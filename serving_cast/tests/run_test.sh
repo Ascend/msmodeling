@@ -100,7 +100,7 @@ run_st() {
         return 0
     fi
 
-    PYTHONPATH=$PROJECT_DIR pytest "${ST_DIR}" -v -s
+    PYTHONPATH=$PROJECT_DIR python -m pytest "${ST_DIR}" -v -s
 
     if [ $? -eq 0 ]; then
         log "SUCCESS" "==================== ALL SYSTEM TESTS PASSED ===================="

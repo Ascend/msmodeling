@@ -14,7 +14,14 @@ VALID_INSTANCE_CONFIG = {
             "num_instances": 2,
             "num_devices_per_instance": 4,
             "pd_role": "both",
-            "parallel_config": {"world_size": 4, "tp_size": 4, "dp_size": 1},
+            "parallel_config": {
+                "world_size": 4,
+                "tp_size": 4,
+                "dp_size": 1,
+                "ep_size": 1,
+                "moe_tp_size": 4,
+                "moe_dp_size": 1,
+            },
         }
     ]
 }
@@ -83,8 +90,7 @@ class TestCLI:
 
     def _run_command(self, args, check=True):
         """Run command line and return result"""
-        main_py_path = SCRIPT_DIR + "/../../main.py"
-        cmd = ["python", main_py_path] + args
+        cmd = ["python", "-m", "serving_cast.main"] + args
         result = subprocess.run(cmd, capture_output=True, text=True, check=check)
         return result
 

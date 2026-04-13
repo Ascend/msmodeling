@@ -33,7 +33,7 @@ class ServingTestCase(unittest.TestCase):
         mock_get_instance = self.patch_get_instance.start()
         mock_get_instance.return_value = self.mock_cfg
 
-        self.dummy_duration = 0.3
+        self.dummy_duration = {"analytic": 0.3}
         self.fake_ret = Mock()
         self.fake_ret.execution_time_s = self.dummy_duration
         self.fake_ret.device_memory_available_gb = 40.0
@@ -123,12 +123,18 @@ class ServingTestCase(unittest.TestCase):
         self.assertEqual(len(requests), num_requests)
 
         for request in requests.values():
-            self.assertAlmostEqual(request.time_to_first_token(), self.dummy_duration)
+            self.assertAlmostEqual(
+                request.time_to_first_token(), self.dummy_duration.get("analytic")
+            )
             self.assertEqual(request.num_decoded_tokens, num_output_tokens)
             self.assertGreater(
-                request.time_per_output_token(), self.dummy_duration - 0.1
+                request.time_per_output_token(),
+                self.dummy_duration.get("analytic") - 0.1,
             )
-            self.assertLess(request.time_per_output_token(), self.dummy_duration + 0.1)
+            self.assertLess(
+                request.time_per_output_token(),
+                self.dummy_duration.get("analytic") + 0.1,
+            )
 
     def test_pd_aggregation_dummy_model(self):
         instance_config = InstanceConfig(
@@ -175,8 +181,12 @@ class ServingTestCase(unittest.TestCase):
         self.assertEqual(len(requests), num_requests)
         for request in requests.values():
             self.assertEqual(request.num_decoded_tokens, num_output_tokens)
-            self.assertAlmostEqual(request.time_to_first_token(), self.dummy_duration)
-            self.assertAlmostEqual(request.time_per_output_token(), self.dummy_duration)
+            self.assertAlmostEqual(
+                request.time_to_first_token(), self.dummy_duration.get("analytic")
+            )
+            self.assertAlmostEqual(
+                request.time_per_output_token(), self.dummy_duration.get("analytic")
+            )
 
     def test_pd_aggregation_dummy_model_single_scheduler(self):
         instance_config = InstanceConfig(
@@ -221,7 +231,9 @@ class ServingTestCase(unittest.TestCase):
         self.assertEqual(len(requests), num_requests)
         for request in requests.values():
             self.assertEqual(request.num_decoded_tokens, num_output_tokens)
-            self.assertAlmostEqual(request.time_per_output_token(), self.dummy_duration)
+            self.assertAlmostEqual(
+                request.time_per_output_token(), self.dummy_duration.get("analytic")
+            )
 
     def test_pd_aggregation_dummy_model_single_scheduler_trigger_preempt(self):
         instance_config = InstanceConfig(

@@ -9,16 +9,10 @@
 
 ## Run simulation
 
-### Set environment variable
-
-```bash
-export PYTHONPATH=/path/to/msmodeling:$PYTHONPATH
-```
-
 Its general usage is shown below:
 
 ```text
-usage: main.py [-h] --instance_config_path INSTANCE_CONFIG_PATH [INSTANCE_CONFIG_PATH ...] --common_config_path COMMON_CONFIG_PATH
+usage: python -m serving_cast.main [-h] --instance_config_path INSTANCE_CONFIG_PATH [INSTANCE_CONFIG_PATH ...] --common_config_path COMMON_CONFIG_PATH
 
 Run a service inference simulation driven by JSON configuration files.
 
@@ -43,19 +37,19 @@ example:
 - basic usage
 
 ```bash
-python main.py --instance_config_path=./example/instances.yaml --common_config_path=./example/common.yaml 
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml 
 ```
 
 - enable profiling
 
 ```bash
-python main.py --instance_config_path=./example/instances.yaml --common_config_path=./example/common.yaml --enable_profiling​ 
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling​ 
 ```
 
 - enable profiling with custom output path
 
 ```bash
-python main.py --instance_config_path=./example/instances.yaml --common_config_path=./example/common.yaml --enable_profiling --profiling_output_path=/path/to/custom/profiling_dir
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling --profiling_output_path=/path/to/custom/profiling_dir
 ```
 
 ### Result
@@ -99,13 +93,13 @@ Use the following command to enable profiling:
 - enable profiling
 
 ```bash
-python main.py --instance_config_path=./example/instances.yaml --common_config_path=./example/common.yaml --enable_profiling​ 
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling​ 
 ```
 
 - enable profiling with custom output path
 
 ```bash
-python main.py --instance_config_path=./example/instances.yaml --common_config_path=./example/common.yaml --enable_profiling --profiling_output_path=/path/to/custom/profiling_dir
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling --profiling_output_path=/path/to/custom/profiling_dir
 ```
 
 The original collected profiling result is stored in the directory ```profiling_output_path/{$time_stamp}```.

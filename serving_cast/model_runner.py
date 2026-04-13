@@ -303,9 +303,10 @@ class ModelRunner:
         x, y = [], []
         for batch in batches:
             interpolation_point = self.get_interpolation_point(batch)
+            # TODO: We need to support other performance models in the future
             dt = self.tensor_cast_model_runner.run_inference(
                 batch, with_sampler=True
-            ).execution_time_s
+            ).execution_time_s.get("analytic", 0)
             if dt <= 0:
                 raise ValueError(f"run_inference get negative execution time: {dt}")
             x.append(
@@ -343,7 +344,7 @@ class ModelRunner:
                 current_batch = future_batch
             result = self.async_task_manager.find_result(batch)
             if result is not None:
-                duration = result.execution_time_s
+                duration = result.execution_time_s.get("analytic")
             else:
                 duration = self._get_estimated_time(batch)
             for future_batch in future_batch_list:
@@ -404,7 +405,7 @@ class ModelRunner:
         else:
             estimated_time = self.tensor_cast_model_runner.run_inference(
                 batch, with_sampler=True
-            ).execution_time_s
+            ).execution_time_s.get("analytic")
         return estimated_time
 
 
