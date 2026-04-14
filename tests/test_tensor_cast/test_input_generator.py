@@ -6,6 +6,7 @@ from parameterized import parameterized
 
 from tensor_cast.core.input_generator import (
     _get_padding_alignment,
+    generate_image_inputs,
     generate_inputs,
     generate_inputs_varlen,
     RequestInfo,
@@ -167,4 +168,29 @@ class InputGeneratorTestCase(unittest.TestCase):
         result = _get_padding_alignment(model_config)
         assert result == expected, (
             f"Scenario [{desc}] test failed: expected {expected}, actual {result}"
+        )
+
+    def test_qwen3_vl_1080p_resize_to_1088x1920(self):
+        model_id = "Qwen/Qwen3-VL-8B-Instruct"
+        auto_loader = AutoModelConfigLoader()
+        hf_config = auto_loader.load_config(model_id)
+        model_config = ModelConfig(
+            parallel_config=ParallelConfig(),
+            quant_config=QuantConfig(),
+            dtype=torch.bfloat16,
+            hf_config=hf_config,
+        )
+        model = TransformerModel(model_id, model_config)
+
+        image_kwargs = generate_image_inputs(
+            model=model,
+            image_batch_size=1,
+            image_height=1080,
+            image_width=1920,
+            concurrency=1,
+        )
+
+        # grid_h=68, grid_w=120 -> resized height/width = 1088x1920
+        self.assertTrue(
+            torch.equal(image_kwargs["image_grid_thw"], torch.tensor([[1, 68, 120]]))
         )

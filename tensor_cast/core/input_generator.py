@@ -182,16 +182,27 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
 
 
 def resize_image(
-    model_type, image_height, image_width, patch_size, merge_size, temporal_patch_size
+    model_id,
+    model_type,
+    image_height,
+    image_width,
+    patch_size,
+    merge_size,
+    temporal_patch_size,
 ):
     factor = patch_size * merge_size
 
     def build_qwen_resize_params():
-        return {
+        params = {
             "height": image_height,
             "width": image_width,
             "factor": factor,
         }
+        min_pixels, max_pixels = _load_preprocessor_pixel_limits(model_id)
+        if min_pixels is not None and max_pixels is not None:
+            params["min_pixels"] = min_pixels
+            params["max_pixels"] = max_pixels
+        return params
 
     def build_glm_resize_params():
         return {
@@ -222,6 +233,34 @@ def resize_image(
     return smart_resize(**params_builder())
 
 
+def _load_preprocessor_pixel_limits(model_id: str):
+    """
+    Load image pixel limits from instantiated HF processor.
+    """
+    if not model_id:
+        logger.warning("model_id is empty; falling back to smart_resize defaults.")
+        return None, None
+
+    try:
+        from transformers import AutoImageProcessor
+
+        image_processor = AutoImageProcessor.from_pretrained(model_id)
+        size = getattr(image_processor, "size", None)
+        if not isinstance(size, dict):
+            return None, None
+        min_pixels = size.get("shortest_edge")
+        max_pixels = size.get("longest_edge")
+        return min_pixels, max_pixels
+    except Exception:
+        logger.warning(
+            "Failed to load processor/image size for model_id=%s; "
+            "falling back to smart_resize defaults.",
+            model_id,
+            exc_info=True,
+        )
+        return None, None
+
+
 def generate_image_inputs(
     model, image_batch_size, image_height, image_width, concurrency
 ):
@@ -235,6 +274,7 @@ def generate_image_inputs(
     # Rescales the image
     temporal_patch_size = vision_config.temporal_patch_size or 2
     resized_height, resized_width = resize_image(
+        getattr(model, "model_id", ""),
         hf_config.model_type,
         image_height,
         image_width,
