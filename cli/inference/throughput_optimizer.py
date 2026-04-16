@@ -24,6 +24,7 @@ from serving_cast.service.utils import (
     OptimizerData,
 )
 
+from tensor_cast import device_profiles  # noqa: F401
 from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
     QuantizeLinearAction,
