@@ -1,14 +1,17 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import multiprocessing as mp
-import queue
+import tempfile
 import threading
 import unittest
+from dataclasses import dataclass
 from typing import List
 
 import numpy as np
 
+from serving_cast.config import Config, ParallelConfig
 from serving_cast.model_runner import (
     AsyncTask,
+    AsyncTaskManager,
     CompletionEventManager,
     InterpolationPoint,
     ModelRunner,
@@ -26,6 +29,68 @@ from tensor_cast.core.quantization.datatypes import (
     QuantizeLinearAction,
 )
 from tensor_cast.core.user_config import UserInputConfig
+
+
+@dataclass
+class MockParsedArgs:
+    """Mock parsed args for Config initialization."""
+
+    instance_config_path: str
+    common_config_path: str
+    enable_profiling: bool = False
+
+
+def create_test_config_files():
+    """Create temporary config files for testing."""
+    import os
+
+    import yaml
+
+    tmp_dir = tempfile.mkdtemp()
+
+    common_config = {
+        "model_config": {
+            "name": "Qwen/Qwen3-32B",
+            "enable_multi_process": False,
+            "enable_interpolate": False,
+        },
+        "load_gen": {
+            "load_gen_type": "poisson",
+            "num_requests": 10,
+            "num_input_tokens": 100,
+            "num_output_tokens": 50,
+            "request_rate": 1.0,
+        },
+        "serving_config": {
+            "max_concurrency": 100,
+            "block_size": 128,
+            "max_tokens_budget": 8192,
+        },
+    }
+
+    instance_config = {
+        "instance_groups": [
+            {
+                "num_instances": 1,
+                "num_devices_per_instance": 1,
+                "pd_role": "both",
+                "parallel_config": {
+                    "world_size": 1,
+                    "tp_size": 1,
+                },
+            }
+        ]
+    }
+
+    common_path = os.path.join(tmp_dir, "common.yaml")
+    instance_path = os.path.join(tmp_dir, "instances.yaml")
+
+    with open(common_path, "w") as f:
+        yaml.dump(common_config, f)
+    with open(instance_path, "w") as f:
+        yaml.dump(instance_config, f)
+
+    return tmp_dir, common_path, instance_path
 
 
 class TestTensorCastModelRunner(unittest.TestCase):
@@ -713,113 +778,338 @@ class TestAsyncTaskManager(unittest.TestCase):
         event_manager.shutdown()
         manager.shutdown()
 
-    def test_find_result_existing(self):
-        """Test find_result with existing task."""
-        batch = [RequestInfo(query_len=10, seq_len=100, is_decode=False)]
-        task = AsyncTask(batch)
-        task_hash = task.hash_value
 
-        manager = mp.Manager()
-        cache_manager = ModelRunnerMetricCacheManager(manager)
-        event_manager = CompletionEventManager(manager)
+class TestModelRunnerIntegration(unittest.TestCase):
+    """Integration tests for ModelRunner with Config."""
 
-        # Initialize slots
-        cache_manager.init_cache_slot(task_hash)
-        event_manager.init_event_slot(task_hash)
-
-        # Store a result with all required fields
-        test_metrics = ModelRunnerMetrics(
-            total_device_memory_gb=80.0,
-            model_weight_size_gb=15.0,
-            peak_memory_usage_gb=50.0,
-            kv_cache_size_gb=5.0,
-            kv_cache_per_token_gb=0.001,
-            model_activation_size_gb=10.0,
-            reserved_memory_gb=0.0,
-            device_memory_available_gb=10.0,
-            execution_time_s={"analytic": 0.5},
-            tps_per_model={"analytic": 100.0},
-            run_time_s=1.0,
-            batch_size=1,
+    @classmethod
+    def setUpClass(cls):
+        """Set up Config for ModelRunner tests."""
+        cls.tmp_dir, cls.common_path, cls.instance_path = create_test_config_files()
+        Config._instance = None
+        Config._initialized = False
+        cls.config = Config(
+            MockParsedArgs(
+                instance_config_path=cls.instance_path,
+                common_config_path=cls.common_path,
+            )
         )
-        cache_manager.record_cache(task_hash, test_metrics)
 
-        # Set the event
-        event_manager.set_completion_event(task_hash)
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up temp files."""
+        import shutil
 
-        import time
+        Config._instance = None
+        Config._initialized = False
+        shutil.rmtree(cls.tmp_dir, ignore_errors=True)
 
-        time.sleep(0.5)
+    def test_init_tensor_cast_model_runner(self):
+        """Test init_tensor_cast_model_runner static method."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner.init_tensor_cast_model_runner(
+            self.config.common_config, parallel_config, "TEST_DEVICE"
+        )
+        self.assertIsNotNone(runner)
 
-        # Wait for completion
-        event_manager.wait_completion_event(task_hash)
+    def test_model_runner_init(self):
+        """Test ModelRunner initialization."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
+        self.assertIsNotNone(runner.tensor_cast_model_runner)
+        self.assertFalse(runner.enable_multi_process)
+        runner.shutdown()
 
-        # Retrieve result
-        result = cache_manager.get_cache(task_hash)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.execution_time_s["analytic"], 0.5)
+    def test_model_runner_get_kv_cache_num_bytes(self):
+        """Test get_kv_cache_num_bytes method."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
+        num_bytes = runner.get_kv_cache_num_bytes(100)
+        self.assertIsNotNone(num_bytes)
+        runner.shutdown()
 
-        event_manager.shutdown()
-        manager.shutdown()
+    def test_model_runner_get_inputs_num_bytes(self):
+        """Test get_inputs_num_bytes method."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
 
-    def test_find_result_not_existing(self):
-        """Test find_result with non-existing task."""
+        request = Request(num_input_tokens=100, num_output_tokens=50)
+        request.state = RequestState.PREFILLING
+        request.query_len = 10
+        request.seq_len = 10
+
+        num_bytes = runner.get_inputs_num_bytes([request])
+        self.assertIsInstance(num_bytes, int)
+        runner.shutdown()
+
+    def test_model_runner_process_batch(self):
+        """Test process_batch method."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
+
+        request = Request(num_input_tokens=100, num_output_tokens=50)
+        request.state = RequestState.PREFILLING
+        request.query_len = 10
+        request.seq_len = 10
+
+        runner.process_batch([request])
+        runner.shutdown()
+
+    def test_model_runner_warmup(self):
+        """Test warmup method."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
+
+        num_blocks, block_size = runner.warmup()
+        self.assertIsInstance(num_blocks, int)
+        self.assertIsInstance(block_size, int)
+        runner.shutdown()
+
+    def test_apply_interpolation_model_not_ready(self):
+        """Test apply_interpolation_model raises when not ready."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
+        runner._interpolation_ready = False
+        runner._interpolation_model = None
+
         batch = [RequestInfo(query_len=10, seq_len=100, is_decode=False)]
-        task = AsyncTask(batch)
-        task_hash = task.hash_value
+        with self.assertRaises(ValueError):
+            runner.apply_interpolation_model(batch)
+        runner.shutdown()
 
-        manager = mp.Manager()
-        cache_manager = ModelRunnerMetricCacheManager(manager)
-        event_manager = CompletionEventManager(manager)
+    def test_apply_interpolation_model_with_model(self):
+        """Test apply_interpolation_model with a real interpolation model."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
 
-        # Check that task is not in record (simulating not found)
-        task_record = set()
+        # Manually set up the interpolation model
+        x = np.array([[0, 0], [1000, 0], [0, 1000], [1000, 1000]])
+        y = np.array([0.1, 0.5, 0.3, 0.8])
+        runner._interpolation_model = ModelRunner.get_interpolation_model(x, y)
+        runner._interpolation_ready = True
 
-        if task_hash not in task_record:
-            result = None
-        else:
-            result = cache_manager.get_cache(task_hash)
+        batch = [RequestInfo(query_len=100, seq_len=500, is_decode=False)]
+        result = runner.apply_interpolation_model(batch)
+        self.assertIsInstance(result, float)
+        runner.shutdown()
 
+
+class TestModelRunnerWithInterpolation(unittest.TestCase):
+    """Tests for ModelRunner with interpolation enabled."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up Config with enable_interpolate=True."""
+        import os
+
+        import yaml
+
+        tmp_dir = tempfile.mkdtemp()
+
+        common_config = {
+            "model_config": {
+                "name": "Qwen/Qwen3-32B",
+                "enable_multi_process": False,
+                "enable_interpolate": True,
+                "interpolation_seed": 42,
+            },
+            "load_gen": {
+                "load_gen_type": "poisson",
+                "num_requests": 10,
+                "num_input_tokens": 100,
+                "num_output_tokens": 50,
+                "request_rate": 1.0,
+            },
+            "serving_config": {
+                "max_concurrency": 10,
+                "block_size": 128,
+                "max_tokens_budget": 512,
+            },
+        }
+
+        instance_config = {
+            "instance_groups": [
+                {
+                    "num_instances": 1,
+                    "num_devices_per_instance": 1,
+                    "pd_role": "both",
+                    "parallel_config": {
+                        "world_size": 1,
+                        "tp_size": 1,
+                    },
+                }
+            ]
+        }
+
+        common_path = os.path.join(tmp_dir, "common.yaml")
+        instance_path = os.path.join(tmp_dir, "instances.yaml")
+
+        with open(common_path, "w") as f:
+            yaml.dump(common_config, f)
+        with open(instance_path, "w") as f:
+            yaml.dump(instance_config, f)
+
+        cls.tmp_dir = tmp_dir
+        Config._instance = None
+        Config._initialized = False
+        cls.config = Config(
+            MockParsedArgs(
+                instance_config_path=instance_path,
+                common_config_path=common_path,
+            )
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up temp files."""
+        import shutil
+
+        Config._instance = None
+        Config._initialized = False
+        shutil.rmtree(cls.tmp_dir, ignore_errors=True)
+
+    def test_model_runner_init_with_interpolate(self):
+        """Test ModelRunner initialization with interpolation enabled."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
+        self.assertTrue(runner.enable_interpolate)
+        self.assertTrue(runner._interpolation_ready)
+        self.assertIsNotNone(runner._interpolation_model)
+        runner.shutdown()
+
+    def test_model_runner_process_batch_with_interpolate(self):
+        """Test process_batch uses interpolation when enabled."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
+
+        request = Request(num_input_tokens=100, num_output_tokens=50)
+        request.state = RequestState.PREFILLING
+        request.query_len = 10
+        request.seq_len = 10
+
+        runner.process_batch([request])
+        runner.shutdown()
+
+
+class TestAsyncTaskManagerFull(unittest.TestCase):
+    """Tests for AsyncTaskManager actual initialization with Config."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up Config for AsyncTaskManager tests."""
+        cls.tmp_dir, cls.common_path, cls.instance_path = create_test_config_files()
+        Config._instance = None
+        Config._initialized = False
+        cls.config = Config(
+            MockParsedArgs(
+                instance_config_path=cls.instance_path,
+                common_config_path=cls.common_path,
+            )
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up temp files."""
+        import shutil
+
+        Config._instance = None
+        Config._initialized = False
+        shutil.rmtree(cls.tmp_dir, ignore_errors=True)
+
+    def test_async_task_manager_init_and_shutdown(self):
+        """Test AsyncTaskManager initialization and shutdown."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        task_manager = AsyncTaskManager(
+            device_type="TEST_DEVICE",
+            parallel_config=parallel_config,
+            num_workers=2,
+        )
+        self.assertIsNotNone(task_manager.workers)
+        self.assertEqual(len(task_manager.workers), 2)
+        task_manager.shutdown()
+        self.assertEqual(len(task_manager.workers), 0)
+
+    def test_async_task_manager_add_task(self):
+        """Test AsyncTaskManager add_task method."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        task_manager = AsyncTaskManager(
+            device_type="TEST_DEVICE",
+            parallel_config=parallel_config,
+            num_workers=2,
+        )
+        batch = [RequestInfo(query_len=10, seq_len=100, is_decode=False)]
+        task_manager.add_task(batch)
+        task_hash = AsyncTask(batch).hash_value
+        self.assertIn(task_hash, task_manager.task_record)
+
+        # Adding same task again should not duplicate
+        task_manager.add_task(batch)
+        task_manager.shutdown()
+
+    def test_async_task_manager_find_result_not_in_record(self):
+        """Test AsyncTaskManager find_result with task not in record."""
+        parallel_config = ParallelConfig(
+            world_size=1,
+            tp_size=1,
+            moe_dp_size=1,
+        )
+        task_manager = AsyncTaskManager(
+            device_type="TEST_DEVICE",
+            parallel_config=parallel_config,
+            num_workers=2,
+        )
+        batch = [RequestInfo(query_len=10, seq_len=100, is_decode=False)]
+        result = task_manager.find_result(batch)
         self.assertIsNone(result)
-
-        event_manager.shutdown()
-        manager.shutdown()
-
-    def test_shutdown_terminates_workers(self):
-        """Test that shutdown terminates worker processes."""
-        manager = mp.Manager()
-        task_queue = manager.Queue()
-
-        # Create mock workers
-        stop_event = mp.Event()
-        workers = []
-
-        # Create dummy processes
-        def dummy_worker():
-            while not stop_event.is_set():
-                try:
-                    task_queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
-
-        for _ in range(2):
-            p = mp.Process(target=dummy_worker, daemon=True)
-            p.start()
-            workers.append(p)
-
-        # Set stop event and join
-        stop_event.set()
-        for p in workers:
-            p.join(timeout=2)
-            if p.is_alive():
-                p.terminate()
-                p.join(timeout=1)
-
-        # All workers should be stopped
-        for p in workers:
-            self.assertFalse(p.is_alive())
-
-        manager.shutdown()
+        task_manager.shutdown()
 
 
 if __name__ == "__main__":
