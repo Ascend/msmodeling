@@ -638,10 +638,16 @@ class TestTextGenerate(unittest.TestCase):
             result = asdict(result)
         self.assertIn("tensor_cast.mlapo_quant.default", result["table_result"])
 
-    def test_moe_gating_top_k_softmax(self):
+    @parameterized.expand(
+        [
+            ["zai-org/GLM-4.5V"],
+            ["zai-org/GLM-4.5"],
+        ]
+    )
+    def test_moe_gating_top_k_softmax(self, model_id):
         user_input = UserInputConfig(
             device=self.device,
-            model_id="Qwen/Qwen3-30B-A3B",
+            model_id=model_id,
             num_queries=1,
             query_len=1,
         )
@@ -651,6 +657,33 @@ class TestTextGenerate(unittest.TestCase):
         if isinstance(result, ModelRunnerMetrics):
             result = asdict(result)
         self.assertIn(
+            "tensor_cast.moe_gating_top_k_softmax.default", result["table_result"]
+        )
+
+    @parameterized.expand(
+        [
+            ["baidu/ERNIE-4.5-300B-A47B-PT"],
+            ["XiaomiMiMo/MiMo-V2-Flash"],
+            ["MiniMaxAI/MiniMax-M2"],
+            ["Qwen/Qwen3.5-397B-A17B"],
+            ["Qwen/Qwen3-235B-A22B"],
+            ["Qwen/Qwen3-Next-80B-A3B-Instruct"],
+            ["Qwen/Qwen3-VL-30B-A3B-Instruct"],
+        ]
+    )
+    def test_gate_returns_precomputed_topk(self, model_id):
+        user_input = UserInputConfig(
+            device=self.device,
+            model_id=model_id,
+            num_queries=1,
+            query_len=1,
+        )
+        model_runner = ModelRunner(user_input)
+        result = model_runner.run_inference(generate_inputs_func=generate_inputs)
+        self._validate_inference_result(result, "test_gate_returns_precomputed_topk")
+        if isinstance(result, ModelRunnerMetrics):
+            result = asdict(result)
+        self.assertNotIn(
             "tensor_cast.moe_gating_top_k_softmax.default", result["table_result"]
         )
 

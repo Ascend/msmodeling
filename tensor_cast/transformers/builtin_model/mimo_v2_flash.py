@@ -25,6 +25,7 @@ register_model_profile(
     ModelProfile(
         model_type="mimo_v2_flash",
         moe_module_name="MiMoV2MoE",
+        moe_gate_returns_raw_logits=False,
         moe_num_experts_key="n_routed_experts",
         mtp_block_module_name="MiMoV2DecoderLayer",
         custom_expert_module_type=MiMoV2MoeExpertMLP,

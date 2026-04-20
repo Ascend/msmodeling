@@ -76,7 +76,7 @@ register_model_profile(
     ModelProfile(
         model_type="qwen3_vl_moe",
         moe_module_name="Qwen3VLMoeTextSparseMoeBlock",
-        moe_gate_returns_raw_logits=True,
+        moe_gate_returns_raw_logits=False,
         moe_num_experts_key=["text_config", "num_experts"],
         model_family="qwen3_vl",
         patch_method=patch_method_for_qwen3_vl,

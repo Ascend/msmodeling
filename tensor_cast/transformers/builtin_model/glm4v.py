@@ -69,7 +69,7 @@ register_model_profile(
     ModelProfile(
         model_type="glm4v_moe",
         moe_module_name="Glm4vMoeTextMoE",
-        moe_gate_returns_raw_logits=False,
+        moe_gate_returns_raw_logits=True,
         moe_num_experts_key=["text_config", "n_routed_experts"],
         model_family="glm4v",
         patch_method=patch_method_for_glm4_vl,

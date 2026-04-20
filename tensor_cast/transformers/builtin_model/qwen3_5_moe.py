@@ -115,7 +115,7 @@ register_model_profile(
     ModelProfile(
         model_type="qwen3_5_moe",
         moe_module_name="Qwen3_5MoeSparseMoeBlock",
-        moe_gate_returns_raw_logits=True,
+        moe_gate_returns_raw_logits=False,
         moe_num_experts_key=["text_config", "num_experts"],
         moe_field_names_override={
             "shared_experts": "shared_expert",
