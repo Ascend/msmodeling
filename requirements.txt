@@ -23,5 +23,6 @@ pandas
 
 # test
 pytest
+pytest-cov
 pytest-xdist
 parameterized

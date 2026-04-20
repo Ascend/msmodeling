@@ -180,3 +180,22 @@ select = [
 [tool.ruff.lint.pyupgrade]
 # Preserve types, even if a file imports `from __future__ import annotations`.
 keep-runtime-typing = true
+
+# Coverage #####################################################################
+
+[tool.coverage.run]
+branch = true
+omit = [
+    "*/test_*.py",
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/.pytest_cache/*",
+    "*/builtin_model/*"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "@abstractmethod",
+    "raise NotImplementedError",
+]

@@ -99,7 +99,7 @@ Fix the remaining lint issues reported by `lintrunner`.
 cd /path/to/msmodeling
 ```
 
-Make sure unit tests pass by running: `python -m pytest -n auto tests`
+Make sure unit tests pass by running: `bash ./tests/run_ut.sh tensor_cast` or `bash ./tests/run_ut.sh serving_cast`. Please ensure that the ut coverage rate of the newly added code is greater than `80%`
 
 ## License
 
