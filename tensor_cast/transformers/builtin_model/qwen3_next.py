@@ -1,7 +1,7 @@
 from ..custom_model_registry import ModelProfile, register_model_profile
 
 
-def patch_method_for_qwen3_next():
+def patch_method_for_qwen3_next(_model):
     from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextModel
 
     def _patched_update_linear_attn_mask(self, attention_mask, cache_position):

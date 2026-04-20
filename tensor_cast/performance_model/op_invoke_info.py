@@ -151,7 +151,19 @@ class OpInvokeInfo:
                         str(t.requires_grad),
                     ]
                 )
+            elif isinstance(t, (list, tuple)):
+                components.append(type(t).__name__)
+                components.append(str(len(t)))
+                for item in t:
+                    add_tensor_info(item, components)
+            elif isinstance(t, dict):
+                components.append("dict")
+                components.append(str(len(t)))
+                for key in sorted(t):
+                    components.append(str(key))
+                    add_tensor_info(t[key], components)
             else:
+                components.append(type(t).__name__)
                 components.append(str(t))
 
         for arg in self.args:

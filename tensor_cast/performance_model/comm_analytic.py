@@ -236,13 +236,20 @@ class CommAnalyticModel(PerformanceModel):
             raise ValueError(
                 "input_split_sizes and output_split_sizes must be provided."
             )
+        if rank not in group:
+            raise ValueError(f"rank {rank} is not in communication group {group}")
 
         bandwidth, latency = self._get_bandwidth_and_latency(rank, group)
 
+        rank_in_group = group.index(rank)
+        elements_per_split = x.numel() // sum(input_split_sizes)
+
         # Calculate the total data volume sent and received by this rank.
-        total_elements_sent = x.numel()
-        total_elements_received = (
-            x.numel() // sum(input_split_sizes) * sum(output_split_sizes)
+        total_elements_sent = elements_per_split * (
+            sum(input_split_sizes) - input_split_sizes[rank_in_group]
+        )
+        total_elements_received = elements_per_split * (
+            sum(output_split_sizes) - output_split_sizes[rank_in_group]
         )
 
         # The bottleneck depends on the larger one of the data volumes sent and received respectively.

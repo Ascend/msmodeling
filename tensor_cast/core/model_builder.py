@@ -63,6 +63,6 @@ def build_model(user_input: UserInputConfig = None) -> TransformerModel:
         import torch
 
         model = torch.compile(
-            model, backend=get_backend(), dynamic=True, fullgraph=use_full_graph
+            model, backend=get_backend(), dynamic=False, fullgraph=use_full_graph
         )
     return model

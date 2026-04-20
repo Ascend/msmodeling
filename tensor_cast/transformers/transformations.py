@@ -140,10 +140,10 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
     return model
 
 
-def patch_model(model_type: str):
-    profile = get_model_profile(model_type)
+def patch_model(model: "ModelWrapperBase"):
+    profile = get_model_profile(model.hf_config.model_type)
     if profile and profile.patch_method:
-        profile.patch_method()
+        profile.patch_method(model)
 
 
 def patch_rotary_emb(model: "ModelWrapperBase") -> "ModelWrapperBase":

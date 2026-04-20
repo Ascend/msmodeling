@@ -354,6 +354,232 @@ def _default_query_lens_and_seq_lens(query) -> Tuple[torch.Tensor, torch.Tensor]
     return query_lens, seq_lens
 
 
+def _elementwise_sigmoid_ops(numel: int) -> int:
+    return numel * 4
+
+
+def _elementwise_softplus_ops(numel: int) -> int:
+    return numel * 4
+
+
+def _elementwise_silu_ops(numel: int) -> int:
+    return numel * 6
+
+
+def _rmsnorm_ops(num_rows: int, row_width: int) -> int:
+    # Approximate RMSNorm by mean(square) + rsqrt + normalization.
+    return num_rows * row_width * 5
+
+
+def _l2norm_ops(num_rows: int, row_width: int) -> int:
+    # Approximate L2 norm by square + reduction + rsqrt + scaling.
+    return num_rows * row_width * 4
+
+
+def _accumulate_compute_ops(
+    properties: OpInvokeInfo.PerformanceProperties,
+    dtype: torch.dtype,
+    mma_ops: int = 0,
+    gp_ops: int = 0,
+) -> None:
+    if mma_ops == 0 and gp_ops == 0:
+        return
+    delta = OpInvokeInfo.PerformanceProperties(
+        compute_ops={
+            dtype: OpInvokeInfo.ComputeOps(mma_ops=mma_ops, gp_ops=gp_ops),
+        }
+    )
+    properties.combine(delta, compute_only=True)
+
+
+def _linear_attention_common_ops(
+    batch_size: int,
+    seq_len: int,
+    hidden_size: int,
+    num_k_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_kernel_size: int,
+) -> Tuple[int, int, int, int]:
+    num_tokens = batch_size * seq_len
+    key_dim = num_k_heads * head_k_dim
+    value_dim = num_v_heads * head_v_dim
+    conv_dim = key_dim * 2 + value_dim
+
+    # in_proj_qkv + in_proj_z + in_proj_b + in_proj_a + out_proj
+    projection_mma_ops = num_tokens * (
+        hidden_size * conv_dim * 2
+        + hidden_size * value_dim * 2
+        + hidden_size * num_v_heads * 2
+        + hidden_size * num_v_heads * 2
+        + value_dim * hidden_size * 2
+    )
+
+    conv_gp_ops = num_tokens * conv_dim * conv_kernel_size * 2 + _elementwise_silu_ops(
+        num_tokens * conv_dim
+    )
+    beta_gp_ops = _elementwise_sigmoid_ops(num_tokens * num_v_heads)
+
+    # g = -exp(A_log.float()) * softplus(a.float() + dt_bias)
+    g_gp_ops = num_v_heads + num_tokens * num_v_heads * (
+        1 + _elementwise_softplus_ops(1) + 1 + 1
+    )
+
+    gated_rmsnorm_gp_ops = (
+        _rmsnorm_ops(num_tokens, value_dim)
+        + num_tokens * value_dim
+        + _elementwise_silu_ops(num_tokens * value_dim)
+        + num_tokens * value_dim
+    )
+
+    return (
+        projection_mma_ops,
+        conv_gp_ops,
+        beta_gp_ops,
+        g_gp_ops + gated_rmsnorm_gp_ops,
+    )
+
+
+def _linear_attention_chunk_gated_delta_ops(
+    batch_size: int,
+    seq_len: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    chunk_size: int = 64,
+) -> Tuple[int, int, int]:
+    padded_seq_len = ((seq_len + chunk_size - 1) // chunk_size) * chunk_size
+    num_chunks = padded_seq_len // chunk_size
+    batch_heads = batch_size * num_v_heads
+    valid_positions = batch_heads * seq_len
+    total_positions = batch_heads * padded_seq_len
+    total_chunk_pairs = batch_heads * num_chunks * chunk_size * chunk_size
+
+    intra_chunk_mma_ops = total_chunk_pairs * (head_k_dim * 4 + head_v_dim * 2)
+    inter_chunk_mma_ops = (
+        total_chunk_pairs * (head_k_dim + head_v_dim) * 2
+        + total_positions * head_k_dim * head_v_dim * 6
+    )
+
+    qk_l2norm_gp_ops = _l2norm_ops(valid_positions, head_k_dim) * 2
+    prefix_correction_gp_ops = (
+        batch_heads
+        * num_chunks
+        * (chunk_size - 1)
+        * chunk_size
+        * (2 * chunk_size - 1)
+        // 3
+    )
+
+    # After the explicit float32 cast in torch_chunk_gated_delta_rule, the rest of
+    # the recurrence, exponentials, cumsums, masking, and gated updates run in fp32.
+    chunk_rule_fp32_gp_ops = (
+        total_positions * head_k_dim
+        + total_positions * (head_k_dim + head_v_dim)
+        + total_positions * 3
+        + total_chunk_pairs * 6
+        + prefix_correction_gp_ops
+        + total_positions * head_k_dim
+        + total_positions * head_v_dim * 2
+        + batch_heads * num_chunks * (2 * head_k_dim * head_v_dim + 1)
+    )
+
+    return (
+        intra_chunk_mma_ops + inter_chunk_mma_ops,
+        qk_l2norm_gp_ops,
+        chunk_rule_fp32_gp_ops,
+    )
+
+
+def _linear_attention_recurrent_gated_delta_ops(
+    batch_size: int,
+    seq_len: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+) -> Tuple[int, int, int]:
+    num_tokens = batch_size * seq_len
+    total_positions = num_tokens * num_v_heads
+
+    recurrent_mma_ops = num_tokens * num_v_heads * head_k_dim * head_v_dim * 4
+    qk_l2norm_gp_ops = _l2norm_ops(total_positions, head_k_dim) * 2
+    recurrent_fp32_gp_ops = (
+        total_positions * head_k_dim
+        + total_positions * (head_v_dim * 2 + 2)
+        + total_positions * head_k_dim * head_v_dim * 2
+    )
+
+    return recurrent_mma_ops, qk_l2norm_gp_ops, recurrent_fp32_gp_ops
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attention.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    assert len(op_invoke_info.args) == 8
+    hidden_states = op_invoke_info.args[0]
+    num_k_heads = op_invoke_info.args[3]
+    num_v_heads = op_invoke_info.args[4]
+    head_k_dim = op_invoke_info.args[5]
+    head_v_dim = op_invoke_info.args[6]
+    conv_kernel_size = op_invoke_info.args[7]
+
+    batch_size = hidden_states.size(0)
+    seq_len = hidden_states.size(1)
+    hidden_size = hidden_states.size(2)
+
+    properties = op_invoke_info.get_memory_access_properties()
+    (
+        projection_mma_ops,
+        conv_gp_ops,
+        beta_gp_ops,
+        fp32_common_gp_ops,
+    ) = _linear_attention_common_ops(
+        batch_size,
+        seq_len,
+        hidden_size,
+        num_k_heads,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        conv_kernel_size,
+    )
+
+    # TensorCast does not thread cache state through this fused op. Use seq_len=1
+    # as the decode heuristic and otherwise model the chunk_gated_delta prefill path.
+    if seq_len == 1:
+        (
+            attn_mma_ops,
+            hidden_gp_ops,
+            fp32_gp_ops,
+        ) = _linear_attention_recurrent_gated_delta_ops(
+            batch_size, seq_len, num_v_heads, head_k_dim, head_v_dim
+        )
+    else:
+        (
+            attn_mma_ops,
+            hidden_gp_ops,
+            fp32_gp_ops,
+        ) = _linear_attention_chunk_gated_delta_ops(
+            batch_size, seq_len, num_v_heads, head_k_dim, head_v_dim
+        )
+
+    _accumulate_compute_ops(
+        properties,
+        hidden_states.dtype,
+        mma_ops=projection_mma_ops,
+        gp_ops=conv_gp_ops + beta_gp_ops + hidden_gp_ops,
+    )
+    _accumulate_compute_ops(
+        properties,
+        torch.float32,
+        mma_ops=attn_mma_ops,
+        gp_ops=fp32_common_gp_ops + fp32_gp_ops,
+    )
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.attention.default)
 def _(
     op_invoke_info: OpInvokeInfo,
@@ -437,10 +663,11 @@ def _(
 
     # Add quantization/dequantization ops to gp_ops
     total_quant_dequant_ops = dequant_qkt_ops + quant_softmax_ops + dequant_output_ops
-    compute_ops = properties.compute_ops.setdefault(
-        softmax_dtype, OpInvokeInfo.ComputeOps()
+    _accumulate_compute_ops(
+        properties,
+        softmax_dtype,
+        gp_ops=total_quant_dequant_ops,
     )
-    compute_ops.gp_ops += total_quant_dequant_ops
 
     return properties
 
@@ -604,10 +831,11 @@ def _(
         + quant3_ops
         + dequant3_ops
     )
-    compute_ops = properties.compute_ops.setdefault(
-        hidden_states.dtype, OpInvokeInfo.ComputeOps()
+    _accumulate_compute_ops(
+        properties,
+        hidden_states.dtype,
+        gp_ops=total_quant_dequant_ops,
     )
-    compute_ops.gp_ops += total_quant_dequant_ops
 
     return properties
 
@@ -878,10 +1106,11 @@ def _(
     )
 
     # Add all quantization/dequantization ops to gp_ops
-    compute_ops = properties.compute_ops.setdefault(
-        softmax_dtype, OpInvokeInfo.ComputeOps()
+    _accumulate_compute_ops(
+        properties,
+        softmax_dtype,
+        gp_ops=total_quant_dequant_ops,
     )
-    compute_ops.gp_ops += total_quant_dequant_ops
 
     return properties
 
@@ -1053,9 +1282,7 @@ def _swiglu_fusion_properties_helper(
                 total_swiglu_ops += M * n_gate * 7
 
     # 3. Accumulate SwiGLU ops into gp_ops
-    if dtype not in properties.compute_ops:
-        properties.compute_ops[dtype] = OpInvokeInfo.ComputeOps()
-    properties.compute_ops[dtype].gp_ops += total_swiglu_ops
+    _accumulate_compute_ops(properties, dtype, gp_ops=total_swiglu_ops)
 
     return properties
 

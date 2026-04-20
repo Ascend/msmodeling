@@ -225,7 +225,7 @@ class TransformerModel(ModelWrapperBase):
                     wrap_model(self)
                     maybe_enable_mtp(self)
                     maybe_reuse_layers(self)
-                    patch_model(model_type)
+                    patch_model(self)
                     patch_rotary_emb(self)
                     patch_attention(self)
                     patch_mla(self)

@@ -22,7 +22,7 @@ QWEN3_VL_VISUAL_CONFIG = resolve_visual_config(
 )
 
 
-def patch_method_for_qwen3_vl():
+def patch_method_for_qwen3_vl(_model):
     """
     Patch the Qwen3-VL model to fix simulation issues in meta mode.
       Problem background:

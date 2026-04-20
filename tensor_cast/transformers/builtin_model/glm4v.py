@@ -24,7 +24,7 @@ GLM4V_VISUAL_CONFIG = resolve_visual_config(
 )
 
 
-def patch_method_for_glm4_vl():
+def patch_method_for_glm4_vl(_model):
     """
     Patch the GLM4V-MoE model to fix simulation issues in meta mode.
 

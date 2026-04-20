@@ -48,6 +48,21 @@ class PerfAnalysisTestCase(unittest.TestCase):
         actual_execution_time = analytic_result.execution_time_s
         return actual_execution_time
 
+    def _execute_linear_attention_and_get_base_data(self, linear_attention_args):
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(
+                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
+            ) as runtime,
+            torch.no_grad(),
+        ):
+            torch.ops.tensor_cast.linear_attention(*linear_attention_args)
+        self.assertEqual(len(runtime.event_list), 1)
+        analytic_result = runtime.event_list[0].perf_results.get("analytic")
+        actual_execution_time = analytic_result.execution_time_s
+        return actual_execution_time
+
     def _execute_multihead_latent_attention_and_get_base_data(self, mla_args):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
@@ -166,6 +181,80 @@ class PerfAnalysisTestCase(unittest.TestCase):
         )
 
         assert_close(self, actual_execution_time, 5.99e-6)
+
+    def test_linear_attention_eager(self):
+        hidden_states = torch.randn(2, 16, 4096, device="meta", dtype=torch.float16)
+        actual_execution_time = self._execute_linear_attention_and_get_base_data(
+            (
+                hidden_states,
+                None,
+                None,
+                16,
+                64,
+                128,
+                128,
+                4,
+            )
+        )
+        assert_close(self, actual_execution_time, 6.78e-5)
+
+    def test_linear_attention_chunk_gated_delta_modeling(self):
+        hidden_states = torch.randn(1, 65, 256, device="meta", dtype=torch.float16)
+        actual_execution_time = self._execute_linear_attention_and_get_base_data(
+            (hidden_states, None, None, 2, 4, 8, 16, 4)
+        )
+        assert_close(self, actual_execution_time, 5.53e-6)
+
+    def test_linear_attention_decode_uses_recurrent_modeling(self):
+        hidden_states = torch.randn(1, 1, 256, device="meta", dtype=torch.float16)
+        actual_execution_time = self._execute_linear_attention_and_get_base_data(
+            (hidden_states, None, None, 2, 4, 8, 16, 4)
+        )
+        assert_close(self, actual_execution_time, 5.0e-6)
+
+    def test_qwen3_5_linear_attention_uses_local_tp_heads(self):
+        user_config = UserInputConfig(
+            model_id="Qwen/Qwen3.5-397B-A17B",
+            tp_size=16,
+            world_size=16,
+            ep_size=16,
+            do_compile=False,
+            num_hidden_layers_override=1,
+        )
+        model = build_model(user_config)
+        linear_attn = model.unwrap().language_model.layers[0].linear_attn
+        hidden_states = torch.randn(1, 8, model.hidden_size, device="meta")
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(
+                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
+            ) as runtime,
+            torch.no_grad(),
+        ):
+            out = linear_attn(hidden_states)
+
+        self.assertEqual(out.shape, hidden_states.shape)
+        self.assertEqual(getattr(linear_attn, "tensor_cast_tp_size", None), 16)
+        self.assertEqual(runtime.event_list[0].op_invoke_info.args[3], 1)
+        self.assertEqual(runtime.event_list[0].op_invoke_info.args[4], 4)
+
+    def test_qwen3_5_linear_attention_rejects_invalid_tp_size(self):
+        user_config = UserInputConfig(
+            model_id="Qwen/Qwen3.5-397B-A17B",
+            tp_size=32,
+            world_size=32,
+            ep_size=16,
+            do_compile=False,
+            num_hidden_layers_override=1,
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            build_model(user_config)
+
+        self.assertIn("num_k_heads=16", str(cm.exception))
+        self.assertIn("tp_size=32", str(cm.exception))
 
     def test_mlapo_eager(self):
         num_tokens = 8192
