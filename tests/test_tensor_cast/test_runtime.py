@@ -560,7 +560,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
             )
         )
 
-        assert_close(self, actual_execution_time, 1.29e-4)
+        assert_close(self, actual_execution_time, 9.26e-6)
 
     @parameterized.expand(
         [

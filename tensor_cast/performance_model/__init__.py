@@ -1,4 +1,5 @@
 import logging
+import math
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -857,7 +858,7 @@ def _multihead_latent_attention_properties_helper(
         W_UV,
         kv_b_proj,
         v_head_dim,
-        *_,
+        *rest,
     ) = op_invoke_info.args
 
     # Extract dimensions from input tensors
@@ -866,6 +867,7 @@ def _multihead_latent_attention_properties_helper(
     kv_lora_rank = W_UK_T.size(-1)
     qk_rope_head_dim = kv_cache.size(-1) - kv_lora_rank
     qk_nope_head_dim = q_head_dim - qk_rope_head_dim
+    index_topk = rest[0] if len(rest) > 0 else None
 
     # 2. Separate Prefill and Decode Sequences
     # A sequence is in "decode" if it's processing only one query token.
@@ -917,8 +919,13 @@ def _multihead_latent_attention_properties_helper(
         decode_num_tokens_per_seq = num_tokens_per_seq[is_decode]
 
         # The total number of key/value tokens to attend to across all decode sequences
+        decode_attn_len = (
+            torch.clamp(decode_seq_lens, max=index_topk)
+            if index_topk is not None
+            else decode_seq_lens
+        )
         decode_context_sum = torch.sum(
-            decode_num_tokens_per_seq.to(decode_seq_lens.dtype) * decode_seq_lens
+            decode_num_tokens_per_seq.to(decode_attn_len.dtype) * decode_attn_len
         ).item()
 
         # The decode formula is: softmax(q_nope @ W_UK_T @ k_cache) @ v_cache @ W_UV
@@ -955,8 +962,16 @@ def _multihead_latent_attention_properties_helper(
     # Estimate memory read from the KV Cache.
     # The size of a cached entry is (kv_lora_rank + qk_rope_head_dim).
     cache_entry_size = bytes_of_elements(kv_cache.size(-1), kv_cache.dtype)
-
-    properties.memory_read_bytes += torch.sum(seq_lens * cache_entry_size).item()
+    if index_topk is not None:
+        decode_seq_lens = torch.minimum(
+            seq_lens, torch.tensor(index_topk, device=seq_lens.device)
+        )
+        actual_seq_lens = torch.where(is_decode, decode_seq_lens, seq_lens)
+        properties.memory_read_bytes += (
+            torch.sum(actual_seq_lens).item() * cache_entry_size
+        )
+    else:
+        properties.memory_read_bytes += torch.sum(seq_lens * cache_entry_size).item()
 
     compute_ops = properties.compute_ops.setdefault(q.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = total_fma_ops
@@ -1396,8 +1411,6 @@ def _(
 def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
-    import math
-
     # op_invoke_info.args length: torch.nn.functional.conv2d is 7, nn.Conv2d is 9
     assert len(op_invoke_info.args) == 7 or len(op_invoke_info.args) == 9
     # Conv2D input:(B, C_in, H, W), weight:(C_out, C_in/groups, K_h, K_w)
@@ -1857,15 +1870,15 @@ def _(
     assert q.ndim == 4, f"dsa_index q expected 4D, got {q.ndim}D"
     k = op_invoke_info.args[2]
 
-    batch, num_queries, num_heads, head_dim = q.shape
+    batch, seq_len, num_heads, head_dim = q.shape
     kv_len = k.shape[1]
     properties = op_invoke_info.get_memory_access_properties()
 
-    mma_ops = batch * num_queries * num_heads * kv_len * head_dim * 2
+    mma_ops = batch * seq_len * num_heads * kv_len * head_dim * 2
 
     gp_ops = 0
-    gp_ops += batch * num_queries * num_heads * kv_len  # ReLU
-    gp_ops += batch * num_queries * num_heads * kv_len  # * q_s
+    gp_ops += batch * seq_len * num_heads * kv_len  # ReLU
+    gp_ops += batch * seq_len * num_heads * kv_len  # * q_s
     gp_ops += batch * num_heads * kv_len  # sum
     gp_ops += batch * num_heads * kv_len  # * k_s
 

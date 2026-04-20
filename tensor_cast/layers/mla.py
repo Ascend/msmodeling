@@ -132,7 +132,6 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
     def _pre_attention_forward(
         self,
         hidden_states: torch.Tensor,
-        qa_normed: Optional[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_meta: Optional[AttentionMetadataBase] = None,
         **kwargs,
@@ -142,6 +141,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         This hook is INTENDED FOR IN-PLACE CACHE PREPARATION (e.g., writing precomputed key
         features or index data into pre-allocated cache tensors such as indexer_cache).
         """
+        return None
 
     def forward(
         self,
@@ -220,17 +220,9 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                 self.kv_lora_rank,
                 self.q_lora_rank,
             )
-        qa_normed = None
-        if not linear_quant_enabled and self.q_lora_rank is not None:
-            temp_q_a_out = torch.nn.functional.linear(
-                hidden_states_view, self.q_a_proj_weight
-            )
-            qa_normed = torch.nn.functional.layer_norm(
-                temp_q_a_out, temp_q_a_out.shape[-1:], weight=self.q_a_layernorm_weight
-            )
-        self._pre_attention_forward(
+
+        pre_attn_out = self._pre_attention_forward(
             hidden_states=hidden_states,
-            qa_normed=qa_normed,
             position_embeddings=position_embeddings,
             attention_meta=attention_meta,
             **kwargs,
@@ -271,7 +263,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                     kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping
                 )
 
-        extra_backend_kwargs = self._get_backend_kwargs()
+        extra_backend_kwargs = self._get_backend_kwargs(pre_attn_out)
         if self.quant_config is not None:
             attention_backend = partial(
                 torch.ops.tensor_cast.multihead_latent_attention_quant,
@@ -322,7 +314,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         attn_output = self.o_proj(attn_output)
         return attn_output, None
 
-    def _get_backend_kwargs(self) -> dict:
+    def _get_backend_kwargs(self, pre_attn_out) -> dict:
         """
         Hook for subclasses to inject additional arguments into the attention backend.
         Default implementation returns an empty dict (standard dense attention).
@@ -371,41 +363,49 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
         super().__init__(mla_config, mla_module, tp_group, decode_only)
         self.indexer = DeepseekSparseAttentionIndexer(self._inner.indexer)
 
-    def _get_backend_kwargs(self) -> dict:
+    def _get_backend_kwargs(self, pre_attn_out) -> dict:
         """
-        Inject sparse attention specific parameters.
-        The parent class simply passes these to the backend without knowing their meaning.
+        Sparse Attention Args:
+        - index_topk: int, number of selected sparse tokens
+        - cached_topk_indices: Tensor, precomputed sparse position indices
         """
-        return {"index_topk": self.indexer.index_topk}
+        return {
+            "index_topk": self.indexer.index_topk,
+            "cached_topk_indices": pre_attn_out,
+        }
 
     def _pre_attention_forward(
         self,
         hidden_states: torch.Tensor,
-        qa_normed: Optional[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_meta: Optional[AttentionMetadataBase] = None,
         **kwargs,
     ):
-        self._run_sparse_attention_indexer(
-            hidden_states, qa_normed, position_embeddings, attention_meta, **kwargs
+        # Cache the top-k indices to prevent the DSA operator from being optimized away by torch.compile
+        return self._run_sparse_attention_indexer(
+            hidden_states, position_embeddings, attention_meta, **kwargs
         )
 
     def _run_sparse_attention_indexer(
         self,
         hidden_states: torch.Tensor,
-        qa_normed: Optional[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_meta: Optional[AttentionMetadataBase] = None,
         **kwargs,
     ):
-        if qa_normed is None:
-            return
+        if getattr(self, "q_lora_rank", None) is None:
+            return None
+        batch_size, seq_length = hidden_states.shape[:-1]
+        hidden_states_view = hidden_states.view(batch_size * seq_length, -1)
+        # Use module directly: seamlessly supports both quant (TensorCastQuantLinear) and unquant paths
+        temp_q_a_out = self.q_a_proj(hidden_states_view)
+        qa_normed = self.q_a_layernorm(temp_q_a_out)
 
         indexer_cache_by_layers = kwargs.pop("indexer_cache_by_layers", None)
         indexer_cache = (
             indexer_cache_by_layers[self.layer_idx] if indexer_cache_by_layers else None
         )
-        _ = self.indexer(
+        return self.indexer(
             hidden_states, qa_normed, position_embeddings, indexer_cache, attention_meta
         )
 

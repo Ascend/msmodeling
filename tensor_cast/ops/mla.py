@@ -130,6 +130,7 @@ def _(
     kv_b_proj: Optional[torch.Tensor],
     v_head_dim: int,
     index_topk: Optional[int] = None,
+    cached_topk_indices: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     This op computes multi-head latent attention (MLA). It is supposed to use different
@@ -161,7 +162,9 @@ def _(
             used in the decode phase, None if only prefill sequences are provided.
         kv_b_proj: (kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim))
             used in the prefill phase, None if only decode sequences are provided.
-
+        index_topk: Number of top-K tokens for sparse attention
+        cached_topk_indices: Preselected token positions for DSA sparse attention;
+            prevents dsa_index from being optimized away by torch.compile.
     Returns:
         (num_tokens, num_heads, v_head_dim)
     """
@@ -198,6 +201,7 @@ def _(
     out_offset: Optional[torch.Tensor],
     out_dtype: Optional[torch.dtype],
     index_topk: Optional[int] = None,
+    cached_topk_indices: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Similar to `multihead_latent_attention` but with quantization support.
