@@ -61,10 +61,33 @@ def patch_method_for_qwen3_5(model):
             return None
 
         linear_attn_mask = attention_mask
-        if cache_position[0] > 0 or (
-            attention_mask is not None and torch.all(attention_mask == 1)
-        ):
-            linear_attn_mask = None
+
+        is_meta_tensor = (
+            hasattr(cache_position, "is_meta") and cache_position.is_meta
+        ) or (
+            attention_mask is not None
+            and hasattr(attention_mask, "is_meta")
+            and attention_mask.is_meta
+        )
+
+        if is_meta_tensor:
+            return None
+
+        try:
+            cache_condition = (
+                cache_position[0] > 0 if cache_position.numel() > 0 else False
+            )
+            mask_condition = (
+                torch.all(attention_mask == 1).item()
+                if attention_mask is not None and attention_mask.numel() > 0
+                else False
+            )
+
+            if cache_condition or mask_condition:
+                linear_attn_mask = None
+        except RuntimeError:
+            return None
+
         return linear_attn_mask
 
     def _patched_linear_attn_forward(
