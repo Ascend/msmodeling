@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Dict
 
+from tensor_cast.model_config import ParallelConfig
+
 
 LOG_LEVELS = {
     "debug": logging.DEBUG,
@@ -148,3 +150,51 @@ def format_breakdowns(breakdowns: Dict[str, Dict[str, float]]):
             formatted_parts.append(f"{key} 0.00")
 
     return " | ".join(formatted_parts)
+
+
+def resolve_search_sizes(
+    values: list[int] | None, target_devices: int, default_size: int
+) -> list[int]:
+    """Resolve final candidate sizes for a search dimension.
+
+    Args:
+        values:
+            - None: dimension is not searched, use fixed default_size
+            - []: dimension is searched with default range (powers of 2)
+            - [v1, v2, ...]: user-provided explicit candidate values
+        target_devices: device count used for default range generation.
+        default_size: fixed value used when values is None.
+
+    Returns:
+        A de-duplicated positive integer list preserving input order.
+    """
+    if values is None:
+        size_list = [default_size]
+    elif len(values) == 0:
+        size_list = [1 << i for i in range(target_devices.bit_length())]
+    else:
+        size_list = values
+
+    normalized = []
+    for size in size_list:
+        if size <= 0 or size in normalized:
+            continue
+        normalized.append(size)
+    return normalized
+
+
+def format_parallel_label(parallel_config: ParallelConfig, is_moe_model: bool) -> str:
+    parts = [
+        f"TP={parallel_config.tensor_parallel_size}",
+        f"PP={parallel_config.pipeline_parallel_size}",
+        f"DP={parallel_config.data_parallel_size}",
+    ]
+    if is_moe_model:
+        parts.extend(
+            [
+                f"EP={parallel_config.expert_parallel_size}",
+                f"MOE-TP={parallel_config.moe_tensor_parallel_size}",
+                f"MOE-DP={parallel_config.moe_data_parallel_size}",
+            ]
+        )
+    return " | ".join(parts)

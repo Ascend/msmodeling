@@ -22,6 +22,7 @@ from serving_cast.service.utils import (
     check_positive_float,
     check_positive_integer,
     OptimizerData,
+    resolve_search_sizes,
 )
 
 from tensor_cast import device_profiles  # noqa: F401
@@ -111,10 +112,27 @@ def arg_parse():
     )
     model_group.add_argument(
         "--tp-sizes",
-        type=int,
-        nargs="+",
+        type=check_positive_integer,
+        nargs="*",
         default=None,
-        help="TP sizes to search (default: powers of 2 up to world_size)",
+        help="Enable TP search. Optional explicit TP sizes. "
+        "If no value is provided, defaults to powers of 2 up to world_size.",
+    )
+    model_group.add_argument(
+        "--ep-sizes",
+        type=check_positive_integer,
+        nargs="*",
+        default=None,
+        help="Enable EP search. Optional explicit EP sizes. "
+        "If no value is provided, defaults to powers of 2 up to world_size.",
+    )
+    model_group.add_argument(
+        "--moe-dp-sizes",
+        type=check_positive_integer,
+        nargs="*",
+        default=None,
+        help="Enable MOE-DP search. Optional explicit MOE-DP sizes. "
+        "If no value is provided, defaults to powers of 2 up to world_size.",
     )
     service_group = parser.add_argument_group("Service Options")
     service_group.add_argument(
@@ -197,6 +215,53 @@ def arg_parse():
         help="Enable PD ratio optimization mode",
     )
     args = parser.parse_args()
+    if all(x is None for x in (args.tp_sizes, args.ep_sizes, args.moe_dp_sizes)):
+        # Backward-compatible default: search TP only with default range.
+        args.tp_sizes = []
+
+    def _normalize_and_validate(
+        values: list[int] | None, arg_name: str, num_devices: int
+    ) -> list[int] | None:
+        if values is None:
+            return None
+        normalized = []
+        for val in values:
+            if val > num_devices:
+                raise ValueError(
+                    f"--{arg_name} contains value {val}, which is larger than --num-devices ({num_devices})."
+                )
+            if val not in normalized:
+                normalized.append(val)
+        return normalized
+
+    args.tp_sizes = _normalize_and_validate(args.tp_sizes, "tp-sizes", args.num_devices)
+    args.ep_sizes = _normalize_and_validate(args.ep_sizes, "ep-sizes", args.num_devices)
+    args.moe_dp_sizes = _normalize_and_validate(
+        args.moe_dp_sizes, "moe-dp-sizes", args.num_devices
+    )
+
+    tp_candidates = resolve_search_sizes(
+        args.tp_sizes, args.num_devices, args.num_devices
+    )
+    ep_candidates = resolve_search_sizes(
+        args.ep_sizes, args.num_devices, args.num_devices
+    )
+    moe_dp_candidates = resolve_search_sizes(args.moe_dp_sizes, args.num_devices, 1)
+
+    has_valid_combination = any(
+        args.num_devices % tp == 0
+        and args.num_devices % ep == 0
+        and args.num_devices % (ep * moe_dp) == 0
+        for tp in tp_candidates
+        for ep in ep_candidates
+        for moe_dp in moe_dp_candidates
+    )
+    if not has_valid_combination:
+        parser.error(
+            "No valid parallel combination is produced by the provided search arguments "
+            "under current --num-devices."
+        )
+
     return args
 
 

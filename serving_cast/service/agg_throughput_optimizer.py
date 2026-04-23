@@ -20,7 +20,7 @@ import pandas as pd
 from tensor_cast.core.model_runner import ModelRunner
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .optimizer_summary import OptimizerSummary
-from .utils import AGG_COLUMNS, format_breakdowns, OptimizerData
+from .utils import AGG_COLUMNS, format_breakdowns, format_parallel_label, OptimizerData
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,14 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         self.pp = (
             self.model_runner.model.model_config.parallel_config.pipeline_parallel_size
         )
+        self.ep = (
+            self.model_runner.model.model_config.parallel_config.expert_parallel_size
+        )
+        self.moe_tp = self.model_runner.model.model_config.parallel_config.moe_tensor_parallel_size
+        self.moe_dp = (
+            self.model_runner.model.model_config.parallel_config.moe_data_parallel_size
+        )
+        self.is_moe_model = self.model_runner.model.model_config.moe_config is not None
         self._prefill_cache = defaultdict(lambda: None)
         self._decode_cache = defaultdict(lambda: None)
 
@@ -104,7 +112,10 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
 
         memory_left = min(prefill_memory_left_gb, decode_memory_left_gb)
         token_s_device = output_throughput / self.dp / self.pp / self.tp
-        parallel = f"tp{self.tp}pp{self.pp}dp{self.dp}"
+        parallel = format_parallel_label(
+            self.model_runner.model.model_config.parallel_config,
+            self.is_moe_model,
+        )
 
         logger.debug(
             "Prefill Latency: %.4f ms, "

@@ -15,7 +15,9 @@ class SimpleArgs:
         self.ttft_limits = None
         self.tpot_limits = 100
         self.disagg = False
-        self.tp_sizes = None
+        self.tp_sizes = []
+        self.ep_sizes = None
+        self.moe_dp_sizes = None
         self.num_devices = 1
         self.batch_range = None
         self.log_level = "INFO"

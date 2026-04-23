@@ -15,7 +15,7 @@ from tensor_cast.device import DeviceProfile
 from .service.optimizer_factory import OptimizerFactory
 from .service.optimizer_summary import OptimizerSummary
 from .service.pd_ratio_throughput_optimizer import PDRatioThroughputOptimizer
-from .service.utils import LIMIT_COUNT, OptimizerData
+from .service.utils import LIMIT_COUNT, OptimizerData, resolve_search_sizes
 
 
 logger = logging.getLogger(__name__)
@@ -189,28 +189,43 @@ class ParallelRunner:
     def _get_user_config(
         self, num_devices: Optional[int] = None
     ) -> Iterator[UserInputConfig]:
-        # Use provided num_devices or default from args
         target_devices = (
             num_devices if num_devices is not None else self.args.num_devices
         )
-        # get tp list
-        tp_list = getattr(self.args, "tp_sizes", None)
-        if tp_list is None:
-            tp_list = [1 << i for i in range(target_devices.bit_length())]
 
-        tmp_args = copy.deepcopy(self.args)
-        tmp_args.num_devices = target_devices
-        for tp in tp_list:
-            tmp_user_input = UserInputConfig.from_args(tmp_args)
+        base_args = copy.copy(self.args)
+        base_args.num_devices = target_devices
+        base_user_input = UserInputConfig.from_args(base_args)
+
+        def _build_user_input(tp: int, ep: int, moe_dp: int) -> UserInputConfig:
+            tmp_user_input = copy.copy(base_user_input)
             tmp_user_input.tp_size = tp
+            tmp_user_input.dp_size = target_devices // tp
             # if the moe_config is None, ep will be set False in update_parallel_config
             # so set it True here, moe models can enable ep parallel correctly
-            tmp_user_input.ep_size = tmp_user_input.world_size
-            tmp_user_input.moe_dp_size = 1
-            tmp_user_input.moe_tp_size = 1
+            tmp_user_input.ep_size = ep
+            tmp_user_input.moe_dp_size = moe_dp
+            tmp_user_input.moe_tp_size = target_devices // (ep * moe_dp)
+            return tmp_user_input
+
+        tp_list = resolve_search_sizes(
+            self.args.tp_sizes, target_devices, target_devices
+        )
+        ep_list = resolve_search_sizes(
+            self.args.ep_sizes, target_devices, target_devices
+        )
+        moe_dp_list = resolve_search_sizes(self.args.moe_dp_sizes, target_devices, 1)
+
+        for tp in tp_list:
             if target_devices % tp != 0:
                 continue
-            yield tmp_user_input
+            for ep in ep_list:
+                if target_devices % ep != 0:
+                    continue
+                for moe_dp in moe_dp_list:
+                    if target_devices % (ep * moe_dp) != 0:
+                        continue
+                    yield _build_user_input(tp=tp, ep=ep, moe_dp=moe_dp)
 
     def _get_df_list(
         self,

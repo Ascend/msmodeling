@@ -122,6 +122,40 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 - `--enable-optimize-prefill-decode-ratio` cannot be used together with `--disagg`
 - Both `--prefill-devices-per-instance` and `--decode-devices-per-instance` must be specified when PD ratio optimization is enabled
 
+## Search dimensions and ranges
+
+`throughput_optimizer` searches dimensions based on which search arguments are provided:
+
+- `--tp-sizes`: enable TP search
+- `--ep-sizes`: enable EP search
+- `--moe-dp-sizes`: enable MOE-DP search
+
+Rules:
+- If no search argument is provided, default behavior is TP-only search with default range.
+- For dimensions not selected for search, fixed defaults are used:
+  - `tp = num_devices`
+  - `ep = num_devices`
+  - `moe-dp = 1`
+- If a search argument is provided without values, that dimension uses default range:
+  `powers of 2 up to world_size`
+  (for example, when `num_devices=8`, default range is `[1, 2, 4, 8]`).
+
+Examples:
+
+```bash
+# Search TP only (explicit range)
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device TEST_DEVICE --num-devices 8 --input-length 3500 --output-length 1500 --tpot-limits 50 --tp-sizes 1 2 4 8
+
+# Search TP/EP (MOE-DP fixed to 1)
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device TEST_DEVICE --num-devices 8 --input-length 3500 --output-length 1500 --tpot-limits 50 --tp-sizes 1 2 4 8 --ep-sizes 1 2 4 8
+
+# Search TP/EP/MOE-DP
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device TEST_DEVICE --num-devices 8 --input-length 3500 --output-length 1500 --tpot-limits 50 --tp-sizes 1 2 4 8 --ep-sizes 1 2 4 8 --moe-dp-sizes 1 2 4 8
+
+# Search EP only with default range (argument provided without values)
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device TEST_DEVICE --num-devices 8 --input-length 3500 --output-length 1500 --tpot-limits 50 --ep-sizes
+```
+
 ## Result Information
 
 The script will output the performance metrics, including throughput, TTFT, TPOT, and concurrency. Like the example below:
@@ -143,14 +177,14 @@ The script will output the performance metrics, including throughput, TTFT, TPOT
     TPOT: 49.90 ms
   ----------------------------------------------------------------------------
 Top 4 Aggregation Configurations:
-+-----+----------------------+-----------+-----------+-------------+---------------+-----------+------------+
-| Top | Throughput (token/s) | TTFT (ms) | TPOT (ms) | concurrency | total_devices |  parallel | batch_size |
-+-----+----------------------+-----------+-----------+-------------+---------------+-----------+------------+
-|  1  |       2888.45        |  16032.05 |   49.90   |     175     |       8       | tp8pp1dp1 |    175     |
-|  2  |       2013.49        |  22512.86 |   49.56   |     130     |       8       | tp4pp1dp2 |     65     |
-|  3  |       1140.23        |  25817.73 |   49.44   |      76     |       8       | tp2pp1dp4 |     19     |
-|  4  |        549.89        |  14214.54 |   48.72   |      32     |       8       | tp1pp1dp8 |     4      |
-+-----+----------------------+-----------+-----------+-------------+---------------+-----------+------------+
++-----+----------------------+-----------+-----------+-------------+-------------+--------------------+------------+
+| Top | Throughput (token/s) | TTFT (ms) | TPOT (ms) | concurrency | num_devices |      parallel      | batch_size |
++-----+----------------------+-----------+-----------+-------------+-------------+--------------------+------------+
+|  1  |       2888.45        |  16032.05 |   49.90   |     175     |       8     | TP=8 | PP=1 | DP=1 |    175     |
+|  2  |       2013.49        |  22512.86 |   49.56   |     130     |       8     | TP=4 | PP=1 | DP=2 |     65     |
+|  3  |       1140.23        |  25817.73 |   49.44   |      76     |       8     | TP=2 | PP=1 | DP=4 |     19     |
+|  4  |        549.89        |  14214.54 |   48.72   |      32     |       8     | TP=1 | PP=1 | DP=8 |     4      |
++-----+----------------------+-----------+-----------+-------------+-------------+--------------------+------------+
 ********************************************************************************
 ```
 
@@ -198,8 +232,12 @@ Model & Quantization Options:
                         Quantize the KV cache with the given action (default: DISABLED)
   --reserved-memory-gb RESERVED_MEMORY_GB
                         Size of reserved device memory (in GB) that we cannot use from applications. (default: 0)
-  --tp-sizes TP_SIZES [TP_SIZES ...]
-                        TP sizes to search (default: powers of 2 up to world_size) (default: None)
+  --tp-sizes [TP_SIZES ...]
+                        Enable TP search. Optional explicit TP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
+  --ep-sizes [EP_SIZES ...]
+                        Enable EP search. Optional explicit EP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
+  --moe-dp-sizes [MOE_DP_SIZES ...]
+                        Enable MOE-DP search. Optional explicit MOE-DP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
 
 Service Options:
   --ttft-limits TTFT_LIMITS

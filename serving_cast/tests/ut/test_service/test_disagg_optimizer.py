@@ -71,7 +71,7 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertIsNone(row["ttft"])
         self.assertEqual(row["concurrency"], 8)  # batch_size * dp * pp = 2 * 4 * 1 = 8
         self.assertEqual(row["device_name"], "TEST_DEVICE")
-        self.assertEqual(row["parallel"], "tp1pp1dp4")
+        self.assertEqual(row["parallel"], "TP=1 | PP=1 | DP=4")
 
     def test_get_inference_info_prefill_mode(self):
         """Test get_inference_info method in prefill mode"""

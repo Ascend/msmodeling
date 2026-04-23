@@ -57,10 +57,13 @@ class TestTaskRunner(unittest.TestCase):
         tps = [config.tp_size for config in configs]
         self.assertIn(2, tps)
         self.assertIn(4, tps)
+        for config in configs:
+            self.assertEqual(config.ep_size, 4)
+            self.assertEqual(config.moe_dp_size, 1)
 
     def test_get_user_config_default_tps(self):
         """Test _get_user_config with default TP values"""
-        self.args.tp_sizes = None
+        self.args.tp_sizes = []
         self.args.num_devices = 8
 
         task_runner = ParallelRunner(self.args)
@@ -71,6 +74,74 @@ class TestTaskRunner(unittest.TestCase):
         actual_tps = [config.tp_size for config in configs]
         for expected_tp in expected_tps:
             self.assertIn(expected_tp, actual_tps)
+
+    def test_get_user_config_tp_ep_combinations(self):
+        """Test searching TP/EP with fixed MOE-DP=1."""
+        self.args.tp_sizes = [1, 2, 4]
+        self.args.ep_sizes = [1, 2, 4]
+        self.args.num_devices = 4
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+        self.assertEqual(len(configs), 9)
+
+        target = next(
+            config for config in configs if config.tp_size == 2 and config.ep_size == 2
+        )
+        self.assertEqual(target.dp_size, 2)
+        self.assertEqual(target.moe_dp_size, 1)
+        self.assertEqual(target.moe_tp_size, 2)
+
+    def test_get_user_config_tp_ep_default_ranges(self):
+        """Test TP/EP default ranges."""
+        self.args.tp_sizes = []
+        self.args.ep_sizes = []
+        self.args.num_devices = 8
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+        self.assertEqual(len(configs), 16)
+        target = next(
+            config for config in configs if config.tp_size == 8 and config.ep_size == 8
+        )
+        self.assertEqual(target.dp_size, 1)
+        self.assertEqual(target.moe_dp_size, 1)
+        self.assertEqual(target.moe_tp_size, 1)
+
+    def test_get_user_config_tp_ep_moe_dp_combinations(self):
+        """Test searching TP/EP/MOE-DP combinations."""
+        self.args.tp_sizes = [1, 2]
+        self.args.ep_sizes = [1, 2, 4]
+        self.args.moe_dp_sizes = [1, 2, 4]
+        self.args.num_devices = 8
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+        keys = {
+            (config.tp_size, config.ep_size, config.moe_dp_size) for config in configs
+        }
+        self.assertIn((1, 2, 4), keys)
+        self.assertIn((2, 4, 2), keys)
+        for config in configs:
+            self.assertEqual(
+                config.moe_tp_size,
+                self.args.num_devices // (config.ep_size * config.moe_dp_size),
+            )
+
+    def test_get_user_config_tp_ep_moe_dp_default_ranges(self):
+        """Test TP/EP/MOE-DP default ranges."""
+        self.args.tp_sizes = []
+        self.args.ep_sizes = []
+        self.args.moe_dp_sizes = []
+        self.args.num_devices = 4
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+        self.assertEqual(len(configs), 18)
+        keys = {
+            (config.tp_size, config.ep_size, config.moe_dp_size) for config in configs
+        }
+        self.assertIn((4, 4, 1), keys)
+        self.assertIn((2, 2, 2), keys)
 
     def test_run_with_tpot_limit(self):
         """Test run method with TPOT limit"""
@@ -179,7 +250,7 @@ class TestTaskRunner(unittest.TestCase):
         self.assertIsNotNone(result_df)
         row = result_df.iloc[0]
         self.assertEqual(row["model_id"], self.args.model_id)
-        self.assertEqual(row["parallel"], "tp1pp1dp1")
+        self.assertEqual(row["parallel"], "TP=1 | PP=1 | DP=1")
 
 
 class TestParallelRunnerPDMode(unittest.TestCase):
