@@ -169,12 +169,6 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         )
         self.q_a_layernorm_weight = self.q_a_layernorm.weight.data
         self.kv_a_layernorm_weight = self.kv_a_layernorm.weight.data
-        self.q_b_proj_weight = get_partial_sharded(
-            self.q_b_proj_weight,
-            self.tp_group.world_size,
-            self.tp_group.rank_in_group,
-            unit_num=self.num_heads,
-        )
         linear_quant_enabled = (
             getattr(self, "q_a_proj_scale", None) is not None
             and getattr(self, "q_b_proj_scale", None) is not None

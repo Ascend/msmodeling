@@ -3,11 +3,14 @@ import unittest
 import torch
 from parameterized import parameterized
 
+from tensor_cast import ops  # noqa: F401
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
+from tensor_cast.layers.parallel_linear import ColumnParallelLinear
 from tensor_cast.layers.sampler import SamplingMetadata
 from tensor_cast.patch_torch import patch_torch
 from tensor_cast.transformers.custom_model_registry import get_mtp_block_module_name
+from tensor_cast.transformers.utils import strip_module_name
 from .test_common import create_mla_metadata_and_kv_cache, has_submodule_with_cls_name
 
 
@@ -102,6 +105,62 @@ class MtpTestCase(unittest.TestCase):
                 ),
             )
             self.assertEqual(outputs.shape, (2, num_mtp_layers + 1))
+
+    @parameterized.expand(
+        [
+            ["deepseek-ai/DeepSeek-V3.2", 128, 128],
+        ]
+    )
+    def test_mtp_self_attn_q_b_proj_sharded_by_tp(self, model_id, tp_size, ep_size):
+        """MTP block's self_attn.q_b_proj should be TP-sharded when tp>1."""
+        num_mtp_layers = 1
+        user_config = UserInputConfig(
+            model_id=model_id,
+            num_mtp_tokens=num_mtp_layers,
+            do_compile=False,
+            world_size=tp_size,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            moe_dp_size=1,
+            moe_tp_size=1,
+        )
+        model = build_model(user_config)
+
+        text_config = model.text_config
+        assert text_config.num_attention_heads % tp_size == 0
+        qk_head_dim = text_config.qk_nope_head_dim + text_config.qk_rope_head_dim
+        expected_out_features = text_config.num_attention_heads * qk_head_dim // tp_size
+        expected_shape = torch.Size([expected_out_features, text_config.q_lora_rank])
+
+        sharded_q_b_projs = []
+        for name, module in model.named_modules():
+            if not isinstance(module, ColumnParallelLinear):
+                continue
+            stripped = strip_module_name(name)
+            if stripped.startswith("mtp.layers.") and stripped.endswith(
+                ".self_attn.q_b_proj"
+            ):
+                sharded_q_b_projs.append((stripped, module))
+
+        self.assertEqual(
+            len(sharded_q_b_projs),
+            num_mtp_layers,
+            f"expected {num_mtp_layers} sharded MTP q_b_proj, "
+            f"found {len(sharded_q_b_projs)}: {[n for n, _ in sharded_q_b_projs]}",
+        )
+        for name, module in sharded_q_b_projs:
+            self.assertEqual(
+                module.out_features_per_partition,
+                expected_out_features,
+                f"{name} out_features_per_partition mismatch",
+            )
+            inner_weight = getattr(module._inner, module.inner_weight_name)
+            self.assertEqual(
+                inner_weight.shape,
+                expected_shape,
+                f"{name} {module.inner_weight_name} shape "
+                f"{tuple(inner_weight.shape)} != expected {tuple(expected_shape)}",
+            )
 
     @parameterized.expand(
         [

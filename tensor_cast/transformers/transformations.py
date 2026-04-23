@@ -375,6 +375,23 @@ def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
                             f"{prefix}.*.self_attn.kv_b_proj": (COLWISE_LINEAR, params),
                         }
                     )
+                if self.model_config.mtp_config is not None:
+                    tp_plan.update(
+                        {
+                            "mtp.layers.*.mtp_block.self_attn.q_proj": (
+                                COLWISE_LINEAR,
+                                params,
+                            ),
+                            "mtp.layers.*.mtp_block.self_attn.q_b_proj": (
+                                COLWISE_LINEAR,
+                                params,
+                            ),
+                            "mtp.layers.*.mtp_block.self_attn.kv_b_proj": (
+                                COLWISE_LINEAR,
+                                params,
+                            ),
+                        }
+                    )
             else:
                 params.update({"head_num": config_info.num_attention_heads})
                 tp_plan.update(
