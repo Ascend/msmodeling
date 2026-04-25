@@ -1,3 +1,4 @@
+from ...model_config import MoEFieldNames
 from ..custom_model_registry import ModelProfile, register_model_profile
 
 
@@ -34,10 +35,10 @@ register_model_profile(
         moe_module_name="Qwen3NextSparseMoeBlock",
         moe_gate_returns_raw_logits=False,
         moe_num_experts_key=["text_config", "num_experts"],
-        moe_field_names_override={
-            "shared_experts": "shared_expert",
-            "shared_experts_gate": "shared_expert_gate",
-        },
+        moe_field_names_override=MoEFieldNames(
+            shared_experts="shared_expert",
+            shared_experts_gate="shared_expert_gate",
+        ),
         patch_method=patch_method_for_qwen3_next,
     )
 )

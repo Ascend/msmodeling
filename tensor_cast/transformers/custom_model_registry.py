@@ -130,102 +130,124 @@ class ModelProfile:
     Model families group related model types for unified processing.
     """
 
-    # Unique identifier for the model architecture, usually corresponding to `model_type` in HuggingFace config.
-    # Example: "llama", "qwen2", "glm"
+    # Corresponds to the `model_type` field in the model's `config.json` (HuggingFace/ModelScope).
+    # Used as the primary key for model identification.
+    # Example: "llama", "qwen2", "deepseek_v3"
     model_type: str
 
-    # --- MoE (Mixture-of-Experts) configuration ---
-    # Fully-qualified class name of the MoE expert module.
-    # Used to dynamically locate and instantiate the MoE block during tensor conversion or model loading.
-    # Example: "transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock"
+    # --- MoE (Mixture-of-Experts) Configuration ---
+
+    # Fully-qualified class name of the MoE module defined in `modeling_{model_type}.py`.
+    # Typically follows the naming pattern `{ModelType}SparseMoeBlock` or `{ModelType}MoE`.
+    # Leave as None for dense (non-MoE) models.
     moe_module_name: Optional[str] = None
 
-    # Indicates whether the MoE gate network returns raw logits instead of softmax probabilities.
-    # If True, subsequent logic will handle the softmax (e.g., for computing load balancing loss).
-    moe_gate_returns_raw_logits: bool = False
-
-    # The configuration key(s) used to retrieve the number of experts from the model config.
-    # Supports a string or a list of strings (tried in order).
-    # Example: ["num_local_experts", "num_experts"]
+    # The key in `config.json` that specifies the total number of experts.
+    # Example: If config has {"num_local_experts": 64}, set this to "num_local_experts".
     moe_num_experts_key: Union[str, List[str]] = "num_experts"
 
-    # Dictionary to override default MoE field mappings defined in MoEFieldNames.
-    # Used when a specific model's field naming deviates from the standard.
-    # Example: {"gate_proj": "router", "up_proj": "w1"}
-    moe_field_names_override: Optional[Dict[str, Any]] = None
+    # Indicates if the MoE gate/router returns *raw, unprocessed logits*.
+    #
+    # Logic for setting this field:
+    # 1. [Default/False] If the gate class (in modeling_{model_type}.py) internally performs
+    #    softmax/sigmoid AND top-k selection (e.g., Ernie4_5_MoeTopKRouter), leave this as False
+    #    (or omit it). The framework expects ready-to-use weights.
+    # 2. [True] Only set to True if the gate returns raw logits (e.g., output of a Linear layer)
+    #    without any probability conversion or token routing. The framework will then handle softmax.
+    moe_gate_returns_raw_logits: bool = False
 
-    # --- MTP (Multi-Task Processing) configuration ---
-    # Fully-qualified class name of the MTP (Multi-Task Processing) block module.
-    # Points to the module path handling multi-task or multi-token prediction (e.g., in DeepSeek V3).
+    # Configuration object to map standard MoE attribute names to the model's specific variable names.
+    #
+    # 【What is this class?】
+    # It defines the standard variable names (fields) that the framework expects to find in the MoE module.
+    # - gate: The router/gate network.
+    # - experts: The list of routed experts.
+    # - shared_experts: The shared expert layer.
+    # - shared_experts_gate: The gate for shared experts.
+    #
+    # 【How to locate the MoE Class?】
+    # 1. Open `transformers/models/{model_type}/modeling_{model_type}.py`.
+    # 2. Search for a class named `{ModelType}SparseMoeBlock` or `{ModelType}MoE`.
+    #    - This class acts as the "container" that holds the gate, experts, and shared experts.
+    #    - Example: `Qwen3NextSparseMoeBlock`, `MixtralSparseMoeBlock`.
+    # 3. Inspect its `__init__` method to find the specific attribute names (e.g., `self.shared_expert`).
+    #
+    # 【Filling Rule】
+    # - The field name (e.g., `shared_experts`) represents the Standard Name.
+    # - The value you assign (e.g., `"shared_expert"`) represents the Model's Actual Name.
+    # - **Only override fields where the names differ.** If the model uses the standard name, ignore it.
+    #
+    # 【Example: Qwen3Next】
+    # Source code: `self.shared_expert = Qwen3NextMLP(...)` (Note the singular 'expert')
+    # Assignment:   moe_field_names_override=MoEFieldNames(shared_experts="shared_expert")
+    moe_field_names_override: Optional[MoEFieldNames] = None
+
+    # --- MTP (Multi-Token Prediction) Configuration ---
+    # Class name implementing the Multi-Token Prediction (or Speculative Decoding) logic.
+    # Used to identify blocks responsible for predicting future tokens (e.g., DeepSeekV3DecoderLayer).
+    # Leave as None if the model does not support MTP.
     mtp_block_module_name: Optional[str] = None
 
-    # --- MLA (Multihead Latent Attention) configuration ---
-    # Fully-qualified class name of the MLA (Multihead Latent Attention) module.
-    # Points to the MLA attention class path for tensor conversion or dynamic loading.
-    # Example: "transformers.models.deepseek_v2.modeling_deepseek.DeepseekV2Attention"
+    # --- MLA (Multi-head Latent Attention) Configuration ---
+
+    # Fully-qualified class name implementing the MLA mechanism.
+    # Used to apply specific MLA optimizations (e.g., FlashMLA, KV cache compression).
+    # Example: "transformers.models.deepseek_v3.modeling_deepseek.DeepseekV3Attention"
     mla_module_name: Optional[str] = None
 
-    # Dictionary to override default MLA field mappings defined in MlaFieldNames.
-    # Example overriding default names: {"q_proj": "q_a_proj", "kv_a_proj_with_mqa": "kv_a_layernorm"}
+    # Dictionary to map standard MLA field names to the model's specific attribute names.
+    # Used when the model's internal naming for MLA components (like compressed KV projections)
+    # differs from the standard.
+    # Example: {"q_proj": "q_a_proj", "kv_a_proj_with_mqa": "kv_a_layernorm"}
     mla_field_names_override: Optional[Dict[str, Any]] = None
 
-    # Python class type for the MLA module.
-    # Defaults to the built-in MultiheadLatentAttentionTensorCast.
-    # Can be specified if a custom MLA implementation is needed.
+    # Python class type used for the MLA module implementation.
+    # Defaults to the built-in tensor casting class. Override only for custom MLA implementations.
     mla_module_class_type: Optional[Type["torch.nn.Module"]] = (
         MultiheadLatentAttentionTensorCast
     )
 
-    # --- Custom expert module configuration ---
-    # Python type used for dynamically creating a custom expert module.
-    # Provided when the standard MoE expert structure does not meet the requirements.
+    # Python type used to dynamically instantiate a custom expert module.
+    # Use this if the standard MLP structure does not fit the model's expert architecture.
     custom_expert_module_type: Optional[Type["torch.nn.Module"]] = MoeExpertMLP
 
-    # --- General configuration ---
-    # Model family identifier used to group related model types for unified processing.
-    # For example, the "llama" family might include "llama", "baichuan", "yi", etc.
+    # Identifier for the model family, grouping related architectures for unified processing.
+    # Example: "llama" family might include "llama", "baichuan", "yi".
     model_family: Optional[str] = None
 
-    # Method for dynamic model patching.
-    # A callable executed during model loading or conversion to modify the model structure
-    # (e.g., replacing specific attention operators).
+    # Callable method for dynamic model patching during loading.
+    # Used to structurally modify the model (e.g., operator replacement) at runtime.
     patch_method: Optional[Callable] = None
 
-    # --- Visual language model patching ---
-    # Access path for the Vision Encoder instance within the model.
-    # Points to the root module responsible for image feature extraction.
-    # Example: "model.vision_tower" or "visual"
+    # Attribute path to the Vision Encoder instance within the root model.
+    # Example: "model.vision_tower"
     visual_module_path: Optional[str] = None
 
-    # Access path for the Language Model (LLM) instance within the model.
-    # Points to the core LLM responsible for text processing and multi-modal fusion.
-    # Example: "model.text_model" or "language_model"
+    # Attribute path to the Language Model (LLM) instance within the root model.
+    # Example: "model.language_model"
     language_module_path: Optional[str] = None
 
-    # [Module Import Path] Python module where vision layer classes are defined.
-    # Used to dynamically import layer types for model parsing and modification.
+    # Python module path where vision layer classes are defined.
+    # Used for dynamic imports during model parsing.
     # Example: "transformers.models.clip.modeling_clip"
     visual_layers_module_path: Optional[str] = None
 
-    # [Model Instance Path] Dot-separated attribute chain to access vision layers in the model object.
-    # Used to locate actual layer instances in the model structure.
+    # Dot-separated attribute path to access vision transformer layers in the model instance.
     # Example: "vision_model.encoder.layers"
     visual_layers_path_str: Optional[str] = None
 
-    # [String Path Representation] of the language model layers.
-    # Similar to visual_layers_path_str, identifying the LLM layers' weight namespace. Example: "language_model.layers"
+    # Dot-separated attribute path to access language model layers.
+    # Example: "language_model.layers"
     language_layers_path_str: Optional[str] = None
 
-    # Mapping for linear layers in the vision feature merger/projector.
-    # Defines how visual features are fused or projected. Empty = default strategy.
-    # Example: {"proj": "visual_projection"}
+    # Mapping for linear layers in the visual feature merger/projector.
+    # Defines how visual features are projected to the language space.
     visual_merger_linear_mapping: Optional[Dict[str, Any]] = dataclasses.field(
         default_factory=dict
     )
 
-    # Mapping for linear layers inside vision MLP blocks (FFN).
-    # Used to locate fc1/fc2 in each transformer layer.
-    # Example: {"fc1": "fc1", "fc2": "fc2"}
+    # Mapping for linear layers (MLP/FFN) inside the vision encoder blocks.
+    # Used to locate specific weights like fc1/fc2 within vision transformer layers.
     visual_mlp_linear_mapping: Optional[Dict[str, Any]] = dataclasses.field(
         default_factory=dict
     )
@@ -253,14 +275,10 @@ class ModelProfile:
         if not self.moe_module_name:
             return None
 
-        field_names = self._build_field_names(
-            MoEFieldNames, self.moe_field_names_override
-        )
-
         return MoEConfig(
             module_name=self.moe_module_name,
             fused_moe_cls=fused_moe_cls,
-            field_names=field_names,
+            field_names=self.moe_field_names_override or MoEFieldNames(),
             gate_returns_raw_logits=self.moe_gate_returns_raw_logits,
             enable_redundant_experts=enable_redundant,
             enable_external_shared_experts=enable_external_shared,

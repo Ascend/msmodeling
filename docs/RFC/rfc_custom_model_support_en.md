@@ -243,7 +243,7 @@ The custom model system now supports universal plugin registration for all LLM m
   - `moe_module_name`: Full-qualified class name of MoE module
   - `moe_gate_returns_raw_logits`: Whether MoE gate returns raw logits
   - `moe_num_experts_key`: Configuration key(s) to get number of experts
-  - `moe_field_names_override`: Field name overrides for MoE
+  - `moe_field_names_override`: Field name overrides for MoE (using `MoEFieldNames`)
 
 - **MTP Configuration**:
   - `mtp_block_module_name`: Full-qualified class name of MTP block module

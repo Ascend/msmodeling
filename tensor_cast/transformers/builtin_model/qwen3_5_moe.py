@@ -1,5 +1,7 @@
 import torch
 
+from ...model_config import MoEFieldNames
+
 from ...utils import exact_division
 
 from ..custom_model_registry import (
@@ -59,6 +61,9 @@ def patch_method_for_qwen3_5(model):
         # mode to keep a stable graph and align with decode behavior.
         if torch.compiler.is_compiling():
             return None
+
+        if cache_position is not None and cache_position.device.type == "meta":
+            return attention_mask
 
         linear_attn_mask = attention_mask
 
@@ -140,20 +145,10 @@ register_model_profile(
         moe_module_name="Qwen3_5MoeSparseMoeBlock",
         moe_gate_returns_raw_logits=False,
         moe_num_experts_key=["text_config", "num_experts"],
-        moe_field_names_override={
-            "shared_experts": "shared_expert",
-            "shared_experts_gate": "shared_expert_gate",
-        },
-        model_family="qwen3_5",
-        patch_method=patch_method_for_qwen3_5,
-        **QWEN3_5_VISUAL_CONFIG,
-    )
-)
-
-
-register_model_profile(
-    ModelProfile(
-        model_type="qwen3_5",
+        moe_field_names_override=MoEFieldNames(
+            shared_experts="shared_expert",
+            shared_experts_gate="shared_expert_gate",
+        ),
         model_family="qwen3_5",
         patch_method=patch_method_for_qwen3_5,
         **QWEN3_5_VISUAL_CONFIG,

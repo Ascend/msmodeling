@@ -246,7 +246,7 @@ def _(model: TransformerModel):
   - `moe_module_name`：MoE模块的完整类名
   - `moe_gate_returns_raw_logits`：MoE门控是否返回原始logits
   - `moe_num_experts_key`：获取专家数量的配置键
-  - `moe_field_names_override`：MoE的字段名覆盖
+  - `moe_field_names_override`：MoE的字段名覆盖（使用 `MoEFieldNames` 对象）
 
 - **MTP配置**：
   - `mtp_block_module_name`：MTP块模块的完整类名

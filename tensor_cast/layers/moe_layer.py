@@ -1,4 +1,5 @@
 import copy
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
@@ -8,6 +9,8 @@ from .. import ops  # noqa: F401
 from ..model_config import MoEConfig
 from ..parallel_group import _DEFAULT_PG, ParallelGroup
 from .utils import ModelWrapperBase
+
+logger = logging.getLogger(__name__)
 
 
 def assign_experts(num_experts, world_size, rank):
@@ -113,6 +116,17 @@ class FusedMoEBase(torch.nn.Module, ABC):
         self.shared_experts = shared_experts
         self.shared_experts_gate = shared_experts_gate
         self.top_k = top_k
+        if top_k is None:
+            logger.error(
+                """The required parameter 'top_k' is missing in the MoE configuration.
+Please ensure your model configuration provides a valid 'top_k' value.
+If you are using a custom model, check that the model's configuration includes 'top_k'.
+If the field name for top_k is non-standard, you may need to adjust the model profile."""
+            )
+            raise ValueError(
+                "Missing required parameter 'top_k' in MoE configuration. "
+                "See logs for detailed guidance."
+            )
 
     @abstractmethod
     def forward(
