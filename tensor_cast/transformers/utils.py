@@ -34,6 +34,42 @@ from ..model_config import AttentionQuantConfig, ModelConfig, RemoteSource
 
 logger = logging.getLogger(__name__)
 
+# When resolving a ModelScope Hub id, only fetch files needed for config + trust_remote_code
+# Python; never pull weight shards into ~/.cache (avoids multi‑GB ._____temp / hub dirs for UT).
+_MODELSCOPE_WEIGHT_IGNORE_PATTERNS = [
+    "*.safetensors",
+    "*.safetensors.index.json",
+    "*.bin",
+    "*.pt",
+    "*.pth",
+    "*.ckpt",
+    "*.h5",
+    "*.npz",
+    "*.onnx",
+    "*.gguf",
+    "*.zip",
+    "*.tar",
+    "*.tar.gz",
+]
+
+
+def _modelscope_snapshot_config_only(model_id: str) -> str:
+    """
+    Materialize a local Hub directory with config and code files only (no weight tensors).
+
+    ModelScope ``AutoConfig.from_pretrained`` may otherwise sync the full repository.
+    """
+    from modelscope import snapshot_download
+
+    try:
+        return snapshot_download(
+            model_id, ignore_patterns=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS
+        )
+    except TypeError:
+        return snapshot_download(
+            model_id, ignore_file_pattern=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS
+        )
+
 
 def replace_module(model, name: str, new_module: torch.nn.Module):
     path = name.split(".")
@@ -242,6 +278,16 @@ class AutoModelConfigLoader:
             from modelscope import AutoConfig
         else:
             from transformers import AutoConfig
+
+        if remote_source == RemoteSource.modelscope and not os.path.isdir(model_id):
+            resolved = _modelscope_snapshot_config_only(model_id)
+            logger.info(
+                "ModelScope Hub id %s resolved to config-only snapshot at %s",
+                model_id,
+                resolved,
+            )
+            model_id = resolved
+
         check_model_path_res = self.check_model_path(model_id)
         if (
             check_model_path_res["has_config_json"]
