@@ -131,6 +131,7 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 - `--moe-dp-sizes`: enable MOE-DP search
 
 Rules:
+
 - If no search argument is provided, default behavior is TP-only search with default range.
 - For dimensions not selected for search, fixed defaults are used:
   - `tp = num_devices`
@@ -213,7 +214,7 @@ General Options:
                         execution. (default: 1)
   --reserved-memory-gb RESERVED_MEMORY_GB
                         Amount of device memory (in gigabytes) reserved for system usage and unavailable for application. Set to 0 to disable      
-                        memory reservation. (default: 0.0)
+                        memory reservation. (default: 10.0)
   --log-level {debug,info,warning,error,critical}
                         Specifies the verbosity level for log output. Available levels: 'debug' (most verbose), 'info', 'warning', 'error',        
                         'critical' (least verbose). (default: error)
@@ -230,8 +231,6 @@ Model & Quantization Options:
                         Group size for MXFP4 quantization (default: 32)
   --quantize-attention-action {DISABLED,INT8,FP8}
                         Quantize the KV cache with the given action (default: DISABLED)
-  --reserved-memory-gb RESERVED_MEMORY_GB
-                        Size of reserved device memory (in GB) that we cannot use from applications. (default: 0)
   --tp-sizes [TP_SIZES ...]
                         Enable TP search. Optional explicit TP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
   --ep-sizes [EP_SIZES ...]

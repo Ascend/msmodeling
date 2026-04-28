@@ -11,6 +11,21 @@ from serving_cast.service.optimizer_summary import SHOW_COLUMNS
 class TestThroughputOptimizer(TestCase):
     """Performance analysis script system test class"""
 
+    def test_arg_parse_reserved_memory_default_is_ten(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            "Qwen/Qwen3-32B",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            args = throughput_optimizer_module.arg_parse()
+
+        self.assertEqual(args.reserved_memory_gb, 10.0)
+
     def _run_throughput_optimizer(self, args, check=True):
         """Run throughput_optimizer script using module execution"""
         cmd = [sys.executable, "-m", "cli.inference.throughput_optimizer"] + args

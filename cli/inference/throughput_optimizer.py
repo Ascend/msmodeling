@@ -43,7 +43,7 @@ def arg_parse():
     parser = argparse.ArgumentParser(
         description="Get Best Throughput for given input/output sequence length and SLO limitations "
         "in aggregation mode or disaggregation mode.",
-        parents=[get_common_argparser()],
+        parents=[get_common_argparser(reserved_memory_gb_default=10.0)],
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(

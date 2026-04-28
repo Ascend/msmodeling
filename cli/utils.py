@@ -85,7 +85,7 @@ def check_string_valid(string: str, max_len=256):
     return string
 
 
-def get_common_argparser():
+def get_common_argparser(reserved_memory_gb_default: float = 0.0):
     common_parser = argparse.ArgumentParser(
         add_help=False,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -127,7 +127,7 @@ def get_common_argparser():
     general_group.add_argument(
         "--reserved-memory-gb",
         type=float,
-        default=0.0,
+        default=reserved_memory_gb_default,
         help=(
             "Amount of device memory (in gigabytes) reserved for system usage and unavailable for application. "
             "Set to 0 to disable memory reservation."
