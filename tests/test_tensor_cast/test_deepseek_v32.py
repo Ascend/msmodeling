@@ -42,7 +42,7 @@ class TestDeepseekV32Model(unittest.TestCase):
             model.forward(**inputs)
         result = runtime.table_averages()
         self.assertIn("tensor_cast.multihead_latent_attention_quant.default", result)
-        self.assertIn("tensor_cast.dsa_index_cache.default", result)
+        self.assertIn("tensor_cast.dsa_indexer.default", result)
         total_time_s = runtime.total_execution_time_s()[perf_model.name]
         self.assertGreater(total_time_s, 0)
 

@@ -81,7 +81,8 @@ class RowParallelLinear(ParallelLinearBase):
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
         self.gather_slice_data = (
-            self.global_tp_group.world_size != self.tp_group.world_size
+            self.tp_group.world_size > 1
+            and self.global_tp_group.world_size != self.tp_group.world_size
         )
         self.slice_input_by_last_dim = slice_input_by_last_dim
         self.reduce_output = reduce_output
@@ -187,7 +188,8 @@ class ColumnParallelLinear(ParallelLinearBase):
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
         self.gather_slice_data = (
-            self.global_tp_group.world_size != self.tp_group.world_size
+            self.tp_group.world_size > 1
+            and self.global_tp_group.world_size != self.tp_group.world_size
         )
         self.gather_output = gather_output
 

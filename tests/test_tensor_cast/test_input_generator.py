@@ -11,6 +11,9 @@ from tensor_cast.core.input_generator import (
     generate_inputs_varlen,
     RequestInfo,
 )
+from tensor_cast.core.model_builder import build_model
+from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
+from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
@@ -168,6 +171,62 @@ class InputGeneratorTestCase(unittest.TestCase):
         result = _get_padding_alignment(model_config)
         assert result == expected, (
             f"Scenario [{desc}] test failed: expected {expected}, actual {result}"
+        )
+
+    def test_dsa_indexer_cache_dtype_follows_attention_quant_config(self):
+        user_input = UserInputConfig(
+            model_id="deepseek-ai/DeepSeek-V3.2",
+            num_queries=1,
+            query_len=32,
+            context_length=32,
+            device="TEST_DEVICE",
+            num_mtp_tokens=2,
+            quantize_attention_action=QuantizeAttentionAction.INT8,
+        )
+        model = build_model(user_input)
+        cache_info = generate_inputs(
+            model,
+            [
+                RequestInfo(
+                    query_len=32,
+                    seq_len=32,
+                    concurrency=1,
+                    is_decode=True,
+                )
+            ],
+        )
+
+        self.assertEqual(
+            cache_info["indexer_cache_by_layers"][0].dtype,
+            torch.int8,
+        )
+
+    def test_dsa_indexer_cache_dtype_uses_fp8_when_attention_quant_is_fp8(self):
+        user_input = UserInputConfig(
+            model_id="deepseek-ai/DeepSeek-V3.2",
+            num_queries=1,
+            query_len=32,
+            context_length=32,
+            device="TEST_DEVICE",
+            num_mtp_tokens=2,
+            quantize_attention_action=QuantizeAttentionAction.FP8,
+        )
+        model = build_model(user_input)
+        cache_info = generate_inputs(
+            model,
+            [
+                RequestInfo(
+                    query_len=32,
+                    seq_len=32,
+                    concurrency=1,
+                    is_decode=True,
+                )
+            ],
+        )
+
+        self.assertEqual(
+            cache_info["indexer_cache_by_layers"][0].dtype,
+            torch.float8_e4m3fn,
         )
 
     def test_qwen3_vl_1080p_resize_to_1088x1920(self):

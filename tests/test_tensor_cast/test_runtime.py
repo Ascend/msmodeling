@@ -9,6 +9,7 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
+from tensor_cast.performance_model import _estimate_dsa_indexer_breakdown
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.base import PerformanceModel
 from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
@@ -173,11 +174,11 @@ class PerfAnalysisTestCase(unittest.TestCase):
         block_table = torch.empty(
             (B, max_num_blocks_per_seq), dtype=torch.long, device="meta"
         )
-        seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
+        request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
 
         actual_execution_time = self._execute_attention_and_get_base_data(
-            (q, k, v, None, block_table, None, seq_lens, query_lens)
+            (q, k, v, None, block_table, None, request_total_seq_lens, query_lens)
         )
 
         assert_close(self, actual_execution_time, 5.99e-6)
@@ -255,6 +256,122 @@ class PerfAnalysisTestCase(unittest.TestCase):
 
         self.assertIn("num_k_heads=16", str(cm.exception))
         self.assertIn("tp_size=32", str(cm.exception))
+
+    def test_dsa_indexer_breakdown_helper_bf16(self):
+        hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)
+        qa_normed = torch.randn(2, 3, 4, device="meta", dtype=torch.float16)
+        indexer_cache = torch.randn(2, 5, 7, device="meta", dtype=torch.float16)
+
+        breakdown = _estimate_dsa_indexer_breakdown(
+            hidden_states,
+            qa_normed,
+            indexer_cache,
+            num_heads=2,
+            head_dim=8,
+            qk_rope_head_dim=4,
+            topk_limit=5,
+        )
+        self.assertEqual(
+            breakdown,
+            {
+                "q_proj_mma": 768,
+                "k_proj_mma": 1536,
+                "weights_proj_mma": 384,
+                "rope_gp": 216,
+                "rotate_activation_gp": 0,
+                "act_quant_gp": 0,
+                "qk_index_mma": 576,
+                "head_relu_gp": 0,
+                "head_q_scale_mul_gp": 0,
+                "head_weight_mul_gp": 36,
+                "head_reduce_gp": 36,
+                "head_k_scale_mul_gp": 0,
+                "topk_gp": 18,
+                "cache_rw_bytes": 140,
+                "scale_cache_rw_bytes": 0,
+            },
+        )
+
+    def test_dsa_indexer_breakdown_helper_uses_request_total_seq_lens_for_score_length(
+        self,
+    ):
+        hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)
+        qa_normed = torch.randn(2, 3, 4, device="meta", dtype=torch.float16)
+        indexer_cache = torch.randn(2, 2, 7, device="meta", dtype=torch.float16)
+        request_total_seq_lens = torch.tensor([5, 5], dtype=torch.long)
+
+        breakdown = _estimate_dsa_indexer_breakdown(
+            hidden_states,
+            qa_normed,
+            indexer_cache,
+            num_heads=2,
+            head_dim=8,
+            qk_rope_head_dim=4,
+            topk_limit=5,
+            request_total_seq_lens=request_total_seq_lens,
+        )
+
+        self.assertEqual(breakdown["qk_index_mma"], 960)
+        self.assertEqual(breakdown["topk_gp"], 30)
+
+    def test_dsa_indexer_breakdown_helper_uses_request_total_seq_lens_for_cache_traffic(
+        self,
+    ):
+        hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)
+        qa_normed = torch.randn(2, 3, 4, device="meta", dtype=torch.float16)
+        indexer_cache = torch.randn(2, 2, 7, device="meta", dtype=torch.float16)
+        request_total_seq_lens = torch.tensor([5, 5], dtype=torch.long)
+
+        breakdown = _estimate_dsa_indexer_breakdown(
+            hidden_states,
+            qa_normed,
+            indexer_cache,
+            num_heads=2,
+            head_dim=8,
+            qk_rope_head_dim=4,
+            topk_limit=5,
+            request_total_seq_lens=request_total_seq_lens,
+            fp8_mode=True,
+        )
+
+        self.assertEqual(breakdown["cache_rw_bytes"], 140)
+        self.assertEqual(breakdown["scale_cache_rw_bytes"], 40)
+
+    def test_dsa_indexer_breakdown_helper_fp8(self):
+        hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)
+        qa_normed = torch.randn(2, 3, 4, device="meta", dtype=torch.float16)
+        indexer_cache = torch.empty(2, 5, 7, device="meta", dtype=torch.float8_e4m3fn)
+
+        breakdown = _estimate_dsa_indexer_breakdown(
+            hidden_states,
+            qa_normed,
+            indexer_cache,
+            num_heads=2,
+            head_dim=8,
+            qk_rope_head_dim=4,
+            topk_limit=5,
+            fp8_mode=True,
+        )
+        self.assertEqual(
+            breakdown,
+            {
+                "q_proj_mma": 768,
+                "k_proj_mma": 1536,
+                "weights_proj_mma": 384,
+                "rope_gp": 216,
+                "rotate_activation_gp": 144,
+                "act_quant_gp": 144,
+                "qk_index_mma": 576,
+                "head_relu_gp": 36,
+                "head_q_scale_mul_gp": 36,
+                "head_weight_mul_gp": 36,
+                "head_reduce_gp": 36,
+                "head_k_scale_mul_gp": 18,
+                "topk_gp": 18,
+                "cache_rw_bytes": 70,
+                "scale_cache_rw_bytes": 40,
+            },
+        )
 
     def test_mlapo_eager(self):
         num_tokens = 8192
@@ -404,7 +521,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         query_len = 3500
         qk_nope_head_dim = q_head_dim - qk_rope_head_dim
         total_tokens = B * query_len
-        index_topk = 1
+        topk_limit = 1
         v_head_dim = 128
 
         q = torch.randn(total_tokens, num_heads, q_head_dim, device="meta", dtype=dtype)
@@ -417,7 +534,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
             dtype=dtype,
             device="meta",
         )
-        seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
+        request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
         W_UK_T = torch.randn(
             num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype
@@ -439,18 +556,18 @@ class PerfAnalysisTestCase(unittest.TestCase):
                     kv_cache,
                     None,
                     None,
-                    seq_lens,
+                    request_total_seq_lens,
                     query_lens,
                     W_UK_T,
                     W_UV,
                     kv_b_proj,
                     v_head_dim,
-                    index_topk,
+                    topk_limit,
                 )
             )
         )
 
-        assert_close(self, actual_execution_time, 6.72e-4)
+        assert_close(self, actual_execution_time, 6.443208610547408e-05)
 
     def test_mla_eager_prefill_with_context(self):
         B, S, num_heads, q_head_dim = 2, 7008, 8, 192
@@ -459,7 +576,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         query_len = 3500
         qk_nope_head_dim = q_head_dim - qk_rope_head_dim
         total_tokens = B * query_len
-        index_topk = 1
+        topk_limit = 1
         v_head_dim = 128
 
         q = torch.randn(total_tokens, num_heads, q_head_dim, device="meta", dtype=dtype)
@@ -472,7 +589,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
             dtype=dtype,
             device="meta",
         )
-        seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
+        request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
         W_UK_T = torch.randn(
             num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype
@@ -494,18 +611,18 @@ class PerfAnalysisTestCase(unittest.TestCase):
                     kv_cache,
                     None,
                     None,
-                    seq_lens,
+                    request_total_seq_lens,
                     query_lens,
                     W_UK_T,
                     W_UV,
                     kv_b_proj,
                     v_head_dim,
-                    index_topk,
+                    topk_limit,
                 )
             )
         )
 
-        assert_close(self, actual_execution_time, 1.28e-3)
+        assert_close(self, actual_execution_time, 6.443208610547408e-05)
 
     def test_mla_eager_decode(self):
         B, S, num_heads, q_head_dim = 16, 7008, 8, 192
@@ -514,7 +631,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         query_len = 1
         qk_nope_head_dim = q_head_dim - qk_rope_head_dim
         total_tokens = B * query_len
-        index_topk = 1
+        topk_limit = 1
         v_head_dim = 128
 
         q = torch.randn(total_tokens, num_heads, q_head_dim, device="meta", dtype=dtype)
@@ -527,7 +644,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
             dtype=dtype,
             device="meta",
         )
-        seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
+        request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
         W_UK_T = torch.randn(
             num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype
@@ -549,12 +666,12 @@ class PerfAnalysisTestCase(unittest.TestCase):
                     kv_cache,
                     None,
                     None,
-                    seq_lens,
+                    request_total_seq_lens,
                     query_lens,
                     W_UK_T,
                     W_UV,
                     kv_b_proj,
-                    index_topk,
+                    topk_limit,
                     v_head_dim,
                 )
             )

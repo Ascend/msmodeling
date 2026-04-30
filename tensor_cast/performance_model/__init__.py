@@ -347,12 +347,24 @@ def _attention_properties_helper(
     return properties
 
 
-def _default_query_lens_and_seq_lens(query) -> Tuple[torch.Tensor, torch.Tensor]:
+def _default_query_lens_and_request_total_seq_lens(
+    query,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     seq_len = query.size(-2)
     batch_size = query.size(0) if query.ndim == 3 else 1
-    seq_lens = torch.full((batch_size,), seq_len, dtype=torch.long)
+    request_total_seq_lens = torch.full((batch_size,), seq_len, dtype=torch.long)
     query_lens = torch.full((batch_size,), seq_len, dtype=torch.long)
-    return query_lens, seq_lens
+    return query_lens, request_total_seq_lens
+
+
+def _normalize_query_lens_and_request_total_seq_lens(
+    query: torch.Tensor,
+    query_lens: Optional[torch.Tensor],
+    request_total_seq_lens: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if query_lens is None or request_total_seq_lens is None:
+        return _default_query_lens_and_request_total_seq_lens(query)
+    return query_lens, request_total_seq_lens
 
 
 def _elementwise_sigmoid_ops(numel: int) -> int:
@@ -588,12 +600,15 @@ def _(
     assert len(op_invoke_info.args) == 8
     query = op_invoke_info.args[0]
     key = op_invoke_info.args[1]
-    seq_lens = op_invoke_info.args[6]
+    request_total_seq_lens = op_invoke_info.args[6]
     query_lens = op_invoke_info.args[7]
-    if query_lens is None or seq_lens is None:
-        query_lens, seq_lens = _default_query_lens_and_seq_lens(query)
+    query_lens, request_total_seq_lens = (
+        _normalize_query_lens_and_request_total_seq_lens(
+            query, query_lens, request_total_seq_lens
+        )
+    )
     return _attention_properties_helper(
-        op_invoke_info, query, key, seq_lens, query_lens, query.dtype
+        op_invoke_info, query, key, request_total_seq_lens, query_lens, query.dtype
     )
 
 
@@ -604,21 +619,24 @@ def _(
     assert len(op_invoke_info.args) == 15
     query = op_invoke_info.args[0]
     key = op_invoke_info.args[1]
-    seq_lens = op_invoke_info.args[6]
+    request_total_seq_lens = op_invoke_info.args[6]
     query_lens = op_invoke_info.args[7]
     is_query_scaled = op_invoke_info.args[8] is not None and not torch.isclose(
         op_invoke_info.args[8], torch.tensor(1.0)
     )
     out_dtype = op_invoke_info.args[14]
-    if query_lens is None or seq_lens is None:
-        query_lens, seq_lens = _default_query_lens_and_seq_lens(query)
+    query_lens, request_total_seq_lens = (
+        _normalize_query_lens_and_request_total_seq_lens(
+            query, query_lens, request_total_seq_lens
+        )
+    )
     if out_dtype is None or out_dtype == query.dtype:
         # use half as default softmax dtype
         softmax_dtype = torch.half
     else:
         softmax_dtype = out_dtype
     properties = _attention_properties_helper(
-        op_invoke_info, query, key, seq_lens, query_lens, softmax_dtype
+        op_invoke_info, query, key, request_total_seq_lens, query_lens, softmax_dtype
     )
 
     # According to
@@ -631,7 +649,7 @@ def _(
     num_q_heads = hidden_size // head_size
     num_tokens_per_seq = query_lens
     context_len_product_sum = torch.sum(
-        num_tokens_per_seq.to(seq_lens.dtype) * seq_lens
+        num_tokens_per_seq.to(request_total_seq_lens.dtype) * request_total_seq_lens
     ).item()
 
     # FP8 (e4m3fn/e5m2): Only 1 op per element (scale multiplication ONLY, no offset applied)
@@ -850,9 +868,9 @@ def _multihead_latent_attention_properties_helper(
     (
         q,
         kv_cache,
-        _,
+        _block_table,
         query_start_loc,
-        seq_lens,
+        request_total_seq_lens,
         query_lens,
         W_UK_T,
         W_UV,
@@ -861,13 +879,16 @@ def _multihead_latent_attention_properties_helper(
         *rest,
     ) = op_invoke_info.args
 
+    topk_limit = rest[0] if len(rest) > 0 else None
+    topk_indices = rest[1] if len(rest) > 1 else None
+
     # Extract dimensions from input tensors
     num_heads = q.size(1)
     q_head_dim = q.size(2)
     kv_lora_rank = W_UK_T.size(-1)
     qk_rope_head_dim = kv_cache.size(-1) - kv_lora_rank
     qk_nope_head_dim = q_head_dim - qk_rope_head_dim
-    index_topk = rest[0] if len(rest) > 0 else None
+    sparse_topk = topk_indices.shape[-1] if topk_indices is not None else topk_limit
 
     # 2. Separate Prefill and Decode Sequences
     # A sequence is in "decode" if it's processing only one query token.
@@ -885,7 +906,7 @@ def _multihead_latent_attention_properties_helper(
     if num_prefill_tokens > 0:
         assert kv_b_proj is not None
         exclude_input_ids = exclude_input_ids - {8}  # kv_b_proj
-        prefill_seq_lens = seq_lens[is_prefill]
+        prefill_request_total_seq_lens = request_total_seq_lens[is_prefill]
         prefill_num_tokens_per_seq = num_tokens_per_seq[is_prefill]
 
         # Op 1: Project compressed KV: `kv_c_normed @ kv_b_proj`
@@ -894,8 +915,13 @@ def _multihead_latent_attention_properties_helper(
         prefill_op1_ops = num_prefill_tokens * kv_proj_out_dim * kv_lora_rank * 2
 
         # For attention ops, we need the sum of (query_len * key_len) over the batch
+        prefill_attn_len = (
+            torch.clamp(prefill_request_total_seq_lens, max=sparse_topk)
+            if sparse_topk is not None
+            else prefill_request_total_seq_lens
+        )
         prefill_context_sum = torch.sum(
-            prefill_num_tokens_per_seq.to(prefill_seq_lens.dtype) * prefill_seq_lens
+            prefill_num_tokens_per_seq.to(prefill_attn_len.dtype) * prefill_attn_len
         ).item()
 
         # Op 2: Score calculation: `q @ K`
@@ -915,14 +941,14 @@ def _multihead_latent_attention_properties_helper(
     if num_decode_tokens > 0:
         assert W_UK_T is not None and W_UV is not None
         exclude_input_ids = exclude_input_ids - {6, 7}  # W_UK_T, W_UV
-        decode_seq_lens = seq_lens[is_decode]
+        decode_request_total_seq_lens = request_total_seq_lens[is_decode]
         decode_num_tokens_per_seq = num_tokens_per_seq[is_decode]
 
         # The total number of key/value tokens to attend to across all decode sequences
         decode_attn_len = (
-            torch.clamp(decode_seq_lens, max=index_topk)
-            if index_topk is not None
-            else decode_seq_lens
+            torch.clamp(decode_request_total_seq_lens, max=sparse_topk)
+            if sparse_topk is not None
+            else decode_request_total_seq_lens
         )
         decode_context_sum = torch.sum(
             decode_num_tokens_per_seq.to(decode_attn_len.dtype) * decode_attn_len
@@ -962,16 +988,21 @@ def _multihead_latent_attention_properties_helper(
     # Estimate memory read from the KV Cache.
     # The size of a cached entry is (kv_lora_rank + qk_rope_head_dim).
     cache_entry_size = bytes_of_elements(kv_cache.size(-1), kv_cache.dtype)
-    if index_topk is not None:
-        decode_seq_lens = torch.minimum(
-            seq_lens, torch.tensor(index_topk, device=seq_lens.device)
+    if sparse_topk is not None:
+        decode_request_total_seq_lens = torch.minimum(
+            request_total_seq_lens,
+            torch.tensor(sparse_topk, device=request_total_seq_lens.device),
         )
-        actual_seq_lens = torch.where(is_decode, decode_seq_lens, seq_lens)
+        actual_request_total_seq_lens = torch.where(
+            is_decode, decode_request_total_seq_lens, request_total_seq_lens
+        )
         properties.memory_read_bytes += (
-            torch.sum(actual_seq_lens).item() * cache_entry_size
+            torch.sum(actual_request_total_seq_lens).item() * cache_entry_size
         )
     else:
-        properties.memory_read_bytes += torch.sum(seq_lens * cache_entry_size).item()
+        properties.memory_read_bytes += torch.sum(
+            request_total_seq_lens * cache_entry_size
+        ).item()
 
     compute_ops = properties.compute_ops.setdefault(q.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = total_fma_ops
@@ -1001,7 +1032,7 @@ def _calculate_mla_quant_ops(
     qk_nope_head_dim: int,
     v_head_dim: int,
     query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
+    request_total_seq_lens: torch.Tensor,
     query_lens: torch.Tensor,
     out_dtype: torch.dtype,
     q_dtype: torch.dtype,
@@ -1020,10 +1051,11 @@ def _calculate_mla_quant_ops(
     # Calculate quant/dequant ops for prefill phase
     num_prefill_tokens = torch.sum(num_tokens_per_seq[is_prefill]).item()
     if num_prefill_tokens > 0:
-        prefill_seq_lens = seq_lens[is_prefill]
+        prefill_request_total_seq_lens = request_total_seq_lens[is_prefill]
         prefill_num_tokens_per_seq = num_tokens_per_seq[is_prefill]
         prefill_context_sum = torch.sum(
-            prefill_num_tokens_per_seq.to(prefill_seq_lens.dtype) * prefill_seq_lens
+            prefill_num_tokens_per_seq.to(prefill_request_total_seq_lens.dtype)
+            * prefill_request_total_seq_lens
         ).item()
 
         # 1. Quantization of kv_c_normed @ kv_b_proj output
@@ -1041,10 +1073,11 @@ def _calculate_mla_quant_ops(
     # Calculate quant/dequant ops for decode phase
     num_decode_tokens = torch.sum(num_tokens_per_seq[is_decode]).item()
     if num_decode_tokens > 0:
-        decode_seq_lens = seq_lens[is_decode]
+        decode_request_total_seq_lens = request_total_seq_lens[is_decode]
         decode_num_tokens_per_seq = num_tokens_per_seq[is_decode]
         decode_context_sum = torch.sum(
-            decode_num_tokens_per_seq.to(decode_seq_lens.dtype) * decode_seq_lens
+            decode_num_tokens_per_seq.to(decode_request_total_seq_lens.dtype)
+            * decode_request_total_seq_lens
         ).item()
 
         # 1. Quantization of q @ W_UK_T output
@@ -1081,11 +1114,13 @@ def _(
     q = op_invoke_info.args[0]
     kv_cache = op_invoke_info.args[1]
     query_start_loc = op_invoke_info.args[3]
-    seq_lens = op_invoke_info.args[4]
+    request_total_seq_lens = op_invoke_info.args[4]
     query_lens = op_invoke_info.args[5]
     W_UK_T = op_invoke_info.args[6]
     v_head_dim = op_invoke_info.args[9]
-    out_dtype = op_invoke_info.args[-1]
+    out_dtype = op_invoke_info.kwargs.get("out_dtype")
+    if out_dtype is None and len(op_invoke_info.args) > 28:
+        out_dtype = op_invoke_info.args[28]
 
     if out_dtype is None or out_dtype == q.dtype:
         # use half as default softmax dtype
@@ -1114,7 +1149,7 @@ def _(
         qk_nope_head_dim,
         v_head_dim,
         query_start_loc,
-        seq_lens,
+        request_total_seq_lens,
         query_lens,
         out_dtype,
         q.dtype,
@@ -1854,46 +1889,188 @@ def _estimate_mxfp4_linear_all_reduce(
     )
 
 
-@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dsa_index.default)
+def _estimate_dsa_indexer_breakdown(
+    hidden_states: torch.Tensor,
+    qa_normed: torch.Tensor,
+    indexer_cache: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    qk_rope_head_dim: int,
+    topk_limit: int,
+    request_total_seq_lens: Optional[torch.Tensor] = None,
+    fp8_mode: bool = False,
+):
+    batch, seq_len, hidden_size = hidden_states.shape
+    q_lora_rank = qa_normed.shape[-1]
+
+    # DeepSeek-V3.2 splits the Indexer into a few distinct buckets:
+    #   1) q projection from the low-rank query stream into [num_heads, head_dim]
+    #   2) k projection from hidden states into head_dim
+    #   3) head-routing projection from hidden states into num_heads
+    #   4) RoPE on the query/key rotary slices
+    #   5) fp8-only rotate_activation + blockwise quantization
+    #   6) fp8_index-style scoring over the active cache
+    #   7) top-k selection over the active sequence axis
+    #
+    # The counts below are intentionally split so the roofline model can place the
+    # heavy matrix multiplies in MMA buckets and the elementwise / reduction work in
+    # GP buckets.  All matrix multiply terms use FMA -> 2 FLOPs.
+
+    # 1) q projection: (B * S, q_lora_rank) @ (q_lora_rank, H * D)
+    q_proj_mma = 2 * batch * seq_len * q_lora_rank * num_heads * head_dim
+
+    # 2) k projection: (B * S, hidden_size) @ (hidden_size, D)
+    k_proj_mma = 2 * batch * seq_len * hidden_size * head_dim
+
+    # 3) head routing projection: (B * S, hidden_size) @ (hidden_size, H)
+    # This is the learned head-weight projection used to mix per-head scores.
+    weights_proj_mma = 2 * batch * seq_len * hidden_size * num_heads
+
+    # 4) RoPE work on the q/k rotary slices.  The q slice is per-head, while k is
+    #    shared across heads, so the two terms have different widths.
+    rope_gp = batch * seq_len * (num_heads * qk_rope_head_dim + qk_rope_head_dim) * 3
+
+    # 5) fp8-only activation rotation and blockwise quantization.  DeepSeek-V3.2's
+    #    reference kernel applies a Hadamard-style rotate_activation before quantizing
+    #    q and k to FP8.  We model those as GP because they are elementwise transforms.
+    rotate_activation_gp = 0
+    act_quant_gp = 0
+    if fp8_mode:
+        # rotate_activation is applied after q/k are fully reassembled, so it runs
+        # over the full query head tensor plus the full key tensor.
+        rotate_activation_gp = batch * seq_len * (num_heads * head_dim + head_dim)
+        # act_quant performs blockwise fp8 quantization over the same full tensors.
+        act_quant_gp = batch * seq_len * (num_heads * head_dim + head_dim)
+
+    # 6) score work.  The reference implementation computes a per-head score tensor
+    #    against the active cache, then combines those head scores with the learned
+    #    routing weights into one index score.
+    max_request_total_seq_len = (
+        int(request_total_seq_lens.max().item())
+        if request_total_seq_lens is not None
+        else None
+    )
+    active_cache_len = max_request_total_seq_len or seq_len
+    qk_index_mma = 2 * batch * seq_len * num_heads * active_cache_len * head_dim
+
+    # Cache traffic uses the logical cache extent when runtime lengths are available;
+    # otherwise it falls back to the preallocated cache buffer length.
+    cache_len = max_request_total_seq_len or indexer_cache.size(1)
+    cache_rw_bytes = (
+        batch * cache_len * indexer_cache.size(-1) * indexer_cache.element_size()
+    )
+    scale_cache_rw_bytes = 0
+    if fp8_mode:
+        # The fp8 path writes both the fp8 key cache and the accompanying scale cache.
+        # The scale cache is a small fp32 side buffer, approximated as one 32-bit scale
+        # per 128-wide block, sized by the same logical cache length.
+        scale_cache_rw_bytes = batch * cache_len * ((head_dim + 127) // 128) * 4
+
+    # BF16/GLM5-style head mixing keeps the learned weight multiply in the base path.
+    # The fp8-only terms are layered on top when fp8_mode is enabled.
+    head_weight_mul_gp = batch * seq_len * num_heads * active_cache_len
+    head_reduce_gp = batch * seq_len * num_heads * active_cache_len
+    head_relu_gp = 0
+    head_q_scale_mul_gp = 0
+    head_k_scale_mul_gp = 0
+    if fp8_mode:
+        # DeepSeek-V3.2 adds fp8-only score shaping around the head mix.
+        head_relu_gp = batch * seq_len * num_heads * active_cache_len
+        head_q_scale_mul_gp = batch * seq_len * num_heads * active_cache_len
+        head_k_scale_mul_gp = batch * seq_len * active_cache_len
+
+    # 7) top-k selection over the active axis.
+    topk_gp = batch * seq_len * active_cache_len
+
+    return {
+        "q_proj_mma": q_proj_mma,
+        "k_proj_mma": k_proj_mma,
+        "weights_proj_mma": weights_proj_mma,
+        "rope_gp": rope_gp,
+        "rotate_activation_gp": rotate_activation_gp,
+        "act_quant_gp": act_quant_gp,
+        "qk_index_mma": qk_index_mma,
+        "head_relu_gp": head_relu_gp,
+        "head_q_scale_mul_gp": head_q_scale_mul_gp,
+        "head_weight_mul_gp": head_weight_mul_gp,
+        "head_reduce_gp": head_reduce_gp,
+        "head_k_scale_mul_gp": head_k_scale_mul_gp,
+        "topk_gp": topk_gp,
+        "cache_rw_bytes": cache_rw_bytes,
+        "scale_cache_rw_bytes": scale_cache_rw_bytes,
+    }
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dsa_indexer.default)
 def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
-    """
-    Modeling for dsa_index:
-    - FP8 Q @ FP8 K -> FP32 logits (dot-product / bmm)
-    - ReLU + scaling with q_s
-    - Sum reduction
-    - Final scaling with k_s
-    """
-    assert len(op_invoke_info.args) == 4
-    q = op_invoke_info.args[0]
-    assert q.ndim == 4, f"dsa_index q expected 4D, got {q.ndim}D"
-    k = op_invoke_info.args[2]
+    hidden_states = op_invoke_info.args[0]
+    qa_normed = op_invoke_info.args[1]
+    indexer_cache = op_invoke_info.args[4]
+    seq_lens = op_invoke_info.args[7]
+    num_heads = op_invoke_info.args[12]
+    head_dim = op_invoke_info.args[13]
+    qk_rope_head_dim = op_invoke_info.args[14]
+    topk_limit = op_invoke_info.args[15]
 
-    batch, seq_len, num_heads, head_dim = q.shape
-    kv_len = k.shape[1]
-    properties = op_invoke_info.get_memory_access_properties()
+    # The cache dtype is already chosen by the upstream attention quant config,
+    # so the roofline model only needs to read it, not re-decide fp8 policy here.
+    fp8_mode = indexer_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
 
-    mma_ops = batch * seq_len * num_heads * kv_len * head_dim * 2
+    breakdown = _estimate_dsa_indexer_breakdown(
+        hidden_states,
+        qa_normed,
+        indexer_cache,
+        num_heads,
+        head_dim,
+        qk_rope_head_dim,
+        topk_limit,
+        request_total_seq_lens=seq_lens,
+        fp8_mode=fp8_mode,
+    )
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={4})
 
-    gp_ops = 0
-    gp_ops += batch * seq_len * num_heads * kv_len  # ReLU
-    gp_ops += batch * seq_len * num_heads * kv_len  # * q_s
-    gp_ops += batch * num_heads * kv_len  # sum
-    gp_ops += batch * num_heads * kv_len  # * k_s
+    # Projection math is the dominant MMA part of the Indexer path.
+    _accumulate_compute_ops(
+        properties,
+        hidden_states.dtype,
+        mma_ops=(
+            breakdown["q_proj_mma"]
+            + breakdown["k_proj_mma"]
+            + breakdown["weights_proj_mma"]
+        ),
+        gp_ops=(
+            breakdown["rope_gp"]
+            + breakdown["rotate_activation_gp"]
+            + breakdown["act_quant_gp"]
+            + breakdown["head_weight_mul_gp"]
+            + breakdown["head_reduce_gp"]
+            + breakdown["topk_gp"]
+        ),
+    )
 
-    compute_ops = properties.compute_ops.setdefault(q.dtype, OpInvokeInfo.ComputeOps())
-    compute_ops.mma_ops = mma_ops
-    compute_ops.gp_ops = gp_ops
+    # The core q/k scoring kernel is bucketed separately: in bf16 mode it stays in the
+    # activation dtype bucket, while in fp8 mode it moves to the cache/score dtype.
+    score_dtype = indexer_cache.dtype if fp8_mode else hidden_states.dtype
+    _accumulate_compute_ops(
+        properties,
+        score_dtype,
+        mma_ops=breakdown["qk_index_mma"],
+        gp_ops=(
+            breakdown["head_relu_gp"]
+            + breakdown["head_q_scale_mul_gp"]
+            + breakdown["head_k_scale_mul_gp"]
+        ),
+    )
 
-    return properties
-
-
-@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dsa_index_cache.default)
-def _(
-    op_invoke_info: OpInvokeInfo,
-) -> OpInvokeInfo.PerformanceProperties:
-    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={1})
+    # The cache itself is dense, and the reference kernel also maintains a separate
+    # scale cache in fp8 mode.  The local wrapper only exposes one cache tensor, so we
+    # count the scale-cache bytes as read/write traffic as well to keep the roofline
+    # bound conservative.
+    properties.memory_readwrite_bytes += (
+        breakdown["cache_rw_bytes"] + breakdown["scale_cache_rw_bytes"]
+    )
     return properties
 
 

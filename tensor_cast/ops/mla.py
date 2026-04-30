@@ -1,6 +1,7 @@
 from typing import Optional, Tuple
 
 import torch
+from torch._subclasses.fake_tensor import is_fake
 
 from ..utils import register_tensor_cast_op
 
@@ -39,7 +40,7 @@ def _(
     qk_rope_head_dim: int,
     kv_lora_rank: int,
     q_lora_rank: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Fused MLA preprocessing op that models RMS norm, matmuls, and RoPE rotation.
 
@@ -59,15 +60,19 @@ def _(
         q_states: (num_tokens, num_heads, qk_head_dim)
         kv_c_normed: (num_tokens, kv_lora_rank)
         k_rot: (num_tokens, qk_rope_head_dim)
+        qa_normed: (num_tokens, q_lora_rank) when q_lora_rank is set;
+            otherwise an empty last-dimension tensor that the caller converts back to None.
     """
 
     num_tokens = hidden_states.size(0)
     device = hidden_states.device
     dtype = hidden_states.dtype
+    qa_normed_dim = q_lora_rank or 0
     return (
         torch.empty((num_tokens, num_heads, qk_head_dim), dtype=dtype, device=device),
         torch.empty((num_tokens, kv_lora_rank), dtype=dtype, device=device),
         torch.empty((num_tokens, qk_rope_head_dim), dtype=dtype, device=device),
+        torch.empty((num_tokens, qa_normed_dim), dtype=dtype, device=device),
     )
 
 
@@ -93,7 +98,7 @@ def _(
     q_b_proj_offset: Optional[torch.Tensor],
     kv_a_proj_scale: torch.Tensor,
     kv_a_proj_offset: Optional[torch.Tensor],
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Quantized variant of the fused MLA preprocessing op.
 
@@ -105,15 +110,19 @@ def _(
         q_states: (num_tokens, num_heads, qk_head_dim)
         kv_c_normed: (num_tokens, kv_lora_rank)
         k_rot: (num_tokens, qk_rope_head_dim)
+        qa_normed: (num_tokens, q_lora_rank) when q_lora_rank is set;
+            otherwise an empty last-dimension tensor that the caller converts back to None.
     """
 
     num_tokens = hidden_states.size(0)
     device = hidden_states.device
     dtype = hidden_states.dtype
+    qa_normed_dim = q_lora_rank or 0
     return (
         torch.empty((num_tokens, num_heads, qk_head_dim), dtype=dtype, device=device),
         torch.empty((num_tokens, kv_lora_rank), dtype=dtype, device=device),
         torch.empty((num_tokens, qk_rope_head_dim), dtype=dtype, device=device),
+        torch.empty((num_tokens, qa_normed_dim), dtype=dtype, device=device),
     )
 
 
@@ -129,8 +138,8 @@ def _(
     W_UV: Optional[torch.Tensor],
     kv_b_proj: Optional[torch.Tensor],
     v_head_dim: int,
-    index_topk: Optional[int] = None,
-    cached_topk_indices: Optional[torch.Tensor] = None,
+    topk_limit: Optional[int] = None,
+    topk_indices: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     This op computes multi-head latent attention (MLA). It is supposed to use different
@@ -142,15 +151,12 @@ def _(
 
     For prefill (non-strict math/code):
         k_nope, v = (kv_c_normed @ kv_b_proj).view(-1, num_heads, qk_nope_head_dim + v_head_dim).split(dim=-1)
-        softmax(q @ (k_nope, k_rot)) @ v
-
-        kv_c_normed: (num_tokens, kv_lora_rank)
-            The normalized and compressed key-value states.
-        k_rot: (num_tokens, qk_rope_head_dim)
-            The slice of key after applying rotation embedding.
+        softmax(q @ (k_nope, k_rot) + sparse_mask(topk_indices)) @ v
 
     For decode (non-strict math/code):
-        softmax(q @ W_UK_T @ k_cache) @ v_cache @ W_UV
+        softmax(q @ W_UK_T @ k_cache + sparse_mask(topk_indices)) @ v_cache @ W_UV
+
+    `sparse_mask(topk_indices)` is omitted when `topk_indices` is None.
 
     Args:
         q: (num_tokens, num_heads, qk_nope_head_dim+qk_rope_head_dim)
@@ -162,12 +168,14 @@ def _(
             used in the decode phase, None if only prefill sequences are provided.
         kv_b_proj: (kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim))
             used in the prefill phase, None if only decode sequences are provided.
-        index_topk: Number of top-K tokens for sparse attention
-        cached_topk_indices: Preselected token positions for DSA sparse attention;
-            prevents dsa_index from being optimized away by torch.compile.
+        topk_limit: Number of top-K tokens for sparse attention
+        topk_indices: Preselected token positions for sparse attention.
     Returns:
         (num_tokens, num_heads, v_head_dim)
     """
+    if topk_indices is not None:
+        # Keep the sparse top-k tensor live in the semantic graph via its shape.
+        _ = topk_indices.shape[-1]
     return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=q.dtype, device="meta")
 
 
@@ -183,6 +191,8 @@ def _(
     W_UV: Optional[torch.Tensor],
     kv_b_proj: Optional[torch.Tensor],
     v_head_dim: int,
+    topk_limit: Optional[int],
+    topk_indices: Optional[torch.Tensor],
     query_scale: torch.Tensor,
     query_offset: Optional[torch.Tensor],
     kv_scale: torch.Tensor,
@@ -200,26 +210,42 @@ def _(
     out_scale: Optional[torch.Tensor],
     out_offset: Optional[torch.Tensor],
     out_dtype: Optional[torch.dtype],
-    index_topk: Optional[int] = None,
-    cached_topk_indices: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Similar to `multihead_latent_attention` but with quantization support.
+
     For prefill (non-strict math/code):
         quant_kv_proj = quant(kv_c_normed @ kv_b_proj, kv_projected_scale, kv_projected_offset)
         k_nope, v = quant_kv_proj.view(-1, num_heads, qk_nope_head_dim + v_head_dim).split(dim=-1)
-        out_fp = quant(softmax(q @ (k_nope, k_rot)), attention_prob_scale, attention_prob_offset) @ v
+        out_fp = quant(
+            softmax(q @ (k_nope, k_rot) + sparse_mask(topk_indices)),
+            attention_prob_scale,
+            attention_prob_offset,
+        ) @ v
         out = quant(out_fp, out_scale, out_offset) # optional
 
     For decode (non-strict math/code):
         quant_qk = quant(q @ W_UK_T, qk_scale, qk_offset)
-        quant_scores = quant(softmax(quant_qk @ k_cache), attention_prob_scale, attention_prob_offset)
+        quant_scores = quant(
+            softmax(quant_qk @ k_cache + sparse_mask(topk_indices)),
+            attention_prob_scale,
+            attention_prob_offset,
+        )
         out_fp = quant(quant_scores @ v_cache, v_scale, v_offset) @ W_UV
         out = quant(out_fp, out_scale, out_offset) # optional
+
+    `sparse_mask(topk_indices)` is omitted when `topk_indices` is None.
+
+    Args:
+        topk_limit: Number of top-K tokens for sparse attention
+        topk_indices: Preselected token positions for sparse attention.
 
     Returns:
         (num_tokens, num_heads, v_head_dim)
     """
+    if topk_indices is not None:
+        # Keep the sparse top-k tensor live in the semantic graph via its shape.
+        _ = topk_indices.shape[-1]
     if out_dtype is None:
         out_dtype = q.dtype
     return torch.empty(
@@ -227,56 +253,68 @@ def _(
     )
 
 
-@register_tensor_cast_op("dsa_index")
+@register_tensor_cast_op("dsa_indexer", mutates_args=("indexer_cache",))
 def _(
-    q: torch.Tensor,
-    q_s: torch.Tensor,
-    k: torch.Tensor,
-    k_s: torch.Tensor,
+    hidden_states: torch.Tensor,
+    qa_normed: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    indexer_cache: torch.Tensor,
+    slot_mapping: Optional[torch.Tensor],
+    block_tables: Optional[torch.Tensor],
+    seq_lens: Optional[torch.Tensor],
+    wq_b_weight: torch.Tensor,
+    wk_weight: torch.Tensor,
+    weights_proj_weight: torch.Tensor,
+    k_norm_weight: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    qk_rope_head_dim: int,
+    topk_limit: int,
 ) -> torch.Tensor:
     """
-    Perform index score using FP8 precision.
-    Args:
-        q (torch.Tensor): The Q tensor, must be contiguous.
-        q_s (torch.Tensor): The scaling factor for Q (float), must be contiguous.
-        k (torch.Tensor): The K tensor, must be contiguous.
-        k_s (torch.Tensor): The scaling factor for K (e8m0 here), must be contiguous.
-        fp8 q @ fp8 k -> fp32 logits
-        relu(fp32 logits) * q_s (weights) -> fp32 logits
-        fp32 logits -> fp32 logits_sum
-        fp32 logits_sum * k_s (e8m0) -> fp32 index_score
+    Fused DSA indexer semantic block.
+
+    For the DeepSeek-V3.2-style fp8 path (non-strict math/code):
+        q = rope(wq_b(qa_normed))
+        k = rope(k_norm(wk(hidden_states)))
+
+        q = rotate_activation(q)
+        k = rotate_activation(k)
+
+        q_fp8, q_scale = act_quant(q)
+        k_fp8, k_scale = act_quant(k)
+        k_cache, k_scale_cache = append(indexer_cache, k_fp8, k_scale)
+
+        weights = weights_proj(hidden_states) * num_heads**-0.5
+        weights = weights.unsqueeze(-1) * q_scale * head_dim**-0.5
+
+        index_score = fp8_index(q_fp8, weights, k_cache, k_scale_cache)
+        topk_indices = topk(index_score, k=min(topk_limit, active_seq_len), dim=-1).indices
+
+    Compared with the fp8 path, the bf16 / GLM5-style path removes:
+        - rotate_activation on q and k
+        - act_quant on q and k
+        - scale-cache writes alongside the key cache
+        - fp8-specific relu / q-scale / k-scale score shaping
+
+    and instead uses direct cache scoring plus head reduction:
+        weights = weights_proj(hidden_states) * num_heads**-0.5
+        head_scores = (q @ k_cache.transpose(-1, -2)) * head_dim**-0.5
+        index_score = reduce_sum(head_scores * weights.unsqueeze(-1), dim=-2)
+        topk_indices = topk(index_score, k=min(topk_limit, active_seq_len), dim=-1).indices
+
+    Returns:
+        topk_indices: (batch, seq_len, min(topk_limit, active_seq_len))
     """
-    # out shape: (batch, num_heads, seq_len)
+    batch, seq_len, _ = hidden_states.shape
+    # torch.compile traces this op with FakeTensors; avoid extracting a
+    # data-dependent Python int from seq_lens in that path.
+    if is_fake(hidden_states):
+        topk = topk_limit
+    else:
+        active_seq_len = int(seq_lens.max().item()) if seq_lens is not None else seq_len
+        topk = min(topk_limit, active_seq_len)
     return torch.empty(
-        q.shape[0], q_s.shape[2], q_s.shape[1], dtype=q.dtype, device="meta"
+        batch, seq_len, topk, dtype=torch.long, device=hidden_states.device
     )
-
-
-@register_tensor_cast_op("dsa_index_cache", mutates_args=("k_cache",))
-def _(
-    k: torch.Tensor,
-    k_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    block_tables: Optional[torch.Tensor] = None,
-) -> None:
-    """
-    In-place write of token Key vectors into KV cache.
-
-    1. Continuous Mode (block_tables is None):
-       - Logic: k_cache[slot_mapping[i]] = k[i]
-       - The 'slot_mapping' tensor directly provides the physical row index in k_cache
-         for each token in the input 'k'.
-
-    2. Paged Attention Mode (block_tables is provided):
-       - Logic: Derive (block_idx, offset) from slot_mapping.
-       - Lookup physical block ID: block_id = block_tables[batch_idx, block_idx_logical]
-       - Write: k_cache[block_id, offset] = k[i]
-       - This allows non-contiguous memory allocation, crucial for long-context inference.
-
-    Args:
-        k: Input Key tensor. Shape varies by backend: [num_tokens, head_dim] or [batch, num_tokens, head_dim].
-        k_cache: Global KV cache buffer.
-                 Shape: [max_seq_len, head_dim] (continuous) or [num_blocks, block_size, head_dim] (paged).
-        slot_mapping: Physical indices mapping each token to its location in k_cache. Shape: [num_tokens].
-        block_tables: Page table for paged attention. Shape: [batch_size, max_blocks_per_seq]. Optional.
-    """

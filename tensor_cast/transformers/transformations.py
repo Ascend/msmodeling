@@ -79,12 +79,23 @@ def maybe_enable_mtp(model: "ModelWrapperBase") -> "ModelWrapperBase":
     if mtp_config.mtp_block_module_name is None and hasattr(unwrapped, "layers"):
         decoder_cls_name = type(unwrapped.layers[-1]).__name__
         mtp_config.mtp_block_module_name = decoder_cls_name
-        if hasattr(model.hf_config, "layer_types") and isinstance(
-            model.hf_config.layer_types, list
-        ):
-            model.hf_config.layer_types.extend(
-                [model.hf_config.layer_types] * mtp_config.num_mtp_layers
-            )
+
+    if (
+        hasattr(model.hf_config, "layer_types")
+        and isinstance(model.hf_config.layer_types, list)
+        and model.hf_config.layer_types
+    ):
+        model.hf_config.layer_types.extend(
+            [model.hf_config.layer_types[-1]] * mtp_config.num_mtp_layers
+        )
+    if (
+        hasattr(model.hf_config, "mlp_layer_types")
+        and isinstance(model.hf_config.mlp_layer_types, list)
+        and model.hf_config.mlp_layer_types
+    ):
+        model.hf_config.mlp_layer_types.extend(
+            [model.hf_config.mlp_layer_types[-1]] * mtp_config.num_mtp_layers
+        )
 
     orig_dtype = torch.get_default_dtype()
     torch.set_default_dtype(model.model_config.dtype)

@@ -425,6 +425,8 @@ def get_dsa_indexer_cache_info(model, num_blocks, block_size):
     indexer_cache_per_token = 0
     for i in range(model.num_hidden_layers):
         cache_dtype = model_config.dtype
+        if (attention_config := get_attention_quant_config(model, i)) is not None:
+            cache_dtype = attention_config.get_quant_dtype()
         indexer_cache_by_layers[i] = torch.empty(
             [
                 num_blocks,

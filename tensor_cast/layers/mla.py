@@ -134,6 +134,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_meta: Optional[AttentionMetadataBase] = None,
+        qa_normed: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         """
@@ -175,7 +176,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             and getattr(self, "kv_a_proj_scale", None) is not None
         )
         if linear_quant_enabled:
-            q_states, kv_c_normed, k_rot = torch.ops.tensor_cast.mlapo_quant(
+            q_states, kv_c_normed, k_rot, qa_normed = torch.ops.tensor_cast.mlapo_quant(
                 hidden_states_view,
                 cos,
                 sin,
@@ -198,7 +199,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                 self.kv_a_proj_offset,
             )
         else:
-            q_states, kv_c_normed, k_rot = torch.ops.tensor_cast.mlapo(
+            q_states, kv_c_normed, k_rot, qa_normed = torch.ops.tensor_cast.mlapo(
                 hidden_states_view,
                 cos,
                 sin,
@@ -215,8 +216,13 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                 self.q_lora_rank,
             )
 
+        if self.q_lora_rank is not None:
+            qa_normed = qa_normed.view(batch_size, seq_length, -1)
+        else:
+            qa_normed = None
         pre_attn_out = self._pre_attention_forward(
             hidden_states=hidden_states,
+            qa_normed=qa_normed,
             position_embeddings=position_embeddings,
             attention_meta=attention_meta,
             **kwargs,
@@ -257,7 +263,11 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                     kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping
                 )
 
-        extra_backend_kwargs = self._get_backend_kwargs(pre_attn_out)
+        extra_backend_kwargs = {
+            "topk_limit": None,
+            "topk_indices": None,
+            **self._get_backend_kwargs(pre_attn_out),
+        }
         if self.quant_config is not None:
             attention_backend = partial(
                 torch.ops.tensor_cast.multihead_latent_attention_quant,
@@ -346,6 +356,30 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         )
 
 
+def _resolve_sparse_topk_limit(
+    indexer: torch.nn.Module,
+    config: Optional[torch.nn.Module] = None,
+    topk_limit: Optional[int] = None,
+) -> int:
+    if topk_limit is not None:
+        return topk_limit
+
+    inner_topk_limit = getattr(indexer, "topk_limit", None)
+    if inner_topk_limit is not None:
+        return inner_topk_limit
+
+    for candidate in (config, getattr(indexer, "config", None)):
+        candidate_topk_limit = getattr(candidate, "topk_limit", None)
+        if candidate_topk_limit is not None:
+            return candidate_topk_limit
+
+        candidate_index_topk = getattr(candidate, "index_topk", None)
+        if candidate_index_topk is not None:
+            return candidate_index_topk
+
+    raise AttributeError("topk_limit")
+
+
 class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
     def __init__(
         self,
@@ -355,17 +389,23 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
         decode_only: bool = False,
     ):
         super().__init__(mla_config, mla_module, tp_group, decode_only)
-        self.indexer = DeepseekSparseAttentionIndexer(self._inner.indexer)
+        self.indexer = DeepseekSparseAttentionIndexer(
+            self._inner.indexer,
+            topk_limit=_resolve_sparse_topk_limit(
+                self._inner.indexer,
+                config=getattr(self._inner, "config", None),
+            ),
+        )
 
     def _get_backend_kwargs(self, pre_attn_out) -> dict:
         """
         Sparse Attention Args:
-        - index_topk: int, number of selected sparse tokens
-        - cached_topk_indices: Tensor, precomputed sparse position indices
+        - topk_limit: int, number of selected sparse tokens
+        - topk_indices: Tensor, precomputed sparse position indices
         """
         return {
-            "index_topk": self.indexer.index_topk,
-            "cached_topk_indices": pre_attn_out,
+            "topk_limit": self.indexer.topk_limit,
+            "topk_indices": pre_attn_out,
         }
 
     def _pre_attention_forward(
@@ -373,27 +413,23 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_meta: Optional[AttentionMetadataBase] = None,
+        qa_normed: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        # Cache the top-k indices to prevent the DSA operator from being optimized away by torch.compile
         return self._run_sparse_attention_indexer(
-            hidden_states, position_embeddings, attention_meta, **kwargs
+            hidden_states, qa_normed, position_embeddings, attention_meta, **kwargs
         )
 
     def _run_sparse_attention_indexer(
         self,
         hidden_states: torch.Tensor,
+        qa_normed: Optional[torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_meta: Optional[AttentionMetadataBase] = None,
         **kwargs,
     ):
-        if getattr(self, "q_lora_rank", None) is None:
+        if qa_normed is None:
             return None
-        batch_size, seq_length = hidden_states.shape[:-1]
-        hidden_states_view = hidden_states.view(batch_size * seq_length, -1)
-        # Use module directly: seamlessly supports both quant (TensorCastQuantLinear) and unquant paths
-        temp_q_a_out = self.q_a_proj(hidden_states_view)
-        qa_normed = self.q_a_layernorm(temp_q_a_out)
 
         indexer_cache_by_layers = kwargs.pop("indexer_cache_by_layers", None)
         indexer_cache = (
@@ -405,8 +441,25 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
 
 
 class DeepseekSparseAttentionIndexer(ModelWrapperBase):
-    def __init__(self, indexer):
+    def __init__(self, indexer, topk_limit: Optional[int] = None):
         super().__init__(indexer)
+        self._topk_limit = _resolve_sparse_topk_limit(indexer, topk_limit=topk_limit)
+
+    @property
+    def num_heads(self) -> int:
+        if hasattr(self._inner, "num_heads"):
+            return self._inner.num_heads
+        return self._inner.n_heads
+
+    @property
+    def head_dim(self) -> int:
+        if hasattr(self._inner, "head_dim"):
+            return self._inner.head_dim
+        return self._inner.index_head_dim
+
+    @property
+    def topk_limit(self) -> int:
+        return self._topk_limit
 
     def forward(
         self,
@@ -416,36 +469,31 @@ class DeepseekSparseAttentionIndexer(ModelWrapperBase):
         indexer_cache: torch.Tensor,
         attention_meta: Optional[AttentionMetadataBase] = None,
     ):
-        bsz, seq_len, _ = hidden_states.size()
-        q = self.wq_b(qa_normed)
-        q = q.view(bsz, seq_len, self.num_heads, self.head_dim)
-        q_rot, q_pass = torch.split(
-            q, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-        )
-
-        k = self.wk(hidden_states)
-        k = self.k_norm(k)
-        k_rot, k_pass = torch.split(
-            k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-        )
         cos, sin = position_embeddings
-
-        q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
-        q = torch.cat([q_rot, q_pass], dim=-1)
-        k_rot = k_rot.squeeze(2)
-        k = torch.cat([k_rot, k_pass], dim=-1)
-
-        torch.ops.tensor_cast.dsa_index_cache(
-            k,
+        wq_b_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(
+            self.wq_b
+        )
+        wk_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(self.wk)
+        weights_proj_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(
+            self.weights_proj
+        )
+        # The performance model infers fp8-vs-bf16 behavior from the cache dtype.
+        # The semantic op itself stays shape-only and does not encode the cost model.
+        return torch.ops.tensor_cast.dsa_indexer(
+            hidden_states,
+            qa_normed,
+            cos,
+            sin,
             indexer_cache,
-            slot_mapping=attention_meta.slot_mapping if attention_meta else None,
-            block_tables=attention_meta.block_table_tensor if attention_meta else None,
+            attention_meta.slot_mapping if attention_meta else None,
+            attention_meta.block_table_tensor if attention_meta else None,
+            attention_meta.seq_lens if attention_meta is not None else None,
+            wq_b_weight,
+            wk_weight,
+            weights_proj_weight,
+            self.k_norm.weight,
+            self.num_heads,
+            self.head_dim,
+            self.qk_rope_head_dim,
+            self.topk_limit,
         )
-        weights = self.weights_proj(hidden_states) * self.num_heads**-0.5
-
-        # the second indexer_cache is a place holder
-        index_score = torch.ops.tensor_cast.dsa_index(
-            q.contiguous(), weights, indexer_cache, indexer_cache
-        )
-        topk_indices = index_score.topk(min(self.index_topk, seq_len), dim=-1)[1]
-        return topk_indices

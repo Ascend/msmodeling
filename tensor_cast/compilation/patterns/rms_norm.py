@@ -3,6 +3,11 @@ import torch
 from ... import config
 
 _RMS_NORM_DTYPE_LIST = [torch.float16, torch.bfloat16]
+_DEFAULT_EPS_SCALAR_WORKAROUND = {"eps": 1e-6}
+
+
+def _create_pattern_result(pattern, replacement, example_inputs):
+    return pattern, replacement, example_inputs, _DEFAULT_EPS_SCALAR_WORKAROUND
 
 
 class RMSNormPattern:
@@ -12,71 +17,71 @@ class RMSNormPattern:
     """
 
     @staticmethod
-    def create(dtype, eps: float = 1e-6):
+    def create(dtype):
         def get_inputs():
             hidden_states = torch.empty(2, 4, dtype=dtype, device="meta")
             weight = torch.empty(4, dtype=dtype, device="meta")
             return [hidden_states, weight]
 
-        def pattern(hidden_states, weight):
+        def pattern(hidden_states, weight, eps):
             hidden_states = hidden_states.to(torch.float32)
             variance = hidden_states.pow(2).mean(-1, keepdim=True)
             hidden_states = hidden_states * torch.rsqrt(variance + eps)
             out = weight * hidden_states.to(dtype)
             return out
 
-        def replacement(hidden_states, weight):
+        def replacement(hidden_states, weight, eps):
             out = torch.ops.tensor_cast.rms_norm(hidden_states, weight, eps)
             return out
 
-        return (pattern, replacement, get_inputs())
+        return _create_pattern_result(pattern, replacement, get_inputs())
 
 
 class AddRMSNormPattern:
     @staticmethod
-    def create(eps: float = 1e-6):
+    def create():
         def get_inputs():
             hidden_states = torch.empty(2, 4, device="meta")
             residual = torch.empty(2, 4, device="meta")
             weight = torch.empty(4, device="meta")
             return [hidden_states, residual, weight]
 
-        def pattern(hidden_states, residual, weight):
+        def pattern(hidden_states, residual, weight, eps):
             out = torch.ops.tensor_cast.rms_norm(hidden_states + residual, weight, eps)
             return out
 
-        def replacement(hidden_states, residual, weight):
+        def replacement(hidden_states, residual, weight, eps):
             out = torch.ops.tensor_cast.add_rms_norm(
                 hidden_states, residual, weight, eps
             )
             return out
 
-        return (pattern, replacement, get_inputs())
+        return _create_pattern_result(pattern, replacement, get_inputs())
 
 
 class AddRMSNorm2Pattern:
     """AddRMSNorm2 pattern that produces both the output and the residual."""
 
     @staticmethod
-    def create(eps: float = 1e-6):
+    def create():
         def get_inputs():
             hidden_states = torch.empty(2, 4, device="meta")
             residual = torch.empty(2, 4, device="meta")
             weight = torch.empty(4, device="meta")
             return [hidden_states, residual, weight]
 
-        def pattern(hidden_states, residual, weight):
+        def pattern(hidden_states, residual, weight, eps):
             residual = hidden_states + residual
             out = torch.ops.tensor_cast.rms_norm(residual, weight, eps)
             return out, residual
 
-        def replacement(hidden_states, residual, weight):
+        def replacement(hidden_states, residual, weight, eps):
             out, residual = torch.ops.tensor_cast.add_rms_norm2(
                 hidden_states, residual, weight, eps
             )
             return out, residual
 
-        return (pattern, replacement, get_inputs())
+        return _create_pattern_result(pattern, replacement, get_inputs())
 
 
 class RMSNormQuantPattern:
@@ -454,13 +459,15 @@ def register_all_patterns():
 
     if config.compilation.fusion_patterns.enable_rms_norm:
         for dtype in _RMS_NORM_DTYPE_LIST:
-            pattern, replacement, example_inputs = RMSNormPattern.create(dtype)
-            # Register the pattern with the PatternManager
+            pattern, replacement, example_inputs, scalar_workaround = (
+                RMSNormPattern.create(dtype)
+            )
             register_pattern(
                 f"rms_norm_pattern_{dtype}",
                 pattern,
                 replacement,
                 example_inputs,
+                scalar_workaround=scalar_workaround,
                 level=0,
             )
 
@@ -471,14 +478,26 @@ def register_all_patterns():
         )
 
     if config.compilation.fusion_patterns.enable_add_rms_norm:
+        pattern, replacement, example_inputs, scalar_workaround = (
+            AddRMSNormPattern.create()
+        )
         register_pattern(
             "add_rms_norm_pattern",
-            *AddRMSNormPattern.create(),
+            pattern,
+            replacement,
+            example_inputs,
+            scalar_workaround=scalar_workaround,
             level=1,  # make sure RMSNorm+Quant is fused before it.
+        )
+        pattern, replacement, example_inputs, scalar_workaround = (
+            AddRMSNorm2Pattern.create()
         )
         register_pattern(
             "add_rms_norm2_pattern",
-            *AddRMSNorm2Pattern.create(),
+            pattern,
+            replacement,
+            example_inputs,
+            scalar_workaround=scalar_workaround,
             level=1,  # make sure RMSNorm+Quant is fused before it.
         )
         if config.compilation.fusion_patterns.enable_rms_norm_quant:

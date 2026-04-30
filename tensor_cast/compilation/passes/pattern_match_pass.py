@@ -46,7 +46,8 @@ class PatternMatchPass(TensorCastGraphModulePass):
         name: str,
         pattern: Callable[..., Any],
         replacement: Callable[..., Any],
-        example_inputs: List[torch.Tensor],
+        example_inputs: List[Any],
+        scalar_workaround: Dict[str, Any] | None = None,
     ):
         if name in self.pattern_replacements:
             raise ValueError(f"Pattern '{name}' is already registered.")
@@ -60,6 +61,7 @@ class PatternMatchPass(TensorCastGraphModulePass):
                 example_inputs,
                 pm.fwd_only,
                 self.pattern_pass.patterns,
+                scalar_workaround=scalar_workaround,
             )
             logger.debug("Successfully register pattern: %s", name)
         except RuntimeError as e:

@@ -49,11 +49,12 @@ class DeepseekV32Config(DeepseekV3Config):
 
     def __init__(
         self,
-        index_topk: Optional[int] = 2048,
+        topk_limit: Optional[int] = None,
         **kwargs,
     ):
+        index_topk = kwargs.pop("index_topk", None)
         super().__init__(**kwargs)
-        self.index_topk = index_topk
+        self.topk_limit = index_topk if index_topk is not None else topk_limit
 
 
 class DeepseekV32RMSNorm(DeepseekV3RMSNorm):
@@ -82,7 +83,7 @@ class DeepseekV32Indexer(nn.Module):
         self.num_local_heads = config.index_n_heads
         self.head_dim = config.index_head_dim
         self.qk_rope_head_dim = config.qk_rope_head_dim
-        self.index_topk = config.index_topk
+        self.topk_limit = config.topk_limit
         self.q_lora_rank = config.q_lora_rank
 
         self.wq_b = nn.Linear(

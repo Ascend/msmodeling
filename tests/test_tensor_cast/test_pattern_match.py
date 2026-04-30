@@ -3,6 +3,7 @@ import unittest
 import torch
 from parameterized import parameterized
 
+from tensor_cast import ops  # noqa: F401
 from tensor_cast.compilation import get_backend
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
@@ -13,6 +14,28 @@ from tensor_cast.quantize_utils import LinearQuantType, QuantGranularity, QuantS
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.model import TransformerModel
 from .test_common import get_quant_config
+
+
+class NonDefaultEpsRMSNormModule(torch.nn.Module):
+    def __init__(self, dtype=torch.float16, eps: float = 1e-5):
+        super().__init__()
+        self.dtype = dtype
+        self.eps = eps
+        self.weight = torch.nn.Parameter(torch.ones(4, dtype=dtype, device="meta"))
+
+    def _rms_norm(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+        return self.weight * hidden_states.to(input_dtype)
+
+    def forward(self, hidden_states, residual):
+        rms = self._rms_norm(hidden_states)
+        add_rms = self._rms_norm(hidden_states + residual)
+        added = hidden_states + residual
+        add_rms2 = self._rms_norm(added)
+        return rms, add_rms, add_rms2, added
 
 
 class PatternReplaceTestCase(unittest.TestCase):
@@ -209,3 +232,20 @@ class PatternReplaceTestCase(unittest.TestCase):
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
         result = runtime.table_averages()
         self.assertIn("tensor_cast.apply_rope.default", result)
+
+    def test_rms_norm_pattern_non_default_eps(self):
+        model = NonDefaultEpsRMSNormModule()
+        model = torch.compile(
+            model, backend=self.compile_backend, fullgraph=True, dynamic=True
+        )
+        machine_config = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(machine_config)
+        hidden_states = torch.empty(2, 4, device="meta", dtype=torch.float16)
+        residual = torch.empty(2, 4, device="meta", dtype=torch.float16)
+        with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
+            outputs = model(hidden_states, residual)
+            self.assertEqual(len(outputs), 4)
+        result = runtime.table_averages()
+        self.assertIn("tensor_cast.rms_norm.default", result)
+        self.assertIn("tensor_cast.add_rms_norm.default", result)
+        self.assertIn("tensor_cast.add_rms_norm2.default", result)
