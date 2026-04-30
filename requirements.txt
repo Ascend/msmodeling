@@ -20,9 +20,14 @@ scipy
 prettytable
 pyyaml
 pandas
+matplotlib
 
 # test
 pytest
 pytest-cov
 pytest-xdist
 parameterized
+
+# web ui
+gradio>=5,<6
+openpyxl
