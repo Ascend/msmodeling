@@ -3,8 +3,10 @@ import unittest
 import torch
 
 from tensor_cast.device import TEST_DEVICE
+from tensor_cast.performance_model.base import PerformanceModel
 from tensor_cast.performance_model.memory_tracker import MemoryTracker
-from tensor_cast.runtime import Runtime
+from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+from tensor_cast.runtime import Runtime, RuntimeEvent
 
 
 class TestMemoryTracker(unittest.TestCase):
@@ -172,6 +174,39 @@ class TestMemoryTracker(unittest.TestCase):
         expected_profile = [(400, 400), (400, 400)]
         self._run_and_check(func, [x], expected_profile)
 
+    def test_unused_alias_is_not_model_output_when_source_is_used_later(self):
+        """Ensures dead alias outputs do not keep their source alive."""
+        x = torch.randn(100)  # 400 bytes
+        a = x + 1.0
+        view_out = a.view(-1)
+        mul_out = a * 2.0
+
+        add_info = OpInvokeInfo(torch.ops.aten.add.Tensor, (x, 1.0), {}, a)
+        view_info = OpInvokeInfo(torch.ops.aten.view.default, (a, [-1]), {}, view_out)
+        mul_info = OpInvokeInfo(torch.ops.aten.mul.Tensor, (a, 2.0), {}, mul_out)
+
+        mt = MemoryTracker(TEST_DEVICE)
+        mt.record_single_op_invocation(add_info)
+        mt.record_single_op_invocation(view_info)
+        mt.record_single_op_invocation(mul_info)
+        mt.analyze()
+        profile = mt.get_profile()
+
+        # Initial memory: 400 (x)
+        # Op 0 (add): Before=400. Allocates 400 for a. After=800.
+        # Op 1 (view): Before=800. No allocation. After=800.
+        # Op 2 (mul): Before=800. Allocates 400, then a can be freed.
+        expected_profile = [(400, 800), (800, 800), (800, 1200), (800, 800)]
+        self.assertEqual(len(profile), len(expected_profile))
+        for op_profile, expected in zip(profile, expected_profile):
+            self.assertEqual(
+                (
+                    op_profile.usage_before_call_bytes,
+                    op_profile.usage_after_call_bytes,
+                ),
+                expected,
+            )
+
     def test_alias_from_kwargs_input(self):
         """Ensures alias tracking works when tensor inputs are passed by kwargs."""
 
@@ -187,3 +222,85 @@ class TestMemoryTracker(unittest.TestCase):
         # Op 1 (add): Before=400. Allocates 400. After=800.
         expected_profile = [(400, 400), (400, 800), (800, 800)]
         self._run_and_check(func, [x], expected_profile)
+
+    def test_multistream_wait_anchor_does_not_add_model_input_memory(self):
+        """Ensures wait anchors do not turn their output into extra model input memory."""
+        x = torch.randn(100)  # 400 bytes
+        wait_out = x.clone()
+        relu_out = torch.relu(x)
+        neg_out = torch.neg(wait_out)
+        wait_info = OpInvokeInfo(
+            torch.ops.tensor_cast._internal_wait_and_bind.default,
+            (x, 1, []),
+            {},
+            wait_out,
+        )
+        relu_info = OpInvokeInfo(torch.ops.aten.relu.default, (x,), {}, relu_out)
+        neg_info = OpInvokeInfo(torch.ops.aten.neg.default, (wait_out,), {}, neg_out)
+
+        runtime = Runtime([], TEST_DEVICE, MemoryTracker(TEST_DEVICE))
+        runtime.op_info_group = [relu_info, wait_info, neg_info]
+        runtime.replay_op_invoke_infos()
+        runtime.memory_tracker.analyze()
+        profile = runtime.memory_tracker.get_profile()
+
+        # The wait anchor is control-only. Its output is a cloned tensor for the
+        # custom-op contract, but memory accounting should still treat it as x.
+        # Op 0 (relu): Before=400. Allocates 400. After=800.
+        # Op 1 (neg): Before=800. Allocates 400. After=1200.
+        expected_profile = [(400, 800), (800, 1200), (1200, 1200)]
+        self.assertEqual(len(profile), len(expected_profile))
+        for op_profile, expected in zip(profile, expected_profile):
+            self.assertEqual(
+                (
+                    op_profile.usage_before_call_bytes,
+                    op_profile.usage_after_call_bytes,
+                ),
+                expected,
+            )
+
+    def test_multistream_memory_keeps_def_use_order(self):
+        """Ensures memory replay does not classify intermediates as inputs."""
+        produced = torch.empty(100)  # 400 bytes
+        consumed = torch.neg(produced)
+        producer_info = OpInvokeInfo(
+            torch.ops.aten.empty.memory_format,
+            ([100],),
+            {},
+            produced,
+        )
+        consumer_info = OpInvokeInfo(
+            torch.ops.aten.neg.default,
+            (produced,),
+            {},
+            consumed,
+        )
+
+        runtime = Runtime([], TEST_DEVICE, MemoryTracker(TEST_DEVICE))
+        runtime.event_list = [
+            RuntimeEvent(
+                op_invoke_info=producer_info,
+                perf_results={"analytic": PerformanceModel.Result(10.0)},
+                stream_id=1,
+            ),
+            RuntimeEvent(
+                op_invoke_info=consumer_info,
+                perf_results={"analytic": PerformanceModel.Result(1.0)},
+                stream_id=0,
+            ),
+        ]
+        runtime._event_reference_ids = [0, 0]
+        runtime._record_memory_invocations()
+        runtime.memory_tracker.analyze()
+        profile = runtime.memory_tracker.get_profile()
+
+        expected_profile = [(0, 400), (400, 800), (400, 400)]
+        self.assertEqual(len(profile), len(expected_profile))
+        for op_profile, expected in zip(profile, expected_profile):
+            self.assertEqual(
+                (
+                    op_profile.usage_before_call_bytes,
+                    op_profile.usage_after_call_bytes,
+                ),
+                expected,
+            )

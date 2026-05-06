@@ -14,6 +14,20 @@ class performance_model:
 class compilation:
     enable_freezing = True
 
+    class multistream:
+        enable = True
+        # Backward-compatible aliases; scheduling logic should read role_to_stream_ids.
+        compute_stream_id = 0
+        comm_stream_id = 1
+        # Role-based stream assignment. Keep defaults to 2 lanes while allowing future expansion.
+        role_to_stream_ids = {
+            "compute": (compute_stream_id,),
+            "comm": (comm_stream_id,),
+        }
+        cross_stream_sync_overhead_s = 0.0
+        # Enable analytic estimator for schedulable FX nodes when metadata is available.
+        enable_analytic_cost_model = True
+
     class passes:
         enable_life_combine_quant = True
         enable_merge_linear = True

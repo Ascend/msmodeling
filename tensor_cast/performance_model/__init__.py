@@ -1628,6 +1628,14 @@ def _estimate_default(
 register_op_estimator(None, None)(_estimate_default)
 
 
+@register_op_estimator(torch.ops.tensor_cast._internal_wait_and_bind.default, None)
+@register_op_estimator(torch.ops.tensor_cast._internal_record.default, None)
+def _estimate_internal_multistream_anchor(
+    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
+) -> PerformanceModel.Result:
+    return PerformanceModel.Result(0.0)
+
+
 @register_op_estimator(torch.ops.tensor_cast.all_reduce.default, None)
 @register_op_estimator(torch.ops.tensor_cast.all_gather.default, None)
 @register_op_estimator(torch.ops.tensor_cast.reduce_scatter.default, None)

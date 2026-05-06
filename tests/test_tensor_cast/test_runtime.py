@@ -14,6 +14,7 @@ from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.base import PerformanceModel
 from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
 from tensor_cast.performance_model.memory_tracker import MemoryTracker
+from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
 from tensor_cast.performance_model.profiling_database.data_source import (
     DataSourcePerformanceModel,
     QueryResult,
@@ -851,6 +852,90 @@ class PerfAnalysisTestCase(unittest.TestCase):
         self.assertEqual(len(runtime.event_list), 1)
         self.assertGreater(runtime.total_execution_time_s()[perf_model.name], 0)
         self.assertIn("aten.copy_.default", runtime.table_averages())
+
+    def test_multistream_total_execution_time_critical_path(self):
+        def func(x):
+            c0 = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 0, [])
+            a = torch.ops.aten.relu.default(c0)
+            _ = torch.ops.tensor_cast._internal_record.default(a, 0)
+
+            c1 = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 1, [])
+            b = torch.ops.aten.sigmoid.default(c1)
+            token_b = torch.ops.tensor_cast._internal_record.default(b, 1)
+
+            c2 = torch.ops.tensor_cast._internal_wait_and_bind.default(a, 0, [token_b])
+            out = torch.ops.aten.tanh.default(c2)
+            _ = torch.ops.tensor_cast._internal_record.default(out, 0)
+            return out
+
+        durations_s = {
+            torch.ops.aten.relu.default: 3.0,
+            torch.ops.aten.sigmoid.default: 5.0,
+            torch.ops.aten.tanh.default: 2.0,
+        }
+        perf_model = Mock(spec=PerformanceModel)
+        perf_model.name = "fixed"
+        perf_model.device_profile = TEST_DEVICE
+        perf_model.get_classifiers.return_value = []
+
+        def _fixed_duration_process_op(op_invoke_info):
+            return PerformanceModel.Result(
+                execution_time_s=durations_s.get(op_invoke_info.func, 0.0)
+            )
+
+        perf_model.process_op.side_effect = _fixed_duration_process_op
+        x = torch.randn([8, 8], device="meta")
+        with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+            _ = func(x)
+
+        # Serial sum is 10s, but critical path is 7s:
+        # max(relu=3s on stream0, sigmoid=5s on stream1) + tanh=2s (depends on sigmoid).
+        total_time_s = runtime.total_execution_time_s()[perf_model.name]
+        assert_close(self, total_time_s, 7.0)
+        tracked_events = [
+            event
+            for event in runtime.event_list
+            if event.op_invoke_info.func in durations_s
+        ]
+        self.assertEqual(len(tracked_events), 3)
+        self.assertEqual([event.stream_id for event in tracked_events], [0, 1, 0])
+
+    def test_multistream_anchors_do_not_inflate_memory_tracking(self):
+        x = torch.randn([8, 8], device="meta")
+        y = torch.ops.aten.neg.default(x)
+        token = torch.empty((), dtype=torch.int64, device="meta")
+        plain_runtime = Runtime(
+            [], TEST_DEVICE, memory_tracker=MemoryTracker(TEST_DEVICE)
+        )
+        plain_runtime.op_info_group = [
+            OpInvokeInfo(torch.ops.aten.neg.default, (x,), {}, y),
+        ]
+        plain_runtime.replay_op_invoke_infos()
+        plain_runtime.memory_tracker.analyze()
+
+        anchored_runtime = Runtime(
+            [], TEST_DEVICE, memory_tracker=MemoryTracker(TEST_DEVICE)
+        )
+        anchored_runtime.op_info_group = [
+            OpInvokeInfo(
+                torch.ops.tensor_cast._internal_wait_and_bind.default, (x, 0, []), {}, x
+            ),
+            OpInvokeInfo(torch.ops.aten.neg.default, (x,), {}, y),
+            OpInvokeInfo(
+                torch.ops.tensor_cast._internal_record.default, (y, 0), {}, token
+            ),
+        ]
+        anchored_runtime.replay_op_invoke_infos()
+        anchored_runtime.memory_tracker.analyze()
+
+        self.assertEqual(
+            anchored_runtime.memory_tracker.peak_mem_usage(),
+            plain_runtime.memory_tracker.peak_mem_usage(),
+        )
+        self.assertEqual(
+            len(anchored_runtime.memory_tracker.get_profile()),
+            len(plain_runtime.memory_tracker.get_profile()),
+        )
 
     def test_model_cost_with_view(self):
         def func(x):

@@ -5,6 +5,7 @@ model_builder
 
 import logging
 
+from .. import config
 from ..compilation import get_backend
 from ..core.config_resolver import ConfigResolver
 from ..core.user_config import UserInputConfig
@@ -62,7 +63,11 @@ def build_model(user_input: UserInputConfig = None) -> TransformerModel:
     if user_input.do_compile:
         import torch
 
+        config.compilation.multistream.enable = bool(user_input.enable_multistream)
         model = torch.compile(
-            model, backend=get_backend(), dynamic=False, fullgraph=use_full_graph
+            model,
+            backend=get_backend(device_name=user_input.device),
+            dynamic=False,
+            fullgraph=use_full_graph,
         )
     return model

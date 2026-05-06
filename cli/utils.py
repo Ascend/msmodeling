@@ -125,6 +125,16 @@ def get_common_argparser(reserved_memory_gb_default: float = 0.0):
     )
 
     general_group.add_argument(
+        "--enable-multistream",
+        action="store_true",
+        default=True,
+        help=(
+            "Enable compiler-driven multi-stream simulation for torch.compile path. "
+            "Enabled by default."
+        ),
+    )
+
+    general_group.add_argument(
         "--reserved-memory-gb",
         type=float,
         default=reserved_memory_gb_default,

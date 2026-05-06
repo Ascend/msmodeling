@@ -123,6 +123,25 @@ class MemoryTracker:
         tensor_id, repeat_id = Region.get_tensor_id(tensor, repeat_id)
         return TensorKey(tensor_id=tensor_id, repeat_id=repeat_id)
 
+    def record_tensor_alias(
+        self,
+        source_tensor: torch.Tensor,
+        alias_tensor: torch.Tensor,
+        repeat_id: int = 0,
+    ) -> None:
+        """Record that ``alias_tensor`` reuses ``source_tensor``'s storage."""
+        source_id = self._get_real_tensor_id(source_tensor, repeat_id)
+        alias_id = self._get_real_tensor_id(alias_tensor, repeat_id)
+        if source_id == alias_id:
+            return
+
+        if source_id not in self.tensor_infos:
+            self.tensor_infos[source_id] = _TensorInfo(
+                size_bytes=int(bytes_of_tensor(source_tensor))
+            )
+
+        self.alias_info[alias_id] = self.alias_info.get(source_id, source_id)
+
     def _handle_aliasing(self, op_invoke_info: OpInvokeInfo, repeat_id: int):
         cached = self._alias_plan_cache.get(op_invoke_info.func, _MISSING)
         if cached is _MISSING:
@@ -308,19 +327,35 @@ class MemoryTracker:
 
         # Step 1: Finalize tensor lifecycle info (inputs, outputs, last use).
         for tensor_id, info in self.tensor_infos.items():
-            if not info.use_op_indices:
+            all_use_op_indices = info.use_op_indices + info.use_op_indices_by_alias
+            if not all_use_op_indices:
                 if tensor_id in self.alias_info:
                     # we treat the aliased tensor as output, not the aliasing ones
-                    self.model_output_tensors.add(self.alias_info[tensor_id])
+                    source_id = self.alias_info[tensor_id]
+                    source_info = self.tensor_infos.get(source_id)
+                    source_use_op_indices = (
+                        []
+                        if source_info is None
+                        else source_info.use_op_indices
+                        + source_info.use_op_indices_by_alias
+                    )
+                    if not source_use_op_indices or info.def_op_idx >= max(
+                        source_use_op_indices
+                    ):
+                        self.model_output_tensors.add(source_id)
                 else:
                     self.model_output_tensors.add(tensor_id)
             else:
-                info.last_use_op_idx = max(
-                    info.use_op_indices + info.use_op_indices_by_alias
-                )
+                info.last_use_op_idx = max(all_use_op_indices)
 
             if info.def_op_idx == -1:
-                self.model_input_tensors.add(tensor_id)
+                if tensor_id in self.alias_info:
+                    source_id = self.alias_info[tensor_id]
+                    source_info = self.tensor_infos.get(source_id)
+                    if source_info is None or source_info.def_op_idx == -1:
+                        self.model_input_tensors.add(source_id)
+                else:
+                    self.model_input_tensors.add(tensor_id)
 
         # Step 2: Simulate memory usage over the sequence of operations.
         # Start with memory consumed by model inputs, which are pre-allocated.

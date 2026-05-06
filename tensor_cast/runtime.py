@@ -5,7 +5,7 @@ import json
 import logging
 import threading
 import time
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -31,12 +31,21 @@ class RuntimeEvent:
     perf_results: Dict[str, PerformanceModel.Result] = dataclasses.field(
         default_factory=dict
     )
+    stream_id: int = 0
+    dependency_token_ids: tuple[int, ...] = ()
+    produced_token_ids: List[int] = dataclasses.field(default_factory=list)
+    memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = dataclasses.field(
+        default_factory=list
+    )
 
 
 class Runtime(TorchDispatchMode):
     """
     Runtime of TensorCast that simulates the execution of a PyTorch program.
     """
+
+    _INTERNAL_WAIT_AND_BIND = torch.ops.tensor_cast._internal_wait_and_bind.default
+    _INTERNAL_RECORD = torch.ops.tensor_cast._internal_record.default
 
     def __init__(
         self,
@@ -59,7 +68,10 @@ class Runtime(TorchDispatchMode):
         self.op_invoke_infos: List[OpInvokeInfo] = []
         self.op_info_group: List[Union[OpInvokeInfo, Region]] = []
         self.event_list: List[RuntimeEvent] = []
-        # TODO: add multi-stream support
+        self._event_reference_ids: List[int] = []
+        self._pending_wait_stream_id: Optional[int] = None
+        self._pending_wait_dependency_token_ids: List[int] = []
+        self._pending_wait_memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = []
 
         self.exit_stack = contextlib.ExitStack()
 
@@ -143,24 +155,196 @@ class Runtime(TorchDispatchMode):
                 else:
                     self.op_info_group.append(op_invoke_info)
 
+    @staticmethod
+    def _dedup_token_ids(token_ids: List[int]) -> tuple[int, ...]:
+        return tuple(dict.fromkeys(token_ids))
+
+    @staticmethod
+    def _extract_tensor_token_ids(value: Any) -> List[int]:
+        if isinstance(value, torch.Tensor):
+            return [id(value)]
+        if isinstance(value, (list, tuple)):
+            token_ids: List[int] = []
+            for item in value:
+                token_ids.extend(Runtime._extract_tensor_token_ids(item))
+            return token_ids
+        if isinstance(value, dict):
+            token_ids: List[int] = []
+            for item in value.values():
+                token_ids.extend(Runtime._extract_tensor_token_ids(item))
+            return token_ids
+        return []
+
+    def _consume_pending_wait_context(
+        self,
+    ) -> tuple[int, tuple[int, ...], List[tuple[torch.Tensor, torch.Tensor]]]:
+        if self._pending_wait_stream_id is None:
+            return 0, (), []
+        stream_id = self._pending_wait_stream_id
+        dependency_token_ids = self._dedup_token_ids(
+            self._pending_wait_dependency_token_ids
+        )
+        memory_aliases = self._pending_wait_memory_aliases
+        self._pending_wait_stream_id = None
+        self._pending_wait_dependency_token_ids.clear()
+        self._pending_wait_memory_aliases = []
+        return stream_id, dependency_token_ids, memory_aliases
+
+    def _handle_wait_and_bind(self, op_invoke_info: OpInvokeInfo) -> None:
+        stream_id = 0
+        if len(op_invoke_info.args) > 1:
+            stream_id = int(op_invoke_info.args[1])
+        deps = op_invoke_info.args[2] if len(op_invoke_info.args) > 2 else []
+        dep_token_ids = self._extract_tensor_token_ids(deps)
+        if (
+            self._pending_wait_stream_id is not None
+            and stream_id != self._pending_wait_stream_id
+        ):
+            raise RuntimeError(
+                f"Conflicting wait_and_bind stream ids "
+                f"({self._pending_wait_stream_id} vs. {stream_id})"
+            )
+        self._pending_wait_stream_id = stream_id
+        self._pending_wait_dependency_token_ids.extend(dep_token_ids)
+        if (
+            len(op_invoke_info.args) > 0
+            and isinstance(op_invoke_info.args[0], torch.Tensor)
+            and isinstance(op_invoke_info.out, torch.Tensor)
+        ):
+            self._pending_wait_memory_aliases.append(
+                (op_invoke_info.args[0], op_invoke_info.out)
+            )
+
+    def _handle_record(self, op_invoke_info: OpInvokeInfo) -> None:
+        if not self.event_list:
+            logger.warning(
+                "Ignoring _internal_record because no preceding runtime event exists."
+            )
+            return
+        event = self.event_list[-1]
+        if len(op_invoke_info.args) > 1:
+            event.stream_id = int(op_invoke_info.args[1])
+        token_ids = self._extract_tensor_token_ids(op_invoke_info.out)
+        if not token_ids:
+            return
+        event.produced_token_ids = list(
+            self._dedup_token_ids(event.produced_token_ids + token_ids)
+        )
+
     def _replay_single_op(self, op_invoke_info):
+        if op_invoke_info.func == self._INTERNAL_WAIT_AND_BIND:
+            self._handle_wait_and_bind(op_invoke_info)
+            return
+        if op_invoke_info.func == self._INTERNAL_RECORD:
+            self._handle_record(op_invoke_info)
+            return
+
+        stream_id, dependency_token_ids, memory_aliases = (
+            self._consume_pending_wait_context()
+        )
         perf_results = {}
         for perf_model in self.perf_models:
             result = perf_model.process_op(op_invoke_info)
             perf_results[perf_model.name] = result
         self.event_list.append(
-            RuntimeEvent(op_invoke_info=op_invoke_info, perf_results=perf_results)
+            RuntimeEvent(
+                op_invoke_info=op_invoke_info,
+                perf_results=perf_results,
+                stream_id=stream_id,
+                dependency_token_ids=dependency_token_ids,
+                memory_aliases=memory_aliases,
+            )
         )
 
-    def replay_op_invoke_infos(self):
-        for op_info in self.op_info_group:
-            if self.memory_tracker:
-                self.memory_tracker.record_op_invocation(op_info)
-            if isinstance(op_info, Region):
-                for op_invoke_info in op_info.op_invoke_infos:
-                    self._replay_single_op(op_invoke_info)
+    @classmethod
+    def _is_multistream_anchor_op(cls, func) -> bool:
+        return func in (cls._INTERNAL_WAIT_AND_BIND, cls._INTERNAL_RECORD)
+
+    def _record_single_memory_invocation(
+        self, op_invoke_info: OpInvokeInfo, reference_id: int
+    ) -> None:
+        if self._is_multistream_anchor_op(op_invoke_info.func):
+            return
+        self.memory_tracker.record_single_op_invocation(op_invoke_info, reference_id)
+
+    def _iter_flat_invocations(self) -> List[tuple[OpInvokeInfo, int]]:
+        invocations: List[tuple[OpInvokeInfo, int]] = []
+        for op_info_or_region in self.op_info_group:
+            if isinstance(op_info_or_region, Region):
+                invocations.extend(
+                    (op_invoke_info, op_info_or_region.reference_id)
+                    for op_invoke_info in op_info_or_region.op_invoke_infos
+                )
             else:
-                self._replay_single_op(op_info)
+                invocations.append((op_info_or_region, 0))
+        return invocations
+
+    @staticmethod
+    def _event_duration_s(event: RuntimeEvent) -> float:
+        if not event.perf_results:
+            return 0.0
+        return max(
+            perf_result.execution_time_s for perf_result in event.perf_results.values()
+        )
+
+    def _record_memory_invocations(self) -> None:
+        if self.memory_tracker is None:
+            return
+        memory_events = self.event_list
+        if len(self._event_reference_ids) != len(self.event_list):
+            logger.warning(
+                "Runtime event/reference mismatch for memory tracking: events=%d, references=%d.",
+                len(self.event_list),
+                len(self._event_reference_ids),
+            )
+        event_reference_id = {
+            id(event): (
+                self._event_reference_ids[index]
+                if index < len(self._event_reference_ids)
+                else 0
+            )
+            for index, event in enumerate(self.event_list)
+        }
+        # Multistream anchors are runtime control ops rather than model-semantic ops.
+        # In particular, _internal_record publishes control tokens, not activations.
+        # Skip anchors so activation-memory accounting tracks model tensors only.
+        # MemoryTracker models tensor liveness from def-use order. Reordering by
+        # simulated completion time can place a consumer before its producer and
+        # incorrectly turn intermediate tensors into model inputs.
+        for event in memory_events:
+            reference_id = event_reference_id.get(id(event), 0)
+            consumed_tensor_ids = set(
+                self._extract_tensor_token_ids(
+                    (event.op_invoke_info.args, event.op_invoke_info.kwargs)
+                )
+            )
+            for source_tensor, alias_tensor in event.memory_aliases:
+                if id(alias_tensor) in consumed_tensor_ids:
+                    self.memory_tracker.record_tensor_alias(
+                        source_tensor, alias_tensor, reference_id
+                    )
+            self._record_single_memory_invocation(event.op_invoke_info, reference_id)
+
+    def replay_op_invoke_infos(self):
+        self._pending_wait_stream_id = None
+        self._pending_wait_dependency_token_ids.clear()
+        self.event_list.clear()
+        self._event_reference_ids.clear()
+        invocations = self._iter_flat_invocations()
+        for op_invoke_info, reference_id in invocations:
+            num_events_before_replay = len(self.event_list)
+            self._replay_single_op(op_invoke_info)
+            if len(self.event_list) > num_events_before_replay:
+                self._event_reference_ids.append(reference_id)
+        if self._pending_wait_stream_id is not None:
+            logger.warning(
+                "Dropping dangling _internal_wait_and_bind context on stream %s.",
+                self._pending_wait_stream_id,
+            )
+            self._pending_wait_stream_id = None
+            self._pending_wait_dependency_token_ids.clear()
+            self._pending_wait_memory_aliases.clear()
+        self._record_memory_invocations()
 
     def __enter__(self):
         super().__enter__()
@@ -348,11 +532,7 @@ class Runtime(TorchDispatchMode):
 
         # Map performance model names to Process IDs (pid)
         perf_model_pids = {model.name: i for i, model in enumerate(self.perf_models)}
-
-        # Keep track of the current time for each process/thread combination.
-        # The key is the pid, and the value is the cumulative time in microseconds.
-        # For now, we assume a single thread (tid=0) per process.
-        current_time_us = dict.fromkeys(perf_model_pids.values(), 0)
+        model_timelines = self._build_model_timelines()
 
         # 1. Add Metadata Events to name the processes for readability in the trace viewer
         for model_name, pid in perf_model_pids.items():
@@ -364,30 +544,32 @@ class Runtime(TorchDispatchMode):
                     "args": {"name": f"{model_name} (PID: {pid})"},
                 }
             )
-            # Also name the default thread for this process
-            trace_events.append(
-                {
-                    "name": "thread_name",
-                    "ph": "M",
-                    "pid": pid,
-                    "tid": 0,  # Assuming a single stream for now
-                    "args": {"name": "Stream 0"},
-                }
-            )
+            stream_ids = sorted(model_timelines[model_name]["stream_end_s"].keys())
+            if not stream_ids:
+                stream_ids = [0]
+            for stream_id in stream_ids:
+                trace_events.append(
+                    {
+                        "name": "thread_name",
+                        "ph": "M",
+                        "pid": pid,
+                        "tid": stream_id,
+                        "args": {"name": f"Stream {stream_id}"},
+                    }
+                )
 
         # 2. Iterate through events and create trace entries
-        for event in self.event_list:
+        for event_idx, event in enumerate(self.event_list):
             op_name = str(event.op_invoke_info.func)
 
             # Create a trace event for each performance model's result
             for model_name, result in event.perf_results.items():
                 pid = perf_model_pids[model_name]
-
-                # result.runtime is in seconds, Chrome Trace wants microseconds
+                timeline = model_timelines[model_name]
+                start_time_us = max(
+                    0, int(round(timeline["event_start_s"][event_idx] * 1e6))
+                )
                 duration_us = max(0, int(round(result.execution_time_s * 1e6)))
-
-                # The event starts at the current cumulative time for this process
-                start_time_us = current_time_us[pid]
 
                 trace_event = {
                     "name": op_name,
@@ -396,7 +578,7 @@ class Runtime(TorchDispatchMode):
                     "ts": start_time_us,
                     "dur": duration_us,
                     "pid": pid,
-                    "tid": 0,  # Hardcoded to thread 0 for now
+                    "tid": event.stream_id,
                     "args": {  # Add any extra useful info here
                         "Inputs": str(event.op_invoke_info.args)
                         + " kwargs: "
@@ -409,9 +591,6 @@ class Runtime(TorchDispatchMode):
                     },
                 }
                 trace_events.append(trace_event)
-
-                # Update the cumulative time for this process's timeline
-                current_time_us[pid] += duration_us
 
         return trace_events
 
@@ -456,10 +635,36 @@ class Runtime(TorchDispatchMode):
         return breakdowns
 
     def total_execution_time_s(self) -> Dict[str, float]:
-        total: Dict[str, float] = {}
+        timelines = self._build_model_timelines()
+        return {
+            perf_model.name: timelines[perf_model.name]["total_time_s"]
+            for perf_model in self.perf_models
+        }
+
+    def _build_model_timelines(self) -> Dict[str, Dict[str, object]]:
+        timelines: Dict[str, Dict[str, object]] = {}
         for perf_model in self.perf_models:
-            total[perf_model.name] = sum(
-                event.perf_results[perf_model.name].execution_time_s
-                for event in self.event_list
-            )
-        return total
+            model_name = perf_model.name
+            stream_end_s: Dict[int, float] = collections.defaultdict(float)
+            token_ready_s: Dict[int, float] = {}
+            event_start_s: List[float] = []
+
+            for event in self.event_list:
+                dep_ready_s = 0.0
+                for token_id in event.dependency_token_ids:
+                    dep_ready_s = max(dep_ready_s, token_ready_s.get(token_id, 0.0))
+                start_time_s = max(stream_end_s[event.stream_id], dep_ready_s)
+                duration_s = max(0.0, event.perf_results[model_name].execution_time_s)
+                end_time_s = start_time_s + duration_s
+                stream_end_s[event.stream_id] = end_time_s
+                for token_id in event.produced_token_ids:
+                    token_ready_s[token_id] = end_time_s
+                event_start_s.append(start_time_s)
+
+            timelines[model_name] = {
+                "event_start_s": event_start_s,
+                "stream_end_s": dict(stream_end_s),
+                "total_time_s": max(stream_end_s.values(), default=0.0),
+            }
+
+        return timelines

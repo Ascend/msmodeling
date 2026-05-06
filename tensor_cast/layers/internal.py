@@ -29,6 +29,9 @@ class RegionMarkerWrapper(ModelWrapperBase):
             hidden_states,
             self.region_id,
         )
+        # Keep the begin marker in the dataflow so compile/DCE cannot drop it
+        # while preserving the paired end marker.
+        args = (hidden_states,) + args[1:]
         result = self._inner.forward(*args, **kwargs)
 
         # Handle both single tensor and tuple returns

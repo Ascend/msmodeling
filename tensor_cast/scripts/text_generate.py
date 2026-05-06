@@ -65,6 +65,15 @@ def main():
         help="If set, invoke torch.compile() on the model before inference.",
     )
     parser.add_argument(
+        "--enable-multistream",
+        action="store_true",
+        default=True,
+        help=(
+            "Enable compiler-driven multi-stream simulation for torch.compile path. "
+            "Enabled by default."
+        ),
+    )
+    parser.add_argument(
         "--dump-input-shapes",
         action="store_true",
         help="If set, group the table average by input shapes",
@@ -288,7 +297,10 @@ def main():
     )
 
     args = parser.parse_args()
-    logging.basicConfig(level=LOG_LEVELS[args.log_level.lower()])
+    log_level = LOG_LEVELS[args.log_level.lower()]
+    logging.getLogger().setLevel(log_level)
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=log_level)
 
     if args.graph_log_url:
         config.compilation.debug.graph_log_url = args.graph_log_url

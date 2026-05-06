@@ -10,7 +10,7 @@ from torch._inductor.decomposition import select_decomp_table
 from torch._inductor.freezing import freeze
 from torch._inductor.fx_passes.post_grad import decompose_auto_functionalized
 
-from .. import config
+from .. import config, ops  # noqa: F401
 from . import patterns
 from .constant_folding import fold_meta_constants
 from .freezing_passes import patterns as freezing_patterns
@@ -18,6 +18,7 @@ from .freezing_passes.grouped_matmul_swiglu_pass import GroupedMatmulSwigluPass
 from .freezing_passes.sink_split_pass import SinkSplitPass
 from .passes.lift_quant_pass import LiftCombineQuantPass
 from .passes.merge_linear_pass import MergeLinearPass
+from .passes.multistream_pass import MultiStreamSchedulePass
 from .passes.peep_hole_pass import PeepHolePass
 from .passes.redundant_node_elimination_pass import ReduandantNodeEliminationPass
 
@@ -29,6 +30,9 @@ class CompilerBackend:
     The compilation backend for 'torch.compile'.
     It is used to process the FX graph and perform custom operation fusing etc.
     """
+
+    def __init__(self, device_name: Optional[str] = None):
+        self._multistream_device_name = device_name
 
     def __call__(self, gm: fx.GraphModule, example_inputs) -> Callable:
         """
@@ -83,6 +87,11 @@ class CompilerBackend:
             self.apply_redundant_node_elimination_pass(fx_graph, inputs)
             # make sure we add freezing passes after constant folding
             self.apply_freezing_passes(fx_graph, inputs)
+            # Run multistream scheduling on the pure-functional graph before
+            # decompose_auto_functionalized introduces mutation-style forms.
+            # MultiStreamSchedulePass internally invokes DCE, which assumes
+            # pure-functional graph semantics.
+            self.apply_multistream_pass(fx_graph, inputs)
             self.apply_decompose_auto_functionalized_pass(fx_graph)
             logger.debug("Graph after compiling:")
             if logger.isEnabledFor(logging.DEBUG):
@@ -219,5 +228,21 @@ class CompilerBackend:
         )
         GraphTransformObserver(gm, "peep_hole_pass").apply_gm_pass(PeepHolePass())
         logger.debug("Graph after peep hole pass:")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(gm.print_readable(print_output=False))
+
+    def apply_multistream_pass(self, gm: fx.GraphModule, inputs):
+        if not config.compilation.multistream.enable:
+            return
+        GraphTransformObserver = functools.partial(
+            torch.fx.passes.graph_transform_observer.GraphTransformObserver,
+            subsystem="multistream_pass",
+            log_url=config.compilation.debug.graph_log_url,
+        )
+        fake_tensor_prop(gm, inputs, force_allow_non_fake_inputs=True)
+        GraphTransformObserver(gm, "multistream_pass").apply_gm_pass(
+            MultiStreamSchedulePass(device_name=self._multistream_device_name)
+        )
+        logger.debug("Graph after multistream pass:")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(gm.print_readable(print_output=False))
