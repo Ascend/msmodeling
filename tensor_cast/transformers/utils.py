@@ -65,7 +65,9 @@ def _modelscope_snapshot_config_only(model_id: str) -> str:
         return snapshot_download(
             model_id, ignore_patterns=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS
         )
-    except TypeError:
+    except TypeError as e:
+        if "ignore_patterns" not in str(e):
+            raise
         return snapshot_download(
             model_id, ignore_file_pattern=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS
         )

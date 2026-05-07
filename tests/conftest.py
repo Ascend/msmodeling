@@ -65,7 +65,7 @@ def _prune_hub_weight_files() -> int:
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
-    flag = os.environ.get("TENSOR_CAST_PRUNE_HUB_WEIGHTS_AFTER_UT", "1").strip().lower()
+    flag = os.environ.get("TENSOR_CAST_PRUNE_HUB_WEIGHTS_AFTER_UT", "0").strip().lower()
     if flag in ("0", "false", "no", "off"):
         return
     _prune_hub_weight_files()
