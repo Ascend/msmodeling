@@ -117,7 +117,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             self.is_moe_model,
         )
 
-        logger.debug(
+        logger.info(
             "Prefill Latency: %.4f ms, "
             "Decode Latency: %.4f ms, "
             "TTFT: %.4f ms, TPOT: %.4f ms, "
@@ -179,16 +179,18 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         """
         # Select appropriate cache based on operation type
         cache = self._decode_cache if is_decode else self._prefill_cache
+        cache_key = batch_size
+        model_concurrency = batch_size * self.dp * self.pp if is_decode else batch_size
 
         # Check if result already exists in cache
-        batch_flag = cache.get(batch_size)
+        batch_flag = cache.get(cache_key)
 
         if batch_flag:
-            (latency, memory_left_gb, breakdowns) = cache[batch_size]
+            (latency, memory_left_gb, breakdowns) = cache[cache_key]
         else:
             # Compute result
             batch_result = self._get_forward_info(
-                batch_size * self.dp * self.pp, optimizer_data, is_decode
+                model_concurrency, optimizer_data, is_decode
             )
 
             # Convert execution time to milliseconds

@@ -309,6 +309,51 @@ class TestParallelRunnerPDMode(unittest.TestCase):
         task_runner._add_summary_result([df], optimizer_data)
         self.assertEqual(len(task_runner.summary_result), 1)
 
+    def test_pd_phase_forces_disaggregation_strategy(self):
+        """PD ratio sub-phases should use disaggregated optimizer semantics."""
+        import pandas as pd
+
+        class InlineExecutor:
+            def __init__(self, max_workers=None, initializer=None):
+                self.initializer = initializer
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def map(self, fn, *iterables, timeout=None, chunksize=1):
+                if self.initializer is not None:
+                    self.initializer()
+                return [fn(item) for item in iterables[0]]
+
+        class RecordingParallelRunner(ParallelRunner):
+            def __init__(self, args):
+                super().__init__(args, executor_class=InlineExecutor)
+                self.disagg_modes = []
+
+            def _submit_task(
+                self,
+                user_input,
+                overwrite_optimizer_data,
+                disagg_mode=None,
+            ):
+                self.disagg_modes.append(disagg_mode)
+                return pd.DataFrame({"ttft": [100.0], "concurrency": [1]})
+
+        self.args.disagg = False
+        task_runner = RecordingParallelRunner(self.args)
+        result_df = task_runner._run_pd_phase(
+            devices_per_instance=self.args.prefill_devices_per_instance,
+            is_prefill=True,
+        )
+
+        self.assertFalse(self.args.disagg)
+        self.assertEqual(result_df.iloc[0]["ttft"], 100.0)
+        self.assertTrue(task_runner.disagg_modes)
+        self.assertTrue(all(task_runner.disagg_modes))
+
 
 if __name__ == "__main__":
     unittest.main()

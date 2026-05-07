@@ -231,12 +231,14 @@ class ParallelRunner:
         self,
         overwrite_optimizer_data: OptimizerData,
         user_configs: Optional[list] = None,
+        disagg_mode: Optional[bool] = None,
     ) -> list[pd.DataFrame]:
         """Execute optimization tasks in parallel and return list of DataFrames.
 
         Args:
             overwrite_optimizer_data: Optimizer data for tasks.
             user_configs: Optional list of user configs. If None, use self._get_user_config().
+            disagg_mode: Optional override for strategy selection.
 
         Returns:
             List of result DataFrames (non-None results only).
@@ -252,6 +254,7 @@ class ParallelRunner:
                 partial(
                     self._submit_task,
                     overwrite_optimizer_data=overwrite_optimizer_data,
+                    disagg_mode=disagg_mode,
                 ),
                 configs,
             )
@@ -298,12 +301,14 @@ class ParallelRunner:
         self,
         user_input: UserInputConfig,
         overwrite_optimizer_data: OptimizerData,
+        disagg_mode: Optional[bool] = None,
     ):
         """Submit a single optimization task.
 
         Args:
             user_input: User input configuration.
             overwrite_optimizer_data: Optimizer data for this task.
+            disagg_mode: Optional override for strategy selection.
 
         Returns:
             DataFrame with optimization results or None.
@@ -321,7 +326,10 @@ class ParallelRunner:
             return None
 
         # 2. get strategy result
-        strategy = OptimizerFactory.create_strategy(model_runner, self.args.disagg)
+        strategy = OptimizerFactory.create_strategy(
+            model_runner,
+            self.args.disagg if disagg_mode is None else disagg_mode,
+        )
         result = strategy.run(overwrite_optimizer_data, self.args.batch_range)
 
         if (
@@ -384,6 +392,7 @@ class ParallelRunner:
         df_list = self._get_df_list(
             overwrite_optimizer_data=overwrite_optimizer_data,
             user_configs=user_configs,
+            disagg_mode=True,
         )
 
         # Concatenate all DataFrames

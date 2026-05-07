@@ -84,7 +84,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             self.is_moe_model,
         )
 
-        logger.debug(
+        logger.info(
             "TTFT: %r ms, TPOT: %r ms, "
             "Output Throughput: %.2f token/s, "
             "Concurrency: %d, "
