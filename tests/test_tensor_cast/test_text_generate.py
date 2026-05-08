@@ -687,6 +687,61 @@ class TestTextGenerate(unittest.TestCase):
             "tensor_cast.moe_gating_top_k_softmax.default", result["table_result"]
         )
 
+    @parameterized.expand(
+        [
+            ["Qwen/Qwen3.5-397B-A17B"],
+            ["Qwen/Qwen3-Next-80B-A3B-Instruct"],
+        ]
+    )
+    def test_single_token_prefill_vs_decode(self, model_id):
+        """Test that single-token prefill is slower than single-token decode"""
+        # Test single-token prefill
+        prefill_input = UserInputConfig(
+            device=self.device,
+            model_id=model_id,
+            num_queries=1,
+            query_len=1,
+            context_length=0,  # No previous context
+        )
+        prefill_runner = ModelRunner(prefill_input)
+        prefill_result = prefill_runner.run_inference(
+            generate_inputs_func=generate_inputs
+        )
+        self._validate_inference_result(prefill_result, "test_single_token_prefill")
+
+        # Test single-token decode
+        decode_input = UserInputConfig(
+            device=self.device,
+            model_id=model_id,
+            num_queries=1,
+            query_len=1,
+            context_length=10,  # With previous context → has_previous_state=True
+        )
+        decode_runner = ModelRunner(decode_input)
+        decode_result = decode_runner.run_inference(
+            generate_inputs_func=generate_inputs
+        )
+        self._validate_inference_result(decode_result, "test_single_token_decode")
+
+        # Verify that prefill is slower than decode
+        if isinstance(prefill_result, ModelRunnerMetrics) and isinstance(
+            decode_result, ModelRunnerMetrics
+        ):
+            prefill_time = (
+                prefill_result.execution_time_s.get("analytic", 0) * 1e6
+            )  # Convert to us
+            decode_time = (
+                decode_result.execution_time_s.get("analytic", 0) * 1e6
+            )  # Convert to us
+
+            # Ensure prefill is slower than decode
+            self.assertGreater(
+                prefill_time,
+                decode_time,
+                f"Single-token prefill should be slower than decode, but got prefill={prefill_time}"
+                f" vs decode={decode_time}",
+            )
+
     def test_with_quantized_lmhead(self):
         """Test with LM head quantization enabled."""
         user_input = UserInputConfig(

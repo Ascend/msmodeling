@@ -22,6 +22,7 @@ class RequestInfo:
     query_len: int
     seq_len: int
     is_decode: bool = True
+    context_length: int = 0
     num_input_tokens: int = None
     num_output_tokens: int = None
     concurrency: int = 1
@@ -56,6 +57,7 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
     query_len = request.query_len
     is_decode = request.is_decode
     image_kwargs = {}
+    context_length = request.context_length
     if model.is_vl_model:
         image_kwargs = generate_image_inputs(
             model,
@@ -173,9 +175,13 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
     dsa_indexer_cache = get_dsa_indexer_cache_info(model, num_blocks, block_size)
     kwargs.update(dsa_indexer_cache)
 
-    if model.model_config.hf_config.model_type == "qwen3_next":
+    if model.model_config.hf_config.model_type in (
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_moe",
+    ):
         kwargs["cache_position"] = torch.arange(
-            0, num_tokens, dtype=torch.long, device="cpu"
+            context_length, context_length + num_tokens, dtype=torch.long, device="cpu"
         )
     kwargs.update(image_kwargs)
     return kwargs

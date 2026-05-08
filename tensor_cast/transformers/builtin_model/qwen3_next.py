@@ -1,9 +1,23 @@
+import logging
+
+import torch
+
 from ...model_config import MoEFieldNames
 from ..custom_model_registry import ModelProfile, register_model_profile
 
+logger = logging.getLogger(__name__)
+
+
+def _get_local_linear_attn_heads(self):
+    from transformers.models.qwen3_next import modeling_qwen3_next
+
+    if isinstance(self, modeling_qwen3_next.Qwen3NextGatedDeltaNet):
+        return self.num_k_heads, self.num_v_heads
+    return 0, 0
+
 
 def patch_method_for_qwen3_next(_model):
-    from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextModel
+    from transformers.models.qwen3_next import modeling_qwen3_next
 
     def _patched_update_linear_attn_mask(self, attention_mask, cache_position):
         """
@@ -24,9 +38,62 @@ def patch_method_for_qwen3_next(_model):
         """
         # Currently, this is the only feasible modification. However, the drawback is that
         # it still passes an attention mask to the linear attention mechanism during decoding, where it is unnecessary.
+        # Check if it's a meta tensor
+
+        is_meta = (hasattr(cache_position, "is_meta") and cache_position.is_meta) or (
+            attention_mask is not None
+            and hasattr(attention_mask, "is_meta")
+            and attention_mask.is_meta
+        )
+        if is_meta:
+            return attention_mask
+
+        try:
+            cache_condition = (
+                cache_position[0] > 0 if cache_position.numel() > 0 else False
+            )
+            mask_condition = (
+                torch.all(attention_mask == 1).item()
+                if attention_mask is not None and attention_mask.numel() > 0
+                else False
+            )
+
+            if cache_condition or mask_condition:
+                return None
+        except RuntimeError:
+            logger.warning(
+                "_update_linear_attn_mask fallback due to runtime error",
+                exc_info=True,
+            )
         return attention_mask
 
-    Qwen3NextModel._update_linear_attn_mask = _patched_update_linear_attn_mask
+    def _patched_linear_attn_forward(
+        self,
+        hidden_states,
+        cache_params=None,
+        cache_position=None,
+        attention_mask=None,
+    ):
+        # Route Qwen3Next GatedDeltaNet through tensor_cast.linear_attention so
+        # TensorCast can model mixed full/linear attention explicitly.
+        del cache_params
+        local_num_k_heads, local_num_v_heads = _get_local_linear_attn_heads(self)
+
+        return torch.ops.tensor_cast.linear_attention(
+            hidden_states,
+            attention_mask,
+            cache_position,
+            local_num_k_heads,
+            local_num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.conv_kernel_size,
+        )
+
+    modeling_qwen3_next.Qwen3NextModel._update_linear_attn_mask = (
+        _patched_update_linear_attn_mask
+    )
+    modeling_qwen3_next.Qwen3NextGatedDeltaNet.forward = _patched_linear_attn_forward
 
 
 register_model_profile(

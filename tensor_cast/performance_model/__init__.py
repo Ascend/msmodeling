@@ -532,11 +532,23 @@ def _(
 ) -> OpInvokeInfo.PerformanceProperties:
     assert len(op_invoke_info.args) == 8
     hidden_states = op_invoke_info.args[0]
+    cache_position = op_invoke_info.args[2]
     num_k_heads = op_invoke_info.args[3]
     num_v_heads = op_invoke_info.args[4]
     head_k_dim = op_invoke_info.args[5]
     head_v_dim = op_invoke_info.args[6]
     conv_kernel_size = op_invoke_info.args[7]
+
+    has_previous_state = False
+    if cache_position is not None and cache_position.numel() > 0:
+        # Check if it's a meta tensor (no actual data)
+        is_meta = hasattr(cache_position, "is_meta") and cache_position.is_meta
+        if not is_meta:
+            try:
+                has_previous_state = cache_position[0].item() > 0
+            except RuntimeError:
+                # If we can't get the value, default to prefill mode
+                has_previous_state = False
 
     batch_size = hidden_states.size(0)
     seq_len = hidden_states.size(1)
@@ -559,9 +571,12 @@ def _(
         conv_kernel_size,
     )
 
-    # TensorCast does not thread cache state through this fused op. Use seq_len=1
-    # as the decode heuristic and otherwise model the chunk_gated_delta prefill path.
-    if seq_len == 1:
+    # Determine path:
+    # 1. seq_len == 1 and has_previous_state=True → decode (recurrent)
+    # 2. seq_len == 1 and has_previous_state=False → prefill (chunk)
+    # 3. seq_len > 1 → prefill (chunk)
+    if seq_len == 1 and has_previous_state:
+        # Single token with previous context → decode
         (
             attn_mma_ops,
             hidden_gp_ops,

@@ -104,7 +104,7 @@ def _(
     Args:
         hidden_states: (batch_size, seq_len, hidden_size)
         attention_mask: optional mask tensor for left-padding cases
-        cache_position: optional cache positions
+        cache_position: optional cache positions, used to determine if there's previous state
         num_k_heads: number of key heads
         num_v_heads: number of value heads
         head_k_dim: per-head key dimension

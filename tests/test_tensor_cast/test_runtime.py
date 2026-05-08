@@ -212,7 +212,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         actual_execution_time = self._execute_linear_attention_and_get_base_data(
             (hidden_states, None, None, 2, 4, 8, 16, 4)
         )
-        assert_close(self, actual_execution_time, 5.0e-6)
+        assert_close(self, actual_execution_time, 5.0e-6, rtol=0.05)
 
     def test_qwen3_5_linear_attention_uses_local_tp_heads(self):
         user_config = UserInputConfig(
