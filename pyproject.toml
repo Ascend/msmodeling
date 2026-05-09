@@ -6,6 +6,15 @@ description = "Light-weight full-system simulation framework"
 readme = "README.md"
 requires-python = ">=3.9"
 
+# Test tools ###################################################################
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "npu: mark test as requiring NPU hardware (torch_npu + physical device)",
+]
+addopts = "-m 'not npu'"
+
 # Linter tools #################################################################
 
 [tool.black]

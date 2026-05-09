@@ -1,0 +1,44 @@
+"""
+Replay ArgMaxV2 cases from the performance database on Ascend NPU.
+
+Purpose:
+  Read ArgMaxV2 rows from
+  profiling_database/data/{device}/vllm_ascend/{version}/ArgMaxV2.csv,
+  rebuild input tensors from the recorded shapes, formats, and dtypes,
+  then execute torch.argmax() along the last dimension.
+"""
+
+from __future__ import annotations
+
+try:
+    from .replay_framework import OpReplay
+except ImportError:
+    from replay_framework import OpReplay
+
+
+op = OpReplay(
+    kernel_type="ArgMaxV2",
+    api_path="torch.argmax",
+    description=(
+        "Run ArgMaxV2 workload replay on Ascend NPU.\n"
+        "The script reads ArgMaxV2.csv under the selected device and\n"
+        "vllm_ascend version directory, reconstructs input tensors from\n"
+        "Input Shapes / Input Formats / Input Data Types, then runs\n"
+        "torch.argmax(input, dim=-1)."
+    ),
+    usage_examples=[
+        "py -3 tools/perf_data_collection/op_replay/ArgMaxV2_run.py "
+        "--device ATLAS_800_A3_752T_128G_DIE --vllm-version 0.15.0",
+    ],
+    version_help="vLLM-Ascend version, e.g. 0.15.0.",
+    input_count=1,
+    fixed_kwargs={"dim": -1},
+)
+
+
+def main() -> None:
+    op.main()
+
+
+if __name__ == "__main__":
+    main()
