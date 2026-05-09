@@ -32,6 +32,7 @@ class compilation:
         enable_life_combine_quant = True
         enable_merge_linear = True
         enable_sink_split = True
+        enable_sequence_parallel = False
 
     class fusion_patterns:
         enable_rms_norm = True
@@ -41,6 +42,7 @@ class compilation:
         enable_swiglu = True
         enable_matmul_allreduce = True
         enable_grouped_matmul_swiglu = True
+        enable_dispatch_ffn_combine = False
 
     class debug:
         graph_log_url = None

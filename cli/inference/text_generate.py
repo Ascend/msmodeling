@@ -88,6 +88,11 @@ def main():
         action="store_true",
         help="Allow graph breaks during torch.compile() for models with dynamic control flow.",
     )
+    optim_group.add_argument(
+        "--enable-sequence-parallel",
+        action="store_true",
+        help="Enable the sequence parallel graph rewrite pass during compilation.",
+    )
 
     quant_group = parser.add_argument_group("Quantization Options")
     quant_group.add_argument(
@@ -222,6 +227,17 @@ def main():
         "then each device hosting the routing experts will also add one redundant expert.",
     )
     par_group.add_argument(
+        "--enable-shared-expert-tp",
+        action="store_true",
+        help="Enable vLLM-style tensor parallel for shared experts. "
+        "This uses dense-MLP TP for shared_experts with delayed down_proj reduction.",
+    )
+    par_group.add_argument(
+        "--enable-dispatch-ffn-combine",
+        action="store_true",
+        help="Enable dispatch_ffn_combine fusion pattern during compilation.",
+    )
+    par_group.add_argument(
         "--enable-external-shared-experts",
         action="store_true",
         help="Whether or not to implement external shared experts",
@@ -277,6 +293,13 @@ def main():
         "The directory must contain op_mapping.yaml and per-kernel-type CSV files, "
         "e.g. tensor_cast/performance_model/profiling_database/data/atlas_a3_752t_128g/vllm_ascend/v0.13.0/",
     )
+    parser.add_argument(
+        "--export-empirical-metrics",
+        type=str,
+        default=None,
+        help="(developer only) Export M1-M5 metrics report as JSON for offline M6 computation. "
+        "Requires --performance-model profiling",
+    )
 
     args = parser.parse_args()
     logging.basicConfig(
@@ -287,6 +310,10 @@ def main():
 
     if args.graph_log_url:
         config.compilation.debug.graph_log_url = args.graph_log_url
+    config.compilation.passes.enable_sequence_parallel = args.enable_sequence_parallel
+    config.compilation.fusion_patterns.enable_dispatch_ffn_combine = (
+        args.enable_dispatch_ffn_combine
+    )
 
     selected_embedding_tp_mode = args.word_embedding_tp
     args.word_embedding_tp = selected_embedding_tp_mode is not None
@@ -297,6 +324,12 @@ def main():
     # Set default performance_model if not specified
     if args.performance_model is None:
         args.performance_model = ["analytic"]
+
+    # Validate developer-only options
+    if args.export_empirical_metrics and "profiling" not in args.performance_model:
+        parser.error(
+            "--export-empirical-metrics requires --performance-model profiling"
+        )
 
     # import here to make sure the logger level is set
     logger.info("Importing core modules...")
@@ -317,6 +350,22 @@ def main():
     logger.info("Running inference...")
     metrics = model_runner.run_inference(generate_inputs_func=generate_inputs)
     metrics.print_info()
+
+    # Export metrics JSON for offline M6 computation
+    if args.export_empirical_metrics:
+        from pathlib import Path
+
+        from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
+        from tensor_cast.performance_model.metrics_collector import MetricsCollector
+
+        for pm in model_runner.perf_models:
+            if isinstance(pm, EmpiricalPerformanceModel):
+                collector = MetricsCollector()
+                collector.collect_from_records(pm.op_records)
+                collector.export_hit_miss_report(
+                    output_path=Path(args.export_empirical_metrics),
+                )
+                break
 
 
 if __name__ == "__main__":

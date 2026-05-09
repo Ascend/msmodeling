@@ -1,0 +1,1094 @@
+# op_mapping.yaml — 算子映射表 (Production-ready)
+# 路径: tensor_cast/performance_model/perf_database/data/{device}/vllm_ascend/{version}/op_mapping.yaml
+#
+# 映射方法论 (遵循 tutorial/OP_PLUGIN_MAPPING_TUTORIAL.md):
+#   每条映射遵循完整证据链, 证据写入 notes 字段:
+#   路径 A: TC op → torch_npu/aten API → op-plugin YAML → C++ impl → EXEC_NPU_CMD(aclnn*) → Profiling Type
+#   路径 B: vLLM-ascend Python → torch_npu.npu_* → op-plugin → aclnn* → Profiling Type
+#   路径 C: vLLM-ascend fusion pass → custom kernel → Profiling Type
+#
+# 数据来源:
+#   - TensorCast 注册算子: register_tensor_cast_op (56 ops, tensor_cast/ops/*.py)
+#   - op-plugin: /home/horacehxw/Projects/op-plugin/ (op_plugin_functions.yaml + opapi/*.cpp)
+#   - vLLM-ascend: vllm_ascend/ops/*.py (torch_npu pybind + Triton kernels)
+#   - DSV3 Decode Profiling: 32 卡 W8A8, 86840 kernels, 45 unique Types
+#   - Qwen3-30B Prefill Profiling: 16 卡 BF16, 1505 kernels, 45 unique Types
+#
+# 字段说明:
+#   kernel_type: Profiling Type 列的值 (用于数据库查询 key)
+#   category: 算子类别 (驱动查询分派, 如 communication)
+#   query_mode: 特殊查询模式 (如 attention_special)
+#   composite: true 表示 1:N 映射, 需分解后逐 kernel 查询
+#   sub_kernels: 复合映射子内核列表
+#   notes: 证据链 + 补充说明
+#
+# ============================================================================
+#                         字段参考 (Field Reference)
+# ============================================================================
+#
+# --- 顶级字段 (Top-level Fields) ---
+#
+# version (string): vLLM-ascend 版本号, 标识 profiling 数据来源.
+# device (string): 硬件设备型号 (如 ATLAS_800_A3_752T_128G_DIE).
+# cann_version (string): CANN 版本号, 影响 kernel type 和融合行为.
+# collection_date (string): profiling 数据采集日期 (YYYY-MM-DD).
+# communication_data_ref (string): 通信 CSV 数据的相对路径.
+# communication_fallback (string): 通信查询未命中时的回退策略 (analytic).
+# interpolation_policy: 插值策略配置.
+#   default_method (string): 默认插值方法 (linear). 所有算子默认 dtype+format
+#     精确匹配, shape 维度线性插值.
+#   kernel_overrides (map): 特定 kernel 的插值覆盖配置.
+#     示例: FusedInferAttentionScore: { shape_transform: sqrt }
+#     shape_transform: sqrt 用于 O(seq²) 复杂度的算子, 在 sqrt(seq) 空间插值.
+#
+# --- operator_mappings 中每条映射的可用字段 ---
+#
+# kernel_type (string, 必填*):
+#   NPU Profiling kernel_details.csv 中 Type 列的值, 同时也是 CSV 文件名.
+#   约束: 必须与 data/ 目录下的 {kernel_type}.csv 文件名精确匹配.
+#   示例: kernel_type: MatMulV2  →  查询 MatMulV2.csv
+#   * 当 zero_cost: true 或 composite: true 时可省略.
+#
+# alternate_kernel_types (list[string], 可选):
+#   备选 kernel type 列表, 按优先级排序. 当 kernel_type 的 CSV 查询未命中时,
+#   依次尝试 alternate 列表中的 kernel type.
+#   约束: 每个值必须有对应的 {name}.csv 文件.
+#   示例: alternate_kernel_types: [MatMulV3, MatMulCommon]
+#
+# category (string, 可选):
+#   算子类别, 驱动查询分派逻辑. 默认为 "compute".
+#   可选值: compute | communication
+#   - compute: 标准计算算子, 按 shape 匹配 CSV (默认)
+#   - communication: 通信算子, 按 message_bytes + topology_tier 查询 hccl CSV
+#   示例: category: communication  →  走通信查询路径
+#
+# query_mode (string, 可选):
+#   特殊查询模式, 覆盖默认的 shape 匹配逻辑.
+#   可选值: attention_special | elementwise
+#   - attention_special: 按 (batch, seq, heads, head_dim) 四元组查询
+#   - elementwise: 按 output shape 匹配, 使用 byte-ratio dtype 缩放
+#   示例: query_mode: attention_special
+#
+# composite (bool, 可选):
+#   true 表示 1:N 复合映射, TC 的一个 op 对应 NPU 上多个 kernel.
+#   需配合 sub_kernels 使用.
+#   约束: composite: true 时不需要 kernel_type.
+#
+# sub_kernels (list[string], composite 时必填):
+#   复合映射的子内核列表. 查询时逐个查询子 kernel 并求和.
+#   约束: 每个子 kernel 必须有对应的 CSV 或为已知通信 kernel.
+#   示例: sub_kernels: [MatMulV2, hcom_allReduce_]
+#
+# tc_input_count (int, 可选):
+#   TC 侧有效 tensor 输入数量, 用于 shape 匹配时截取前 N 个输入.
+#   背景: TC op 和 NPU kernel 的输入数量/顺序可能不同 (如 NPU 额外有 axis 参数).
+#   示例: tc_input_count: 2  →  仅匹配前 2 个 tensor 输入的 shape
+#
+# zero_cost (bool, 可选):
+#   true 表示该 op 在 NPU 上无实际 kernel 执行 (shape-only view, 融合吸收等).
+#   查询直接返回 0, 不访问 CSV.
+#   约束: zero_cost: true 时不需要 kernel_type.
+#
+# accepted_miss (string, 可选):
+#   标记该 op 的 CSV 查询 MISS 是预期行为 (非错误), 并说明原因.
+#   用于 TC 有但 NPU profiling 中不存在对应 kernel 的情况.
+#
+# notes (string, 推荐):
+#   证据链 + 补充说明. 格式: [优先级] 溯源路径 + profiling 验证.
+#   优先级: [HIGH] 高频/关键路径, [MEDIUM] 中频, [LOW] 低频/placeholder.
+#
+# ============================================================================
+#                       添加新映射示例
+# ============================================================================
+#
+# 示例 1: 标准计算算子 (1:1 映射)
+#   "aten.mm.default":
+#     kernel_type: MatMulV2                    # CSV 文件: MatMulV2.csv
+#     notes: "[HIGH] op-plugin: aclnnMm. Profiling: MatMulV2(275x)."
+#
+# 示例 2: 通信算子
+#   "tensor_cast.all_reduce.default":
+#     kernel_type: hcom_allReduce_
+#     category: communication                  # 走通信查询路径
+#     notes: "[HIGH] HCCL direct."
+#
+# 示例 3: 复合算子 (静态 sub_kernels)
+#   "tensor_cast.matmul_all_reduce.default":
+#     composite: true                          # 1:N 映射
+#     sub_kernels: [MatMulV2, hcom_allReduce_] # 逐个查询求和
+#     notes: "[MEDIUM] MC2 fusion."
+#
+# 示例 4: Zero-cost op
+#   "aten.view.default":
+#     zero_cost: true                          # 直接返回 0
+#     notes: "Shape-only view, no kernel execution on NPU"
+#
+# 示例 5: 特殊查询模式
+#   "tensor_cast.attention.default":
+#     kernel_type: FusedInferAttentionScore
+#     query_mode: attention_special            # 按 (batch,seq,heads,head_dim) 查询
+#     notes: "[HIGH] aclnnFusedInferAttentionScoreV2/V3."
+#
+# ============================================================================
+#                       常见问题 (FAQ)
+# ============================================================================
+#
+# Q1: kernel_type 的值从哪里获取?
+# A1: 从 NPU profiling 的 kernel_details.csv 的 Type 列获取.
+#     使用 tools/perf_data_collection/parse_kernel_details.py 解析后,
+#     每个 unique Type 会生成一个 {Type}.csv 文件.
+#
+# Q2: TC op 和 NPU kernel 输入数量不同怎么办?
+# A2: 使用 tc_input_count 指定 TC 侧有效输入数量.
+#     例如 TC embedding 有 (weight, indices), NPU CSV 有 (weight, indices, axis),
+#     设置 tc_input_count: 2 只匹配前 2 个.
+#
+# Q3: 一个 TC op 对应多个 NPU kernel 怎么办?
+# A3: 使用 composite: true + sub_kernels 列表.
+#     查询时逐个查询子 kernel 并求和延迟.
+#
+# Q4: NPU profiling 中出现但 TC 无对应 op 的 kernel 怎么处理?
+# A4: 在 "Profiling-only Placeholder" 区域添加 "profiling.{KernelType}" 条目.
+#     这些条目用于 CSV 数据完整性, TC 不会主动查询.
+#
+# Q5: 同一 aclnn API 在不同 CANN 版本产生不同 kernel type 怎么办?
+# A5: 使用 alternate_kernel_types 列出所有可能的 kernel type, 按优先级排序.
+#
+
+version: "0.13.0"
+device: ATLAS_800_A3_752T_128G_DIE
+cann_version: "8.1.RC1"
+collection_date: "2026-03-04"
+
+communication_data_ref: "../../hccl/v8.1.RC1/"
+communication_fallback: analytic
+
+interpolation_policy:
+  default_method: linear    # 所有算子默认: dtype+format 精确匹配, shape 维度线性插值
+  kernel_overrides:         # 仅列出需要特殊处理的 kernel_type
+    FusedInferAttentionScore:
+      shape_transform: sqrt # O(seq²) → 在 sqrt(seq) 空间插值
+
+
+# ============================================================================
+#                         计算算子映射 (operator_mappings)
+# ============================================================================
+
+operator_mappings:
+
+  # ========== 1. 标准 aten 算子 ==========
+
+  "aten.mm.default":
+    kernel_type: MatMulV2
+    notes: >
+      [HIGH] op-plugin: YAML:3476 / MmKernelNpuOpApi.cpp.
+      aclnn: aclnnMm (ND), aclnnMatmulWeightNz (NZ权重); 两者 Type 均为 MatMulV2.
+      Profiling: Qwen3 Prefill MatMulV2(275x), DSV3 Decode MatMulV2(41x, dynamic path).
+
+  "aten.addmm.default":
+    kernel_type: MatMulV2
+    notes: >
+      [MEDIUM] op-plugin: YAML:915 / AddmmKernelNpuOpApi.cpp.
+      aclnn: aclnnAddmm (ND), aclnnAddmmWeightNz (NZ).
+      vLLM 推理中 nn.Linear 通常走 mm (无 bias), addmm 较少出现; 无直接 profiling 验证.
+
+  "aten.bmm.default":
+    kernel_type: TransposeBatchMatMul
+    notes: >
+      [HIGH] op-plugin: YAML:1447 / BmmKernelNpuOpApi.cpp.
+      aclnn: aclnnBatchMatMul (ND), aclnnBatchMatMulWeightNz (NZ).
+      Profiling: DSV3 Decode TransposeBatchMatMul(5002x, MLA absorb projections).
+
+  "aten.embedding.default":
+    kernel_type: GatherV2
+    notes: >
+      [HIGH] op-plugin: YAML:1930 / EmbeddingKernelNpuOpApi.cpp.
+      aclnn: aclnnEmbedding; 内部实现为 gather dim=0.
+      Profiling: DSV3 GatherV2(123x), Qwen3 GatherV2(4x) + GatherV3(8x).
+
+  "aten.index_select.default":
+    kernel_type: GatherV2
+    notes: >
+      [MEDIUM] op-plugin: YAML:2654 / IndexSelectKernelNpuOpApi.cpp.
+      aclnn: aclnnIndexSelect; 语义等价 gather.
+      LLM 推理中较少使用, 无直接 profiling 验证.
+
+  "aten.convolution.default":
+    kernel_type: Conv2D
+    notes: >
+      [LOW] op-plugin: YAML:1709 / ConvolutionKernelNpuOpApi.cpp.
+      aclnn: aclnnConvolution.
+      LLM 不含卷积层, profiling 中无此算子; 仅用于 video/image models (DiT 等).
+
+  "aten.cat.default":
+    kernel_type: ConcatD
+    notes: >
+      [HIGH] op-plugin: YAML:1466 / CatKernelNpuOpApi.cpp.
+      aclnn: aclnnCat.
+      Profiling: DSV3 ConcatD(246x), Qwen3 ConcatD(3x).
+
+  "tensor_cast.cat.default":
+    kernel_type: ConcatD
+    notes: >
+      [HIGH] 与 aten.cat.default 相同 kernel; TC 专用 cat op (保留 dtype, 仅 shape 计算).
+      op-plugin: YAML:1466 / CatKernelNpuOpApi.cpp.
+      aclnn: aclnnCat.
+
+  "aten.add.Tensor":
+    kernel_type: Add
+    query_mode: elementwise
+    notes: >
+      [HIGH] op-plugin: YAML:784 / AddKernelNpuOpApi.cpp.
+      aclnn: aclnnAdd.
+      Profiling: DSV3 Decode Add(7545x, 残差连接 + 偏置加法).
+      query_mode=elementwise: output-shape matching with byte-ratio dtype scaling.
+
+  "aten.to.dtype":
+    kernel_type: Cast
+    notes: >
+      [HIGH] op-plugin: _to_copy → aclnnInplaceCopy.
+      aclnn: aclnnInplaceCopy.
+      Profiling: DSV3 Decode Cast(2788x, dtype 转换).
+
+
+  # ========== 2. 量化线性 (Quantized Linear) ==========
+  # op-plugin 统一入口: npu_weight_quant_batchmatmul (YAML:6608)
+
+  "tensor_cast.static_quant_linear.default":
+    kernel_type: QuantBatchMatmulV3
+    notes: >
+      [HIGH] op-plugin: YAML:6608 / WeightQuantBatchMatmulV2KernelNpuOpApi.cpp.
+      aclnn: aclnnWeightQuantBatchMatmulV2/V3; inner_precise=1 → V3 (vLLM 默认).
+      W8A8; DSV3 Decode 中 INT8;INT8 ND;FRACTAL_NZ.
+      Profiling: DSV3 Decode QuantBatchMatmulV3(15006x) — 最高频算子.
+
+  "tensor_cast.static_quant_linear_int4.default":
+    kernel_type: QuantBatchMatmulV3
+    notes: >
+      [MEDIUM] op-plugin: YAML:6608 (npu_weight_quant_batchmatmul) + YAML:6328 (npu_quant_matmul).
+      aclnn: aclnnWeightQuantBatchMatmulV2/V3, aclnnQuantMatmulV5.
+      W4A8; INT4 weights packed as INT32 (8 values/INT32).
+      两条路径: npu_weight_quant_batchmatmul (antiquant_scale/offset) 或 npu_quant_matmul (A8W4 → aclnnQuantMatmulV5).
+      无 W4A8 profiling 数据验证, 但两者预期 Type 均为 QuantBatchMatmulV3.
+
+  "tensor_cast.fp8_linear.default":
+    kernel_type: QuantBatchMatmulV3
+    notes: >
+      [LOW] op-plugin 中无 FP8 专用 matmul API.
+      FP8 可能通过 npu_weight_quant_batchmatmul 传入 FP8 dtype,
+      或依赖更新版 CANN. 映射到 QuantBatchMatmulV3 为设计时假设, 待 FP8 profiling 验证.
+
+  "tensor_cast.mxfp4_linear.default":
+    kernel_type: QuantBatchMatmulV3
+    notes: >
+      [LOW] op-plugin 中无 MXFP4 专用 API. TC 中 MXFP4 仅支持 meta tensor.
+      映射到 QuantBatchMatmulV3 为 placeholder, 待硬件支持后验证.
+
+
+  # ========== 3. GroupedMatmul (MoE) ==========
+  # op-plugin 统一入口: npu_grouped_matmul (YAML:5987)
+  # 所有量化变体共享同一 API, 通过 scale/offset/antiquant_* 可选参数区分
+
+  "tensor_cast.grouped_matmul.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [HIGH] op-plugin: YAML:5987 / GroupedMatmulKernelNpuOpApi.cpp.
+      aclnn: aclnnGroupedMatmul/V4/V5/WeightNz; BF16 base, 无 scale/offset 参数.
+      Profiling: DSV3 Decode GroupedMatmul(4756x).
+
+  "tensor_cast.grouped_matmul_quant.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [HIGH] op-plugin: YAML:5987 (scale + per_token_scale populated).
+      aclnn: aclnnGroupedMatmulV4/V5/WeightNz.
+      W8A8; scale/per_token_scale 参数填充.
+
+  "tensor_cast.grouped_matmul_quant_int4.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [HIGH] op-plugin: YAML:5987 (antiquant_scale/offset for INT4 dequant).
+      aclnn: aclnnGroupedMatmulV4/V5/WeightNz.
+      W4A8; INT4 weights packed as INT32, C++ 处理 n0 * INT4_NUMS_IN_INT32.
+
+  "tensor_cast.grouped_matmul_fp8.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [HIGH] op-plugin: YAML:5987 (scale + per_token_scale, no offset).
+      aclnn: aclnnGroupedMatmulV4/V5/WeightNz.
+      FP8; scale only (no offset), same API as base.
+
+  "tensor_cast.grouped_matmul_mxfp4.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [MEDIUM] op-plugin: YAML:5987.
+      aclnn: aclnnGroupedMatmulV4/V5/WeightNz.
+      MXFP4; 与 FP8 同签名, MXFP4 硬件支持取决于 CANN 版本.
+
+
+  # ========== 4. GroupedMatmul+SwiGlu 融合 ==========
+  # op-plugin: npu_grouped_matmul_swiglu_quant (YAML:6203) / _v2 (YAML:6207)
+  # TC 实现: GroupedMatmulSwigluPass (compilation/freezing_passes/)
+
+  "tensor_cast.grouped_matmul_swiglu.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [MEDIUM] op-plugin: YAML:5987 (npu_grouped_matmul with act_type parameter).
+      aclnn: aclnnGroupedMatmulV4/V5.
+      BF16 GMM+SwiGlu; 通过 npu_grouped_matmul 的 act_type 参数激活 SwiGlu 融合.
+
+  "tensor_cast.grouped_matmul_quant_swiglu.default":
+    kernel_type: DequantSwigluQuant
+    notes: >
+      [HIGH] op-plugin: YAML:6203 (V1) + YAML:6207 (V2) / GroupedMatmulSwigluQuantNpuOpapi.cpp.
+      aclnn: aclnnGroupedMatmulSwigluQuantWeightNZ/V2.
+      W8A8 GMM+SwiGlu+Quant 三合一融合; 输出 (INT8 output, scale, offset).
+      Profiling: DSV3 Decode DequantSwigluQuant(4879x) 对应此融合算子.
+
+  "tensor_cast.grouped_matmul_quant_int4_swiglu.default":
+    kernel_type: DequantSwigluQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6207 (V2 支持 dequant_mode/dequant_dtype for INT4).
+      aclnn: aclnnGroupedMatmulSwigluQuantWeightNzV2.
+      W4A8 GMM+SwiGlu+Quant; V2 API 支持 INT4 (packed INT32) + weight_assist_matrix.
+
+  "tensor_cast.grouped_matmul_fp8_swiglu.default":
+    kernel_type: DequantSwigluQuant
+    notes: >
+      [LOW] op-plugin: YAML:6207 (V2 with FP8 dequant_dtype).
+      aclnn: aclnnGroupedMatmulSwigluQuantWeightNzV2.
+      FP8 路径不确定; 可能通过 V2 API 的 dequant_dtype 参数, 或回退到 base GMM + act_type.
+
+  "tensor_cast.grouped_matmul_mxfp4_swiglu.default":
+    kernel_type: DequantSwigluQuant
+    notes: >
+      [LOW] op-plugin: YAML:6207.
+      aclnn: aclnnGroupedMatmulSwigluQuantWeightNzV2.
+      MXFP4 路径不确定; 与 FP8 同签名, MXFP4 融合支持待验证.
+
+
+  # ========== 5. MoE 路由 (Token Routing) ==========
+  # EP 路径: npu_moe_distribute_dispatch_v2 / npu_moe_distribute_combine_v2
+  # 非 EP 路径: npu_moe_init_routing_v2 / npu_moe_finalize_routing
+
+  "tensor_cast.init_routing_v2.default":
+    kernel_type: MoeDistributeDispatchV2
+    notes: >
+      [MEDIUM] op-plugin: YAML:6217 (npu_moe_distribute_dispatch_v2) / MoeDistributeDispatchV2KernelOpApi.cpp.
+      aclnn: aclnnMoeDistributeDispatchV2/V3/V4.
+      EP 场景映射到 MoeDistributeDispatchV2; 非 EP 场景映射到 MoeInitRouting
+      (npu_moe_init_routing_v2, YAML:6197, aclnn: aclnnMoeInitRoutingV2/V3).
+      TC 模型 permute + 独立 all_to_all, 而 NPU 融合为单 kernel.
+      Profiling: DSV3 Decode MoeDistributeDispatchV2(2378x).
+
+  "tensor_cast.unpermute_tokens.default":
+    kernel_type: MoeDistributeCombineV2
+    notes: >
+      [MEDIUM] op-plugin: YAML:6223 (npu_moe_distribute_combine_v2) / MoeDistributeCombineKernelV2OpApi.cpp.
+      aclnn: aclnnMoeDistributeCombineV2/V3/V4.
+      EP 场景映射到 MoeDistributeCombineV2; 非 EP 场景映射到 MoeFinalizeRouting
+      (npu_moe_finalize_routing, YAML:6182, aclnn: aclnnMoeFinalizeRouting/V2).
+      Profiling: DSV3 Decode MoeDistributeCombineV2(2378x).
+
+  "tensor_cast.moe_gating_top_k_softmax.default":
+    kernel_type: MoeGatingTopK
+    notes: >
+      [HIGH] op-plugin: YAML:~6190 (npu_moe_gating_top_k) / MoeGatingTopKKernelNpuOpApi.cpp.
+      aclnn: aclnnMoeGatingTopK.
+      vllm-ascend: vllm_ascend/ops/experts_selector.py → torch_npu.npu_moe_gating_top_k().
+      TC 当前用 aten.topk 实现路由, NPU 有专用融合 kernel (待新增 TC 算子, 未在 develop 注册).
+      Profiling: DSV3 Decode MoeGatingTopK(2378x).
+
+
+  # ========== 6. Attention ==========
+  # op-plugin: npu_fused_infer_attention_score (YAML:5898) / _v2 (YAML:5915)
+
+  "tensor_cast.attention.default":
+    kernel_type: FusedInferAttentionScore
+    query_mode: attention_special
+    notes: >
+      [HIGH] op-plugin: YAML:5898 / FusedInferAttentionScoreKernelNpuOpApi.cpp.
+      aclnn: aclnnFusedInferAttentionScoreV2 (CANN <8.1.RC1), V3 (>=8.1.RC1).
+      PA/FA 两种模式 Type 相同.
+      Profiling: DSV3 Decode(2501x), Qwen3 Prefill(67x).
+
+  "tensor_cast.attention_quant.default":
+    kernel_type: FusedInferAttentionScore
+    query_mode: attention_special
+    notes: >
+      [HIGH] op-plugin: YAML:5898 (V1 with dequant/quant scales) + YAML:5915 (V2 with quant_mode).
+      aclnn: aclnnFusedInferAttentionScoreV2/V3/V4; V2 API 走 V4 aclnn.
+      量化 attention; quant params 填充但底层 kernel Type 不变.
+
+
+  # ========== 7. MLA (Multihead Latent Attention) ==========
+  # MLA 为 composite op, NPU 上分解为 BMM (absorb projection) + FIA (attention)
+
+  "tensor_cast.multihead_latent_attention.default":
+    composite: true
+    sub_kernels: [TransposeBatchMatMul, FusedInferAttentionScore]
+    notes: >
+      [HIGH] op-plugin: YAML:6613 (npu_transpose_batchmatmul) + YAML:5898.
+      aclnn: aclnnTransposeBatchMatMul + aclnnFusedInferAttentionScoreV2.
+      Decode: q@W_UK_T + attn@W_UV → TransposeBatchMatMul (5002x in DSV3, 2 per MLA layer),
+      core attention → FusedInferAttentionScore.
+      Prefill: kv_c@kv_b_proj → MatMulV2, attention → FusedInferAttentionScore.
+      需 MLA 分解 pass 才能逐 kernel 查询, 当前 fallback to analytic.
+
+  "tensor_cast.multihead_latent_attention_quant.default":
+    composite: true
+    sub_kernels: [TransposeBatchMatMul, FusedInferAttentionScore]
+    notes: >
+      [HIGH] op-plugin: YAML:6613 + YAML:5898/5915.
+      aclnn: aclnnTransposeBatchMatMul + aclnnFusedInferAttentionScoreV2.
+      量化 MLA; BMM with scale for INT8, FIA with dequant/quant scales.
+      额外 AscendQuantV2/DynamicQuant kernel 用于中间 quant/dequant 步骤.
+
+  "tensor_cast.mlapo.default":
+    composite: true
+    sub_kernels: [TransposeBatchMatMul, FusedInferAttentionScore]
+    notes: >
+      [LOW] op-plugin: YAML:6129 (npu_mla_prolog_v3).
+      aclnn: aclnnMlaPrologV3WeightNz.
+      MLAPO 包含 projection+norm+RoPE+cache 融合; npu_mla_prolog_v3 覆盖 prolog 部分, attention 仍独立.
+
+  "tensor_cast.mlapo_quant.default":
+    composite: true
+    sub_kernels: [TransposeBatchMatMul, FusedInferAttentionScore]
+    notes: >
+      [LOW] op-plugin: YAML:6129.
+      aclnn: aclnnMlaPrologV3WeightNz.
+      量化 MLAPO; 与非量化版同结构, 待实现后确认.
+
+
+  # ========== 8. KV Cache ==========
+
+  "tensor_cast.reshape_and_cache.default":
+    kernel_type: ReshapeAndCacheNdKernel
+    notes: >
+      [MEDIUM] op-plugin: ATB ReshapeAndCachAtb.cpp + aclnn YAML:6493 (npu_scatter_pa_kv_cache).
+      aclnn: aclnnScatterPaKvCache.
+      两条路径: ATB ReshapeCacheOperation → ReshapeAndCacheNdKernel (Qwen3 Prefill 67x),
+      aclnn ScatterPaKvCache → ScatterPaKvCache (DSV3 Decode 61x, 用于非 MLA 层).
+      主映射用 ReshapeAndCacheNdKernel (ATB prefill path); 替代 kernel_type: ScatterPaKvCache.
+
+  "tensor_cast.concat_and_cache_mla.default":
+    kernel_type: ReshapeAndCacheNdKernel
+    notes: >
+      [LOW] op-plugin: ATB ReshapeAndCacheSisoAtb.cpp (atb._npu_reshape_and_cache_siso).
+      MLA KV cache concat+write; 通常被 npu_mla_prolog_v3 吸收 (无独立 profiling 条目).
+      独立执行时走 ATB ReshapeAndCacheSiso → ReshapeAndCacheNdKernel.
+
+  "tensor_cast.kv_rmsnorm_rope_cache.default":
+    kernel_type: KvRmsNormRopeCache
+    notes: >
+      [HIGH] op-plugin: YAML:~5669 (npu_kv_rmsnorm_rope_cache).
+      aclnn: aclnnKvRmsNormRopeCache/V2.
+      vllm-ascend: vllm_ascend/ops/mla_v1.py → torch_npu.npu_kv_rmsnorm_rope_cache().
+      TC 当前分解为 rms_norm + apply_rope + reshape_and_cache (待新增 TC 算子, 未在 develop 注册).
+      Profiling: DSV3 Decode KvRmsNormRopeCache(2501x).
+
+
+  # ========== 9. Norm 基础 ==========
+
+  "tensor_cast.rms_norm.default":
+    kernel_type: RmsNorm
+    notes: >
+      [HIGH] op-plugin: YAML:6406 (npu_rms_norm) / RmsNormKernelOpApi.cpp.
+      aclnn: aclnnRmsNorm.
+      Profiling: DSV3 RmsNorm(2542x), Qwen3 RmsNorm(7x).
+
+  "tensor_cast.add_rms_norm.default":
+    kernel_type: AddRmsNorm
+    notes: >
+      [HIGH] op-plugin: YAML:5583 (npu_add_rms_norm).
+      aclnn: aclnnAddRmsNorm.
+      Profiling: Qwen3 Prefill AddRmsNorm(131x); DSV3 Decode InplaceAddRmsNorm(5002x, 同 API 的 in-place 变体).
+
+  "tensor_cast.add_rms_norm2.default":
+    kernel_type: AddRmsNorm
+    notes: >
+      [HIGH] op-plugin: YAML:5583 (同 add_rms_norm, 第 3 返回值 x_out 也使用).
+      aclnn: aclnnAddRmsNorm.
+      与 add_rms_norm 相同 kernel; '2' 表示同时使用 norm 输出和更新后的 residual.
+
+  "tensor_cast.swiglu.default":
+    kernel_type: SwiGlu
+    notes: >
+      [HIGH] op-plugin: YAML:6549 (npu_swiglu).
+      aclnn: aclnnSwiGlu.
+      Profiling: Qwen3 Prefill SwiGlu(67x).
+
+
+  # ========== 10. Norm + Static Quant 融合 ==========
+
+  "tensor_cast.rms_norm_quant.default":
+    kernel_type: RmsNormQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:5598 (npu_rms_norm_quant).
+      aclnn: aclnnRmsNormQuant.
+      RmsNorm + static quant 融合 kernel; 有专用 aclnn, 但无 profiling 验证 (static quant 路径).
+
+  "tensor_cast.add_rms_norm_quant.default":
+    kernel_type: AddRmsNormQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:5623 (npu_add_rms_norm_quant) / AddRmsNormQuantKernelOpApi.cpp.
+      aclnn: aclnnAddRmsNormQuant/V2; V2 支持 beta.
+      AddRmsNorm + static quant 融合; 无 profiling 验证.
+
+  "tensor_cast.add_rms_norm_quant2.default":
+    kernel_type: AddRmsNormQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:5623 (同 add_rms_norm_quant).
+      aclnn: aclnnAddRmsNormQuant/V2.
+      与 add_rms_norm_quant 同 kernel; '2' 表示同时使用 residual 输出.
+
+
+  # ========== 11. Norm + Dynamic Quant Symmetric ==========
+
+  "tensor_cast.rms_norm_dynamic_quant_symmetric.default":
+    composite: true
+    sub_kernels: [RmsNorm, DynamicQuant]
+    notes: >
+      [HIGH] op-plugin: YAML:6406 + YAML:5864; 无 fused aclnnRmsNormDynamicQuant 存在.
+      aclnn: aclnnRmsNorm + aclnnDynamicQuantV2.
+      op-plugin 无 rms_norm_dynamic_quant 融合 API; 分解为两个独立 kernel.
+
+  "tensor_cast.add_rms_norm_dynamic_quant_symmetric.default":
+    kernel_type: AddRmsNormDynamicQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6248 (npu_add_rms_norm_dynamic_quant).
+      aclnn: aclnnAddRmsNormDynamicQuantV2.
+      有 fused kernel; output_mask 控制哪些输出填充; 无 profiling 验证.
+
+  "tensor_cast.add_rms_norm_dynamic_quant2_symmetric.default":
+    kernel_type: AddRmsNormDynamicQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6248 (同上, 使用 x_out 第 3 返回值).
+      aclnn: aclnnAddRmsNormDynamicQuantV2.
+      与 add_rms_norm_dynamic_quant_symmetric 同 kernel; '2' 表示使用 residual.
+
+
+  # ========== 12. Norm + Dynamic Quant Asymmetric ==========
+
+  "tensor_cast.rms_norm_dynamic_quant_asymmetric.default":
+    composite: true
+    sub_kernels: [RmsNorm, DynamicQuant]
+    notes: >
+      [HIGH] op-plugin: YAML:6406 + YAML:5868 (npu_dynamic_quant_asymmetric, 同 aclnnDynamicQuantV2 带 offset).
+      aclnn: aclnnRmsNorm + aclnnDynamicQuantV2.
+      无 fused kernel; asymmetric vs symmetric 共享 aclnnDynamicQuantV2 (offset 是否填充).
+
+  "tensor_cast.add_rms_norm_dynamic_quant_asymmetric.default":
+    kernel_type: AddRmsNormDynamicQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6248.
+      aclnn: aclnnAddRmsNormDynamicQuantV2.
+      使用 fused kernel; asymmetric 通过 offset 输出区分, 但 API 无显式 asymmetric flag; 实际行为需设备验证.
+
+  "tensor_cast.add_rms_norm_dynamic_quant2_asymmetric.default":
+    kernel_type: AddRmsNormDynamicQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6248.
+      aclnn: aclnnAddRmsNormDynamicQuantV2.
+      与 add_rms_norm_dynamic_quant_asymmetric 同 kernel; '2' 使用 residual.
+
+
+  # ========== 13. Norm + Dynamic Quant MXFP4 ==========
+
+  "tensor_cast.rms_norm_dynamic_quant_mxfp4.default":
+    composite: true
+    sub_kernels: [RmsNorm]
+    notes: >
+      [LOW] op-plugin: YAML:6406; MXFP4 quant 部分无 op-plugin 对应.
+      aclnn: aclnnRmsNorm.
+      RmsNorm + MXFP4 quant 分解; MXFP4 quant 可能用 npu_dynamic_block_quant (YAML:7016).
+
+  "tensor_cast.add_rms_norm_dynamic_quant_mxfp4.default":
+    composite: true
+    sub_kernels: [AddRmsNorm]
+    notes: >
+      [LOW] op-plugin: YAML:5583; npu_add_rms_norm_dynamic_quant 仅支持 INT8 输出, 不支持 MXFP4.
+      aclnn: aclnnAddRmsNorm.
+      AddRmsNorm + MXFP4 quant 分解.
+
+  "tensor_cast.add_rms_norm_dynamic_quant2_mxfp4.default":
+    composite: true
+    sub_kernels: [AddRmsNorm]
+    notes: >
+      [LOW] op-plugin: YAML:5583.
+      aclnn: aclnnAddRmsNorm.
+      与 add_rms_norm_dynamic_quant_mxfp4 同; '2' 使用 residual.
+
+
+  # ========== 14. 量化 (Quantization) ==========
+
+  "tensor_cast.quantize.default":
+    kernel_type: AscendQuantV2
+    notes: >
+      [HIGH] op-plugin: YAML:6363 (npu_quantize) / QuantizeKernelNpuOpApi.cpp.
+      aclnn: aclnnAscendQuant/V3; div_mode=False→aclnnAscendQuant/V3, div_mode=True→legacy AscendQuantV2 GE op.
+      Profiling: DSV3 Decode AscendQuantV2(10004x) — 第 2 高频算子.
+
+  "tensor_cast.dynamic_quantize_symmetric.default":
+    kernel_type: DynamicQuant
+    notes: >
+      [HIGH] op-plugin: YAML:5864 (npu_dynamic_quant) / DynamicQuantKernelNpuOpApi.cpp.
+      aclnn: aclnnDynamicQuant/V2; 返回 (quantized, scale); 优先用 V2.
+      Profiling: DSV3 Decode DynamicQuant(2501x).
+
+  "tensor_cast.dynamic_quantize_asymmetric.default":
+    kernel_type: DynamicQuant
+    notes: >
+      [HIGH] op-plugin: YAML:5868 (npu_dynamic_quant_asymmetric) / DynamicQuantKernelNpuOpApi.cpp.
+      aclnn: aclnnDynamicQuant/V2; 返回 (quantized, scale, offset).
+      与 symmetric 共享 aclnnDynamicQuantV2, offset 输出填充.
+
+  "tensor_cast.dynamic_quantize_mxfp4.default":
+    kernel_type: DynamicBlockQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:7016 (npu_dynamic_block_quant) / DynamicBlockQuantNpuOpApi.cpp.
+      aclnn: aclnnDynamicBlockQuant.
+      MXFP4 block-wise quantization; 最接近的 API 为 npu_dynamic_block_quant (col_block_size=group_size).
+      但 TC 的 float8_e8m0fnu scale dtype 可能不被直接支持. 待验证.
+
+
+  # ========== 15. RoPE ==========
+
+  "tensor_cast.apply_rope.default":
+    kernel_type: InterleaveRope
+    notes: >
+      [HIGH] op-plugin: YAML:5666 (npu_apply_rotary_pos_emb) + YAML:6025 (npu_interleave_rope).
+      aclnn: aclnnApplyRotaryPosEmbV2 (neox mode), aclnnInterleaveRope (interleave mode).
+      is_neox=True → ApplyRotaryPosEmb (Qwen3 3x); is_neox=False → InterleaveRope (DSV3 2501x).
+      默认映射 InterleaveRope (DeepSeek interleave 模式更常见于 MLA).
+      neox 模式 kernel_type: ApplyRotaryPosEmb (op-plugin: YAML:5666).
+
+
+  # ========== 16. 通信 (Communication) ==========
+  # HCCL collectives, 不经过 op-plugin aclnn, 直接走 torch.distributed → HCCL
+
+  "tensor_cast.all_reduce.default":
+    kernel_type: hcom_allReduce_
+    category: communication
+    notes: >
+      [HIGH] HCCL direct; op-plugin 仅有 fused npu_mm_all_reduce_base (MC2).
+      Profiling: DSV3(82x), Qwen3(276x).
+
+  "tensor_cast.all_gather.default":
+    kernel_type: hcom_allGather_
+    category: communication
+    notes: >
+      [MEDIUM] HCCL direct; op-plugin 仅有 fused npu_all_gather_base_mm (MC2).
+      Profiling 中有三种变体: HcomAllGather(164x, graph-compiled),
+      hcom_allGather_(41x, PyTorch dispatch), allgatherAicpuKernel(41x, AICPU).
+      TC standalone all_gather → hcom_allGather_; 聚合查询时应包含所有变体.
+
+  "tensor_cast.reduce_scatter.default":
+    kernel_type: HcomReduceScatter
+    category: communication
+    notes: >
+      [MEDIUM] HCCL direct; op-plugin 仅有 fused npu_mm_reduce_scatter_base (MC2).
+      DSV3 仅见 HcomReduceScatter(82x, CamelCase = graph-compiled); 也可能出现 hcom_reduceScatter_.
+
+  "tensor_cast.all_to_all.default":
+    kernel_type: hcom_alltoallv_
+    category: communication
+    notes: >
+      [HIGH] HCCL direct; op-plugin 有 fused npu_gmm_alltoallv (aclnnGroupedMatMulAlltoAllv).
+      TC 使用 variable split sizes → alltoallv (非 fixed alltoall).
+      op-plugin 有融合 GMM+AllToAllV, TC 独立建模.
+      Profiling: DSV3 Decode hcom_alltoallv_(82x, MoE EP routing).
+
+
+  # ========== 17. MC2 融合算子 (MatMul + AllReduce) ==========
+  # 由 freezing_passes/patterns/matmul_allreduce.py 图模式匹配生成
+  # NPU 上对应 npu_mm_all_reduce_base (op-plugin MC2 API)
+
+  "tensor_cast.matmul_all_reduce.default":
+    composite: true
+    sub_kernels: [MatMulV2, hcom_allReduce_]
+    notes: >
+      [MEDIUM] op-plugin: npu_mm_all_reduce_base → aclnnMmAllReduceBase (MC2).
+      fusion pass: matmul_allreduce.py 将 aten.mm + all_reduce 融合为单 op.
+      BF16/FP16 matmul + all_reduce; NPU MC2 pipeline ~20% prefill improvement with TP.
+      Profiling 中表现为单个 MC2 kernel (非独立 MatMulV2 + hcom_allReduce_).
+
+  "tensor_cast.static_quant_linear_all_reduce.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
+    notes: >
+      [MEDIUM] op-plugin: npu_mm_all_reduce_base (MC2 with quant params).
+      fusion pass: matmul_allreduce.py 将 static_quant_linear + all_reduce 融合.
+      W8A8 quant linear + all_reduce; 复用 MC2 pipeline.
+
+  "tensor_cast.static_quant_linear_int4_all_reduce.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
+    notes: >
+      [MEDIUM] op-plugin: npu_mm_all_reduce_base (MC2 with INT4 quant params).
+      fusion pass: matmul_allreduce.py 将 static_quant_linear_int4 + all_reduce 融合.
+      W4A8 quant linear + all_reduce; 复用 MC2 pipeline.
+
+  "tensor_cast.fp8_linear_all_reduce.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
+    notes: >
+      [LOW] op-plugin: npu_mm_all_reduce_base (MC2 with FP8).
+      fusion pass: matmul_allreduce.py 将 fp8_linear + all_reduce 融合.
+      FP8 linear + all_reduce; MC2 FP8 支持待验证.
+
+  "tensor_cast.mxfp4_linear_all_reduce.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
+    notes: >
+      [LOW] op-plugin: npu_mm_all_reduce_base (MC2 with MXFP4).
+      fusion pass: matmul_allreduce.py 将 mxfp4_linear + all_reduce 融合.
+      MXFP4 linear + all_reduce; MC2 MXFP4 支持待验证.
+
+
+  # ========== 18. 工具算子 ==========
+
+  "tensor_cast.shift_and_update_input_ids.default":
+    kernel_type: TensorMove
+    notes: >
+      [LOW] 无 NPU 专用 API; MTP 工具 op, 分解为基础 aten ops (slice, index_put, scatter).
+      Profiling 中表现为 TensorMove / Copy / ScatterElements 等基础数据搬移 kernel.
+
+
+  # ========== 19. Profiling-only Placeholder ==========
+  # NPU 融合算子: Profiling 中出现但 TensorCast 无对应实现
+
+  "profiling.KvRmsNormRopeCache":
+    kernel_type: KvRmsNormRopeCache
+    notes: >
+      [HIGH] op-plugin: YAML:~5669 (npu_kv_rmsnorm_rope_cache).
+      aclnn: aclnnKvRmsNormRopeCache/V2.
+      vllm-ascend: vllm_ascend/ops/mla_v1.py → torch_npu.npu_kv_rmsnorm_rope_cache().
+      KV RmsNorm+RoPE+Cache 融合; TC 分解为 rms_norm + apply_rope + reshape_and_cache.
+      (原标 "未在 op-plugin 中找到", 实际 op-plugin 有 npu_kv_rmsnorm_rope_cache.)
+      Profiling: DSV3 Decode(2501x).
+
+  "profiling.InplaceAddRmsNorm":
+    kernel_type: InplaceAddRmsNorm
+    notes: >
+      [HIGH] op-plugin: YAML:5583 (同 npu_add_rms_norm; in-place 为 CANN 运行时优化).
+      aclnn: aclnnAddRmsNorm.
+      AddRmsNorm 的 in-place 变体; TC add_rms_norm 映射到 AddRmsNorm, DSV3 实际用 InplaceAddRmsNorm.
+      Profiling: DSV3 Decode(5002x).
+
+  "profiling.MoeGatingTopK":
+    kernel_type: MoeGatingTopK
+    notes: >
+      [HIGH] op-plugin: YAML:~6190 (npu_moe_gating_top_k) / MoeGatingTopKKernelNpuOpApi.cpp.
+      aclnn: aclnnMoeGatingTopK.
+      vllm-ascend: vllm_ascend/ops/experts_selector.py → torch_npu.npu_moe_gating_top_k().
+      MoE gating top-k; TC 通过 aten.topk 实现, NPU 用专用 kernel.
+      (原标 "未在标准 op-plugin 中找到", 实际 op-plugin 有 npu_moe_gating_top_k.)
+      Profiling: DSV3 Decode(2378x).
+
+  "profiling.AutomaticBufferFusionOp":
+    kernel_type: AutomaticBufferFusionOp
+    notes: >
+      [LOW] NPU 编译器自动融合, 无 op-plugin 对应.
+      CANN 编译器自动 buffer 融合; 无直接 TC 等价物.
+      Profiling: DSV3 Decode(2419x).
+
+  "profiling.split_qkv_rmsnorm_rope_kernel":
+    kernel_type: split_qkv_rmsnorm_rope_kernel
+    notes: >
+      [MEDIUM] 不在 op-plugin 中.
+      vllm-ascend: vllm_ascend/ops/attention.py 中 QKNormRopeFusionPass graph fusion pass (路径 C).
+      vLLM-ascend 的 Triton 自定义 kernel, Qwen3 专用 (有 qk_norm 的模型).
+      TC 分别使用 linear + rms_norm + apply_rope.
+      Profiling: Qwen3-30B Prefill(64x).
+
+  "profiling.PagedCacheLoadNdKernel":
+    kernel_type: PagedCacheLoadNdKernel
+    notes: >
+      [LOW] ATB 内部 cache load kernel.
+      Paged KV cache 加载; TC reshape_and_cache 只处理写入.
+      Profiling: DSV3 Decode(61x).
+
+  "profiling.ScatterPaKvCache":
+    kernel_type: ScatterPaKvCache
+    notes: >
+      [HIGH] op-plugin: YAML:6493 (npu_scatter_pa_kv_cache) / ScatterPaKvCacheNpuOpApi.cpp.
+      aclnn: aclnnScatterPaKvCache.
+      aclnn 路径的 paged KV cache 写入; TC reshape_and_cache 也可映射到此 (见 section 8).
+      Profiling: DSV3 Decode(61x).
+
+
+# ============================================================================
+#                  torch_npu 参考 (microbenchmark 脚本生成用)
+# ============================================================================
+# 每个 kernel_type 对应:
+#   - apis: torch_npu API 列表 (含 op-plugin 溯源)
+#   - microbench_api: 默认 microbenchmark 脚本使用的 API
+#   - aclnn: 底层 CANN 内核名 (从 EXEC_NPU_CMD 提取)
+
+torch_npu_reference:
+
+  # --- Matmul ---
+  MatMulV2:
+    apis:
+      - name: "torch.mm"
+        note: "aten::mm → op_api::mm → aclnnMm / aclnnMatmulWeightNz"
+      - name: "torch_npu.npu_linear"
+        note: "NPU 优化版本, 支持 bias"
+    aclnn: [aclnnMm, aclnnMatmulWeightNz]
+    microbench_api: "torch.mm"
+
+  MatMul:
+    apis:
+      - name: "torch.matmul"
+        note: "aten::matmul → aclnnMatMul (broadcasting support, N-D tensors)"
+    aclnn: aclnnMatMul
+    microbench_api: "torch.matmul"
+
+  TransposeBatchMatMul:
+    apis:
+      - name: "torch.bmm"
+        note: "aten::bmm → op_api::bmm → aclnnBatchMatMul"
+      - name: "torch_npu.npu_transpose_batchmatmul"
+        note: "gen_opapi → aclnnTransposeBatchMatMul (MLA absorb projections)"
+    aclnn: [aclnnBatchMatMul, aclnnTransposeBatchMatMul]
+    microbench_api: "torch.bmm"
+
+  QuantBatchMatmulV3:
+    apis:
+      - name: "torch_npu.npu_weight_quant_batchmatmul"
+        note: "YAML:6608 → aclnnWeightQuantBatchMatmulV2/V3 (W8A8/W4A8/FP8)"
+      - name: "torch_npu.npu_quant_matmul"
+        note: "YAML:6328 → aclnnQuantMatmulV5 (A8W4 path)"
+    aclnn: [aclnnWeightQuantBatchMatmulV2, aclnnWeightQuantBatchMatmulV3, aclnnQuantMatmulV5]
+    microbench_api: "torch_npu.npu_weight_quant_batchmatmul"
+
+  # --- Attention ---
+  FusedInferAttentionScore:
+    apis:
+      - name: "torch_npu.npu_fused_infer_attention_score"
+        note: "YAML:5898 → aclnnFusedInferAttentionScoreV2/V3"
+      - name: "torch_npu.npu_fused_infer_attention_score_v2"
+        note: "YAML:5915 → aclnnFusedInferAttentionScoreV4 (with quant_mode)"
+    aclnn: [aclnnFusedInferAttentionScoreV2, aclnnFusedInferAttentionScoreV3, aclnnFusedInferAttentionScoreV4]
+    microbench_api: "torch_npu.npu_fused_infer_attention_score"
+
+  # --- MoE ---
+  GroupedMatmul:
+    apis:
+      - name: "torch_npu.npu_grouped_matmul"
+        note: "YAML:5987 → aclnnGroupedMatmul/V4/V5/WeightNz"
+    aclnn: [aclnnGroupedMatmul, aclnnGroupedMatmulV4, aclnnGroupedMatmulV5, aclnnGroupedMatmulWeightNz]
+    microbench_api: "torch_npu.npu_grouped_matmul"
+
+  DequantSwigluQuant:
+    apis:
+      - name: "torch_npu.npu_grouped_matmul_swiglu_quant"
+        note: "YAML:6203 → aclnnGroupedMatmulSwigluQuantWeightNZ"
+      - name: "torch_npu.npu_grouped_matmul_swiglu_quant_v2"
+        note: "YAML:6207 → aclnnGroupedMatmulSwigluQuantWeightNzV2"
+    aclnn: [aclnnGroupedMatmulSwigluQuantWeightNZ, aclnnGroupedMatmulSwigluQuantWeightNzV2]
+    microbench_api: "torch_npu.npu_grouped_matmul_swiglu_quant"
+
+  MoeDistributeDispatchV2:
+    apis:
+      - name: "torch_npu.npu_moe_distribute_dispatch_v2"
+        note: "YAML:6217 → aclnnMoeDistributeDispatchV2/V3/V4 (EP 路径)"
+      - name: "torch_npu.npu_moe_init_routing_v2"
+        note: "YAML:6197 → aclnnMoeInitRoutingV2/V3 (非 EP 路径)"
+    aclnn: [aclnnMoeDistributeDispatchV2, aclnnMoeDistributeDispatchV3, aclnnMoeDistributeDispatchV4]
+    microbench_api: "torch_npu.npu_moe_distribute_dispatch_v2"
+
+  MoeDistributeCombineV2:
+    apis:
+      - name: "torch_npu.npu_moe_distribute_combine_v2"
+        note: "YAML:6223 → aclnnMoeDistributeCombineV2/V3/V4 (EP 路径)"
+      - name: "torch_npu.npu_moe_finalize_routing"
+        note: "YAML:6182 → aclnnMoeFinalizeRouting/V2 (非 EP 路径)"
+    aclnn: [aclnnMoeDistributeCombineV2, aclnnMoeDistributeCombineV3, aclnnMoeDistributeCombineV4]
+    microbench_api: "torch_npu.npu_moe_distribute_combine_v2"
+
+  MoeGatingTopK:
+    apis:
+      - name: "torch_npu.npu_moe_gating_top_k"
+        note: "YAML:~6190 → aclnnMoeGatingTopK; vllm-ascend: experts_selector.py"
+    aclnn: aclnnMoeGatingTopK
+    microbench_api: "torch_npu.npu_moe_gating_top_k"
+
+  # --- Norm ---
+  RmsNorm:
+    apis:
+      - name: "torch_npu.npu_rms_norm"
+        note: "YAML:6406 → aclnnRmsNorm"
+    aclnn: aclnnRmsNorm
+    microbench_api: "torch_npu.npu_rms_norm"
+
+  AddRmsNorm:
+    apis:
+      - name: "torch_npu.npu_add_rms_norm"
+        note: "YAML:5583 → aclnnAddRmsNorm"
+    aclnn: aclnnAddRmsNorm
+    microbench_api: "torch_npu.npu_add_rms_norm"
+
+  InplaceAddRmsNorm:
+    apis:
+      - name: "torch_npu.npu_add_rms_norm"
+        note: "同 AddRmsNorm API; in-place 为 CANN 运行时自动优化"
+    aclnn: aclnnAddRmsNorm
+    microbench_api: "torch_npu.npu_add_rms_norm"
+
+  RmsNormQuant:
+    apis:
+      - name: "torch_npu.npu_rms_norm_quant"
+        note: "YAML:5598 → aclnnRmsNormQuant"
+    aclnn: aclnnRmsNormQuant
+    microbench_api: "torch_npu.npu_rms_norm_quant"
+
+  AddRmsNormQuant:
+    apis:
+      - name: "torch_npu.npu_add_rms_norm_quant"
+        note: "YAML:5623 → aclnnAddRmsNormQuant / aclnnAddRmsNormQuantV2"
+    aclnn: [aclnnAddRmsNormQuant, aclnnAddRmsNormQuantV2]
+    microbench_api: "torch_npu.npu_add_rms_norm_quant"
+
+  AddRmsNormDynamicQuant:
+    apis:
+      - name: "torch_npu.npu_add_rms_norm_dynamic_quant"
+        note: "YAML:6248 → aclnnAddRmsNormDynamicQuantV2"
+    aclnn: aclnnAddRmsNormDynamicQuantV2
+    microbench_api: "torch_npu.npu_add_rms_norm_dynamic_quant"
+
+  # --- Activation ---
+  SwiGlu:
+    apis:
+      - name: "torch_npu.npu_swiglu"
+        note: "YAML:6549 → aclnnSwiGlu"
+    aclnn: aclnnSwiGlu
+    microbench_api: "torch_npu.npu_swiglu"
+
+  # --- Quantization ---
+  AscendQuantV2:
+    apis:
+      - name: "torch_npu.npu_quantize"
+        note: "YAML:6363 → aclnnAscendQuant / aclnnAscendQuantV3"
+    aclnn: [aclnnAscendQuant, aclnnAscendQuantV3]
+    microbench_api: "torch_npu.npu_quantize"
+
+  DynamicQuant:
+    apis:
+      - name: "torch_npu.npu_dynamic_quant"
+        note: "YAML:5864 → aclnnDynamicQuant / aclnnDynamicQuantV2 (symmetric)"
+      - name: "torch_npu.npu_dynamic_quant_asymmetric"
+        note: "YAML:5868 → aclnnDynamicQuantV2 (same kernel, offset populated)"
+    aclnn: [aclnnDynamicQuant, aclnnDynamicQuantV2]
+    microbench_api: "torch_npu.npu_dynamic_quant"
+
+  DynamicBlockQuant:
+    apis:
+      - name: "torch_npu.npu_dynamic_block_quant"
+        note: "YAML:7016 → aclnnDynamicBlockQuant (MXFP4 block quant)"
+    aclnn: aclnnDynamicBlockQuant
+    microbench_api: "torch_npu.npu_dynamic_block_quant"
+
+  # --- RoPE ---
+  InterleaveRope:
+    apis:
+      - name: "torch_npu.npu_interleave_rope"
+        note: "YAML:6025 → aclnnInterleaveRope (DeepSeek interleave mode)"
+    aclnn: aclnnInterleaveRope
+    microbench_api: "torch_npu.npu_interleave_rope"
+
+  ApplyRotaryPosEmb:
+    apis:
+      - name: "torch_npu.npu_apply_rotary_pos_emb"
+        note: "YAML:5666 → aclnnApplyRotaryPosEmb / aclnnApplyRotaryPosEmbV2 (neox mode)"
+    aclnn: [aclnnApplyRotaryPosEmb, aclnnApplyRotaryPosEmbV2]
+    microbench_api: "torch_npu.npu_apply_rotary_pos_emb"
+
+  KvRmsNormRopeCache:
+    apis:
+      - name: "torch_npu.npu_kv_rmsnorm_rope_cache"
+        note: "YAML:~5669 → aclnnKvRmsNormRopeCache/V2; vllm-ascend: mla_v1.py"
+    aclnn: [aclnnKvRmsNormRopeCache, aclnnKvRmsNormRopeCacheV2]
+    microbench_api: "torch_npu.npu_kv_rmsnorm_rope_cache"
+
+  # --- KV Cache ---
+  ReshapeAndCacheNdKernel:
+    apis:
+      - name: "atb._npu_reshape_and_cache"
+        note: "ATB 路径 / ReshapeAndCachAtb.cpp (prefill)"
+      - name: "atb._npu_reshape_and_cache_siso"
+        note: "ATB 路径 / ReshapeAndCacheSisoAtb.cpp (MLA single KV)"
+    aclnn: null
+    microbench_api: "atb._npu_reshape_and_cache"
+
+  ScatterPaKvCache:
+    apis:
+      - name: "torch_npu.npu_scatter_pa_kv_cache"
+        note: "YAML:6493 → aclnnScatterPaKvCache (aclnn PA NZ path)"
+    aclnn: aclnnScatterPaKvCache
+    microbench_api: "torch_npu.npu_scatter_pa_kv_cache"
+
+  # --- Data Movement ---
+  GatherV2:
+    apis:
+      - name: "torch.nn.functional.embedding"
+        note: "aten::embedding → aclnnEmbedding → GatherV2"
+      - name: "torch.index_select"
+        note: "aten::index_select → aclnnIndexSelect → GatherV2"
+    aclnn: [aclnnEmbedding, aclnnIndexSelect]
+    microbench_api: "torch.nn.functional.embedding"
+
+  ConcatD:
+    apis:
+      - name: "torch.cat"
+        note: "aten::cat → aclnnCat → ConcatD"
+    aclnn: aclnnCat
+    microbench_api: "torch.cat"
+
+  Add:
+    apis:
+      - name: "torch.add"
+        note: "aten::add.Tensor → aclnnAdd → Add"
+    aclnn: aclnnAdd
+    microbench_api: "torch.add"
+
+  Cast:
+    apis:
+      - name: "torch.Tensor.to"
+        note: "aten::to.dtype → aclnnInplaceCopy → Cast"
+    aclnn: aclnnInplaceCopy
+    microbench_api: "torch.Tensor.to"
+
+  # --- MC2 (MatMul + Communication Fusion) ---
+  # MC2 融合算子在 profiling 中表现为不同于 standalone 的 kernel type
+  # 具体 MC2 kernel type 需要从 MC2 profiling 数据确认
+
+  # --- Communication ---
+  hcom_allReduce_:
+    apis:
+      - name: "torch.distributed.all_reduce"
+        note: "HCCL direct (standalone)"
+    aclnn: null
+    microbench_api: "torch.distributed.all_reduce"
+
+  hcom_allGather_:
+    apis:
+      - name: "torch.distributed.all_gather"
+        note: "HCCL direct (standalone); 另有 HcomAllGather (graph-compiled) 和 allgatherAicpuKernel"
+    aclnn: null
+    microbench_api: "torch.distributed.all_gather"
+
+  HcomReduceScatter:
+    apis:
+      - name: "torch.distributed.reduce_scatter"
+        note: "HCCL direct (graph-compiled variant)"
+    aclnn: null
+    microbench_api: "torch.distributed.reduce_scatter"
+
+  hcom_alltoallv_:
+    apis:
+      - name: "torch.distributed.all_to_all"
+        note: "HCCL direct (variable-length); MoE EP token routing"
+    aclnn: null
+    microbench_api: "torch.distributed.all_to_all"

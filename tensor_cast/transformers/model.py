@@ -1,5 +1,4 @@
 import contextlib
-import dataclasses
 import logging
 import typing
 from typing import Dict, Optional, Union
@@ -244,24 +243,6 @@ class TransformerModel(ModelWrapperBase):
             yield
         finally:
             torch.set_default_dtype(orig_dtype)
-
-    def _all_required_fields_exist(self, module: torch.nn.Module, field_names):
-        def is_optional(annotation):
-            if typing.get_origin(annotation) is Union:
-                return type(None) in typing.get_args(annotation)
-            return False
-
-        for field in dataclasses.fields(field_names):
-            if not is_optional(
-                type(field_names).__annotations__[field.name]
-            ) and not hasattr(module, getattr(field_names, field.name)):
-                logger.warning(
-                    "Field %s not found in module %s",
-                    getattr(field_names, field.name),
-                    module,
-                )
-                return False
-        return True
 
     def load_weights(self):
         """TODO: load real weights"""

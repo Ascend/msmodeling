@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 import torch.nn as nn
 
+import tensor_cast.ops  # noqa: F401 — triggers op registration
 from tensor_cast.layers.mla import DeepseekSparseAttentionIndexer
 from tensor_cast.transformers.builtin_model.deepseek_v32 import DeepseekV32Config
 

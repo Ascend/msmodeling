@@ -3,6 +3,8 @@
 Resolves and configures model settings for tensor cast operations.
 """
 
+import logging
+
 from ..core.user_config import UserInputConfig
 from ..layers.attention import AttentionTensorCast
 from ..layers.quant_linear import TensorCastQuantLinear
@@ -20,6 +22,8 @@ from ..transformers.custom_model_registry import (
     get_mtp_block_module_name,
 )
 from ..transformers.utils import AutoModelConfigLoader
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigResolver:
@@ -100,12 +104,14 @@ class ConfigResolver:
         )
         self.update_moe_config(
             enable_redundant_experts=self.user_input.enable_redundant_experts,
+            enable_shared_expert_tp=self.user_input.enable_shared_expert_tp,
             enable_external_shared_experts=self.user_input.enable_external_shared_experts,
             host_external_shared_experts=self.user_input.host_external_shared_experts,
         )
         self.update_mla_config()
         self.update_mtp_config(num_mtp_tokens=self.user_input.num_mtp_tokens)
         self.update_parallel_config()
+        self.validate_moe_parallel_config()
         # Apply remote source configuration
         self.model_config.remote_source = self.user_input.remote_source
         return self.model_config
@@ -114,23 +120,39 @@ class ConfigResolver:
         self,
         model_type: str = "",
         enable_redundant_experts: bool = False,
+        enable_shared_expert_tp: bool = False,
         enable_external_shared_experts: bool = False,
         host_external_shared_experts: bool = False,
     ):
-        """
-        Update the Mixture of Experts (MoE) configuration.
+        """Update the Mixture of Experts (MoE) configuration.
 
         Args:
             model_type: The type of the model. If empty, uses the loaded model's type.
-            enable_redundant_experts: Whether to enable redundant experts.
-            enable_external_shared_experts: Whether to enable external shared experts.
-            host_external_shared_experts: Whether to host external shared experts.
+            enable_redundant_experts: Pad routing-expert count to a multiple of EP
+                size so that every rank hosts the same number of experts.
+            enable_shared_expert_tp: Apply tensor-parallelism to shared experts
+                across the EP group.  Requires ``expert_parallel_size > 1``.
+                Mutually exclusive with ``host_external_shared_experts``.
+            enable_external_shared_experts: Allocate dedicated ranks within the EP
+                group to run shared experts, separating them from routing experts.
+            host_external_shared_experts: Place external shared experts on the host
+                (CPU) side.  Mutually exclusive with ``enable_shared_expert_tp``.
+
+        Legal combinations (when both relate to shared experts)::
+
+            enable_shared_expert_tp  | host_external_shared_experts | OK?
+            -------------------------+------------------------------+-----
+            False                    | False                        | Yes
+            True                     | False                        | Yes (needs EP > 1)
+            False                    | True                         | Yes
+            True                     | True                         | NO — ValueError
         """
         if not model_type:
             model_type = self.hf_config.model_type
         moe_config = get_moe_config(model_type)
         if moe_config is not None:
             moe_config.enable_redundant_experts = enable_redundant_experts
+            moe_config.enable_shared_expert_tp = enable_shared_expert_tp
             moe_config.enable_external_shared_experts = enable_external_shared_experts
             moe_config.host_external_shared_experts = host_external_shared_experts
         self.model_config.moe_config = moe_config
@@ -197,4 +219,35 @@ class ConfigResolver:
             self.model_config.parallel_config.moe_tensor_parallel_size = 1
             self.model_config.parallel_config.moe_data_parallel_size = (
                 self.model_config.parallel_config.world_size
+            )
+
+    def validate_moe_parallel_config(self):
+        """Validate MoE-related parallel configuration constraints.
+
+        Raises:
+            ValueError: If enable_shared_expert_tp is True but EP size <= 1.
+            ValueError: If enable_shared_expert_tp and host_external_shared_experts
+                are both True (mutually exclusive).
+        """
+        moe_config = self.model_config.moe_config
+        if moe_config is None:
+            return
+
+        expert_parallel_size = self.model_config.parallel_config.expert_parallel_size
+        if moe_config.enable_shared_expert_tp and expert_parallel_size <= 1:
+            raise ValueError(
+                "When enable_shared_expert_tp=True, expert_parallel_size must be "
+                "greater than 1. Either set enable_shared_expert_tp=False or "
+                "set expert_parallel_size > 1."
+            )
+
+        if (
+            moe_config.enable_shared_expert_tp
+            and moe_config.host_external_shared_experts
+        ):
+            raise ValueError(
+                "enable_shared_expert_tp and host_external_shared_experts are "
+                "mutually exclusive. enable_shared_expert_tp applies TP to shared "
+                "experts across the EP group, while host_external_shared_experts "
+                "dedicates separate ranks to run shared experts. Set at most one."
             )

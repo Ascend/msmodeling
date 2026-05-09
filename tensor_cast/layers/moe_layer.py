@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Optional
 
 import torch
+import torch.nn.functional as F
 
 from .. import ops  # noqa: F401
 from ..model_config import MoEConfig
@@ -134,6 +135,7 @@ If the field name for top_k is non-standard, you may need to adjust the model pr
         hidden_states: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_weights: torch.Tensor,
+        skip_shared_experts: bool = False,
     ) -> torch.Tensor:
         raise NotImplementedError(
             "FusedMoEBase is an abstract class and should not be instantiated directly"
@@ -165,10 +167,18 @@ class MoELayer(torch.nn.Module):
             self.top_k,
         )
 
-    def forward(self, hidden_states: torch.Tensor):
+    def route(
+        self,
+        hidden_states: torch.Tensor,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+    ):
         if self.moe_config.gate_returns_raw_logits:
             # Branch 1: Custom fused top-k + softmax gating (from raw logits)
-            # Uses tensor_cast custom moe_gating_top_k_softmax kernel
+            # Uses tensor_cast custom moe_gating_top_k_softmax kernel.
+            # Gate runs on full tokens (matching vllm-ascend design where gate is called
+            # before TP slice). When tp_size > 1, router_logits are sliced here to align
+            # with the hidden_states slice done by _dp_transform_enter().
             if self.top_k is None:
                 raise ValueError(
                     "top_k must be specified if gate_returns_raw_logits is True"
@@ -178,10 +188,18 @@ class MoELayer(torch.nn.Module):
                 router_logits = gate_output[0]
             else:
                 router_logits = gate_output
+            if tp_size > 1:
+                # Pad to tp_size multiple then slice, matching vllm-ascend prepare() logic
+                num_tokens = router_logits.shape[0]
+                pad = (-num_tokens) % tp_size
+                if pad > 0:
+                    router_logits = F.pad(router_logits, (0, 0, 0, pad))
+                router_logits = torch.tensor_split(router_logits, tp_size, dim=0)[
+                    tp_rank
+                ]
             topk_weights, topk_indices = torch.ops.tensor_cast.moe_gating_top_k_softmax(
                 router_logits, self.top_k
             )
-
             if self.norm_topk_prob:
                 topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(hidden_states.dtype)
@@ -205,13 +223,18 @@ class MoELayer(torch.nn.Module):
                 raise ValueError(
                     f"Expected gate to return tuple with at least 2 elements, got {type(gate_output)}"
                 )
-            topk_indices = topk_indices.view(
-                *hidden_states.shape[:-1], topk_indices.shape[-1]
-            )
-            topk_weights = topk_weights.view(
-                *hidden_states.shape[:-1], topk_weights.shape[-1]
-            )
+            if topk_indices.shape[0] == hidden_states.shape[0]:
+                topk_indices = topk_indices.view(
+                    *hidden_states.shape[:-1], topk_indices.shape[-1]
+                )
+                topk_weights = topk_weights.view(
+                    *hidden_states.shape[:-1], topk_weights.shape[-1]
+                )
 
+        return topk_indices, topk_weights
+
+    def forward(self, hidden_states: torch.Tensor):
+        topk_indices, topk_weights = self.route(hidden_states)
         hidden_states = self.fused_moe(hidden_states, topk_indices, topk_weights)
         return hidden_states
 
@@ -227,6 +250,7 @@ class ParallelMoELayer(ModelWrapperBase):
         module: MoELayer,
         global_dp_group: ParallelGroup,
         global_tp_group: ParallelGroup,
+        mlp_tp_group: Optional[ParallelGroup],
         ep_group: ParallelGroup,
         num_external_shared_experts: int,
         num_redundant_experts: int,
@@ -271,10 +295,12 @@ class ParallelMoELayer(ModelWrapperBase):
             self.ep_group,
             num_external_shared_experts=num_external_shared_experts,
             num_global_experts=num_routing_experts + num_redundant_experts,
+            global_tp_size=global_tp_group.world_size,
         )
 
         self.global_dp_group = global_dp_group
         self.global_tp_group = global_tp_group
+        self.mlp_tp_group = mlp_tp_group or global_tp_group
         if self.has_ep:
             self.transform_dp_group = (
                 self.global_dp_group.world_size != self.ep_group.world_size
@@ -282,23 +308,105 @@ class ParallelMoELayer(ModelWrapperBase):
         else:
             self.transform_dp_group = self.global_dp_group.world_size != 1
 
+    def _run_shared_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Current EP path gathers routed outputs by token dimension, so we cannot
+        # reuse vLLM's "add partial shared + partial routed, then one all-reduce"
+        # scheme directly without over-reducing the routed branch. Instead, we
+        # all-reduce only the shared-expert partial output here.
+        return self.mlp_tp_group.all_reduce(
+            self._inner.fused_moe._run_shared_experts(hidden_states)
+        )
+
+    def _get_dp_alignment(self):
+        """Get the alignment divisor for MoE DP domain transformations.
+
+        We align token count to global TP size before `global_tp_group.slice`,
+        so exact_division() is always satisfied in transform_dp_group paths.
+        """
+        return self.global_tp_group.world_size
+
+    def _dp_transform_enter(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, int]:
+        """Pre-MoE DP domain transform. Returns (transformed, num_tokens_original)."""
+        num_tokens = hidden_states.shape[0]
+        if self.has_ep:
+            divisor = self._get_dp_alignment()
+            padding_tokens = (-num_tokens) % divisor
+            if padding_tokens > 0:
+                hidden_states = torch.nn.functional.pad(
+                    hidden_states, (0, 0, 0, padding_tokens)
+                )
+            hidden_states = self.global_tp_group.slice(hidden_states, dim=0)
+        else:
+            hidden_states = self.global_dp_group.all_gather(hidden_states, dim=0)
+        return hidden_states, num_tokens
+
+    def _dp_transform_exit(
+        self, hidden_states: torch.Tensor, num_tokens: int
+    ) -> torch.Tensor:
+        """Post-MoE DP domain transform. Restores original token count."""
+        if self.has_ep:
+            hidden_states = self.global_tp_group.all_gather(hidden_states, dim=0)
+        else:
+            hidden_states = self.global_dp_group.slice(hidden_states, dim=0)
+        return hidden_states[:num_tokens]
+
     def forward(self, hidden_states: torch.Tensor):
+        if self.has_ep and self._inner.moe_config.enable_shared_expert_tp:
+            origin_shape = hidden_states.shape
+            if len(origin_shape) == 3:
+                hidden_states = hidden_states.view(-1, *origin_shape[2:])
+
+            shared_expert_output = None
+            if (
+                self._inner.fused_moe.shared_experts is not None
+                and self.num_external_shared_experts == 0
+            ):
+                shared_expert_output = self._run_shared_experts(hidden_states)
+
+            if self.transform_dp_group:
+                tp_size = self.global_tp_group.world_size
+                tp_rank = self.global_tp_group.rank_in_group
+                topk_indices, topk_weights = self._inner.route(
+                    hidden_states, tp_size=tp_size, tp_rank=tp_rank
+                )
+                hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
+                hidden_states = self._inner.fused_moe(
+                    hidden_states,
+                    topk_indices,
+                    topk_weights,
+                    skip_shared_experts=shared_expert_output is not None,
+                )
+                hidden_states = self._dp_transform_exit(hidden_states, num_tokens)
+            else:
+                topk_indices, topk_weights = self._inner.route(hidden_states)
+                hidden_states = self._inner.fused_moe(
+                    hidden_states,
+                    topk_indices,
+                    topk_weights,
+                    skip_shared_experts=shared_expert_output is not None,
+                )
+
+            if shared_expert_output is not None:
+                hidden_states = hidden_states + shared_expert_output
+
+            if len(origin_shape) == 3:
+                hidden_states = hidden_states.view(
+                    *origin_shape[:2], *hidden_states.shape[1:]
+                )
+            return hidden_states
+
         if self.transform_dp_group:
             origin_shape = hidden_states.shape
             if len(origin_shape) == 3:
                 hidden_states = hidden_states.view(-1, *origin_shape[2:])
-            if self.has_ep:
-                hidden_states = self.global_tp_group.slice(hidden_states, dim=0)
-            else:
-                hidden_states = self.global_dp_group.all_gather(hidden_states, dim=0)
+            hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
 
         hidden_states = self._inner(hidden_states)
 
         if self.transform_dp_group:
-            if self.has_ep:
-                hidden_states = self.global_tp_group.all_gather(hidden_states, dim=0)
-            else:
-                hidden_states = self.global_dp_group.slice(hidden_states, dim=0)
+            hidden_states = self._dp_transform_exit(hidden_states, num_tokens)
             if len(origin_shape) == 3:
                 hidden_states = hidden_states.view(
                     *origin_shape[:2], *hidden_states.shape[1:]
@@ -318,6 +426,7 @@ class FusedMoETensorCast(FusedMoEBase):
         ep_group: Optional[ParallelGroup] = _DEFAULT_PG,
         num_external_shared_experts: int = 0,
         num_global_experts: Optional[int] = None,
+        global_tp_size: int = 1,
     ):
         super().__init__(
             moe_config, experts, shared_experts, shared_experts_gate, top_k
@@ -327,6 +436,9 @@ class FusedMoETensorCast(FusedMoEBase):
             self.experts.num_experts if self.experts is not None else 0
         )
         self.num_external_shared_experts = num_external_shared_experts
+        # Global TP size for per-expert local padding.
+        # RowParallelLinear.gather_slice_data needs token dim % global_tp == 0.
+        self._global_tp_size = global_tp_size
 
         if self.experts is not None:
             expert_idx_start, num_local_experts = assign_experts(
@@ -337,6 +449,17 @@ class FusedMoETensorCast(FusedMoEBase):
             self.experts.slice_experts(expert_idx_start, num_local_experts)
             self.num_local_experts = num_local_experts
             self.expert_idx_start = expert_idx_start
+
+    def _run_shared_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.shared_experts is None:
+            raise RuntimeError("_run_shared_experts called but shared_experts is None")
+        output = self.shared_experts(hidden_states)
+        if self.shared_experts_gate:
+            output = (
+                torch.nn.functional.sigmoid(self.shared_experts_gate(hidden_states))
+                * output
+            )
+        return output
 
     def get_split_sizes(self, num_tokens: int, top_k: int):
         num_tokens_per_expert = num_tokens // self.num_global_experts
@@ -474,6 +597,7 @@ class FusedMoETensorCast(FusedMoEBase):
         hidden_states: torch.Tensor,
         topk_indices: torch.Tensor,  # [bsz, seq, topk]
         topk_weights: torch.Tensor,
+        skip_shared_experts: bool = False,
     ) -> torch.Tensor:
         original_shape = hidden_states.shape  # e.g., (2, 100, 4096)
         num_tokens = topk_indices.numel()
@@ -513,21 +637,19 @@ class FusedMoETensorCast(FusedMoEBase):
         experts_hidden_states = []
         if self.ep_group.rank_in_group < self.num_external_shared_experts:
             assert len(dispatched_hidden_states) == 1
-            shared_expert_output = self.shared_experts(dispatched_hidden_states[0])
-            if self.shared_experts_gate:
-                shared_expert_output = (
-                    torch.nn.functional.sigmoid(
-                        self.shared_experts_gate(dispatched_hidden_states[0])
-                    )
-                    * shared_expert_output
-                )
-            experts_hidden_states.append(shared_expert_output)
+            experts_hidden_states.append(
+                self._run_shared_experts(dispatched_hidden_states[0])
+            )
         else:
             for expert_idx, x in enumerate(dispatched_hidden_states):
+                num_expert_tokens = x.shape[0]
+                pad_size = (-num_expert_tokens) % self._global_tp_size
+                if pad_size > 0:
+                    x = torch.nn.functional.pad(x, (0, 0, 0, pad_size))
                 out = self.experts.call_expert(
                     expert_idx, x, topk_indices, topk_weights
                 )
-                experts_hidden_states.append(out)
+                experts_hidden_states.append(out[:num_expert_tokens])
 
         combined_hidden_states = self.combine_tokens(
             experts_hidden_states,
@@ -541,13 +663,13 @@ class FusedMoETensorCast(FusedMoEBase):
         ).sum(dim=-2)
 
         final_hidden_states = final_hidden_states.view(original_shape)
-        if self.shared_experts and self.num_external_shared_experts == 0:
-            shared_expert_output = self.shared_experts(hidden_states)
-            if self.shared_experts_gate:
-                shared_expert_output = (
-                    torch.nn.functional.sigmoid(self.shared_experts_gate(hidden_states))
-                    * shared_expert_output
-                )
-            final_hidden_states = final_hidden_states + shared_expert_output
+        if (
+            self.shared_experts
+            and self.num_external_shared_experts == 0
+            and not skip_shared_experts
+        ):
+            final_hidden_states = final_hidden_states + self._run_shared_experts(
+                hidden_states
+            )
 
         return final_hidden_states.to(hidden_states.dtype)

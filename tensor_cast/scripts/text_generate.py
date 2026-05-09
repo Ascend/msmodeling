@@ -110,6 +110,11 @@ def main():
         help="Quantize the KV cache with the given action",
     )
     parser.add_argument(
+        "--enable-sequence-parallel",
+        action="store_true",
+        help="Enable the sequence parallel graph rewrite pass during compilation.",
+    )
+    parser.add_argument(
         "--graph-log-url",
         type=str,
         default=None,
@@ -241,6 +246,17 @@ def main():
         "then each device hosting the routing experts will also add one redundant expert.",
     )
     parser.add_argument(
+        "--enable-shared-expert-tp",
+        action="store_true",
+        help="Enable vLLM-style tensor parallel for shared experts. "
+        "This uses dense-MLP TP for shared_experts with delayed down_proj reduction.",
+    )
+    parser.add_argument(
+        "--enable-dispatch-ffn-combine",
+        action="store_true",
+        help="Enable dispatch_ffn_combine fusion pattern during compilation.",
+    )
+    parser.add_argument(
         "--enable-external-shared-experts",
         action="store_true",
         help="Whether or not to implement external shared experts",
@@ -296,14 +312,32 @@ def main():
         help="Width of the input images",
     )
 
+    parser.add_argument(
+        "--export-empirical-metrics",
+        type=str,
+        default=None,
+        help="(developer only) Export M1-M5 metrics report as JSON for offline M6 computation. "
+        "Requires --performance-model profiling",
+    )
+
     args = parser.parse_args()
     log_level = LOG_LEVELS[args.log_level.lower()]
     logging.getLogger().setLevel(log_level)
     if not logging.getLogger().handlers:
         logging.basicConfig(level=log_level)
 
+    # Validate developer-only options
+    if args.export_empirical_metrics and "profiling" not in args.performance_model:
+        parser.error(
+            "--export-empirical-metrics requires --performance-model profiling"
+        )
+
     if args.graph_log_url:
         config.compilation.debug.graph_log_url = args.graph_log_url
+    config.compilation.passes.enable_sequence_parallel = args.enable_sequence_parallel
+    config.compilation.fusion_patterns.enable_dispatch_ffn_combine = (
+        args.enable_dispatch_ffn_combine
+    )
 
     selected_embedding_tp_mode = args.word_embedding_tp
     args.word_embedding_tp = selected_embedding_tp_mode is not None
@@ -315,6 +349,22 @@ def main():
     model_runner = ModelRunner(user_input)
     metrics = model_runner.run_inference(generate_inputs_func=generate_inputs)
     metrics.print_info()
+
+    # Export metrics JSON for offline M6 computation
+    if args.export_empirical_metrics:
+        from pathlib import Path
+
+        from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
+        from tensor_cast.performance_model.metrics_collector import MetricsCollector
+
+        for pm in model_runner.perf_models:
+            if isinstance(pm, EmpiricalPerformanceModel):
+                collector = MetricsCollector()
+                collector.collect_from_records(pm.op_records)
+                collector.export_hit_miss_report(
+                    output_path=Path(args.export_empirical_metrics),
+                )
+                break
 
 
 if __name__ == "__main__":

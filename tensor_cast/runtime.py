@@ -584,6 +584,16 @@ class Runtime(TorchDispatchMode):
                         + " kwargs: "
                         + str(event.op_invoke_info.kwargs),
                         "Output": str(event.op_invoke_info.out),
+                        # Structured input tensor shapes for per-shape analysis tools.
+                        # Only captures top-level Tensor args; ops taking List[Tensor]
+                        # (e.g. aten.cat, grouped_matmul) will show [] here.
+                        "simulation_shapes": str(
+                            [
+                                list(a.shape)
+                                for a in event.op_invoke_info.args
+                                if isinstance(a, torch.Tensor)
+                            ]
+                        ),
                         **{
                             name: str(value)
                             for name, value in result.statistics.items()

@@ -1912,6 +1912,389 @@ def _estimate_mxfp4_linear_all_reduce(
     )
 
 
+# ---------------------------------------------------------------------------
+# DFC (DispatchFFNCombine) analytic roofline estimator
+# ---------------------------------------------------------------------------
+
+
+_INT4_GMM_TARGETS = frozenset(
+    {
+        torch.ops.tensor_cast.grouped_matmul_quant_int4.default,
+        torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default,
+    }
+)
+
+
+def _compute_time_from_properties(
+    properties: OpInvokeInfo.PerformanceProperties,
+    device_profile: DeviceProfile,
+) -> float:
+    """Extract FLOPs from op properties and compute time (no memory).
+
+    Logic mirrors _estimate_default_without_static_cost but returns only
+    the compute component, ignoring memory access time.  Used by the DFC
+    estimator to avoid double-counting intermediate activation HBM access.
+    """
+    compute_time_s = 0.0
+    for dtype in DeviceProfile.DTYPES:
+        if dtype in properties.compute_ops:
+            compute_ops = properties.compute_ops[dtype]
+            if compute_ops.mma_ops > 0 and dtype in device_profile.mma_ops:
+                device_mma_ops = (
+                    device_profile.mma_ops[dtype] * device_profile.compute_efficiency
+                )
+                compute_time_s += compute_ops.mma_ops / device_mma_ops
+            if compute_ops.gp_ops > 0 and dtype in device_profile.gp_ops:
+                device_gp_ops = (
+                    device_profile.gp_ops[dtype] * device_profile.compute_efficiency
+                )
+                compute_time_s += compute_ops.gp_ops / device_gp_ops
+    return compute_time_s
+
+
+def _logical_weight_k(w: torch.Tensor, is_int4: bool) -> int:
+    """Derive logical K (input dimension) from a weight tensor.
+
+    For INT4 packed weights the physical shape encodes 2 values per byte,
+    so shape[0] is K/pack_factor.  Uses the same pack_factor formula as
+    _static_quant_linear_properties_helper (L120-139).
+
+    For all other dtypes (BF16, INT8, FP8, MXFP4) shape[0] is logical K.
+    """
+    if is_int4 and w.dim() == 2:
+        pack_factor = (w.element_size() * 8) // 4
+        logical_total = w.numel() * pack_factor
+        return logical_total // w.shape[1]
+    return w.shape[0]
+
+
+def _estimate_dfc_common(
+    op_invoke_info: OpInvokeInfo,
+    device_profile: DeviceProfile,
+    x: torch.Tensor,
+    expert_indices: torch.Tensor,
+    gmm1_swiglu_target,
+    gmm1_w_args: tuple,
+    gmm2_target,
+    gmm2_w_args: tuple,
+    rank: int,
+    rank_group,
+) -> PerformanceModel.Result:
+    """Core DFC estimator: T_dfc = max(T_compute, T_memory) + T_comm.
+
+    T_compute = T_gmm1 + T_gmm2  (sum, no pipeline overlap)
+    T_memory  = real HBM only (x + weights + output, NOT intermediates)
+    T_comm    = 2 * T_all_to_all  (serial, no overlap with compute)
+    """
+    # --- Build dummy activation for grouped_matmul calls ---
+    # M_total = total dispatched tokens across all experts = bs * seq * top_k
+    M_total = expert_indices.numel()
+    hidden_size = x.shape[-1]
+
+    # Use the weight dtype for dummy activation so that MMA throughput is
+    # computed for the correct dtype (e.g. INT8 for W8A8, not float16).
+    # This is critical: grouped_matmul properties key MMA ops off x.dtype.
+    first_w = gmm1_w_args[0]
+    if isinstance(first_w, (list, tuple)):
+        first_w = first_w[0] if first_w else None
+    raw_weight_dtype = first_w.dtype if first_w is not None else x.dtype
+    # INT4 packed weights use uint8 storage (2 values per byte), but MMA
+    # runs on INT8.  Map uint8 → int8 so DeviceProfile throughput lookup works.
+    weight_dtype = torch.int8 if raw_weight_dtype == torch.uint8 else raw_weight_dtype
+
+    # Determine number of experts from the weight list length.
+    # gmm1_w_args[0] is the weight list (List[Tensor]), one per expert.
+    first_w_list = gmm1_w_args[0]
+    num_experts = len(first_w_list) if isinstance(first_w_list, (list, tuple)) else 1
+
+    # Build dummy activation list matching the expert count.
+    # Distribute M_total evenly across experts so FLOPs and memory are both correct.
+    # FLOPs = sum(M_i * N * K * 2) = M_total * N * K * 2 when all experts share (N,K).
+    tokens_per_expert = max(1, M_total // num_experts) if num_experts > 0 else M_total
+    dummy_gmm1_x_list = [
+        torch.empty((tokens_per_expert, hidden_size), dtype=weight_dtype, device="meta")
+        for _ in range(num_experts)
+    ]
+
+    # --- GMM1 (gate_up_proj + SwiGLU) ---
+    gmm1_full_args = (dummy_gmm1_x_list, *gmm1_w_args)
+    gmm1_out = gmm1_swiglu_target(*gmm1_full_args)
+    gmm1_info = OpInvokeInfo(gmm1_swiglu_target, gmm1_full_args, None, gmm1_out)
+    gmm1_props = gmm1_info.get_perf_properties()
+    gmm1_compute_s = _compute_time_from_properties(gmm1_props, device_profile)
+
+    # --- GMM2 (down_proj) ---
+    gmm2_first_w_list = gmm2_w_args[0]
+    gmm2_first_w = (
+        gmm2_first_w_list[0]
+        if isinstance(gmm2_first_w_list, (list, tuple))
+        else gmm2_first_w_list
+    )
+    gmm2_weight_dtype = gmm2_first_w.dtype if gmm2_first_w is not None else weight_dtype
+    # Derive logical K from weight shape. For INT4 packed weights the physical
+    # shape[0] is K/pack_factor; use the same is_int4 + pack_factor logic as
+    # _static_quant_linear_properties_helper (L120-139) for consistency.
+    is_int4 = gmm2_target in _INT4_GMM_TARGETS
+    gmm2_K = _logical_weight_k(gmm2_first_w, is_int4)
+    gmm2_num_experts = (
+        len(gmm2_first_w_list) if isinstance(gmm2_first_w_list, (list, tuple)) else 1
+    )
+    dummy_gmm2_x_list = [
+        torch.empty((tokens_per_expert, gmm2_K), dtype=gmm2_weight_dtype, device="meta")
+        for _ in range(gmm2_num_experts)
+    ]
+
+    gmm2_full_args = (dummy_gmm2_x_list, *gmm2_w_args)
+    gmm2_out = gmm2_target(*gmm2_full_args)
+    gmm2_info = OpInvokeInfo(gmm2_target, gmm2_full_args, None, gmm2_out)
+    gmm2_props = gmm2_info.get_perf_properties()
+    gmm2_compute_s = _compute_time_from_properties(gmm2_props, device_profile)
+
+    total_compute_s = gmm1_compute_s + gmm2_compute_s
+
+    # --- HBM memory: x + expert_indices + all weights + output (no intermediates) ---
+    memory_bytes = 0.0
+    # Input activation + routing indices
+    memory_bytes += bytes_of_tensor(x)
+    memory_bytes += bytes_of_tensor(expert_indices)
+    # Output
+    memory_bytes += bytes_of_tensor(op_invoke_info.out)
+    # GMM1 weight args (already weights-only, iterate all list-of-tensor args)
+    for a in gmm1_w_args:
+        if isinstance(a, (list, tuple)):
+            for t in a:
+                if isinstance(t, torch.Tensor):
+                    memory_bytes += bytes_of_tensor(t)
+        elif isinstance(a, torch.Tensor):
+            memory_bytes += bytes_of_tensor(a)
+    # GMM2 weight args
+    for a in gmm2_w_args:
+        if isinstance(a, (list, tuple)):
+            for t in a:
+                if isinstance(t, torch.Tensor):
+                    memory_bytes += bytes_of_tensor(t)
+        elif isinstance(a, torch.Tensor):
+            memory_bytes += bytes_of_tensor(a)
+
+    memory_bandwidth = (
+        device_profile.memory_bandwidth_bytes_ps * device_profile.memory_efficiency
+    )
+    memory_time_s = memory_bytes / memory_bandwidth
+
+    # --- Communication: 2 x all_to_all (dispatch + combine) ---
+    # Comm runs on the ROUTED tensor (after init_routing_v2), not pre-routing x.
+    # Routed tensor shape = (M_total, hidden_size) where M_total = bs*seq*top_k.
+    comm_time_s = 0.0
+    ep_size = len(rank_group) if isinstance(rank_group, (list, tuple)) else 1
+    if ep_size > 1 and M_total > 0:
+        tokens_per_rank = max(1, M_total // ep_size)
+        split_sizes = [tokens_per_rank] * ep_size
+        # DFC kernel dispatches quantized tokens: INT8 for W8A8, BF16 for BF16.
+        # weight_dtype matches the dispatch dtype for all current variants.
+        # TODO: if a future variant breaks this assumption, add explicit
+        # comm_dtype parameter to _estimate_dfc_common.
+        routed_x = torch.empty(
+            (M_total, hidden_size), dtype=weight_dtype, device="meta"
+        )
+
+        comm_info = OpInvokeInfo(
+            torch.ops.tensor_cast.all_to_all.default,
+            (routed_x, split_sizes, split_sizes, rank, rank_group),
+            None,
+            routed_x,
+        )
+        one_a2a_result = _estimate_collective_comm(comm_info, device_profile)
+        comm_time_s = 2 * one_a2a_result.execution_time_s
+
+    # --- Combine: max(compute, memory) + comm ---
+    # Spec formula: T_dfc = max(T_compute, T_memory) + T_comm
+    # No extra static_cost — DFC is a single fused kernel launch.
+    roofline_time_s = max(total_compute_s, memory_time_s)
+    total_time_s = roofline_time_s + comm_time_s
+
+    result = PerformanceModel.Result(
+        execution_time_s=total_time_s,
+        statistics={
+            "overlap_model": "max(gmm1+gmm2, memory) + 2*all_to_all",
+            "gmm1_compute_s": gmm1_compute_s,
+            "gmm2_compute_s": gmm2_compute_s,
+            StatsKey.COMPUTE: total_compute_s,
+            StatsKey.MEMORY_ACCESS: memory_time_s,
+            "memory_bytes": memory_bytes,
+            "comm_time_s": comm_time_s,
+            "is_compute_bound": total_compute_s > memory_time_s,
+        },
+    )
+    return result
+
+
+@register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine.default, None)
+def _estimate_dfc_bf16(
+    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
+) -> PerformanceModel.Result:
+    (x, expert_indices, gmm1_w, gmm1_bias, gmm2_w, gmm2_bias, rank, rank_group) = (
+        op_invoke_info.args
+    )
+    return _estimate_dfc_common(
+        op_invoke_info,
+        device_profile,
+        x,
+        expert_indices,
+        gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_swiglu.default,
+        gmm1_w_args=(gmm1_w, gmm1_bias),
+        gmm2_target=torch.ops.tensor_cast.grouped_matmul.default,
+        gmm2_w_args=(gmm2_w, gmm2_bias),
+        rank=rank,
+        rank_group=rank_group,
+    )
+
+
+@register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine_quant.default, None)
+def _estimate_dfc_quant(
+    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
+) -> PerformanceModel.Result:
+    (
+        x,
+        ei,
+        gmm1_w,
+        gmm1_ws,
+        gmm1_wo,
+        gmm1_xs,
+        gmm1_xo,
+        gmm1_bias,
+        gmm1_dt,
+        gmm2_w,
+        gmm2_ws,
+        gmm2_wo,
+        gmm2_xs,
+        gmm2_xo,
+        gmm2_bias,
+        gmm2_dt,
+        rank,
+        rg,
+    ) = op_invoke_info.args
+    return _estimate_dfc_common(
+        op_invoke_info,
+        device_profile,
+        x,
+        ei,
+        gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default,
+        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_wo, gmm1_xs, gmm1_xo, gmm1_bias, gmm1_dt),
+        gmm2_target=torch.ops.tensor_cast.grouped_matmul_quant.default,
+        gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_wo, gmm2_xs, gmm2_xo, gmm2_bias, gmm2_dt),
+        rank=rank,
+        rank_group=rg,
+    )
+
+
+@register_op_estimator(
+    torch.ops.tensor_cast.dispatch_ffn_combine_quant_int4.default, None
+)
+def _estimate_dfc_quant_int4(
+    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
+) -> PerformanceModel.Result:
+    (
+        x,
+        ei,
+        gmm1_w,
+        gmm1_ws,
+        gmm1_wo,
+        gmm1_xs,
+        gmm1_xo,
+        gmm1_bias,
+        gmm1_dt,
+        gmm2_w,
+        gmm2_ws,
+        gmm2_wo,
+        gmm2_xs,
+        gmm2_xo,
+        gmm2_bias,
+        gmm2_dt,
+        rank,
+        rg,
+    ) = op_invoke_info.args
+    return _estimate_dfc_common(
+        op_invoke_info,
+        device_profile,
+        x,
+        ei,
+        gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default,
+        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_wo, gmm1_xs, gmm1_xo, gmm1_bias, gmm1_dt),
+        gmm2_target=torch.ops.tensor_cast.grouped_matmul_quant_int4.default,
+        gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_wo, gmm2_xs, gmm2_xo, gmm2_bias, gmm2_dt),
+        rank=rank,
+        rank_group=rg,
+    )
+
+
+@register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine_fp8.default, None)
+def _estimate_dfc_fp8(
+    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
+) -> PerformanceModel.Result:
+    (
+        x,
+        ei,
+        gmm1_w,
+        gmm1_ws,
+        gmm1_xs,
+        gmm1_bias,
+        gmm1_dt,
+        gmm2_w,
+        gmm2_ws,
+        gmm2_xs,
+        gmm2_bias,
+        gmm2_dt,
+        rank,
+        rg,
+    ) = op_invoke_info.args
+    return _estimate_dfc_common(
+        op_invoke_info,
+        device_profile,
+        x,
+        ei,
+        gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default,
+        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_xs, gmm1_bias, gmm1_dt),
+        gmm2_target=torch.ops.tensor_cast.grouped_matmul_fp8.default,
+        gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_xs, gmm2_bias, gmm2_dt),
+        rank=rank,
+        rank_group=rg,
+    )
+
+
+@register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine_mxfp4.default, None)
+def _estimate_dfc_mxfp4(
+    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
+) -> PerformanceModel.Result:
+    (
+        x,
+        ei,
+        gmm1_w,
+        gmm1_ws,
+        gmm1_xs,
+        gmm1_bias,
+        gmm1_dt,
+        gmm2_w,
+        gmm2_ws,
+        gmm2_xs,
+        gmm2_bias,
+        gmm2_dt,
+        rank,
+        rg,
+    ) = op_invoke_info.args
+    return _estimate_dfc_common(
+        op_invoke_info,
+        device_profile,
+        x,
+        ei,
+        gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default,
+        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_xs, gmm1_bias, gmm1_dt),
+        gmm2_target=torch.ops.tensor_cast.grouped_matmul_mxfp4.default,
+        gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_xs, gmm2_bias, gmm2_dt),
+        rank=rank,
+        rank_group=rg,
+    )
+
+
 def _estimate_dsa_indexer_breakdown(
     hidden_states: torch.Tensor,
     qa_normed: torch.Tensor,

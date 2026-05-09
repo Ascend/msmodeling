@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from parameterized import parameterized
@@ -7,7 +9,13 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
-from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
+from tensor_cast.layers.moe_layer import (
+    ExpertWrapper,
+    FusedMoETensorCast,
+    MoELayer,
+    ParallelMoELayer,
+)
+from tensor_cast.model_config import ModelConfig, MoEConfig, ParallelConfig, QuantConfig
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.custom_model_registry import get_moe_config
@@ -187,3 +195,402 @@ class ParallelMoETestCase(unittest.TestCase):
             model.num_redundant_experts,
             num_redundant_experts,
         )
+
+
+def _make_fake_gate(top_k, tp_size=1, tp_rank=0, shard_by_tp=False):
+    """Return an nn.Identity whose output is replaced by gate-shaped zeros via hooks."""
+    module = torch.nn.Identity()
+    module.top_k = top_k
+    module.tp_size = tp_size
+    module.tp_rank = tp_rank
+    module.shard_by_tp = shard_by_tp
+    module.seen_shape = None
+
+    def _pre_hook(m, args):
+        m.seen_shape = tuple(args[0].shape)
+
+    def _post_hook(m, inp, out):
+        hidden_states = inp[0]
+        num_tokens = hidden_states.shape[0]
+        local_tokens = num_tokens
+        if m.shard_by_tp and hidden_states.dim() == 2 and m.tp_size > 1:
+            local_tokens = (num_tokens + m.tp_size - 1) // m.tp_size
+        return torch.zeros(
+            local_tokens,
+            256,
+            device=hidden_states.device,
+            dtype=torch.float32,
+        )
+
+    module.register_forward_pre_hook(_pre_hook)
+    module.register_forward_hook(_post_hook)
+    return module
+
+
+def _make_fake_fused_moe(
+    moe_config,
+    experts,
+    shared_experts,
+    shared_experts_gate,
+    top_k,
+    ep_group=None,
+    num_external_shared_experts=0,
+    num_global_experts=None,
+    global_tp_size=1,
+):
+    """Return an nn.Identity that records forward inputs via hooks."""
+    module = torch.nn.Identity()
+    module.moe_config = moe_config
+    if experts is None:
+        module.experts = None
+    elif isinstance(experts, ExpertWrapper):
+        module.experts = experts
+    else:
+        module.experts = ExpertWrapper(experts)
+    module.shared_experts = shared_experts
+    module.shared_experts_gate = shared_experts_gate
+    module.top_k = top_k
+    module.ep_group = ep_group
+    module.num_external_shared_experts = num_external_shared_experts
+    module.num_global_experts = num_global_experts or (
+        module.experts.num_experts if module.experts is not None else 0
+    )
+    module.forward_inputs = []
+
+    def _run_shared_experts(hidden_states):
+        assert shared_experts is not None
+        output = shared_experts(hidden_states)
+        if shared_experts_gate:
+            output = (
+                torch.nn.functional.sigmoid(shared_experts_gate(hidden_states)) * output
+            )
+        return output
+
+    module._run_shared_experts = _run_shared_experts
+
+    def _pre_hook(m, args, kwargs):
+        skip = args[3] if len(args) > 3 else kwargs.get("skip_shared_experts", False)
+        m.forward_inputs.append(
+            (
+                tuple(args[0].shape),
+                tuple(args[1].shape),
+                tuple(args[2].shape),
+                skip,
+            )
+        )
+        # Filter args to (hidden_states,) so Identity.forward works.
+        return (args[0],), {}
+
+    module.register_forward_pre_hook(_pre_hook, with_kwargs=True)
+    _make_fake_fused_moe.last_instance = module
+    return module
+
+
+_make_fake_fused_moe.last_instance = None
+
+
+def _make_spy_identity():
+    """Return an nn.Identity with call_count and seen_shape tracked via forward_pre_hook."""
+    module = torch.nn.Identity()
+    module.call_count = 0
+    module.seen_shape = None
+
+    def _hook(m, args):
+        m.call_count += 1
+        m.seen_shape = tuple(args[0].shape)
+
+    module.register_forward_pre_hook(_hook)
+    return module
+
+
+def _make_spy_zeros_gate():
+    """Like _make_spy_identity but forward_hook replaces the output with zeros."""
+    module = torch.nn.Identity()
+    module.call_count = 0
+    module.seen_shape = None
+
+    def _pre_hook(m, args):
+        m.call_count += 1
+        m.seen_shape = tuple(args[0].shape)
+
+    def _post_hook(m, inp, out):
+        return torch.zeros_like(out)
+
+    module.register_forward_pre_hook(_pre_hook)
+    module.register_forward_hook(_post_hook)
+    return module
+
+
+class _FakeParallelGroup:
+    def __init__(self, world_size, rank_in_group=0, name="pg"):
+        self.world_size = world_size
+        self.rank_in_group = rank_in_group
+        self.name = name
+        self.all_reduce_calls = 0
+
+    def all_reduce(self, input_):
+        self.all_reduce_calls += 1
+        return input_
+
+    def slice(self, input_, dim=0):
+        split_size = input_.shape[dim] // self.world_size
+        start = self.rank_in_group * split_size
+        return torch.narrow(input_, dim=dim, start=start, length=split_size)
+
+    def all_gather(self, input_, dim=0):
+        return torch.cat([input_] * self.world_size, dim=dim)
+
+    def all_to_all(self, input_, output_split_sizes, input_split_sizes):
+        return input_
+
+
+class _PadSensitiveExpert(torch.nn.Module):
+    def __init__(self, divisor):
+        super().__init__()
+        self.divisor = divisor
+        self.call_count = 0
+        self.seen_shape = None
+
+    def forward(self, x):
+        self.call_count += 1
+        self.seen_shape = tuple(x.shape)
+        assert x.shape[0] % self.divisor == 0
+        return x + 1
+
+
+def test_parallel_moe_ep_route_before_tp_slice_smoke():
+    gate = _make_fake_gate(top_k=2, tp_size=2, shard_by_tp=False)
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=2,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(4)]),
+        shared_experts=None,
+        shared_experts_gate=None,
+    )
+    moe_config = MoEConfig(module_name="FakeMoE")
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=1),
+            global_tp_group=_FakeParallelGroup(world_size=2, rank_in_group=0),
+            mlp_tp_group=_FakeParallelGroup(world_size=2, rank_in_group=0),
+            ep_group=_FakeParallelGroup(world_size=2, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(1, 6, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert output.shape == (1, 6, 16)
+    # For non-shared_expert_tp path, routing happens after TP slice.
+    # With tp_size=2 and seq_len=6, each TP rank routes 3 tokens.
+    assert gate.seen_shape == (3, 16)
+
+    fused_moe = _make_fake_fused_moe.last_instance
+    assert fused_moe is not None
+    # After TP slice (world_size=2): 6/2 = 3 tokens per rank.
+    assert fused_moe.forward_inputs == [((3, 16), (3, 2), (3, 2), False)]
+
+
+def test_parallel_moe_ep_route_before_tp_slice_small_seq_len():
+    gate = _make_fake_gate(top_k=2, tp_size=8, shard_by_tp=False)
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=2,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(4)]),
+        shared_experts=None,
+        shared_experts_gate=None,
+    )
+    moe_config = MoEConfig(module_name="FakeMoE")
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=1),
+            global_tp_group=_FakeParallelGroup(world_size=8, rank_in_group=0),
+            mlp_tp_group=_FakeParallelGroup(world_size=8, rank_in_group=0),
+            ep_group=_FakeParallelGroup(world_size=2, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(1, 1, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert output.shape == (1, 1, 16)
+    # Gate still sees the real token count before TP-domain alignment.
+    assert gate.seen_shape == (1, 16)
+
+    fused_moe = _make_fake_fused_moe.last_instance
+    assert fused_moe is not None
+    # seq_len=1 pads to tp_size=8, then TP slice keeps 1 token per rank.
+    assert fused_moe.forward_inputs == [((1, 16), (1, 2), (1, 2), False)]
+
+
+def test_fused_moe_per_expert_local_padding_restores_real_token_count():
+    hidden_states = torch.arange(64, dtype=torch.float32).view(4, 16)
+    topk_indices = torch.zeros(4, 1, dtype=torch.long)
+    topk_weights = torch.ones(4, 1, dtype=torch.float32)
+    expert = _PadSensitiveExpert(divisor=8)
+    fused_moe = FusedMoETensorCast(
+        moe_config=MoEConfig(module_name="FakeMoE"),
+        experts=torch.nn.ModuleList([expert, torch.nn.Identity()]),
+        shared_experts=None,
+        shared_experts_gate=None,
+        top_k=1,
+        ep_group=_FakeParallelGroup(world_size=1),
+        num_global_experts=2,
+        global_tp_size=8,
+    )
+
+    output = fused_moe(hidden_states, topk_indices, topk_weights)
+
+    assert expert.call_count == 1
+    assert expert.seen_shape == (8, 16)
+    assert output.shape == hidden_states.shape
+    assert output.dtype == hidden_states.dtype
+
+
+def test_parallel_moe_shared_expert_tp_skip_inner_shared_experts():
+    gate = _make_fake_gate(top_k=2, tp_size=2, shard_by_tp=True)
+    shared_experts = _make_spy_identity()
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=2,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(4)]),
+        shared_experts=shared_experts,
+        shared_experts_gate=None,
+    )
+    moe_config = MoEConfig(
+        module_name="FakeMoE",
+        enable_shared_expert_tp=True,
+    )
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        global_tp_group = _FakeParallelGroup(world_size=2, rank_in_group=0, name="tp")
+        mlp_tp_group = _FakeParallelGroup(world_size=4, rank_in_group=0, name="mlp_tp")
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=1),
+            global_tp_group=global_tp_group,
+            mlp_tp_group=mlp_tp_group,
+            ep_group=_FakeParallelGroup(world_size=2, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(1, 6, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert output.shape == (1, 6, 16)
+    assert gate.seen_shape == (6, 16)
+    assert shared_experts.call_count == 1
+    assert shared_experts.seen_shape == (6, 16)
+    assert global_tp_group.all_reduce_calls == 0
+    assert mlp_tp_group.all_reduce_calls == 1
+
+    fused_moe = _make_fake_fused_moe.last_instance
+    assert fused_moe is not None
+    assert fused_moe.forward_inputs == [((3, 16), (3, 2), (3, 2), True)]
+
+
+def test_parallel_moe_shared_expert_tp_with_gate():
+    gate = _make_fake_gate(top_k=2, tp_size=2, shard_by_tp=True)
+    shared_experts = _make_spy_identity()
+    shared_experts_gate = _make_spy_zeros_gate()
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=2,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(4)]),
+        shared_experts=shared_experts,
+        shared_experts_gate=shared_experts_gate,
+    )
+    moe_config = MoEConfig(
+        module_name="FakeMoE",
+        enable_shared_expert_tp=True,
+    )
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        global_tp_group = _FakeParallelGroup(world_size=2, rank_in_group=0, name="tp")
+        mlp_tp_group = _FakeParallelGroup(world_size=4, rank_in_group=0, name="mlp_tp")
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=1),
+            global_tp_group=global_tp_group,
+            mlp_tp_group=mlp_tp_group,
+            ep_group=_FakeParallelGroup(world_size=2, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(1, 6, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert output.shape == (1, 6, 16)
+    assert gate.seen_shape == (6, 16)
+    assert shared_experts.call_count == 1
+    assert shared_experts.seen_shape == (6, 16)
+    assert shared_experts_gate.call_count == 1
+    assert shared_experts_gate.seen_shape == (6, 16)
+    assert global_tp_group.all_reduce_calls == 0
+    assert mlp_tp_group.all_reduce_calls == 1
+
+    fused_moe = _make_fake_fused_moe.last_instance
+    assert fused_moe is not None
+    assert fused_moe.forward_inputs == [((3, 16), (3, 2), (3, 2), True)]
+
+
+def test_parallel_moe_shared_expert_tp_without_dp_transform():
+    gate = _make_fake_gate(top_k=2)
+    shared_experts = _make_spy_identity()
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=2,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(4)]),
+        shared_experts=shared_experts,
+        shared_experts_gate=None,
+    )
+    moe_config = MoEConfig(
+        module_name="FakeMoE",
+        enable_shared_expert_tp=True,
+    )
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        global_tp_group = _FakeParallelGroup(world_size=2, rank_in_group=0, name="tp")
+        mlp_tp_group = _FakeParallelGroup(world_size=4, rank_in_group=0, name="mlp_tp")
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=2),
+            global_tp_group=global_tp_group,
+            mlp_tp_group=mlp_tp_group,
+            ep_group=_FakeParallelGroup(world_size=2, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(1, 6, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert output.shape == (1, 6, 16)
+    assert parallel_moe.transform_dp_group is False
+    assert gate.seen_shape == (6, 16)
+    assert shared_experts.call_count == 1
+    assert shared_experts.seen_shape == (6, 16)
+    assert global_tp_group.all_reduce_calls == 0
+    assert mlp_tp_group.all_reduce_calls == 1
+
+    fused_moe = _make_fake_fused_moe.last_instance
+    assert fused_moe is not None
+    assert fused_moe.forward_inputs == [((6, 16), (6, 2), (6, 2), True)]

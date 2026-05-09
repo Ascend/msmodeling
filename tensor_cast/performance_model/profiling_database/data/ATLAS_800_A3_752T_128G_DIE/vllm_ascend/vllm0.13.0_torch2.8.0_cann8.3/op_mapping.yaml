@@ -1,0 +1,1301 @@
+# op_mapping.yaml — operator mapping table (Production-ready)
+# Path: tensor_cast/performance_model/perf_database/data/{device}/vllm_ascend/{version}/op_mapping.yaml
+#
+# Mapping methodology (follow tutorial/OP_PLUGIN_MAPPING_TUTORIAL.md):
+# Each mapping follows a complete evidence chain, and the evidence is written into the notes field:
+# Path A: TC op → torch_npu/aten API → op-plugin YAML → C++ impl → EXEC_NPU_CMD(aclnn*) → Profiling Type
+# Path B: vLLM-ascend Python → torch_npu.npu_* → op-plugin → aclnn* → Profiling Type
+# Path C: vLLM-ascend fusion pass → custom kernel → Profiling Type
+#
+# Data source:
+# - TensorCast registration operator: register_tensor_cast_op (56 ops, tensor_cast/ops/*.py)
+#   - op-plugin: /home/horacehxw/Projects/op-plugin/ (op_plugin_functions.yaml + opapi/*.cpp)
+#   - vLLM-ascend: vllm_ascend/ops/*.py (torch_npu pybind + Triton kernels)
+# - DSV3 PandD Profiling (CANN 8.3): 32 cards W8A8, 22773 kernels, 68 unique Types
+# - Qwen3-32B PandD Profiling (CANN 8.3): 16 cards BF16, 14832 kernels, 51 unique Types
+#
+# Field description:
+# kernel_type: Profiling Type column value (used for database query key)
+# category: operator category (drives query dispatch, such as communication)
+# query_mode: special query mode (such as attention_special)
+# composite: true means 1:N mapping, which needs to be decomposed and queried kernel by kernel.
+# sub_kernels: Composite mapping sub-kernel list
+# notes: chain of evidence + additional explanation
+#
+# ============================================================================
+#Field Reference (Field Reference)
+# ============================================================================
+#
+# --- Top-level Fields ---
+#
+# version (string): vLLM-ascend version number, identifying the profiling data source.
+# device (string): Hardware device model (such as ATLAS_800_A3_752T_128G_DIE).
+# cann_version (string): CANN version number, affects kernel type and fusion behavior.
+# pytorch_version (string): PyTorch version number.
+# op_plugin_version (string): op-plugin version number.
+# collection_date (string): profiling data collection date (YYYY-MM-DD).
+# communication_data_ref (string): Relative path to communication CSV data.
+# communication_fallback (string): Fallback strategy when communication query misses (analytic).
+# interpolation_policy: Interpolation policy configuration.
+# default_method (string): Default interpolation method (linear). All operators default to dtype+format
+# Exact matching, linear interpolation of shape dimension.
+# kernel_overrides (map): Interpolation override configuration for a specific kernel.
+# Example: FusedInferAttentionScore: { shape_transform: sqrt }
+# shape_transform: sqrt operator for O(seq²) complexity, interpolating in sqrt(seq) space.
+#
+# --- Available fields for each mapping in operator_mappings ---
+#
+# kernel_type (string, required*):
+# The value of the Type column in NPU Profiling kernel_details.csv is also the CSV file name.
+# Constraint: Must exactly match the file name of {kernel_type}.csv in the data/ directory.
+# Example: kernel_type: MatMulV2 → Query MatMulV2.csv
+# * Can be omitted when zero_cost: true or composite: true.
+#
+# alternate_kernel_types (list[string], optional):
+# List of alternative kernel types, sorted by priority. When the CSV query of kernel_type misses,
+# Try the kernel types in the alternate list in sequence.
+# Constraint: Each value must have a corresponding {name}.csv file.
+# Example: alternate_kernel_types: [MatMulV3, MatMulCommon]
+#
+# category (string, optional):
+# Operator category, drives query dispatch logic. Default is "compute".
+# Optional values: compute | communication
+# - compute: standard calculation operator, matches CSV by shape (default)
+# - communication: communication operator, query hccl CSV by message_bytes + topology_tier
+# Example: category: communication → Take the communication query path
+#
+# query_mode (string, optional):
+# Special query mode, overriding the default shape matching logic.
+# Optional values: attention_special | elementwise
+# - attention_special: query by (batch, seq, heads, head_dim) quadruple
+# - elementwise: match by output shape, scale using byte-ratio dtype
+# Example: query_mode: attention_special
+#
+# composite (bool, optional):
+# true indicates 1:N composite mapping, and one op of TC corresponds to multiple kernels on the NPU.
+# Need to be used with sub_kernels.
+# Constraint: kernel_type is not required when composite: true.
+#
+# sub_kernels (list[string], required for composite):
+# List of sub-kernels for composite mapping. When querying, query the sub-kernels one by one and sum them up.
+# Constraint: Each sub-kernel must have a corresponding CSV or be a known communication kernel.
+# Example: sub_kernels: [MatMulV2, hcom_allReduce_]
+#
+# tc_input_count (int, optional):
+# The number of valid tensor inputs on the TC side, used to intercept the first N inputs during shape matching.
+# Background: The input number/order of TC op and NPU kernel may be different (for example, NPU has additional axis parameters).
+# Example: tc_input_count: 2 → only match the shape of the first 2 tensor inputs
+#
+# zero_cost (bool, optional):
+# true means that the op has no actual kernel execution on the NPU (shape-only view, fusion absorption, etc.).
+# The query returns 0 directly, without accessing CSV.
+# Constraint: kernel_type is not required when zero_cost: true.
+#
+# accepted_miss (string, optional):
+# Mark this op's CSV query as MISS as expected behavior (not an error), and explain why.
+# Used when TC exists but the corresponding kernel does not exist in NPU profiling.
+#
+# notes (string, recommended):
+# Evidence chain + supplementary explanation. Format: [Priority] Traceability path + profiling verification.
+# Priority: [HIGH] high frequency/critical path, [MEDIUM] medium frequency, [LOW] low frequency/placeholder.
+#
+# ============================================================================
+# Add new mapping example
+# ============================================================================
+#
+# Example 1: Standard calculation operator (1:1 mapping)
+#   "aten.mm.default":
+# kernel_type: MatMulV2 # CSV file: MatMulV2.csv
+#     notes: "[HIGH] op-plugin: aclnnMm. Profiling: MatMulV2(275x)."
+#
+# Example 2: Communication operator
+#   "tensor_cast.all_reduce.default":
+#     kernel_type: hcom_allReduce_
+# category: communication # Take the communication query path
+#     notes: "[HIGH] HCCL direct."
+#
+# Example 3: Composite operators (static sub_kernels)
+#   "tensor_cast.matmul_all_reduce.default":
+# composite: true # 1:N mapping
+# sub_kernels: [MatMulV2, hcom_allReduce_] # Query and sum one by one
+#     notes: "[MEDIUM] MC2 fusion."
+#
+# Example 4: Zero-cost op
+#   "aten.view.default":
+# zero_cost: true # Return 0 directly
+#     notes: "Shape-only view, no kernel execution on NPU"
+#
+# Example 5: Special query mode
+#   "tensor_cast.attention.default":
+#     kernel_type: FusedInferAttentionScore
+# query_mode: attention_special # Query by (batch,seq,heads,head_dim)
+#     notes: "[HIGH] aclnnFusedInferAttentionScoreV2/V3."
+#
+# ============================================================================
+# Frequently Asked Questions (FAQ)
+# ============================================================================
+#
+# Q1: Where does the value of kernel_type come from?
+# A1: Obtained from the Type column of kernel_details.csv of NPU profiling.
+# After parsing using tools/perf_data_collection/parse_kernel_details.py,
+# Each unique Type will generate a {Type}.csv file.
+#
+# Q2: What should I do if the input numbers of TC op and NPU kernel are different?
+# A2: Use tc_input_count to specify the number of valid inputs on the TC side.
+# For example, TC embedding has (weight, indices), NPU CSV has (weight, indices, axis),
+# Set tc_input_count: 2 to only match the first 2.
+#
+# Q3: What should I do if one TC op corresponds to multiple NPU kernels?
+# A3: Use composite: true + sub_kernels list.
+# When querying, query the sub-kernels one by one and sum the delay.
+#
+# Q4: How to deal with the kernel that appears in NPU profiling but has no corresponding op in TC?
+# A4: Add the "profiling.{KernelType}" entry in the "Profiling-only Placeholder" area.
+# These entries are used for CSV data integrity, TC will not actively query them.
+#
+# Q5: What should I do if the same aclnn API produces different kernel types in different CANN versions?
+# A5: Use alternate_kernel_types to list all possible kernel types, sorted by priority.
+#
+
+version: "0.15.0"  # CANN 8.3 updated
+device: ATLAS_800_A3_752T_128G_DIE
+cann_version: "8.3.RC1"
+op_plugin_version: "7.2.0"
+collection_date: "2026-03-10"
+
+communication_data_ref: "../../hccl/v8.3.RC1/"
+communication_fallback: analytic
+
+interpolation_policy:
+  default_method: linear # Default for all operators: dtype+format exact matching, shape dimension linear interpolation
+  kernel_overrides: # Only list kernel_types that require special handling
+    FusedInferAttentionScore:
+      shape_transform: sqrt # O(seq²) → interpolation in sqrt(seq) space
+
+
+# ============================================================================
+# Calculate operator mapping (operator_mappings)
+# ============================================================================
+
+operator_mappings:
+
+  # ========== 1. Standard aten operator ==========
+
+  "aten.mm.default":
+    kernel_type: MatMulV2
+    notes: >
+      [HIGH] op-plugin: YAML:3486 / MmKernelNpuOpApi.cpp.
+      aclnn: aclnnMm (ND), aclnnMatmulWeightNz (NZ weight); both Type are MatMulV2.
+      Profiling: Qwen3 Prefill MatMulV2(275x), DSV3 Decode MatMulV2(41x, dynamic path).
+
+  "aten.addmm.default":
+    kernel_type: MatMulV2
+    notes: >
+      [MEDIUM] op-plugin: YAML:915 / AddmmKernelNpuOpApi.cpp.
+      aclnn: aclnnAddmm (ND), aclnnAddmmWeightNz (NZ); The underlying kernel Type is still MatMulV2.
+      In vLLM reasoning, nn.Linear usually takes mm (no bias), and addmm appears less frequently; aclnnAddmm entry is not seen in profiling.
+      [Manual Review] A colleague believes that "addmm has weighted addition and cannot be summarized by MatMulV2"; after verification, AddmmKernelNpuOpApi.cpp calls
+      aclnnAddmm/aclnnAddmmWeightNz, the NPU bottom layer still executes MatMulV2 kernel (bias add is integrated). The mapping is correct.
+
+  "aten.bmm.default":
+    kernel_type: BatchMatMulV2
+    alternate_kernel_types: [batch_matmul_transpose]
+    notes: >
+      [HIGH] Path A. CANN 8.3: TransposeBatchMatMul replaced by BatchMatMulV2 (366x DSv3)
+      and batch_matmul_transpose (366x). op-plugin: BmmKernelNpuOpApi.cpp → aclnnBatchMatMul → BatchMatMulV2.
+      batch_matmul_transpose is the transposed variant (MLA attn_output @ W_UV).
+
+  "aten.embedding.default":
+    kernel_type: GatherV2
+    alternate_kernel_types: [GatherV3]
+    notes: >
+      [HIGH] op-plugin: YAML:1930 / EmbeddingKernelNpuOpApi.cpp.
+      aclnn: aclnnEmbedding; internally implemented as gather dim=0 (computation operator, non-communication).
+      Profiling: DSV3 GatherV2(123x), Qwen3 GatherV2(4x) + GatherV3(8x).
+      [Manual Review] Colleagues marked "embedding type, completely unrelated to communication type"; confirmed that GatherV2 is a computing type kernel (non-communication),
+      The current mapping is not classified as communication, the mapping is correct. GatherV3 also appears in Qwen3, and alternate has been added.
+
+  "aten.index_select.default":
+    kernel_type: GatherV3
+    alternate_kernel_types: [GatherV2]
+    notes: >
+      [MEDIUM] op-plugin: YAML:2664 / IndexSelectKernelNpuOpApi.cpp.
+      aclnn: aclnnIndexSelect → GatherV3 (profiling verification: aclnnIndexSelect_GatherV3AiCore_GatherV3).
+      The acl_op layer calls GatherV2, but the aclnn runtime actually dispatches to GatherV3.
+      A GatherV3 entry exists in Qwen3 Profiling. Keep GatherV2 as an alternative for compatibility with older CANN versions.
+      [Manual Review] A colleague confirmed that the actual kernel is GatherV3, which has been corrected.
+
+  "aten.convolution.default":
+    kernel_type: Conv2D
+    notes: >
+      [LOW] op-plugin: YAML:1709 / ConvolutionKernelNpuOpApi.cpp.
+      aclnn: aclnnConvolution.
+      LLM does not contain convolutional layers, and there is no such operator in profiling; it is only used for video/image models (DiT, etc.).
+      [Manual Review] A colleague pointed out "Why is it 2D and not 3D/1D", Conv2D is the actual kernel type name of aclnn (Conv2D is used uniformly even when dealing with 1D/3D);
+      It does not appear in profiling and cannot be verified. If it is extended to DiT, it needs to be confirmed again.
+
+  "aten.cat.default":
+    kernel_type: ConcatD
+    notes: >
+      [HIGH] op-plugin: YAML:1466 / CatKernelNpuOpApi.cpp.
+      aclnn: aclnnCat.
+      Profiling: DSV3 ConcatD(246x), Qwen3 ConcatD(3x).
+
+  "tensor_cast.cat.default":
+    kernel_type: ConcatD
+    notes: >
+      [HIGH] Same as aten.cat.default kernel; TC-specific cat op (retains dtype, only shape calculations).
+      op-plugin: YAML:1466 / CatKernelNpuOpApi.cpp.
+      aclnn: aclnnCat.
+
+  "aten.add.Tensor":
+    kernel_type: Add
+    notes: >
+      [HIGH] op-plugin: YAML:862 / AddKernelNpuOpApi.cpp.
+      aclnn: aclnnAdd (tensor+tensor), aclnnAdds (tensor+scalar); all produce Type=Add.
+      Profiling: DSV3 Decode Add(7545x, residual connection + bias addition).
+      [Manual Review] A colleague marked N but did not give a reason; after checking AddKernelNpuOpApi.cpp, it was confirmed that aclnnAdd → Add, the mapping is correct.
+
+  "aten.to.dtype":
+    kernel_type: Cast
+    alternate_kernel_types: [TensorMove]
+    notes: >
+      [HIGH] op-plugin: CastKernelNpuOpApi.cpp → aclnnCast (dtype conversion).
+      _to_copy path: aclnnInplaceCopy (same dtype produces TensorMove instead of Cast).
+      Profiling: DSV3 Decode Cast(2788x, dtype conversion).
+      [Manual Review] A colleague pointed out that TensorMove/BroadcastTo may occur; after verification, BroadcastTo is a shape broadcast non-dtype conversion,
+      TensorMove only appears when copying the same dtype, has been added as alternate.
+
+
+  # ========== 2. Quantized Linear ==========
+  # op-plugin unified entrance: npu_weight_quant_batchmatmul (YAML:6529)
+
+  "tensor_cast.static_quant_linear.default":
+    kernel_type: QuantBatchMatmulV3
+    notes: >
+      [HIGH] op-plugin: YAML:6529 / WeightQuantBatchMatmulV2KernelNpuOpApi.cpp.
+      aclnn: aclnnWeightQuantBatchMatmulV2/V3; inner_precise=1 → V3 (vLLM default).
+      W8A8; DSV3 Decode in INT8;INT8 ND;FRACTAL_NZ.
+      Profiling: DSV3 Decode QuantBatchMatmulV3(15006x) — the highest frequency operator.
+
+  "tensor_cast.static_quant_linear_int4.default":
+    kernel_type: QuantBatchMatmulV3
+    notes: >
+      [MEDIUM] op-plugin: YAML:6529 (npu_weight_quant_batchmatmul) + YAML:6257 (npu_quant_matmul).
+      aclnn: aclnnWeightQuantBatchMatmulV2/V3, aclnnQuantMatmulV5.
+      W4A8; INT4 weights packed as INT32 (8 values/INT32).
+      Two paths: npu_weight_quant_batchmatmul (antiquant_scale/offset) or npu_quant_matmul (A8W4 → aclnnQuantMatmulV5).
+      There is no W4A8 profiling data verification, but the expected Type of both is QuantBatchMatmulV3.
+
+  "tensor_cast.fp8_linear.default":
+    kernel_type: QuantBatchMatmulV3
+    notes: >
+      [LOW] There is no FP8-specific matmul API in op-plugin.
+      FP8 may pass npu_weight_quant_batchmatmul passed in FP8 dtype,
+      Or rely on a newer version of CANN. Mapping to QuantBatchMatmulV3 is a design-time assumption, to be verified by FP8 profiling.
+
+  "tensor_cast.mxfp4_linear.default":
+    kernel_type: QuantBatchMatmulV3
+    notes: >
+      [LOW] There is no MXFP4 dedicated API in op-plugin. MXFP4 in TC only supports meta tensor.
+      Mapping to QuantBatchMatmulV3 as placeholder, to be verified after hardware support.
+
+
+  # ========== 3. GroupedMatmul (MoE) ==========
+  # op-plugin unified entrance: npu_grouped_matmul (YAML:5954)
+  # All quantization variants share the same API, distinguished by scale/offset/antiquant_* optional parameters
+
+  "tensor_cast.grouped_matmul.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [HIGH] op-plugin: YAML:5954 / GroupedMatmulKernelNpuOpApi.cpp.
+      aclnn: aclnnGroupedMatmul/V4/V5/WeightNz; BF16 base, no scale/offset parameters.
+      Profiling: DSV3 Decode GroupedMatmul(4756x).
+
+  "tensor_cast.grouped_matmul_quant.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [HIGH] op-plugin: YAML:5954 (scale + per_token_scale populated).
+      aclnn: aclnnGroupedMatmulV4/V5/WeightNz.
+      W8A8; scale/per_token_scale parameter filling.
+
+  "tensor_cast.grouped_matmul_quant_int4.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [HIGH] op-plugin: YAML:5954 (antiquant_scale/offset for INT4 dequant).
+      aclnn: aclnnGroupedMatmulV4/V5/WeightNz.
+      W4A8; INT4 weights packed as INT32, C++ handles n0 * INT4_NUMS_IN_INT32.
+
+  "tensor_cast.grouped_matmul_fp8.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [HIGH] op-plugin: YAML:5954 (scale + per_token_scale, no offset).
+      aclnn: aclnnGroupedMatmulV4/V5/WeightNz.
+      FP8; scale only (no offset), same API as base.
+
+  "tensor_cast.grouped_matmul_mxfp4.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [MEDIUM] op-plugin: YAML:5954.
+      aclnn: aclnnGroupedMatmulV4/V5/WeightNz.
+      MXFP4; Same signature as FP8, MXFP4 hardware support depends on CANN version.
+
+
+  # ========== 4. GroupedMatmul+SwiGlu fusion ==========
+  # op-plugin: npu_grouped_matmul_swiglu_quant (YAML:6136, V1 only in 7.2.0; V2 not available)
+  # TC implementation: GroupedMatmulSwigluPass (compilation/freezing_passes/)
+
+  "tensor_cast.grouped_matmul_swiglu.default":
+    kernel_type: GroupedMatmul
+    notes: >
+      [MEDIUM] op-plugin: YAML:5954 (npu_grouped_matmul with act_type parameter).
+      aclnn: aclnnGroupedMatmulV4/V5.
+      BF16 GMM+SwiGlu; Activate SwiGlu fusion via the act_type parameter of npu_grouped_matmul.
+
+  "tensor_cast.grouped_matmul_quant_swiglu.default":
+    kernel_type: GroupedMatmulSwigluQuant
+    notes: >
+      [HIGH] op-plugin: YAML:6136 (V1 only) / GroupedMatmulSwigluQuantNpuOpapi.cpp.
+      aclnn: aclnnGroupedMatmulSwigluQuantWeightNZ (V1 only; V2 not in op-plugin 7.2.0).
+      W8A8 GMM+SwiGlu+Quant three-in-one fusion; output (INT8 output, scale, offset).
+      Profiling: DSV3 Decode DequantSwigluQuant(4879x) corresponds to this fusion operator.
+
+  "tensor_cast.grouped_matmul_quant_int4_swiglu.default":
+    kernel_type: GroupedMatmulSwigluQuant
+    notes: >
+      [LOW] op-plugin: V2 API not available in op-plugin 7.2.0; only V1 at YAML:6136.
+      aclnn: aclnnGroupedMatmulSwigluQuantWeightNZ (V1, W8A8 only).
+      W4A8 GMM+SwiGlu+Quant: V2 API (dequant_mode/dequant_dtype for INT4) expected in future CANN.
+      Currently unsupported in op-plugin 7.2.0; mapping to DequantSwigluQuant is a placeholder.
+
+  "tensor_cast.grouped_matmul_fp8_swiglu.default":
+    kernel_type: GroupedMatmulSwigluQuant
+    notes: >
+      [LOW] op-plugin: V2 API not available in op-plugin 7.2.0; only V1 at YAML:6136.
+      aclnn: aclnnGroupedMatmulSwigluQuantWeightNZ (V1, W8A8 only).
+      FP8 GMM+SwiGlu+Quant: V2 API expected in future CANN. Placeholder mapping.
+
+  "tensor_cast.grouped_matmul_mxfp4_swiglu.default":
+    kernel_type: GroupedMatmulSwigluQuant
+    notes: >
+      [LOW] op-plugin: V2 API not available in op-plugin 7.2.0; only V1 at YAML:6136.
+      aclnn: aclnnGroupedMatmulSwigluQuantWeightNZ (V1, W8A8 only).
+      MXFP4 GMM+SwiGlu+Quant: V2 API expected in future CANN. Placeholder mapping.
+
+
+  # ========== 5. MoE Routing (Token Routing) ==========
+  # EP path: npu_moe_distribute_dispatch_v2 / npu_moe_distribute_combine_v2
+  # Non-EP path: npu_moe_init_routing_v2 / npu_moe_finalize_routing
+
+  "tensor_cast.init_routing_v2.default":
+    kernel_type: MoeTokenPermute
+    tc_input_count: 2
+    notes: >
+      [MEDIUM] op-plugin: YAML:6146 (npu_moe_distribute_dispatch_v2) / MoeDistributeDispatchV2KernelOpApi.cpp.
+      aclnn: aclnnMoeDistributeDispatchV2/V3 (no V4 in op-plugin 7.2.0).
+      EP scenarios map to MoeDistributeDispatchV2; non-EP scenarios map to MoeInitRouting
+      (npu_moe_init_routing_v2, YAML:6130, aclnn: aclnnMoeInitRoutingV2/V3).
+      TC model permute + independent all_to_all, while NPU is fused into a single kernel.
+      Profiling: DSV3 Decode MoeDistributeDispatchV2(2378x).
+
+  "tensor_cast.unpermute_tokens.default":
+    kernel_type: MoeTokenUnpermute
+    tc_input_count: 1
+    notes: >
+      [MEDIUM] op-plugin: YAML:6152 (npu_moe_distribute_combine_v2) / MoeDistributeCombineKernelV2OpApi.cpp.
+      aclnn: aclnnMoeDistributeCombineV2/V3 (no V4 in op-plugin 7.2.0).
+      EP scenarios map to MoeDistributeCombineV2; non-EP scenarios map to MoeFinalizeRouting
+      (npu_moe_finalize_routing, YAML:6115, aclnn: aclnnMoeFinalizeRouting/V2).
+      Profiling: DSV3 Decode MoeDistributeCombineV2(2378x).
+
+  "tensor_cast.moe_gating_top_k_softmax.default":
+    kernel_type: MoeGatingTopK
+    notes: >
+      [HIGH] op-plugin: YAML:6123 (npu_moe_gating_top_k) / MoeGatingTopKKernelNpuOpApi.cpp.
+      aclnn: aclnnMoeGatingTopK.
+      vllm-ascend: vllm_ascend/ops/experts_selector.py → torch_npu.npu_moe_gating_top_k().
+      TC currently uses aten.topk to implement routing, and NPU has a dedicated fusion kernel (the TC operator is to be added and has not been registered in develop).
+      Profiling: DSV3 Decode MoeGatingTopK(2378x).
+
+
+  # ========== 6. Attention ==========
+  # op-plugin: npu_fused_infer_attention_score (YAML:5873) / _v2 (YAML:5886)
+
+  "tensor_cast.attention.default":
+    kernel_type: FusedInferAttentionScore
+    query_mode: attention_special
+    notes: >
+      [HIGH] op-plugin: YAML:5873 / FusedInferAttentionScoreKernelNpuOpApi.cpp.
+      aclnn: aclnnFusedInferAttentionScoreV2 (CANN <8.1.RC1), V3 (>=8.1.RC1).
+      The two modes of PA/FA have the same Type.
+      Profiling: DSV3 Decode(2501x), Qwen3 Prefill(67x).
+
+  "tensor_cast.attention_quant.default":
+    kernel_type: FusedInferAttentionScore
+    query_mode: attention_special
+    notes: >
+      [HIGH] op-plugin: YAML:5873 (V1 with dequant/quant scales) + YAML:5886 (V2 with quant_mode).
+      aclnn: aclnnFusedInferAttentionScoreV2/V3/V4; V2 API goes to V4 aclnn.
+      Quantize attention; quant params are filled in but the underlying kernel Type remains unchanged.
+
+
+  # ========== 7. MLA (Multihead Latent Attention) ==========
+  # MLA uses different kernel combinations for composite op, decode/prefill (branched by decomposer)
+
+  "tensor_cast.multihead_latent_attention.default":
+    composite: true
+    sub_kernels: [TransposeBatchMatMul, FusedInferAttentionScore, MatMulV2, RINGMLAPrefillBF16Kernel]
+    notes: >
+      [HIGH] MLA composite, decode/prefill using different kernel combinations (forked by decomposer).
+      Decode: TransposeBMM(q@W_UK_T) + FIA(attention) + TransposeBMM(out@W_UV).
+      op-plugin: YAML:6534 (npu_transpose_batchmatmul) + YAML:5873.
+      aclnn: aclnnTransposeBatchMatMul + aclnnFusedInferAttentionScoreV2.
+      Prefill: MatMulV2(kv_c@kv_b_proj) + RINGMLAPrefillBF16Kernel.
+      Note: DSV3 prefill does not use FusedInferAttentionScore (v1.5 verification confirmation).
+
+  "tensor_cast.multihead_latent_attention_quant.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, FusedInferAttentionScore, MatMulV2, RINGMLAPrefillBF16Kernel]
+    notes: >
+      [HIGH] Quantized MLA, decode/prefill using different kernel combinations (branched by decomposer).
+      Decode: QuantBatchMatmulV3(q@W_UK_T) + FIA + QuantBatchMatmulV3(out@W_UV).
+      op-plugin: YAML:6534 + YAML:5873/5886.
+      Prefill: MatMulV2(kv_c@kv_b_proj) + RINGMLAPrefillBF16Kernel.
+      Additional AscendQuantV2/DynamicQuant kernel for intermediate quant/dequant steps.
+
+  "tensor_cast.mlapo.default":
+    composite: true
+    sub_kernels: [MatMulV2, KvRmsNormRopeCache]
+    notes: >
+      [HIGH] MLAPO composite: TC fuses projection+norm+RoPE. Decomposer splits
+      into 3x MatMulV2 (q_a, q_b, kv_a projections) + KvRmsNormRopeCache (post-projection
+      norm+rope). Shapes derived from OpInvokeInfo.args projection weights.
+
+  "tensor_cast.mlapo_quant.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, KvRmsNormRopeCache]
+    notes: >
+      [HIGH] Quantized MLAPO composite: same decomposition, QuantBatchMatmulV3
+      for projections instead of MatMulV2.
+
+
+  # ========== 8. KV Cache ==========
+
+  "tensor_cast.reshape_and_cache.default":
+    kernel_type: ReshapeAndCacheNdKernel
+    notes: >
+      [MEDIUM] op-plugin: ATB ReshapeAndCachAtb.cpp + aclnn YAML:6422 (npu_scatter_pa_kv_cache, was 6493 pre-7.2.0).
+      aclnn: aclnnScatterPaKvCache.
+      Two paths: ATB ReshapeCacheOperation → ReshapeAndCacheNdKernel (Qwen3 Prefill 67x),
+      aclnn ScatterPaKvCache → ScatterPaKvCache (DSV3 Decode 61x, for non-MLA layers).
+      The main mapping uses ReshapeAndCacheNdKernel (ATB prefill path); instead of kernel_type: ScatterPaKvCache.
+
+  "tensor_cast.concat_and_cache_mla.default":
+    kernel_type: ReshapeAndCacheNdKernel
+    notes: >
+      [LOW] op-plugin: ATB ReshapeAndCacheSisoAtb.cpp (atb._npu_reshape_and_cache_siso).
+      MLA KV cache concat+write; usually absorbed by npu_mla_prolog_v2 (no separate profiling entry).
+      When executing independently, go to ATB ReshapeAndCacheSiso → ReshapeAndCacheNdKernel.
+
+  "tensor_cast.kv_rmsnorm_rope_cache.default":
+    kernel_type: KvRmsNormRopeCache
+    notes: >
+      [HIGH] op-plugin: YAML:5646 (npu_kv_rmsnorm_rope_cache).
+      aclnn: aclnnKvRmsNormRopeCache/V2.
+      vllm-ascend: vllm_ascend/ops/mla_v1.py → torch_npu.npu_kv_rmsnorm_rope_cache().
+      TC is currently decomposed into rms_norm + apply_rope + reshape_and_cache (TC operator to be added, not registered in develop).
+      Profiling: DSV3 Decode KvRmsNormRopeCache(2501x).
+
+
+  # ========== 9. Norm Basics ==========
+
+  "tensor_cast.rms_norm.default":
+    kernel_type: RmsNorm
+    notes: >
+      [HIGH] op-plugin: YAML:6335 (npu_rms_norm) / RmsNormKernelOpApi.cpp.
+      aclnn: aclnnRmsNorm.
+      Profiling: DSV3 RmsNorm(2542x), Qwen3 RmsNorm(7x).
+
+  "tensor_cast.add_rms_norm.default":
+    kernel_type: AddRmsNorm
+    notes: >
+      [HIGH] op-plugin: YAML:5560 (npu_add_rms_norm).
+      aclnn: aclnnAddRmsNorm.
+      Profiling: Qwen3 Prefill AddRmsNorm(131x); DSV3 Decode InplaceAddRmsNorm(5002x, in-place variant of the same API).
+
+  "tensor_cast.add_rms_norm2.default":
+    kernel_type: AddRmsNorm
+    notes: >
+      [HIGH] op-plugin: YAML:5560 (same as add_rms_norm, the 3rd return value x_out is also used).
+      aclnn: aclnnAddRmsNorm.
+      Same kernel as add_rms_norm; '2' means using both norm output and updated residual.
+
+  "tensor_cast.swiglu.default":
+    kernel_type: SwiGlu
+    notes: >
+      [HIGH] op-plugin: YAML:6478 (npu_swiglu).
+      aclnn: aclnnSwiGlu.
+      Profiling: Qwen3 Prefill SwiGlu(67x).
+
+
+  # ========== 10. Norm + Static Quant Fusion ==========
+
+  "tensor_cast.rms_norm_quant.default":
+    kernel_type: RmsNormQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:5575 (npu_rms_norm_quant).
+      aclnn: aclnnRmsNormQuant.
+      RmsNorm + static quant fusion kernel; has dedicated aclnn, but no profiling verification (static quant path).
+
+  "tensor_cast.add_rms_norm_quant.default":
+    kernel_type: AddRmsNormQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:5600 (npu_add_rms_norm_quant) / AddRmsNormQuantKernelOpApi.cpp.
+      aclnn: aclnnAddRmsNormQuant/V2; V2 supports beta.
+      AddRmsNorm + static quant fusion; no profiling verification.
+
+  "tensor_cast.add_rms_norm_quant2.default":
+    kernel_type: AddRmsNormQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:5600 (same as add_rms_norm_quant).
+      aclnn: aclnnAddRmsNormQuant/V2.
+      Same kernel as add_rms_norm_quant; '2' means using residual output at the same time.
+
+
+  # ========== 11. Norm + Dynamic Quant Symmetric ==========
+
+  "tensor_cast.rms_norm_dynamic_quant_symmetric.default":
+    composite: true
+    sub_kernels: [RmsNorm, DynamicQuant]
+    notes: >
+      [HIGH] op-plugin: YAML:6335 + YAML:5841; No fused aclnnRmsNormDynamicQuant exists.
+      aclnn: aclnnRmsNorm + aclnnDynamicQuantV2.
+      op-plugin no rms_norm_dynamic_quant fusion API; decomposed into two independent kernels.
+
+  "tensor_cast.add_rms_norm_dynamic_quant_symmetric.default":
+    kernel_type: AddRmsNormDynamicQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6177 (npu_add_rms_norm_dynamic_quant).
+      aclnn: aclnnAddRmsNormDynamicQuantV2.
+      With fused kernel; output_mask controls which outputs are populated; without profiling verification.
+
+  "tensor_cast.add_rms_norm_dynamic_quant2_symmetric.default":
+    kernel_type: AddRmsNormDynamicQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6177 (same as above, using x_out 3rd return value).
+      aclnn: aclnnAddRmsNormDynamicQuantV2.
+      Same as add_rms_norm_dynamic_quant_symmetric kernel; '2' means use residual.
+
+
+  # ========== 12. Norm + Dynamic Quant Asymmetric ==========
+
+  "tensor_cast.rms_norm_dynamic_quant_asymmetric.default":
+    composite: true
+    sub_kernels: [RmsNorm, DynamicQuant]
+    notes: >
+      [HIGH] op-plugin: YAML:6335 + YAML:5845 (npu_dynamic_quant_asymmetric, same as aclnnDynamicQuantV2 with offset).
+      aclnn: aclnnRmsNorm + aclnnDynamicQuantV2.
+      No fused kernel; asymmetric vs symmetric shared aclnnDynamicQuantV2 (offset is padded or not).
+
+  "tensor_cast.add_rms_norm_dynamic_quant_asymmetric.default":
+    kernel_type: AddRmsNormDynamicQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6177.
+      aclnn: aclnnAddRmsNormDynamicQuantV2.
+      Use fused kernel; asymmetric is distinguished by offset output, but the API does not have an explicit asymmetric flag; actual behavior requires device verification.
+
+  "tensor_cast.add_rms_norm_dynamic_quant2_asymmetric.default":
+    kernel_type: AddRmsNormDynamicQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6177.
+      aclnn: aclnnAddRmsNormDynamicQuantV2.
+      Same as add_rms_norm_dynamic_quant_asymmetric kernel; '2' uses residual.
+
+
+  # ========== 13. Norm + Dynamic Quant MXFP4 ==========
+
+  "tensor_cast.rms_norm_dynamic_quant_mxfp4.default":
+    composite: true
+    sub_kernels: [RmsNorm, DynamicQuant]
+    notes: >
+      [LOW] op-plugin: YAML:6335; There is no op-plugin corresponding to the MXFP4 quant part.
+      aclnn: aclnnRmsNorm.
+      RmsNorm + MXFP4 quant decomposition; MXFP4 quant may use npu_dynamic_block_quant (YAML:6929).
+
+  "tensor_cast.add_rms_norm_dynamic_quant_mxfp4.default":
+    composite: true
+    sub_kernels: [AddRmsNorm]
+    notes: >
+      [LOW] op-plugin: YAML:5560; npu_add_rms_norm_dynamic_quant only supports INT8 output, not MXFP4.
+      aclnn: aclnnAddRmsNorm.
+      AddRmsNorm + MXFP4 quant decomposition.
+
+  "tensor_cast.add_rms_norm_dynamic_quant2_mxfp4.default":
+    composite: true
+    sub_kernels: [AddRmsNorm]
+    notes: >
+      [LOW] op-plugin: YAML:5560.
+      aclnn: aclnnAddRmsNorm.
+      Same as add_rms_norm_dynamic_quant_mxfp4; '2' uses residual.
+
+
+  # ========== 14. Quantization ==========
+
+  "tensor_cast.quantize.default":
+    kernel_type: AscendQuantV2
+    notes: >
+      [HIGH] op-plugin: YAML:6292 (npu_quantize) / QuantizeKernelNpuOpApi.cpp.
+      aclnn: aclnnAscendQuant/V3; div_mode=False→aclnnAscendQuant/V3, div_mode=True→legacy AscendQuantV2 GE op.
+      Profiling: DSV3 Decode AscendQuantV2(10004x) — 2nd high frequency operator.
+
+  "tensor_cast.dynamic_quantize_symmetric.default":
+    kernel_type: DynamicQuant
+    notes: >
+      [HIGH] op-plugin: YAML:5841 (npu_dynamic_quant) / DynamicQuantKernelNpuOpApi.cpp.
+      aclnn: aclnnDynamicQuant/V2; returns (quantized, scale); V2 is preferred.
+      Profiling: DSV3 Decode DynamicQuant(2501x).
+
+  "tensor_cast.dynamic_quantize_asymmetric.default":
+    kernel_type: DynamicQuant
+    notes: >
+      [HIGH] op-plugin: YAML:5845 (npu_dynamic_quant_asymmetric) / DynamicQuantKernelNpuOpApi.cpp.
+      aclnn: aclnnDynamicQuant/V2; returns (quantized, scale, offset).
+      Shared with symmetric aclnnDynamicQuantV2, offset output padding.
+
+  "tensor_cast.dynamic_quantize_mxfp4.default":
+    kernel_type: DynamicBlockQuant
+    notes: >
+      [MEDIUM] op-plugin: YAML:6929 (npu_dynamic_block_quant) / DynamicBlockQuantNpuOpApi.cpp.
+      aclnn: aclnnDynamicBlockQuant.
+      MXFP4 block-wise quantization; the closest API is npu_dynamic_block_quant (col_block_size=group_size).
+      But TC's float8_e8m0fnu scale dtype may not be directly supported. It needs to be verified.
+
+
+  # ========== 15. RoPE ==========
+
+  "tensor_cast.apply_rope.default":
+    kernel_type: InterleaveRope
+    alternate_kernel_types: [ApplyRotaryPosEmb]
+    notes: >
+      [HIGH] op-plugin: YAML:5643 (npu_apply_rotary_pos_emb) + YAML:5992 (npu_interleave_rope).
+      aclnn: aclnnApplyRotaryPosEmbV2 (neox mode), aclnnInterleaveRope (interleave mode).
+      is_neox=True → ApplyRotaryPosEmb (Qwen3 3x); is_neox=False → InterleaveRope (DSV3 2501x).
+      Default mapping InterleaveRope (DeepSeek interleave mode is more common with MLA).
+      neox mode kernel_type: ApplyRotaryPosEmb (op-plugin: YAML:5643).
+      alternate_kernel_types supports two modes of automatic fallback matching.
+
+
+  # ========== 16. Communication ==========
+  # HCCL collectives, without going through op-plugin aclnn, go directly to torch.distributed → HCCL
+
+  "tensor_cast.all_reduce.default":
+    kernel_type: hcom_allReduce_
+    category: communication
+    notes: >
+      [HIGH] HCCL direct; op-plugin only fused npu_mm_all_reduce_base (MC2).
+      Profiling: DSV3(82x), Qwen3(276x).
+
+  "tensor_cast.all_gather.default":
+    kernel_type: hcom_allGather_
+    category: communication
+    notes: >
+      [MEDIUM] HCCL direct; op-plugin only fused npu_all_gather_base_mm (MC2).
+      There are three variants in Profiling: HcomAllGather(164x, graph-compiled),
+      hcom_allGather_(41x, PyTorch dispatch), allgatherAicpuKernel(41x, AICPU).
+      TC standalone all_gather → hcom_allGather_; All variants should be included when aggregating queries.
+
+  "tensor_cast.reduce_scatter.default":
+    kernel_type: hcom_reduceScatter_
+    alternate_kernel_types: [HcomReduceScatter]
+    category: communication
+    notes: >
+      [MEDIUM] HCCL direct; op-plugin only fused npu_mm_reduce_scatter_base (MC2).
+      DSV3 only HcomReduceScatter(82x, CamelCase = graph-compiled); may also appear hcom_reduceScatter_.
+
+  "tensor_cast.all_to_all.default":
+    kernel_type: hcom_alltoallv_
+    category: communication
+    notes: >
+      [HIGH] HCCL direct; op-plugin has fused npu_gmm_alltoallv (aclnnGroupedMatMulAlltoAllv).
+      TC uses variable split sizes → alltoallv (not fixed alltoall).
+      The op-plugin integrates GMM+AllToAllV and TC independent modeling.
+      Profiling: DSV3 Decode hcom_alltoallv_(82x, MoE EP routing).
+
+
+  # ========== 17. MC2 fusion operator (MatMul + AllReduce) ==========
+  # Generated by freezing_passes/patterns/matmul_allreduce.py graph pattern matching
+  # Corresponds to npu_mm_all_reduce_base (op-plugin MC2 API) on NPU
+
+  "tensor_cast.matmul_all_reduce.default":
+    composite: true
+    sub_kernels: [MatMulV2, hcom_allReduce_]
+    notes: >
+      [MEDIUM] op-plugin: npu_mm_all_reduce_base → aclnnMatmulAllReduce/V2 (MC2).
+      fusion pass: matmul_allreduce.py fuses aten.mm + all_reduce into a single op.
+      BF16/FP16 matmul + all_reduce; NPU MC2 pipeline ~20% prefill improvement with TP.
+      Represented in profiling as a single MC2 kernel (non-independent MatMulV2 + hcom_allReduce_).
+
+  "tensor_cast.static_quant_linear_all_reduce.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
+    notes: >
+      [MEDIUM] op-plugin: npu_mm_all_reduce_base → aclnnQuantMatmulAllReduce/V2/V3 (MC2 with quant params).
+      fusion pass: matmul_allreduce.py fuses static_quant_linear + all_reduce.
+      W8A8 quant linear + all_reduce; reuse MC2 pipeline.
+
+  "tensor_cast.static_quant_linear_int4_all_reduce.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
+    notes: >
+      [MEDIUM] op-plugin: npu_mm_all_reduce_base → aclnnWeightQuantMatmulAllReduce (MC2 with INT4 antiquant).
+      fusion pass: matmul_allreduce.py fuses static_quant_linear_int4 + all_reduce.
+      W4A8 quant linear + all_reduce; reuse MC2 pipeline.
+
+  "tensor_cast.fp8_linear_all_reduce.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
+    notes: >
+      [LOW] op-plugin: npu_mm_all_reduce_base (MC2 with FP8).
+      fusion pass: matmul_allreduce.py fuses fp8_linear + all_reduce.
+      FP8 linear + all_reduce; MC2 FP8 support needs to be verified.
+
+  "tensor_cast.mxfp4_linear_all_reduce.default":
+    composite: true
+    sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
+    notes: >
+      [LOW] op-plugin: npu_mm_all_reduce_base (MC2 with MXFP4).
+      fusion pass: matmul_allreduce.py fuses mxfp4_linear + all_reduce.
+      MXFP4 linear + all_reduce; MC2 MXFP4 support needs to be verified.
+
+
+  # ========== 18. Tool operator ==========
+
+  "tensor_cast.shift_and_update_input_ids.default":
+    kernel_type: TensorMove
+    notes: >
+      [LOW] No NPU-specific API; MTP tool ops, decomposed into basic aten ops (slice, index_put, scatter).
+      Profiling is represented by basic data moving kernels such as TensorMove / Copy / ScatterElements.
+
+
+  # ========== 19. MoE Routing Elementwise (DSv3 trace, added v0.15.0) ==========
+  # aten operators appearing in DSV3 MoE gating/routing logic; TC MoE layer uses these operators
+  # Mostly small tensor operations in MoE gating topk logic, covered by MoeGatingTopK fusion on NPU
+  # Add here to ensure correct mapping when profiling mode fallback
+
+  "aten.mul.Tensor":
+    kernel_type: Mul
+    notes: >
+      [MEDIUM] op-plugin: YAML:3525 / MulKernelNpuOpApi.cpp.
+      aclnn: aclnnMul. Used for score scaling in DSV3 MoE gating.
+
+  "aten.div.Tensor":
+    kernel_type: Div
+    alternate_kernel_types: [RealDiv]
+    notes: >
+      [MEDIUM] Path A. op-plugin: DivKernelNpuOpApi.cpp → aclnnDiv.
+      CANN 8.3: Qwen3 profiling shows RealDiv (30x). DSv3 uses Div for MoE gating normalization.
+
+  "aten.sigmoid.default":
+    kernel_type: Sigmoid
+    notes: >
+      [LOW] op-plugin: YAML:4435 / SigmoidKernelNpuOpApi.cpp.
+      aclnn: aclnnSigmoid. DSV3 MoE routing sigmoid activated.
+
+  "aten.topk.default":
+    kernel_type: TopKV2
+    notes: >
+      [MEDIUM] op-plugin: YAML:4977 / TopKKernelNpuOpApi.cpp.
+      aclnn: aclnnTopK. DSV3 MoE gating top-k selection (NPU has fused MoeGatingTopK, but TC decomposition uses aten.topk).
+
+  "aten.where.self":
+    kernel_type: SelectV2
+    notes: >
+      [LOW] op-plugin: YAML:5297 / WhereKernelNpuOpApi.cpp.
+      aclnn: aclnnSWhere. DSV3 MoE routing condition selection.
+
+  "aten.gather.default":
+    kernel_type: GatherV2
+    notes: >
+      [LOW] op-plugin: YAML:2291 / GatherKernelNpuOpApi.cpp.
+      aclnn: aclnnGather. Expert index gather in DSV3 MoE routing.
+
+  "aten.scatter.value":
+    kernel_type: ScatterElementsV2
+    alternate_kernel_types: [ScatterElements]
+    notes: >
+      [HIGH] Path A. CANN 8.3: ScatterElementsV2 (12x DSv3, 20x Qwen3).
+      op-plugin: ScatterKernelNpuOpApi.cpp → aclnnInplaceScatterValue → ScatterElementsV2.
+
+  "aten.sum.dim_IntList":
+    kernel_type: ReduceSum
+    alternate_kernel_types: [ReduceSumD]
+    notes: >
+      [HIGH] Path A. CANN 8.3: ReduceSum (238x DSv3, 10x Qwen3).
+      op-plugin: SumKernelNpuOpApi.cpp → aclnnReduceSum → ReduceSum.
+
+  "aten.clone.default":
+    kernel_type: TensorMove
+    notes: >
+      [LOW] op-plugin: clone → aclnnInplaceCopy/contiguous copy.
+      Used in DSV3 MoE routing to ensure contiguous memory layout.
+
+  "aten.bitwise_not.default":
+    kernel_type: BitwiseNot
+    notes: >
+      [LOW] op-plugin: YAML:1385 / BitwiseNotKernelNpuOpApi.cpp.
+      aclnn: aclnnBitwiseNot. Boolean mask inversion in DSV3 MoE routing.
+
+  "aten.index.Tensor":
+    kernel_type: Index
+    alternate_kernel_types: [GatherV2]
+    notes: >
+      [HIGH] path: A. op-plugin: YAML:2601 / IndexKernelNpuOpApi.cpp.
+      aclnn: aclnnIndex. CANN: ops-nn/index/index/ OPTYPE: index (DEPENDENCIES: gather_v2).
+      Profiling: Type=Index (Name=aclnnIndex_IndexAiCore_Index).
+      Prior mapping to GatherV2 was incorrect — GatherV2 is from aclnnEmbedding, not aclnnIndex.
+
+  "prims.convert_element_type.default":
+    zero_cost: true
+    notes: "Prims dtype conversion, handled at dispatch level; mapped to Cast or zero-cost depending on context"
+
+  "aten.expand.default":
+    zero_cost: true
+    notes: "Shape-only broadcast expand, no data copy on NPU (returns a view)"
+
+  "aten.full.default":
+    zero_cost: true
+    notes: "Scalar fill tensor creation, negligible cost"
+
+
+  # ========== 20. Zero-cost (shape-only) ops ==========
+  # No reshape/view/permute operators executed by the kernel are generated on the NPU.
+
+  "aten.view.default":
+    zero_cost: true
+    notes: "Shape-only view, no kernel execution on NPU"
+
+  "aten.permute.default":
+    zero_cost: true
+    notes: "Shape-only permute, no kernel execution on NPU"
+
+  "aten.t.default":
+    zero_cost: true
+    notes: "Shape-only transpose, no kernel execution on NPU"
+
+  "aten.transpose.int":
+    zero_cost: true
+    notes: "Shape-only transpose, no kernel execution on NPU"
+
+  "aten._unsafe_view.default":
+    zero_cost: true
+    notes: "Shape-only unsafe view, no kernel execution on NPU"
+
+  "aten.unsqueeze.default":
+    zero_cost: true
+    notes: "Shape-only unsqueeze, no kernel execution on NPU"
+
+  "aten.split.Tensor":
+    zero_cost: true
+    notes: "Shape-only split, no kernel execution on NPU"
+
+  "aten.split_with_sizes.default":
+    zero_cost: true
+    notes: "Shape-only split, no kernel execution on NPU"
+
+  "aten.select.int":
+    zero_cost: true
+    notes: "Shape-only select, no kernel execution on NPU"
+
+  "aten.detach.default":
+    zero_cost: true
+    notes: "No-op detach, no kernel execution"
+
+  "aten.alias.default":
+    zero_cost: true
+    notes: "No-op alias, no kernel execution"
+
+  "aten.arange.start":
+    zero_cost: true
+    notes: "Index generation, negligible cost"
+
+  "aten.copy_.default":
+    kernel_type: TensorMove
+    notes: >
+      [LOW] op-plugin: CopyKernelNpuOpApi.cpp. aclnn: aclnnInplaceCopy → TensorMove.
+      Profiling: Type=TensorMove (~5.6 us). Previously marked zero_cost but real NPU
+      kernel is TensorMove (data movement for dtype conversion / cache init).
+
+  "aten.slice.Tensor":
+    zero_cost: true
+    notes: "Contiguous slice returns a view, no data movement"
+
+
+  # ========== 19. Profiling-only Placeholder ==========
+  # NPU fusion operator: appears in Profiling but has no corresponding implementation in TensorCast
+
+  "profiling.KvRmsNormRopeCache":
+    kernel_type: KvRmsNormRopeCache
+    notes: >
+      [HIGH] op-plugin: YAML:5646 (npu_kv_rmsnorm_rope_cache).
+      aclnn: aclnnKvRmsNormRopeCache/V2.
+      vllm-ascend: vllm_ascend/ops/mla_v1.py → torch_npu.npu_kv_rmsnorm_rope_cache().
+      KV RmsNorm+RoPE+Cache fusion; TC decomposed into rms_norm + apply_rope + reshape_and_cache.
+      (The original label is "not found in op-plugin", the actual op-plugin has npu_kv_rmsnorm_rope_cache.)
+      Profiling: DSV3 Decode(2501x).
+
+  # profiling.InplaceAddRmsNorm: removed in CANN 8.3 (not present in new profiling data)
+
+  "profiling.MoeGatingTopK":
+    kernel_type: MoeGatingTopK
+    notes: >
+      [HIGH] op-plugin: YAML:6123 (npu_moe_gating_top_k) / MoeGatingTopKKernelNpuOpApi.cpp.
+      aclnn: aclnnMoeGatingTopK.
+      vllm-ascend: vllm_ascend/ops/experts_selector.py → torch_npu.npu_moe_gating_top_k().
+      MoE gating top-k; TC is implemented through aten.topk, and NPU uses a dedicated kernel.
+      (The original label is "not found in the standard op-plugin", the actual op-plugin has npu_moe_gating_top_k.)
+      Profiling: DSV3 Decode(2378x).
+
+  # profiling.AutomaticBufferFusionOp: removed in CANN 8.3 (not present in new profiling data)
+
+  # profiling.split_qkv_rmsnorm_rope_kernel: removed in CANN 8.3 (not present in Qwen3-32B profiling)
+
+  # profiling.PagedCacheLoadNdKernel: removed in CANN 8.3 (not present in new profiling data)
+  # profiling.ScatterPaKvCache: removed in CANN 8.3 (not present in new profiling data)
+
+
+# ============================================================================
+#torch_npu reference (for microbenchmark script generation)
+# ============================================================================
+# Each kernel_type corresponds to:
+# - apis: torch_npu API list (including op-plugin traceability)
+# - microbench_api: API used by the default microbenchmark script
+# - aclnn: underlying CANN kernel name (extracted from EXEC_NPU_CMD)
+
+# ---------- CANN 8.3 adds profiling-only operator ----------
+
+  profiling.batch_matmul_transpose:
+    kernel_type: batch_matmul_transpose
+    notes: "[HIGH] CANN 8.3. TransposeBatchMatMul replacement. 366x DSv3 decode (MLA attn_output @ W_UV)."
+
+  profiling.BatchMatMulV2:
+    kernel_type: BatchMatMulV2
+    notes: "[HIGH] CANN 8.3. 366x DSv3 decode. op-plugin: aclnnBatchMatMul → BatchMatMulV2."
+
+  profiling.GroupedMatmulSwigluQuant:
+    kernel_type: GroupedMatmulSwigluQuant
+    notes: "[HIGH] CANN 8.3 fused MoE gate-up kernel. 348x DSv3. Replaces old DequantSwigluQuant 2-step path."
+
+  profiling.hcom_broadcast_:
+    kernel_type: hcom_broadcast_
+    category: communication
+    notes: "[MEDIUM] CANN 8.3. 930x DSv3. HCCL broadcast. No TC equivalent currently."
+
+  profiling.RINGMLAPrefillBF16Kernel:
+    kernel_type: RINGMLAPrefillBF16Kernel
+    notes: >
+      [HIGH] CANN 8.3. 61x DSv3. ATB ring MLA prefill. vllm-ascend: torch_npu.atb.npu_ring_mla().
+      Used as sub_kernel in MLA composite prefill path (replaces FIA, v1.5).
+      CSV data to be added (TCX T3, P1).
+
+  profiling.MoeTokenPermute:
+    kernel_type: MoeTokenPermute
+    notes: "[HIGH] CANN 8.3. 174x DSv3. MoE token permutation, part of MoeDistributeDispatch pipeline."
+
+  profiling.MoeTokenUnpermute:
+    kernel_type: MoeTokenUnpermute
+    notes: "[HIGH] CANN 8.3. 116x DSv3. MoE token unpermutation, part of MoeDistributeCombine pipeline."
+
+  profiling.ApplyRotaryPosEmb:
+    kernel_type: ApplyRotaryPosEmb
+    notes: "[HIGH] CANN 8.3. 670x Qwen3-32B. ATB RoPE kernel."
+
+  profiling.Transpose:
+    kernel_type: Transpose
+    notes: "[MEDIUM] CANN 8.3. 474x DSv3, 10x Qwen3. Data layout transformation."
+
+  profiling.PadV3:
+    kernel_type: PadV3
+    notes: "[MEDIUM] CANN 8.3. 580x DSv3. Padding for aligned memory access."
+
+  profiling.Muls:
+    kernel_type: Muls
+    notes: "[MEDIUM] CANN 8.3. 348x DSv3. Scalar multiplication (MoE scaling)."
+
+  profiling.AsStrided:
+    kernel_type: AsStrided
+    notes: "[MEDIUM] CANN 8.3. 366x DSv3. Memory view / stride manipulation."
+
+  profiling.RepeatInterleave:
+    kernel_type: RepeatInterleave
+    notes: "[LOW] CANN 8.3. 58x DSv3. Token repetition for MoE routing."
+
+
+torch_npu_reference:
+
+  # --- Matmul ---
+  MatMulV2:
+    apis:
+      - name: "torch.mm"
+        note: "aten::mm → op_api::mm → aclnnMm / aclnnMatmulWeightNz"
+      - name: "torch_npu.npu_linear"
+        note: "NPU optimized version, supports bias"
+    aclnn: [aclnnMm, aclnnMatmulWeightNz]
+    microbench_api: "torch.mm"
+
+  MatMul:
+    apis:
+      - name: "torch.matmul"
+        note: "aten::matmul → aclnnMatMul (broadcasting support, N-D tensors)"
+    aclnn: aclnnMatMul
+    microbench_api: "torch.matmul"
+
+  TransposeBatchMatMul:
+    apis:
+      - name: "torch.bmm"
+        note: "aten::bmm → op_api::bmm → aclnnBatchMatMul"
+      - name: "torch_npu.npu_transpose_batchmatmul"
+        note: "gen_opapi → aclnnTransposeBatchMatMul (MLA absorb projections)"
+    aclnn: [aclnnBatchMatMul, aclnnTransposeBatchMatMul]
+    microbench_api: "torch.bmm"
+
+  QuantBatchMatmulV3:
+    apis:
+      - name: "torch_npu.npu_weight_quant_batchmatmul"
+        note: "YAML:6529 → aclnnWeightQuantBatchMatmulV2/V3 (W8A8/W4A8/FP8)"
+      - name: "torch_npu.npu_quant_matmul"
+        note: "YAML:6257 → aclnnQuantMatmulV5 (A8W4 path)"
+    aclnn: [aclnnWeightQuantBatchMatmulV2, aclnnWeightQuantBatchMatmulV3, aclnnQuantMatmulV5]
+    microbench_api: "torch_npu.npu_weight_quant_batchmatmul"
+
+  # --- Attention ---
+  FusedInferAttentionScore:
+    apis:
+      - name: "torch_npu.npu_fused_infer_attention_score"
+        note: "YAML:5873 → aclnnFusedInferAttentionScoreV2/V3"
+      - name: "torch_npu.npu_fused_infer_attention_score_v2"
+        note: "YAML:5886 → aclnnFusedInferAttentionScoreV4 (with quant_mode)"
+    aclnn: [aclnnFusedInferAttentionScoreV2, aclnnFusedInferAttentionScoreV3, aclnnFusedInferAttentionScoreV4]
+    microbench_api: "torch_npu.npu_fused_infer_attention_score"
+
+  # --- MoE ---
+  GroupedMatmul:
+    apis:
+      - name: "torch_npu.npu_grouped_matmul"
+        note: "YAML:5954 → aclnnGroupedMatmul/V4/V5/WeightNz"
+    aclnn: [aclnnGroupedMatmul, aclnnGroupedMatmulV4, aclnnGroupedMatmulV5, aclnnGroupedMatmulWeightNz]
+    microbench_api: "torch_npu.npu_grouped_matmul"
+
+  DequantSwigluQuant:
+    apis:
+      - name: "torch_npu.npu_grouped_matmul_swiglu_quant"
+        note: "YAML:6136 → aclnnGroupedMatmulSwigluQuantWeightNZ (V1 only in op-plugin 7.2.0)"
+    aclnn: [aclnnGroupedMatmulSwigluQuantWeightNZ]
+    microbench_api: "torch_npu.npu_grouped_matmul_swiglu_quant"
+
+  MoeDistributeDispatchV2:
+    apis:
+      - name: "torch_npu.npu_moe_distribute_dispatch_v2"
+        note: "YAML:6146 → aclnnMoeDistributeDispatchV2/V3 (EP path)"
+      - name: "torch_npu.npu_moe_init_routing_v2"
+        note: "YAML:6130 → aclnnMoeInitRoutingV2/V3 (non-EP routing)"
+    aclnn: [aclnnMoeDistributeDispatchV2, aclnnMoeDistributeDispatchV3, aclnnMoeDistributeDispatchV4]
+    microbench_api: "torch_npu.npu_moe_distribute_dispatch_v2"
+
+  MoeDistributeCombineV2:
+    apis:
+      - name: "torch_npu.npu_moe_distribute_combine_v2"
+        note: "YAML:6152 → aclnnMoeDistributeCombineV2/V3 (EP path)"
+      - name: "torch_npu.npu_moe_finalize_routing"
+        note: "YAML:6115 → aclnnMoeFinalizeRouting/V2 (non-EP path)"
+    aclnn: [aclnnMoeDistributeCombineV2, aclnnMoeDistributeCombineV3, aclnnMoeDistributeCombineV4]
+    microbench_api: "torch_npu.npu_moe_distribute_combine_v2"
+
+  MoeGatingTopK:
+    apis:
+      - name: "torch_npu.npu_moe_gating_top_k"
+        note: "YAML:6123 → aclnnMoeGatingTopK; vllm-ascend: experts_selector.py"
+    aclnn: aclnnMoeGatingTopK
+    microbench_api: "torch_npu.npu_moe_gating_top_k"
+
+  # --- Norm ---
+  RmsNorm:
+    apis:
+      - name: "torch_npu.npu_rms_norm"
+        note: "YAML:6335 → aclnnRmsNorm"
+    aclnn: aclnnRmsNorm
+    microbench_api: "torch_npu.npu_rms_norm"
+
+  AddRmsNorm:
+    apis:
+      - name: "torch_npu.npu_add_rms_norm"
+        note: "YAML:5560 → aclnnAddRmsNorm"
+    aclnn: aclnnAddRmsNorm
+    microbench_api: "torch_npu.npu_add_rms_norm"
+
+  InplaceAddRmsNorm:
+    apis:
+      - name: "torch_npu.npu_add_rms_norm"
+        note: "Same as AddRmsNorm API; in-place for CANN runtime automatic optimization"
+    aclnn: aclnnAddRmsNorm
+    microbench_api: "torch_npu.npu_add_rms_norm"
+
+  RmsNormQuant:
+    apis:
+      - name: "torch_npu.npu_rms_norm_quant"
+        note: "YAML:5575 → aclnnRmsNormQuant"
+    aclnn: aclnnRmsNormQuant
+    microbench_api: "torch_npu.npu_rms_norm_quant"
+
+  AddRmsNormQuant:
+    apis:
+      - name: "torch_npu.npu_add_rms_norm_quant"
+        note: "YAML:5600 → aclnnAddRmsNormQuant / aclnnAddRmsNormQuantV2"
+    aclnn: [aclnnAddRmsNormQuant, aclnnAddRmsNormQuantV2]
+    microbench_api: "torch_npu.npu_add_rms_norm_quant"
+
+  AddRmsNormDynamicQuant:
+    apis:
+      - name: "torch_npu.npu_add_rms_norm_dynamic_quant"
+        note: "YAML:6177 → aclnnAddRmsNormDynamicQuantV2"
+    aclnn: aclnnAddRmsNormDynamicQuantV2
+    microbench_api: "torch_npu.npu_add_rms_norm_dynamic_quant"
+
+  # --- Activation ---
+  SwiGlu:
+    apis:
+      - name: "torch_npu.npu_swiglu"
+        note: "YAML:6478 → aclnnSwiGlu"
+    aclnn: aclnnSwiGlu
+    microbench_api: "torch_npu.npu_swiglu"
+
+  # --- Quantization ---
+  AscendQuantV2:
+    apis:
+      - name: "torch_npu.npu_quantize"
+        note: "YAML:6292 → aclnnAscendQuant / aclnnAscendQuantV3"
+    aclnn: [aclnnAscendQuant, aclnnAscendQuantV3]
+    microbench_api: "torch_npu.npu_quantize"
+
+  DynamicQuant:
+    apis:
+      - name: "torch_npu.npu_dynamic_quant"
+        note: "YAML:5841 → aclnnDynamicQuant / aclnnDynamicQuantV2 (symmetric)"
+      - name: "torch_npu.npu_dynamic_quant_asymmetric"
+        note: "YAML:5845 → aclnnDynamicQuantV2 (same kernel, offset populated)"
+    aclnn: [aclnnDynamicQuant, aclnnDynamicQuantV2]
+    microbench_api: "torch_npu.npu_dynamic_quant"
+
+  DynamicBlockQuant:
+    apis:
+      - name: "torch_npu.npu_dynamic_block_quant"
+        note: "YAML:6929 → aclnnDynamicBlockQuant (MXFP4 block quant)"
+    aclnn: aclnnDynamicBlockQuant
+    microbench_api: "torch_npu.npu_dynamic_block_quant"
+
+  # --- RoPE ---
+  InterleaveRope:
+    apis:
+      - name: "torch_npu.npu_interleave_rope"
+        note: "YAML:5992 → aclnnInterleaveRope (DeepSeek interleave mode)"
+    aclnn: aclnnInterleaveRope
+    microbench_api: "torch_npu.npu_interleave_rope"
+
+  ApplyRotaryPosEmb:
+    apis:
+      - name: "torch_npu.npu_apply_rotary_pos_emb"
+        note: "YAML:5643 → aclnnApplyRotaryPosEmb / aclnnApplyRotaryPosEmbV2 (neox mode)"
+    aclnn: [aclnnApplyRotaryPosEmb, aclnnApplyRotaryPosEmbV2]
+    microbench_api: "torch_npu.npu_apply_rotary_pos_emb"
+
+  KvRmsNormRopeCache:
+    apis:
+      - name: "torch_npu.npu_kv_rmsnorm_rope_cache"
+        note: "YAML:5646 → aclnnKvRmsNormRopeCache/V2; vllm-ascend: mla_v1.py"
+    aclnn: [aclnnKvRmsNormRopeCache, aclnnKvRmsNormRopeCacheV2]
+    microbench_api: "torch_npu.npu_kv_rmsnorm_rope_cache"
+
+  # --- KV Cache ---
+  ReshapeAndCacheNdKernel:
+    apis:
+      - name: "atb._npu_reshape_and_cache"
+        note: "ATB path / ReshapeAndCachAtb.cpp (prefill)"
+      - name: "atb._npu_reshape_and_cache_siso"
+        note: "ATB path / ReshapeAndCacheSisoAtb.cpp (MLA single KV)"
+    aclnn: null
+    microbench_api: "atb._npu_reshape_and_cache"
+
+  ScatterPaKvCache:
+    apis:
+      - name: "torch_npu.npu_scatter_pa_kv_cache"
+        note: "YAML:6422 → aclnnScatterPaKvCache (aclnn PA NZ path)"
+    aclnn: aclnnScatterPaKvCache
+    microbench_api: "torch_npu.npu_scatter_pa_kv_cache"
+
+  # --- Data Movement ---
+  GatherV2:
+    apis:
+      - name: "torch.nn.functional.embedding"
+        note: "aten::embedding → aclnnEmbedding → GatherV2"
+    aclnn: [aclnnEmbedding]
+    microbench_api: "torch.nn.functional.embedding"
+
+  GatherV3:
+    apis:
+      - name: "torch.index_select"
+        note: "aten::index_select → aclnnIndexSelect → GatherV3 (aclnn runtime dispatch)"
+    aclnn: [aclnnIndexSelect]
+    microbench_api: "torch.index_select"
+
+  ConcatD:
+    apis:
+      - name: "torch.cat"
+        note: "aten::cat → aclnnCat → ConcatD"
+    aclnn: aclnnCat
+    microbench_api: "torch.cat"
+
+  Add:
+    apis:
+      - name: "torch.add"
+        note: "aten::add.Tensor → aclnnAdd → Add"
+    aclnn: aclnnAdd
+    microbench_api: "torch.add"
+
+  Cast:
+    apis:
+      - name: "torch.Tensor.to"
+        note: "aten::to.dtype → aclnnCast (dtype conversion) → Cast; with dtype, go aclnnInplaceCopy → TensorMove"
+    aclnn: [aclnnCast, aclnnInplaceCopy]
+    microbench_api: "torch.Tensor.to"
+
+  # --- MC2 (MatMul + Communication Fusion) ---
+  # MC2 fusion operator behaves as a kernel type different from standalone in profiling
+  # The specific MC2 kernel type needs to be confirmed from MC2 profiling data
+
+  # --- Communication ---
+  hcom_allReduce_:
+    apis:
+      - name: "torch.distributed.all_reduce"
+        note: "HCCL direct (standalone)"
+    aclnn: null
+    microbench_api: "torch.distributed.all_reduce"
+
+  hcom_allGather_:
+    apis:
+      - name: "torch.distributed.all_gather"
+        note: "HCCL direct (standalone); also HcomAllGather (graph-compiled) and allgatherAicpuKernel"
+    aclnn: null
+    microbench_api: "torch.distributed.all_gather"
+
+  HcomReduceScatter:
+    apis:
+      - name: "torch.distributed.reduce_scatter"
+        note: "HCCL direct (graph-compiled variant)"
+    aclnn: null
+    microbench_api: "torch.distributed.reduce_scatter"
+
+  hcom_alltoallv_:
+    apis:
+      - name: "torch.distributed.all_to_all"
+        note: "HCCL direct (variable-length); MoE EP token routing"
+    aclnn: null
+    microbench_api: "torch.distributed.all_to_all"

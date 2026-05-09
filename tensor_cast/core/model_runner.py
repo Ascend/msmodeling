@@ -76,6 +76,7 @@ class ModelRunner:
                 data_source = ProfilingDataSource(
                     profiling_database,
                     self.device_profile,
+                    parallel_config=user_input.get_parallel_config(),
                 )
                 self.perf_models.append(
                     EmpiricalPerformanceModel(
@@ -159,6 +160,16 @@ class ModelRunner:
             if with_sampler:
                 _ = self.sampler(logits, input_kwargs["sampling_metadata"])
         run_end = time.perf_counter()
+
+        # Log empirical model stats if using profiling mode
+        for pm in self.perf_models:
+            if isinstance(pm, EmpiricalPerformanceModel):
+                from ..performance_model.metrics_collector import MetricsCollector
+
+                collector = MetricsCollector()
+                collector.collect_from_records(pm.op_records)
+                collector.log_stats()
+
         all_execution_time_s = runtime.total_execution_time_s()
         run_time_s = run_end - run_start
 
@@ -231,7 +242,7 @@ class ModelRunner:
             breakdowns=runtime.get_breakdowns(),
         )
 
-    def get_inputs_num_bytes(self, requests: List[Request]) -> int:  # noqa: F821
+    def get_inputs_num_bytes(self, requests: List[RequestInfo]) -> int:
         return get_inputs_num_bytes(self.model, requests, self.user_input.block_size)
 
     def get_kv_cache_num_bytes(self, num_tokens: int) -> int:

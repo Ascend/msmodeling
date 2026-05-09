@@ -14,6 +14,7 @@ from .. import config, ops  # noqa: F401
 from . import patterns
 from .constant_folding import fold_meta_constants
 from .freezing_passes import patterns as freezing_patterns
+from .freezing_passes.dispatch_ffn_combine_pass import DispatchFFNCombinePass
 from .freezing_passes.grouped_matmul_swiglu_pass import GroupedMatmulSwigluPass
 from .freezing_passes.sink_split_pass import SinkSplitPass
 from .passes.lift_quant_pass import LiftCombineQuantPass
@@ -21,6 +22,8 @@ from .passes.merge_linear_pass import MergeLinearPass
 from .passes.multistream_pass import MultiStreamSchedulePass
 from .passes.peep_hole_pass import PeepHolePass
 from .passes.redundant_node_elimination_pass import ReduandantNodeEliminationPass
+from .passes.sequence_parallel_pass import SequenceParallelPass
+
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,7 @@ class CompilerBackend:
             self.apply_redundant_node_elimination_pass(fx_graph, inputs)
             self.apply_quantization_passes(fx_graph, inputs)
             self.apply_pattern_match_passes(fx_graph, inputs)
+            self.apply_sequence_parallel_pass(fx_graph, inputs)
             return fx_graph
 
         def graph_rewrite_after_freezing(fx_graph, inputs):
@@ -158,6 +162,36 @@ class CompilerBackend:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(gm.print_readable(print_output=False))
 
+    def apply_sequence_parallel_pass(self, gm: fx.GraphModule, inputs):
+        """Rewrite TP `all_reduce + norm` patterns into SP
+        `reduce_scatter + norm + all_gather`.
+
+        Runs the norm on a seq-dim-sharded tensor so each rank processes only
+        1/TP of the tokens, cutting norm compute/memory; the trade-off is an
+        all_gather after the norm to restore the full sequence. Must run before
+        freezing, otherwise CSE will break the all_reduce→norm match chain.
+        """
+        # GraphTransformObserver dumps per-pass rewrite results to `log_url`
+        # for fusion-pass debugging; `subsystem` tags the log group.
+        GraphTransformObserver = functools.partial(
+            torch.fx.passes.graph_transform_observer.GraphTransformObserver,
+            subsystem="sequence_parallel_pass",
+            log_url=config.compilation.debug.graph_log_url,
+        )
+        # Config-gated: skip when SP is not enabled (e.g. TP=1 or SP disabled).
+        if config.compilation.passes.enable_sequence_parallel:
+            # SequenceParallelPass rewrites in P1/P2/P3 order (see that pass's
+            # module docstring):
+            #   P1: all_reduce → rms_norm / add_rms_norm
+            #   P2: all_reduce → add_rms_norm2 (residual-aware)
+            #   P3: add → norm on the residual path P2 leaves local
+            GraphTransformObserver(gm, "sequence_parallel_pass").apply_gm_pass(
+                SequenceParallelPass()
+            )
+            logger.debug("Graph after sequence parallel pass:")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(gm.print_readable(print_output=False))
+
     def apply_decompose_auto_functionalized_pass(self, gm: fx.GraphModule):
         GraphTransformObserver = functools.partial(
             torch.fx.passes.graph_transform_observer.GraphTransformObserver,
@@ -202,6 +236,13 @@ class CompilerBackend:
             GraphTransformObserver(
                 gm, "grouped_matmul_swiglu_fusion_pass"
             ).apply_gm_pass(GroupedMatmulSwigluPass())
+            fake_tensor_prop(gm, inputs, force_allow_non_fake_inputs=True)
+        # DFC must run AFTER GroupedMatmulSwigluPass — it looks for
+        # grouped_matmul_*_swiglu nodes that the swiglu pass produces.
+        if config.compilation.fusion_patterns.enable_dispatch_ffn_combine:
+            GraphTransformObserver(
+                gm, "dispatch_ffn_combine_fusion_pass"
+            ).apply_gm_pass(DispatchFFNCombinePass())
             fake_tensor_prop(gm, inputs, force_allow_non_fake_inputs=True)
         logger.debug("Graph after freezing passes:")
         if logger.isEnabledFor(logging.DEBUG):

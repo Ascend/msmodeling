@@ -222,6 +222,8 @@ def get_sp_group(world_size: int, ulysses_size: int) -> ParallelGroup:
     rank = 0
     if ulysses_size > 0:
         rank_groups = all_ranks.reshape(-1, ulysses_size)
+    else:
+        rank_groups = all_ranks.reshape(1, -1)
     sp_group = ParallelGroup(
         rank=rank,
         rank_groups=[x.tolist() for x in rank_groups],

@@ -351,7 +351,6 @@ def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
         o_proj_tp_group = self.parallel_group_manager.o_proj_tp_group
         mlp_tp_group = self.parallel_group_manager.mlp_tp_group
         lmhead_tp_group = self.parallel_group_manager.lmhead_tp_group
-        all_rank_group = self.parallel_group_manager.all_rank_group
         moe_tp_group = self.parallel_group_manager.moe_tp_group
 
         def get_tp_plan():
@@ -475,8 +474,8 @@ def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
                     tp_plan[key] = (parallel_type, params)
             if not self.model_config.parallel_config.has_ep():
                 params = {
-                    "tp_group": all_rank_group,
-                    "global_tp_group": all_rank_group,
+                    "tp_group": moe_tp_group,
+                    "global_tp_group": moe_tp_group,
                 }
                 for prefix in layer_prefixes:
                     tp_plan.update(
@@ -497,20 +496,54 @@ def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
                             f"{prefix}.*.experts.*.gate_proj": (COLWISE_LINEAR, params),
                             f"{prefix}.*.experts.*.up_proj": (COLWISE_LINEAR, params),
                             f"{prefix}.*.experts.*.down_proj": (ROWWISE_LINEAR, params),
-                            f"{prefix}.*.shared_expert.*.gate_proj": (
-                                COLWISE_LINEAR,
-                                params,
-                            ),
-                            f"{prefix}.*.shared_expert.*.up_proj": (
-                                COLWISE_LINEAR,
-                                params,
-                            ),
-                            f"{prefix}.*.shared_expert.*.down_proj": (
-                                ROWWISE_LINEAR,
-                                params,
-                            ),
                         }
                     )
+                    if (
+                        self.model_config.moe_config is not None
+                        and self.model_config.moe_config.enable_shared_expert_tp
+                    ):
+                        shared_expert_params = {
+                            "tp_group": mlp_tp_group,
+                            "global_tp_group": mlp_tp_group,
+                        }
+                        shared_expert_down_proj_params = {
+                            "tp_group": mlp_tp_group,
+                            "global_tp_group": mlp_tp_group,
+                            "reduce_output": False,
+                        }
+                        tp_plan.update(
+                            {
+                                f"{prefix}.*.mlp.fused_moe.shared_experts.gate_proj": (
+                                    COLWISE_LINEAR,
+                                    shared_expert_params,
+                                ),
+                                f"{prefix}.*.mlp.fused_moe.shared_experts.up_proj": (
+                                    COLWISE_LINEAR,
+                                    shared_expert_params,
+                                ),
+                                f"{prefix}.*.mlp.fused_moe.shared_experts.down_proj": (
+                                    ROWWISE_LINEAR,
+                                    shared_expert_down_proj_params,
+                                ),
+                            }
+                        )
+                    else:
+                        tp_plan.update(
+                            {
+                                f"{prefix}.*.shared_expert.*.gate_proj": (
+                                    COLWISE_LINEAR,
+                                    params,
+                                ),
+                                f"{prefix}.*.shared_expert.*.up_proj": (
+                                    COLWISE_LINEAR,
+                                    params,
+                                ),
+                                f"{prefix}.*.shared_expert.*.down_proj": (
+                                    ROWWISE_LINEAR,
+                                    params,
+                                ),
+                            }
+                        )
 
             params = {
                 "tp_group": lmhead_tp_group,
@@ -600,6 +633,11 @@ def shard_model_by_ep(model: "ModelWrapperBase") -> "ModelWrapperBase":
 
     dp_group = model.parallel_group_manager.dp_group
     tp_group = model.parallel_group_manager.tp_group
+    moe_tp_group = model.parallel_group_manager.moe_tp_group
+    mlp_tp_group = model.parallel_group_manager.mlp_tp_group
+    routed_expert_global_tp_group = (
+        tp_group if model.model_config.parallel_config.has_ep() else moe_tp_group
+    )
     for name, module in model._inner.named_modules():
         if isinstance(module, MoELayer):
             model._replace_module(
@@ -607,7 +645,8 @@ def shard_model_by_ep(model: "ModelWrapperBase") -> "ModelWrapperBase":
                 ParallelMoELayer(
                     module,
                     dp_group,
-                    tp_group,
+                    routed_expert_global_tp_group,
+                    mlp_tp_group,
                     ep_group,
                     model.num_external_shared_experts,
                     model.num_redundant_experts,

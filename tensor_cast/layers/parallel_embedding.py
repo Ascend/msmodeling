@@ -54,7 +54,7 @@ class ParallelEmbedding(ModelWrapperBase):
                 in_local_vocab, x - self._row_start, torch.zeros_like(x)
             )
             x = self._inner(safe_local_indices)
-            x = x * in_local_vocab.unsqueeze(-1).to(x.dtype)
+            x = x.masked_fill_(~in_local_vocab.unsqueeze(-1), 0)
             return self.tp_group.all_reduce(x)
         x = self._inner(x)
         x = self.tp_group.all_gather(x, dim=-1)

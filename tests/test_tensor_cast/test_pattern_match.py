@@ -249,3 +249,7 @@ class PatternReplaceTestCase(unittest.TestCase):
         self.assertIn("tensor_cast.rms_norm.default", result)
         self.assertIn("tensor_cast.add_rms_norm.default", result)
         self.assertIn("tensor_cast.add_rms_norm2.default", result)
+
+
+if __name__ == "__main__":
+    unittest.main()

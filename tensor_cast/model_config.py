@@ -379,6 +379,7 @@ class MoEConfig:
     """whether the gate module returns raw logits or (topk_indices, topk_weights) tuple"""
     # TODO: add expert-parallel configuration
     enable_redundant_experts: bool = False
+    enable_shared_expert_tp: bool = False
     enable_external_shared_experts: bool = False
     host_external_shared_experts: bool = False
     num_experts_key: Union[str, List[str]] = "num_experts"

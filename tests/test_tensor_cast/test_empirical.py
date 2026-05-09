@@ -98,6 +98,8 @@ class TestEmpiricalPerformanceModel(unittest.TestCase):
         query_result.latency_us = 100.0
         query_result.confidence = 0.95
         query_result.source = QuerySource.MEASURED
+        query_result.details = {"kernel_type": "MatMulV2"}
+        query_result.shape_debug_statistics.return_value = {}
         self.data_source.lookup.return_value = query_result
 
         # Create empirical model with mock data source

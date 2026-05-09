@@ -33,6 +33,10 @@ class PerfAnalysisTestCase(unittest.TestCase):
     def setUp(self):
         self.data_source = Mock(spec=DataSourcePerformanceModel)
         self.fallback_model = Mock(spec=PerformanceModel)
+        # Configure fallback to return a valid Result for M5 latency tracking
+        fallback_result = Mock()
+        fallback_result.execution_time_s = 1e-6
+        self.fallback_model.process_op.return_value = fallback_result
         torch.compiler.reset()
 
     def _execute_attention_and_get_base_data(self, attention_args):
@@ -1174,6 +1178,8 @@ class PerfAnalysisTestCase(unittest.TestCase):
         query_result.latency_us = 100.0
         query_result.confidence = 0.95
         query_result.source = QuerySource.MEASURED
+        query_result.details = {"kernel_type": "MatMulV2"}
+        query_result.shape_debug_statistics.return_value = {}
         self.data_source.lookup.return_value = query_result
 
         perf_model = EmpiricalPerformanceModel(
@@ -1231,6 +1237,8 @@ class PerfAnalysisTestCase(unittest.TestCase):
         query_result.latency_us = 50.0
         query_result.confidence = 0.95
         query_result.source = QuerySource.MEASURED
+        query_result.details = {"kernel_type": "AscendQuantV2"}
+        query_result.shape_debug_statistics.return_value = {}
         self.data_source.lookup.return_value = query_result
 
         perf_model = EmpiricalPerformanceModel(

@@ -475,5 +475,5 @@ class TestThroughputOptimizer(TestCase):
             "P Concurrency",
             "D Concurrency",
         ]
-        table_start_pattern = r"Top \d PD Ratio Configurations:"
+        table_start_pattern = r"Top \d+ PD Ratio Configurations:"
         self._validate_table_structure(full_output, local_columns, table_start_pattern)

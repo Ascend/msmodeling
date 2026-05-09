@@ -6,6 +6,59 @@ from torch._subclasses.fake_tensor import is_fake
 from ..utils import register_tensor_cast_op
 
 
+@register_tensor_cast_op("kv_rmsnorm_rope_cache", mutates_args=("kv_cache",))
+def _(
+    kv: torch.Tensor,
+    gamma: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    epsilon: float = 1e-6,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused KV RmsNorm + RoPE + Cache write for MLA attention.
+
+    Equivalent to vllm-ascend's torch_npu.npu_kv_rmsnorm_rope_cache().
+    This is a meta implementation for TensorCast performance modeling.
+
+    Algorithm:
+        1. Split kv into kv_c (compressed) and k_pe (rope part)
+        2. Apply RmsNorm to kv_c: kv_c_normed = kv_c * gamma / sqrt(mean(kv_c^2) + epsilon)
+        3. Apply RoPE to k_pe using cos/sin
+        4. Write both kv_c_normed and rotated k_pe to kv_cache at slot_mapping positions
+
+    Args:
+        kv: Input tensor of shape (num_tokens, kv_lora_rank + qk_rope_head_dim)
+            Must be contiguous and have correct dtype (BF16/FP16)
+        gamma: RmsNorm weight of shape (kv_lora_rank,)
+        cos, sin: Rotary embeddings of shape (1, seq_len, qk_rope_head_dim)
+        kv_cache: Cache tensor of shape (total_blocks, block_size, kv_lora_rank + qk_rope_head_dim)
+        slot_mapping: Cache slot indices of shape (num_tokens,)
+            Must be in range [0, total_blocks * block_size)
+        kv_lora_rank: Dimension of compressed KV (must be > 0)
+        qk_rope_head_dim: Dimension of RoPE part (must be > 0)
+        epsilon: RmsNorm epsilon (default: 1e-6)
+
+    Returns:
+        k_pe: RoPE-rotated key of shape (num_tokens, qk_rope_head_dim)
+        kv_c_normed: Normalized compressed KV of shape (num_tokens, kv_lora_rank)
+
+    Note:
+        This is a meta operation for performance modeling.
+        The actual implementation in vllm-ascend uses torch_npu.npu_kv_rmsnorm_rope_cache.
+    """
+    num_tokens = kv.size(0)
+    device = kv.device
+    dtype = kv.dtype
+    return (
+        torch.empty((num_tokens, qk_rope_head_dim), dtype=dtype, device=device),
+        torch.empty((num_tokens, kv_lora_rank), dtype=dtype, device=device),
+    )
+
+
 @register_tensor_cast_op("concat_and_cache_mla", mutates_args=("kv_cache",))
 def _(
     kv_c_normed: torch.Tensor,
@@ -48,9 +101,9 @@ def _(
         hidden_states: (num_tokens, hidden_size) activations entering MLA.
         cos/sin: rotary embedding caches shaped (1, seq_len, qk_rope_head_dim).
         q_a_proj_weight / q_b_proj_weight: LoRA weights with shapes
-            (hidden_size, q_lora_rank) and (q_lora_rank, num_heads * qk_head_dim).
+            (q_lora_rank, hidden_size) and (num_heads * qk_head_dim, q_lora_rank).
         q_a_layernorm_weight: RMSNorm scale for the LoRA branch (q_lora_rank,).
-        kv_a_proj_weight: (hidden_size, kv_lora_rank + qk_rope_head_dim) matrix
+        kv_a_proj_weight: (kv_lora_rank + qk_rope_head_dim, hidden_size) matrix
             producing compressed key/value streams; kv_a_layernorm_weight matches
             its last dimension.
         num_heads/qk_* dims/kv_lora_rank/q_lora_rank: structural scalars that

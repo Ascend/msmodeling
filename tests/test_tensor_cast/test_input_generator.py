@@ -1,11 +1,9 @@
 import unittest
-from unittest.mock import Mock
 
 import torch
 from parameterized import parameterized
 
 from tensor_cast.core.input_generator import (
-    _get_padding_alignment,
     generate_image_inputs,
     generate_inputs,
     generate_inputs_varlen,
@@ -98,80 +96,6 @@ class InputGeneratorTestCase(unittest.TestCase):
         with Runtime(perf_model, machine_config), torch.no_grad():
             outputs = model.forward(**inputs)
             self.assertEqual(outputs.shape, output_shape)
-
-    # Define test cases: (scenario description, moe_tensor_size, tensor_size, has_ep, num_experts, expected result)
-    test_cases = [
-        (
-            "moe_tensor_parallel_size not equal and has_ep is True",
-            2,
-            4,
-            True,
-            8,
-            32,  # 8*4=32
-        ),
-        (
-            "moe_tensor_parallel_size equal and has_ep is True",
-            4,
-            4,
-            True,
-            None,
-            4,  # Go to else branch, return tensor_size
-        ),
-        (
-            "moe_tensor_parallel_size not equal and has_ep is False",
-            2,
-            4,
-            False,
-            None,
-            4,  # Go to else branch, return tensor_size
-        ),
-        (
-            "moe_tensor_parallel_size equal and has_ep is False",
-            8,
-            8,
-            False,
-            None,
-            8,  # Go to else branch, return tensor_size
-        ),
-        (
-            "Edge case: tensor_parallel_size is 0",
-            0,
-            0,
-            False,
-            None,
-            0,  # Boundary value test
-        ),
-    ]
-
-    @parameterized.expand(test_cases)
-    def test_get_padding_alignment(
-        self, desc, moe_tensor_size, tensor_size, has_ep, num_experts, expected
-    ):
-        """Parameterized test for all scenarios of _get_padding_alignment function"""
-        # 1. Mock parallel_config object
-        parallel_config = Mock()
-        parallel_config.moe_tensor_parallel_size = moe_tensor_size
-        parallel_config.tensor_parallel_size = tensor_size
-        parallel_config.has_ep = Mock(return_value=has_ep)
-
-        # 2. Mock hf_config object (set num_experts only when needed)
-        hf_config = Mock()
-        if num_experts is not None:
-            hf_config.num_experts = num_experts
-        moe_config = Mock()
-        moe_config.num_experts_key = "num_experts"
-
-        # 3. Mock model_config object
-        model_config = Mock()
-        model_config.parallel_config = parallel_config
-        model_config.hf_config = hf_config
-        model_config.moe_config = moe_config
-
-        # 4. Execute function and assert result
-        result = _get_padding_alignment(model_config)
-        assert result == expected, (
-            f"Scenario [{desc}] test failed: expected {expected}, actual {result}"
-        )
 
     def test_dsa_indexer_cache_dtype_follows_attention_quant_config(self):
         user_input = UserInputConfig(

@@ -1,0 +1,81 @@
+# op_mapping.yaml — Worker Output Template
+#
+# Each worker agent produces ONE snippet in this format for a single operator.
+# The orchestrator merges all snippets into the final op_mapping.yaml.
+#
+# RULES:
+#   - kernel_type, composite, zero_cost are MUTUALLY EXCLUSIVE (exactly one required)
+#   - notes field is REQUIRED — must contain full evidence chain
+#   - alternate_kernel_types only for compute ops with multiple NPU kernel variants
+
+# --- Variant A: Compute Op (most common) ---
+"<tc_op_name_or_aten_op_name>":
+  kernel_type: <ProfilingType>          # Profiling Type column value = CSV filename for lookup
+  # query_mode: attention_special       # Only for FusedInferAttentionScore
+  # alternate_kernel_types: [<Alt1>]    # Fallback kernel types (e.g., RoPE has InterleaveRope + ApplyRotaryPosEmb)
+  notes: >
+    [HIGH|MEDIUM|LOW] path: A|B|C.
+    op-plugin: <yaml_entry_name or N/A> / <ImplFile.cpp or N/A>.
+    aclnn: <aclnn_kernel_name>.
+    CANN: <ops-xxx/category/opname/> OPTYPE: <value>.
+    Profiling: <Type(count)> or N/A.
+    shape_flags: [<applicable shape differences>].
+
+# --- Variant B: Communication Op ---
+"tensor_cast.<comm_op>.default":
+  kernel_type: <hcom_op_name>           # e.g., hcom_allReduce_, hcom_allGather_
+  category: communication
+  notes: >
+    [HIGH] path: HCCL direct.
+    torch.distributed.<op> -> ProcessGroupHCCL -> HCCL API.
+    Profiling: <Type(count)>.
+
+# --- Variant C: Composite Op (1:N decomposition) ---
+"tensor_cast.<fused_op>.default":
+  composite: true
+  sub_kernels: [<Kernel1>, <Kernel2>]   # Each must be a valid kernel_type with its own CSV
+  notes: >
+    [MEDIUM] path: A|B.
+    TC fused op decomposes to: <Kernel1> (compute) + <Kernel2> (comm or compute).
+    op-plugin: <api_name>.
+    Profiling: single fused kernel or separate kernels.
+
+# --- Variant D: Zero-Cost Op (no kernel execution) ---
+"aten.<shape_op>.default":
+  zero_cost: true
+  notes: >
+    [HIGH] Pure shape/view op. No NPU kernel execution.
+    Examples: view, permute, reshape, expand, slice, transpose.
+
+# --- Variant E: Profiling-Only Placeholder ---
+# For NPU fusion kernels that appear in profiling but have no TC equivalent
+"profiling.<KernelType>":
+  kernel_type: <ProfilingType>
+  notes: >
+    [HIGH|MEDIUM] path: B|C.
+    NPU fusion kernel not modeled in TC.
+    TC decomposes into: <list of TC ops>.
+    vllm-ascend: <source_file> -> <torch_npu_api or triton_kernel>.
+
+# --- Variant F: Elementwise Op (output-shape matching) ---
+"aten.<elementwise_op>.Tensor":
+  kernel_type: <ProfilingType>
+  query_mode: elementwise          # Match on output shape, dtype-relaxed
+  # alternate_kernel_types: [...]  # Optional: AiCore variants
+  notes: >
+    [HIGH|MEDIUM] path: A.
+    op-plugin: <ImplFile.cpp>. aclnn: <aclnn_name>.
+    query_mode=elementwise: output-shape matching with byte-ratio dtype scaling.
+    Applicable to memory-bound elementwise ops (add, mul, div, sub).
+
+# ============================================================
+# torch_npu_reference entry (for microbenchmark script generation)
+# ============================================================
+# Append one entry per unique kernel_type:
+#
+# <KernelType>:
+#   apis:
+#     - name: "<torch_npu_or_torch_api>"
+#       note: "<op-plugin source and aclnn mapping>"
+#   aclnn: [<aclnn_kernel_1>, <aclnn_kernel_2>]   # or single string
+#   microbench_api: "<default API for microbenchmark scripts>"

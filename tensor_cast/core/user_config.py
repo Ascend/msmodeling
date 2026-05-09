@@ -44,6 +44,7 @@ class UserInputConfig:
     quantize_attention_action: QuantizeAttentionAction = (
         QuantizeAttentionAction.DISABLED
     )
+    enable_sequence_parallel: bool = False
     decode: bool = False
     num_mtp_tokens: int = 0
     mtp_acceptance_rate: List[float] = field(
@@ -68,8 +69,19 @@ class UserInputConfig:
     word_embedding_tp: bool = False
     word_embedding_tp_mode: WordEmbeddingTPMode = WordEmbeddingTPMode.col
     enable_redundant_experts: bool = False
+    """Pad routing-expert count to a multiple of EP size for load balancing."""
+    enable_shared_expert_tp: bool = False
+    enable_dispatch_ffn_combine: bool = False
+    """Apply tensor-parallelism to shared experts across the EP group.
+    Requires expert_parallel_size > 1.
+    Mutually exclusive with ``host_external_shared_experts``.
+    """
     enable_external_shared_experts: bool = False
+    """Allocate dedicated ranks within the EP group to run shared experts."""
     host_external_shared_experts: bool = False
+    """Place external shared experts on the host (CPU) side instead of device.
+    Mutually exclusive with ``enable_shared_expert_tp``.
+    """
     block_size: int = 128
     remote_source: str = RemoteSource.huggingface
     image_batch_size: Optional[int] = None

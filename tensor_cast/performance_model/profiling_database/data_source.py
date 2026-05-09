@@ -1,70 +1,85 @@
-# Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
-"""
-Abstract base class and data structures for the performance data source system.
-
-This module defines the core interfaces that decouple EmpiricalPerformanceModel
-from specific data backends (Profiling CSV, JIT benchmark cache, etc.).
-"""
-
-from __future__ import annotations
-
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import auto, Enum
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..op_invoke_info import OpInvokeInfo
 
 
 class QuerySource(Enum):
-    """Indicates how a performance result was obtained."""
-
     MEASURED = auto()
-    """Exact match from measured profiling data (confidence: 1.0)."""
-
     INTERPOLATED = auto()
-    """Result estimated by interpolation between measured data points (confidence: 0.7-0.95)."""
+    EXTRAPOLATED = auto()
+    # Forward-declared: returned by _lookup_composite_decomposed when some
+    # (but not all) sub-kernels hit, enabling partial composite estimation.
+    PARTIAL = auto()
 
 
 @dataclass
 class QueryResult:
-    """Result returned by a DataSourcePerformanceModel lookup."""
-
     latency_us: float
-    """Operator execution latency in microseconds."""
-
     confidence: float
-    """Confidence score in [0, 1]. 1.0 means exact measured data."""
-
     source: QuerySource
-    """How this result was obtained."""
-
     details: Dict[str, Any] = field(default_factory=dict)
-    """Optional extra metadata (e.g., matched CSV row info, interpolation weights)."""
+    shape_match_info: Optional["ShapeMatchInfo"] = None
+    sub_kernel_shapes: Optional[List["SubKernelShapeInfo"]] = None
+
+    def shape_debug_statistics(self) -> dict:
+        """Serialize shape debug info into statistics dict entries.
+
+        Uses isinstance checks (not 'is not None') so that Mock objects in tests
+        do not accidentally trigger iteration and raise TypeError.
+        """
+        out: dict = {}
+        if isinstance(self.sub_kernel_shapes, list):
+            out["sub_kernel_shapes"] = json.dumps(
+                [
+                    {
+                        "kernel_type": sk.kernel_type,
+                        "simulation_shapes": str(sk.simulation_shapes),
+                        "kernel_shapes": str(sk.kernel_shapes),
+                        "shape_match_rule": sk.shape_match_rule,
+                    }
+                    for sk in self.sub_kernel_shapes
+                ]
+            )
+        elif isinstance(self.shape_match_info, ShapeMatchInfo):
+            info = self.shape_match_info
+            out["kernel_shapes"] = str(info.kernel_shapes) if info.kernel_shapes else ""
+            out["shape_match_rule"] = info.shape_match_rule
+        return out
+
+
+@dataclass
+class ShapeMatchInfo:
+    """Shape debug info for a single profiling lookup."""
+
+    simulation_shapes: List[List[int]]  # TC dispatch shapes
+    kernel_shapes: List[List[int]]  # Matched CSV shapes ([] on MISS)
+    shape_match_rule: str  # Rule name or miss reason
+
+
+@dataclass
+class SubKernelShapeInfo:
+    """Shape debug info for one sub-kernel inside a composite op."""
+
+    kernel_type: str
+    simulation_shapes: List[List[int]]
+    kernel_shapes: List[List[int]]
+    shape_match_rule: str
 
 
 class DataSourcePerformanceModel(ABC):
-    """
-    Abstract base class for operator performance data sources.
-
-    TensorCast queries operator latency only through OpInvokeInfo; it is
-    unaware of the underlying mapping logic, data format, or storage backend.
-    """
+    """Abstract base class for performance data sources.
+    TensorCast queries via OpInvokeInfo only, unaware of underlying data format."""
 
     @abstractmethod
-    def lookup(self, op_invoke_info: OpInvokeInfo) -> Optional[QueryResult]:
-        """
-        Query operator performance from the data source.
-        """
-        # TODO(Phase 1): implement interpolation
+    def lookup(self, op_invoke_info: "OpInvokeInfo") -> Optional[QueryResult]:
+        """Query operator performance from OpInvokeInfo."""
         ...
 
-    def store(self, op_invoke_info: OpInvokeInfo, result: QueryResult) -> None:
-        """
-        Persist a performance measurement into this data source (optional).
-        """
-        # TODO(Phase 1): implement interpolation
-        raise NotImplementedError(
-            f"{type(self).__name__} is read-only and does not support store()"
-        )
+    def store(self, op_invoke_info: "OpInvokeInfo", result: QueryResult) -> None:
+        """Store performance data (optional). Default: read-only."""
+        raise NotImplementedError("This data source is read-only")

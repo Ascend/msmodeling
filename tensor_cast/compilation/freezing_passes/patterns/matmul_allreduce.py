@@ -2,7 +2,7 @@ import torch
 import torch.fx as fx
 from torch._inductor.pattern_matcher import Arg as _BaseArg, CallFunction, Match
 
-from .... import config
+from .... import config, ops  # noqa: F401
 
 
 def _arg(name: str):

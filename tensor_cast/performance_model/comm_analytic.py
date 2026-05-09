@@ -104,6 +104,8 @@ class CommAnalyticModel(PerformanceModel):
         group = op_invoke_info.args[-1]  # a list of ranks for this communication group
         if op_invoke_info.func == torch.ops.tensor_cast.all_reduce.default:
             return self.all_reduce(x, rank, group)
+        elif op_invoke_info.func == torch.ops.tensor_cast.reduce_scatter.default:
+            return self.reduce_scatter(x, rank, group)
         elif op_invoke_info.func == torch.ops.tensor_cast.all_gather.default:
             return self.all_gather(x, rank, group)
         elif op_invoke_info.func == torch.ops.tensor_cast.all_to_all.default:

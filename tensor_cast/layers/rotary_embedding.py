@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import torch
 
@@ -9,6 +9,11 @@ class CachingRotaryEmb(torch.nn.Module):
     """
     Cache the position embeddings so that we can do quick index_select without
     computing them again and again in each forward.
+
+    cos and sin are stored separately to align with NPU profiling shapes.
+    NPU stores cos/sin as (max_pos, rope_dim) each; previous implementation
+    concatenated them into (max_pos, 2*rope_dim) which produced an
+    aten.index.Tensor shape that never appears in profiling data.
     """
 
     def __init__(
@@ -32,36 +37,47 @@ class CachingRotaryEmb(torch.nn.Module):
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
         with support_autocast_for_meta():
             position_embeddings = rotary_emb(x, position_ids)
-        self.cos_sin_cache: Optional[torch.Tensor]
+        self.cos_cache: Optional[torch.Tensor]
+        self.sin_cache: Optional[torch.Tensor]
         if (
             isinstance(position_embeddings, (tuple, list))
             and len(position_embeddings) == 2
         ):
-            position_embeddings = torch.cat(position_embeddings, dim=-1).squeeze()
-            if expand_to_3d_position_ids and position_embeddings.ndim == 3:
+            cos, sin = position_embeddings
+            cos = cos.squeeze()
+            sin = sin.squeeze()
+            if expand_to_3d_position_ids and cos.ndim == 3:
                 self.use_3d_position_index = True
-            self.register_buffer("cos_sin_cache", position_embeddings, persistent=False)
+            self.register_buffer("cos_cache", cos, persistent=False)
+            self.register_buffer("sin_cache", sin, persistent=False)
         else:
-            self.cos_sin_cache = None
+            self.cos_cache = None
+            self.sin_cache = None
             self.rotary_emb = rotary_emb
 
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-        if self.cos_sin_cache is not None and x.dtype == self.act_dtype:
+    def forward(
+        self, x: torch.Tensor, position_ids: torch.Tensor
+    ) -> Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+        if self.cos_cache is not None and x.dtype == self.act_dtype:
             if self.use_3d_position_index:
                 batch_idx = torch.arange(
                     position_ids.size(0), device=position_ids.device
                 )[:, None, None]
-                return self.cos_sin_cache[batch_idx, position_ids].chunk(2, dim=-1)
+                return (
+                    self.cos_cache[batch_idx, position_ids],
+                    self.sin_cache[batch_idx, position_ids],
+                )
 
             if position_ids.ndim == 3:
-                # Determine whether the input is text-only or multimodal based on tensor dimensions.
-                # If it is multimodal, use the text shape (B, S).
-                # position_ids is (3, batch, seq_len), where 3--> (T/H/W)
+                # position_ids is (3, batch, seq_len) for multimodal; use text positions [0]
                 position_ids = position_ids[0]
-            return (
-                self.cos_sin_cache.index_select(0, position_ids.flatten())
-                .reshape(position_ids.size(0), -1, self.cos_sin_cache.size(-1))
-                .chunk(2, dim=-1)
+            flat_ids = position_ids.flatten()
+            cos = self.cos_cache.index_select(0, flat_ids).reshape(
+                position_ids.size(0), -1, self.cos_cache.size(-1)
             )
+            sin = self.sin_cache.index_select(0, flat_ids).reshape(
+                position_ids.size(0), -1, self.sin_cache.size(-1)
+            )
+            return cos, sin
         else:
             return self.rotary_emb(x, position_ids)
