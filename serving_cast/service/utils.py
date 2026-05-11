@@ -78,11 +78,11 @@ class OptimizerData:
 def check_string_valid(string: str, max_len=256):
     if len(string) > max_len:
         raise argparse.ArgumentTypeError(
-            "String length exceeds %d characters: %r", max_len, string
+            f"String length exceeds {max_len} characters: {string!r}"
         )
     if not re.match(r"^[a-zA-Z0-9_/.-]+$", string):
         raise argparse.ArgumentTypeError(
-            "String contains invalid characters: %r", string
+            f"String contains invalid characters: {string!r}"
         )
     return string
 
@@ -91,11 +91,11 @@ def check_positive_integer(value):
     try:
         value = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError("Invalid integer value: %r", value) from None
+        raise argparse.ArgumentTypeError(f"Invalid integer value: {value!r}") from None
     if value <= 0:
-        raise argparse.ArgumentTypeError("%r is not a positive integer", value)
+        raise argparse.ArgumentTypeError(f"{value!r} is not a positive integer")
     if value > 1e6:
-        raise argparse.ArgumentTypeError("%r is too large", value)
+        raise argparse.ArgumentTypeError(f"{value!r} is too large")
     return value
 
 
@@ -107,9 +107,9 @@ def check_positive_float(value):
     try:
         value = float(value)
     except ValueError:
-        raise argparse.ArgumentTypeError("Invalid float value: %r", value) from None
+        raise argparse.ArgumentTypeError(f"Invalid float value: {value!r}") from None
     if value <= 0:
-        raise argparse.ArgumentTypeError("%r is not a positive number", value)
+        raise argparse.ArgumentTypeError(f"{value!r} is not a positive number")
     return value
 
 
