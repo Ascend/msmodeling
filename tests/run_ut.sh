@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 PROJECT_DIR=$(readlink -f "${SCRIPT_DIR}/..")
 TENSOR_CAST_DIR="${PROJECT_DIR}/tests/"
 SERVING_CAST_DIR="${PROJECT_DIR}/serving_cast/tests/ut"
+THROUGHPUT_OPTIMIZER_TEST="${PROJECT_DIR}/tests/test_throughput_optimizer.py"
 COVERAGE_THRESHOLD=80
 
 # Color codes
@@ -35,29 +36,29 @@ log() {
 
 
 run_module_tests() {
-    # Accept space-separated module names and test dirs
+    # Accept space-separated module names and test targets
     local module_names_str="$1"
-    local test_dirs_str="$2"
+    local test_targets_str="$2"
 
     # Convert space-separated strings to arrays
     read -ra module_names <<< "$module_names_str"
-    read -ra test_dirs <<< "$test_dirs_str"
+    read -ra test_targets <<< "$test_targets_str"
 
     local upper_name
     upper_name=$(echo "$module_names_str" | tr '[:lower:]' '[:upper:]' | tr ' ' '_')
 
     log "INFO" "==================== RUNNING ${upper_name} TESTS ===================="
 
-    # Validate all test directories exist
-    for test_dir in "${test_dirs[@]}"; do
-        if [ ! -d "${test_dir}" ]; then
-            log "ERROR" "Test directory not found: ${test_dir}"
+    # Validate all test targets exist
+    for test_target in "${test_targets[@]}"; do
+        if [ ! -e "${test_target}" ]; then
+            log "ERROR" "Test target not found: ${test_target}"
             exit 1
         fi
     done
 
     log "INFO" "Running tests with coverage (threshold: ${COVERAGE_THRESHOLD}%)..."
-    log "INFO" "Test directories: ${test_dirs_str}"
+    log "INFO" "Test targets: ${test_targets_str}"
     echo ""
 
     # Build --cov arguments for each module
@@ -73,7 +74,7 @@ run_module_tests() {
     tmp_output=$(mktemp)
 
     # Run tests with real-time output, also capture to temp file for parsing
-    PYTHONPATH="${PROJECT_DIR}" python -m pytest "${test_dirs[@]}" \
+    PYTHONPATH="${PROJECT_DIR}" python -m pytest "${test_targets[@]}" \
         -n auto \
         -v \
         --tb=short \
@@ -107,7 +108,7 @@ run_tensor_cast_tests() {
 
 
 run_serving_cast_tests() {
-    run_module_tests "serving_cast" "${SERVING_CAST_DIR}"
+    run_module_tests "serving_cast" "${SERVING_CAST_DIR} ${THROUGHPUT_OPTIMIZER_TEST}"
 }
 
 
