@@ -285,7 +285,7 @@ def main():
         and not args.enable_optimize_prefill_decode_ratio
         and args.max_prefill_tokens < effective_input_length
     ):
-        logger.warning(
+        logger.error(
             "max_prefill_tokens (%r) is smaller than effective_input_length (%r). "
             "We currently do not have support for this scenario.",
             args.max_prefill_tokens,
@@ -297,7 +297,7 @@ def main():
         args.num_mtp_tokens > 0
         and args.num_mtp_tokens > len(args.mtp_acceptance_rate) + 1
     ):
-        logger.warning(
+        logger.error(
             "num_mtp_tokens (%r) is greater than the length of mtp_acceptance_rate (%r). Please check.",
             args.num_mtp_tokens,
             len(args.mtp_acceptance_rate),
@@ -307,7 +307,7 @@ def main():
     # Validate PD ratio optimization parameters
     if args.enable_optimize_prefill_decode_ratio:
         if args.disagg:
-            logger.warning(
+            logger.error(
                 "--enable-optimize-prefill-decode-ratio cannot be used together with --disagg."
             )
             return 1
@@ -315,7 +315,7 @@ def main():
             args.prefill_devices_per_instance is None
             or args.decode_devices_per_instance is None
         ):
-            logger.warning(
+            logger.error(
                 "Both --prefill-devices-per-instance and --decode-devices-per-instance "
                 "are required when PD ratio optimization is enabled."
             )
@@ -336,7 +336,8 @@ def main():
         res.report_final_result(args)
 
     end_time = time.time()
-    logger.info("All experiments completed in %.2f seconds.", end_time - start_time)
+    elapsed_time = end_time - start_time
+    print(f"All experiments completed in {elapsed_time:.2f} seconds.")
 
 
 if __name__ == "__main__":
