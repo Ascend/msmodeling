@@ -389,7 +389,10 @@ class ModelRunner:
         return num_blocks, block_size
 
     def get_kv_cache_num_bytes(self, num_tokens) -> int:
-        return self.tensor_cast_model_runner.get_kv_cache_num_bytes(num_tokens)
+        result = self.tensor_cast_model_runner.get_kv_cache_num_bytes(num_tokens)
+        if isinstance(result, tuple):
+            return result[1] * num_tokens
+        return result
 
     def get_inputs_num_bytes(self, batch: List[Request]) -> int:
         batch = self.request2info(batch)
