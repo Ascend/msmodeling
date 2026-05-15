@@ -84,9 +84,7 @@ class TestBatchRangeAction(unittest.TestCase):
         """Set up test fixtures before each test method."""
         self.parser = argparse.ArgumentParser()
         self.namespace = argparse.Namespace()
-        self.action = BatchRangeAction(
-            option_strings=["--batch-range"], dest="batch_range"
-        )
+        self.action = BatchRangeAction(option_strings=["--batch-range"], dest="batch_range")
 
     def test_valid_single_value(self):
         """Test BatchRangeAction with valid single value"""

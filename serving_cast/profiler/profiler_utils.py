@@ -33,9 +33,7 @@ def queue_profiler(before_queue, after_queue, queue_name):
         rid_list.append(seq_group.id)
     if len(rid_list) > 0:
         prof = Profiler(Level.INFO).domain("BatchSchedule").res(rid_list[:])
-        prof.metric("QueueSize", len(after_queue)).metric_scope(
-            "QueueName", queue_name
-        ).event("Dequeue")
+        prof.metric("QueueSize", len(after_queue)).metric_scope("QueueName", queue_name).event("Dequeue")
 
     add_queue = compare_deques(after_queue, before_queue)
     rid_list.clear()
@@ -43,9 +41,7 @@ def queue_profiler(before_queue, after_queue, queue_name):
         rid_list.append(seq_group.id)
     if len(rid_list) > 0:
         prof = Profiler(Level.INFO).domain("BatchSchedule").res(rid_list)
-        prof.metric("QueueSize", len(after_queue)).metric_scope(
-            "QueueName", queue_name
-        ).event("Enqueue")
+        prof.metric("QueueSize", len(after_queue)).metric_scope("QueueName", queue_name).event("Enqueue")
 
 
 def get_batch_type(request_id_with_iter_list):
@@ -66,9 +62,7 @@ def get_iter_size_info(current_running_queue, increase_iter_size):
     for request in current_running_queue:
         request_id = request.id
         if increase_iter_size:
-            iter_size = (
-                state.request_id_to_iter_size.get(request_id, -1) + 1
-            )  # start from 0
+            iter_size = state.request_id_to_iter_size.get(request_id, -1) + 1  # start from 0
             state.request_id_to_iter_size[request_id] = iter_size
         else:
             iter_size = state.request_id_to_iter_size.get(request_id)

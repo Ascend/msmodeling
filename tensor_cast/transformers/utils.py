@@ -62,15 +62,11 @@ def _modelscope_snapshot_config_only(model_id: str) -> str:
     from modelscope import snapshot_download
 
     try:
-        return snapshot_download(
-            model_id, ignore_patterns=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS
-        )
+        return snapshot_download(model_id, ignore_patterns=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS)
     except TypeError as e:
         if "ignore_patterns" not in str(e):
             raise
-        return snapshot_download(
-            model_id, ignore_file_pattern=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS
-        )
+        return snapshot_download(model_id, ignore_file_pattern=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS)
 
 
 def replace_module(model, name: str, new_module: torch.nn.Module):
@@ -135,9 +131,7 @@ def init_on_device_without_buffers(device: torch.device):
             param_cls = type(module._parameters[name])
             kwargs = module._parameters[name].__dict__
             kwargs["requires_grad"] = param.requires_grad
-            module._parameters[name] = param_cls(
-                module._parameters[name].to(device), **kwargs
-            )
+            module._parameters[name] = param_cls(module._parameters[name].to(device), **kwargs)
 
     tensor_constructors_to_patch = [
         # Not a full list of tensor factory functions
@@ -162,9 +156,7 @@ def init_on_device_without_buffers(device: torch.device):
     try:
         torch.nn.Module.register_parameter = register_empty_parameter
         for torch_function_name in tensor_constructors_to_patch:
-            old_tensor_constructors[torch_function_name] = getattr(
-                torch, torch_function_name
-            )
+            old_tensor_constructors[torch_function_name] = getattr(torch, torch_function_name)
             setattr(
                 torch,
                 torch_function_name,
@@ -270,9 +262,7 @@ class AutoModelConfigLoader:
 
         return result
 
-    def load_config(
-        self, model_id: str, remote_source: str = RemoteSource.huggingface
-    ) -> Optional[PretrainedConfig]:
+    def load_config(self, model_id: str, remote_source: str = RemoteSource.huggingface) -> Optional[PretrainedConfig]:
         """
         load config
         """
@@ -291,10 +281,7 @@ class AutoModelConfigLoader:
             model_id = resolved
 
         check_model_path_res = self.check_model_path(model_id)
-        if (
-            check_model_path_res["has_config_json"]
-            and not check_model_path_res["has_configuration_py"]
-        ):
+        if check_model_path_res["has_config_json"] and not check_model_path_res["has_configuration_py"]:
             model_id = os.path.join(
                 model_id, "config.json"
             )  # When there's only one configuration file, you should pass the path to the configuration file itself.
@@ -311,12 +298,8 @@ class AutoModelConfigLoader:
             if is_diff:
                 # Using the real config class to load again
                 # for example: use native deepseek_v3 to load kimi-k2`s config.json
-                logger.warning(
-                    "Using a model of type %s to instantiate again.", real_type
-                )
-                hf_config = AutoConfig.for_model(real_type).from_dict(
-                    hf_config.to_dict()
-                )
+                logger.warning("Using a model of type %s to instantiate again.", real_type)
+                hf_config = AutoConfig.for_model(real_type).from_dict(hf_config.to_dict())
                 self.is_transformers_natively_supported = True
 
         logger.info(
@@ -366,15 +349,11 @@ class AutoModelConfigLoader:
         hf_config = self.load_config(model_id, remote_source=model_config.remote_source)
         if model_config.num_hidden_layers_override:
             hf_config.num_hidden_layers = model_config.num_hidden_layers_override
-        hf_model = self.load_model(
-            hf_config, model_config.dtype, remote_source=model_config.remote_source
-        )
+        hf_model = self.load_model(hf_config, model_config.dtype, remote_source=model_config.remote_source)
         return hf_config, hf_model
 
     @staticmethod
-    def try_to_load_model(
-        *args, remote_source: str = RemoteSource.huggingface, **kwarg
-    ):
+    def try_to_load_model(*args, remote_source: str = RemoteSource.huggingface, **kwarg):
         if remote_source == RemoteSource.modelscope:
             from modelscope import AutoModel
         else:

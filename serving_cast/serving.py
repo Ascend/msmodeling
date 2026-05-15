@@ -8,7 +8,7 @@ from serving_cast.config import Config
 from serving_cast.instance import Instance, InstanceLoadBalancer
 from serving_cast.request import Request, RequestState
 
-from . import stime
+import serving_cast.stime as stime
 
 
 logger = stime.get_logger(__name__)
@@ -25,9 +25,7 @@ class Serving(ABC):
     """
 
     def __init__(self):
-        self.max_concurrency = (
-            Config.get_instance().common_config.serving_config.max_concurrency
-        )
+        self.max_concurrency = Config.get_instance().common_config.serving_config.max_concurrency
 
     @abstractmethod
     def serve(self, args, **kwargs) -> None:
@@ -72,9 +70,7 @@ class PdDisaggregationServing(Serving):
 
     """
 
-    def __init__(
-        self, prefill_instances: List[Instance], decode_instances: List[Instance]
-    ):
+    def __init__(self, prefill_instances: List[Instance], decode_instances: List[Instance]):
         # TOBEDONEL use InstanceGroup to group these prefill and decode instances, pass InstanceGroup to Serving
         super().__init__()
 
@@ -95,9 +91,9 @@ class PdDisaggregationServing(Serving):
         prefill_instance.handle(request)
 
     def get_work_load(self):
-        work_load = sum(
-            instance.get_work_load() for instance in self.prefill_instances
-        ) + sum(instance.get_work_load() for instance in self.decode_instances)
+        work_load = sum(instance.get_work_load() for instance in self.prefill_instances) + sum(
+            instance.get_work_load() for instance in self.decode_instances
+        )
 
         return work_load
 
@@ -106,10 +102,7 @@ class PdDisaggregationServing(Serving):
         logger.debug("Continue serving %s", request)
 
         if request.state != RequestState.KVS_TRANSFERRING:
-            raise ValueError(
-                "In continue serving: request.state shoulf be KVS_TRANSFERRING, "
-                f"but get {request.state}"
-            )
+            raise ValueError(f"In continue serving: request.state shoulf be KVS_TRANSFERRING, but get {request.state}")
         decode_instance = self.decode_balancer.select(request)
         decode_instance.handle(request)
 
@@ -141,6 +134,4 @@ class PdAggregationServing(Serving):
 
     def get_work_load(self):
         """Get the work load of the instance group"""
-        return sum(
-            instance.get_work_load() for instance in self.prefill_decode_instances
-        )
+        return sum(instance.get_work_load() for instance in self.prefill_decode_instances)

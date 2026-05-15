@@ -27,9 +27,7 @@ def create_linear_quant_config(quantize_linear_action: QuantizeLinearAction, **k
     elif quantize_linear_action == "MXFP4":
         quant_type = LinearQuantType.MXFP4
         if "weight_group_size" not in kwargs:
-            raise ValueError(
-                "weight_group_size must be provided for MXFP4 quantization"
-            )
+            raise ValueError("weight_group_size must be provided for MXFP4 quantization")
     elif quantize_linear_action in ("W4A8_STATIC", "W4A8_DYNAMIC"):
         quant_type = LinearQuantType.W4A8
     else:
@@ -72,26 +70,14 @@ def create_quant_config(
 ):
     quant_config = QuantConfig()
     if quantize_linear_action != QuantizeLinearAction.DISABLED:
-        quant_config.linear_configs["layers.*"] = create_linear_quant_config(
-            quantize_linear_action, **kwargs
-        )
-        quant_config.linear_configs["*.layers.*"] = create_linear_quant_config(
-            quantize_linear_action, **kwargs
-        )
-        quant_config.linear_configs["default_dit"] = create_linear_quant_config(
-            quantize_linear_action, **kwargs
-        )
+        quant_config.linear_configs["layers.*"] = create_linear_quant_config(quantize_linear_action, **kwargs)
+        quant_config.linear_configs["*.layers.*"] = create_linear_quant_config(quantize_linear_action, **kwargs)
+        quant_config.linear_configs["default_dit"] = create_linear_quant_config(quantize_linear_action, **kwargs)
         if quantize_lmhead:
-            quant_config.linear_configs["lm_head"] = create_linear_quant_config(
-                quantize_linear_action, **kwargs
-            )
-            quant_config.linear_configs["*.lm_head"] = create_linear_quant_config(
-                quantize_linear_action, **kwargs
-            )
+            quant_config.linear_configs["lm_head"] = create_linear_quant_config(quantize_linear_action, **kwargs)
+            quant_config.linear_configs["*.lm_head"] = create_linear_quant_config(quantize_linear_action, **kwargs)
     if quantize_attention_action != QuantizeAttentionAction.DISABLED:
         # default to symmetric quant with dummy scales
-        quant_config.attention_configs[-1] = create_attention_quant_config(
-            quantize_attention_action
-        )
+        quant_config.attention_configs[-1] = create_attention_quant_config(quantize_attention_action)
 
     return quant_config

@@ -75,15 +75,10 @@ class LinearQuantConfig:
     output is not common."""
 
     def __post_init__(self):
-        if (
-            self.weight_quant_granularity is not None
-            and self.dynamic_quant_granularity is None
-        ):
+        if self.weight_quant_granularity is not None and self.dynamic_quant_granularity is None:
             self.dynamic_quant_granularity = self.weight_quant_granularity
         if self.weight_scale is None and self.weight_offset is not None:
-            raise ValueError(
-                "weight_offset is provided but weight_scale is None, which is invalid"
-            )
+            raise ValueError("weight_offset is provided but weight_scale is None, which is invalid")
         if self.weight_scale is None:
             if self.weight_quant_granularity is None:
                 self.weight_quant_granularity = QuantGranularity.PER_TENSOR
@@ -105,33 +100,19 @@ class LinearQuantConfig:
                 self.dynamic_quant_scheme = QuantScheme.SYMMETRIC
         # Validate FP8 configuration
         if self.quant_type == LinearQuantType.FP8:
-            if (
-                self.dynamic_quant_scheme is not None
-                and self.dynamic_quant_scheme != QuantScheme.SYMMETRIC
-            ):
-                raise ValueError(
-                    "FP8 quantization only supports symmetric scheme for activations"
-                )
+            if self.dynamic_quant_scheme is not None and self.dynamic_quant_scheme != QuantScheme.SYMMETRIC:
+                raise ValueError("FP8 quantization only supports symmetric scheme for activations")
             if self.activation_scale is not None or self.activation_offset is not None:
-                raise ValueError(
-                    "FP8 quantization does not support static activation quantization"
-                )
+                raise ValueError("FP8 quantization does not support static activation quantization")
 
         # Validate MXFP4 configuration
         if self.quant_type == LinearQuantType.MXFP4:
             if self.dynamic_quant_granularity != QuantGranularity.PER_GROUP:
-                raise ValueError(
-                    "MXFP4 quantization only supports PER_GROUP granularity"
-                )
-            if (
-                self.dynamic_quant_scheme is not None
-                and self.dynamic_quant_scheme != QuantScheme.SYMMETRIC
-            ):
+                raise ValueError("MXFP4 quantization only supports PER_GROUP granularity")
+            if self.dynamic_quant_scheme is not None and self.dynamic_quant_scheme != QuantScheme.SYMMETRIC:
                 raise ValueError("MXFP4 quantization only supports symmetric scheme")
             if self.activation_scale is not None or self.activation_offset is not None:
-                raise ValueError(
-                    "MXFP4 quantization does not support static activation quantization"
-                )
+                raise ValueError("MXFP4 quantization does not support static activation quantization")
 
 
 @dataclasses.dataclass
@@ -193,14 +174,10 @@ class MultiheadLatentAttentionQuantConfig(AttentionQuantConfig):
 
 @dataclasses.dataclass
 class QuantConfig:
-    linear_configs: Dict[str, LinearQuantConfig] = dataclasses.field(
-        default_factory=dict
-    )
+    linear_configs: Dict[str, LinearQuantConfig] = dataclasses.field(default_factory=dict)
     """Per-layer configs: full module path -> LinearQuantConfig"""
 
-    attention_configs: Dict[int, AttentionQuantConfig] = dataclasses.field(
-        default_factory=dict
-    )
+    attention_configs: Dict[int, AttentionQuantConfig] = dataclasses.field(default_factory=dict)
     """Per-layer configs: attn_layer_id -> AttentionQuantConfig"""
 
     modules_to_not_convert: Optional[List[str]] = None
@@ -259,18 +236,9 @@ class ParallelConfig:
 
     def __post_init__(self) -> None:
         if self.data_parallel_size is None:
-            self.data_parallel_size = (
-                self.world_size
-                // self.tensor_parallel_size
-                // self.pipeline_parallel_size
-            )
+            self.data_parallel_size = self.world_size // self.tensor_parallel_size // self.pipeline_parallel_size
 
-        if (
-            self.tensor_parallel_size
-            * self.data_parallel_size
-            * self.pipeline_parallel_size
-            != self.world_size
-        ):
+        if self.tensor_parallel_size * self.data_parallel_size * self.pipeline_parallel_size != self.world_size:
             raise ValueError(
                 f"tensor_parallel_size ({self.tensor_parallel_size}) * "
                 f"data_parallel_size ({self.data_parallel_size}) * "
@@ -279,17 +247,8 @@ class ParallelConfig:
             )
 
         if self.moe_tensor_parallel_size is None:
-            self.moe_tensor_parallel_size = (
-                self.world_size
-                // self.moe_data_parallel_size
-                // self.expert_parallel_size
-            )
-        if (
-            self.moe_data_parallel_size
-            * self.moe_tensor_parallel_size
-            * self.expert_parallel_size
-            != self.world_size
-        ):
+            self.moe_tensor_parallel_size = self.world_size // self.moe_data_parallel_size // self.expert_parallel_size
+        if self.moe_data_parallel_size * self.moe_tensor_parallel_size * self.expert_parallel_size != self.world_size:
             raise ValueError(
                 f"moe_tensor_parallel_size ({self.moe_tensor_parallel_size}) * "
                 f"moe_data_parallel_size ({self.moe_data_parallel_size}) * "
@@ -300,14 +259,10 @@ class ParallelConfig:
             self.o_proj_tensor_parallel_size = self.tensor_parallel_size
         if self.o_proj_data_parallel_size is None:
             self.o_proj_data_parallel_size = (
-                self.world_size
-                // self.o_proj_tensor_parallel_size
-                // self.pipeline_parallel_size
+                self.world_size // self.o_proj_tensor_parallel_size // self.pipeline_parallel_size
             )
         if (
-            self.o_proj_tensor_parallel_size
-            * self.o_proj_data_parallel_size
-            * self.pipeline_parallel_size
+            self.o_proj_tensor_parallel_size * self.o_proj_data_parallel_size * self.pipeline_parallel_size
             != self.world_size
         ):
             raise ValueError(
@@ -321,16 +276,9 @@ class ParallelConfig:
             self.mlp_tensor_parallel_size = self.tensor_parallel_size
         if self.mlp_data_parallel_size is None:
             self.mlp_data_parallel_size = (
-                self.world_size
-                // self.mlp_tensor_parallel_size
-                // self.pipeline_parallel_size
+                self.world_size // self.mlp_tensor_parallel_size // self.pipeline_parallel_size
             )
-        if (
-            self.mlp_tensor_parallel_size
-            * self.mlp_data_parallel_size
-            * self.pipeline_parallel_size
-            != self.world_size
-        ):
+        if self.mlp_tensor_parallel_size * self.mlp_data_parallel_size * self.pipeline_parallel_size != self.world_size:
             raise ValueError(
                 f"mlp_tensor_parallel_size ({self.mlp_tensor_parallel_size}) * "
                 f"mlp_data_parallel_size ({self.mlp_data_parallel_size}) * "
@@ -342,14 +290,10 @@ class ParallelConfig:
             self.lmhead_tensor_parallel_size = self.tensor_parallel_size
         if self.lmhead_data_parallel_size is None:
             self.lmhead_data_parallel_size = (
-                self.world_size
-                // self.lmhead_tensor_parallel_size
-                // self.pipeline_parallel_size
+                self.world_size // self.lmhead_tensor_parallel_size // self.pipeline_parallel_size
             )
         if (
-            self.lmhead_tensor_parallel_size
-            * self.lmhead_data_parallel_size
-            * self.pipeline_parallel_size
+            self.lmhead_tensor_parallel_size * self.lmhead_data_parallel_size * self.pipeline_parallel_size
             != self.world_size
         ):
             raise ValueError(
@@ -406,12 +350,8 @@ class MlaFieldNames:
     kv_a_layernorm: str = "kv_a_layernorm"
 
     def __post_init__(self):
-        if self.q_proj is None and (
-            self.q_a_proj is None or self.q_b_proj is None or self.q_a_layernorm is None
-        ):
-            raise ValueError(
-                "Either q_proj or all of q_a_proj/q_b_proj/q_a_layernorm must be specified"
-            )
+        if self.q_proj is None and (self.q_a_proj is None or self.q_b_proj is None or self.q_a_layernorm is None):
+            raise ValueError("Either q_proj or all of q_a_proj/q_b_proj/q_a_layernorm must be specified")
 
 
 @dataclasses.dataclass

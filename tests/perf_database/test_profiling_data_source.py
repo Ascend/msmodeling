@@ -109,9 +109,7 @@ def _make_op_info(func, input_tensors, output_tensors=None):
     mock.args = tuple(input_tensors)
     mock.kwargs = {}
     if output_tensors:
-        mock.out = (
-            output_tensors[0] if len(output_tensors) == 1 else tuple(output_tensors)
-        )
+        mock.out = output_tensors[0] if len(output_tensors) == 1 else tuple(output_tensors)
     else:
         mock.out = None
     return mock
@@ -127,7 +125,8 @@ class _FakeTorchOp:
 
 def test_exact_match_with_fractal_nz(sample_data_dir):
     """aten.mm(A[136,5120], B[5120,768]) matches
-    CSV row with FRACTAL_NZ weight [320,48,16,16] after restoration."""
+    CSV row with FRACTAL_NZ weight [320,48,16,16] after restoration.
+    """
     ds = ProfilingDataSource(sample_data_dir)
     op = _make_op_info(
         torch.ops.aten.mm.default,
@@ -214,11 +213,7 @@ def test_compute_transpose_hit_attaches_shape_debug(tmp_path):
     data_dir = tmp_path / "transpose_hit"
     data_dir.mkdir()
     (data_dir / "op_mapping.yaml").write_text(
-        'version: "test"\n'
-        "device: TEST_DEVICE\n\n"
-        "operator_mappings:\n"
-        '  "aten.mm.default":\n'
-        "    kernel_type: MatMulV2\n"
+        'version: "test"\ndevice: TEST_DEVICE\n\noperator_mappings:\n  "aten.mm.default":\n    kernel_type: MatMulV2\n'
     )
     (data_dir / "MatMulV2.csv").write_text(
         "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
@@ -279,12 +274,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 def lmhead_data_dir(tmp_path):
     data_dir = tmp_path / "lmhead"
     data_dir.mkdir()
-    op_mapping = (
-        'version: "test"\n'
-        "operator_mappings:\n"
-        '  "aten.mm.default":\n'
-        "    kernel_type: MatMulV2\n"
-    )
+    op_mapping = 'version: "test"\noperator_mappings:\n  "aten.mm.default":\n    kernel_type: MatMulV2\n'
     (data_dir / "op_mapping.yaml").write_text(op_mapping)
     (data_dir / "MatMulV2.csv").write_text(LMHEAD_CSV.strip())
     return data_dir
@@ -293,7 +283,8 @@ def lmhead_data_dir(tmp_path):
 def test_nd_weight_transpose_match(lmhead_data_dir):
     """ND-format matmul weight stored as (N,K) should match TC's (K,N).
     CSV has weight (9496,5120) = (N,K). TC mm receives (5120,9496) = (K,N)
-    because F.linear transposes before dispatch."""
+    because F.linear transposes before dispatch.
+    """
     ds = ProfilingDataSource(lmhead_data_dir)
     op = _make_op_info(
         torch.ops.aten.mm.default,
@@ -333,12 +324,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 def add_data_dir(tmp_path):
     data_dir = tmp_path / "add"
     data_dir.mkdir()
-    op_mapping = (
-        'version: "test"\n'
-        "operator_mappings:\n"
-        '  "aten.add.Tensor":\n'
-        "    kernel_type: Add\n"
-    )
+    op_mapping = 'version: "test"\noperator_mappings:\n  "aten.add.Tensor":\n    kernel_type: Add\n'
     (data_dir / "op_mapping.yaml").write_text(op_mapping)
     (data_dir / "Add.csv").write_text(ADD_CSV.strip())
     return data_dir
@@ -404,12 +390,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 def rmsnorm_data_dir(tmp_path):
     data_dir = tmp_path / "rmsnorm"
     data_dir.mkdir()
-    op_mapping = (
-        'version: "test"\n'
-        "operator_mappings:\n"
-        '  "tensor_cast.rms_norm.default":\n'
-        "    kernel_type: RmsNorm\n"
-    )
+    op_mapping = 'version: "test"\noperator_mappings:\n  "tensor_cast.rms_norm.default":\n    kernel_type: RmsNorm\n'
     (data_dir / "op_mapping.yaml").write_text(op_mapping)
     (data_dir / "RmsNorm.csv").write_text(RMSNORM_CSV.strip())
     return data_dir
@@ -420,10 +401,7 @@ def add_rmsnorm_data_dir(tmp_path):
     data_dir = tmp_path / "add_rmsnorm"
     data_dir.mkdir()
     op_mapping = (
-        'version: "test"\n'
-        "operator_mappings:\n"
-        '  "tensor_cast.add_rms_norm2.default":\n'
-        "    kernel_type: AddRmsNorm\n"
+        'version: "test"\noperator_mappings:\n  "tensor_cast.add_rms_norm2.default":\n    kernel_type: AddRmsNorm\n'
     )
     (data_dir / "op_mapping.yaml").write_text(op_mapping)
     (data_dir / "AddRmsNorm.csv").write_text(ADD_RMSNORM_CSV.strip())
@@ -441,9 +419,7 @@ def test_batch_dim_stripping_rmsnorm(rmsnorm_data_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match after stripping batch dim=1 + padding tolerance"
-    )
+    assert result is not None, "Should match after stripping batch dim=1 + padding tolerance"
     assert abs(result.latency_us - 21.66) < 0.01
     assert result.shape_match_info is not None
     assert result.shape_match_info.shape_match_rule == "padding"
@@ -504,12 +480,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 def swiglu_data_dir(tmp_path):
     data_dir = tmp_path / "swiglu"
     data_dir.mkdir()
-    op_mapping = (
-        'version: "test"\n'
-        "operator_mappings:\n"
-        '  "tensor_cast.swiglu.default":\n'
-        "    kernel_type: SwiGlu\n"
-    )
+    op_mapping = 'version: "test"\noperator_mappings:\n  "tensor_cast.swiglu.default":\n    kernel_type: SwiGlu\n'
     (data_dir / "op_mapping.yaml").write_text(op_mapping)
     (data_dir / "SwiGlu.csv").write_text(SWIGLU_CSV.strip())
     return data_dir
@@ -606,12 +577,8 @@ def test_rope_no_false_positive(rope_data_dir):
     op = _make_op_info(
         torch.ops.tensor_cast.apply_rope.default,
         [
-            torch.empty(
-                1, 8, 144, 128, device="meta", dtype=torch.bfloat16
-            ),  # Q with wrong heads
-            torch.empty(
-                1, 8, 144, 128, device="meta", dtype=torch.bfloat16
-            ),  # K with wrong heads
+            torch.empty(1, 8, 144, 128, device="meta", dtype=torch.bfloat16),  # Q with wrong heads
+            torch.empty(1, 8, 144, 128, device="meta", dtype=torch.bfloat16),  # K with wrong heads
             torch.empty(1, 144, 128, device="meta", dtype=torch.bfloat16),
             torch.empty(1, 144, 128, device="meta", dtype=torch.bfloat16),
         ],
@@ -649,7 +616,8 @@ def test_triton_rope_tc_input_count_2_prefill(triton_rope_data_dir):
     """TC RoPE with _triton_rope + tc_input_count=2: Qwen3 Prefill.
     TC sends [Q(1,1,41040,128), K(1,4,41040,128), cos, sin] — tc_input_count=2 truncates to [Q, K].
     Normalize: swap Q↔K, transpose (B,H,S,D)→(B,S,H,D), strip batch=1.
-    Result: [K(41040,4,128), Q(41040,1,128)] should match CSV first 2 inputs."""
+    Result: [K(41040,4,128), Q(41040,1,128)] should match CSV first 2 inputs.
+    """
     ds = ProfilingDataSource(triton_rope_data_dir)
     op = _make_op_info(
         torch.ops.tensor_cast.apply_rope.default,
@@ -661,9 +629,7 @@ def test_triton_rope_tc_input_count_2_prefill(triton_rope_data_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match _triton_rope with tc_input_count=2 after normalize"
-    )
+    assert result is not None, "Should match _triton_rope with tc_input_count=2 after normalize"
     assert abs(result.latency_us - 55.0) < 0.01
 
 
@@ -725,9 +691,7 @@ def test_triton_rope_dtype_relaxed_hit(triton_rope_float_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "RoPE dtype relaxed: BF16 vs FLOAT should match for _ROPE_KERNELS"
-    )
+    assert result is not None, "RoPE dtype relaxed: BF16 vs FLOAT should match for _ROPE_KERNELS"
     assert abs(result.latency_us - 12.3) < 0.01
 
 
@@ -736,10 +700,7 @@ def test_matmul_dtype_relaxed_and_transpose_absorbed(tmp_path):
     data_dir = tmp_path / "matmul_dtype_relaxed"
     data_dir.mkdir()
     (data_dir / "op_mapping.yaml").write_text(
-        'version: "test"\n'
-        "operator_mappings:\n"
-        '  "aten.mm.default":\n'
-        "    kernel_type: MatMulV2\n"
+        'version: "test"\noperator_mappings:\n  "aten.mm.default":\n    kernel_type: MatMulV2\n'
     )
     (data_dir / "MatMulV2.csv").write_text(
         "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
@@ -757,8 +718,7 @@ def test_matmul_dtype_relaxed_and_transpose_absorbed(tmp_path):
     )
     result = ds.lookup(op)
     assert result is not None, (
-        "MatMul should match profiling row when dtype relaxes FLOAT->DT_BF16 "
-        "and the transposed ND weight is absorbed"
+        "MatMul should match profiling row when dtype relaxes FLOAT->DT_BF16 and the transposed ND weight is absorbed"
     )
     assert abs(result.latency_us - 47.4) < 0.01
     assert result.details.get("kernel_type") == "MatMulV2"
@@ -808,9 +768,7 @@ def test_composite_decomposition_matmul(composite_data_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match both MatMulV2 and hcom_allReduce_ sub-kernels"
-    )
+    assert result is not None, "Should match both MatMulV2 and hcom_allReduce_ sub-kernels"
     assert abs(result.latency_us - (14.156 + 200.00)) < 0.01
     assert result.details.get("composite") is True
     assert result.confidence == 0.9
@@ -1026,7 +984,8 @@ def quant_mc2_data_dir(tmp_path):
 
 def test_composite_quant_mc2_hit(quant_mc2_data_dir):
     """static_quant_linear_all_reduce: tc_input_count=2 truncates 6 tensor args to x+w,
-    matches QuantBatchMatmulV3 + hcom_allReduce_, latency summed."""
+    matches QuantBatchMatmulV3 + hcom_allReduce_, latency summed.
+    """
     ds = ProfilingDataSource(quant_mc2_data_dir)
     # 6 tensor args: x, w, scale, zero_point, bias, per_token_scale
     op = _make_op_info(
@@ -1052,7 +1011,8 @@ def test_composite_quant_mc2_hit(quant_mc2_data_dir):
 def test_composite_quant_mc2_message_bytes_uses_output_dtype(tmp_path):
     """message_bytes should use BF16 output (2B) not INT8 input (1B).
     With INT8 input: 144*5120*1=737280. With BF16 output: 144*5120*2=1474560.
-    Only the BF16-sized comm CSV should match."""
+    Only the BF16-sized comm CSV should match.
+    """
     data_dir = tmp_path / "quant_mc2_dtype"
     data_dir.mkdir()
     op_mapping = (
@@ -1422,12 +1382,8 @@ def test_attention_prefill_match(attn_data_dir):
     op = _make_op_info(
         torch.ops.tensor_cast.attention.default,
         [
-            torch.empty(
-                7000, 512, device="meta", dtype=torch.bfloat16
-            ),  # query: hidden=4*128=512
-            torch.empty(
-                56, 128, 4, 128, device="meta", dtype=torch.bfloat16
-            ),  # key (paged)
+            torch.empty(7000, 512, device="meta", dtype=torch.bfloat16),  # query: hidden=4*128=512
+            torch.empty(56, 128, 4, 128, device="meta", dtype=torch.bfloat16),  # key (paged)
             torch.empty(56, 128, 4, 128, device="meta", dtype=torch.bfloat16),  # value
             None,  # attention_mask
             torch.empty(2, 28, device="meta", dtype=torch.int32),  # block_table
@@ -1485,9 +1441,7 @@ def test_attention_miss_wrong_heads(attn_data_dir):
         torch.ops.tensor_cast.attention.default,
         [
             torch.empty(1, 2048, device="meta", dtype=torch.bfloat16),  # 16 heads * 128
-            torch.empty(
-                32, 128, 16, 128, device="meta", dtype=torch.bfloat16
-            ),  # 16 kv heads
+            torch.empty(32, 128, 16, 128, device="meta", dtype=torch.bfloat16),  # 16 kv heads
             torch.empty(32, 128, 16, 128, device="meta", dtype=torch.bfloat16),
             None,
             torch.empty(1, 32, device="meta", dtype=torch.int32),
@@ -1652,9 +1606,7 @@ def _make_device_profile_with_comm_grid(comm_grid):
 def test_comm_topology_tier_selects_correct_row(tiered_comm_dir):
     """With comm_grid, inter-pod group (tier 0) should match the tier=0 row (689.96 us)."""
     comm_grid = _make_test_comm_grid()
-    ds = ProfilingDataSource(
-        tiered_comm_dir, _make_device_profile_with_comm_grid(comm_grid)
-    )
+    ds = ProfilingDataSource(tiered_comm_dir, _make_device_profile_with_comm_grid(comm_grid))
     # rank_group [0,4] spans pods → tier 0
     # tensor: 4 devices, message_bytes = 4 * 1024 * 160 * 2 = 1310720
     op = _make_op_info(
@@ -1674,9 +1626,7 @@ def test_comm_topology_tier_selects_correct_row(tiered_comm_dir):
 def test_comm_topology_tier_intra_pod_row(tiered_comm_dir):
     """Intra-pod group (tier 1) should match the tier=1 row (125.30 us)."""
     comm_grid = _make_test_comm_grid()
-    ds = ProfilingDataSource(
-        tiered_comm_dir, _make_device_profile_with_comm_grid(comm_grid)
-    )
+    ds = ProfilingDataSource(tiered_comm_dir, _make_device_profile_with_comm_grid(comm_grid))
     # rank_group [0,1] within pod → tier 1
     op = _make_op_info(
         torch.ops.tensor_cast.all_reduce.default,
@@ -1695,9 +1645,7 @@ def test_comm_topology_tier_intra_pod_row(tiered_comm_dir):
 def test_comm_topology_tier_miss_when_tier_absent(tier0_only_comm_dir):
     """Intra-pod group (tier 1) should MISS when CSV only has tier=0 data."""
     comm_grid = _make_test_comm_grid()
-    ds = ProfilingDataSource(
-        tier0_only_comm_dir, _make_device_profile_with_comm_grid(comm_grid)
-    )
+    ds = ProfilingDataSource(tier0_only_comm_dir, _make_device_profile_with_comm_grid(comm_grid))
     op = _make_op_info(
         torch.ops.tensor_cast.all_reduce.default,
         [
@@ -1731,9 +1679,7 @@ def test_comm_no_comm_grid_ignores_topology_tier(tiered_comm_dir):
 def test_comm_csv_without_topology_tier_col(no_tier_col_comm_dir):
     """CSV without topology_tier column works fine even when comm_grid is provided."""
     comm_grid = _make_test_comm_grid()
-    ds = ProfilingDataSource(
-        no_tier_col_comm_dir, _make_device_profile_with_comm_grid(comm_grid)
-    )
+    ds = ProfilingDataSource(no_tier_col_comm_dir, _make_device_profile_with_comm_grid(comm_grid))
     op = _make_op_info(
         torch.ops.tensor_cast.all_reduce.default,
         [
@@ -1829,9 +1775,7 @@ def test_comm_data_ref_missing_falls_back_to_data_dir(comm_no_ref_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        f"Expected hit in legacy layout, got: {ds.last_miss_reason}"
-    )
+    assert result is not None, f"Expected hit in legacy layout, got: {ds.last_miss_reason}"
     assert abs(result.latency_us - 512.00) < 0.01
 
 
@@ -1848,9 +1792,10 @@ def test_comm_data_ref_csv_not_found_returns_none(comm_ref_dir):
         ],
     )
     # Need all_gather in op_mapping — patch the loaded mapping directly
-    ds._op_mapping.setdefault("operator_mappings", {})[
-        "tensor_cast.all_gather.default"
-    ] = {"kernel_type": "hcom_allGather_", "category": "communication"}
+    ds._op_mapping.setdefault("operator_mappings", {})["tensor_cast.all_gather.default"] = {
+        "kernel_type": "hcom_allGather_",
+        "category": "communication",
+    }
     result = ds.lookup(op)
     assert result is None
     assert ds.last_miss_reason == "csv_not_found"
@@ -1963,9 +1908,7 @@ def test_comm_hccl_preferred_over_data_dir(comm_priority_both_dir):
     ds = ProfilingDataSource(comm_priority_both_dir)
     result = ds.lookup(_allreduce_op_16dev())
     assert result is not None
-    assert abs(result.latency_us - 100.00) < 0.01, (
-        f"Should use hccl CSV (100.00), got {result.latency_us}"
-    )
+    assert abs(result.latency_us - 100.00) < 0.01, f"Should use hccl CSV (100.00), got {result.latency_us}"
 
 
 def test_comm_hccl_only_hit(comm_priority_hccl_only):
@@ -2008,17 +1951,13 @@ def test_comm_allreduce_interpolates_message_bytes(comm_data_dir):
     op = _make_op_info(
         torch.ops.tensor_cast.all_reduce.default,
         [
-            torch.empty(
-                983040 // 2, device="meta", dtype=torch.bfloat16
-            ),  # 983040 bytes
+            torch.empty(983040 // 2, device="meta", dtype=torch.bfloat16),  # 983040 bytes
             0,
             list(range(16)),
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should interpolate comm between bracketing message_bytes"
-    )
+    assert result is not None, "Should interpolate comm between bracketing message_bytes"
     assert abs(result.latency_us - 551.23) < 1.0
     assert result.source == QuerySource.INTERPOLATED
 
@@ -2079,9 +2018,7 @@ message_bytes,num_devices,dtype,topology_tier,Duration(us)
     op = _make_op_info(
         torch.ops.tensor_cast.all_reduce.default,
         [
-            torch.empty(
-                163840 // 2, device="meta", dtype=torch.bfloat16
-            ),  # 163840 bytes
+            torch.empty(163840 // 2, device="meta", dtype=torch.bfloat16),  # 163840 bytes
             0,
             list(range(16)),
         ],
@@ -2102,9 +2039,7 @@ def test_comm_allreduce_exact_still_measured(comm_data_dir):
     op = _make_op_info(
         torch.ops.tensor_cast.all_reduce.default,
         [
-            torch.empty(
-                1, 640, 1024, device="meta", dtype=torch.bfloat16
-            ),  # 1310720 bytes
+            torch.empty(1, 640, 1024, device="meta", dtype=torch.bfloat16),  # 1310720 bytes
             0,
             list(range(16)),
         ],
@@ -2268,12 +2203,8 @@ _CANN85_DATA_DIR = Path(__file__).resolve().parents[2] / (
     "ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.15.0_torch2.9.0_cann8.5"
 )
 
-_skip_no_cann83 = pytest.mark.skipif(
-    not _CANN83_DATA_DIR.exists(), reason="CANN 8.3 data dir not present"
-)
-_skip_no_cann85 = pytest.mark.skipif(
-    not _CANN85_DATA_DIR.exists(), reason="CANN 8.5 data dir not present"
-)
+_skip_no_cann83 = pytest.mark.skipif(not _CANN83_DATA_DIR.exists(), reason="CANN 8.3 data dir not present")
+_skip_no_cann85 = pytest.mark.skipif(not _CANN85_DATA_DIR.exists(), reason="CANN 8.5 data dir not present")
 
 
 # MoE real CANN tests (init_routing_v2, unpermute_tokens, moe_gating_top_k_softmax)
@@ -2356,7 +2287,7 @@ def test_mlapo_composite_not_rejected():
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        with open(os.path.join(tmpdir, "op_mapping.yaml"), "w") as f:
+        with open(os.path.join(tmpdir, "op_mapping.yaml"), "w", encoding="utf-8") as f:
             yaml.dump(op_mapping, f)
 
         ds = ProfilingDataSource(tmpdir, device_profile=MagicMock())
@@ -2399,7 +2330,7 @@ def test_miss_reason_respects_tc_input_count():
     }
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        with open(os.path.join(tmpdir, "op_mapping.yaml"), "w") as f:
+        with open(os.path.join(tmpdir, "op_mapping.yaml"), "w", encoding="utf-8") as f:
             yaml.dump(op_mapping, f)
 
         # CSV with 1-input shape that doesn't match TC shape
@@ -2430,9 +2361,7 @@ def test_miss_reason_respects_tc_input_count():
         result = ds.lookup(mock_op)
         assert result is None  # should miss
         # Key assertion: reason should be shape_mismatch, NOT input_count_mismatch
-        assert ds.last_miss_reason == "shape_mismatch", (
-            f"Expected shape_mismatch, got {ds.last_miss_reason}"
-        )
+        assert ds.last_miss_reason == "shape_mismatch", f"Expected shape_mismatch, got {ds.last_miss_reason}"
 
 
 # --- Flatten batch 3D→2D tests (quantize / norm kernels) ---
@@ -2462,7 +2391,8 @@ def quant_flatten_data_dir(tmp_path):
 
 def test_flatten_batch_quantize_3d_to_2d(quant_flatten_data_dir):
     """TC quantize sends (1,16,7168) 3D — should match CSV (16,7168) 2D
-    via flatten batch rule for AscendQuantV2."""
+    via flatten batch rule for AscendQuantV2.
+    """
     ds = ProfilingDataSource(quant_flatten_data_dir)
     op = _make_op_info(
         torch.ops.tensor_cast.quantize.default,
@@ -2473,9 +2403,7 @@ def test_flatten_batch_quantize_3d_to_2d(quant_flatten_data_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match 3D (1,16,7168) → 2D (16,7168) via flatten batch"
-    )
+    assert result is not None, "Should match 3D (1,16,7168) → 2D (16,7168) via flatten batch"
     assert abs(result.latency_us - 5.5) < 0.01
     assert result.shape_match_info is not None
     assert result.shape_match_info.shape_match_rule == "batch_strip"
@@ -2483,7 +2411,8 @@ def test_flatten_batch_quantize_3d_to_2d(quant_flatten_data_dir):
 
 def test_flatten_batch_quantize_batch_gt_1(quant_flatten_data_dir):
     """TC quantize sends (4,64,5120) 3D — should match CSV (256,5120) 2D
-    via flatten: 4*64=256."""
+    via flatten: 4*64=256.
+    """
     ds = ProfilingDataSource(quant_flatten_data_dir)
     op = _make_op_info(
         torch.ops.tensor_cast.quantize.default,
@@ -2494,9 +2423,7 @@ def test_flatten_batch_quantize_batch_gt_1(quant_flatten_data_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match 3D (4,64,5120) → 2D (256,5120) via flatten batch"
-    )
+    assert result is not None, "Should match 3D (4,64,5120) → 2D (256,5120) via flatten batch"
     assert abs(result.latency_us - 18.2) < 0.01
     assert result.shape_match_info is not None
     assert result.shape_match_info.shape_match_rule == "flatten_3d"
@@ -2506,7 +2433,8 @@ def test_flatten_batch_quantize_with_padding(quant_flatten_data_dir):
     """TC quantize sends (1,272,5120) 3D — should match CSV (256,5120) 2D
     via flatten + block padding: flatten→(272,5120), 272 ≈ 256 via ceil(256/16)*16=256? No.
     Actually 272 = ceil(256/16)*16 = 256? No, ceil(256/16)*16 = 256. 272 = ceil(268/16)*16.
-    Use (1,256,5120) instead for exact flatten match."""
+    Use (1,256,5120) instead for exact flatten match.
+    """
     ds = ProfilingDataSource(quant_flatten_data_dir)
     # 3D exact flatten (no padding needed)
     op = _make_op_info(
@@ -2518,14 +2446,13 @@ def test_flatten_batch_quantize_with_padding(quant_flatten_data_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match 3D (1,256,5120) → 2D (256,5120) via flatten"
-    )
+    assert result is not None, "Should match 3D (1,256,5120) → 2D (256,5120) via flatten"
 
 
 def test_flatten_batch_rmsnorm_3d_to_2d(rmsnorm_data_dir):
     """TC RmsNorm sends (2,68,5120),(5120,) 3D — should match CSV (136,5120),(5120)
-    via flatten batch: 2*68=136."""
+    via flatten batch: 2*68=136.
+    """
     ds = ProfilingDataSource(rmsnorm_data_dir)
     op = _make_op_info(
         torch.ops.tensor_cast.rms_norm.default,
@@ -2535,9 +2462,7 @@ def test_flatten_batch_rmsnorm_3d_to_2d(rmsnorm_data_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match 3D (2,68,5120) → 2D (136,5120) via flatten batch"
-    )
+    assert result is not None, "Should match 3D (2,68,5120) → 2D (136,5120) via flatten batch"
     assert abs(result.latency_us - 21.66) < 0.01
 
 
@@ -2599,7 +2524,8 @@ def quant_mla_data_dir(tmp_path):
 
 def test_merge_last_dims_quantize_mla_decode(quant_mla_data_dir):
     """MLA quantize: TC (8, 16, 128) 3D → should match CSV (8, 2048) 2D
-    by merging last two dims: 16*128=2048."""
+    by merging last two dims: 16*128=2048.
+    """
     ds = ProfilingDataSource(quant_mla_data_dir)
     op = _make_op_info(
         torch.ops.tensor_cast.quantize.default,
@@ -2632,10 +2558,11 @@ def test_merge_last_dims_quantize_mla_prefill(quant_mla_data_dir):
 
 def test_merge_last_dims_quantize_mla_batch1(quant_mla_data_dir):
     """MLA quantize batch=1: TC (1, 16, 128) 3D → should match CSV (1, 2048) 2D.
-    _strip_batch_dim collapses (1,16,128)→(16,128), so merge must use original shape."""
+    _strip_batch_dim collapses (1,16,128)→(16,128), so merge must use original shape.
+    """
     # Add a batch=1 row to CSV
     csv_path = quant_mla_data_dir / "AscendQuantV2.csv"
-    with open(csv_path, "a") as f:
+    with open(csv_path, "a", encoding="utf-8") as f:
         f.write('\n"1,2048","DT_BF16","ND","1,2048","INT8","ND",4.2\n')
     ds = ProfilingDataSource(quant_mla_data_dir)
     op = _make_op_info(
@@ -2647,15 +2574,14 @@ def test_merge_last_dims_quantize_mla_batch1(quant_mla_data_dir):
         ],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match (1,16,128) → (1,2048) via merge-last-dims on original shape"
-    )
+    assert result is not None, "Should match (1,16,128) → (1,2048) via merge-last-dims on original shape"
     assert abs(result.latency_us - 4.2) < 0.01
 
 
 def test_merge_last_dims_not_applied_to_matmul(sample_data_dir):
     """MatMulV2 is NOT in _FLATTEN_BATCH_KERNELS — merge should NOT apply.
-    Uses sample_data_dir which has MatMulV2 mapped via aten.mm.default."""
+    Uses sample_data_dir which has MatMulV2 mapped via aten.mm.default.
+    """
     ds = ProfilingDataSource(sample_data_dir)
     # CSV has (136,5120) for MatMulV2. Try 3D (2,68,5120) — should NOT match
     # via merge-last-dims (68*5120=348160 ≠ 5120).
@@ -2747,7 +2673,8 @@ def test_elementwise_dtype_scaled_match(elementwise_data_dir):
 
 def test_elementwise_broadcast_ignored(elementwise_data_dir):
     """Scalar mul where TC has 1 tensor + scalar, out=(256,7168) -> HIT on output shape.
-    Elementwise lookup matches on output shape, not input pattern."""
+    Elementwise lookup matches on output shape, not input pattern.
+    """
     ds = ProfilingDataSource(elementwise_data_dir)
     out_tensor = torch.empty(256, 7168, device="meta", dtype=torch.bfloat16)
     op = _make_op_info(
@@ -2760,9 +2687,7 @@ def test_elementwise_broadcast_ignored(elementwise_data_dir):
         [out_tensor],
     )
     result = ds.lookup(op)
-    assert result is not None, (
-        "Should match elementwise on output shape regardless of inputs"
-    )
+    assert result is not None, "Should match elementwise on output shape regardless of inputs"
     assert abs(result.latency_us - 10.5) < 0.01
 
 
@@ -2786,7 +2711,8 @@ def test_elementwise_miss_no_shape(elementwise_data_dir):
 def test_elementwise_fallback_no_output(elementwise_data_dir):
     """op_invoke_info.out = None -> falls back to _lookup_compute (returns None
     since _lookup_compute uses input-shape matching and the CSV input shapes
-    happen to match, but the key test is the fallback path, not the result)."""
+    happen to match, but the key test is the fallback path, not the result).
+    """
     ds = ProfilingDataSource(elementwise_data_dir)
     op = _make_op_info(
         torch.ops.aten.mul.Tensor,
@@ -2906,9 +2832,7 @@ class TestFindComputeMatch:
             ((4099, 7168), torch.bfloat16),
             ((2112, 7168), torch.bfloat16),
         ]
-        hit = ds._find_compute_match(
-            ["QuantBatchMatmulV3"], tc_inputs, tc_input_count=2
-        )
+        hit = ds._find_compute_match(["QuantBatchMatmulV3"], tc_inputs, tc_input_count=2)
         assert hit is not None
         assert abs(hit.latency_us - 100.5) < 0.01
         assert hit.kernel_type == "QuantBatchMatmulV3"
@@ -2924,9 +2848,7 @@ class TestFindComputeMatch:
             ((4099, 7168), torch.bfloat16),
             ((2112, 7168), torch.bfloat16),
         ]
-        hit = ds._find_compute_match(
-            ["QuantBatchMatmulV3"], tc_inputs, auto_truncate=True
-        )
+        hit = ds._find_compute_match(["QuantBatchMatmulV3"], tc_inputs, auto_truncate=True)
         assert hit is not None
         assert abs(hit.latency_us - 100.5) < 0.01
         assert hit.kernel_type == "QuantBatchMatmulV3"
@@ -3127,9 +3049,7 @@ def dfc_data_dir(tmp_path):
 class TestLookupMoe:
     def test_ep_size_exact_match(self, dfc_data_dir):
         """Same shape, different EP sizes → match the right one."""
-        ds = ProfilingDataSource(
-            dfc_data_dir, parallel_config=_make_parallel_config(ep_size=16)
-        )
+        ds = ProfilingDataSource(dfc_data_dir, parallel_config=_make_parallel_config(ep_size=16))
         op = _make_op_info(
             torch.ops.tensor_cast.dispatch_ffn_combine.default,
             [
@@ -3142,9 +3062,7 @@ class TestLookupMoe:
         assert abs(result.latency_us - 235.0) < 0.01
 
     def test_ep_size_8_matches_different_row(self, dfc_data_dir):
-        ds = ProfilingDataSource(
-            dfc_data_dir, parallel_config=_make_parallel_config(ep_size=8)
-        )
+        ds = ProfilingDataSource(dfc_data_dir, parallel_config=_make_parallel_config(ep_size=8))
         op = _make_op_info(
             torch.ops.tensor_cast.dispatch_ffn_combine.default,
             [
@@ -3175,9 +3093,7 @@ class TestLookupMoe:
 
         NOTE: This is the last test in TestLookupMoe.
         """
-        ds = ProfilingDataSource(
-            dfc_data_dir, parallel_config=_make_parallel_config(ep_size=16)
-        )
+        ds = ProfilingDataSource(dfc_data_dir, parallel_config=_make_parallel_config(ep_size=16))
         op = _make_op_info(
             torch.ops.tensor_cast.dispatch_ffn_combine.default,
             [

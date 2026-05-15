@@ -64,9 +64,7 @@ class TestVideoGeneration(unittest.TestCase):
             "z_dim": 16,
         }
 
-        self.temp_dir, self.model_id = self._create_mock_model_dir(
-            transformer_config, vae_config
-        )
+        self.temp_dir, self.model_id = self._create_mock_model_dir(transformer_config, vae_config)
         self.device = "TEST_DEVICE"
         self.batch_size = 2
         self.seq_len = 10
@@ -89,13 +87,13 @@ class TestVideoGeneration(unittest.TestCase):
 
         transformer_dir = os.path.join(model_dir, "transformer")
         os.makedirs(transformer_dir, exist_ok=True)
-        with open(os.path.join(transformer_dir, "config.json"), "w") as f:
+        with open(os.path.join(transformer_dir, "config.json"), "w", encoding="utf-8") as f:
             json.dump(transformer_config, f)
 
         # Write VAE config
         vae_dir = os.path.join(model_dir, "vae")
         os.makedirs(vae_dir, exist_ok=True)
-        with open(os.path.join(vae_dir, "config.json"), "w") as f:
+        with open(os.path.join(vae_dir, "config.json"), "w", encoding="utf-8") as f:
             json.dump(vae_config, f)
         return temp_dir, model_dir
 
@@ -263,9 +261,7 @@ class TestVideoGeneration(unittest.TestCase):
             (False, True, 2, "CFG disabled + parallel enabled → no extra operations"),
         ]
     )
-    def test_classifier_free_guidance_parallel(
-        self, use_cfg, cfg_parallel, world_size, test_desc
-    ):
+    def test_classifier_free_guidance_parallel(self, use_cfg, cfg_parallel, world_size, test_desc):
         """Test basic video inference without Ulysses parallelism."""
         try:
             run_inference(
@@ -283,13 +279,9 @@ class TestVideoGeneration(unittest.TestCase):
                 use_cfg=use_cfg,
                 cfg_parallel=cfg_parallel,
             )
-            self._validate_inference_result(
-                f"test_classifier_free_guidance_parallel {test_desc}"
-            )
+            self._validate_inference_result(f"test_classifier_free_guidance_parallel {test_desc}")
         except Exception as e:
-            self.fail(
-                f"test_classifier_free_guidance_parallel {test_desc} failed with exception: {str(e)}"
-            )
+            self.fail(f"test_classifier_free_guidance_parallel {test_desc} failed with exception: {str(e)}")
 
     def test_process_input_with_ulysses_size_1(self):
         """Test process_input function when ulysses_size is 1."""
@@ -338,9 +330,7 @@ class TestVideoGeneration(unittest.TestCase):
             )
             self._validate_inference_result(f"test_video_inference_with_{dtype}_param")
         except Exception as e:
-            self.fail(
-                f"test_video_inference_with_{dtype}_param failed with exception: {str(e)}"
-            )
+            self.fail(f"test_video_inference_with_{dtype}_param failed with exception: {str(e)}")
 
     @parameterized.expand(
         [
@@ -350,9 +340,7 @@ class TestVideoGeneration(unittest.TestCase):
             [8, 2],
         ]
     )
-    def test_video_inference_with_different_parallel_sizes(
-        self, world_size, ulysses_size
-    ):
+    def test_video_inference_with_different_parallel_sizes(self, world_size, ulysses_size):
         """Parameterized test for different parallel configurations."""
         try:
             run_inference(
@@ -368,9 +356,7 @@ class TestVideoGeneration(unittest.TestCase):
                 world_size=world_size,
                 ulysses_size=ulysses_size,
             )
-            self._validate_inference_result(
-                f"test_video_inference_with_world_{world_size}_ulysses_{ulysses_size}"
-            )
+            self._validate_inference_result(f"test_video_inference_with_world_{world_size}_ulysses_{ulysses_size}")
         except Exception as e:
             self.fail(
                 f"test_video_inference_with_world_{world_size}_ulysses_{ulysses_size} failed with exception: {str(e)}"
@@ -535,12 +521,8 @@ class TestVideoGeneration(unittest.TestCase):
             ),
         ]
     )
-    def test_video_inference_with_model_configs(
-        self, config_name, transformer_config, vae_config
-    ):
-        temp_dir, model_dir = self._create_mock_model_dir(
-            transformer_config, vae_config
-        )
+    def test_video_inference_with_model_configs(self, config_name, transformer_config, vae_config):
+        temp_dir, model_dir = self._create_mock_model_dir(transformer_config, vae_config)
         try:
             run_inference(
                 device="TEST_DEVICE",
@@ -556,13 +538,9 @@ class TestVideoGeneration(unittest.TestCase):
                 ulysses_size=1,
                 quantize_linear_action=QuantizeLinearAction.W8A8_DYNAMIC,
             )
-            self._validate_inference_result(
-                f"test_video_inference_with_model_configs[{config_name}]"
-            )
+            self._validate_inference_result(f"test_video_inference_with_model_configs[{config_name}]")
         except Exception as e:
-            self.fail(
-                f"test_video_inference_with_model_configs[{config_name}] failed with exception: {str(e)}"
-            )
+            self.fail(f"test_video_inference_with_model_configs[{config_name}] failed with exception: {str(e)}")
         finally:
             import shutil
 

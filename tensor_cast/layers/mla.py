@@ -101,15 +101,9 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             exact_division(self.num_heads, tp_group.world_size),
             self.qk_nope_head_dim + self.v_head_dim,
         )
-        W_UK, W_UV = kv_b_proj_view.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-        )
-        self.W_UV = W_UV.transpose(
-            0, 1
-        )  # (num_heads_per_rank, kv_lora_rank, v_head_dim)
-        self.W_UK_T = W_UK.permute(
-            1, 2, 0
-        )  # (num_heads_per_rank, qk_nope_head_dim, kv_lora_rank)
+        W_UK, W_UV = kv_b_proj_view.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        self.W_UV = W_UV.transpose(0, 1)  # (num_heads_per_rank, kv_lora_rank, v_head_dim)
+        self.W_UK_T = W_UK.permute(1, 2, 0)  # (num_heads_per_rank, qk_nope_head_dim, kv_lora_rank)
         self._num_heads_per_rank = self.W_UV.size(0)
         self.tp_group = tp_group
 
@@ -124,9 +118,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             return target.qweight, target.weight_scale, target.weight_offset
         weight = getattr(target, "weight", None)
         if weight is None:
-            raise AttributeError(
-                f"Module {module.__class__.__name__} does not expose a weight tensor. "
-            )
+            raise AttributeError(f"Module {module.__class__.__name__} does not expose a weight tensor. ")
         return weight.data, None, None
 
     def _pre_attention_forward(
@@ -159,14 +151,10 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         num_tokens = batch_size * seq_length
         hidden_states_view = hidden_states.view(num_tokens, -1)
         cos, sin = position_embeddings
-        self.q_a_proj_weight, self.q_a_proj_scale, self.q_a_proj_offset = (
-            self.extract_qparams(self.q_a_proj)
-        )
-        self.q_b_proj_weight, self.q_b_proj_scale, self.q_b_proj_offset = (
-            self.extract_qparams(self.q_b_proj)
-        )
-        self.kv_a_proj_weight, self.kv_a_proj_scale, self.kv_a_proj_offset = (
-            self.extract_qparams(self.kv_a_proj_with_mqa)
+        self.q_a_proj_weight, self.q_a_proj_scale, self.q_a_proj_offset = self.extract_qparams(self.q_a_proj)
+        self.q_b_proj_weight, self.q_b_proj_scale, self.q_b_proj_offset = self.extract_qparams(self.q_b_proj)
+        self.kv_a_proj_weight, self.kv_a_proj_scale, self.kv_a_proj_offset = self.extract_qparams(
+            self.kv_a_proj_with_mqa
         )
         self.q_a_layernorm_weight = self.q_a_layernorm.weight.data
         self.kv_a_layernorm_weight = self.kv_a_layernorm.weight.data
@@ -254,14 +242,10 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             )
 
             if attention_meta is not None:
-                torch.ops.tensor_cast.concat_and_cache_mla(
-                    kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping
-                )
+                torch.ops.tensor_cast.concat_and_cache_mla(kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping)
         else:
             if attention_meta is not None:
-                torch.ops.tensor_cast.concat_and_cache_mla(
-                    kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping
-                )
+                torch.ops.tensor_cast.concat_and_cache_mla(kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping)
 
         extra_backend_kwargs = {
             "topk_limit": None,
@@ -307,9 +291,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         attn_output = attention_backend(
             q=q_states,
             kv_cache=kv_cache,
-            block_table=attention_meta.block_table_tensor
-            if attention_meta is not None
-            else None,
+            block_table=attention_meta.block_table_tensor if attention_meta is not None else None,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
             query_lens=query_lens,
@@ -327,9 +309,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         return {}
 
     def quantize_params(self):
-        assert self.quant_config is not None, (
-            "quant_config must be set before quantization"
-        )
+        assert self.quant_config is not None, "quant_config must be set before quantization"
         out_dtype = self.quant_config.get_quant_dtype()
         kv_b_proj = self.kv_b_proj
         if not isinstance(kv_b_proj, TensorCastQuantLinear):
@@ -432,12 +412,8 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
             return None
 
         indexer_cache_by_layers = kwargs.pop("indexer_cache_by_layers", None)
-        indexer_cache = (
-            indexer_cache_by_layers[self.layer_idx] if indexer_cache_by_layers else None
-        )
-        return self.indexer(
-            hidden_states, qa_normed, position_embeddings, indexer_cache, attention_meta
-        )
+        indexer_cache = indexer_cache_by_layers[self.layer_idx] if indexer_cache_by_layers else None
+        return self.indexer(hidden_states, qa_normed, position_embeddings, indexer_cache, attention_meta)
 
 
 class DeepseekSparseAttentionIndexer(ModelWrapperBase):
@@ -470,13 +446,9 @@ class DeepseekSparseAttentionIndexer(ModelWrapperBase):
         attention_meta: Optional[AttentionMetadataBase] = None,
     ):
         cos, sin = position_embeddings
-        wq_b_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(
-            self.wq_b
-        )
+        wq_b_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(self.wq_b)
         wk_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(self.wk)
-        weights_proj_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(
-            self.weights_proj
-        )
+        weights_proj_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(self.weights_proj)
         # The performance model infers fp8-vs-bf16 behavior from the cache dtype.
         # The semantic op itself stays shape-only and does not encode the cost model.
         return torch.ops.tensor_cast.dsa_indexer(

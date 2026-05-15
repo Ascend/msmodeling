@@ -51,7 +51,5 @@ def parse_int_range(value: str, name: str) -> tuple[int, int]:
     if start < 0 or end < 0:
         raise ValueError(f"{name} must be non-negative, got {value!r}.")
     if end < start:
-        raise ValueError(
-            f"{name} must be 'start,end' with end >= start, got {value!r}."
-        )
+        raise ValueError(f"{name} must be 'start,end' with end >= start, got {value!r}.")
     return start, end

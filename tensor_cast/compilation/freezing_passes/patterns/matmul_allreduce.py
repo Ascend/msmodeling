@@ -110,15 +110,11 @@ def _is_matmul_allreduce(match: Match) -> bool:
 
 
 def _is_static_quant_linear_allreduce(match: Match) -> bool:
-    return _is_allreduce_after_target(
-        match, torch.ops.tensor_cast.static_quant_linear.default
-    )
+    return _is_allreduce_after_target(match, torch.ops.tensor_cast.static_quant_linear.default)
 
 
 def _is_static_quant_linear_int4_allreduce(match: Match) -> bool:
-    return _is_allreduce_after_target(
-        match, torch.ops.tensor_cast.static_quant_linear_int4.default
-    )
+    return _is_allreduce_after_target(match, torch.ops.tensor_cast.static_quant_linear_int4.default)
 
 
 def _is_fp8_linear_allreduce(match: Match) -> bool:

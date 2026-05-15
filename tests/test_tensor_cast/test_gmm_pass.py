@@ -49,16 +49,12 @@ class GmmPassTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
-        self.assertEqual(
-            count_events(runtime, torch.ops.tensor_cast.grouped_matmul.default), 1
-        )
+        self.assertEqual(count_events(runtime, torch.ops.tensor_cast.grouped_matmul.default), 1)
 
     def test_qwen3_static_int8(self):
         model_id = "Qwen/Qwen3-235B-A22B"
@@ -85,20 +81,14 @@ class GmmPassTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
+        self.assertEqual(count_events(runtime, torch.ops.tensor_cast.grouped_matmul_quant.default), 1)
         self.assertEqual(
-            count_events(runtime, torch.ops.tensor_cast.grouped_matmul_quant.default), 1
-        )
-        self.assertEqual(
-            count_events(
-                runtime, torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default
-            ),
+            count_events(runtime, torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default),
             1,
         )
 
@@ -138,9 +128,7 @@ class GmmPassTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
@@ -149,21 +137,15 @@ class GmmPassTestCase(unittest.TestCase):
         expected_swiglu_op = None
         if quant_type == LinearQuantType.W8A8:
             expected_op = torch.ops.tensor_cast.grouped_matmul_quant.default
-            expected_swiglu_op = (
-                torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default
-            )
+            expected_swiglu_op = torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default
         elif quant_type == LinearQuantType.W4A8:
             expected_op = torch.ops.tensor_cast.grouped_matmul_quant_int4.default
-            expected_swiglu_op = (
-                torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default
-            )
+            expected_swiglu_op = torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default
         elif quant_type == LinearQuantType.FP8:
             expected_op = torch.ops.tensor_cast.grouped_matmul_fp8.default
             expected_swiglu_op = torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default
         elif quant_type == LinearQuantType.MXFP4:
             expected_op = torch.ops.tensor_cast.grouped_matmul_mxfp4.default
-            expected_swiglu_op = (
-                torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default
-            )
+            expected_swiglu_op = torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default
         self.assertEqual(count_events(runtime, expected_op), 1)
         self.assertEqual(count_events(runtime, expected_swiglu_op), 1)

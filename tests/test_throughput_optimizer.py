@@ -32,9 +32,7 @@ class TestThroughputOptimizer(TestCase):
         result = subprocess.run(cmd, capture_output=True, text=True, check=check)
         return result
 
-    def _validate_table_structure(
-        self, output_text, required_columns, table_start_pattern
-    ):
+    def _validate_table_structure(self, output_text, required_columns, table_start_pattern):
         """Validate the overall table structure and format"""
         # Check for required sections
         required_sections = [
@@ -56,16 +54,12 @@ class TestThroughputOptimizer(TestCase):
                 header_line = line
                 break
 
-        self.assertIsNotNone(
-            header_line, "Table header with required columns not found"
-        )
+        self.assertIsNotNone(header_line, "Table header with required columns not found")
 
         # Check for table borders (prettytable format)
         border_pattern = r"\+-+\+"
         borders = re.findall(border_pattern, output_text)
-        self.assertGreaterEqual(
-            len(borders), 2, "Table borders not found or incomplete"
-        )
+        self.assertGreaterEqual(len(borders), 2, "Table borders not found or incomplete")
 
         # Check for data rows in table format
         data_row_pattern = r"\|\s*\d+\s*\|.*\|"
@@ -81,9 +75,7 @@ class TestThroughputOptimizer(TestCase):
         # Check for throughput values in table
         throughput_pattern = r"\|\s*\d+\s*\|\s*[\d.]+\s*"
         throughput_matches = re.findall(throughput_pattern, output_text)
-        self.assertGreaterEqual(
-            len(throughput_matches), 1, "Throughput values not found in table"
-        )
+        self.assertGreaterEqual(len(throughput_matches), 1, "Throughput values not found in table")
 
     def test_aggregation_functionality_with_output_validation(self):
         """Test aggregation functionality with comprehensive output validation"""
@@ -102,9 +94,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Basic execution check
         if result.returncode != 0:
-            self.fail(
-                f"Script execution failed with return code {result.returncode}: {result.stderr}"
-            )
+            self.fail(f"Script execution failed with return code {result.returncode}: {result.stderr}")
 
         # Combine stdout and stderr for analysis
         full_output = result.stdout + result.stderr
@@ -112,9 +102,7 @@ class TestThroughputOptimizer(TestCase):
         # Validate table structure
         required_columns = SHOW_COLUMNS
         table_start_pattern = r"Top \d Aggregation Configurations:"
-        self._validate_table_structure(
-            full_output, required_columns, table_start_pattern
-        )
+        self._validate_table_structure(full_output, required_columns, table_start_pattern)
 
     def test_disaggregation_prefill_only_with_output_validation(self):
         """Test disaggregation prefill only functionality with comprehensive output validation"""
@@ -134,9 +122,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Basic execution check
         if result.returncode != 0:
-            self.fail(
-                f"Script execution failed with return code {result.returncode}: {result.stderr}"
-            )
+            self.fail(f"Script execution failed with return code {result.returncode}: {result.stderr}")
 
         # Combine stdout and stderr for analysis
         full_output = result.stdout + result.stderr
@@ -170,9 +156,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Basic execution check
         if result.returncode != 0:
-            self.fail(
-                f"Script execution failed with return code {result.returncode}: {result.stderr}"
-            )
+            self.fail(f"Script execution failed with return code {result.returncode}: {result.stderr}")
 
         # Combine stdout and stderr for analysis
         full_output = result.stdout + result.stderr
@@ -200,9 +184,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Basic execution check
         if result.returncode != 0:
-            self.fail(
-                f"Script execution failed with return code {result.returncode}: {result.stderr}"
-            )
+            self.fail(f"Script execution failed with return code {result.returncode}: {result.stderr}")
 
         # Combine stdout and stderr for analysis
         full_output = result.stdout + result.stderr
@@ -233,9 +215,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Basic execution check
         if result.returncode != 0:
-            self.fail(
-                f"Script execution failed with return code {result.returncode}: {result.stderr}"
-            )
+            self.fail(f"Script execution failed with return code {result.returncode}: {result.stderr}")
 
         # Combine stdout and stderr for analysis
         full_output = result.stdout + result.stderr
@@ -264,9 +244,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Basic execution check
         if result.returncode != 0:
-            self.fail(
-                f"Script execution failed with return code {result.returncode}: {result.stderr}"
-            )
+            self.fail(f"Script execution failed with return code {result.returncode}: {result.stderr}")
 
         # Combine stdout and stderr for analysis
         full_output = result.stdout + result.stderr
@@ -300,9 +278,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Basic execution check
         if result.returncode != 0:
-            self.fail(
-                f"Script execution failed with return code {result.returncode}: {result.stderr}"
-            )
+            self.fail(f"Script execution failed with return code {result.returncode}: {result.stderr}")
 
         # Combine stdout and stderr for analysis
         full_output = result.stdout + result.stderr
@@ -418,9 +394,7 @@ class TestThroughputOptimizer(TestCase):
             enable_optimize_prefill_decode_ratio = False
 
         with (
-            patch.object(
-                throughput_optimizer_module, "arg_parse", return_value=DummyArgs()
-            ),
+            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
             patch(
                 "cli.inference.throughput_optimizer.OptimizerData.get_effective_input_length",
                 return_value=100,
@@ -452,9 +426,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Basic execution check
         if result.returncode != 0:
-            self.fail(
-                f"Script execution failed with return code {result.returncode}: {result.stderr}"
-            )
+            self.fail(f"Script execution failed with return code {result.returncode}: {result.stderr}")
 
         # Combine stdout and stderr for analysis
         full_output = result.stdout + result.stderr

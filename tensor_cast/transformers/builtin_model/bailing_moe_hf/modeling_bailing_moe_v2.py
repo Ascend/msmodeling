@@ -141,9 +141,7 @@ def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(
-        torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0)
-    )
+    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0))
     return (
         indices,
         cu_seqlens,
@@ -206,9 +204,7 @@ class BailingMoeV2RotaryEmbedding(nn.Module):
         super().__init__()
         # BC: "rope_type" was originally "type"
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
-            self.rope_type = config.rope_scaling.get(
-                "rope_type", config.rope_scaling.get("type")
-            )
+            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
         else:
             self.rope_type = "default"
         self.max_seq_len_cached = config.max_position_embeddings
@@ -240,23 +236,12 @@ class BailingMoeV2RotaryEmbedding(nn.Module):
     @torch.no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
-        inv_freq_expanded = (
-            self.inv_freq[None, :, None]
-            .float()
-            .expand(position_ids.shape[0], -1, 1)
-            .to(x.device)
-        )
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
 
-        device_type = (
-            x.device.type
-            if isinstance(x.device.type, str) and x.device.type != "mps"
-            else "cpu"
-        )
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):  # Force float32
-            freqs = (
-                inv_freq_expanded.float() @ position_ids_expanded.float()
-            ).transpose(1, 2)
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
@@ -354,9 +339,7 @@ class BailingMoeV2Gate(nn.Module):
     ):
         num_tokens, _ = scores.size()
         # Organize the experts into groups
-        group_scores = (
-            scores.view(num_tokens, self.n_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
-        )
+        group_scores = scores.view(num_tokens, self.n_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
         group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
         group_mask = torch.zeros_like(group_scores)
         group_mask.scatter_(1, group_idx, 1)
@@ -376,9 +359,7 @@ class BailingMoeV2Gate(nn.Module):
     def forward(self, hidden_states):
         # compute gating score
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        logits = F.linear(
-            hidden_states.type(torch.float32), self.weight.type(torch.float32)
-        )
+        logits = F.linear(hidden_states.type(torch.float32), self.weight.type(torch.float32))
 
         scores = torch.sigmoid(logits.float()).type_as(logits)
 
@@ -387,11 +368,7 @@ class BailingMoeV2Gate(nn.Module):
 
         scores = torch.gather(scores, dim=1, index=topk_idx).type_as(logits)
 
-        topk_weight = (
-            scores / (scores.sum(dim=-1, keepdim=True) + 1e-20)
-            if self.top_k > 1
-            else scores
-        )
+        topk_weight = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20) if self.top_k > 1 else scores
         topk_weight = topk_weight * self.routed_scaling_factor
 
         return logits, topk_weight, topk_idx
@@ -411,8 +388,7 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
         if config.num_shared_experts is not None:
             self.shared_experts = BailingMoeV2MLP(
                 config=config,
-                intermediate_size=config.moe_intermediate_size
-                * config.num_shared_experts,
+                intermediate_size=config.moe_intermediate_size * config.num_shared_experts,
             )
 
     def _setup_experts(self):
@@ -433,18 +409,14 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         flat_topk_idx = topk_idx.view(-1)
         if self.training:
-            hidden_states = hidden_states.repeat_interleave(
-                self.num_experts_per_tok, dim=0
-            )
+            hidden_states = hidden_states.repeat_interleave(self.num_experts_per_tok, dim=0)
             y = torch.empty_like(hidden_states)
             for i, expert in enumerate(self.experts):
                 y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
             y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
             y = y.to(hidden_states.dtype).view(bsz, seq_len, h)
         else:
-            y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(
-                bsz, seq_len, h
-            )
+            y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(bsz, seq_len, h)
         if self.config.num_shared_experts is not None:
             y = y + self.shared_experts(identity)
         return y, (
@@ -494,9 +466,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, slen, head_dim
-    )
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
@@ -519,11 +489,7 @@ class BailingMoeV2Attention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = config.head_dim or self.hidden_size // self.num_heads
-        partial_rotary_factor = (
-            config.partial_rotary_factor
-            if hasattr(config, "partial_rotary_factor")
-            else 1.0
-        )
+        partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
         self.rope_dim = int(self.head_dim * partial_rotary_factor)
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
@@ -538,22 +504,12 @@ class BailingMoeV2Attention(nn.Module):
         )
 
         if self.config.use_qk_norm:
-            self.query_layernorm = BailingMoeV2RMSNorm(
-                self.head_dim, eps=config.rms_norm_eps
-            )
-            self.key_layernorm = BailingMoeV2RMSNorm(
-                self.head_dim, eps=config.rms_norm_eps
-            )
-        self.dense = nn.Linear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=config.use_bias
-        )
+            self.query_layernorm = BailingMoeV2RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            self.key_layernorm = BailingMoeV2RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.dense = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.use_bias)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return (
-            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
-            .transpose(1, 2)
-            .contiguous()
-        )
+        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
@@ -563,17 +519,13 @@ class BailingMoeV2Attention(nn.Module):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        position_embeddings: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
         qkv = self.query_key_value(hidden_states)
-        qkv = qkv.view(
-            bsz, q_len, self.num_heads + 2 * self.num_key_value_heads, self.head_dim
-        )
+        qkv = qkv.view(bsz, q_len, self.num_heads + 2 * self.num_key_value_heads, self.head_dim)
 
         query_states, key_states, value_states = qkv.split(
             [self.num_heads, self.num_key_value_heads, self.num_key_value_heads], dim=-2
@@ -587,9 +539,7 @@ class BailingMoeV2Attention(nn.Module):
             key_states = self.key_layernorm(key_states)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
             if self.layer_idx is None:
@@ -599,16 +549,12 @@ class BailingMoeV2Attention(nn.Module):
                     "with a layer index."
                 )
             cache_kwargs = {"sin": sin, "cos": cos}
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(
-            query_states, key_states.transpose(2, 3)
-        ) / math.sqrt(self.head_dim)
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         kv_seq_len = key_states.shape[-2]
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
@@ -625,12 +571,8 @@ class BailingMoeV2Attention(nn.Module):
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32
-        ).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(
-            attn_weights, p=self.attention_dropout, training=self.training
-        )
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
@@ -679,9 +621,7 @@ class BailingMoeV2FlashAttention2(BailingMoeV2Attention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        position_embeddings: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         # BailingMoeV2FlashAttention2 attention does not support output_attentions
@@ -694,9 +634,7 @@ class BailingMoeV2FlashAttention2(BailingMoeV2Attention):
         # therefore we just need to keep the original shape
 
         qkv = self.query_key_value(hidden_states)
-        qkv = qkv.view(
-            bsz, q_len, self.num_heads + 2 * self.num_key_value_heads, self.head_dim
-        )
+        qkv = qkv.view(bsz, q_len, self.num_heads + 2 * self.num_key_value_heads, self.head_dim)
 
         query_states, key_states, value_states = qkv.split(
             [self.num_heads, self.num_key_value_heads, self.num_key_value_heads], dim=-2
@@ -710,15 +648,11 @@ class BailingMoeV2FlashAttention2(BailingMoeV2Attention):
             key_states = self.key_layernorm(key_states)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # TODO: These transpose are quite inefficient but Flash Attention requires the layout
         # [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
@@ -822,9 +756,7 @@ class BailingMoeV2FlashAttention2(BailingMoeV2Attention):
                 indices_q,
                 cu_seq_lens,
                 max_seq_lens,
-            ) = self._upad_input(
-                query_states, key_states, value_states, attention_mask, query_length
-            )
+            ) = self._upad_input(query_states, key_states, value_states, attention_mask, query_length)
 
             cu_seqlens_q, cu_seqlens_k = cu_seq_lens
             max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
@@ -842,9 +774,7 @@ class BailingMoeV2FlashAttention2(BailingMoeV2Attention):
                 causal=causal,
             )
 
-            attn_output = pad_input(
-                attn_output_unpad, indices_q, batch_size, query_length
-            )
+            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
         else:
             attn_output = flash_attn_func(
                 query_states,
@@ -857,9 +787,7 @@ class BailingMoeV2FlashAttention2(BailingMoeV2Attention):
 
         return attn_output
 
-    def _upad_input(
-        self, query_layer, key_layer, value_layer, attention_mask, query_length
-    ):
+    def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
         indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
@@ -889,9 +817,7 @@ class BailingMoeV2FlashAttention2(BailingMoeV2Attention):
         else:
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -query_length:]
-            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(
-                query_layer, attention_mask
-            )
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
 
         return (
             query_layer,
@@ -920,9 +846,7 @@ class BailingMoeV2SdpaAttention(BailingMoeV2Attention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        position_embeddings: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
@@ -947,9 +871,7 @@ class BailingMoeV2SdpaAttention(BailingMoeV2Attention):
         bsz, q_len, _ = hidden_states.size()
 
         qkv = self.query_key_value(hidden_states)
-        qkv = qkv.view(
-            bsz, q_len, self.num_heads + 2 * self.num_key_value_heads, self.head_dim
-        )
+        qkv = qkv.view(bsz, q_len, self.num_heads + 2 * self.num_key_value_heads, self.head_dim)
 
         query_states, key_states, value_states = qkv.split(
             [self.num_heads, self.num_key_value_heads, self.num_key_value_heads], dim=-2
@@ -963,15 +885,11 @@ class BailingMoeV2SdpaAttention(BailingMoeV2Attention):
             key_states = self.key_layernorm(key_states)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -1021,24 +939,16 @@ class BailingMoeV2MTPLayer(nn.Module):
     def __init__(self, config: BailingMoeV2Config, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
-        self.input_layernorm = BailingMoeV2RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = BailingMoeV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.enorm = BailingMoeV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        self.post_attention_layernorm = BailingMoeV2RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.attention = ATTENTION_CLASSES[config._attn_implementation](
-            config=config, layer_idx=layer_idx
-        )
+        self.post_attention_layernorm = BailingMoeV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.attention = ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
         self.mlp = BailingMoeV2SparseMoeBlock(config)
 
         self.hnorm = BailingMoeV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.final_layernorm = BailingMoeV2RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.final_layernorm = BailingMoeV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -1050,13 +960,9 @@ class BailingMoeV2MTPLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        position_embeddings: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs,
-    ) -> Tuple[
-        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
-    ]:
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         input_embeds = self.enorm(input_embeds)
         hidden_states = self.hnorm(hidden_states)
         hidden_states = self.eh_proj(torch.cat([input_embeds, hidden_states], dim=-1))
@@ -1106,26 +1012,15 @@ class BailingMoeV2DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.attention = ATTENTION_CLASSES[config._attn_implementation](
-            config=config, layer_idx=layer_idx
-        )
+        self.attention = ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
 
         self.mlp = (
             BailingMoeV2SparseMoeBlock(config)
-            if (
-                config.num_experts is not None
-                and layer_idx >= config.first_k_dense_replace
-            )
-            else BailingMoeV2MLP(
-                config=config, intermediate_size=config.intermediate_size
-            )
+            if (config.num_experts is not None and layer_idx >= config.first_k_dense_replace)
+            else BailingMoeV2MLP(config=config, intermediate_size=config.intermediate_size)
         )
-        self.input_layernorm = BailingMoeV2RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_attention_layernorm = BailingMoeV2RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = BailingMoeV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = BailingMoeV2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -1136,13 +1031,9 @@ class BailingMoeV2DecoderLayer(nn.Module):
         output_attentions: Optional[bool] = False,
         output_router_logits: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        position_embeddings: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs,
-    ) -> Tuple[
-        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
-    ]:
+    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -1335,18 +1226,10 @@ class BailingMoeV2Model(BailingMoeV2PreTrainedModel):
         self.vocab_size = config.vocab_size
         self.num_nextn_predict_layers = config.num_nextn_predict_layers
 
-        self.word_embeddings = nn.Embedding(
-            config.vocab_size, config.hidden_size, self.padding_idx
-        )
+        self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = []
-        for layer_idx in range(
-            config.num_hidden_layers + config.num_nextn_predict_layers
-        ):
-            layer_cls = (
-                BailingMoeV2DecoderLayer
-                if layer_idx < config.num_hidden_layers
-                else BailingMoeV2MTPLayer
-            )
+        for layer_idx in range(config.num_hidden_layers + config.num_nextn_predict_layers):
+            layer_cls = BailingMoeV2DecoderLayer if layer_idx < config.num_hidden_layers else BailingMoeV2MTPLayer
             self.layers.append(layer_cls(config, layer_idx))
 
         self.layers = nn.ModuleList(self.layers)
@@ -1380,32 +1263,20 @@ class BailingMoeV2Model(BailingMoeV2PreTrainedModel):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, MoeV2ModelOutputWithPast]:
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         output_router_logits = (
-            output_router_logits
-            if output_router_logits is not None
-            else self.config.output_router_logits
+            output_router_logits if output_router_logits is not None else self.config.output_router_logits
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError(
-                "You cannot specify both input_ids and inputs_embeds at the same time"
-            )
+            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
             batch_size, seq_length = input_ids.shape[:2]
         elif inputs_embeds is not None:
@@ -1415,8 +1286,7 @@ class BailingMoeV2Model(BailingMoeV2PreTrainedModel):
 
         if self.gradient_checkpointing and self.training and use_cache:
             logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. "
-                "Setting `use_cache=False`transformers."
+                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`transformers."
             )
             use_cache = False
 
@@ -1426,9 +1296,7 @@ class BailingMoeV2Model(BailingMoeV2PreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
 
-        past_seen_tokens = (
-            past_key_values.get_seq_length() if past_key_values is not None else 0
-        )
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
 
         if position_ids is None:
             position_ids = torch.arange(
@@ -1440,11 +1308,7 @@ class BailingMoeV2Model(BailingMoeV2PreTrainedModel):
 
         if self._use_flash_attention_2:
             # 2d mask is passed through the layers
-            attention_mask = (
-                attention_mask
-                if (attention_mask is not None and 0 in attention_mask)
-                else None
-            )
+            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
         elif self._use_sdpa and not output_attentions:
             # output_attentions=True can not be supported when using SDPA, and we fall back on
             # the manual implementation that requires a 4D causal mask in all cases.
@@ -1474,16 +1338,8 @@ class BailingMoeV2Model(BailingMoeV2PreTrainedModel):
         all_self_attns = () if output_attentions else None
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
-        layers = (
-            self.layers[: -self.num_nextn_predict_layers]
-            if self.num_nextn_predict_layers > 0
-            else self.layers
-        )
-        mtp_layers = (
-            self.layers[-self.num_nextn_predict_layers :]
-            if self.num_nextn_predict_layers > 0
-            else None
-        )
+        layers = self.layers[: -self.num_nextn_predict_layers] if self.num_nextn_predict_layers > 0 else self.layers
+        mtp_layers = self.layers[-self.num_nextn_predict_layers :] if self.num_nextn_predict_layers > 0 else None
 
         for decoder_layer in layers:
             if output_hidden_states:
@@ -1637,9 +1493,7 @@ class BailingMoeV2ForCausalLM(BailingMoeV2PreTrainedModel, GenerationMixin):
         return self.model
 
     @add_start_docstrings_to_model_forward(BAILINGMOEV2_INPUTS_DOCSTRING)
-    @replace_return_docstrings(
-        output_type=MoEV2CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
-    )
+    @replace_return_docstrings(output_type=MoEV2CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -1679,25 +1533,16 @@ class BailingMoeV2ForCausalLM(BailingMoeV2PreTrainedModel, GenerationMixin):
         >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
-        ```"""
-        output_attentions = (
-            output_attentions
-            if output_attentions is not None
-            else self.config.output_attentions
-        )
+        ```
+        """
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
-            output_hidden_states
-            if output_hidden_states is not None
-            else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         output_router_logits = (
-            output_router_logits
-            if output_router_logits is not None
-            else self.config.output_router_logits
+            output_router_logits if output_router_logits is not None else self.config.output_router_logits
         )
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1736,9 +1581,7 @@ class BailingMoeV2ForCausalLM(BailingMoeV2PreTrainedModel, GenerationMixin):
                 if labels is not None:
                     if shift_labels_mtp is None:
                         shift_labels_mtp = labels.clone()
-                    shift_labels_mtp, _ = roll_tensor(
-                        shift_labels_mtp, shifts=-1, dims=-1, fill_value=-100
-                    )
+                    shift_labels_mtp, _ = roll_tensor(shift_labels_mtp, shifts=-1, dims=-1, fill_value=-100)
                     mtp_logits_ = mtp_logits.view(-1, self.config.vocab_size)
                     mtp_loss = self.loss_function(
                         mtp_logits_,

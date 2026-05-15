@@ -13,7 +13,7 @@ body:
 - type: textarea
   attributes:
     label: Problem Statement | 概述
-    description: Explain background and the problems to address. Summarize the proposal concisely in 1-2 sentences. | 
+    description: Explain background and the problems to address. Summarize the proposal concisely in 1-2 sentences. |
                  解释问题背景，并用一两句话清晰概括整个提案。
     placeholder: e.g.:Resolve the inconsistency of xx configurations and consolidate the access entries of xx and xx into xx. |
                  例：解决xx配置不归一的问题，使xx和xx的入口收编至xx。

@@ -41,17 +41,13 @@ def patch_method_for_qwen3_next(_model):
         # Check if it's a meta tensor
 
         is_meta = (hasattr(cache_position, "is_meta") and cache_position.is_meta) or (
-            attention_mask is not None
-            and hasattr(attention_mask, "is_meta")
-            and attention_mask.is_meta
+            attention_mask is not None and hasattr(attention_mask, "is_meta") and attention_mask.is_meta
         )
         if is_meta:
             return attention_mask
 
         try:
-            cache_condition = (
-                cache_position[0] > 0 if cache_position.numel() > 0 else False
-            )
+            cache_condition = cache_position[0] > 0 if cache_position.numel() > 0 else False
             mask_condition = (
                 torch.all(attention_mask == 1).item()
                 if attention_mask is not None and attention_mask.numel() > 0
@@ -90,9 +86,7 @@ def patch_method_for_qwen3_next(_model):
             self.conv_kernel_size,
         )
 
-    modeling_qwen3_next.Qwen3NextModel._update_linear_attn_mask = (
-        _patched_update_linear_attn_mask
-    )
+    modeling_qwen3_next.Qwen3NextModel._update_linear_attn_mask = _patched_update_linear_attn_mask
     modeling_qwen3_next.Qwen3NextGatedDeltaNet.forward = _patched_linear_attn_forward
 
 

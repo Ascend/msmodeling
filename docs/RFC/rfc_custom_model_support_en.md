@@ -61,29 +61,29 @@ All transformation functions have been extracted to an independent `transformati
 # Independent transformation functions in transformations.py
 def wrap_model(model) -> None:
     # Standardize forward interface wrapper
-    
+
 def maybe_enable_mtp(model) -> None:
     # MTP (Multi-Stage Training) mechanism
     # When model config enables MTP, substitute subsequent training modules with MTP training modules to support multi-stage training architecture
-    
+
 def maybe_reuse_layers(model) -> None:
     # Layer reuse optimization
-    
+
 def patch_rotary_emb(model) -> None:
     # Rotary position encoding adaptation
-    
+
 def patch_attention(model) -> None:
     # Attention module processing
-    
+
 def patch_mla(model) -> None:
     # Multi-head latent attention processing
-    
+
 def patch_moe(model) -> None:
     # Mixture of experts module processing
-    
+
 def quantize_model(model) -> None:
     # Model quantization processing
-    
+
 def shard_model(model) -> None:
     # Model sharding processing
 ```
@@ -147,7 +147,7 @@ Based on the analysis of actual code implementation, the plugin system works as 
 - Each step corresponds to a specific model processing operation:
   1. `wrap_model` - Standardize forward interface with standardized wrapper
   2. `maybe_enable_mtp` - Multi-stage training optimization
-  3. `maybe_reuse_layers` - Layer reuse optimization  
+  3. `maybe_reuse_layers` - Layer reuse optimization
   4. `patch_rotary_emb` - Rotary position encoding adaptation
   5. `patch_attention` - Attention mechanism replacement with custom modules
   6. `patch_mla` - Multi-head latent attention replacement
@@ -219,13 +219,13 @@ def _(model: TransformerModel):
 def _(model: TransformerModel):
    """Complex custom model processing"""
    wrap_model(model)
-   
+
    # Custom attention processing
    patch_attention(model)
-   
+
    # Custom rotary position encoding
    patch_rotary_emb(model)
-   
+
    # Skip other standard transformation steps
    # Only execute custom module replacements
    custom_module_replacement(model)
@@ -275,10 +275,10 @@ In `DiffusersTransformerModel.__init__()`, the transformation functions are call
 with init_on_device_without_buffers("meta"), no_init_weights():
     self._inner = model_class.from_config(hf_config).to(model_config.dtype)
     self._inner.eval()
-    
+
     # Unified transformation pipeline for both standard and diffusers models
     wrap_model(self)           # Handles both transformer and diffusers interfaces
-    quantize_model(self)       # Supports both model types with shared quantization logic  
+    quantize_model(self)       # Supports both model types with shared quantization logic
     quantize_linear(self)      # Applies quantization to individual layers
 # Note: shard_model() is implicitly handled within the transformation functions
 ```

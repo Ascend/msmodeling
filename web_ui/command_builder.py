@@ -77,15 +77,9 @@ def _performance_models(value: Any) -> list[str]:
 
 def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
     devices = _device_matrix(form["device"], form.get("competitor_devices", []))
-    num_queries_list = parse_scalar_or_list(
-        form.get("num_queries_sweep") or form["num_queries"], int
-    )
-    tp_size_list = parse_scalar_or_list(
-        form.get("tp_sweep") or form.get("tp_size", 1), int
-    )
-    quant_linear_list = parse_scalar_or_list(
-        form.get("quant_linear_sweep") or form["quantize_linear_action"], str
-    )
+    num_queries_list = parse_scalar_or_list(form.get("num_queries_sweep") or form["num_queries"], int)
+    tp_size_list = parse_scalar_or_list(form.get("tp_sweep") or form.get("tp_size", 1), int)
+    quant_linear_list = parse_scalar_or_list(form.get("quant_linear_sweep") or form["quantize_linear_action"], str)
     quant_attention_list = parse_scalar_or_list(
         form.get("quant_attention_sweep") or form["quantize_attention_action"], str
     )
@@ -116,26 +110,20 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "tp_size": int(tp_size),
             "dp_size": parse_optional_number(form.get("dp_size"), int),
             "ep_size": int(form.get("ep_size", 1) or 1),
-            "image_batch_size": parse_optional_number(
-                form.get("image_batch_size"), int
-            ),
+            "image_batch_size": parse_optional_number(form.get("image_batch_size"), int),
             "image_height": parse_optional_number(form.get("image_height"), int),
             "image_width": parse_optional_number(form.get("image_width"), int),
             "prefix_cache_hit_rate": float(form.get("prefix_cache_hit_rate") or 0.0),
             "reserved_memory_gb": float(form.get("reserved_memory_gb") or 0.0),
             "log_level": str(form.get("log_level") or "error"),
-            "compile_allow_graph_break": _as_bool(
-                form.get("compile_allow_graph_break", False)
-            ),
+            "compile_allow_graph_break": _as_bool(form.get("compile_allow_graph_break", False)),
             "disable_repetition": _as_bool(form.get("disable_repetition", False)),
             "quantize_lmhead": _as_bool(form.get("quantize_lmhead", False)),
             "mxfp4_group_size": int(form.get("mxfp4_group_size") or 32),
             "graph_log_url": _optional_str(form.get("graph_log_url")),
             "dump_input_shapes": _as_bool(form.get("dump_input_shapes", False)),
             "chrome_trace": _optional_str(form.get("chrome_trace")),
-            "num_hidden_layers_override": int(
-                form.get("num_hidden_layers_override") or 0
-            ),
+            "num_hidden_layers_override": int(form.get("num_hidden_layers_override") or 0),
             "o_proj_tp_size": parse_optional_number(form.get("o_proj_tp_size"), int),
             "o_proj_dp_size": parse_optional_number(form.get("o_proj_dp_size"), int),
             "mlp_tp_size": parse_optional_number(form.get("mlp_tp_size"), int),
@@ -145,15 +133,9 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "moe_tp_size": parse_optional_number(form.get("moe_tp_size"), int),
             "moe_dp_size": int(form.get("moe_dp_size") or 1),
             "word_embedding_tp": _optional_str(form.get("word_embedding_tp")),
-            "enable_redundant_experts": _as_bool(
-                form.get("enable_redundant_experts", False)
-            ),
-            "enable_external_shared_experts": _as_bool(
-                form.get("enable_external_shared_experts", False)
-            ),
-            "host_external_shared_experts": _as_bool(
-                form.get("host_external_shared_experts", False)
-            ),
+            "enable_redundant_experts": _as_bool(form.get("enable_redundant_experts", False)),
+            "enable_external_shared_experts": _as_bool(form.get("enable_external_shared_experts", False)),
+            "host_external_shared_experts": _as_bool(form.get("host_external_shared_experts", False)),
             "remote_source": str(form.get("remote_source") or "huggingface"),
             "performance_model": _performance_models(form.get("performance_model")),
             "profiling_database": _optional_str(form.get("profiling_database")),
@@ -179,11 +161,7 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd += ["--num-mtp-tokens", str(params["num_mtp_tokens"])]
             # Add MTP acceptance-rate arguments
             if params["mtp_acceptance_rate"]:
-                rates = [
-                    r.strip()
-                    for r in params["mtp_acceptance_rate"].split(",")
-                    if r.strip()
-                ]
+                rates = [r.strip() for r in params["mtp_acceptance_rate"].split(",") if r.strip()]
                 if rates:
                     cmd += ["--mtp-acceptance-rate"] + rates
         if params["prefix_cache_hit_rate"] > 0:
@@ -258,8 +236,7 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd += ["--profiling-database", params["profiling_database"]]
         thash = stable_hash({"sim_type": "text_generate", **normalize_value(params)})
         label = (
-            f"{params['model_id']} | {device} | nq={params['num_queries']} | "
-            f"tp={params['tp_size']} | {qlin}/{qattn}"
+            f"{params['model_id']} | {device} | nq={params['num_queries']} | tp={params['tp_size']} | {qlin}/{qattn}"
         )
         tasks.append(ExperimentTask("text_generate", params, cmd, thash, label))
     return tasks
@@ -267,16 +244,10 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
 
 def build_video_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
     devices = _device_matrix(form["device"], form.get("competitor_devices", []))
-    quant_linear_list = parse_scalar_or_list(
-        form.get("quant_linear_sweep") or form["quantize_linear_action"], str
-    )
-    ulysses_list = parse_scalar_or_list(
-        form.get("ulysses_sweep") or form["ulysses_size"], int
-    )
+    quant_linear_list = parse_scalar_or_list(form.get("quant_linear_sweep") or form["quantize_linear_action"], str)
+    ulysses_list = parse_scalar_or_list(form.get("ulysses_sweep") or form["ulysses_size"], int)
     tasks: list[ExperimentTask] = []
-    for device, qlin, ulysses in itertools.product(
-        devices, quant_linear_list, ulysses_list
-    ):
+    for device, qlin, ulysses in itertools.product(devices, quant_linear_list, ulysses_list):
         params = {
             "model_id": form["model_id"],
             "device": device,
@@ -294,10 +265,7 @@ def build_video_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "cfg_parallel": bool(form.get("cfg_parallel", False)),
             "dit_cache": bool(form.get("dit_cache", False)),
             "cache_step_range": form.get("cache_step_range") or None,
-            "cache_step_interval": parse_optional_number(
-                form.get("cache_step_interval"), int
-            )
-            or 1,
+            "cache_step_interval": parse_optional_number(form.get("cache_step_interval"), int) or 1,
             "cache_block_range": form.get("cache_block_range") or None,
             "chrome_trace": _optional_str(form.get("chrome_trace")),
             "log_level": str(form.get("log_level") or "info"),
@@ -341,9 +309,7 @@ def build_video_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
         if params["log_level"] != "info":
             cmd += ["--log-level", params["log_level"]]
         thash = stable_hash({"sim_type": "video_generate", **normalize_value(params)})
-        label = (
-            f"{params['model_id']} | {device} | usp={params['ulysses_size']} | {qlin}"
-        )
+        label = f"{params['model_id']} | {device} | usp={params['ulysses_size']} | {qlin}"
         tasks.append(ExperimentTask("video_generate", params, cmd, thash, label))
     return tasks
 
@@ -360,26 +326,18 @@ def _mode_name(ttft, tpot):
 
 def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
     devices = _device_matrix(form["device"], form.get("competitor_devices", []))
-    quant_linear_list = parse_scalar_or_list(
-        form.get("quant_linear_sweep") or form["quantize_linear_action"], str
-    )
+    quant_linear_list = parse_scalar_or_list(form.get("quant_linear_sweep") or form["quantize_linear_action"], str)
     quant_attention_list = parse_scalar_or_list(
         form.get("quant_attention_sweep") or form["quantize_attention_action"], str
     )
-    tpot_list = parse_scalar_or_list(
-        form.get("tpot_sweep") or form.get("tpot_limits") or "None", str
-    )
-    ttft_list = parse_scalar_or_list(
-        form.get("ttft_sweep") or form.get("ttft_limits") or "None", str
-    )
+    tpot_list = parse_scalar_or_list(form.get("tpot_sweep") or form.get("tpot_limits") or "None", str)
+    ttft_list = parse_scalar_or_list(form.get("ttft_sweep") or form.get("ttft_limits") or "None", str)
 
     tp_sizes_str = form.get("tp_sizes", "")
     tp_sizes = parse_scalar_or_list(tp_sizes_str, int) if tp_sizes_str else None
 
     batch_range_str = form.get("batch_range", "")
-    batch_range = (
-        parse_scalar_or_list(batch_range_str, int) if batch_range_str else None
-    )
+    batch_range = parse_scalar_or_list(batch_range_str, int) if batch_range_str else None
 
     jobs = int(form.get("jobs") or 8)
     deployment_mode = _normalize_optimizer_deployment_mode(form.get("deployment_mode"))
@@ -391,12 +349,8 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
     mxfp4_group_size = int(form.get("mxfp4_group_size") or 32)
     prefix_cache_hit_rate = float(form.get("prefix_cache_hit_rate") or 0.0)
 
-    prefill_devices_per_instance = parse_optional_number(
-        form.get("prefill_devices_per_instance"), int
-    )
-    decode_devices_per_instance = parse_optional_number(
-        form.get("decode_devices_per_instance"), int
-    )
+    prefill_devices_per_instance = parse_optional_number(form.get("prefill_devices_per_instance"), int)
+    decode_devices_per_instance = parse_optional_number(form.get("decode_devices_per_instance"), int)
     if not enable_pd_ratio:
         prefill_devices_per_instance = None
         decode_devices_per_instance = None
@@ -410,9 +364,7 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
 
         num_mtp_tokens = int(form.get("num_mtp_tokens") or 0)
         mtp_acceptance_rate_str = form.get("mtp_acceptance_rate") or "0.9,0.6,0.4,0.2"
-        mtp_acceptance_rate = [
-            float(r.strip()) for r in mtp_acceptance_rate_str.split(",") if r.strip()
-        ]
+        mtp_acceptance_rate = [float(r.strip()) for r in mtp_acceptance_rate_str.split(",") if r.strip()]
         max_prefill_tokens = int(form.get("max_prefill_tokens") or 8192)
 
         params = {
@@ -513,21 +465,13 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
         if params["image_width"] is not None:
             cmd += ["--image-width", str(params["image_width"])]
 
-        thash = stable_hash(
-            {"sim_type": "throughput_optimizer", **normalize_value(params)}
-        )
+        thash = stable_hash({"sim_type": "throughput_optimizer", **normalize_value(params)})
         label = f"{params['model_id']} | {device} | {params['optimization_mode']} | {deployment_mode} | {qlin}/{qattn}"
         if num_mtp_tokens > 0:
             label += f" | mtp={num_mtp_tokens}"
         if prefix_cache_hit_rate > 0:
             label += f" | cache={prefix_cache_hit_rate:g}"
-        if (
-            enable_pd_ratio
-            and prefill_devices_per_instance is not None
-            and decode_devices_per_instance is not None
-        ):
-            label += (
-                f" | p:d={prefill_devices_per_instance}:{decode_devices_per_instance}"
-            )
+        if enable_pd_ratio and prefill_devices_per_instance is not None and decode_devices_per_instance is not None:
+            label += f" | p:d={prefill_devices_per_instance}:{decode_devices_per_instance}"
         tasks.append(ExperimentTask("throughput_optimizer", params, cmd, thash, label))
     return tasks

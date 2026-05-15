@@ -174,6 +174,4 @@ class InputGeneratorTestCase(unittest.TestCase):
         )
 
         # grid_h=68, grid_w=120 -> resized height/width = 1088x1920
-        self.assertTrue(
-            torch.equal(image_kwargs["image_grid_thw"], torch.tensor([[1, 68, 120]]))
-        )
+        self.assertTrue(torch.equal(image_kwargs["image_grid_thw"], torch.tensor([[1, 68, 120]])))

@@ -8,7 +8,7 @@ from serving_cast.model_runner import ModelRunner
 from serving_cast.profiler import profiler_interface
 from serving_cast.request import Request, RequestState
 
-from . import stime
+import serving_cast.stime as stime
 
 
 logger = stime.get_logger(__name__)
@@ -25,12 +25,8 @@ class BatchScheduler(stime.Task):
         common_config = Config.get_instance().common_config
         self.model_runner = model_runner
         self.kv_manager = kv_manager
-        self.enable_preprocessing_modeling = (
-            common_config.model_config.enable_preprocessing_modeling
-        )
-        self.enable_kv_transfer_modeling = (
-            common_config.model_config.enable_kv_transfer_modeling
-        )
+        self.enable_preprocessing_modeling = common_config.model_config.enable_preprocessing_modeling
+        self.enable_kv_transfer_modeling = common_config.model_config.enable_kv_transfer_modeling
         self.communication_manager = communication_manager
         self.waiting_queue = []
         self.running_queue = []
@@ -65,15 +61,11 @@ class BatchScheduler(stime.Task):
             request = self.running_queue[req_index]
             num_computed_tokens = min(token_budget, request.num_current_max_new_tokens)
             if num_computed_tokens <= 0:
-                raise ValueError(
-                    f"num_computed_tokens should be positive, got {num_computed_tokens}"
-                )
+                raise ValueError(f"num_computed_tokens should be positive, got {num_computed_tokens}")
 
             # try to allocate KV cache for the request
             while True:
-                new_blocks = self.kv_manager.allocate_slots(
-                    request.id, num_computed_tokens
-                )
+                new_blocks = self.kv_manager.allocate_slots(request.id, num_computed_tokens)
 
                 if new_blocks is None:
                     # The request cannot be scheduled. Preempt the lowest-priority request. now naively preempt the last
@@ -94,9 +86,7 @@ class BatchScheduler(stime.Task):
             if not can_schedule:
                 break
             if new_blocks is None:
-                raise ValueError(
-                    "BatchScheduler._schedule failed: new_blocks should not be None"
-                )
+                raise ValueError("BatchScheduler._schedule failed: new_blocks should not be None")
 
             # kv cache allocation success, schedule the request
             token_budget -= num_computed_tokens
@@ -117,16 +107,10 @@ class BatchScheduler(stime.Task):
                     and not self._receive_remote_kvs(request)
                 ):
                     continue
-                num_computed_tokens = min(
-                    token_budget, request.num_current_max_new_tokens
-                )
+                num_computed_tokens = min(token_budget, request.num_current_max_new_tokens)
                 if num_computed_tokens <= 0:
-                    raise ValueError(
-                        f"num_computed_tokens should be positive, got {num_computed_tokens}"
-                    )
-                new_blocks = self.kv_manager.allocate_slots(
-                    request.id, num_computed_tokens
-                )
+                    raise ValueError(f"num_computed_tokens should be positive, got {num_computed_tokens}")
+                new_blocks = self.kv_manager.allocate_slots(request.id, num_computed_tokens)
                 # try to allocate kv cache, if failed, no need to check the rest requests in waiting queue
                 if new_blocks is None:
                     logger.debug(
@@ -146,9 +130,7 @@ class BatchScheduler(stime.Task):
                 self.running_queue.append(request)
 
         while len(self.running_queue) == 0 and len(self.waiting_queue) == 0:
-            logger.debug(
-                "BatchScheduler._schedule: no requests are scheduled, passivate current BatchScheduler"
-            )
+            logger.debug("BatchScheduler._schedule: no requests are scheduled, passivate current BatchScheduler")
             self.wait()
 
     def _receive_remote_kvs(self, request) -> bool:
@@ -170,9 +152,7 @@ class BatchScheduler(stime.Task):
             def kv_transfer_done_callback():
                 request.state = RequestState.KVS_TRANSFERRING
 
-            self.communication_manager.device2device_async(
-                num_bytes, kv_transfer_done_callback
-            )
+            self.communication_manager.device2device_async(num_bytes, kv_transfer_done_callback)
         else:
             request.state = RequestState.KVS_TRANSFERRING
 
@@ -185,9 +165,7 @@ class BatchScheduler(stime.Task):
         self.running_queue.remove(request)
         self.waiting_queue = [request] + self.waiting_queue
         request.state = RequestState.RECOMPUTATION
-        request.num_current_max_new_tokens = (
-            request.num_input_tokens + request.num_decoded_tokens
-        )
+        request.num_current_max_new_tokens = request.num_input_tokens + request.num_decoded_tokens
         request.seq_len = 0
         request.query_len = 0
         self.kv_manager.free(request.id)
@@ -212,10 +190,7 @@ class BatchScheduler(stime.Task):
         try:
             while True:
                 logger.debug("in schedule   ")
-                if (
-                    profiler_interface.is_profiling_ready()
-                    and Config.get_instance().enable_profiling
-                ):
+                if profiler_interface.is_profiling_ready() and Config.get_instance().enable_profiling:
                     prof = (
                         profiler_interface.SimProfiler(profiler_interface.Level.INFO)
                         .domain("BatchSchedule")
@@ -224,26 +199,17 @@ class BatchScheduler(stime.Task):
                     before_running_queue = self.running_queue
                     before_waiting_queue = self.waiting_queue
                 self._schedule()
-                if (
-                    profiler_interface.is_profiling_ready()
-                    and Config.get_instance().enable_profiling
-                ):
+                if profiler_interface.is_profiling_ready() and Config.get_instance().enable_profiling:
                     request_id_with_iter_list = profiler_interface.get_iter_size_info(
                         self.running_queue, increase_iter_size=True
                     )
 
                     if len(request_id_with_iter_list) != 0:
-                        profiler_interface.queue_profiler(
-                            before_running_queue, self.running_queue, "running"
-                        )
-                        profiler_interface.queue_profiler(
-                            before_waiting_queue, self.waiting_queue, "waiting"
-                        )
+                        profiler_interface.queue_profiler(before_running_queue, self.running_queue, "running")
+                        profiler_interface.queue_profiler(before_waiting_queue, self.waiting_queue, "waiting")
                         prof.res(request_id_with_iter_list)
 
-                        batch_type = profiler_interface.get_batch_type(
-                            request_id_with_iter_list
-                        )
+                        batch_type = profiler_interface.get_batch_type(request_id_with_iter_list)
                         prof.attr("batch_type", batch_type)
                         prof.span_end()
                 if len(self.running_queue) != 0:
@@ -258,9 +224,7 @@ class BatchScheduler(stime.Task):
                         and Config.get_instance().enable_profiling
                         and request_id_with_iter_list
                     ):
-                        prof = profiler_interface.SimProfiler(
-                            profiler_interface.Level.INFO
-                        ).domain("ModelExecute")
+                        prof = profiler_interface.SimProfiler(profiler_interface.Level.INFO).domain("ModelExecute")
                         prof.res(request_id_with_iter_list)
                         prof.attr("batch_type", batch_type)
                         prof.span_start("modelExec")
@@ -291,8 +255,7 @@ class BatchScheduler(stime.Task):
                 RequestState.RECOMPUTATION,
             ]:
                 raise ValueError(
-                    "In _postprocess_batch, request.state should be PREFILLING, DECODING or "
-                    "RECOMPUTATION, but get %s",
+                    "In _postprocess_batch, request.state should be PREFILLING, DECODING or RECOMPUTATION, but get %s",
                     request.state,
                 )
             if request.num_current_max_new_tokens == 0:
@@ -337,16 +300,10 @@ class Engine:
     """
 
     def __init__(self, instance_config, device_type, dp_rank: int):
-        self.model_runner = ModelRunner(
-            instance_config.parallel_config, device_type, dp_rank
-        )
-        self.communication_manager = CommunicationManager(
-            instance_config.communication_config
-        )
+        self.model_runner = ModelRunner(instance_config.parallel_config, device_type, dp_rank)
+        self.communication_manager = CommunicationManager(instance_config.communication_config)
         self.kv_manager = self.create_kv_manager()
-        self.batch_scheduler = BatchScheduler(
-            self.model_runner, self.kv_manager, self.communication_manager
-        )
+        self.batch_scheduler = BatchScheduler(self.model_runner, self.kv_manager, self.communication_manager)
 
     def create_kv_manager(self):
         block_nums, block_size = self.model_runner.warmup()

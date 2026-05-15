@@ -12,15 +12,9 @@ from .utils import ModelWrapperBase
 class MultiTokenPredictorLayer(torch.nn.Module):
     def __init__(self, hf_config, mtp_block: torch.nn.Module):
         super().__init__()
-        self.emb_norm = torch.nn.RMSNorm(
-            hf_config.hidden_size, eps=hf_config.rms_norm_eps
-        )
-        self.hidden_norm = torch.nn.RMSNorm(
-            hf_config.hidden_size, eps=hf_config.rms_norm_eps
-        )
-        self.linear_proj = torch.nn.Linear(
-            hf_config.hidden_size * 2, hf_config.hidden_size, bias=False
-        )
+        self.emb_norm = torch.nn.RMSNorm(hf_config.hidden_size, eps=hf_config.rms_norm_eps)
+        self.hidden_norm = torch.nn.RMSNorm(hf_config.hidden_size, eps=hf_config.rms_norm_eps)
+        self.linear_proj = torch.nn.Linear(hf_config.hidden_size * 2, hf_config.hidden_size, bias=False)
         self.mtp_block = mtp_block
 
     def forward(
@@ -34,9 +28,7 @@ class MultiTokenPredictorLayer(torch.nn.Module):
         inputs_embeds = self.emb_norm(inputs_embeds)
         previous_hidden_states = self.hidden_norm(previous_hidden_states)
 
-        hidden_states = self.linear_proj(
-            torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
-        )
+        hidden_states = self.linear_proj(torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
         hidden_states = self.mtp_block(
             hidden_states,
@@ -76,9 +68,7 @@ class MultiTokenPredictor(torch.nn.Module):
         )
         # TODO(jgong5): lm_head should share the weights with the main model and among MTP layers.
         #               Otherwise, the memory consumption would be higher.
-        self.lm_head = torch.nn.Linear(
-            hf_config.hidden_size, hf_config.vocab_size, bias=False
-        )
+        self.lm_head = torch.nn.Linear(hf_config.hidden_size, hf_config.vocab_size, bias=False)
 
     def forward(
         self,
@@ -103,9 +93,7 @@ class MultiTokenPredictor(torch.nn.Module):
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
         assert sampling_metadata is not None, "No sampling metadata given for MTP"
         if sampling_metadata.selected_token_indices is not None:
-            hidden_states = hidden_states.index_select(
-                1, sampling_metadata.selected_token_indices
-            )
+            hidden_states = hidden_states.index_select(1, sampling_metadata.selected_token_indices)
         hidden_states = self.lm_head(hidden_states)
         return hidden_states, intermediate_hidden_states
 
@@ -159,9 +147,7 @@ class MtpWrapper(ModelWrapperBase):
             output_intermediate_hidden_states=True,
             **kwargs,
         )
-        next_tokens = self.sampler(
-            logits, sampling_metadata
-        )  # shape: (batch_size, selected_token_indices.nelements())
+        next_tokens = self.sampler(logits, sampling_metadata)  # shape: (batch_size, selected_token_indices.nelements())
         # skip token verification... assuming all predications are taken and we use the last token of each batch
         output = torch.empty(
             [next_tokens.size(0), self.mtp_config.num_mtp_layers + 1],

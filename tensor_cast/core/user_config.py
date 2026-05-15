@@ -41,15 +41,11 @@ class UserInputConfig:
     quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.W8A8_DYNAMIC
     quantize_lmhead: bool = False
     mxfp4_group_size: int = 32
-    quantize_attention_action: QuantizeAttentionAction = (
-        QuantizeAttentionAction.DISABLED
-    )
+    quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED
     enable_sequence_parallel: bool = False
     decode: bool = False
     num_mtp_tokens: int = 0
-    mtp_acceptance_rate: List[float] = field(
-        default_factory=lambda: [0.9, 0.6, 0.4, 0.2]
-    )
+    mtp_acceptance_rate: List[float] = field(default_factory=lambda: [0.9, 0.6, 0.4, 0.2])
     num_hidden_layers_override: int = 0
     disable_repetition: bool = False
     reserved_memory_gb: float = 0
@@ -111,13 +107,10 @@ class UserInputConfig:
 
     def _normalize_embedding_tp_mode(self):
         try:
-            self.word_embedding_tp_mode = WordEmbeddingTPMode(
-                self.word_embedding_tp_mode
-            )
+            self.word_embedding_tp_mode = WordEmbeddingTPMode(self.word_embedding_tp_mode)
         except ValueError as err:
             raise ValueError(
-                "word_embedding_tp_mode must be one of {'col', 'row'}, "
-                f"got {self.word_embedding_tp_mode!r}."
+                f"word_embedding_tp_mode must be one of {{'col', 'row'}}, got {self.word_embedding_tp_mode!r}."
             ) from err
 
     def _print_info(self):
@@ -132,9 +125,7 @@ class UserInputConfig:
         if self.num_mtp_tokens > 0:
             print(f"Number of MTP layers: {self.num_mtp_tokens}")
         if self.quantize_linear_action != QuantizeLinearAction.DISABLED:
-            print(
-                f"Quantization Linear: {self.quantize_linear_action}, quantize LM Head: {self.quantize_lmhead}"
-            )
+            print(f"Quantization Linear: {self.quantize_linear_action}, quantize LM Head: {self.quantize_lmhead}")
             if self.quantize_linear_action == QuantizeLinearAction.MXFP4:
                 print(f"  MXFP4 group size: {self.mxfp4_group_size}")
         else:
@@ -233,8 +224,7 @@ class UserInputConfig:
         # get all names of cls
         field_names = {_field.name for _field in fields(cls)}
         logger.debug(
-            "Initializing %s from command-line arguments. "
-            "Class has %d defined fields: %s",
+            "Initializing %s from command-line arguments. Class has %d defined fields: %s",
             cls.__name__,
             len(field_names),
             sorted(field_names),

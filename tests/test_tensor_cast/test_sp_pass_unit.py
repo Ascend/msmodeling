@@ -59,34 +59,22 @@ def _run_pass(graph_module):
 
 
 def _count_calls(graph_module, target):
-    return sum(
-        1
-        for node in graph_module.graph.nodes
-        if node.op == "call_function" and node.target is target
-    )
+    return sum(1 for node in graph_module.graph.nodes if node.op == "call_function" and node.target is target)
 
 
 def _find_calls(graph_module, target):
-    return [
-        node
-        for node in graph_module.graph.nodes
-        if node.op == "call_function" and node.target is target
-    ]
+    return [node for node in graph_module.graph.nodes if node.op == "call_function" and node.target is target]
 
 
 def _has_user(node, target):
-    return any(
-        user.op == "call_function" and user.target is target for user in node.users
-    )
+    return any(user.op == "call_function" and user.target is target for user in node.users)
 
 
 def _find_getitems(graph_module, index):
     return [
         node
         for node in graph_module.graph.nodes
-        if node.op == "call_function"
-        and node.target is operator.getitem
-        and node.args[1] == index
+        if node.op == "call_function" and node.target is operator.getitem and node.args[1] == index
     ]
 
 
@@ -97,9 +85,7 @@ def _get_node_index(graph_module, node):
     raise AssertionError("node not found in graph")
 
 
-def _build_p2_p3_graph(
-    begin_on_res=False, with_end=True, with_view=False, num_copies=0
-):
+def _build_p2_p3_graph(begin_on_res=False, with_end=True, with_view=False, num_copies=0):
     """Build a graph with P2 (add_rms_norm2) + P3 (gi1 + ar -> add -> norm)."""
     graph = fx.Graph()
     x = _make_placeholder(graph, "x")
@@ -108,15 +94,9 @@ def _build_p2_p3_graph(
     x2 = _make_placeholder(graph, "x2")
     w2 = _make_placeholder(graph, "w2", WEIGHT_SHAPE)
 
-    all_reduce_1 = _make_call(
-        graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-    )
+    all_reduce_1 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
     res_input = (
-        _make_call(
-            graph, torch.ops.tensor_cast._internal_mark_region_begin.default, (res, 0)
-        )
-        if begin_on_res
-        else res
+        _make_call(graph, torch.ops.tensor_cast._internal_mark_region_begin.default, (res, 0)) if begin_on_res else res
     )
     add_rms_norm2 = _make_call(
         graph,
@@ -126,13 +106,9 @@ def _build_p2_p3_graph(
     getitem0 = _make_getitem(graph, add_rms_norm2, 0)
     getitem1 = _make_getitem(graph, add_rms_norm2, 1)
 
-    all_reduce_2 = _make_call(
-        graph, torch.ops.tensor_cast.all_reduce.default, (x2, 0, RANK_GROUP)
-    )
+    all_reduce_2 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x2, 0, RANK_GROUP))
     comm_output = (
-        _make_call(
-            graph, torch.ops.aten.reshape.default, (all_reduce_2, list(INPUT_SHAPE))
-        )
+        _make_call(graph, torch.ops.aten.reshape.default, (all_reduce_2, list(INPUT_SHAPE)))
         if with_view
         else all_reduce_2
     )
@@ -140,16 +116,10 @@ def _build_p2_p3_graph(
 
     current = add_node
     if with_end:
-        current = _make_call(
-            graph, torch.ops.tensor_cast._internal_mark_region_end.default, (current, 0)
-        )
+        current = _make_call(graph, torch.ops.tensor_cast._internal_mark_region_end.default, (current, 0))
     for index in range(num_copies):
-        current = _make_call(
-            graph, torch.ops.tensor_cast._internal_copy_region.default, (current, index)
-        )
-    tail = _make_call(
-        graph, torch.ops.tensor_cast.rms_norm.default, (current, w2, 1e-5)
-    )
+        current = _make_call(graph, torch.ops.tensor_cast._internal_copy_region.default, (current, index))
+    tail = _make_call(graph, torch.ops.tensor_cast.rms_norm.default, (current, w2, 1e-5))
     graph.output((getitem0, tail))
     return _make_graph_module(graph)
 
@@ -159,65 +129,39 @@ class Pattern1RewriterTestCase(unittest.TestCase):
         graph = fx.Graph()
         x = _make_placeholder(graph, "x")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
-        norm = _make_call(
-            graph, torch.ops.tensor_cast.rms_norm.default, (all_reduce, w, 1e-5)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
+        norm = _make_call(graph, torch.ops.tensor_cast.rms_norm.default, (all_reduce, w, 1e-5))
         graph.output(norm)
         graph_module = _make_graph_module(graph)
 
         rewritten = Pattern1Rewriter().apply(graph_module.graph)
 
         self.assertEqual(rewritten, 1)
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 1
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 1
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 1
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 1)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 1)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 1)
 
     def test_p1_with_marker(self):
         graph = fx.Graph()
         x = _make_placeholder(graph, "x")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         begin = _make_call(
             graph,
             torch.ops.tensor_cast._internal_mark_region_begin.default,
             (all_reduce, 0),
         )
-        norm = _make_call(
-            graph, torch.ops.tensor_cast.rms_norm.default, (begin, w, 1e-5)
-        )
+        norm = _make_call(graph, torch.ops.tensor_cast.rms_norm.default, (begin, w, 1e-5))
         graph.output(norm)
         graph_module = _run_pass(_make_graph_module(graph))
 
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 1
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 1
-        )
-        [reduce_scatter] = _find_calls(
-            graph_module, torch.ops.tensor_cast.reduce_scatter.default
-        )
-        [begin_node] = _find_calls(
-            graph_module, torch.ops.tensor_cast._internal_mark_region_begin.default
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 1)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 1)
+        [reduce_scatter] = _find_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default)
+        [begin_node] = _find_calls(graph_module, torch.ops.tensor_cast._internal_mark_region_begin.default)
         [norm_node] = _find_calls(graph_module, torch.ops.tensor_cast.rms_norm.default)
-        [all_gather] = _find_calls(
-            graph_module, torch.ops.tensor_cast.all_gather.default
-        )
+        [all_gather] = _find_calls(graph_module, torch.ops.tensor_cast.all_gather.default)
         self.assertIs(begin_node.args[0], reduce_scatter)
         self.assertIs(norm_node.args[0], begin_node)
         self.assertIs(all_gather.args[0], norm_node)
@@ -226,25 +170,15 @@ class Pattern1RewriterTestCase(unittest.TestCase):
         graph = fx.Graph()
         x = _make_placeholder(graph, "x")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
-        norm = _make_call(
-            graph, torch.ops.tensor_cast.rms_norm.default, (all_reduce, w, 1e-5)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
+        norm = _make_call(graph, torch.ops.tensor_cast.rms_norm.default, (all_reduce, w, 1e-5))
         graph.output(norm)
         graph_module = _run_pass(_make_graph_module(graph))
 
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0
-        )
-        [reduce_scatter] = _find_calls(
-            graph_module, torch.ops.tensor_cast.reduce_scatter.default
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0)
+        [reduce_scatter] = _find_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default)
         [norm_node] = _find_calls(graph_module, torch.ops.tensor_cast.rms_norm.default)
-        [all_gather] = _find_calls(
-            graph_module, torch.ops.tensor_cast.all_gather.default
-        )
+        [all_gather] = _find_calls(graph_module, torch.ops.tensor_cast.all_gather.default)
         self.assertIs(norm_node.args[0], reduce_scatter)
         self.assertIs(all_gather.args[0], norm_node)
 
@@ -253,26 +187,18 @@ class Pattern1RewriterTestCase(unittest.TestCase):
         x = _make_placeholder(graph, "x")
         res = _make_placeholder(graph, "res")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         begin = _make_call(
             graph,
             torch.ops.tensor_cast._internal_mark_region_begin.default,
             (all_reduce, 0),
         )
-        norm = _make_call(
-            graph, torch.ops.tensor_cast.add_rms_norm.default, (begin, res, w, 1e-5)
-        )
+        norm = _make_call(graph, torch.ops.tensor_cast.add_rms_norm.default, (begin, res, w, 1e-5))
         graph.output(norm)
         graph_module = _run_pass(_make_graph_module(graph))
 
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0
-        )
-        [norm_node] = _find_calls(
-            graph_module, torch.ops.tensor_cast.add_rms_norm.default
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0)
+        [norm_node] = _find_calls(graph_module, torch.ops.tensor_cast.add_rms_norm.default)
         self.assertTrue(_has_user(norm_node, torch.ops.tensor_cast.all_gather.default))
 
 
@@ -282,9 +208,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         x = _make_placeholder(graph, "x")
         res = _make_placeholder(graph, "res")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         norm2 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -297,23 +221,13 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         rewritten = Pattern2Rewriter().apply(graph_module.graph)
 
         self.assertEqual(rewritten, 1)
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 1
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 1
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 1
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 1)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 1)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 1)
 
     def _assert_p2_p3_middle(self, graph_module):
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0
-        )
-        self.assertGreaterEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 2
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0)
+        self.assertGreaterEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 2)
         for getitem1 in _find_getitems(graph_module, 1):
             self.assertFalse(
                 _has_user(getitem1, torch.ops.tensor_cast.all_gather.default),
@@ -325,10 +239,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
             )
         norms = _find_calls(graph_module, torch.ops.tensor_cast.rms_norm.default)
         self.assertTrue(
-            any(
-                _has_user(norm_node, torch.ops.tensor_cast.all_gather.default)
-                for norm_node in norms
-            ),
+            any(_has_user(norm_node, torch.ops.tensor_cast.all_gather.default) for norm_node in norms),
             "tail rms_norm must feed all_gather",
         )
 
@@ -345,9 +256,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         x = _make_placeholder(graph, "x")
         res = _make_placeholder(graph, "res")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         norm2 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -368,12 +277,8 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         x1 = _make_placeholder(graph, "x1")
         x2 = _make_placeholder(graph, "x2")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce_1 = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x1, 0, RANK_GROUP)
-        )
-        all_reduce_2 = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x2, 0, RANK_GROUP)
-        )
+        all_reduce_1 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x1, 0, RANK_GROUP))
+        all_reduce_2 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x2, 0, RANK_GROUP))
         norm2 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -383,21 +288,11 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         graph.output(getitem0)
         graph_module = _run_pass(_make_graph_module(graph))
 
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 2
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 0
-        )
-        [norm2_new] = _find_calls(
-            graph_module, torch.ops.tensor_cast.add_rms_norm2.default
-        )
-        all_reduce_nodes = _find_calls(
-            graph_module, torch.ops.tensor_cast.all_reduce.default
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 2)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 0)
+        [norm2_new] = _find_calls(graph_module, torch.ops.tensor_cast.add_rms_norm2.default)
+        all_reduce_nodes = _find_calls(graph_module, torch.ops.tensor_cast.all_reduce.default)
         self.assertIn(norm2_new.args[0], all_reduce_nodes)
         self.assertIn(norm2_new.args[1], all_reduce_nodes)
         self.assertIsNot(norm2_new.args[0], norm2_new.args[1])
@@ -407,39 +302,23 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         x = _make_placeholder(graph, "x")
         res = _make_placeholder(graph, "res")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         begin = _make_call(
             graph,
             torch.ops.tensor_cast._internal_mark_region_begin.default,
             (all_reduce, 0),
         )
-        norm2 = _make_call(
-            graph, torch.ops.tensor_cast.add_rms_norm2.default, (begin, res, w, 1e-5)
-        )
+        norm2 = _make_call(graph, torch.ops.tensor_cast.add_rms_norm2.default, (begin, res, w, 1e-5))
         getitem0 = _make_getitem(graph, norm2, 0)
         graph.output(getitem0)
         graph_module = _run_pass(_make_graph_module(graph))
 
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 1
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.add_rms_norm2.default), 1
-        )
-        [norm2_new] = _find_calls(
-            graph_module, torch.ops.tensor_cast.add_rms_norm2.default
-        )
-        [begin_new] = _find_calls(
-            graph_module, torch.ops.tensor_cast._internal_mark_region_begin.default
-        )
-        [all_reduce_new] = _find_calls(
-            graph_module, torch.ops.tensor_cast.all_reduce.default
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 1)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.add_rms_norm2.default), 1)
+        [norm2_new] = _find_calls(graph_module, torch.ops.tensor_cast.add_rms_norm2.default)
+        [begin_new] = _find_calls(graph_module, torch.ops.tensor_cast._internal_mark_region_begin.default)
+        [all_reduce_new] = _find_calls(graph_module, torch.ops.tensor_cast.all_reduce.default)
         self.assertIs(norm2_new.args[0], begin_new)
         self.assertIs(begin_new.args[0], all_reduce_new)
 
@@ -466,12 +345,8 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         graph.output((getitem0, getitem1))
         graph_module = _run_pass(_make_graph_module(graph))
 
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0
-        )
-        [reduce_scatter] = _find_calls(
-            graph_module, torch.ops.tensor_cast.reduce_scatter.default
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0)
+        [reduce_scatter] = _find_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default)
         self.assertEqual(reduce_scatter.args[1], 0)
 
         for node in _find_getitems(graph_module, 1):
@@ -479,9 +354,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         for node in _find_getitems(graph_module, 0):
             self.assertTrue(_has_user(node, torch.ops.tensor_cast.all_gather.default))
 
-        all_gathers = _find_calls(
-            graph_module, torch.ops.tensor_cast.all_gather.default
-        )
+        all_gathers = _find_calls(graph_module, torch.ops.tensor_cast.all_gather.default)
         self.assertGreaterEqual(len(all_gathers), 2)
         for all_gather in all_gathers:
             self.assertEqual(all_gather.args[1], 0)
@@ -491,9 +364,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         x = _make_placeholder(graph, "x")
         res = _make_placeholder(graph, "res")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         norm2 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -503,9 +374,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         graph.output(getitem0)
         graph_module = _run_pass(_make_graph_module(graph))
 
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0)
         for node in _find_getitems(graph_module, 0):
             self.assertTrue(_has_user(node, torch.ops.tensor_cast.all_gather.default))
 
@@ -514,9 +383,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         x = _make_placeholder(graph, "x")
         res = _make_placeholder(graph, "res")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         norm2 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -528,9 +395,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         graph_module = _make_graph_module(graph)
         Pattern2Rewriter().apply(graph_module.graph)
 
-        [reduce_scatter] = _find_calls(
-            graph_module, torch.ops.tensor_cast.reduce_scatter.default
-        )
+        [reduce_scatter] = _find_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default)
         self.assertLess(
             _get_node_index(graph_module, all_reduce),
             _get_node_index(graph_module, reduce_scatter),
@@ -545,16 +410,10 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         w2 = _make_placeholder(graph, "w2", WEIGHT_SHAPE)
         w3 = _make_placeholder(graph, "w3", WEIGHT_SHAPE)
 
-        all_reduce_0 = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
-        _make_call(
-            graph, torch.ops.tensor_cast.rms_norm.default, (all_reduce_0, w, 1e-5)
-        )
+        all_reduce_0 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
+        _make_call(graph, torch.ops.tensor_cast.rms_norm.default, (all_reduce_0, w, 1e-5))
 
-        all_reduce_1 = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x2, 0, RANK_GROUP)
-        )
+        all_reduce_1 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x2, 0, RANK_GROUP))
         norm2 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -563,9 +422,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         getitem0 = _make_getitem(graph, norm2, 0)
         getitem1 = _make_getitem(graph, norm2, 1)
 
-        all_reduce_2 = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x3, 0, RANK_GROUP)
-        )
+        all_reduce_2 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x3, 0, RANK_GROUP))
         tail = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm.default,
@@ -574,22 +431,14 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         graph.output((getitem0, tail))
         graph_module = _run_pass(_make_graph_module(graph))
 
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 3
-        )
-        self.assertGreaterEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 2
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 3)
+        self.assertGreaterEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 2)
         for node in _find_getitems(graph_module, 0):
             self.assertTrue(_has_user(node, torch.ops.tensor_cast.all_gather.default))
         for node in _find_getitems(graph_module, 1):
             self.assertFalse(_has_user(node, torch.ops.tensor_cast.all_gather.default))
-        [tail_new] = _find_calls(
-            graph_module, torch.ops.tensor_cast.add_rms_norm.default
-        )
+        [tail_new] = _find_calls(graph_module, torch.ops.tensor_cast.add_rms_norm.default)
         self.assertTrue(_has_user(tail_new, torch.ops.tensor_cast.all_gather.default))
 
     def test_p2_residual_chained_into_next_p2_stays_local(self):
@@ -600,9 +449,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         w1 = _make_placeholder(graph, "w1", WEIGHT_SHAPE)
         w2 = _make_placeholder(graph, "w2", WEIGHT_SHAPE)
 
-        all_reduce_1 = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x1, 0, RANK_GROUP)
-        )
+        all_reduce_1 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x1, 0, RANK_GROUP))
         norm2_1 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -610,9 +457,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         )
         getitem1 = _make_getitem(graph, norm2_1, 1)
 
-        all_reduce_2 = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x2, 0, RANK_GROUP)
-        )
+        all_reduce_2 = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x2, 0, RANK_GROUP))
         norm2_2 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -627,9 +472,7 @@ class Pattern2RewriterTestCase(unittest.TestCase):
             _has_user(chained_getitem1, torch.ops.tensor_cast.all_gather.default),
             "intermediate residual feeding next P2 must stay local",
         )
-        [norm2_2_new] = _find_calls(
-            graph_module, torch.ops.tensor_cast.add_rms_norm2.default
-        )[1:]
+        [norm2_2_new] = _find_calls(graph_module, torch.ops.tensor_cast.add_rms_norm2.default)[1:]
         self.assertIs(norm2_2_new.args[0], chained_getitem1)
 
 
@@ -640,23 +483,16 @@ class Pattern3RewriterTestCase(unittest.TestCase):
             0,
             "no all_reduce should remain",
         )
-        self.assertGreaterEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 2
-        )
+        self.assertGreaterEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 2)
         for getitem1 in _find_getitems(graph_module, 1):
             self.assertFalse(
                 _has_user(getitem1, torch.ops.tensor_cast.all_gather.default),
                 "gi[1] must NOT be gathered",
             )
-            self.assertTrue(
-                _has_user(getitem1, torch.ops.aten.add.Tensor), "gi[1] should feed add"
-            )
+            self.assertTrue(_has_user(getitem1, torch.ops.aten.add.Tensor), "gi[1] should feed add")
         norms = _find_calls(graph_module, torch.ops.tensor_cast.rms_norm.default)
         self.assertTrue(
-            any(
-                _has_user(node, torch.ops.tensor_cast.all_gather.default)
-                for node in norms
-            ),
+            any(_has_user(node, torch.ops.tensor_cast.all_gather.default) for node in norms),
             "tail norm must feed all_gather",
         )
 
@@ -679,8 +515,7 @@ class Pattern3RewriterTestCase(unittest.TestCase):
         end_users = [
             user
             for user in add_node.users
-            if hasattr(user, "target")
-            and user.target is torch.ops.tensor_cast._internal_mark_region_end.default
+            if hasattr(user, "target") and user.target is torch.ops.tensor_cast._internal_mark_region_end.default
         ]
         self.assertEqual(len(end_users), 1, "add must feed exactly one region_end")
         end_node = end_users[0]
@@ -713,9 +548,7 @@ class Pattern3RewriterTestCase(unittest.TestCase):
         self._assert_p3_base(graph_module)
 
         self.assertEqual(
-            _count_calls(
-                graph_module, torch.ops.tensor_cast._internal_mark_region_end.default
-            ),
+            _count_calls(graph_module, torch.ops.tensor_cast._internal_mark_region_end.default),
             0,
         )
         [norm] = _find_calls(graph_module, torch.ops.tensor_cast.rms_norm.default)
@@ -736,32 +569,22 @@ class Pattern3RewriterTestCase(unittest.TestCase):
         copy0 = copy1.args[0]
         self.assertIs(copy0.target, torch.ops.tensor_cast._internal_copy_region.default)
         end_node = copy0.args[0]
-        self.assertIs(
-            end_node.target, torch.ops.tensor_cast._internal_mark_region_end.default
-        )
+        self.assertIs(end_node.target, torch.ops.tensor_cast._internal_mark_region_end.default)
         [add_node] = _find_calls(graph_module, torch.ops.aten.add.Tensor)
         self.assertIs(end_node.args[0], add_node)
 
     def test_p3_reduce_scatter_inserted_after_all_reduce(self):
         graph_module = _run_pass(_build_p2_p3_graph(with_end=True))
 
-        reduce_scatter_nodes = _find_calls(
-            graph_module, torch.ops.tensor_cast.reduce_scatter.default
-        )
+        reduce_scatter_nodes = _find_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default)
         add_comm = self._get_add_comm_input(graph_module)
         p3_reduce_scatter = (
-            add_comm
-            if add_comm.target is torch.ops.tensor_cast.reduce_scatter.default
-            else add_comm.args[0]
+            add_comm if add_comm.target is torch.ops.tensor_cast.reduce_scatter.default else add_comm.args[0]
         )
 
-        reduce_scatter_positions = [
-            _get_node_index(graph_module, node) for node in reduce_scatter_nodes
-        ]
+        reduce_scatter_positions = [_get_node_index(graph_module, node) for node in reduce_scatter_nodes]
         p3_position = _get_node_index(graph_module, p3_reduce_scatter)
-        entry_position = min(
-            pos for pos in reduce_scatter_positions if pos != p3_position
-        )
+        entry_position = min(pos for pos in reduce_scatter_positions if pos != p3_position)
         self.assertGreater(p3_position, entry_position)
 
 
@@ -776,12 +599,8 @@ class SequenceParallelPassEdgeTestCase(unittest.TestCase):
         graph = fx.Graph()
         x = _make_placeholder(graph, "x")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, [0])
-        )
-        norm = _make_call(
-            graph, torch.ops.tensor_cast.rms_norm.default, (all_reduce, w, 1e-5)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, [0]))
+        norm = _make_call(graph, torch.ops.tensor_cast.rms_norm.default, (all_reduce, w, 1e-5))
         graph.output(norm)
         graph_module = _run_pass(_make_graph_module(graph))
 
@@ -790,12 +609,8 @@ class SequenceParallelPassEdgeTestCase(unittest.TestCase):
             1,
             "should not rewrite when world_size=1",
         )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 0
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 0)
 
 
 class SequenceParallelPassNegativeTestCase(unittest.TestCase):
@@ -803,21 +618,15 @@ class SequenceParallelPassNegativeTestCase(unittest.TestCase):
         graph = fx.Graph()
         x = _make_placeholder(graph, "x")
         y = _make_placeholder(graph, "y")
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         add_node = _make_call(graph, torch.ops.aten.add.Tensor, (all_reduce, y))
         graph.output(add_node)
         graph_module = _make_graph_module(graph)
 
         matched = Pattern1Rewriter().apply(graph_module.graph)
         self.assertEqual(matched, 0)
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 0
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 0)
 
     def test_p1_rms_norm_without_all_reduce_source(self):
         graph = fx.Graph()
@@ -829,33 +638,23 @@ class SequenceParallelPassNegativeTestCase(unittest.TestCase):
 
         matched = Pattern1Rewriter().apply(graph_module.graph)
         self.assertEqual(matched, 0)
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 0
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_gather.default), 0)
 
     def test_p2_add_rms_norm2_without_all_reduce(self):
         graph = fx.Graph()
         x = _make_placeholder(graph, "x")
         res = _make_placeholder(graph, "res")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        norm2 = _make_call(
-            graph, torch.ops.tensor_cast.add_rms_norm2.default, (x, res, w, 1e-5)
-        )
+        norm2 = _make_call(graph, torch.ops.tensor_cast.add_rms_norm2.default, (x, res, w, 1e-5))
         _make_getitem(graph, norm2, 0)
         graph.output(norm2)
         graph_module = _make_graph_module(graph)
 
         matched = Pattern2Rewriter().apply(graph_module.graph)
         self.assertEqual(matched, 0)
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0
-        )
-        self.assertEqual(
-            _count_calls(graph_module, torch.ops.tensor_cast.add_rms_norm2.default), 1
-        )
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.add_rms_norm2.default), 1)
 
     def test_p3_add_sibling_is_plain_placeholder(self):
         graph = fx.Graph()
@@ -864,9 +663,7 @@ class SequenceParallelPassNegativeTestCase(unittest.TestCase):
         plain = _make_placeholder(graph, "plain")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
         w2 = _make_placeholder(graph, "w2", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         norm2 = _make_call(
             graph,
             torch.ops.tensor_cast.add_rms_norm2.default,
@@ -875,9 +672,7 @@ class SequenceParallelPassNegativeTestCase(unittest.TestCase):
         _make_getitem(graph, norm2, 0)
         getitem1 = _make_getitem(graph, norm2, 1)
         add_node = _make_call(graph, torch.ops.aten.add.Tensor, (getitem1, plain))
-        tail = _make_call(
-            graph, torch.ops.tensor_cast.rms_norm.default, (add_node, w2, 1e-5)
-        )
+        tail = _make_call(graph, torch.ops.tensor_cast.rms_norm.default, (add_node, w2, 1e-5))
         graph.output(tail)
         graph_module = _make_graph_module(graph)
 
@@ -889,13 +684,9 @@ class SequenceParallelPassNegativeTestCase(unittest.TestCase):
         x = _make_placeholder(graph, "x")
         y = _make_placeholder(graph, "y")
         w = _make_placeholder(graph, "w", WEIGHT_SHAPE)
-        all_reduce = _make_call(
-            graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP)
-        )
+        all_reduce = _make_call(graph, torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
         add_node = _make_call(graph, torch.ops.aten.add.Tensor, (y, all_reduce))
-        tail = _make_call(
-            graph, torch.ops.tensor_cast.rms_norm.default, (add_node, w, 1e-5)
-        )
+        tail = _make_call(graph, torch.ops.tensor_cast.rms_norm.default, (add_node, w, 1e-5))
         graph.output(tail)
         graph_module = _make_graph_module(graph)
 

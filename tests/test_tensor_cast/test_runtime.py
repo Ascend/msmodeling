@@ -43,9 +43,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             torch.ops.tensor_cast.attention(*attention_args)
@@ -58,9 +56,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             torch.ops.tensor_cast.linear_attention(*linear_attention_args)
@@ -73,9 +69,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             torch.ops.tensor_cast.multihead_latent_attention(*mla_args)
@@ -88,9 +82,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             torch.ops.tensor_cast.mlapo(*mlapo_args)
@@ -103,9 +95,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             torch.ops.tensor_cast.mlapo_quant(*mlapo_args)
@@ -121,9 +111,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             x = torch.randn([100], device="meta")
@@ -138,9 +126,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             x = torch.randn([100], device="meta")
@@ -155,9 +141,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         k = torch.randn(B, S, num_heads, head_dim, device="meta", dtype=dtype)
         v = torch.randn(B, S, num_heads, head_dim, device="meta", dtype=dtype)
 
-        actual_execution_time = self._execute_attention_and_get_base_data(
-            (q, k, v, None, None, None, None, None)
-        )
+        actual_execution_time = self._execute_attention_and_get_base_data((q, k, v, None, None, None, None, None))
 
         assert_close(self, actual_execution_time, 6.49e-6)
 
@@ -170,15 +154,9 @@ class PerfAnalysisTestCase(unittest.TestCase):
         q = torch.randn(total_tokens, hidden_size, device="meta", dtype=dtype)
         max_num_blocks_per_seq = (S + block_size - 1) // block_size
         num_blocks = B * max_num_blocks_per_seq
-        k = torch.randn(
-            num_blocks, block_size, num_kv_heads, head_dim, device="meta", dtype=dtype
-        )
-        v = torch.randn(
-            num_blocks, block_size, num_kv_heads, head_dim, device="meta", dtype=dtype
-        )
-        block_table = torch.empty(
-            (B, max_num_blocks_per_seq), dtype=torch.long, device="meta"
-        )
+        k = torch.randn(num_blocks, block_size, num_kv_heads, head_dim, device="meta", dtype=dtype)
+        v = torch.randn(num_blocks, block_size, num_kv_heads, head_dim, device="meta", dtype=dtype)
+        block_table = torch.empty((B, max_num_blocks_per_seq), dtype=torch.long, device="meta")
         request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
 
@@ -234,9 +212,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             out = linear_attn(hidden_states)
@@ -392,19 +368,11 @@ class PerfAnalysisTestCase(unittest.TestCase):
         hidden_states = torch.randn(num_tokens, hidden_size, device="meta", dtype=dtype)
         cos = torch.randn(1, num_tokens, qk_rope_head_dim, device="meta", dtype=dtype)
         sin = torch.randn(1, num_tokens, qk_rope_head_dim, device="meta", dtype=dtype)
-        q_a_proj_weight = torch.randn(
-            hidden_size, q_lora_rank, device="meta", dtype=dtype
-        )
+        q_a_proj_weight = torch.randn(hidden_size, q_lora_rank, device="meta", dtype=dtype)
         q_a_layernorm_weight = torch.randn(q_lora_rank, device="meta", dtype=dtype)
-        q_b_proj_weight = torch.randn(
-            q_lora_rank, num_heads * qk_head_dim, device="meta", dtype=dtype
-        )
-        kv_a_proj_weight = torch.randn(
-            hidden_size, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype
-        )
-        kv_a_layernorm_weight = torch.randn(
-            kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype
-        )
+        q_b_proj_weight = torch.randn(q_lora_rank, num_heads * qk_head_dim, device="meta", dtype=dtype)
+        kv_a_proj_weight = torch.randn(hidden_size, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype)
+        kv_a_layernorm_weight = torch.randn(kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype)
 
         actual_execution_time = self._execute_mlapo_and_get_base_data(
             (
@@ -442,22 +410,16 @@ class PerfAnalysisTestCase(unittest.TestCase):
         hidden_states = torch.randn(num_tokens, hidden_size, device="meta", dtype=dtype)
         cos = torch.randn(1, num_tokens, qk_rope_head_dim, device="meta", dtype=dtype)
         sin = torch.randn(1, num_tokens, qk_rope_head_dim, device="meta", dtype=dtype)
-        q_a_proj_weight = torch.empty(
-            hidden_size, q_lora_rank, device="meta", dtype=quant_dtype
-        )
+        q_a_proj_weight = torch.empty(hidden_size, q_lora_rank, device="meta", dtype=quant_dtype)
         q_a_layernorm_weight = torch.randn(q_lora_rank, device="meta", dtype=dtype)
-        q_b_proj_weight = torch.empty(
-            q_lora_rank, num_heads * qk_head_dim, device="meta", dtype=quant_dtype
-        )
+        q_b_proj_weight = torch.empty(q_lora_rank, num_heads * qk_head_dim, device="meta", dtype=quant_dtype)
         kv_a_proj_weight = torch.empty(
             hidden_size,
             kv_lora_rank + qk_rope_head_dim,
             device="meta",
             dtype=quant_dtype,
         )
-        kv_a_layernorm_weight = torch.randn(
-            kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype
-        )
+        kv_a_layernorm_weight = torch.randn(kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype)
 
         q_a_proj_scale = torch.ones(q_lora_rank, device="meta")
         q_b_proj_scale = torch.ones(num_heads * qk_head_dim, device="meta")
@@ -504,14 +466,10 @@ class PerfAnalysisTestCase(unittest.TestCase):
         top_k = 2
         expected_shape = (*test_logits.shape[:-1], top_k)
         with (
-            Runtime(
-                perf_model, TEST_DEVICE, memory_tracker=MemoryTracker(TEST_DEVICE)
-            ) as runtime,
+            Runtime(perf_model, TEST_DEVICE, memory_tracker=MemoryTracker(TEST_DEVICE)) as runtime,
             torch.no_grad(),
         ):
-            topk_weights, topk_indices = torch.ops.tensor_cast.moe_gating_top_k_softmax(
-                test_logits, top_k
-            )
+            topk_weights, topk_indices = torch.ops.tensor_cast.moe_gating_top_k_softmax(test_logits, top_k)
             self.assertEqual(topk_weights.shape, expected_shape)
             self.assertEqual(topk_indices.shape, expected_shape)
         self.assertEqual(len(runtime.event_list), 1)
@@ -541,12 +499,8 @@ class PerfAnalysisTestCase(unittest.TestCase):
         )
         request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
-        W_UK_T = torch.randn(
-            num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype
-        )
-        W_UV = torch.randn(
-            num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype
-        )
+        W_UK_T = torch.randn(num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype)
+        W_UV = torch.randn(num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype)
         kv_b_proj = torch.randn(
             kv_lora_rank,
             num_heads * (qk_nope_head_dim + v_head_dim),
@@ -554,21 +508,19 @@ class PerfAnalysisTestCase(unittest.TestCase):
             dtype=dtype,
         )
 
-        actual_execution_time = (
-            self._execute_multihead_latent_attention_and_get_base_data(
-                (
-                    q,
-                    kv_cache,
-                    None,
-                    None,
-                    request_total_seq_lens,
-                    query_lens,
-                    W_UK_T,
-                    W_UV,
-                    kv_b_proj,
-                    v_head_dim,
-                    topk_limit,
-                )
+        actual_execution_time = self._execute_multihead_latent_attention_and_get_base_data(
+            (
+                q,
+                kv_cache,
+                None,
+                None,
+                request_total_seq_lens,
+                query_lens,
+                W_UK_T,
+                W_UV,
+                kv_b_proj,
+                v_head_dim,
+                topk_limit,
             )
         )
 
@@ -596,12 +548,8 @@ class PerfAnalysisTestCase(unittest.TestCase):
         )
         request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
-        W_UK_T = torch.randn(
-            num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype
-        )
-        W_UV = torch.randn(
-            num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype
-        )
+        W_UK_T = torch.randn(num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype)
+        W_UV = torch.randn(num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype)
         kv_b_proj = torch.randn(
             kv_lora_rank,
             num_heads * (qk_nope_head_dim + v_head_dim),
@@ -609,21 +557,19 @@ class PerfAnalysisTestCase(unittest.TestCase):
             dtype=dtype,
         )
 
-        actual_execution_time = (
-            self._execute_multihead_latent_attention_and_get_base_data(
-                (
-                    q,
-                    kv_cache,
-                    None,
-                    None,
-                    request_total_seq_lens,
-                    query_lens,
-                    W_UK_T,
-                    W_UV,
-                    kv_b_proj,
-                    v_head_dim,
-                    topk_limit,
-                )
+        actual_execution_time = self._execute_multihead_latent_attention_and_get_base_data(
+            (
+                q,
+                kv_cache,
+                None,
+                None,
+                request_total_seq_lens,
+                query_lens,
+                W_UK_T,
+                W_UV,
+                kv_b_proj,
+                v_head_dim,
+                topk_limit,
             )
         )
 
@@ -651,12 +597,8 @@ class PerfAnalysisTestCase(unittest.TestCase):
         )
         request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
-        W_UK_T = torch.randn(
-            num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype
-        )
-        W_UV = torch.randn(
-            num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype
-        )
+        W_UK_T = torch.randn(num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype)
+        W_UV = torch.randn(num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype)
         kv_b_proj = torch.randn(
             kv_lora_rank,
             num_heads * (qk_nope_head_dim + v_head_dim),
@@ -664,21 +606,19 @@ class PerfAnalysisTestCase(unittest.TestCase):
             dtype=dtype,
         )
 
-        actual_execution_time = (
-            self._execute_multihead_latent_attention_and_get_base_data(
-                (
-                    q,
-                    kv_cache,
-                    None,
-                    None,
-                    request_total_seq_lens,
-                    query_lens,
-                    W_UK_T,
-                    W_UV,
-                    kv_b_proj,
-                    topk_limit,
-                    v_head_dim,
-                )
+        actual_execution_time = self._execute_multihead_latent_attention_and_get_base_data(
+            (
+                q,
+                kv_cache,
+                None,
+                None,
+                request_total_seq_lens,
+                query_lens,
+                W_UK_T,
+                W_UV,
+                kv_b_proj,
+                topk_limit,
+                v_head_dim,
             )
         )
 
@@ -696,21 +636,15 @@ class PerfAnalysisTestCase(unittest.TestCase):
     )
     def test_model(self, model_id, do_compile):
         num_tokens = 100
-        user_config = UserInputConfig(
-            model_id=model_id, do_compile=do_compile, num_hidden_layers_override=2
-        )
+        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile, num_hidden_layers_override=2)
         model = build_model(user_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
-        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(model, model.model_config)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(
@@ -733,21 +667,15 @@ class PerfAnalysisTestCase(unittest.TestCase):
     def test_deepseek(self, model_id, do_compile):
         user_config = UserInputConfig(model_id=model_id, do_compile=do_compile)
         model = build_model(user_config)
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         # make sure all original attention modules have been replaced
-        self.assertTrue(
-            has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast")
-        )
+        self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(
@@ -769,9 +697,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             x = torch.randn([100], device="meta")
@@ -791,9 +717,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             x = torch.randn([10, 10], device="meta")
@@ -815,9 +739,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             x = torch.randn([100], device="meta")
@@ -883,9 +805,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         perf_model.get_classifiers.return_value = []
 
         def _fixed_duration_process_op(op_invoke_info):
-            return PerformanceModel.Result(
-                execution_time_s=durations_s.get(op_invoke_info.func, 0.0)
-            )
+            return PerformanceModel.Result(execution_time_s=durations_s.get(op_invoke_info.func, 0.0))
 
         perf_model.process_op.side_effect = _fixed_duration_process_op
         x = torch.randn([8, 8], device="meta")
@@ -896,11 +816,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         # max(relu=3s on stream0, sigmoid=5s on stream1) + tanh=2s (depends on sigmoid).
         total_time_s = runtime.total_execution_time_s()[perf_model.name]
         assert_close(self, total_time_s, 7.0)
-        tracked_events = [
-            event
-            for event in runtime.event_list
-            if event.op_invoke_info.func in durations_s
-        ]
+        tracked_events = [event for event in runtime.event_list if event.op_invoke_info.func in durations_s]
         self.assertEqual(len(tracked_events), 3)
         self.assertEqual([event.stream_id for event in tracked_events], [0, 1, 0])
 
@@ -908,26 +824,18 @@ class PerfAnalysisTestCase(unittest.TestCase):
         x = torch.randn([8, 8], device="meta")
         y = torch.ops.aten.neg.default(x)
         token = torch.empty((), dtype=torch.int64, device="meta")
-        plain_runtime = Runtime(
-            [], TEST_DEVICE, memory_tracker=MemoryTracker(TEST_DEVICE)
-        )
+        plain_runtime = Runtime([], TEST_DEVICE, memory_tracker=MemoryTracker(TEST_DEVICE))
         plain_runtime.op_info_group = [
             OpInvokeInfo(torch.ops.aten.neg.default, (x,), {}, y),
         ]
         plain_runtime.replay_op_invoke_infos()
         plain_runtime.memory_tracker.analyze()
 
-        anchored_runtime = Runtime(
-            [], TEST_DEVICE, memory_tracker=MemoryTracker(TEST_DEVICE)
-        )
+        anchored_runtime = Runtime([], TEST_DEVICE, memory_tracker=MemoryTracker(TEST_DEVICE))
         anchored_runtime.op_info_group = [
-            OpInvokeInfo(
-                torch.ops.tensor_cast._internal_wait_and_bind.default, (x, 0, []), {}, x
-            ),
+            OpInvokeInfo(torch.ops.tensor_cast._internal_wait_and_bind.default, (x, 0, []), {}, x),
             OpInvokeInfo(torch.ops.aten.neg.default, (x,), {}, y),
-            OpInvokeInfo(
-                torch.ops.tensor_cast._internal_record.default, (y, 0), {}, token
-            ),
+            OpInvokeInfo(torch.ops.tensor_cast._internal_record.default, (y, 0), {}, token),
         ]
         anchored_runtime.replay_op_invoke_infos()
         anchored_runtime.memory_tracker.analyze()
@@ -1182,9 +1090,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         query_result.shape_debug_statistics.return_value = {}
         self.data_source.lookup.return_value = query_result
 
-        perf_model = EmpiricalPerformanceModel(
-            device_profile, self.data_source, self.fallback_model
-        )
+        perf_model = EmpiricalPerformanceModel(device_profile, self.data_source, self.fallback_model)
         with (
             Runtime(perf_model, device_profile) as runtime,
             torch.no_grad(),
@@ -1210,9 +1116,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         fallback_result.execution_time_s = 0
         self.fallback_model.process_op.return_value = fallback_result
 
-        perf_model = EmpiricalPerformanceModel(
-            device_profile, self.data_source, self.fallback_model
-        )
+        perf_model = EmpiricalPerformanceModel(device_profile, self.data_source, self.fallback_model)
         with (
             Runtime(perf_model, device_profile) as runtime,
             torch.no_grad(),
@@ -1241,9 +1145,7 @@ class PerfAnalysisTestCase(unittest.TestCase):
         query_result.shape_debug_statistics.return_value = {}
         self.data_source.lookup.return_value = query_result
 
-        perf_model = EmpiricalPerformanceModel(
-            device_profile, self.data_source, self.fallback_model
-        )
+        perf_model = EmpiricalPerformanceModel(device_profile, self.data_source, self.fallback_model)
         with (
             Runtime(perf_model, device_profile) as runtime,
             torch.no_grad(),

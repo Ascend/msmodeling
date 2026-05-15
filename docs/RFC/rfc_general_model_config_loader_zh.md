@@ -32,7 +32,7 @@ graph TD
     D --> E[ModelRunner 模型运行器]
     B --> F[AutoModelConfigLoader 配置加载器]
     F --> G[HuggingFace Config]
-    
+
     subgraph "tensor_cast/core/"
         A
         B
@@ -40,7 +40,7 @@ graph TD
         D
         E
     end
-    
+
     subgraph "tensor_cast/transformers/"
         F
         G
@@ -50,27 +50,32 @@ graph TD
 #### 2.0.1 核心组件说明
 
 **1. UserInputConfig** ([user_config.py](../../tensor_cast/core/user_config.py))
+
 - 用户输入配置类，包含所有用户可配置的参数
 - 支持设备配置、模型配置、并行配置、量化配置等
 - 提供 `get_parallel_config()` 和 `get_quant_config()` 方法生成运行时配置
 
 **2. ConfigResolver** ([config_resolver.py](../../tensor_cast/core/config_resolver.py))
+
 - 配置解析器，负责将用户输入转换为运行时配置
 - 使用 `AutoModelConfigLoader` 加载 HuggingFace 配置
 - 自动解析并配置 MoE、MLA、MTP 等特殊模块
 - 支持根据 `model_type` 自动匹配模型特性
 
 **3. ModelRunner** ([model_runner.py](../../tensor_cast/core/model_runner.py))
+
 - 模型运行器，负责执行推理并收集性能指标
 - 封装了设备配置、性能模型、模型构建等初始化逻辑
 - 提供 `run_inference()` 方法执行推理并返回详细的性能指标
 
 **4. build_model()** ([model_builder.py](../../tensor_cast/core/model_builder.py))
+
 - 模型构建入口函数
 - 协调 ConfigResolver 和 TransformerModel 完成模型构建
 - 支持可选的 torch.compile 编译
 
 **5. RequestInfo & ModelRunnerMetrics** ([input_generator.py](../../tensor_cast/core/input_generator.py))
+
 - `RequestInfo`: 封装请求信息（query_len、seq_len、concurrency等）
 - `ModelRunnerMetrics`: 封装推理性能指标（内存使用、执行时间等）
 
@@ -197,7 +202,7 @@ graph TD
 
 ### 2.3 方案分析
 
-#### 主推方案优点：
+#### 主推方案优点
 
 1. 解决了模块间的循环依赖问题，提高了代码质量
 2. 改进了模型类型识别，提高了系统的兼容性
@@ -206,7 +211,7 @@ graph TD
 5. 支持配置驱动，提高了系统的灵活性
 6. **核心模块重构后**：职责分离更清晰，配置系统更灵活，易于扩展新模型类型
 
-#### 主推方案局限性：
+#### 主推方案局限性
 
 1. 需要更新现有的模型和配置加载使用方式
 2. 增加了新的模块，需要相应的文档和培训
@@ -260,6 +265,7 @@ graph TD
 ### 核心组件
 
 #### AutoModelConfigLoader
+
 此类作为所有配置和模型加载操作的中心枢纽：
 
 - **配置加载**：处理各种配置格式和来源
@@ -268,6 +274,7 @@ graph TD
 - **类型检测**：自动检测并修正 model_type 不一致的情况
 
 #### ConfigResolver
+
 配置解析器，负责协调配置加载和转换：
 
 - **自动配置**：根据 model_type 自动匹配 MoE、MLA、MTP 配置
@@ -276,6 +283,7 @@ graph TD
 - **量化配置**：支持多种量化策略和粒度
 
 #### ModelRunner
+
 模型运行器，封装推理执行和性能分析：
 
 - **初始化管理**：统一管理设备、性能模型、模型构建
@@ -284,6 +292,7 @@ graph TD
 - **结果输出**：提供详细的性能分析报告
 
 #### TransformerModel
+
 模型构建器，负责模型加载和转换：
 
 - **模型加载**：使用 AutoModelConfigLoader 加载 HuggingFace 模型
@@ -304,6 +313,7 @@ graph TD
 ### 迁移策略
 
 实现遵循分阶段方法：
+
 1. 核心基础设施搭建（已完成）
 2. 配置系统统一（已完成）
 3. 模型加载集成（已完成）

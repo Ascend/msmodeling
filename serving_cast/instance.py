@@ -6,7 +6,7 @@ from typing import List
 from serving_cast.engine import Engine, EngineLoadBalancer
 from serving_cast.request import Request, RequestState
 
-from . import stime
+import serving_cast.stime as stime
 
 
 logger = stime.get_logger(__name__)
@@ -22,15 +22,13 @@ class Instance:
         device_type = instance_config.device_type
         if num_devices % dp_size != 0:
             raise ValueError(
-                "In instance __init__, num_devices must be divisible by dp_size,"
-                "but got num_devices = %d, dp_size = %d",
+                "In instance __init__, num_devices must be divisible by dp_size,but got num_devices = %d, dp_size = %d",
                 num_devices,
                 dp_size,
             )
 
         self.engines: List[Engine] = [
-            Engine(instance_config=instance_config, device_type=device_type, dp_rank=i)
-            for i in range(dp_size)
+            Engine(instance_config=instance_config, device_type=device_type, dp_rank=i) for i in range(dp_size)
         ]
         self.load_balancer = EngineLoadBalancer(self.engines)
 
@@ -41,8 +39,7 @@ class Instance:
             RequestState.KVS_TRANSFERRING,
         ]:
             raise ValueError(
-                "Instance.handle failed, request.state should be ARRIVES_SERVER "
-                "or KVS_TRANSFERRING, but get %s",
+                "Instance.handle failed, request.state should be ARRIVES_SERVER or KVS_TRANSFERRING, but get %s",
                 request.state,
             )
 

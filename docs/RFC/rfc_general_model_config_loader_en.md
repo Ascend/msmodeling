@@ -32,7 +32,7 @@ graph TD
     D --> E[ModelRunner]
     B --> F[AutoModelConfigLoader]
     F --> G[HuggingFace Config]
-    
+
     subgraph "tensor_cast/core/"
         A
         B
@@ -40,7 +40,7 @@ graph TD
         D
         E
     end
-    
+
     subgraph "tensor_cast/transformers/"
         F
         G
@@ -50,27 +50,32 @@ graph TD
 #### 2.0.1 Core Component Descriptions
 
 **1. UserInputConfig** ([user_config.py](../../tensor_cast/core/user_config.py))
+
 - User input configuration class containing all user-configurable parameters
 - Supports device configuration, model configuration, parallel configuration, quantization configuration, etc.
 - Provides `get_parallel_config()` and `get_quant_config()` methods to generate runtime configurations
 
 **2. ConfigResolver** ([config_resolver.py](../../tensor_cast/core/config_resolver.py))
+
 - Configuration resolver responsible for converting user input into runtime configuration
 - Uses `AutoModelConfigLoader` to load HuggingFace configuration
 - Automatically parses and configures special modules like MoE, MLA, MTP
 - Supports automatic matching of model features based on `model_type`
 
 **3. ModelRunner** ([model_runner.py](../../tensor_cast/core/model_runner.py))
+
 - Model runner responsible for executing inference and collecting performance metrics
 - Encapsulates initialization logic for device configuration, performance model, model construction, etc.
 - Provides `run_inference()` method to execute inference and return detailed performance metrics
 
 **4. build_model()** ([model_builder.py](../../tensor_cast/core/model_builder.py))
+
 - Model construction entry function
 - Coordinates ConfigResolver and TransformerModel to complete model construction
 - Supports optional torch.compile compilation
 
 **5. RequestInfo & ModelRunnerMetrics** ([input_generator.py](../../tensor_cast/core/input_generator.py))
+
 - `RequestInfo`: Encapsulates request information (query_len, seq_len, concurrency, etc.)
 - `ModelRunnerMetrics`: Encapsulates inference performance metrics (memory usage, execution time, etc.)
 
@@ -197,7 +202,7 @@ graph TD
 
 ### 2.3 Solution Analysis
 
-#### Advantages of Proposed Solution:
+#### Advantages of Proposed Solution
 
 1. Solves circular dependency issues between modules, improving code quality
 2. Improves model type recognition, enhancing system compatibility
@@ -206,7 +211,7 @@ graph TD
 5. Supports configuration-driven approach, enhancing system flexibility
 6. **After core module refactoring**: Clearer separation of responsibilities, more flexible configuration system, easier to extend new model types
 
-#### Limitations of Proposed Solution:
+#### Limitations of Proposed Solution
 
 1. Requires updating existing model and config loading usage patterns
 2. Adds new modules, requiring corresponding documentation and training
@@ -260,6 +265,7 @@ graph TD
 ### Core Components
 
 #### AutoModelConfigLoader
+
 This class serves as the central hub for all configuration and model loading operations:
 
 - **Configuration Loading**: Handles various configuration formats and sources
@@ -268,6 +274,7 @@ This class serves as the central hub for all configuration and model loading ope
 - **Type Detection**: Automatically detects and corrects model_type inconsistencies
 
 #### ConfigResolver
+
 Configuration resolver responsible for coordinating configuration loading and transformation:
 
 - **Automatic Configuration**: Automatically matches MoE, MLA, MTP configurations based on model_type
@@ -276,6 +283,7 @@ Configuration resolver responsible for coordinating configuration loading and tr
 - **Quantization Configuration**: Supports multiple quantization strategies and granularities
 
 #### ModelRunner
+
 Model runner encapsulating inference execution and performance analysis:
 
 - **Initialization Management**: Unified management of device, performance model, model construction
@@ -284,6 +292,7 @@ Model runner encapsulating inference execution and performance analysis:
 - **Result Output**: Provides detailed performance analysis reports
 
 #### TransformerModel
+
 Model builder responsible for model loading and transformation:
 
 - **Model Loading**: Uses AutoModelConfigLoader to load HuggingFace models
@@ -304,6 +313,7 @@ Model builder responsible for model loading and transformation:
 ### Migration Strategy
 
 Implementation follows a phased approach:
+
 1. Core infrastructure setup (Completed)
 2. Configuration system unification (Completed)
 3. Model loading integration (Completed)

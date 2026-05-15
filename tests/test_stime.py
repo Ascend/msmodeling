@@ -33,7 +33,7 @@ class TestTimeFunctions(unittest.TestCase):
     def test_now_function(self):
         """Test that the now() function returns the correct logical time"""
         env = SimulationEnv()
-        env.run(till=10.0)
+        env.run(till=10.0)  # pylint: disable=no-member
         self.assertEqual(now(), 10.0, "now() should return the current simulation time")
 
     def test_start_simulation(self):
@@ -45,9 +45,7 @@ class TestTimeFunctions(unittest.TestCase):
 
         TestComponent()
         start_simulation()
-        self.assertEqual(
-            now(), 5.0, "Simulation should run until all components complete"
-        )
+        self.assertEqual(now(), 5.0, "Simulation should run until all components complete")
 
 
 class TestTask(unittest.TestCase):

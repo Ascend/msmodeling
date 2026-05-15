@@ -24,47 +24,31 @@ from ..model import TransformerModel
 class MoELayerWithBias(MoELayer):
     def forward(self, hidden_states: torch.Tensor):
         num_experts = getattr(self.gate, "num_experts", None)
-        if (
-            num_experts is None
-            and hasattr(self.gate, "weight")
-            and len(self.gate.weight.shape) == 2
-        ):
+        if num_experts is None and hasattr(self.gate, "weight") and len(self.gate.weight.shape) == 2:
             num_experts = self.gate.weight.shape[0]
         if num_experts is None:
-            num_experts = getattr(self.moe_config, "num_experts", None) or getattr(
-                self.fused_moe, "num_experts", None
-            )
+            num_experts = getattr(self.moe_config, "num_experts", None) or getattr(self.fused_moe, "num_experts", None)
 
-        e_score_correction_bias = torch.zeros(
-            num_experts, device=hidden_states.device, dtype=hidden_states.dtype
-        )
+        e_score_correction_bias = torch.zeros(num_experts, device=hidden_states.device, dtype=hidden_states.dtype)
 
         if self.moe_config.gate_returns_raw_logits:
             if self.top_k is None:
-                raise ValueError(
-                    "top_k must be specified if gate_returns_raw_logits is True"
-                )
+                raise ValueError("top_k must be specified if gate_returns_raw_logits is True")
 
-            gate_output = self.gate(
-                hidden_states, e_score_correction_bias=e_score_correction_bias
-            )
+            gate_output = self.gate(hidden_states, e_score_correction_bias=e_score_correction_bias)
 
             if isinstance(gate_output, tuple):
                 router_logits = gate_output[0]
             else:
                 router_logits = gate_output
 
-            topk_weights, topk_indices = torch.ops.tensor_cast.moe_gating_top_k_softmax(
-                router_logits, self.top_k
-            )
+            topk_weights, topk_indices = torch.ops.tensor_cast.moe_gating_top_k_softmax(router_logits, self.top_k)
 
             if self.norm_topk_prob:
                 topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
             topk_weights = topk_weights.to(hidden_states.dtype)
         else:
-            gate_output = self.gate(
-                hidden_states, e_score_correction_bias=e_score_correction_bias
-            )
+            gate_output = self.gate(hidden_states, e_score_correction_bias=e_score_correction_bias)
 
             if isinstance(gate_output, tuple) and len(gate_output) >= 2:
                 if len(gate_output) == 3:
@@ -75,9 +59,7 @@ class MoELayerWithBias(MoELayer):
                 top_k = self.top_k
                 topk_weights, topk_indices = torch.topk(gate_output, top_k, dim=-1)
             else:
-                raise ValueError(
-                    f"Expected gate to return tuple with at least 2 elements, got {type(gate_output)}"
-                )
+                raise ValueError(f"Expected gate to return tuple with at least 2 elements, got {type(gate_output)}")
 
             if hidden_states.dim() > 2:
                 target_shape = list(hidden_states.shape[:-1]) + [topk_indices.shape[-1]]

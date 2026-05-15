@@ -151,9 +151,7 @@ class TestHcomAllReduceZeroing:
             tmp_path,
             [
                 # One standalone allReduce
-                _x_event(
-                    "tensor_cast.all_reduce.default", 8, kernel_type="hcom_allReduce_"
-                ),
+                _x_event("tensor_cast.all_reduce.default", 8, kernel_type="hcom_allReduce_"),
             ],
         )
         stats = extract_tc_from_chrome_trace(trace, OP_MAPPING)
@@ -186,9 +184,7 @@ class TestHcomAllReduceZeroing:
                     },
                 },
                 # Standalone allReduce
-                _x_event(
-                    "tensor_cast.all_reduce.default", 8, kernel_type="hcom_allReduce_"
-                ),
+                _x_event("tensor_cast.all_reduce.default", 8, kernel_type="hcom_allReduce_"),
             ],
         )
         stats = extract_tc_from_chrome_trace(trace, OP_MAPPING)

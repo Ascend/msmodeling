@@ -48,12 +48,8 @@ class ParallelLinearTestCase(unittest.TestCase):
         self.input_batch_size = 2
         self.compile_backend = get_backend()
         with torch.device("meta"):
-            self.inputs = torch.empty(
-                [self.input_batch_size, num_tokens], dtype=torch.long
-            )
-            self.position_ids = torch.empty(
-                [self.input_batch_size, num_tokens], dtype=torch.long
-            )
+            self.inputs = torch.empty([self.input_batch_size, num_tokens], dtype=torch.long)
+            self.position_ids = torch.empty([self.input_batch_size, num_tokens], dtype=torch.long)
 
     def _check_comm_analytic(self, trace_events, comm_op_name):
         count = 0
@@ -63,15 +59,9 @@ class ParallelLinearTestCase(unittest.TestCase):
                 count += 1
         self.assertGreater(count, 0)
 
-    def _validate_comm_result(
-        self, result: str, runtime: Runtime, parallel_config: ParallelConfig
-    ):
+    def _validate_comm_result(self, result: str, runtime: Runtime, parallel_config: ParallelConfig):
         comm_op_name = "tensor_cast.all_reduce.default"
-        if (
-            parallel_config.has_attn_tp()
-            or parallel_config.has_o_proj_tp()
-            or parallel_config.has_mlp_tp()
-        ):
+        if parallel_config.has_attn_tp() or parallel_config.has_o_proj_tp() or parallel_config.has_mlp_tp():
             self.assertIn(comm_op_name, result)
             self._check_comm_analytic(runtime.get_trace_events(), comm_op_name)
         else:
@@ -115,9 +105,7 @@ class ParallelLinearTestCase(unittest.TestCase):
         perf_model = AnalyticPerformanceModel(machine_config)
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
             outputs = model.forward(self.inputs, self.position_ids)
-            self.assertEqual(
-                outputs.shape, (output_batch_size, num_tokens, model.vocab_size)
-            )
+            self.assertEqual(outputs.shape, (output_batch_size, num_tokens, model.vocab_size))
         result = runtime.table_averages()
         self._validate_comm_result(result, runtime, parallel_config)
 
@@ -149,9 +137,7 @@ class ParallelLinearTestCase(unittest.TestCase):
         model_config.mla_config = mla_config
         model = TransformerModel(model_id, model_config)
 
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            model, model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
 
@@ -198,9 +184,7 @@ class ParallelLinearTestCase(unittest.TestCase):
         )
         model = TransformerModel(model_id, model_config)
 
-        model_config.quant_config = get_quant_config(
-            model.unwrap(), quant_type=LinearQuantType.W4A8
-        )
+        model_config.quant_config = get_quant_config(model.unwrap(), quant_type=LinearQuantType.W4A8)
         model_config.quant_linear_cls = TensorCastQuantLinear
         qmodel = TransformerModel(model_id, model_config)
 
@@ -210,9 +194,7 @@ class ParallelLinearTestCase(unittest.TestCase):
         perf_model = AnalyticPerformanceModel(machine_config)
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
             outputs = qmodel.forward(self.inputs, self.position_ids)
-            self.assertEqual(
-                outputs.shape, (output_batch_size, num_tokens, qmodel.vocab_size)
-            )
+            self.assertEqual(outputs.shape, (output_batch_size, num_tokens, qmodel.vocab_size))
         result = runtime.table_averages()
 
         self._validate_comm_result(result, runtime, parallel_config)
@@ -246,15 +228,11 @@ class ParallelLinearTestCase(unittest.TestCase):
         model_config.mla_config = mla_config
         model = TransformerModel(model_id, model_config)
 
-        model_config.quant_config = get_quant_config(
-            model.unwrap(), quant_type=LinearQuantType.W4A8
-        )
+        model_config.quant_config = get_quant_config(model.unwrap(), quant_type=LinearQuantType.W4A8)
         model_config.quant_linear_cls = TensorCastQuantLinear
         qmodel = TransformerModel(model_id, model_config)
 
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            qmodel, model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(qmodel, model_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
 
@@ -314,9 +292,7 @@ class ParallelLinearTestCase(unittest.TestCase):
             torch.no_grad(),
         ):
             outputs = qmodel.forward(self.inputs, self.position_ids)
-            self.assertEqual(
-                outputs.shape, (output_batch_size, num_tokens, qmodel.vocab_size)
-            )
+            self.assertEqual(outputs.shape, (output_batch_size, num_tokens, qmodel.vocab_size))
         result = runtime.table_averages()
 
         self._validate_comm_result(result, runtime, parallel_config)

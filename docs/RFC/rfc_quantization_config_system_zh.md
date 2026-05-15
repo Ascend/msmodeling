@@ -138,7 +138,7 @@ flowchart TD
 
 ### 2.3 方案分析
 
-#### 主推方案优点：
+#### 主推方案优点
 
 1. 解决了模块间的循环依赖问题，提高了代码质量
 2. 提供了灵活的模块排除机制，支持多种匹配模式
@@ -147,7 +147,7 @@ flowchart TD
 5. 采用分层架构设计，便于扩展和维护
 6. 支持配置驱动，提高了系统的灵活性
 
-#### 主推方案局限性：
+#### 主推方案局限性
 
 1. 需要更新现有的量化配置使用方式
 2. 增加了新的模块，需要相应的文档和培训
@@ -192,7 +192,7 @@ flowchart TD
 class QuantConfig:
     """
     统一量化配置类，支持多种量化配置来源的统一转换
-    
+
     功能特性：
     1. 支持从开源量化配置（FineGrainedFP8Config、CompressedTensorsConfig）转换
     2. 支持从用户输入配置转换
@@ -201,58 +201,58 @@ class QuantConfig:
     5. 配置查询缓存，提升性能
     6. 配置验证功能
     """
-    
+
     # 线性层量化配置映射：模块路径模式 -> LinearQuantConfig
     linear_configs: Dict[str, LinearQuantConfig] = dataclasses.field(default_factory=dict)
-    
+
     # 注意力层量化配置映射：层索引 -> AttentionQuantConfig
     attention_configs: Dict[int, AttentionQuantConfig] = dataclasses.field(default_factory=dict)
-    
+
     # 不需要量化的模块列表（支持正则表达式、fnmatch模式、精确匹配）
     modules_to_not_convert: List[str] = dataclasses.field(default_factory=lambda: ["lm_head"])
-    
+
     # 原始量化配置（保留原始配置用于调试和兼容性）
     ori_quant_config: Optional[QuantizationConfigMixin] = None
-    
+
     # 配置缓存，提升查询性能
     _config_cache: Dict[str, Optional[LinearQuantConfig]] = dataclasses.field(
         default_factory=dict,
         init=False,
         repr=False
     )
-    
+
     # 优化的模式匹配器
     _pattern_matcher: Optional[PatternMatcher] = dataclasses.field(
         default=None,
         init=False,
         repr=False
     )
-    
+
     def __post_init__(self):
         if self.modules_to_not_convert is None:
             self.modules_to_not_convert = ["lm_head"]
         self._pattern_matcher = PatternMatcher(self.modules_to_not_convert)
-    
+
     @classmethod
     def from_hf_quant_config(
-        cls, 
+        cls,
         hf_quant_config: QuantizationConfigMixin
     ) -> "QuantConfig":
         """
         从HuggingFace量化配置创建QuantConfig
-        
+
         Args:
             hf_quant_config: HuggingFace量化配置实例
-            
+
         Returns:
             QuantConfig实例
         """
         config = cls()
         config.ori_quant_config = hf_quant_config
-        
+
         # 提取modules_to_not_convert
         config.modules_to_not_convert = get_modules_to_not_convert(hf_quant_config)
-        
+
         # 根据不同配置类型进行转换
         if isinstance(hf_quant_config, FineGrainedFP8Config):
             config._from_fine_grained_fp8(hf_quant_config)
@@ -260,9 +260,9 @@ class QuantConfig:
             config._from_compressed_tensors(hf_quant_config)
         else:
             config._from_generic(hf_quant_config)
-            
+
         return config
-    
+
     @classmethod
     def from_user_input(
         cls,
@@ -273,13 +273,13 @@ class QuantConfig:
     ) -> "QuantConfig":
         """
         从用户输入创建QuantConfig
-        
+
         Args:
             quantize_linear_action: 线性层量化动作
             quantize_lmhead: 是否量化lm_head
             quantize_attention_action: 注意力层量化动作
             **kwargs: 其他量化参数
-            
+
         Returns:
             QuantConfig实例
         """
@@ -294,14 +294,14 @@ class QuantConfig:
             attention_configs=quant_config.attention_configs,
             modules_to_not_convert=quant_config.modules_to_not_convert
         )
-    
+
     def _from_fine_grained_fp8(self, config: FineGrainedFP8Config):
         """从FineGrainedFP8Config转换"""
         self.linear_configs["layers.*"] = LinearQuantConfig(
             quant_type=LinearQuantType.FP8,
             weight_scale=torch.tensor(1.0),
         )
-        
+
     def _from_compressed_tensors(self, config: CompressedTensorsConfig):
         """从CompressedTensorsConfig转换"""
         quant_scheme = config.quantization_config.scheme
@@ -315,79 +315,79 @@ class QuantConfig:
                 quant_type=LinearQuantType.FP8,
                 weight_scale=torch.tensor(1.0),
             )
-    
+
     def _from_generic(self, config: QuantizationConfigMixin):
         """通用转换逻辑"""
         pass
-    
+
     def should_skip_module(self, module_name: str) -> bool:
         """
         判断模块是否应该跳过量化（优化：使用编译后的模式匹配器）
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             True表示跳过量化，False表示应用量化
         """
         return self._pattern_matcher.match(module_name)
-    
+
     def get_linear_config(self, module_name: str) -> Optional[LinearQuantConfig]:
         """
         获取指定模块的线性量化配置（优化：带缓存）
-        
+
         Args:
             module_name: 模块名称
-            
+
         Returns:
             匹配的LinearQuantConfig，如果没有匹配则返回None
         """
         if module_name in self._config_cache:
             return self._config_cache[module_name]
-        
+
         for pattern, config in self.linear_configs.items():
             if pattern_match(module_name, [pattern]):
                 self._config_cache[module_name] = config
                 return config
-        
+
         self._config_cache[module_name] = None
         return None
-    
+
     def get_attention_config(self, layer_idx: int) -> Optional[AttentionQuantConfig]:
         """
         获取指定层的注意力量化配置
-        
+
         Args:
             layer_idx: 层索引
-            
+
         Returns:
             AttentionQuantConfig，如果没有配置则返回None
         """
         return self.attention_configs.get(layer_idx)
-    
+
     def validate(self, hardware_adapter: HardwareAdapter) -> Tuple[bool, List[str]]:
         """
         验证量化配置
-        
+
         Args:
             hardware_adapter: 硬件适配器
-            
+
         Returns:
             (is_valid, error_messages)
         """
         validator = ConfigValidator(hardware_adapter)
         all_errors = []
-        
+
         for pattern, config in self.linear_configs.items():
             is_valid, errors = validator.validate_linear_config(config)
             if not is_valid:
                 all_errors.extend([f"Pattern '{pattern}': {e}" for e in errors])
-        
+
         for layer_idx, config in self.attention_configs.items():
             is_valid, errors = validator.validate_attention_config(config)
             if not is_valid:
                 all_errors.extend([f"Layer {layer_idx}: {e}" for e in errors])
-        
+
         return len(all_errors) == 0, all_errors
 ```
 
@@ -400,22 +400,22 @@ class QuantizationStrategy(ABC):
     """
     量化策略抽象基类
     """
-    
+
     @abstractmethod
     def get_quant_type(self) -> LinearQuantType:
         """获取量化类型"""
         pass
-    
+
     @abstractmethod
     def validate_config(self, config: LinearQuantConfig) -> bool:
         """验证配置有效性"""
         pass
-    
+
     @abstractmethod
     def get_weight_dtype(self) -> torch.dtype:
         """获取权重数据类型"""
         pass
-    
+
     @abstractmethod
     def get_activation_dtype(self) -> Optional[torch.dtype]:
         """获取激活值数据类型"""
@@ -424,26 +424,26 @@ class QuantizationStrategy(ABC):
 
 class W8A8Strategy(QuantizationStrategy):
     """W8A8量化策略"""
-    
+
     def get_quant_type(self) -> LinearQuantType:
         return LinearQuantType.W8A8
-    
+
     def validate_config(self, config: LinearQuantConfig) -> bool:
         return config.quant_type == LinearQuantType.W8A8
-    
+
     def get_weight_dtype(self) -> torch.dtype:
         return torch.int8
-    
+
     def get_activation_dtype(self) -> Optional[torch.dtype]:
         return torch.int8
 
 
 class FP8Strategy(QuantizationStrategy):
     """FP8量化策略"""
-    
+
     def get_quant_type(self) -> LinearQuantType:
         return LinearQuantType.FP8
-    
+
     def validate_config(self, config: LinearQuantConfig) -> bool:
         if config.quant_type != LinearQuantType.FP8:
             return False
@@ -452,24 +452,24 @@ class FP8Strategy(QuantizationStrategy):
         if config.activation_scale is not None:
             return False
         return True
-    
+
     def get_weight_dtype(self) -> torch.dtype:
         return DTYPE_FP8
-    
+
     def get_activation_dtype(self) -> Optional[torch.dtype]:
         return DTYPE_FP8
 
 
 class QuantizationStrategyRegistry:
     """量化策略注册表"""
-    
+
     _strategies: Dict[LinearQuantType, QuantizationStrategy] = {}
-    
+
     @classmethod
     def register(cls, strategy: QuantizationStrategy):
         """注册量化策略"""
         cls._strategies[strategy.get_quant_type()] = strategy
-    
+
     @classmethod
     def get(cls, quant_type: LinearQuantType) -> Optional[QuantizationStrategy]:
         """获取量化策略"""
@@ -494,15 +494,15 @@ class PatternMatcher:
     """
     高性能模式匹配器
     """
-    
+
     def __init__(self, patterns: List[str]):
         self.patterns = patterns
         self._compiled_regex: List[Pattern] = []
         self._exact_matches: set = set()
         self._fnmatch_patterns: List[str] = []
-        
+
         self._compile_patterns()
-    
+
     def _compile_patterns(self):
         """编译模式"""
         for pattern in self.patterns:
@@ -513,23 +513,23 @@ class PatternMatcher:
                 self._fnmatch_patterns.append(pattern)
             else:
                 self._exact_matches.add(pattern)
-    
+
     def match(self, name: str) -> bool:
         """匹配模块名称"""
         # 精确匹配（最快）
         if name in self._exact_matches:
             return True
-        
+
         # 正则表达式匹配
         for regex in self._compiled_regex:
             if regex.match(name):
                 return True
-        
+
         # fnmatch模式匹配
         for pattern in self._fnmatch_patterns:
             if fnmatch.fnmatch(name, pattern):
                 return True
-        
+
         return False
 ```
 
@@ -554,20 +554,20 @@ class HardwareAdapter(ABC):
     """
     硬件适配器抽象基类
     """
-    
+
     @abstractmethod
     def get_capabilities(self) -> HardwareCapabilities:
         """获取硬件能力"""
         pass
-    
+
     @abstractmethod
     def get_optimized_quant_config(
-        self, 
+        self,
         base_config: LinearQuantConfig
     ) -> LinearQuantConfig:
         """获取硬件优化的量化配置"""
         pass
-    
+
     @abstractmethod
     def is_supported(self, quant_type: LinearQuantType) -> bool:
         """检查是否支持指定的量化类型"""
@@ -576,7 +576,7 @@ class HardwareAdapter(ABC):
 
 class AscendHardwareAdapter(HardwareAdapter):
     """昇腾硬件适配器"""
-    
+
     def __init__(self):
         self._capabilities = HardwareCapabilities(
             supports_fp8=True,
@@ -587,12 +587,12 @@ class AscendHardwareAdapter(HardwareAdapter):
             supports_dynamic_quantization=True,
             supports_static_quantization=True
         )
-    
+
     def get_capabilities(self) -> HardwareCapabilities:
         return self._capabilities
-    
+
     def get_optimized_quant_config(
-        self, 
+        self,
         base_config: LinearQuantConfig
     ) -> LinearQuantConfig:
         """获取昇腾优化的量化配置"""
@@ -603,7 +603,7 @@ class AscendHardwareAdapter(HardwareAdapter):
                 self._capabilities.max_group_size
             )
         return optimized_config
-    
+
     def is_supported(self, quant_type: LinearQuantType) -> bool:
         if quant_type == LinearQuantType.FP8:
             return self._capabilities.supports_fp8
@@ -618,7 +618,7 @@ class AscendHardwareAdapter(HardwareAdapter):
 
 class CudaHardwareAdapter(HardwareAdapter):
     """CUDA硬件适配器"""
-    
+
     def __init__(self):
         self._capabilities = HardwareCapabilities(
             supports_fp8=True,
@@ -629,12 +629,12 @@ class CudaHardwareAdapter(HardwareAdapter):
             supports_dynamic_quantization=True,
             supports_static_quantization=True
         )
-    
+
     def get_capabilities(self) -> HardwareCapabilities:
         return self._capabilities
-    
+
     def get_optimized_quant_config(
-        self, 
+        self,
         base_config: LinearQuantConfig
     ) -> LinearQuantConfig:
         """获取CUDA优化的量化配置"""
@@ -645,7 +645,7 @@ class CudaHardwareAdapter(HardwareAdapter):
                 self._capabilities.max_group_size
             )
         return optimized_config
-    
+
     def is_supported(self, quant_type: LinearQuantType) -> bool:
         if quant_type == LinearQuantType.FP8:
             return self._capabilities.supports_fp8
@@ -679,29 +679,29 @@ class ConfigValidator:
     """
     配置验证器
     """
-    
+
     def __init__(self, hardware_adapter: HardwareAdapter):
         self._hardware_adapter = hardware_adapter
         self._strategy_registry = QuantizationStrategyRegistry
-    
+
     def validate_linear_config(
-        self, 
+        self,
         config: LinearQuantConfig
     ) -> Tuple[bool, List[str]]:
         """
         验证线性量化配置
-        
+
         Returns:
             (is_valid, error_messages)
         """
         errors = []
-        
+
         # 检查量化类型是否被硬件支持
         if not self._hardware_adapter.is_supported(config.quant_type):
             errors.append(
                 f"Quantization type {config.quant_type} is not supported by the hardware"
             )
-        
+
         # 使用策略验证配置
         strategy = self._strategy_registry.get(config.quant_type)
         if strategy is not None:
@@ -709,7 +709,7 @@ class ConfigValidator:
                 errors.append(
                     f"Invalid configuration for quantization type {config.quant_type}"
                 )
-        
+
         # 检查group_size
         if config.weight_quant_granularity == QuantGranularity.PER_GROUP:
             if config.weight_group_size is None:
@@ -721,27 +721,27 @@ class ConfigValidator:
                     f"weight_group_size {config.weight_group_size} exceeds hardware limit "
                     f"{self._hardware_adapter.get_capabilities().max_group_size}"
                 )
-        
+
         return len(errors) == 0, errors
-    
+
     def validate_attention_config(
-        self, 
+        self,
         config: AttentionQuantConfig
     ) -> Tuple[bool, List[str]]:
         """
         验证注意力量化配置
-        
+
         Returns:
             (is_valid, error_messages)
         """
         errors = []
-        
+
         if config.quant_type == AttentionQuantType.INT8:
             if config.kv_scale is None:
                 errors.append("kv_scale must be provided for INT8 quantization")
         else:
             errors.append(f"Unsupported attention quant type {config.quant_type}")
-        
+
         return len(errors) == 0, errors
 ```
 
@@ -753,14 +753,14 @@ class ConfigValidator:
 class Quantizer:
     """
     量化引擎，负责执行模型量化操作
-    
+
     功能特性：
     1. 支持多种量化方案（W8A8、W4A8、FP8、MXFP4等）
     2. 支持动态和静态量化
     3. 支持基于模式的模块排除
     4. 支持硬件特定的优化
     """
-    
+
     def __init__(
         self,
         quant_config: QuantConfig,
@@ -769,7 +769,7 @@ class Quantizer:
     ):
         """
         初始化Quantizer
-        
+
         Args:
             quant_config: 量化配置
             quant_linear_cls: 量化线性层类
@@ -778,36 +778,36 @@ class Quantizer:
         self.quant_config = quant_config
         self.quant_linear_cls = quant_linear_cls
         self.hardware_config = hardware_config or {}
-    
+
     def quantize_model(self, model: torch.nn.Module) -> torch.nn.Module:
         """
         对模型进行量化
-        
+
         Args:
             model: 待量化的模型
-            
+
         Returns:
             量化后的模型
         """
         for name, module in model.named_modules():
             if self.quant_config.should_skip_module(name):
                 continue
-            
+
             if isinstance(module, torch.nn.Linear):
                 linear_config = self.quant_config.get_linear_config(name)
                 if linear_config is not None:
                     quantized_module = self.quant_linear_cls(module, linear_config)
                     self._replace_module(model, name, quantized_module)
-        
+
         return model
-    
+
     def quantize_attention(self, model: torch.nn.Module) -> torch.nn.Module:
         """
         对注意力层进行量化
-        
+
         Args:
             model: 待量化的模型
-            
+
         Returns:
             量化后的模型
         """
@@ -815,13 +815,13 @@ class Quantizer:
             attn_config = self.quant_config.get_attention_config(layer_idx)
             if attn_config is not None:
                 self._apply_attention_quantization(model, layer_idx, attn_config)
-        
+
         return model
-    
+
     def _replace_module(
-        self, 
-        model: torch.nn.Module, 
-        module_name: str, 
+        self,
+        model: torch.nn.Module,
+        module_name: str,
         new_module: torch.nn.Module
     ):
         """替换模型中的模块"""
@@ -830,13 +830,13 @@ class Quantizer:
         for part in parts[:-1]:
             current = getattr(current, part)
         setattr(current, parts[-1], new_module)
-    
+
     def _get_num_layers(self, model: torch.nn.Module) -> int:
         """获取模型的层数"""
         if hasattr(model, "config"):
             return getattr(model.config, "num_hidden_layers", 0)
         return 0
-    
+
     def _apply_attention_quantization(
         self,
         model: torch.nn.Module,
@@ -855,19 +855,19 @@ class Quantizer:
 class ConfigResolver:
     """
     配置解析器，负责解析和合并不同来源的配置
-    
+
     功能特性：
     1. 解析用户输入配置
     2. 解析模型原生配置
     3. 合并配置并解决冲突
     4. 生成最终的运行时配置
     """
-    
+
     def __init__(self):
         self.user_input_config: Optional[UserInputConfig] = None
         self.model_native_config: Optional[ModelNativeConfig] = None
         self.runtime_config: Optional[RuntimeConfig] = None
-    
+
     def resolve(
         self,
         user_input: Optional[Dict[str, Any]] = None,
@@ -876,30 +876,30 @@ class ConfigResolver:
     ) -> RuntimeConfig:
         """
         解析配置并生成运行时配置
-        
+
         Args:
             user_input: 用户输入配置
             model_id: 模型ID
             hf_config: HuggingFace配置
-            
+
         Returns:
             运行时配置
         """
         # 解析用户输入配置
         if user_input is not None:
             self.user_input_config = self._parse_user_input(user_input)
-        
+
         # 解析模型原生配置
         if hf_config is not None:
             self.model_native_config = self._parse_model_native_config(hf_config)
         elif model_id is not None:
             self.model_native_config = self._load_model_config(model_id)
-        
+
         # 合并配置
         self.runtime_config = self._merge_configs()
-        
+
         return self.runtime_config
-    
+
     def _parse_user_input(self, user_input: Dict[str, Any]) -> UserInputConfig:
         """解析用户输入配置"""
         return UserInputConfig(
@@ -908,9 +908,9 @@ class ConfigResolver:
             quantize_attention_action=user_input.get("quantize_attention_action"),
             **user_input.get("quantization_kwargs", {})
         )
-    
+
     def _parse_model_native_config(
-        self, 
+        self,
         hf_config: PretrainedConfig
     ) -> ModelNativeConfig:
         """解析模型原生配置"""
@@ -919,22 +919,22 @@ class ConfigResolver:
             quant_config = AutoQuantizationConfig.from_dict(
                 hf_config.quantization_config
             )
-        
+
         return ModelNativeConfig(
             hf_config=hf_config,
             quant_config=quant_config
         )
-    
+
     def _load_model_config(self, model_id: str) -> ModelNativeConfig:
         """加载模型配置"""
         auto_loader = AutoModelConfigLoader()
         hf_config = auto_loader.load_config(model_id)
         return self._parse_model_native_config(hf_config)
-    
+
     def _merge_configs(self) -> RuntimeConfig:
         """
         合并配置
-        
+
         优先级：用户输入配置 > 模型原生配置 > 默认配置
         """
         # 如果用户指定了量化配置，使用用户配置
@@ -953,7 +953,7 @@ class ConfigResolver:
         # 使用默认配置
         else:
             quant_config = QuantConfig()
-        
+
         return RuntimeConfig(quant_config=quant_config)
 
 
@@ -964,7 +964,7 @@ class UserInputConfig:
     quantize_lmhead: bool = False
     quantize_attention_action: Optional[QuantizeAttentionAction] = None
     quantization_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
-    
+
     def has_quantization(self) -> bool:
         """检查是否有量化配置"""
         return (
@@ -999,13 +999,13 @@ def create_quant_config(
 ) -> QuantConfig:
     """
     创建量化配置（更新为返回QuantConfig）
-    
+
     Args:
         quantize_linear_action: 线性层量化动作
         quantize_lmhead: 是否量化lm_head
         quantize_attention_action: 注意力层量化动作
         **kwargs: 其他量化参数
-        
+
     Returns:
         QuantConfig实例
     """
@@ -1025,10 +1025,10 @@ def get_modules_to_not_convert(
 ) -> List[Optional[str]]:
     """
     从量化配置中提取不需要量化的模块列表
-    
+
     Args:
         quant_config: HuggingFace量化配置实例
-        
+
     Returns:
         不需要量化的模块列表
     """
@@ -1089,16 +1089,16 @@ quantized_model = quantizer.quantize_model(model)
 # 示例6：使用策略模式扩展新的量化类型
 class CustomQuantStrategy(QuantizationStrategy):
     """自定义量化策略"""
-    
+
     def get_quant_type(self) -> LinearQuantType:
         return LinearQuantType.CUSTOM
-    
+
     def validate_config(self, config: LinearQuantConfig) -> bool:
         return True
-    
+
     def get_weight_dtype(self) -> torch.dtype:
         return torch.int8
-    
+
     def get_activation_dtype(self) -> Optional[torch.dtype]:
         return None
 

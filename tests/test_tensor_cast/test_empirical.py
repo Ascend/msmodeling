@@ -43,17 +43,13 @@ class TestEmpiricalPerformanceModel(unittest.TestCase):
 
     def test_init_without_fallback_model(self):
         """Test initialization without a provided fallback model (should use AnalyticPerformanceModel)."""
-        empirical_model = EmpiricalPerformanceModel(
-            device_profile=self.device_profile, data_source=self.data_source
-        )
+        empirical_model = EmpiricalPerformanceModel(device_profile=self.device_profile, data_source=self.data_source)
 
         self.assertEqual(empirical_model.name, "empirical")
         self.assertEqual(empirical_model.device_profile, self.device_profile)
         self.assertEqual(empirical_model.data_source, self.data_source)
         self.assertIsInstance(empirical_model.fallback_model, AnalyticPerformanceModel)
-        self.assertEqual(
-            empirical_model.fallback_model.device_profile, self.device_profile
-        )
+        self.assertEqual(empirical_model.fallback_model.device_profile, self.device_profile)
 
     def test_get_classifiers_with_runtime(self):
         """Test get_classifiers returns classifiers from fallback model via Runtime."""

@@ -21,24 +21,18 @@ class PerformanceModel(ABC):
 
         def combine(self, other: "PerformanceModel.Result", method: str = "max"):
             if method == "max":
-                self.execution_time_s = max(
-                    self.execution_time_s, other.execution_time_s
-                )
+                self.execution_time_s = max(self.execution_time_s, other.execution_time_s)
             elif method == "sum":
                 self.execution_time_s += other.execution_time_s
             else:
-                raise ValueError(
-                    f"Unsupported method {method} for combining performance result"
-                )
+                raise ValueError(f"Unsupported method {method} for combining performance result")
             self.statistics.update(other.statistics)
 
     class OpClassifier(Protocol):
         @property
         def name(self): ...
 
-        def classify(
-            self, event_list: List[Tuple[OpInvokeInfo, "PerformanceModel.Result"]]
-        ) -> Dict[str, float]:
+        def classify(self, event_list: List[Tuple[OpInvokeInfo, "PerformanceModel.Result"]]) -> Dict[str, float]:
             """
             Classify an event list into a breakdown.
 

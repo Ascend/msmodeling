@@ -102,14 +102,10 @@ class SinkConfig:
         schema = schema_op_target._schema
 
         # Populate rewrite_input_types
-        self.rewrite_input_types = [
-            self._get_py_type_from_schema_type(arg.type) for arg in schema.arguments
-        ]
+        self.rewrite_input_types = [self._get_py_type_from_schema_type(arg.type) for arg in schema.arguments]
 
         # Populate rewrite_output_types
-        self.rewrite_output_types = [
-            self._get_py_type_from_schema_type(ret.type) for ret in schema.returns
-        ]
+        self.rewrite_output_types = [self._get_py_type_from_schema_type(ret.type) for ret in schema.returns]
 
 
 @dataclass
@@ -155,17 +151,12 @@ class SinkSplitPass(TensorCastGraphModulePass):
             bias_list = [source_op.args[0] for source_op in source_op_group]
             return (x_list, w_list, bias_list), {}
 
-        def split_with_sizes_extra_check(
-            split_node, source_op_group, split_args, uniform_args, template_kwargs
-        ):
+        def split_with_sizes_extra_check(split_node, source_op_group, split_args, uniform_args, template_kwargs):
             """Extra check for split_with_sizes op to be sunk. Only allow
             different split dim from the split node.
             """
             source_op = source_op_group[0]
-            assert (
-                _is_split_with_sizes_node(source_op)
-                or source_op.target == torch.ops.aten.split.Tensor
-            ), (
+            assert _is_split_with_sizes_node(source_op) or source_op.target == torch.ops.aten.split.Tensor, (
                 f"Assertion failed: expected operator is 'split_with_sizes' or 'split'."
                 f"The operator currently executed is: {source_op.target}. Please check if the correct operator is used."
             )
@@ -317,9 +308,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                 expanded: Boolean, true if we successfully descended into a child split.
             """
 
-            nodes_to_purge.append(
-                getitem_node
-            )  # Will be replaced, so mark for deletion
+            nodes_to_purge.append(getitem_node)  # Will be replaced, so mark for deletion
 
             # Constraint 1: If the intermediate tensor is used by anything OTHER than
             # a single split node, we cannot collapse it (without adding 'cat' ops).
@@ -352,9 +341,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                     leaves.append((size, None))
                 else:
                     # Recurse further
-                    sub_leaves, _ = _expand_branch(
-                        child_getitem, size, root_dim, nodes_to_purge
-                    )
+                    sub_leaves, _ = _expand_branch(child_getitem, size, root_dim, nodes_to_purge)
                     leaves.extend(sub_leaves)
 
             return leaves, True
@@ -390,9 +377,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                     continue
 
                 # Check if this branch can be expanded
-                branch_leaves, branch_expanded = _expand_branch(
-                    getitem_node, size, root_dim, nodes_to_purge
-                )
+                branch_leaves, branch_expanded = _expand_branch(getitem_node, size, root_dim, nodes_to_purge)
                 leaves.extend(branch_leaves)
                 if branch_expanded:
                     has_nested_splits = True
@@ -421,9 +406,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
 
                     # Create a new getitem for this leaf
                     with graph.inserting_after(new_split):
-                        new_getitem = graph.call_function(
-                            operator.getitem, args=(new_split, idx)
-                        )
+                        new_getitem = graph.call_function(operator.getitem, args=(new_split, idx))
 
                     # Replace all usages of the old leaf node with the new one
                     # This makes 'old_getitem' have 0 users.
@@ -449,9 +432,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
         3. Intermediate cat nodes must be consumed EXCLUSIVELY by the parent cat.
         """
 
-        def _flatten_inputs(
-            input_node: Node, root_dim: int, nodes_to_purge: List[Node]
-        ) -> Tuple[List[Node], bool]:
+        def _flatten_inputs(input_node: Node, root_dim: int, nodes_to_purge: List[Node]) -> Tuple[List[Node], bool]:
             """
             Recursively checks if an input node is a compatible cat node.
             Returns (flattened_input_list, was_expanded).
@@ -512,9 +493,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
             changed = True
             # Rewrite
             with graph.inserting_after(root_cat):
-                new_cat = graph.call_function(
-                    torch.ops.tensor_cast.cat.default, args=(new_inputs, root_dim)
-                )
+                new_cat = graph.call_function(torch.ops.tensor_cast.cat.default, args=(new_inputs, root_dim))
                 new_cat.meta = root_cat.meta
 
                 root_cat.replace_all_uses_with(new_cat)
@@ -557,11 +536,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
             # cat is the only user of split-getitems
             is_valid_pattern = True
             for node in tensors_arg:
-                if not (
-                    node.target == operator.getitem
-                    and node.args[0] == split_node
-                    and len(node.users) == 1
-                ):
+                if not (node.target == operator.getitem and node.args[0] == split_node and len(node.users) == 1):
                     is_valid_pattern = False
                     break
 
@@ -598,9 +573,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
         return len(nodes_to_clean) > 0
 
     @staticmethod
-    def _check_pattern(
-        split_node: Node, op_registry: Dict[Target, SinkConfig]
-    ) -> List[Match]:
+    def _check_pattern(split_node: Node, op_registry: Dict[Target, SinkConfig]) -> List[Match]:
         """
         Checks if the users of a split_node match the sinking criteria.
         """
@@ -613,11 +586,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
             if isinstance(left, Node) and isinstance(right, Node):
                 shape_left = get_node_shape(left)
                 shape_right = get_node_shape(right)
-                return (
-                    shape_left is not None
-                    and shape_right is not None
-                    and shape_left == shape_right
-                )
+                return shape_left is not None and shape_right is not None and shape_left == shape_right
             else:
                 return left == right
 
@@ -633,9 +602,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
             num_split_users = _get_num_split_users(split_node)
             if num_split_users == 0:
                 return source_op_groups
-            getitem_nodes = sorted(
-                split_node.users, key=lambda n: n.args[1]
-            )  # sort by index
+            getitem_nodes = sorted(split_node.users, key=lambda n: n.args[1])  # sort by index
 
             # Group source ops by their target
             target_to_group: Dict[Target, List[Node]] = {}
@@ -712,9 +679,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
             # 2. For inputs that don't allow splitting, we make sure their shapes match for
             #    tensors and values match for non-tensors.
             for i, arg_node in enumerate(template_args):
-                if i in op_config.split_input_indices and is_non_scalar_tensor_node(
-                    arg_node
-                ):
+                if i in op_config.split_input_indices and is_non_scalar_tensor_node(arg_node):
                     if all(
                         isinstance(source_op.args[i], Node)
                         and source_op.args[i].target == operator.getitem
@@ -735,9 +700,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                             break
                         split_args[i] = _split_node
                         continue
-                    elif any(
-                        source_op.args[i] != arg_node for source_op in source_op_group
-                    ):
+                    elif any(source_op.args[i] != arg_node for source_op in source_op_group):
                         matched = False
                         break
                 uniform_args[i] = arg_node
@@ -758,9 +721,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                 # NOTE: we assume all kwargs are uniform args here
                 if not all(
                     uniform_arg_match(kwarg, template_kwarg)
-                    for kwarg, template_kwarg in zip(
-                        user.kwargs.values(), template_kwargs.values()
-                    )
+                    for kwarg, template_kwarg in zip(user.kwargs.values(), template_kwargs.values())
                 ):
                     matched = False
                     break
@@ -815,7 +776,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                 if i >= len(template_source_op.args):
                     continue
 
-                if arg_type == list and rewrite_op_target != template_source_op.target:
+                if arg_type == list and rewrite_op_target != template_source_op.target:  # noqa: E721
                     # when we use a different rewrite op which groups the input args
                     # into a list, such as grouped matmul, we need to build a list of split outputs.
                     arg_list = [source_op.args[i] for source_op in source_op_group]
@@ -832,9 +793,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
             new_op_kwargs = uniform_kwargs
 
         with graph.inserting_before(template_source_op):
-            new_op_node = graph.call_function(
-                rewrite_op_target, args=new_op_args, kwargs=new_op_kwargs
-            )
+            new_op_node = graph.call_function(rewrite_op_target, args=new_op_args, kwargs=new_op_kwargs)
         return new_op_node
 
     def _rewrite_outputs(
@@ -876,17 +835,13 @@ class SinkSplitPass(TensorCastGraphModulePass):
                             break
                 assert len(old_output_nodes) == len(source_op_group)
                 with graph.inserting_after(new_output_node):
-                    new_output_node = graph.call_function(
-                        operator.getitem, args=(new_output_node, i)
-                    )
+                    new_output_node = graph.call_function(operator.getitem, args=(new_output_node, i))
                     maybe_copy_meta(new_output_node, old_output_nodes[0])
 
             old_node_shape = get_node_shape(old_output_nodes[0])
-            assert output_type == list or old_node_shape is not None
-            if i in op_config.split_output_indices and (
-                output_type == list or len(old_node_shape) > 0
-            ):
-                if output_type == list:
+            assert output_type == list or old_node_shape is not None  # noqa: E721
+            if i in op_config.split_output_indices and (output_type == list or len(old_node_shape) > 0):  # noqa: E721
+                if output_type == list:  # noqa: E721
                     # we have to split on the getitem outputs so
                     # we insert the getitems after the split first
                     new_splits = {}
@@ -895,9 +850,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                         for user in old_template_node.users:
                             assert user.target == operator.getitem
                             index = user.args[1]
-                            new_getitem = graph.call_function(
-                                operator.getitem, args=(new_output_node, index)
-                            )
+                            new_getitem = graph.call_function(operator.getitem, args=(new_output_node, index))
                             new_splits[index] = graph.call_function(
                                 torch.ops.aten.split_with_sizes.default,
                                 args=(new_getitem, split_sizes, split_dim),
@@ -912,9 +865,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                             assert user.target == operator.getitem
                             index = user.args[1]
                             with graph.inserting_after(new_splits[index]):
-                                new_getitem = graph.call_function(
-                                    operator.getitem, args=(new_splits[index], j)
-                                )
+                                new_getitem = graph.call_function(operator.getitem, args=(new_splits[index], j))
                                 maybe_copy_meta(new_getitem, user)
                             user.replace_all_uses_with(new_getitem)
                         old_node_idx += 1
@@ -932,9 +883,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
                         assert old_node_idx < len(old_output_nodes)
                         old_node = old_output_nodes[old_node_idx]
                         with graph.inserting_after(new_split):
-                            new_getitem = graph.call_function(
-                                operator.getitem, args=(new_split, j)
-                            )
+                            new_getitem = graph.call_function(operator.getitem, args=(new_split, j))
                             maybe_copy_meta(new_getitem, old_node)
                         old_node.replace_all_uses_with(new_getitem)
                         old_node_idx += 1
@@ -996,15 +945,8 @@ class SinkSplitPass(TensorCastGraphModulePass):
             changed_collapse_split = self._collapse_split_tree(gm.graph)
             changed_collapse_cat = self._collapse_cat_tree(gm.graph)
             changed_concat = self._cancel_split_concat(gm.graph)
-            changed_sinking = self._run_sinking_pass(
-                gm.graph, self._sink_config_registry
-            )
-            if not (
-                changed_collapse_split
-                or changed_collapse_cat
-                or changed_concat
-                or changed_sinking
-            ):
+            changed_sinking = self._run_sinking_pass(gm.graph, self._sink_config_registry)
+            if not (changed_collapse_split or changed_collapse_cat or changed_concat or changed_sinking):
                 break
         stable_topo_sort(gm)
         gm.graph.eliminate_dead_code()

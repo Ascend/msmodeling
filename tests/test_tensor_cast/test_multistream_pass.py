@@ -108,12 +108,8 @@ class MultiStreamPassTestCase(unittest.TestCase):
         inputs = (torch.empty((8, 8), dtype=torch.float16, device="meta"),)
         gm = _apply_multistream_pass(ToyGraph(), inputs)
 
-        self.assertEqual(
-            _count_nodes(gm, torch.ops.tensor_cast._internal_wait_and_bind.default), 3
-        )
-        self.assertEqual(
-            _count_nodes(gm, torch.ops.tensor_cast._internal_record.default), 1
-        )
+        self.assertEqual(_count_nodes(gm, torch.ops.tensor_cast._internal_wait_and_bind.default), 3)
+        self.assertEqual(_count_nodes(gm, torch.ops.tensor_cast._internal_record.default), 1)
         dep_wait_count = sum(
             1
             for node in gm.graph.nodes
@@ -124,23 +120,17 @@ class MultiStreamPassTestCase(unittest.TestCase):
         self.assertEqual(dep_wait_count, 2)
 
         record_nodes = [
-            node
-            for node in gm.graph.nodes
-            if node.target == torch.ops.tensor_cast._internal_record.default
+            node for node in gm.graph.nodes if node.target == torch.ops.tensor_cast._internal_record.default
         ]
         self.assertEqual(len(record_nodes), 1)
-        self.assertEqual(
-            record_nodes[0].args[0].target, torch.ops.tensor_cast.all_reduce.default
-        )
+        self.assertEqual(record_nodes[0].args[0].target, torch.ops.tensor_cast.all_reduce.default)
         self.assertEqual(record_nodes[0].args[1], 1)
 
     def test_multistream_pass_lowers_hybrid_and_comm_with_graph_nodes(self):
         class ToyGraph(torch.nn.Module):
             def forward(self, x, w):
                 compute = torch.ops.aten.neg.default(x)
-                hybrid = torch.ops.tensor_cast.matmul_all_reduce.default(
-                    x, w, None, 0, [0, 1]
-                )
+                hybrid = torch.ops.tensor_cast.matmul_all_reduce.default(x, w, None, 0, [0, 1])
                 comm = torch.ops.tensor_cast.all_reduce.default(x, 0, [0, 1])
                 mixed = torch.ops.aten.add.Tensor(compute, hybrid)
                 return torch.ops.aten.add.Tensor(mixed, comm)
@@ -150,23 +140,17 @@ class MultiStreamPassTestCase(unittest.TestCase):
         gm = _apply_multistream_pass(ToyGraph(), (x, w))
 
         record_nodes = [
-            node
-            for node in gm.graph.nodes
-            if node.target == torch.ops.tensor_cast._internal_record.default
+            node for node in gm.graph.nodes if node.target == torch.ops.tensor_cast._internal_record.default
         ]
         self.assertEqual(len(record_nodes), 1)
 
         hybrid_record_nodes = [
-            node
-            for node in record_nodes
-            if node.args[0].target == torch.ops.tensor_cast.matmul_all_reduce.default
+            node for node in record_nodes if node.args[0].target == torch.ops.tensor_cast.matmul_all_reduce.default
         ]
         self.assertEqual(len(hybrid_record_nodes), 0)
 
         comm_record_nodes = [
-            node
-            for node in record_nodes
-            if node.args[0].target == torch.ops.tensor_cast.all_reduce.default
+            node for node in record_nodes if node.args[0].target == torch.ops.tensor_cast.all_reduce.default
         ]
         self.assertEqual(len(comm_record_nodes), 1)
         self.assertEqual(comm_record_nodes[0].args[1], 1)
@@ -180,12 +164,8 @@ class MultiStreamPassTestCase(unittest.TestCase):
 
         inputs = (torch.empty((8, 8), dtype=torch.float16, device="meta"),)
         gm = _apply_multistream_pass(ChainGraph(), inputs)
-        self.assertEqual(
-            _count_nodes(gm, torch.ops.tensor_cast._internal_wait_and_bind.default), 0
-        )
-        self.assertEqual(
-            _count_nodes(gm, torch.ops.tensor_cast._internal_record.default), 0
-        )
+        self.assertEqual(_count_nodes(gm, torch.ops.tensor_cast._internal_wait_and_bind.default), 0)
+        self.assertEqual(_count_nodes(gm, torch.ops.tensor_cast._internal_record.default), 0)
 
     def test_wait_anchor_preserves_value_without_aliasing_input(self):
         x = torch.randn((2, 3), dtype=torch.float32)

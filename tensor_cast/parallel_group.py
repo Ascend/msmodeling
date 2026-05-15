@@ -64,9 +64,7 @@ class ParallelGroup:
         if self.world_size == 1:
             return input_
 
-        return torch.ops.tensor_cast.reduce_scatter(
-            input_, dim, self.rank, self.rank_group
-        )
+        return torch.ops.tensor_cast.reduce_scatter(input_, dim, self.rank, self.rank_group)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         if self.world_size == 1:
@@ -144,17 +142,11 @@ class ParallelGroupManager:
             )
 
             if parallel_type == ParallelGroupType.EXPERT_PARALLEL:
-                rank_groups = rank_groups_raw.swapaxes(3, -1).reshape(
-                    -1, expert_parallel_size
-                )
+                rank_groups = rank_groups_raw.swapaxes(3, -1).reshape(-1, expert_parallel_size)
             elif parallel_type == ParallelGroupType.DATA_PARALLEL:
-                rank_groups = rank_groups_raw.swapaxes(1, -1).reshape(
-                    -1, data_parallel_size
-                )
+                rank_groups = rank_groups_raw.swapaxes(1, -1).reshape(-1, data_parallel_size)
             elif parallel_type == ParallelGroupType.PIPELINE_PARALLEL:
-                rank_groups = rank_groups_raw.swapaxes(2, -1).reshape(
-                    -1, pipeline_parallel_size
-                )
+                rank_groups = rank_groups_raw.swapaxes(2, -1).reshape(-1, pipeline_parallel_size)
             elif parallel_type == ParallelGroupType.TENSOR_PARALLEL:
                 rank_groups = rank_groups_raw.reshape(-1, tensor_parallel_size)
             else:

@@ -60,8 +60,7 @@ def main():
         "--prefix-cache-hit-rate",
         type=check_prefix_cache_hit_rate,
         default=0.0,
-        help="Prefix cache hit rate for prefill token reuse. "
-        "This is a token-level approximation in [0, 1).",
+        help="Prefix cache hit rate for prefill token reuse. This is a token-level approximation in [0, 1).",
     )
     llm_group.add_argument(
         "--num-mtp-tokens",
@@ -214,8 +213,7 @@ def main():
         type=str,
         choices=[mode.value for mode in WordEmbeddingTPMode],
         default=None,
-        help="Enable word embedding tensor parallel with mode {'col','row'}. "
-        "If omitted, embedding TP is disabled.",
+        help="Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled.",
     )
     par_group.add_argument(
         "--enable-redundant-experts",
@@ -311,15 +309,11 @@ def main():
     if args.graph_log_url:
         config.compilation.debug.graph_log_url = args.graph_log_url
     config.compilation.passes.enable_sequence_parallel = args.enable_sequence_parallel
-    config.compilation.fusion_patterns.enable_dispatch_ffn_combine = (
-        args.enable_dispatch_ffn_combine
-    )
+    config.compilation.fusion_patterns.enable_dispatch_ffn_combine = args.enable_dispatch_ffn_combine
 
     selected_embedding_tp_mode = args.word_embedding_tp
     args.word_embedding_tp = selected_embedding_tp_mode is not None
-    args.word_embedding_tp_mode = (
-        selected_embedding_tp_mode or WordEmbeddingTPMode.col.value
-    )
+    args.word_embedding_tp_mode = selected_embedding_tp_mode or WordEmbeddingTPMode.col.value
 
     # Set default performance_model if not specified
     if args.performance_model is None:
@@ -327,9 +321,7 @@ def main():
 
     # Validate developer-only options
     if args.export_empirical_metrics and "profiling" not in args.performance_model:
-        parser.error(
-            "--export-empirical-metrics requires --performance-model profiling"
-        )
+        parser.error("--export-empirical-metrics requires --performance-model profiling")
 
     # import here to make sure the logger level is set
     logger.info("Importing core modules...")

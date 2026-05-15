@@ -57,9 +57,7 @@ class ModelLoadTestCase(unittest.TestCase):
         user_config = UserInputConfig(model_id=model_id, do_compile=do_compile)
         model = build_model(user_config)
         # make sure all original attention modules have been replaced
-        self.assertTrue(
-            has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast")
-        )
+        self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
         inputs = torch.empty([2, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([2, num_tokens], dtype=torch.long, device="meta")
         with torch.no_grad(), patch_torch():
@@ -77,13 +75,9 @@ class ModelLoadTestCase(unittest.TestCase):
     def test_deepseek_with_kvcache(self, model_id, do_compile):
         user_config = UserInputConfig(model_id=model_id, do_compile=do_compile)
         model = build_model(user_config)
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         # make sure all original attention modules have been replaced
-        self.assertTrue(
-            has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast")
-        )
+        self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         with torch.no_grad(), patch_torch():
@@ -107,9 +101,7 @@ class ModelLoadTestCase(unittest.TestCase):
     )
     def test_prefill_without_kvcache(self, model_id, do_compile):
         num_tokens = 100
-        user_config = UserInputConfig(
-            model_id=model_id, do_compile=do_compile, num_hidden_layers_override=2
-        )
+        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile, num_hidden_layers_override=2)
         model = build_model(user_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
@@ -128,13 +120,9 @@ class ModelLoadTestCase(unittest.TestCase):
         ]
     )
     def test_prefill_with_kvcache(self, model_id, do_compile):
-        user_config = UserInputConfig(
-            model_id=model_id, do_compile=do_compile, num_hidden_layers_override=2
-        )
+        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile, num_hidden_layers_override=2)
         model = build_model(user_config)
-        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(model, model.model_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         with torch.no_grad(), patch_torch():
@@ -154,13 +142,9 @@ class ModelLoadTestCase(unittest.TestCase):
     )
     # temporarily disable since it relies on Transformers mainline
     def _test_qwen3_next_with_kvcache(self, model_id, do_compile):
-        user_config = UserInputConfig(
-            model_id=model_id, do_compile=do_compile, num_hidden_layers_override=2
-        )
+        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile, num_hidden_layers_override=2)
         model = build_model(user_config)
-        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(model, model.model_config)
         if do_compile:
             model = torch.compile(
                 model,
@@ -176,9 +160,7 @@ class ModelLoadTestCase(unittest.TestCase):
                 position_ids,
                 attention_meta=attn_meta,
                 kv_cache_by_layers=kv_cache_by_layers,
-                cache_position=torch.arange(
-                    0, num_tokens, dtype=torch.long, device="cpu"
-                ),
+                cache_position=torch.arange(0, num_tokens, dtype=torch.long, device="cpu"),
             )
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
 
@@ -189,13 +171,9 @@ class ModelLoadTestCase(unittest.TestCase):
     )
     # temporarily disable since it relies on Transformers mainline
     def test_qwen3_5(self, model_id, remote_source):
-        user_config = UserInputConfig(
-            model_id=model_id, do_compile=False, remote_source=remote_source
-        )
+        user_config = UserInputConfig(model_id=model_id, do_compile=False, remote_source=remote_source)
         model = build_model(user_config)
-        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(model, model.model_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         with torch.no_grad(), patch_torch():
@@ -204,8 +182,6 @@ class ModelLoadTestCase(unittest.TestCase):
                 position_ids,
                 attention_meta=attn_meta,
                 kv_cache_by_layers=kv_cache_by_layers,
-                cache_position=torch.arange(
-                    0, num_tokens, dtype=torch.long, device="cpu"
-                ),
+                cache_position=torch.arange(0, num_tokens, dtype=torch.long, device="cpu"),
             )
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))

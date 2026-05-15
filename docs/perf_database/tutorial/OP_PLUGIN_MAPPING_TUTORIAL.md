@@ -662,7 +662,7 @@ awk -F',' 'NR>1 && $2=="<kernel_type>" {print $3}' kernel_details.csv | sort | u
   kernel_type: <NPU_KernelType>
   alternate_kernel_types: [<BackupType1>, <BackupType2>]
   notes: >
-    [CONFIDENCE] Path X. 
+    [CONFIDENCE] Path X.
     op-plugin: <File>.cpp → aclnn<API> → <KernelType>.
     Profiling: <KernelType>(N times).
 ```
@@ -674,7 +674,7 @@ awk -F',' 'NR>1 && $2=="<kernel_type>" {print $3}' kernel_details.csv | sort | u
   composite: true
   sub_kernels: [<Kernel1>, <Kernel2>, <Kernel3>]
   notes: >
-    [CONFIDENCE] Composite mapping. 
+    [CONFIDENCE] Composite mapping.
     NPU kernels: <Kernel1> + <Kernel2> + <Kernel3>.
 ```
 
@@ -1086,7 +1086,7 @@ python3.10 -m tensor_cast.scripts.text_generate $MODEL \
   - 新增内核: MatMulV3, DispatchFFNCombine
   - 移除内核: RINGMLAPrefillBF16Kernel
   - 重命名: ScatterElements → ScatterElementsV2
-  
+
   ### 映射更新
   - aten.mm: 添加 MatMulV3 作为 alternate
   - tensor_cast.dispatch_ffn_combine: 新增条目

@@ -77,13 +77,9 @@ class OptimizerData:
 
 def check_string_valid(string: str, max_len=256):
     if len(string) > max_len:
-        raise argparse.ArgumentTypeError(
-            f"String length exceeds {max_len} characters: {string!r}"
-        )
+        raise argparse.ArgumentTypeError(f"String length exceeds {max_len} characters: {string!r}")
     if not re.match(r"^[a-zA-Z0-9_/.-]+$", string):
-        raise argparse.ArgumentTypeError(
-            f"String contains invalid characters: {string!r}"
-        )
+        raise argparse.ArgumentTypeError(f"String contains invalid characters: {string!r}")
     return string
 
 
@@ -116,17 +112,11 @@ def check_positive_float(value):
 class BatchRangeAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         if len(values) not in (1, 2):
-            raise argparse.ArgumentTypeError(
-                f"{option_string} expects [min max] or [max], got {values}"
-            )
+            raise argparse.ArgumentTypeError(f"{option_string} expects [min max] or [max], got {values}")
         if len(values) == 2 and values[0] > values[1]:
-            raise argparse.ArgumentTypeError(
-                f"{option_string} min must be <= max, got {values}"
-            )
+            raise argparse.ArgumentTypeError(f"{option_string} min must be <= max, got {values}")
         if any(v <= 0 for v in values):
-            raise argparse.ArgumentTypeError(
-                f"{option_string} values must be > 0, got {values}"
-            )
+            raise argparse.ArgumentTypeError(f"{option_string} values must be > 0, got {values}")
         setattr(namespace, self.dest, values)
 
 
@@ -152,9 +142,7 @@ def format_breakdowns(breakdowns: Dict[str, Dict[str, float]]):
     return " | ".join(formatted_parts)
 
 
-def resolve_search_sizes(
-    values: list[int] | None, target_devices: int, default_size: int
-) -> list[int]:
+def resolve_search_sizes(values: list[int] | None, target_devices: int, default_size: int) -> list[int]:
     """Resolve final candidate sizes for a search dimension.
 
     Args:

@@ -35,9 +35,7 @@ def _strip_ansi(text: str) -> str:
 
 def _extract_execution_error(log: str, fallback: str | None = None) -> str | None:
     lines = [_strip_ansi(line).strip() for line in (log or "").splitlines()]
-    if "huggingface.co" in (log or "") and "couldn't find them in the cached files" in (
-        log or ""
-    ):
+    if "huggingface.co" in (log or "") and "couldn't find them in the cached files" in (log or ""):
         return (
             "Unable to download model files from HuggingFace and no local cache was found. "
             "Check network access or use a cached/local model source."
@@ -130,9 +128,7 @@ def _parse_table(lines: list[str]) -> list[dict[str, Any]]:
     return rows
 
 
-def parse_text_generate(
-    task: ExperimentTask, log: str, status: str, error: str | None = None
-) -> ExperimentResult:
+def parse_text_generate(task: ExperimentTask, log: str, status: str, error: str | None = None) -> ExperimentResult:
     summary = {}
     warnings = []
     infos = []
@@ -149,50 +145,30 @@ def parse_text_generate(
         elif stripped.startswith("Model compilation and execution time:"):
             summary["run_time_s"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("Total time for analytic:"):
-            summary["analytic_total_time_s"] = time_to_seconds(
-                stripped.split(":", 1)[1].strip()
-            )
+            summary["analytic_total_time_s"] = time_to_seconds(stripped.split(":", 1)[1].strip())
             in_table = False
         elif stripped.startswith("TPS/Device:"):
-            summary["tps_per_device"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
+            summary["tps_per_device"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("Total device memory:"):
-            summary["total_device_memory_gb"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
+            summary["total_device_memory_gb"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("Model weight size:"):
-            summary["model_weight_size_gb"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
+            summary["model_weight_size_gb"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("KV cache:"):
             summary["kv_cache_gb"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("Model activation size:"):
-            summary["model_activation_size_gb"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
+            summary["model_activation_size_gb"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("Reserved memory:"):
-            summary["reserved_memory_gb"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
+            summary["reserved_memory_gb"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("Memory available:"):
-            summary["memory_available_gb"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
-            summary["memory_fit_status"] = (
-                "oom_risk" if summary["memory_available_gb"] < 0 else "fit"
-            )
+            summary["memory_available_gb"] = float(stripped.split(":", 1)[1].strip().split()[0])
+            summary["memory_fit_status"] = "oom_risk" if summary["memory_available_gb"] < 0 else "fit"
         elif "analytic_OpBound:" in stripped:
             parts = stripped.split("analytic_OpBound:", 1)[1].strip().split(",")
             for part in parts:
                 if ":" in part:
                     k, v = part.split(":", 1)
                     summary[k.strip()] = float(v.strip())
-        if (
-            "Name" in stripped
-            and "analytic total" in stripped
-            and "# of Calls" in stripped
-        ):
+        if "Name" in stripped and "analytic total" in stripped and "# of Calls" in stripped:
             in_table = True
             table_lines = []
         elif in_table:
@@ -234,9 +210,7 @@ def _pick_bottleneck(summary: dict[str, Any]) -> str | None:
     return max(valid, key=valid.get)
 
 
-def parse_video_generate(
-    task: ExperimentTask, log: str, status: str, error: str | None = None
-) -> ExperimentResult:
+def parse_video_generate(task: ExperimentTask, log: str, status: str, error: str | None = None) -> ExperimentResult:
     summary = {
         "cfg_mode": "cfg_parallel"
         if task.params.get("cfg_parallel") and task.params.get("use_cfg")
@@ -255,9 +229,7 @@ def parse_video_generate(
         if stripped.startswith("Model compilation and execution time:"):
             summary["run_time_s"] = time_to_seconds(stripped.split(":", 1)[1].strip())
         elif stripped.startswith("Total time for analytic:"):
-            summary["analytic_total_time_s"] = time_to_seconds(
-                stripped.split(":", 1)[1].strip()
-            )
+            summary["analytic_total_time_s"] = time_to_seconds(stripped.split(":", 1)[1].strip())
             in_table = False
         elif "Enabled dit_block_cache" in stripped:
             summary["dit_cache_effective"] = True
@@ -272,14 +244,8 @@ def parse_video_generate(
                 summary["total_blocks"] = int(m.group(4))
         elif "DiT cache is disabled because" in stripped:
             summary["dit_cache_effective"] = False
-            summary["dit_cache_disable_reason"] = (
-                stripped.split("because", 1)[1].strip().rstrip(".")
-            )
-        if (
-            "Name" in stripped
-            and "analytic total" in stripped
-            and "# of Calls" in stripped
-        ):
+            summary["dit_cache_disable_reason"] = stripped.split("because", 1)[1].strip().rstrip(".")
+        if "Name" in stripped and "analytic total" in stripped and "# of Calls" in stripped:
             in_table = True
             table_lines = []
         elif in_table:
@@ -304,9 +270,7 @@ def parse_video_generate(
     )
 
 
-def parse_optimizer(
-    task: ExperimentTask, log: str, status: str, error: str | None = None
-) -> ExperimentResult:
+def parse_optimizer(task: ExperimentTask, log: str, status: str, error: str | None = None) -> ExperimentResult:
     summary = {}
     warnings = []
     infos = []
@@ -319,17 +283,11 @@ def parse_optimizer(
         elif stripped.startswith("INFO"):
             infos.append(stripped)
         if stripped.startswith("Best Throughput:"):
-            summary["best_throughput"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
+            summary["best_throughput"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("TTFT:"):
-            summary["best_ttft_ms"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
+            summary["best_ttft_ms"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("TPOT:"):
-            summary["best_tpot_ms"] = float(
-                stripped.split(":", 1)[1].strip().split()[0]
-            )
+            summary["best_tpot_ms"] = float(stripped.split(":", 1)[1].strip().split()[0])
         elif stripped.startswith("TTFT Limits:"):
             raw = stripped.split(":", 1)[1].strip().split()[0]
             summary["ttft_limits_ms"] = None if raw == "None" else float(raw)
@@ -374,9 +332,7 @@ def parse_optimizer(
     )
 
 
-def parse_result(
-    task: ExperimentTask, log: str, status: str, error: str | None = None
-) -> ExperimentResult:
+def parse_result(task: ExperimentTask, log: str, status: str, error: str | None = None) -> ExperimentResult:
     if task.sim_type == "text_generate":
         return parse_text_generate(task, log, status, error)
     if task.sim_type == "video_generate":

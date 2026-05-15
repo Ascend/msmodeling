@@ -133,9 +133,7 @@ def _parse_fia_q_shape(input_shapes_str: str) -> Optional[Tuple[int, ...]]:
         return None
 
 
-def _normalize_fia_q_shape(
-    q_shape: Tuple[int, ...], head_dim: int = 0
-) -> Optional[Tuple[int, ...]]:
+def _normalize_fia_q_shape(q_shape: Tuple[int, ...], head_dim: int = 0) -> Optional[Tuple[int, ...]]:
     """Normalize FIA Q shape to 3D (T, N, D).
 
     3D (T, N, D) → identity; 4D (B, N, 1, D) → squeeze; 2D (T, H) → reshape.
@@ -199,17 +197,13 @@ _SWIGLU_KERNELS = frozenset({"SwiGlu"})
 # RoPE kernel types: TC dispatches (B,H,S,D) layout with [Q, K, cos, sin],
 # but profiling CSVs store (B,S,H,D) layout with [K, Q, cos, sin] and
 # cos/sin have an extra head dim (1).
-_ROPE_KERNELS = frozenset(
-    {"ApplyRotaryPosEmb", "_triton_rope", "split_qkv_rmsnorm_rope_kernel"}
-)
+_ROPE_KERNELS = frozenset({"ApplyRotaryPosEmb", "_triton_rope", "split_qkv_rmsnorm_rope_kernel"})
 
 # ReshapeAndCache kernel types: TC dispatches (key, value, kv_cache, slot_mapping)
 # with key/value as 2D (N, D) and a single merged kv_cache (2, blocks, block_size, heads, D).
 # Profiling CSVs store (key, value, cache_k, cache_v, slot_mapping) with key/value
 # as 3D (N, 1, D) and separate cache_k/cache_v tensors.
-_RESHAPE_AND_CACHE_KERNELS = frozenset(
-    {"ReshapeAndCacheNdKernel", "reshape_and_cache_200000000"}
-)
+_RESHAPE_AND_CACHE_KERNELS = frozenset({"ReshapeAndCacheNdKernel", "reshape_and_cache_200000000"})
 
 # Dtype groups that are considered equivalent for matching purposes.
 # NPU _triton_rope profiling records K as FLOAT (FP32) while TC dispatches
@@ -222,9 +216,7 @@ _DTYPE_COMPAT = {"DT_BF16": "FLOAT_GROUP", "FLOAT": "FLOAT_GROUP"}
 # the realized kernel as BF16. Allow FLOAT <-> DT_BF16 compatibility so shape
 # matching can still reuse the measured kernel entry. Quant matmul kernels keep
 # strict dtype matching because their dtype semantics differ from plain matmul.
-_DTYPE_RELAXED_KERNELS = (
-    _ROPE_KERNELS | _RELAXED_DTYPE_MATMUL_KERNELS | _RELAXED_DTYPE_PAD_KERNELS
-)
+_DTYPE_RELAXED_KERNELS = _ROPE_KERNELS | _RELAXED_DTYPE_MATMUL_KERNELS | _RELAXED_DTYPE_PAD_KERNELS
 
 # Kernel types where TC may produce 3D (B, M, D) shapes that should
 # match CSV's 2D (B*M, D) shapes by flattening the leading two dims.
@@ -403,8 +395,7 @@ def _is_block_padded(tc_dim: int, csv_dim: int) -> bool:
     if any(tc_dim == ((csv_dim + bs - 1) // bs) * bs for bs in _BLOCK_SIZES):
         return True
     return any(
-        csv_dim >= min_dim and tc_dim == ((csv_dim + bs - 1) // bs) * bs
-        for bs, min_dim in _BLOCK_SIZE_MIN_DIM.items()
+        csv_dim >= min_dim and tc_dim == ((csv_dim + bs - 1) // bs) * bs for bs, min_dim in _BLOCK_SIZE_MIN_DIM.items()
     )
 
 
@@ -455,9 +446,7 @@ def get_topology_tier(comm_grid: "CommGrid", group: List[int]) -> int:
 
 # Query modes handled by dedicated _lookup_<mode>() methods.
 # Tests import this to avoid duplicating the dispatch contract.
-SUPPORTED_QUERY_MODES: frozenset[str] = frozenset(
-    {"attention_special", "elementwise", "moe_fused"}
-)
+SUPPORTED_QUERY_MODES: frozenset[str] = frozenset({"attention_special", "elementwise", "moe_fused"})
 
 # ---- MLA / MLAPO composite decomposition ----
 
@@ -644,9 +633,7 @@ def _decompose_mla_common(
         ]
 
 
-def _decompose_mla(
-    op_invoke_info: "OpInvokeInfo", mapping: dict
-) -> Optional[List[SubKernelSpec]]:
+def _decompose_mla(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
     """Decompose multihead_latent_attention (BF16)."""
     return _decompose_mla_common(
         op_invoke_info,
@@ -656,9 +643,7 @@ def _decompose_mla(
     )
 
 
-def _decompose_mla_quant(
-    op_invoke_info: "OpInvokeInfo", mapping: dict
-) -> Optional[List[SubKernelSpec]]:
+def _decompose_mla_quant(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
     """Decompose multihead_latent_attention_quant."""
     return _decompose_mla_common(op_invoke_info, mapping, "QuantBatchMatmulV3")
 
@@ -700,12 +685,7 @@ def _decompose_mlapo_common(
     q_b_proj = args[5]
     kv_a_proj = args[6]
 
-    if (
-        hidden_states is None
-        or q_a_proj is None
-        or q_b_proj is None
-        or kv_a_proj is None
-    ):
+    if hidden_states is None or q_a_proj is None or q_b_proj is None or kv_a_proj is None:
         return None
 
     dtype_str = DTYPE_MAP.get(hidden_states.dtype)
@@ -761,20 +741,14 @@ def _decompose_mlapo_common(
     ]
 
 
-def _decompose_mlapo(
-    op_invoke_info: "OpInvokeInfo", mapping: dict
-) -> Optional[List[SubKernelSpec]]:
+def _decompose_mlapo(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
     """Decompose mlapo (BF16)."""
     return _decompose_mlapo_common(op_invoke_info, mapping, "MatMulV2", min_args=14)
 
 
-def _decompose_mlapo_quant(
-    op_invoke_info: "OpInvokeInfo", mapping: dict
-) -> Optional[List[SubKernelSpec]]:
+def _decompose_mlapo_quant(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
     """Decompose mlapo_quant."""
-    return _decompose_mlapo_common(
-        op_invoke_info, mapping, "QuantBatchMatmulV3", min_args=20
-    )
+    return _decompose_mlapo_common(op_invoke_info, mapping, "QuantBatchMatmulV3", min_args=20)
 
 
 COMPOSITE_DECOMPOSERS: Dict[
@@ -994,9 +968,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         lat_col = self._latency_col(df)
 
         # --- Exact match ---
-        mask = (df["message_bytes"] == message_bytes) & (
-            df["num_devices"] == num_devices
-        )
+        mask = (df["message_bytes"] == message_bytes) & (df["num_devices"] == num_devices)
         if topology_tier is not None and "topology_tier" in df.columns:
             mask = mask & (df["topology_tier"] == topology_tier)
 
@@ -1036,15 +1008,11 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             return None
 
         mb_lo, mb_hi = int(below.max()), int(above.min())
-        lat_lo = float(
-            candidates.loc[candidates["message_bytes"] == mb_lo, lat_col].iloc[0]
-        )
+        lat_lo = float(candidates.loc[candidates["message_bytes"] == mb_lo, lat_col].iloc[0])
         if mb_lo == mb_hi:
             return (lat_lo, False)  # degenerate bracket = exact
 
-        lat_hi = float(
-            candidates.loc[candidates["message_bytes"] == mb_hi, lat_col].iloc[0]
-        )
+        lat_hi = float(candidates.loc[candidates["message_bytes"] == mb_hi, lat_col].iloc[0])
 
         # Alpha-beta interpolation: comm latency = alpha + message_bytes / bandwidth
         # Fit from ALL candidate data points (least-squares) rather than just the
@@ -1107,9 +1075,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         if mapping is None:
             self.last_miss_reason = "unmapped"
             self.last_shape_match_info = ShapeMatchInfo(
-                simulation_shapes=[
-                    list(s) for s, _ in self._extract_tensor_inputs(op_invoke_info)
-                ],
+                simulation_shapes=[list(s) for s, _ in self._extract_tensor_inputs(op_invoke_info)],
                 kernel_shapes=[],
                 shape_match_rule="unmapped",
             )
@@ -1129,9 +1095,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
         # Zero-cost ops: shape-only operations with no kernel execution
         if mapping.get("zero_cost"):
-            _zc_sim_shapes = [
-                list(s) for s, _ in self._extract_tensor_inputs(op_invoke_info)
-            ]
+            _zc_sim_shapes = [list(s) for s, _ in self._extract_tensor_inputs(op_invoke_info)]
             _zc_shape_info = ShapeMatchInfo(
                 simulation_shapes=_zc_sim_shapes,
                 kernel_shapes=[],
@@ -1164,9 +1128,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                     "note": accepted,
                 },
                 shape_match_info=ShapeMatchInfo(
-                    simulation_shapes=[
-                        list(s) for s, _ in self._extract_tensor_inputs(op_invoke_info)
-                    ],
+                    simulation_shapes=[list(s) for s, _ in self._extract_tensor_inputs(op_invoke_info)],
                     kernel_shapes=[],
                     shape_match_rule="accepted_miss",
                 ),
@@ -1176,9 +1138,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
     # ---- Composite op lookup ----
 
-    def _lookup_composite(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _lookup_composite(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         """Decompose composite ops and sum sub-kernel latencies.
 
         For MLA/MLAPO: uses registered decomposer to derive sub-kernel shapes,
@@ -1190,9 +1150,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         func_str = _normalize_func_name(op_invoke_info.func)
         decomposer = COMPOSITE_DECOMPOSERS.get(func_str)
         if decomposer is not None:
-            return self._lookup_composite_decomposed(
-                op_invoke_info, mapping, decomposer
-            )
+            return self._lookup_composite_decomposed(op_invoke_info, mapping, decomposer)
 
         # Generic composite path (MC2 etc.)
         sub_kernels = mapping.get("sub_kernels", [])
@@ -1210,25 +1168,15 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
         # --- Compute sub-kernels: try each until one matches ---
         compute_kernels = [k for k in sub_kernels if not k.startswith("hcom_")]
-        compute_hit = self._find_compute_match(
-            compute_kernels, tc_inputs, tc_input_count
-        )
+        compute_hit = self._find_compute_match(compute_kernels, tc_inputs, tc_input_count)
 
         if compute_hit is None:
             return None
 
         compute_latency = compute_hit.latency_us
         compute_kernel_hit = compute_hit.kernel_type
-        compute_csv_shapes = (
-            compute_hit.shape_match_info.kernel_shapes
-            if compute_hit.shape_match_info
-            else []
-        )
-        compute_rule = (
-            compute_hit.shape_match_info.shape_match_rule
-            if compute_hit.shape_match_info
-            else "unknown"
-        )
+        compute_csv_shapes = compute_hit.shape_match_info.kernel_shapes if compute_hit.shape_match_info else []
+        compute_rule = compute_hit.shape_match_info.shape_match_rule if compute_hit.shape_match_info else "unknown"
         simulation_shapes = [list(s) for s, _ in tc_inputs]
 
         # --- Communication sub-kernels ---
@@ -1281,11 +1229,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 "kernel_type": compute_kernel_hit,
                 "sub_kernel_durations": sub_kernel_durations,
                 "composite": True,
-                "note": (
-                    "compute + comm sub-kernels"
-                    if has_comm
-                    else "compute sub-kernel only"
-                ),
+                "note": ("compute + comm sub-kernels" if has_comm else "compute sub-kernel only"),
             },
             sub_kernel_shapes=sub_kernel_shapes_info,
         )
@@ -1318,9 +1262,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             kernel_types = [spec.kernel_type] + (spec.alternate_kernel_types or [])
 
             if spec.query_mode == "attention" and spec.attention_params:
-                result = self._query_by_attn_params(
-                    kernel_types, spec.attention_params, spec.dtype
-                )
+                result = self._query_by_attn_params(kernel_types, spec.attention_params, spec.dtype)
                 if result is not None:
                     # attention path result is (lat, kernel_type) 2-tuple — no csv_shapes
                     lat, matched_kernel = result
@@ -1361,22 +1303,14 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 if hit is not None:
                     total_latency += hit.latency_us
                     hit_kernels.append(hit.kernel_type)
-                    sub_kernel_durations.append(
-                        (hit.kernel_type, round(hit.latency_us, 2))
-                    )
+                    sub_kernel_durations.append((hit.kernel_type, round(hit.latency_us, 2)))
                     sub_kernel_shapes_list.append(
                         SubKernelShapeInfo(
                             kernel_type=hit.kernel_type,
                             simulation_shapes=[list(s) for s in spec.input_shapes],
-                            kernel_shapes=(
-                                hit.shape_match_info.kernel_shapes
-                                if hit.shape_match_info
-                                else []
-                            ),
+                            kernel_shapes=(hit.shape_match_info.kernel_shapes if hit.shape_match_info else []),
                             shape_match_rule=(
-                                hit.shape_match_info.shape_match_rule
-                                if hit.shape_match_info
-                                else "unknown"
+                                hit.shape_match_info.shape_match_rule if hit.shape_match_info else "unknown"
                             ),
                         )
                     )
@@ -1492,19 +1426,13 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
             csv_N, csv_D = csv_q_3d[1], csv_q_3d[2]
             csv_dtypes_str = str(row.get("Input Data Types", ""))
-            csv_first_dtype = (
-                csv_dtypes_str.split(";")[0].strip() if csv_dtypes_str else ""
-            )
+            csv_first_dtype = csv_dtypes_str.split(";")[0].strip() if csv_dtypes_str else ""
             if dtype_str != csv_first_dtype:
                 return None
             if tc_N != csv_N or tc_D != csv_D:
                 return None
 
-            if (
-                col_info.has_sparse
-                and target_sparse is not None
-                and int(row["Runtime sparse_mode"]) != target_sparse
-            ):
+            if col_info.has_sparse and target_sparse is not None and int(row["Runtime sparse_mode"]) != target_sparse:
                 return None
             if (
                 col_info.has_kv_heads
@@ -1523,11 +1451,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
             tc_T = q_shape_3d[0]
             csv_T = csv_q_3d[0]
-            if (
-                tc_T != csv_T
-                and not _is_block_padded(tc_T, csv_T)
-                and not _is_block_padded(csv_T, tc_T)
-            ):
+            if tc_T != csv_T and not _is_block_padded(tc_T, csv_T) and not _is_block_padded(csv_T, tc_T):
                 return None
 
             return Candidate(
@@ -1552,9 +1476,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         )
         return hit.latency_us, hit.kernel_type
 
-    def _lookup_comm_for_composite(
-        self, op_invoke_info: "OpInvokeInfo", kernel_type: str
-    ) -> Optional[float]:
+    def _lookup_comm_for_composite(self, op_invoke_info: "OpInvokeInfo", kernel_type: str) -> Optional[float]:
         """Look up comm sub-kernel latency for composite ops (e.g., MC2).
 
         Computes message_bytes from the matmul output shape:
@@ -1591,9 +1513,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
         topology_tier = self._resolve_topology_tier(list(rank_group))
 
-        result = self._query_comm_csv(
-            kernel_type, message_bytes, num_devices, topology_tier
-        )
+        result = self._query_comm_csv(kernel_type, message_bytes, num_devices, topology_tier)
         if result is None:
             return None
         return result[0]  # latency only, caller doesn't need is_interpolated
@@ -1613,9 +1533,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             logger.debug("Could not resolve topology_tier for group %s", group)
             return None
 
-    def _lookup_comm(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _lookup_comm(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         """Look up communication op latency by message_bytes + num_devices + topology_tier.
 
         All TC comm ops have rank_group as the last arg:
@@ -1659,9 +1577,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         # Resolve topology_tier from group via CommGrid
         topology_tier = self._resolve_topology_tier(list(rank_group))
 
-        result = self._query_comm_csv(
-            kernel_type, message_bytes, num_devices, topology_tier
-        )
+        result = self._query_comm_csv(kernel_type, message_bytes, num_devices, topology_tier)
         if result is None:
             return None
 
@@ -1690,9 +1606,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
     # ---- Attention special lookup ----
 
-    def _lookup_attention(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _lookup_attention(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         """Query FIA enriched CSV: extract params from OpInvokeInfo, delegate.
 
         Extracts Q shape, avg_seq_len, sparse_mode, num_kv_heads from the op,
@@ -1724,9 +1638,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             return None
 
         # Get head_dim from key tensor
-        head_dim = (
-            key.shape[-1] if isinstance(key, torch.Tensor) and key.ndim >= 1 else 0
-        )
+        head_dim = key.shape[-1] if isinstance(key, torch.Tensor) and key.ndim >= 1 else 0
 
         # Normalize TC query to 3D
         tc_q_3d = _normalize_fia_q_shape(tuple(query.shape), head_dim)
@@ -1749,14 +1661,10 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         tc_sparse_mode = _infer_sparse_mode(query_lens)
 
         # Extract num_kv_heads from key tensor: shape[-2] is kv_head_num
-        tc_num_kv_heads = (
-            key.shape[-2] if isinstance(key, torch.Tensor) and key.ndim >= 2 else None
-        )
+        tc_num_kv_heads = key.shape[-2] if isinstance(key, torch.Tensor) and key.ndim >= 2 else None
 
         # Derive input_layout from query shape ndim
-        input_layout = (
-            "TND" if query.ndim == 3 else "BNSD_NBSD" if query.ndim == 4 else None
-        )
+        input_layout = "TND" if query.ndim == 3 else "BNSD_NBSD" if query.ndim == 4 else None
 
         # Build params dict
         params = {
@@ -1791,9 +1699,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 "num_kv_heads": tc_num_kv_heads,
             },
             shape_match_info=ShapeMatchInfo(
-                simulation_shapes=[
-                    list(s) for s, _ in self._extract_tensor_inputs(op_invoke_info)
-                ],
+                simulation_shapes=[list(s) for s, _ in self._extract_tensor_inputs(op_invoke_info)],
                 kernel_shapes=[],
                 shape_match_rule="attention",
             ),
@@ -1801,9 +1707,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
     # ---- Elementwise op lookup (output-shape matching) ----
 
-    def _lookup_elementwise(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _lookup_elementwise(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         """Look up elementwise op latency by matching output shape.
 
         Elementwise ops (mul, add, etc.) are bandwidth-bound and their cost
@@ -1932,9 +1836,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             rule = self._inputs_match(tc_inputs, row, kt, tc_input_count)
             if rule is None:
                 return None
-            csv_shapes = [
-                list(s) for s in _parse_shape_str(str(row.get("Input Shapes", "")))
-            ]
+            csv_shapes = [list(s) for s in _parse_shape_str(str(row.get("Input Shapes", "")))]
             return Candidate(
                 latency_us=float(row[lat_col]),
                 kernel_type=kt,
@@ -1972,31 +1874,17 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             primary = kernel_types[0] if kernel_types else "unknown"
             df = self._load_csv(primary)
             if df is not None and not df.empty:
-                csv_first_shapes = _parse_shape_str(
-                    str(df.iloc[0].get("Input Shapes", ""))
-                )
+                csv_first_shapes = _parse_shape_str(str(df.iloc[0].get("Input Shapes", "")))
                 effective_csv_count = len(csv_first_shapes)
                 effective_tc_count = len(tc_inputs)
                 if effective_tc_input_count is not None:
-                    effective_csv_count = min(
-                        effective_csv_count, effective_tc_input_count
-                    )
-                    effective_tc_count = min(
-                        effective_tc_count, effective_tc_input_count
-                    )
+                    effective_csv_count = min(effective_csv_count, effective_tc_input_count)
+                    effective_tc_count = min(effective_tc_count, effective_tc_input_count)
                 # SwiGlu: TC 2 inputs → CSV 1 (concat normalization)
-                if (
-                    primary in _SWIGLU_KERNELS
-                    and effective_tc_count == 2
-                    and effective_csv_count == 1
-                ):
+                if primary in _SWIGLU_KERNELS and effective_tc_count == 2 and effective_csv_count == 1:
                     effective_tc_count = 1
                 # ReshapeAndCache: TC 4 inputs → CSV 5 (split normalization)
-                if (
-                    primary in _RESHAPE_AND_CACHE_KERNELS
-                    and effective_tc_count == 4
-                    and effective_csv_count == 5
-                ):
+                if primary in _RESHAPE_AND_CACHE_KERNELS and effective_tc_count == 4 and effective_csv_count == 5:
                     effective_tc_count = 5
                 if effective_tc_count != effective_csv_count:
                     self.last_miss_reason = "input_count_mismatch"
@@ -2008,9 +1896,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
     # ---- MoE fused op lookup (EP Size matching) ----
 
-    def _lookup_moe(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _lookup_moe(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         """Query DFC CSV: shape match + EP Size exact match."""
         kernel_type = mapping.get("kernel_type")
         if not kernel_type:
@@ -2025,8 +1911,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         has_ep_col = "EP Size" in df.columns
         if has_ep_col and self.ep_size is None:
             logger.warning(
-                "DFC CSV has EP Size column but ep_size not configured. "
-                "Pass parallel_config to ProfilingDataSource."
+                "DFC CSV has EP Size column but ep_size not configured. Pass parallel_config to ProfilingDataSource."
             )
             self.last_miss_reason = "ep_size_not_configured"
             return None
@@ -2044,9 +1929,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 return None
             if has_ep_col and ep_size is not None and int(row["EP Size"]) != ep_size:
                 return None
-            csv_shapes = [
-                list(s) for s in _parse_shape_str(str(row.get("Input Shapes", "")))
-            ]
+            csv_shapes = [list(s) for s in _parse_shape_str(str(row.get("Input Shapes", "")))]
             return Candidate(
                 latency_us=float(row[lat_col]),
                 kernel_type=kt,
@@ -2080,9 +1963,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
     # ---- Compute op lookup ----
 
-    def _lookup_compute(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _lookup_compute(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         kernel_types = [mapping["kernel_type"]]
         for alt in mapping.get("alternate_kernel_types", []):
             if alt not in kernel_types:
@@ -2095,9 +1976,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
         simulation_shapes = [list(s) for s, _ in tc_inputs]
 
-        checker = self._make_compute_checker(
-            tc_inputs, tc_input_count, simulation_shapes
-        )
+        checker = self._make_compute_checker(tc_inputs, tc_input_count, simulation_shapes)
 
         hit = self._find_candidates(kernel_types, checker)
         if hit is None:
@@ -2119,9 +1998,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             shape_match_info=hit.shape_match_info,
         )
 
-    def _extract_tensor_inputs(
-        self, op_invoke_info: "OpInvokeInfo"
-    ) -> List[Tuple[Tuple[int, ...], torch.dtype]]:
+    def _extract_tensor_inputs(self, op_invoke_info: "OpInvokeInfo") -> List[Tuple[Tuple[int, ...], torch.dtype]]:
         """Extract (shape, dtype) for each non-scalar tensor arg.
 
         Scalar tensors (ndim=0, shape=()) are filtered out because profiling
@@ -2174,20 +2051,12 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         # RoPE input normalization: swap Q↔K, transpose (B,H,S,D)→(B,S,H,D).
         # Works with both full (4 inputs) and tc_input_count-truncated (2 inputs).
         tc_inputs_normalized = tc_inputs
-        if (
-            kernel_type in _ROPE_KERNELS
-            and len(tc_inputs) >= 2
-            and len(csv_shapes) >= 2
-        ):
+        if kernel_type in _ROPE_KERNELS and len(tc_inputs) >= 2 and len(csv_shapes) >= 2:
             tc_inputs_normalized = _normalize_rope_inputs(tc_inputs)
 
         # SwiGlu input normalization: TC sends 2 inputs (gate, up),
         # profiling CSV has 1 fused input concatenated along last dim.
-        if (
-            kernel_type in _SWIGLU_KERNELS
-            and len(tc_inputs) == 2
-            and len(csv_shapes) == 1
-        ):
+        if kernel_type in _SWIGLU_KERNELS and len(tc_inputs) == 2 and len(csv_shapes) == 1:
             s1, dtype1 = tc_inputs[0]
             s2, dtype2 = tc_inputs[1]
             s1 = _strip_batch_dim(s1)
@@ -2199,11 +2068,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         # ReshapeAndCache input normalization: TC sends 4 inputs
         # (key, value, kv_cache, slot_mapping) with 2D key/value and merged
         # kv_cache; CSV has 5 inputs with 3D key/value and split cache_k/cache_v.
-        if (
-            kernel_type in _RESHAPE_AND_CACHE_KERNELS
-            and len(tc_inputs) == 4
-            and len(csv_shapes) == 5
-        ):
+        if kernel_type in _RESHAPE_AND_CACHE_KERNELS and len(tc_inputs) == 4 and len(csv_shapes) == 5:
             normalized = _normalize_reshape_and_cache_inputs(tc_inputs_normalized)
             if normalized is not None:
                 tc_inputs_normalized = normalized
@@ -2225,11 +2090,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 if kernel_type in _DTYPE_RELAXED_KERNELS:
                     compat_expected = _DTYPE_COMPAT.get(expected_dtype)
                     compat_csv = _DTYPE_COMPAT.get(csv_dtype_i)
-                    if (
-                        compat_expected is None
-                        or compat_csv is None
-                        or compat_expected != compat_csv
-                    ):
+                    if compat_expected is None or compat_csv is None or compat_expected != compat_csv:
                         return None
                 else:
                     return None
@@ -2283,11 +2144,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 # _strip_batch_dim may collapse (1,H,D) → (H,D) losing the
                 # 3D structure needed for flatten/merge.
                 shape_3d = (
-                    tc_shape_stripped
-                    if len(tc_shape_stripped) == 3
-                    else tc_shape
-                    if len(tc_shape) == 3
-                    else None
+                    tc_shape_stripped if len(tc_shape_stripped) == 3 else tc_shape if len(tc_shape) == 3 else None
                 )
                 if shape_3d is not None:
                     # Flatten first two dims: TC (B, M, D) → CSV (B*M, D)
@@ -2322,9 +2179,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         return matched_rule  # all inputs matched
 
     @staticmethod
-    def _shapes_match_with_padding(
-        tc_shape: Tuple[int, ...], csv_shape: Tuple[int, ...]
-    ) -> bool:
+    def _shapes_match_with_padding(tc_shape: Tuple[int, ...], csv_shape: Tuple[int, ...]) -> bool:
         """Check if shapes match allowing block-padding on any dimension."""
         if len(tc_shape) != len(csv_shape):
             return False

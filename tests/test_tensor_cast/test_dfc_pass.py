@@ -36,14 +36,10 @@ class DfcPassTestCase(unittest.TestCase):
 
     def setUp(self):
         torch.compiler.reset()
-        self._orig_enable_dispatch_ffn_combine = (
-            config.compilation.fusion_patterns.enable_dispatch_ffn_combine
-        )
+        self._orig_enable_dispatch_ffn_combine = config.compilation.fusion_patterns.enable_dispatch_ffn_combine
 
     def tearDown(self):
-        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = (
-            self._orig_enable_dispatch_ffn_combine
-        )
+        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = self._orig_enable_dispatch_ffn_combine
 
     @parameterized.expand(
         [
@@ -201,9 +197,7 @@ class DfcPassTestCase(unittest.TestCase):
         rank = graph.placeholder("rank")
         rank_group = graph.placeholder("rank_group")
 
-        routed = graph.call_function(
-            torch.ops.tensor_cast.init_routing_v2.default, args=(x, expert_indices)
-        )
+        routed = graph.call_function(torch.ops.tensor_cast.init_routing_v2.default, args=(x, expert_indices))
         dispatched = graph.call_function(
             torch.ops.tensor_cast.all_to_all.default,
             args=(routed, output_splits, input_splits, rank, rank_group),
@@ -231,30 +225,20 @@ class DfcPassTestCase(unittest.TestCase):
             )
 
         gate_up_0 = add_quant_linear("gate_up_0", dispatched)
-        split_0 = graph.call_function(
-            torch.ops.aten.split_with_sizes.default, args=(gate_up_0, [4, 4], 1)
-        )
+        split_0 = graph.call_function(torch.ops.aten.split_with_sizes.default, args=(gate_up_0, [4, 4], 1))
         gate_0 = graph.call_function(operator.getitem, args=(split_0, 0))
         up_0 = graph.call_function(operator.getitem, args=(split_0, 1))
-        swiglu_0 = graph.call_function(
-            torch.ops.tensor_cast.swiglu.default, args=(gate_0, up_0)
-        )
+        swiglu_0 = graph.call_function(torch.ops.tensor_cast.swiglu.default, args=(gate_0, up_0))
         down_0 = add_quant_linear("down_0", swiglu_0)
 
         gate_up_1 = add_quant_linear("gate_up_1", dispatched)
-        split_1 = graph.call_function(
-            torch.ops.aten.split_with_sizes.default, args=(gate_up_1, [4, 4], 1)
-        )
+        split_1 = graph.call_function(torch.ops.aten.split_with_sizes.default, args=(gate_up_1, [4, 4], 1))
         gate_1 = graph.call_function(operator.getitem, args=(split_1, 0))
         up_1 = graph.call_function(operator.getitem, args=(split_1, 1))
-        swiglu_1 = graph.call_function(
-            torch.ops.tensor_cast.swiglu.default, args=(gate_1, up_1)
-        )
+        swiglu_1 = graph.call_function(torch.ops.tensor_cast.swiglu.default, args=(gate_1, up_1))
         down_1 = add_quant_linear("down_1", swiglu_1)
 
-        combined = graph.call_function(
-            torch.ops.aten.cat.default, args=([down_0, down_1], 0)
-        )
+        combined = graph.call_function(torch.ops.aten.cat.default, args=([down_0, down_1], 0))
         reduced = graph.call_function(
             torch.ops.tensor_cast.all_to_all.default,
             args=(combined, input_splits, output_splits, rank, rank_group),

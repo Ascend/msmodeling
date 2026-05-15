@@ -73,17 +73,11 @@ class EmpiricalPerformanceModel(PerformanceModel):
 
         # Analytic fallback — needed for MISS latency and as weight
         analytic_result = self.fallback_model.process_op(op_invoke_info)
-        tc_shapes = [
-            tuple(a.shape) for a in op_invoke_info.args if isinstance(a, torch.Tensor)
-        ]
+        tc_shapes = [tuple(a.shape) for a in op_invoke_info.args if isinstance(a, torch.Tensor)]
 
         if result is not None and result.source != QuerySource.PARTIAL:
             # Full HIT
-            self.op_records.append(
-                EmpiricalOpRecord(
-                    func_name, result, analytic_result.execution_time_s, tc_shapes
-                )
-            )
+            self.op_records.append(EmpiricalOpRecord(func_name, result, analytic_result.execution_time_s, tc_shapes))
             empirical_s = result.latency_us * 1e-6
             return PerformanceModel.Result(
                 execution_time_s=empirical_s,
@@ -97,11 +91,7 @@ class EmpiricalPerformanceModel(PerformanceModel):
 
         if result is not None and result.source == QuerySource.PARTIAL:
             # PARTIAL
-            self.op_records.append(
-                EmpiricalOpRecord(
-                    func_name, result, analytic_result.execution_time_s, tc_shapes
-                )
-            )
+            self.op_records.append(EmpiricalOpRecord(func_name, result, analytic_result.execution_time_s, tc_shapes))
             empirical_s = result.latency_us * 1e-6
             return PerformanceModel.Result(
                 execution_time_s=empirical_s,

@@ -6,8 +6,22 @@ import time
 profiling_supported = True
 try:
     from serving_cast.profiler.profiler_stime import Level, parse_main_func, SimProfiler
+    from serving_cast.profiler import profiler_utils as _profiler_utils
+
+    get_batch_type = _profiler_utils.get_batch_type
+    get_iter_size_info = _profiler_utils.get_iter_size_info
+    queue_profiler = _profiler_utils.queue_profiler
+    record_kv_cache_free_blocks = _profiler_utils.record_kv_cache_free_blocks
 except ImportError:
     profiling_supported = False
+    Level = None  # type: ignore[assignment]
+    SimProfiler = None  # type: ignore[assignment]
+    parse_main_func = None  # type: ignore[assignment]
+
+    def _profiling_import_failed(*_args, **_kwargs):
+        raise RuntimeError("profiling is not supported")
+
+    get_batch_type = get_iter_size_info = queue_profiler = record_kv_cache_free_blocks = _profiling_import_failed
 
 
 def is_profiling_ready():

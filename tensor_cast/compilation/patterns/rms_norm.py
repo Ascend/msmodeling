@@ -51,9 +51,7 @@ class AddRMSNormPattern:
             return out
 
         def replacement(hidden_states, residual, weight, eps):
-            out = torch.ops.tensor_cast.add_rms_norm(
-                hidden_states, residual, weight, eps
-            )
+            out = torch.ops.tensor_cast.add_rms_norm(hidden_states, residual, weight, eps)
             return out
 
         return _create_pattern_result(pattern, replacement, get_inputs())
@@ -76,9 +74,7 @@ class AddRMSNorm2Pattern:
             return out, residual
 
         def replacement(hidden_states, residual, weight, eps):
-            out, residual = torch.ops.tensor_cast.add_rms_norm2(
-                hidden_states, residual, weight, eps
-            )
+            out, residual = torch.ops.tensor_cast.add_rms_norm2(hidden_states, residual, weight, eps)
             return out, residual
 
         return _create_pattern_result(pattern, replacement, get_inputs())
@@ -100,9 +96,7 @@ class RMSNormQuantPattern:
             return out
 
         def replacement(hidden_states, weight, scale, offset):
-            out = torch.ops.tensor_cast.rms_norm_quant(
-                hidden_states, weight, scale, offset, eps
-            )
+            out = torch.ops.tensor_cast.rms_norm_quant(hidden_states, weight, scale, offset, eps)
             return out
 
         return (pattern, replacement, get_inputs())
@@ -120,15 +114,11 @@ class AddRMSNormQuantPattern:
             return [hidden_states, residual, weight, scale, offset]
 
         def pattern(hidden_states, residual, weight, scale, offset):
-            out = torch.ops.tensor_cast.rms_norm_quant(
-                hidden_states + residual, weight, scale, offset, eps
-            )
+            out = torch.ops.tensor_cast.rms_norm_quant(hidden_states + residual, weight, scale, offset, eps)
             return out
 
         def replacement(hidden_states, residual, weight, scale, offset):
-            out = torch.ops.tensor_cast.add_rms_norm_quant(
-                hidden_states, residual, weight, scale, offset, eps
-            )
+            out = torch.ops.tensor_cast.add_rms_norm_quant(hidden_states, residual, weight, scale, offset, eps)
             return out
 
         return (pattern, replacement, get_inputs())
@@ -149,9 +139,7 @@ class AddRMSNormQuant2Pattern:
 
         def pattern(hidden_states, residual, weight, scale, offset):
             residual = hidden_states + residual
-            out = torch.ops.tensor_cast.rms_norm_quant(
-                residual, weight, scale, offset, eps
-            )
+            out = torch.ops.tensor_cast.rms_norm_quant(residual, weight, scale, offset, eps)
             return out, residual
 
         def replacement(hidden_states, residual, weight, scale, offset):
@@ -331,29 +319,25 @@ class AddRMSNormDynamicQuant2Pattern:
 
         def replacement(hidden_states, residual, weight):
             if symmetric:
-                out, scale, residual = (
-                    torch.ops.tensor_cast.add_rms_norm_dynamic_quant2_symmetric(
-                        hidden_states,
-                        residual,
-                        weight,
-                        eps,
-                        dims,
-                        scale_dtype=scale_dtype,
-                        out_dtype=out_dtype,
-                    )
+                out, scale, residual = torch.ops.tensor_cast.add_rms_norm_dynamic_quant2_symmetric(
+                    hidden_states,
+                    residual,
+                    weight,
+                    eps,
+                    dims,
+                    scale_dtype=scale_dtype,
+                    out_dtype=out_dtype,
                 )
                 return out, scale, residual
             else:
-                out, scale, offset, residual = (
-                    torch.ops.tensor_cast.add_rms_norm_dynamic_quant2_asymmetric(
-                        hidden_states,
-                        residual,
-                        weight,
-                        eps,
-                        dims,
-                        scale_dtype=scale_dtype,
-                        out_dtype=out_dtype,
-                    )
+                out, scale, offset, residual = torch.ops.tensor_cast.add_rms_norm_dynamic_quant2_asymmetric(
+                    hidden_states,
+                    residual,
+                    weight,
+                    eps,
+                    dims,
+                    scale_dtype=scale_dtype,
+                    out_dtype=out_dtype,
                 )
                 return out, scale, offset, residual
 
@@ -372,9 +356,7 @@ class RMSNormDynamicQuantMXFP4Pattern:
 
         def pattern(hidden_states, weight):
             out = torch.ops.tensor_cast.rms_norm(hidden_states, weight, eps)
-            return torch.ops.tensor_cast.dynamic_quantize_mxfp4(
-                out, group_size=group_size
-            )
+            return torch.ops.tensor_cast.dynamic_quantize_mxfp4(out, group_size=group_size)
 
         def replacement(hidden_states, weight):
             return torch.ops.tensor_cast.rms_norm_dynamic_quant_mxfp4(
@@ -440,14 +422,12 @@ class AddRMSNormDynamicQuant2MXFP4Pattern:
             return *result, residual
 
         def replacement(hidden_states, residual, weight):
-            out, scale, residual = (
-                torch.ops.tensor_cast.add_rms_norm_dynamic_quant2_mxfp4(
-                    hidden_states,
-                    residual,
-                    weight,
-                    eps,
-                    group_size,
-                )
+            out, scale, residual = torch.ops.tensor_cast.add_rms_norm_dynamic_quant2_mxfp4(
+                hidden_states,
+                residual,
+                weight,
+                eps,
+                group_size,
             )
             return out, scale, residual
 
@@ -459,9 +439,7 @@ def register_all_patterns():
 
     if config.compilation.fusion_patterns.enable_rms_norm:
         for dtype in _RMS_NORM_DTYPE_LIST:
-            pattern, replacement, example_inputs, scalar_workaround = (
-                RMSNormPattern.create(dtype)
-            )
+            pattern, replacement, example_inputs, scalar_workaround = RMSNormPattern.create(dtype)
             register_pattern(
                 f"rms_norm_pattern_{dtype}",
                 pattern,
@@ -478,9 +456,7 @@ def register_all_patterns():
         )
 
     if config.compilation.fusion_patterns.enable_add_rms_norm:
-        pattern, replacement, example_inputs, scalar_workaround = (
-            AddRMSNormPattern.create()
-        )
+        pattern, replacement, example_inputs, scalar_workaround = AddRMSNormPattern.create()
         register_pattern(
             "add_rms_norm_pattern",
             pattern,
@@ -489,9 +465,7 @@ def register_all_patterns():
             scalar_workaround=scalar_workaround,
             level=1,  # make sure RMSNorm+Quant is fused before it.
         )
-        pattern, replacement, example_inputs, scalar_workaround = (
-            AddRMSNorm2Pattern.create()
-        )
+        pattern, replacement, example_inputs, scalar_workaround = AddRMSNorm2Pattern.create()
         register_pattern(
             "add_rms_norm2_pattern",
             pattern,
@@ -522,26 +496,20 @@ def register_all_patterns():
                 # RMS norm dynamic quantization pattern
                 register_pattern(
                     f"rms_norm_dynamic_quant_{variant_name}_pattern",
-                    *RMSNormDynamicQuantPattern.create(
-                        symmetric=symmetric, per_sample=per_sample
-                    ),
+                    *RMSNormDynamicQuantPattern.create(symmetric=symmetric, per_sample=per_sample),
                 )
 
                 if config.compilation.fusion_patterns.enable_add_rms_norm:
                     # Add RMS norm dynamic quantization pattern
                     register_pattern(
                         f"add_rms_norm_dynamic_quant_{variant_name}_pattern",
-                        *AddRMSNormDynamicQuantPattern.create(
-                            symmetric=symmetric, per_sample=per_sample
-                        ),
+                        *AddRMSNormDynamicQuantPattern.create(symmetric=symmetric, per_sample=per_sample),
                     )
 
                     # Add RMS norm2 dynamic quantization pattern
                     register_pattern(
                         f"add_rms_norm_dynamic_quant2_{variant_name}_pattern",
-                        *AddRMSNormDynamicQuant2Pattern.create(
-                            symmetric=symmetric, per_sample=per_sample
-                        ),
+                        *AddRMSNormDynamicQuant2Pattern.create(symmetric=symmetric, per_sample=per_sample),
                     )
 
         # Register MXFP4 patterns

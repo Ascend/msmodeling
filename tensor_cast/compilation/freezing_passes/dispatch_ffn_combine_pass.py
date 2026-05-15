@@ -46,9 +46,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
 
     # Map from grouped_matmul_*_swiglu target → DFC fused op target
     _DFC_OP_MAP_GMM = {
-        torch.ops.tensor_cast.grouped_matmul_swiglu.default: (
-            torch.ops.tensor_cast.dispatch_ffn_combine.default
-        ),
+        torch.ops.tensor_cast.grouped_matmul_swiglu.default: (torch.ops.tensor_cast.dispatch_ffn_combine.default),
         torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default: (
             torch.ops.tensor_cast.dispatch_ffn_combine_quant.default
         ),
@@ -68,18 +66,12 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
     # BF16 (aten.mm) is NOT included — it always takes the grouped path (Case 1)
     # because GroupedMatmulSwigluPass runs before DFC and successfully groups BF16.
     _DFC_OP_MAP_LINEAR = {
-        torch.ops.tensor_cast.static_quant_linear.default: (
-            torch.ops.tensor_cast.dispatch_ffn_combine_quant.default
-        ),
+        torch.ops.tensor_cast.static_quant_linear.default: (torch.ops.tensor_cast.dispatch_ffn_combine_quant.default),
         torch.ops.tensor_cast.static_quant_linear_int4.default: (
             torch.ops.tensor_cast.dispatch_ffn_combine_quant_int4.default
         ),
-        torch.ops.tensor_cast.fp8_linear.default: (
-            torch.ops.tensor_cast.dispatch_ffn_combine_fp8.default
-        ),
-        torch.ops.tensor_cast.mxfp4_linear.default: (
-            torch.ops.tensor_cast.dispatch_ffn_combine_mxfp4.default
-        ),
+        torch.ops.tensor_cast.fp8_linear.default: (torch.ops.tensor_cast.dispatch_ffn_combine_fp8.default),
+        torch.ops.tensor_cast.mxfp4_linear.default: (torch.ops.tensor_cast.dispatch_ffn_combine_mxfp4.default),
     }
 
     # Upper bound on BFS depth when traversing from init_routing_v2 to
@@ -131,8 +123,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
             result = self._resolve_dfc_variant(region_nodes)
             if result is None:
                 logger.debug(
-                    "DispatchFFNCombinePass skip: cannot resolve DFC variant "
-                    "(start=%s end=%s)",
+                    "DispatchFFNCombinePass skip: cannot resolve DFC variant (start=%s end=%s)",
                     start_node.name,
                     end_node.name,
                 )
@@ -239,10 +230,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         swiglu_nodes = []
         linear_nodes = []
         for node in region_nodes:
-            if (
-                node.op == "call_function"
-                and node.target == torch.ops.tensor_cast.swiglu.default
-            ):
+            if node.op == "call_function" and node.target == torch.ops.tensor_cast.swiglu.default:
                 swiglu_nodes.append(node)
             if self._is_linear_ffn(node):
                 linear_nodes.append(node)
@@ -263,9 +251,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         # Collect every swiglu branch in graph order. The previous logic kept
         # only one swiglu node, so only one expert's gate_up linear landed in
         # GMM1 while all remaining gate_up linears were mis-bucketed into GMM2.
-        graph_order = {
-            node: idx for idx, node in enumerate(linear_nodes[0].graph.nodes)
-        }
+        graph_order = {node: idx for idx, node in enumerate(linear_nodes[0].graph.nodes)}
         swiglu_nodes.sort(key=graph_order.get)
 
         # Collect gate_up linears: trace back from ALL swiglu nodes
@@ -353,9 +339,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         return predecessors
 
     # Forward BFS to collect region nodes with depth limit
-    def _collect_region_nodes_forward(
-        self, start_node: fx.Node, processed: set, max_depth: int
-    ) -> tuple[set, fx.Node]:
+    def _collect_region_nodes_forward(self, start_node: fx.Node, processed: set, max_depth: int) -> tuple[set, fx.Node]:
         region = set()
         q = deque([(start_node, 0)])
         end_node = None
@@ -386,25 +370,16 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
 
     # Node type check helpers
     def _is_permute_token(self, node: fx.Node) -> bool:
-        return (
-            node.op == "call_function"
-            and node.target == torch.ops.tensor_cast.init_routing_v2.default
-        )
+        return node.op == "call_function" and node.target == torch.ops.tensor_cast.init_routing_v2.default
 
     def _is_unpermute_token(self, node: fx.Node) -> bool:
-        return (
-            node.op == "call_function"
-            and node.target == torch.ops.tensor_cast.unpermute_tokens.default
-        )
+        return node.op == "call_function" and node.target == torch.ops.tensor_cast.unpermute_tokens.default
 
     def _is_grouped_matmul(self, node: fx.Node) -> bool:
         return node.op == "call_function" and node.target in self._GROUPED_MATMUL_OPS
 
     def _is_grouped_matmul_swiglu(self, node: fx.Node) -> bool:
-        return (
-            node.op == "call_function"
-            and node.target in self._GROUPED_MATMUL_SWIGLU_OPS
-        )
+        return node.op == "call_function" and node.target in self._GROUPED_MATMUL_SWIGLU_OPS
 
     def _is_linear_ffn(self, node: fx.Node) -> bool:
         return node.op == "call_function" and node.target in self._LINEAR_FFN_OPS
@@ -413,10 +388,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         return node.op == "call_function" and node.target in self._SWIGLU_OPS
 
     def _is_all_to_all(self, node: fx.Node) -> bool:
-        return (
-            node.op == "call_function"
-            and node.target == torch.ops.tensor_cast.all_to_all.default
-        )
+        return node.op == "call_function" and node.target == torch.ops.tensor_cast.all_to_all.default
 
     # Check if region contains required MoE FFN operators
     def _check_region_features(self, region: set) -> tuple[bool, str]:
@@ -430,11 +402,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
                 has_permute = True
             if self._is_unpermute_token(node):
                 has_unpermute = True
-            if (
-                self._is_grouped_matmul(node)
-                or self._is_grouped_matmul_swiglu(node)
-                or self._is_linear_ffn(node)
-            ):
+            if self._is_grouped_matmul(node) or self._is_grouped_matmul_swiglu(node) or self._is_linear_ffn(node):
                 has_ffn_compute = True
             if self._is_swiglu(node):
                 has_swiglu = True

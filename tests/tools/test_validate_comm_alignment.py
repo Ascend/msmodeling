@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+# pylint: disable=no-name-in-module
 from tools.perf_data_collection.comm_bench.validate_comm_alignment import (
     _A3_TOPOLOGIES,
     _CSV_TO_OP,
@@ -152,9 +153,7 @@ class TestAlignmentRow:
 
 class TestAlignmentReport:
     def _make_report(self, ratios, tolerance=2.0):
-        rows = [
-            AlignmentRow("all_reduce", 1024, 16, 1, r * 100.0, 100.0) for r in ratios
-        ]
+        rows = [AlignmentRow("all_reduce", 1024, 16, 1, r * 100.0, 100.0) for r in ratios]
         return AlignmentReport(rows=rows, tolerance=tolerance)
 
     def test_all_pass(self):
@@ -248,9 +247,7 @@ def comm_csv_dir(tmp_path):
 
 def test_validate_csv_all_pass(comm_csv_dir):
     """Measured values within 2x of analytic predictions → all rows PASS."""
-    report = validate_csv(
-        comm_csv_dir / "hcom_allReduce_.csv", "all_reduce", tolerance=2.0
-    )
+    report = validate_csv(comm_csv_dir / "hcom_allReduce_.csv", "all_reduce", tolerance=2.0)
     assert report.fail_count == 0
     assert report.warn_count == 0
     assert report.pass_count == 2
@@ -259,13 +256,9 @@ def test_validate_csv_all_pass(comm_csv_dir):
 
 def test_validate_csv_ratio_near_one(comm_csv_dir):
     """Measured values within 20% of analytic predictions → ratio within [0.8, 1.3]."""
-    report = validate_csv(
-        comm_csv_dir / "hcom_allReduce_.csv", "all_reduce", tolerance=2.0
-    )
+    report = validate_csv(comm_csv_dir / "hcom_allReduce_.csv", "all_reduce", tolerance=2.0)
     for row in report.rows:
-        assert 0.8 <= row.ratio <= 1.3, (
-            f"Expected ratio in [0.8, 1.3], got {row.ratio:.3f}"
-        )
+        assert 0.8 <= row.ratio <= 1.3, f"Expected ratio in [0.8, 1.3], got {row.ratio:.3f}"
 
 
 def test_validate_csv_fail_on_large_discrepancy(tmp_path):

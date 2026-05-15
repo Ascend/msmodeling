@@ -165,9 +165,7 @@ def compute_fused_op_stats(
         "m2_fused_op_hr": fused_hit / fused_total if fused_total > 0 else 0,
         "m3_fused_hit_no_zc": fused_hit_no_zc,
         "m3_fused_total_no_zc": fused_total_no_zc,
-        "m3_fused_op_hr_no_zc": (
-            fused_hit_no_zc / fused_total_no_zc if fused_total_no_zc > 0 else 0
-        ),
+        "m3_fused_op_hr_no_zc": (fused_hit_no_zc / fused_total_no_zc if fused_total_no_zc > 0 else 0),
     }
 
 
@@ -275,9 +273,7 @@ class MetricsCollector:
                 metric_kernel_type = "accepted_miss"
             shape_sig = tuple(tc_shapes)
             empirical_s = result.latency_us * 1e-6
-            self._hit_details.append(
-                (func_name, metric_kernel_type, shape_sig, empirical_s)
-            )
+            self._hit_details.append((func_name, metric_kernel_type, shape_sig, empirical_s))
 
         elif result is not None and result.source == QuerySource.PARTIAL:
             # PARTIAL: use empirical latency in E2E sum, but count as MISS
@@ -286,17 +282,13 @@ class MetricsCollector:
             self._stats["miss"] += 1
             missed_kernels = result.details.get("missed_kernels", [])
             reason = f"partial:{','.join(missed_kernels)}"
-            self._miss_details.append(
-                (func_name, reason, tc_shapes, analytic_latency_s)
-            )
+            self._miss_details.append((func_name, reason, tc_shapes, analytic_latency_s))
 
         else:
             # Full MISS
             self._stats["miss"] += 1
             reason = miss_reason or "unknown"
-            self._miss_details.append(
-                (func_name, reason, tc_shapes, analytic_latency_s)
-            )
+            self._miss_details.append((func_name, reason, tc_shapes, analytic_latency_s))
 
     def get_stats(self) -> dict:
         """Return M1: Raw Op-Count Match Rate."""
@@ -318,9 +310,7 @@ class MetricsCollector:
         )
 
         partial_details = [
-            (fn, reason, shapes, lat)
-            for fn, reason, shapes, lat in self._miss_details
-            if reason.startswith("partial:")
+            (fn, reason, shapes, lat) for fn, reason, shapes, lat in self._miss_details if reason.startswith("partial:")
         ]
         full_miss_details = [
             (fn, reason, shapes, lat)
@@ -332,13 +322,9 @@ class MetricsCollector:
             total = stats["total"]
             partial_count = len(partial_details)
             partial_op_counts = Counter(
-                fn.removeprefix("torch.ops.").split(".")[-1] if "." in fn else fn
-                for fn, _r, _s, _l in partial_details
+                fn.removeprefix("torch.ops.").split(".")[-1] if "." in fn else fn for fn, _r, _s, _l in partial_details
             )
-            op_strs = [
-                f"{name}\u00d7{count}" if count > 1 else name
-                for name, count in partial_op_counts.most_common()
-            ]
+            op_strs = [f"{name}\u00d7{count}" if count > 1 else name for name, count in partial_op_counts.most_common()]
             logger.info(
                 "  PARTIAL: %d/%d (%s)",
                 partial_count,
@@ -353,9 +339,7 @@ class MetricsCollector:
                 f"  {mapping} (x{count})" if count > 1 else f"  {mapping}"
                 for mapping, count in hit_counts.most_common()
             ]
-            logger.info(
-                "  HITs (%d unique):\n%s", len(hit_counts), "\n".join(hit_lines)
-            )
+            logger.info("  HITs (%d unique):\n%s", len(hit_counts), "\n".join(hit_lines))
 
         if full_miss_details:
             by_reason: dict[str, list[tuple[str, list[tuple]]]] = {}
@@ -366,10 +350,7 @@ class MetricsCollector:
             for reason, ops in sorted(by_reason.items()):
                 label = _MISS_REASON_LABELS.get(reason, reason)
                 op_counts = Counter(func_name for func_name, _ in ops)
-                op_strs = [
-                    f"{name} (x{count})" if count > 1 else name
-                    for name, count in op_counts.most_common()
-                ]
+                op_strs = [f"{name} (x{count})" if count > 1 else name for name, count in op_counts.most_common()]
                 miss_lines.append(f"  [{reason}] {label}: {', '.join(op_strs)}")
                 for func_name, tc_shapes in ops:
                     logger.debug("    %s shapes: %s", func_name, tc_shapes)
@@ -402,9 +383,7 @@ class MetricsCollector:
             shape_stats["m4_per_shape_hr"] * 100,
         )
         if shape_stats["m4_miss_shape_list"]:
-            miss_lines = [
-                f"  {fn} {ss}" for fn, ss in shape_stats["m4_miss_shape_list"][:20]
-            ]
+            miss_lines = [f"  {fn} {ss}" for fn, ss in shape_stats["m4_miss_shape_list"][:20]]
             remaining = len(shape_stats["m4_miss_shape_list"]) - 20
             if remaining > 0:
                 miss_lines.append(f"  ... and {remaining} more")
@@ -464,17 +443,14 @@ class MetricsCollector:
                 "m4_total_shapes": shape["m4_total_shapes"],
                 "m4_per_shape_hr": shape["m4_per_shape_hr"],
                 "m4_miss_shape_list": [
-                    {"func_name": fn, "shape": [list(s) for s in ss]}
-                    for fn, ss in shape["m4_miss_shape_list"]
+                    {"func_name": fn, "shape": [list(s) for s in ss]} for fn, ss in shape["m4_miss_shape_list"]
                 ],
             },
             "m5": {
                 "m5_hit_latency_sum_s": self._hit_latency_sum,
                 "m5_total_latency_sum_s": self._total_latency_sum,
                 "m5_simulated_latency_coverage": (
-                    self._hit_latency_sum / self._total_latency_sum
-                    if self._total_latency_sum > 0
-                    else 0.0
+                    self._hit_latency_sum / self._total_latency_sum if self._total_latency_sum > 0 else 0.0
                 ),
             },
             "misses": [

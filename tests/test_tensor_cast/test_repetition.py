@@ -60,35 +60,25 @@ class RepetitionTestCase(unittest.TestCase):
         model_with_repeats = TransformerModel(model_id, model_config_with_repeats)
         self.check_num_effective_layers(model_with_repeats.unwrap().layers, 1)
         if do_compile:
-            model = torch.compile(
-                model, backend=get_backend(), dynamic=True, fullgraph=True
-            )
-            model_with_repeats = torch.compile(
-                model_with_repeats, backend=get_backend(), dynamic=True, fullgraph=True
-            )
+            model = torch.compile(model, backend=get_backend(), dynamic=True, fullgraph=True)
+            model_with_repeats = torch.compile(model_with_repeats, backend=get_backend(), dynamic=True, fullgraph=True)
         inputs = torch.empty([2, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([2, num_tokens], dtype=torch.long, device="meta")
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (2, num_tokens, model.vocab_size))
 
         with (
-            Runtime(
-                perf_model, device_profile, MemoryTracker(device_profile)
-            ) as runtime_with_repeats,
+            Runtime(perf_model, device_profile, MemoryTracker(device_profile)) as runtime_with_repeats,
             torch.no_grad(),
         ):
             outputs = model_with_repeats.forward(inputs, position_ids)
-            self.assertEqual(
-                outputs.shape, (2, num_tokens, model_with_repeats.vocab_size)
-            )
+            self.assertEqual(outputs.shape, (2, num_tokens, model_with_repeats.vocab_size))
 
         # NOTE: we might miss some cross-layer fusion patterns with repetitions
         #       so we allow some errors here.
@@ -99,9 +89,7 @@ class RepetitionTestCase(unittest.TestCase):
             rtol=0.027 if do_compile else 0,
         )
         runtime_cost_s = runtime.total_execution_time_s()[perf_model.name]
-        runtime_cost_with_repeats_s = runtime_with_repeats.total_execution_time_s()[
-            perf_model.name
-        ]
+        runtime_cost_with_repeats_s = runtime_with_repeats.total_execution_time_s()[perf_model.name]
         assert_close(
             self,
             runtime_cost_s,
@@ -109,9 +97,7 @@ class RepetitionTestCase(unittest.TestCase):
             rtol=0.01 if do_compile else 0,
         )
         peak_mem_usage = runtime.memory_tracker.peak_mem_usage()
-        peak_mem_usage_with_repeats = (
-            runtime_with_repeats.memory_tracker.peak_mem_usage()
-        )
+        peak_mem_usage_with_repeats = runtime_with_repeats.memory_tracker.peak_mem_usage()
         assert_close(
             self,
             peak_mem_usage,
@@ -133,20 +119,14 @@ class RepetitionTestCase(unittest.TestCase):
 
         model = build_model(user_config)
 
-        mtp_block_module_name = get_mtp_block_module_name(
-            model.model_config.hf_config.model_type
-        )
+        mtp_block_module_name = get_mtp_block_module_name(model.model_config.hf_config.model_type)
         self.assertIsNotNone(mtp_block_module_name)
 
         self.check_num_effective_layers(model.unwrap().layers, 2)
         self.check_num_effective_layers(model._inner.mtp.layers, 1)
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         # make sure all original attention modules have been replaced
-        self.assertTrue(
-            has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast")
-        )
+        self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         device_profile = TEST_DEVICE
@@ -170,7 +150,6 @@ class RepetitionTestCase(unittest.TestCase):
         start_str = "tensor_cast.multihead_latent_attention.default"
         end_str = "64"
         found = any(
-            line.strip().startswith(start_str) and line.strip().endswith(end_str)
-            for line in result.splitlines()
+            line.strip().startswith(start_str) and line.strip().endswith(end_str) for line in result.splitlines()
         )
         self.assertTrue(found, result)

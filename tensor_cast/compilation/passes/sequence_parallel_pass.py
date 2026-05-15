@@ -86,11 +86,7 @@ def _find_norm_after_add(add_node):
             return None
         cur = users[0]
     visited = set()
-    while (
-        cur.op == "call_function"
-        and cur.target is _COPY_REGION
-        and id(cur) not in visited
-    ):
+    while cur.op == "call_function" and cur.target is _COPY_REGION and id(cur) not in visited:
         visited.add(id(cur))
         users = list(cur.users)
         if len(users) != 1:
@@ -204,11 +200,7 @@ class Pattern3Rewriter:
                 and node.args[0].target is _ADD_RMS_NORM2
             ):
                 continue
-            fused_users = [
-                u
-                for u in node.users
-                if u.op == "call_function" and u.target is _ADD_RMS_NORM
-            ]
+            fused_users = [u for u in node.users if u.op == "call_function" and u.target is _ADD_RMS_NORM]
             if len(fused_users) == 1:
                 norm = fused_users[0]
                 if id(norm) in seen:
@@ -220,11 +212,7 @@ class Pattern3Rewriter:
                 seen.add(id(norm))
                 out.append(_P3Match(comm, comm_out, norm, norm))
                 continue
-            add_users = [
-                u
-                for u in node.users
-                if u.op == "call_function" and u.target in _ADD_OPS
-            ]
+            add_users = [u for u in node.users if u.op == "call_function" and u.target in _ADD_OPS]
             if len(add_users) != 1:
                 continue
             add_node = add_users[0]
@@ -251,9 +239,7 @@ class Pattern3Rewriter:
         rank, rg = m.comm_node.args[1], m.comm_node.args[2]
         rs_dim = _shard_dim(m.comm_node.args[0])
         with graph.inserting_after(m.comm_node):
-            rs = graph.call_function(
-                _REDUCE_SCATTER, (m.comm_node.args[0], rs_dim, rank, rg)
-            )
+            rs = graph.call_function(_REDUCE_SCATTER, (m.comm_node.args[0], rs_dim, rank, rg))
         if m.comm_output is m.comm_node:
             m.add_node.replace_input_with(m.comm_node, rs)
         else:
@@ -280,11 +266,7 @@ class Pattern1Rewriter:
             inp = node.args[0]
             if not isinstance(inp, Node):
                 continue
-            if (
-                inp.target is _REGION_BEGIN
-                and isinstance(inp.args[0], Node)
-                and inp.args[0].target is _ALL_REDUCE
-            ):
+            if inp.target is _REGION_BEGIN and isinstance(inp.args[0], Node) and inp.args[0].target is _ALL_REDUCE:
                 out.append((inp.args[0], inp, node))
             elif inp.target is _ALL_REDUCE:
                 out.append((inp, None, node))
@@ -338,9 +320,7 @@ class Pattern2Rewriter:
             ar_inputs = [
                 arg
                 for arg in node.args[:2]
-                if isinstance(arg, torch.fx.Node)
-                and arg.op == "call_function"
-                and arg.target is _ALL_REDUCE
+                if isinstance(arg, torch.fx.Node) and arg.op == "call_function" and arg.target is _ALL_REDUCE
             ]
             if len(ar_inputs) != 1:
                 continue

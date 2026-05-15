@@ -17,6 +17,7 @@ Tests are split into two categories:
    dist is initialized automatically inside each test (hccl backend, rank=0, world_size=1).
 """
 
+# pylint: disable=no-name-in-module
 import csv
 import inspect
 from pathlib import Path
@@ -140,9 +141,9 @@ class TestApplyDispatchOverhead:
         for (op_type, nd), overhead in _DISPATCH_OVERHEAD.items():
             row = self._row(op_type, nd, 100.0)
             result = _apply_dispatch_overhead(row, op_type)
-            assert result["Duration(us)"] == pytest.approx(
-                100.0 + overhead, abs=0.01
-            ), f"op={op_type} nd={nd}: expected {100.0 + overhead}"
+            assert result["Duration(us)"] == pytest.approx(100.0 + overhead, abs=0.01), (
+                f"op={op_type} nd={nd}: expected {100.0 + overhead}"
+            )
 
     def test_bandwidth_recalculated_after_overhead(self):
         row = self._row("all_gather", 16, 100.0, msg_bytes=1048576)
@@ -183,22 +184,13 @@ class TestActiveItersForMsg:
         assert _active_iters_for_msg(65536) == PROFILER_ACTIVE_ITERS
 
     def test_just_below_threshold_returns_full_active(self):
-        assert (
-            _active_iters_for_msg(PROFILER_LARGE_MSG_THRESHOLD - 1)
-            == PROFILER_ACTIVE_ITERS
-        )
+        assert _active_iters_for_msg(PROFILER_LARGE_MSG_THRESHOLD - 1) == PROFILER_ACTIVE_ITERS
 
     def test_at_threshold_returns_one(self):
-        assert (
-            _active_iters_for_msg(PROFILER_LARGE_MSG_THRESHOLD)
-            == PROFILER_ACTIVE_ITERS_LARGE
-        )
+        assert _active_iters_for_msg(PROFILER_LARGE_MSG_THRESHOLD) == PROFILER_ACTIVE_ITERS_LARGE
 
     def test_above_threshold_returns_one(self):
-        assert (
-            _active_iters_for_msg(PROFILER_LARGE_MSG_THRESHOLD * 4)
-            == PROFILER_ACTIVE_ITERS_LARGE
-        )
+        assert _active_iters_for_msg(PROFILER_LARGE_MSG_THRESHOLD * 4) == PROFILER_ACTIVE_ITERS_LARGE
 
 
 # ---------------------------------------------------------------------------
@@ -242,13 +234,10 @@ class TestBuildRunOp:
         closure_vars = {
             cell.cell_contents
             for cell in run_op.__closure__
-            if hasattr(cell, "cell_contents")
-            and isinstance(cell.cell_contents, torch.Tensor)
+            if hasattr(cell, "cell_contents") and isinstance(cell.cell_contents, torch.Tensor)
         }
         shapes = [t.shape for t in closure_vars]
-        assert any(s == torch.Size([32768]) for s in shapes), (
-            f"Expected tensor of shape [32768], got {shapes}"
-        )
+        assert any(s == torch.Size([32768]) for s in shapes), f"Expected tensor of shape [32768], got {shapes}"
 
 
 # ---------------------------------------------------------------------------
@@ -347,9 +336,7 @@ def test_run_bench_kernel_no_sync_returns_positive_duration():
     def run_op():
         dist.all_reduce(tensor)
 
-    result = _run_bench_kernel(
-        run_op, "all_reduce", is_npu=True, is_leader=True, no_sync=True
-    )
+    result = _run_bench_kernel(run_op, "all_reduce", is_npu=True, is_leader=True, no_sync=True)
     assert result is not None, "Leader (no_sync) should return a duration"
     assert result > 0.0, f"Expected positive duration, got {result}"
 
@@ -380,9 +367,7 @@ def test_run_bench_profiler_batch_small_msg():
 
     assert isinstance(results, dict), "Should return a dict"
     assert msg_bytes in results, f"Result missing key {msg_bytes}"
-    assert results[msg_bytes] > 0.0, (
-        f"Expected positive duration, got {results[msg_bytes]}"
-    )
+    assert results[msg_bytes] > 0.0, f"Expected positive duration, got {results[msg_bytes]}"
 
 
 @pytest.mark.npu
@@ -411,9 +396,7 @@ def test_run_bench_profiler_batch_large_msg():
 
     assert isinstance(results, dict), "Should return a dict"
     assert msg_bytes in results, f"Result missing key {msg_bytes}"
-    assert results[msg_bytes] > 0.0, (
-        f"Expected positive duration, got {results[msg_bytes]}"
-    )
+    assert results[msg_bytes] > 0.0, f"Expected positive duration, got {results[msg_bytes]}"
 
 
 @pytest.mark.npu
@@ -440,7 +423,7 @@ def test_run_benchmark_kernel_mode_writes_csv(tmp_path):
     assert result["bandwidth_gbps"] > 0.0
     assert result["message_bytes"] == 65536
     assert Path(csv_path).exists(), "CSV file should have been written"
-    with open(csv_path) as f:
+    with open(csv_path, encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 1
     assert float(rows[0]["Duration(us)"]) > 0.0
@@ -453,7 +436,7 @@ def test_run_benchmark_kernel_mode_writes_csv(tmp_path):
 
 def _write_kernel_details(path: Path, rows: list):
     """Write a minimal kernel_details.csv with Type, Name, Duration(us) columns."""
-    with path.open("w", newline="") as f:
+    with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["Type", "Name", "Duration(us)"])
         writer.writeheader()
         writer.writerows(rows)
@@ -584,8 +567,7 @@ class TestMainKernelPath:
     def test_kernel_branch_exists(self):
         """main() must have an explicit 'bench_mode == kernel' branch."""
         assert 'bench_mode == "kernel"' in self._main_source(), (
-            "main() must have an explicit kernel branch to avoid "
-            "per-point profiler restart (CANN constraint)"
+            "main() must have an explicit kernel branch to avoid per-point profiler restart (CANN constraint)"
         )
 
     def test_kernel_branch_uses_parse_kernel_fn(self):
@@ -602,9 +584,7 @@ class TestMainKernelPath:
         )
 
         source = inspect.getsource(mod._run_bench_profiler_batch)
-        assert "return {}" in source, (
-            "_run_bench_profiler_batch must return empty dict for tolerant error handling"
-        )
+        assert "return {}" in source, "_run_bench_profiler_batch must return empty dict for tolerant error handling"
         assert "if not durations:" in source
 
 

@@ -86,9 +86,7 @@ class DeepseekV32Indexer(nn.Module):
         self.topk_limit = config.topk_limit
         self.q_lora_rank = config.q_lora_rank
 
-        self.wq_b = nn.Linear(
-            self.q_lora_rank, self.num_heads * self.head_dim, bias=False
-        )
+        self.wq_b = nn.Linear(self.q_lora_rank, self.num_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(self.hidden_size, self.head_dim, bias=False)
         self.k_norm = nn.LayerNorm(self.head_dim)
         self.weights_proj = nn.Linear(
@@ -128,23 +126,15 @@ class DeepseekV32SparseAttention(nn.Module):
         self.v_head_dim = config.v_head_dim
         self.qk_nope_head_dim = config.qk_nope_head_dim
         self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
-        self.num_key_value_groups = (
-            config.num_attention_heads // config.num_key_value_heads
-        )
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.is_causal = True
 
         if self.q_lora_rank is None:
-            self.q_proj = nn.Linear(
-                self.hidden_size, self.num_heads * self.qk_head_dim, bias=False
-            )
+            self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.qk_head_dim, bias=False)
         else:
-            self.q_a_proj = nn.Linear(
-                self.hidden_size, config.q_lora_rank, bias=config.attention_bias
-            )
+            self.q_a_proj = nn.Linear(self.hidden_size, config.q_lora_rank, bias=config.attention_bias)
             self.q_a_layernorm = DeepseekV32RMSNorm(config.q_lora_rank)
-            self.q_b_proj = nn.Linear(
-                config.q_lora_rank, self.num_heads * self.qk_head_dim, bias=False
-            )
+            self.q_b_proj = nn.Linear(config.q_lora_rank, self.num_heads * self.qk_head_dim, bias=False)
 
         self.kv_a_proj_with_mqa = nn.Linear(
             self.hidden_size,
@@ -154,8 +144,7 @@ class DeepseekV32SparseAttention(nn.Module):
         self.kv_a_layernorm = DeepseekV32RMSNorm(config.kv_lora_rank)
         self.kv_b_proj = nn.Linear(
             config.kv_lora_rank,
-            self.num_heads
-            * (self.qk_head_dim - self.qk_rope_head_dim + self.v_head_dim),
+            self.num_heads * (self.qk_head_dim - self.qk_rope_head_dim + self.v_head_dim),
             bias=False,
         )
 
@@ -192,12 +181,8 @@ class DeepseekV32DecoderLayer(nn.Module):
         else:
             self.mlp = DeepseekV32MLP(config)
 
-        self.input_layernorm = DeepseekV32RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_attention_layernorm = DeepseekV32RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.input_layernorm = DeepseekV32RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = DeepseekV32RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -238,9 +223,7 @@ class DeepseekV32Model(DeepseekV3Model):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.embed_tokens = nn.Embedding(
-            config.vocab_size, config.hidden_size, self.padding_idx
-        )
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
 
         layers = []
         for layer_idx in range(config.num_hidden_layers):

@@ -62,29 +62,29 @@ with self.set_default_dtype():
 # transformtions.py 中的独立转换函数
 def wrap_model(model) -> None:
     # 标准化前向接口包装
-    
+
 def maybe_enable_mtp(model) -> None:
     # MTP (Multi-Stage Training) 多阶段训练机制
     # 当模型配置启用 MTP 时，将后续层训练模块替换为 MTP 训练模块，支持多阶段训练架构
-    
+
 def maybe_reuse_layers(model) -> None:
     # 层重用优化
-    
+
 def patch_rotary_emb(model) -> None:
     # 旋转位置编码适配
-    
+
 def patch_attention(model) -> None:
     # 注意力模块处理
-    
+
 def patch_mla(model) -> None:
     # 多头潜在注意力处理
-    
+
 def patch_moe(model) -> None:
     # 专家混合模块处理
-    
+
 def quantize_model(model) -> None:
     # 模型量化处理
-    
+
 def shard_model(model) -> None:
     # 模型分片处理
 ```
@@ -222,13 +222,13 @@ def _(model: TransformerModel):
  def _(model: TransformerModel):
      """复杂自定义模型处理"""
      wrap_model(model)
-     
+
      # 自定义注意力处理
      patch_attention(model)
-     
+
      # 自定义旋转位置编码
      patch_rotary_emb(model)
-     
+
      # 跳过其他标准转换步骤
      # 只执行自定义的模块替换
      custom_module_replacement(model)
@@ -278,7 +278,7 @@ def _(model: TransformerModel):
  with init_on_device_without_buffers("meta"), no_init_weights():
      self._inner = model_class.from_config(hf_config).to(model_config.dtype)
  self._inner.eval()
- 
+
  # 用于标准模型和diffusers模型的统一转换流水线
  wrap_model(self)           # 处理transformer和diffusers接口
  quantize_model(self)       # 支持两种模型类型的共享量化逻辑

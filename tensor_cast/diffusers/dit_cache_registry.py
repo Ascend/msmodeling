@@ -40,9 +40,7 @@ def _make_block_setter(container, index: int) -> BlockSetter:
 
 
 def _module_list_blocks_with_setters(blocks) -> list[tuple[Any, BlockSetter]]:
-    return [
-        (block, _make_block_setter(blocks, idx)) for idx, block in enumerate(blocks)
-    ]
+    return [(block, _make_block_setter(blocks, idx)) for idx, block in enumerate(blocks)]
 
 
 def replace_blocks_in_range(
@@ -78,14 +76,10 @@ def _get_hunyuanvideo_blocks_with_setters(
     inner: Any,
 ) -> Sequence[Tuple[Any, BlockSetter]]:
     if not hasattr(inner, "transformer_blocks"):
-        logger.warning(
-            "HunyuanVideoTransformer3DModel has no attribute 'transformer_blocks'."
-        )
+        logger.warning("HunyuanVideoTransformer3DModel has no attribute 'transformer_blocks'.")
         return []
     if not hasattr(inner, "single_transformer_blocks"):
-        logger.warning(
-            "HunyuanVideoTransformer3DModel has no attribute 'single_transformer_blocks'."
-        )
+        logger.warning("HunyuanVideoTransformer3DModel has no attribute 'single_transformer_blocks'.")
         return []
     pairs = _module_list_blocks_with_setters(inner.transformer_blocks)
     pairs.extend(_module_list_blocks_with_setters(inner.single_transformer_blocks))
@@ -98,9 +92,7 @@ def _get_hunyuanvideo15_blocks_with_setters(
     inner: Any,
 ) -> Sequence[Tuple[Any, BlockSetter]]:
     if not hasattr(inner, "transformer_blocks"):
-        logger.warning(
-            "HunyuanVideo15Transformer3DModel has no attribute 'transformer_blocks'."
-        )
+        logger.warning("HunyuanVideo15Transformer3DModel has no attribute 'transformer_blocks'.")
         return []
     pairs = _module_list_blocks_with_setters(inner.transformer_blocks)
     if not pairs:

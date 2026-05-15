@@ -20,10 +20,7 @@ class PeepHolePass(TensorCastGraphModulePass):
         modified = False
 
         for node in list(graph.nodes):
-            if (
-                node.target == torch.ops.aten.view.default
-                and self._sink_view_before_all_reduce(node)
-            ):
+            if node.target == torch.ops.aten.view.default and self._sink_view_before_all_reduce(node):
                 modified = True
                 continue
 
@@ -53,9 +50,7 @@ class PeepHolePass(TensorCastGraphModulePass):
         graph = view_node.graph
         new_args = (all_reduce_node,) + tuple(view_node.args[1:])
         with graph.inserting_after(all_reduce_node):
-            new_view = graph.call_function(
-                torch.ops.aten.view.default, new_args, dict(view_node.kwargs)
-            )
+            new_view = graph.call_function(torch.ops.aten.view.default, new_args, dict(view_node.kwargs))
             new_view.meta = dict(view_node.meta)
 
         # Redirect previous consumers of all_reduce to the new view.

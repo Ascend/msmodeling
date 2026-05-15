@@ -6,23 +6,30 @@ A module for managing and synchronizing logical time in a multi-threaded environ
 import logging
 from abc import abstractmethod
 from functools import wraps
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import salabim as sim
 
+# Singleton salabim Environment (call sites use _get_sim_env() so pylint sees sim.Environment).
+_salabim_env: Optional[sim.Environment] = None
 
-# 1. Singleton simulation environment
+
+def _get_sim_env() -> sim.Environment:
+    global _salabim_env
+    if _salabim_env is None:
+        _salabim_env = sim.Environment()
+    return _salabim_env
+
+
+# 1. Singleton simulation environment (public API for tests / external use)
 class SimulationEnv:
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = sim.Environment()
-        return cls._instance
-
     @classmethod
-    def clear(cls):
-        cls._instance = None
+    def clear(cls) -> None:
+        global _salabim_env
+        _salabim_env = None
+
+    def __new__(cls) -> sim.Environment:
+        return _get_sim_env()
 
 
 def init_simulation():
@@ -30,29 +37,29 @@ def init_simulation():
     initialize simulation environment
     """
     SimulationEnv.clear()
-    SimulationEnv()
+    _get_sim_env()
 
 
 def start_simulation():
     """
     Start simulation
     """
-    SimulationEnv().run()
+    _get_sim_env().run()
 
 
 def stop_simulation():
     """
     Stop simulation
     """
-    SimulationEnv().main().activate()
+    _get_sim_env().main().activate()
 
 
 def current_task_name():
-    return SimulationEnv().current_component().name()
+    return _get_sim_env().current_component().name()
 
 
 def current_task():
-    return SimulationEnv().current_component()
+    return _get_sim_env().current_component()
 
 
 # 2. time related functions/classes
@@ -60,7 +67,7 @@ def now() -> float:
     """
     Returns the current logical timestamp.
     """
-    return SimulationEnv().now()
+    return _get_sim_env().now()
 
 
 def elapse(ts: float):
@@ -70,7 +77,7 @@ def elapse(ts: float):
     Args:
         ts (float): The logical duration (in seconds) to set.
     """
-    SimulationEnv().current_component().hold(ts)
+    _get_sim_env().current_component().hold(ts)
 
 
 class DurationDecorator:
@@ -171,11 +178,11 @@ def get_logger(logger_name: str):
 
         def filter(self, record):
             try:
-                record.sim_time = SimulationEnv().now()
+                record.sim_time = _get_sim_env().now()
             except Exception:
                 record.sim_time = 0.0
             try:
-                record.task_name = SimulationEnv().current_component().name()
+                record.task_name = _get_sim_env().current_component().name()
             except Exception:
                 record.task_name = ""
             return True  # always return True to ensure the record is processed

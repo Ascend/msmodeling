@@ -87,8 +87,7 @@ def arg_parse():
         "--prefix-cache-hit-rate",
         type=check_prefix_cache_hit_rate,
         default=0.0,
-        help="Prefix cache hit rate for prefill token reuse. "
-        "This is a token-level approximation in [0, 1).",
+        help="Prefix cache hit rate for prefill token reuse. This is a token-level approximation in [0, 1).",
     )
     model_group.add_argument(
         "--quantize-linear-action",
@@ -219,9 +218,7 @@ def arg_parse():
         # Backward-compatible default: search TP only with default range.
         args.tp_sizes = []
 
-    def _normalize_and_validate(
-        values: list[int] | None, arg_name: str, num_devices: int
-    ) -> list[int] | None:
+    def _normalize_and_validate(values: list[int] | None, arg_name: str, num_devices: int) -> list[int] | None:
         if values is None:
             return None
         normalized = []
@@ -236,30 +233,21 @@ def arg_parse():
 
     args.tp_sizes = _normalize_and_validate(args.tp_sizes, "tp-sizes", args.num_devices)
     args.ep_sizes = _normalize_and_validate(args.ep_sizes, "ep-sizes", args.num_devices)
-    args.moe_dp_sizes = _normalize_and_validate(
-        args.moe_dp_sizes, "moe-dp-sizes", args.num_devices
-    )
+    args.moe_dp_sizes = _normalize_and_validate(args.moe_dp_sizes, "moe-dp-sizes", args.num_devices)
 
-    tp_candidates = resolve_search_sizes(
-        args.tp_sizes, args.num_devices, args.num_devices
-    )
-    ep_candidates = resolve_search_sizes(
-        args.ep_sizes, args.num_devices, args.num_devices
-    )
+    tp_candidates = resolve_search_sizes(args.tp_sizes, args.num_devices, args.num_devices)
+    ep_candidates = resolve_search_sizes(args.ep_sizes, args.num_devices, args.num_devices)
     moe_dp_candidates = resolve_search_sizes(args.moe_dp_sizes, args.num_devices, 1)
 
     has_valid_combination = any(
-        args.num_devices % tp == 0
-        and args.num_devices % ep == 0
-        and args.num_devices % (ep * moe_dp) == 0
+        args.num_devices % tp == 0 and args.num_devices % ep == 0 and args.num_devices % (ep * moe_dp) == 0
         for tp in tp_candidates
         for ep in ep_candidates
         for moe_dp in moe_dp_candidates
     )
     if not has_valid_combination:
         parser.error(
-            "No valid parallel combination is produced by the provided search arguments "
-            "under current --num-devices."
+            "No valid parallel combination is produced by the provided search arguments under current --num-devices."
         )
 
     return args
@@ -293,10 +281,7 @@ def main():
         )
         return 1
 
-    if (
-        args.num_mtp_tokens > 0
-        and args.num_mtp_tokens > len(args.mtp_acceptance_rate) + 1
-    ):
+    if args.num_mtp_tokens > 0 and args.num_mtp_tokens > len(args.mtp_acceptance_rate) + 1:
         logger.error(
             "num_mtp_tokens (%r) is greater than the length of mtp_acceptance_rate (%r). Please check.",
             args.num_mtp_tokens,
@@ -307,14 +292,9 @@ def main():
     # Validate PD ratio optimization parameters
     if args.enable_optimize_prefill_decode_ratio:
         if args.disagg:
-            logger.error(
-                "--enable-optimize-prefill-decode-ratio cannot be used together with --disagg."
-            )
+            logger.error("--enable-optimize-prefill-decode-ratio cannot be used together with --disagg.")
             return 1
-        if (
-            args.prefill_devices_per_instance is None
-            or args.decode_devices_per_instance is None
-        ):
+        if args.prefill_devices_per_instance is None or args.decode_devices_per_instance is None:
             logger.error(
                 "Both --prefill-devices-per-instance and --decode-devices-per-instance "
                 "are required when PD ratio optimization is enabled."

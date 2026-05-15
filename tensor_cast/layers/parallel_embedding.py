@@ -24,9 +24,7 @@ class ParallelEmbedding(ModelWrapperBase):
         try:
             self.shard_mode = WordEmbeddingTPMode(shard_mode)
         except ValueError as err:
-            raise ValueError(
-                f"word embedding tp mode must be 'col' or 'row', got {shard_mode!r}."
-            ) from err
+            raise ValueError(f"word embedding tp mode must be 'col' or 'row', got {shard_mode!r}.") from err
         self._vocab_size = self.num_embeddings
         self._row_start = 0
         self._row_end = self._vocab_size
@@ -36,9 +34,7 @@ class ParallelEmbedding(ModelWrapperBase):
         if not self.tp_size > 1:
             return
         shard_dim = 1 if self.shard_mode == WordEmbeddingTPMode.col else 0
-        shard_weight = get_partial_sharded(
-            self._inner.weight, self.tp_size, self.tp_rank, dim=shard_dim
-        )
+        shard_weight = get_partial_sharded(self._inner.weight, self.tp_size, self.tp_rank, dim=shard_dim)
         self._inner.weight = nn.Parameter(shard_weight.contiguous())
         if self.shard_mode == WordEmbeddingTPMode.row:
             block_size = self._inner.weight.shape[0]
@@ -50,9 +46,7 @@ class ParallelEmbedding(ModelWrapperBase):
             return self._inner(x)
         if self.shard_mode == WordEmbeddingTPMode.row:
             in_local_vocab = (x >= self._row_start) & (x < self._row_end)
-            safe_local_indices = torch.where(
-                in_local_vocab, x - self._row_start, torch.zeros_like(x)
-            )
+            safe_local_indices = torch.where(in_local_vocab, x - self._row_start, torch.zeros_like(x))
             x = self._inner(safe_local_indices)
             x = x.masked_fill_(~in_local_vocab.unsqueeze(-1), 0)
             return self.tp_group.all_reduce(x)

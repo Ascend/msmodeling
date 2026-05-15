@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+# pylint: disable=no-name-in-module
 from tools.perf_data_collection.op_replay import common
 
 if TYPE_CHECKING:
@@ -21,10 +22,7 @@ def test_get_target_data_dir_preserves_full_version_dir_name():
         vllm_ascend_version="vllm0.18.0_torch2.9.0_cann8.5",
     )
     assert target_dir == (
-        common.DATA_DIR
-        / "ATLAS_800_A3_752T_128G_DIE"
-        / "vllm_ascend"
-        / "vllm0.18.0_torch2.9.0_cann8.5"
+        common.DATA_DIR / "ATLAS_800_A3_752T_128G_DIE" / "vllm_ascend" / "vllm0.18.0_torch2.9.0_cann8.5"
     )
 
 
@@ -36,10 +34,7 @@ def test_get_target_data_dir_builds_version_dir_from_components():
         cann_version="8.5",
     )
     assert target_dir == (
-        common.DATA_DIR
-        / "ATLAS_800_A3_752T_128G_DIE"
-        / "vllm_ascend"
-        / "vllm0.18.0_torch2.9.0_cann8.5"
+        common.DATA_DIR / "ATLAS_800_A3_752T_128G_DIE" / "vllm_ascend" / "vllm0.18.0_torch2.9.0_cann8.5"
     )
 
 
@@ -63,9 +58,7 @@ def test_detect_cann_version_reads_ascend_toolkit_install_info(
     cann_root = tmp_path / "Ascend" / "cann" / "arm64-linux"
     cann_root.mkdir(parents=True)
     (cann_root / "ascend_toolkit_install.info").write_text(
-        "package_name=Ascend-cann-toolkit\n"
-        "version=8.5.0\n"
-        "innerversion=V100R001C25SPC001B232\n",
+        "package_name=Ascend-cann-toolkit\nversion=8.5.0\ninnerversion=V100R001C25SPC001B232\n",
         encoding="utf-8",
     )
 

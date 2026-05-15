@@ -12,9 +12,7 @@ def _get_sharded_shape(shape: torch.Tensor, dim: int, block_size: int):
     return sharded_shape
 
 
-def _get_partial_sharded_padding(
-    tensor: torch.Tensor, world_size: int, rank: int, dim: int = 0
-):
+def _get_partial_sharded_padding(tensor: torch.Tensor, world_size: int, rank: int, dim: int = 0):
     """
     Splits a PyTorch tensor along a specified dimension into shards across multiple processes,
     with padding applied to ensure all shards have uniform size (using zeros for padding).
@@ -43,9 +41,7 @@ def _get_partial_sharded_padding(
         tensor = tensor[..., start:stop]
 
     sharded_shape = _get_sharded_shape(tensor.shape, dim, block_size)
-    tensor_zeros = torch.zeros(
-        size=sharded_shape, dtype=tensor.dtype, device=tensor.device
-    )
+    tensor_zeros = torch.zeros(size=sharded_shape, dtype=tensor.dtype, device=tensor.device)
     if dim == 0:
         tensor_zeros[: tensor.shape[0]] = tensor
     else:
@@ -54,9 +50,7 @@ def _get_partial_sharded_padding(
     return tensor_zeros
 
 
-def _get_partial_sharded_by_unit(
-    tensor: torch.Tensor, world_size: int, rank: int, dim: int = 0, unit_size: int = 1
-):
+def _get_partial_sharded_by_unit(tensor: torch.Tensor, world_size: int, rank: int, dim: int = 0, unit_size: int = 1):
     """
     Splits a PyTorch tensor along a specified dimension into shards across multiple processes,
     with alignment to fixed-size units to ensure shards don't split units.
@@ -102,9 +96,7 @@ def get_partial_sharded(
     if unit_num is not None:
         unit_size = exact_division(size, unit_num)
         if unit_num % world_size == 0 or world_size % unit_num == 0:
-            return _get_partial_sharded_by_unit(
-                tensor, world_size, rank, dim, unit_size
-            )
+            return _get_partial_sharded_by_unit(tensor, world_size, rank, dim, unit_size)
         else:
             raise ValueError(
                 f"The scenario where unit_num {unit_num} does not divide world_size {world_size}"

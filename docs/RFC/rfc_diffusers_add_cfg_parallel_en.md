@@ -23,12 +23,10 @@ CFG is a feature of diffusion model inference pipeline but not a part of DiT mod
 
 ## 3. Detailed Design
 
-
 - case 1 (use cfg, cfg world size == 1)
-    
+
     Do DiT model inference twice
 
 - case 2 (use cfg, cfg world size == 2)
-    
-    Do DiT model inference once, and all-gather the output.
 
+    Do DiT model inference once, and all-gather the output.

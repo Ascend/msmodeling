@@ -60,9 +60,7 @@ class ModelRunner:
         logger.debug("Device profile loaded: %s", self.device_profile)
 
         logger.info("Initializing performance model")
-        perf_model_types: List[str] = getattr(
-            user_input, "performance_model", ["analytic"]
-        )
+        perf_model_types: List[str] = getattr(user_input, "performance_model", ["analytic"])
         profiling_database = getattr(user_input, "profiling_database", None)
 
         self.perf_models: List[PerformanceModel] = []
@@ -70,9 +68,7 @@ class ModelRunner:
             if perf_model_type == "profiling":
                 # Exact match against pre-collected Profiling CSV database
                 if not profiling_database:
-                    raise ValueError(
-                        "--profiling-database must be specified when using --performance-model profiling"
-                    )
+                    raise ValueError("--profiling-database must be specified when using --performance-model profiling")
                 data_source = ProfilingDataSource(
                     profiling_database,
                     self.device_profile,
@@ -131,9 +127,7 @@ class ModelRunner:
         data_parallel_size = self.model.model_config.parallel_config.data_parallel_size
         logger.debug("data_parallel_size: %s", data_parallel_size)
 
-        batch_size = (
-            self.user_input.num_queries + data_parallel_size - 1
-        ) // data_parallel_size
+        batch_size = (self.user_input.num_queries + data_parallel_size - 1) // data_parallel_size
         logger.debug("batch_size: %s", batch_size)
 
         if requests is None:
@@ -173,9 +167,7 @@ class ModelRunner:
         all_execution_time_s = runtime.total_execution_time_s()
         run_time_s = run_end - run_start
 
-        table_result = runtime.table_averages(
-            group_by_input_shapes=self.user_input.dump_input_shapes
-        )
+        table_result = runtime.table_averages(group_by_input_shapes=self.user_input.dump_input_shapes)
 
         # Calculate TPS for each model
         tps_per_model: Dict[str, float] = {}
@@ -186,26 +178,16 @@ class ModelRunner:
         peak_memory_usage_gb = runtime.memory_tracker.peak_mem_usage() / 1024**3
 
         kv_cache_size_gb = (
-            sum(
-                bytes_of_tensor(kv_cache)
-                for kv_cache in input_kwargs["kv_cache_by_layers"].values()
-            )
-            / 1024**3
+            sum(bytes_of_tensor(kv_cache) for kv_cache in input_kwargs["kv_cache_by_layers"].values()) / 1024**3
         )
         kv_cache_per_token_gb = input_kwargs["kv_cache_per_token"] / 1024**3
         if get_visual(self.model) and input_kwargs.get("pixel_values") is None:
             # If there is no image input, the visual part does not participate
             # in the calculation and needs to be removed
-            visual_weight_size_gb = (
-                self.model.get_weight_size_nested([get_visual(self.model)]) / 1024**3
-            )
-            self.model_weight_size_gb = (
-                self.model_weight_size_gb - visual_weight_size_gb
-            )
+            visual_weight_size_gb = self.model.get_weight_size_nested([get_visual(self.model)]) / 1024**3
+            self.model_weight_size_gb = self.model_weight_size_gb - visual_weight_size_gb
 
-        model_activation_size_gb = (
-            peak_memory_usage_gb - kv_cache_size_gb - self.model_weight_size_gb
-        )
+        model_activation_size_gb = peak_memory_usage_gb - kv_cache_size_gb - self.model_weight_size_gb
         if model_activation_size_gb < 0:
             logger.warning(
                 "Negative activation memory estimate (peak=%.6f GB, weight=%.6f GB, kv=%.6f GB); "
@@ -217,9 +199,7 @@ class ModelRunner:
             model_activation_size_gb = 0.0
             peak_memory_usage_gb = self.model_weight_size_gb + kv_cache_size_gb
         device_memory_available_gb = (
-            self.total_device_memory_gb
-            - peak_memory_usage_gb
-            - self.user_input.reserved_memory_gb
+            self.total_device_memory_gb - peak_memory_usage_gb - self.user_input.reserved_memory_gb
         )
 
         if self.user_input.chrome_trace:
@@ -290,7 +270,5 @@ class ModelRunnerMetrics:
             total = sum(breakdown.values())
             if total == 0:
                 continue
-            formatted = ", ".join(
-                f"{key}: {val * 100 / total:.2f}" for key, val in breakdown.items()
-            )
+            formatted = ", ".join(f"{key}: {val * 100 / total:.2f}" for key, val in breakdown.items())
             print(f"  {breakdown_name}: {formatted}")

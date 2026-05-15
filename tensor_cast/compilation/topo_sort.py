@@ -54,11 +54,7 @@ def stable_topo_sort(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
     # Add all nodes with no dependencies to the queue
     for node in gm.graph.nodes:
         if indeg[node] == 0:
-            op_priority = (
-                0
-                if node.op == "call_function" and node.target in PRIORITIZED_OPS_SET
-                else 1
-            )
+            op_priority = 0 if node.op == "call_function" and node.target in PRIORITIZED_OPS_SET else 1
             original_index = original_order[node]
             heapq.heappush(queue, (op_priority, original_index, node))
 
@@ -78,20 +74,14 @@ def stable_topo_sort(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
             indeg[user] -= 1
             if indeg[user] == 0:
                 # Add newly ready nodes to the heap with their priority
-                op_priority = (
-                    0
-                    if user.op == "call_function" and user.target in PRIORITIZED_OPS_SET
-                    else 1
-                )
+                op_priority = 0 if user.op == "call_function" and user.target in PRIORITIZED_OPS_SET else 1
                 original_index = original_order[user]
                 heapq.heappush(queue, (op_priority, original_index, user))
 
     # If the new graph's size is not as large as the old one, then there must be
     # a cycle (i.e. some node's dependencies were not satisfied.)
     if len(new_graph.nodes) < len(gm.graph.nodes):
-        raise RuntimeError(
-            f"Input graph has cycles, unable to add {[node for node in indeg if indeg[node] != 0]}"
-        )
+        raise RuntimeError(f"Input graph has cycles, unable to add {[node for node in indeg if indeg[node] != 0]}")
 
     new_graph._codegen = gm.graph._codegen
     gm.graph = new_graph

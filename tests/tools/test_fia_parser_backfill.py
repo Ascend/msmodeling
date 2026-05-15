@@ -1,3 +1,4 @@
+# pylint: disable=no-name-in-module
 import csv
 
 from tools.perf_data_collection.fill_fia_runtime_metadata import (
@@ -34,9 +35,7 @@ def _base_kernel_row(input_shapes: str, output_shapes: str) -> dict[str, str]:
     return row
 
 
-def _build_input_shapes(
-    *, query: str, key: str, value: str, seq_kv_len: str, block: str
-) -> str:
+def _build_input_shapes(*, query: str, key: str, value: str, seq_kv_len: str, block: str) -> str:
     slots = [""] * 15
     slots[0] = query
     slots[1] = key
@@ -54,8 +53,7 @@ class TestFiaOperatorDetailsEnrichment:
                 ";;;;;;;;;;;;1,512;;;;;;;;;;4099,16,64;4099,16,64;;;;;"
             ),
             "Runtime operator_input_shapes_raw": (
-                "16,1,1,512;4099,1,128,512;4099,1,128,512;;;"
-                "1;1;;;;;;;;1,512;;;;;;;;;;16,1,1,64;4099,1,128,64;;;;;"
+                "16,1,1,512;4099,1,128,512;4099,1,128,512;;;1;1;;;;;;;;1,512;;;;;;;;;;16,1,1,64;4099,1,128,64;;;;;"
             ),
             "Runtime input_layout": "BNSD_NBSD",
             "Runtime num_heads": "16",
@@ -122,10 +120,7 @@ class TestFiaOperatorDetailsEnrichment:
         operator_csv = profile_dir / "operator_details.csv"
 
         kernel_row = _base_kernel_row(
-            (
-                "8192,16,128;8192,16,128;8192,16,128;;2048,2048;2;2"
-                ";;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"
-            ),
+            ("8192,16,128;8192,16,128;8192,16,128;;2048,2048;2;2;;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"),
             "8192,16,128;8192,16,1",
         )
 
@@ -138,8 +133,7 @@ class TestFiaOperatorDetailsEnrichment:
             "Type": "aclnnFusedInferAttentionScoreV2",
             "Name": "npu_fused_infer_attention_score_v2",
             "Input Shapes": (
-                "5,16,1,512;1171,1,128,512;1171,1,128,512;"
-                ";;;;;;;;;;;;5,512;;;;;;;;;;5,16,1,64;1171,1,128,64"
+                "5,16,1,512;1171,1,128,512;1171,1,128,512;;;;;;;;;;;;;5,512;;;;;;;;;;5,16,1,64;1171,1,128,64"
             ),
             "Output Shapes": "5,16,1,512;5,16,1,1",
         }
@@ -241,9 +235,7 @@ class TestFiaBackfillSignature:
             ]
         }
 
-        output_rows, matched, total = backfill(
-            rows, jsonl_index, "runtime_values_dumped"
-        )
+        output_rows, matched, total = backfill(rows, jsonl_index, "runtime_values_dumped")
 
         assert matched == 1
         assert total == 2
@@ -273,9 +265,7 @@ class TestFiaBackfillSignature:
             }
         ]
 
-        output_rows, matched, total = backfill(
-            rows, jsonl_index={}, metadata_tag="runtime_values_dumped"
-        )
+        output_rows, matched, total = backfill(rows, jsonl_index={}, metadata_tag="runtime_values_dumped")
 
         assert matched == 0
         assert total == 1

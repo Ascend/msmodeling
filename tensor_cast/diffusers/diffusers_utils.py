@@ -7,14 +7,13 @@ import torch
 
 def get_diffusers_transformer_module(config_or_json_path: Union[str, dict]):
     if isinstance(config_or_json_path, str):
-        with open(config_or_json_path) as f:
+        with open(config_or_json_path, encoding="utf-8") as f:
             config = json.load(f)
     elif isinstance(config_or_json_path, dict):
         config = config_or_json_path
     else:
         raise TypeError(
-            "config_or_json_path must be a dict or a path to config.json, "
-            f"but got {type(config_or_json_path)}."
+            f"config_or_json_path must be a dict or a path to config.json, but got {type(config_or_json_path)}."
         )
 
     try:
@@ -25,8 +24,7 @@ def get_diffusers_transformer_module(config_or_json_path: Union[str, dict]):
     class_name = config.get("_class_name")
     if class_name is None or not isinstance(class_name, str):
         raise ValueError(
-            "Unable to find _class_name attribute "
-            "or _class_name not a str from the diffusers transformer config.json."
+            "Unable to find _class_name attribute or _class_name not a str from the diffusers transformer config.json."
         )
     if class_name not in dir(module):
         raise KeyError(f"The class {class_name} is not supported by diffusers.")
@@ -95,9 +93,7 @@ def generate_hunyuanvideo15_input(**kwargs):
         )
     image_embed_dim = kwargs.get("image_embed_dim")
     if image_embed_dim is not None:
-        res["image_embeds"] = SafeMetaTensor(
-            (image_embed_dim, image_embed_dim, image_embed_dim), dtype=dtype
-        )
+        res["image_embeds"] = SafeMetaTensor((image_embed_dim, image_embed_dim, image_embed_dim), dtype=dtype)
     return res
 
 
@@ -138,19 +134,13 @@ class SafeMetaTensor(torch.Tensor):
     def __new__(cls, shape, dtype=None, device=None, requires_grad=False):
         if device is not None and device != torch.device("meta"):
             raise ValueError("SafeMetaTensor only supports 'meta' device.")
-        return torch.empty(
-            shape, dtype=dtype, device="meta", requires_grad=requires_grad
-        ).as_subclass(cls)
+        return torch.empty(shape, dtype=dtype, device="meta", requires_grad=requires_grad).as_subclass(cls)
 
     def __bool__(self):
         return True
 
     def __getitem__(self, idx):
-        if (
-            isinstance(idx, torch.Tensor)
-            and idx.dtype == torch.bool
-            and idx.device.type == "meta"
-        ):
+        if isinstance(idx, torch.Tensor) and idx.dtype == torch.bool and idx.device.type == "meta":
             return SafeMetaTensor((self.shape[0],) + self.shape[1:], dtype=self.dtype)
 
         return super().__getitem__(idx)

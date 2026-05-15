@@ -59,9 +59,7 @@ def _(
     M dimension derived from expert_indices.numel().
     """
     hidden_size = x.shape[-1]
-    return torch.empty(
-        (*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device
-    )
+    return torch.empty((*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device)
 
 
 @register_tensor_cast_op("dispatch_ffn_combine_quant")
@@ -90,9 +88,7 @@ def _(
     GMM weight/scale args mirror grouped_matmul_quant[_swiglu] sans x.
     """
     hidden_size = x.shape[-1]
-    return torch.empty(
-        (*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device
-    )
+    return torch.empty((*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device)
 
 
 @register_tensor_cast_op("dispatch_ffn_combine_fp8")
@@ -117,9 +113,7 @@ def _(
     GMM weight/scale args mirror grouped_matmul_fp8[_swiglu] sans x.
     """
     hidden_size = x.shape[-1]
-    return torch.empty(
-        (*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device
-    )
+    return torch.empty((*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device)
 
 
 @register_tensor_cast_op("moe_gating_top_k_softmax")

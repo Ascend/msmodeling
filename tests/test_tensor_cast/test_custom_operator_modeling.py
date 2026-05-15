@@ -29,9 +29,7 @@ class CustomModelingOperatorTestCase(unittest.TestCase):
         MODEL_ID = "Qwen/Qwen3-32B"
         TARGET_OP_NAME = "reshape_and_cache"
 
-        @OpInvokeInfo.register_op_properties(
-            torch.ops.tensor_cast.reshape_and_cache.default, True
-        )
+        @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.reshape_and_cache.default, True)
         def simple_operator_properties(
             op_invoke_info: OpInvokeInfo,
         ) -> OpInvokeInfo.PerformanceProperties:
@@ -41,9 +39,7 @@ class CustomModelingOperatorTestCase(unittest.TestCase):
             properties.memory_write_bytes = MEMORY_WRITE_BYTES
             properties.memory_readwrite_bytes = MEMORY_READWRITE_BYTES
 
-            compute_ops = properties.compute_ops.setdefault(
-                torch.float16, OpInvokeInfo.ComputeOps()
-            )
+            compute_ops = properties.compute_ops.setdefault(torch.float16, OpInvokeInfo.ComputeOps())
             compute_ops.mma_ops = MMA_OPS
             compute_ops.gp_ops = GP_OPS
 
@@ -55,13 +51,9 @@ class CustomModelingOperatorTestCase(unittest.TestCase):
         position_ids = torch.empty([1, NUM_TOKENS], dtype=torch.long, device="meta")
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
-        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(model, model.model_config)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             model.forward(
@@ -131,9 +123,7 @@ class CustomModelingOperatorTestCase(unittest.TestCase):
         NUM_TOKENS = 100
         inputs = torch.empty([1, NUM_TOKENS], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, NUM_TOKENS], dtype=torch.long, device="meta")
-        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(model, model.model_config)
         machine_config = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(machine_config)
         with (

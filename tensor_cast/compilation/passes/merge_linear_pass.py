@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 
 # --- Type Alias for Merge Specification ---
 # (grouping_key_args, grouping_key_kwargs, w_idx, bias_idx)
-OpMergeSpec = Tuple[
-    Callable[[Node], Tuple[Any, ...]], int, Optional[int], Optional[int], Optional[int]
-]
+OpMergeSpec = Tuple[Callable[[Node], Tuple[Any, ...]], int, Optional[int], Optional[int], Optional[int]]
 
 
 class MergeLinearPass(TensorCastGraphModulePass):
@@ -91,9 +89,7 @@ class MergeLinearPass(TensorCastGraphModulePass):
             grouping_key_args = (0,)
             # Concat: w (idx 1)
             w_idx, bias_idx = 1, None
-            grouping_key_func = functools.partial(
-                default_grouping_key_func, grouping_key_args
-            )
+            grouping_key_func = functools.partial(default_grouping_key_func, grouping_key_args)
             return grouping_key_func, w_idx, bias_idx, None, None
 
         # aten.addmm.default(bias, x, w)
@@ -102,9 +98,7 @@ class MergeLinearPass(TensorCastGraphModulePass):
             grouping_key_args = (1,)
             # Concat: w (idx 2)
             w_idx, bias_idx = 2, 0
-            grouping_key_func = functools.partial(
-                default_grouping_key_func, grouping_key_args
-            )
+            grouping_key_func = functools.partial(default_grouping_key_func, grouping_key_args)
             return grouping_key_func, w_idx, bias_idx, None, None
 
         if node.target in (
@@ -251,9 +245,7 @@ class MergeLinearPass(TensorCastGraphModulePass):
                     shape = get_node_shape(w_scale_ref_node)
                     assert shape is not None
                     if len(shape) == 1:
-                        w_scale_cat_node = insert_concat_node(
-                            insertion_point, w_scale_nodes, len(shape) - 1
-                        )
+                        w_scale_cat_node = insert_concat_node(insertion_point, w_scale_nodes, len(shape) - 1)
 
                 if has_w_offset:
                     w_offset_ref_node = ref_node.args[w_offset_idx]
@@ -261,9 +253,7 @@ class MergeLinearPass(TensorCastGraphModulePass):
                         shape = get_node_shape(w_offset_ref_node)
                         assert shape is not None
                         if len(shape) == 1:
-                            w_offset_cat_node = insert_concat_node(
-                                insertion_point, w_offset_nodes, len(shape) - 1
-                            )
+                            w_offset_cat_node = insert_concat_node(insertion_point, w_offset_nodes, len(shape) - 1)
 
             # Create the new merged op
             new_args = list(ref_node.args)
@@ -298,9 +288,7 @@ class MergeLinearPass(TensorCastGraphModulePass):
 
             for i, old_node in enumerate(group):
                 with gm.graph.inserting_after(old_node):
-                    getitem_node = gm.graph.create_node(
-                        "call_function", operator.getitem, args=(split_node, i)
-                    )
+                    getitem_node = gm.graph.create_node("call_function", operator.getitem, args=(split_node, i))
                     old_node.replace_all_uses_with(getitem_node)
 
         # 7. Clean up the graph

@@ -73,7 +73,8 @@ class SubKernelShapeInfo:
 
 class DataSourcePerformanceModel(ABC):
     """Abstract base class for performance data sources.
-    TensorCast queries via OpInvokeInfo only, unaware of underlying data format."""
+    TensorCast queries via OpInvokeInfo only, unaware of underlying data format.
+    """
 
     @abstractmethod
     def lookup(self, op_invoke_info: "OpInvokeInfo") -> Optional[QueryResult]:

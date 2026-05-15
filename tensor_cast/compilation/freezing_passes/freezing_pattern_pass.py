@@ -21,7 +21,7 @@ def _always_true(_match: Match) -> bool:
 class FreezingPatternPass(TensorCastGraphModulePass):
     """A generic graph-pattern pass used only in the after-freezing stage."""
 
-    def __init__(self, pass_name: str = "freezing_pattern_pass"):
+    def __init__(self, pass_name: str = "freezing_pattern_pass"):  # nosec B107
         self.pattern_handlers: Dict[str, Tuple[Any, Callable[..., Any]]] = {}
         self.pattern_pass: PatternMatcherPass = PatternMatcherPass(pass_name=pass_name)
 

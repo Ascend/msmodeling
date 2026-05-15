@@ -7,9 +7,7 @@ from pathlib import Path
 
 import pytest
 
-OP_REPLAY_DIR = (
-    Path(__file__).resolve().parents[2] / "tools" / "perf_data_collection" / "op_replay"
-)
+OP_REPLAY_DIR = Path(__file__).resolve().parents[2] / "tools" / "perf_data_collection" / "op_replay"
 
 
 class TestOpReplayScriptsExist:

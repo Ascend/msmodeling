@@ -29,16 +29,10 @@ from ..utils import check_positive_integer, LOG_LEVELS, parse_int_range
 logger = logging.getLogger(__name__)
 
 
-def generate_diffusers_inputs(
-    batch_size, height, width, frame_num, seq_lens, model_config
-):
+def generate_diffusers_inputs(batch_size, height, width, frame_num, seq_lens, model_config):
     kwargs = {
-        "hidden_states": generate_diffusers_pixel_input(
-            batch_size, height, width, frame_num, model_config
-        ),
-        "encoder_hidden_states": generate_diffusers_text_input(
-            batch_size, seq_lens, model_config
-        ),
+        "hidden_states": generate_diffusers_pixel_input(batch_size, height, width, frame_num, model_config),
+        "encoder_hidden_states": generate_diffusers_text_input(batch_size, seq_lens, model_config),
         "timestep": generate_diffusers_timestamp_input(model_config),
     }
     extra_args = generate_extra_input(batch_size, seq_lens, model_config)
@@ -47,9 +41,7 @@ def generate_diffusers_inputs(
 
 
 def generate_diffusers_pixel_input(batch_size, height, width, frame_num, model_config):
-    vae_stride = model_class_to_vae_stride(
-        model_config.transformer_config.model_config.get("_class_name")
-    )
+    vae_stride = model_class_to_vae_stride(model_config.transformer_config.model_config.get("_class_name"))
     channels = model_config.transformer_config.model_config.get("in_channels")
     size = [
         batch_size,
@@ -70,9 +62,7 @@ def generate_diffusers_pixel_input(batch_size, height, width, frame_num, model_c
 
 def generate_diffusers_text_input(batch_size, seq_lens, model_config):
     hidden_size = model_config.transformer_config.model_config.get("text_dim")  # Wan
-    hidden_size = hidden_size or model_config.transformer_config.model_config.get(
-        "text_embed_dim"
-    )  # Hunyuan
+    hidden_size = hidden_size or model_config.transformer_config.model_config.get("text_embed_dim")  # Hunyuan
     if hidden_size is None:
         raise ValueError("Get hidden_size from config failed.")
     size = [batch_size, seq_lens, hidden_size]
@@ -87,16 +77,11 @@ def generate_diffusers_text_input(batch_size, seq_lens, model_config):
 def generate_extra_input(batch_size, seq_lens, model_config):
     res = {}
 
-    if (
-        model_config.transformer_config.model_config.get("pooled_projection_dim")
-        is not None
-    ):
+    if model_config.transformer_config.model_config.get("pooled_projection_dim") is not None:
         pooled_projections = torch.zeros(
             [
                 batch_size,
-                model_config.transformer_config.model_config.get(
-                    "pooled_projection_dim"
-                ),
+                model_config.transformer_config.model_config.get("pooled_projection_dim"),
             ],
             device=torch.device("meta"),
             dtype=model_config.transformer_config.dtype,
@@ -112,9 +97,7 @@ def generate_extra_input(batch_size, seq_lens, model_config):
         res["guidance"] = guidance
 
     res.update(
-        model_class_to_input(
-            model_config.transformer_config.model_config.get("_class_name")
-        )(
+        model_class_to_input(model_config.transformer_config.model_config.get("_class_name"))(
             batch_size=batch_size,
             seq_lens=seq_lens,
             dtype=model_config.transformer_config.dtype,
@@ -126,9 +109,7 @@ def generate_extra_input(batch_size, seq_lens, model_config):
 
 
 def generate_diffusers_timestamp_input(model_config):
-    return torch.zeros(
-        [1], device=torch.device("meta"), dtype=model_config.transformer_config.dtype
-    )
+    return torch.zeros([1], device=torch.device("meta"), dtype=model_config.transformer_config.dtype)
 
 
 def process_input(input_kwargs, model_config):
@@ -214,16 +195,12 @@ def run_inference(
     if dit_cache:
         if cache_step_range is None:
             raise ValueError("--cache-step-range is required when --dit-cache is set.")
-        cache_step_start, cache_step_end = parse_int_range(
-            cache_step_range, "--cache-step-range"
-        )
+        cache_step_start, cache_step_end = parse_int_range(cache_step_range, "--cache-step-range")
         cache_step_end = min(cache_step_end, sample_step - 1)
         if cache_block_range is None:
             block_start, block_end = 0, 10000
         else:
-            block_start, block_end = parse_int_range(
-                cache_block_range, "--cache-block-range"
-            )
+            block_start, block_end = parse_int_range(cache_block_range, "--cache-block-range")
         if cache_step_interval <= 1:
             logger.info(
                 "DiT cache is disabled because cache_step_interval=%d.",
@@ -236,25 +213,17 @@ def run_inference(
                 quant_config,
                 dtype,
             )
-            cache_state = cache_model.enable_dit_block_cache(
-                CacheConfig(block_start=block_start, block_end=block_end)
-            )
+            cache_state = cache_model.enable_dit_block_cache(CacheConfig(block_start=block_start, block_end=block_end))
             if cache_state is None:
-                logger.warning(
-                    "DiT cache is enabled but no blocks were replaced; fallback to baseline model path."
-                )
+                logger.warning("DiT cache is enabled but no blocks were replaced; fallback to baseline model path.")
                 cache_model = None
     if use_cfg and cfg_parallel:
-        cfg_parallel_group = ParallelGroup(
-            0, [[0, 1]], world_size
-        )  # cfg parallel group can only be size 2
+        cfg_parallel_group = ParallelGroup(0, [[0, 1]], world_size)  # cfg parallel group can only be size 2
     else:
         cfg_parallel_group = None
 
     print("Preparing dummy input tensors...")
-    input_kwargs = generate_diffusers_inputs(
-        batch_size, height, width, frame_num, seq_len, model_config
-    )
+    input_kwargs = generate_diffusers_inputs(batch_size, height, width, frame_num, seq_len, model_config)
     input_kwargs, split_dim = process_input(input_kwargs, model_config)
 
     cfg_input_kwargs = None
@@ -262,9 +231,7 @@ def run_inference(
         # Keep one transformer forward per denoising step in simulation.
         cfg_input_kwargs = _duplicate_batch_tensors_for_cfg(input_kwargs, batch_size)
         if "hidden_states" in cfg_input_kwargs:
-            print(
-                f"CFG enabled (batch-concat): effective batch_size={cfg_input_kwargs['hidden_states'].shape[0]}"
-            )
+            print(f"CFG enabled (batch-concat): effective batch_size={cfg_input_kwargs['hidden_states'].shape[0]}")
     active_inputs = cfg_input_kwargs or input_kwargs
 
     print(input_kwargs)
@@ -272,30 +239,21 @@ def run_inference(
     run_start = time.perf_counter()
 
     with (
-        Runtime(
-            perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-        ) as runtime,
+        Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
         torch.no_grad(),
         use_custom_sdpa(),
     ):
         for step_idx in range(sample_step):
-            in_cache_window = (
-                cache_state is not None
-                and cache_step_start <= step_idx <= cache_step_end
-            )
+            in_cache_window = cache_state is not None and cache_step_start <= step_idx <= cache_step_end
             if cache_state is not None:
-                cache_state.reuse = in_cache_window and (
-                    (step_idx - cache_step_start) % cache_step_interval != 0
-                )
+                cache_state.reuse = in_cache_window and ((step_idx - cache_step_start) % cache_step_interval != 0)
             active_model = cache_model if in_cache_window else model
             if ulysses_size > 1:
                 set_sp_group(active_model.sp_group)
             out = active_model.forward(**active_inputs)
             if ulysses_size > 1:
                 out = active_model.sp_group.all_gather(out, dim=split_dim)
-            if (
-                use_cfg and cfg_parallel
-            ):  # use cfg and use cfg parallel, do all-gather after each step of DiT forward
+            if use_cfg and cfg_parallel:  # use cfg and use cfg parallel, do all-gather after each step of DiT forward
                 out = cfg_parallel_group.all_gather(out, dim=0)
 
     run_end = time.perf_counter()
@@ -446,9 +404,7 @@ def main():
         logging.getLogger().setLevel(LOG_LEVELS[args.log_level.lower()])
 
     if args.world_size % args.ulysses_size != 0:
-        raise ValueError(
-            f"World size {args.world_size!r} must be divisible by ulysses size {args.ulysses_size!r}."
-        )
+        raise ValueError(f"World size {args.world_size!r} must be divisible by ulysses size {args.ulysses_size!r}.")
 
     run_inference(
         device=args.device,

@@ -22,9 +22,7 @@ def register_op_impl(op, device_str):
     def decorator(benchmark_functor):
         key = (op, device_str)
         if key in _op_impl_registry:
-            raise ValueError(
-                f"Implementation for {op} on {device_str} already registered"
-            )
+            raise ValueError(f"Implementation for {op} on {device_str} already registered")
         _op_impl_registry[key] = benchmark_functor
         return benchmark_functor
 
@@ -60,16 +58,12 @@ class OpBenchmark(OpBenchmarkBase):
         self.runtime_device = self.infer_runtime_device()
 
     def benchmark(self, op_invoke_info: OpInvokeInfo) -> PerformanceModel.Result:
-        if is_view_op(op_invoke_info.func) or is_noop_self_copy_op(
-            op_invoke_info.func, op_invoke_info.args
-        ):
+        if is_view_op(op_invoke_info.func) or is_noop_self_copy_op(op_invoke_info.func, op_invoke_info.args):
             return PerformanceModel.Result(0.0)
         if op_invoke_info.func.namespace == "tensor_cast":
             op_impl = get_op_impl(op_invoke_info.func, self.runtime_device)
             if op_impl is None:
-                raise ValueError(
-                    f"No implementation registered for {op_invoke_info.func} on {self.runtime_device}"
-                )
+                raise ValueError(f"No implementation registered for {op_invoke_info.func} on {self.runtime_device}")
         else:
             op_impl = op_invoke_info.func
         return self.do_bench(op_impl, op_invoke_info.args, op_invoke_info.kwargs)
@@ -77,11 +71,7 @@ class OpBenchmark(OpBenchmarkBase):
     def do_bench(self, op_impl, args, kwargs) -> PerformanceModel.Result:
         # construct real inputs for all the meta tensors on the given device
         real_args, real_kwargs = tree_map(
-            lambda t: (
-                torch.empty_like(t, device=self.runtime_device)
-                if isinstance(t, torch.Tensor)
-                else t
-            ),
+            lambda t: (torch.empty_like(t, device=self.runtime_device) if isinstance(t, torch.Tensor) else t),
             (args, kwargs),
         )
         # warm up
@@ -100,9 +90,7 @@ class OpBenchmark(OpBenchmarkBase):
         return PerformanceModel.Result(execution_time_s=avg_latency_s)
 
     def infer_runtime_device(self) -> torch.device:
-        if (
-            device_override := perf_config.empirical.runtime_device_override
-        ) is not None:
+        if (device_override := perf_config.empirical.runtime_device_override) is not None:
             return device_override
         if self.device_profile.name == "TEST_DEVICE":
             return torch.device("cpu")
@@ -111,6 +99,4 @@ class OpBenchmark(OpBenchmarkBase):
         elif self.device_profile.vendor == "NVIDIA":
             return torch.device("cuda")
         else:
-            raise ValueError(
-                f"Unsupported benchmarking ops on vendor: {self.device_profile.vendor}"
-            )
+            raise ValueError(f"Unsupported benchmarking ops on vendor: {self.device_profile.vendor}")

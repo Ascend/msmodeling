@@ -407,9 +407,7 @@ class ControlledDataSource(DataSourcePerformanceModel):
         self.last_miss_reason = "shape_mismatch"
 
     def lookup(self, op_invoke_info):
-        shapes = tuple(
-            tuple(a.shape) for a in op_invoke_info.args if isinstance(a, torch.Tensor)
-        )
+        shapes = tuple(tuple(a.shape) for a in op_invoke_info.args if isinstance(a, torch.Tensor))
         if shapes in self.hit_set:
             return QueryResult(
                 latency_us=100.0,
@@ -430,9 +428,7 @@ class TestM5SimulatedLatencyCoverage:
         fallback.process_op.return_value = PerformanceModel.Result(
             execution_time_s=analytic_latency_s,
         )
-        return EmpiricalPerformanceModel(
-            device, data_source=ds, fallback_model=fallback
-        )
+        return EmpiricalPerformanceModel(device, data_source=ds, fallback_model=fallback)
 
     def test_all_hit(self):
         shape_a = ((2048, 5120), (5120, 768))
@@ -549,9 +545,7 @@ class TestExportHitMissReport:
         fallback.process_op.return_value = PerformanceModel.Result(
             execution_time_s=analytic_latency_s,
         )
-        return EmpiricalPerformanceModel(
-            device, data_source=ds, fallback_model=fallback
-        )
+        return EmpiricalPerformanceModel(device, data_source=ds, fallback_model=fallback)
 
     def test_report_structure(self):
         """Report contains all expected top-level keys."""
@@ -622,7 +616,8 @@ class TestExportHitMissReport:
 
 class TestModelRunnerProfilingMetrics:
     """Verify model_runner.run_inference() triggers MetricsCollector.log_stats()
-    via the external collector path when using EmpiricalPerformanceModel."""
+    via the external collector path when using EmpiricalPerformanceModel.
+    """
 
     def _make_empirical_pm(self, hit_shapes):
         """Build an EmpiricalPerformanceModel with a controlled data source."""
@@ -633,13 +628,12 @@ class TestModelRunnerProfilingMetrics:
             execution_time_s=50e-6,
         )
         fallback.get_classifiers.return_value = []
-        return EmpiricalPerformanceModel(
-            device, data_source=ds, fallback_model=fallback
-        )
+        return EmpiricalPerformanceModel(device, data_source=ds, fallback_model=fallback)
 
     def test_op_records_populated_after_process_op(self):
         """op_records is populated after process_op() calls — the data
-        that model_runner feeds into MetricsCollector."""
+        that model_runner feeds into MetricsCollector.
+        """
         pm = self._make_empirical_pm(hit_shapes={((2048, 5120), (5120, 768))})
 
         pm.process_op(_make_op([(2048, 5120), (5120, 768)]))  # HIT
@@ -652,7 +646,8 @@ class TestModelRunnerProfilingMetrics:
     def test_log_stats_called_via_external_collector(self, caplog):
         """Simulate the model_runner.py log path:
         MetricsCollector().collect_from_records(pm.op_records).log_stats()
-        produces the expected log line."""
+        produces the expected log line.
+        """
         import logging
 
         pm = self._make_empirical_pm(hit_shapes={((2048, 5120), (5120, 768))})
@@ -670,7 +665,8 @@ class TestModelRunnerProfilingMetrics:
     def test_collect_from_records_matches_direct_collect(self):
         """collect_from_records(pm.op_records) produces identical M1 stats
         to calling _collect_one() directly with the same data — verifies the
-        model_runner path is equivalent to the old inline path."""
+        model_runner path is equivalent to the old inline path.
+        """
         from tensor_cast.performance_model.empirical import EmpiricalOpRecord
 
         hit_result = QueryResult(
@@ -692,12 +688,8 @@ class TestModelRunnerProfilingMetrics:
         old_collector = MetricsCollector()
         old_collector.collect_from_records(
             [
-                EmpiricalOpRecord(
-                    "aten.mm.default", hit_result, 50e-6, [(2048, 5120), (5120, 768)]
-                ),
-                EmpiricalOpRecord(
-                    "aten.mm.default", None, 50e-6, [(4096, 5120), (5120, 768)]
-                ),
+                EmpiricalOpRecord("aten.mm.default", hit_result, 50e-6, [(2048, 5120), (5120, 768)]),
+                EmpiricalOpRecord("aten.mm.default", None, 50e-6, [(4096, 5120), (5120, 768)]),
             ]
         )
         old_stats = old_collector.get_stats()

@@ -59,12 +59,8 @@ class ShapeCatPassesTestCase(unittest.TestCase):
     def test_merge_linear_mxfp4_uses_tensor_cast_cat(self):
         class Mxfp4LinearPair(torch.nn.Module):
             def forward(self, x, w1, w2, x_scale, w_scale1, w_scale2, b1, b2):
-                y1 = torch.ops.tensor_cast.mxfp4_linear.default(
-                    x, w1, x_scale, w_scale1, b1, None
-                )
-                y2 = torch.ops.tensor_cast.mxfp4_linear.default(
-                    x, w2, x_scale, w_scale2, b2, None
-                )
+                y1 = torch.ops.tensor_cast.mxfp4_linear.default(x, w1, x_scale, w_scale1, b1, None)
+                y2 = torch.ops.tensor_cast.mxfp4_linear.default(x, w2, x_scale, w_scale2, b2, None)
                 return y1, y2
 
         inputs = (
@@ -88,12 +84,8 @@ class ShapeCatPassesTestCase(unittest.TestCase):
     def test_merge_linear_fp8_uses_tensor_cast_cat(self):
         class Fp8LinearPair(torch.nn.Module):
             def forward(self, x, w1, w2, x_scale, w_scale1, w_scale2, b1, b2):
-                y1 = torch.ops.tensor_cast.fp8_linear.default(
-                    x, w1, x_scale, w_scale1, b1, None
-                )
-                y2 = torch.ops.tensor_cast.fp8_linear.default(
-                    x, w2, x_scale, w_scale2, b2, None
-                )
+                y1 = torch.ops.tensor_cast.fp8_linear.default(x, w1, x_scale, w_scale1, b1, None)
+                y2 = torch.ops.tensor_cast.fp8_linear.default(x, w2, x_scale, w_scale2, b2, None)
                 return y1, y2
 
         inputs = (

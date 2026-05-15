@@ -8,12 +8,7 @@ from pathlib import Path
 
 sys.path.insert(
     0,
-    str(
-        Path(__file__).resolve().parents[2]
-        / "tools"
-        / "perf_data_collection"
-        / "parsers"
-    ),
+    str(Path(__file__).resolve().parents[2] / "tools" / "perf_data_collection" / "parsers"),
 )
 import trace_to_csv as trace_to_csv_module  # noqa: E402
 
@@ -38,7 +33,7 @@ def _x(name, dur, pid=0, **kwargs):
 
 
 def _read_csv(path):
-    with Path(path).open(newline="") as handle:
+    with Path(path).open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         return reader.fieldnames, list(reader)
 
@@ -144,9 +139,7 @@ class TestTraceToCSV:
             }
         ]
 
-    def test_composite_ops_stay_one_row_per_op_and_keep_parseable_shapes(
-        self, tmp_path
-    ):
+    def test_composite_ops_stay_one_row_per_op_and_keep_parseable_shapes(self, tmp_path):
         composite_shapes = [
             {
                 "kernel_type": "PadKernel",
@@ -250,9 +243,7 @@ class TestTraceToCSV:
             }
         ]
 
-    def test_main_prints_csv_to_stdout_when_output_omitted(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    def test_main_prints_csv_to_stdout_when_output_omitted(self, tmp_path, monkeypatch, capsys):
         trace = _make_trace(
             tmp_path,
             [

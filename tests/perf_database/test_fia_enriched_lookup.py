@@ -240,9 +240,7 @@ class TestQueryByAttnParams:
     def test_exact_match(self, ds):
         """Primary kernel_type matches → returns (latency, kernel_type)."""
         params = {"q_shape_3d": (4, 16, 512), "avg_seq_len": 2048}
-        result = ds._query_by_attn_params(
-            ["FusedInferAttentionScore"], params, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
         assert result is not None
         lat, kernel = result
         assert abs(lat - 28.0) < 1.0
@@ -251,18 +249,14 @@ class TestQueryByAttnParams:
     def test_miss(self, ds):
         """Shape not in CSV → None."""
         params = {"q_shape_3d": (99, 16, 512), "avg_seq_len": 2048}
-        result = ds._query_by_attn_params(
-            ["FusedInferAttentionScore"], params, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
         assert result is None
 
     def test_alternate_kernel_fallback(self, ds):
         """Primary misses, alternate kernel hits."""
         params = {"q_shape_3d": (4, 16, 512), "avg_seq_len": 2048}
         # "NoSuchKernel" will miss, "FusedInferAttentionScore" should hit
-        result = ds._query_by_attn_params(
-            ["NoSuchKernel", "FusedInferAttentionScore"], params, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["NoSuchKernel", "FusedInferAttentionScore"], params, "DT_BF16")
         assert result is not None
         lat, kernel = result
         assert abs(lat - 28.0) < 1.0
@@ -270,17 +264,13 @@ class TestQueryByAttnParams:
 
     def test_missing_params(self, ds):
         """Missing q_shape_3d → None."""
-        result = ds._query_by_attn_params(
-            ["FusedInferAttentionScore"], {"avg_seq_len": 2048}, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], {"avg_seq_len": 2048}, "DT_BF16")
         assert result is None
 
     def test_block_padding_tolerance(self, ds):
         """TC T=512, CSV T=496 → block-padding match."""
         params = {"q_shape_3d": (512, 4, 128), "avg_seq_len": 4096}
-        result = ds._query_by_attn_params(
-            ["FusedInferAttentionScore"], params, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
         assert result is not None
         lat, kernel = result
         assert abs(lat - 64.2) < 1.0
@@ -312,9 +302,7 @@ _ENRICHED_HEADER = (
 _STATS = ",".join([""] * 27)
 
 
-def _fia_row(
-    q_shape_str, dtype_str, out_shape_str, duration, avg_seq, sparse, kv_heads
-):
+def _fia_row(q_shape_str, dtype_str, out_shape_str, duration, avg_seq, sparse, kv_heads):
     """Build one enriched FIA CSV row."""
     return (
         f'dynamic,MIX_AIC,"""{q_shape_str}""",'
@@ -331,9 +319,7 @@ def _build_enriched_db(tmp_path, rows):
     db = tmp_path / "enriched_db"
     db.mkdir()
     csv_lines = [_ENRICHED_HEADER] + rows
-    (db / "FusedInferAttentionScore.csv").write_text(
-        "\n".join(csv_lines), encoding="utf-8"
-    )
+    (db / "FusedInferAttentionScore.csv").write_text("\n".join(csv_lines), encoding="utf-8")
     # Minimal op_mapping
     (db / "op_mapping.yaml").write_text(
         "operator_mappings:\n"
@@ -345,9 +331,7 @@ def _build_enriched_db(tmp_path, rows):
     return db
 
 
-def _make_attention_op_with_query_lens(
-    query_shape, key_shape, seq_lens, query_lens, dtype
-):
+def _make_attention_op_with_query_lens(query_shape, key_shape, seq_lens, query_lens, dtype):
     """Build mock OpInvokeInfo with query_lens for sparse_mode inference."""
     query = torch.zeros(query_shape, dtype=dtype)
     key = torch.zeros(key_shape, dtype=dtype)
@@ -630,9 +614,7 @@ _ENRICHED_HEADER_WITH_LAYOUT = (
 )
 
 
-def _fia_row_with_layout(
-    q_shape_str, dtype_str, out_shape_str, duration, avg_seq, sparse, kv_heads, layout
-):
+def _fia_row_with_layout(q_shape_str, dtype_str, out_shape_str, duration, avg_seq, sparse, kv_heads, layout):
     """Build one enriched FIA CSV row with input_layout column."""
     return (
         f'dynamic,MIX_AIC,"""{q_shape_str}""",'
@@ -649,9 +631,7 @@ def _build_enriched_db_with_layout(tmp_path, rows, subdir="enriched_layout_db"):
     db = tmp_path / subdir
     db.mkdir()
     csv_lines = [_ENRICHED_HEADER_WITH_LAYOUT] + rows
-    (db / "FusedInferAttentionScore.csv").write_text(
-        "\n".join(csv_lines), encoding="utf-8"
-    )
+    (db / "FusedInferAttentionScore.csv").write_text("\n".join(csv_lines), encoding="utf-8")
     (db / "op_mapping.yaml").write_text(
         "operator_mappings:\n"
         '  "tensor_cast.attention.default":\n'
@@ -703,9 +683,7 @@ class TestInputLayoutTieBreaker:
             "num_kv_heads": 4,
             "input_layout": "TND",
         }
-        result = ds._query_by_attn_params(
-            ["FusedInferAttentionScore"], params, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
         assert result is not None
         lat, kernel = result
         assert abs(lat - 70.0) < 1.0
@@ -719,9 +697,7 @@ class TestInputLayoutTieBreaker:
             "num_kv_heads": 4,
             "input_layout": "BNSD_NBSD",
         }
-        result = ds._query_by_attn_params(
-            ["FusedInferAttentionScore"], params, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
         assert result is not None
         lat, kernel = result
         assert abs(lat - 30.0) < 1.0
@@ -759,9 +735,7 @@ class TestInputLayoutTieBreaker:
             "num_kv_heads": 4,
             "input_layout": None,
         }
-        result = ds._query_by_attn_params(
-            ["FusedInferAttentionScore"], params, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
         assert result is not None
         lat, kernel = result
         assert abs(lat - 30.0) < 1.0
@@ -790,9 +764,7 @@ class TestInputLayoutTieBreaker:
             "num_kv_heads": 4,
             "input_layout": "BNSD_NBSD",
         }
-        result = ds._query_by_attn_params(
-            ["FusedInferAttentionScore"], params, "DT_BF16"
-        )
+        result = ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16")
         assert result is None
 
 

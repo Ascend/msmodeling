@@ -64,8 +64,6 @@ class QuantConfigTestCase(unittest.TestCase):
             hf_config = auto_loader.load_config(model_name_or_path)
             quant_config = auto_loader.load_quant_config(hf_config)
             modules_to_not_convert = get_modules_to_not_convert(quant_config)
-            test_result = [
-                pattern_match(case, modules_to_not_convert) for case in test_case
-            ]
+            test_result = [pattern_match(case, modules_to_not_convert) for case in test_case]
 
         self.assertListEqual(test_result, match_result)

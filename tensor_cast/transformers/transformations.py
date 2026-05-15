@@ -85,17 +85,13 @@ def maybe_enable_mtp(model: "ModelWrapperBase") -> "ModelWrapperBase":
         and isinstance(model.hf_config.layer_types, list)
         and model.hf_config.layer_types
     ):
-        model.hf_config.layer_types.extend(
-            [model.hf_config.layer_types[-1]] * mtp_config.num_mtp_layers
-        )
+        model.hf_config.layer_types.extend([model.hf_config.layer_types[-1]] * mtp_config.num_mtp_layers)
     if (
         hasattr(model.hf_config, "mlp_layer_types")
         and isinstance(model.hf_config.mlp_layer_types, list)
         and model.hf_config.mlp_layer_types
     ):
-        model.hf_config.mlp_layer_types.extend(
-            [model.hf_config.mlp_layer_types[-1]] * mtp_config.num_mtp_layers
-        )
+        model.hf_config.mlp_layer_types.extend([model.hf_config.mlp_layer_types[-1]] * mtp_config.num_mtp_layers)
 
     orig_dtype = torch.get_default_dtype()
     torch.set_default_dtype(model.model_config.dtype)
@@ -114,9 +110,7 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         submodule_types = []
         for name, sub_module in module.named_modules():
             submodule_types.append(name)
-            submodule_types.append(
-                ".".join([type(sub_module).__module__, type(sub_module).__name__])
-            )
+            submodule_types.append(".".join([type(sub_module).__module__, type(sub_module).__name__]))
         return ",".join(submodule_types)
 
     def reuse_layers(layers):
@@ -197,9 +191,7 @@ def patch_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
                     "attention_by_layers": model.attention_by_layers,
                     "depth_layer_idx": depth_layer_idx,
                 }
-                model.attention_by_layers[depth_layer_idx] = (
-                    model.model_config.attention_cls()
-                )
+                model.attention_by_layers[depth_layer_idx] = model.model_config.attention_cls()
                 depth_layer_idx += 1
     return model
 
@@ -223,9 +215,7 @@ def _all_required_fields_exist(module: torch.nn.Module, field_names) -> bool:
     for field in dataclasses.fields(fields_obj):
         field_name = field.name
         target_attr = getattr(fields_obj, field_name, field_name)
-        if not is_optional(
-            type(fields_obj).__annotations__.get(field_name)
-        ) and not hasattr(module, target_attr):
+        if not is_optional(type(fields_obj).__annotations__.get(field_name)) and not hasattr(module, target_attr):
             return False
     return True
 
@@ -240,9 +230,7 @@ def patch_mla(model: "ModelWrapperBase") -> "ModelWrapperBase":
         if type(module).__name__ == mla_config.module_name:
             if not _all_required_fields_exist(module, mla_config.field_names):
                 continue
-            mla = mla_config.mla_cls(
-                mla_config, module, model.parallel_group_manager.tp_group
-            )
+            mla = mla_config.mla_cls(mla_config, module, model.parallel_group_manager.tp_group)
             model._replace_module(name, mla)
     return model
 
@@ -268,19 +256,13 @@ def _patch_moe_expert_helper(model: "ModelWrapperBase", module):
         return
 
     experts = module.experts
-    expert_num = (
-        len(experts)
-        if isinstance(experts, torch.nn.ModuleList)
-        else getattr(experts, "num_experts", 0)
-    )
+    expert_num = len(experts) if isinstance(experts, torch.nn.ModuleList) else getattr(experts, "num_experts", 0)
     assert isinstance(expert_num, int) and expert_num > 0
 
     adapter = profile.custom_expert_module_type
     module.experts = torch.nn.ModuleList(
         [
-            adapter(experts, i)
-            if _is_3d_tensor_experts(experts, expert_num)
-            else adapter(experts)
+            adapter(experts, i) if _is_3d_tensor_experts(experts, expert_num) else adapter(experts)
             for i in range(expert_num)
         ]
     )
@@ -333,9 +315,7 @@ def _shard_model_visual_by_tp_helper(model: "ModelWrapperBase"):
         return
     pattern = f"{visual_layers_path}.*.attn"
     for name, module in model._inner.named_modules():
-        if fnmatch.fnmatchcase(strip_module_name(name), pattern) and hasattr(
-            module, "qkv"
-        ):
+        if fnmatch.fnmatchcase(strip_module_name(name), pattern) and hasattr(module, "qkv"):
             assert module.num_heads % tp_size == 0
             module.num_heads = module.num_heads // tp_size
 
@@ -404,9 +384,7 @@ def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
                     )
             else:
                 params.update({"head_num": config_info.num_attention_heads})
-                tp_plan.update(
-                    {f"{language_layers}.*.q_proj": (COLWISE_LINEAR, params)}
-                )
+                tp_plan.update({f"{language_layers}.*.q_proj": (COLWISE_LINEAR, params)})
                 params = params.copy()
                 params.update(
                     {
@@ -459,9 +437,7 @@ def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
                         f"{visual_layers_path}.*.attn.proj": (ROWWISE_LINEAR, params),
                     }
                 )
-                visual_merger_linear = get_visual_merger_linear(
-                    self.hf_config.model_type
-                )
+                visual_merger_linear = get_visual_merger_linear(self.hf_config.model_type)
                 for key, parallel_type in visual_merger_linear.items():
                     tp_plan[key] = (parallel_type, params)
 
@@ -579,49 +555,32 @@ def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
 
 def shard_model_by_ep(model: "ModelWrapperBase") -> "ModelWrapperBase":
     moe_config = model.model_config.moe_config
-    if (
-        not moe_config
-        or not getattr(model, "top_k", None)
-        or not getattr(model, "num_routing_experts", None)
-    ):
+    if not moe_config or not getattr(model, "top_k", None) or not getattr(model, "num_routing_experts", None):
         return model
 
     ep_group = model.parallel_group_manager.ep_group
     model.num_external_shared_experts = 0
     model.num_redundant_experts = 0
     if not model.model_config.parallel_config.has_ep():
-        assert (
-            not moe_config.enable_redundant_experts
-            and not moe_config.enable_external_shared_experts
-        )
+        assert not moe_config.enable_redundant_experts and not moe_config.enable_external_shared_experts
     else:
         if moe_config.enable_external_shared_experts:
             assert ep_group.world_size >= 2
             if model.top_k + 1 > ep_group.world_size:
                 model.num_external_shared_experts = 1
             else:
-                model.num_external_shared_experts = math.ceil(
-                    ep_group.world_size / (model.top_k + 1)
-                )
+                model.num_external_shared_experts = math.ceil(ep_group.world_size / (model.top_k + 1))
 
-            num_routing_experts_device = (
-                ep_group.world_size - model.num_external_shared_experts
-            )
+            num_routing_experts_device = ep_group.world_size - model.num_external_shared_experts
             model.num_redundant_experts = (
-                num_routing_experts_device
-                - model.num_routing_experts % num_routing_experts_device
+                num_routing_experts_device - model.num_routing_experts % num_routing_experts_device
             )
-            if (
-                not moe_config.enable_redundant_experts
-                and model.num_redundant_experts == num_routing_experts_device
-            ):
+            if not moe_config.enable_redundant_experts and model.num_redundant_experts == num_routing_experts_device:
                 model.num_redundant_experts = 0
 
             if not moe_config.host_external_shared_experts:
                 if model.model_config.parallel_config.rank == -1:
-                    model.parallel_group_manager.set_rank(
-                        model.num_external_shared_experts
-                    )
+                    model.parallel_group_manager.set_rank(model.num_external_shared_experts)
                 else:
                     raise ValueError(
                         "If you want to check the performance of the device with external shared experts, "
@@ -635,9 +594,7 @@ def shard_model_by_ep(model: "ModelWrapperBase") -> "ModelWrapperBase":
     tp_group = model.parallel_group_manager.tp_group
     moe_tp_group = model.parallel_group_manager.moe_tp_group
     mlp_tp_group = model.parallel_group_manager.mlp_tp_group
-    routed_expert_global_tp_group = (
-        tp_group if model.model_config.parallel_config.has_ep() else moe_tp_group
-    )
+    routed_expert_global_tp_group = tp_group if model.model_config.parallel_config.has_ep() else moe_tp_group
     for name, module in model._inner.named_modules():
         if isinstance(module, MoELayer):
             model._replace_module(
@@ -708,10 +665,7 @@ def quantize_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
     if model.model_config.mla_config:
         for _, module in model._inner.named_modules():
             if isinstance(module, MultiheadLatentAttentionBase):
-                if (
-                    hasattr(module, "layer_idx")
-                    and module.layer_idx in attention_configs
-                ):
+                if hasattr(module, "layer_idx") and module.layer_idx in attention_configs:
                     module.quant_config = attention_configs[module.layer_idx]
                 else:
                     module.quant_config = default_attention_config
@@ -720,9 +674,7 @@ def quantize_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
 
     if hasattr(model, "attention_by_layers"):
         for i in range(model.num_hidden_layers):
-            model.attention_by_layers[i].quant_config = attention_configs.get(
-                i, default_attention_config
-            )
+            model.attention_by_layers[i].quant_config = attention_configs.get(i, default_attention_config)
     return model
 
 

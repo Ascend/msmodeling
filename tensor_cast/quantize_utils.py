@@ -58,8 +58,7 @@ def get_attention_quant_type(action: QuantizeAttentionAction) -> AttentionQuantT
         return getattr(AttentionQuantType, action.name)
     except AttributeError:
         raise ValueError(
-            f"Unsupported quantization action: {action}. "
-            f"Ensure '{action.name}' is defined in AttentionQuantType."
+            f"Unsupported quantization action: {action}. Ensure '{action.name}' is defined in AttentionQuantType."
         ) from None
 
 
@@ -83,16 +82,13 @@ def get_torch_quant_type(action: QuantizeAttentionAction) -> AttentionQuantType:
         return getattr(AttentionQuantType, action.name)
     except AttributeError:
         raise ValueError(
-            f"Unsupported quantization action: {action}. "
-            f"Ensure '{action.name}' is defined in AttentionQuantType."
+            f"Unsupported quantization action: {action}. Ensure '{action.name}' is defined in AttentionQuantType."
         ) from None
 
 
 class QuantGranularity(Enum):
     PER_TENSOR = auto()  # use a single quant param for the entire tensor
-    PER_SAMPLE = (
-        auto()
-    )  # use quant param per sample in the batch (e.g. per-token for LLM)
+    PER_SAMPLE = auto()  # use quant param per sample in the batch (e.g. per-token for LLM)
     PER_GROUP = auto()  # use quant param per channel group
 
 
@@ -104,9 +100,7 @@ class QuantScheme(Enum):
 def get_quant_config(name, quant_config, default_config_name):
     if not hasattr(quant_config, "_cached_wildcard_configs"):
         quant_config._cached_wildcard_configs = {
-            n: quant_config.linear_configs[n]
-            for n in quant_config.linear_configs
-            if "*" in n or "?" in n
+            n: quant_config.linear_configs[n] for n in quant_config.linear_configs if "*" in n or "?" in n
         }
     wildcard_configs = quant_config._cached_wildcard_configs
     if name in quant_config.linear_configs:

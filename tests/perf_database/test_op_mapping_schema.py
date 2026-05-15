@@ -22,13 +22,7 @@ from tensor_cast.performance_model.profiling_database.profiling_data_source impo
 )
 
 # Discover all op_mapping.yaml files across all device/backend/version combos
-DATA_ROOT = (
-    Path(__file__).resolve().parents[2]
-    / "tensor_cast"
-    / "performance_model"
-    / "profiling_database"
-    / "data"
-)
+DATA_ROOT = Path(__file__).resolve().parents[2] / "tensor_cast" / "performance_model" / "profiling_database" / "data"
 
 # Valid dispatch categories
 VALID_CATEGORIES = {"communication"}
@@ -87,21 +81,15 @@ def test_every_entry_has_valid_dispatch_path(version_ctx):
         if entry.get("composite"):
             # Path 1: composite → needs either sub_kernels or decomposer:true
             if "sub_kernels" not in entry and not entry.get("decomposer"):
-                errors.append(
-                    f"{op_name}: composite=true but missing sub_kernels or decomposer:true"
-                )
+                errors.append(f"{op_name}: composite=true but missing sub_kernels or decomposer:true")
         elif entry.get("category") in VALID_CATEGORIES:
             # Path 2: communication → needs kernel_type
             if "kernel_type" not in entry:
-                errors.append(
-                    f"{op_name}: category={entry['category']} but missing kernel_type"
-                )
+                errors.append(f"{op_name}: category={entry['category']} but missing kernel_type")
         elif entry.get("query_mode") in SUPPORTED_QUERY_MODES:
             # Path 3: attention_special → needs kernel_type
             if "kernel_type" not in entry:
-                errors.append(
-                    f"{op_name}: query_mode={entry['query_mode']} but missing kernel_type"
-                )
+                errors.append(f"{op_name}: query_mode={entry['query_mode']} but missing kernel_type")
         elif entry.get("zero_cost") or entry.get("accepted_miss"):
             # Path 4b: accepted_miss → OK, latency absorbed by other kernel
             pass
@@ -113,9 +101,8 @@ def test_every_entry_has_valid_dispatch_path(version_ctx):
                     f"but missing kernel_type (has: {list(entry.keys())})"
                 )
 
-    assert errors == [], (
-        f"[{label}] {len(errors)} entries with invalid dispatch path:\n"
-        + "\n".join(f"  - {e}" for e in errors)
+    assert errors == [], f"[{label}] {len(errors)} entries with invalid dispatch path:\n" + "\n".join(
+        f"  - {e}" for e in errors
     )
 
 
@@ -134,13 +121,10 @@ def test_sub_kernels_is_list(version_ctx):
     for op_name, entry in entries.items():
         sk = entry.get("sub_kernels")
         if sk is not None and not isinstance(sk, list):
-            errors.append(
-                f"{op_name}: sub_kernels is {type(sk).__name__} ('{sk}'), must be list"
-            )
+            errors.append(f"{op_name}: sub_kernels is {type(sk).__name__} ('{sk}'), must be list")
 
-    assert errors == [], (
-        f"[{label}] {len(errors)} entries with non-list sub_kernels:\n"
-        + "\n".join(f"  - {e}" for e in errors)
+    assert errors == [], f"[{label}] {len(errors)} entries with non-list sub_kernels:\n" + "\n".join(
+        f"  - {e}" for e in errors
     )
 
 
@@ -193,8 +177,7 @@ def test_referenced_csvs_exist(version_ctx):
     if missing:
         warnings.warn(
             f"[{label}] {len(missing)}/{total_checked} referenced CSVs missing "
-            f"(placeholder entries awaiting data collection):\n"
-            + "\n".join(f"  - {e}" for e in missing),
+            f"(placeholder entries awaiting data collection):\n" + "\n".join(f"  - {e}" for e in missing),
             stacklevel=1,
         )
 
@@ -222,14 +205,10 @@ def test_no_sub_kernels_without_composite(version_ctx):
 
     for op_name, entry in entries.items():
         if "sub_kernels" in entry and not entry.get("composite"):
-            errors.append(
-                f"{op_name}: has sub_kernels={entry['sub_kernels']} "
-                f"but composite is not true"
-            )
+            errors.append(f"{op_name}: has sub_kernels={entry['sub_kernels']} but composite is not true")
 
-    assert errors == [], (
-        f"[{label}] {len(errors)} entries with orphaned sub_kernels:\n"
-        + "\n".join(f"  - {e}" for e in errors)
+    assert errors == [], f"[{label}] {len(errors)} entries with orphaned sub_kernels:\n" + "\n".join(
+        f"  - {e}" for e in errors
     )
 
 
@@ -238,6 +217,4 @@ def test_elementwise_excludes_tc_input_count(version_ctx):
     label, entries, _ = version_ctx
     for op_name, entry in entries.items():
         if entry.get("query_mode") == "elementwise" and "tc_input_count" in entry:
-            pytest.fail(
-                f"[{label}] {op_name}: query_mode=elementwise must not have tc_input_count"
-            )
+            pytest.fail(f"[{label}] {op_name}: query_mode=elementwise must not have tc_input_count")

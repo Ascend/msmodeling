@@ -1,7 +1,7 @@
 # RFC: 支持用户自定义算子建模
 
-
 ## 元数据
+
 | 项目 | 内容                                        |
 | :--- |:------------------------------------------|
 | **状态** | 已批准                                       |
@@ -12,6 +12,7 @@
 ---
 
 ## 1. 概述
+
 需要为用户自定义PyTorch算子提供统一的性能建模能力，支持全新算子实现和已有算子覆盖，使其能够准确评估内存占用和计算开销，以便进行性能分析和优化。
 
 ## 2. 方案设计
@@ -19,16 +20,20 @@
 ### 2.1 推荐方案
 
 #### 2.1.1 核心设计
+
 提供基于两级注册机制的算子性能建模功能：
+
 - **直接估计**：使用 `@register_op_estimator` 直接估计算子执行时间，适用于任何算子类型
 - **详细分析**：使用 `@OpInvokeInfo.register_op_properties` 提供算子详细计算和内存访问属性
 
 该设计支持用户为新算子提供性能模型，或覆盖已有算子的性能建模，以提高性能分析和优化的准确性。
 
 #### 2.1.2 用户自定义算子加载
+
 系统启动时扫描 `tensor_cast/performance_model/custom_op/` 目录下的所有 `.py` 文件，自动加载所有注册的算子性能建模函数。
 
 #### 2.1.3 算子覆盖支持
+
 算子覆盖机制已实现。当用户使用相同算子签名注册时，用户自定义的性能建模会自动覆盖默认实现。
 
 #### 2.1.4 性能估算优先级机制
@@ -67,11 +72,10 @@ graph TD
     I --> E[加载完成]
 ```
 
-
-
 ### 2.2 替代方案
 
 #### 方案2：基于配置文件驱动的方式
+
 通过JSON/YAML配置文件定义算子性能属性，但不推荐，理由如下：
 
 1. **表达能力差**：无法处理复杂逻辑、动态计算和运行时信息
@@ -80,25 +84,29 @@ graph TD
 
 ### 2.3 方案分析
 
-#### 推荐方案（代码实现）优势：
+#### 推荐方案（代码实现）优势
+
 - **实现简单**：代码路径清晰，易于理解和维护
 - **灵活性高**：支持各种类型算子，无需架构修改
 - **计算精度准确**：支持多数据类型和复杂逻辑
 - **与现有系统集成良好**：基于现有注册机制扩展
 - **代码模板化**：易于复用，学习成本低
 
-#### 推荐方案局限性：
+#### 推荐方案局限性
+
 - **需要手动实现**：用户必须手动编写建模逻辑
 - **技术门槛**：对复杂算子的性能评估需要领域知识
 
 ## 3. 实施计划
 
 ### 3.1 已完成功能
+
 - **核心框架实现**：基于 `OpInvokeInfo.register_op_properties` 的算子性能建模机制
 - **自定义算子加载**：系统扫描 `tensor_cast/performance_model/custom_op/` 目录自动加载用户自定义建模
 - **算子覆盖支持**：完整实现算子覆盖机制，自定义建模自动覆盖默认实现
 
 ### 3.2 下一步计划
+
 - **模板和示例优化**：开发通用的算子性能建模模板和完善示例代码，提供更多实用的建模案例
 - **用户体验改进**：简化用户自定义建模的实现复杂度，降低使用门槛
 
@@ -137,7 +145,7 @@ def _estimate_your_op(op_invoke_info, device_profile) -> object:
     total_elements = sum(tensor.numel() for tensor in input_tensors)
     base_time = 0.001
     compute_time = total_elements * 1e-9
-    
+
     return PerformanceModel.Result(base_time + compute_time)
 ```
 
@@ -158,16 +166,14 @@ import torch
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     """为缺少直接估计的算子提供详细分析"""
     properties = op_invoke_info.get_memory_access_properties()
-    
+
     # 按数据类型添加计算量
     compute_ops = properties.compute_ops.setdefault(
         op_invoke_info.args[0].dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = calculated_ops
-    
+
     return properties
 ```
-
-
 
 #### **工作机制**
 
@@ -181,7 +187,8 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
 - **计算算子**：可以根据复杂性选择适当的方法
 - **混合场景**：可以同时使用两种装饰器，用于不同用途
 
-#### **`@register_op_estimator`的参数**：
+#### **`@register_op_estimator`的参数**
+
 1. **Operator**：要估计的任意PyTorch算子
 2. **Device Profile**：特定设备的配置（可以是 `None`）
 3. **Override**：是否允许覆盖现有估计器
@@ -195,12 +202,12 @@ import torch
 @OpInvokeInfo.register_op_properties(torch.ops.your_op.Operator)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     properties = op_invoke_info.get_memory_access_properties()
-    
+
     # 按数据类型添加计算量
     compute_ops = properties.compute_ops.setdefault(
         op_invoke_info.args[0].dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = calculated_ops
-    
+
     return properties
 ```
 
@@ -216,7 +223,7 @@ from tensor_cast.performance_model.model import PerformanceModel
 def _estimate_all_to_all(op_invoke_info, device_profile) -> object:
     input_tensor = op_invoke_info.args[0]
     message_size = input_tensor.numel() * input_tensor.element_size()
-    
+
     # 简单的时间估计
     return PerformanceModel.Result(0.001 + message_size / (10.0 * 1e9))
 ```
@@ -231,6 +238,7 @@ def _estimate_all_to_all(op_invoke_info, device_profile) -> object:
 ### 4.6 常见模式
 
 #### 4.6.1 内存访问属性
+
 ```python
 # 基础内存属性
 properties = op_invoke_info.get_memory_access_properties()
@@ -241,6 +249,7 @@ properties.memory_write_bytes += output_tensor.numel() * output_tensor.element_s
 ```
 
 #### 4.6.2 计算操作
+
 ```python
 # 按数据类型添加计算量
 compute_ops = properties.compute_ops.setdefault(tensor.dtype, OpInvokeInfo.ComputeOps())

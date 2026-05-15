@@ -28,31 +28,21 @@ class TestDeepseekSparseAttentionIndexer(unittest.TestCase):
             inner_module.num_heads * inner_module.head_dim,
             bias=False,
         )
-        inner_module.wk = nn.Linear(
-            inner_module.hidden_size, inner_module.head_dim, bias=False
-        )
+        inner_module.wk = nn.Linear(inner_module.hidden_size, inner_module.head_dim, bias=False)
         inner_module.k_norm = nn.LayerNorm(inner_module.head_dim)
-        inner_module.weights_proj = nn.Linear(
-            inner_module.hidden_size, inner_module.num_heads, bias=False
-        )
+        inner_module.weights_proj = nn.Linear(inner_module.hidden_size, inner_module.num_heads, bias=False)
         inner_module.softmax_scale = inner_module.head_dim**-0.5
 
         self.inner_module = inner_module
         self.indexer = DeepseekSparseAttentionIndexer(inner_module)
 
-        self.hidden_states = torch.randn(
-            self.batch_size, self.seq_len, inner_module.hidden_size
-        )
-        self.qa_normed = torch.randn(
-            self.batch_size, self.seq_len, inner_module.q_lora_rank
-        )
+        self.hidden_states = torch.randn(self.batch_size, self.seq_len, inner_module.hidden_size)
+        self.qa_normed = torch.randn(self.batch_size, self.seq_len, inner_module.q_lora_rank)
         self.position_embeddings = (
             torch.randn(self.seq_len, inner_module.qk_rope_head_dim),
             torch.randn(self.seq_len, inner_module.qk_rope_head_dim),
         )
-        self.indexer_cache = torch.empty(
-            self.batch_size, self.seq_len, inner_module.head_dim
-        )
+        self.indexer_cache = torch.empty(self.batch_size, self.seq_len, inner_module.head_dim)
 
     def test_topk_limit_is_available_on_wrapper(self):
         self.assertEqual(self.indexer.topk_limit, 2)
@@ -135,9 +125,7 @@ class TestDeepseekSparseAttentionIndexer(unittest.TestCase):
                 attention_meta,
             )
 
-        self.assertTrue(
-            torch.equal(mock_dsa_indexer.call_args.args[7], attention_meta.seq_lens)
-        )
+        self.assertTrue(torch.equal(mock_dsa_indexer.call_args.args[7], attention_meta.seq_lens))
 
     def test_dsa_indexer_op_returns_query_major_topk_shape(self):
         batch_size = 2

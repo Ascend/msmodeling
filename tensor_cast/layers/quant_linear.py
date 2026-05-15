@@ -27,9 +27,7 @@ class QuantLinearBase(torch.nn.Module):
         self.in_features = linear_layer.weight.shape[1]
         self.out_features = linear_layer.weight.shape[0]
         self.quant_config = quant_config
-        self.dynamic_quant_dtype = quant_type_to_dynamic_quant_dtype(
-            quant_config.quant_type
-        )
+        self.dynamic_quant_dtype = quant_type_to_dynamic_quant_dtype(quant_config.quant_type)
 
         # Store bias if it exists
         if linear_layer.bias is not None:
@@ -114,16 +112,12 @@ class QuantLinearBase(torch.nn.Module):
                     pad_size = padded_in_features - in_features
                     tensor = torch.nn.functional.pad(tensor, (0, pad_size))
 
-                tensor_grouped = tensor.reshape(
-                    out_features, num_groups, self.group_size
-                )
+                tensor_grouped = tensor.reshape(out_features, num_groups, self.group_size)
 
                 if scale.ndim == 1:
                     scale = scale.reshape(1, -1, 1)
                 else:
-                    raise ValueError(
-                        f"Unsupported scale shape for MXFP4: {scale.shape}"
-                    )
+                    raise ValueError(f"Unsupported scale shape for MXFP4: {scale.shape}")
 
                 quantized_grouped = tensor_grouped / scale
                 tensor = quantized_grouped.reshape(out_features, padded_in_features)
@@ -219,9 +213,7 @@ class QuantLinearBase(torch.nn.Module):
             max_val = torch.amax(x, dim=dim)
         elif quant_granularity == QuantGranularity.PER_GROUP:
             # Group-wise quantization along the specified dimension
-            assert group_size > 0, (
-                "group_size must be greater than 0 for PER_CHANNEL_GROUP"
-            )
+            assert group_size > 0, "group_size must be greater than 0 for PER_CHANNEL_GROUP"
             group_dim = x.ndim - 1
 
             # Get the size of the dimension to group
@@ -249,9 +241,7 @@ class QuantLinearBase(torch.nn.Module):
             scale = max_abs / q_max
             offset = None
         elif quant_scheme == QuantScheme.ASYMMETRIC:
-            assert self.dynamic_quant_dtype != DTYPE_FP8, (
-                "FP8 only supports symmetric quantization"
-            )
+            assert self.dynamic_quant_dtype != DTYPE_FP8, "FP8 only supports symmetric quantization"
             scale = (max_val - min_val) / (q_max - q_min)
             offset = q_min - min_val / scale
         else:
@@ -265,9 +255,7 @@ class QuantLinearBase(torch.nn.Module):
         Performs the forward pass of the quantized linear layer.
         """
         if self.quant_config.quant_type == LinearQuantType.MXFP4:
-            raise ValueError(
-                "MXFP4 simulation is not supported in QuantLinearBase, use TensorCastQuantLinear instead."
-            )
+            raise ValueError("MXFP4 simulation is not supported in QuantLinearBase, use TensorCastQuantLinear instead.")
         # Dequantize weights
         dequantized_weight = self.dequantize_weight().to(x.dtype)
 
@@ -307,9 +295,7 @@ class QuantLinearBase(torch.nn.Module):
         # Perform linear operation
         output = torch.nn.functional.linear(x, dequantized_weight, self.bias)
 
-        out_dtype = (
-            self.quant_config.out_dtype if self.quant_config is not None else x.dtype
-        )
+        out_dtype = self.quant_config.out_dtype if self.quant_config is not None else x.dtype
         return output.to(out_dtype)
 
     def __repr__(self):
@@ -333,22 +319,12 @@ class TensorCastQuantLinear(QuantLinearBase):
         x_shape = x.shape
         x = x.reshape(-1, x_shape[-1])
         qweight = self.qweight.transpose(0, 1)
-        out_dtype = (
-            self.quant_config.out_dtype
-            if self.quant_config.out_dtype is not None
-            else x.dtype
-        )
+        out_dtype = self.quant_config.out_dtype if self.quant_config.out_dtype is not None else x.dtype
         if self.activation_scale is None:
             # Dynamic quantization path
-            if (
-                self.quant_config.dynamic_quant_granularity
-                == QuantGranularity.PER_TENSOR
-            ):
+            if self.quant_config.dynamic_quant_granularity == QuantGranularity.PER_TENSOR:
                 dims = []
-            elif (
-                self.quant_config.dynamic_quant_granularity
-                == QuantGranularity.PER_SAMPLE
-            ):
+            elif self.quant_config.dynamic_quant_granularity == QuantGranularity.PER_SAMPLE:
                 dims = [-1]
             else:
                 dims = []
@@ -370,13 +346,11 @@ class TensorCastQuantLinear(QuantLinearBase):
                 activation_offset = None
             else:
                 assert self.quant_config.dynamic_quant_scheme == QuantScheme.ASYMMETRIC
-                x, activation_scale, activation_offset = (
-                    torch.ops.tensor_cast.dynamic_quantize_asymmetric(
-                        x,
-                        dims=dims,
-                        scale_dtype=self.weight_scale.dtype,
-                        out_dtype=torch.int8,
-                    )
+                x, activation_scale, activation_offset = torch.ops.tensor_cast.dynamic_quantize_asymmetric(
+                    x,
+                    dims=dims,
+                    scale_dtype=self.weight_scale.dtype,
+                    out_dtype=torch.int8,
                 )
         else:
             # Static quantization path

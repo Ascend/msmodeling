@@ -19,9 +19,7 @@ def replace_with_sharded_tensor(
     dim: int = 0,
     head_num: Optional[int] = None,
 ):
-    shard_attr = get_partial_sharded(
-        getattr(module, attr), tp_size, tp_rank, dim, head_num
-    ).contiguous()
+    shard_attr = get_partial_sharded(getattr(module, attr), tp_size, tp_rank, dim, head_num).contiguous()
 
     if not is_quant:
         shard_attr = nn.Parameter(shard_attr)
@@ -81,8 +79,7 @@ class RowParallelLinear(ParallelLinearBase):
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
         self.gather_slice_data = (
-            self.tp_group.world_size > 1
-            and self.global_tp_group.world_size != self.tp_group.world_size
+            self.tp_group.world_size > 1 and self.global_tp_group.world_size != self.tp_group.world_size
         )
         self.slice_input_by_last_dim = slice_input_by_last_dim
         self.reduce_output = reduce_output
@@ -102,11 +99,7 @@ class RowParallelLinear(ParallelLinearBase):
             if self.tp_rank != 0:
                 setattr(self._inner, self.inner_bias_name, None)
 
-        if (
-            self.is_quant
-            and self._inner.weight_scale.ndim > 0
-            and self._inner.weight_scale.shape[0] > 0
-        ):
+        if self.is_quant and self._inner.weight_scale.ndim > 0 and self._inner.weight_scale.shape[0] > 0:
             replace_with_sharded_tensor(
                 self._inner,
                 "weight_scale",
@@ -171,9 +164,7 @@ class ColumnParallelLinear(ParallelLinearBase):
         self.tp_rank = self.tp_group.rank_in_group
         self.in_features_per_partition = self.in_features
         if head_num is None:
-            self.out_features_per_partition = math.ceil(
-                self.out_features / self.tp_size
-            )
+            self.out_features_per_partition = math.ceil(self.out_features / self.tp_size)
         else:
             head_size = exact_division(self.out_features, head_num)
             if is_replicable and head_num < self.tp_size:
@@ -188,8 +179,7 @@ class ColumnParallelLinear(ParallelLinearBase):
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
         self.gather_slice_data = (
-            self.tp_group.world_size > 1
-            and self.global_tp_group.world_size != self.tp_group.world_size
+            self.tp_group.world_size > 1 and self.global_tp_group.world_size != self.tp_group.world_size
         )
         self.gather_output = gather_output
 

@@ -1,0 +1,113 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+format.quote-style = "preserve"
+
+[tool.ruff.lint]
+# extend-select adds rules; does not remove existing Ruff defaults
+extend-select = [
+  "D209",  # closing """ of multiline docstring on its own line
+  "SIM115",  # prefer context manager over try/finally for open files
+]
+
+# Pylint: high-signal checks only. Use disable=all then enable, otherwise
+# enable stacks on Pylint defaults and a long disable list still leaves
+# unlisted C/R/W messages enabled.
+# ================================
+[tool.pylint]
+max-line-length = 120
+max-args = 15       # relaxed (not enforced as messages; limits for enabled checks)
+max-branches = 50   # relaxed
+max-statements = 200# relaxed
+max-locals = 50     # relaxed
+max-positional-arguments = 20  # relaxed
+
+[tool.pylint.reports]
+reports = false
+score = false
+
+# Pre-commit runs pylint with cwd at repo root; tests import `tools.perf_data_collection.*`.
+[tool.pylint.main]
+init-hook = "import sys; from pathlib import Path; sys.path.insert(0, str(Path.cwd()))"
+
+[tool.pylint."messages control"]
+disable = ["all"]
+enable = [
+  # Syntax / likely runtime errors
+  "E0100",  # syntax-error
+  "E0601",  # used-before-assignment
+  "E0602",  # undefined-variable
+  "E0603",  # undefined-all-variable (attr)
+  "E0611",  # no-name-in-module
+  "E0632",  # return value issues
+  "E1101",  # no-member
+  "E1120",  # no-value-for-parameter
+
+  # High-value warnings
+  "W0632",  # unbalanced-tuple-unpacking
+  "W1514",  # unspecified-encoding for open()
+]
+
+# ==============================================
+# Bandit: allowlist of tests; B101 (assert) skipped below
+# ==============================================
+[tool.bandit]
+# LOW so explicitly listed tests still run
+severity_level = "LOW"
+confidence_level = "LOW"
+
+# Directories excluded from Bandit scans
+exclude_dirs = [
+  "tests", "test", "venv", ".venv", "build", "dist", "migrations", "__pycache__"
+]
+
+# ==============================
+# Enabled Bandit test IDs
+# ==============================
+tests = [
+  # SQL injection
+  "B608",      # SQL injection via string formatting
+
+  # Command injection
+  "B602",      # subprocess with shell true / partial paths
+  "B605",      # unsafe subprocess patterns
+  "B607",      # partial path, shell true
+
+  # Dangerous execution
+  "B307",      # eval / exec
+  "B324",      # use of input()
+
+  # Deserialization
+  "B301",      # pickle of untrusted data
+
+  # Crypto
+  "B306",      # weak crypto
+  "B321",      # weak hash
+  "B311",      # random for security-sensitive use
+
+  # Secrets / sensitive data
+  "B105",      # hardcoded password
+  "B106",
+  "B107",
+  "B108",      # sensitive values in exceptions
+  "B110",      # sensitive data in logs
+
+]
+
+# ==============================
+# Skipped tests (e.g. B101 assert_used); others not listed above stay off
+# ==============================
+skips = [
+  "B101",
+  "B102", "B103", "B104",
+  "B201", "B202",
+  "B302", "B303", "B304", "B305", "B308",
+  "B401", "B402", "B403", "B404", "B405", "B406",
+  "B501", "B502", "B503",
+  "B601", "B603", "B604", "B606", "B609",
+  "B701", "B702"
+]
+
+# Bandit output
+format = "screen"
+quiet = false

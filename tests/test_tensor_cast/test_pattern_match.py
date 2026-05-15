@@ -54,13 +54,9 @@ class PatternReplaceTestCase(unittest.TestCase):
     )
     def test_rms_norm_pattern(self, model_id):
         num_tokens = 100
-        model_config = ModelConfig(
-            ParallelConfig(), QuantConfig(), num_hidden_layers_override=2
-        )
+        model_config = ModelConfig(ParallelConfig(), QuantConfig(), num_hidden_layers_override=2)
         model = TransformerModel(model_id, model_config)
-        model = torch.compile(
-            model, backend=self.compile_backend, fullgraph=True, dynamic=True
-        )
+        model = torch.compile(model, backend=self.compile_backend, fullgraph=True, dynamic=True)
         machine_config = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(machine_config)
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
@@ -80,16 +76,12 @@ class PatternReplaceTestCase(unittest.TestCase):
         num_tokens = 100
         model_config = ModelConfig(
             ParallelConfig(),
-            get_quant_config(
-                activation_scale=torch.max(torch.abs(torch.randn(1))) / 127.0
-            ),
+            get_quant_config(activation_scale=torch.max(torch.abs(torch.randn(1))) / 127.0),
             quant_linear_cls=TensorCastQuantLinear,
             num_hidden_layers_override=1,
         )
         model = TransformerModel(model_id, model_config)
-        model = torch.compile(
-            model, backend=self.compile_backend, fullgraph=True, dynamic=True
-        )
+        model = torch.compile(model, backend=self.compile_backend, fullgraph=True, dynamic=True)
         machine_config = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(machine_config)
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
@@ -112,17 +104,13 @@ class PatternReplaceTestCase(unittest.TestCase):
         model_config = ModelConfig(
             ParallelConfig(),
             get_quant_config(
-                dynamic_quant_granularity=QuantGranularity.PER_SAMPLE
-                if per_sample
-                else QuantGranularity.PER_TENSOR
+                dynamic_quant_granularity=QuantGranularity.PER_SAMPLE if per_sample else QuantGranularity.PER_TENSOR
             ),
             quant_linear_cls=TensorCastQuantLinear,
             num_hidden_layers_override=1,
         )
         model = TransformerModel(model_id, model_config)
-        model = torch.compile(
-            model, backend=self.compile_backend, fullgraph=True, dynamic=True
-        )
+        model = torch.compile(model, backend=self.compile_backend, fullgraph=True, dynamic=True)
         machine_config = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(machine_config)
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
@@ -132,9 +120,7 @@ class PatternReplaceTestCase(unittest.TestCase):
         self.assertIn("tensor_cast.rms_norm.default", result)
         self.assertIn("tensor_cast.add_rms_norm.default", result)
         self.assertIn("tensor_cast.rms_norm_dynamic_quant_symmetric.default", result)
-        self.assertIn(
-            "tensor_cast.add_rms_norm_dynamic_quant2_symmetric.default", result
-        )
+        self.assertIn("tensor_cast.add_rms_norm_dynamic_quant2_symmetric.default", result)
 
     @parameterized.expand(
         [
@@ -154,9 +140,7 @@ class PatternReplaceTestCase(unittest.TestCase):
             num_hidden_layers_override=1,
         )
         model = TransformerModel(model_id, model_config)
-        model = torch.compile(
-            model, backend=self.compile_backend, fullgraph=True, dynamic=True
-        )
+        model = torch.compile(model, backend=self.compile_backend, fullgraph=True, dynamic=True)
         machine_config = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(machine_config)
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
@@ -166,9 +150,7 @@ class PatternReplaceTestCase(unittest.TestCase):
         self.assertIn("tensor_cast.rms_norm.default", result)
         self.assertIn("tensor_cast.add_rms_norm.default", result)
         self.assertIn("tensor_cast.rms_norm_dynamic_quant_symmetric.default", result)
-        self.assertIn(
-            "tensor_cast.add_rms_norm_dynamic_quant2_symmetric.default", result
-        )
+        self.assertIn("tensor_cast.add_rms_norm_dynamic_quant2_symmetric.default", result)
 
     @parameterized.expand(
         [
@@ -191,9 +173,7 @@ class PatternReplaceTestCase(unittest.TestCase):
             num_hidden_layers_override=1,
         )
         model = TransformerModel(model_id, model_config)
-        model = torch.compile(
-            model, backend=self.compile_backend, fullgraph=True, dynamic=True
-        )
+        model = torch.compile(model, backend=self.compile_backend, fullgraph=True, dynamic=True)
         machine_config = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(machine_config)
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
@@ -214,17 +194,13 @@ class PatternReplaceTestCase(unittest.TestCase):
         num_tokens = 100
         model_config = ModelConfig(
             ParallelConfig(),
-            get_quant_config(
-                activation_scale=torch.max(torch.abs(torch.randn(1))) / 127.0
-            ),
+            get_quant_config(activation_scale=torch.max(torch.abs(torch.randn(1))) / 127.0),
             quant_linear_cls=TensorCastQuantLinear,
             attention_cls=AttentionTensorCast,
             num_hidden_layers_override=2,
         )
         model = TransformerModel(model_id, model_config)
-        model = torch.compile(
-            model, backend=self.compile_backend, fullgraph=True, dynamic=True
-        )
+        model = torch.compile(model, backend=self.compile_backend, fullgraph=True, dynamic=True)
         machine_config = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(machine_config)
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
@@ -235,9 +211,7 @@ class PatternReplaceTestCase(unittest.TestCase):
 
     def test_rms_norm_pattern_non_default_eps(self):
         model = NonDefaultEpsRMSNormModule()
-        model = torch.compile(
-            model, backend=self.compile_backend, fullgraph=True, dynamic=True
-        )
+        model = torch.compile(model, backend=self.compile_backend, fullgraph=True, dynamic=True)
         machine_config = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(machine_config)
         hidden_states = torch.empty(2, 4, device="meta", dtype=torch.float16)

@@ -82,16 +82,15 @@ For detailed usage, please refer to the two documentation files:
 
 ### Coding style
 
-Use `lintrunner` to make sure the coding style aligns:
+Use `pre-commit` to make sure the coding style aligns:
 
 ```bash
-pip install lintrunner
+pip install pre-commit
 cd /path/to/msmodeling
-lintrunner init  # run once
-lintrunner --all-files -a  # run every time before code check-in: check and apply necessary changes to follow the coding style
+pre-commit install  # run once
 ```
 
-Fix the remaining lint issues reported by `lintrunner`.
+Later commit will be checked by `pre-commit` automatically.
 
 ### Unit tests
 

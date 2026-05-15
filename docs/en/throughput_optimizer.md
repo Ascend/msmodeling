@@ -202,21 +202,21 @@ Options:
                         Acceptance rate list for MTP (default: [0.9, 0.6, 0.4, 0.2])
   --dump-original-results
                         If set, dump the original results for analysis. (default: False)
-                
+
 General Options:
-  model_id              The model identifier, which can be: 1) A Hugging Face model ID (e.g., 'meta-llama/Llama-2-7b-hf') to load from the Hub;    
+  model_id              The model identifier, which can be: 1) A Hugging Face model ID (e.g., 'meta-llama/Llama-2-7b-hf') to load from the Hub;
                         2) A local directory path containing a diffusers model (must include 'transformer/config.json').
   --device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE}
-                        Specifies the target device profile to use for benchmarking and simulation. Must be a valid device name as defined in      
+                        Specifies the target device profile to use for benchmarking and simulation. Must be a valid device name as defined in
                         DeviceProfile. The default device 'TEST_DEVICE' is used for standard simulation runs. (default: TEST_DEVICE)
   --num-devices NUM_DEVICES
-                        Specifies the total number of devices/processes to use. Must be a positive integer. A value of 1 indicates single-device   
+                        Specifies the total number of devices/processes to use. Must be a positive integer. A value of 1 indicates single-device
                         execution. (default: 1)
   --reserved-memory-gb RESERVED_MEMORY_GB
-                        Amount of device memory (in gigabytes) reserved for system usage and unavailable for application. Set to 0 to disable      
+                        Amount of device memory (in gigabytes) reserved for system usage and unavailable for application. Set to 0 to disable
                         memory reservation. (default: 10.0)
   --log-level {debug,info,warning,error,critical}
-                        Specifies the verbosity level for log output. Available levels: 'debug' (most verbose), 'info', 'warning', 'error',        
+                        Specifies the verbosity level for log output. Available levels: 'debug' (most verbose), 'info', 'warning', 'error',
                         'critical' (least verbose). (default: error)
 
 Model & Quantization Options:
@@ -279,8 +279,8 @@ PD Ratio Optimization Options:
 
   For example, if we have 12 requests, and max_prefill_tokens is 8192, input_length is 2048,
   then prefill_batch_size is 4. And 12 requests was processed in 3 steps.
-  so 
-  
+  so
+
   `sum_for_ttft = (prefill_latency * 4 ) * (1 + 3) * 3 / 2`
 
   `ttft = sum_for_ttft / 12`

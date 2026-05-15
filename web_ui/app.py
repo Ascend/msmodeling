@@ -223,9 +223,7 @@ HERO_HTML = """
 def build_app() -> gr.Blocks:
     """Build the Gradio application."""
     if gr is None:
-        raise RuntimeError(
-            "gradio is not installed. Please `pip install gradio` first."
-        )
+        raise RuntimeError("gradio is not installed. Please `pip install gradio` first.")
 
     vendor_map = get_vendor_device_map()
     vendors = list(vendor_map.keys())
@@ -233,9 +231,7 @@ def build_app() -> gr.Blocks:
     default_devices = vendor_map.get(default_vendor, [])
     default_device = default_devices[0] if default_devices else None
 
-    theme = gr.themes.Soft(
-        primary_hue="indigo", secondary_hue="slate", neutral_hue="slate"
-    )
+    theme = gr.themes.Soft(primary_hue="indigo", secondary_hue="slate", neutral_hue="slate")
 
     with gr.Blocks(title=APP_TITLE, theme=theme, css=APP_CSS, head=APP_HEAD) as demo:
         gr.HTML(HERO_HTML)
@@ -251,18 +247,14 @@ def build_app() -> gr.Blocks:
             with gr.Group(elem_classes=["section-card"]):
                 tg_model = gr.Textbox(label="model-id", value=default_model)
                 with gr.Row():
-                    tg_vendor = gr.Dropdown(
-                        vendors, value=default_vendor, label="Vendor"
-                    )
+                    tg_vendor = gr.Dropdown(vendors, value=default_vendor, label="Vendor")
                     tg_device = gr.Dropdown(
                         default_devices,
                         value=default_device,
                         label="Device",
                     )
                 with gr.Row():
-                    tg_comp_vendor = gr.Dropdown(
-                        vendors, multiselect=True, label="Compare Vendors"
-                    )
+                    tg_comp_vendor = gr.Dropdown(vendors, multiselect=True, label="Compare Vendors")
                     tg_comp = gr.Dropdown([], multiselect=True, label="Compare Devices")
                 with gr.Accordion("Concurrency and Length", open=True):
                     with gr.Row():
@@ -275,9 +267,7 @@ def build_app() -> gr.Blocks:
                         )
                     with gr.Row():
                         tg_query_len = gr.Textbox(label="query-length", value="1")
-                        tg_context_len = gr.Textbox(
-                            label="context-length", value="4500"
-                        )
+                        tg_context_len = gr.Textbox(label="context-length", value="4500")
                     with gr.Row():
                         tg_decode = gr.Checkbox(label="decode", value=True)
                         tg_mtp = gr.Textbox(label="num-mtp-tokens", value="0")
@@ -315,9 +305,7 @@ def build_app() -> gr.Blocks:
                 with gr.Accordion("Parallel Settings", open=False):
                     with gr.Row():
                         tg_tp = gr.Textbox(label="tp-size", value="1")
-                        tg_tp_list = gr.Textbox(
-                            label="TP List", value="", placeholder="e.g. [1,2,4,8]"
-                        )
+                        tg_tp_list = gr.Textbox(label="TP List", value="", placeholder="e.g. [1,2,4,8]")
                         tg_dp = gr.Textbox(label="dp-size (auto/num)", value="auto")
                         tg_ep = gr.Textbox(label="ep-size", value="1")
                     tg_compile = gr.Checkbox(label="compile", value=True)
@@ -365,13 +353,9 @@ def build_app() -> gr.Blocks:
                             label="disable-repetition",
                             value=False,
                         )
-                        tg_quantize_lmhead = gr.Checkbox(
-                            label="quantize-lmhead", value=False
-                        )
+                        tg_quantize_lmhead = gr.Checkbox(label="quantize-lmhead", value=False)
                     with gr.Row():
-                        tg_mxfp4_group_size = gr.Textbox(
-                            label="mxfp4-group-size", value="32"
-                        )
+                        tg_mxfp4_group_size = gr.Textbox(label="mxfp4-group-size", value="32")
                         tg_num_hidden_layers_override = gr.Textbox(
                             label="num-hidden-layers-override",
                             value="0",
@@ -430,9 +414,7 @@ def build_app() -> gr.Blocks:
                             value=["analytic"],
                             label="performance-model",
                         )
-                        tg_profiling_database = gr.Textbox(
-                            label="profiling-database", value=""
-                        )
+                        tg_profiling_database = gr.Textbox(label="profiling-database", value="")
                 with gr.Row():
                     tg_preview_btn = gr.Button("Preview Configuration")
                     tg_run = gr.Button("Run", variant="primary")
@@ -480,17 +462,13 @@ def build_app() -> gr.Blocks:
                 tg_mtp_acceptance_state,
             ) = text_generate_result_section()
             tg_vendor.change(
-                lambda v: gr.update(
-                    choices=vendor_map.get(v, []), value=(vendor_map.get(v, [None])[0])
-                ),
+                lambda v: gr.update(choices=vendor_map.get(v, []), value=(vendor_map.get(v, [None])[0])),
                 inputs=[tg_vendor],
                 outputs=[tg_device],
             )
             tg_comp_vendor.change(
                 lambda vs: gr.update(
-                    choices=sorted(
-                        {d for vendor in (vs or []) for d in vendor_map.get(vendor, [])}
-                    ),
+                    choices=sorted({d for vendor in (vs or []) for d in vendor_map.get(vendor, [])}),
                     value=[],
                 ),
                 inputs=[tg_comp_vendor],
@@ -674,9 +652,7 @@ def build_app() -> gr.Blocks:
                     tg_mtp_acceptance_state,
                 ],
             )
-            wire_export(
-                tg_export_btn, tg_display_state, tg_export_file, "text_generate_results"
-            )
+            wire_export(tg_export_btn, tg_display_state, tg_export_file, "text_generate_results")
             tg_memory_device.change(
                 update_memory_analysis_by_device,
                 inputs=[tg_full_state, tg_memory_device, tg_memory_case],
@@ -728,22 +704,16 @@ def build_app() -> gr.Blocks:
                 "Cache combinations, and cross-device comparison.",
             )
             with gr.Group(elem_classes=["section-card"]):
-                vg_model = gr.Textbox(
-                    label="model-id", value="Wan2.2-T2V-A14B-Diffusers"
-                )
+                vg_model = gr.Textbox(label="model-id", value="Wan2.2-T2V-A14B-Diffusers")
                 with gr.Row():
-                    vg_vendor = gr.Dropdown(
-                        vendors, value=default_vendor, label="Vendor"
-                    )
+                    vg_vendor = gr.Dropdown(vendors, value=default_vendor, label="Vendor")
                     vg_device = gr.Dropdown(
                         default_devices,
                         value=default_device,
                         label="Device",
                     )
                 with gr.Row():
-                    vg_comp_vendor = gr.Dropdown(
-                        vendors, multiselect=True, label="Compare Vendors"
-                    )
+                    vg_comp_vendor = gr.Dropdown(vendors, multiselect=True, label="Compare Vendors")
                     vg_comp = gr.Dropdown([], multiselect=True, label="Compare Devices")
                 with gr.Row():
                     vg_batch = gr.Textbox(label="batch-size", value="1")
@@ -785,12 +755,8 @@ def build_app() -> gr.Blocks:
                 with gr.Accordion("DiT Cache", open=False):
                     vg_cache = gr.Checkbox(label="dit-cache", value=False)
                     with gr.Row():
-                        vg_cache_range = gr.Textbox(
-                            label="cache-step-range", value="20,30"
-                        )
-                        vg_cache_interval = gr.Textbox(
-                            label="cache-step-interval", value="5"
-                        )
+                        vg_cache_range = gr.Textbox(label="cache-step-range", value="20,30")
+                        vg_cache_interval = gr.Textbox(label="cache-step-interval", value="5")
                         vg_cache_block = gr.Textbox(label="cache-block-range", value="")
                 with gr.Accordion("Other Parameters", open=False):
                     gr.Markdown(
@@ -839,17 +805,13 @@ def build_app() -> gr.Blocks:
                 vg_op_breakdown_state,
             ) = video_generate_result_section()
             vg_vendor.change(
-                lambda v: gr.update(
-                    choices=vendor_map.get(v, []), value=(vendor_map.get(v, [None])[0])
-                ),
+                lambda v: gr.update(choices=vendor_map.get(v, []), value=(vendor_map.get(v, [None])[0])),
                 inputs=[vg_vendor],
                 outputs=[vg_device],
             )
             vg_comp_vendor.change(
                 lambda vs: gr.update(
-                    choices=sorted(
-                        {d for vendor in (vs or []) for d in vendor_map.get(vendor, [])}
-                    ),
+                    choices=sorted({d for vendor in (vs or []) for d in vendor_map.get(vendor, [])}),
                     value=[],
                 ),
                 inputs=[vg_comp_vendor],
@@ -989,19 +951,11 @@ def build_app() -> gr.Blocks:
                 with gr.Group(elem_classes=["section-card"]):
                     op_model = gr.Textbox(label="model-id", value="Qwen/Qwen3-32B")
                     with gr.Row():
-                        op_vendor = gr.Dropdown(
-                            vendors, value=default_vendor, label="Vendor"
-                        )
-                        op_device = gr.Dropdown(
-                            default_devices, value=default_device, label="Device"
-                        )
+                        op_vendor = gr.Dropdown(vendors, value=default_vendor, label="Vendor")
+                        op_device = gr.Dropdown(default_devices, value=default_device, label="Device")
                     with gr.Row():
-                        op_comp_vendor = gr.Dropdown(
-                            vendors, multiselect=True, label="Peer Vendors"
-                        )
-                        op_comp = gr.Dropdown(
-                            [], multiselect=True, label="Peer Devices"
-                        )
+                        op_comp_vendor = gr.Dropdown(vendors, multiselect=True, label="Peer Vendors")
+                        op_comp = gr.Dropdown([], multiselect=True, label="Peer Devices")
                     with gr.Row():
                         op_num_devices = gr.Textbox(label="Device Count", value="4")
                         op_input = gr.Textbox(label="Input Length", value="3500")
@@ -1129,9 +1083,7 @@ def build_app() -> gr.Blocks:
                                 placeholder="Required in PD Ratio mode",
                             )
                         with gr.Row():
-                            op_compile_break = gr.Checkbox(
-                                label="Allow Graph Breaks", value=False
-                            )
+                            op_compile_break = gr.Checkbox(label="Allow Graph Breaks", value=False)
                             op_max_prefill_tokens = gr.Textbox(
                                 label="Prefill Batch Parameter (max-prefill-tokens)",
                                 value="8192",
@@ -1159,18 +1111,14 @@ def build_app() -> gr.Blocks:
                             elem_classes=["field-hint"],
                         )
                         with gr.Row():
-                            op_reserved_memory_gb = gr.Textbox(
-                                label="reserved-memory-gb (GB)", value="0.0"
-                            )
+                            op_reserved_memory_gb = gr.Textbox(label="reserved-memory-gb (GB)", value="0.0")
                             op_log_level = gr.Dropdown(
                                 ["debug", "info", "warning", "error", "critical"],
                                 value="error",
                                 label="log-level",
                             )
                         with gr.Row():
-                            op_serving_cost = gr.Textbox(
-                                label="Serving cost", value="0"
-                            )
+                            op_serving_cost = gr.Textbox(label="Serving cost", value="0")
                             op_dump_original_results = gr.Checkbox(
                                 label="\u5bfc\u51fa\u539f\u59cb\u5bfb\u4f18\u7ed3\u679c",
                                 value=False,
@@ -1186,9 +1134,7 @@ def build_app() -> gr.Blocks:
                         elem_classes=["preview-summary"],
                     )
                     with gr.Accordion("Command Preview", open=False):
-                        op_preview = gr.Textbox(
-                            label="Command", lines=4, interactive=False
-                        )
+                        op_preview = gr.Textbox(label="Command", lines=4, interactive=False)
                 # Optimizer result workspace
                 (
                     op_progress,
@@ -1251,13 +1197,7 @@ def build_app() -> gr.Blocks:
                 )
                 op_comp_vendor.change(
                     lambda vs: gr.update(
-                        choices=sorted(
-                            {
-                                d
-                                for vendor in (vs or [])
-                                for d in vendor_map.get(vendor, [])
-                            }
-                        ),
+                        choices=sorted({d for vendor in (vs or []) for d in vendor_map.get(vendor, [])}),
                         value=[],
                     ),
                     inputs=[op_comp_vendor],
@@ -1475,9 +1415,7 @@ def build_app() -> gr.Blocks:
     return demo
 
 
-def launch_app(
-    server_name: str = "0.0.0.0", server_port: int = 2345, share: bool = False
-):
+def launch_app(server_name: str = "0.0.0.0", server_port: int = 2345, share: bool = False):
     """Launch the application
 
     Args:

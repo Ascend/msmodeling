@@ -138,7 +138,7 @@ flowchart TD
 
 ### 2.3 Solution Analysis
 
-#### Advantages of Proposed Solution:
+#### Advantages of Proposed Solution
 
 1. Solves circular dependency issues between modules, improving code quality
 2. Provides flexible module exclusion mechanism supporting multiple matching patterns
@@ -147,7 +147,7 @@ flowchart TD
 5. Adopts layered architecture design, facilitating extension and maintenance
 6. Supports configuration-driven approach, enhancing system flexibility
 
-#### Limitations of Proposed Solution:
+#### Limitations of Proposed Solution
 
 1. Requires updating existing quantization configuration usage patterns
 2. Adds new modules, requiring corresponding documentation and training
@@ -192,7 +192,7 @@ Extend the existing `QuantConfig` class, adding configuration conversion, cachin
 class QuantConfig:
     """
     Unified quantization configuration class, supporting unified conversion from multiple quantization configuration sources
-    
+
     Features:
     1. Support conversion from open-source quantization configurations (FineGrainedFP8Config, CompressedTensorsConfig)
     2. Support conversion from user input configurations
@@ -201,58 +201,58 @@ class QuantConfig:
     5. Configuration query caching for improved performance
     6. Configuration validation functionality
     """
-    
+
     # Linear layer quantization configuration mapping: module path pattern -> LinearQuantConfig
     linear_configs: Dict[str, LinearQuantConfig] = dataclasses.field(default_factory=dict)
-    
+
     # Attention layer quantization configuration mapping: layer index -> AttentionQuantConfig
     attention_configs: Dict[int, AttentionQuantConfig] = dataclasses.field(default_factory=dict)
-    
+
     # List of modules not to be quantized (supports regex, fnmatch patterns, exact matching)
     modules_to_not_convert: List[str] = dataclasses.field(default_factory=lambda: ["lm_head"])
-    
+
     # Original quantization configuration (retained for debugging and compatibility)
     ori_quant_config: Optional[QuantizationConfigMixin] = None
-    
+
     # Configuration cache for improved query performance
     _config_cache: Dict[str, Optional[LinearQuantConfig]] = dataclasses.field(
         default_factory=dict,
         init=False,
         repr=False
     )
-    
+
     # Optimized pattern matcher
     _pattern_matcher: Optional[PatternMatcher] = dataclasses.field(
         default=None,
         init=False,
         repr=False
     )
-    
+
     def __post_init__(self):
         if self.modules_to_not_convert is None:
             self.modules_to_not_convert = ["lm_head"]
         self._pattern_matcher = PatternMatcher(self.modules_to_not_convert)
-    
+
     @classmethod
     def from_hf_quant_config(
-        cls, 
+        cls,
         hf_quant_config: QuantizationConfigMixin
     ) -> "QuantConfig":
         """
         Create QuantConfig from HuggingFace quantization configuration
-        
+
         Args:
             hf_quant_config: HuggingFace quantization configuration instance
-            
+
         Returns:
             QuantConfig instance
         """
         config = cls()
         config.ori_quant_config = hf_quant_config
-        
+
         # Extract modules_to_not_convert
         config.modules_to_not_convert = get_modules_to_not_convert(hf_quant_config)
-        
+
         # Convert based on different configuration types
         if isinstance(hf_quant_config, FineGrainedFP8Config):
             config._from_fine_grained_fp8(hf_quant_config)
@@ -260,9 +260,9 @@ class QuantConfig:
             config._from_compressed_tensors(hf_quant_config)
         else:
             config._from_generic(hf_quant_config)
-            
+
         return config
-    
+
     @classmethod
     def from_user_input(
         cls,
@@ -273,13 +273,13 @@ class QuantConfig:
     ) -> "QuantConfig":
         """
         Create QuantConfig from user input
-        
+
         Args:
             quantize_linear_action: Linear layer quantization action
             quantize_lmhead: Whether to quantize lm_head
             quantize_attention_action: Attention layer quantization action
             **kwargs: Other quantization parameters
-            
+
         Returns:
             QuantConfig instance
         """
@@ -294,14 +294,14 @@ class QuantConfig:
             attention_configs=quant_config.attention_configs,
             modules_to_not_convert=quant_config.modules_to_not_convert
         )
-    
+
     def _from_fine_grained_fp8(self, config: FineGrainedFP8Config):
         """Convert from FineGrainedFP8Config"""
         self.linear_configs["layers.*"] = LinearQuantConfig(
             quant_type=LinearQuantType.FP8,
             weight_scale=torch.tensor(1.0),
         )
-        
+
     def _from_compressed_tensors(self, config: CompressedTensorsConfig):
         """Convert from CompressedTensorsConfig"""
         quant_scheme = config.quantization_config.scheme
@@ -315,79 +315,79 @@ class QuantConfig:
                 quant_type=LinearQuantType.FP8,
                 weight_scale=torch.tensor(1.0),
             )
-    
+
     def _from_generic(self, config: QuantizationConfigMixin):
         """Generic conversion logic"""
         pass
-    
+
     def should_skip_module(self, module_name: str) -> bool:
         """
         Determine whether a module should skip quantization (optimized: use compiled pattern matcher)
-        
+
         Args:
             module_name: Module name
-            
+
         Returns:
             True to skip quantization, False to apply quantization
         """
         return self._pattern_matcher.match(module_name)
-    
+
     def get_linear_config(self, module_name: str) -> Optional[LinearQuantConfig]:
         """
         Get linear quantization configuration for a specific module (optimized: with caching)
-        
+
         Args:
             module_name: Module name
-            
+
         Returns:
             Matched LinearQuantConfig, or None if no match
         """
         if module_name in self._config_cache:
             return self._config_cache[module_name]
-        
+
         for pattern, config in self.linear_configs.items():
             if pattern_match(module_name, [pattern]):
                 self._config_cache[module_name] = config
                 return config
-        
+
         self._config_cache[module_name] = None
         return None
-    
+
     def get_attention_config(self, layer_idx: int) -> Optional[AttentionQuantConfig]:
         """
         Get attention quantization configuration for a specific layer
-        
+
         Args:
             layer_idx: Layer index
-            
+
         Returns:
             AttentionQuantConfig, or None if no configuration
         """
         return self.attention_configs.get(layer_idx)
-    
+
     def validate(self, hardware_adapter: HardwareAdapter) -> Tuple[bool, List[str]]:
         """
         Validate quantization configuration
-        
+
         Args:
             hardware_adapter: Hardware adapter
-            
+
         Returns:
             (is_valid, error_messages)
         """
         validator = ConfigValidator(hardware_adapter)
         all_errors = []
-        
+
         for pattern, config in self.linear_configs.items():
             is_valid, errors = validator.validate_linear_config(config)
             if not is_valid:
                 all_errors.extend([f"Pattern '{pattern}': {e}" for e in errors])
-        
+
         for layer_idx, config in self.attention_configs.items():
             is_valid, errors = validator.validate_attention_config(config)
             if not is_valid:
                 all_errors.extend([f"Layer {layer_idx}: {e}" for e in errors])
-        
+
         return len(all_errors) == 0, all_errors
 ```
 
@@ -400,22 +400,22 @@ class QuantizationStrategy(ABC):
     """
     Quantization strategy abstract base class
     """
-    
+
     @abstractmethod
     def get_quant_type(self) -> LinearQuantType:
         """Get quantization type"""
         pass
-    
+
     @abstractmethod
     def validate_config(self, config: LinearQuantConfig) -> bool:
         """Validate configuration validity"""
         pass
-    
+
     @abstractmethod
     def get_weight_dtype(self) -> torch.dtype:
         """Get weight data type"""
         pass
-    
+
     @abstractmethod
     def get_activation_dtype(self) -> Optional[torch.dtype]:
         """Get activation data type"""
@@ -424,26 +424,26 @@ class QuantizationStrategy(ABC):
 
 class W8A8Strategy(QuantizationStrategy):
     """W8A8 quantization strategy"""
-    
+
     def get_quant_type(self) -> LinearQuantType:
         return LinearQuantType.W8A8
-    
+
     def validate_config(self, config: LinearQuantConfig) -> bool:
         return config.quant_type == LinearQuantType.W8A8
-    
+
     def get_weight_dtype(self) -> torch.dtype:
         return torch.int8
-    
+
     def get_activation_dtype(self) -> Optional[torch.dtype]:
         return torch.int8
 
 
 class FP8Strategy(QuantizationStrategy):
     """FP8 quantization strategy"""
-    
+
     def get_quant_type(self) -> LinearQuantType:
         return LinearQuantType.FP8
-    
+
     def validate_config(self, config: LinearQuantConfig) -> bool:
         if config.quant_type != LinearQuantType.FP8:
             return False
@@ -452,24 +452,24 @@ class FP8Strategy(QuantizationStrategy):
         if config.activation_scale is not None:
             return False
         return True
-    
+
     def get_weight_dtype(self) -> torch.dtype:
         return DTYPE_FP8
-    
+
     def get_activation_dtype(self) -> Optional[torch.dtype]:
         return DTYPE_FP8
 
 
 class QuantizationStrategyRegistry:
     """Quantization strategy registry"""
-    
+
     _strategies: Dict[LinearQuantType, QuantizationStrategy] = {}
-    
+
     @classmethod
     def register(cls, strategy: QuantizationStrategy):
         """Register quantization strategy"""
         cls._strategies[strategy.get_quant_type()] = strategy
-    
+
     @classmethod
     def get(cls, quant_type: LinearQuantType) -> Optional[QuantizationStrategy]:
         """Get quantization strategy"""
@@ -494,15 +494,15 @@ class PatternMatcher:
     """
     High-performance pattern matcher
     """
-    
+
     def __init__(self, patterns: List[str]):
         self.patterns = patterns
         self._compiled_regex: List[Pattern] = []
         self._exact_matches: set = set()
         self._fnmatch_patterns: List[str] = []
-        
+
         self._compile_patterns()
-    
+
     def _compile_patterns(self):
         """Compile patterns"""
         for pattern in self.patterns:
@@ -513,23 +513,23 @@ class PatternMatcher:
                 self._fnmatch_patterns.append(pattern)
             else:
                 self._exact_matches.add(pattern)
-    
+
     def match(self, name: str) -> bool:
         """Match module name"""
         # Exact match (fastest)
         if name in self._exact_matches:
             return True
-        
+
         # Regular expression match
         for regex in self._compiled_regex:
             if regex.match(name):
                 return True
-        
+
         # fnmatch pattern match
         for pattern in self._fnmatch_patterns:
             if fnmatch.fnmatch(name, pattern):
                 return True
-        
+
         return False
 ```
 
@@ -554,20 +554,20 @@ class HardwareAdapter(ABC):
     """
     Hardware adapter abstract base class
     """
-    
+
     @abstractmethod
     def get_capabilities(self) -> HardwareCapabilities:
         """Get hardware capabilities"""
         pass
-    
+
     @abstractmethod
     def get_optimized_quant_config(
-        self, 
+        self,
         base_config: LinearQuantConfig
     ) -> LinearQuantConfig:
         """Get hardware-optimized quantization configuration"""
         pass
-    
+
     @abstractmethod
     def is_supported(self, quant_type: LinearQuantType) -> bool:
         """Check if specified quantization type is supported"""
@@ -576,7 +576,7 @@ class HardwareAdapter(ABC):
 
 class AscendHardwareAdapter(HardwareAdapter):
     """Ascend hardware adapter"""
-    
+
     def __init__(self):
         self._capabilities = HardwareCapabilities(
             supports_fp8=True,
@@ -587,12 +587,12 @@ class AscendHardwareAdapter(HardwareAdapter):
             supports_dynamic_quantization=True,
             supports_static_quantization=True
         )
-    
+
     def get_capabilities(self) -> HardwareCapabilities:
         return self._capabilities
-    
+
     def get_optimized_quant_config(
-        self, 
+        self,
         base_config: LinearQuantConfig
     ) -> LinearQuantConfig:
         """Get Ascend-optimized quantization configuration"""
@@ -603,7 +603,7 @@ class AscendHardwareAdapter(HardwareAdapter):
                 self._capabilities.max_group_size
             )
         return optimized_config
-    
+
     def is_supported(self, quant_type: LinearQuantType) -> bool:
         if quant_type == LinearQuantType.FP8:
             return self._capabilities.supports_fp8
@@ -618,7 +618,7 @@ class AscendHardwareAdapter(HardwareAdapter):
 
 class CudaHardwareAdapter(HardwareAdapter):
     """CUDA hardware adapter"""
-    
+
     def __init__(self):
         self._capabilities = HardwareCapabilities(
             supports_fp8=True,
@@ -629,12 +629,12 @@ class CudaHardwareAdapter(HardwareAdapter):
             supports_dynamic_quantization=True,
             supports_static_quantization=True
         )
-    
+
     def get_capabilities(self) -> HardwareCapabilities:
         return self._capabilities
-    
+
     def get_optimized_quant_config(
-        self, 
+        self,
         base_config: LinearQuantConfig
     ) -> LinearQuantConfig:
         """Get CUDA-optimized quantization configuration"""
@@ -645,7 +645,7 @@ class CudaHardwareAdapter(HardwareAdapter):
                 self._capabilities.max_group_size
             )
         return optimized_config
-    
+
     def is_supported(self, quant_type: LinearQuantType) -> bool:
         if quant_type == LinearQuantType.FP8:
             return self._capabilities.supports_fp8
@@ -679,29 +679,29 @@ class ConfigValidator:
     """
     Configuration validator
     """
-    
+
     def __init__(self, hardware_adapter: HardwareAdapter):
         self._hardware_adapter = hardware_adapter
         self._strategy_registry = QuantizationStrategyRegistry
-    
+
     def validate_linear_config(
-        self, 
+        self,
         config: LinearQuantConfig
     ) -> Tuple[bool, List[str]]:
         """
         Validate linear quantization configuration
-        
+
         Returns:
             (is_valid, error_messages)
         """
         errors = []
-        
+
         # Check if quantization type is supported by hardware
         if not self._hardware_adapter.is_supported(config.quant_type):
             errors.append(
                 f"Quantization type {config.quant_type} is not supported by the hardware"
             )
-        
+
         # Use strategy to validate configuration
         strategy = self._strategy_registry.get(config.quant_type)
         if strategy is not None:
@@ -709,7 +709,7 @@ class ConfigValidator:
                 errors.append(
                     f"Invalid configuration for quantization type {config.quant_type}"
                 )
-        
+
         # Check group_size
         if config.weight_quant_granularity == QuantGranularity.PER_GROUP:
             if config.weight_group_size is None:
@@ -721,27 +721,27 @@ class ConfigValidator:
                     f"weight_group_size {config.weight_group_size} exceeds hardware limit "
                     f"{self._hardware_adapter.get_capabilities().max_group_size}"
                 )
-        
+
         return len(errors) == 0, errors
-    
+
     def validate_attention_config(
-        self, 
+        self,
         config: AttentionQuantConfig
     ) -> Tuple[bool, List[str]]:
         """
         Validate attention quantization configuration
-        
+
         Returns:
             (is_valid, error_messages)
         """
         errors = []
-        
+
         if config.quant_type == AttentionQuantType.INT8:
             if config.kv_scale is None:
                 errors.append("kv_scale must be provided for INT8 quantization")
         else:
             errors.append(f"Unsupported attention quant type {config.quant_type}")
-        
+
         return len(errors) == 0, errors
 ```
 
@@ -753,14 +753,14 @@ class ConfigValidator:
 class Quantizer:
     """
     Quantization engine, responsible for executing model quantization operations
-    
+
     Features:
     1. Supports multiple quantization schemes (W8A8, W4A8, FP8, MXFP4, etc.)
     2. Supports dynamic and static quantization
     3. Supports pattern-based module exclusion
     4. Supports hardware-specific optimizations
     """
-    
+
     def __init__(
         self,
         quant_config: QuantConfig,
@@ -769,7 +769,7 @@ class Quantizer:
     ):
         """
         Initialize Quantizer
-        
+
         Args:
             quant_config: Quantization configuration
             quant_linear_cls: Quantized linear layer class
@@ -778,36 +778,36 @@ class Quantizer:
         self.quant_config = quant_config
         self.quant_linear_cls = quant_linear_cls
         self.hardware_config = hardware_config or {}
-    
+
     def quantize_model(self, model: torch.nn.Module) -> torch.nn.Module:
         """
         Quantize the model
-        
+
         Args:
             model: Model to be quantized
-            
+
         Returns:
             Quantized model
         """
         for name, module in model.named_modules():
             if self.quant_config.should_skip_module(name):
                 continue
-            
+
             if isinstance(module, torch.nn.Linear):
                 linear_config = self.quant_config.get_linear_config(name)
                 if linear_config is not None:
                     quantized_module = self.quant_linear_cls(module, linear_config)
                     self._replace_module(model, name, quantized_module)
-        
+
         return model
-    
+
     def quantize_attention(self, model: torch.nn.Module) -> torch.nn.Module:
         """
         Quantize attention layers
-        
+
         Args:
             model: Model to be quantized
-            
+
         Returns:
             Quantized model
         """
@@ -815,13 +815,13 @@ class Quantizer:
             attn_config = self.quant_config.get_attention_config(layer_idx)
             if attn_config is not None:
                 self._apply_attention_quantization(model, layer_idx, attn_config)
-        
+
         return model
-    
+
     def _replace_module(
-        self, 
-        model: torch.nn.Module, 
-        module_name: str, 
+        self,
+        model: torch.nn.Module,
+        module_name: str,
         new_module: torch.nn.Module
     ):
         """Replace module in model"""
@@ -830,13 +830,13 @@ class Quantizer:
         for part in parts[:-1]:
             current = getattr(current, part)
         setattr(current, parts[-1], new_module)
-    
+
     def _get_num_layers(self, model: torch.nn.Module) -> int:
         """Get number of layers in model"""
         if hasattr(model, "config"):
             return getattr(model.config, "num_hidden_layers", 0)
         return 0
-    
+
     def _apply_attention_quantization(
         self,
         model: torch.nn.Module,
@@ -855,19 +855,19 @@ class Quantizer:
 class ConfigResolver:
     """
     Configuration parser, responsible for parsing and merging configurations from different sources
-    
+
     Features:
     1. Parse user input configurations
     2. Parse model native configurations
     3. Merge configurations and resolve conflicts
     4. Generate final runtime configuration
     """
-    
+
     def __init__(self):
         self.user_input_config: Optional[UserInputConfig] = None
         self.model_native_config: Optional[ModelNativeConfig] = None
         self.runtime_config: Optional[RuntimeConfig] = None
-    
+
     def resolve(
         self,
         user_input: Optional[Dict[str, Any]] = None,
@@ -876,30 +876,30 @@ class ConfigResolver:
     ) -> RuntimeConfig:
         """
         Parse configuration and generate runtime configuration
-        
+
         Args:
             user_input: User input configuration
             model_id: Model ID
             hf_config: HuggingFace configuration
-            
+
         Returns:
             Runtime configuration
         """
         # Parse user input configuration
         if user_input is not None:
             self.user_input_config = self._parse_user_input(user_input)
-        
+
         # Parse model native configuration
         if hf_config is not None:
             self.model_native_config = self._parse_model_native_config(hf_config)
         elif model_id is not None:
             self.model_native_config = self._load_model_config(model_id)
-        
+
         # Merge configurations
         self.runtime_config = self._merge_configs()
-        
+
         return self.runtime_config
-    
+
     def _parse_user_input(self, user_input: Dict[str, Any]) -> UserInputConfig:
         """Parse user input configuration"""
         return UserInputConfig(
@@ -908,9 +908,9 @@ class ConfigResolver:
             quantize_attention_action=user_input.get("quantize_attention_action"),
             **user_input.get("quantization_kwargs", {})
         )
-    
+
     def _parse_model_native_config(
-        self, 
+        self,
         hf_config: PretrainedConfig
     ) -> ModelNativeConfig:
         """Parse model native configuration"""
@@ -919,22 +919,22 @@ class ConfigResolver:
             quant_config = AutoQuantizationConfig.from_dict(
                 hf_config.quantization_config
             )
-        
+
         return ModelNativeConfig(
             hf_config=hf_config,
             quant_config=quant_config
         )
-    
+
     def _load_model_config(self, model_id: str) -> ModelNativeConfig:
         """Load model configuration"""
         auto_loader = AutoModelConfigLoader()
         hf_config = auto_loader.load_config(model_id)
         return self._parse_model_native_config(hf_config)
-    
+
     def _merge_configs(self) -> RuntimeConfig:
         """
         Merge configurations
-        
+
         Priority: User input configuration > Model native configuration > Default configuration
         """
         # If user specified quantization configuration, use user configuration
@@ -953,7 +953,7 @@ class ConfigResolver:
         # Use default configuration
         else:
             quant_config = QuantConfig()
-        
+
         return RuntimeConfig(quant_config=quant_config)
 
 
@@ -964,7 +964,7 @@ class UserInputConfig:
     quantize_lmhead: bool = False
     quantize_attention_action: Optional[QuantizeAttentionAction] = None
     quantization_kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
-    
+
     def has_quantization(self) -> bool:
         """Check if there is quantization configuration"""
         return (
@@ -999,13 +999,13 @@ def create_quant_config(
 ) -> QuantConfig:
     """
     Create quantization configuration (updated to return QuantConfig)
-    
+
     Args:
         quantize_linear_action: Linear layer quantization action
         quantize_lmhead: Whether to quantize lm_head
         quantize_attention_action: Attention layer quantization action
         **kwargs: Other quantization parameters
-        
+
     Returns:
         QuantConfig instance
     """
@@ -1025,10 +1025,10 @@ def get_modules_to_not_convert(
 ) -> List[Optional[str]]:
     """
     Extract list of modules not to be quantized from quantization configuration
-    
+
     Args:
         quant_config: HuggingFace quantization configuration instance
-        
+
     Returns:
         List of modules not to be quantized
     """
@@ -1089,16 +1089,16 @@ quantized_model = quantizer.quantize_model(model)
 # Example 6: Use strategy pattern to extend new quantization types
 class CustomQuantStrategy(QuantizationStrategy):
     """Custom quantization strategy"""
-    
+
     def get_quant_type(self) -> LinearQuantType:
         return LinearQuantType.CUSTOM
-    
+
     def validate_config(self, config: LinearQuantConfig) -> bool:
         return True
-    
+
     def get_weight_dtype(self) -> torch.dtype:
         return torch.int8
-    
+
     def get_activation_dtype(self) -> Optional[torch.dtype]:
         return None
 

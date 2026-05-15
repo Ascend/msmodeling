@@ -36,17 +36,13 @@ class MergeLinearPassTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
         self.assertEqual(count_events(runtime, torch.ops.aten.mm.default), 5)
-        self.assertEqual(
-            count_events(runtime, torch.ops.aten.split_with_sizes.default), 2
-        )
+        self.assertEqual(count_events(runtime, torch.ops.aten.split_with_sizes.default), 2)
 
     def test_qwen3_32b_static_int8(self):
         model_id = "Qwen/Qwen3-32B"
@@ -55,9 +51,7 @@ class MergeLinearPassTestCase(unittest.TestCase):
             ParallelConfig(),
             get_quant_config(
                 quant_type=LinearQuantType.W8A8,
-                activation_scale=torch.empty(
-                    [num_tokens], dtype=torch.float, device="meta"
-                ),
+                activation_scale=torch.empty([num_tokens], dtype=torch.float, device="meta"),
             ),
             quant_linear_cls=TensorCastQuantLinear,
             attention_cls=AttentionTensorCast,
@@ -70,19 +64,13 @@ class MergeLinearPassTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
-        self.assertEqual(
-            count_events(runtime, torch.ops.tensor_cast.static_quant_linear.default), 4
-        )
-        self.assertEqual(
-            count_events(runtime, torch.ops.aten.split_with_sizes.default), 2
-        )
+        self.assertEqual(count_events(runtime, torch.ops.tensor_cast.static_quant_linear.default), 4)
+        self.assertEqual(count_events(runtime, torch.ops.aten.split_with_sizes.default), 2)
 
     @parameterized.expand(
         [
@@ -115,9 +103,7 @@ class MergeLinearPassTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
@@ -132,6 +118,4 @@ class MergeLinearPassTestCase(unittest.TestCase):
         elif quant_type == LinearQuantType.MXFP4:
             expected_op = torch.ops.tensor_cast.mxfp4_linear.default
         self.assertEqual(count_events(runtime, expected_op), 4)
-        self.assertEqual(
-            count_events(runtime, torch.ops.aten.split_with_sizes.default), 2
-        )
+        self.assertEqual(count_events(runtime, torch.ops.aten.split_with_sizes.default), 2)

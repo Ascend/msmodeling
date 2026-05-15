@@ -5,7 +5,7 @@ from ..freezing_pattern_pass import FreezingPatternPass
 from . import matmul_allreduce
 
 all_passes: List[FreezingPatternPass] = [
-    FreezingPatternPass(pass_name="freezing_pattern_pass_0"),
+    FreezingPatternPass(pass_name="freezing_pattern_pass_0"),  # nosec B106
 ]
 
 

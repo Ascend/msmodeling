@@ -120,9 +120,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
 
     # ---- Compute interpolation ----
 
-    def _interpolate_compute(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _interpolate_compute(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         """Interpolate compute ops on the first dimension of the first input.
 
         Strategy: find all CSV rows where dtype matches and all dimensions
@@ -228,9 +226,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return None
 
         candidates.sort(key=lambda x: x[0])
-        return self._interpolate_from_candidates(
-            candidates, float(target_dim), kernel_type
-        )
+        return self._interpolate_from_candidates(candidates, float(target_dim), kernel_type)
 
     # ---- Communication interpolation ----
 
@@ -240,9 +236,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
 
     # ---- Attention interpolation ----
 
-    def _interpolate_attention(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _interpolate_attention(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         """Interpolate attention ops on avg_seq_len using enriched CSV.
 
         Filters by (N, D, dtype, sparse_mode, num_kv_heads) exact match on
@@ -276,14 +270,10 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         key = args[1]
         seq_lens = args[6]
         query_lens = args[7] if len(args) > 7 else None
-        if not isinstance(query, torch.Tensor) or not isinstance(
-            seq_lens, torch.Tensor
-        ):
+        if not isinstance(query, torch.Tensor) or not isinstance(seq_lens, torch.Tensor):
             return None
 
-        head_dim = (
-            key.shape[-1] if isinstance(key, torch.Tensor) and key.ndim >= 1 else 0
-        )
+        head_dim = key.shape[-1] if isinstance(key, torch.Tensor) and key.ndim >= 1 else 0
         tc_q_3d = _normalize_fia_q_shape(tuple(query.shape), head_dim)
         if tc_q_3d is None:
             return None
@@ -300,9 +290,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
 
         # Infer sparse_mode and num_kv_heads from TC args
         tc_sparse_mode = _infer_sparse_mode(query_lens)
-        tc_num_kv_heads = (
-            key.shape[-2] if isinstance(key, torch.Tensor) and key.ndim >= 2 else None
-        )
+        tc_num_kv_heads = key.shape[-2] if isinstance(key, torch.Tensor) and key.ndim >= 2 else None
 
         has_sparse_col = "Runtime sparse_mode" in df.columns
         has_kv_heads_col = "Runtime num_key_value_heads" in df.columns
@@ -326,9 +314,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 continue
 
             csv_dtypes_str = str(row.get("Input Data Types", ""))
-            csv_first_dtype = (
-                csv_dtypes_str.split(";")[0].strip() if csv_dtypes_str else ""
-            )
+            csv_first_dtype = csv_dtypes_str.split(";")[0].strip() if csv_dtypes_str else ""
             if dtype_str != csv_first_dtype:
                 continue
 
@@ -338,11 +324,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             # T (token count) filter: must match exactly or within block-padding
             csv_T = csv_q_3d[0]
             tc_T = tc_q_3d[0]
-            if (
-                tc_T != csv_T
-                and not _is_block_padded(tc_T, csv_T)
-                and not _is_block_padded(csv_T, tc_T)
-            ):
+            if tc_T != csv_T and not _is_block_padded(tc_T, csv_T) and not _is_block_padded(csv_T, tc_T):
                 continue
 
             # sparse_mode filter (skip if CSV lacks column)
@@ -368,12 +350,8 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         transform = override.get("shape_transform")
 
         if transform == "sqrt":
-            return self._interpolate_from_candidates_sqrt(
-                candidates, float(avg_seq_len), kernel_type
-            )
-        return self._interpolate_from_candidates(
-            candidates, float(avg_seq_len), kernel_type
-        )
+            return self._interpolate_from_candidates_sqrt(candidates, float(avg_seq_len), kernel_type)
+        return self._interpolate_from_candidates(candidates, float(avg_seq_len), kernel_type)
 
     # ---- Composite interpolation ----
 
@@ -402,9 +380,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             # First try exact match via base ProfilingDataSource
             kernel_types = [spec.kernel_type] + (spec.alternate_kernel_types or [])
             if spec.query_mode == "attention" and spec.attention_params:
-                result_exact = self.base._query_by_attn_params(
-                    kernel_types, spec.attention_params, spec.dtype
-                )
+                result_exact = self.base._query_by_attn_params(kernel_types, spec.attention_params, spec.dtype)
                 lat = result_exact[0] if result_exact else None
             else:
                 torch_dtype = None
@@ -414,9 +390,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                         break
                 if torch_dtype is not None:
                     tc_inputs = [(shape, torch_dtype) for shape in spec.input_shapes]
-                    hit = self.base._find_compute_match(
-                        kernel_types, tc_inputs, spec.tc_input_count
-                    )
+                    hit = self.base._find_compute_match(kernel_types, tc_inputs, spec.tc_input_count)
                     lat = hit.latency_us if hit else None
                 else:
                     lat = None
@@ -424,13 +398,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             # If exact miss, try interpolation
             if lat is None:
                 if spec.query_mode == "attention" and spec.attention_params:
-                    lat = self._interpolate_attention_by_params(
-                        spec.kernel_type, spec.attention_params, spec.dtype
-                    )
+                    lat = self._interpolate_attention_by_params(spec.kernel_type, spec.attention_params, spec.dtype)
                 else:
-                    lat = self._interpolate_compute_by_shapes(
-                        spec.kernel_type, spec.input_shapes, spec.dtype
-                    )
+                    lat = self._interpolate_compute_by_shapes(spec.kernel_type, spec.input_shapes, spec.dtype)
 
             if lat is None:
                 return None
@@ -570,9 +540,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 continue
 
             csv_dtypes_str = str(row.get("Input Data Types", ""))
-            csv_first_dtype = (
-                csv_dtypes_str.split(";")[0].strip() if csv_dtypes_str else ""
-            )
+            csv_first_dtype = csv_dtypes_str.split(";")[0].strip() if csv_dtypes_str else ""
             if dtype_str != csv_first_dtype:
                 continue
 
@@ -582,19 +550,11 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             # T (token count) filter: must match exactly or within block-padding
             csv_T = csv_q_3d[0]
             tc_T = q_shape_3d[0]
-            if (
-                tc_T != csv_T
-                and not _is_block_padded(tc_T, csv_T)
-                and not _is_block_padded(csv_T, tc_T)
-            ):
+            if tc_T != csv_T and not _is_block_padded(tc_T, csv_T) and not _is_block_padded(csv_T, tc_T):
                 continue
 
             # sparse_mode filter
-            if (
-                has_sparse_col
-                and target_sparse is not None
-                and int(row["Runtime sparse_mode"]) != target_sparse
-            ):
+            if has_sparse_col and target_sparse is not None and int(row["Runtime sparse_mode"]) != target_sparse:
                 continue
 
             # num_kv_heads filter
@@ -617,18 +577,14 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         transform = override.get("shape_transform")
 
         if transform == "sqrt":
-            result = self._interpolate_from_candidates_sqrt(
-                candidates, target, kernel_type
-            )
+            result = self._interpolate_from_candidates_sqrt(candidates, target, kernel_type)
         else:
             result = self._interpolate_from_candidates(candidates, target, kernel_type)
         return result.latency_us if result else None
 
     # ---- Elementwise interpolation ----
 
-    def _interpolate_elementwise(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict
-    ) -> Optional[QueryResult]:
+    def _interpolate_elementwise(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
         """Interpolate elementwise ops on first dim of output shape, dtype-relaxed.
 
         Groups CSV rows by output_shape[1:] (hidden dims must match exactly).
@@ -726,8 +682,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         latency = _interp_1d(x_lo, y_lo, x_hi, y_hi, target)
 
         logger.debug(
-            "INTERPOLATED %s: target=%.1f, bracket=(%.1f, %.1f), "
-            "durations=(%.1f, %.1f) -> %.1f us",
+            "INTERPOLATED %s: target=%.1f, bracket=(%.1f, %.1f), durations=(%.1f, %.1f) -> %.1f us",
             kernel_type,
             target,
             x_lo,
@@ -776,8 +731,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         latency = _interp_1d(sqrt_lo, y_lo, sqrt_hi, y_hi, sqrt_target)
 
         logger.debug(
-            "INTERPOLATED (sqrt) %s: target=%.1f (sqrt=%.2f), "
-            "bracket=(%.1f, %.1f), durations=(%.1f, %.1f) -> %.1f us",
+            "INTERPOLATED (sqrt) %s: target=%.1f (sqrt=%.2f), bracket=(%.1f, %.1f), durations=(%.1f, %.1f) -> %.1f us",
             kernel_type,
             target,
             sqrt_target,

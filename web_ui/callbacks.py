@@ -168,21 +168,15 @@ def _preview_first_command(tasks) -> str:
     return " ".join(str(part) for part in command)
 
 
-def _preview_summary_markdown(
-    sim_type: str, form: dict[str, Any], tasks: list[Any]
-) -> str:
+def _preview_summary_markdown(sim_type: str, form: dict[str, Any], tasks: list[Any]) -> str:
     task_count = len(tasks)
     devices = _dedupe(task.params.get("device") for task in tasks)
     qlinear = _dedupe(task.params.get("quantize_linear_action") for task in tasks)
     qattn = _dedupe(task.params.get("quantize_attention_action") for task in tasks)
     model_id = form.get("model_id") or "-"
     device_text = ", ".join(devices[:8]) if devices else form.get("device", "-")
-    qlinear_text = (
-        ", ".join(qlinear[:8]) if qlinear else form.get("quantize_linear_action", "-")
-    )
-    qattn_text = (
-        ", ".join(qattn[:8]) if qattn else form.get("quantize_attention_action", "-")
-    )
+    qlinear_text = ", ".join(qlinear[:8]) if qlinear else form.get("quantize_linear_action", "-")
+    qattn_text = ", ".join(qattn[:8]) if qattn else form.get("quantize_attention_action", "-")
 
     lines = ["### Configuration Summary"]
     lines.append(f"- Model: **{model_id}**")
@@ -192,9 +186,7 @@ def _preview_summary_markdown(
     if sim_type == "text_generate":
         num_queries = _dedupe(task.params.get("num_queries") for task in tasks)
         query_text = ", ".join(num_queries[:8]) or form.get("num_queries", "-")
-        lines.append(
-            f"- Device Count / Concurrency: **{form.get('num_devices', '-')} / {query_text}**"
-        )
+        lines.append(f"- Device Count / Concurrency: **{form.get('num_devices', '-')} / {query_text}**")
         lines.append(
             f"- Sequence Length: **Context {form.get('context_length', '-')} / "
             f"Generate {form.get('query_length', '-')} token**"
@@ -209,40 +201,29 @@ def _preview_summary_markdown(
             image_count = form.get("image_batch_size") or "-"
             image_height = form.get("image_height") or "-"
             image_width = form.get("image_width") or "-"
-            lines.append(
-                f"- Images: **{image_count} / {image_height} x {image_width}**"
-            )
+            lines.append(f"- Images: **{image_count} / {image_height} x {image_width}**")
     elif sim_type == "video_generate":
         ulysses = _dedupe(task.params.get("ulysses_size") for task in tasks)
         ulysses_text = ", ".join(ulysses[:8]) or form.get("ulysses_size", "-")
-        lines.append(
-            f"- Device Count / Ulysses: **{form.get('world_size', '-')} / {ulysses_text}**"
-        )
+        lines.append(f"- Device Count / Ulysses: **{form.get('world_size', '-')} / {ulysses_text}**")
         lines.append(
             f"- Video Shape: **{form.get('height', '-')} x {form.get('width', '-')} / "
             f"{form.get('frame_num', '-')} frames / {form.get('sample_step', '-')} steps**"
         )
-        lines.append(
-            f"- Batch / Prompt: **{form.get('batch_size', '-')} / {form.get('seq_len', '-')} tokens**"
-        )
+        lines.append(f"- Batch / Prompt: **{form.get('batch_size', '-')} / {form.get('seq_len', '-')} tokens**")
         lines.append(f"- Quantization: **MLP={qlinear_text}**")
         cfg_text = "Enabled" if form.get("use_cfg") else "Disabled"
         cfg_parallel_text = "Enabled" if form.get("cfg_parallel") else "Disabled"
         dit_cache_text = "Enabled" if form.get("dit_cache") else "Disabled"
         lines.append(
-            f"- CFG / Cache: **CFG={cfg_text} / CFG Parallel={cfg_parallel_text} / "
-            f"DiT Cache={dit_cache_text}**"
+            f"- CFG / Cache: **CFG={cfg_text} / CFG Parallel={cfg_parallel_text} / DiT Cache={dit_cache_text}**"
         )
     elif sim_type == "throughput_optimizer":
         modes = _dedupe(task.params.get("deployment_mode") for task in tasks)
         tpot = _dedupe(task.params.get("tpot_limits") for task in tasks)
         ttft = _dedupe(task.params.get("ttft_limits") for task in tasks)
-        lines.append(
-            f"- Deployment Mode: **{', '.join(modes[:4]) or form.get('deployment_mode', '-')}**"
-        )
-        lines.append(
-            f"- Device Count / Jobs: **{form.get('num_devices', '-')} / {form.get('jobs', '-')}**"
-        )
+        lines.append(f"- Deployment Mode: **{', '.join(modes[:4]) or form.get('deployment_mode', '-')}**")
+        lines.append(f"- Device Count / Jobs: **{form.get('num_devices', '-')} / {form.get('jobs', '-')}**")
         lines.append(
             f"- Length: **Input {form.get('input_length', '-')} / Output {form.get('output_length', '-')} token**"
         )
@@ -252,9 +233,7 @@ def _preview_summary_markdown(
         )
         lines.append(f"- Quantization: **MLP={qlinear_text} / Attention={qattn_text}**")
         if str(form.get("prefix_cache_hit_rate") or "0") not in {"", "0", "0.0"}:
-            lines.append(
-                f"- Prefix Cache Hit Rate: **{form.get('prefix_cache_hit_rate')}**"
-            )
+            lines.append(f"- Prefix Cache Hit Rate: **{form.get('prefix_cache_hit_rate')}**")
     return "\n".join(lines)
 
 
@@ -263,10 +242,7 @@ def _round_numeric_columns(df: pd.DataFrame, digits: int = 3) -> pd.DataFrame:
         return df
     out = df.copy()
     for col in out.columns:
-        if any(
-            unit in str(col)
-            for unit in ["(ms)", "(s)", "(GB)", "(%)", "token/s", "QPS", "Throughput"]
-        ):
+        if any(unit in str(col) for unit in ["(ms)", "(s)", "(GB)", "(%)", "token/s", "QPS", "Throughput"]):
             numeric = pd.to_numeric(out[col], errors="coerce")
             if numeric.notna().any():
                 out[col] = numeric.round(digits)
@@ -305,11 +281,7 @@ def _op_table_from_records(
         return pd.DataFrame()
 
     if "category" not in df.columns:
-        name_series = (
-            df["name"]
-            if "name" in df.columns
-            else pd.Series([""] * len(df), index=df.index)
-        )
+        name_series = df["name"] if "name" in df.columns else pd.Series([""] * len(df), index=df.index)
         df["category"] = name_series.fillna("").astype(str).apply(_categorize_op)
     for raw_col in ["analytic_total_us", "analytic_avg_us", "num_calls"]:
         if raw_col in df.columns:
@@ -324,9 +296,7 @@ def _op_table_from_records(
 
     sort_col = sort_by if sort_by in OP_TABLE_SORT_OPTIONS else "Total Time (ms)"
     ascending = sort_col == "Operator"
-    df = df.sort_values(by=sort_col, ascending=ascending, kind="stable").head(
-        int(top_n or 20)
-    )
+    df = df.sort_values(by=sort_col, ascending=ascending, kind="stable").head(int(top_n or 20))
     display_df = df[OP_TABLE_COLUMNS].copy()
     display_df = _round_numeric_columns(display_df)
     return display_df[_normalize_op_columns(columns)].reset_index(drop=True)
@@ -510,13 +480,9 @@ def _validate_text_form(form: dict[str, Any]) -> list[str]:
     try:
         context_length = int(form.get("context_length") or 0)
         if context_length < 0:
-            errors.append(
-                "\u4e0a\u4e0b\u6587\u957f\u5ea6\u4e0d\u80fd\u5c0f\u4e8e0\u3002"
-            )
+            errors.append("\u4e0a\u4e0b\u6587\u957f\u5ea6\u4e0d\u80fd\u5c0f\u4e8e0\u3002")
     except (TypeError, ValueError):
-        errors.append(
-            "\u4e0a\u4e0b\u6587\u957f\u5ea6\u5fc5\u987b\u662f\u6574\u6570\u3002"
-        )
+        errors.append("\u4e0a\u4e0b\u6587\u957f\u5ea6\u5fc5\u987b\u662f\u6574\u6570\u3002")
 
     try:
         num_mtp_tokens = int(form.get("num_mtp_tokens") or 0)
@@ -525,22 +491,12 @@ def _validate_text_form(form: dict[str, Any]) -> list[str]:
         num_mtp_tokens = 0
     if num_mtp_tokens < 0:
         errors.append("MTP token \u6570\u91cf\u4e0d\u80fd\u5c0f\u4e8e0\u3002")
-    if (
-        query_length is not None
-        and num_mtp_tokens > 0
-        and query_length <= num_mtp_tokens
-    ):
-        errors.append(
-            "\u751f\u6210token\u6570\u91cf\u5fc5\u987b\u5927\u4e8e MTP token \u6570\u91cf\u3002"
-        )
+    if query_length is not None and num_mtp_tokens > 0 and query_length <= num_mtp_tokens:
+        errors.append("\u751f\u6210token\u6570\u91cf\u5fc5\u987b\u5927\u4e8e MTP token \u6570\u91cf\u3002")
 
-    prefix_cache = non_negative_float(
-        "prefix_cache_hit_rate", "Prefix Cache \u547d\u4e2d\u7387"
-    )
+    prefix_cache = non_negative_float("prefix_cache_hit_rate", "Prefix Cache \u547d\u4e2d\u7387")
     if prefix_cache is not None and prefix_cache >= 1:
-        errors.append(
-            "Prefix Cache \u547d\u4e2d\u7387\u5fc5\u987b\u5728 [0, 1) \u8303\u56f4\u5185\u3002"
-        )
+        errors.append("Prefix Cache \u547d\u4e2d\u7387\u5fc5\u987b\u5728 [0, 1) \u8303\u56f4\u5185\u3002")
     non_negative_float("reserved_memory_gb", "\u9884\u7559\u663e\u5b58")
 
     for key, label in [
@@ -550,19 +506,13 @@ def _validate_text_form(form: dict[str, Any]) -> list[str]:
         positive_int(key, label)
     try:
         if int(form.get("num_hidden_layers_override") or 0) < 0:
-            errors.append(
-                "\u9690\u85cf\u5c42\u6570\u91cf\u8986\u76d6\u4e0d\u80fd\u5c0f\u4e8e0\u3002"
-            )
+            errors.append("\u9690\u85cf\u5c42\u6570\u91cf\u8986\u76d6\u4e0d\u80fd\u5c0f\u4e8e0\u3002")
     except (TypeError, ValueError):
-        errors.append(
-            "\u9690\u85cf\u5c42\u6570\u91cf\u8986\u76d6\u5fc5\u987b\u662f\u6574\u6570\u3002"
-        )
+        errors.append("\u9690\u85cf\u5c42\u6570\u91cf\u8986\u76d6\u5fc5\u987b\u662f\u6574\u6570\u3002")
 
     if num_devices:
         try:
-            tp_values = parse_scalar_or_list(
-                form.get("tp_sweep") or form.get("tp_size") or 1, int
-            )
+            tp_values = parse_scalar_or_list(form.get("tp_sweep") or form.get("tp_size") or 1, int)
             ep = int(form.get("ep_size") or 1)
             dp = parse_optional_number(form.get("dp_size"), int) or 1
         except (TypeError, ValueError) as exc:
@@ -573,13 +523,9 @@ def _validate_text_form(form: dict[str, Any]) -> list[str]:
             ep = dp = 1
         for value, label in [(dp, "DP"), (ep, "EP")]:
             if value <= 0:
-                errors.append(
-                    f"{label} \u5e76\u884c\u6570\u5fc5\u987b\u5927\u4e8e0\u3002"
-                )
+                errors.append(f"{label} \u5e76\u884c\u6570\u5fc5\u987b\u5927\u4e8e0\u3002")
             elif value > num_devices:
-                errors.append(
-                    f"{label} \u5e76\u884c\u6570\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002"
-                )
+                errors.append(f"{label} \u5e76\u884c\u6570\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002")
             elif num_devices % value != 0:
                 errors.append(
                     f"\u90e8\u7f72\u5361\u6570\u9700\u8981\u80fd\u88ab {label} \u5e76\u884c\u6570\u6574\u9664\u3002"
@@ -588,9 +534,7 @@ def _validate_text_form(form: dict[str, Any]) -> list[str]:
             if tp <= 0:
                 errors.append("TP \u5e76\u884c\u6570\u5fc5\u987b\u5927\u4e8e0\u3002")
             elif tp > num_devices:
-                errors.append(
-                    "TP \u5e76\u884c\u6570\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002"
-                )
+                errors.append("TP \u5e76\u884c\u6570\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002")
             elif num_devices % tp != 0:
                 errors.append(
                     "\u90e8\u7f72\u5361\u6570\u9700\u8981\u80fd\u88ab TP \u5e76\u884c\u6570\u6574\u9664\u3002"
@@ -621,13 +565,9 @@ def _validate_text_form(form: dict[str, Any]) -> list[str]:
             if value <= 0:
                 errors.append(f"{label}\u5fc5\u987b\u5927\u4e8e0\u3002")
             elif value > num_devices:
-                errors.append(
-                    f"{label}\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002"
-                )
+                errors.append(f"{label}\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002")
             elif num_devices % value != 0:
-                errors.append(
-                    f"\u90e8\u7f72\u5361\u6570\u9700\u8981\u80fd\u88ab {label} \u6574\u9664\u3002"
-                )
+                errors.append(f"\u90e8\u7f72\u5361\u6570\u9700\u8981\u80fd\u88ab {label} \u6574\u9664\u3002")
 
     perf_models = form.get("performance_model") or []
     if isinstance(perf_models, str):
@@ -668,21 +608,15 @@ def _validate_video_form(form: dict[str, Any]) -> list[str]:
     world_size = positive_int("world_size", "\u90e8\u7f72\u5361\u6570")
     if world_size:
         try:
-            ulysses_values = parse_scalar_or_list(
-                form.get("ulysses_sweep") or form.get("ulysses_size"), int
-            )
+            ulysses_values = parse_scalar_or_list(form.get("ulysses_sweep") or form.get("ulysses_size"), int)
         except Exception as exc:
             errors.append(f"Ulysses \u5217\u8868\u89e3\u6790\u5931\u8d25\uff1a{exc}")
             ulysses_values = []
         for ulysses in ulysses_values:
             if ulysses <= 0:
-                errors.append(
-                    "Ulysses \u5e76\u884c\u6570\u5fc5\u987b\u5927\u4e8e0\u3002"
-                )
+                errors.append("Ulysses \u5e76\u884c\u6570\u5fc5\u987b\u5927\u4e8e0\u3002")
             elif ulysses > world_size:
-                errors.append(
-                    "Ulysses \u5e76\u884c\u6570\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002"
-                )
+                errors.append("Ulysses \u5e76\u884c\u6570\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002")
             elif world_size % ulysses != 0:
                 errors.append(
                     "\u90e8\u7f72\u5361\u6570\u5fc5\u987b\u80fd\u88ab Ulysses \u5e76\u884c\u6570\u6574\u9664\u3002"
@@ -699,9 +633,7 @@ def _validate_video_form(form: dict[str, Any]) -> list[str]:
             continue
         parts = [p.strip() for p in raw.split(",")]
         if len(parts) != 2:
-            errors.append(
-                f"{label}\u9700\u8981\u586b\u5199\u4e3a start,end \u683c\u5f0f\u3002"
-            )
+            errors.append(f"{label}\u9700\u8981\u586b\u5199\u4e3a start,end \u683c\u5f0f\u3002")
             continue
         try:
             start, end = [int(p) for p in parts]
@@ -750,9 +682,7 @@ def _validate_optimizer_form(form: dict[str, Any]) -> list[str]:
     ]:
         require_positive_int(key, label)
 
-    prefix_cache_hit_rate = non_negative_float(
-        "prefix_cache_hit_rate", "Prefix Cache Hit Rate"
-    )
+    prefix_cache_hit_rate = non_negative_float("prefix_cache_hit_rate", "Prefix Cache Hit Rate")
     if prefix_cache_hit_rate is not None and prefix_cache_hit_rate >= 1:
         errors.append("Prefix Cache Hit Rate must be in the range [0, 1).")
     non_negative_float("reserved_memory_gb", "Reserved Memory")
@@ -768,19 +698,13 @@ def _validate_optimizer_form(form: dict[str, Any]) -> list[str]:
             try:
                 tp_sizes = parse_scalar_or_list(raw_tp, int)
             except Exception as exc:
-                errors.append(
-                    f"TP\u5e76\u884c\u5927\u5c0f\u5217\u8868\u89e3\u6790\u5931\u8d25\uff1a{exc}"
-                )
+                errors.append(f"TP\u5e76\u884c\u5927\u5c0f\u5217\u8868\u89e3\u6790\u5931\u8d25\uff1a{exc}")
                 tp_sizes = []
             for tp in tp_sizes:
                 if tp <= 0:
-                    errors.append(
-                        "TP\u5e76\u884c\u5927\u5c0f\u5fc5\u987b\u5927\u4e8e0\u3002"
-                    )
+                    errors.append("TP\u5e76\u884c\u5927\u5c0f\u5fc5\u987b\u5927\u4e8e0\u3002")
                 elif tp > num_devices:
-                    errors.append(
-                        "TP\u5e76\u884c\u5927\u5c0f\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002"
-                    )
+                    errors.append("TP\u5e76\u884c\u5927\u5c0f\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002")
                 elif num_devices % tp != 0:
                     errors.append(
                         "\u90e8\u7f72\u5361\u6570\u9700\u8981\u80fd\u88ab TP\u5e76\u884c\u5927\u5c0f\u6574\u9664\u3002"
@@ -791,18 +715,12 @@ def _validate_optimizer_form(form: dict[str, Any]) -> list[str]:
         try:
             batch_range = parse_scalar_or_list(raw_batch, int)
         except Exception as exc:
-            errors.append(
-                f"\u6279\u5927\u5c0f\u8303\u56f4\u89e3\u6790\u5931\u8d25\uff1a{exc}"
-            )
+            errors.append(f"\u6279\u5927\u5c0f\u8303\u56f4\u89e3\u6790\u5931\u8d25\uff1a{exc}")
             batch_range = []
         if len(batch_range) not in {1, 2}:
-            errors.append(
-                "\u6279\u5927\u5c0f\u8303\u56f4\u9700\u8981\u662f [max] \u6216 [min,max]\u3002"
-            )
+            errors.append("\u6279\u5927\u5c0f\u8303\u56f4\u9700\u8981\u662f [max] \u6216 [min,max]\u3002")
         if any(v <= 0 for v in batch_range):
-            errors.append(
-                "\u6279\u5927\u5c0f\u8303\u56f4\u5fc5\u987b\u5927\u4e8e0\u3002"
-            )
+            errors.append("\u6279\u5927\u5c0f\u8303\u56f4\u5fc5\u987b\u5927\u4e8e0\u3002")
         if len(batch_range) == 2 and batch_range[1] < batch_range[0]:
             errors.append(
                 "\u6279\u5927\u5c0f\u8303\u56f4\u7684\u6700\u5927\u503c"
@@ -850,8 +768,7 @@ def _optimizer_empty_outputs(summary: str, detail_md: str | None = None):
         empty_plot("Fixed-Config Throughput Comparison"),
         empty_df,
         gr.update(choices=[], value=None),
-        detail_md
-        or "\n".join(["### Single-Device Search Details", "No results available."]),
+        detail_md or "\n".join(["### Single-Device Search Details", "No results available."]),
         empty_plot("Single-Device Pareto Frontier"),
         empty_df,
         "",
@@ -925,9 +842,7 @@ def _results_to_df(results: list[ExperimentResult]) -> pd.DataFrame:
 # -----------------------------
 # Summary helpers
 # -----------------------------
-def _summary_markdown(
-    df: pd.DataFrame, latest: ExperimentResult | None, sim_type: str
-) -> str:
+def _summary_markdown(df: pd.DataFrame, latest: ExperimentResult | None, sim_type: str) -> str:
     """Build the summary markdown."""
     if df.empty:
         return "### Summary\nNo results available."
@@ -956,19 +871,12 @@ def _summary_markdown(
         if not best.empty:
             top = best.sort_values(by="analytic_total_time_s", ascending=True).iloc[0]
             lines.append(
-                f"- Lowest Analytic Time: **{top['analytic_total_time_s']:.3f} s**, "
-                f"device **{top.get('device', '-')}**"
+                f"- Lowest Analytic Time: **{top['analytic_total_time_s']:.3f} s**, device **{top.get('device', '-')}**"
             )
     elif sim_type == "throughput_optimizer":
         if latest is not None and latest.summary.get("no_result_reason"):
-            lines.append(
-                f"- Current Result Note: **{latest.summary.get('no_result_reason')}**"
-            )
-        best = (
-            df.dropna(subset=["best_throughput"])
-            if "best_throughput" in df.columns
-            else pd.DataFrame()
-        )
+            lines.append(f"- Current Result Note: **{latest.summary.get('no_result_reason')}**")
+        best = df.dropna(subset=["best_throughput"]) if "best_throughput" in df.columns else pd.DataFrame()
         if not best.empty:
             top = best.sort_values(by="best_throughput", ascending=False).iloc[0]
             lines.append(
@@ -980,9 +888,7 @@ def _summary_markdown(
             )
         else:
             no_result_series = (
-                df["no_result_reason"].dropna()
-                if "no_result_reason" in df.columns
-                else pd.Series(dtype=object)
+                df["no_result_reason"].dropna() if "no_result_reason" in df.columns else pd.Series(dtype=object)
             )
             if not no_result_series.empty:
                 lines.append(f"- Feasibility Note: **{no_result_series.iloc[0]}**")
@@ -1002,9 +908,7 @@ def _optimizer_deployment_mode(row: pd.Series) -> str:
     mode = row.get("deployment_mode")
     if isinstance(mode, str) and mode.strip():
         return _normalize_optimizer_deployment_mode(mode)
-    if bool(row.get("enable_optimize_prefill_decode_ratio", False)) or pd.notna(
-        row.get("pd_ratio")
-    ):
+    if bool(row.get("enable_optimize_prefill_decode_ratio", False)) or pd.notna(row.get("pd_ratio")):
         return OPT_DEPLOY_PD_RATIO
     if bool(row.get("disagg", False)):
         return OPT_DEPLOY_PD_SPLIT
@@ -1093,18 +997,14 @@ def _optimizer_pareto_chart(candidate_df: pd.DataFrame, device: str) -> Any:
         return empty_plot("Single-Device Pareto Frontier")
 
     work_df["label"] = work_df.apply(
-        lambda row: (
-            f"{row.get('parallel', '-')} | B{row.get('batch_size', '-')} | C{row.get('concurrency', '-')}"
-        ),
+        lambda row: (f"{row.get('parallel', '-')} | B{row.get('batch_size', '-')} | C{row.get('concurrency', '-')}"),
         axis=1,
     )
     work_df["series"] = "Candidate Configurations"
 
     frontier_rows: list[int] = []
     best_throughput = float("-inf")
-    ordered = work_df.sort_values(
-        by=["ttft_ms", "throughput_token_s"], ascending=[True, False], kind="stable"
-    )
+    ordered = work_df.sort_values(by=["ttft_ms", "throughput_token_s"], ascending=[True, False], kind="stable")
     for idx, row in ordered.iterrows():
         throughput = float(row.get("throughput_token_s", 0) or 0)
         if throughput > best_throughput:
@@ -1175,13 +1075,7 @@ def _ascii_table(headers: list[str], rows: list[list[str]]) -> str:
         return "+" + "+".join("-" * (width + 2) for width in widths) + "+"
 
     def _line(values: list[str]) -> str:
-        return (
-            "|"
-            + "|".join(
-                f" {str(value).ljust(widths[idx])} " for idx, value in enumerate(values)
-            )
-            + "|"
-        )
+        return "|" + "|".join(f" {str(value).ljust(widths[idx])} " for idx, value in enumerate(values)) + "|"
 
     parts = [_sep(), _line(headers), _sep()]
     parts.extend(_line(row) for row in rows)
@@ -1189,9 +1083,7 @@ def _ascii_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(parts)
 
 
-def _optimizer_cli_style_output(
-    top: pd.Series | None, device_candidates: pd.DataFrame, current_device: str
-) -> str:
+def _optimizer_cli_style_output(top: pd.Series | None, device_candidates: pd.DataFrame, current_device: str) -> str:
     if top is None:
         return ""
 
@@ -1262,9 +1154,7 @@ def _optimizer_cli_style_output(
     if raw_log:
         lines.extend(["", "Raw CLI Output:", raw_log])
 
-    lines.append(
-        "********************************************************************************"
-    )
+    lines.append("********************************************************************************")
     return "\n".join(lines)
 
 
@@ -1309,19 +1199,14 @@ def _optimizer_detail_view(
 
     top = None
     if not device_summary.empty:
-        device_summary["deployment_mode"] = device_summary.apply(
-            _optimizer_deployment_mode, axis=1
-        )
+        device_summary["deployment_mode"] = device_summary.apply(_optimizer_deployment_mode, axis=1)
         sort_col = (
             "balanced_qps"
-            if "balanced_qps" in device_summary.columns
-            and device_summary["balanced_qps"].notna().any()
+            if "balanced_qps" in device_summary.columns and device_summary["balanced_qps"].notna().any()
             else "best_throughput"
         )
         if sort_col in device_summary.columns:
-            device_summary = device_summary.sort_values(
-                by=sort_col, ascending=False, kind="stable"
-            )
+            device_summary = device_summary.sort_values(by=sort_col, ascending=False, kind="stable")
         top = device_summary.iloc[0]
     elif not device_candidates.empty:
         device_candidates = device_candidates.sort_values(
@@ -1375,7 +1260,7 @@ def _optimizer_detail_view(
                     "parallel": "Parallel Mode",
                     "batch_size": "Batch Size",
                     "concurrency": "Concurrency",
-                    "throughput_token_s": "Throughput (token/s)",
+                    "throughput_token_s": "Throughput (token/s)",  # nosec B105
                     "ttft_ms": "TTFT(ms)",
                     "tpot_ms": "TPOT(ms)",
                     "num_devices": "Device Count",
@@ -1391,11 +1276,7 @@ def _optimizer_detail_view(
 
     raw_output = _optimizer_cli_style_output(top, device_candidates, current_device)
 
-    if (
-        pd.isna(top.get("best_throughput"))
-        and pd.isna(top.get("balanced_qps"))
-        and top.get("no_result_reason")
-    ):
+    if pd.isna(top.get("best_throughput")) and pd.isna(top.get("balanced_qps")) and top.get("no_result_reason"):
         md = (
             f"### Single-Device Search Details\n"
             f"- Current Device: **{current_device}**\n"
@@ -1420,34 +1301,20 @@ def _optimizer_detail_view(
             f"- Best Throughput: **"
             f"{float(top.get('best_throughput', top.get('throughput_token_s', 0)) or 0):.2f} "
             f"token/s**",
-            f"- Best TTFT: **"
-            f"{float(top.get('best_ttft_ms', top.get('ttft_ms', 0)) or 0):.2f} "
-            f"ms**",
-            f"- Best TPOT: **"
-            f"{float(top.get('best_tpot_ms', top.get('tpot_ms', 0)) or 0):.2f} "
-            f"ms**",
+            f"- Best TTFT: **{float(top.get('best_ttft_ms', top.get('ttft_ms', 0)) or 0):.2f} ms**",
+            f"- Best TPOT: **{float(top.get('best_tpot_ms', top.get('tpot_ms', 0)) or 0):.2f} ms**",
         ]
         prefix_cache = top.get("prefix_cache_hit_rate")
-        if (
-            prefix_cache is not None
-            and not pd.isna(prefix_cache)
-            and float(prefix_cache) > 0
-        ):
+        if prefix_cache is not None and not pd.isna(prefix_cache) and float(prefix_cache) > 0:
             md_lines.append(f"- Prefix Cache Hit Rate: **{float(prefix_cache):.2f}**")
         if pd.notna(top.get("balanced_qps")):
-            md_lines.append(
-                f"- Balanced QPS: **{float(top.get('balanced_qps', 0) or 0):.2f}**"
-            )
+            md_lines.append(f"- Balanced QPS: **{float(top.get('balanced_qps', 0) or 0):.2f}**")
         if pd.notna(top.get("pd_ratio")):
             md_lines.append(f"- PD Ratio: **{float(top.get('pd_ratio', 0) or 0):.2f}**")
-        if pd.notna(top.get("prefill_devices_per_instance")) and pd.notna(
-            top.get("decode_devices_per_instance")
-        ):
+        if pd.notna(top.get("prefill_devices_per_instance")) and pd.notna(top.get("decode_devices_per_instance")):
             prefill_devices = int(top.get("prefill_devices_per_instance"))
             decode_devices = int(top.get("decode_devices_per_instance"))
-            md_lines.append(
-                f"- Prefill/Decode Devices per Instance: **{prefill_devices}:{decode_devices}**"
-            )
+            md_lines.append(f"- Prefill/Decode Devices per Instance: **{prefill_devices}:{decode_devices}**")
         if not device_candidates.empty:
             md_lines.append(f"- Top Candidate Count: **{len(device_candidates)}**")
             md_lines.append(
@@ -1469,17 +1336,13 @@ def _optimizer_detail_view(
 # Common outputs
 # -----------------------------
 # -----------------------------
-def _common_outputs(
-    sim_type: str, results: list[ExperimentResult], latest: ExperimentResult | None
-):
+def _common_outputs(sim_type: str, results: list[ExperimentResult], latest: ExperimentResult | None):
     """Generate shared outputs."""
     full_df = _results_to_df(results)
     display_df = _display_df_for_sim(sim_type, full_df)
     summary = _summary_markdown(full_df, latest, sim_type)
     fig1, fig2, fig3 = make_figures(sim_type, full_df, latest)
-    base_fig, base_update, base_df = baseline_plot(
-        sim_type, df_to_records(full_df), None
-    )
+    base_fig, base_update, base_df = baseline_plot(sim_type, df_to_records(full_df), None)
     return (
         summary,
         fig1,
@@ -1515,9 +1378,7 @@ def _run_tasks(sim_type: str, tasks):
             display_rows,
             full_rows,
         ) = _common_outputs(sim_type, results, result)
-        progress = progress_html(
-            completed, total, result.label, f"{result.status} / {result.source}"
-        )
+        progress = progress_html(completed, total, result.label, f"{result.status} / {result.source}")
         yield (
             progress,
             summary,
@@ -1552,9 +1413,7 @@ def preview_text_generate(*vals):
         tasks = build_text_generate_tasks(form)
     except Exception as exc:
         return _format_preview_error(exc)
-    return _preview_summary_markdown(
-        "text_generate", form, tasks
-    ), _preview_first_command(tasks)
+    return _preview_summary_markdown("text_generate", form, tasks), _preview_first_command(tasks)
 
 
 # -----------------------------
@@ -1581,9 +1440,7 @@ def preview_video_generate(*vals):
         tasks = build_video_generate_tasks(form)
     except Exception as exc:
         return _format_preview_error(exc)
-    return _preview_summary_markdown(
-        "video_generate", form, tasks
-    ), _preview_first_command(tasks)
+    return _preview_summary_markdown("video_generate", form, tasks), _preview_first_command(tasks)
 
 
 # -----------------------------
@@ -1608,12 +1465,10 @@ def run_optimizer(*vals):
             display_rows,
             full_rows,
         ) = _common_outputs("throughput_optimizer", results, result)
-        detail_update, detail_md, _detail_pareto_chart, detail_df, _detail_output = (
-            _optimizer_detail_view(full_rows, None, None)
+        detail_update, detail_md, _detail_pareto_chart, detail_df, _detail_output = _optimizer_detail_view(
+            full_rows, None, None
         )
-        progress = progress_html(
-            completed, total, result.label, f"{result.status} / {result.source}"
-        )
+        progress = progress_html(completed, total, result.label, f"{result.status} / {result.source}")
         yield (
             progress,
             summary,
@@ -1642,9 +1497,7 @@ def preview_optimizer(*vals):
         tasks = build_optimizer_tasks(form)
     except Exception as exc:
         return _format_preview_error(exc)
-    return _preview_summary_markdown(
-        "throughput_optimizer", form, tasks
-    ), _preview_first_command(tasks)
+    return _preview_summary_markdown("throughput_optimizer", form, tasks), _preview_first_command(tasks)
 
 
 # -----------------------------
@@ -1657,9 +1510,7 @@ def load_history_for_sim(sim_type: str):
     display_df = _display_df_for_sim(sim_type, full_df)
     summary = _summary_markdown(full_df, None, sim_type)
     fig1, fig2, fig3 = make_figures(sim_type, full_df, None)
-    base_fig, base_update, base_df = baseline_plot(
-        sim_type, df_to_records(full_df), None
-    )
+    base_fig, base_update, base_df = baseline_plot(sim_type, df_to_records(full_df), None)
     progress = progress_html(
         len(full_df),
         len(full_df) if len(full_df) > 0 else 1,
@@ -1696,8 +1547,8 @@ def load_optimizer_history():
         display_rows,
         full_rows,
     ) = load_history_for_sim("throughput_optimizer")
-    detail_update, detail_md, _detail_pareto_chart, detail_df, _detail_output = (
-        _optimizer_detail_view(full_rows, None, None)
+    detail_update, detail_md, _detail_pareto_chart, detail_df, _detail_output = _optimizer_detail_view(
+        full_rows, None, None
     )
     return (
         progress,
@@ -1721,9 +1572,7 @@ def load_optimizer_history():
 # -----------------------------
 # Refresh callbacks
 # -----------------------------
-def refresh_baseline_view(
-    sim_type: str, rows: list[dict[str, Any]] | None, baseline_device: str | None
-):
+def refresh_baseline_view(sim_type: str, rows: list[dict[str, Any]] | None, baseline_device: str | None):
     """Refresh the baseline views."""
     fig, update, df = baseline_plot(sim_type, rows, baseline_device)
     return fig, df
@@ -1731,7 +1580,7 @@ def refresh_baseline_view(
 
 def refresh_optimizer_detail(rows: list[dict[str, Any]] | None, device: str | None):
     """Refresh optimizer details."""
-    _update, md, df = _optimizer_detail_view(rows, device)
+    _update, md, _pareto, df, _raw = _optimizer_detail_view(rows, None, device)
     return md, df
 
 
@@ -1750,9 +1599,7 @@ def _categorize_op(op_name: str) -> str:
         return "Attention"
     elif "linear" in op_lower or "gemm" in op_lower or "matmul" in op_lower:
         return "Linear"
-    elif (
-        "all_reduce" in op_lower or "all_gather" in op_lower or "all_to_all" in op_lower
-    ):
+    elif "all_reduce" in op_lower or "all_gather" in op_lower or "all_to_all" in op_lower:
         return "Communication"
     elif "moe" in op_lower or "expert" in op_lower:
         return "MoE"
@@ -1760,21 +1607,11 @@ def _categorize_op(op_name: str) -> str:
         return "Normalization"
     elif "embedding" in op_lower:
         return "Embedding"
-    elif (
-        "softmax" in op_lower
-        or "silu" in op_lower
-        or "gelu" in op_lower
-        or "activation" in op_lower
-    ):
+    elif "softmax" in op_lower or "silu" in op_lower or "gelu" in op_lower or "activation" in op_lower:
         return "Activation"
     elif "add" in op_lower or "mul" in op_lower or "div" in op_lower:
         return "Elementwise"
-    elif (
-        "copy" in op_lower
-        or "index" in op_lower
-        or "slice" in op_lower
-        or "reshape" in op_lower
-    ):
+    elif "copy" in op_lower or "index" in op_lower or "slice" in op_lower or "reshape" in op_lower:
         return "Memory"
     else:
         return "Other"
@@ -1806,9 +1643,7 @@ def _text_generate_op_table(
     case_label: str | None = None,
 ) -> pd.DataFrame:
     """Build the operator time table for a specific device."""
-    return _op_table_from_records(
-        _text_generate_op_summary(results), device, top_n, columns, sort_by, case_label
-    )
+    return _op_table_from_records(_text_generate_op_summary(results), device, top_n, columns, sort_by, case_label)
 
 
 def _text_generate_category_stats(
@@ -1829,23 +1664,13 @@ def _text_generate_category_stats(
         return pd.DataFrame(), {}
 
     # Aggregate by category
-    category_stats = (
-        df.groupby("category")
-        .agg({"analytic_total_us": "sum", "name": "count"})
-        .reset_index()
-    )
+    category_stats = df.groupby("category").agg({"analytic_total_us": "sum", "name": "count"}).reset_index()
     category_stats.columns = ["Category", "Total Time (us)", "Operator Count"]
     category_stats["Total Time (ms)"] = category_stats["Total Time (us)"] / 1000.0
-    category_stats["Ratio (%)"] = (
-        category_stats["Total Time (us)"]
-        / category_stats["Total Time (us)"].sum()
-        * 100
-    )
+    category_stats["Ratio (%)"] = category_stats["Total Time (us)"] / category_stats["Total Time (us)"].sum() * 100
     category_stats = category_stats.sort_values(by="Total Time (us)", ascending=False)
 
-    display_df = category_stats[
-        ["Category", "Total Time (ms)", "Operator Count", "Ratio (%)"]
-    ].copy()
+    display_df = category_stats[["Category", "Total Time (ms)", "Operator Count", "Ratio (%)"]].copy()
 
     # Build chart data
     chart_data = {
@@ -1857,9 +1682,7 @@ def _text_generate_category_stats(
     return _round_numeric_columns(display_df.reset_index(drop=True)), chart_data
 
 
-def _text_generate_compare_table(
-    results: list[ExperimentResult], top_n: int = 15
-) -> pd.DataFrame:
+def _text_generate_compare_table(results: list[ExperimentResult], top_n: int = 15) -> pd.DataFrame:
     """Build the cross-device operator comparison table without a total column."""
     all_ops = _text_generate_op_summary(results)
     if not all_ops:
@@ -1880,9 +1703,7 @@ def _text_generate_compare_table(
     # Build the pivot table
     pivot_df = (
         df[df["name"].isin(unique_ops)]
-        .pivot_table(
-            index="name", columns="device", values="analytic_total_us", aggfunc="sum"
-        )
+        .pivot_table(index="name", columns="device", values="analytic_total_us", aggfunc="sum")
         .fillna(0)
     )
 
@@ -1913,15 +1734,10 @@ def _text_generate_summary_markdown(results: list[ExperimentResult]) -> str:
     work_df = full_df.copy()
     ranking_col = (
         "tps_per_device"
-        if "tps_per_device" in work_df.columns
-        and work_df["tps_per_device"].notna().any()
+        if "tps_per_device" in work_df.columns and work_df["tps_per_device"].notna().any()
         else "analytic_total_time_s"
     )
-    ranked = (
-        work_df.dropna(subset=[ranking_col])
-        if ranking_col in work_df.columns
-        else pd.DataFrame()
-    )
+    ranked = work_df.dropna(subset=[ranking_col]) if ranking_col in work_df.columns else pd.DataFrame()
     if not ranked.empty:
         ranked = ranked.sort_values(
             by=ranking_col,
@@ -1934,13 +1750,9 @@ def _text_generate_summary_markdown(results: list[ExperimentResult]) -> str:
         top = ranked.iloc[0]
         lines.append(f"- Recommended Device: **{top.get('device', '-')}**")
         if ranking_col == "tps_per_device":
-            lines.append(
-                f"- Key Metric: **{float(top.get('tps_per_device', 0) or 0):.2f} token/s/Device**"
-            )
+            lines.append(f"- Key Metric: **{float(top.get('tps_per_device', 0) or 0):.2f} token/s/Device**")
         else:
-            lines.append(
-                f"- Key Metric: **{float(top.get('analytic_total_time_s', 0) or 0) * 1000:.2f} ms**"
-            )
+            lines.append(f"- Key Metric: **{float(top.get('analytic_total_time_s', 0) or 0) * 1000:.2f} ms**")
         lines.append(
             f"- Constraint Profile: **{top.get('num_devices', '-')} "
             f"devices / Concurrency {top.get('num_queries', '-')} / "
@@ -1951,9 +1763,7 @@ def _text_generate_summary_markdown(results: list[ExperimentResult]) -> str:
             f"Attention={top.get('quantize_attention_action', '-')}**"
         )
         if pd.notna(top.get("analytic_total_time_s")):
-            lines.append(
-                f"- Analytic Time: **{float(top.get('analytic_total_time_s', 0) or 0) * 1000:.2f} ms**"
-            )
+            lines.append(f"- Analytic Time: **{float(top.get('analytic_total_time_s', 0) or 0) * 1000:.2f} ms**")
         if len(ranked) > 1 and ranking_col in ranked.columns:
             runner = ranked.iloc[1]
             top_val = float(top.get(ranking_col, 0) or 0)
@@ -1961,44 +1771,28 @@ def _text_generate_summary_markdown(results: list[ExperimentResult]) -> str:
             if runner_val > 0:
                 if ranking_col == "tps_per_device":
                     gap = (top_val - runner_val) / runner_val * 100.0
-                    lines.append(
-                        f"- Throughput lead over runner-up **{runner.get('device', '-')}**: **{gap:.2f}%**"
-                    )
+                    lines.append(f"- Throughput lead over runner-up **{runner.get('device', '-')}**: **{gap:.2f}%**")
                 else:
                     gap = (runner_val - top_val) / runner_val * 100.0
-                    lines.append(
-                        f"- Time Saved vs Runner-up **{runner.get('device', '-')}**: **{gap:.2f}%**"
-                    )
+                    lines.append(f"- Time Saved vs Runner-up **{runner.get('device', '-')}**: **{gap:.2f}%**")
     else:
         lines.append("- No valid simulation result is available for recommendation.")
         exec_errors = (
-            work_df["execution_error"].dropna()
-            if "execution_error" in work_df.columns
-            else pd.Series(dtype=object)
+            work_df["execution_error"].dropna() if "execution_error" in work_df.columns else pd.Series(dtype=object)
         )
         if not exec_errors.empty:
             lines.append(f"- Failure Reason: **{exec_errors.iloc[0]}**")
-        errors = (
-            work_df["error"].dropna()
-            if "error" in work_df.columns
-            else pd.Series(dtype=object)
-        )
+        errors = work_df["error"].dropna() if "error" in work_df.columns else pd.Series(dtype=object)
         if exec_errors.empty and not errors.empty:
             lines.append(f"- Failure Reason: **{errors.iloc[0]}**")
 
     lines.append("")
     lines.append("### Workspace Summary")
     lines.append(f"- Completed Runs: **{len(results)}**")
-    devices = (
-        work_df["device"].dropna().astype(str).unique().tolist()
-        if "device" in work_df.columns
-        else []
-    )
+    devices = work_df["device"].dropna().astype(str).unique().tolist() if "device" in work_df.columns else []
     if devices:
         lines.append(f"- Compared Devices: **{', '.join(devices[:8])}**")
-    failed_count = (
-        int((work_df["status"] == "failed").sum()) if "status" in work_df.columns else 0
-    )
+    failed_count = int((work_df["status"] == "failed").sum()) if "status" in work_df.columns else 0
     if failed_count:
         lines.append(f"- Failed Runs: **{failed_count}**")
     return "\n".join(lines)
@@ -2052,17 +1846,9 @@ def _text_generate_memory_analysis(
 
     candidates = results
     if device:
-        candidates = [
-            result
-            for result in candidates
-            if str(result.params.get("device", "")) == str(device)
-        ]
+        candidates = [result for result in candidates if str(result.params.get("device", "")) == str(device)]
     if case_label:
-        candidates = [
-            result
-            for result in candidates
-            if _case_label_from_mapping(result.params) == case_label
-        ]
+        candidates = [result for result in candidates if _case_label_from_mapping(result.params) == case_label]
     if not candidates:
         return {}, pd.DataFrame()
 
@@ -2118,18 +1904,10 @@ def _text_generate_time_chart(full_df: pd.DataFrame, devices: list[str]):
         return empty_plot("Analytic Time Comparison")
 
     plot_df = full_df.copy()
-    plot_df["analytic_total_time_ms"] = (
-        pd.to_numeric(plot_df["analytic_total_time_s"], errors="coerce") * 1000
-    )
-    plot_df["tp_size"] = (
-        pd.to_numeric(plot_df.get("tp_size", 1), errors="coerce").fillna(1).astype(int)
-    )
-    plot_df["num_queries"] = pd.to_numeric(
-        plot_df.get("num_queries", 0), errors="coerce"
-    )
-    plot_df = plot_df.dropna(
-        subset=["analytic_total_time_ms", "num_queries", "tp_size"]
-    )
+    plot_df["analytic_total_time_ms"] = pd.to_numeric(plot_df["analytic_total_time_s"], errors="coerce") * 1000
+    plot_df["tp_size"] = pd.to_numeric(plot_df.get("tp_size", 1), errors="coerce").fillna(1).astype(int)
+    plot_df["num_queries"] = pd.to_numeric(plot_df.get("num_queries", 0), errors="coerce")
+    plot_df = plot_df.dropna(subset=["analytic_total_time_ms", "num_queries", "tp_size"])
     if plot_df.empty:
         return empty_plot("Analytic Time Comparison")
 
@@ -2142,9 +1920,7 @@ def _text_generate_time_chart(full_df: pd.DataFrame, devices: list[str]):
         import matplotlib.pyplot as plt
 
         n_tp = len(tp_values)
-        fig, axes = plt.subplots(
-            n_tp, 1, figsize=(14.5, max(4.2, 3.2 * n_tp)), squeeze=False
-        )
+        fig, axes = plt.subplots(n_tp, 1, figsize=(14.5, max(4.2, 3.2 * n_tp)), squeeze=False)
         for idx, tp in enumerate(tp_values):
             ax = axes[idx][0]
             tp_df = plot_df[plot_df["tp_size"] == tp]
@@ -2234,11 +2010,7 @@ def _text_generate_common_outputs(
         full_df["case_label"] = full_df.apply(_case_label_from_mapping, axis=1)
 
     summary = _text_generate_summary_markdown(results)
-    devices = (
-        sorted(full_df["device"].dropna().astype(str).unique().tolist())
-        if "device" in full_df.columns
-        else []
-    )
+    devices = sorted(full_df["device"].dropna().astype(str).unique().tolist()) if "device" in full_df.columns else []
     default_device = devices[0] if devices else None
     case_choices = _case_choices_from_rows(full_df)
     default_case = case_choices[0] if case_choices else None
@@ -2246,16 +2018,8 @@ def _text_generate_common_outputs(
     tps_chart = gr.update(visible=False)
     time_chart = _text_generate_time_chart(full_df, devices)
 
-    num_mtp_tokens = (
-        int(latest.params.get("num_mtp_tokens", 0) or 0)
-        if latest and hasattr(latest, "params")
-        else 0
-    )
-    decode_mode = (
-        bool(latest.params.get("decode", False))
-        if latest and hasattr(latest, "params")
-        else False
-    )
+    num_mtp_tokens = int(latest.params.get("num_mtp_tokens", 0) or 0) if latest and hasattr(latest, "params") else 0
+    decode_mode = bool(latest.params.get("decode", False)) if latest and hasattr(latest, "params") else False
 
     tpot_metric_md = ""
     if decode_mode and num_mtp_tokens > 0 and latest and hasattr(latest, "summary"):
@@ -2263,11 +2027,7 @@ def _text_generate_common_outputs(
         rates = []
         if mtp_acceptance_rate:
             try:
-                rates = [
-                    float(r.strip())
-                    for r in mtp_acceptance_rate.split(",")
-                    if r.strip()
-                ]
+                rates = [float(r.strip()) for r in mtp_acceptance_rate.split(",") if r.strip()]
             except (ValueError, TypeError):
                 rates = []
         if rates and total_time > 0:
@@ -2275,25 +2035,15 @@ def _text_generate_common_outputs(
             tpot = (total_time / total_tokens) * 1000
             tpot_metric_md = f"**TPOT**: {tpot:.2f} ms/token"
 
-    memory_data, memory_table = _text_generate_memory_analysis(
-        results, default_device, default_case
-    )
+    memory_data, memory_table = _text_generate_memory_analysis(results, default_device, default_case)
     if memory_data:
-        memory_pie = pie_plot(
-            memory_data, f"Memory usage - {default_device} - {default_case}"
-        )
+        memory_pie = pie_plot(memory_data, f"Memory usage - {default_device} - {default_case}")
     else:
         memory_pie = empty_pie_plot("Memory usage")
 
-    bandwidth_table = _text_generate_bandwidth_analysis(
-        results, default_device, default_case
-    )
-    op_table = _text_generate_op_table(
-        results, default_device, 20, case_label=default_case
-    )
-    category_table, category_data = _text_generate_category_stats(
-        results, default_device, default_case
-    )
+    bandwidth_table = _text_generate_bandwidth_analysis(results, default_device, default_case)
+    op_table = _text_generate_op_table(results, default_device, 20, case_label=default_case)
+    category_table, category_data = _text_generate_category_stats(results, default_device, default_case)
 
     if category_data:
         category_df = pd.DataFrame(
@@ -2319,10 +2069,7 @@ def _text_generate_common_outputs(
     display_df = full_df.copy()
     if not display_df.empty:
         if "analytic_total_time_s" in display_df.columns:
-            display_df["inference_time_ms"] = (
-                pd.to_numeric(display_df["analytic_total_time_s"], errors="coerce")
-                * 1000
-            )
+            display_df["inference_time_ms"] = pd.to_numeric(display_df["analytic_total_time_s"], errors="coerce") * 1000
         key_cols = [
             "model_id",
             "device",
@@ -2425,12 +2172,8 @@ def run_text_generate_v2(*vals):
             op_breakdown,
             current_model,
             mtp_acceptance_data,
-        ) = _text_generate_common_outputs(
-            results, result, current_model, mtp_acceptance_rate
-        )
-        progress = progress_html(
-            completed, total, result.label, f"{result.status} / {result.source}"
-        )
+        ) = _text_generate_common_outputs(results, result, current_model, mtp_acceptance_rate)
+        progress = progress_html(completed, total, result.label, f"{result.status} / {result.source}")
         yield (
             progress,
             summary,
@@ -2473,9 +2216,7 @@ def refresh_text_generate_op_table(results_data: list[dict], device: str, top_n:
     return _text_generate_op_table([], device, top_n)  # Simplified path
 
 
-def refresh_text_generate_op_table_from_store(
-    full_rows: list[dict], device: str, top_n: int
-):
+def refresh_text_generate_op_table_from_store(full_rows: list[dict], device: str, top_n: int):
     """Refresh the operator table from stored data."""
     # Simplified placeholder. In production, reload operator data from STORE.
     return pd.DataFrame()  # Placeholder
@@ -2522,18 +2263,13 @@ def load_text_generate_history(current_model: str = ""):
         filtered_df = full_df[full_df["model_id"] == current_model]
         if filtered_df.empty:
             hint = (
-                f"Warning: no history results found for model "
-                f"**{current_model}**. Showing all history results instead."
+                f"Warning: no history results found for model **{current_model}**. Showing all history results instead."
             )
         else:
             hint = f"Loaded history results for model **{current_model}** ({len(filtered_df)} records)."
             full_df = filtered_df
     else:
-        models = (
-            full_df["model_id"].unique().tolist()
-            if "model_id" in full_df.columns
-            else []
-        )
+        models = full_df["model_id"].unique().tolist() if "model_id" in full_df.columns else []
         hint = f"Loaded all history results ({len(full_df)} records). Models: {', '.join(str(m) for m in models[:5])}"
 
     # Distinguish stages
@@ -2542,11 +2278,7 @@ def load_text_generate_history(current_model: str = ""):
         if len(stages) > 1:
             hint += f"\n\nStages: {', '.join(str(s) for s in stages)}"
 
-    devices = (
-        sorted(full_df["device"].unique().tolist())
-        if "device" in full_df.columns
-        else []
-    )
+    devices = sorted(full_df["device"].unique().tolist()) if "device" in full_df.columns else []
 
     # Convert analytic time to milliseconds
     plot_df = full_df.copy()
@@ -2594,13 +2326,9 @@ def load_text_generate_history(current_model: str = ""):
             memory_data["Activations"] = last_row["model_activation_size_gb"]
 
     memory_pie = (
-        pie_plot(memory_data, "Memory Usage Breakdown")
-        if memory_data
-        else empty_pie_plot("Memory Usage Breakdown")
+        pie_plot(memory_data, "Memory Usage Breakdown") if memory_data else empty_pie_plot("Memory Usage Breakdown")
     )
-    memory_table = pd.DataFrame(
-        [{"Item": k, "Size (GB)": f"{v:.3f}"} for k, v in memory_data.items()]
-    )
+    memory_table = pd.DataFrame([{"Item": k, "Size (GB)": f"{v:.3f}"} for k, v in memory_data.items()])
 
     # Summary table
     display_df = full_df.copy()
@@ -2615,20 +2343,14 @@ def load_text_generate_history(current_model: str = ""):
         tps_chart,
         time_chart,
         gr.update(value="", visible=False),  # tpot_metric
-        gr.update(
-            choices=devices, value=devices[0] if devices else None
-        ),  # memory_device
+        gr.update(choices=devices, value=devices[0] if devices else None),  # memory_device
         memory_pie,
         memory_table,
-        gr.update(
-            choices=devices, value=devices[0] if devices else None
-        ),  # bandwidth_device
+        gr.update(choices=devices, value=devices[0] if devices else None),  # bandwidth_device
         pd.DataFrame(),  # Bandwidth analysis
         gr.update(choices=devices, value=devices[0] if devices else None),  # op_device
         pd.DataFrame(),  # Operator table
-        gr.update(
-            choices=devices, value=devices[0] if devices else None
-        ),  # category_device
+        gr.update(choices=devices, value=devices[0] if devices else None),  # category_device
         empty_plot("Operator Category Time"),
         pd.DataFrame(),
         gr.update(),  # compare_mode
@@ -2655,22 +2377,14 @@ def update_op_table_from_breakdown(
     if isinstance(case_or_top_n, (int, float)) or case_or_top_n is None:
         case_label = None
         top_n = int(case_or_top_n or 20)
-        columns = (
-            top_n_or_columns if isinstance(top_n_or_columns, (list, tuple)) else None
-        )
-        effective_sort = (
-            columns_or_sort if isinstance(columns_or_sort, str) else sort_by
-        )
+        columns = top_n_or_columns if isinstance(top_n_or_columns, (list, tuple)) else None
+        effective_sort = columns_or_sort if isinstance(columns_or_sort, str) else sort_by
     else:
         case_label = str(case_or_top_n)
         top_n = int(top_n_or_columns or 20)
-        columns = (
-            columns_or_sort if isinstance(columns_or_sort, (list, tuple)) else None
-        )
+        columns = columns_or_sort if isinstance(columns_or_sort, (list, tuple)) else None
         effective_sort = sort_by
-    return _op_table_from_records(
-        op_breakdown, device, top_n, columns, effective_sort, case_label
-    )
+    return _op_table_from_records(op_breakdown, device, top_n, columns, effective_sort, case_label)
 
 
 # -----------------------------
@@ -2702,9 +2416,7 @@ def _video_generate_op_table(
     case_label: str | None = None,
 ) -> pd.DataFrame:
     """Build the operator time table for a specific device."""
-    return _op_table_from_records(
-        _video_generate_op_summary(results), device, top_n, columns, sort_by
-    )
+    return _op_table_from_records(_video_generate_op_summary(results), device, top_n, columns, sort_by)
 
 
 def _video_generate_category_stats(
@@ -2718,23 +2430,13 @@ def _video_generate_category_stats(
     df = pd.DataFrame(all_ops)
 
     # Aggregate by category
-    category_stats = (
-        df.groupby("category")
-        .agg({"analytic_total_us": "sum", "name": "count"})
-        .reset_index()
-    )
+    category_stats = df.groupby("category").agg({"analytic_total_us": "sum", "name": "count"}).reset_index()
     category_stats.columns = ["Category", "Total Time (us)", "Operator Count"]
     category_stats["Total Time (ms)"] = category_stats["Total Time (us)"] / 1000.0
-    category_stats["Ratio (%)"] = (
-        category_stats["Total Time (us)"]
-        / category_stats["Total Time (us)"].sum()
-        * 100
-    )
+    category_stats["Ratio (%)"] = category_stats["Total Time (us)"] / category_stats["Total Time (us)"].sum() * 100
     category_stats = category_stats.sort_values(by="Total Time (us)", ascending=False)
 
-    display_df = category_stats[
-        ["Category", "Total Time (ms)", "Operator Count", "Ratio (%)"]
-    ].copy()
+    display_df = category_stats[["Category", "Total Time (ms)", "Operator Count", "Ratio (%)"]].copy()
 
     # Build chart data
     chart_data = {
@@ -2746,9 +2448,7 @@ def _video_generate_category_stats(
     return _round_numeric_columns(display_df.reset_index(drop=True)), chart_data
 
 
-def _video_generate_compare_table(
-    results: list[ExperimentResult], top_n: int = 15
-) -> pd.DataFrame:
+def _video_generate_compare_table(results: list[ExperimentResult], top_n: int = 15) -> pd.DataFrame:
     """Build the cross-device operator comparison table."""
     all_ops = _video_generate_op_summary(results)
     if not all_ops:
@@ -2769,9 +2469,7 @@ def _video_generate_compare_table(
     # Build the pivot table
     pivot_df = (
         df[df["name"].isin(unique_ops)]
-        .pivot_table(
-            index="name", columns="device", values="analytic_total_us", aggfunc="sum"
-        )
+        .pivot_table(index="name", columns="device", values="analytic_total_us", aggfunc="sum")
         .fillna(0)
     )
 
@@ -2806,21 +2504,15 @@ def _video_generate_summary_markdown(results: list[ExperimentResult]) -> str:
         else pd.DataFrame()
     )
     if not ranked.empty:
-        ranked = ranked.sort_values(
-            by="analytic_total_time_s", ascending=True, kind="stable"
-        )
+        ranked = ranked.sort_values(by="analytic_total_time_s", ascending=True, kind="stable")
 
     lines = ["### Recommendation"]
     if not ranked.empty:
         top = ranked.iloc[0]
         lines.append(f"- Recommended Device: **{top.get('device', '-')}**")
-        lines.append(
-            f"- Key Metric: **{float(top.get('analytic_total_time_s', 0) or 0):.4f} s total analytic time**"
-        )
+        lines.append(f"- Key Metric: **{float(top.get('analytic_total_time_s', 0) or 0):.4f} s total analytic time**")
         if pd.notna(top.get("communication_total_s")):
-            lines.append(
-                f"- Communication Time: **{float(top.get('communication_total_s', 0) or 0):.4f} s**"
-            )
+            lines.append(f"- Communication Time: **{float(top.get('communication_total_s', 0) or 0):.4f} s**")
         lines.append(
             f"- Scenario: **{top.get('batch_size', '-')} Batch / {top.get('height', '-')} x {top.get('width', '-')} / "
             f"{top.get('frame_num', '-')} frames / {top.get('sample_step', '-')} steps**"
@@ -2837,40 +2529,26 @@ def _video_generate_summary_markdown(results: list[ExperimentResult]) -> str:
             runner_val = float(runner.get("analytic_total_time_s", 0) or 0)
             if runner_val > 0:
                 gap = (runner_val - top_val) / runner_val * 100.0
-                lines.append(
-                    f"- Time Saved vs Runner-up **{runner.get('device', '-')}**: **{gap:.2f}%**"
-                )
+                lines.append(f"- Time Saved vs Runner-up **{runner.get('device', '-')}**: **{gap:.2f}%**")
     else:
         lines.append("- No valid simulation result is available for recommendation.")
-        errors = (
-            work_df["error"].dropna()
-            if "error" in work_df.columns
-            else pd.Series(dtype=object)
-        )
+        errors = work_df["error"].dropna() if "error" in work_df.columns else pd.Series(dtype=object)
         if not errors.empty:
             lines.append(f"- Failure Reason: **{errors.iloc[0]}**")
 
     lines.append("")
     lines.append("### Workspace Summary")
     lines.append(f"- Completed Runs: **{len(results)}**")
-    devices = (
-        work_df["device"].dropna().astype(str).unique().tolist()
-        if "device" in work_df.columns
-        else []
-    )
+    devices = work_df["device"].dropna().astype(str).unique().tolist() if "device" in work_df.columns else []
     if devices:
         lines.append(f"- Compared Devices: **{', '.join(devices[:8])}**")
-    failed_count = (
-        int((work_df["status"] == "failed").sum()) if "status" in work_df.columns else 0
-    )
+    failed_count = int((work_df["status"] == "failed").sum()) if "status" in work_df.columns else 0
     if failed_count:
         lines.append(f"- Failed Runs: **{failed_count}**")
     return "\n".join(lines)
 
 
-def _video_generate_common_outputs(
-    results: list[ExperimentResult], latest: ExperimentResult | None
-):
+def _video_generate_common_outputs(results: list[ExperimentResult], latest: ExperimentResult | None):
     """Generate Video Generate outputs."""
     if gr is None:
         raise RuntimeError("gradio is not installed")
@@ -2879,11 +2557,7 @@ def _video_generate_common_outputs(
     summary = _video_generate_summary_markdown(results)
 
     # Load the device list
-    devices = (
-        sorted(full_df["device"].unique().tolist())
-        if "device" in full_df.columns
-        else []
-    )
+    devices = sorted(full_df["device"].unique().tolist()) if "device" in full_df.columns else []
 
     # Total analytic time chart
     time_chart = (
@@ -2894,19 +2568,14 @@ def _video_generate_common_outputs(
             "Total Analytic Time Comparison",
             "Analytic Time (s)",
             xlabel="Device",
-            group="quantize_linear_action"
-            if "quantize_linear_action" in full_df.columns
-            else None,
+            group="quantize_linear_action" if "quantize_linear_action" in full_df.columns else None,
         )
         if not full_df.empty
         else empty_plot("Total Analytic Time Comparison")
     )
 
     # Communication time chart
-    if (
-        "communication_total_s" in full_df.columns
-        and not full_df["communication_total_s"].dropna().empty
-    ):
+    if "communication_total_s" in full_df.columns and not full_df["communication_total_s"].dropna().empty:
         comm_chart = bar_plot(
             full_df,
             "device",
@@ -3030,9 +2699,7 @@ def run_video_generate_v2(*vals):
             full_rows,
             op_breakdown,
         ) = _video_generate_common_outputs(results, result)
-        progress = progress_html(
-            completed, total, result.label, f"{result.status} / {result.source}"
-        )
+        progress = progress_html(completed, total, result.label, f"{result.status} / {result.source}")
         yield (
             progress,
             summary,
@@ -3073,11 +2740,7 @@ def load_video_generate_history():
         )
 
     # Simplified path using stored row data
-    devices = (
-        sorted(full_df["device"].unique().tolist())
-        if "device" in full_df.columns
-        else []
-    )
+    devices = sorted(full_df["device"].unique().tolist()) if "device" in full_df.columns else []
 
     summary = _video_generate_summary_markdown([])
     time_chart = (
@@ -3088,18 +2751,13 @@ def load_video_generate_history():
             "Total Analytic Time Comparison",
             "Analytic Time (s)",
             xlabel="Device",
-            group="quantize_linear_action"
-            if "quantize_linear_action" in full_df.columns
-            else None,
+            group="quantize_linear_action" if "quantize_linear_action" in full_df.columns else None,
         )
         if not full_df.empty
         else empty_plot("Total Analytic Time Comparison")
     )
 
-    if (
-        "communication_total_s" in full_df.columns
-        and not full_df["communication_total_s"].dropna().empty
-    ):
+    if "communication_total_s" in full_df.columns and not full_df["communication_total_s"].dropna().empty:
         comm_chart = bar_plot(
             full_df,
             "device",
@@ -3144,14 +2802,8 @@ def update_video_op_table_from_breakdown(
 # -----------------------------
 # Throughput Optimizer callbacks
 # -----------------------------
-def _optimizer_metric_plot(
-    full_df: pd.DataFrame, metric_col: str, title: str, ylabel: str
-):
-    if (
-        full_df.empty
-        or metric_col not in full_df.columns
-        or not full_df[metric_col].notna().any()
-    ):
+def _optimizer_metric_plot(full_df: pd.DataFrame, metric_col: str, title: str, ylabel: str):
+    if full_df.empty or metric_col not in full_df.columns or not full_df[metric_col].notna().any():
         return empty_plot(title)
     return bar_plot(
         full_df,
@@ -3194,11 +2846,7 @@ def _optimizer_candidate_rows_from_records(
             parallel = candidate.get("parallel")
             batch_size = candidate.get("batch_size")
             concurrency = candidate.get("concurrency")
-            if (
-                parallel in (None, "")
-                or batch_size in (None, "")
-                or concurrency in (None, "")
-            ):
+            if parallel in (None, "") or batch_size in (None, "") or concurrency in (None, ""):
                 continue
             candidates.append(
                 {
@@ -3210,9 +2858,7 @@ def _optimizer_candidate_rows_from_records(
                     "output_length": record.get("output_length"),
                     "prefix_cache_hit_rate": record.get("prefix_cache_hit_rate"),
                     "quantize_linear_action": record.get("quantize_linear_action"),
-                    "quantize_attention_action": record.get(
-                        "quantize_attention_action"
-                    ),
+                    "quantize_attention_action": record.get("quantize_attention_action"),
                     "parallel": parallel,
                     "batch_size": batch_size,
                     "concurrency": concurrency,
@@ -3253,9 +2899,7 @@ def _optimizer_fixed_config_key(row: pd.Series) -> str:
     return "||".join(str(part) for part in parts)
 
 
-def _optimizer_fixed_config_label(
-    row: pd.Series, device_count: int | None = None
-) -> str:
+def _optimizer_fixed_config_label(row: pd.Series, device_count: int | None = None) -> str:
     pieces = [
         str(row.get("model_id", "-")),
         str(row.get("deployment_mode", "-")),
@@ -3264,11 +2908,7 @@ def _optimizer_fixed_config_label(
         f"Concurrency {row.get('concurrency', '-')}",
     ]
     prefix_cache = row.get("prefix_cache_hit_rate")
-    if (
-        prefix_cache is not None
-        and not pd.isna(prefix_cache)
-        and float(prefix_cache) > 0
-    ):
+    if prefix_cache is not None and not pd.isna(prefix_cache) and float(prefix_cache) > 0:
         pieces.append(f"Prefix Cache {float(prefix_cache):.2f}")
     if device_count is not None:
         pieces.append(f"{device_count} devices")
@@ -3309,8 +2949,7 @@ def _optimizer_fixed_compare_outputs(
             "\n".join(
                 [
                     "### Fixed-Config Comparison",
-                    "The current results do not include enough candidate "
-                    "configuration fields.",
+                    "The current results do not include enough candidate configuration fields.",
                 ]
             ),
             empty_plot(title),
@@ -3358,26 +2997,18 @@ def _optimizer_fixed_compare_outputs(
         )
     )
     config_df["label"] = config_df.apply(
-        lambda row: _optimizer_fixed_config_label(
-            row, int(row.get("device_count", 0) or 0)
-        ),
+        lambda row: _optimizer_fixed_config_label(row, int(row.get("device_count", 0) or 0)),
         axis=1,
     )
-    choice_values = [
-        (row["label"], row["config_key"]) for _, row in config_df.iterrows()
-    ]
+    choice_values = [(row["label"], row["config_key"]) for _, row in config_df.iterrows()]
     valid_keys = set(config_df["config_key"].tolist())
-    current_key = (
-        selected_key if selected_key in valid_keys else config_df.iloc[0]["config_key"]
-    )
+    current_key = selected_key if selected_key in valid_keys else config_df.iloc[0]["config_key"]
     selected_row = config_df.loc[config_df["config_key"] == current_key].iloc[0]
 
     compare_df = work_df[work_df["config_key"] == current_key].copy()
     compare_df = compare_df.dropna(subset=[metric_col])
     if metric_col in compare_df.columns:
-        compare_df = compare_df.sort_values(
-            by=metric_col, ascending=lower_is_better, kind="stable"
-        )
+        compare_df = compare_df.sort_values(by=metric_col, ascending=lower_is_better, kind="stable")
 
     chart = bar_plot(
         compare_df,
@@ -3419,7 +3050,7 @@ def _optimizer_fixed_compare_outputs(
                 "parallel": "Parallel Mode",
                 "batch_size": "Batch Size",
                 "concurrency": "Concurrency",
-                "throughput_token_s": "Throughput (token/s)",
+                "throughput_token_s": "Throughput (token/s)",  # nosec B105
                 "ttft_ms": "TTFT(ms)",
                 "tpot_ms": "TPOT(ms)",
                 "input_length": "Input Length",
@@ -3437,22 +3068,15 @@ def _optimizer_fixed_compare_outputs(
         f"- Comparable Devices: **{int(selected_row.get('device_count', 0) or 0)}**",
         f"- Current Metric: **{metric_name}**",
     ]
-    if pd.notna(selected_row.get("input_length")) and pd.notna(
-        selected_row.get("output_length")
-    ):
+    if pd.notna(selected_row.get("input_length")) and pd.notna(selected_row.get("output_length")):
         input_length = int(selected_row.get("input_length"))
         output_length = int(selected_row.get("output_length"))
         num_devices = int(selected_row.get("num_devices", 0) or 0)
-        lines.append(
-            f"- Constraint Profile: **Input {input_length} / Output {output_length} / "
-            f"{num_devices} devices**"
-        )
+        lines.append(f"- Constraint Profile: **Input {input_length} / Output {output_length} / {num_devices} devices**")
     qlinear = selected_row.get("quantize_linear_action")
     qattn = selected_row.get("quantize_attention_action")
     if qlinear or qattn:
-        lines.append(
-            f"- Quantization: **MLP={qlinear or '-'} / Attention={qattn or '-'}**"
-        )
+        lines.append(f"- Quantization: **MLP={qlinear or '-'} / Attention={qattn or '-'}**")
     if not compare_df.empty and metric_col in compare_df.columns:
         leader = compare_df.iloc[0]
         lines.append(
@@ -3465,9 +3089,7 @@ def _optimizer_fixed_compare_outputs(
             "and is mainly useful for single-device reference."
         )
     else:
-        lines.append(
-            "- This view compares devices under the same parallel mode, batch size, and concurrency."
-        )
+        lines.append("- This view compares devices under the same parallel mode, batch size, and concurrency.")
 
     return (
         gr.update(choices=choice_values, value=current_key),
@@ -3487,13 +3109,9 @@ def _optimizer_pd_ratio_outputs(full_df: pd.DataFrame):
         p_qps = row.get("p_qps")
         d_qps = row.get("d_qps")
         if pd.notna(p_qps):
-            plot_rows.append(
-                {"device": device, "metric": "Prefill QPS", "value": float(p_qps)}
-            )
+            plot_rows.append({"device": device, "metric": "Prefill QPS", "value": float(p_qps)})
         if pd.notna(d_qps):
-            plot_rows.append(
-                {"device": device, "metric": "Decode QPS", "value": float(d_qps)}
-            )
+            plot_rows.append({"device": device, "metric": "Decode QPS", "value": float(d_qps)})
 
     plot_df = pd.DataFrame(plot_rows)
     if plot_df.empty:
@@ -3540,9 +3158,7 @@ def _optimizer_pd_ratio_outputs(full_df: pd.DataFrame):
     return chart, pd_df
 
 
-def _optimizer_summary_markdown_from_df(
-    full_df: pd.DataFrame, completed_count: int | None = None
-) -> str:
+def _optimizer_summary_markdown_from_df(full_df: pd.DataFrame, completed_count: int | None = None) -> str:
     if full_df.empty:
         return "\n".join(["### Recommendation", "No results available."])
 
@@ -3555,9 +3171,7 @@ def _optimizer_summary_markdown_from_df(
     )
     ranking_label = "Balanced QPS" if ranking_col == "balanced_qps" else "\u541e\u5410"
     if ranking_col in work_df.columns:
-        ranked = work_df.dropna(subset=[ranking_col]).sort_values(
-            by=ranking_col, ascending=False
-        )
+        ranked = work_df.dropna(subset=[ranking_col]).sort_values(by=ranking_col, ascending=False)
     else:
         ranked = pd.DataFrame()
 
@@ -3565,17 +3179,13 @@ def _optimizer_summary_markdown_from_df(
     if not ranked.empty:
         top = ranked.iloc[0]
         lines_out.append(f"- Recommended Device: **{top.get('device', '-')}**")
-        lines_out.append(
-            f"- Recommended Deployment Mode: **{top.get('deployment_mode', '-')}**"
-        )
+        lines_out.append(f"- Recommended Deployment Mode: **{top.get('deployment_mode', '-')}**")
         lines_out.append(
             f"- Recommended Configuration: **{top.get('best_parallel', '-')} / "
             f"Batch {top.get('best_batch_size', '-')} / "
             f"Concurrency {top.get('best_concurrency', '-')}**"
         )
-        lines_out.append(
-            f"- {ranking_label}: **{float(top.get(ranking_col, 0) or 0):.2f}**"
-        )
+        lines_out.append(f"- {ranking_label}: **{float(top.get(ranking_col, 0) or 0):.2f}**")
         lines_out.append(
             f"- Throughput / TTFT / TPOT: **"
             f"{float(top.get('best_throughput', 0) or 0):.2f} token/s / "
@@ -3583,56 +3193,32 @@ def _optimizer_summary_markdown_from_df(
             f"{float(top.get('best_tpot_ms', 0) or 0):.2f} ms**"
         )
         prefix_cache = top.get("prefix_cache_hit_rate")
-        if (
-            prefix_cache is not None
-            and not pd.isna(prefix_cache)
-            and float(prefix_cache) > 0
-        ):
+        if prefix_cache is not None and not pd.isna(prefix_cache) and float(prefix_cache) > 0:
             lines_out.append(f"- Prefix Cache Hit Rate: **{float(prefix_cache):.2f}**")
         if pd.notna(top.get("pd_ratio")):
-            lines_out.append(
-                f"- PD Ratio: **{float(top.get('pd_ratio', 0) or 0):.2f}**"
-            )
-        if pd.notna(top.get("prefill_devices_per_instance")) and pd.notna(
-            top.get("decode_devices_per_instance")
-        ):
+            lines_out.append(f"- PD Ratio: **{float(top.get('pd_ratio', 0) or 0):.2f}**")
+        if pd.notna(top.get("prefill_devices_per_instance")) and pd.notna(top.get("decode_devices_per_instance")):
             prefill_devices = int(top.get("prefill_devices_per_instance"))
             decode_devices = int(top.get("decode_devices_per_instance"))
-            lines_out.append(
-                f"- Prefill/Decode Devices per Instance: **{prefill_devices}:{decode_devices}**"
-            )
+            lines_out.append(f"- Prefill/Decode Devices per Instance: **{prefill_devices}:{decode_devices}**")
         if len(ranked) > 1:
             runner_up = ranked.iloc[1]
             top_val = float(top.get(ranking_col, 0) or 0)
             second_val = float(runner_up.get(ranking_col, 0) or 0)
             if second_val > 0:
                 gap = (top_val - second_val) / second_val * 100.0
-                lines_out.append(
-                    f"- Lead over runner-up **{runner_up.get('device', '-')}**: **{gap:.2f}%**"
-                )
+                lines_out.append(f"- Lead over runner-up **{runner_up.get('device', '-')}**: **{gap:.2f}%**")
     else:
         reason_series = (
-            work_df["no_result_reason"].dropna()
-            if "no_result_reason" in work_df.columns
-            else pd.Series(dtype=object)
+            work_df["no_result_reason"].dropna() if "no_result_reason" in work_df.columns else pd.Series(dtype=object)
         )
-        error_series = (
-            work_df["error"].dropna()
-            if "error" in work_df.columns
-            else pd.Series(dtype=object)
-        )
+        error_series = work_df["error"].dropna() if "error" in work_df.columns else pd.Series(dtype=object)
         exec_error_series = (
-            work_df["execution_error"].dropna()
-            if "execution_error" in work_df.columns
-            else pd.Series(dtype=object)
+            work_df["execution_error"].dropna() if "execution_error" in work_df.columns else pd.Series(dtype=object)
         )
-        lines_out.append(
-            "- No valid configuration is currently available for recommendation."
-        )
+        lines_out.append("- No valid configuration is currently available for recommendation.")
         if not exec_error_series.empty:
-            lines_out.append(
-                f"- Backend Execution Error: **{exec_error_series.iloc[0]}**"
-            )
+            lines_out.append(f"- Backend Execution Error: **{exec_error_series.iloc[0]}**")
         elif not error_series.empty:
             lines_out.append(f"- Backend Execution Error: **{error_series.iloc[0]}**")
         elif not reason_series.empty:
@@ -3646,18 +3232,10 @@ def _optimizer_summary_markdown_from_df(
     lines_out.append("")
     lines_out.append("### Workspace Summary")
     lines_out.append(f"- Completed Runs: **{completed_count or len(full_df)}**")
-    devices = (
-        work_df["device"].dropna().astype(str).unique().tolist()
-        if "device" in work_df.columns
-        else []
-    )
+    devices = work_df["device"].dropna().astype(str).unique().tolist() if "device" in work_df.columns else []
     if devices:
         lines_out.append(f"- Compared Devices: **{', '.join(devices[:8])}**")
-    no_result_count = (
-        int(work_df["no_result_reason"].notna().sum())
-        if "no_result_reason" in work_df.columns
-        else 0
-    )
+    no_result_count = int(work_df["no_result_reason"].notna().sum()) if "no_result_reason" in work_df.columns else 0
     if no_result_count > 0:
         lines_out.append(f"- Runs Without Feasible Plans: **{no_result_count}**")
     return "\n".join(lines_out)
@@ -3670,9 +3248,7 @@ def _optimizer_summary_markdown(results: list[ExperimentResult]) -> str:
     return _optimizer_summary_markdown_from_df(_results_to_df(results), len(results))
 
 
-def _optimizer_common_outputs(
-    results: list[ExperimentResult], latest: ExperimentResult | None
-):
+def _optimizer_common_outputs(results: list[ExperimentResult], latest: ExperimentResult | None):
     """Generate optimizer workspace outputs without changing the external interface."""
     if gr is None:
         raise RuntimeError("gradio is not installed")
@@ -3686,25 +3262,17 @@ def _optimizer_common_outputs(
     throughput_chart = _optimizer_metric_plot(
         full_df, "best_throughput", "Best Throughput by Device", "Throughput (token/s)"
     )
-    ttft_chart = _optimizer_metric_plot(
-        full_df, "best_ttft_ms", "Best TTFT by Device", "TTFT (ms)"
-    )
-    tpot_chart = _optimizer_metric_plot(
-        full_df, "best_tpot_ms", "Best TPOT by Device", "TPOT (ms)"
-    )
+    ttft_chart = _optimizer_metric_plot(full_df, "best_ttft_ms", "Best TTFT by Device", "TTFT (ms)")
+    tpot_chart = _optimizer_metric_plot(full_df, "best_tpot_ms", "Best TPOT by Device", "TPOT (ms)")
     compare_metric, compare_title, compare_ylabel = _optimizer_primary_metric(full_df)
-    batch_chart = _optimizer_metric_plot(
-        full_df, compare_metric, compare_title, compare_ylabel
-    )
+    batch_chart = _optimizer_metric_plot(full_df, compare_metric, compare_title, compare_ylabel)
     pd_chart, pd_df = _optimizer_pd_ratio_outputs(full_df)
 
     candidate_rows = _optimizer_candidate_rows_from_results(results)
     state_rows = _optimizer_state_rows(results)
-    fixed_update, fixed_md, fixed_chart, fixed_df = _optimizer_fixed_compare_outputs(
-        candidate_rows
-    )
-    detail_update, detail_md, detail_pareto_chart, detail_df, detail_output = (
-        _optimizer_detail_view(state_rows, candidate_rows, None)
+    fixed_update, fixed_md, fixed_chart, fixed_df = _optimizer_fixed_compare_outputs(candidate_rows)
+    detail_update, detail_md, detail_pareto_chart, detail_df, detail_output = _optimizer_detail_view(
+        state_rows, candidate_rows, None
     )
     display_df = _simplify_optimizer_display_df(full_df)
 
@@ -3778,9 +3346,7 @@ def run_optimizer_v2(*vals):
             full_rows,
             candidate_rows,
         ) = _optimizer_common_outputs(results, result)
-        progress = progress_html(
-            completed, total, result.label, f"{result.status} / {result.source}"
-        )
+        progress = progress_html(completed, total, result.label, f"{result.status} / {result.source}")
         yield (
             progress,
             summary,
@@ -3842,23 +3408,15 @@ def load_optimizer_history_v2():
     throughput_chart = _optimizer_metric_plot(
         full_df, "best_throughput", "Best Throughput by Device", "Throughput (token/s)"
     )
-    ttft_chart = _optimizer_metric_plot(
-        full_df, "best_ttft_ms", "Best TTFT by Device", "TTFT (ms)"
-    )
-    tpot_chart = _optimizer_metric_plot(
-        full_df, "best_tpot_ms", "Best TPOT by Device", "TPOT (ms)"
-    )
+    ttft_chart = _optimizer_metric_plot(full_df, "best_ttft_ms", "Best TTFT by Device", "TTFT (ms)")
+    tpot_chart = _optimizer_metric_plot(full_df, "best_tpot_ms", "Best TPOT by Device", "TPOT (ms)")
     compare_metric, compare_title, compare_ylabel = _optimizer_primary_metric(full_df)
-    batch_chart = _optimizer_metric_plot(
-        full_df, compare_metric, compare_title, compare_ylabel
-    )
+    batch_chart = _optimizer_metric_plot(full_df, compare_metric, compare_title, compare_ylabel)
     pd_chart, pd_df = _optimizer_pd_ratio_outputs(full_df)
     candidate_rows = _optimizer_candidate_rows_from_records(rows)
-    fixed_update, fixed_md, fixed_chart, fixed_df = _optimizer_fixed_compare_outputs(
-        candidate_rows
-    )
-    detail_update, detail_md, detail_pareto_chart, detail_df, detail_output = (
-        _optimizer_detail_view(rows, candidate_rows, None)
+    fixed_update, fixed_md, fixed_chart, fixed_df = _optimizer_fixed_compare_outputs(candidate_rows)
+    detail_update, detail_md, detail_pareto_chart, detail_df, detail_output = _optimizer_detail_view(
+        rows, candidate_rows, None
     )
     display_df = _simplify_optimizer_display_df(full_df)
 
@@ -3887,29 +3445,19 @@ def load_optimizer_history_v2():
     )
 
 
-def refresh_optimizer_fixed_compare(
-    candidate_rows: list[dict], config_key: str | None, metric_name: str
-):
+def refresh_optimizer_fixed_compare(candidate_rows: list[dict], config_key: str | None, metric_name: str):
     """Refresh the fixed-configuration comparison results."""
-    _update, md, chart, df = _optimizer_fixed_compare_outputs(
-        candidate_rows, config_key, metric_name
-    )
+    _update, md, chart, df = _optimizer_fixed_compare_outputs(candidate_rows, config_key, metric_name)
     return md, chart, df
 
 
-def refresh_optimizer_detail_v2(
-    full_rows: list[dict], candidate_rows: list[dict], device: str
-):
+def refresh_optimizer_detail_v2(full_rows: list[dict], candidate_rows: list[dict], device: str):
     """Refresh optimizer details in the refactored workspace."""
-    _update, md, pareto_chart, df, raw_output = _optimizer_detail_view(
-        full_rows, candidate_rows, device
-    )
+    _update, md, pareto_chart, df, raw_output = _optimizer_detail_view(full_rows, candidate_rows, device)
     return md, pareto_chart, df, raw_output
 
 
-def update_memory_analysis_by_device(
-    full_rows: list[dict], device: str, case_label: str | None = None
-):
+def update_memory_analysis_by_device(full_rows: list[dict], device: str, case_label: str | None = None):
     """Refresh memory analysis for the selected chip and case."""
     from .charts import empty_pie_plot, pie_plot
 
@@ -3932,9 +3480,7 @@ def update_memory_analysis_by_device(
     return empty_pie_plot("Memory usage"), memory_table
 
 
-def update_bandwidth_analysis_by_device(
-    full_rows: list[dict], device: str, case_label: str | None = None
-):
+def update_bandwidth_analysis_by_device(full_rows: list[dict], device: str, case_label: str | None = None):
     """Refresh bandwidth/bottleneck details for the selected chip and case."""
     if not full_rows:
         return pd.DataFrame()
@@ -3973,9 +3519,7 @@ def update_bandwidth_analysis_by_device(
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
-def update_category_stats_by_device(
-    op_breakdown: list[dict], device: str, case_label: str | None = None
-):
+def update_category_stats_by_device(op_breakdown: list[dict], device: str, case_label: str | None = None):
     """Refresh operator category statistics for the selected chip and case."""
     if not op_breakdown:
         return empty_plot("Operator category time"), pd.DataFrame()
@@ -4000,23 +3544,17 @@ def update_category_stats_by_device(
     )
     category_stats.columns = ["category", "total_time_us", "op_count"]
     category_stats["total_time_ms"] = category_stats["total_time_us"] / 1000.0
-    category_stats["ratio_pct"] = (
-        category_stats["total_time_us"] / category_stats["total_time_us"].sum() * 100
-    )
+    category_stats["ratio_pct"] = category_stats["total_time_us"] / category_stats["total_time_us"].sum() * 100
     category_stats = category_stats.sort_values(by="total_time_us", ascending=False)
 
-    display_df = category_stats[
-        ["category", "total_time_ms", "op_count", "ratio_pct"]
-    ].copy()
+    display_df = category_stats[["category", "total_time_ms", "op_count", "ratio_pct"]].copy()
     category_df = pd.DataFrame(
         {
             "category": category_stats["category"].tolist(),
             "time_ms": category_stats["total_time_ms"].tolist(),
         }
     )
-    title = f"Operator category time - {device}" + (
-        f" - {case_label}" if case_label else ""
-    )
+    title = f"Operator category time - {device}" + (f" - {case_label}" if case_label else "")
     category_chart = bar_plot(
         category_df,
         "category",

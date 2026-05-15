@@ -16,7 +16,5 @@ def get_available_memory_gb(device_profile, runtime, reserved_memory_size_gb=0):
     """
     total_device_memory_gb = device_profile.memory_size_bytes / 1024**3
     peak_memory_usage_gb = runtime.memory_tracker.peak_mem_usage() / 1024**3
-    device_memory_available_gb = (
-        total_device_memory_gb - peak_memory_usage_gb - reserved_memory_size_gb
-    )
+    device_memory_available_gb = total_device_memory_gb - peak_memory_usage_gb - reserved_memory_size_gb
     return device_memory_available_gb

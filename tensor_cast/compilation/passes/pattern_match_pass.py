@@ -12,11 +12,9 @@ logger = logging.getLogger(__name__)
 
 class PatternMatchPass(TensorCastGraphModulePass):
     def __init__(self):
-        self.pattern_replacements: Dict[
-            str, Tuple[Callable[..., Any], Callable[..., Any]]
-        ] = {}
+        self.pattern_replacements: Dict[str, Tuple[Callable[..., Any], Callable[..., Any]]] = {}
         self.pattern_pass: PatternMatcherPass = PatternMatcherPass(
-            pass_name="pattern_match_pass"
+            pass_name="pattern_match_pass"  # nosec B106
         )
 
     def __call__(self, gm: torch.fx.GraphModule) -> torch.fx.GraphModule:

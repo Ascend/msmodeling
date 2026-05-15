@@ -67,7 +67,7 @@ def load_config_from_file(
 
     config_dict: Dict[str, Dict] = {}
     for key, config_path in config_path_dict.items():
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
         config_dict[key] = config
 
@@ -108,7 +108,7 @@ def load_config_from_file(
         dtype=dtype,
     )
     if vae_config_json_path is not None and os.path.isfile(vae_config_json_path):
-        with open(vae_config_json_path) as f:
+        with open(vae_config_json_path, encoding="utf-8") as f:
             vae_config = json.load(f)
         model_config.vae_config = DiffusersVaeConfig(
             parallel_config=parallel_config,
@@ -179,9 +179,7 @@ class DiffusersTransformerModel(ModelWrapperBase):
         class_name = model_config.get("_class_name")
         spec = get_dit_block_cache_spec(class_name)
         if spec is None:
-            logger.warning(
-                "dit_block_cache is not implemented for model %r.", class_name
-            )
+            logger.warning("dit_block_cache is not implemented for model %r.", class_name)
             return None
 
         blocks_with_setters = list(spec.get_blocks_with_setters(self._inner))

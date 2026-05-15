@@ -82,18 +82,11 @@ def _enrich_optimizer_summary(
             summary.setdefault("best_tpot_ms", top1.get("tpot_ms"))
 
     if (
-        any(
-            summary.get(k) in (None, "")
-            for k in ["best_parallel", "best_batch_size", "best_concurrency"]
-        )
+        any(summary.get(k) in (None, "") for k in ["best_parallel", "best_batch_size", "best_concurrency"])
         or not top_rows
     ):
         summary.update(
-            {
-                k: v
-                for k, v in _extract_optimizer_top1_from_log(raw_log).items()
-                if summary.get(k) in (None, "")
-            }
+            {k: v for k, v in _extract_optimizer_top1_from_log(raw_log).items() if summary.get(k) in (None, "")}
         )
 
     summary.setdefault("ttft_limits_ms", params.get("ttft_limits"))
@@ -102,14 +95,8 @@ def _enrich_optimizer_summary(
     has_result = summary.get("best_throughput") not in (None, "")
     if error and not summary.get("execution_error"):
         summary["execution_error"] = error
-    if (
-        not has_result
-        and not summary.get("no_result_reason")
-        and not summary.get("execution_error")
-    ):
-        summary["no_result_reason"] = _infer_optimizer_no_result_reason_from_params(
-            params
-        )
+    if not has_result and not summary.get("no_result_reason") and not summary.get("execution_error"):
+        summary["no_result_reason"] = _infer_optimizer_no_result_reason_from_params(params)
 
     return summary
 
@@ -162,9 +149,7 @@ class ResultStore:
         summary = json.loads(row[4])
         tables = json.loads(row[5])
         if row[0] == "throughput_optimizer":
-            summary = _enrich_optimizer_summary(
-                summary, tables, raw_log, json.loads(row[3]), row[9]
-            )
+            summary = _enrich_optimizer_summary(summary, tables, raw_log, json.loads(row[3]), row[9])
         return ExperimentResult(
             sim_type=row[0],
             status=row[1],
@@ -230,26 +215,14 @@ class ResultStore:
                             "SELECT tables_json, log_path FROM runs WHERE task_hash=?",
                             (row[8],),
                         ).fetchone()
-                        tables = (
-                            json.loads(raw_row[0]) if raw_row and raw_row[0] else {}
-                        )
-                        log_file = (
-                            _resolve_log_path(raw_row[1])
-                            if raw_row and raw_row[1]
-                            else Path("")
-                        )
-                        raw_log = (
-                            log_file.read_text(encoding="utf-8")
-                            if log_file.exists()
-                            else ""
-                        )
+                        tables = json.loads(raw_row[0]) if raw_row and raw_row[0] else {}
+                        log_file = _resolve_log_path(raw_row[1]) if raw_row and raw_row[1] else Path("")
+                        raw_log = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
                     except Exception:
                         tables = {}
                         raw_log = ""
                     top_configs = tables.get("top_configs") or []
-                    summary = _enrich_optimizer_summary(
-                        summary, tables, raw_log, json.loads(row[3]), row[9]
-                    )
+                    summary = _enrich_optimizer_summary(summary, tables, raw_log, json.loads(row[3]), row[9])
                 rows.append(
                     {
                         "sim_type": row[0],

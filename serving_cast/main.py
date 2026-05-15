@@ -14,7 +14,7 @@ from serving_cast.utils import (
     summarize,
 )
 
-from . import stime
+import serving_cast.stime as stime
 
 
 def parse_command_line_args():
@@ -68,14 +68,10 @@ def parse_command_line_args():
 
 def instance_group2pd_type(instance_group):
     is_pd_aggregation = (
-        len(instance_group["both"]) > 0
-        and len(instance_group["prefill"]) == 0
-        and len(instance_group["decode"]) == 0
+        len(instance_group["both"]) > 0 and len(instance_group["prefill"]) == 0 and len(instance_group["decode"]) == 0
     )
     is_pd_disaggregation = (
-        len(instance_group["both"]) == 0
-        and len(instance_group["prefill"]) > 0
-        and len(instance_group["decode"]) > 0
+        len(instance_group["both"]) == 0 and len(instance_group["prefill"]) > 0 and len(instance_group["decode"]) > 0
     )
 
     if is_pd_aggregation and not is_pd_disaggregation:
@@ -109,9 +105,7 @@ def get_serving(instance_group):
     if pd_type == "pd_aggregation":
         serving = PdAggregationServing(instance_group["both"])
     elif pd_type == "pd_disaggregation":
-        serving = PdDisaggregationServing(
-            instance_group["prefill"], instance_group["decode"]
-        )
+        serving = PdDisaggregationServing(instance_group["prefill"], instance_group["decode"])
     else:
         raise ValueError(f"Unknown pd type: {pd_type}")
 
@@ -133,9 +127,7 @@ def get_load_gen(load_gen_config):
 
 
 def init_profiling(args):
-    profiling_path_with_timestamp = os.path.join(
-        args.profiling_output_path, get_basic_timestamp()
-    )
+    profiling_path_with_timestamp = os.path.join(args.profiling_output_path, get_basic_timestamp())
     os.makedirs(profiling_path_with_timestamp, exist_ok=True)
     gen_profiling_config_set_env_variable(prof_dir=profiling_path_with_timestamp)
     profiler_interface.init_profiling()
@@ -155,9 +147,7 @@ def main():
 
     stime.init_simulation()
 
-    instance_group = get_instance_group(
-        config.instance_config_list, config.common_config
-    )
+    instance_group = get_instance_group(config.instance_config_list, config.common_config)
     load_gen = get_load_gen(config.common_config.load_gen)
     serving = get_serving(instance_group)
 

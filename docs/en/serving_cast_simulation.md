@@ -19,7 +19,7 @@ Run a service inference simulation driven by JSON configuration files.
 required arguments:
   --instance_config_path INSTANCE_CONFIG_PATH [INSTANCE_CONFIG_PATH ...]
                         Path to a YAML file that declares one or more instance groups.
-                        Each group defines a homogeneous pool of nodes (role, count, TP/DP parallelism) 
+                        Each group defines a homogeneous pool of nodes (role, count, TP/DP parallelism)
                         and can be mixed-and-matched in a single benchmark run.
   --common_config_path COMMON_CONFIG_PATH
                         Path to a YAML file with global settings: model architecture,
@@ -37,13 +37,13 @@ example:
 - basic usage
 
 ```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml 
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml
 ```
 
 - enable profiling
 
 ```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling​ 
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling​
 ```
 
 - enable profiling with custom output path
@@ -93,7 +93,7 @@ Use the following command to enable profiling:
 - enable profiling
 
 ```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling​ 
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling​
 ```
 
 - enable profiling with custom output path

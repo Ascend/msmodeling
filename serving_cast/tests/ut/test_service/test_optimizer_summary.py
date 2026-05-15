@@ -35,23 +35,17 @@ class TestSummary(unittest.TestCase):
 
     def test_set_stop_flag_tpot_exceeds_limit(self):
         """Test set_stop_flag when tpot exceeds limit"""
-        self.summary.set_early_stop_flag(
-            memory_left=10, tpot=60.0, ttft=100.0
-        )  # 60 > 50 (limit)
+        self.summary.set_early_stop_flag(memory_left=10, tpot=60.0, ttft=100.0)  # 60 > 50 (limit)
         self.assertTrue(self.summary.check_early_stop_flag())
 
     def test_set_stop_flag_ttft_exceeds_limit(self):
         """Test set_stop_flag when ttft exceeds limit"""
-        self.summary.set_early_stop_flag(
-            memory_left=10, tpot=10.0, ttft=1500.0
-        )  # 1500 > 1000 (limit)
+        self.summary.set_early_stop_flag(memory_left=10, tpot=10.0, ttft=1500.0)  # 1500 > 1000 (limit)
         self.assertTrue(self.summary.check_early_stop_flag())
 
     def test_set_stop_flag_all_within_limits(self):
         """Test set_stop_flag when all values are within limits"""
-        self.summary.set_early_stop_flag(
-            memory_left=10, tpot=10.0, ttft=100.0
-        )  # All within limits
+        self.summary.set_early_stop_flag(memory_left=10, tpot=10.0, ttft=100.0)  # All within limits
         self.assertFalse(self.summary.check_early_stop_flag())
 
     def test_check_early_stop_flag_initial_state(self):

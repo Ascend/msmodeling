@@ -38,9 +38,7 @@ def get_vendor_device_map() -> dict[str, list[str]]:
 # -----------------------------
 # Progress components
 # -----------------------------
-def progress_html(
-    completed: int, total: int, latest: str = "", status: str = ""
-) -> str:
+def progress_html(completed: int, total: int, latest: str = "", status: str = "") -> str:
     """Create the progress-bar HTML."""
     total = max(1, int(total or 1))
     completed = max(0, min(int(completed or 0), total))
@@ -117,9 +115,7 @@ def result_section(sim_type: str):
         chart3 = result_plot(label="Comparison Chart")
     with gr.Group(elem_classes=["section-card"]):
         gr.Markdown("### Baseline-Normalized Performance")
-        baseline_device = gr.Dropdown(
-            choices=[], label="Baseline Device", allow_custom_value=False
-        )
+        baseline_device = gr.Dropdown(choices=[], label="Baseline Device", allow_custom_value=False)
         baseline_plot = result_plot(label="Baseline Curve")
         baseline_df = result_dataframe("Baseline Table")
     with gr.Group(elem_classes=["section-card"]):
@@ -154,9 +150,7 @@ def result_section(sim_type: str):
     )
 
 
-def _refresh_baseline_view(
-    sim_type: str, rows: list[dict[str, Any]] | None, baseline_device: str | None
-):
+def _refresh_baseline_view(sim_type: str, rows: list[dict[str, Any]] | None, baseline_device: str | None):
     """Refresh the baseline view."""
     from .charts import baseline_plot
 
@@ -226,9 +220,7 @@ def text_generate_result_section():
     # Core metrics: num-queries versus runtime
     with gr.Group(elem_classes=["section-card"]):
         gr.Markdown("### Core Metrics")
-        tg_tps_chart = result_plot(
-            label="TPS/Device Comparison (Hidden)", visible=False
-        )
+        tg_tps_chart = result_plot(label="TPS/Device Comparison (Hidden)", visible=False)
         tg_time_chart = result_plot(label="num-queries vs Runtime")
         # Show the TPOT metric when MTP > 0.
         tg_tpot_metric = gr.Markdown("", visible=False)
@@ -236,12 +228,8 @@ def text_generate_result_section():
     with gr.Group(elem_classes=["section-card"]):
         gr.Markdown("### Memory Usage Analysis")
         with gr.Row():
-            tg_memory_device = gr.Dropdown(
-                choices=[], label="Device", allow_custom_value=False
-            )
-            tg_memory_case = gr.Dropdown(
-                choices=[], label="Case (queries/tp-size)", allow_custom_value=False
-            )
+            tg_memory_device = gr.Dropdown(choices=[], label="Device", allow_custom_value=False)
+            tg_memory_case = gr.Dropdown(choices=[], label="Case (queries/tp-size)", allow_custom_value=False)
         with gr.Row(elem_classes=["memory-analysis-row"]):
             tg_memory_pie = result_plot(
                 label="Memory Usage Breakdown",
@@ -258,15 +246,9 @@ def text_generate_result_section():
     with gr.Group(elem_classes=["section-card"]):
         gr.Markdown("### Bandwidth and Bottleneck Analysis")
         with gr.Row():
-            tg_bandwidth_device = gr.Dropdown(
-                choices=[], label="Device", allow_custom_value=False
-            )
-            tg_bandwidth_case = gr.Dropdown(
-                choices=[], label="Case (queries/tp-size)", allow_custom_value=False
-            )
-        tg_bandwidth_table = result_dataframe(
-            "Bandwidth and Bottleneck Details", max_height=300
-        )
+            tg_bandwidth_device = gr.Dropdown(choices=[], label="Device", allow_custom_value=False)
+            tg_bandwidth_case = gr.Dropdown(choices=[], label="Case (queries/tp-size)", allow_custom_value=False)
+        tg_bandwidth_table = result_dataframe("Bandwidth and Bottleneck Details", max_height=300)
 
     # Operator-time analysis table
     with gr.Group(elem_classes=["section-card"]):
@@ -277,12 +259,8 @@ def text_generate_result_section():
                 label="Device for Operator Details",
                 allow_custom_value=False,
             )
-            tg_op_case = gr.Dropdown(
-                choices=[], label="Case (queries/tp-size)", allow_custom_value=False
-            )
-            tg_op_top_n = gr.Slider(
-                minimum=5, maximum=50, value=20, step=5, label="Top N Operators"
-            )
+            tg_op_case = gr.Dropdown(choices=[], label="Case (queries/tp-size)", allow_custom_value=False)
+            tg_op_top_n = gr.Slider(minimum=5, maximum=50, value=20, step=5, label="Top N Operators")
             tg_op_sort = gr.Radio(
                 ["Total Time (ms)", "Avg Time (ms)", "Calls", "Operator"],
                 value="Total Time (ms)",
@@ -317,12 +295,8 @@ def text_generate_result_section():
     with gr.Group(elem_classes=["section-card"]):
         gr.Markdown("### Operator Category Statistics")
         with gr.Row():
-            tg_op_category_device = gr.Dropdown(
-                choices=[], label="Device", allow_custom_value=False
-            )
-            tg_op_category_case = gr.Dropdown(
-                choices=[], label="Case (queries/tp-size)", allow_custom_value=False
-            )
+            tg_op_category_device = gr.Dropdown(choices=[], label="Device", allow_custom_value=False)
+            tg_op_category_case = gr.Dropdown(choices=[], label="Case (queries/tp-size)", allow_custom_value=False)
         tg_op_category_chart = result_plot(label="By Category")
         tg_op_category_table = result_dataframe("Category Statistics", max_height=300)
 
@@ -335,9 +309,7 @@ def text_generate_result_section():
                 value="Total Time",
                 label="Comparison Metric",
             )
-        tg_op_compare_table = result_dataframe(
-            "Device Operator Comparison", max_height=460
-        )
+        tg_op_compare_table = result_dataframe("Device Operator Comparison", max_height=460)
 
     # Summary table and export
     with gr.Group(elem_classes=["section-card"]):
@@ -417,9 +389,7 @@ def video_generate_result_section():
                 label="Device for Operator Details",
                 allow_custom_value=False,
             )
-            vg_op_top_n = gr.Slider(
-                minimum=5, maximum=50, value=20, step=5, label="Top N Operators"
-            )
+            vg_op_top_n = gr.Slider(minimum=5, maximum=50, value=20, step=5, label="Top N Operators")
             vg_op_sort = gr.Radio(
                 ["Total Time (ms)", "Avg Time (ms)", "Calls", "Operator"],
                 value="Total Time (ms)",
@@ -459,9 +429,7 @@ def video_generate_result_section():
     # Cross-device operator comparison
     with gr.Group(elem_classes=["section-card"]):
         gr.Markdown("### Cross-Device Operator Comparison")
-        vg_op_compare_table = result_dataframe(
-            "Device Operator Comparison", max_height=460
-        )
+        vg_op_compare_table = result_dataframe("Device Operator Comparison", max_height=460)
 
     # Summary table and export
     with gr.Group(elem_classes=["section-card"]):
@@ -526,33 +494,22 @@ def optimizer_result_section():
             op_results_df = result_dataframe("Best Results by Device", max_height=420)
 
         with gr.Tab("Fixed-Config Comparison"), gr.Group(elem_classes=["section-card"]):
-            gr.Markdown(
-                "Compare devices under the same configuration for a fair side-by-side evaluation."
-            )
+            gr.Markdown("Compare devices under the same configuration for a fair side-by-side evaluation.")
             with gr.Row():
-                op_fixed_config = gr.Dropdown(
-                    choices=[], label="Fixed Configuration", allow_custom_value=False
-                )
-                op_fixed_metric = gr.Radio(
-                    ["Throughput", "TTFT", "TPOT"], value="Throughput", label="Metric"
-                )
-            op_fixed_md = gr.Markdown(
-                "\n".join(["### Fixed-Config Comparison", "Waiting to run."])
-            )
+                op_fixed_config = gr.Dropdown(choices=[], label="Fixed Configuration", allow_custom_value=False)
+                op_fixed_metric = gr.Radio(["Throughput", "TTFT", "TPOT"], value="Throughput", label="Metric")
+            op_fixed_md = gr.Markdown("\n".join(["### Fixed-Config Comparison", "Waiting to run."]))
             op_fixed_chart = result_plot(label="Fixed-Config Metric Comparison")
             op_fixed_df = result_dataframe("Fixed-Config Table", max_height=420)
 
         with gr.Tab("PD Ratio"), gr.Group(elem_classes=["section-card"]):
-            gr.Markdown(
-                "Use this tab to inspect the Prefill/Decode balance when deployment mode is PD Ratio."
-            )
+            gr.Markdown("Use this tab to inspect the Prefill/Decode balance when deployment mode is PD Ratio.")
             op_pd_chart = result_plot(label="Prefill / Decode QPS Comparison")
             op_pd_df = result_dataframe("PD Ratio Key Metrics", max_height=320)
 
         with gr.Tab("Single-Device Details"), gr.Group(elem_classes=["section-card"]):
             gr.Markdown(
-                "Inspect candidate configurations, the Pareto frontier, "
-                "and detailed search results for one device."
+                "Inspect candidate configurations, the Pareto frontier, and detailed search results for one device."
             )
             with gr.Row():
                 op_detail_device = gr.Dropdown(
@@ -560,9 +517,7 @@ def optimizer_result_section():
                     label="Device for Search Details",
                     allow_custom_value=False,
                 )
-            op_detail_md = gr.Markdown(
-                "\n".join(["### Single-Device Search Details", "Waiting to run."])
-            )
+            op_detail_md = gr.Markdown("\n".join(["### Single-Device Search Details", "Waiting to run."]))
             op_detail_pareto_chart = result_plot(label="Single-Device Pareto Frontier")
             op_detail_df = result_dataframe("Single-Device Top Results", max_height=420)
             op_detail_output = gr.Textbox(
@@ -577,8 +532,7 @@ def optimizer_result_section():
         with gr.Row():
             op_export_btn = gr.Button("Export Results to Excel")
         gr.Markdown(
-            "Repeated runs for the same case reuse cached logs "
-            "automatically; no manual history loading is required."
+            "Repeated runs for the same case reuse cached logs automatically; no manual history loading is required."
         )
         op_export_file = gr.File(label="Excel Export File", interactive=False)
 

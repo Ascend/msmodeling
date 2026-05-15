@@ -33,9 +33,7 @@ def get_sp_group() -> Optional[ParallelGroup]:
 def _attention(query, key, value, **kwargs):
     sp_group = get_sp_group()
     if sp_group is None:
-        return torch.ops.tensor_cast.attention(
-            query, key, value, None, None, None, None, None
-        )
+        return torch.ops.tensor_cast.attention(query, key, value, None, None, None, None, None)
 
     ulysses_size = sp_group.world_size
 
@@ -71,9 +69,7 @@ def _attention(query, key, value, **kwargs):
         output_split_sizes=output_split_sizes,
         input_split_sizes=input_split_sizes,
     )
-    query = query.view(
-        batch_size, seq_per_rank * ulysses_size, num_heads // ulysses_size, head_dim
-    )
+    query = query.view(batch_size, seq_per_rank * ulysses_size, num_heads // ulysses_size, head_dim)
     key = key.view(
         batch_size_kv,
         seq_per_rank_kv * ulysses_size,
@@ -86,9 +82,7 @@ def _attention(query, key, value, **kwargs):
         num_heads_kv // ulysses_size,
         head_dim_kv,
     )
-    out = torch.ops.tensor_cast.attention(
-        query, key, value, None, None, None, None, None
-    )
+    out = torch.ops.tensor_cast.attention(query, key, value, None, None, None, None, None)
 
     _ = sp_group.all_to_all(
         input_tensor_q,
@@ -105,12 +99,8 @@ def _attention(query, key, value, **kwargs):
 def use_custom_sdpa():
     original_sdpa = F.scaled_dot_product_attention
 
-    def _custom_sdpa(
-        q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None
-    ):
-        return torch.ops.tensor_cast.attention(
-            q, k, v, attn_mask, None, None, None, None
-        )
+    def _custom_sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
+        return torch.ops.tensor_cast.attention(q, k, v, attn_mask, None, None, None, None)
 
     F.scaled_dot_product_attention = _custom_sdpa
     try:

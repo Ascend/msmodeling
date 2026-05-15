@@ -87,10 +87,7 @@ class MiMoV2FlashConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
 
         if hybrid_block_size is not None and hybrid_layer_pattern is None:
-            hybrid_layer_pattern = [
-                0 if ((i + 1) % hybrid_block_size == 0) else 1
-                for i in range(num_hidden_layers)
-            ]
+            hybrid_layer_pattern = [0 if ((i + 1) % hybrid_block_size == 0) else 1 for i in range(num_hidden_layers)]
         self.hybrid_block_size = hybrid_block_size
         self.hybrid_layer_pattern = hybrid_layer_pattern
 

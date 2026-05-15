@@ -123,9 +123,7 @@ class ServingTestCase(unittest.TestCase):
         self.assertEqual(len(requests), num_requests)
 
         for request in requests.values():
-            self.assertAlmostEqual(
-                request.time_to_first_token(), self.dummy_duration.get("analytic")
-            )
+            self.assertAlmostEqual(request.time_to_first_token(), self.dummy_duration.get("analytic"))
             self.assertEqual(request.num_decoded_tokens, num_output_tokens)
             self.assertGreater(
                 request.time_per_output_token(),
@@ -158,9 +156,7 @@ class ServingTestCase(unittest.TestCase):
             ),
         )
 
-        prefill_decode_instances = [
-            Instance(instance_config) for _ in range(instance_config.num_instances)
-        ]
+        prefill_decode_instances = [Instance(instance_config) for _ in range(instance_config.num_instances)]
 
         num_requests = 10
         num_input_tokens = 2048
@@ -181,12 +177,8 @@ class ServingTestCase(unittest.TestCase):
         self.assertEqual(len(requests), num_requests)
         for request in requests.values():
             self.assertEqual(request.num_decoded_tokens, num_output_tokens)
-            self.assertAlmostEqual(
-                request.time_to_first_token(), self.dummy_duration.get("analytic")
-            )
-            self.assertAlmostEqual(
-                request.time_per_output_token(), self.dummy_duration.get("analytic")
-            )
+            self.assertAlmostEqual(request.time_to_first_token(), self.dummy_duration.get("analytic"))
+            self.assertAlmostEqual(request.time_per_output_token(), self.dummy_duration.get("analytic"))
 
     def test_pd_aggregation_dummy_model_single_scheduler(self):
         instance_config = InstanceConfig(
@@ -231,9 +223,7 @@ class ServingTestCase(unittest.TestCase):
         self.assertEqual(len(requests), num_requests)
         for request in requests.values():
             self.assertEqual(request.num_decoded_tokens, num_output_tokens)
-            self.assertAlmostEqual(
-                request.time_per_output_token(), self.dummy_duration.get("analytic")
-            )
+            self.assertAlmostEqual(request.time_per_output_token(), self.dummy_duration.get("analytic"))
 
     def test_pd_aggregation_dummy_model_single_scheduler_trigger_preempt(self):
         instance_config = InstanceConfig(

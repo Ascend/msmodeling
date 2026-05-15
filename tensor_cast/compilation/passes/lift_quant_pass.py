@@ -62,10 +62,7 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
 
         def is_multi_output_node(node: fx.Node) -> bool:
             """Checks if a node produces multiple outputs, i.e. used by getitem."""
-            return any(
-                user.op == "call_function" and user.target == operator.getitem
-                for user in node.users
-            )
+            return any(user.op == "call_function" and user.target == operator.getitem for user in node.users)
 
         graph = gm.graph
 
@@ -111,10 +108,7 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                     if is_multi_output:
                         new_getitem_nodes = {}
                         for user in list(lifted_quant_node.users):
-                            if (
-                                user.op == "call_function"
-                                and user.target == operator.getitem
-                            ):
+                            if user.op == "call_function" and user.target == operator.getitem:
                                 idx = user.args[1]
                                 new_getitem_nodes.setdefault(idx, user)
                         quantized_tensor_node = new_getitem_nodes[0]
@@ -133,10 +127,7 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                     if is_multi_output:
                         new_getitem_nodes = {}
                         for user in list(original_quant_node.users):
-                            if (
-                                user.op == "call_function"
-                                and user.target == operator.getitem
-                            ):
+                            if user.op == "call_function" and user.target == operator.getitem:
                                 idx = user.args[1]
                                 if idx not in new_getitem_nodes:
                                     with graph.inserting_after(lifted_quant_node):
@@ -178,10 +169,7 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                 # This is the key change. We replace users of each output separately.
                 if is_multi_output:
                     for user in list(original_quant_node.users):
-                        if (
-                            user.op == "call_function"
-                            and user.target == operator.getitem
-                        ):
+                        if user.op == "call_function" and user.target == operator.getitem:
                             # Get the index this user is accessing (0 for tensor, 1 for scale, etc.)
                             idx = user.args[1]
 

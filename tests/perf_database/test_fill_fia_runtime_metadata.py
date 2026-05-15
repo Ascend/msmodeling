@@ -1,5 +1,6 @@
 """Tests for fill_fia_runtime_metadata JOIN-based backfill."""
 
+# pylint: disable=no-name-in-module
 import json
 import tempfile
 from pathlib import Path
@@ -20,8 +21,7 @@ class TestBuildCsvKey:
         """MLA prefill: 3D TND shapes, mask present, no block_table."""
         row = {
             "Input Shapes": (
-                '"8192,16,128;8192,16,128;8192,16,128;;2048,2048;'
-                '2;2;;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"'
+                '"8192,16,128;8192,16,128;8192,16,128;;2048,2048;2;2;;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"'
             ),
         }
         key = build_csv_key(row)
@@ -38,8 +38,7 @@ class TestBuildCsvKey:
         """3-seq batch: slot[6] = 3."""
         row = {
             "Input Shapes": (
-                '"8192,16,128;8192,16,128;8192,16,128;;2048,2048;'
-                '3;3;;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"'
+                '"8192,16,128;8192,16,128;8192,16,128;;2048,2048;3;3;;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"'
             ),
         }
         key = build_csv_key(row)
@@ -48,10 +47,7 @@ class TestBuildCsvKey:
     def test_mla_chunk_no_mask(self):
         """Chunk context: Q != K, no atten_mask."""
         row = {
-            "Input Shapes": (
-                '"4105,16,128;4093,16,128;4093,16,128;;;'
-                '2;2;;;;;;;;;;;;;;;;;;4105,16,64;4093,16,64;;;;;"'
-            ),
+            "Input Shapes": ('"4105,16,128;4093,16,128;4093,16,128;;;2;2;;;;;;;;;;;;;;;;;;4105,16,64;4093,16,64;;;;;"'),
         }
         key = build_csv_key(row)
         assert key[0] == (4105, 16, 128)  # Q
@@ -62,8 +58,7 @@ class TestBuildCsvKey:
         """MLA decode: 4D BNSD, block_table present."""
         row = {
             "Input Shapes": (
-                '"1,16,1,512;1170,1,128,512;1170,1,128,512;;;'
-                ';1;;;;;;;;1,512;;;;;;;;;1,16,1,64;1170,1,128,64;;;;;"'
+                '"1,16,1,512;1170,1,128,512;1170,1,128,512;;;;1;;;;;;;;1,512;;;;;;;;;1,16,1,64;1170,1,128,64;;;;;"'
             ),
         }
         key = build_csv_key(row)
@@ -204,8 +199,7 @@ class TestBackfill:
     def test_1_to_1_match(self):
         """One CSV row matches exactly one JSONL record."""
         csv_row = self._make_csv_row(
-            '"4099,16,128;4099,16,128;4099,16,128;;2048,2048;'
-            '1;1;;;;;;;;;;;;;;;;;;4099,16,64;4099,16,64;;;;;"',
+            '"4099,16,128;4099,16,128;4099,16,128;;2048,2048;1;1;;;;;;;;;;;;;;;;;;4099,16,64;4099,16,64;;;;;"',
             "600.0",
         )
         jsonl_record = self._make_jsonl_record(
@@ -215,9 +209,7 @@ class TestBackfill:
             [4099],
             mask=[2048, 2048],
         )
-        jsonl_index = {
-            build_jsonl_key(jsonl_record): [build_runtime_payload(jsonl_record)]
-        }
+        jsonl_index = {build_jsonl_key(jsonl_record): [build_runtime_payload(jsonl_record)]}
         rows, matched, total = backfill([csv_row], jsonl_index, "test")
 
         assert matched == 1
@@ -228,8 +220,7 @@ class TestBackfill:
     def test_1_to_n_expansion(self):
         """One CSV row matches two JSONL records with different seq values."""
         csv_row = self._make_csv_row(
-            '"8192,16,128;8192,16,128;8192,16,128;;2048,2048;'
-            ';2;;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"',
+            '"8192,16,128;8192,16,128;8192,16,128;;2048,2048;;2;;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"',
             "1200.0",
         )
         rec_a = self._make_jsonl_record(
@@ -247,9 +238,7 @@ class TestBackfill:
             mask=[2048, 2048],
         )
         key = build_jsonl_key(rec_a)
-        jsonl_index = {
-            key: [build_runtime_payload(rec_a), build_runtime_payload(rec_b)]
-        }
+        jsonl_index = {key: [build_runtime_payload(rec_a), build_runtime_payload(rec_b)]}
         rows, matched, total = backfill([csv_row], jsonl_index, "test")
 
         assert matched == 1
@@ -272,12 +261,10 @@ class TestBackfill:
     def test_prefill_vs_chunk_no_cross_match(self):
         """Prefill (K==Q, mask) and chunk (K!=Q, no mask) don't cross-match."""
         prefill_csv = self._make_csv_row(
-            '"4105,16,128;4105,16,128;4105,16,128;;2048,2048;'
-            ';2;;;;;;;;;;;;;;;;;;4105,16,64;4105,16,64;;;;;"',
+            '"4105,16,128;4105,16,128;4105,16,128;;2048,2048;;2;;;;;;;;;;;;;;;;;;4105,16,64;4105,16,64;;;;;"',
         )
         chunk_csv = self._make_csv_row(
-            '"4105,16,128;4093,16,128;4093,16,128;;;'
-            ';2;;;;;;;;;;;;;;;;;;4105,16,64;4093,16,64;;;;;"',
+            '"4105,16,128;4093,16,128;4093,16,128;;;;2;;;;;;;;;;;;;;;;;;4105,16,64;4093,16,64;;;;;"',
         )
         prefill_rec = self._make_jsonl_record(
             [4105, 16, 128],
@@ -312,8 +299,7 @@ class TestBackfill:
     def test_decode_seq_q_differs_from_seq_kv(self):
         """Decode: actual_seq_lengths (Q=1 per seq) != actual_seq_lengths_kv (KV=4500)."""
         csv_row = self._make_csv_row(
-            '"1,16,1,512;1170,1,128,512;1170,1,128,512;;;;1;;;;;;;;1,512'
-            ';;;;;;;;;;1,16,1,64;1170,1,128,64;;;;;"',
+            '"1,16,1,512;1170,1,128,512;1170,1,128,512;;;;1;;;;;;;;1,512;;;;;;;;;;1,16,1,64;1170,1,128,64;;;;;"',
         )
         rec = {
             "query_shape": [1, 16, 1, 512],

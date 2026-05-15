@@ -49,25 +49,19 @@ class TestQuantLinear(unittest.TestCase):
         """Set up common resources for tests."""
         torch.compiler.reset()
         torch.manual_seed(0)
-        self.linear_layer_with_bias = torch.nn.Linear(
-            IN_FEATURES, OUT_FEATURES, bias=True
-        ).to(DEVICE, dtype=MODEL_DTYPE)
-
-        torch.manual_seed(0)
-        self.linear_layer_no_bias = torch.nn.Linear(
-            IN_FEATURES, OUT_FEATURES, bias=False
-        ).to(DEVICE, dtype=MODEL_DTYPE)
-
-        torch.manual_seed(1)
-        self.input_tensor = torch.randn(BATCH_SIZE, IN_FEATURES).to(
+        self.linear_layer_with_bias = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=True).to(
             DEVICE, dtype=MODEL_DTYPE
         )
 
+        torch.manual_seed(0)
+        self.linear_layer_no_bias = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=False).to(DEVICE, dtype=MODEL_DTYPE)
+
+        torch.manual_seed(1)
+        self.input_tensor = torch.randn(BATCH_SIZE, IN_FEATURES).to(DEVICE, dtype=MODEL_DTYPE)
+
     def test_pack_unpack_int4_roundtrip(self):
         """Tests if packing and then unpacking an int4 tensor restores the original."""
-        original_tensor = torch.randint(
-            -8, 8, (OUT_FEATURES, IN_FEATURES), dtype=torch.int8, device=DEVICE
-        )
+        original_tensor = torch.randint(-8, 8, (OUT_FEATURES, IN_FEATURES), dtype=torch.int8, device=DEVICE)
         dummy_layer = QuantLinearBase(
             self.linear_layer_no_bias,
             get_linear_quant_config(LinearQuantType.W4A8, torch.randn(1)),
@@ -136,9 +130,9 @@ class TestQuantLinear(unittest.TestCase):
         for params in test_configs:
             with self.subTest(**params):
                 torch.manual_seed(42)
-                linear_layer = torch.nn.Linear(
-                    IN_FEATURES, OUT_FEATURES, bias=params["use_bias"]
-                ).to(DEVICE, dtype=MODEL_DTYPE)
+                linear_layer = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=params["use_bias"]).to(
+                    DEVICE, dtype=MODEL_DTYPE
+                )
                 weight = linear_layer.weight.data
 
                 config_kwargs = {}
@@ -154,16 +148,12 @@ class TestQuantLinear(unittest.TestCase):
 
                 if params["a_scheme"]:
                     config_kwargs["dynamic_quant_scheme"] = (
-                        QuantScheme.SYMMETRIC
-                        if params["a_scheme"] == "symmetric"
-                        else QuantScheme.ASYMMETRIC
+                        QuantScheme.SYMMETRIC if params["a_scheme"] == "symmetric" else QuantScheme.ASYMMETRIC
                     )
 
                 quant_type_enum = LinearQuantType(params["quant_type"])
 
-                config = get_linear_quant_config(
-                    quant_type_enum, weight, **config_kwargs
-                )
+                config = get_linear_quant_config(quant_type_enum, weight, **config_kwargs)
                 quant_linear_layer = QuantLinearBase(linear_layer, config)
 
                 expected_output = linear_layer(self.input_tensor)
@@ -193,11 +183,7 @@ class TestQuantLinear(unittest.TestCase):
             hf_config=hf_config,
         )
         qmodel = TransformerModel(model_id, model_config_with_quant)
-        num_linear_modules = sum(
-            1
-            for _, module in qmodel.named_modules()
-            if isinstance(module, torch.nn.Linear)
-        )
+        num_linear_modules = sum(1 for _, module in qmodel.named_modules() if isinstance(module, torch.nn.Linear))
         # lm_head will never be quantized
         self.assertEqual(num_linear_modules, 1)
 
@@ -230,11 +216,7 @@ class TestQuantLinear(unittest.TestCase):
             hf_config=hf_config,
         )
         model = TransformerModel(model_id, model_config)
-        num_linear_modules = sum(
-            1
-            for _, module in model.named_modules()
-            if isinstance(module, torch.nn.Linear)
-        )
+        num_linear_modules = sum(1 for _, module in model.named_modules() if isinstance(module, torch.nn.Linear))
 
         model_config_with_quant = ModelConfig(
             ParallelConfig(),
@@ -245,11 +227,7 @@ class TestQuantLinear(unittest.TestCase):
             hf_config=hf_config,
         )
         qmodel = TransformerModel(model_id, model_config_with_quant)
-        num_qlinear_modules = sum(
-            1
-            for _, module in qmodel.named_modules()
-            if isinstance(module, QuantLinearBase)
-        )
+        num_qlinear_modules = sum(1 for _, module in qmodel.named_modules() if isinstance(module, QuantLinearBase))
         # lm_head will never be quantized
         self.assertEqual(num_qlinear_modules + 1, num_linear_modules)
 
@@ -288,12 +266,8 @@ class TestQuantLinear(unittest.TestCase):
             get_quant_config(
                 model.unwrap(),
                 quant_type=LinearQuantType.W4A8,
-                dynamic_quant_scheme=QuantScheme.SYMMETRIC
-                if symmetric
-                else QuantScheme.ASYMMETRIC,
-                dynamic_quant_granularity=QuantGranularity.PER_SAMPLE
-                if per_sample
-                else QuantGranularity.PER_TENSOR,
+                dynamic_quant_scheme=QuantScheme.SYMMETRIC if symmetric else QuantScheme.ASYMMETRIC,
+                dynamic_quant_granularity=QuantGranularity.PER_SAMPLE if per_sample else QuantGranularity.PER_TENSOR,
             ),
             quant_linear_cls=TensorCastQuantLinear,
             num_hidden_layers_override=2,
@@ -348,9 +322,7 @@ class TestQuantLinear(unittest.TestCase):
             get_quant_config(
                 model.unwrap(),
                 quant_type=LinearQuantType.W8A8,
-                activation_scale=torch.empty(
-                    [num_tokens], dtype=torch.float, device="meta"
-                ),
+                activation_scale=torch.empty([num_tokens], dtype=torch.float, device="meta"),
             ),
             quant_linear_cls=TensorCastQuantLinear,
             num_hidden_layers_override=2,
@@ -389,18 +361,12 @@ class TestQuantLinear(unittest.TestCase):
 
         model = build_model(user_config)
 
-        mtp_block_module_name = get_mtp_block_module_name(
-            model.model_config.hf_config.model_type
-        )
+        mtp_block_module_name = get_mtp_block_module_name(model.model_config.hf_config.model_type)
         self.assertIsNotNone(mtp_block_module_name)
 
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         # make sure all original attention modules have been replaced
-        self.assertTrue(
-            has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast")
-        )
+        self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
 
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
@@ -413,9 +379,7 @@ class TestQuantLinear(unittest.TestCase):
                 position_ids,
                 attention_meta=attn_meta,
                 kv_cache_by_layers=kv_cache_by_layers,
-                sampling_metadata=SamplingMetadata(
-                    query_start_loc=attn_meta.query_start_loc
-                ),
+                sampling_metadata=SamplingMetadata(query_start_loc=attn_meta.query_start_loc),
             )
             self.assertEqual(outputs.shape, (2, num_mtp_layers + 1))
         result = runtime.table_averages()
@@ -489,12 +453,8 @@ class TestQuantLinear(unittest.TestCase):
         model_config.mtp_config = mtp_config
         model = TransformerModel(model_id, model_config)
         # make sure all original attention modules have been replaced
-        self.assertTrue(
-            has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast")
-        )
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            model, model_config
-        )
+        self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model_config)
         num_tokens = 100
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
@@ -509,9 +469,7 @@ class TestQuantLinear(unittest.TestCase):
                 position_ids,
                 attention_meta=attn_meta,
                 kv_cache_by_layers=kv_cache_by_layers,
-                sampling_metadata=SamplingMetadata(
-                    query_start_loc=attn_meta.query_start_loc
-                ),
+                sampling_metadata=SamplingMetadata(query_start_loc=attn_meta.query_start_loc),
             )
             self.assertEqual(outputs.shape, (2, num_mtp_layers + 1))
         result = runtime.table_averages()
@@ -583,17 +541,13 @@ class TestQuantLinear(unittest.TestCase):
         """Test FP8 dynamic quantization with TensorCastQuantLinear."""
 
         # Create linear layer with or without bias
-        linear_layer = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=with_bias).to(
-            DEVICE, dtype=MODEL_DTYPE
-        )
+        linear_layer = torch.nn.Linear(IN_FEATURES, OUT_FEATURES, bias=with_bias).to(DEVICE, dtype=MODEL_DTYPE)
 
         config = get_linear_quant_config(
             quant_type=LinearQuantType.FP8,
             weight_scale=torch.tensor(1.0),
             dynamic_quant_scheme=QuantScheme.SYMMETRIC,
-            dynamic_quant_granularity=QuantGranularity.PER_SAMPLE
-            if per_sample
-            else QuantGranularity.PER_TENSOR,
+            dynamic_quant_granularity=QuantGranularity.PER_SAMPLE if per_sample else QuantGranularity.PER_TENSOR,
         )
 
         fp8_layer = TensorCastQuantLinear(linear_layer, config)
@@ -720,6 +674,4 @@ class TestQuantLinear(unittest.TestCase):
         # Check that bias is preserved
         if self.linear_layer_with_bias.bias is not None:
             self.assertIsNotNone(fp8_layer.bias)
-            self.assertEqual(
-                fp8_layer.bias.shape, self.linear_layer_with_bias.bias.shape
-            )
+            self.assertEqual(fp8_layer.bias.shape, self.linear_layer_with_bias.bias.shape)

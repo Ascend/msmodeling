@@ -38,9 +38,7 @@ class SwiGLUFusionPassTestCase(unittest.TestCase):
             ("Qwen/Qwen3-32B", QuantizeLinearAction.W4A8_DYNAMIC),
         ]
     )
-    def test_swiglu_fused_op_present(
-        self, model_id: str, linear_act: QuantizeLinearAction
-    ):
+    def test_swiglu_fused_op_present(self, model_id: str, linear_act: QuantizeLinearAction):
         num_tokens = 100
         # Determine QuantConfig based on linear_act.
         # Since the test only uses DISABLED, we can just use default QuantConfig().
@@ -56,9 +54,7 @@ class SwiGLUFusionPassTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
@@ -76,9 +72,7 @@ class SwiGLUFusionPassTestCase(unittest.TestCase):
             ("Qwen/Qwen3-235B-A22B", QuantizeLinearAction.W4A8_DYNAMIC),
         ]
     )
-    def test_gmm_swiglu_fused_op_present(
-        self, model_id: str, linear_act: QuantizeLinearAction
-    ):
+    def test_gmm_swiglu_fused_op_present(self, model_id: str, linear_act: QuantizeLinearAction):
         user_input = UserInputConfig(
             model_id=model_id,
             do_compile=True,
@@ -96,27 +90,17 @@ class SwiGLUFusionPassTestCase(unittest.TestCase):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
         ):
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
         self.assertEqual(
             count_events(runtime, torch.ops.tensor_cast.grouped_matmul_swiglu.default)
-            + count_events(
-                runtime, torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default
-            )
-            + count_events(
-                runtime, torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default
-            )
-            + count_events(
-                runtime, torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default
-            )
-            + count_events(
-                runtime, torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default
-            ),
+            + count_events(runtime, torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default)
+            + count_events(runtime, torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default)
+            + count_events(runtime, torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default)
+            + count_events(runtime, torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default),
             1,
         )
 
@@ -126,9 +110,7 @@ class SwiGLUFusionPassTestCase(unittest.TestCase):
             ("deepseek-ai/DeepSeek-V3.1", QuantizeLinearAction.DISABLED),
         ]
     )
-    def test_swiglu_fused_op_present_deepseek(
-        self, model_id: str, linear_act: QuantizeLinearAction
-    ):
+    def test_swiglu_fused_op_present_deepseek(self, model_id: str, linear_act: QuantizeLinearAction):
         num_tokens = 100
 
         user_config = UserInputConfig(
@@ -148,20 +130,14 @@ class SwiGLUFusionPassTestCase(unittest.TestCase):
             attention_cls=AttentionTensorCast,
         )
 
-        attn_meta, kv_cache_by_layers, actual_num_tokens = (
-            create_mla_metadata_and_kv_cache(model, model_config)
-        )
+        attn_meta, kv_cache_by_layers, actual_num_tokens = create_mla_metadata_and_kv_cache(model, model_config)
         inputs = torch.empty([1, actual_num_tokens], dtype=torch.long, device="meta")
-        position_ids = torch.empty(
-            [1, actual_num_tokens], dtype=torch.long, device="meta"
-        )
+        position_ids = torch.empty([1, actual_num_tokens], dtype=torch.long, device="meta")
 
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
         with (
-            Runtime(
-                perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)
-            ) as runtime,
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
             patch_torch(),
         ):
@@ -170,13 +146,9 @@ class SwiGLUFusionPassTestCase(unittest.TestCase):
                 position_ids,
                 attention_meta=attn_meta,
                 kv_cache_by_layers=kv_cache_by_layers,
-                sampling_metadata=SamplingMetadata(
-                    query_start_loc=attn_meta.query_start_loc
-                ),
+                sampling_metadata=SamplingMetadata(query_start_loc=attn_meta.query_start_loc),
             )
-            self.assertEqual(
-                outputs.shape, (1, 1, model.model_config.hf_config.vocab_size)
-            )
+            self.assertEqual(outputs.shape, (1, 1, model.model_config.hf_config.vocab_size))
 
         self.assertGreaterEqual(
             count_events(runtime, torch.ops.tensor_cast.swiglu.default),

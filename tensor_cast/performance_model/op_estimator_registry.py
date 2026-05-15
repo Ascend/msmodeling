@@ -11,9 +11,7 @@ _op_estimator_table = {}
 logger = logging.getLogger(__name__)
 
 
-def register_op_estimator(
-    op, device_names: Optional[Union[str, List[str]]], override: Optional[bool] = False
-):
+def register_op_estimator(op, device_names: Optional[Union[str, List[str]]], override: Optional[bool] = False):
     if not isinstance(device_names, (list, tuple)):
         device_names = [device_names]
 
@@ -29,9 +27,7 @@ def register_op_estimator(
                         device_name,
                     )
                 else:
-                    raise ValueError(
-                        f"Op {op} already registered for device {device_name}"
-                    )
+                    raise ValueError(f"Op {op} already registered for device {device_name}")
             _op_estimator_table[device_name][op] = estimator
         return estimator
 

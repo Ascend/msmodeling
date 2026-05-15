@@ -1,6 +1,7 @@
 # RFC: SwiGLU算子融合
 
 ## 元数据
+
 | 项目 | 内容                                            |
 | :--- |:----------------------------------------------|
 | **状态** | 已批准                                           |
@@ -11,19 +12,24 @@
 ---
 
 ## 1. 概述
+
 SwiGLU激活函数由线性变换、SiLU激活和逐元素乘法构成，传统执行方式将其分解为独立算子，导致kernel调用开销大、内存访问效率低。
 本文提出采用基于PyTorch图的模式匹配方案实现SwiGLU融合。使用`torch.ops.tensor_cast.swiglu`算子替换SwiGLU激活的计算模式，并通过Sink Split下沉优化将静态参数转换为动态输入，提升性能。
 
 ## 2. 方案设计
+
 ### 2.1 推荐方案
+
 基于PyTorch图实现SwiGLU融合，通过模式匹配识别SwiGLU模式并替换为 `torch.ops.tensor_cast.swiglu.default` 调用，结合Sink Split下沉优化提升性能。方案利用模式注册和替换机制实现融合，不再采用分组融合方式。
 
 #### 核心实现文件
+
 - `tensor_cast/compilation/patterns/swiglu.py`：SwiGLU模式定义与注册
 - `tensor_cast/compilation/passes/pattern_match_pass.py`：模式匹配与替换Pass实现
 - `tensor_cast/compilation/freezing_passes/sink_split_pass.py`：Sink Split优化实现
 
 #### 接口
+
 - 自定义算子：`tensor_cast::swiglu`
   - 输入：`gate: Tensor`, `up: Tensor`
   - 输出：`Tensor`，执行swiglu激活函数计算
@@ -39,7 +45,7 @@ graph LR
     C[up_proj] --> F[mul]
     D --> F
     F --> G[swiglu_out]
-    
+
     style B fill:#ccf,stroke:#333,stroke-width:2px
     style C fill:#ccf,stroke:#333,stroke-width:2px
     style D fill:#fcc,stroke:#333,stroke-width:2px
@@ -47,12 +53,15 @@ graph LR
 ```
 
 **实现细节：**
+
 - **仅激活部分**：算子仅匹配和替换激活计算部分：`gate → fp32转换 → sigmoid → fp16转换 → 与up相乘`
 - **Gate和Up作为输入**：gate和up投影的线性变换在上游生成，并作为参数传递给swiglu算子
 - **后续与matmul融合**：当前实现不处理gate和up投影的矩阵乘法，这将与GMM算子集成时完成
 
 #### 核心实现
+
 基于`tensor_cast/compilation/patterns/swiglu.py`的实现：
+
 - **SwiGLUPattern类**：定义SwiGLU模式匹配和替换逻辑
 - **create方法**：返回pattern, replacement, get_inputs三元组
 - **pattern函数**：匹配激活计算部分：gate → fp32转换 → sigmoid → mul → fp16转换 → mul with up
@@ -60,6 +69,7 @@ graph LR
 - **支持的数据类型**：torch.float16, torch.bfloat16
 
 #### 与现有模块的关系
+
 - 模式匹配与替换：由`pattern_match_pass.py`的`PatternMatchPass`类调用`register_pattern`注册模式
 - 图遍历：通过`register_all_patterns()`将模式注册到全局模式表中
 - 性能优化：通过Sink Split Pass进一步优化图结构
@@ -89,7 +99,7 @@ graph LR
     C --> D[Pattern Match Passes]
     D --> E[After Freezing]
     E --> F[Sink Split Pass]
-    
+
     style C fill:#ffcccc,stroke:#333,stroke-width:2px
     style F fill:#ccffcc,stroke:#333,stroke-width:2px
 ```
@@ -105,15 +115,17 @@ graph LR
 5. **更高的兼容性**：通过灵活的模式匹配，适用于各种量化策略和模型结构
 
 ### 2.3 性能建模
+
 `torch.ops.tensor_cast.swiglu`算子的性能特征通过标准的tensor_cast性能建模基础设施处理。
 
 #### FLOPs计算模型
+
 - 矩阵乘法操作（上游）：`2 * M * N * K`
 - SiLU激活操作：`3 * M * N`（sigmoid + 乘法 + 一次乘法）
 - 总计算量取决于上游算子和融合的激活函数
 
-
 ### 2.4 如何查找定位与验证算子
+
 - **注册与使用**：
   - `tensor_cast/compilation/patterns/swiglu.py`中的SwiGLU模式注册
   - `tensor_cast/compilation/passes/pattern_match_pass.py`中的模式匹配基础架构
@@ -140,6 +152,7 @@ graph LR
 4. **无法与GMM算子融合**：分组方式阻碍了与GMM操作的无缝集成
 
 #### 2.5.2 前端融合方案
+
 算子前端融合是指在模型定义阶段就将线性变换、SiLU激活和乘法操作组合为单个自定义算子的做法。具体实现包括：
 
 1. **自定义SwiGLU算子**：在模型层直接实现`SwiGLU(x, W_gate, W_up) = Silu(x @ W_gate) * (x @ W_up)`
@@ -170,6 +183,7 @@ SwiGLU算子的使用场景复杂，后端融合方案更符合实际需求：
    - 明确排除量化节点，避免因量化导致的性能损失
 
 **优势总结**：
+
 - 图更简洁、节点数量更少，核融合机会更好
 - 通过聚合matmul属性实现更准确的性能建模
 - 增强的环形检测确保融合安全，避免计算错误
@@ -184,6 +198,7 @@ SwiGLU算子的使用场景复杂，后端融合方案更符合实际需求：
 #### 2.6.1 SwiGLU Sink Split工作机制
 
 **SwiGLU分割配置**：
+
 ```python
 # 二进制操作配置
 binary_ops = [
@@ -198,17 +213,19 @@ for op in binary_ops:
 **Sink Split工作原理**：
 
 传统split模式：
+
 ```python
 # 多个getitem+split组合
 getitem1 = input_tensor[0]        # 切片
 split1 = split(getitem1, size1)   # 分割
-getitem2 = input_tensor[1]        # 切片  
+getitem2 = input_tensor[1]        # 切片
 split2 = split(getitem2, size2)   # 分割
 # SwiGLU需要合并结果
 swiglu_out = swiglu(split1, split2)  # 融合
 ```
 
 Sink Split优化后：
+
 ```python
 # 单个split树合并
 dynamic_size = get_dynamic_sizes()  # 从静态参数转为动态输入
@@ -217,6 +234,7 @@ swiglu_out = swiglu(output_list[0], output_list[1])  # 直接索引使用
 ```
 
 **关键公式**：
+
 - **静态→动态转换**：`split_sizes=[a,b,c]` → `dynamic_sizes=a+b+c`，统一分配内存
 - **树合并优化**：时间复杂度O(n) → O(1)，减少内存分配和碎片
 - **内存连续性**：物理内存连续 → 逻辑切片访问，提升缓存命中率
@@ -226,7 +244,7 @@ swiglu_out = swiglu(output_list[0], output_list[1])  # 直接索引使用
 SwiGLU通过Sink Split优化实现以下性能提升：
 
 - **内存访问效率**：减少内存碎片，提高数据局部性
-- **Kernel调用减少**：合并分割操作为单一操作，降低通信开销  
+- **Kernel调用减少**：合并分割操作为单一操作，降低通信开销
 - **硬件利用率提升**：采用更连续的数据访问模式，优化硬件资源使用
 
 ### 2.7 SwiGLU与GMM融合
@@ -235,19 +253,22 @@ SwiGLU通过Sink Split优化实现以下性能提升：
 SwiGLU不仅独立进行优化，还会进一步与各种类型的GMM（Grouped MatMul）算子深度融合，实现最大化性能提升：
 
 **支持的GMM类型**：
+
 - `torch.ops.tensor_cast.static_quant_linear`：静态量化线性层
-- `torch.ops.tensor_cast.static_quant_linear_int4`：静态量化int4线性层  
+- `torch.ops.tensor_cast.static_quant_linear_int4`：静态量化int4线性层
 - `torch.ops.tensor_cast.fp8_linear`：FP8线性层
 - `torch.ops.tensor_cast.mxfp4_linear`：MXFP4线性层
 - `torch.ops.tensor_cast.grouped_matmul`：通用分组矩阵乘法
 
 **GMM-SwiGLU联合优化**：
+
 - **参数统一**：GMM与SwiGLU共享split优化配置，统一处理迭代器
 - **树合并**：GMM通过`add_config(op, {0}, {0})`配置，与SwiGLU的树合并机制协同工作
 - **静态转动态**：同样将静态split参数转换为动态输入，减少内存碎片
 - **硬件优化**：通过聚合SwiGLU输出与GMM输入，实现端到端内存访问优化
 
 **SwiGLU分割配置**：
+
 ```python
 # 二进制操作配置
 binary_ops = [
@@ -262,17 +283,19 @@ for op in binary_ops:
 **Sink Split工作原理**：
 
 传统split模式：
+
 ```python
 # 多个getitem+split组合
 getitem1 = input_tensor[0]        # 切片
 split1 = split(getitem1, size1)   # 分割
-getitem2 = input_tensor[1]        # 切片  
+getitem2 = input_tensor[1]        # 切片
 split2 = split(getitem2, size2)   # 分割
 # SwiGLU需要合并结果
 swiglu_out = swiglu(split1, split2)  # 融合
 ```
 
 Sink Split优化后：
+
 ```python
 # 单个split树合并
 dynamic_size = get_dynamic_sizes()  # 从静态参数转为动态输入
@@ -281,6 +304,7 @@ swiglu_out = swiglu(output_list[0], output_list[1])  # 直接索引使用
 ```
 
 **关键公式**：
+
 - **静态→动态转换**：`split_sizes=[a,b,c]` → `dynamic_sizes=a+b+c`，统一分配内存
 - **树合并优化**：时间复杂度O(n) → O(1)，减少内存分配和碎片
 - **内存连续性**：物理内存连续 → 逻辑切片访问，提升缓存命中率
@@ -290,7 +314,7 @@ swiglu_out = swiglu(output_list[0], output_list[1])  # 直接索引使用
 SwiGLU通过Sink Split优化实现以下性能提升：
 
 - **内存访问效率**：减少内存碎片，提高数据局部性
-- **Kernel调用减少**：合并分割操作为单一操作，降低通信开销  
+- **Kernel调用减少**：合并分割操作为单一操作，降低通信开销
 - **硬件利用率提升**：采用更连续的数据访问模式，优化硬件资源使用
 
 ## 3. 实施计划

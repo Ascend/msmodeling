@@ -34,24 +34,14 @@ class ExperimentRunner:
         cached = self.store.get_cached_result(task)
         if cached is not None and cached.status != "failed":
             return cached
-        proc = subprocess.run(
-            task.command, capture_output=True, text=False, cwd=str(PROJECT_ROOT)
-        )
+        proc = subprocess.run(task.command, capture_output=True, text=False, cwd=str(PROJECT_ROOT))
         log = _decode_stream(proc.stdout) + _decode_stream(proc.stderr)
-        error = (
-            None
-            if proc.returncode == 0
-            else f"Process exited with code {proc.returncode}"
-        )
-        result = parse_result(
-            task, log, "success" if proc.returncode == 0 else "failed", error
-        )
+        error = None if proc.returncode == 0 else f"Process exited with code {proc.returncode}"
+        result = parse_result(task, log, "success" if proc.returncode == 0 else "failed", error)
         self.store.save_result(result)
         return result
 
-    def run_matrix(
-        self, tasks: list[ExperimentTask]
-    ) -> Iterable[tuple[int, int, ExperimentResult]]:
+    def run_matrix(self, tasks: list[ExperimentTask]) -> Iterable[tuple[int, int, ExperimentResult]]:
         total = len(tasks)
         with ThreadPoolExecutor(max_workers=max(1, self.max_workers)) as pool:
             futures = {pool.submit(self._run_task, task): task for task in tasks}

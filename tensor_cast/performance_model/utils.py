@@ -25,9 +25,7 @@ def is_noop_self_copy_op(op, args=()) -> bool:
     if len(args) < 2:
         return False
     dst, src = args[0], args[1]
-    return (
-        isinstance(dst, torch.Tensor) and isinstance(src, torch.Tensor) and dst is src
-    )
+    return isinstance(dst, torch.Tensor) and isinstance(src, torch.Tensor) and dst is src
 
 
 def bytes_of_tensor(tensor: torch.Tensor, dtype: Optional[torch.dtype] = None) -> float:

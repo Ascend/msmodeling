@@ -35,9 +35,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.strategy._prefill_cache[4] = (50.0, 2.0, "")
 
         optimizer_data = OptimizerData()
-        latency, memory_left, _ = self.strategy._get_or_compute_latency(
-            4, optimizer_data, is_decode=False
-        )
+        latency, memory_left, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
 
         # Should return cached value
         self.assertEqual(latency, 50.0)
@@ -50,9 +48,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             input_length=10,
             output_length=10,
         )
-        latency, memory_left, breakdown = self.strategy._get_or_compute_latency(
-            4, optimizer_data, is_decode=False
-        )
+        latency, memory_left, breakdown = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
 
         # Should cache the result
         self.assertEqual(
@@ -66,9 +62,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.strategy._decode_cache[4] = (10.0, 2.0, "")
 
         optimizer_data = OptimizerData()
-        latency, memory_left, _ = self.strategy._get_or_compute_latency(
-            4, optimizer_data, is_decode=True
-        )
+        latency, memory_left, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=True)
 
         self.assertEqual(latency, 10.0)
         self.assertEqual(memory_left, 2.0)
@@ -92,9 +86,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             captured_calls.append((batch_size, is_decode))
             return (1.0, 1.0, "")
 
-        with patch.object(
-            self.strategy, "_get_or_compute_latency", side_effect=fake_latency
-        ):
+        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
             self.strategy.get_inference_info(optimizer_data)
 
         self.assertEqual(captured_calls[0], (2, False))

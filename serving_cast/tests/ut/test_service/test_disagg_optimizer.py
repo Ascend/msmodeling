@@ -111,9 +111,7 @@ class TestDisaggStrategy(unittest.TestCase):
         captured = []
 
         def fake_forward(concurrency, optimizer_data, is_decode):
-            captured.append(
-                (is_decode, optimizer_data.get_effective_input_length(is_decode))
-            )
+            captured.append((is_decode, optimizer_data.get_effective_input_length(is_decode)))
 
             class DummyMetrics:
                 execution_time_s = {"analytic": 0.001}

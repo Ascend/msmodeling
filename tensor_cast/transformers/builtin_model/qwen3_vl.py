@@ -63,9 +63,7 @@ def patch_method_for_qwen3_vl(_model):
 
     DEEPSTACK_PROCESS_TARGET_CLASSES = [Qwen3VLTextModel, Qwen3VLMoeTextModel]
 
-    def _patched_deepstack_process(
-        self, hidden_states, visual_pos_masks, visual_embeds
-    ):
+    def _patched_deepstack_process(self, hidden_states, visual_pos_masks, visual_embeds):
         return hidden_states
 
     for cls in DEEPSTACK_PROCESS_TARGET_CLASSES:

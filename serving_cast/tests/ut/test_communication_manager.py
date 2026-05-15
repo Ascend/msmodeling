@@ -57,9 +57,7 @@ class TestCommunicationManager(unittest.TestCase):
 
                 def check_callback(index):
                     _ = now()
-                    target_now_time = (
-                        index + 1
-                    ) * interval_time + target_bytes_commun_time
+                    target_now_time = (index + 1) * interval_time + target_bytes_commun_time
                     self.assertEqual(now(), target_now_time)
 
                 self.mgr.host2device_async(send_bytes, check_callback, i)
@@ -97,9 +95,7 @@ class TestCommunicationManager(unittest.TestCase):
 
                 def check_callback(index):
                     _ = now()
-                    target_now_time = (
-                        index + 1
-                    ) * target_bytes_commun_time + interval_time
+                    target_now_time = (index + 1) * target_bytes_commun_time + interval_time
                     self.assertEqual(now(), target_now_time)
 
                 self.mgr.host2device_async(send_bytes, check_callback, i)
@@ -120,9 +116,7 @@ class TestCommunicationManager(unittest.TestCase):
 
                 def check_callback(index):
                     _ = now()
-                    target_now_time = unit_target_bytes_commun_time * (
-                        (index + 2) * (index + 1) // 2
-                    )
+                    target_now_time = unit_target_bytes_commun_time * ((index + 2) * (index + 1) // 2)
                     self.assertEqual(now(), target_now_time)
 
                 self.mgr.host2device_async(unit_send_bytes * (i + 1), check_callback, i)

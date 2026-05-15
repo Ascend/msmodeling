@@ -108,9 +108,7 @@ class BailingMoeV2AttentionAdapter(torch.nn.Module):
             self.num_key_value_heads * self.head_dim,
             bias=self.config.use_qkv_bias,
         )
-        self.o_proj = torch.nn.Linear(
-            self.num_heads * self.head_dim, self.hidden_size, bias=self.config.use_bias
-        )
+        self.o_proj = torch.nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=self.config.use_bias)
 
         # Optional layers
         if hasattr(original_attention, "query_layernorm"):
@@ -135,21 +133,9 @@ class BailingMoeV2AttentionAdapter(torch.nn.Module):
         bsz, q_len, _ = hidden_states.size()
 
         # Compute QKV
-        query_states = (
-            self.q_proj(hidden_states)
-            .view(bsz, q_len, -1, self.head_dim)
-            .transpose(1, 2)
-        )
-        key_states = (
-            self.k_proj(hidden_states)
-            .view(bsz, q_len, -1, self.head_dim)
-            .transpose(1, 2)
-        )
-        value_states = (
-            self.v_proj(hidden_states)
-            .view(bsz, q_len, -1, self.head_dim)
-            .transpose(1, 2)
-        )
+        query_states = self.q_proj(hidden_states).view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
         # Apply QK norm if configured
         if hasattr(self, "query_layernorm") and self.config.use_qk_norm:
@@ -162,18 +148,14 @@ class BailingMoeV2AttentionAdapter(torch.nn.Module):
             # Import the apply_rotary_pos_emb from the original module's namespace
             # This ensures we use the correct implementation for this model
             apply_rotary_pos_emb = self._get_apply_rotary_pos_emb()
-            query_states, key_states = apply_rotary_pos_emb(
-                query_states, key_states, cos, sin
-            )
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # Handle KV cache
         if past_key_value is not None:
             cache_kwargs = {}
             if position_embeddings is not None:
                 cache_kwargs = {"sin": sin, "cos": cos}
-            key_states, value_states = past_key_value.update(
-                key_states, value_states, self.layer_idx, cache_kwargs
-            )
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # Call tensorcast attention
         attn_output, attn_weights = flash_attention_forward(

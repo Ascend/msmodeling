@@ -33,7 +33,7 @@ DeepseekV32 introduces DeepseekSparseAttention, which builds upon the original M
 
 #### 2.1.3 Adaptation of DeepseekSparseAttention Architecture
 
-##### Sparse Caculation of MLA Part
+##### Sparse Calculation of MLA Part
 
 In the original deepseekv32 code, after obtaining the score via q*kT, the top k tokens are filtered using an indexer. A tensor with the same shape as the score is then created, where the top k positions are set to 0 and the rest to -inf, and this tensor is added to the score. This computational approach is equivalent to directly sparsifying the k matrix before calculating the score. Therefore, in the newly added code, an input for the top k indices has been included in the mla operator's inputs. When evaluating the performance of the simulation operator, the minimum value between k's seqlen dimension and the top k is used to assess computational load.
 

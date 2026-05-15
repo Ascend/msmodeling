@@ -11,21 +11,13 @@ from ..topo_sort import stable_topo_sort
 class GroupedMatmulSwigluPass(TensorCastGraphModulePass):
     # Map original operators to their fused counterparts
     _op_map = {
-        torch.ops.tensor_cast.grouped_matmul.default: (
-            torch.ops.tensor_cast.grouped_matmul_swiglu.default
-        ),
-        torch.ops.tensor_cast.grouped_matmul_quant.default: (
-            torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default
-        ),
+        torch.ops.tensor_cast.grouped_matmul.default: (torch.ops.tensor_cast.grouped_matmul_swiglu.default),
+        torch.ops.tensor_cast.grouped_matmul_quant.default: (torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default),
         torch.ops.tensor_cast.grouped_matmul_quant_int4.default: (
             torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default
         ),
-        torch.ops.tensor_cast.grouped_matmul_mxfp4.default: (
-            torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default
-        ),
-        torch.ops.tensor_cast.grouped_matmul_fp8.default: (
-            torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default
-        ),
+        torch.ops.tensor_cast.grouped_matmul_mxfp4.default: (torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default),
+        torch.ops.tensor_cast.grouped_matmul_fp8.default: (torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default),
     }
 
     def __call__(self, gm: fx.GraphModule) -> fx.GraphModule:
@@ -189,9 +181,7 @@ class GroupedMatmulSwigluPass(TensorCastGraphModulePass):
             return False
         return node.target in self._op_map
 
-    def _check_user_counts(
-        self, split_node: fx.Node, gate_node: fx.Node, up_node: fx.Node
-    ) -> bool:
+    def _check_user_counts(self, split_node: fx.Node, gate_node: fx.Node, up_node: fx.Node) -> bool:
         """
         Ensure intermediate nodes are not used by other operations to guarantee fusion safety.
         """

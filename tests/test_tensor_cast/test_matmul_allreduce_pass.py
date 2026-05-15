@@ -59,9 +59,7 @@ class MatmulAllReducePassTestCase(unittest.TestCase):
             ),
         ]
     )
-    def test_qwen3_quant_matmul_allreduce_fused(
-        self, quant_action: QuantizeLinearAction, expected_op
-    ):
+    def test_qwen3_quant_matmul_allreduce_fused(self, quant_action: QuantizeLinearAction, expected_op):
         user_input = self._base_user_config(quant_action)
         model_runner = ModelRunner(user_input)
         result = model_runner.run_inference(generate_inputs_func=generate_inputs)

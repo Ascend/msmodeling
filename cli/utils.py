@@ -30,9 +30,7 @@ def check_prefix_cache_hit_rate(value):
     try:
         value = float(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"Invalid float value for prefix cache hit rate: {value!r}"
-        ) from None
+        raise argparse.ArgumentTypeError(f"Invalid float value for prefix cache hit rate: {value!r}") from None
     if not 0 <= value < 1:
         raise argparse.ArgumentTypeError(f"{value!r} is not in the valid range [0, 1)")
     return value
@@ -67,21 +65,15 @@ def parse_int_range(value: str, name: str) -> tuple[int, int]:
     if start < 0 or end < 0:
         raise ValueError(f"{name} must be non-negative, got {value!r}.")
     if end < start:
-        raise ValueError(
-            f"{name} must be 'start,end' with end >= start, got {value!r}."
-        )
+        raise ValueError(f"{name} must be 'start,end' with end >= start, got {value!r}.")
     return start, end
 
 
 def check_string_valid(string: str, max_len=256):
     if len(string) > max_len:
-        raise argparse.ArgumentTypeError(
-            f"String length exceeds {max_len} characters: {string!r}"
-        )
+        raise argparse.ArgumentTypeError(f"String length exceeds {max_len} characters: {string!r}")
     if not re.match(r"^[a-zA-Z0-9_/.-]+$", string):
-        raise argparse.ArgumentTypeError(
-            f"String contains invalid characters: {string!r}"
-        )
+        raise argparse.ArgumentTypeError(f"String contains invalid characters: {string!r}")
     return string
 
 
@@ -128,10 +120,7 @@ def get_common_argparser(reserved_memory_gb_default: float = 0.0):
         "--enable-multistream",
         action="store_true",
         default=True,
-        help=(
-            "Enable compiler-driven multi-stream simulation for torch.compile path. "
-            "Enabled by default."
-        ),
+        help=("Enable compiler-driven multi-stream simulation for torch.compile path. Enabled by default."),
     )
 
     general_group.add_argument(

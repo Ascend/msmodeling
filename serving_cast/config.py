@@ -95,12 +95,8 @@ class Config:
 
     def __init__(self, parsed_args):
         if not self._initialized:
-            self.instance_config_list = self._parse_instance_config(
-                parsed_args.instance_config_path
-            )
-            self.common_config = self._parse_common_config(
-                parsed_args.common_config_path
-            )
+            self.instance_config_list = self._parse_instance_config(parsed_args.instance_config_path)
+            self.common_config = self._parse_common_config(parsed_args.common_config_path)
             self.enable_profiling = parsed_args.enable_profiling
             self._initialized = True
 
@@ -111,9 +107,7 @@ class Config:
         model = ModelConfig(**d.pop("model_config", {}))
         load_gen = LoadGenConfig(**d.pop("load_gen", {}))
         serving = ServingConfig(**d.pop("serving_config", {}))
-        return CommonConfig(
-            model_config=model, load_gen=load_gen, serving_config=serving
-        )
+        return CommonConfig(model_config=model, load_gen=load_gen, serving_config=serving)
 
     @staticmethod
     def _parse_instance_config(path: str) -> List[InstanceConfig]:
@@ -123,9 +117,7 @@ class Config:
         return [
             InstanceConfig(
                 parallel_config=ParallelConfig(**item.pop("parallel_config", {})),
-                communication_config=CommunicationConfig(
-                    **item.pop("communication_config", {})
-                ),
+                communication_config=CommunicationConfig(**item.pop("communication_config", {})),
                 **item,
             )
             for item in instances

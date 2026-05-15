@@ -19,7 +19,7 @@ from tensor_cast.core.model_runner import (
     ModelRunnerMetrics,
 )
 from tensor_cast.core.user_config import UserInputConfig
-from . import stime
+import serving_cast.stime as stime
 
 logger = stime.get_logger(__name__)
 
@@ -47,22 +47,14 @@ class ModelRunner:
         self.num_processes = self.common_config.model_config.num_processes
         self.predict_steps = self.common_config.model_config.predict_steps
         if self.enable_multi_process and self.enable_interpolate:
-            raise ValueError(
-                "Interpolate is not supported with multi-process."
-            )  # TOBEDONE
+            raise ValueError("Interpolate is not supported with multi-process.")  # TOBEDONE
         if self.enable_multi_process:
             if not (isinstance(self.predict_steps, int) and self.predict_steps > 1):
-                raise ValueError(
-                    "check common_config.model_config.predict_steps, need to be int and > 1"
-                )
+                raise ValueError("check common_config.model_config.predict_steps, need to be int and > 1")
             if isinstance(self.num_processes, int) and self.num_processes > 1:
-                self.async_task_manager = AsyncTaskManager(
-                    device_type, parallel_config, self.num_processes
-                )
+                self.async_task_manager = AsyncTaskManager(device_type, parallel_config, self.num_processes)
             else:
-                raise ValueError(
-                    "check common_config.model_config.num_processes, need be int and greater than 1"
-                )
+                raise ValueError("check common_config.model_config.num_processes, need be int and greater than 1")
         self._interpolation_model = None
         self._interpolation_ready = False
         self.enable_interpolate = self.common_config.model_config.enable_interpolate
@@ -70,9 +62,7 @@ class ModelRunner:
 
         if self.enable_interpolate:
             if not isinstance(self.interpolation_seed, int):
-                raise ValueError(
-                    "check common_config.model_config.interpolation_seed, need be int"
-                )
+                raise ValueError("check common_config.model_config.interpolation_seed, need be int")
             random.seed(self.interpolation_seed)
             np.random.seed(self.interpolation_seed)
             self.init_interpolate_mode()
@@ -118,17 +108,13 @@ class ModelRunner:
             num_output_tokens = req.num_output_tokens
             seq_len = req.seq_len
             if not query_len <= seq_len:
-                raise ValueError(
-                    f"req_id: {req.id}, query_len {query_len} > seq_len {seq_len}"
-                )
+                raise ValueError(f"req_id: {req.id}, query_len {query_len} > seq_len {seq_len}")
             if req.state not in [
                 RequestState.PREFILLING,
                 RequestState.DECODING,
                 RequestState.RECOMPUTATION,
             ]:
-                raise ValueError(
-                    f"req_id: {req.id}, state {req.state} is not PREFILLING, DECODING or RECOMPUTATION"
-                )
+                raise ValueError(f"req_id: {req.id}, state {req.state} is not PREFILLING, DECODING or RECOMPUTATION")
             is_decode = req.state == RequestState.DECODING
             request_info = RequestInfo(
                 query_len=query_len,
@@ -146,26 +132,14 @@ class ModelRunner:
         future_batch = []
         for current_req_info in current_batch:
             if current_req_info.seq_len < current_req_info.num_input_tokens:
-                future_query_len = (
-                    current_req_info.num_input_tokens - current_req_info.query_len
-                )
+                future_query_len = current_req_info.num_input_tokens - current_req_info.query_len
                 future_seq_len = current_req_info.seq_len
                 future_is_decode = False
-            elif (
-                current_req_info.seq_len
-                < current_req_info.num_input_tokens
-                + current_req_info.num_output_tokens
-                - 1
-            ):
+            elif current_req_info.seq_len < current_req_info.num_input_tokens + current_req_info.num_output_tokens - 1:
                 future_query_len = 1  # TOBEDONE consider mtp here
                 future_seq_len = current_req_info.seq_len + future_query_len
                 future_is_decode = True
-            elif (
-                current_req_info.seq_len
-                == current_req_info.num_input_tokens
-                + current_req_info.num_output_tokens
-                - 1
-            ):
+            elif current_req_info.seq_len == current_req_info.num_input_tokens + current_req_info.num_output_tokens - 1:
                 continue
             else:
                 raise ValueError(
@@ -208,13 +182,9 @@ class ModelRunner:
         """
         # Validate input data format
         if not isinstance(x, np.ndarray) or x.ndim != 2 or x.shape[1] != 2:
-            raise ValueError(
-                "x must be a numpy array of shape (n, 2) (each row is (x,y))"
-            )
+            raise ValueError("x must be a numpy array of shape (n, 2) (each row is (x,y))")
         if not isinstance(y, np.ndarray) or y.ndim != 1 or len(y) != len(x):
-            raise ValueError(
-                "y must be a numpy array of shape (n,) (consistent with number of rows in x)"
-            )
+            raise ValueError("y must be a numpy array of shape (n,) (consistent with number of rows in x)")
 
         interpolator = LinearNDInterpolator(points=x, values=y, fill_value=np.nan)
 
@@ -224,14 +194,10 @@ class ModelRunner:
             points_arr = np.asarray(points)
             if points_arr.ndim == 1:
                 if len(points_arr) != 2:
-                    raise ValueError(
-                        "Single point input must be a sequence of length 2 (x1, y1)"
-                    )
+                    raise ValueError("Single point input must be a sequence of length 2 (x1, y1)")
                 points_arr = points_arr.reshape(1, 2)
             elif points_arr.ndim != 2 or points_arr.shape[1] != 2:
-                raise ValueError(
-                    "Multiple points input must be a numpy array of shape (m, 2)"
-                )
+                raise ValueError("Multiple points input must be a numpy array of shape (m, 2)")
 
             z_estimated = interpolator(points_arr)
             return z_estimated[0] if len(z_estimated) == 1 else z_estimated
@@ -244,9 +210,7 @@ class ModelRunner:
         serving_config = Config.get_instance().common_config.serving_config
         load_gen_config = Config.get_instance().common_config.load_gen
         max_concurrency = serving_config.max_concurrency
-        max_seq_len = (
-            load_gen_config.num_input_tokens + load_gen_config.num_output_tokens
-        )
+        max_seq_len = load_gen_config.num_input_tokens + load_gen_config.num_output_tokens
         max_query_len = load_gen_config.num_input_tokens
         max_tokens_budget = serving_config.max_tokens_budget
 
@@ -257,39 +221,24 @@ class ModelRunner:
             max_concurrency,
         )
 
-        max_nums_prefill_req = min(
-            upper_batch_size, (max_tokens_budget + max_query_len - 1) // max_query_len
-        )
+        max_nums_prefill_req = min(upper_batch_size, (max_tokens_budget + max_query_len - 1) // max_query_len)
         for num_prefill_req in range(1, max_nums_prefill_req + 1):
             prefill_reqs = [
-                RequestInfo(
-                    query_len=max_query_len, seq_len=max_query_len, is_decode=False
-                )
+                RequestInfo(query_len=max_query_len, seq_len=max_query_len, is_decode=False)
                 for _ in range(num_prefill_req)
             ]
             max_num_decode_req = upper_batch_size - max_nums_prefill_req
             for num_decode_req in range(1, max_num_decode_req + 1, 2):
                 decode_reqs = [
-                    RequestInfo(query_len=1, seq_len=max_seq_len, is_decode=True)
-                    for _ in range(num_decode_req)
+                    RequestInfo(query_len=1, seq_len=max_seq_len, is_decode=True) for _ in range(num_decode_req)
                 ]
                 batches.append(prefill_reqs + decode_reqs)
 
         # edging cases
         batches.append([RequestInfo(query_len=1, seq_len=1, is_decode=False)])
-        batches.append(
-            [
-                RequestInfo(
-                    query_len=1, seq_len=max_seq_len * upper_batch_size, is_decode=True
-                )
-            ]
-        )
-        max_tok = min(
-            serving_config.max_tokens_budget, max_query_len * upper_batch_size
-        )
-        batches.append(
-            [RequestInfo(query_len=max_tok, seq_len=max_tok, is_decode=False)]
-        )
+        batches.append([RequestInfo(query_len=1, seq_len=max_seq_len * upper_batch_size, is_decode=True)])
+        max_tok = min(serving_config.max_tokens_budget, max_query_len * upper_batch_size)
+        batches.append([RequestInfo(query_len=max_tok, seq_len=max_tok, is_decode=False)])
         return batches
 
     def init_interpolate_mode(self):
@@ -304,14 +253,12 @@ class ModelRunner:
         for batch in batches:
             interpolation_point = self.get_interpolation_point(batch)
             # TODO: We need to support other performance models in the future
-            dt = self.tensor_cast_model_runner.run_inference(
-                batch, with_sampler=True
-            ).execution_time_s.get("analytic", 0)
+            dt = self.tensor_cast_model_runner.run_inference(batch, with_sampler=True).execution_time_s.get(
+                "analytic", 0
+            )
             if dt <= 0:
                 raise ValueError(f"run_inference get negative execution time: {dt}")
-            x.append(
-                [interpolation_point.total_seq_len, interpolation_point.total_query_len]
-            )
+            x.append([interpolation_point.total_seq_len, interpolation_point.total_query_len])
             y.append(dt)
 
         x, y = np.array(x), np.array(y)
@@ -323,9 +270,7 @@ class ModelRunner:
             raise ValueError("interpolation model not ready")
 
         interpolation_point = self.get_interpolation_point(batch)
-        x = np.array(
-            [interpolation_point.total_seq_len, interpolation_point.total_query_len]
-        )
+        x = np.array([interpolation_point.total_seq_len, interpolation_point.total_query_len])
         dt = float(self._interpolation_model(x))
         if math.isnan(dt):
             raise ValueError("_interpolation_model return nan")
@@ -374,17 +319,10 @@ class ModelRunner:
                 num_output_tokens=2 * serving_config.max_tokens_budget,
             )
         ]
-        inference_metrics = self.tensor_cast_model_runner.run_inference(
-            batch, with_sampler=True
-        )
+        inference_metrics = self.tensor_cast_model_runner.run_inference(batch, with_sampler=True)
         block_size = self.common_config.serving_config.block_size
-        all_mem_for_kv_cache = (
-            inference_metrics.device_memory_available_gb
-            + inference_metrics.kv_cache_size_gb
-        )
-        num_blocks = int(
-            all_mem_for_kv_cache / inference_metrics.kv_cache_per_token_gb // block_size
-        )
+        all_mem_for_kv_cache = inference_metrics.device_memory_available_gb + inference_metrics.kv_cache_size_gb
+        num_blocks = int(all_mem_for_kv_cache / inference_metrics.kv_cache_per_token_gb // block_size)
         logger.debug("warmup result: %d blocks", num_blocks)
         return num_blocks, block_size
 
@@ -406,9 +344,9 @@ class ModelRunner:
         if self.enable_interpolate:
             estimated_time = self.apply_interpolation_model(batch)
         else:
-            estimated_time = self.tensor_cast_model_runner.run_inference(
-                batch, with_sampler=True
-            ).execution_time_s.get("analytic")
+            estimated_time = self.tensor_cast_model_runner.run_inference(batch, with_sampler=True).execution_time_s.get(
+                "analytic"
+            )
         return estimated_time
 
 
@@ -428,27 +366,21 @@ class ModelRunnerMetricCacheManager:
     def init_cache_slot(self, cache_id: str) -> None:
         """main process call this func: init cache slot for new cache"""
         if cache_id in self.cache:
-            raise ValueError(
-                f"init_task_slot failed, cache with cache_id {cache_id} already exists"
-            )
+            raise ValueError(f"init_task_slot failed, cache with cache_id {cache_id} already exists")
 
         self.cache[cache_id] = None
 
     def get_cache(self, cache_id: str) -> Optional[ModelRunnerMetrics]:
         """main process call this func: get cache by cache_id"""
         if cache_id not in self.cache:
-            raise KeyError(
-                f"get_cache failed, cache with cache_id {cache_id} not found"
-            )
+            raise KeyError(f"get_cache failed, cache with cache_id {cache_id} not found")
 
         return self.cache[cache_id]
 
     def record_cache(self, cache_id: str, result: ModelRunnerMetrics) -> None:
         """child process call this func: record cache"""
         if cache_id not in self.cache:
-            raise KeyError(
-                f"record_cache failed, cache with cache_id {cache_id} not found"
-            )
+            raise KeyError(f"record_cache failed, cache with cache_id {cache_id} not found")
 
         self.cache[cache_id] = result
 
@@ -460,17 +392,13 @@ class CompletionEventManager:
 
         self._thread_running = True
 
-        self._event_thread = threading.Thread(
-            target=self._process_completion_queue, daemon=True
-        )
+        self._event_thread = threading.Thread(target=self._process_completion_queue, daemon=True)
         self._event_thread.start()
 
     def init_event_slot(self, event_id):
         """main process call this func: init event slot for new task"""
         if event_id in self.event_dict:
-            raise ValueError(
-                f"init_event_slot failed, event with event_id {event_id} already exists"
-            )
+            raise ValueError(f"init_event_slot failed, event with event_id {event_id} already exists")
 
         event = Event()
         event.clear()
@@ -499,14 +427,10 @@ class CompletionEventManager:
             self.completion_queue.put(None)
             self._event_thread.join(timeout=5)  # Wait at most 5 seconds
             if self._event_thread.is_alive():
-                logger.warning(
-                    "CompletionEventManager: Warning - Background thread did not exit in time"
-                )
+                logger.warning("CompletionEventManager: Warning - Background thread did not exit in time")
 
         # Clean up remaining items in the completion queue
-        logger.info(
-            "CompletionEventManager: Clearing remaining items in completion queue"
-        )
+        logger.info("CompletionEventManager: Clearing remaining items in completion queue")
         try:
             while not self.completion_queue.empty():
                 # Remove all remaining elements (including the dummy None if present)
@@ -543,9 +467,7 @@ class AsyncTaskManager:
         self.manager = Manager()
 
         self.task_queue = self.manager.Queue()
-        self.model_runner_metrics_cache_manager = ModelRunnerMetricCacheManager(
-            self.manager
-        )
+        self.model_runner_metrics_cache_manager = ModelRunnerMetricCacheManager(self.manager)
         self.event_manager = CompletionEventManager(self.manager)
 
         self.stop_event = mp.Event()
@@ -620,9 +542,7 @@ class AsyncTaskManager:
                     raise RuntimeError("AsyncTaskManager get task failed") from e
 
                 try:
-                    result = tensor_cast_model_runner.run_inference(
-                        task.batch, with_sampler=True
-                    )
+                    result = tensor_cast_model_runner.run_inference(task.batch, with_sampler=True)
                 except Exception as e:
                     raise RuntimeError("AsyncTaskManager execute task failed") from e
 

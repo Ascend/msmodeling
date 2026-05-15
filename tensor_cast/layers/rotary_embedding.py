@@ -26,12 +26,8 @@ class CachingRotaryEmb(torch.nn.Module):
         super().__init__()
         self.act_dtype = act_dtype
         self.use_3d_position_index = False
-        x = torch.empty(
-            max_position_embeddings, device="meta", dtype=act_dtype
-        ).unsqueeze(0)
-        position_ids = torch.arange(
-            0, max_position_embeddings, device="meta", dtype=torch.long
-        ).unsqueeze(0)
+        x = torch.empty(max_position_embeddings, device="meta", dtype=act_dtype).unsqueeze(0)
+        position_ids = torch.arange(0, max_position_embeddings, device="meta", dtype=torch.long).unsqueeze(0)
         if expand_to_3d_position_ids:
             # Expand to (3, 1, max_position_embeddings) for T/H/W dimensions
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
@@ -39,10 +35,7 @@ class CachingRotaryEmb(torch.nn.Module):
             position_embeddings = rotary_emb(x, position_ids)
         self.cos_cache: Optional[torch.Tensor]
         self.sin_cache: Optional[torch.Tensor]
-        if (
-            isinstance(position_embeddings, (tuple, list))
-            and len(position_embeddings) == 2
-        ):
+        if isinstance(position_embeddings, (tuple, list)) and len(position_embeddings) == 2:
             cos, sin = position_embeddings
             cos = cos.squeeze()
             sin = sin.squeeze()
@@ -60,9 +53,7 @@ class CachingRotaryEmb(torch.nn.Module):
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         if self.cos_cache is not None and x.dtype == self.act_dtype:
             if self.use_3d_position_index:
-                batch_idx = torch.arange(
-                    position_ids.size(0), device=position_ids.device
-                )[:, None, None]
+                batch_idx = torch.arange(position_ids.size(0), device=position_ids.device)[:, None, None]
                 return (
                     self.cos_cache[batch_idx, position_ids],
                     self.sin_cache[batch_idx, position_ids],
@@ -72,12 +63,8 @@ class CachingRotaryEmb(torch.nn.Module):
                 # position_ids is (3, batch, seq_len) for multimodal; use text positions [0]
                 position_ids = position_ids[0]
             flat_ids = position_ids.flatten()
-            cos = self.cos_cache.index_select(0, flat_ids).reshape(
-                position_ids.size(0), -1, self.cos_cache.size(-1)
-            )
-            sin = self.sin_cache.index_select(0, flat_ids).reshape(
-                position_ids.size(0), -1, self.sin_cache.size(-1)
-            )
+            cos = self.cos_cache.index_select(0, flat_ids).reshape(position_ids.size(0), -1, self.cos_cache.size(-1))
+            sin = self.sin_cache.index_select(0, flat_ids).reshape(position_ids.size(0), -1, self.sin_cache.size(-1))
             return cos, sin
         else:
             return self.rotary_emb(x, position_ids)

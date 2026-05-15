@@ -68,10 +68,7 @@ def main():
         "--enable-multistream",
         action="store_true",
         default=True,
-        help=(
-            "Enable compiler-driven multi-stream simulation for torch.compile path. "
-            "Enabled by default."
-        ),
+        help=("Enable compiler-driven multi-stream simulation for torch.compile path. Enabled by default."),
     )
     parser.add_argument(
         "--dump-input-shapes",
@@ -233,8 +230,7 @@ def main():
         type=str,
         choices=[mode.value for mode in WordEmbeddingTPMode],
         default=None,
-        help="Enable word embedding tensor parallel with mode {'col','row'}. "
-        "If omitted, embedding TP is disabled.",
+        help="Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled.",
     )
     parser.add_argument(
         "--enable-redundant-experts",
@@ -328,22 +324,16 @@ def main():
 
     # Validate developer-only options
     if args.export_empirical_metrics and "profiling" not in args.performance_model:
-        parser.error(
-            "--export-empirical-metrics requires --performance-model profiling"
-        )
+        parser.error("--export-empirical-metrics requires --performance-model profiling")
 
     if args.graph_log_url:
         config.compilation.debug.graph_log_url = args.graph_log_url
     config.compilation.passes.enable_sequence_parallel = args.enable_sequence_parallel
-    config.compilation.fusion_patterns.enable_dispatch_ffn_combine = (
-        args.enable_dispatch_ffn_combine
-    )
+    config.compilation.fusion_patterns.enable_dispatch_ffn_combine = args.enable_dispatch_ffn_combine
 
     selected_embedding_tp_mode = args.word_embedding_tp
     args.word_embedding_tp = selected_embedding_tp_mode is not None
-    args.word_embedding_tp_mode = (
-        selected_embedding_tp_mode or WordEmbeddingTPMode.col.value
-    )
+    args.word_embedding_tp_mode = selected_embedding_tp_mode or WordEmbeddingTPMode.col.value
 
     user_input = UserInputConfig.from_args(args)
     model_runner = ModelRunner(user_input)

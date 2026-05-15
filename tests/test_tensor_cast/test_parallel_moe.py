@@ -47,12 +47,8 @@ class ParallelMoETestCase(unittest.TestCase):
         self.input_batch_size = 2
         self.compile_backend = get_backend()
         with torch.device("meta"):
-            self.inputs = torch.empty(
-                [self.input_batch_size, num_tokens], dtype=torch.long
-            )
-            self.position_ids = torch.empty(
-                [self.input_batch_size, num_tokens], dtype=torch.long
-            )
+            self.inputs = torch.empty([self.input_batch_size, num_tokens], dtype=torch.long)
+            self.position_ids = torch.empty([self.input_batch_size, num_tokens], dtype=torch.long)
 
     def _check_comm_analytic(self, trace_events, comm_op_name):
         count = 0
@@ -93,17 +89,13 @@ class ParallelMoETestCase(unittest.TestCase):
             torch.no_grad(),
         ):
             outputs = model.forward(self.inputs, self.position_ids)
-            self.assertEqual(
-                outputs.shape, (output_batch_size, num_tokens, model.vocab_size)
-            )
+            self.assertEqual(outputs.shape, (output_batch_size, num_tokens, model.vocab_size))
         result = runtime.table_averages()
         self.assertIn("tensor_cast.init_routing_v2.default", result)
         self.assertIn("tensor_cast.unpermute_tokens.default", result)
         if parallel_config.has_ep():
             self.assertIn("tensor_cast.all_to_all.default", result)
-            self._check_comm_analytic(
-                runtime.get_trace_events(), "tensor_cast.all_to_all.default"
-            )
+            self._check_comm_analytic(runtime.get_trace_events(), "tensor_cast.all_to_all.default")
 
     @parameterized.expand(
         [
@@ -113,9 +105,7 @@ class ParallelMoETestCase(unittest.TestCase):
             # ["moonshotai/Kimi-K2-Base", (16, 2, 4, 1, True), (True, True)],
         ]
     )
-    def test_deepseek_with_ep(
-        self, model_id, parallel_configuration, moe_configuration
-    ):
+    def test_deepseek_with_ep(self, model_id, parallel_configuration, moe_configuration):
         user_config = UserInputConfig(
             model_id=model_id,
             world_size=parallel_configuration[0],
@@ -131,9 +121,7 @@ class ParallelMoETestCase(unittest.TestCase):
 
         model = build_model(user_config)
 
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
 
@@ -153,9 +141,7 @@ class ParallelMoETestCase(unittest.TestCase):
         self.assertIn("tensor_cast.unpermute_tokens.default", result)
         if model.model_config.parallel_config.has_ep():
             self.assertIn("tensor_cast.all_to_all.default", result)
-            self._check_comm_analytic(
-                runtime.get_trace_events(), "tensor_cast.all_to_all.default"
-            )
+            self._check_comm_analytic(runtime.get_trace_events(), "tensor_cast.all_to_all.default")
 
     @parameterized.expand(
         [
@@ -252,18 +238,14 @@ def _make_fake_fused_moe(
     module.top_k = top_k
     module.ep_group = ep_group
     module.num_external_shared_experts = num_external_shared_experts
-    module.num_global_experts = num_global_experts or (
-        module.experts.num_experts if module.experts is not None else 0
-    )
+    module.num_global_experts = num_global_experts or (module.experts.num_experts if module.experts is not None else 0)
     module.forward_inputs = []
 
     def _run_shared_experts(hidden_states):
         assert shared_experts is not None
         output = shared_experts(hidden_states)
         if shared_experts_gate:
-            output = (
-                torch.nn.functional.sigmoid(shared_experts_gate(hidden_states)) * output
-            )
+            output = torch.nn.functional.sigmoid(shared_experts_gate(hidden_states)) * output
         return output
 
     module._run_shared_experts = _run_shared_experts

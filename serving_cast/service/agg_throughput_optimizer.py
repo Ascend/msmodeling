@@ -36,22 +36,12 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             if self.model_runner.model.model_config.mtp_config is not None
             else 0
         )
-        self.dp = (
-            self.model_runner.model.model_config.parallel_config.data_parallel_size
-        )
-        self.tp = (
-            self.model_runner.model.model_config.parallel_config.tensor_parallel_size
-        )
-        self.pp = (
-            self.model_runner.model.model_config.parallel_config.pipeline_parallel_size
-        )
-        self.ep = (
-            self.model_runner.model.model_config.parallel_config.expert_parallel_size
-        )
+        self.dp = self.model_runner.model.model_config.parallel_config.data_parallel_size
+        self.tp = self.model_runner.model.model_config.parallel_config.tensor_parallel_size
+        self.pp = self.model_runner.model.model_config.parallel_config.pipeline_parallel_size
+        self.ep = self.model_runner.model.model_config.parallel_config.expert_parallel_size
         self.moe_tp = self.model_runner.model.model_config.parallel_config.moe_tensor_parallel_size
-        self.moe_dp = (
-            self.model_runner.model.model_config.parallel_config.moe_data_parallel_size
-        )
+        self.moe_dp = self.model_runner.model.model_config.parallel_config.moe_data_parallel_size
         self.is_moe_model = self.model_runner.model.model_config.moe_config is not None
         self._prefill_cache = defaultdict(lambda: None)
         self._decode_cache = defaultdict(lambda: None)
@@ -80,35 +70,27 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         calc_nums_for_ttft = concurrency // prefill_batch_size
         left_calc_num = concurrency % prefill_batch_size
 
-        prefill_latency, prefill_memory_left_gb, prefill_breakdowns = (
-            self._get_or_compute_latency(
-                prefill_batch_size, optimizer_data, is_decode=False
-            )
+        prefill_latency, prefill_memory_left_gb, prefill_breakdowns = self._get_or_compute_latency(
+            prefill_batch_size, optimizer_data, is_decode=False
         )
         left_latency = 0
         if left_calc_num != 0:
-            left_latency, _, _ = self._get_or_compute_latency(
-                left_calc_num, optimizer_data, is_decode=False
-            )
+            left_latency, _, _ = self._get_or_compute_latency(left_calc_num, optimizer_data, is_decode=False)
 
-        left_batch_time = (
-            calc_nums_for_ttft * prefill_latency + left_latency
-        ) * left_calc_num
+        left_batch_time = (calc_nums_for_ttft * prefill_latency + left_latency) * left_calc_num
         sum_for_ttft = (prefill_batch_size * prefill_latency) * (
             1 + calc_nums_for_ttft
         ) * calc_nums_for_ttft / 2 + left_batch_time
         ttft = sum_for_ttft / concurrency
 
         # calculate TPOT
-        decode_latency, decode_memory_left_gb, decode_breakdowns = (
-            self._get_or_compute_latency(batch_size, optimizer_data, is_decode=True)
+        decode_latency, decode_memory_left_gb, decode_breakdowns = self._get_or_compute_latency(
+            batch_size, optimizer_data, is_decode=True
         )
         # LEFT: we don't consider the bubble time
         tpot = (ttft + decode_latency * output_length) / output_length
         # calculate output throughput: we assume e2e latency is ttft + tpot * output_length
-        output_throughput = (
-            1000 * (output_length * concurrency) / (ttft + tpot * output_length)
-        )
+        output_throughput = 1000 * (output_length * concurrency) / (ttft + tpot * output_length)
 
         memory_left = min(prefill_memory_left_gb, decode_memory_left_gb)
         token_s_device = output_throughput / self.dp / self.pp / self.tp
@@ -163,9 +145,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
 
         return summary
 
-    def _get_or_compute_latency(
-        self, batch_size: int, optimizer_data: OptimizerData, is_decode=False
-    ):
+    def _get_or_compute_latency(self, batch_size: int, optimizer_data: OptimizerData, is_decode=False):
         """
         Unified method for computing prefill or decode latency with caching.
 
@@ -189,9 +169,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             (latency, memory_left_gb, breakdowns) = cache[cache_key]
         else:
             # Compute result
-            batch_result = self._get_forward_info(
-                model_concurrency, optimizer_data, is_decode
-            )
+            batch_result = self._get_forward_info(model_concurrency, optimizer_data, is_decode)
 
             # Convert execution time to milliseconds
             latency = batch_result.execution_time_s.get("analytic") * 1000
@@ -200,14 +178,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
 
             # Apply decode-specific adjustments
             if is_decode:
-                average_tokens = (
-                    sum(
-                        optimizer_data.mtp_acceptance_rate[
-                            : optimizer_data.num_mtp_tokens
-                        ]
-                    )
-                    + 1
-                )
+                average_tokens = sum(optimizer_data.mtp_acceptance_rate[: optimizer_data.num_mtp_tokens]) + 1
                 # average_tokens is always greater than 0
                 latency /= average_tokens
 

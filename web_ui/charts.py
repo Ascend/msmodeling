@@ -403,7 +403,7 @@ def scatter_plot(
                         alpha=0.9,
                     )
                 except Exception:
-                    pass
+                    pass  # nosec B110
         ax.legend(title=group, frameon=False)
     else:
         ax.scatter(
@@ -439,17 +439,11 @@ def top_ops_plot(latest, title: str = "Top 10 Operator Time"):
     if not rows:
         return empty_plot(title)
     op_df = pd.DataFrame(rows)
-    if (
-        op_df.empty
-        or "name" not in op_df.columns
-        or "analytic_total_us" not in op_df.columns
-    ):
+    if op_df.empty or "name" not in op_df.columns or "analytic_total_us" not in op_df.columns:
         return empty_plot(title)
     op_df = op_df.sort_values(by="analytic_total_us", ascending=False).head(10).copy()
     op_df["analytic_total_ms"] = op_df["analytic_total_us"] / 1000.0
-    return bar_plot(
-        op_df, "name", "analytic_total_ms", title, "Time (ms)", xlabel="Operator"
-    )
+    return bar_plot(op_df, "name", "analytic_total_ms", title, "Time (ms)", xlabel="Operator")
 
 
 def optimizer_top_configs_plot(latest, title: str = "Latest Run Top Config Throughput"):
@@ -518,11 +512,7 @@ def _baseline_df(
 
     agg = base_df.groupby("device", dropna=False)[column].mean().reset_index()
     devices = agg["device"].astype(str).tolist()
-    baseline = (
-        baseline_device
-        if baseline_device in devices
-        else (devices[0] if devices else None)
-    )
+    baseline = baseline_device if baseline_device in devices else (devices[0] if devices else None)
     if baseline is None:
         return pd.DataFrame(), []
 
@@ -592,9 +582,7 @@ def text_chart_figures(df: pd.DataFrame, latest):
         xlabel="num-queries",
         group="device",
     )
-    group_col = (
-        "quantize_linear_action" if "quantize_linear_action" in df.columns else None
-    )
+    group_col = "quantize_linear_action" if "quantize_linear_action" in df.columns else None
     fig2 = bar_plot(
         df,
         "device",
@@ -619,10 +607,7 @@ def video_chart_figures(df: pd.DataFrame, latest):
         xlabel="Device",
         group="quantize_linear_action",
     )
-    if (
-        "communication_total_s" in df.columns
-        and not df["communication_total_s"].dropna().empty
-    ):
+    if "communication_total_s" in df.columns and not df["communication_total_s"].dropna().empty:
         fig2 = bar_plot(
             df,
             "device",

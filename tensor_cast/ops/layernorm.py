@@ -69,9 +69,7 @@ def _(
     eps: float,
     out_dtype: torch.dtype = torch.int8,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x, dtype=out_dtype).contiguous(), torch.empty_like(
-        x
-    ).contiguous()
+    return torch.empty_like(x, dtype=out_dtype).contiguous(), torch.empty_like(x).contiguous()
 
 
 @register_tensor_cast_op("rms_norm_dynamic_quant_symmetric")
@@ -83,9 +81,7 @@ def _(
     scale_dtype: torch.dtype = torch.float32,
     out_dtype: torch.dtype = torch.int8,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.tensor_cast.dynamic_quantize_symmetric(
-        x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype
-    )
+    return torch.ops.tensor_cast.dynamic_quantize_symmetric(x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype)
 
 
 @register_tensor_cast_op("rms_norm_dynamic_quant_asymmetric")
@@ -97,9 +93,7 @@ def _(
     scale_dtype: torch.dtype = torch.float32,
     out_dtype: torch.dtype = torch.int8,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return torch.ops.tensor_cast.dynamic_quantize_asymmetric(
-        x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype
-    )
+    return torch.ops.tensor_cast.dynamic_quantize_asymmetric(x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype)
 
 
 @register_tensor_cast_op("add_rms_norm_dynamic_quant_symmetric")
@@ -112,9 +106,7 @@ def _(
     scale_dtype: torch.dtype = torch.float32,
     out_dtype: torch.dtype = torch.int8,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.tensor_cast.dynamic_quantize_symmetric(
-        x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype
-    )
+    return torch.ops.tensor_cast.dynamic_quantize_symmetric(x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype)
 
 
 @register_tensor_cast_op("add_rms_norm_dynamic_quant_asymmetric")
@@ -127,9 +119,7 @@ def _(
     scale_dtype: torch.dtype = torch.float32,
     out_dtype: torch.dtype = torch.int8,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return torch.ops.tensor_cast.dynamic_quantize_asymmetric(
-        x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype
-    )
+    return torch.ops.tensor_cast.dynamic_quantize_asymmetric(x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype)
 
 
 @register_tensor_cast_op("add_rms_norm_dynamic_quant2_symmetric")
@@ -143,9 +133,7 @@ def _(
     out_dtype: torch.dtype = torch.int8,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     x2 = torch.empty_like(x).contiguous()
-    x1, scale = torch.ops.tensor_cast.dynamic_quantize_symmetric(
-        x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype
-    )
+    x1, scale = torch.ops.tensor_cast.dynamic_quantize_symmetric(x, dims, scale_dtype=scale_dtype, out_dtype=out_dtype)
     return x1, scale, x2
 
 

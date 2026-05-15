@@ -74,9 +74,7 @@ class CausalLmWrapper(ModelWrapperBase):
         intermediate_hidden_states = hidden_states
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
         if sampling_metadata and sampling_metadata.selected_token_indices is not None:
-            hidden_states = hidden_states.index_select(
-                1, sampling_metadata.selected_token_indices
-            )
+            hidden_states = hidden_states.index_select(1, sampling_metadata.selected_token_indices)
         hidden_states = self.lm_head(hidden_states)
         if output_intermediate_hidden_states:
             return hidden_states, intermediate_hidden_states
@@ -114,9 +112,7 @@ class VLModelWrapper(ModelWrapperBase):
         hidden_states = outputs.last_hidden_state
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
         if sampling_metadata and sampling_metadata.selected_token_indices is not None:
-            hidden_states = hidden_states.index_select(
-                1, sampling_metadata.selected_token_indices
-            )
+            hidden_states = hidden_states.index_select(1, sampling_metadata.selected_token_indices)
         logits = self.lm_head(hidden_states)
 
         return logits
@@ -178,9 +174,7 @@ class TransformerModel(ModelWrapperBase):
                         "Overriding num_hidden_layers to %s",
                         model_config.num_hidden_layers_override,
                     )
-                    self.hf_config.get_text_config().num_hidden_layers = (
-                        model_config.num_hidden_layers_override
-                    )
+                    self.hf_config.get_text_config().num_hidden_layers = model_config.num_hidden_layers_override
                 self._inner = auto_loader.load_model(
                     self.hf_config,
                     self.model_config.dtype,
@@ -188,21 +182,14 @@ class TransformerModel(ModelWrapperBase):
                 )
             else:
                 logger.info("Auto-loading model and configuration for: %s", model_id)
-                self.hf_config, self._inner = auto_loader.auto_load_model_and_config(
-                    self.model_id, self.model_config
-                )
+                self.hf_config, self._inner = auto_loader.auto_load_model_and_config(self.model_id, self.model_config)
             logger.info("origin model and config are loaded successfully")
 
             self.text_config = self.hf_config.get_text_config()
             self.is_vl_model = hasattr(self.hf_config, "vision_config")
-            logger.info(
-                "Model type: %s", "Vision-Language" if self.is_vl_model else "Text-only"
-            )
+            logger.info("Model type: %s", "Vision-Language" if self.is_vl_model else "Text-only")
 
-            if (
-                self.model_config.attention_cls
-                and self.model_config.attention_cls.attn_implmentation
-            ):
+            if self.model_config.attention_cls and self.model_config.attention_cls.attn_implmentation:
                 attn_impl = self.model_config.attention_cls.attn_implmentation
                 logger.info("Setting attention implementation to: %s", attn_impl)
                 self.text_config._attn_implementation = attn_impl
@@ -210,9 +197,7 @@ class TransformerModel(ModelWrapperBase):
                     self.hf_config.vision_config._attn_implementation = attn_impl
 
             logger.info("Initializing parallel groups")
-            self.parallel_group_manager = ParallelGroupManager(
-                self.model_config.parallel_config
-            )
+            self.parallel_group_manager = ParallelGroupManager(self.model_config.parallel_config)
             # the order of these functions matters!
             logger.info("Applying model transformations")
             model_type = self.hf_config.model_type

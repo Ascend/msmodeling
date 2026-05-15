@@ -23,9 +23,7 @@ class SamplingMetadata:
 
 
 class Sampler(torch.nn.Module):
-    def forward(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata, **kwargs
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata, **kwargs) -> torch.Tensor:
         if sampling_metadata.query_start_loc is None:
             assert hidden_states.ndim == 3
             logits = hidden_states[:, -1, :]

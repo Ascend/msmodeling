@@ -43,22 +43,14 @@ def _make_mla_decode_args(
 ):
     """Build args for multihead_latent_attention in decode mode."""
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    q = torch.empty(
-        num_tokens, num_heads, qk_head_dim, device="meta", dtype=torch.bfloat16
-    )
-    kv_cache = torch.empty(
-        256, 16, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=torch.bfloat16
-    )
+    q = torch.empty(num_tokens, num_heads, qk_head_dim, device="meta", dtype=torch.bfloat16)
+    kv_cache = torch.empty(256, 16, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=torch.bfloat16)
     block_table = torch.empty(batch_size, 16, device="meta", dtype=torch.int32)
     query_start_loc = torch.arange(batch_size + 1, dtype=torch.int32)
     seq_lens = torch.full((batch_size,), avg_seq_len, dtype=torch.int64)
     query_lens = None  # decode
-    W_UK_T = torch.empty(
-        num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=torch.bfloat16
-    )
-    W_UV = torch.empty(
-        num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=torch.bfloat16
-    )
+    W_UK_T = torch.empty(num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=torch.bfloat16)
+    W_UV = torch.empty(num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=torch.bfloat16)
     kv_b_proj = None  # decode
     return [
         q,
@@ -86,12 +78,8 @@ def _make_mla_prefill_args(
 ):
     """Build args for multihead_latent_attention in prefill mode."""
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    q = torch.empty(
-        num_tokens, num_heads, qk_head_dim, device="meta", dtype=torch.bfloat16
-    )
-    kv_cache = torch.empty(
-        256, 16, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=torch.bfloat16
-    )
+    q = torch.empty(num_tokens, num_heads, qk_head_dim, device="meta", dtype=torch.bfloat16)
+    kv_cache = torch.empty(256, 16, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=torch.bfloat16)
     block_table = torch.empty(batch_size, 16, device="meta", dtype=torch.int32)
     query_start_loc = torch.arange(batch_size + 1, dtype=torch.int32)
     seq_lens = torch.full((batch_size,), avg_seq_len, dtype=torch.int64)
@@ -99,9 +87,7 @@ def _make_mla_prefill_args(
     W_UK_T = None
     W_UV = None
     proj_out_dim = num_heads * (qk_nope_head_dim + v_head_dim)
-    kv_b_proj = torch.empty(
-        kv_lora_rank, proj_out_dim, device="meta", dtype=torch.bfloat16
-    )
+    kv_b_proj = torch.empty(kv_lora_rank, proj_out_dim, device="meta", dtype=torch.bfloat16)
     return [
         q,
         kv_cache,
@@ -135,9 +121,7 @@ class TestIsDecodeMLA:
 class TestDecomposeMLA:
     def test_decode_returns_3_specs(self):
         args = _make_mla_decode_args()
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         assert specs is not None
         assert len(specs) == 3
@@ -156,9 +140,7 @@ class TestDecomposeMLA:
             kv_lora_rank=512,
             v_head_dim=128,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         # q @ W_UK_T: (num_heads=16, num_tokens=4, qk_nope=128) @ (16, 128, 512)
         assert specs[0].input_shapes == [(16, 4, 128), (16, 128, 512)]
@@ -168,9 +150,7 @@ class TestDecomposeMLA:
     def test_prefill_decomposes_to_matmul_and_fia(self):
         """Prefill decomposes to MatMulV2 + FIA (v0.18.0: unified FIA)."""
         args = _make_mla_prefill_args()
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         assert specs is not None
         assert len(specs) == 2
@@ -183,9 +163,7 @@ class TestDecomposeMLA:
     def test_prefill_fia_has_attention_params(self):
         """Prefill FIA spec has attention_params (v0.18.0)."""
         args = _make_mla_prefill_args(num_tokens=136, kv_lora_rank=512)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         assert specs is not None
         assert len(specs) == 2
@@ -204,12 +182,8 @@ class TestDecomposeMLA:
 
     def test_fia_attention_params_decode(self):
         """Decode FIA spec uses attention_params (not fia_raw_shapes)."""
-        args = _make_mla_decode_args(
-            batch_size=16, avg_seq_len=4096, num_heads=16, kv_lora_rank=512
-        )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        args = _make_mla_decode_args(batch_size=16, avg_seq_len=4096, num_heads=16, kv_lora_rank=512)
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         fia = specs[1]
         assert fia.attention_params is not None
@@ -233,9 +207,7 @@ class TestDecomposeMLAPrefillFIAFix:
             kv_lora_rank=512,
             batch_size=2,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         fia = specs[1]
         q_shape_3d = fia.attention_params["q_shape_3d"]
@@ -243,16 +215,12 @@ class TestDecomposeMLAPrefillFIAFix:
         assert len(q_shape_3d) == 3, f"Expected 3D TND shape, got {q_shape_3d}"
         assert q_shape_3d[0] == 136, f"T should be num_tokens=136, got {q_shape_3d[0]}"
         assert q_shape_3d[1] == 16, f"N should be num_heads=16, got {q_shape_3d[1]}"
-        assert q_shape_3d[2] == 128, (
-            f"D should be qk_nope_head_dim=128, got {q_shape_3d[2]}"
-        )
+        assert q_shape_3d[2] == 128, f"D should be qk_nope_head_dim=128, got {q_shape_3d[2]}"
 
     def test_fia_prefill_sparse_mode_3(self):
         """FIA prefill sparse_mode must be 3 (causal), not 0."""
         args = _make_mla_prefill_args()
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         fia = specs[1]
         assert fia.attention_params["sparse_mode"] == 3, (
@@ -263,9 +231,7 @@ class TestDecomposeMLAPrefillFIAFix:
 class TestDecomposeMLAQuant:
     def test_decode_uses_quant_kernel(self):
         args = _make_mla_decode_args()
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention_quant.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention_quant.default, args)
         specs = _decompose_mla_quant(op, {})
         assert specs is not None
         assert specs[0].kernel_type == "QuantBatchMatmulV3"
@@ -273,9 +239,7 @@ class TestDecomposeMLAQuant:
     def test_prefill_decomposes_to_matmul_and_fia(self):
         """Quant prefill decomposes to MatMulV2 + FIA (v0.18.0)."""
         args = _make_mla_prefill_args()
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention_quant.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention_quant.default, args)
         specs = _decompose_mla_quant(op, {})
         assert specs is not None
         assert len(specs) == 2
@@ -322,14 +286,8 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 # MISS #5 fix: FIA head_dim = kv_lora_rank = 512 (not head_dim=576)
 # slots: 0=q(16,16,1,512), 1=k(256,1,16,512), 2=v(256,1,16,512), 6=seq_lens(16,),
 #        14=block_table(16,256), 24=rope_q(16,16,1,64), 25=rope_k(256,1,16,64)
-_FIA_DECODE_ROW_16 = (
-    '"16,16,1,512;256,1,16,512;256,1,16,512;;;;16;;;;;;;;16,256;;;;;;;;;;'
-    '16,16,1,64;256,1,16,64;;;;;"'
-)
-_FIA_DECODE_ROW_32 = (
-    '"32,16,1,512;256,1,16,512;256,1,16,512;;;;32;;;;;;;;32,256;;;;;;;;;;'
-    '32,16,1,64;256,1,16,64;;;;;"'
-)
+_FIA_DECODE_ROW_16 = '"16,16,1,512;256,1,16,512;256,1,16,512;;;;16;;;;;;;;16,256;;;;;;;;;;16,16,1,64;256,1,16,64;;;;;"'
+_FIA_DECODE_ROW_32 = '"32,16,1,512;256,1,16,512;256,1,16,512;;;;32;;;;;;;;32,256;;;;;;;;;;32,16,1,64;256,1,16,64;;;;;"'
 FIA_CSV = (
     "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
     "Output Data Types,Output Formats,Duration(us),avg_seq_len\n"
@@ -400,9 +358,7 @@ class TestCompositeLookupMLA:
             batch_size=16,
             avg_seq_len=4096,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
         assert result is not None
         # 5.0 (BatchMatMulV2 q@W_UK_T) + 50.0 (FIA) + 4.0 (TBMM out@W_UV) = 59.0
@@ -414,9 +370,7 @@ class TestCompositeLookupMLA:
         """MLA decode: FIA miss (wrong batch_size) → PARTIAL."""
         ds = ProfilingDataSource(mla_data_dir)
         args = _make_mla_decode_args(batch_size=99, avg_seq_len=4096)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
         assert result is not None
         assert result.source == QuerySource.PARTIAL
@@ -435,9 +389,7 @@ class TestCompositeLookupMLA:
             batch_size=16,
             avg_seq_len=4096,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
         assert result is not None
         # 7.0 (BatchMatMulNd fallback q@W_UK_T) + 50.0 (FIA) + 4.0 (TBMM out@W_UV)
@@ -474,9 +426,7 @@ class TestCompositeInterpolation:
             batch_size=16,
             avg_seq_len=4096,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
         # TBMM exact: 5.0 + 4.0, FIA enriched hit: 50.0 → total 59.0
         assert result is not None
@@ -753,9 +703,7 @@ class TestConfidenceLevels:
             batch_size=16,
             avg_seq_len=4096,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
         assert result.confidence == 0.8
 
@@ -773,9 +721,7 @@ class TestConfidenceLevels:
             batch_size=32,  # batch=32 not in CSV → FIA miss
             avg_seq_len=3000,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
         # FIA raw shape for batch=32 not in CSV → sub_kernel_miss → PARTIAL
         assert result is not None
@@ -983,9 +929,7 @@ class TestCompositeMixedHitInterpolate:
             batch_size=16,
             avg_seq_len=4096,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
         assert result is not None
         # BatchMatMulV2 exact: 5.0, TBMM exact: 4.0, FIA enriched hit: 50.0.
@@ -1006,9 +950,7 @@ class TestCompositeMixedHitInterpolate:
             batch_size=64,
             avg_seq_len=999,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
         assert result is None
 
@@ -1022,8 +964,7 @@ class TestEmptyCSV:
         d.mkdir()
         (d / "op_mapping.yaml").write_text(EXTRAP_OP_MAPPING)
         (d / "MatMulV2.csv").write_text(
-            "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
-            "Output Data Types,Output Formats,Duration(us)\n"
+            "Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)\n"
         )
         base = ProfilingDataSource(d)
         ds = InterpolatingDataSource(base)
@@ -1045,18 +986,14 @@ class TestDecomposeFailureModes:
         """Decode path with W_UK_T=None → decompose returns None."""
         args = _make_mla_decode_args()
         args[6] = None  # W_UK_T = None
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         assert _decompose_mla(op, {}) is None
 
     def test_mla_prefill_missing_kv_b_proj(self):
         """Prefill path with kv_b_proj=None → decompose returns None."""
         args = _make_mla_prefill_args()
         args[8] = None  # kv_b_proj = None
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         assert _decompose_mla(op, {}) is None
 
     def test_mla_unsupported_dtype(self):
@@ -1064,18 +1001,14 @@ class TestDecomposeFailureModes:
         args = _make_mla_decode_args()
         # Replace q with float64 (not in DTYPE_MAP)
         args[0] = torch.empty(16, 16, 192, device="meta", dtype=torch.float64)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         assert _decompose_mla(op, {}) is None
 
     def test_mla_seq_lens_not_tensor(self):
         """MLA with seq_lens as list instead of tensor → returns None."""
         args = _make_mla_decode_args()
         args[4] = [4096] * 16  # list instead of tensor
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         assert _decompose_mla(op, {}) is None
 
 
@@ -1090,9 +1023,7 @@ class TestMLADecomposeWithAttentionParams:
             kv_lora_rank=448,
             qk_rope_head_dim=64,
         )
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         assert len(specs) == 3
         fia_spec = specs[1]
@@ -1105,9 +1036,7 @@ class TestMLADecomposeWithAttentionParams:
     def test_e2_mla_decode_attention_query_mode(self):
         """MLA decode FIA spec has query_mode='attention'."""
         args = _make_mla_decode_args(batch_size=4, num_heads=16)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         fia_spec = specs[1]
         assert fia_spec.query_mode == "attention"
@@ -1116,9 +1045,7 @@ class TestMLADecomposeWithAttentionParams:
     def test_e3_mla_prefill_fia(self):
         """MLA prefill: decomposes to MatMulV2 + FIA (v0.18.0)."""
         args = _make_mla_prefill_args(num_tokens=256, num_heads=16, kv_lora_rank=512)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         assert specs is not None
         assert len(specs) == 2
@@ -1128,18 +1055,14 @@ class TestMLADecomposeWithAttentionParams:
     def test_e3b_mla_prefill_matmulv2_tc_input_count(self):
         """MLA prefill MatMulV2 needs tc_input_count=2 (CSV has bias columns)."""
         args = _make_mla_prefill_args(num_tokens=256, num_heads=16, kv_lora_rank=512)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         assert specs[0].tc_input_count == 2
 
     def test_e3c_mla_decode_tbmm_no_tc_input_count(self):
         """MLA BF16 decode: BatchMatMulV2 needs no tc_input_count override."""
         args = _make_mla_decode_args(batch_size=4, num_heads=16)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         specs = _decompose_mla(op, {})
         assert specs[0].tc_input_count is None  # BatchMatMulV2
         assert specs[2].tc_input_count is None  # TransposeBatchMatMul
@@ -1147,9 +1070,7 @@ class TestMLADecomposeWithAttentionParams:
     def test_e4_mla_quant_decode_attention_params(self):
         """MLA quant decode also produces attention_params."""
         args = _make_mla_decode_args(batch_size=4, num_heads=16, kv_lora_rank=448)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention_quant.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention_quant.default, args)
         specs = _decompose_mla_quant(op, {})
         assert len(specs) == 3
         fia_spec = specs[1]
@@ -1159,9 +1080,7 @@ class TestMLADecomposeWithAttentionParams:
     def test_e4b_mla_quant_decode_qbmv3_tc_input_count(self):
         """MLA quant decode: QuantBatchMatmulV3 needs tc_input_count=2."""
         args = _make_mla_decode_args(batch_size=4, num_heads=16, kv_lora_rank=448)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention_quant.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention_quant.default, args)
         specs = _decompose_mla_quant(op, {})
         assert specs[0].tc_input_count == 2  # QuantBatchMatmulV3
         assert specs[2].tc_input_count is None  # TransposeBatchMatMul
@@ -1169,9 +1088,7 @@ class TestMLADecomposeWithAttentionParams:
     def test_e5_mla_quant_prefill_fia(self):
         """MLA quant prefill: decomposes to MatMulV2 + FIA (v0.18.0)."""
         args = _make_mla_prefill_args(num_tokens=256, num_heads=16, kv_lora_rank=512)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention_quant.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention_quant.default, args)
         specs = _decompose_mla_quant(op, {})
         assert specs is not None
         assert len(specs) == 2
@@ -1181,9 +1098,7 @@ class TestMLADecomposeWithAttentionParams:
     def test_e5b_mla_quant_prefill_matmulv2_tc_input_count(self):
         """MLA quant prefill MatMulV2 needs tc_input_count=2."""
         args = _make_mla_prefill_args(num_tokens=256, num_heads=16, kv_lora_rank=512)
-        op = _make_op_info(
-            torch.ops.tensor_cast.multihead_latent_attention_quant.default, args
-        )
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention_quant.default, args)
         specs = _decompose_mla_quant(op, {})
         assert specs[0].tc_input_count == 2
 
@@ -1258,25 +1173,17 @@ def _make_mlapo_args(
     so using shape[1] (in_features) instead of shape[0] (out_features) would
     produce wrong intermediate activation shapes.
     """
-    hidden_states = torch.empty(
-        num_tokens, hidden_size, device="meta", dtype=torch.bfloat16
-    )
+    hidden_states = torch.empty(num_tokens, hidden_size, device="meta", dtype=torch.bfloat16)
     # args[1], args[2]: norms (unused by decomposer but need placeholders)
     q_a_layernorm = torch.empty(q_lora_rank, device="meta", dtype=torch.bfloat16)
     q_a_scale = None
     # args[3]: q_a_proj (out_features=q_lora_rank, in_features=hidden_size)
-    q_a_proj = torch.empty(
-        q_lora_rank, hidden_size, device="meta", dtype=torch.bfloat16
-    )
+    q_a_proj = torch.empty(q_lora_rank, hidden_size, device="meta", dtype=torch.bfloat16)
     q_a_proj_scale = None
     # args[5]: q_b_proj (out_features=num_heads*qk_head_dim, in_features=q_lora_rank)
-    q_b_proj = torch.empty(
-        num_heads_x_qk_head_dim, q_lora_rank, device="meta", dtype=torch.bfloat16
-    )
+    q_b_proj = torch.empty(num_heads_x_qk_head_dim, q_lora_rank, device="meta", dtype=torch.bfloat16)
     # args[6]: kv_a_proj (out_features=kv_proj_dim, in_features=hidden_size)
-    kv_a_proj = torch.empty(
-        kv_proj_dim, hidden_size, device="meta", dtype=torch.bfloat16
-    )
+    kv_a_proj = torch.empty(kv_proj_dim, hidden_size, device="meta", dtype=torch.bfloat16)
     # args[7]: kv_a_layernorm_weight
     kv_a_layernorm = torch.empty(kv_lora_rank, device="meta", dtype=torch.bfloat16)
     # Pad to 20 args (decomposer checks len(args) >= 14 for mlapo, >= 20 for quant)
@@ -1331,7 +1238,8 @@ class TestDecomposeMlapo:
 
     def test_q_lora_rank_from_out_features(self):
         """q_compressed @ q_b_proj: activation shape must use q_lora_rank (shape[0]),
-        not hidden_size (shape[1]). This is the core regression test."""
+        not hidden_size (shape[1]). This is the core regression test.
+        """
         args = _make_mlapo_args(num_tokens=136, hidden_size=5120, q_lora_rank=1536)
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
@@ -1342,7 +1250,8 @@ class TestDecomposeMlapo:
     def test_kv_proj_dim_from_out_features(self):
         """KvRmsNormRopeCache shape must use kv_proj_dim (shape[0]),
         not hidden_size (shape[1]). This is the core regression test.
-        NPU CSV shape is 4D (T,1,1,D) — MISS #3 fix."""
+        NPU CSV shape is 4D (T,1,1,D) — MISS #3 fix.
+        """
         args = _make_mlapo_args(num_tokens=136, hidden_size=5120, kv_proj_dim=576)
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
@@ -1352,9 +1261,7 @@ class TestDecomposeMlapo:
 
     def test_fused_qkv_a_proj_shape(self):
         """Op1: hidden @ fused_qkv_a_proj with N = q_lora_rank + kv_proj_dim."""
-        args = _make_mlapo_args(
-            num_tokens=100, hidden_size=5120, q_lora_rank=1536, kv_proj_dim=576
-        )
+        args = _make_mlapo_args(num_tokens=100, hidden_size=5120, q_lora_rank=1536, kv_proj_dim=576)
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
         # Fused: (num_tokens, hidden_size) @ (q_lora_rank+kv_proj_dim, hidden_size)
@@ -1408,7 +1315,8 @@ class TestDecomposeMlapoQuant:
 
     def test_kv_proj_dim_from_out_features_quant(self):
         """Same bugfix regression: kv_proj_dim must come from shape[0].
-        MISS #3 fix: NPU CSV shape is 4D (T,1,1,D), not 2D (T,D)."""
+        MISS #3 fix: NPU CSV shape is 4D (T,1,1,D), not 2D (T,D).
+        """
         args = _make_mlapo_args(num_tokens=136, hidden_size=5120, kv_proj_dim=576)
         op = _make_op_info(torch.ops.tensor_cast.mlapo_quant.default, args)
         specs = _decompose_mlapo_quant(op, {})
@@ -1584,12 +1492,8 @@ class TestDecomposeMLAPOQuantFix:
         # First two specs are QBMV3 matmuls
         assert specs[0].kernel_type == "QuantBatchMatmulV3"
         assert specs[1].kernel_type == "QuantBatchMatmulV3"
-        assert specs[0].dtype == "INT8", (
-            f"Expected INT8 for QBMV3, got {specs[0].dtype!r}"
-        )
-        assert specs[1].dtype == "INT8", (
-            f"Expected INT8 for QBMV3, got {specs[1].dtype!r}"
-        )
+        assert specs[0].dtype == "INT8", f"Expected INT8 for QBMV3, got {specs[0].dtype!r}"
+        assert specs[1].dtype == "INT8", f"Expected INT8 for QBMV3, got {specs[1].dtype!r}"
 
     def test_q_b_proj_uses_full_weight_shape(self):
         """MISS #2: q_b_proj weight must use full shape (num_heads*qk_head_dim, q_lora_rank).
@@ -1622,9 +1526,7 @@ class TestDecomposeMLAPOQuantFix:
         assert kv_spec.kernel_type == "KvRmsNormRopeCache"
         # Must be 4D: (T, 1, 1, kv_proj_dim)
         input_shape = kv_spec.input_shapes[0]
-        assert len(input_shape) == 4, (
-            f"Expected 4D shape (T,1,1,D), got {len(input_shape)}D: {input_shape}"
-        )
+        assert len(input_shape) == 4, f"Expected 4D shape (T,1,1,D), got {len(input_shape)}D: {input_shape}"
         assert input_shape == (8, 1, 1, 576), f"Expected (8,1,1,576), got {input_shape}"
 
     def test_kv_rms_norm_rope_cache_keeps_bf16_dtype(self):
@@ -1638,9 +1540,7 @@ class TestDecomposeMLAPOQuantFix:
         assert specs is not None
         kv_spec = specs[2]
         assert kv_spec.kernel_type == "KvRmsNormRopeCache"
-        assert kv_spec.dtype == "DT_BF16", (
-            f"Expected DT_BF16 for KvRmsNormRopeCache, got {kv_spec.dtype!r}"
-        )
+        assert kv_spec.dtype == "DT_BF16", f"Expected DT_BF16 for KvRmsNormRopeCache, got {kv_spec.dtype!r}"
 
 
 # ============================================================
@@ -1784,9 +1684,7 @@ class TestCompositeLookupMLAPO:
         op = _make_op_info(torch.ops.tensor_cast.mlapo_quant.default, args)
         result = ds.lookup(op)
         # All 3 sub-kernels miss (no CSV rows with T=999) → None
-        assert result is None, (
-            f"Expected None for all-miss with num_tokens=999, got {result}"
-        )
+        assert result is None, f"Expected None for all-miss with num_tokens=999, got {result}"
 
     def test_mlapo_insufficient_args_returns_none(self, mlapo_data_dir):
         """mlapo_quant with insufficient args → decompose fails → None."""

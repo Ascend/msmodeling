@@ -107,7 +107,8 @@ class MemoryTracker:
 
     def _extract_tensors(self, data: Any) -> List[torch.Tensor]:
         """A helper function to recursively find all torch.Tensor objects
-        within a nested data structure (e.g., list, tuple, dict)."""
+        within a nested data structure (e.g., list, tuple, dict).
+        """
         tensors = []
         if isinstance(data, torch.Tensor):
             return [data]
@@ -136,9 +137,7 @@ class MemoryTracker:
             return
 
         if source_id not in self.tensor_infos:
-            self.tensor_infos[source_id] = _TensorInfo(
-                size_bytes=int(bytes_of_tensor(source_tensor))
-            )
+            self.tensor_infos[source_id] = _TensorInfo(size_bytes=int(bytes_of_tensor(source_tensor)))
 
         self.alias_info[alias_id] = self.alias_info.get(source_id, source_id)
 
@@ -157,15 +156,10 @@ class MemoryTracker:
                     input_indices = []
                     for input_idx, input_schema in enumerate(schema.arguments):
                         input_alias = input_schema.alias_info
-                        if (
-                            input_alias is not None
-                            and output_alias_set & input_alias.before_set
-                        ):
+                        if input_alias is not None and output_alias_set & input_alias.before_set:
                             input_indices.append(input_idx)
                     if input_indices:
-                        output_plans.append(
-                            (OutputKind.TENSOR, output_idx, input_indices)
-                        )
+                        output_plans.append((OutputKind.TENSOR, output_idx, input_indices))
                 elif isinstance(output_schema.real_type, torch.ListType):
                     list_alias_input_idx = None
                     for input_idx, input_schema in enumerate(schema.arguments):
@@ -174,9 +168,7 @@ class MemoryTracker:
                             list_alias_input_idx = input_idx
                             break
                     if list_alias_input_idx is not None:
-                        output_plans.append(
-                            (OutputKind.LIST, output_idx, [list_alias_input_idx])
-                        )
+                        output_plans.append((OutputKind.LIST, output_idx, [list_alias_input_idx]))
                 else:
                     logger.warning(
                         "MemoryTracker: unsupported alias output type %s for op %s "
@@ -215,11 +207,7 @@ class MemoryTracker:
             else:
                 self.alias_info[output_id] = input_id
 
-        outputs = (
-            op_invoke_info.out
-            if isinstance(op_invoke_info.out, tuple)
-            else [op_invoke_info.out]
-        )
+        outputs = op_invoke_info.out if isinstance(op_invoke_info.out, tuple) else [op_invoke_info.out]
         for output_kind, output_idx, input_indices in output_plans:
             output = outputs[output_idx]
             if output_kind is OutputKind.TENSOR:
@@ -264,13 +252,9 @@ class MemoryTracker:
             op_invoke_info = op_info_or_region
             self.record_single_op_invocation(op_invoke_info, 0)
         else:
-            raise ValueError(
-                f"record_op_invocation failed: Unsupported type: {type(op_info_or_region)}"
-            )
+            raise ValueError(f"record_op_invocation failed: Unsupported type: {type(op_info_or_region)}")
 
-    def record_single_op_invocation(
-        self, op_invoke_info: OpInvokeInfo, repeat_id: int = 0
-    ):
+    def record_single_op_invocation(self, op_invoke_info: OpInvokeInfo, repeat_id: int = 0):
         """
         Record the memory usage of an op invocation. Client code calls this method
         multiple times for ops executed by the PyTorch program.
@@ -289,15 +273,11 @@ class MemoryTracker:
             if tensor_id not in self.tensor_infos:
                 # If a tensor is used before it's defined, it's a model input.
                 # We initialize its info here.
-                self.tensor_infos[tensor_id] = _TensorInfo(
-                    size_bytes=int(bytes_of_tensor(tensor))
-                )
+                self.tensor_infos[tensor_id] = _TensorInfo(size_bytes=int(bytes_of_tensor(tensor)))
             self.tensor_infos[tensor_id].use_op_indices.append(op_idx)
             aliased_tensor_id = self.alias_info.get(tensor_id)
             if aliased_tensor_id is not None:
-                self.tensor_infos[aliased_tensor_id].use_op_indices_by_alias.append(
-                    op_idx
-                )
+                self.tensor_infos[aliased_tensor_id].use_op_indices_by_alias.append(op_idx)
 
         # Identify all output tensors and record their definition site.
         output_tensors = self._extract_tensors(op_invoke_info.out)
@@ -306,9 +286,7 @@ class MemoryTracker:
             tensor_id = self._get_real_tensor_id(tensor, repeat_id)
             output_tensor_ids.add(tensor_id)
             if tensor_id not in self.tensor_infos:
-                self.tensor_infos[tensor_id] = _TensorInfo(
-                    size_bytes=int(bytes_of_tensor(tensor))
-                )
+                self.tensor_infos[tensor_id] = _TensorInfo(size_bytes=int(bytes_of_tensor(tensor)))
                 # This op is the one that defines (creates) the tensor.
                 self.tensor_infos[tensor_id].def_op_idx = op_idx
 
@@ -334,14 +312,9 @@ class MemoryTracker:
                     source_id = self.alias_info[tensor_id]
                     source_info = self.tensor_infos.get(source_id)
                     source_use_op_indices = (
-                        []
-                        if source_info is None
-                        else source_info.use_op_indices
-                        + source_info.use_op_indices_by_alias
+                        [] if source_info is None else source_info.use_op_indices + source_info.use_op_indices_by_alias
                     )
-                    if not source_use_op_indices or info.def_op_idx >= max(
-                        source_use_op_indices
-                    ):
+                    if not source_use_op_indices or info.def_op_idx >= max(source_use_op_indices):
                         self.model_output_tensors.add(source_id)
                 else:
                     self.model_output_tensors.add(tensor_id)
@@ -359,9 +332,7 @@ class MemoryTracker:
 
         # Step 2: Simulate memory usage over the sequence of operations.
         # Start with memory consumed by model inputs, which are pre-allocated.
-        current_memory_usage = sum(
-            self.tensor_infos[t_id].size_bytes for t_id in self.model_input_tensors
-        )
+        current_memory_usage = sum(self.tensor_infos[t_id].size_bytes for t_id in self.model_input_tensors)
 
         for op_idx, (op_info, _) in enumerate(self.op_invoke_infos_with_repeat_id):
             usage_before_call = current_memory_usage
@@ -370,9 +341,7 @@ class MemoryTracker:
             output_tensor_ids = self.op_output_tensor_ids[op_idx]
 
             mem_allocated = sum(
-                self.tensor_infos[t_id].size_bytes
-                for t_id in output_tensor_ids
-                if t_id not in self.alias_info
+                self.tensor_infos[t_id].size_bytes for t_id in output_tensor_ids if t_id not in self.alias_info
             )
 
             # The memory usage after the call includes the newly allocated tensors.
@@ -380,9 +349,7 @@ class MemoryTracker:
             #               require a more sophisticated model to estimate the workspace usage.
             usage_after_call = usage_before_call + mem_allocated
 
-            self.memory_profiles.append(
-                OpMemoryProfile(op_info, usage_before_call, usage_after_call)
-            )
+            self.memory_profiles.append(OpMemoryProfile(op_info, usage_before_call, usage_after_call))
 
             # Update memory state for the beginning of the next operation.
             current_memory_usage = usage_after_call
@@ -405,15 +372,11 @@ class MemoryTracker:
             current_memory_usage -= mem_freed
 
         # memory usage after model execution, all intermediate tensors should be freed
-        self.memory_profiles.append(
-            OpMemoryProfile(None, current_memory_usage, current_memory_usage)
-        )
+        self.memory_profiles.append(OpMemoryProfile(None, current_memory_usage, current_memory_usage))
 
         self.is_analyzed = True
 
-    def get_profile(
-        self, initial_mem_usage_bytes: float = 0.0
-    ) -> List[OpMemoryProfile]:
+    def get_profile(self, initial_mem_usage_bytes: float = 0.0) -> List[OpMemoryProfile]:
         """
         Return the memory profile of the recorded PyTorch program.
 
@@ -430,15 +393,11 @@ class MemoryTracker:
             return [
                 OpMemoryProfile(
                     op_invoke_info=profile.op_invoke_info,
-                    usage_before_call_bytes=profile.usage_before_call_bytes
-                    + initial_mem_usage_bytes,
-                    usage_after_call_bytes=profile.usage_after_call_bytes
-                    + initial_mem_usage_bytes,
+                    usage_before_call_bytes=profile.usage_before_call_bytes + initial_mem_usage_bytes,
+                    usage_after_call_bytes=profile.usage_after_call_bytes + initial_mem_usage_bytes,
                 )
                 for profile in self.memory_profiles
             ]
 
     def peak_mem_usage(self, initial_mem_usage_bytes: float = 0.0):
-        return max(
-            [mem_profile.usage_before_call_bytes for mem_profile in self.get_profile()]
-        )
+        return max([mem_profile.usage_before_call_bytes for mem_profile in self.get_profile()])

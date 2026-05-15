@@ -7,11 +7,9 @@ from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
-from serving_cast.stime import get_logger
+import serving_cast.stime as stime
 
-from . import stime
-
-logger = get_logger(__name__)
+logger = stime.get_logger(__name__)
 
 
 def main_processing(serving, load_gen):
@@ -24,9 +22,7 @@ def main_processing(serving, load_gen):
     while not load_gen.is_finished():
         stime.elapse(10)
 
-    logger.debug(
-        "time %.1f: all of the requests are finished, stop simulation", stime.now()
-    )
+    logger.debug("time %.1f: all of the requests are finished, stop simulation", stime.now())
     stime.stop_simulation()
     return
 
@@ -71,12 +67,8 @@ def summarize(requests_list):
         e2e = req.decode_done_time - req.leaves_client_time
         ttft = req.prefill_done_time - req.arrives_server_time
         # TPOT = pure decode time / number of output tokens
-        tpot = (req.decode_done_time - req.prefill_done_time) / max(
-            1, req.num_output_tokens
-        )
-        out_tps = req.num_output_tokens / max(
-            0.001, (req.decode_done_time - req.prefill_done_time)
-        )
+        tpot = (req.decode_done_time - req.prefill_done_time) / max(1, req.num_output_tokens)
+        out_tps = req.num_output_tokens / max(0.001, (req.decode_done_time - req.prefill_done_time))
         return pd.Series(
             [e2e, ttft, tpot, req.num_input_tokens, req.num_output_tokens, out_tps],
             index=[
@@ -166,9 +158,7 @@ def dataclass2dict(obj: Any, *, skip_none: bool = False) -> Dict[str, Any]:
         Plain Python dict ready for json.dump
     """
     if not is_dataclass(obj):
-        raise TypeError(
-            f"dataclass2dict() expects a dataclass instance, got {type(obj)}"
-        )
+        raise TypeError(f"dataclass2dict() expects a dataclass instance, got {type(obj)}")
 
     result: Dict[str, Any] = {}
     for field in fields(obj):

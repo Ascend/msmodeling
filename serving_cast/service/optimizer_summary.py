@@ -52,9 +52,7 @@ class OptimizerSummary:
             return value is not None and limit is not None and value > limit
 
         self._early_stop_flag = (
-            (memory_left < 0)
-            or check(tpot, self.data_config.tpot_limits)
-            or check(ttft, self.data_config.ttft_limits)
+            (memory_left < 0) or check(tpot, self.data_config.tpot_limits) or check(ttft, self.data_config.ttft_limits)
         )
 
     def check_early_stop_flag(self):
@@ -96,16 +94,8 @@ class OptimizerSummary:
         tpot_limit = self.data_config.tpot_limits or float("inf")
         ttft_limit = self.data_config.ttft_limits or float("inf")
 
-        mask = (
-            pd.to_numeric(self._summary_df["tpot"], errors="coerce").fillna(
-                float("inf")
-            )
-            <= tpot_limit
-        ) & (
-            pd.to_numeric(self._summary_df["ttft"], errors="coerce").fillna(
-                float("inf")
-            )
-            <= ttft_limit
+        mask = (pd.to_numeric(self._summary_df["tpot"], errors="coerce").fillna(float("inf")) <= tpot_limit) & (
+            pd.to_numeric(self._summary_df["ttft"], errors="coerce").fillna(float("inf")) <= ttft_limit
         )
 
         return (
@@ -129,9 +119,7 @@ class OptimizerSummary:
         final_out.append("  Input Configuration: ")
         final_out.append(f"    Model: {args.model_id}")
         final_out.append(f"    Quantize Linear action: {args.quantize_linear_action}")
-        final_out.append(
-            f"    Quantize Attention action: {args.quantize_attention_action}"
-        )
+        final_out.append(f"    Quantize Attention action: {args.quantize_attention_action}")
         final_out.append(f"    Devices: {args.num_devices} {args.device}")
         final_out.append(f"    TTFT Limits: {self.data_config.ttft_limits} ms")
         final_out.append(f"    TPOT Limits: {self.data_config.tpot_limits} ms")
@@ -145,11 +133,7 @@ class OptimizerSummary:
             final_out.append(f"    TPOT: {best_result['tpot']:.2f} ms")
         final_out.append("  " + "-" * 76)
 
-        table_buf = (
-            _get_disagg_table_buf(sorted_summary_df)
-            if args.disagg
-            else _get_agg_table_buf(sorted_summary_df)
-        )
+        table_buf = _get_disagg_table_buf(sorted_summary_df) if args.disagg else _get_agg_table_buf(sorted_summary_df)
         final_out.append(table_buf)
         final_out.append("*" * 80)
 
@@ -168,16 +152,8 @@ class OptimizerSummary:
         ttft_limit = self.data_config.ttft_limits or float("inf")
 
         # Apply limits filter
-        mask = (
-            pd.to_numeric(self._summary_df["ttft_p"], errors="coerce").fillna(
-                float("inf")
-            )
-            <= ttft_limit
-        ) & (
-            pd.to_numeric(self._summary_df["tpot_d"], errors="coerce").fillna(
-                float("inf")
-            )
-            <= tpot_limit
+        mask = (pd.to_numeric(self._summary_df["ttft_p"], errors="coerce").fillna(float("inf")) <= ttft_limit) & (
+            pd.to_numeric(self._summary_df["tpot_d"], errors="coerce").fillna(float("inf")) <= tpot_limit
         )
 
         filtered_df = self._summary_df[mask]
@@ -221,27 +197,18 @@ class OptimizerSummary:
         # Only show Devices when user specifies --num-devices
         if (
             self.data_config.num_devices
-            >= self.data_config.prefill_devices_per_instance
-            + self.data_config.decode_devices_per_instance
+            >= self.data_config.prefill_devices_per_instance + self.data_config.decode_devices_per_instance
         ):
-            final_out.append(
-                f"    Devices: {self.data_config.num_devices} {args.device}"
-            )
-        final_out.append(
-            f"    Prefill Devices Per Instance: {self.data_config.prefill_devices_per_instance}"
-        )
-        final_out.append(
-            f"    Decode Devices Per Instance: {self.data_config.decode_devices_per_instance}"
-        )
+            final_out.append(f"    Devices: {self.data_config.num_devices} {args.device}")
+        final_out.append(f"    Prefill Devices Per Instance: {self.data_config.prefill_devices_per_instance}")
+        final_out.append(f"    Decode Devices Per Instance: {self.data_config.decode_devices_per_instance}")
         final_out.append(f"    TTFT Limits: {self.data_config.ttft_limits} ms")
         final_out.append(f"    TPOT Limits: {self.data_config.tpot_limits} ms")
         final_out.append("  " + "-" * 116)
 
         # Overall Best Configuration section
         final_out.append("  Overall Best Configuration:")
-        final_out.append(
-            f"      PD Ratio: {best_result['pd_ratio']:.2f} (P Instance:D Instance)"
-        )
+        final_out.append(f"      PD Ratio: {best_result['pd_ratio']:.2f} (P Instance:D Instance)")
         final_out.append(
             f"      Prefill QPS: {best_result['p_qps']:.2f} req/s  "
             f"(TTFT: {best_result['ttft_p']:.2f} ms, Parallel: {best_result['parallel_p']}, "
@@ -262,12 +229,8 @@ class OptimizerSummary:
                 best_result["num_devices_d"],
             )
             if p_inst > 0 and d_inst > 0:
-                final_out.append(
-                    f"      P Instances: {p_inst} ({p_inst * best_result['num_devices_p']} devices)"
-                )
-                final_out.append(
-                    f"      D Instances: {d_inst} ({d_inst * best_result['num_devices_d']} devices)"
-                )
+                final_out.append(f"      P Instances: {p_inst} ({p_inst * best_result['num_devices_p']} devices)")
+                final_out.append(f"      D Instances: {d_inst} ({d_inst * best_result['num_devices_d']} devices)")
 
         final_out.append("  " + "-" * 116)
 

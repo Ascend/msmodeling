@@ -92,9 +92,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         # Normalize role-based lanes once so the scheduling loop can stay data-driven.
         self._device_name = device_name
         self.role_to_stream_ids = self._resolve_role_to_stream_ids()
-        self.cross_stream_sync_overhead_s = (
-            config.compilation.multistream.cross_stream_sync_overhead_s
-        )
+        self.cross_stream_sync_overhead_s = config.compilation.multistream.cross_stream_sync_overhead_s
         self.device_profile = self._resolve_device_profile()
         (
             self.compute_bandwidth_bytes_per_s,
@@ -102,8 +100,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         ) = self._resolve_bandwidth_proxies(self.device_profile)
         self._analytic_model = self._build_analytic_model(self.device_profile)
         self._has_heuristic_bandwidth = (
-            self.compute_bandwidth_bytes_per_s is not None
-            and self.comm_bandwidth_bytes_per_s is not None
+            self.compute_bandwidth_bytes_per_s is not None and self.comm_bandwidth_bytes_per_s is not None
         )
         logger.debug(
             "Multistream cost model initialized: device=%s, compute_bw=%s, comm_bw=%s, analytic=%s",
@@ -143,24 +140,17 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         self, device_profile: Optional[DeviceProfile]
     ) -> tuple[Optional[float], Optional[float]]:
         if device_profile is not None:
-            derived_compute = (
-                device_profile.memory_bandwidth_bytes_ps
-                * device_profile.memory_efficiency
-            )
+            derived_compute = device_profile.memory_bandwidth_bytes_ps * device_profile.memory_efficiency
             derived_comm = self._derive_comm_bandwidth_proxy(device_profile)
             if derived_compute > 0 and derived_comm > 0:
                 return derived_compute, derived_comm
 
         return (None, None)
 
-    def _build_analytic_model(
-        self, device_profile: Optional[DeviceProfile]
-    ) -> Optional[AnalyticPerformanceModel]:
+    def _build_analytic_model(self, device_profile: Optional[DeviceProfile]) -> Optional[AnalyticPerformanceModel]:
         if device_profile is None:
             return None
-        if not getattr(
-            config.compilation.multistream, "enable_analytic_cost_model", True
-        ):
+        if not getattr(config.compilation.multistream, "enable_analytic_cost_model", True):
             return None
         return AnalyticPerformanceModel(device_profile)
 
@@ -190,9 +180,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         if isinstance(configured, Mapping):
             for role in (self.RESOURCE_COMPUTE, self.RESOURCE_COMM):
                 if role in configured:
-                    role_to_stream_ids[role] = self._normalize_stream_ids(
-                        configured[role]
-                    )
+                    role_to_stream_ids[role] = self._normalize_stream_ids(configured[role])
 
         # Backward compatibility for legacy flat fields.
         if self.RESOURCE_COMPUTE not in role_to_stream_ids:
@@ -227,9 +215,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         if isinstance(value, (list, tuple)):
             return sum(MultiStreamSchedulePass._sum_tensor_bytes(v) for v in value)
         if isinstance(value, dict):
-            return sum(
-                MultiStreamSchedulePass._sum_tensor_bytes(v) for v in value.values()
-            )
+            return sum(MultiStreamSchedulePass._sum_tensor_bytes(v) for v in value.values())
         return 0
 
     @staticmethod
@@ -237,14 +223,9 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         if isinstance(value, torch.Tensor):
             return any(isinstance(dim, torch.SymInt) for dim in value.shape)
         if isinstance(value, (list, tuple)):
-            return any(
-                MultiStreamSchedulePass._value_has_symbolic_shape(v) for v in value
-            )
+            return any(MultiStreamSchedulePass._value_has_symbolic_shape(v) for v in value)
         if isinstance(value, dict):
-            return any(
-                MultiStreamSchedulePass._value_has_symbolic_shape(v)
-                for v in value.values()
-            )
+            return any(MultiStreamSchedulePass._value_has_symbolic_shape(v) for v in value.values())
         return False
 
     @staticmethod
@@ -254,18 +235,14 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         if isinstance(value, (list, tuple)):
             return any(MultiStreamSchedulePass._value_contains_none(v) for v in value)
         if isinstance(value, dict):
-            return any(
-                MultiStreamSchedulePass._value_contains_none(v) for v in value.values()
-            )
+            return any(MultiStreamSchedulePass._value_contains_none(v) for v in value.values())
         return False
 
     @staticmethod
     def _to_meta_value_for_cost_model(value: Any) -> Any:
         if isinstance(value, torch.Tensor):
             if value.layout != torch.strided:
-                raise _MetaCostModelUnsupported(
-                    f"Meta-only cost model does not support tensor layout {value.layout}."
-                )
+                raise _MetaCostModelUnsupported(f"Meta-only cost model does not support tensor layout {value.layout}.")
             with torch._C._DisableTorchDispatch():
                 return torch.empty_strided(
                     tuple(value.shape),
@@ -275,20 +252,11 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
                     requires_grad=value.requires_grad,
                 )
         if isinstance(value, tuple):
-            return tuple(
-                MultiStreamSchedulePass._to_meta_value_for_cost_model(item)
-                for item in value
-            )
+            return tuple(MultiStreamSchedulePass._to_meta_value_for_cost_model(item) for item in value)
         if isinstance(value, list):
-            return [
-                MultiStreamSchedulePass._to_meta_value_for_cost_model(item)
-                for item in value
-            ]
+            return [MultiStreamSchedulePass._to_meta_value_for_cost_model(item) for item in value]
         if isinstance(value, dict):
-            return {
-                key: MultiStreamSchedulePass._to_meta_value_for_cost_model(item)
-                for key, item in value.items()
-            }
+            return {key: MultiStreamSchedulePass._to_meta_value_for_cost_model(item) for key, item in value.items()}
         return value
 
     def _materialize_fx_arg_values(self, arg: Any) -> Any:
@@ -337,9 +305,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         kwargs = self._materialize_fx_arg_values(node.kwargs)
         if self._value_contains_none((args, kwargs)):
             return None
-        if self._value_has_symbolic_shape(args) or self._value_has_symbolic_shape(
-            kwargs
-        ):
+        if self._value_has_symbolic_shape(args) or self._value_has_symbolic_shape(kwargs):
             return None
         try:
             args = self._to_meta_value_for_cost_model(args)
@@ -348,9 +314,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             # Cost estimation is side-band metadata. Run estimators on meta-only
             # tensor copies so probing cannot create symbols in the compile graph.
             with torch._C._DisableTorchDispatch():
-                result = self._analytic_model.process_op(
-                    OpInvokeInfo(node.target, args, kwargs, out)
-                )
+                result = self._analytic_model.process_op(OpInvokeInfo(node.target, args, kwargs, out))
             return max(self.MIN_COST_S, float(result.execution_time_s))
         except (
             DataDependentOutputException,
@@ -383,9 +347,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         if bytes_out <= 0:
             return self.MIN_COST_S
 
-        compute_cost_s = max(
-            self.MIN_COST_S, bytes_out / self.compute_bandwidth_bytes_per_s
-        )
+        compute_cost_s = max(self.MIN_COST_S, bytes_out / self.compute_bandwidth_bytes_per_s)
         comm_cost_s = max(self.MIN_COST_S, bytes_out / self.comm_bandwidth_bytes_per_s)
         policy = self._node_policy(node)
         if policy.cost_model == "comm":
@@ -403,11 +365,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             cost_s = float("inf")
         else:
             analytic_cost_s = self._estimate_node_cost_with_analytic(node)
-            cost_s = (
-                analytic_cost_s
-                if analytic_cost_s is not None
-                else self._estimate_node_cost_with_heuristic(node)
-            )
+            cost_s = analytic_cost_s if analytic_cost_s is not None else self._estimate_node_cost_with_heuristic(node)
         self._cost_cache[cache_key] = cost_s
         return cost_s
 
@@ -417,10 +375,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         def rank_of(node: fx.Node) -> float:
             if node in self._ranks:
                 return self._ranks[node]
-            self_cost = min(
-                self._estimate_node_cost_s(node, stream_id)
-                for stream_id in self._allowed_streams(node)
-            )
+            self_cost = min(self._estimate_node_cost_s(node, stream_id) for stream_id in self._allowed_streams(node))
             max_succ_rank = 0.0
             for user in node.users.keys():
                 if user in schedulable:
@@ -451,11 +406,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             if parent not in self._schedule:
                 continue
             parent_sched = self._schedule[parent]
-            sync_overhead = (
-                self.cross_stream_sync_overhead_s
-                if parent_sched.stream_id != stream_id
-                else 0.0
-            )
+            sync_overhead = self.cross_stream_sync_overhead_s if parent_sched.stream_id != stream_id else 0.0
             t_deps = max(t_deps, parent_sched.end_time_s + sync_overhead)
         return max(t_stream, t_resource, t_deps)
 
@@ -481,9 +432,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
                 cost_s = self._estimate_node_cost_s(node, stream_id)
                 if cost_s == float("inf"):
                     continue
-                start_s = self._estimate_start_time_s(
-                    node, stream_id, stream_ready_s, resource_ready_s
-                )
+                start_s = self._estimate_start_time_s(node, stream_id, stream_ready_s, resource_ready_s)
                 end_s = start_s + cost_s
                 candidate = _ScheduledNode(
                     stream_id=stream_id,
@@ -525,9 +474,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
 
     @staticmethod
     def _is_tensor_node(node: fx.Node) -> bool:
-        return MultiStreamSchedulePass._is_single_tensor_value(
-            MultiStreamSchedulePass._node_value(node)
-        )
+        return MultiStreamSchedulePass._is_single_tensor_value(MultiStreamSchedulePass._node_value(node))
 
     def _dependency_tokens_for_node(
         self,
@@ -587,9 +534,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             if node not in self._schedule:
                 continue
             stream_id = self._schedule[node].stream_id
-            dep_tokens = self._dependency_tokens_for_node(
-                node, stream_id, node_to_token
-            )
+            dep_tokens = self._dependency_tokens_for_node(node, stream_id, node_to_token)
             self._gate_node_inputs(graph, node, stream_id, dep_tokens)
 
             # Every scheduled op publishes a completion token. This keeps the lowering
@@ -614,8 +559,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         ]
         if helper_nodes:
             logger.debug(
-                "Skip multistream cost-model for %d helper call_function nodes "
-                "(for example: %s)",
+                "Skip multistream cost-model for %d helper call_function nodes (for example: %s)",
                 len(helper_nodes),
                 helper_nodes[0].target,
             )
@@ -623,9 +567,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         if not schedulable_nodes:
             return gm
         if self._analytic_model is None and not self._has_heuristic_bandwidth:
-            logger.info(
-                "Skip multistream lowering: no device/profile bandwidth proxy and analytic model disabled."
-            )
+            logger.info("Skip multistream lowering: no device/profile bandwidth proxy and analytic model disabled.")
             return gm
 
         original_order = {node: i for i, node in enumerate(nodes_in_order)}
@@ -651,7 +593,5 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         gm.graph.eliminate_dead_code()
         gm.graph.lint()
         gm.recompile()
-        logger.debug(
-            "Applied MultiStreamSchedulePass to %d nodes", len(schedulable_nodes)
-        )
+        logger.debug("Applied MultiStreamSchedulePass to %d nodes", len(schedulable_nodes))
         return gm

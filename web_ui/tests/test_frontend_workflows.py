@@ -189,9 +189,7 @@ def optimizer_args(
 
 def test_app_build() -> None:
     demo = build_app()
-    record(
-        "app build", demo is not None, "build_app returned None" if demo is None else ""
-    )
+    record("app build", demo is not None, "build_app returned None" if demo is None else "")
 
 
 @pytest.fixture
@@ -335,8 +333,7 @@ Top 4 Aggregation Configurations:
     top1_from_log = _extract_optimizer_top1_from_log(log)
     record(
         "optimizer history fallback parses PP rows",
-        top1_from_log.get("best_parallel") == "TP=8 | PP=1 | DP=1"
-        and top1_from_log.get("best_batch_size") == 175,
+        top1_from_log.get("best_parallel") == "TP=8 | PP=1 | DP=1" and top1_from_log.get("best_batch_size") == 175,
         str(top1_from_log),
     )
 
@@ -382,10 +379,7 @@ def test_operator_table() -> None:
         ["Operator", "Total Time (ms)"],
         "Total Time (ms)",
     )
-    ok = (
-        list(df.columns) == ["Operator", "Total Time (ms)"]
-        and df.iloc[0, 0] == "matmul"
-    )
+    ok = list(df.columns) == ["Operator", "Total Time (ms)"] and df.iloc[0, 0] == "matmul"
     record("operator table columns and sort", ok, str(df.head().to_dict("records")))
 
 
@@ -416,9 +410,7 @@ def test_case_detail_filters() -> None:
     bandwidth_df = update_bandwidth_analysis_by_device(full_rows, "D1", case2)
     record(
         "case memory filter",
-        not memory_df.empty
-        and not bandwidth_df.empty
-        and bandwidth_df.iloc[0]["concurrency"] == 32,
+        not memory_df.empty and not bandwidth_df.empty and bandwidth_df.iloc[0]["concurrency"] == 32,
         str(bandwidth_df.to_dict("records")),
     )
 
@@ -442,9 +434,7 @@ def test_case_detail_filters() -> None:
             "case_label": case2,
         },
     ]
-    df = update_op_table_from_breakdown(
-        op_rows, "D1", case2, 10, ["????", "???(ms)"], "???(ms)"
-    )
+    df = update_op_table_from_breakdown(op_rows, "D1", case2, 10, ["????", "???(ms)"], "???(ms)")
     record(
         "case operator filter",
         not df.empty and df.iloc[0, 0] == "matmul_tp2",

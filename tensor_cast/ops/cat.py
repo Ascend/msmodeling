@@ -15,9 +15,7 @@ def _(tensors: Sequence[torch.Tensor], dim: int = 0) -> torch.Tensor:
     ref = tensors[0]
     for t in tensors[1:]:
         if t.dtype != ref.dtype:
-            raise ValueError(
-                "tensor_cast.cat expects all input tensors to have the same dtype"
-            )
+            raise ValueError("tensor_cast.cat expects all input tensors to have the same dtype")
     out_shape = list(ref.shape)
     if dim < 0:
         dim = dim + len(out_shape)

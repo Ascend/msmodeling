@@ -5,21 +5,17 @@ from typing import Optional
 
 from blinker import signal
 
-from . import stime
+import serving_cast.stime as stime
 
 
 class RequestState(Enum):
     INITIAL = auto()  # Initial state after the request is created from the client side
     LEAVES_CLIENT = auto()  # The request leaves the client
-    ARRIVES_SERVER = (
-        auto()
-    )  # The request arrives at the server side and ready to be served
+    ARRIVES_SERVER = auto()  # The request arrives at the server side and ready to be served
     PREFILLING = auto()  # The prefill stage is in progress
     PREFILL_DONE = auto()  # Prefill completed
     RECOMPUTATION = auto()  # The request be preempted due to insufficiency of kv cache
-    KVS_TRANSFERRING = (
-        auto()
-    )  # The request's kv cache is trasnferring from prefill node to decode node
+    KVS_TRANSFERRING = auto()  # The request's kv cache is trasnferring from prefill node to decode node
     DECODING = auto()  # The decode stage is in progress
     DECODE_DONE = auto()  # Decode completed
     COMPLETED = DECODE_DONE
@@ -45,9 +41,7 @@ class Request:
         # TOBEDONE: add sampling methods
         self.model_name: Optional[str] = kwargs.get("model_name")
         self.num_input_tokens: int = kwargs.get("num_input_tokens", 0)
-        self.num_output_tokens: int = kwargs.get(
-            "num_output_tokens", 0
-        )  # number of expected output tokens
+        self.num_output_tokens: int = kwargs.get("num_output_tokens", 0)  # number of expected output tokens
 
         # The following fields are states
         self._state: RequestState = RequestState.INITIAL
@@ -124,9 +118,7 @@ class Request:
     def time_per_output_token(self):
         if self.num_output_tokens == 1:
             return 0
-        return (self.decode_done_time - self.prefill_done_time) / (
-            self.num_output_tokens - 1
-        )
+        return (self.decode_done_time - self.prefill_done_time) / (self.num_output_tokens - 1)
 
     def serving_time(self):
         return self.decode_done_time - self.leaves_client_time

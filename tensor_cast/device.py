@@ -51,9 +51,7 @@ class CommGrid:
         if self.grid.ndim == 0:
             raise ValueError("CommGrid grid must have at least one dimension")
         if self.grid.ndim != len(self.topologies):
-            raise ValueError(
-                f"CommGrid grid ndim {self.grid.ndim} must match topologies length {len(self.topologies)}"
-            )
+            raise ValueError(f"CommGrid grid ndim {self.grid.ndim} must match topologies length {len(self.topologies)}")
         if any(dim < 2 for dim in self.grid.shape):
             raise ValueError("CommGrid grid dimensions must be at least 2")
 
@@ -104,9 +102,7 @@ class DeviceProfile:
 TEST_INTERCONNECT = CommGrid(
     grid=torch.arange(256 * 8).reshape(256, 8),
     topologies={
-        0: InterconnectTopology(
-            bandwidth_bytes_ps=50 * 1e9, latency_s=1e-5, comm_efficiency=0.7
-        ),
+        0: InterconnectTopology(bandwidth_bytes_ps=50 * 1e9, latency_s=1e-5, comm_efficiency=0.7),
         1: InterconnectTopology(
             bandwidth_bytes_ps=196 * 1e9,
             latency_s=1.3e-6,
@@ -144,9 +140,7 @@ TEST_DEVICE = DeviceProfile(
 
 class ATLAS_800:
     # TODO(jgong5): double-confirm static cost
-    STATIC_COST = StaticCost(
-        mma_op_cost_s=5 * 1e-6, gp_op_cost_s=2 * 1e-6, comm_op_cost_s=10 * 1e-6
-    )
+    STATIC_COST = StaticCost(mma_op_cost_s=5 * 1e-6, gp_op_cost_s=2 * 1e-6, comm_op_cost_s=10 * 1e-6)
 
     # TODO(jgong5): double-confirm latency
     # TODO(jgong5): double-confirm communication efficiency
@@ -168,9 +162,7 @@ class ATLAS_800:
     A2_INTERCONNECT_PCIE = CommGrid(
         grid=torch.arange(8).reshape(8),
         topologies={
-            0: InterconnectTopology(
-                bandwidth_bytes_ps=64 * 1e9, latency_s=0.2 * 1e-6, comm_efficiency=0.7
-            ),
+            0: InterconnectTopology(bandwidth_bytes_ps=64 * 1e9, latency_s=0.2 * 1e-6, comm_efficiency=0.7),
         },
     )
 

@@ -157,9 +157,7 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
 
         # Results should be sorted by balanced QPS in descending order
         for i in range(len(result_df) - 1):
-            self.assertGreaterEqual(
-                result_df.iloc[i]["balanced_qps"], result_df.iloc[i + 1]["balanced_qps"]
-            )
+            self.assertGreaterEqual(result_df.iloc[i]["balanced_qps"], result_df.iloc[i + 1]["balanced_qps"])
 
     def test_optimize_empty_p_results(self):
         """Test optimization with empty prefill results."""

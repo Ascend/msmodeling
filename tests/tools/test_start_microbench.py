@@ -11,9 +11,7 @@ from pathlib import Path
 import pytest
 
 # Add perf_data_collection to path for imports
-PERF_DATA_COLLECTION_DIR = (
-    Path(__file__).resolve().parents[2] / "tools" / "perf_data_collection"
-)
+PERF_DATA_COLLECTION_DIR = Path(__file__).resolve().parents[2] / "tools" / "perf_data_collection"
 if str(PERF_DATA_COLLECTION_DIR) not in sys.path:
     sys.path.insert(0, str(PERF_DATA_COLLECTION_DIR))
 
@@ -583,9 +581,7 @@ class TestPrintReport:
     def test_writes_report_to_file(self, tmp_path: Path):
         """Should write report to file when to_file is provided."""
         results = [UpdateResult(csv_path=Path("/tmp/test.csv"), updated=5, added=2)]
-        gaps = [
-            GapRecord("MatMulV2", "MatMulV2.csv", "1024,1024", 80.0, 100.0, 20.0, 0.8)
-        ]
+        gaps = [GapRecord("MatMulV2", "MatMulV2.csv", "1024,1024", 80.0, 100.0, 20.0, 0.8)]
 
         report_result = print_report(results, gaps, status=None, to_file=tmp_path)
 
@@ -748,9 +744,7 @@ class TestEndToEndWithProfPath:
 
         return db_path
 
-    def test_e2e_prof_path_updates_database(
-        self, tmp_path: Path, mock_prof_data: Path, temp_database: Path, capsys
-    ):
+    def test_e2e_prof_path_updates_database(self, tmp_path: Path, mock_prof_data: Path, temp_database: Path, capsys):
         """Test full pipeline with --prof-path updates database correctly."""
         # Simulate CLI args
         import sys
@@ -794,9 +788,7 @@ class TestEndToEndWithProfPath:
         finally:
             sys.argv = old_argv
 
-    def test_e2e_missing_only_mode(
-        self, tmp_path: Path, mock_prof_data: Path, temp_database: Path, capsys
-    ):
+    def test_e2e_missing_only_mode(self, tmp_path: Path, mock_prof_data: Path, temp_database: Path, capsys):
         """Test missing-only mode only updates rows without valid duration."""
         import sys
 
@@ -834,9 +826,7 @@ class TestEndToEndWithProfPath:
         finally:
             sys.argv = old_argv
 
-    def test_e2e_creates_report_files(
-        self, tmp_path: Path, mock_prof_data: Path, temp_database: Path
-    ):
+    def test_e2e_creates_report_files(self, tmp_path: Path, mock_prof_data: Path, temp_database: Path):
         """Test that report markdown and CSV files are created."""
         import sys
 
@@ -966,8 +956,7 @@ class TestEndToEndWithNPU:
 
     # Configure these paths before running NPU tests
     _VLLM_ASCEND_OPS = (
-        "/usr/local/python3.11.14/lib/python3.11/site-packages"
-        "/vllm_ascend/_cann_ops_custom/vendors/vllm-ascend"
+        "/usr/local/python3.11.14/lib/python3.11/site-packages/vllm_ascend/_cann_ops_custom/vendors/vllm-ascend"
     )
     ASCEND_CUSTOM_OPP_PATH = f"{_VLLM_ASCEND_OPS}:${{ASCEND_CUSTOM_OPP_PATH}}"
     LD_LIBRARY_PATH = f"{_VLLM_ASCEND_OPS}/op_api/lib/:${{LD_LIBRARY_PATH}}"
@@ -991,18 +980,14 @@ class TestEndToEndWithNPU:
 
         if self.ASCEND_CUSTOM_OPP_PATH:
             old_ascend = os.environ.get("ASCEND_CUSTOM_OPP_PATH", "")
-            path = self.ASCEND_CUSTOM_OPP_PATH.replace(
-                "${ASCEND_CUSTOM_OPP_PATH}", old_ascend
-            )
+            path = self.ASCEND_CUSTOM_OPP_PATH.replace("${ASCEND_CUSTOM_OPP_PATH}", old_ascend)
             os.environ["ASCEND_CUSTOM_OPP_PATH"] = path
         if self.LD_LIBRARY_PATH:
             old_ld = os.environ.get("LD_LIBRARY_PATH", "")
             path = self.LD_LIBRARY_PATH.replace("${LD_LIBRARY_PATH}", old_ld)
             os.environ["LD_LIBRARY_PATH"] = path
         if self.PROF_DATABASE_PATH:
-            self.PROF_DATABASE_PATH = self.PROF_DATABASE_PATH.replace(
-                "$(pwd)", os.getcwd()
-            )
+            self.PROF_DATABASE_PATH = self.PROF_DATABASE_PATH.replace("$(pwd)", os.getcwd())
 
     def _check_npu_available(self) -> bool:
         """Check if NPU and msprof are available."""
@@ -1119,8 +1104,7 @@ class TestEndToEndWithNPU:
             # Otherwise, it outputs the profile update report.
             assert (
                 "# Profile Update Report" in captured
-                or "All target CSV files already have usable replay durations"
-                in captured
+                or "All target CSV files already have usable replay durations" in captured
             )
 
         finally:

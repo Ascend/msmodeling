@@ -32,9 +32,7 @@ class TestTextGenerate(unittest.TestCase):
         self.context_length = 0
         torch.compiler.reset()
 
-    def _validate_inference_result(
-        self, result: Union[dict, ModelRunnerMetrics], test_name: str = ""
-    ):
+    def _validate_inference_result(self, result: Union[dict, ModelRunnerMetrics], test_name: str = ""):
         """
         Validate the result from run_inference.
 
@@ -90,11 +88,7 @@ class TestTextGenerate(unittest.TestCase):
         )
 
         # Validate memory consistency: peak = weight + kv_cache + activation
-        expected_peak = (
-            result["model_weight_size_gb"]
-            + result["kv_cache_size_gb"]
-            + result["model_activation_size_gb"]
-        )
+        expected_peak = result["model_weight_size_gb"] + result["kv_cache_size_gb"] + result["model_activation_size_gb"]
         self.assertAlmostEqual(
             result["peak_memory_usage_gb"],
             expected_peak,
@@ -113,9 +107,7 @@ class TestTextGenerate(unittest.TestCase):
         )
 
         # Validate table result is a string
-        self.assertIsInstance(
-            result["table_result"], str, f"{test_name}: Table result should be a string"
-        )
+        self.assertIsInstance(result["table_result"], str, f"{test_name}: Table result should be a string")
         self.assertGreater(
             len(result["table_result"]),
             0,
@@ -123,9 +115,7 @@ class TestTextGenerate(unittest.TestCase):
         )
 
         # Validate breakdowns is a dictionary
-        self.assertIsInstance(
-            result["breakdowns"], dict, f"{test_name}: Breakdowns should be a dict"
-        )
+        self.assertIsInstance(result["breakdowns"], dict, f"{test_name}: Breakdowns should be a dict")
 
     def test_main_given_invalid_log_level_argument_when_invoked_then_system_exits_with_code_2(
         self,
@@ -559,9 +549,7 @@ class TestTextGenerate(unittest.TestCase):
         if isinstance(result, ModelRunnerMetrics):
             result = asdict(result)
         self.assertGreater(result["kv_cache_size_gb"], 0)
-        self.assertIn(
-            "tensor_cast.multihead_latent_attention_quant", result["table_result"]
-        )
+        self.assertIn("tensor_cast.multihead_latent_attention_quant", result["table_result"])
 
     @parameterized.expand(
         [
@@ -586,9 +574,7 @@ class TestTextGenerate(unittest.TestCase):
         self._validate_inference_result(result, "test_kvcache_int8_decode_mode")
         if isinstance(result, ModelRunnerMetrics):
             result = asdict(result)
-        self.assertIn(
-            "tensor_cast.multihead_latent_attention_quant", result["table_result"]
-        )
+        self.assertIn("tensor_cast.multihead_latent_attention_quant", result["table_result"])
 
     @parameterized.expand(
         [
@@ -656,9 +642,7 @@ class TestTextGenerate(unittest.TestCase):
         self._validate_inference_result(result, "test_moe_gating_top_k_softmax")
         if isinstance(result, ModelRunnerMetrics):
             result = asdict(result)
-        self.assertIn(
-            "tensor_cast.moe_gating_top_k_softmax.default", result["table_result"]
-        )
+        self.assertIn("tensor_cast.moe_gating_top_k_softmax.default", result["table_result"])
 
     @parameterized.expand(
         [
@@ -683,9 +667,7 @@ class TestTextGenerate(unittest.TestCase):
         self._validate_inference_result(result, "test_gate_returns_precomputed_topk")
         if isinstance(result, ModelRunnerMetrics):
             result = asdict(result)
-        self.assertNotIn(
-            "tensor_cast.moe_gating_top_k_softmax.default", result["table_result"]
-        )
+        self.assertNotIn("tensor_cast.moe_gating_top_k_softmax.default", result["table_result"])
 
     @parameterized.expand(
         [
@@ -704,9 +686,7 @@ class TestTextGenerate(unittest.TestCase):
             context_length=0,  # No previous context
         )
         prefill_runner = ModelRunner(prefill_input)
-        prefill_result = prefill_runner.run_inference(
-            generate_inputs_func=generate_inputs
-        )
+        prefill_result = prefill_runner.run_inference(generate_inputs_func=generate_inputs)
         self._validate_inference_result(prefill_result, "test_single_token_prefill")
 
         # Test single-token decode
@@ -718,21 +698,13 @@ class TestTextGenerate(unittest.TestCase):
             context_length=10,  # With previous context → has_previous_state=True
         )
         decode_runner = ModelRunner(decode_input)
-        decode_result = decode_runner.run_inference(
-            generate_inputs_func=generate_inputs
-        )
+        decode_result = decode_runner.run_inference(generate_inputs_func=generate_inputs)
         self._validate_inference_result(decode_result, "test_single_token_decode")
 
         # Verify that prefill is slower than decode
-        if isinstance(prefill_result, ModelRunnerMetrics) and isinstance(
-            decode_result, ModelRunnerMetrics
-        ):
-            prefill_time = (
-                prefill_result.execution_time_s.get("analytic", 0) * 1e6
-            )  # Convert to us
-            decode_time = (
-                decode_result.execution_time_s.get("analytic", 0) * 1e6
-            )  # Convert to us
+        if isinstance(prefill_result, ModelRunnerMetrics) and isinstance(decode_result, ModelRunnerMetrics):
+            prefill_time = prefill_result.execution_time_s.get("analytic", 0) * 1e6  # Convert to us
+            decode_time = decode_result.execution_time_s.get("analytic", 0) * 1e6  # Convert to us
 
             # Ensure prefill is slower than decode
             self.assertGreater(
@@ -823,9 +795,7 @@ class TestTextGenerate(unittest.TestCase):
             [8, 4, 2, True],
         ]
     )
-    def test_with_different_parallel_mtp_tokens(
-        self, tp_size, ep_size, moe_tp_size, do_compile
-    ):
+    def test_with_different_parallel_mtp_tokens(self, tp_size, ep_size, moe_tp_size, do_compile):
         """Test with MTP (Multi-Token Prediction) tokens."""
         user_input = UserInputConfig(
             device=self.device,
@@ -846,9 +816,7 @@ class TestTextGenerate(unittest.TestCase):
         )
         model_runner = ModelRunner(user_input)
         result = model_runner.run_inference(generate_inputs_func=generate_inputs)
-        self._validate_inference_result(
-            result, "test_with_different_parallel_mtp_tokens"
-        )
+        self._validate_inference_result(result, "test_with_different_parallel_mtp_tokens")
 
     def test_with_auto_mtp(self):
         """Test with MTP (Multi-Token Prediction) tokens with auto mode."""
@@ -903,14 +871,8 @@ class TestTextGenerate(unittest.TestCase):
         self._validate_inference_result(result, "test_with_reserved_memory")
         if isinstance(result, ModelRunnerMetrics):
             result = asdict(result)
-        expected_available = (
-            result["total_device_memory_gb"]
-            - result["peak_memory_usage_gb"]
-            - reserved_gb
-        )
-        self.assertAlmostEqual(
-            result["device_memory_available_gb"], expected_available, places=2
-        )
+        expected_available = result["total_device_memory_gb"] - result["peak_memory_usage_gb"] - reserved_gb
+        self.assertAlmostEqual(result["device_memory_available_gb"], expected_available, places=2)
 
     def test_num_hidden_layers_override(self):
         """Test with overridden number of hidden layers."""
@@ -1257,41 +1219,27 @@ class TestTextGenerate(unittest.TestCase):
             word_embedding_tp_mode=embedding_tp_mode,
         )
         model_runner = ModelRunner(user_input)
-        embedding_layers = [
-            module
-            for module in model_runner.model.modules()
-            if isinstance(module, ParallelEmbedding)
-        ]
+        embedding_layers = [module for module in model_runner.model.modules() if isinstance(module, ParallelEmbedding)]
         self.assertGreaterEqual(
             len(embedding_layers),
             1,
             "Expected at least one ParallelEmbedding when word_embedding_tp is enabled.",
         )
-        embedding_layer = max(
-            embedding_layers, key=lambda module: module.num_embeddings
-        )
-        self.assertEqual(
-            embedding_layer.shard_mode, WordEmbeddingTPMode(embedding_tp_mode)
-        )
+        embedding_layer = max(embedding_layers, key=lambda module: module.num_embeddings)
+        self.assertEqual(embedding_layer.shard_mode, WordEmbeddingTPMode(embedding_tp_mode))
         sharded_vocab, sharded_hidden = embedding_layer._inner.weight.shape
         if embedding_tp_mode == WordEmbeddingTPMode.col.value:
             self.assertEqual(sharded_vocab, embedding_layer.num_embeddings)
             self.assertLess(sharded_hidden, embedding_layer.embedding_dim)
-            self.assertGreaterEqual(
-                sharded_hidden * embedding_layer.tp_size, embedding_layer.embedding_dim
-            )
+            self.assertGreaterEqual(sharded_hidden * embedding_layer.tp_size, embedding_layer.embedding_dim)
         else:
             self.assertEqual(sharded_hidden, embedding_layer.embedding_dim)
             self.assertLess(sharded_vocab, embedding_layer.num_embeddings)
-            self.assertGreaterEqual(
-                sharded_vocab * embedding_layer.tp_size, embedding_layer.num_embeddings
-            )
+            self.assertGreaterEqual(sharded_vocab * embedding_layer.tp_size, embedding_layer.num_embeddings)
             self.assertLess(embedding_layer._row_start, embedding_layer._row_end)
             self.assertLessEqual(embedding_layer._row_end, embedding_layer._vocab_size)
         result = model_runner.run_inference(generate_inputs_func=generate_inputs)
-        self._validate_inference_result(
-            result, f"test_word_embedding_parallel_{embedding_tp_mode}"
-        )
+        self._validate_inference_result(result, f"test_word_embedding_parallel_{embedding_tp_mode}")
 
     def test_qwen3_32b_tp16(self):
         """Make sure tp_size can be greater than num_key_value_heads."""
@@ -1432,9 +1380,7 @@ class TestTextGenerate(unittest.TestCase):
         )
         num_image_tokens = image_kwargs.get("num_image_tokens")
         seq_len = input_kwargs.get("attention_meta").seq_lens[0].item()
-        self.assertEqual(
-            seq_len, num_image_tokens + user_input.context_length + user_input.query_len
-        )
+        self.assertEqual(seq_len, num_image_tokens + user_input.context_length + user_input.query_len)
         query_len = input_kwargs.get("attention_meta").query_lens[0].item()
         self.assertEqual(query_len, num_image_tokens + user_input.query_len)
         self.assertIn("pixel_values", input_kwargs)
@@ -1502,9 +1448,7 @@ class TestTextGenerate(unittest.TestCase):
         )
         num_image_tokens = image_kwargs.get("num_image_tokens")
         seq_len = input_kwargs.get("attention_meta").seq_lens[0].item()
-        self.assertEqual(
-            seq_len, num_image_tokens + user_input.context_length + user_input.query_len
-        )
+        self.assertEqual(seq_len, num_image_tokens + user_input.context_length + user_input.query_len)
         query_len = input_kwargs.get("attention_meta").query_lens[0].item()
         self.assertEqual(query_len, user_input.query_len)
         self.assertNotIn("pixel_values", input_kwargs)

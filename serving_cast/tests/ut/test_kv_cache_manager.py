@@ -12,9 +12,7 @@ class TestKVCacheManager(unittest.TestCase):
 
     def setUp(self) -> None:
         # Create a new manager with 10 blocks before each test case
-        self.mgr = KVCacheManager(
-            num_blocks=self.NUM_BLOCKS, block_size=self.BLOCK_SIZE
-        )
+        self.mgr = KVCacheManager(num_blocks=self.NUM_BLOCKS, block_size=self.BLOCK_SIZE)
         self.mock_cfg = Mock()
         self.mock_cfg.enable_profiling = False
 
@@ -33,9 +31,7 @@ class TestKVCacheManager(unittest.TestCase):
         self.assertEqual(self.mgr.stats()["used_blocks"], 1)
 
     def test_allocate_exact_block(self):
-        new_blocks = self.mgr.allocate_slots(
-            request_id=2, num_new_tokens=self.BLOCK_SIZE
-        )
+        new_blocks = self.mgr.allocate_slots(request_id=2, num_new_tokens=self.BLOCK_SIZE)
         self.assertEqual(new_blocks, [9])
         self.assertEqual(self.mgr.used_slots_in_request(2), self.BLOCK_SIZE)
         self.assertEqual(self.mgr.stats()["used_blocks"], 1)

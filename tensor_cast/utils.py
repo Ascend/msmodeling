@@ -30,9 +30,7 @@ def register_tensor_cast_op(name, mutates_args=(), **kwargs):
     """
 
     def decorator(func):
-        custom_op = torch.library.custom_op(
-            f"tensor_cast::{name}", mutates_args=mutates_args, **kwargs
-        )(func)
+        custom_op = torch.library.custom_op(f"tensor_cast::{name}", mutates_args=mutates_args, **kwargs)(func)
         custom_op.register_fake(func)
         logger.debug("Registered Operator: tensor_cast::%s", name)
         return func
@@ -41,9 +39,7 @@ def register_tensor_cast_op(name, mutates_args=(), **kwargs):
 
 
 def exact_division(numerator, denominator):
-    assert numerator % denominator == 0, (
-        f"{numerator} is not divisible by {denominator}"
-    )
+    assert numerator % denominator == 0, f"{numerator} is not divisible by {denominator}"
     return numerator // denominator
 
 
@@ -193,6 +189,4 @@ def check_dependencies():
     print(RED + "Automatically upgrading now..." + END)
     print(RED + "=" * 60 + END)
 
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", f"{pkg}=={target_ver}"]
-    )
+    subprocess.check_call([sys.executable, "-m", "pip", "install", f"{pkg}=={target_ver}"])

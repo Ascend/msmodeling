@@ -95,9 +95,7 @@ def _make_prof_trace(tmp_path, rows=None):
         t = 0
         rows = []
         for _ in range(64):
-            rows.append(
-                ("FusedInferAttentionScore", "50.0", str(t), str(t + 50), '"16,4,128"')
-            )
+            rows.append(("FusedInferAttentionScore", "50.0", str(t), str(t + 50), '"16,4,128"'))
             t += 60
         for _ in range(128):
             rows.append(("MatMulV2", "25.0", str(t), str(t + 25), '"16,5120"'))

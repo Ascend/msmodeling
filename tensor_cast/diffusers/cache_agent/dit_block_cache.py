@@ -61,9 +61,7 @@ class DiTBlockCache(torch.nn.Module):
         is_range_start = self._block_index == self._block_start
         if state.delta_encoder is not None:
             if encoder_hidden_states is None:
-                raise ValueError(
-                    "[DiTBlockCache] 'encoder_hidden_states' is required for two-output cache reuse."
-                )
+                raise ValueError("[DiTBlockCache] 'encoder_hidden_states' is required for two-output cache reuse.")
             if is_range_start:
                 return (
                     hidden_states + state.delta_hidden,
@@ -77,9 +75,7 @@ class DiTBlockCache(torch.nn.Module):
         state = self._state
         output_count = len(res) if isinstance(res, (List, Tuple)) else 1
         if output_count not in (1, 2):
-            raise RuntimeError(
-                f"[DiTBlockCache] The output count must be 1 or 2, but got {output_count}."
-            )
+            raise RuntimeError(f"[DiTBlockCache] The output count must be 1 or 2, but got {output_count}.")
 
         is_range_start = self._block_index == self._block_start
         is_range_end = self._block_index == (self._block_end - 1)
@@ -92,18 +88,14 @@ class DiTBlockCache(torch.nn.Module):
             return
 
         if state.range_hidden is None:
-            raise RuntimeError(
-                "[DiTBlockCache] Missing cache range input for hidden_states."
-            )
+            raise RuntimeError("[DiTBlockCache] Missing cache range input for hidden_states.")
 
         if output_count == 2:
             hidden_states, encoder_hidden_states = res
             if hidden_states is None or encoder_hidden_states is None:
                 raise RuntimeError("[DiTBlockCache] Cache function output is None.")
             if state.range_encoder is None:
-                raise ValueError(
-                    "[DiTBlockCache] 'encoder_hidden_states' is required when output count is 2."
-                )
+                raise ValueError("[DiTBlockCache] 'encoder_hidden_states' is required when output count is 2.")
             state.delta_hidden = hidden_states - state.range_hidden
             state.delta_encoder = encoder_hidden_states - state.range_encoder
             return

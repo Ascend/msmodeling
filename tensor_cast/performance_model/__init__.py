@@ -67,9 +67,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     return properties
 
 
-def _mm_properties_helper(
-    op_invoke_info: OpInvokeInfo, mat1, mat2, bias
-) -> OpInvokeInfo.PerformanceProperties:
+def _mm_properties_helper(op_invoke_info: OpInvokeInfo, mat1, mat2, bias) -> OpInvokeInfo.PerformanceProperties:
     # Get the logical dimensions of the operation.
     # mat1 is (M, K).
     m = mat1.size(0)
@@ -93,9 +91,7 @@ def _mm_properties_helper(
     properties.compute_ops[mat1.dtype] = OpInvokeInfo.ComputeOps()
     properties.compute_ops[mat1.dtype].mma_ops = matmul_ops
     if bias is not None:
-        compute_ops = properties.compute_ops.setdefault(
-            bias.dtype, OpInvokeInfo.ComputeOps()
-        )
+        compute_ops = properties.compute_ops.setdefault(bias.dtype, OpInvokeInfo.ComputeOps())
         compute_ops.gp_ops = bias_ops
         properties.compute_ops[bias.dtype] = compute_ops
 
@@ -105,9 +101,7 @@ def _mm_properties_helper(
 @OpInvokeInfo.register_op_properties(torch.ops.aten.mm.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     assert len(op_invoke_info.args) == 2
-    return _mm_properties_helper(
-        op_invoke_info, op_invoke_info.args[0], op_invoke_info.args[1], None
-    )
+    return _mm_properties_helper(op_invoke_info, op_invoke_info.args[0], op_invoke_info.args[1], None)
 
 
 def _static_quant_linear_properties_helper(
@@ -171,24 +165,18 @@ def _static_quant_linear_properties_helper(
     properties.compute_ops[x.dtype].mma_ops = matmul_ops
     if is_int4:
         # TODO(jgong5): use fp32 flops for int4->int8, should use something more accurate
-        compute_ops = properties.compute_ops.setdefault(
-            torch.float32, OpInvokeInfo.ComputeOps()
-        )
+        compute_ops = properties.compute_ops.setdefault(torch.float32, OpInvokeInfo.ComputeOps())
         compute_ops.gp_ops = dequant_ops
         properties.compute_ops[torch.float32] = OpInvokeInfo.ComputeOps()
     if bias is not None:
-        compute_ops = properties.compute_ops.setdefault(
-            bias.dtype, OpInvokeInfo.ComputeOps()
-        )
+        compute_ops = properties.compute_ops.setdefault(bias.dtype, OpInvokeInfo.ComputeOps())
         compute_ops.gp_ops = bias_ops
         properties.compute_ops[bias.dtype] = compute_ops
 
     return properties
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.static_quant_linear_int4.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.static_quant_linear_int4.default)
 def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
@@ -197,9 +185,7 @@ def _(
     w = op_invoke_info.args[1]
     w_offset = op_invoke_info.args[3] if len(op_invoke_info.args) > 3 else None
     bias = op_invoke_info.args[6] if len(op_invoke_info.args) > 6 else None
-    return _static_quant_linear_properties_helper(
-        op_invoke_info, x, w, w_offset, bias, is_int4=True
-    )
+    return _static_quant_linear_properties_helper(op_invoke_info, x, w, w_offset, bias, is_int4=True)
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.static_quant_linear.default)
@@ -211,9 +197,7 @@ def _(
     w = op_invoke_info.args[1]
     w_offset = op_invoke_info.args[3] if len(op_invoke_info.args) > 3 else None
     bias = op_invoke_info.args[6] if len(op_invoke_info.args) > 6 else None
-    return _static_quant_linear_properties_helper(
-        op_invoke_info, x, w, w_offset, bias, is_int4=False
-    )
+    return _static_quant_linear_properties_helper(op_invoke_info, x, w, w_offset, bias, is_int4=False)
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.fp8_linear.default)
@@ -225,9 +209,7 @@ def _(
     x = op_invoke_info.args[0]
     w = op_invoke_info.args[1]
     bias = op_invoke_info.args[4] if len(op_invoke_info.args) > 4 else None
-    return _static_quant_linear_properties_helper(
-        op_invoke_info, x, w, None, bias, is_int4=False
-    )
+    return _static_quant_linear_properties_helper(op_invoke_info, x, w, None, bias, is_int4=False)
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.aten.embedding.default)
@@ -238,9 +220,7 @@ def _(
     weight = op_invoke_info.args[0]
     indices = op_invoke_info.args[1]
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
-    properties.memory_read_bytes += (
-        bytes_of_tensor(indices, weight.dtype) * weight.shape[-1]
-    )
+    properties.memory_read_bytes += bytes_of_tensor(indices, weight.dtype) * weight.shape[-1]
     return properties
 
 
@@ -253,9 +233,7 @@ def _(
     dim = op_invoke_info.args[1]
     index = op_invoke_info.args[2]
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
-    properties.memory_read_bytes += (
-        bytes_of_tensor(input) * index.numel() / input.shape[dim]
-    )
+    properties.memory_read_bytes += bytes_of_tensor(input) * index.numel() / input.shape[dim]
     return properties
 
 
@@ -269,9 +247,7 @@ def _(
     kv_cache = op_invoke_info.args[2]
 
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={2})
-    properties.memory_write_bytes += bytes_of_tensor(
-        key, kv_cache.dtype
-    ) + bytes_of_tensor(value, kv_cache.dtype)
+    properties.memory_write_bytes += bytes_of_tensor(key, kv_cache.dtype) + bytes_of_tensor(value, kv_cache.dtype)
     return properties
 
 
@@ -290,9 +266,7 @@ def _attention_properties_helper(
         # this product is the same for every sequence, and the total across the batch is:
         # batch_size * query_len_per_seq * key_len_per_seq.
         # This gives a measure of the total QK^T and Score*V interactions.
-        assert block_table is None, (
-            "4D query implies no KV cache; block_table must be None"
-        )
+        assert block_table is None, "4D query implies no KV cache; block_table must be None"
         batch_size, query_len_per_seq, num_q_heads, head_size = query.size()
         assert key.ndim == 4, "key size must be 4"
         _, key_len_per_seq, _, _ = key.size()
@@ -303,9 +277,7 @@ def _attention_properties_helper(
         assert hidden_size % head_size == 0
         num_q_heads = hidden_size // head_size
 
-        context_len_product_sum = torch.sum(
-            query_lens.to(seq_lens.dtype) * seq_lens
-        ).item()
+        context_len_product_sum = torch.sum(query_lens.to(seq_lens.dtype) * seq_lens).item()
 
     # 1. First Batched Matrix Multiplication (BMM): Q @ K^T
     # For each query head, this is a sum of (num_tokens_per_seq * seq_len) dot products,
@@ -328,20 +300,14 @@ def _attention_properties_helper(
     if block_table is None:
         properties = op_invoke_info.get_memory_access_properties()
     else:
-        properties = op_invoke_info.get_memory_access_properties(
-            exclude_input_ids={1, 2}
-        )
+        properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={1, 2})
         properties.memory_read_bytes += torch.sum(
             seq_lens * 2 * bytes_of_elements(key.size(-1) * key.size(-2), key.dtype)
         ).item()
 
-    compute_ops = properties.compute_ops.setdefault(
-        query.dtype, OpInvokeInfo.ComputeOps()
-    )
+    compute_ops = properties.compute_ops.setdefault(query.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = bmm1_ops + bmm2_ops
-    compute_ops = properties.compute_ops.setdefault(
-        softmax_dtype, OpInvokeInfo.ComputeOps()
-    )
+    compute_ops = properties.compute_ops.setdefault(softmax_dtype, OpInvokeInfo.ComputeOps())
     compute_ops.gp_ops = softmax_ops
 
     return properties
@@ -429,15 +395,11 @@ def _linear_attention_common_ops(
         + value_dim * hidden_size * 2
     )
 
-    conv_gp_ops = num_tokens * conv_dim * conv_kernel_size * 2 + _elementwise_silu_ops(
-        num_tokens * conv_dim
-    )
+    conv_gp_ops = num_tokens * conv_dim * conv_kernel_size * 2 + _elementwise_silu_ops(num_tokens * conv_dim)
     beta_gp_ops = _elementwise_sigmoid_ops(num_tokens * num_v_heads)
 
     # g = -exp(A_log.float()) * softplus(a.float() + dt_bias)
-    g_gp_ops = num_v_heads + num_tokens * num_v_heads * (
-        1 + _elementwise_softplus_ops(1) + 1 + 1
-    )
+    g_gp_ops = num_v_heads + num_tokens * num_v_heads * (1 + _elementwise_softplus_ops(1) + 1 + 1)
 
     gated_rmsnorm_gp_ops = (
         _rmsnorm_ops(num_tokens, value_dim)
@@ -471,19 +433,11 @@ def _linear_attention_chunk_gated_delta_ops(
 
     intra_chunk_mma_ops = total_chunk_pairs * (head_k_dim * 4 + head_v_dim * 2)
     inter_chunk_mma_ops = (
-        total_chunk_pairs * (head_k_dim + head_v_dim) * 2
-        + total_positions * head_k_dim * head_v_dim * 6
+        total_chunk_pairs * (head_k_dim + head_v_dim) * 2 + total_positions * head_k_dim * head_v_dim * 6
     )
 
     qk_l2norm_gp_ops = _l2norm_ops(valid_positions, head_k_dim) * 2
-    prefix_correction_gp_ops = (
-        batch_heads
-        * num_chunks
-        * (chunk_size - 1)
-        * chunk_size
-        * (2 * chunk_size - 1)
-        // 3
-    )
+    prefix_correction_gp_ops = batch_heads * num_chunks * (chunk_size - 1) * chunk_size * (2 * chunk_size - 1) // 3
 
     # After the explicit float32 cast in torch_chunk_gated_delta_rule, the rest of
     # the recurrence, exponentials, cumsums, masking, and gated updates run in fp32.
@@ -581,17 +535,13 @@ def _(
             attn_mma_ops,
             hidden_gp_ops,
             fp32_gp_ops,
-        ) = _linear_attention_recurrent_gated_delta_ops(
-            batch_size, seq_len, num_v_heads, head_k_dim, head_v_dim
-        )
+        ) = _linear_attention_recurrent_gated_delta_ops(batch_size, seq_len, num_v_heads, head_k_dim, head_v_dim)
     else:
         (
             attn_mma_ops,
             hidden_gp_ops,
             fp32_gp_ops,
-        ) = _linear_attention_chunk_gated_delta_ops(
-            batch_size, seq_len, num_v_heads, head_k_dim, head_v_dim
-        )
+        ) = _linear_attention_chunk_gated_delta_ops(batch_size, seq_len, num_v_heads, head_k_dim, head_v_dim)
 
     _accumulate_compute_ops(
         properties,
@@ -617,14 +567,10 @@ def _(
     key = op_invoke_info.args[1]
     request_total_seq_lens = op_invoke_info.args[6]
     query_lens = op_invoke_info.args[7]
-    query_lens, request_total_seq_lens = (
-        _normalize_query_lens_and_request_total_seq_lens(
-            query, query_lens, request_total_seq_lens
-        )
+    query_lens, request_total_seq_lens = _normalize_query_lens_and_request_total_seq_lens(
+        query, query_lens, request_total_seq_lens
     )
-    return _attention_properties_helper(
-        op_invoke_info, query, key, request_total_seq_lens, query_lens, query.dtype
-    )
+    return _attention_properties_helper(op_invoke_info, query, key, request_total_seq_lens, query_lens, query.dtype)
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.attention_quant.default)
@@ -640,10 +586,8 @@ def _(
         op_invoke_info.args[8], torch.tensor(1.0)
     )
     out_dtype = op_invoke_info.args[14]
-    query_lens, request_total_seq_lens = (
-        _normalize_query_lens_and_request_total_seq_lens(
-            query, query_lens, request_total_seq_lens
-        )
+    query_lens, request_total_seq_lens = _normalize_query_lens_and_request_total_seq_lens(
+        query, query_lens, request_total_seq_lens
     )
     if out_dtype is None or out_dtype == query.dtype:
         # use half as default softmax dtype
@@ -716,9 +660,9 @@ def _(
     kv_cache = op_invoke_info.args[2]
 
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={2})
-    properties.memory_write_bytes += bytes_of_tensor(
-        kv_c_normed, dtype=kv_cache.dtype
-    ) + bytes_of_tensor(k_rot, dtype=kv_cache.dtype)
+    properties.memory_write_bytes += bytes_of_tensor(kv_c_normed, dtype=kv_cache.dtype) + bytes_of_tensor(
+        k_rot, dtype=kv_cache.dtype
+    )
     return properties
 
 
@@ -773,13 +717,9 @@ def _mlapo_properties_helper(
     total_gp_ops += op2_ops + op4_ops + op6_ops + op7_ops
 
     properties = op_invoke_info.get_memory_access_properties()
-    compute_ops = properties.compute_ops.setdefault(
-        kv_a_proj_weight.dtype, OpInvokeInfo.ComputeOps()
-    )
+    compute_ops = properties.compute_ops.setdefault(kv_a_proj_weight.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops += total_mma_ops
-    compute_ops = properties.compute_ops.setdefault(
-        hidden_states.dtype, OpInvokeInfo.ComputeOps()
-    )
+    compute_ops = properties.compute_ops.setdefault(hidden_states.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.gp_ops += total_gp_ops
     return properties
 
@@ -857,14 +797,7 @@ def _(
         # QDQ for kv_a_proj
         quant3_ops = num_tokens * hidden_size * qdq_op_factor3
         dequant3_ops = hidden_size * (kv_lora_rank + qk_rope_head_dim) * qdq_op_factor3
-    total_quant_dequant_ops = (
-        quant1_ops
-        + dequant1_ops
-        + quant2_ops
-        + dequant2_ops
-        + quant3_ops
-        + dequant3_ops
-    )
+    total_quant_dequant_ops = quant1_ops + dequant1_ops + quant2_ops + dequant2_ops + quant3_ops + dequant3_ops
     _accumulate_compute_ops(
         properties,
         hidden_states.dtype,
@@ -935,9 +868,7 @@ def _multihead_latent_attention_properties_helper(
             if sparse_topk is not None
             else prefill_request_total_seq_lens
         )
-        prefill_context_sum = torch.sum(
-            prefill_num_tokens_per_seq.to(prefill_attn_len.dtype) * prefill_attn_len
-        ).item()
+        prefill_context_sum = torch.sum(prefill_num_tokens_per_seq.to(prefill_attn_len.dtype) * prefill_attn_len).item()
 
         # Op 2: Score calculation: `q @ K`
         prefill_op2_ops = prefill_context_sum * num_heads * q_head_dim * 2
@@ -965,21 +896,15 @@ def _multihead_latent_attention_properties_helper(
             if sparse_topk is not None
             else decode_request_total_seq_lens
         )
-        decode_context_sum = torch.sum(
-            decode_num_tokens_per_seq.to(decode_attn_len.dtype) * decode_attn_len
-        ).item()
+        decode_context_sum = torch.sum(decode_num_tokens_per_seq.to(decode_attn_len.dtype) * decode_attn_len).item()
 
         # The decode formula is: softmax(q_nope @ W_UK_T @ k_cache) @ v_cache @ W_UV
         # Op 1: `q_nope @ W_UK_T`
         # Shapes: (num_decode_tokens, num_heads, qk_nope_head_dim) @ (num_heads, qk_nope_head_dim, kv_lora_rank)
-        decode_op1_ops = (
-            num_decode_tokens * num_heads * qk_nope_head_dim * kv_lora_rank * 2
-        )
+        decode_op1_ops = num_decode_tokens * num_heads * qk_nope_head_dim * kv_lora_rank * 2
 
         # Op 2: `(result_op1, q_rope) @ kv_cache`
-        decode_op2_ops = (
-            decode_context_sum * num_heads * (kv_lora_rank + qk_rope_head_dim) * 2
-        )
+        decode_op2_ops = decode_context_sum * num_heads * (kv_lora_rank + qk_rope_head_dim) * 2
 
         # Op 3: Softmax
         decode_op3_ops = decode_context_sum * num_heads * 4
@@ -991,14 +916,10 @@ def _multihead_latent_attention_properties_helper(
         # Shapes: (num_decode_tokens, num_heads, kv_lora_rank) @ (num_heads, kv_lora_rank, v_head_dim)
         decode_op5_ops = num_decode_tokens * num_heads * kv_lora_rank * v_head_dim * 2
 
-        total_fma_ops += (
-            decode_op1_ops + decode_op2_ops + decode_op4_ops + decode_op5_ops
-        )
+        total_fma_ops += decode_op1_ops + decode_op2_ops + decode_op4_ops + decode_op5_ops
         total_gp_ops += decode_op3_ops
 
-    properties = op_invoke_info.get_memory_access_properties(
-        exclude_input_ids=exclude_input_ids
-    )  # exclude kv_cache
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids=exclude_input_ids)  # exclude kv_cache
 
     # Estimate memory read from the KV Cache.
     # The size of a cached entry is (kv_lora_rank + qk_rope_head_dim).
@@ -1008,30 +929,20 @@ def _multihead_latent_attention_properties_helper(
             request_total_seq_lens,
             torch.tensor(sparse_topk, device=request_total_seq_lens.device),
         )
-        actual_request_total_seq_lens = torch.where(
-            is_decode, decode_request_total_seq_lens, request_total_seq_lens
-        )
-        properties.memory_read_bytes += (
-            torch.sum(actual_request_total_seq_lens).item() * cache_entry_size
-        )
+        actual_request_total_seq_lens = torch.where(is_decode, decode_request_total_seq_lens, request_total_seq_lens)
+        properties.memory_read_bytes += torch.sum(actual_request_total_seq_lens).item() * cache_entry_size
     else:
-        properties.memory_read_bytes += torch.sum(
-            request_total_seq_lens * cache_entry_size
-        ).item()
+        properties.memory_read_bytes += torch.sum(request_total_seq_lens * cache_entry_size).item()
 
     compute_ops = properties.compute_ops.setdefault(q.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = total_fma_ops
-    compute_ops = properties.compute_ops.setdefault(
-        softmax_dtype, OpInvokeInfo.ComputeOps()
-    )
+    compute_ops = properties.compute_ops.setdefault(softmax_dtype, OpInvokeInfo.ComputeOps())
     compute_ops.gp_ops = total_gp_ops
 
     return properties
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.multihead_latent_attention.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.multihead_latent_attention.default)
 def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
@@ -1069,8 +980,7 @@ def _calculate_mla_quant_ops(
         prefill_request_total_seq_lens = request_total_seq_lens[is_prefill]
         prefill_num_tokens_per_seq = num_tokens_per_seq[is_prefill]
         prefill_context_sum = torch.sum(
-            prefill_num_tokens_per_seq.to(prefill_request_total_seq_lens.dtype)
-            * prefill_request_total_seq_lens
+            prefill_num_tokens_per_seq.to(prefill_request_total_seq_lens.dtype) * prefill_request_total_seq_lens
         ).item()
 
         # 1. Quantization of kv_c_normed @ kv_b_proj output
@@ -1091,8 +1001,7 @@ def _calculate_mla_quant_ops(
         decode_request_total_seq_lens = request_total_seq_lens[is_decode]
         decode_num_tokens_per_seq = num_tokens_per_seq[is_decode]
         decode_context_sum = torch.sum(
-            decode_num_tokens_per_seq.to(decode_request_total_seq_lens.dtype)
-            * decode_request_total_seq_lens
+            decode_num_tokens_per_seq.to(decode_request_total_seq_lens.dtype) * decode_request_total_seq_lens
         ).item()
 
         # 1. Quantization of q @ W_UK_T output
@@ -1120,9 +1029,7 @@ def _calculate_mla_quant_ops(
     return total_quant_dequant_ops
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.multihead_latent_attention_quant.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.multihead_latent_attention_quant.default)
 def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
@@ -1144,9 +1051,7 @@ def _(
         softmax_dtype = out_dtype
 
     # Get base properties from helper
-    properties = _multihead_latent_attention_properties_helper(
-        op_invoke_info, softmax_dtype
-    )
+    properties = _multihead_latent_attention_properties_helper(op_invoke_info, softmax_dtype)
 
     # Extract dimensions (reuse logic instead of duplicating)
     num_heads = q.size(1)
@@ -1209,16 +1114,12 @@ def _(
 
     properties = op_invoke_info.get_memory_access_properties()
     for xi, wi, w_offseti, biasi in zip(x, w, w_offset, bias):
-        properties_i = _static_quant_linear_properties_helper(
-            op_invoke_info, xi, wi, w_offseti, biasi, is_int4=False
-        )
+        properties_i = _static_quant_linear_properties_helper(op_invoke_info, xi, wi, w_offseti, biasi, is_int4=False)
         properties.combine(properties_i, compute_only=True)
     return properties
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.grouped_matmul_quant_int4.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_quant_int4.default)
 def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
@@ -1231,9 +1132,7 @@ def _(
 
     properties = op_invoke_info.get_memory_access_properties()
     for xi, wi, w_offseti, biasi in zip(x, w, w_offset, bias):
-        properties_i = _static_quant_linear_properties_helper(
-            op_invoke_info, xi, wi, w_offseti, biasi, is_int4=True
-        )
+        properties_i = _static_quant_linear_properties_helper(op_invoke_info, xi, wi, w_offseti, biasi, is_int4=True)
         properties.combine(properties_i, compute_only=True)
     return properties
 
@@ -1249,9 +1148,7 @@ def _(
     assert len(x) == len(w) == len(bias)
     properties = op_invoke_info.get_memory_access_properties()
     for xi, wi, biasi in zip(x, w, bias):
-        properties_i = _static_quant_linear_properties_helper(
-            op_invoke_info, xi, wi, None, biasi, is_int4=False
-        )
+        properties_i = _static_quant_linear_properties_helper(op_invoke_info, xi, wi, None, biasi, is_int4=False)
         properties.combine(properties_i, compute_only=True)
     return properties
 
@@ -1267,9 +1164,7 @@ def _(
     assert len(x) == len(w) == len(bias)
     properties = op_invoke_info.get_memory_access_properties()
     for xi, wi, biasi in zip(x, w, bias):
-        properties_i = _static_quant_linear_properties_helper(
-            op_invoke_info, xi, wi, None, biasi, is_int4=True
-        )
+        properties_i = _static_quant_linear_properties_helper(op_invoke_info, xi, wi, None, biasi, is_int4=True)
         properties.combine(properties_i, compute_only=True)
     return properties
 
@@ -1310,9 +1205,7 @@ def _swiglu_fusion_properties_helper(
 
         # 1. Calculate MatMul Costs
         if mm_helper.__name__ == "_static_quant_linear_properties_helper":
-            props_i = mm_helper(
-                op_invoke_info, xi, wi, w_offseti, biasi, is_int4_weight
-            )
+            props_i = mm_helper(op_invoke_info, xi, wi, w_offseti, biasi, is_int4_weight)
         else:
             props_i = mm_helper(op_invoke_info, xi, wi, biasi)
 
@@ -1352,9 +1245,7 @@ def _swiglu_fusion_properties_helper(
     return properties
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.grouped_matmul_swiglu.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     # Args: (x, w, bias)
     return _swiglu_fusion_properties_helper(
@@ -1368,9 +1259,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     )
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     # Args: (x, w, w_scale, w_offset, x_scale, x_offset, bias, ...) -> offset=3, bias=6
     return _swiglu_fusion_properties_helper(
@@ -1384,9 +1273,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     )
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     # Args: offset=3, bias=6
     return _swiglu_fusion_properties_helper(
@@ -1400,9 +1287,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     )
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     # Args: (x, w, w_scale, x_scale, bias, ...) -> bias=4, no offset
     return _swiglu_fusion_properties_helper(
@@ -1416,9 +1301,7 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     )
 
 
-@OpInvokeInfo.register_op_properties(
-    torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default
-)
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     # Args: bias=4, no offset
     return _swiglu_fusion_properties_helper(
@@ -1450,9 +1333,7 @@ def _(
         return OpInvokeInfo.PerformanceProperties()
 
     properties = op_invoke_info.get_memory_access_properties()
-    compute_ops = properties.compute_ops.setdefault(
-        input.dtype, OpInvokeInfo.ComputeOps()
-    )
+    compute_ops = properties.compute_ops.setdefault(input.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = bmm1
     return properties
 
@@ -1540,16 +1421,12 @@ def _(
         return OpInvokeInfo.PerformanceProperties()
 
     properties = op_invoke_info.get_memory_access_properties()
-    compute_ops = properties.compute_ops.setdefault(
-        input.dtype, OpInvokeInfo.ComputeOps()
-    )
+    compute_ops = properties.compute_ops.setdefault(input.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = total_flops
     return properties
 
 
-def _estimate_static_cost(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> float:
+def _estimate_static_cost(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> float:
     perf_properties = op_invoke_info.get_perf_properties()
     for dtype in DeviceProfile.DTYPES:
         if dtype in perf_properties.compute_ops:
@@ -1564,9 +1441,7 @@ def _estimate_static_cost(
 def _estimate_default_without_static_cost(
     op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
 ) -> PerformanceModel.Result:
-    if is_view_op(op_invoke_info.func) or is_noop_self_copy_op(
-        op_invoke_info.func, op_invoke_info.args
-    ):
+    if is_view_op(op_invoke_info.func) or is_noop_self_copy_op(op_invoke_info.func, op_invoke_info.args):
         return PerformanceModel.Result(0.0)
     perf_properties = op_invoke_info.get_perf_properties()
     # By default, we do not consider instruction-level parallelism when counting computation time
@@ -1577,10 +1452,7 @@ def _estimate_default_without_static_cost(
             compute_ops = perf_properties.compute_ops[dtype]
             if compute_ops.mma_ops > 0:
                 if dtype in device_profile.mma_ops:
-                    device_mma_ops = (
-                        device_profile.mma_ops[dtype]
-                        * device_profile.compute_efficiency
-                    )
+                    device_mma_ops = device_profile.mma_ops[dtype] * device_profile.compute_efficiency
                     mma_ops_time_s += compute_ops.mma_ops / device_mma_ops
                 else:
                     logger.warning(
@@ -1592,9 +1464,7 @@ def _estimate_default_without_static_cost(
             if compute_ops.gp_ops > 0:
                 if dtype in device_profile.gp_ops:
                     compute_ops = perf_properties.compute_ops[dtype]
-                    device_gp_ops = (
-                        device_profile.gp_ops[dtype] * device_profile.compute_efficiency
-                    )
+                    device_gp_ops = device_profile.gp_ops[dtype] * device_profile.compute_efficiency
                     gp_ops_time_s += compute_ops.gp_ops / device_gp_ops
                 else:
                     logger.warning(
@@ -1604,15 +1474,11 @@ def _estimate_default_without_static_cost(
                         device_profile,
                     )
     compute_time_s = mma_ops_time_s + gp_ops_time_s
-    memory_bandwidth = (
-        device_profile.memory_bandwidth_bytes_ps * device_profile.memory_efficiency
-    )
+    memory_bandwidth = device_profile.memory_bandwidth_bytes_ps * device_profile.memory_efficiency
     memory_read_time_s = perf_properties.memory_read_bytes / memory_bandwidth
     memory_write_time_s = perf_properties.memory_write_bytes / memory_bandwidth
     memory_readwrite_time_s = perf_properties.memory_readwrite_bytes / memory_bandwidth
-    memory_access_time_s = (
-        memory_read_time_s + memory_write_time_s + memory_readwrite_time_s
-    )
+    memory_access_time_s = memory_read_time_s + memory_write_time_s + memory_readwrite_time_s
     time_s = max(compute_time_s, memory_access_time_s)
     result = PerformanceModel.Result(
         execution_time_s=time_s,
@@ -1630,9 +1496,7 @@ def _estimate_default_without_static_cost(
     return result
 
 
-def _estimate_default(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> PerformanceModel.Result:
+def _estimate_default(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
     result = _estimate_default_without_static_cost(op_invoke_info, device_profile)
     if result.execution_time_s == 0:
         return result
@@ -1655,9 +1519,7 @@ def _estimate_internal_multistream_anchor(
 @register_op_estimator(torch.ops.tensor_cast.all_gather.default, None)
 @register_op_estimator(torch.ops.tensor_cast.reduce_scatter.default, None)
 @register_op_estimator(torch.ops.tensor_cast.all_to_all.default, None)
-def _estimate_collective_comm(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> PerformanceModel.Result:
+def _estimate_collective_comm(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
     from .comm_analytic import CommAnalyticModel
 
     result = _estimate_default_without_static_cost(op_invoke_info, device_profile)
@@ -1683,14 +1545,8 @@ def _combine_linear_all_reduce_results(
     stats_prefix: str,
     time_key: str,
 ) -> PerformanceModel.Result:
-    result = PerformanceModel.Result(
-        linear_result.execution_time_s, dict(linear_result.statistics)
-    )
-    result.combine(
-        PerformanceModel.Result(
-            comm_result.execution_time_s, dict(comm_result.statistics)
-        )
-    )
+    result = PerformanceModel.Result(linear_result.execution_time_s, dict(linear_result.statistics))
+    result.combine(PerformanceModel.Result(comm_result.execution_time_s, dict(comm_result.statistics)))
     result.statistics = {
         "overlap_model": overlap_label,
         time_key: linear_result.execution_time_s,
@@ -1702,9 +1558,7 @@ def _combine_linear_all_reduce_results(
 
 
 @register_op_estimator(torch.ops.tensor_cast.matmul_all_reduce.default, None)
-def _estimate_matmul_all_reduce(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> PerformanceModel.Result:
+def _estimate_matmul_all_reduce(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
     mat1 = op_invoke_info.args[0]
     mat2 = op_invoke_info.args[1]
     rank = op_invoke_info.args[3]
@@ -1726,14 +1580,8 @@ def _estimate_matmul_all_reduce(
     )
     comm_result = _estimate_collective_comm(comm_info, device_profile)
 
-    result = PerformanceModel.Result(
-        mm_result.execution_time_s, dict(mm_result.statistics)
-    )
-    result.combine(
-        PerformanceModel.Result(
-            comm_result.execution_time_s, dict(comm_result.statistics)
-        )
-    )
+    result = PerformanceModel.Result(mm_result.execution_time_s, dict(mm_result.statistics))
+    result.combine(PerformanceModel.Result(comm_result.execution_time_s, dict(comm_result.statistics)))
     result.statistics = {
         "overlap_model": "max(matmul, all_reduce)",
         "matmul_time_s": mm_result.execution_time_s,
@@ -1744,9 +1592,7 @@ def _estimate_matmul_all_reduce(
     return result
 
 
-@register_op_estimator(
-    torch.ops.tensor_cast.static_quant_linear_all_reduce.default, None
-)
+@register_op_estimator(torch.ops.tensor_cast.static_quant_linear_all_reduce.default, None)
 def _estimate_static_quant_linear_all_reduce(
     op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
 ) -> PerformanceModel.Result:
@@ -1788,9 +1634,7 @@ def _estimate_static_quant_linear_all_reduce(
     )
 
 
-@register_op_estimator(
-    torch.ops.tensor_cast.static_quant_linear_int4_all_reduce.default, None
-)
+@register_op_estimator(torch.ops.tensor_cast.static_quant_linear_int4_all_reduce.default, None)
 def _estimate_static_quant_linear_int4_all_reduce(
     op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
 ) -> PerformanceModel.Result:
@@ -1940,14 +1784,10 @@ def _compute_time_from_properties(
         if dtype in properties.compute_ops:
             compute_ops = properties.compute_ops[dtype]
             if compute_ops.mma_ops > 0 and dtype in device_profile.mma_ops:
-                device_mma_ops = (
-                    device_profile.mma_ops[dtype] * device_profile.compute_efficiency
-                )
+                device_mma_ops = device_profile.mma_ops[dtype] * device_profile.compute_efficiency
                 compute_time_s += compute_ops.mma_ops / device_mma_ops
             if compute_ops.gp_ops > 0 and dtype in device_profile.gp_ops:
-                device_gp_ops = (
-                    device_profile.gp_ops[dtype] * device_profile.compute_efficiency
-                )
+                device_gp_ops = device_profile.gp_ops[dtype] * device_profile.compute_efficiency
                 compute_time_s += compute_ops.gp_ops / device_gp_ops
     return compute_time_s
 
@@ -2012,8 +1852,7 @@ def _estimate_dfc_common(
     # FLOPs = sum(M_i * N * K * 2) = M_total * N * K * 2 when all experts share (N,K).
     tokens_per_expert = max(1, M_total // num_experts) if num_experts > 0 else M_total
     dummy_gmm1_x_list = [
-        torch.empty((tokens_per_expert, hidden_size), dtype=weight_dtype, device="meta")
-        for _ in range(num_experts)
+        torch.empty((tokens_per_expert, hidden_size), dtype=weight_dtype, device="meta") for _ in range(num_experts)
     ]
 
     # --- GMM1 (gate_up_proj + SwiGLU) ---
@@ -2025,20 +1864,14 @@ def _estimate_dfc_common(
 
     # --- GMM2 (down_proj) ---
     gmm2_first_w_list = gmm2_w_args[0]
-    gmm2_first_w = (
-        gmm2_first_w_list[0]
-        if isinstance(gmm2_first_w_list, (list, tuple))
-        else gmm2_first_w_list
-    )
+    gmm2_first_w = gmm2_first_w_list[0] if isinstance(gmm2_first_w_list, (list, tuple)) else gmm2_first_w_list
     gmm2_weight_dtype = gmm2_first_w.dtype if gmm2_first_w is not None else weight_dtype
     # Derive logical K from weight shape. For INT4 packed weights the physical
     # shape[0] is K/pack_factor; use the same is_int4 + pack_factor logic as
     # _static_quant_linear_properties_helper (L120-139) for consistency.
     is_int4 = gmm2_target in _INT4_GMM_TARGETS
     gmm2_K = _logical_weight_k(gmm2_first_w, is_int4)
-    gmm2_num_experts = (
-        len(gmm2_first_w_list) if isinstance(gmm2_first_w_list, (list, tuple)) else 1
-    )
+    gmm2_num_experts = len(gmm2_first_w_list) if isinstance(gmm2_first_w_list, (list, tuple)) else 1
     dummy_gmm2_x_list = [
         torch.empty((tokens_per_expert, gmm2_K), dtype=gmm2_weight_dtype, device="meta")
         for _ in range(gmm2_num_experts)
@@ -2076,9 +1909,7 @@ def _estimate_dfc_common(
         elif isinstance(a, torch.Tensor):
             memory_bytes += bytes_of_tensor(a)
 
-    memory_bandwidth = (
-        device_profile.memory_bandwidth_bytes_ps * device_profile.memory_efficiency
-    )
+    memory_bandwidth = device_profile.memory_bandwidth_bytes_ps * device_profile.memory_efficiency
     memory_time_s = memory_bytes / memory_bandwidth
 
     # --- Communication: 2 x all_to_all (dispatch + combine) ---
@@ -2093,9 +1924,7 @@ def _estimate_dfc_common(
         # weight_dtype matches the dispatch dtype for all current variants.
         # TODO: if a future variant breaks this assumption, add explicit
         # comm_dtype parameter to _estimate_dfc_common.
-        routed_x = torch.empty(
-            (M_total, hidden_size), dtype=weight_dtype, device="meta"
-        )
+        routed_x = torch.empty((M_total, hidden_size), dtype=weight_dtype, device="meta")
 
         comm_info = OpInvokeInfo(
             torch.ops.tensor_cast.all_to_all.default,
@@ -2129,12 +1958,8 @@ def _estimate_dfc_common(
 
 
 @register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine.default, None)
-def _estimate_dfc_bf16(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> PerformanceModel.Result:
-    (x, expert_indices, gmm1_w, gmm1_bias, gmm2_w, gmm2_bias, rank, rank_group) = (
-        op_invoke_info.args
-    )
+def _estimate_dfc_bf16(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
+    (x, expert_indices, gmm1_w, gmm1_bias, gmm2_w, gmm2_bias, rank, rank_group) = op_invoke_info.args
     return _estimate_dfc_common(
         op_invoke_info,
         device_profile,
@@ -2150,9 +1975,7 @@ def _estimate_dfc_bf16(
 
 
 @register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine_quant.default, None)
-def _estimate_dfc_quant(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> PerformanceModel.Result:
+def _estimate_dfc_quant(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
     (
         x,
         ei,
@@ -2187,12 +2010,8 @@ def _estimate_dfc_quant(
     )
 
 
-@register_op_estimator(
-    torch.ops.tensor_cast.dispatch_ffn_combine_quant_int4.default, None
-)
-def _estimate_dfc_quant_int4(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> PerformanceModel.Result:
+@register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine_quant_int4.default, None)
+def _estimate_dfc_quant_int4(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
     (
         x,
         ei,
@@ -2228,9 +2047,7 @@ def _estimate_dfc_quant_int4(
 
 
 @register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine_fp8.default, None)
-def _estimate_dfc_fp8(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> PerformanceModel.Result:
+def _estimate_dfc_fp8(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
     (
         x,
         ei,
@@ -2262,9 +2079,7 @@ def _estimate_dfc_fp8(
 
 
 @register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine_mxfp4.default, None)
-def _estimate_dfc_mxfp4(
-    op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
-) -> PerformanceModel.Result:
+def _estimate_dfc_mxfp4(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
     (
         x,
         ei,
@@ -2351,20 +2166,14 @@ def _estimate_dsa_indexer_breakdown(
     # 6) score work.  The reference implementation computes a per-head score tensor
     #    against the active cache, then combines those head scores with the learned
     #    routing weights into one index score.
-    max_request_total_seq_len = (
-        int(request_total_seq_lens.max().item())
-        if request_total_seq_lens is not None
-        else None
-    )
+    max_request_total_seq_len = int(request_total_seq_lens.max().item()) if request_total_seq_lens is not None else None
     active_cache_len = max_request_total_seq_len or seq_len
     qk_index_mma = 2 * batch * seq_len * num_heads * active_cache_len * head_dim
 
     # Cache traffic uses the logical cache extent when runtime lengths are available;
     # otherwise it falls back to the preallocated cache buffer length.
     cache_len = max_request_total_seq_len or indexer_cache.size(1)
-    cache_rw_bytes = (
-        batch * cache_len * indexer_cache.size(-1) * indexer_cache.element_size()
-    )
+    cache_rw_bytes = batch * cache_len * indexer_cache.size(-1) * indexer_cache.element_size()
     scale_cache_rw_bytes = 0
     if fp8_mode:
         # The fp8 path writes both the fp8 key cache and the accompanying scale cache.
@@ -2441,11 +2250,7 @@ def _(
     _accumulate_compute_ops(
         properties,
         hidden_states.dtype,
-        mma_ops=(
-            breakdown["q_proj_mma"]
-            + breakdown["k_proj_mma"]
-            + breakdown["weights_proj_mma"]
-        ),
+        mma_ops=(breakdown["q_proj_mma"] + breakdown["k_proj_mma"] + breakdown["weights_proj_mma"]),
         gp_ops=(
             breakdown["rope_gp"]
             + breakdown["rotate_activation_gp"]
@@ -2463,20 +2268,14 @@ def _(
         properties,
         score_dtype,
         mma_ops=breakdown["qk_index_mma"],
-        gp_ops=(
-            breakdown["head_relu_gp"]
-            + breakdown["head_q_scale_mul_gp"]
-            + breakdown["head_k_scale_mul_gp"]
-        ),
+        gp_ops=(breakdown["head_relu_gp"] + breakdown["head_q_scale_mul_gp"] + breakdown["head_k_scale_mul_gp"]),
     )
 
     # The cache itself is dense, and the reference kernel also maintains a separate
     # scale cache in fp8 mode.  The local wrapper only exposes one cache tensor, so we
     # count the scale-cache bytes as read/write traffic as well to keep the roofline
     # bound conservative.
-    properties.memory_readwrite_bytes += (
-        breakdown["cache_rw_bytes"] + breakdown["scale_cache_rw_bytes"]
-    )
+    properties.memory_readwrite_bytes += breakdown["cache_rw_bytes"] + breakdown["scale_cache_rw_bytes"]
     return properties
 
 

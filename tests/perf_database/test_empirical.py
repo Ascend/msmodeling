@@ -49,9 +49,7 @@ def test_empirical_uses_datasource_when_hit():
     device = _make_mock_device_profile()
     fallback = MagicMock(spec=PerformanceModel)
     fallback.process_op.return_value = PerformanceModel.Result(execution_time_s=200e-6)
-    model = EmpiricalPerformanceModel(
-        device, data_source=HitDataSource(), fallback_model=fallback
-    )
+    model = EmpiricalPerformanceModel(device, data_source=HitDataSource(), fallback_model=fallback)
     result = model.process_op(_make_mock_op_invoke_info())
     assert abs(result.execution_time_s - 45.3e-6) < 1e-12
     assert result.statistics.get("source") == "MEASURED"
@@ -96,9 +94,7 @@ def test_hit_with_shape_match_info_populates_statistics():
     device = _make_mock_device_profile()
     fallback = MagicMock(spec=PerformanceModel)
     fallback.process_op.return_value = PerformanceModel.Result(execution_time_s=200e-6)
-    model = EmpiricalPerformanceModel(
-        device, data_source=ShapeHitDataSource(), fallback_model=fallback
-    )
+    model = EmpiricalPerformanceModel(device, data_source=ShapeHitDataSource(), fallback_model=fallback)
     result = model.process_op(_make_mock_op_invoke_info())
     assert result.statistics["kernel_shapes"] == "[[128, 5120]]"
     assert result.statistics["shape_match_rule"] == "padding"
@@ -128,9 +124,7 @@ def test_hit_with_sub_kernel_shapes_populates_statistics():
     device = _make_mock_device_profile()
     fallback = MagicMock(spec=PerformanceModel)
     fallback.process_op.return_value = PerformanceModel.Result(execution_time_s=200e-6)
-    model = EmpiricalPerformanceModel(
-        device, data_source=CompositeHitDataSource(), fallback_model=fallback
-    )
+    model = EmpiricalPerformanceModel(device, data_source=CompositeHitDataSource(), fallback_model=fallback)
     result = model.process_op(_make_mock_op_invoke_info())
     assert "sub_kernel_shapes" in result.statistics
     parsed = json.loads(result.statistics["sub_kernel_shapes"])
@@ -144,9 +138,7 @@ def test_miss_sets_shape_match_rule_analytic():
     device = _make_mock_device_profile()
     fallback = MagicMock(spec=PerformanceModel)
     fallback.process_op.return_value = PerformanceModel.Result(execution_time_s=100e-6)
-    model = EmpiricalPerformanceModel(
-        device, data_source=MissDataSource(), fallback_model=fallback
-    )
+    model = EmpiricalPerformanceModel(device, data_source=MissDataSource(), fallback_model=fallback)
     result = model.process_op(_make_mock_op_invoke_info())
     assert result.statistics.get("shape_match_rule") == "analytic"
 
@@ -177,9 +169,7 @@ def test_interpolating_data_source_wraps_profiling():
     device = _make_mock_device_profile()
     fallback = MagicMock(spec=PerformanceModel)
     fallback.process_op.return_value = PerformanceModel.Result(execution_time_s=200e-6)
-    model = EmpiricalPerformanceModel(
-        device, data_source=wrapped_ds, fallback_model=fallback
-    )
+    model = EmpiricalPerformanceModel(device, data_source=wrapped_ds, fallback_model=fallback)
 
     result = model.process_op(_make_mock_op_invoke_info())
 

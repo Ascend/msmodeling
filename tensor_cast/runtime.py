@@ -28,15 +28,11 @@ def current_runtime():
 @dataclasses.dataclass
 class RuntimeEvent:
     op_invoke_info: OpInvokeInfo
-    perf_results: Dict[str, PerformanceModel.Result] = dataclasses.field(
-        default_factory=dict
-    )
+    perf_results: Dict[str, PerformanceModel.Result] = dataclasses.field(default_factory=dict)
     stream_id: int = 0
     dependency_token_ids: tuple[int, ...] = ()
     produced_token_ids: List[int] = dataclasses.field(default_factory=list)
-    memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = dataclasses.field(
-        default_factory=list
-    )
+    memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = dataclasses.field(default_factory=list)
 
 
 class Runtime(TorchDispatchMode):
@@ -54,13 +50,9 @@ class Runtime(TorchDispatchMode):
         memory_tracker: Optional[MemoryTracker] = None,
     ):
         super().__init__()
-        self.perf_models = (
-            perf_models if isinstance(perf_models, (list, tuple)) else [perf_models]
-        )
+        self.perf_models = perf_models if isinstance(perf_models, (list, tuple)) else [perf_models]
         self.perf_models = [
-            perf_model
-            if isinstance(perf_model, CachingPerformanceModel)
-            else CachingPerformanceModel(perf_model)
+            perf_model if isinstance(perf_model, CachingPerformanceModel) else CachingPerformanceModel(perf_model)
             for perf_model in self.perf_models
         ]
         self.device_profile = device_profile
@@ -83,9 +75,7 @@ class Runtime(TorchDispatchMode):
         kwargs = {} if kwargs is None else kwargs
 
         if not torch.compiler.is_compiling():
-            func_name = (
-                func.__qualname__ if hasattr(func, "__qualname__") else str(func)
-            )
+            func_name = func.__qualname__ if hasattr(func, "__qualname__") else str(func)
             start = time.perf_counter() if logger.isEnabledFor(logging.DEBUG) else None
             out = func(*args, **kwargs)
             if logger.isEnabledFor(logging.DEBUG):
@@ -108,22 +98,12 @@ class Runtime(TorchDispatchMode):
         region_id_to_op_invoke_infos = {}
         current_id = None
         for op_invoke_info in self.op_invoke_infos:
-            if (
-                op_invoke_info.func
-                == torch.ops.tensor_cast._internal_mark_region_begin.default
-            ):
-                assert current_id is None, (
-                    f"Already in region {current_id}, we do not support nested regions"
-                )
+            if op_invoke_info.func == torch.ops.tensor_cast._internal_mark_region_begin.default:
+                assert current_id is None, f"Already in region {current_id}, we do not support nested regions"
                 current_id = op_invoke_info.args[1]
-                assert current_id not in region_id_to_op_invoke_infos, (
-                    f"Duplicated region id {current_id} found"
-                )
+                assert current_id not in region_id_to_op_invoke_infos, f"Duplicated region id {current_id} found"
                 region_id_to_op_invoke_infos[current_id] = Region(op_invoke_info)
-            elif (
-                op_invoke_info.func
-                == torch.ops.tensor_cast._internal_mark_region_end.default
-            ):
+            elif op_invoke_info.func == torch.ops.tensor_cast._internal_mark_region_end.default:
                 current_id = op_invoke_info.args[1]
                 assert current_id in region_id_to_op_invoke_infos, (
                     f"Region end with id {current_id} not paired with a region begin"
@@ -131,27 +111,16 @@ class Runtime(TorchDispatchMode):
                 region_id_to_op_invoke_infos[current_id].finalize(op_invoke_info)
                 self.op_info_group.append(region_id_to_op_invoke_infos[current_id])
                 current_id = None
-            elif (
-                op_invoke_info.func
-                == torch.ops.tensor_cast._internal_copy_region.default
-            ):
-                assert current_id is None, (
-                    f"Already in region {current_id}, we do not support nested regions"
-                )
+            elif op_invoke_info.func == torch.ops.tensor_cast._internal_copy_region.default:
+                assert current_id is None, f"Already in region {current_id}, we do not support nested regions"
                 copy_id = op_invoke_info.args[1]
-                assert copy_id in region_id_to_op_invoke_infos, (
-                    f"Regioin {copy_id} not marked before copy"
-                )
+                assert copy_id in region_id_to_op_invoke_infos, f"Regioin {copy_id} not marked before copy"
                 self.op_info_group.append(
-                    region_id_to_op_invoke_infos[copy_id].shallow_copy(
-                        op_invoke_info.args[0], op_invoke_info.out
-                    )
+                    region_id_to_op_invoke_infos[copy_id].shallow_copy(op_invoke_info.args[0], op_invoke_info.out)
                 )
             else:
                 if current_id is not None:
-                    region_id_to_op_invoke_infos[current_id].op_invoke_infos.append(
-                        op_invoke_info
-                    )
+                    region_id_to_op_invoke_infos[current_id].op_invoke_infos.append(op_invoke_info)
                 else:
                     self.op_info_group.append(op_invoke_info)
 
@@ -181,9 +150,7 @@ class Runtime(TorchDispatchMode):
         if self._pending_wait_stream_id is None:
             return 0, (), []
         stream_id = self._pending_wait_stream_id
-        dependency_token_ids = self._dedup_token_ids(
-            self._pending_wait_dependency_token_ids
-        )
+        dependency_token_ids = self._dedup_token_ids(self._pending_wait_dependency_token_ids)
         memory_aliases = self._pending_wait_memory_aliases
         self._pending_wait_stream_id = None
         self._pending_wait_dependency_token_ids.clear()
@@ -196,14 +163,8 @@ class Runtime(TorchDispatchMode):
             stream_id = int(op_invoke_info.args[1])
         deps = op_invoke_info.args[2] if len(op_invoke_info.args) > 2 else []
         dep_token_ids = self._extract_tensor_token_ids(deps)
-        if (
-            self._pending_wait_stream_id is not None
-            and stream_id != self._pending_wait_stream_id
-        ):
-            raise RuntimeError(
-                f"Conflicting wait_and_bind stream ids "
-                f"({self._pending_wait_stream_id} vs. {stream_id})"
-            )
+        if self._pending_wait_stream_id is not None and stream_id != self._pending_wait_stream_id:
+            raise RuntimeError(f"Conflicting wait_and_bind stream ids ({self._pending_wait_stream_id} vs. {stream_id})")
         self._pending_wait_stream_id = stream_id
         self._pending_wait_dependency_token_ids.extend(dep_token_ids)
         if (
@@ -211,15 +172,11 @@ class Runtime(TorchDispatchMode):
             and isinstance(op_invoke_info.args[0], torch.Tensor)
             and isinstance(op_invoke_info.out, torch.Tensor)
         ):
-            self._pending_wait_memory_aliases.append(
-                (op_invoke_info.args[0], op_invoke_info.out)
-            )
+            self._pending_wait_memory_aliases.append((op_invoke_info.args[0], op_invoke_info.out))
 
     def _handle_record(self, op_invoke_info: OpInvokeInfo) -> None:
         if not self.event_list:
-            logger.warning(
-                "Ignoring _internal_record because no preceding runtime event exists."
-            )
+            logger.warning("Ignoring _internal_record because no preceding runtime event exists.")
             return
         event = self.event_list[-1]
         if len(op_invoke_info.args) > 1:
@@ -227,9 +184,7 @@ class Runtime(TorchDispatchMode):
         token_ids = self._extract_tensor_token_ids(op_invoke_info.out)
         if not token_ids:
             return
-        event.produced_token_ids = list(
-            self._dedup_token_ids(event.produced_token_ids + token_ids)
-        )
+        event.produced_token_ids = list(self._dedup_token_ids(event.produced_token_ids + token_ids))
 
     def _replay_single_op(self, op_invoke_info):
         if op_invoke_info.func == self._INTERNAL_WAIT_AND_BIND:
@@ -239,9 +194,7 @@ class Runtime(TorchDispatchMode):
             self._handle_record(op_invoke_info)
             return
 
-        stream_id, dependency_token_ids, memory_aliases = (
-            self._consume_pending_wait_context()
-        )
+        stream_id, dependency_token_ids, memory_aliases = self._consume_pending_wait_context()
         perf_results = {}
         for perf_model in self.perf_models:
             result = perf_model.process_op(op_invoke_info)
@@ -260,9 +213,7 @@ class Runtime(TorchDispatchMode):
     def _is_multistream_anchor_op(cls, func) -> bool:
         return func in (cls._INTERNAL_WAIT_AND_BIND, cls._INTERNAL_RECORD)
 
-    def _record_single_memory_invocation(
-        self, op_invoke_info: OpInvokeInfo, reference_id: int
-    ) -> None:
+    def _record_single_memory_invocation(self, op_invoke_info: OpInvokeInfo, reference_id: int) -> None:
         if self._is_multistream_anchor_op(op_invoke_info.func):
             return
         self.memory_tracker.record_single_op_invocation(op_invoke_info, reference_id)
@@ -283,9 +234,7 @@ class Runtime(TorchDispatchMode):
     def _event_duration_s(event: RuntimeEvent) -> float:
         if not event.perf_results:
             return 0.0
-        return max(
-            perf_result.execution_time_s for perf_result in event.perf_results.values()
-        )
+        return max(perf_result.execution_time_s for perf_result in event.perf_results.values())
 
     def _record_memory_invocations(self) -> None:
         if self.memory_tracker is None:
@@ -298,11 +247,7 @@ class Runtime(TorchDispatchMode):
                 len(self._event_reference_ids),
             )
         event_reference_id = {
-            id(event): (
-                self._event_reference_ids[index]
-                if index < len(self._event_reference_ids)
-                else 0
-            )
+            id(event): (self._event_reference_ids[index] if index < len(self._event_reference_ids) else 0)
             for index, event in enumerate(self.event_list)
         }
         # Multistream anchors are runtime control ops rather than model-semantic ops.
@@ -314,15 +259,11 @@ class Runtime(TorchDispatchMode):
         for event in memory_events:
             reference_id = event_reference_id.get(id(event), 0)
             consumed_tensor_ids = set(
-                self._extract_tensor_token_ids(
-                    (event.op_invoke_info.args, event.op_invoke_info.kwargs)
-                )
+                self._extract_tensor_token_ids((event.op_invoke_info.args, event.op_invoke_info.kwargs))
             )
             for source_tensor, alias_tensor in event.memory_aliases:
                 if id(alias_tensor) in consumed_tensor_ids:
-                    self.memory_tracker.record_tensor_alias(
-                        source_tensor, alias_tensor, reference_id
-                    )
+                    self.memory_tracker.record_tensor_alias(source_tensor, alias_tensor, reference_id)
             self._record_single_memory_invocation(event.op_invoke_info, reference_id)
 
     def replay_op_invoke_infos(self):
@@ -452,26 +393,18 @@ class Runtime(TorchDispatchMode):
 
             if group_by_input_shapes:
                 shapes_str = key[1]
-                col_widths["Input Shapes"] = max(
-                    col_widths["Input Shapes"], len(shapes_str)
-                )
+                col_widths["Input Shapes"] = max(col_widths["Input Shapes"], len(shapes_str))
                 for model_name in model_names:
                     total_time_str = _format_time(data["total_runtimes"][model_name])
-                    col_widths[f"{model_name} total"] = max(
-                        col_widths[f"{model_name} total"], len(total_time_str)
-                    )
-            col_widths["# of Calls"] = max(
-                col_widths["# of Calls"], len(str(data["count"]))
-            )
+                    col_widths[f"{model_name} total"] = max(col_widths[f"{model_name} total"], len(total_time_str))
+            col_widths["# of Calls"] = max(col_widths["# of Calls"], len(str(data["count"])))
             for model_name in model_names:
                 total_time = data["total_runtimes"][model_name]
                 avg_time = total_time / data["count"]
                 col_widths[f"{model_name} total"] = max(
                     col_widths[f"{model_name} total"], len(_format_time(total_time))
                 )
-                col_widths[f"{model_name} avg"] = max(
-                    col_widths[f"{model_name} avg"], len(_format_time(avg_time))
-                )
+                col_widths[f"{model_name} avg"] = max(col_widths[f"{model_name} avg"], len(_format_time(avg_time)))
 
         # --- Build Table String ---
         output_lines = []
@@ -499,12 +432,8 @@ class Runtime(TorchDispatchMode):
             for model_name in model_names:
                 total_time = data["total_runtimes"][model_name]
                 avg_time = total_time / data["count"]
-                row.append(
-                    _format_time(total_time).rjust(col_widths[f"{model_name} total"])
-                )
-                row.append(
-                    _format_time(avg_time).rjust(col_widths[f"{model_name} avg"])
-                )
+                row.append(_format_time(total_time).rjust(col_widths[f"{model_name} total"]))
+                row.append(_format_time(avg_time).rjust(col_widths[f"{model_name} avg"]))
             row.append(str(data["count"]).rjust(col_widths["# of Calls"]))
 
             output_lines.append("  ".join(row))
@@ -566,9 +495,7 @@ class Runtime(TorchDispatchMode):
             for model_name, result in event.perf_results.items():
                 pid = perf_model_pids[model_name]
                 timeline = model_timelines[model_name]
-                start_time_us = max(
-                    0, int(round(timeline["event_start_s"][event_idx] * 1e6))
-                )
+                start_time_us = max(0, int(round(timeline["event_start_s"][event_idx] * 1e6)))
                 duration_us = max(0, int(round(result.execution_time_s * 1e6)))
 
                 trace_event = {
@@ -580,24 +507,15 @@ class Runtime(TorchDispatchMode):
                     "pid": pid,
                     "tid": event.stream_id,
                     "args": {  # Add any extra useful info here
-                        "Inputs": str(event.op_invoke_info.args)
-                        + " kwargs: "
-                        + str(event.op_invoke_info.kwargs),
+                        "Inputs": str(event.op_invoke_info.args) + " kwargs: " + str(event.op_invoke_info.kwargs),
                         "Output": str(event.op_invoke_info.out),
                         # Structured input tensor shapes for per-shape analysis tools.
                         # Only captures top-level Tensor args; ops taking List[Tensor]
                         # (e.g. aten.cat, grouped_matmul) will show [] here.
                         "simulation_shapes": str(
-                            [
-                                list(a.shape)
-                                for a in event.op_invoke_info.args
-                                if isinstance(a, torch.Tensor)
-                            ]
+                            [list(a.shape) for a in event.op_invoke_info.args if isinstance(a, torch.Tensor)]
                         ),
-                        **{
-                            name: str(value)
-                            for name, value in result.statistics.items()
-                        },
+                        **{name: str(value) for name, value in result.statistics.items()},
                     },
                 }
                 trace_events.append(trace_event)
@@ -612,7 +530,7 @@ class Runtime(TorchDispatchMode):
         # Write the final JSON object to the specified file
 
         if isinstance(trace_file, str):
-            f = open(trace_file, "w")  # noqa: SIM115
+            f = open(trace_file, "w", encoding="utf-8")  # noqa: SIM115
             file_context = f
         else:
             f = trace_file
@@ -636,8 +554,7 @@ class Runtime(TorchDispatchMode):
         for perf_model in self.perf_models:
             if classifiers := perf_model.get_classifiers():
                 event_list_for_this = [
-                    (event.op_invoke_info, event.perf_results[perf_model.name])
-                    for event in self.event_list
+                    (event.op_invoke_info, event.perf_results[perf_model.name]) for event in self.event_list
                 ]
                 for classifier in classifiers:
                     breakdown = classifier.classify(event_list_for_this)
@@ -646,10 +563,7 @@ class Runtime(TorchDispatchMode):
 
     def total_execution_time_s(self) -> Dict[str, float]:
         timelines = self._build_model_timelines()
-        return {
-            perf_model.name: timelines[perf_model.name]["total_time_s"]
-            for perf_model in self.perf_models
-        }
+        return {perf_model.name: timelines[perf_model.name]["total_time_s"] for perf_model in self.perf_models}
 
     def _build_model_timelines(self) -> Dict[str, Dict[str, object]]:
         timelines: Dict[str, Dict[str, object]] = {}

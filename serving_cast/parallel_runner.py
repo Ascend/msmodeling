@@ -52,9 +52,7 @@ class ParallelRunner:
         self.args = args
         self.device_profile = DeviceProfile.all_device_profiles[self.args.device]
         if self.device_profile.comm_grid.grid.nelement() < self.args.num_devices:
-            raise ValueError(
-                f"No communication grid found for {self.args.num_devices} devices."
-            )
+            raise ValueError(f"No communication grid found for {self.args.num_devices} devices.")
 
         self._executor_class = executor_class or ProcessPoolExecutor
         self._worker_initializer = worker_initializer or self._init_worker
@@ -129,9 +127,7 @@ class ParallelRunner:
         # Phase 1 & 2: Prefill & Decode optimization
         # Use ThreadPoolExecutor to avoid nested process pool issue
         # (_run_pd_phase internally uses ProcessPoolExecutor)
-        logger.info(
-            "Phase 1 & 2: Running Prefill and Decode optimization in parallel..."
-        )
+        logger.info("Phase 1 & 2: Running Prefill and Decode optimization in parallel...")
         with ThreadPoolExecutor(max_workers=2) as executor:
             p_future = executor.submit(
                 self._run_pd_phase,
@@ -163,9 +159,7 @@ class ParallelRunner:
 
         return self.summary_result
 
-    def _add_summary_result(
-        self, df_list: list[pd.DataFrame], overwrite_data_config: OptimizerData
-    ):
+    def _add_summary_result(self, df_list: list[pd.DataFrame], overwrite_data_config: OptimizerData):
         if len(df_list) == 0:
             logger.info(
                 "No results found with ttft %r ms, tpot %r ms",
@@ -186,12 +180,8 @@ class ParallelRunner:
 
         return model_runner
 
-    def _get_user_config(
-        self, num_devices: Optional[int] = None
-    ) -> Iterator[UserInputConfig]:
-        target_devices = (
-            num_devices if num_devices is not None else self.args.num_devices
-        )
+    def _get_user_config(self, num_devices: Optional[int] = None) -> Iterator[UserInputConfig]:
+        target_devices = num_devices if num_devices is not None else self.args.num_devices
 
         base_args = copy.copy(self.args)
         base_args.num_devices = target_devices
@@ -208,12 +198,8 @@ class ParallelRunner:
             tmp_user_input.moe_tp_size = target_devices // (ep * moe_dp)
             return tmp_user_input
 
-        tp_list = resolve_search_sizes(
-            self.args.tp_sizes, target_devices, target_devices
-        )
-        ep_list = resolve_search_sizes(
-            self.args.ep_sizes, target_devices, target_devices
-        )
+        tp_list = resolve_search_sizes(self.args.tp_sizes, target_devices, target_devices)
+        ep_list = resolve_search_sizes(self.args.ep_sizes, target_devices, target_devices)
         moe_dp_list = resolve_search_sizes(self.args.moe_dp_sizes, target_devices, 1)
 
         for tp in tp_list:
@@ -243,13 +229,9 @@ class ParallelRunner:
         Returns:
             List of result DataFrames (non-None results only).
         """
-        configs = (
-            user_configs if user_configs is not None else list(self._get_user_config())
-        )
+        configs = user_configs if user_configs is not None else list(self._get_user_config())
 
-        with self._executor_class(
-            max_workers=self.args.jobs, initializer=self._worker_initializer
-        ) as executor:
+        with self._executor_class(max_workers=self.args.jobs, initializer=self._worker_initializer) as executor:
             results = executor.map(
                 partial(
                     self._submit_task,
@@ -293,9 +275,7 @@ class ParallelRunner:
         log_level_name = self.args.log_level.upper()
         log_level = logging._nameToLevel[log_level_name]
 
-        logging.basicConfig(
-            level=log_level, format="[%(levelname)s] [%(name)s] %(message)s"
-        )
+        logging.basicConfig(level=log_level, format="[%(levelname)s] [%(name)s] %(message)s")
 
     def _submit_task(
         self,
@@ -332,10 +312,7 @@ class ParallelRunner:
         )
         result = strategy.run(overwrite_optimizer_data, self.args.batch_range)
 
-        if (
-            not isinstance(result, OptimizerSummary)
-            or len(result.get_summary_df()) == 0
-        ):
+        if not isinstance(result, OptimizerSummary) or len(result.get_summary_df()) == 0:
             logger.warning(
                 "No result found with TP %d for ttft %s ms, tpot %s ms",
                 model_runner.model.model_config.parallel_config.tensor_parallel_size,

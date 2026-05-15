@@ -301,9 +301,7 @@ def _(
         _ = topk_indices.shape[-1]
     if out_dtype is None:
         out_dtype = q.dtype
-    return torch.empty(
-        q.shape[0], q.shape[1], v_head_dim, dtype=out_dtype, device="meta"
-    )
+    return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=out_dtype, device="meta")
 
 
 @register_tensor_cast_op("dsa_indexer", mutates_args=("indexer_cache",))
@@ -368,6 +366,4 @@ def _(
     else:
         active_seq_len = int(seq_lens.max().item()) if seq_lens is not None else seq_len
         topk = min(topk_limit, active_seq_len)
-    return torch.empty(
-        batch, seq_len, topk, dtype=torch.long, device=hidden_states.device
-    )
+    return torch.empty(batch, seq_len, topk, dtype=torch.long, device=hidden_states.device)

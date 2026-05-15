@@ -5,7 +5,7 @@ model_config:
   quantize_lmhead: False
   mxfp4_group_size: 32
   quantize_attention_action: DISABLED
-  do_compile: False 
+  do_compile: False
   allow_graph_break: False
   dump_input_shapes: False
   chrome_trace: null

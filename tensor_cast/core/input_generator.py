@@ -57,22 +57,12 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
         else:
             query_len += num_image_tokens
     else:
-        if (
-            request.image_batch_size is not None
-            or request.image_height is not None
-            or request.image_width is not None
-        ):
-            logger.warning(
-                "For non-VL models, the parameter input of the image is ignored"
-            )
+        if request.image_batch_size is not None or request.image_height is not None or request.image_width is not None:
+            logger.warning("For non-VL models, the parameter input of the image is ignored")
     model_config = model.model_config
-    num_mtp_tokens = (
-        model_config.mtp_config.num_mtp_layers if model_config.mtp_config else 0
-    )
+    num_mtp_tokens = model_config.mtp_config.num_mtp_layers if model_config.mtp_config else 0
     parallel_config = model_config.parallel_config
-    batch_size = (
-        concurrency + parallel_config.data_parallel_size - 1
-    ) // parallel_config.data_parallel_size
+    batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
 
     max_context_length = seq_len + num_mtp_tokens + 1
 
@@ -84,9 +74,7 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
     # Prepare Attention Metadata for Paged Attention
     # `query_start_loc` indicates the start of each query in the concatenated input tensor.
     # Shape: [num_queries + 1] -> e.g., [0, 50, 100, 150] for 3 queries of length 50.
-    query_start_loc = torch.arange(
-        0, (batch_size + 1) * query_len, query_len, dtype=torch.long
-    )
+    query_start_loc = torch.arange(0, (batch_size + 1) * query_len, query_len, dtype=torch.long)
 
     # `seq_lens` is the total length (context + new tokens) for each sequence in the batch.
     seq_lens = torch.empty(batch_size, dtype=torch.long)
@@ -98,13 +86,9 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
     # `block_tables` map logical sequence blocks to physical blocks in the KV cache.
     max_num_blocks_per_seq = (seq_len + block_size - 1) // block_size
 
-    block_table_tensor = torch.empty(
-        (batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta"
-    )
+    block_table_tensor = torch.empty((batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta")
 
-    slot_mapping = torch.empty(
-        (batch_size * query_len,), dtype=torch.long, device="meta"
-    )
+    slot_mapping = torch.empty((batch_size * query_len,), dtype=torch.long, device="meta")
 
     attn_meta = AttentionMetadataTensorCast(
         query_start_loc=query_start_loc,
@@ -123,9 +107,7 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
     num_tokens = batch_size * query_len
     input_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
-    kv_cache_by_layers, kv_cache_per_token = _get_kv_cache_info(
-        model, num_blocks, block_size
-    )
+    kv_cache_by_layers, kv_cache_per_token = _get_kv_cache_info(model, num_blocks, block_size)
     sampling_metadata = SamplingMetadata(
         query_start_loc=attn_meta.query_start_loc,
     )
@@ -233,17 +215,14 @@ def _load_preprocessor_pixel_limits(model_id: str):
         return min_pixels, max_pixels
     except Exception:
         logger.warning(
-            "Failed to load processor/image size for model_id=%s; "
-            "falling back to smart_resize defaults.",
+            "Failed to load processor/image size for model_id=%s; falling back to smart_resize defaults.",
             model_id,
             exc_info=True,
         )
         return None, None
 
 
-def generate_image_inputs(
-    model, image_batch_size, image_height, image_width, concurrency
-):
+def generate_image_inputs(model, image_batch_size, image_height, image_width, concurrency):
     if image_batch_size is None or image_height is None or image_width is None:
         print("For vision-language models,without image input")
         return {}
@@ -266,9 +245,7 @@ def generate_image_inputs(
     # For images, the value of grid_t is 1.
     grid_t = 1
     grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
-    image_grid_thw = torch.tensor([[grid_t, grid_h, grid_w]], dtype=torch.long).expand(
-        image_batch_size, 3
-    )
+    image_grid_thw = torch.tensor([[grid_t, grid_h, grid_w]], dtype=torch.long).expand(image_batch_size, 3)
     channel = vision_config.in_channels or 3
     hidden_dim = channel * temporal_patch_size * patch_size * patch_size
     tokens = grid_t * grid_h * grid_w
@@ -282,9 +259,7 @@ def generate_image_inputs(
     merge_length = merge_size**2
     num_image_tokens = image_batch_size * (tokens // merge_length + 2)
     parallel_config = model.model_config.parallel_config
-    batch_size = (
-        concurrency + parallel_config.data_parallel_size - 1
-    ) // parallel_config.data_parallel_size
+    batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
     pixel_values = pixel_values.repeat(batch_size, 1)
     image_grid_thw = image_grid_thw.repeat(batch_size, 1)
     return {
@@ -294,9 +269,7 @@ def generate_image_inputs(
     }
 
 
-def _get_kv_cache_info(
-    model, num_blocks: int, block_size: int
-) -> Tuple[dict[Any, Any], int]:
+def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[Any, Any], int]:
     model_config = model.model_config
     parallel_config = model.model_config.parallel_config
     # Initialize the KV cache structure (also on 'meta' device).
@@ -320,20 +293,13 @@ def _get_kv_cache_info(
             )
         else:
             # Shape: [2 (K/V), num_blocks, block_size, num_heads, head_dim]
-            if (
-                model.text_config.num_key_value_heads
-                >= parallel_config.tensor_parallel_size
-            ):
+            if model.text_config.num_key_value_heads >= parallel_config.tensor_parallel_size:
                 kv_heads = exact_division(
                     model.text_config.num_key_value_heads,
                     parallel_config.tensor_parallel_size,
                 )
             else:
-                assert (
-                    parallel_config.tensor_parallel_size
-                    % model.text_config.num_key_value_heads
-                    == 0
-                )
+                assert parallel_config.tensor_parallel_size % model.text_config.num_key_value_heads == 0
                 kv_heads = 1
 
             kv_cache_by_layers[i] = torch.empty(
@@ -347,9 +313,7 @@ def _get_kv_cache_info(
                 dtype=kvcache_dtype,
                 device="meta",
             )
-        kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (
-            num_blocks * block_size
-        )
+        kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (num_blocks * block_size)
     return kv_cache_by_layers, kv_cache_per_token
 
 
@@ -387,18 +351,14 @@ def get_kv_cache_info(model, num_blocks, block_size):
                 dtype=kvcache_dtype,
                 device="meta",
             )
-        kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (
-            num_blocks * block_size
-        )
+        kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (num_blocks * block_size)
 
     return kv_cache_by_layers, kv_cache_per_token
 
 
 def get_dsa_indexer_cache_info(model, num_blocks, block_size):
     model_config = model.model_config
-    if model_config.mla_config is None or not issubclass(
-        model_config.mla_config.mla_cls, DeepseekSparseAttention
-    ):
+    if model_config.mla_config is None or not issubclass(model_config.mla_config.mla_cls, DeepseekSparseAttention):
         return {}
 
     indexer_cache_by_layers = {}
@@ -416,9 +376,7 @@ def get_dsa_indexer_cache_info(model, num_blocks, block_size):
             dtype=cache_dtype,
             device="meta",
         )
-        indexer_cache_per_token += bytes_of_tensor(indexer_cache_by_layers[i]) / (
-            num_blocks * block_size
-        )
+        indexer_cache_per_token += bytes_of_tensor(indexer_cache_by_layers[i]) / (num_blocks * block_size)
 
     return {
         "indexer_cache_by_layers": indexer_cache_by_layers,
@@ -451,13 +409,9 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
     seq_lens_t = torch.tensor(seq_lens, dtype=torch.long)
     query_len_t = torch.tensor(query_lens, dtype=torch.long)
 
-    num_blocks = (
-        sum(seq_lens) + batch_size * (num_mtp_tokens + 1) + block_size - 1
-    ) // block_size
+    num_blocks = (sum(seq_lens) + batch_size * (num_mtp_tokens + 1) + block_size - 1) // block_size
     max_num_blocks_per_seq = (max(seq_lens) + block_size - 1) // block_size
-    block_table_tensor = torch.empty(
-        (batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta"
-    )
+    block_table_tensor = torch.empty((batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta")
     slot_mapping = torch.empty((num_tokens,), dtype=torch.long, device="meta")
 
     attn_meta = AttentionMetadataTensorCast(
@@ -471,9 +425,7 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
     input_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
 
-    kv_cache_by_layers, kv_cache_per_token = get_kv_cache_info(
-        model, num_blocks, block_size
-    )
+    kv_cache_by_layers, kv_cache_per_token = get_kv_cache_info(model, num_blocks, block_size)
 
     sampling_meta = SamplingMetadata(query_start_loc=query_start_loc)
     selected_token_indices = []
@@ -485,9 +437,7 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
         else:
             selected_token_indices.append(pos + ql - 1)
         pos += ql
-    sampling_meta.selected_token_indices = torch.tensor(
-        selected_token_indices, dtype=torch.long, device="meta"
-    )
+    sampling_meta.selected_token_indices = torch.tensor(selected_token_indices, dtype=torch.long, device="meta")
 
     kwargs = {
         "input_ids": input_ids,
@@ -499,9 +449,7 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
     }
 
     if model.model_config.hf_config.model_type == "qwen3_next":
-        kwargs["cache_position"] = torch.arange(
-            num_tokens, dtype=torch.long, device="cpu"
-        )
+        kwargs["cache_position"] = torch.arange(num_tokens, dtype=torch.long, device="cpu")
 
     return kwargs
 
@@ -517,8 +465,6 @@ def get_inputs_num_bytes(model, requests: List[RequestInfo], block_size: int) ->
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].query_start_loc)
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].seq_lens)
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].query_lens)
-    inputs_num_bytes += bytes_of_tensor(
-        input_kwargs["attention_meta"].block_table_tensor
-    )
+    inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].block_table_tensor)
     inputs_num_bytes += bytes_of_tensor(input_kwargs["attention_meta"].slot_mapping)
     return inputs_num_bytes

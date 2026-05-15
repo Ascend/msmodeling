@@ -54,9 +54,7 @@ class CommAnalyticModel(PerformanceModel):
 
         TODO(jgong5): cache the result to avoid duplicate computation.
         """
-        coords = [
-            self._rank_to_coord(rank, self.comm_grid.grid.shape) for rank in group
-        ]
+        coords = [self._rank_to_coord(rank, self.comm_grid.grid.shape) for rank in group]
 
         # Find the outermost grid dimension where the ranks' coordinates differ.
         # This dimension determines the scope of the communication.
@@ -81,13 +79,9 @@ class CommAnalyticModel(PerformanceModel):
             if start_dim <= diff_dim:
                 return start_dim
 
-        raise ValueError(
-            f"No suitable interconnect topology found for communication up to dimension {diff_dim}"
-        )
+        raise ValueError(f"No suitable interconnect topology found for communication up to dimension {diff_dim}")
 
-    def _get_bandwidth_and_latency(
-        self, rank: int, group: List[int]
-    ) -> Tuple[float, float]:
+    def _get_bandwidth_and_latency(self, rank: int, group: List[int]) -> Tuple[float, float]:
         topology_idx = self._get_topology_idx_for_group(group)
         topology = self.comm_grid.topologies[topology_idx]
         effective_bandwidth = topology.bandwidth_bytes_ps * topology.comm_efficiency
@@ -114,9 +108,7 @@ class CommAnalyticModel(PerformanceModel):
             return self.all_to_all(x, rank, group, out_split_sizes, input_split_sizes)
         raise ValueError(f"Unsupported communication op: {op_invoke_info.func}")
 
-    def all_reduce(
-        self, x: torch.Tensor, rank: int, group: List[int]
-    ) -> PerformanceModel.Result:
+    def all_reduce(self, x: torch.Tensor, rank: int, group: List[int]) -> PerformanceModel.Result:
         """
         Models all-reduce by dynamically selecting the most efficient algorithm
         (Ring or Tree-based) based on the estimated communication cost.
@@ -131,10 +123,7 @@ class CommAnalyticModel(PerformanceModel):
 
         # --- Model 1: Ring Algorithm ---
         # Cost: 2*(N-1) steps. Good for bandwidth-bound (large) messages.
-        time_ring = (
-            2 * (num_ranks - 1) * latency
-            + (2 * (num_ranks - 1) * message_size_bytes / num_ranks) / bandwidth
-        )
+        time_ring = 2 * (num_ranks - 1) * latency + (2 * (num_ranks - 1) * message_size_bytes / num_ranks) / bandwidth
 
         # --- Model 2: Tree-based/Recursive Doubling Algorithm ---
         # Cost: 2*log2(N) steps. Good for latency-bound (small) messages.
@@ -165,9 +154,7 @@ class CommAnalyticModel(PerformanceModel):
         }
         return PerformanceModel.Result(execution_time_s=comm_time, statistics=stats)
 
-    def all_gather(
-        self, x: torch.Tensor, rank: int, group: List[int]
-    ) -> PerformanceModel.Result:
+    def all_gather(self, x: torch.Tensor, rank: int, group: List[int]) -> PerformanceModel.Result:
         """
         Models all-gather communication time by dynamically selecting the most
         efficient algorithm (Ring or Recursive Doubling) based on the estimated cost.
@@ -183,18 +170,14 @@ class CommAnalyticModel(PerformanceModel):
 
         # --- Model 1: Ring Algorithm ---
         # Cost: (N-1) steps. Good for bandwidth-bound (large) messages.
-        time_ring = (num_ranks - 1) * latency + (
-            (num_ranks - 1) * message_size_bytes
-        ) / bandwidth
+        time_ring = (num_ranks - 1) * latency + ((num_ranks - 1) * message_size_bytes) / bandwidth
 
         # --- Model 2: Recursive Doubling / Bruck's Algorithm ---
         # Cost: log2(N) steps. Good for latency-bound (small) messages.
         # The total data transferred per rank is the same as the ring algorithm.
         if num_ranks > 1:
             log2_n = math.log2(num_ranks)
-            time_recursive = (
-                log2_n * latency + ((num_ranks - 1) * message_size_bytes) / bandwidth
-            )
+            time_recursive = log2_n * latency + ((num_ranks - 1) * message_size_bytes) / bandwidth
         else:
             time_recursive = float("inf")
 
@@ -235,9 +218,7 @@ class CommAnalyticModel(PerformanceModel):
             return PerformanceModel.Result(execution_time_s=0.0)
 
         if input_split_sizes is None or output_split_sizes is None:
-            raise ValueError(
-                "input_split_sizes and output_split_sizes must be provided."
-            )
+            raise ValueError("input_split_sizes and output_split_sizes must be provided.")
         if rank not in group:
             raise ValueError(f"rank {rank} is not in communication group {group}")
 
@@ -247,12 +228,8 @@ class CommAnalyticModel(PerformanceModel):
         elements_per_split = x.numel() // sum(input_split_sizes)
 
         # Calculate the total data volume sent and received by this rank.
-        total_elements_sent = elements_per_split * (
-            sum(input_split_sizes) - input_split_sizes[rank_in_group]
-        )
-        total_elements_received = elements_per_split * (
-            sum(output_split_sizes) - output_split_sizes[rank_in_group]
-        )
+        total_elements_sent = elements_per_split * (sum(input_split_sizes) - input_split_sizes[rank_in_group])
+        total_elements_received = elements_per_split * (sum(output_split_sizes) - output_split_sizes[rank_in_group])
 
         # The bottleneck depends on the larger one of the data volumes sent and received respectively.
         bottleneck_elements = max(total_elements_sent, total_elements_received)
@@ -290,9 +267,7 @@ class CommAnalyticModel(PerformanceModel):
         }
         return PerformanceModel.Result(execution_time_s=comm_time, statistics=stats)
 
-    def reduce_scatter(
-        self, x: torch.Tensor, rank: int, group: List[int]
-    ) -> PerformanceModel.Result:
+    def reduce_scatter(self, x: torch.Tensor, rank: int, group: List[int]) -> PerformanceModel.Result:
         """
         Models reduce-scatter by dynamically selecting the most efficient algorithm
         (Ring or Recursive Halving) based on the estimated communication cost.
@@ -308,18 +283,13 @@ class CommAnalyticModel(PerformanceModel):
 
         # --- Model 1: Ring Algorithm ---
         # Cost: (N-1) steps. Each step communicates a chunk of size M/N.
-        time_ring = (num_ranks - 1) * latency + (
-            (num_ranks - 1) * message_size_bytes / num_ranks
-        ) / bandwidth
+        time_ring = (num_ranks - 1) * latency + ((num_ranks - 1) * message_size_bytes / num_ranks) / bandwidth
 
         # --- Model 2: Recursive Halving Algorithm ---
         # Cost: log2(N) steps. Total data transfer is the same as the ring algorithm.
         if num_ranks > 1:
             log2_n = math.log2(num_ranks)
-            time_recursive = (
-                log2_n * latency
-                + ((num_ranks - 1) * message_size_bytes / num_ranks) / bandwidth
-            )
+            time_recursive = log2_n * latency + ((num_ranks - 1) * message_size_bytes / num_ranks) / bandwidth
         else:
             time_recursive = float("inf")
 

@@ -1,6 +1,7 @@
 # RFC: SwiGLU Operator Fusion
 
 ## Metadata
+
 | Item | Content                                       |
 | :--- |:----------------------------------------------|
 | **Status** | Approved                                      |
@@ -9,21 +10,26 @@
 | **Related Links** | https://gitcode.com/Ascend/msmodeling/pull/75 |
 
 ---
+
 ## 1. Overview
 
 The SwiGLU (Swish Gated Linear Unit) activation function consists of linear transformations, SiLU activation, and element-wise multiplication. Traditional execution approaches break it down into separate operators, leading to significant kernel launch overhead and inefficient memory access.
 This RFC proposes implementing SwiGLU fusion using a pattern matching approach based on PyTorch graphs. The solution uses `torch.ops.tensor_cast.swiglu` operator to replace the computational patterns of SwiGLU activation. The performance is enhanced through Sink Split optimization that converts static parameters into dynamic inputs.
 
 ## 2. Solution Design
+
 ### 2.1 Recommended Approach
+
 Implement SwiGLU fusion using PyTorch Graph-based Pattern Matching that identifies SwiGLU patterns and replaces them with calls to `torch.ops.tensor_cast.swiglu.default`, combined with Sink Split optimization for performance enhancement. The solution leverages pattern registration and replacement mechanisms from pattern matching infrastructure.
 
 #### Core Implementation Files
+
 - `tensor_cast/compilation/patterns/swiglu.py`: SwiGLU pattern definition and registration
 - `tensor_cast/compilation/passes/pattern_match_pass.py`: Pattern matching and replacement pass implementation
 - `tensor_cast/compilation/freezing_passes/sink_split_pass.py`: Sink Split optimization implementation
 
 #### Interface
+
 - Custom operator: `tensor_cast::swiglu`
   - input：`gate: Tensor`, `up: Tensor`
   - output：`Tensor`, `swiglu(gate, up)`
@@ -39,7 +45,7 @@ graph LR
     C[up_proj] --> F[mul]
     D --> F
     F --> G[swiglu_out]
-    
+
     style B fill:#ccf,stroke:#333,stroke-width:2px
     style C fill:#ccf,stroke:#333,stroke-width:2px
     style D fill:#fcc,stroke:#333,stroke-width:2px
@@ -47,14 +53,17 @@ graph LR
 ```
 
 **Implementation Details:**
+
 - **Activation segment only**: The operator matches and replaces only the activation computation: `gate → fp32 conversion → sigmoid → fp16 conversion → mul with up`
 - **Gate and Up as inputs**: The linear transformations for gate and up projections are generated upstream and passed as inputs to the swiglu operator
 - **Future matmul fusion**: Current implementation does not handle matrix multiplications for gate and up projections, this will be completed during GMM operator integration
 
 #### Core Implementation
+
 Based on `tensor_cast/compilation/patterns/swiglu.py` implementation:
+
 - **SwiGLUPattern class**: Defines SwiGLU pattern matching and replacement logic
-- **create method**: Returns pattern, replacement, get_inputs triplet  
+- **create method**: Returns pattern, replacement, get_inputs triplet
 - **pattern function**: Matches activation computation segment: gate → fp32 conversion → sigmoid → fp16 conversion → mul with up
 - **replacement function**: Uses `torch.ops.tensor_cast.swiglu` to replace original pattern
 - **Supported data types**: torch.float16, torch.bfloat16
@@ -65,7 +74,7 @@ Based on `tensor_cast/compilation/patterns/swiglu.py` implementation:
 
 Based on the implementation in `tensor_cast/compilation/patterns/swiglu.py`, the pattern detection happens through a registration mechanism:
 
-- Iterate through each data type, get pattern, replacement, example_inputs 
+- Iterate through each data type, get pattern, replacement, example_inputs
 - Register patterns via PyTorch pattern matcher's `register_pattern` function
 - After registration, patterns become available for matching in computation graphs
 
@@ -84,7 +93,7 @@ graph LR
     C --> D[Pattern Match Passes]
     D --> E[After Freezing]
     E --> F[Sink Split Pass]
-    
+
     style C fill:#ffcccc,stroke:#333,stroke-width:2px
     style F fill:#ccffcc,stroke:#333,stroke-width:2px
 ```
@@ -100,9 +109,11 @@ The new approach using PyTorch Graph-based Pattern Matching and Sink Split:
 5. **Higher Compatibility**: Works with various quantization strategies and model structures through flexible pattern matching
 
 ### 2.3 Performance Modeling
+
 The performance characteristics of `torch.ops.tensor_cast.swiglu` are handled through the standard tensor_cast performance modeling infrastructure.
 
 #### FLOPs Calculation
+
 - Matrix multiplication operations (upstream): `2 * M * N * K`
 - SiLU activation operations: `3 * M * N` (sigmoid + multiplication + one more multiplication)
 - Total computation depends on upstream operators and the fused activation
@@ -110,15 +121,18 @@ The performance characteristics of `torch.ops.tensor_cast.swiglu` are handled th
 ### 2.4 Finding and Validating the Operator
 
 **Registration locations**:
+
 - `tensor_cast/compilation/patterns/swiglu.py`: SwiGLU pattern registration
 - `tensor_cast/compilation/passes/pattern_match_pass.py`: Pattern matching infrastructure
 
 **Graph pattern recognition**:
+
 - Pattern gate → fp32 conversion → sigmoid → fp16 conversion → multiplication with up tensor
 - Ignores transparent operations like reshape/cast
 - Supports both torch.float16 and torch.bfloat16 data types
 
 **Validation methods**:
+
 1. Check if SwiGLU patterns are registered via `register_all_patterns()`
 2. Run compilation pipeline with pattern matching enabled
 3. Use graph observers to verify `torch.ops.tensor_cast.swiglu` calls appear after transformations
@@ -130,7 +144,7 @@ The performance characteristics of `torch.ops.tensor_cast.swiglu` are handled th
 The original approach using individual passes like `swiglu_fusion_pass.py` was abandoned for the following reasons:
 
 1. **Poor Performance**: Individual passes created significant overhead due to complex grouping logic
-2. **Inflexibility**: Difficult to adapt to different model structures and optimization requirements  
+2. **Inflexibility**: Difficult to adapt to different model structures and optimization requirements
 3. **Limited Extensibility**: Hard to add support for new operator patterns
 4. **Inability to Fuse with GMM Operators**: The grouping approach prevented seamless integration with GMM operations
 
@@ -139,7 +153,8 @@ The original approach using individual passes like `swiglu_fusion_pass.py` was a
 Combining linear transformations, SiLU activation and multiplication during model definition: `SwiGLU(x, W_gate, W_up) = Silu(x @ W_gate) * (x @ W_up)`
 
 **Comparison**:
-- **Individual Pass (Abandoned)**: Poor performance, inflexibility, poor extensibility, inability to fuse with GMM operators  
+
+- **Individual Pass (Abandoned)**: Poor performance, inflexibility, poor extensibility, inability to fuse with GMM operators
 - **Front-end Fusion**: Compile-time optimizations, hardware-specific optimizations, better memory locality vs. lack of flexibility, high loading overhead, difficult to maintain
 - **This RFC**: High performance, strong flexibility, good extensibility, seamless integration vs. requires graph matching, higher development complexity
 
@@ -164,6 +179,7 @@ Back-end fusion is the optimal choice for SwiGLU given its specific usage scenar
    - Explicit exclusion of quantized nodes prevents performance degradation caused by quantization
 
 **Advantages Summary**:
+
 - Computational graphs with fewer nodes and better kernel fusion opportunities
 - More accurate performance modeling through aggregated matmul properties
 - Enhanced cycle detection ensures fusion safety and prevents calculation errors
@@ -178,6 +194,7 @@ Based on `tensor_cast/compilation/freezing_passes/sink_split_pass.py`, the Sink 
 #### 2.6.1 SwiGLU Sink Split Working Mechanism
 
 **SwiGLU Split Configuration**:
+
 ```python
 # Binary operation configuration
 binary_ops = [
@@ -192,17 +209,19 @@ for op in binary_ops:
 **Sink Split Working Principle**:
 
 Traditional Split Pattern:
+
 ```python
 # Multiple getitem+split combinations
 getitem1 = input_tensor[0]        # Slice
 split1 = split(getitem1, size1)   # Split
-getitem2 = input_tensor[1]        # Slice  
+getitem2 = input_tensor[1]        # Slice
 split2 = split(getitem2, size2)   # Split
 # SwiGLU needs to combine results
 swiglu_out = swiglu(split1, split2)  # Fusion
 ```
 
 Sink Split Optimization:
+
 ```python
 # Single split tree merging
 dynamic_size = get_dynamic_sizes()  # Convert static to dynamic input
@@ -211,6 +230,7 @@ swiglu_out = swiglu(output_list[0], output_list[1])  # Direct indexing
 ```
 
 **Key Formulas**:
+
 - **Static→Dynamic Conversion**: `split_sizes=[a,b,c]` → `dynamic_sizes=a+b+c`, unified memory allocation
 - **Tree Merging Optimization**: Time complexity O(n) → O(1), reduces memory allocation and fragmentation
 - **Memory Continuity**: Physical memory continuous → Logical slice access, improves cache hit rate
@@ -229,19 +249,22 @@ SwiGLU achieves following performance improvements through Sink Split optimizati
 SwiGLU not only optimizes independently but also deeply integrates with various types of GMM (Grouped MatMul) operators to achieve maximum performance enhancement:
 
 **Supported GMM Types**:
+
 - `torch.ops.tensor_cast.static_quant_linear`: Static quantized linear layer
-- `torch.ops.tensor_cast.static_quant_linear_int4`: Static quantized int4 linear layer  
+- `torch.ops.tensor_cast.static_quant_linear_int4`: Static quantized int4 linear layer
 - `torch.ops.tensor_cast.fp8_linear`: FP8 linear layer
 - `torch.ops.tensor_cast.mxfp4_linear`: MXFP4 linear layer
 - `torch.ops.tensor_cast.grouped_matmul`: Generic grouped matrix multiplication
 
 **GMM-SwiGLU Joint Optimization**:
+
 - **Parameter Unification**: GMM and SwiGLU share split optimization configuration with unified iterator handling
 - **Tree Merging**: GMM configured via `add_config(op, {0}, {0})` works collaboratively with SwiGLU tree merging mechanism
 - **Static to Dynamic Conversion**: Converts static split parameters to dynamic inputs to reduce memory fragmentation
 - **Hardware Optimization**: Achieves end-to-end memory access optimization by aggregating SwiGLU outputs with GMM inputs
 
 **SwiGLU Split Configuration**:
+
 ```python
 # Binary operation configuration
 binary_ops = [
@@ -256,17 +279,19 @@ for op in binary_ops:
 **Sink Split Working Principle**:
 
 Traditional Split Pattern:
+
 ```python
 # Multiple getitem+split combinations
 getitem1 = input_tensor[0]        # Slice
 split1 = split(getitem1, size1)   # Split
-getitem2 = input_tensor[1]        # Slice  
+getitem2 = input_tensor[1]        # Slice
 split2 = split(getitem2, size2)   # Split
 # SwiGLU needs to combine results
 swiglu_out = swiglu(split1, split2)  # Fusion
 ```
 
 Sink Split Optimization:
+
 ```python
 # Single split tree merging
 dynamic_size = get_dynamic_sizes()  # Convert static to dynamic input
@@ -275,6 +300,7 @@ swiglu_out = swiglu(output_list[0], output_list[1])  # Direct indexing
 ```
 
 **Key Formulas**:
+
 - **Static→Dynamic Conversion**: `split_sizes=[a,b,c]` → `dynamic_sizes=a+b+c`, unified memory allocation
 - **Tree Merging Optimization**: Time complexity O(n) → O(1), reduces memory allocation and fragmentation
 - **Memory Continuity**: Physical memory continuous → Logical slice access, improves cache hit rate

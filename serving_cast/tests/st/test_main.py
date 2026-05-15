@@ -64,17 +64,11 @@ class TestCLI:
         self.profiling_dir = os.path.join(self.temp_dir, "profiling")
 
         # Create valid configuration files
-        self.valid_instance_path = self._create_config_file(
-            VALID_INSTANCE_CONFIG, "instance_valid.yaml"
-        )
-        self.valid_common_path = self._create_config_file(
-            VALID_COMMON_CONFIG, "common_valid.yaml"
-        )
+        self.valid_instance_path = self._create_config_file(VALID_INSTANCE_CONFIG, "instance_valid.yaml")
+        self.valid_common_path = self._create_config_file(VALID_COMMON_CONFIG, "common_valid.yaml")
 
         # Create invalid configuration file
-        self.invalid_instance_path = self._create_config_file(
-            INVALID_INSTANCE_CONFIG, "instance_invalid.yaml"
-        )
+        self.invalid_instance_path = self._create_config_file(INVALID_INSTANCE_CONFIG, "instance_invalid.yaml")
 
         yield  # Test execution
 
@@ -84,7 +78,7 @@ class TestCLI:
     def _create_config_file(self, content, filename):
         """Create configuration file for testing"""
         file_path = os.path.join(self.temp_dir, filename)
-        with open(file_path, "w") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             yaml.dump(content, f)
         return file_path
 
@@ -107,9 +101,7 @@ class TestCLI:
 
         # Verify results
         assert result.returncode == 0, "Command execution failed"
-        assert "Simulation" in result.stdout or "Summary" in result.stdout, (
-            "Expected output not found"
-        )
+        assert "Simulation" in result.stdout or "Summary" in result.stdout, "Expected output not found"
 
     def test_missing_required_args(self):
         """Test case of missing required arguments"""
@@ -121,9 +113,7 @@ class TestCLI:
             self._run_command(args)
 
         # Verify error code
-        assert exc_info.value.returncode != 0, (
-            "Command should not succeed when required arguments are missing"
-        )
+        assert exc_info.value.returncode != 0, "Command should not succeed when required arguments are missing"
         assert "error: the following arguments are required" in exc_info.value.stderr
 
     def test_invalid_file_path(self):

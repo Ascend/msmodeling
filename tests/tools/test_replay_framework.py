@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+# pylint: disable=no-name-in-module
 from tools.perf_data_collection.op_replay import replay_framework
 
 if TYPE_CHECKING:

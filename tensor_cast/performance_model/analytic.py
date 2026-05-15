@@ -32,9 +32,7 @@ class OpBoundClassifier(PerformanceModel.OpClassifier):
     def name(self):
         return "OpBound"
 
-    def classify(
-        self, event_list: List[Tuple[OpInvokeInfo, "PerformanceModel.Result"]]
-    ) -> Dict[str, float]:
+    def classify(self, event_list: List[Tuple[OpInvokeInfo, "PerformanceModel.Result"]]) -> Dict[str, float]:
         COMPUTE_BOUND_MMA = "compute_bound_mma"
         COMPUTE_BOUND_GP = "compute_bound_gp"
         MEMORY_BOUND = "memory_bound"
@@ -57,9 +55,7 @@ class OpBoundClassifier(PerformanceModel.OpClassifier):
             if max_index < 2:
                 breakdown[breakdown_keys[max_index]] += max_value
             else:
-                breakdown[COMPUTE_BOUND_MMA] += result.statistics.get(
-                    StatsKey.MMA_OPS, 0
-                )
+                breakdown[COMPUTE_BOUND_MMA] += result.statistics.get(StatsKey.MMA_OPS, 0)
                 breakdown[COMPUTE_BOUND_GP] += result.statistics.get(StatsKey.GP_OPS, 0)
         return breakdown
 

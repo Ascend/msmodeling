@@ -32,9 +32,7 @@ class Device:
 class MachineManager:
     def __init__(self, machine_config: MachineConfig):
         self.machine_config = machine_config
-        self.devices = [
-            Device(machine_config, i) for i in range(machine_config.num_devices)
-        ]
+        self.devices = [Device(machine_config, i) for i in range(machine_config.num_devices)]
 
     def get_devices(self) -> List[Device]:
         return self.devices

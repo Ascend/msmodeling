@@ -104,9 +104,7 @@ class MoeExpertMLP(torch.nn.Module):
             gate_weight, up_weight = gate_up_weight.chunk(2, dim=0)
             self.gate_proj.weight.copy_(gate_weight)
             self.up_proj.weight.copy_(up_weight)
-            self.down_proj.weight.copy_(
-                original_experts_module.down_proj.data[expert_idx]
-            )
+            self.down_proj.weight.copy_(original_experts_module.down_proj.data[expert_idx])
 
     def forward(self, hidden_states):
         gate = self.gate_proj(hidden_states)
@@ -203,9 +201,7 @@ class ModelProfile:
 
     # Python class type used for the MLA module implementation.
     # Defaults to the built-in tensor casting class. Override only for custom MLA implementations.
-    mla_module_class_type: Optional[Type["torch.nn.Module"]] = (
-        MultiheadLatentAttentionTensorCast
-    )
+    mla_module_class_type: Optional[Type["torch.nn.Module"]] = MultiheadLatentAttentionTensorCast
 
     # Python type used to dynamically instantiate a custom expert module.
     # Use this if the standard MLP structure does not fit the model's expert architecture.
@@ -242,26 +238,17 @@ class ModelProfile:
 
     # Mapping for linear layers in the visual feature merger/projector.
     # Defines how visual features are projected to the language space.
-    visual_merger_linear_mapping: Optional[Dict[str, Any]] = dataclasses.field(
-        default_factory=dict
-    )
+    visual_merger_linear_mapping: Optional[Dict[str, Any]] = dataclasses.field(default_factory=dict)
 
     # Mapping for linear layers (MLP/FFN) inside the vision encoder blocks.
     # Used to locate specific weights like fc1/fc2 within vision transformer layers.
-    visual_mlp_linear_mapping: Optional[Dict[str, Any]] = dataclasses.field(
-        default_factory=dict
-    )
+    visual_mlp_linear_mapping: Optional[Dict[str, Any]] = dataclasses.field(default_factory=dict)
 
-    def _build_field_names(
-        self, base_class: Type, override_dict: Optional[Dict[str, Any]]
-    ) -> Any:
+    def _build_field_names(self, base_class: Type, override_dict: Optional[Dict[str, Any]]) -> Any:
         if not override_dict:
             return base_class()
 
-        existing_fields = {
-            f.name: getattr(base_class(), f.name)
-            for f in dataclasses.fields(base_class())
-        }
+        existing_fields = {f.name: getattr(base_class(), f.name) for f in dataclasses.fields(base_class())}
         existing_fields.update(override_dict)
         return base_class(**existing_fields)
 
@@ -299,9 +286,7 @@ class ModelProfile:
         if not self.mla_module_name:
             return None
 
-        field_names = self._build_field_names(
-            MlaFieldNames, self.mla_field_names_override
-        )
+        field_names = self._build_field_names(MlaFieldNames, self.mla_field_names_override)
 
         return MlaConfig(
             module_name=self.mla_module_name,
@@ -332,9 +317,7 @@ def register_model_profile(profile: ModelProfile):
     Should be used as a decorator or called directly after defining the profile.
     """
     if profile.model_type in _MODEL_PROFILE_REGISTRY:
-        raise ValueError(
-            f"ModelProfile for '{profile.model_type}' is already registered."
-        )
+        raise ValueError(f"ModelProfile for '{profile.model_type}' is already registered.")
 
     _MODEL_PROFILE_REGISTRY[profile.model_type] = profile
     return profile
@@ -381,14 +364,10 @@ def get_vl_language_model(model: "ModelWrapperBase"):
 
 
 def get_visual_layers(model: "ModelWrapperBase"):
-    return get_vl_model_module(
-        model, "visual_layers_module_path", "visual_layers_module_path"
-    )
+    return get_vl_model_module(model, "visual_layers_module_path", "visual_layers_module_path")
 
 
-def get_vl_model_profile_attr(
-    model_type: str, profile_attr: str, default_key: str, fallback_value=None
-):
+def get_vl_model_profile_attr(model_type: str, profile_attr: str, default_key: str, fallback_value=None):
     profile = get_model_profile(model_type)
     if profile and getattr(profile, profile_attr, None):
         return getattr(profile, profile_attr)
@@ -399,27 +378,19 @@ def get_vl_model_profile_attr(
 
 
 def get_visual_merger_linear(model_type: str):
-    return get_vl_model_profile_attr(
-        model_type, "visual_merger_linear_mapping", "visual_merger_linear_mapping", {}
-    )
+    return get_vl_model_profile_attr(model_type, "visual_merger_linear_mapping", "visual_merger_linear_mapping", {})
 
 
 def get_visual_mlp_linear(model_type: str):
-    return get_vl_model_profile_attr(
-        model_type, "visual_mlp_linear_mapping", "visual_visual_mlp_linear_mapping", {}
-    )
+    return get_vl_model_profile_attr(model_type, "visual_mlp_linear_mapping", "visual_visual_mlp_linear_mapping", {})
 
 
 def get_visual_layers_path(model_type: str) -> Optional[str]:
-    return get_vl_model_profile_attr(
-        model_type, "visual_layers_path_str", "visual_layers_path_str", None
-    )
+    return get_vl_model_profile_attr(model_type, "visual_layers_path_str", "visual_layers_path_str", None)
 
 
 def get_language_layers(model_type: str) -> str:
-    return get_vl_model_profile_attr(
-        model_type, "language_layers_path_str", "language_layers_path_str", "layers"
-    )
+    return get_vl_model_profile_attr(model_type, "language_layers_path_str", "language_layers_path_str", "layers")
 
 
 def get_mla_module_name(model_type: str = "") -> str:

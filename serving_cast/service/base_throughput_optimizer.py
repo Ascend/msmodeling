@@ -14,6 +14,8 @@
 
 from abc import ABC, abstractmethod
 
+from typing import Optional
+
 import pandas as pd
 
 from tensor_cast.core.input_generator import generate_inputs, RequestInfo
@@ -34,6 +36,10 @@ class BaseThroughputOptimizer(ABC):
     """
 
     name = "base"
+
+    def __init__(self) -> None:
+        self.model_runner: Optional[ModelRunner] = None
+        self.num_mtp_tokens: int = 0
 
     @abstractmethod
     def initialize(self, model_runner: ModelRunner):
@@ -60,9 +66,7 @@ class BaseThroughputOptimizer(ABC):
             the specified batch size and return performance metrics.
         """
 
-    def run(
-        self, optimizer_data: OptimizerData, batch_range: list[int]
-    ) -> OptimizerSummary:
+    def run(self, optimizer_data: OptimizerData, batch_range: list[int]) -> OptimizerSummary:
         left, right = 1, 512
         result = []
         result_df = pd.DataFrame(columns=AGG_COLUMNS)
@@ -115,20 +119,12 @@ class BaseThroughputOptimizer(ABC):
     ) -> ModelRunnerMetrics:
         if is_decode:
             query_len = self.num_mtp_tokens + 1
-            seq_len = (
-                optimizer_data.output_length // 2
-                + optimizer_data.input_length
-                + query_len
-            )
+            seq_len = optimizer_data.output_length // 2 + optimizer_data.input_length + query_len
         else:
             seq_len = query_len = optimizer_data.get_effective_input_length()
 
         # avoid print duplicate image input log
-        _image_batch_size = (
-            optimizer_data.batch_size
-            if optimizer_data.image_height is not None
-            else None
-        )
+        _image_batch_size = optimizer_data.batch_size if optimizer_data.image_height is not None else None
         requests = [
             RequestInfo(
                 query_len=query_len,
@@ -141,8 +137,8 @@ class BaseThroughputOptimizer(ABC):
             )
         ]
 
-        metrics = self.model_runner.run_inference(
-            requests, generate_inputs_func=generate_inputs
-        )
+        runner = self.model_runner
+        assert runner is not None, "initialize() must set model_runner"
+        metrics = runner.run_inference(requests, generate_inputs_func=generate_inputs)
 
         return metrics

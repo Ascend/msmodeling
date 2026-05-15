@@ -99,9 +99,7 @@ class TestQuantAttention(unittest.TestCase):
             hf_config=hf_config,
         )
         model = TransformerModel(model_id, model_config)
-        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(
-            model, model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(model, model_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         machine_config = TEST_DEVICE
@@ -131,17 +129,11 @@ class TestQuantAttention(unittest.TestCase):
 
         model = build_model(user_config)
 
-        mtp_block_module_name = get_mtp_block_module_name(
-            model.model_config.hf_config.model_type
-        )
+        mtp_block_module_name = get_mtp_block_module_name(model.model_config.hf_config.model_type)
         self.assertIsNotNone(mtp_block_module_name)
-        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(
-            model, model.model_config
-        )
+        attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         # make sure all original attention modules have been replaced
-        self.assertTrue(
-            has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast")
-        )
+        self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
         machine_config = TEST_DEVICE

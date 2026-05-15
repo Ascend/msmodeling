@@ -59,9 +59,7 @@ class CompilerBackend:
     ) -> tuple[Callable, Optional[Any]]:
         def freezing_compile(compile_inner, aot_autograd_gm, example_inputs):
             # Freeze the graph first before passing to AOT Autograd.
-            frozen_gm, preserved_arg_indices = freeze(
-                gm, aot_autograd_gm, example_inputs
-            )
+            frozen_gm, preserved_arg_indices = freeze(gm, aot_autograd_gm, example_inputs)
             example_inputs = [example_inputs[ind] for ind in preserved_arg_indices]
             optimized_function = compile_inner(frozen_gm, example_inputs)
 
@@ -126,9 +124,7 @@ class CompilerBackend:
             subsystem="redundant_node_elimination_pass",
             log_url=config.compilation.debug.graph_log_url,
         )
-        GraphTransformObserver(gm, "redundant_node_elimination_pass").apply_gm_pass(
-            ReduandantNodeEliminationPass()
-        )
+        GraphTransformObserver(gm, "redundant_node_elimination_pass").apply_gm_pass(ReduandantNodeEliminationPass())
         logger.debug("Graph after redundant node elimination pass:")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(gm.print_readable(print_output=False))
@@ -140,9 +136,7 @@ class CompilerBackend:
             log_url=config.compilation.debug.graph_log_url,
         )
         if config.compilation.passes.enable_life_combine_quant:
-            GraphTransformObserver(gm, "life_combine_quant_pass").apply_gm_pass(
-                LiftCombineQuantPass()
-            )
+            GraphTransformObserver(gm, "life_combine_quant_pass").apply_gm_pass(LiftCombineQuantPass())
         logger.debug("Graph after quantization passes:")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(gm.print_readable(print_output=False))
@@ -155,9 +149,7 @@ class CompilerBackend:
             log_url=config.compilation.debug.graph_log_url,
         )
         for i, pattern_match_pass in enumerate(patterns.all_passes):
-            GraphTransformObserver(gm, f"pattern_match_pass_{i}").apply_gm_pass(
-                pattern_match_pass
-            )
+            GraphTransformObserver(gm, f"pattern_match_pass_{i}").apply_gm_pass(pattern_match_pass)
         logger.debug("Graph after pattern matching:")
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(gm.print_readable(print_output=False))
@@ -185,9 +177,7 @@ class CompilerBackend:
             #   P1: all_reduce → rms_norm / add_rms_norm
             #   P2: all_reduce → add_rms_norm2 (residual-aware)
             #   P3: add → norm on the residual path P2 leaves local
-            GraphTransformObserver(gm, "sequence_parallel_pass").apply_gm_pass(
-                SequenceParallelPass()
-            )
+            GraphTransformObserver(gm, "sequence_parallel_pass").apply_gm_pass(SequenceParallelPass())
             logger.debug("Graph after sequence parallel pass:")
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(gm.print_readable(print_output=False))
@@ -198,9 +188,7 @@ class CompilerBackend:
             subsystem="decompose_auto_functionalized_pass",
             log_url=config.compilation.debug.graph_log_url,
         )
-        GraphTransformObserver(gm, "decompose_auto_functionalized").apply_graph_pass(
-            decompose_auto_functionalized
-        )
+        GraphTransformObserver(gm, "decompose_auto_functionalized").apply_graph_pass(decompose_auto_functionalized)
 
     def apply_merge_linear_pass(self, gm: fx.GraphModule, inputs):
         GraphTransformObserver = functools.partial(
@@ -209,9 +197,7 @@ class CompilerBackend:
             log_url=config.compilation.debug.graph_log_url,
         )
         if config.compilation.passes.enable_merge_linear:
-            GraphTransformObserver(gm, "merge_linear_pass").apply_gm_pass(
-                MergeLinearPass()
-            )
+            GraphTransformObserver(gm, "merge_linear_pass").apply_gm_pass(MergeLinearPass())
             # TODO(jgong): make sure the merge linear pass is correct by shape propagation
             #              since explicitly adding shape info might be expensive
             fake_tensor_prop(gm, inputs, force_allow_non_fake_inputs=True)
@@ -233,16 +219,12 @@ class CompilerBackend:
         if config.compilation.fusion_patterns.enable_matmul_allreduce:
             self.apply_freezing_pattern_passes(gm, inputs)
         if config.compilation.fusion_patterns.enable_grouped_matmul_swiglu:
-            GraphTransformObserver(
-                gm, "grouped_matmul_swiglu_fusion_pass"
-            ).apply_gm_pass(GroupedMatmulSwigluPass())
+            GraphTransformObserver(gm, "grouped_matmul_swiglu_fusion_pass").apply_gm_pass(GroupedMatmulSwigluPass())
             fake_tensor_prop(gm, inputs, force_allow_non_fake_inputs=True)
         # DFC must run AFTER GroupedMatmulSwigluPass — it looks for
         # grouped_matmul_*_swiglu nodes that the swiglu pass produces.
         if config.compilation.fusion_patterns.enable_dispatch_ffn_combine:
-            GraphTransformObserver(
-                gm, "dispatch_ffn_combine_fusion_pass"
-            ).apply_gm_pass(DispatchFFNCombinePass())
+            GraphTransformObserver(gm, "dispatch_ffn_combine_fusion_pass").apply_gm_pass(DispatchFFNCombinePass())
             fake_tensor_prop(gm, inputs, force_allow_non_fake_inputs=True)
         logger.debug("Graph after freezing passes:")
         if logger.isEnabledFor(logging.DEBUG):
@@ -256,9 +238,7 @@ class CompilerBackend:
             log_url=config.compilation.debug.graph_log_url,
         )
         for i, freezing_pattern_pass in enumerate(freezing_patterns.all_passes):
-            GraphTransformObserver(gm, f"freezing_pattern_pass_{i}").apply_gm_pass(
-                freezing_pattern_pass
-            )
+            GraphTransformObserver(gm, f"freezing_pattern_pass_{i}").apply_gm_pass(freezing_pattern_pass)
             fake_tensor_prop(gm, inputs, force_allow_non_fake_inputs=True)
 
     def apply_peep_hole_pass(self, gm: fx.GraphModule, inputs):

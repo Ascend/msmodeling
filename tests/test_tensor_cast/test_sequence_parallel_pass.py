@@ -23,14 +23,10 @@ class SequenceParallelPassTestCase(unittest.TestCase):
 
     def setUp(self):
         torch.compiler.reset()
-        self._orig_enable_sequence_parallel = (
-            config.compilation.passes.enable_sequence_parallel
-        )
+        self._orig_enable_sequence_parallel = config.compilation.passes.enable_sequence_parallel
 
     def tearDown(self):
-        config.compilation.passes.enable_sequence_parallel = (
-            self._orig_enable_sequence_parallel
-        )
+        config.compilation.passes.enable_sequence_parallel = self._orig_enable_sequence_parallel
 
     @parameterized.expand(
         [
@@ -44,9 +40,7 @@ class SequenceParallelPassTestCase(unittest.TestCase):
             (2, 64, True),
         ]
     )
-    def test_sp_reduces_rms_norm_seq_dim(
-        self, tp_size: int, expected_local_seq: int, disable_repetition: bool
-    ):
+    def test_sp_reduces_rms_norm_seq_dim(self, tp_size: int, expected_local_seq: int, disable_repetition: bool):
         """Verify rms_norm operates on reduced seq length with sequence parallel enabled."""
         config.compilation.passes.enable_sequence_parallel = True
         user_input = UserInputConfig(

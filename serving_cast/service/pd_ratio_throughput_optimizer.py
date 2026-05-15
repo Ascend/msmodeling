@@ -112,10 +112,6 @@ class PDRatioThroughputOptimizer:
             "concurrency_p",
             "concurrency_d",
         ]
-        self._result_df = (
-            merged[result_cols]
-            .sort_values(by="balanced_qps", ascending=False)
-            .reset_index(drop=True)
-        )
+        self._result_df = merged[result_cols].sort_values(by="balanced_qps", ascending=False).reset_index(drop=True)
 
         return self._result_df

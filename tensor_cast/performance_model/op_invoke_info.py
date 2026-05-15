@@ -26,9 +26,7 @@ class OpInvokeInfo:
 
     @dataclasses.dataclass
     class PerformanceProperties:
-        compute_ops: Dict[torch.dtype, "OpInvokeInfo.ComputeOps"] = dataclasses.field(
-            default_factory=dict
-        )
+        compute_ops: Dict[torch.dtype, "OpInvokeInfo.ComputeOps"] = dataclasses.field(default_factory=dict)
         memory_read_bytes: int = 0
         """Read-only bytes"""
         memory_write_bytes: int = 0
@@ -36,9 +34,7 @@ class OpInvokeInfo:
         memory_readwrite_bytes: int = 0
         """Read-write bytes"""
 
-        def combine(
-            self, other: "OpInvokeInfo.PerformanceProperties", compute_only=False
-        ):
+        def combine(self, other: "OpInvokeInfo.PerformanceProperties", compute_only=False):
             for dtype, compute_ops in other.compute_ops.items():
                 if dtype not in self.compute_ops:
                     self.compute_ops[dtype] = OpInvokeInfo.ComputeOps()
@@ -65,8 +61,7 @@ class OpInvokeInfo:
             run_once(
                 self.func,
                 logger.warning,
-                f"No op properties function defined for {self.func}, "
-                f"assuming it is memory-bandwidth bound.",
+                f"No op properties function defined for {self.func}, assuming it is memory-bandwidth bound.",
             )
             return self.get_memory_access_properties()
 
@@ -79,9 +74,7 @@ class OpInvokeInfo:
         def decorator(functor):
             if op in OpInvokeInfo._op_properties_functors:
                 if override:
-                    logger.warning(
-                        "Overwriting existing properties functor for op: %s", op
-                    )
+                    logger.warning("Overwriting existing properties functor for op: %s", op)
                 else:
                     raise ValueError(f"Op {op} already registered")
             OpInvokeInfo._op_properties_functors[op] = functor
@@ -214,12 +207,8 @@ class Region:
     @classmethod
     def get_tensor_id(cls, tensor, region_reference_id=0):
         raw_tensor_id = (id(tensor), region_reference_id)
-        equivalent_tensor_id = cls.equivalent_tensor_id_manager.get_group_root_key(
-            (id(tensor), region_reference_id)
-        )
-        return (
-            equivalent_tensor_id if equivalent_tensor_id is not None else raw_tensor_id
-        )
+        equivalent_tensor_id = cls.equivalent_tensor_id_manager.get_group_root_key((id(tensor), region_reference_id))
+        return equivalent_tensor_id if equivalent_tensor_id is not None else raw_tensor_id
 
     def shallow_copy(self, real_input_tensor, real_output_tensor) -> "Region":
         copied_region = Region(None)
@@ -257,13 +246,9 @@ class Region:
         self.mark_end = mark_end
         inouts = []
         for op_invoke_info in self.op_invoke_infos:
-            inouts.append(
-                (op_invoke_info.args, op_invoke_info.kwargs, op_invoke_info.out)
-            )
+            inouts.append((op_invoke_info.args, op_invoke_info.kwargs, op_invoke_info.out))
         new_inouts = tree_map(patch_inout, inouts)
-        for op_invoke_info, (new_args, new_kwargs, new_out) in zip(
-            self.op_invoke_infos, new_inouts
-        ):
+        for op_invoke_info, (new_args, new_kwargs, new_out) in zip(self.op_invoke_infos, new_inouts):
             op_invoke_info.args = new_args
             op_invoke_info.kwargs = new_kwargs
             op_invoke_info.out = new_out

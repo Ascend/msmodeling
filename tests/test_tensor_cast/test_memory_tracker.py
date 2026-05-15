@@ -29,11 +29,7 @@ class TestMemoryTracker(unittest.TestCase):
         # Verify the memory profile for each operation
         for i, op_profile in enumerate(profile):
             expected_before, expected_after = expected_profile_bytes[i]
-            op_name = (
-                op_profile.op_invoke_info.func.__name__
-                if op_profile.op_invoke_info is not None
-                else "output"
-            )
+            op_name = op_profile.op_invoke_info.func.__name__ if op_profile.op_invoke_info is not None else "output"
             self.assertEqual(
                 op_profile.usage_before_call_bytes,
                 expected_before,

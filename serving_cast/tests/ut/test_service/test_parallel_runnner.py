@@ -85,9 +85,7 @@ class TestTaskRunner(unittest.TestCase):
         configs = list(task_runner._get_user_config())
         self.assertEqual(len(configs), 9)
 
-        target = next(
-            config for config in configs if config.tp_size == 2 and config.ep_size == 2
-        )
+        target = next(config for config in configs if config.tp_size == 2 and config.ep_size == 2)
         self.assertEqual(target.dp_size, 2)
         self.assertEqual(target.moe_dp_size, 1)
         self.assertEqual(target.moe_tp_size, 2)
@@ -101,9 +99,7 @@ class TestTaskRunner(unittest.TestCase):
         task_runner = ParallelRunner(self.args)
         configs = list(task_runner._get_user_config())
         self.assertEqual(len(configs), 16)
-        target = next(
-            config for config in configs if config.tp_size == 8 and config.ep_size == 8
-        )
+        target = next(config for config in configs if config.tp_size == 8 and config.ep_size == 8)
         self.assertEqual(target.dp_size, 1)
         self.assertEqual(target.moe_dp_size, 1)
         self.assertEqual(target.moe_tp_size, 1)
@@ -116,9 +112,7 @@ class TestTaskRunner(unittest.TestCase):
         self.args.num_devices = 8
         task_runner = ParallelRunner(self.args)
         configs = list(task_runner._get_user_config())
-        keys = {
-            (config.tp_size, config.ep_size, config.moe_dp_size) for config in configs
-        }
+        keys = {(config.tp_size, config.ep_size, config.moe_dp_size) for config in configs}
         self.assertIn((1, 2, 4), keys)
         self.assertIn((2, 4, 2), keys)
         for config in configs:
@@ -137,9 +131,7 @@ class TestTaskRunner(unittest.TestCase):
         task_runner = ParallelRunner(self.args)
         configs = list(task_runner._get_user_config())
         self.assertEqual(len(configs), 18)
-        keys = {
-            (config.tp_size, config.ep_size, config.moe_dp_size) for config in configs
-        }
+        keys = {(config.tp_size, config.ep_size, config.moe_dp_size) for config in configs}
         self.assertIn((4, 4, 1), keys)
         self.assertIn((2, 2, 2), keys)
 
@@ -176,9 +168,7 @@ class TestTaskRunner(unittest.TestCase):
         task_runner = ParallelRunner(self.args, executor_cls, initializer)
         df_list = task_runner._get_df_list(task_runner.optimizer_data)
 
-        executor_cls.assert_called_once_with(
-            max_workers=self.args.jobs, initializer=initializer
-        )
+        executor_cls.assert_called_once_with(max_workers=self.args.jobs, initializer=initializer)
         initializer.assert_called_once_with()
 
         self.assertEqual(df_list, [])
@@ -194,9 +184,7 @@ class TestTaskRunner(unittest.TestCase):
         )
 
         with self.assertLogs("serving_cast.parallel_runner", "ERROR") as cm:
-            self.assertRaises(
-                RuntimeError, task_runner._get_df_list, task_runner.optimizer_data
-            )
+            self.assertRaises(RuntimeError, task_runner._get_df_list, task_runner.optimizer_data)
             self.assertTrue(len(cm.output), 3)
             self.assertRegex(
                 cm.output[0],

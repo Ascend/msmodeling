@@ -143,9 +143,7 @@ class TestRequest(unittest.TestCase):
         request.state_change_signal.connect(callback)
         request.state = RequestState.LEAVES_CLIENT
         self.assertEqual(len(signal_received), 1)
-        self.assertEqual(
-            signal_received[0], (RequestState.INITIAL, RequestState.LEAVES_CLIENT)
-        )
+        self.assertEqual(signal_received[0], (RequestState.INITIAL, RequestState.LEAVES_CLIENT))
 
     def test_prefill_done_signal(self):
         """Test prefill_done_signal is sent."""

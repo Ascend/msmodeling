@@ -4,7 +4,7 @@ from typing import Dict
 
 from serving_cast.request import Request, RequestState
 
-from . import stime
+import serving_cast.stime as stime
 
 logger = stime.get_logger(__name__)
 
@@ -51,9 +51,7 @@ class FixedLengthLoadGen(LoadGen):
         self.requests: Dict[int, Request] = {}
         self.num_requests = num_requests
         for _ in range(num_requests):
-            request = Request(
-                num_input_tokens=num_input_tokens, num_output_tokens=num_output_tokens
-            )
+            request = Request(num_input_tokens=num_input_tokens, num_output_tokens=num_output_tokens)
             self.requests[request.id] = request
         self.finished_requests = {}
 

@@ -24,11 +24,7 @@ class OptimizerFactory:
 
     @staticmethod
     def create_strategy(model_runner, disagg_mode: bool = False):
-        strategy_name = (
-            DisaggThroughputOptimizer.name
-            if disagg_mode
-            else AggThroughputOptimizer.name
-        )
+        strategy_name = DisaggThroughputOptimizer.name if disagg_mode else AggThroughputOptimizer.name
         if strategy_name not in OptimizerFactory._frameworks_cls.keys():
             raise ValueError(f"Unsupported strategy: {strategy_name}")
 

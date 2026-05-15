@@ -85,9 +85,9 @@ def create_test_config_files():
     common_path = os.path.join(tmp_dir, "common.yaml")
     instance_path = os.path.join(tmp_dir, "instances.yaml")
 
-    with open(common_path, "w") as f:
+    with open(common_path, "w", encoding="utf-8") as f:
         yaml.dump(common_config, f)
-    with open(instance_path, "w") as f:
+    with open(instance_path, "w", encoding="utf-8") as f:
         yaml.dump(instance_config, f)
 
     return tmp_dir, common_path, instance_path
@@ -105,9 +105,7 @@ class TestTensorCastModelRunner(unittest.TestCase):
         )
         self.assertIsNotNone(runner.model)
         self.assertEqual(runner.model.model_config.parallel_config.world_size, 1)
-        self.assertEqual(
-            runner.model.model_config.parallel_config.tensor_parallel_size, 1
-        )
+        self.assertEqual(runner.model.model_config.parallel_config.tensor_parallel_size, 1)
         self.assertIsNotNone(runner.model.model_config.quant_config)
 
     def test_init_invalid_device(self):
@@ -811,9 +809,7 @@ class TestModelRunnerIntegration(unittest.TestCase):
             tp_size=1,
             moe_dp_size=1,
         )
-        runner = ModelRunner.init_tensor_cast_model_runner(
-            self.config.common_config, parallel_config, "TEST_DEVICE"
-        )
+        runner = ModelRunner.init_tensor_cast_model_runner(self.config.common_config, parallel_config, "TEST_DEVICE")
         self.assertIsNotNone(runner)
 
     def test_model_runner_init(self):
@@ -976,9 +972,9 @@ class TestModelRunnerWithInterpolation(unittest.TestCase):
         common_path = os.path.join(tmp_dir, "common.yaml")
         instance_path = os.path.join(tmp_dir, "instances.yaml")
 
-        with open(common_path, "w") as f:
+        with open(common_path, "w", encoding="utf-8") as f:
             yaml.dump(common_config, f)
-        with open(instance_path, "w") as f:
+        with open(instance_path, "w", encoding="utf-8") as f:
             yaml.dump(instance_config, f)
 
         cls.tmp_dir = tmp_dir

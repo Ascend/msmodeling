@@ -61,9 +61,7 @@ def flash_attention_forward(
     attention_mask: Optional[torch.Tensor],
     **kwargs,
 ):
-    attention_by_layers: Optional[dict[int, AttentionBase]] = kwargs.pop(
-        "attention_by_layers", None
-    )
+    attention_by_layers: Optional[dict[int, AttentionBase]] = kwargs.pop("attention_by_layers", None)
     is_vision_attention = False
     if attention_by_layers is None:
         # For VL models, the visual layer's attention_by_layers cannot be obtained from kwargs,
@@ -75,9 +73,7 @@ def flash_attention_forward(
 
     assert attention_by_layers is not None, "Expect attention_by_layers to be provided."
     if is_vision_attention:
-        assert _tensor_cast_context is not None, (
-            "Expect _tensor_cast_context to be provided."
-        )
+        assert _tensor_cast_context is not None, "Expect _tensor_cast_context to be provided."
         depth_layer_idx = _tensor_cast_context.get("depth_layer_idx")
         self_attn = attention_by_layers[depth_layer_idx]
         kv_cache = None
@@ -87,12 +83,10 @@ def flash_attention_forward(
         # For subsequent time calculation, the key and value do not need to be reshaped
         query = query.reshape(num_tokens, -1)
     else:
-        kv_cache_by_layers: Optional[dict[int, torch.Tensor]] = kwargs.pop(
-            "kv_cache_by_layers", None
-        )
+        kv_cache_by_layers: Optional[dict[int, torch.Tensor]] = kwargs.pop("kv_cache_by_layers", None)
         attention_meta: AttentionMetadataBase = kwargs.pop("attention_meta", None)
-        attention_meta_by_layers: Optional[dict[int, AttentionMetadataBase]] = (
-            kwargs.pop("attention_meta_by_layers", None)
+        attention_meta_by_layers: Optional[dict[int, AttentionMetadataBase]] = kwargs.pop(
+            "attention_meta_by_layers", None
         )
         assert attention_meta is None or attention_meta_by_layers is None, (
             "Only one of attention_meta and attention_meta_by_layers can be provided."
@@ -100,11 +94,7 @@ def flash_attention_forward(
 
         self_attn = attention_by_layers[module.layer_idx]
         kv_cache = kv_cache_by_layers[module.layer_idx] if kv_cache_by_layers else None
-        attention_meta = (
-            attention_meta_by_layers[module.layer_idx]
-            if attention_meta_by_layers
-            else attention_meta
-        )
+        attention_meta = attention_meta_by_layers[module.layer_idx] if attention_meta_by_layers else attention_meta
         # TODO: understand why we need these shape manipulation
         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
         num_tokens = query.shape[0] * query.shape[1]
@@ -145,19 +135,13 @@ class AttentionTensorCast(AttentionBase):
             if self.quant_config is not None:
                 kv_scale = self.quant_config.kv_scale
                 kv_offset = self.quant_config.kv_offset
-                key = torch.ops.tensor_cast.quantize(
-                    key, kv_scale, kv_offset, kv_cache.dtype
-                )
-                value = torch.ops.tensor_cast.quantize(
-                    value, kv_scale, kv_offset, kv_cache.dtype
-                )
+                key = torch.ops.tensor_cast.quantize(key, kv_scale, kv_offset, kv_cache.dtype)
+                value = torch.ops.tensor_cast.quantize(value, kv_scale, kv_offset, kv_cache.dtype)
             if not (key.dtype == value.dtype == kv_cache.dtype):
                 raise ValueError(
                     f"Expect key, value and kv_cache dtype match but got {key.dtype}, {value.dtype}, {kv_cache.dtype}"
                 )
-            torch.ops.tensor_cast.reshape_and_cache(
-                key, value, kv_cache, attention_meta.slot_mapping
-            )
+            torch.ops.tensor_cast.reshape_and_cache(key, value, kv_cache, attention_meta.slot_mapping)
             key = kv_cache[0]
             value = kv_cache[1]
         if self.quant_config is not None and attention_meta is not None:
@@ -173,9 +157,7 @@ class AttentionTensorCast(AttentionBase):
                 key,
                 value,
                 attention_mask,
-                attention_meta.block_table_tensor
-                if attention_meta is not None
-                else None,
+                attention_meta.block_table_tensor if attention_meta is not None else None,
                 query_start_loc,
                 seq_lens,
                 query_lens,
@@ -193,9 +175,7 @@ class AttentionTensorCast(AttentionBase):
                 key,
                 value,
                 attention_mask,
-                attention_meta.block_table_tensor
-                if attention_meta is not None
-                else None,
+                attention_meta.block_table_tensor if attention_meta is not None else None,
                 query_start_loc,
                 seq_lens,
                 query_lens,

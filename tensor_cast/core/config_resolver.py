@@ -63,9 +63,7 @@ class ConfigResolver:
         """
         self.model_id = model_id or user_input.model_id
         auto_loader = AutoModelConfigLoader()
-        self.hf_config = auto_loader.load_config(
-            self.model_id, remote_source=user_input.remote_source
-        )
+        self.hf_config = auto_loader.load_config(self.model_id, remote_source=user_input.remote_source)
         self.user_input = user_input
 
         if user_input is not None:
@@ -73,9 +71,7 @@ class ConfigResolver:
             parallel_config = user_input.get_parallel_config()
         else:
             if parallel_config is None or quant_config is None:
-                raise ValueError(
-                    "When the user input is None,quant_config and parallel_config can not be None"
-                )
+                raise ValueError("When the user input is None,quant_config and parallel_config can not be None")
 
         self.model_config = ModelConfig(
             parallel_config,
@@ -84,9 +80,7 @@ class ConfigResolver:
             quant_linear_cls=TensorCastQuantLinear,
         )
         self.model_config.hf_config = self.hf_config
-        self.model_config.trust_remote_code = (
-            not auto_loader.is_transformers_natively_supported
-        )
+        self.model_config.trust_remote_code = not auto_loader.is_transformers_natively_supported
 
     def resolve(self) -> ModelConfig:
         """
@@ -192,9 +186,7 @@ class ConfigResolver:
             )
             self.model_config.mtp_config = mtp_config
 
-    def update_hf_config(
-        self, enable_repetition: bool = False, num_hidden_layers_override: int = 0
-    ):
+    def update_hf_config(self, enable_repetition: bool = False, num_hidden_layers_override: int = 0):
         """
         Update the HuggingFace configuration settings.
 
@@ -217,9 +209,7 @@ class ConfigResolver:
         if self.model_config.moe_config is None:
             self.model_config.parallel_config.expert_parallel_size = 1
             self.model_config.parallel_config.moe_tensor_parallel_size = 1
-            self.model_config.parallel_config.moe_data_parallel_size = (
-                self.model_config.parallel_config.world_size
-            )
+            self.model_config.parallel_config.moe_data_parallel_size = self.model_config.parallel_config.world_size
 
     def validate_moe_parallel_config(self):
         """Validate MoE-related parallel configuration constraints.
@@ -241,10 +231,7 @@ class ConfigResolver:
                 "set expert_parallel_size > 1."
             )
 
-        if (
-            moe_config.enable_shared_expert_tp
-            and moe_config.host_external_shared_experts
-        ):
+        if moe_config.enable_shared_expert_tp and moe_config.host_external_shared_experts:
             raise ValueError(
                 "enable_shared_expert_tp and host_external_shared_experts are "
                 "mutually exclusive. enable_shared_expert_tp applies TP to shared "
