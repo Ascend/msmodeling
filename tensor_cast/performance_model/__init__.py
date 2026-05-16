@@ -167,10 +167,9 @@ def _static_quant_linear_properties_helper(
         # TODO(jgong5): use fp32 flops for int4->int8, should use something more accurate
         compute_ops = properties.compute_ops.setdefault(torch.float32, OpInvokeInfo.ComputeOps())
         compute_ops.gp_ops = dequant_ops
-        properties.compute_ops[torch.float32] = OpInvokeInfo.ComputeOps()
     if bias is not None:
         compute_ops = properties.compute_ops.setdefault(bias.dtype, OpInvokeInfo.ComputeOps())
-        compute_ops.gp_ops = bias_ops
+        compute_ops.gp_ops += bias_ops
         properties.compute_ops[bias.dtype] = compute_ops
 
     return properties

@@ -5,7 +5,7 @@ This directory contains the Gradio frontend for Modeling Compass. It wraps the C
 Launch from the repository root:
 
 ```bash
-python -m cli.inference.web_ui --host 127.0.0.1 --port 2345
+python -m web_ui.web_ui_start --host 127.0.0.1 --port 2345
 ```
 
 ## Directory Structure
@@ -49,7 +49,7 @@ These runtime files are useful locally, but should usually stay out of source co
 - Defines tabs and input controls for Simulator and Optimizer workflows.
 - Connects preview, run, dropdown, case filter, detail refresh, and export events to functions from `callbacks.py`.
 - Uses reusable result workspaces from `components.py`.
-- Exposes `launch_app()` for `cli/inference/web_ui.py`.
+- Exposes `launch_app()` for `web_ui/web_ui_start.py` (`python -m web_ui.web_ui_start`).
 
 When adding or moving UI controls, start here. Keep layout concerns in this file, and keep validation or business logic in `callbacks.py` or `command_builder.py`.
 
@@ -285,7 +285,7 @@ python web_ui/tests/test_frontend_workflows.py
 Also manually launch the app when changing layout or styling:
 
 ```bash
-python -m cli.inference.web_ui --host 127.0.0.1 --port 2345
+python -m web_ui.web_ui_start --host 127.0.0.1 --port 2345
 ```
 
 Then check the main workflows in the browser:
