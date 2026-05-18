@@ -378,9 +378,12 @@ class MiMoV2DecoderLayer(nn.Module):
     def __init__(self, config: MiMoV2FlashConfig, layer_idx: int):
         super().__init__()
 
-        # This is the key logic: choose the module based on the pattern
-        # is_swa_layer = config.hybrid_layer_pattern[layer_idx] == 1
-        is_swa_layer = False
+        # Choose sliding-window vs full attention from hybrid_layer_pattern when present.
+        pattern = getattr(config, "hybrid_layer_pattern", None)
+        if pattern is None or layer_idx >= len(pattern):
+            is_swa_layer = False
+        else:
+            is_swa_layer = pattern[layer_idx] == 1
         if is_swa_layer:
             self.attention_type = "sliding_window_attention"
             self.self_attn = MiMoV2Attention(config, True, layer_idx)

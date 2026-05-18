@@ -339,13 +339,19 @@ def get_kv_cache_info(model, num_blocks, block_size):
                 device="meta",
             )
         else:
-            assert model.text_config.num_key_value_heads % tp_size == 0
+            n_kv = model.text_config.num_key_value_heads
+            if n_kv >= tp_size:
+                assert n_kv % tp_size == 0
+                kv_heads = n_kv // tp_size
+            else:
+                assert tp_size % n_kv == 0
+                kv_heads = 1
             kv_cache_by_layers[i] = torch.empty(
                 (
                     2,
                     num_blocks,
                     block_size,
-                    model.text_config.num_key_value_heads // tp_size,
+                    kv_heads,
                     model.head_dim,
                 ),
                 dtype=kvcache_dtype,

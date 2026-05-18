@@ -382,7 +382,7 @@ def get_visual_merger_linear(model_type: str):
 
 
 def get_visual_mlp_linear(model_type: str):
-    return get_vl_model_profile_attr(model_type, "visual_mlp_linear_mapping", "visual_visual_mlp_linear_mapping", {})
+    return get_vl_model_profile_attr(model_type, "visual_mlp_linear_mapping", "visual_mlp_linear_mapping", {})
 
 
 def get_visual_layers_path(model_type: str) -> Optional[str]:
