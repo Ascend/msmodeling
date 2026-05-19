@@ -110,6 +110,16 @@ class OptimizerSummary:
 
     def _get_agg_disagg_final_out(self, args):
         sorted_summary_df = self._prepare_agg_disagg_results()
+        if sorted_summary_df.empty:
+            logger.warning(
+                "No optimizer rows passed TTFT/TPOT filters; cannot pick best configuration."
+            )
+            return [
+                "*" * 80,
+                "No configurations satisfy the current TTFT/TPOT filters.",
+                "*" * 80,
+            ]
+
         best_result = sorted_summary_df.loc[0]
 
         final_out = []

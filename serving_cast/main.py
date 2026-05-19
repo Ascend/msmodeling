@@ -123,7 +123,9 @@ def get_load_gen(load_gen_config):
         )
         return load_gen
     else:
-        raise ValueError(f"Unknown load generator type: {load_gen_config.type}")
+        raise ValueError(
+            f"Unknown load generator type: {load_gen_config.load_gen_type!r}"
+        )
 
 
 def init_profiling(args):

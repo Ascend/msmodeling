@@ -188,6 +188,9 @@ def get_logger(logger_name: str):
             return True  # always return True to ensure the record is processed
 
     customed_logger = logging.getLogger(logger_name)
+    if getattr(customed_logger, "_serving_cast_sim_handler_installed", False):
+        return customed_logger
+
     handler = logging.StreamHandler()
     sim_filter = SimulationTimeFilter()
     handler.addFilter(sim_filter)
@@ -197,4 +200,5 @@ def get_logger(logger_name: str):
     handler.setFormatter(formatter)
     customed_logger.addHandler(handler)
     customed_logger.propagate = False
+    customed_logger._serving_cast_sim_handler_installed = True
     return customed_logger

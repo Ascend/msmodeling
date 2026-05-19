@@ -46,6 +46,7 @@ class ModelRunner:
         self.enable_multi_process = self.common_config.model_config.enable_multi_process
         self.num_processes = self.common_config.model_config.num_processes
         self.predict_steps = self.common_config.model_config.predict_steps
+        self.enable_interpolate = self.common_config.model_config.enable_interpolate
         if self.enable_multi_process and self.enable_interpolate:
             raise ValueError("Interpolate is not supported with multi-process.")  # TOBEDONE
         if self.enable_multi_process:
@@ -57,7 +58,6 @@ class ModelRunner:
                 raise ValueError("check common_config.model_config.num_processes, need be int and greater than 1")
         self._interpolation_model = None
         self._interpolation_ready = False
-        self.enable_interpolate = self.common_config.model_config.enable_interpolate
         self.interpolation_seed = self.common_config.model_config.interpolation_seed
 
         if self.enable_interpolate:

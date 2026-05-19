@@ -73,13 +73,13 @@ class CommunicationManager:
         current_task.wait()
 
     def host2device_sync(self, num_bytes: int) -> None:
-        if num_bytes <= 0 and (not isinstance(num_bytes, int)):
-            raise ValueError("num_bytes should be positive")
+        if not isinstance(num_bytes, int) or num_bytes <= 0:
+            raise ValueError("num_bytes should be a positive int")
         self.sync_send(self.host2device_channel, num_bytes)
 
     def host2device_async(self, num_bytes: int, callback, *callback_args, **callback_kwargs) -> None:
-        if num_bytes <= 0 and (not isinstance(num_bytes, int)):
-            raise ValueError("num_bytes should be positive")
+        if not isinstance(num_bytes, int) or num_bytes <= 0:
+            raise ValueError("num_bytes should be a positive int")
         self.async_send(
             self.host2device_channel,
             num_bytes,
@@ -89,13 +89,13 @@ class CommunicationManager:
         )
 
     def device2device_sync(self, num_bytes: int) -> None:
-        if num_bytes <= 0 and (not isinstance(num_bytes, int)):
-            raise ValueError("num_bytes should be positive")
+        if not isinstance(num_bytes, int) or num_bytes <= 0:
+            raise ValueError("num_bytes should be a positive int")
         self.sync_send(self.device2device_channel, num_bytes)
 
     def device2device_async(self, num_bytes: int, callback, *callback_args, **callback_kwargs) -> None:
-        if num_bytes <= 0 and (not isinstance(num_bytes, int)):
-            raise ValueError("num_bytes should be positive")
+        if not isinstance(num_bytes, int) or num_bytes <= 0:
+            raise ValueError("num_bytes should be a positive int")
         self.async_send(
             self.device2device_channel,
             num_bytes,
