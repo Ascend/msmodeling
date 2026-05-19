@@ -9,13 +9,27 @@ from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.base import PerformanceModel
 from tensor_cast.performance_model.memory_tracker import MemoryTracker
-from tensor_cast.performance_model.op_estimator_registry import register_op_estimator
+from tensor_cast.performance_model.op_estimator_registry import _op_estimator_table, register_op_estimator
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.custom_model_registry import get_moe_config
 from tensor_cast.transformers.model import TransformerModel
 from tensor_cast.transformers.utils import AutoModelConfigLoader
 from .test_common import create_attn_metadata_and_kv_cache
+
+
+def _restore_op_properties_functor(op, original):
+    if original is not None:
+        OpInvokeInfo._op_properties_functors[op] = original
+    else:
+        OpInvokeInfo._op_properties_functors.pop(op, None)
+
+
+def _restore_op_estimator(device_name, op, original):
+    if original is not None:
+        _op_estimator_table.setdefault(device_name, {})[op] = original
+    else:
+        _op_estimator_table.get(device_name, {}).pop(op, None)
 
 
 class CustomModelingOperatorTestCase(unittest.TestCase):
@@ -28,8 +42,11 @@ class CustomModelingOperatorTestCase(unittest.TestCase):
         NUM_TOKENS = 100
         MODEL_ID = "Qwen/Qwen3-32B"
         TARGET_OP_NAME = "reshape_and_cache"
+        target_op = torch.ops.tensor_cast.reshape_and_cache.default
+        original_properties_functor = OpInvokeInfo._op_properties_functors.get(target_op)
+        self.addCleanup(_restore_op_properties_functor, target_op, original_properties_functor)
 
-        @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.reshape_and_cache.default, True)
+        @OpInvokeInfo.register_op_properties(target_op, True)
         def simple_operator_properties(
             op_invoke_info: OpInvokeInfo,
         ) -> OpInvokeInfo.PerformanceProperties:
@@ -63,7 +80,6 @@ class CustomModelingOperatorTestCase(unittest.TestCase):
                 kv_cache_by_layers=kv_cache_by_layers,
             )
 
-        target_op = torch.ops.tensor_cast.reshape_and_cache.default
         self.assertIn(
             target_op,
             OpInvokeInfo._op_properties_functors,
@@ -93,8 +109,11 @@ class CustomModelingOperatorTestCase(unittest.TestCase):
 
     def test_custom_estimate_operator_estimator(self):
         all_to_all_execution_time_s = 3.0
+        target_op = torch.ops.tensor_cast.all_to_all.default
+        original_estimator = _op_estimator_table.get(None, {}).get(target_op)
+        self.addCleanup(_restore_op_estimator, None, target_op, original_estimator)
 
-        @register_op_estimator(torch.ops.tensor_cast.all_to_all.default, None, True)
+        @register_op_estimator(target_op, None, True)
         def _estimate_custom_comm(op_invoke_info, device_profile) -> object:
             return PerformanceModel.Result(all_to_all_execution_time_s)
 
