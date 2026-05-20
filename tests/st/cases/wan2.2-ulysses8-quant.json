@@ -1,0 +1,77 @@
+{
+  "type": "video",
+  "name": "wan2.2-ulysses8-quant",
+  "description": "Wan2.2-T2V-A14B ulysses=8, batch=1, seq=128, 720x1280x81frames, float16, use_cfg, quant",
+  "initial_time_s": 7.403,
+  "baseline_time_s": 6.872,
+  "initial_tolerance": 0.1,
+  "baseline_tolerance": 0.2,
+  "operator_top_n": 10,
+  "operator_tolerance": 0.1,
+  "device": "ATLAS_800_A2_376T_64G",
+  "model_id": "model_config/Wan2.2-T2V-A14B-Diffusers",
+  "seq_len": 128,
+  "batch_size": 1,
+  "height": 720,
+  "width": 1280,
+  "frame_num": 81,
+  "sample_step": 1,
+  "dtype": "float16",
+  "use_cfg": true,
+  "world_size": 8,
+  "ulysses_size": 8,
+  "cfg_parallel": false,
+  "quantize_linear_action": "W8A8_DYNAMIC",
+  "operators": [
+    {
+      "name": "tensor_cast.attention.default",
+      "total_time_s": 5.11,
+      "num_calls": 80
+    },
+    {
+      "name": "tensor_cast.static_quant_linear.default",
+      "total_time_s": 0.865106,
+      "num_calls": 400
+    },
+    {
+      "name": "aten._to_copy.default",
+      "total_time_s": 0.37752300000000005,
+      "num_calls": 884
+    },
+    {
+      "name": "aten.mul.Tensor",
+      "total_time_s": 0.348225,
+      "num_calls": 804
+    },
+    {
+      "name": "aten.add.Tensor",
+      "total_time_s": 0.192258,
+      "num_calls": 403
+    },
+    {
+      "name": "tensor_cast.dynamic_quantize_symmetric.default",
+      "total_time_s": 0.10781,
+      "num_calls": 400
+    },
+    {
+      "name": "aten.native_layer_norm.default",
+      "total_time_s": 0.08900400000000001,
+      "num_calls": 121
+    },
+    {
+      "name": "aten.pow.Tensor_Scalar",
+      "total_time_s": 0.088727,
+      "num_calls": 160
+    },
+    {
+      "name": "aten.mean.dim",
+      "total_time_s": 0.044531999999999995,
+      "num_calls": 160
+    },
+    {
+      "name": "aten.copy_.default",
+      "total_time_s": 0.044325,
+      "num_calls": 160
+    }
+  ]
+}

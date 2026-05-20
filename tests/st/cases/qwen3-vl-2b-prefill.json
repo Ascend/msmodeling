@@ -1,0 +1,123 @@
+{
+  "type": "text",
+  "name": "qwen3-vl-2b-prefill",
+  "description": "Qwen3-VL-2B prefill, 1 query, qlen=27, img=1080x1920, compile",
+  "initial_time_s": 0.116223,
+  "baseline_time_s": 0.057731,
+  "initial_tolerance": 0.1,
+  "baseline_tolerance": 1.02,
+  "operator_top_n": 10,
+  "operator_tolerance": 0.1,
+  "user_input": {
+    "device": "ATLAS_800_A2_376T_64G",
+    "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+    "num_queries": 1,
+    "query_len": 27,
+    "context_length": 0,
+    "prefix_cache_hit_rate": 0.0,
+    "do_compile": true,
+    "allow_graph_break": false,
+    "enable_multistream": true,
+    "dump_input_shapes": false,
+    "chrome_trace": null,
+    "graph_log_url": null,
+    "log_level": null,
+    "quantize_linear_action": "DISABLED",
+    "quantize_lmhead": false,
+    "mxfp4_group_size": 32,
+    "quantize_attention_action": "DISABLED",
+    "enable_sequence_parallel": false,
+    "decode": false,
+    "num_mtp_tokens": 0,
+    "mtp_acceptance_rate": [
+      0.9,
+      0.6,
+      0.4,
+      0.2
+    ],
+    "num_hidden_layers_override": 0,
+    "disable_repetition": false,
+    "reserved_memory_gb": 0,
+    "world_size": 1,
+    "tp_size": 1,
+    "pp_size": 1,
+    "dp_size": null,
+    "o_proj_tp_size": null,
+    "o_proj_dp_size": null,
+    "mlp_tp_size": null,
+    "mlp_dp_size": null,
+    "lmhead_tp_size": null,
+    "lmhead_dp_size": null,
+    "ep_size": 1,
+    "moe_dp_size": 1,
+    "moe_tp_size": null,
+    "word_embedding_tp": false,
+    "word_embedding_tp_mode": "col",
+    "enable_redundant_experts": false,
+    "enable_shared_expert_tp": false,
+    "enable_dispatch_ffn_combine": false,
+    "enable_external_shared_experts": false,
+    "host_external_shared_experts": false,
+    "block_size": 128,
+    "remote_source": "huggingface",
+    "image_batch_size": 1,
+    "image_height": 1080,
+    "image_width": 1920,
+    "performance_model": [
+      "analytic"
+    ],
+    "profiling_database": null
+  },
+  "operators": [
+    {
+      "name": "tensor_cast.attention.default",
+      "total_time_s": 0.035999,
+      "num_calls": 52
+    },
+    {
+      "name": "aten.mm.default",
+      "total_time_s": 0.023312000000000003,
+      "num_calls": 113
+    },
+    {
+      "name": "aten.addmm.default",
+      "total_time_s": 0.020806,
+      "num_calls": 104
+    },
+    {
+      "name": "aten.add.Tensor",
+      "total_time_s": 0.007976,
+      "num_calls": 136
+    },
+    {
+      "name": "aten.mul.Tensor",
+      "total_time_s": 0.006611,
+      "num_calls": 107
+    },
+    {
+      "name": "aten._to_copy.default",
+      "total_time_s": 0.0047599999999999995,
+      "num_calls": 100
+    },
+    {
+      "name": "aten.cat.default",
+      "total_time_s": 0.003983,
+      "num_calls": 74
+    },
+    {
+      "name": "aten.gelu.default",
+      "total_time_s": 0.003222,
+      "num_calls": 28
+    },
+    {
+      "name": "tensor_cast.swiglu.default",
+      "total_time_s": 0.002079,
+      "num_calls": 28
+    },
+    {
+      "name": "aten.native_layer_norm.default",
+      "total_time_s": 0.0017540000000000001,
+      "num_calls": 52
+    }
+  ]
+}

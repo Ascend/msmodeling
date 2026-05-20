@@ -1,0 +1,123 @@
+{
+  "type": "text",
+  "name": "qwen3-30b-a3b-decode",
+  "description": "Qwen3-30B-A3B decode, 1 query, ctx=3450, TP=4, compile",
+  "initial_time_s": 0.012712,
+  "baseline_time_s": 0.008871,
+  "initial_tolerance": 0.1,
+  "baseline_tolerance": 0.45,
+  "operator_top_n": 10,
+  "operator_tolerance": 0.1,
+  "user_input": {
+    "device": "ATLAS_800_A3_752T_128G_DIE",
+    "model_id": "Qwen/Qwen3-30B-A3B",
+    "num_queries": 1,
+    "query_len": 1,
+    "context_length": 3450,
+    "prefix_cache_hit_rate": 0.0,
+    "do_compile": true,
+    "allow_graph_break": false,
+    "enable_multistream": true,
+    "dump_input_shapes": false,
+    "chrome_trace": null,
+    "graph_log_url": null,
+    "log_level": null,
+    "quantize_linear_action": "DISABLED",
+    "quantize_lmhead": false,
+    "mxfp4_group_size": 32,
+    "quantize_attention_action": "DISABLED",
+    "enable_sequence_parallel": false,
+    "decode": true,
+    "num_mtp_tokens": 0,
+    "mtp_acceptance_rate": [
+      0.9,
+      0.6,
+      0.4,
+      0.2
+    ],
+    "num_hidden_layers_override": 0,
+    "disable_repetition": false,
+    "reserved_memory_gb": 0,
+    "world_size": 4,
+    "tp_size": 4,
+    "pp_size": 1,
+    "dp_size": null,
+    "o_proj_tp_size": null,
+    "o_proj_dp_size": null,
+    "mlp_tp_size": null,
+    "mlp_dp_size": null,
+    "lmhead_tp_size": null,
+    "lmhead_dp_size": null,
+    "ep_size": 1,
+    "moe_dp_size": 1,
+    "moe_tp_size": null,
+    "word_embedding_tp": false,
+    "word_embedding_tp_mode": "col",
+    "enable_redundant_experts": false,
+    "enable_shared_expert_tp": false,
+    "enable_dispatch_ffn_combine": false,
+    "enable_external_shared_experts": false,
+    "host_external_shared_experts": false,
+    "block_size": 128,
+    "remote_source": "huggingface",
+    "image_batch_size": null,
+    "image_height": null,
+    "image_width": null,
+    "performance_model": [
+      "analytic"
+    ],
+    "profiling_database": null
+  },
+  "operators": [
+    {
+      "name": "tensor_cast.matmul_all_reduce.default",
+      "total_time_s": 0.005279,
+      "num_calls": 432
+    },
+    {
+      "name": "aten.mm.default",
+      "total_time_s": 0.003395,
+      "num_calls": 481
+    },
+    {
+      "name": "aten.constant_pad_nd.default",
+      "total_time_s": 0.000775451,
+      "num_calls": 384
+    },
+    {
+      "name": "tensor_cast.swiglu.default",
+      "total_time_s": 0.000769676,
+      "num_calls": 384
+    },
+    {
+      "name": "tensor_cast.attention.default",
+      "total_time_s": 0.000320547,
+      "num_calls": 48
+    },
+    {
+      "name": "aten.sum.dim_IntList",
+      "total_time_s": 0.000291378,
+      "num_calls": 144
+    },
+    {
+      "name": "tensor_cast.rms_norm.default",
+      "total_time_s": 0.000290803,
+      "num_calls": 145
+    },
+    {
+      "name": "prims.convert_element_type.default",
+      "total_time_s": 0.000192594,
+      "num_calls": 96
+    },
+    {
+      "name": "aten.div.Tensor",
+      "total_time_s": 0.00019205,
+      "num_calls": 96
+    },
+    {
+      "name": "aten.mul.Tensor",
+      "total_time_s": 0.000100472,
+      "num_calls": 48
+    }
+  ]
+}
