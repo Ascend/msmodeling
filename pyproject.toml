@@ -34,3 +34,8 @@ exclude_lines = [
     "@abstractmethod",
     "raise NotImplementedError",
 ]
+
+[dependency-groups]
+lint = [
+    "pre-commit>=4.3.0",
+]
