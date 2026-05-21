@@ -41,14 +41,38 @@ class DfcPassTestCase(unittest.TestCase):
     def tearDown(self):
         config.compilation.fusion_patterns.enable_dispatch_ffn_combine = self._orig_enable_dispatch_ffn_combine
 
+    def _assert_no_dfc_residual_ops(self, table_result: str):
+        residual_ops = [
+            "tensor_cast.init_routing_v2.default",
+            "tensor_cast.all_to_all.default",
+            "tensor_cast.unpermute_tokens.default",
+            "tensor_cast.grouped_matmul_quant_swiglu.default",
+            "tensor_cast.grouped_matmul_quant.default",
+            "tensor_cast.grouped_matmul_quant_int4_swiglu.default",
+            "tensor_cast.grouped_matmul_quant_int4.default",
+        ]
+        for op_name in residual_ops:
+            self.assertNotIn(op_name, table_result, f"Residual DFC op found: {op_name}")
+
     @parameterized.expand(
         [
-            # (scenario, num_queries, query_len, context_length)
-            ("prefill", 1, 256, 0),
-            ("decode", 16, 1, 4096),
+            # (scenario, num_queries, query_len, context_length, quantize_linear_action)
+            ("prefill_w8a8_static", 1, 256, 0, QuantizeLinearAction.W8A8_STATIC),
+            ("decode_w8a8_static", 16, 1, 4096, QuantizeLinearAction.W8A8_STATIC),
+            ("prefill_w8a8_dynamic", 1, 256, 0, QuantizeLinearAction.W8A8_DYNAMIC),
+            ("decode_w8a8_dynamic", 16, 1, 4096, QuantizeLinearAction.W8A8_DYNAMIC),
+            ("prefill_w4a8_dynamic", 1, 256, 0, QuantizeLinearAction.W4A8_DYNAMIC),
+            ("decode_w4a8_dynamic", 16, 1, 4096, QuantizeLinearAction.W4A8_DYNAMIC),
         ]
     )
-    def test_dfc_dsv3_ep(self, scenario, num_queries, query_len, context_length):
+    def test_dfc_dsv3_ep(
+        self,
+        scenario,
+        num_queries,
+        query_len,
+        context_length,
+        quantize_linear_action,
+    ):
         """Verify that DFC is effective for DSv3 large EP configuration (Phase 1)"""
         config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
         model_id = "deepseek-ai/DeepSeek-V3"
@@ -64,7 +88,7 @@ class DfcPassTestCase(unittest.TestCase):
             tp_size=8,
             dp_size=2,
             ep_size=16,
-            quantize_linear_action=QuantizeLinearAction.W8A8_STATIC,
+            quantize_linear_action=quantize_linear_action,
         )
         model_runner = ModelRunner(user_input)
         result = model_runner.run_inference(generate_inputs_func=generate_inputs)
@@ -75,8 +99,7 @@ class DfcPassTestCase(unittest.TestCase):
             "tensor_cast.dispatch_ffn_combine" in result["table_result"],
             f"No DFC op found in table_result:\n{result['table_result']}",
         )
-        self.assertNotIn("tensor_cast.init_routing_v2.default", result["table_result"])
-        self.assertNotIn("tensor_cast.unpermute_tokens.default", result["table_result"])
+        self._assert_no_dfc_residual_ops(result["table_result"])
 
     def test_dfc_output_shape_matches_baseline(self):
         """Verify that the DFC output shape is consistent with the unpermute_tokens baseline (Qwen3 non-EP)"""
@@ -113,7 +136,6 @@ class DfcPassTestCase(unittest.TestCase):
         dfc_shape = run_model(enable_dfc=True)
         self.assertEqual(baseline_shape, dfc_shape)
 
-    @unittest.expectedFailure  # W8A8 dynamic DFC pass pending implementation
     def test_dfc_dsv3_w8a8_dynamic_profiling(self):
         """Verify DFC profiling performance model with DeepSeek-V3 config."""
         config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
@@ -146,8 +168,7 @@ class DfcPassTestCase(unittest.TestCase):
             "tensor_cast.dispatch_ffn_combine" in result["table_result"],
             f"No DFC op found in table_result:\n{result['table_result']}",
         )
-        self.assertNotIn("tensor_cast.init_routing_v2.default", result["table_result"])
-        self.assertNotIn("tensor_cast.unpermute_tokens.default", result["table_result"])
+        self._assert_no_dfc_residual_ops(result["table_result"])
 
     def test_dfc_estimator_produces_nonzero_time(self):
         """Verify DFC estimator computes meaningful execution time (not memory-only)."""
@@ -177,6 +198,7 @@ class DfcPassTestCase(unittest.TestCase):
             "tensor_cast.dispatch_ffn_combine" in result["table_result"],
             f"No DFC op found in table_result:\n{result['table_result']}",
         )
+        self._assert_no_dfc_residual_ops(result["table_result"])
 
         # Analytic model should produce non-trivial execution time
         analytic_time = result["execution_time_s"].get("analytic", 0)
@@ -259,7 +281,61 @@ class DfcPassTestCase(unittest.TestCase):
 
         self.assertEqual(gmm1_w_args[0], [gate_up_0.args[1], gate_up_1.args[1]])
         self.assertEqual(gmm2_w_args[0], [down_0.args[1], down_1.args[1]])
+        self.assertEqual(len(gmm1_w_args), 5)
+        self.assertEqual(len(gmm2_w_args), 5)
         self.assertNotIn(gate_up_0.args[1], gmm2_w_args[0])
         self.assertNotIn(gate_up_1.args[1], gmm2_w_args[0])
+        self.assertNotIn(gate_up_0.args[4], gmm1_w_args)
+        self.assertNotIn(gate_up_0.args[5], gmm1_w_args)
+        self.assertNotIn(down_0.args[4], gmm2_w_args)
+        self.assertNotIn(down_0.args[5], gmm2_w_args)
         self.assertIs(resolved_rank, rank)
         self.assertIs(resolved_rank_group, rank_group)
+
+    def test_quant_arg_index_mapping_is_shared_between_gmm_and_linear_paths(self):
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        w = graph.placeholder("w")
+        w_scale = graph.placeholder("w_scale")
+        w_offset = graph.placeholder("w_offset")
+        x_scale = graph.placeholder("x_scale")
+        x_offset = graph.placeholder("x_offset")
+        bias = graph.placeholder("bias")
+
+        grouped_gmm = graph.call_function(
+            torch.ops.tensor_cast.grouped_matmul_quant.default,
+            args=(x, w, w_scale, w_offset, x_scale, x_offset, bias, torch.bfloat16),
+        )
+
+        expected_indices = DispatchFFNCombinePass._QUANT_WEIGHT_ARG_INDICES
+        extracted_args = DispatchFFNCombinePass()._extract_grouped_gmm_args(grouped_gmm)
+
+        self.assertEqual(
+            DispatchFFNCombinePass._get_linear_arg_indices_for_dfc(torch.ops.tensor_cast.static_quant_linear.default),
+            expected_indices,
+        )
+        self.assertEqual(
+            extracted_args,
+            tuple(grouped_gmm.args[i] for i in expected_indices),
+        )
+
+    def test_linear_arg_index_helper_rejects_target_without_schema(self):
+        def plain_callable():
+            return None
+
+        with self.assertRaisesRegex(TypeError, "expects a torch op overload"):
+            DispatchFFNCombinePass._get_linear_arg_indices_for_dfc(plain_callable)
+
+    def test_quant_arg_extraction_rejects_missing_args(self):
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        w = graph.placeholder("w")
+        w_scale = graph.placeholder("w_scale")
+
+        grouped_gmm = graph.call_function(
+            torch.ops.tensor_cast.grouped_matmul_quant.default,
+            args=(x, w, w_scale),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Unexpected argument count"):
+            DispatchFFNCombinePass()._extract_grouped_gmm_args(grouped_gmm)

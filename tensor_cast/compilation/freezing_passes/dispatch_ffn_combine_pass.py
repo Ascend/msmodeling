@@ -12,6 +12,22 @@ logger = logging.getLogger(__name__)
 
 
 class DispatchFFNCombinePass(TensorCastGraphModulePass):
+    # W8A8/W4A8 quant ops feed DFC with weight-side quant args only.
+    # Skip activation-side x_scale (idx 4) and x_offset (idx 5) because
+    # dispatch_ffn_combine performs dynamic activation quantization itself.
+    _QUANT_FULL_ARG_NAMES = (
+        "x",
+        "w",
+        "w_scale",
+        "w_offset",
+        "x_scale",
+        "x_offset",
+        "bias",
+        "out_dtype",
+    )
+    _QUANT_WEIGHT_ARG_NAMES = ("w", "w_scale", "w_offset", "bias", "out_dtype")
+    _QUANT_WEIGHT_ARG_INDICES = (1, 2, 3, 6, 7)
+
     _GROUPED_MATMUL_OPS = {
         torch.ops.tensor_cast.grouped_matmul.default,
         torch.ops.tensor_cast.grouped_matmul_quant.default,
@@ -35,6 +51,15 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast.mxfp4_linear.default,
     }
 
+    _DFC_QUANT_WEIGHT_ONLY_OPS = {
+        torch.ops.tensor_cast.grouped_matmul_quant.default,
+        torch.ops.tensor_cast.grouped_matmul_quant_int4.default,
+        torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default,
+        torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default,
+        torch.ops.tensor_cast.static_quant_linear.default,
+        torch.ops.tensor_cast.static_quant_linear_int4.default,
+    }
+
     _SWIGLU_OPS = {
         torch.ops.tensor_cast.swiglu.default,
         torch.ops.tensor_cast.grouped_matmul_swiglu.default,
@@ -53,9 +78,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default: (
             torch.ops.tensor_cast.dispatch_ffn_combine_quant_int4.default
         ),
-        torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default: (
-            torch.ops.tensor_cast.dispatch_ffn_combine_fp8.default
-        ),
+        torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default: torch.ops.tensor_cast.dispatch_ffn_combine_fp8.default,
         torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default: (
             torch.ops.tensor_cast.dispatch_ffn_combine_mxfp4.default
         ),
@@ -205,11 +228,14 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
             dfc_target = self._DFC_OP_MAP_GMM.get(gmm_swiglu_node.target)
             if dfc_target is None:
                 return None
-            # Skip args[0] (activation) from each GMM node
+            # Skip args[0] (activation) from each GMM node.
+            # For quant/int4, activation-side quantization parameters are
+            # derived from routed/intermediate activations inside this region
+            # and should be internal to DFC rather than external graph inputs.
             return (
                 dfc_target,
-                gmm_swiglu_node.args[1:],
-                gmm_plain_node.args[1:],
+                self._extract_grouped_gmm_args(gmm_swiglu_node),
+                self._extract_grouped_gmm_args(gmm_plain_node),
                 rank_node,
                 rank_group_node,
             )
@@ -288,12 +314,13 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
 
     @staticmethod
     def _collect_linear_args_as_lists(linear_nodes: list) -> tuple:
-        """Collect weight args from multiple linear nodes into List[Tensor] format.
+        """Collect DFC args from multiple linear nodes into List[Tensor] format.
 
         Each linear op has signature (x, w, ...). We skip x (args[0]) and collect
-        the remaining args across all nodes. For tensor args, we build a list
-        containing one element per node (per expert). Non-tensor args (dtype, etc)
-        are taken from the first node and passed through as-is.
+        the remaining args across all nodes. For quant/int4 linears we keep only
+        the static weight-side args and drop activation-side x_scale/x_offset.
+        Tensor args become per-expert lists; non-tensor args (dtype, etc) are
+        taken from the first node.
 
         Example: 16 static_quant_linear nodes with args (x, w, ws, wo, xs, xo, bias, dt)
         → ([w0..w15], [ws0..ws15], [wo0..wo15], [xs0..xs15], [xo0..xo15], [b0..b15], dt)
@@ -301,15 +328,18 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         if not linear_nodes:
             return ()
         template = linear_nodes[0]
-        num_args = len(template.args)
+        arg_indices = DispatchFFNCombinePass._get_linear_arg_indices_for_dfc(template.target)
         result = []
-        for i in range(1, num_args):  # skip args[0] (activation)
+        for i in arg_indices:
+            DispatchFFNCombinePass._check_node_arg_index(template, i)
             first_val = template.args[i]
             if isinstance(first_val, fx.Node) or first_val is None:
                 # Tensor arg or optional tensor → collect from all nodes into a list.
                 # Optional tensor (e.g., w_offset=None) → collect into List[None].
                 # Downstream _swiglu_fusion_properties_helper handles List[None]
                 # correctly via `w_offset and i < len(w_offset)` guard.
+                for node in linear_nodes:
+                    DispatchFFNCombinePass._check_node_arg_index(node, i)
                 result.append([node.args[i] for node in linear_nodes])
             else:
                 # Non-tensor (dtype, etc) → take from first node
@@ -337,6 +367,58 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
                     queue.append(arg)
 
         return predecessors
+
+    def _extract_grouped_gmm_args(self, node: fx.Node) -> tuple:
+        """Extract grouped_matmul args to match the DFC fused op signature."""
+        arg_indices = self._get_weight_only_arg_indices(node.target)
+        if arg_indices is not None:
+            # grouped_matmul_quant signature:
+            #   (x, w, w_scale, w_offset, x_scale, x_offset, bias, out_dtype)
+            # Keep only the static weight-side args. Activation-side dynamic
+            # quantization is performed inside dispatch_ffn_combine.
+            for i in arg_indices:
+                self._check_node_arg_index(node, i)
+            return tuple(node.args[i] for i in arg_indices)
+        return node.args[1:]
+
+    @classmethod
+    def _get_weight_only_arg_indices(cls, target) -> tuple[int, ...] | None:
+        if target in cls._DFC_QUANT_WEIGHT_ONLY_OPS:
+            schema_arg_names = cls._get_schema_arg_names(target)
+            if schema_arg_names != cls._QUANT_FULL_ARG_NAMES:
+                raise ValueError(
+                    "Unexpected DFC quant op schema for "
+                    f"{target}: expected {cls._QUANT_FULL_ARG_NAMES}, "
+                    f"got {schema_arg_names}"
+                )
+            return tuple(schema_arg_names.index(name) for name in cls._QUANT_WEIGHT_ARG_NAMES)
+        return None
+
+    @staticmethod
+    def _get_linear_arg_indices_for_dfc(target) -> tuple[int, ...]:
+        arg_indices = DispatchFFNCombinePass._get_weight_only_arg_indices(target)
+        if arg_indices is not None:
+            # static_quant_linear signature:
+            #   (x, w, w_scale, w_offset, x_scale, x_offset, bias, out_dtype)
+            return arg_indices
+        schema_arg_names = DispatchFFNCombinePass._get_schema_arg_names(target)
+        return tuple(range(1, len(schema_arg_names)))
+
+    @staticmethod
+    def _get_schema_arg_names(target) -> tuple[str, ...]:
+        schema = getattr(target, "_schema", None)
+        if schema is None:
+            raise TypeError(f"DFC argument extraction expects a torch op overload with a _schema, got {target!r}")
+        return tuple(arg.name for arg in schema.arguments)
+
+    @staticmethod
+    def _check_node_arg_index(node: fx.Node, index: int) -> None:
+        if index >= len(node.args):
+            raise ValueError(
+                "Unexpected argument count for DFC node "
+                f"{node.name} ({node.target}): need index {index}, "
+                f"but only {len(node.args)} args are present"
+            )
 
     # Forward BFS to collect region nodes with depth limit
     def _collect_region_nodes_forward(self, start_node: fx.Node, processed: set, max_depth: int) -> tuple[set, fx.Node]:

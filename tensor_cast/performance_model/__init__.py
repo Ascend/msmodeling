@@ -1855,7 +1855,7 @@ def _estimate_dfc_common(
     ]
 
     # --- GMM1 (gate_up_proj + SwiGLU) ---
-    gmm1_full_args = (dummy_gmm1_x_list, *gmm1_w_args)
+    gmm1_full_args = _build_grouped_gmm_args_for_estimator(gmm1_swiglu_target, dummy_gmm1_x_list, gmm1_w_args)
     gmm1_out = gmm1_swiglu_target(*gmm1_full_args)
     gmm1_info = OpInvokeInfo(gmm1_swiglu_target, gmm1_full_args, None, gmm1_out)
     gmm1_props = gmm1_info.get_perf_properties()
@@ -1876,7 +1876,7 @@ def _estimate_dfc_common(
         for _ in range(gmm2_num_experts)
     ]
 
-    gmm2_full_args = (dummy_gmm2_x_list, *gmm2_w_args)
+    gmm2_full_args = _build_grouped_gmm_args_for_estimator(gmm2_target, dummy_gmm2_x_list, gmm2_w_args)
     gmm2_out = gmm2_target(*gmm2_full_args)
     gmm2_info = OpInvokeInfo(gmm2_target, gmm2_full_args, None, gmm2_out)
     gmm2_props = gmm2_info.get_perf_properties()
@@ -1956,6 +1956,34 @@ def _estimate_dfc_common(
     return result
 
 
+def _build_grouped_gmm_args_for_estimator(gmm_target, dummy_x_list: list[torch.Tensor], gmm_w_args: tuple) -> tuple:
+    """Materialize grouped_matmul args for estimator-only dummy invocation."""
+    if gmm_target in {
+        torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default,
+        torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default,
+        torch.ops.tensor_cast.grouped_matmul_quant.default,
+        torch.ops.tensor_cast.grouped_matmul_quant_int4.default,
+    }:
+        if len(gmm_w_args) != 5:
+            raise ValueError(
+                f"Unexpected DFC grouped quant GMM weight arg count for {gmm_target}: expected 5, got {len(gmm_w_args)}"
+            )
+        gmm_w, gmm_ws, gmm_wo, gmm_bias, gmm_dt = gmm_w_args
+        x_scale = [torch.empty((), dtype=torch.float32, device="meta")] * len(dummy_x_list)
+        x_offset = [None] * len(dummy_x_list)
+        return (
+            dummy_x_list,
+            gmm_w,
+            gmm_ws,
+            gmm_wo,
+            x_scale,
+            x_offset,
+            gmm_bias,
+            gmm_dt,
+        )
+    return (dummy_x_list, *gmm_w_args)
+
+
 @register_op_estimator(torch.ops.tensor_cast.dispatch_ffn_combine.default, None)
 def _estimate_dfc_bf16(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> PerformanceModel.Result:
     (x, expert_indices, gmm1_w, gmm1_bias, gmm2_w, gmm2_bias, rank, rank_group) = op_invoke_info.args
@@ -1981,15 +2009,11 @@ def _estimate_dfc_quant(op_invoke_info: OpInvokeInfo, device_profile: DeviceProf
         gmm1_w,
         gmm1_ws,
         gmm1_wo,
-        gmm1_xs,
-        gmm1_xo,
         gmm1_bias,
         gmm1_dt,
         gmm2_w,
         gmm2_ws,
         gmm2_wo,
-        gmm2_xs,
-        gmm2_xo,
         gmm2_bias,
         gmm2_dt,
         rank,
@@ -2001,9 +2025,9 @@ def _estimate_dfc_quant(op_invoke_info: OpInvokeInfo, device_profile: DeviceProf
         x,
         ei,
         gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default,
-        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_wo, gmm1_xs, gmm1_xo, gmm1_bias, gmm1_dt),
+        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_wo, gmm1_bias, gmm1_dt),
         gmm2_target=torch.ops.tensor_cast.grouped_matmul_quant.default,
-        gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_wo, gmm2_xs, gmm2_xo, gmm2_bias, gmm2_dt),
+        gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_wo, gmm2_bias, gmm2_dt),
         rank=rank,
         rank_group=rg,
     )
@@ -2017,15 +2041,11 @@ def _estimate_dfc_quant_int4(op_invoke_info: OpInvokeInfo, device_profile: Devic
         gmm1_w,
         gmm1_ws,
         gmm1_wo,
-        gmm1_xs,
-        gmm1_xo,
         gmm1_bias,
         gmm1_dt,
         gmm2_w,
         gmm2_ws,
         gmm2_wo,
-        gmm2_xs,
-        gmm2_xo,
         gmm2_bias,
         gmm2_dt,
         rank,
@@ -2037,9 +2057,9 @@ def _estimate_dfc_quant_int4(op_invoke_info: OpInvokeInfo, device_profile: Devic
         x,
         ei,
         gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default,
-        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_wo, gmm1_xs, gmm1_xo, gmm1_bias, gmm1_dt),
+        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_wo, gmm1_bias, gmm1_dt),
         gmm2_target=torch.ops.tensor_cast.grouped_matmul_quant_int4.default,
-        gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_wo, gmm2_xs, gmm2_xo, gmm2_bias, gmm2_dt),
+        gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_wo, gmm2_bias, gmm2_dt),
         rank=rank,
         rank_group=rg,
     )

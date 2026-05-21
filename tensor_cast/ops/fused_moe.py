@@ -70,22 +70,20 @@ def _(
     gmm1_w: List[torch.Tensor],
     gmm1_w_scale: List[torch.Tensor],
     gmm1_w_offset: List[Optional[torch.Tensor]],
-    gmm1_x_scale: List[torch.Tensor],
-    gmm1_x_offset: List[Optional[torch.Tensor]],
     gmm1_bias: List[Optional[torch.Tensor]],
     gmm1_out_dtype: Optional[torch.dtype],
     gmm2_w: List[torch.Tensor],
     gmm2_w_scale: List[torch.Tensor],
     gmm2_w_offset: List[Optional[torch.Tensor]],
-    gmm2_x_scale: List[torch.Tensor],
-    gmm2_x_offset: List[Optional[torch.Tensor]],
     gmm2_bias: List[Optional[torch.Tensor]],
     gmm2_out_dtype: Optional[torch.dtype],
     rank: int,
     rank_group: List[int],
 ) -> torch.Tensor:
     """Fused MoE FFN: W8A8/W4A8 quant variant.
-    GMM weight/scale args mirror grouped_matmul_quant[_swiglu] sans x.
+    Both GMM1 and GMM2 carry only static weight-side args. Activation-side
+    quantization for routed input and SwiGLU output is produced inside the
+    fused kernel rather than by external graph nodes.
     """
     hidden_size = x.shape[-1]
     return torch.empty((*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device)
