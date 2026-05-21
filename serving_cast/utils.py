@@ -189,3 +189,40 @@ def gen_profiling_config_set_env_variable(prof_dir):
         json.dump(config, f, ensure_ascii=False, indent=2)
 
     os.environ["SERVICE_PROF_CONFIG_PATH"] = json_path
+
+
+# (column, ascending): higher QPS/throughput first; lower latency first on ties.
+PD_RATIO_RANK_KEYS: tuple[tuple[str, bool], ...] = (
+    ("balanced_qps", False),
+    ("d_qps", False),
+    ("p_qps", False),
+    ("ttft_p", True),
+    ("tpot_d", True),
+    ("batch_size_d", False),
+    ("batch_size_p", False),
+    ("concurrency_d", False),
+    ("concurrency_p", False),
+    ("parallel_p", True),
+    ("parallel_d", True),
+)
+
+
+def rank_pd_ratio_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Sort PD ratio DataFrame by PD_RATIO_RANK_KEYS (stable)."""
+    keys = [(col, asc) for col, asc in PD_RATIO_RANK_KEYS if col in df.columns]
+    if not keys:
+        return df
+    cols, ascending = zip(*keys)
+    return df.sort_values(by=list(cols), ascending=list(ascending), kind="stable")
+
+
+def best_pd_row_per_group(df: pd.DataFrame, group_keys: list[str]) -> pd.DataFrame:
+    """Keep the top-ranked row per group (stable tie-break, see PD_RATIO_RANK_KEYS)."""
+    return rank_pd_ratio_rows(df).groupby(group_keys, as_index=False, sort=False).head(1)
+
+
+def sort_pd_ratio_dict_rows(rows: list[dict]) -> list[dict]:
+    """Sort PD ratio dict rows using the same keys as rank_pd_ratio_rows."""
+    if not rows:
+        return rows
+    return rank_pd_ratio_rows(pd.DataFrame(rows)).to_dict("records")

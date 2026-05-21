@@ -192,6 +192,36 @@ class TestSummaryPDMode(unittest.TestCase):
         result = self.summary._prepare_pd_ratio_results()
         self.assertEqual(len(result), 1)
 
+    def test_prepare_pd_ratio_results_stable_under_shuffle(self):
+        """Tied balanced_qps rows must resolve deterministically across row orders."""
+        df = pd.DataFrame(
+            {
+                "ttft_p": [100.0, 100.0, 80.0, 80.0],
+                "tpot_d": [10.0, 10.0, 10.0, 10.0],
+                "concurrency_p": [10, 10, 8, 8],
+                "concurrency_d": [8, 32, 8, 32],
+                "parallel_p": ["tp4pp1dp1", "tp4pp1dp1", "tp2pp1dp1", "tp2pp1dp1"],
+                "parallel_d": ["tp2pp1dp1", "tp2pp1dp1", "tp2pp1dp1", "tp2pp1dp1"],
+                "batch_size_p": [4, 4, 5, 5],
+                "batch_size_d": [8, 32, 8, 32],
+                "num_devices_p": [4, 4, 2, 2],
+                "num_devices_d": [2, 2, 2, 2],
+                "p_qps": [10.0, 10.0, 10.0, 10.0],
+                "d_qps": [0.5, 2.0, 0.5, 2.0],
+                "pd_ratio": [0.05, 0.2, 0.05, 0.2],
+                "balanced_qps": [0.5, 0.5, 0.5, 0.5],
+            }
+        )
+
+        # with tied balanced_qps, tie-break prefers higher d_qps -> batch_size_d=32, d_qps=2.0
+        expected = (32, 2.0)
+
+        for seed in range(20):
+            self.summary.set_summary_df(df.sample(frac=1, random_state=seed))
+            result = self.summary._prepare_pd_ratio_results()
+            best = (int(result.iloc[0]["batch_size_d"]), float(result.iloc[0]["d_qps"]))
+            self.assertEqual(best, expected)
+
     def test_calculate_instance_distribution(self):
         """Test _calculate_instance_distribution calculation."""
         p_inst, d_inst = self.summary._calculate_instance_distribution(

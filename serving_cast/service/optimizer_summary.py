@@ -18,6 +18,8 @@ from typing import Optional
 import pandas as pd
 from prettytable import PrettyTable
 
+from serving_cast.utils import best_pd_row_per_group, rank_pd_ratio_rows, sort_pd_ratio_dict_rows
+
 logger = logging.getLogger(__name__)
 
 
@@ -275,7 +277,7 @@ class OptimizerSummary:
         1. Keep only the best result for each unique (p_parallel, d_parallel) combination
         2. Keep only one result for each unique balanced_qps value
 
-        Results are sorted by balanced_qps in descending order.
+        Results are sorted by PD_RATIO_RANK_KEYS (see serving_cast.utils).
         """
         tpot_limit = self.data_config.tpot_limits or float("inf")
         ttft_limit = self.data_config.ttft_limits or float("inf")
@@ -285,27 +287,12 @@ class OptimizerSummary:
             pd.to_numeric(self._summary_df["tpot_d"], errors="coerce").fillna(float("inf")) <= tpot_limit
         )
 
-        filtered_df = self._summary_df[mask]
-
-        # Step 1: Keep best result for each (parallel_p, parallel_d) combination
-        filtered_df = (
-            filtered_df.sort_values(by="balanced_qps", ascending=False)
-            .groupby(["parallel_p", "parallel_d"], as_index=False)
-            .first()
-        )
-
-        # Step 2: Keep one result per balanced_qps (round to 2 decimal places to group similar values)
+        filtered_df = best_pd_row_per_group(self._summary_df[mask], ["parallel_p", "parallel_d"])
         filtered_df["_balanced_qps_rounded"] = filtered_df["balanced_qps"].round(2)
-        result_df = (
-            filtered_df.sort_values(by="balanced_qps", ascending=False)
-            .groupby("_balanced_qps_rounded", as_index=False)
-            .first()
-            .drop(columns=["_balanced_qps_rounded"])
-            .sort_values(by="balanced_qps", ascending=False)
-            .reset_index(drop=True)
+        result_df = best_pd_row_per_group(filtered_df, ["_balanced_qps_rounded"]).drop(
+            columns=["_balanced_qps_rounded"]
         )
-
-        return result_df
+        return rank_pd_ratio_rows(result_df).reset_index(drop=True)
 
     def _get_pd_ratio_final_out(self, args, sorted_summary_df):
         """Generate the final output string for PD ratio mode.
@@ -582,7 +569,7 @@ def render_cross_hardware_pd_ratio(rows: list[dict]) -> str:
     """Cross-device PD ratio: one row per hardware (best balanced QPS after PD filtering)."""
     if not rows:
         return ""
-    sorted_rows = _sorted_rows(rows, "balanced_qps")
+    sorted_rows = sort_pd_ratio_dict_rows(rows)
     banner_w = 120
     lines = [
         "",

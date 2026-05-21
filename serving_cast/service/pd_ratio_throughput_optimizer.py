@@ -16,6 +16,8 @@ import logging
 
 import pandas as pd
 
+from serving_cast.utils import rank_pd_ratio_rows
+
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,7 @@ class PDRatioThroughputOptimizer:
         combination, and returns sorted Top N results.
 
         Returns:
-            DataFrame with PD ratio results sorted by balanced_qps in descending order.
+            DataFrame with PD ratio results sorted by PD_RATIO_RANK_KEYS.
         """
         if self._p_df is None or self._p_df.empty:
             self._result_df = pd.DataFrame()
@@ -112,6 +114,6 @@ class PDRatioThroughputOptimizer:
             "concurrency_p",
             "concurrency_d",
         ]
-        self._result_df = merged[result_cols].sort_values(by="balanced_qps", ascending=False).reset_index(drop=True)
+        self._result_df = rank_pd_ratio_rows(merged[result_cols]).reset_index(drop=True)
 
         return self._result_df
