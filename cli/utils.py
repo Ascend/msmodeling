@@ -4,7 +4,6 @@ import re
 
 from tensor_cast.device import DeviceProfile
 
-
 LOG_LEVELS = {
     "debug": logging.DEBUG,
     "info": logging.INFO,
@@ -13,6 +12,49 @@ LOG_LEVELS = {
     "critical": logging.CRITICAL,
 }
 LOG_FORMAT = "[%(levelname)s] [%(name)s] %(message)s"
+
+
+def check_device_targets(args: argparse.Namespace, logger: logging.Logger) -> list[str] | None:
+    """Validate ``--device``: default if omitted, de-dupe, reject invalid names, check comm grid."""
+    profiles = DeviceProfile.all_device_profiles
+    if not profiles:
+        logger.error(
+            "No device profiles are registered. Import tensor_cast.device_profiles before defining CLI defaults."
+        )
+        return None
+
+    if not args.device:
+        args.device = ["TEST_DEVICE"]
+        logger.info("No --device specified; using default profile %r.", args.device[0])
+
+    targets = list(dict.fromkeys(args.device))
+
+    blank = [name for name in targets if not str(name).strip()]
+    if blank:
+        logger.error("Empty --device name is not allowed.")
+        return None
+
+    unknown = [name for name in targets if name not in profiles]
+    if unknown:
+        logger.error(
+            "Unknown --device name(s): %s. Valid profiles: %s",
+            ", ".join(repr(name) for name in unknown),
+            ", ".join(sorted(profiles.keys())),
+        )
+        return None
+
+    for name in targets:
+        grid_n = profiles[name].comm_grid.grid.nelement()
+        if grid_n < args.num_devices:
+            logger.error(
+                "Device profile %r cannot model num_devices=%s (communication grid size is %s).",
+                name,
+                args.num_devices,
+                grid_n,
+            )
+            return None
+
+    return targets
 
 
 def check_positive_integer(value):

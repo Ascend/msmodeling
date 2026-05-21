@@ -12,30 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
 import time
 
+from serving_cast.service.optimizer_curve_plots import (
+    render_cross_hardware_summary,
+    run_multi_device_loop,
+)
 from serving_cast.service.utils import (
     BatchRangeAction,
+    OptimizerData,
     check_positive_float,
     check_positive_integer,
-    OptimizerData,
     resolve_search_sizes,
 )
-
 from tensor_cast import device_profiles  # noqa: F401
 from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
     QuantizeLinearAction,
 )
 from tensor_cast.utils import check_dependencies
+
 from ..utils import (
-    check_prefix_cache_hit_rate,
-    get_common_argparser,
     LOG_FORMAT,
     LOG_LEVELS,
+    check_device_targets,
+    check_prefix_cache_hit_rate,
+    get_common_argparser,
 )
 
 
@@ -45,6 +52,15 @@ def arg_parse():
         "in aggregation mode or disaggregation mode.",
         parents=[get_common_argparser(reserved_memory_gb_default=10.0)],
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        conflict_handler="resolve",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        nargs="+",
+        default=None,
+        metavar="DEVICE",
+        help="Device profile(s) to evaluate. Multiple values enable cross-hardware summaries.",
     )
     parser.add_argument(
         "--input-length",
@@ -263,6 +279,10 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
+    device_targets = check_device_targets(args, logger)
+    if device_targets is None:
+        return 1
+
     effective_input_length = OptimizerData(
         input_length=args.input_length,
         prefix_cache_hit_rate=args.prefix_cache_hit_rate,
@@ -301,19 +321,17 @@ def main():
             )
             return 1
 
-    from serving_cast.parallel_runner import ParallelRunner
+    # Terminal ASCII curves (plotext) run automatically when structurally allowed.
+    plot_curves_allowed = len(device_targets) == 1
 
     logger.info("Starting experiments.")
-    tasks = ParallelRunner(args)
-
-    # Select and run the appropriate method based on mode
-    if not args.enable_optimize_prefill_decode_ratio and not args.disagg:
-        results = tasks.run_agg()
-    else:
-        results = tasks.run_disagg()
-
-    for res in results:
-        res.report_final_result(args)
+    hw_rows = run_multi_device_loop(
+        args,
+        device_targets,
+        plot_curves_allowed=plot_curves_allowed,
+        logger=logger,
+    )
+    render_cross_hardware_summary(args, device_targets, hw_rows, logger=logger)
 
     end_time = time.time()
     elapsed_time = end_time - start_time

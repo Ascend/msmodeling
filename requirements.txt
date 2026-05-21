@@ -21,6 +21,7 @@ prettytable
 pyyaml
 pandas
 matplotlib
+plotext
 
 # test
 pytest

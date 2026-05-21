@@ -103,7 +103,7 @@ class TestGetAggTableBuf(unittest.TestCase):
         result = _get_agg_table_buf(df)
 
         # Should group by parallel and take first of each group, then sort by token/s
-        self.assertIn("Top 4 Aggregation Configurations:", result)
+        self.assertRegex(result, r"Top 4 (?:PD Aggregated|Aggregation) Configurations:")
         self.assertIn("Throughput", result)
 
     def test_get_agg_table_buf_single_row(self):
@@ -121,7 +121,7 @@ class TestGetAggTableBuf(unittest.TestCase):
         )
 
         result = _get_agg_table_buf(df)
-        self.assertIn("Top 1 Aggregation Configurations:", result)
+        self.assertRegex(result, r"Top 1 (?:PD Aggregated|Aggregation) Configurations:")
         self.assertIn("1", result)  # Top rank
         self.assertIn("100.00", result)  # Throughput value
 

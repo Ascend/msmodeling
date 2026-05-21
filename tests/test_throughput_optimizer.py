@@ -7,6 +7,15 @@ from unittest.mock import patch
 
 from serving_cast.service.optimizer_summary import SHOW_COLUMNS
 
+# Match current PD titles and legacy Aggregation / Disaggregation (Prefill|Decode) titles across branches.
+AGG_TABLE_TITLE_RE = r"Top\s+\d+\s+(?:PD\s+Aggregated|Aggregation)\s+Configurations\s*:?"
+DISAGG_PREFILL_TITLE_RE = (
+    r"Top\s+\d+\s+(?:PD\s+Disaggregated\s+Prefill|Disaggregation\s+\(Prefill\))\s+Configurations\s*:?"
+)
+DISAGG_DECODE_TITLE_RE = (
+    r"Top\s+\d+\s+(?:PD\s+Disaggregated\s+Decode|Disaggregation\s+\(Decode\))\s+Configurations\s*:?"
+)
+
 
 class TestThroughputOptimizer(TestCase):
     """Performance analysis script system test class"""
@@ -72,8 +81,8 @@ class TestThroughputOptimizer(TestCase):
             "Configurations table title not found",
         )
 
-        # Check for throughput values in table
-        throughput_pattern = r"\|\s*\d+\s*\|\s*[\d.]+\s*"
+        # Throughput column may embed ANSI escape codes around the numeric cell.
+        throughput_pattern = r"\|\s*\d+\s*\|[^\|\n]*\d+(?:\.\d+)?[^\|\n]*\|"
         throughput_matches = re.findall(throughput_pattern, output_text)
         self.assertGreaterEqual(len(throughput_matches), 1, "Throughput values not found in table")
 
@@ -101,7 +110,7 @@ class TestThroughputOptimizer(TestCase):
 
         # Validate table structure
         required_columns = SHOW_COLUMNS
-        table_start_pattern = r"Top \d Aggregation Configurations:"
+        table_start_pattern = AGG_TABLE_TITLE_RE
         self._validate_table_structure(full_output, required_columns, table_start_pattern)
 
     def test_disaggregation_prefill_only_with_output_validation(self):
@@ -129,7 +138,7 @@ class TestThroughputOptimizer(TestCase):
         # Validate table structure
         local_columns = SHOW_COLUMNS.copy()
         local_columns.remove("TPOT (ms)")
-        table_start_pattern = r"Top \d Disaggregation \(Prefill\) Configurations:"
+        table_start_pattern = DISAGG_PREFILL_TITLE_RE
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
 
     def test_disaggregation_decode_only_with_output_validation(self):
@@ -163,7 +172,7 @@ class TestThroughputOptimizer(TestCase):
         # Validate table structure
         local_columns = SHOW_COLUMNS.copy()
         local_columns.remove("TTFT (ms)")
-        table_start_pattern = r"Top \d Disaggregation \(Decode\) Configurations:"
+        table_start_pattern = DISAGG_DECODE_TITLE_RE
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
 
     def test_vl_model_aggregation_with_output_validation(self):
@@ -190,7 +199,7 @@ class TestThroughputOptimizer(TestCase):
         full_output = result.stdout + result.stderr
         # Validate table structure
         local_columns = SHOW_COLUMNS.copy()
-        table_start_pattern = r"Top \d Aggregation Configurations:"
+        table_start_pattern = AGG_TABLE_TITLE_RE
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
 
     def test_vl_model_disaggregation_prefill_with_output_validation(self):
@@ -222,7 +231,7 @@ class TestThroughputOptimizer(TestCase):
         # Validate table structure
         local_columns = SHOW_COLUMNS.copy()
         local_columns.remove("TPOT (ms)")
-        table_start_pattern = r"Top \d Disaggregation \(Prefill\) Configurations:"
+        table_start_pattern = DISAGG_PREFILL_TITLE_RE
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
 
     def test_vl_model_disaggregation_decode_with_output_validation(self):
@@ -251,7 +260,7 @@ class TestThroughputOptimizer(TestCase):
         # Validate table structure
         local_columns = SHOW_COLUMNS.copy()
         local_columns.remove("TTFT (ms)")
-        table_start_pattern = r"Top \d Disaggregation \(Decode\) Configurations:"
+        table_start_pattern = DISAGG_DECODE_TITLE_RE
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
 
     def test_VL_MOE_model_aggregation_with_output_validation(self):
@@ -284,7 +293,7 @@ class TestThroughputOptimizer(TestCase):
         full_output = result.stdout + result.stderr
         # Validate table structure
         local_columns = SHOW_COLUMNS.copy()
-        table_start_pattern = r"Top \d Aggregation Configurations:"
+        table_start_pattern = AGG_TABLE_TITLE_RE
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
 
     def test_prefix_cache_hit_rate_rejects_invalid_value(self):
@@ -392,9 +401,16 @@ class TestThroughputOptimizer(TestCase):
             mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
             disagg = False
             enable_optimize_prefill_decode_ratio = False
+            device = ["TEST_DEVICE"]
+            num_devices = 1
 
         with (
             patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
+            patch.object(
+                throughput_optimizer_module,
+                "check_device_targets",
+                return_value=["TEST_DEVICE"],
+            ),
             patch(
                 "cli.inference.throughput_optimizer.OptimizerData.get_effective_input_length",
                 return_value=100,
@@ -447,5 +463,5 @@ class TestThroughputOptimizer(TestCase):
             "P Concurrency",
             "D Concurrency",
         ]
-        table_start_pattern = r"Top \d+ PD Ratio Configurations:"
+        table_start_pattern = r"\s*Top\s+\d+\s+PD Ratio Configurations:"
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
