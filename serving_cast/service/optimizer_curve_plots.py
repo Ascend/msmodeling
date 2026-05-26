@@ -63,7 +63,7 @@ def _axis_metric_name(axis_label: str) -> str:
 
 def _parallel_label(parallel: str) -> str:
     s = str(parallel)
-    return s if len(s) < 48 else s[:45] + "..."
+    return s if len(s) < 80 else s[:77] + "..."
 
 
 def _padded_axis_limits(values: list[float]) -> tuple[float, float] | None:

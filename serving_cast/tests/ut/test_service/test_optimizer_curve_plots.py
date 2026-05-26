@@ -25,9 +25,9 @@ class TestCurvePlotHelpers(TestCase):
     def test_parallel_label_truncates_long_string(self):
         short = "tp2pp1dp2"
         self.assertEqual(ocp._parallel_label(short), short)
-        long_p = "x" * 60
+        long_p = "x" * 100
         got = ocp._parallel_label(long_p)
-        self.assertEqual(len(got), 48)
+        self.assertEqual(len(got), 80)
         self.assertTrue(got.endswith("..."))
 
     def test_padded_axis_limits_empty_and_values(self):
