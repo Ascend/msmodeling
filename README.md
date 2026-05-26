@@ -14,7 +14,7 @@ MindStudio-Modeling is a performance simulation and analysis framework for neura
     * **Core Purpose**: A suite of tools for system-level inference serving simulation and throughput optimization.
     * **Main Function**:
         * **Service Simulation**: Driven by `main.py`, it simulates end-to-end serving scenarios with multiple instances and requests based on YAML configuration files, outputting system-level metrics like throughput, latency (TTFT, TPOT).
-        * **Throughput Optimization**: Via `cli.inference.throughput_optimizer.py`, it automatically searches for the optimal model configuration (parallelism strategy, batch size) to maximize token throughput under specified Service Level Objective (SLO) constraints (e.g., limits on TTFT, TPOT).
+        * **Throughput Optimization**: Via `cli.inference.throughput_optimizer.py`, it automatically searches for the optimal model configuration (parallelism strategy, batch size) to maximize token throughput under specified Service Level Objective (SLO) constraints (e.g., limits on TTFT, TPOT). Supports benchmarking multiple `--device` profiles with cross-hardware comparison tables and terminal ASCII sweep curves for single-device analysis.
 
 **Core Value**: It enables developers to predict model performance, identify bottlenecks, and optimize configurations for target hardware without needing access to the physical devices.
 

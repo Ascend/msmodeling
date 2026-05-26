@@ -159,7 +159,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device TEST_DE
 
 ## Result Information
 
-The script will output the performance metrics, including throughput, TTFT, TPOT, and concurrency. Like the example below:
+The script outputs performance metrics (throughput, TTFT, TPOT, concurrency, and mode-specific fields such as QPS or PD ratio). Example:
 
 ```bash
 ********************************************************************************
@@ -197,7 +197,6 @@ Options:
                         The input length of the prompt. (default: None)
   --output-length OUTPUT_LENGTH
                         The expected output length. (default: None)
-                        The device type for benchmarking. (default: None)
   --mtp-acceptance-rate MTP_ACCEPTANCE_RATE [MTP_ACCEPTANCE_RATE ...]
                         Acceptance rate list for MTP (default: [0.9, 0.6, 0.4, 0.2])
   --dump-original-results
@@ -206,9 +205,14 @@ Options:
 General Options:
   model_id              The model identifier, which can be: 1) A Hugging Face model ID (e.g., 'meta-llama/Llama-2-7b-hf') to load from the Hub;
                         2) A local directory path containing a diffusers model (must include 'transformer/config.json').
-  --device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE}
-                        Specifies the target device profile to use for benchmarking and simulation. Must be a valid device name as defined in
-                        DeviceProfile. The default device 'TEST_DEVICE' is used for standard simulation runs. (default: TEST_DEVICE)
+  --device DEVICE [DEVICE ...]
+                        Device profile(s) to evaluate. One or more registered DeviceProfile names.
+                        Supported values: TEST_DEVICE, ATLAS_800_A2_376T_64G, ATLAS_800_A2_313T_64G,
+                        ATLAS_800_A2_280T_64G, ATLAS_800_A2_280T_64G_PCIE, ATLAS_800_A2_280T_32G_PCIE,
+                        ATLAS_800_A3_752T_128G_DIE, ATLAS_800_A3_560T_128G_DIE.
+                        Multiple values enable cross-hardware comparison tables.
+                        Duplicate names are removed; input order is preserved.
+                        If omitted, defaults to TEST_DEVICE. (default: TEST_DEVICE)
   --num-devices NUM_DEVICES
                         Specifies the total number of devices/processes to use. Must be a positive integer. A value of 1 indicates single-device
                         execution. (default: 1)
@@ -342,3 +346,100 @@ PD ratio mode uses QPS (Queries Per Second) as the primary metric for matching P
      - Matches the PD ratio as closely as possible
      - Fits within the total device budget
      - Maximizes overall system throughput
+
+## Compare multiple hardware profiles
+
+One or more `--device` values can be passed in a single run to benchmark multiple `DeviceProfile` targets and compare their best configurations under the same model, workload, and SLO settings.
+
+```bash
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device ATLAS_800_A2_280T_64G ATLAS_800_A3_560T_128G_DIE \
+    --num-devices 8 \
+    --input-length 3500 \
+    --output-length 1500 \
+    --compile \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --quantize-attention-action DISABLED \
+    --tpot-limits 50
+```
+
+Behavior:
+
+- Each device profile is optimized sequentially. Per-device tables (same format as a single-device run) are printed after each profile finishes.
+- When two or more devices are specified, the tool additionally prints:
+  1. A **hardware profile comparison** table with core modeling parameters (compute, memory, communication bandwidth, and related fields).
+  2. A **cross-hardware summary** table with the best configuration per device, ranked for easy comparison.
+- Cross-hardware summaries are mode-specific:
+  - Aggregation: best throughput per device under TTFT/TPOT limits.
+  - Disaggregation: separate Prefill and Decode cross-hardware tables when the corresponding limits are set.
+  - PD ratio: best balanced QPS per device under TTFT/TPOT limits, including PD ratio and optional P/D instance counts when `--num-devices` is set.
+
+### Example output when using multiple `--device` values
+
+When two or more device profiles are specified, the optimizer prints per-device results for each profile, followed by two additional cross-hardware tables:
+
+**1. Hardware profile comparison table**
+
+This table shows core modeling parameters for all requested devices (compute, memory bandwidth, communication bandwidth, etc.):
+
+```
+************************************************************************************************************
+  Cross-hardware - device profile summary (modeling abstraction vs performance merge tables)
+  Device profile parameter comparison (effective compute / memory BW / comm BW)
+  --------------------------------------------------------------------------------------------------------
++-----------------------+-----------------------+-------------------------+---------------+-------------+-----------+----------------+
+|         Device        | Cube Compute (TFLOPS) | Vector Compute (TFLOPS) | HBM BW (TB/s) | Memory (GB) | Comm Grid | Comm BW (GB/s) |
++-----------------------+-----------------------+-------------------------+---------------+-------------+-----------+----------------+
+|      TEST_DEVICE      |         247.73        |           7.70          |     0.960     |     64.0    |  256 x 8  |   35 | 137.2   |
+| ATLAS_800_A2_376T_64G |         247.73        |          15.40          |     0.960     |     64.0    |  128 x 8  |  17.5 | 137.2  |
++-----------------------+-----------------------+-------------------------+---------------+-------------+-----------+----------------+
+```
+
+**2. Cross-hardware summary table (mode-specific)**
+
+A ranked table of the best configuration per device under the active SLO constraints. Example for Aggregation mode:
+
+```
+****************************************************************************************************
+  Cross-hardware - PD Aggregated (best throughput config per device under TTFT/TPOT limits)
+  ------------------------------------------------------------------------------------------------
++-----+-----------------------+----------------------+-----------+-----------+-------------+--------------------+-------+-------------+
+| Top |         Device        | Throughput (token/s) | TTFT (ms) | TPOT (ms) | Concurrency |      Parallel      | Batch | num_devices |
++-----+-----------------------+----------------------+-----------+-----------+-------------+--------------------+-------+-------------+
+|  1  | ATLAS_800_A2_376T_64G |       18435.99       |  4986.05  |   54.48   |     1184    | TP=1 | PP=1 | DP=8 |  148  |      8      |
+|  2  |      TEST_DEVICE      |       18128.74       |  4973.39  |   53.39   |     1144    | TP=1 | PP=1 | DP=8 |  143  |      8      |
++-----+-----------------------+----------------------+-----------+-----------+-------------+--------------------+-------+-------------+
+```
+
+For PD Disaggregation and PD Ratio modes, the cross-hardware summary tables contain the corresponding phase-specific or QPS-related columns.
+
+## Terminal sweep curves (single device)
+
+When exactly one device profile is evaluated, the optimizer can render **terminal ASCII scatter plots** after the sweep completes. These plots help inspect how throughput relates to concurrency and latency across parallel configurations.
+
+Plots are produced for all three optimizer modes:
+
+| Mode | Plots |
+|------|-------|
+| Aggregation | Throughput vs Concurrency; Throughput vs TPOT |
+| Disaggregation (Prefill) | Throughput vs Concurrency; Throughput vs TTFT |
+| Disaggregation (Decode) | Throughput vs Concurrency; Throughput vs TPOT |
+| PD ratio | Throughput vs Concurrency; Throughput vs TPOT (Decode-side TPS) |
+
+Notes:
+
+- Terminal curves are **not** printed when multiple `--device` values are used; use cross-hardware summary tables instead.
+- Curve points exclude OOM / insufficient-memory configurations. They are **not** filtered by TTFT/TPOT SLO limits, so the plots show the full valid sweep while tables still report SLO-constrained bests.
+- Rendering uses the optional `plotext` dependency. If `plotext` is unavailable or plotting fails, optimization results are still printed and a warning is logged.
+
+Example (single device, aggregation):
+
+```bash
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device ATLAS_800_A2_280T_64G \
+    --num-devices 8 \
+    --input-length 3500 \
+    --output-length 1500 \
+    --tpot-limits 50 \
+    --batch-range 1 256
+```
