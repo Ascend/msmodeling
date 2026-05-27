@@ -327,6 +327,10 @@ class MoEConfig:
     enable_external_shared_experts: bool = False
     host_external_shared_experts: bool = False
     num_experts_key: Union[str, List[str]] = "num_experts"
+    route_after_dp_transform: bool = False
+    """When True and enable_shared_expert_tp=True, route() is called after
+    _dp_transform_enter() instead of before. Required for models where DP≠EP
+    to avoid routing on tokens that will be discarded by DP slicing."""
 
 
 @dataclasses.dataclass(frozen=True)

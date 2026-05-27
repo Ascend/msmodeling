@@ -18,6 +18,7 @@ from ..model_config import (
 from ..transformers.custom_model_registry import (
     get_mla_module,
     get_mla_module_name,
+    get_model_profile,
     get_moe_config,
     get_mtp_block_module_name,
 )
@@ -162,11 +163,20 @@ class ConfigResolver:
             model_type = self.hf_config.model_type
         mla_module_name = get_mla_module_name(model_type)
         if mla_module_name is not None:
-            mla_config = MlaConfig(
-                module_name=mla_module_name,
-                mla_cls=get_mla_module(model_type),
-            )
-            self.model_config.mla_config = mla_config
+            # Get field_names (including mla_field_names_override) from ModelProfile first
+            # Otherwise, use the default MlaFieldNames
+            profile = get_model_profile(model_type)
+            if profile is not None:
+                mla_config = profile.build_mla_config()
+                if mla_config is not None:
+                    mla_config.mla_cls = get_mla_module(model_type)
+                    self.model_config.mla_config = mla_config
+            else:
+                mla_config = MlaConfig(
+                    module_name=mla_module_name,
+                    mla_cls=get_mla_module(model_type),
+                )
+                self.model_config.mla_config = mla_config
 
     def update_mtp_config(self, model_type: str = "", num_mtp_tokens: int = 0):
         """

@@ -144,6 +144,10 @@ class ModelProfile:
     # Example: If config has {"num_local_experts": 64}, set this to "num_local_experts".
     moe_num_experts_key: Union[str, List[str]] = "num_experts"
 
+    # Control the calling sequence of route() and _dp_transform_enter() in the shared-expert-tp branch
+    # The default value is False (maintaining the old behavior), and Kimi-K2.5 is set to True
+    moe_route_after_dp_transform: bool = False
+
     # Indicates if the MoE gate/router returns *raw, unprocessed logits*.
     #
     # Logic for setting this field:
@@ -192,6 +196,12 @@ class ModelProfile:
     # Used to apply specific MLA optimizations (e.g., FlashMLA, KV cache compression).
     # Example: "transformers.models.deepseek_v3.modeling_deepseek.DeepseekV3Attention"
     mla_module_name: Optional[str] = None
+
+    # Callback invoked with ``(hf_config, model_id)`` BEFORE model loading.
+    # Used to patch the HuggingFace config and/or monkey-patch remote model
+    # classes (e.g., fixing incompatible attributes, bridging parameter names,
+    # downgrading flash_attention, restoring removed utilities).
+    hf_config_patch_method: Optional[Callable] = None
 
     # Dictionary to map standard MLA field names to the model's specific attribute names.
     # Used when the model's internal naming for MLA components (like compressed KV projections)
@@ -271,6 +281,7 @@ class ModelProfile:
             enable_external_shared_experts=enable_external_shared,
             host_external_shared_experts=host_external_shared,
             num_experts_key=self.moe_num_experts_key,
+            route_after_dp_transform=self.moe_route_after_dp_transform,
         )
 
     def build_mtp_config(self, num_mtp_layers: int) -> Optional[MtpConfig]:

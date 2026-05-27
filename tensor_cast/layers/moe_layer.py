@@ -317,8 +317,13 @@ class ParallelMoELayer(ModelWrapperBase):
             if self.transform_dp_group:
                 tp_size = self.global_tp_group.world_size
                 tp_rank = self.global_tp_group.rank_in_group
-                topk_indices, topk_weights = self._inner.route(hidden_states, tp_size=tp_size, tp_rank=tp_rank)
-                hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
+                route_after_dp = self._inner.moe_config.route_after_dp_transform
+                if route_after_dp:
+                    hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
+                    topk_indices, topk_weights = self._inner.route(hidden_states, tp_size=tp_size, tp_rank=tp_rank)
+                else:
+                    topk_indices, topk_weights = self._inner.route(hidden_states, tp_size=tp_size, tp_rank=tp_rank)
+                    hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
                 hidden_states = self._inner.fused_moe(
                     hidden_states,
                     topk_indices,

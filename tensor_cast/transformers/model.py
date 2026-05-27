@@ -39,6 +39,18 @@ logger = logging.getLogger(__name__)
 
 ALL_ATTENTION_FUNCTIONS["tensor_cast"] = flash_attention_forward
 
+# Keys that ModelRunner injects into each attention layer's
+# _extra_forward_kwargs side-channel.  The same set of keys also
+# appears in the kwargs dicts returned by generate_inputs() /
+# generate_inputs_varlen().
+_EXTRA_TC_KWARGS_KEYS = (
+    "attention_meta",
+    "kv_cache_by_layers",
+    "kv_cache_per_token",
+    "sampling_metadata",
+    "attention_by_layers",
+)
+
 
 class TensorDict:
     def __init__(self, tensors: Dict[str, torch.Tensor]):
@@ -172,6 +184,9 @@ class TransformerModel(ModelWrapperBase):
                 logger.info("Using provided HuggingFace configuration")
                 self.hf_config = self.model_config.hf_config
 
+                # Apply patches for specific models before loading them
+                auto_loader._apply_hf_config_patches(self.hf_config, model_id)
+
                 if self.model_config.num_hidden_layers_override:
                     logger.info(
                         "Overriding num_hidden_layers to %s",
@@ -297,6 +312,15 @@ class TransformerModel(ModelWrapperBase):
         """
         Tensors will be migrated to fake tensor in follow-up work; this patch will be removed.
         """
+
+        # Store tc_kwargs in the instance variable and explicitly inject full_kwargs
+        tc_kwargs = {key: kwargs.get(key) for key in _EXTRA_TC_KWARGS_KEYS}
+        # attention_by_layers may also be set as an instance attribute on the wrapper
+        attention_by_layers = getattr(self, "attention_by_layers", None)
+        if attention_by_layers is not None:
+            tc_kwargs["attention_by_layers"] = attention_by_layers
+        full_kwargs = {**kwargs, **tc_kwargs}
+
         context = contextlib.nullcontext()
         if not torch.compiler.is_compiling():
             context = patch_find_packed_sequence_indices_for_meta()
@@ -305,6 +329,5 @@ class TransformerModel(ModelWrapperBase):
                 input_ids=input_ids,
                 position_ids=position_ids,
                 inputs_embeds=inputs_embeds,
-                attention_by_layers=getattr(self, "attention_by_layers", None),
-                **kwargs,
+                **full_kwargs,
             )

@@ -1,6 +1,7 @@
 import copy
 import dataclasses
 import fnmatch
+import logging
 import math
 import typing
 from typing import TYPE_CHECKING, Union
@@ -33,6 +34,8 @@ from .custom_model_registry import (
     get_vl_language_model,
 )
 from .utils import strip_module_name
+
+logger = logging.getLogger(__name__)
 
 
 def wrap_model(model: "ModelWrapperBase") -> "ModelWrapperBase":
@@ -146,9 +149,19 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
     visual_layers = get_visual_layers(model)
     if visual_layers is not None:
         reuse_layers(visual_layers)
-        language_model = get_vl_language_model(model)
-        if hasattr(language_model, "layers"):
-            reuse_layers(language_model.layers)
+        # Uniformly use get_language_layers to obtain paths
+        from ..transformers.custom_model_registry import get_language_layers
+        import operator
+
+        language_layers_path = get_language_layers(model.hf_config.model_type)
+        try:
+            language_layers = operator.attrgetter(language_layers_path)(model.unwrap())
+            reuse_layers(language_layers)
+        except AttributeError:
+            logger.debug(
+                f"Could not access language layers via path '{language_layers_path}' "
+                f"for model type '{model.hf_config.model_type}'. Skipping layer reuse."
+            )
     from tensor_cast.layers.mtp import MtpWrapper
 
     if isinstance(model._inner, MtpWrapper):

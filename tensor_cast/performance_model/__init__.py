@@ -15,6 +15,8 @@ from .op_invoke_info import OpInvokeInfo
 from .utils import bytes_of_elements, bytes_of_tensor, is_noop_self_copy_op, is_view_op
 
 logger = logging.getLogger(__name__)
+# Deduplication: Each (dtype, category) combination is warned only once to avoid hundreds of duplicate logs
+_warned_unsupported_dtypes = set()
 
 
 def _get_device_ops_for_dtype(

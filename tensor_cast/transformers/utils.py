@@ -17,10 +17,10 @@
 import contextlib
 import logging
 import os
+import signal
+import torch
 
 from typing import List, Optional, Tuple
-
-import torch
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.quantizers.auto import AutoQuantizationConfig
 from transformers.utils.quantization_config import (
@@ -29,10 +29,40 @@ from transformers.utils.quantization_config import (
     QuantizationConfigMixin,
 )
 
+from .custom_model_registry import get_model_profile
 from ..layers.mla import MultiheadLatentAttentionBase
 from ..model_config import AttentionQuantConfig, ModelConfig, RemoteSource
 
 logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------------
+# Global fix: Windows lacks signal.SIGALRM, which breaks
+# transformers' trust_remote_code interactive prompt.  Default
+# trust_remote_code=True on platforms without SIGALRM so that
+# headless simulation never blocks on stdin.
+# ----------------------------------------------------------------
+def _ensure_windows_trust_remote_code_compat():
+    """Monkey-patch resolve_trust_remote_code to skip SIGALRM on Windows."""
+    if hasattr(signal, "SIGALRM"):
+        return  # Unix — no patch needed
+
+    import transformers.dynamic_module_utils
+
+    _orig_resolve = transformers.dynamic_module_utils.resolve_trust_remote_code
+    if getattr(_orig_resolve, "_tensor_cast_patched", False):
+        return  # Already patched
+
+    def _patched_resolve(trust_remote_code, *args, **kwargs):
+        if trust_remote_code is None:
+            trust_remote_code = True
+        return _orig_resolve(trust_remote_code, *args, **kwargs)
+
+    _patched_resolve._tensor_cast_patched = True
+    transformers.dynamic_module_utils.resolve_trust_remote_code = _patched_resolve
+
+
+_ensure_windows_trust_remote_code_compat()
 
 # When resolving a ModelScope Hub id, only fetch files needed for config + trust_remote_code
 # Python; never pull weight shards into ~/.cache (avoids multi‑GB ._____temp / hub dirs for UT).
@@ -308,6 +338,17 @@ class AutoModelConfigLoader:
         )
         return hf_config
 
+    def _apply_hf_config_patches(self, hf_config: PretrainedConfig, model_id: str):
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type is None:
+            return
+        profile = get_model_profile(model_type)
+        if profile is not None and profile.hf_config_patch_method is not None:
+            try:
+                profile.hf_config_patch_method(hf_config, model_id)
+            except Exception as e:
+                logger.warning(f"Failed to apply HF config patches for {model_type}: {e}")
+
     def load_model(
         self,
         hf_config: PretrainedConfig,
@@ -349,6 +390,10 @@ class AutoModelConfigLoader:
         hf_config = self.load_config(model_id, remote_source=model_config.remote_source)
         if model_config.num_hidden_layers_override:
             hf_config.num_hidden_layers = model_config.num_hidden_layers_override
+
+        # Apply patches for specific models before loading them
+        self._apply_hf_config_patches(hf_config, model_id)
+
         hf_model = self.load_model(hf_config, model_config.dtype, remote_source=model_config.remote_source)
         return hf_config, hf_model
 
