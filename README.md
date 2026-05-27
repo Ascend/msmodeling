@@ -100,6 +100,23 @@ cd /path/to/msmodeling
 
 Make sure unit tests pass by running: `bash ./tests/run_ut.sh tensor_cast` or `bash ./tests/run_ut.sh serving_cast`. Please ensure that the ut coverage rate of the newly added code is greater than `80%`
 
+## Suggestions & Community
+
+We welcome everyone to contribute to the community. If you have any questions or suggestions, please submit an [Issue](https://gitcode.com/Ascend/msmodeling/issues) and we will respond as soon as possible. Thank you for your support.
+
+| Technical Chat Groups | Official Account | More Ways to Connect |
+| :---: | :---: | :--- |
+| <img src="https://raw.gitcode.com/user-images/assets/8428112/368af17d-bd72-4bb6-ae94-f10fac88fd00/30be980e7fd65b2486d251b48a7999f3.jpg" width="120"><br><sub>*Scan to join the technical chat*</sub> | <img src="https://raw.gitcode.com/Ascend/msinsight/raw/master/docs/zh/user_guide/figures/readme/officialAccount.jpg" width="120"><br><sub>*Scan to follow for the latest updates*</sub> |Scan the codes to join our technical chat and follow our official account—the fastest way for MindStudio users and developers to connect:<br> **Quick Q&A:** Discuss technical issues instantly with community members<br>**Stay Updated:** Be the first to receive notifications on version releases and feature updates<br> **Knowledge Sharing:** Exchange best practices with fellow developers  <br>🛠️ **Other Channels**:<br> Ascend Assistant：[![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://gitcode.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png)<br> Ascend Forum：[![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
+
+## Weekly Meeting
+
+- MindStudio Modeling Weekly Meeting: [https://etherpad.ascend.osinfra.cn/p/sig-msit-modeling](https://etherpad.ascend.osinfra.cn/p/sig-msit-modeling)
+- Wednesday, 10:00 - 12:00 (UTC+8, [Convert to your timezone](https://dateful.com/convert/gmt8?t=15))
+
+## About the MindStudio Team
+
+The Huawei MindStudio end-to-end development toolchain team is dedicated to providing comprehensive Ascend AI application development solutions, empowering developers to efficiently complete training development, inference development, and operator development.
+
 ## License
 
 msmodeling has a MulanPSL2-style license, as found in the [LICENSE](LICENSE) file.
