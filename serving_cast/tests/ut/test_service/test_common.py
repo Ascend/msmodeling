@@ -21,6 +21,7 @@ class SimpleArgs:
         self.num_devices = 1
         self.batch_range = None
         self.log_level = "INFO"
+        self.image_batch_size = None
         self.image_height = 520
         self.image_width = 520
         self.prefill_devices_per_instance = None

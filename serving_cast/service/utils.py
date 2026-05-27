@@ -5,7 +5,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 from tensor_cast.model_config import ParallelConfig
 
@@ -45,20 +45,21 @@ DISAGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns"]
 
 @dataclass
 class OptimizerData:
-    input_length: int = None
-    output_length: int = None
-    batch_size: int = None
-    image_height: int = None
-    image_width: int = None
-    ttft_limits: float = None
-    tpot_limits: float = None
-    max_prefill_tokens: int = None
-    num_devices: int = None
-    serving_cost: float = None
-    num_mtp_tokens: int = None
-    mtp_acceptance_rate: list = None
-    prefill_devices_per_instance: int = None
-    decode_devices_per_instance: int = None
+    input_length: Optional[int] = None
+    output_length: Optional[int] = None
+    batch_size: Optional[int] = None
+    image_batch_size: Optional[int] = None
+    image_height: Optional[int] = None
+    image_width: Optional[int] = None
+    ttft_limits: Optional[float] = None
+    tpot_limits: Optional[float] = None
+    max_prefill_tokens: Optional[int] = None
+    num_devices: Optional[int] = None
+    serving_cost: Optional[float] = None
+    num_mtp_tokens: Optional[int] = None
+    mtp_acceptance_rate: Optional[list] = None
+    prefill_devices_per_instance: Optional[int] = None
+    decode_devices_per_instance: Optional[int] = None
     prefix_cache_hit_rate: float = 0.0
 
     def get_effective_input_length(self, is_decode: bool = False):

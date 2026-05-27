@@ -70,15 +70,25 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         calc_nums_for_ttft = concurrency // prefill_batch_size
         left_calc_num = concurrency % prefill_batch_size
 
-        prefill_latency, prefill_memory_left_gb, prefill_breakdowns = self._get_or_compute_latency(
+        full_wave_latency, full_wave_memory_left_gb, prefill_breakdowns = self._get_or_compute_latency(
             prefill_batch_size, optimizer_data, is_decode=False
         )
+        last_wave_latency = full_wave_latency
+        prefill_min_memory_left_gb = full_wave_memory_left_gb
         left_latency = 0
         if left_calc_num != 0:
-            left_latency, _, _ = self._get_or_compute_latency(left_calc_num, optimizer_data, is_decode=False)
+            left_latency, left_memory_left_gb, _ = self._get_or_compute_latency(
+                left_calc_num, optimizer_data, is_decode=False
+            )
+            last_wave_latency = left_latency
+            if calc_nums_for_ttft > 0:
+                # Use the minimum memory left across all prefill batch shapes that will be executed.
+                prefill_min_memory_left_gb = min(full_wave_memory_left_gb, left_memory_left_gb)
+            else:
+                prefill_min_memory_left_gb = left_memory_left_gb
 
-        left_batch_time = (calc_nums_for_ttft * prefill_latency + left_latency) * left_calc_num
-        sum_for_ttft = (prefill_batch_size * prefill_latency) * (
+        left_batch_time = (calc_nums_for_ttft * full_wave_latency + left_latency) * left_calc_num
+        sum_for_ttft = (prefill_batch_size * full_wave_latency) * (
             1 + calc_nums_for_ttft
         ) * calc_nums_for_ttft / 2 + left_batch_time
         ttft = sum_for_ttft / concurrency
@@ -92,7 +102,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         # calculate output throughput: we assume e2e latency is ttft + tpot * output_length
         output_throughput = 1000 * (output_length * concurrency) / (ttft + tpot * output_length)
 
-        memory_left = min(prefill_memory_left_gb, decode_memory_left_gb)
+        memory_left = min(prefill_min_memory_left_gb, decode_memory_left_gb)
         token_s_device = output_throughput / self.dp / self.pp / self.tp
         parallel = format_parallel_label(
             self.model_runner.model.model_config.parallel_config,
@@ -100,14 +110,17 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         )
 
         logger.info(
-            "Prefill Latency: %.4f ms, "
+            "Prefill Wave Latency: %.4f ms, "
+            "Prefill Last Wave Latency: %.4f ms, "
             "Decode Latency: %.4f ms, "
             "TTFT: %.4f ms, TPOT: %.4f ms, "
             "Output Throughput: %.2f token/s, "
             "Concurrency: %d, "
             "parallel: %s, "
-            "Memory Left: %.2f GB",
-            prefill_latency,
+            "Memory Left: %.2f GB, "
+            "Prefill Wave Memory Left: %.2f GB",
+            full_wave_latency,
+            last_wave_latency,
             decode_latency,
             ttft,
             tpot,
@@ -115,6 +128,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             concurrency,
             parallel,
             memory_left,
+            full_wave_memory_left_gb,
         )
         summary = OptimizerSummary(optimizer_data)
         result_df = pd.DataFrame(

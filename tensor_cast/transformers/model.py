@@ -62,7 +62,7 @@ class CausalLmWrapper(ModelWrapperBase):
         inputs_embeds: Optional[torch.Tensor] = None,
         output_intermediate_hidden_states: bool = False,  # output hidden_states before lm_head
         **kwargs: object,  # NOTE: extra args should be torch.compile compatible
-    ) -> Union[torch.Tensor, TensorDict]:
+    ) -> Union[torch.Tensor, TensorDict, tuple[torch.Tensor, torch.Tensor]]:
         hidden_states = self._inner(
             input_ids=input_ids,
             use_cache=False,
@@ -99,8 +99,9 @@ class VLModelWrapper(ModelWrapperBase):
         input_ids: Optional[torch.Tensor],
         position_ids: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
+        output_intermediate_hidden_states: bool = False,
         **kwargs: object,
-    ) -> Union[torch.Tensor, TensorDict]:
+    ) -> Union[torch.Tensor, TensorDict, tuple[torch.Tensor, torch.Tensor]]:
         outputs = self._inner(
             input_ids=input_ids,
             use_cache=False,
@@ -115,6 +116,8 @@ class VLModelWrapper(ModelWrapperBase):
             hidden_states = hidden_states.index_select(1, sampling_metadata.selected_token_indices)
         logits = self.lm_head(hidden_states)
 
+        if output_intermediate_hidden_states:
+            return logits, outputs.last_hidden_state
         return logits
 
 

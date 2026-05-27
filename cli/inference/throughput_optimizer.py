@@ -200,6 +200,12 @@ def arg_parse():
     )
     multimodal_group = parser.add_argument_group("MultiModal Options")
     multimodal_group.add_argument(
+        "--image-batch-size",
+        type=check_positive_integer,
+        default=None,
+        help="Number of images per request. If omitted, reuse batch_size for backward compatibility.",
+    )
+    multimodal_group.add_argument(
         "--image-height",
         type=check_positive_integer,
         default=None,

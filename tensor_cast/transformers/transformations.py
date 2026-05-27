@@ -75,29 +75,41 @@ def maybe_enable_mtp(model: "ModelWrapperBase") -> "ModelWrapperBase":
 
     mtp_config = copy.deepcopy(model.model_config.mtp_config)
     unwrapped = model.unwrap()
+    if model.is_vl_model:
+        hf_config_source = model.text_config
+        if hf_config_source is None:
+            raise ValueError("VL model detected but text_config is None; cannot enable MTP")
+    else:
+        hf_config_source = model.hf_config
+    hf_config = copy.deepcopy(hf_config_source)
 
-    if mtp_config.mtp_block_module_name is None and hasattr(unwrapped, "layers"):
-        decoder_cls_name = type(unwrapped.layers[-1]).__name__
-        mtp_config.mtp_block_module_name = decoder_cls_name
+    if mtp_config.mtp_block_module_name is None:
+        layer_owner = None
+        if hasattr(unwrapped, "layers"):
+            layer_owner = unwrapped
+        else:
+            language_model = get_vl_language_model(model)
+            if hasattr(language_model, "layers"):
+                layer_owner = language_model
 
+        if layer_owner is not None:
+            decoder_cls_name = type(layer_owner.layers[-1]).__name__
+            mtp_config.mtp_block_module_name = decoder_cls_name
+
+    if hasattr(hf_config, "layer_types") and isinstance(hf_config.layer_types, list) and hf_config.layer_types:
+        hf_config.layer_types.extend([hf_config.layer_types[-1]] * mtp_config.num_mtp_layers)
     if (
-        hasattr(model.hf_config, "layer_types")
-        and isinstance(model.hf_config.layer_types, list)
-        and model.hf_config.layer_types
+        hasattr(hf_config, "mlp_layer_types")
+        and isinstance(hf_config.mlp_layer_types, list)
+        and hf_config.mlp_layer_types
     ):
-        model.hf_config.layer_types.extend([model.hf_config.layer_types[-1]] * mtp_config.num_mtp_layers)
-    if (
-        hasattr(model.hf_config, "mlp_layer_types")
-        and isinstance(model.hf_config.mlp_layer_types, list)
-        and model.hf_config.mlp_layer_types
-    ):
-        model.hf_config.mlp_layer_types.extend([model.hf_config.mlp_layer_types[-1]] * mtp_config.num_mtp_layers)
+        hf_config.mlp_layer_types.extend([hf_config.mlp_layer_types[-1]] * mtp_config.num_mtp_layers)
 
     orig_dtype = torch.get_default_dtype()
     torch.set_default_dtype(model.model_config.dtype)
     from tensor_cast.layers.mtp import MtpWrapper
 
-    model._inner = MtpWrapper(mtp_config, model.hf_config, model._inner)
+    model._inner = MtpWrapper(mtp_config, hf_config, model._inner)
     torch.set_default_dtype(orig_dtype)
     return model
 

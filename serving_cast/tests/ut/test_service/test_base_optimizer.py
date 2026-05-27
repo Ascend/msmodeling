@@ -167,6 +167,38 @@ class TestBaseBackend(unittest.TestCase):
         self.assertEqual(requests[0].query_len, 1)
         self.assertEqual(requests[0].seq_len, 233)
 
+    def test_get_forward_info_uses_explicit_image_batch_size_when_provided(self):
+        self.backend.model_runner = Mock()
+        optimizer_data = OptimizerData(
+            input_length=32,
+            output_length=64,
+            batch_size=8,
+            image_batch_size=1,
+            image_height=1080,
+            image_width=1920,
+        )
+
+        self.backend._get_forward_info(8, optimizer_data, is_decode=False)
+
+        requests = self.backend.model_runner.run_inference.call_args.args[0]
+        self.assertEqual(requests[0].image_batch_size, 1)
+
+    def test_get_forward_info_falls_back_to_batch_size_for_image_batch_size(self):
+        self.backend.model_runner = Mock()
+        optimizer_data = OptimizerData(
+            input_length=32,
+            output_length=64,
+            batch_size=8,
+            image_batch_size=None,
+            image_height=1080,
+            image_width=1920,
+        )
+
+        self.backend._get_forward_info(8, optimizer_data, is_decode=False)
+
+        requests = self.backend.model_runner.run_inference.call_args.args[0]
+        self.assertEqual(requests[0].image_batch_size, 8)
+
 
 if __name__ == "__main__":
     unittest.main()

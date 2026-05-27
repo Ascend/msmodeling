@@ -2,6 +2,7 @@
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
 from serving_cast.service.agg_throughput_optimizer import AggThroughputOptimizer
 from serving_cast.service.utils import OptimizerData
 
@@ -90,6 +91,61 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             self.strategy.get_inference_info(optimizer_data)
 
         self.assertEqual(captured_calls[0], (2, False))
+
+    def test_get_inference_info_uses_effective_prefill_memory_for_early_stop(self):
+        optimizer_data = OptimizerData(
+            input_length=32,
+            output_length=256,
+            batch_size=1,
+            max_prefill_tokens=8192,
+            num_devices=1,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+
+        def fake_latency(batch_size, optimizer_data, is_decode=False):
+            if not is_decode and batch_size == 256:
+                return (1000.0, -37.15, "wave")
+            if not is_decode and batch_size == 1:
+                return (342.0, 12.5, "effective")
+            if is_decode and batch_size == 1:
+                return (15.0, 9.0, "decode")
+            raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
+
+        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
+            summary = self.strategy.get_inference_info(optimizer_data)
+
+        self.assertFalse(summary.check_early_stop_flag())
+        result_df = summary.get_summary_df()
+        self.assertIsInstance(result_df, pd.DataFrame)
+        self.assertEqual(result_df.iloc[0]["batch_size"], 1)
+
+    def test_get_inference_info_checks_prefill_wave_memory_when_remainder_exists(self):
+        optimizer_data = OptimizerData(
+            input_length=32,
+            output_length=256,
+            batch_size=9,
+            max_prefill_tokens=256,
+            num_devices=1,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+
+        def fake_latency(batch_size, optimizer_data, is_decode=False):
+            if not is_decode and batch_size == 8:
+                return (1000.0, -37.15, "wave")
+            if not is_decode and batch_size == 1:
+                return (342.0, 12.5, "remainder")
+            if is_decode and batch_size == 9:
+                return (15.0, 9.0, "decode")
+            raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
+
+        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
+            summary = self.strategy.get_inference_info(optimizer_data)
+
+        self.assertTrue(summary.check_early_stop_flag())
 
 
 if __name__ == "__main__":

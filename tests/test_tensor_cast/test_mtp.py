@@ -115,6 +115,8 @@ class MtpTestCase(unittest.TestCase):
             ["Qwen/Qwen3-32B", False],
             ["Qwen/Qwen3-32B", True],
             ["Qwen/Qwen3-235B-A22B", False],
+            ["Qwen/Qwen3.5-27B", False],
+            ["Qwen/Qwen3.5-27B", True],
             ["zai-org/GLM-4.5", False],
         ]
     )
@@ -138,46 +140,3 @@ class MtpTestCase(unittest.TestCase):
                 ),
             )
             self.assertEqual(outputs.shape, (2, num_mtp_layers + 1))
-
-    # @parameterized.expand(
-    #     [
-    #         ["Qwen/Qwen3-32B", False],
-    #         ["Qwen/Qwen3-32B", True],
-    #         ["Qwen/Qwen3-235B-A22B", False],
-    #         ["zai-org/GLM-4.5", False],
-    #     ]
-    # )
-    # def test_automatic_mtp_mode(self, model_id, do_compile):
-    #     model_config = ModelConfig(
-    #         ParallelConfig(),
-    #         QuantConfig(),
-    #         attention_cls=AttentionTensorCast,
-    #         enable_repetition=True,
-    #     )
-    #     num_mtp_layers = 3
-    #     mtp_config = MtpConfig(
-    #         num_mtp_layers=num_mtp_layers,
-    #     )
-    #     model_config.mtp_config = mtp_config
-    #     model = TransformerModel(model_id, model_config)
-    #     if do_compile:
-    #         model = torch.compile(
-    #             model, backend=get_backend(), dynamic=True, fullgraph=True
-    #         )
-    #     attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(
-    #         model, model_config
-    #     )
-    #     inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
-    #     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
-    #     with torch.no_grad(), patch_torch():
-    #         outputs = model.forward(
-    #             inputs,
-    #             position_ids,
-    #             attention_meta=attn_meta,
-    #             kv_cache_by_layers=kv_cache_by_layers,
-    #             sampling_metadata=SamplingMetadata(
-    #                 query_start_loc=attn_meta.query_start_loc,
-    #                 selected_token_indices=None,
-    #             ),
-    #         )
-    #         self.assertEqual(outputs.shape, (2, num_mtp_layers + 1))
