@@ -7,6 +7,7 @@ import torch
 
 from .. import ops  # noqa: F401
 from ..device import DeviceProfile
+from ..utils import is_fp8_dtype, performance_dtype
 from .analytic import StatsKey
 from .base import PerformanceModel
 from .op_estimator_registry import register_op_estimator
@@ -14,6 +15,13 @@ from .op_invoke_info import OpInvokeInfo
 from .utils import bytes_of_elements, bytes_of_tensor, is_noop_self_copy_op, is_view_op
 
 logger = logging.getLogger(__name__)
+
+
+def _get_device_ops_for_dtype(
+    perf_ops: dict[torch.dtype, float],
+    dtype: torch.dtype,
+) -> Optional[float]:
+    return perf_ops.get(performance_dtype(dtype))
 
 
 def _load_custom_op():
@@ -610,10 +618,9 @@ def _(
         num_tokens_per_seq.to(request_total_seq_lens.dtype) * request_total_seq_lens
     ).item()
 
-    # FP8 (e4m3fn/e5m2): Only 1 op per element (scale multiplication ONLY, no offset applied)
+    # FP8: only 1 op per element (scale multiplication, no offset applied).
     # Assume FP8 is not natively supported
-    QDQ_OP_FACTOR_MAP = {torch.float8_e4m3fn: 1, torch.float8_e5m2: 1, torch.int8: 2}
-    qdq_op_factor = QDQ_OP_FACTOR_MAP.get(key.dtype, 2)
+    qdq_op_factor = 1 if is_fp8_dtype(key.dtype) else 2
 
     # 1. Dequantization of Q @ K^T (score matrix):
     #    scale multiplication + optional offset subtraction
@@ -776,7 +783,7 @@ def _(
     qdq_op_factor1 = 2 if q_a_proj_offset else 1
     qdq_op_factor2 = 2 if q_b_proj_offset else 1
     qdq_op_factor3 = 2 if kv_a_proj_offset else 1
-    if kv_a_proj_weight.dtype == torch.float8_e5m2:
+    if is_fp8_dtype(kv_a_proj_weight.dtype):
         # QDQ for q_a_proj
         quant1_ops = num_tokens * hidden_size
         dequant1_ops = hidden_size * q_lora_rank
@@ -1427,13 +1434,11 @@ def _(
 
 def _estimate_static_cost(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> float:
     perf_properties = op_invoke_info.get_perf_properties()
-    for dtype in DeviceProfile.DTYPES:
-        if dtype in perf_properties.compute_ops:
-            if dtype not in device_profile.mma_ops:
-                continue
-            compute_ops = perf_properties.compute_ops[dtype]
-            if compute_ops.mma_ops > 0:
-                return device_profile.static_cost.mma_op_cost_s
+    for dtype, compute_ops in perf_properties.compute_ops.items():
+        if _get_device_ops_for_dtype(device_profile.mma_ops, dtype) is None:
+            continue
+        if compute_ops.mma_ops > 0:
+            return device_profile.static_cost.mma_op_cost_s
     return device_profile.static_cost.gp_op_cost_s
 
 
@@ -1446,32 +1451,31 @@ def _estimate_default_without_static_cost(
     # By default, we do not consider instruction-level parallelism when counting computation time
     mma_ops_time_s = 0
     gp_ops_time_s = 0
-    for dtype in DeviceProfile.DTYPES:
-        if dtype in perf_properties.compute_ops:
-            compute_ops = perf_properties.compute_ops[dtype]
-            if compute_ops.mma_ops > 0:
-                if dtype in device_profile.mma_ops:
-                    device_mma_ops = device_profile.mma_ops[dtype] * device_profile.compute_efficiency
-                    mma_ops_time_s += compute_ops.mma_ops / device_mma_ops
-                else:
-                    logger.warning(
-                        "Ignoring mma compute ops of %s for %s since it is not supported on %s",
-                        dtype,
-                        op_invoke_info,
-                        device_profile,
-                    )
-            if compute_ops.gp_ops > 0:
-                if dtype in device_profile.gp_ops:
-                    compute_ops = perf_properties.compute_ops[dtype]
-                    device_gp_ops = device_profile.gp_ops[dtype] * device_profile.compute_efficiency
-                    gp_ops_time_s += compute_ops.gp_ops / device_gp_ops
-                else:
-                    logger.warning(
-                        "Ignoring gp compute ops of %s for %s since it is not supported on %s",
-                        dtype,
-                        op_invoke_info,
-                        device_profile,
-                    )
+    for dtype, compute_ops in perf_properties.compute_ops.items():
+        if compute_ops.mma_ops > 0:
+            device_mma_ops = _get_device_ops_for_dtype(device_profile.mma_ops, dtype)
+            if device_mma_ops is not None:
+                device_mma_ops *= device_profile.compute_efficiency
+                mma_ops_time_s += compute_ops.mma_ops / device_mma_ops
+            else:
+                logger.warning(
+                    "Ignoring mma compute ops of %s for %s since it is not supported on %s",
+                    dtype,
+                    op_invoke_info,
+                    device_profile,
+                )
+        if compute_ops.gp_ops > 0:
+            device_gp_ops = _get_device_ops_for_dtype(device_profile.gp_ops, dtype)
+            if device_gp_ops is not None:
+                device_gp_ops *= device_profile.compute_efficiency
+                gp_ops_time_s += compute_ops.gp_ops / device_gp_ops
+            else:
+                logger.warning(
+                    "Ignoring gp compute ops of %s for %s since it is not supported on %s",
+                    dtype,
+                    op_invoke_info,
+                    device_profile,
+                )
     compute_time_s = mma_ops_time_s + gp_ops_time_s
     memory_bandwidth = device_profile.memory_bandwidth_bytes_ps * device_profile.memory_efficiency
     memory_read_time_s = perf_properties.memory_read_bytes / memory_bandwidth
@@ -1779,15 +1783,15 @@ def _compute_time_from_properties(
     estimator to avoid double-counting intermediate activation HBM access.
     """
     compute_time_s = 0.0
-    for dtype in DeviceProfile.DTYPES:
-        if dtype in properties.compute_ops:
-            compute_ops = properties.compute_ops[dtype]
-            if compute_ops.mma_ops > 0 and dtype in device_profile.mma_ops:
-                device_mma_ops = device_profile.mma_ops[dtype] * device_profile.compute_efficiency
-                compute_time_s += compute_ops.mma_ops / device_mma_ops
-            if compute_ops.gp_ops > 0 and dtype in device_profile.gp_ops:
-                device_gp_ops = device_profile.gp_ops[dtype] * device_profile.compute_efficiency
-                compute_time_s += compute_ops.gp_ops / device_gp_ops
+    for dtype, compute_ops in properties.compute_ops.items():
+        device_mma_ops = _get_device_ops_for_dtype(device_profile.mma_ops, dtype)
+        if compute_ops.mma_ops > 0 and device_mma_ops is not None:
+            device_mma_ops *= device_profile.compute_efficiency
+            compute_time_s += compute_ops.mma_ops / device_mma_ops
+        device_gp_ops = _get_device_ops_for_dtype(device_profile.gp_ops, dtype)
+        if compute_ops.gp_ops > 0 and device_gp_ops is not None:
+            device_gp_ops *= device_profile.compute_efficiency
+            compute_time_s += compute_ops.gp_ops / device_gp_ops
     return compute_time_s
 
 
@@ -2250,7 +2254,7 @@ def _(
 
     # The cache dtype is already chosen by the upstream attention quant config,
     # so the roofline model only needs to read it, not re-decide fp8 policy here.
-    fp8_mode = indexer_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    fp8_mode = is_fp8_dtype(indexer_cache.dtype)
 
     breakdown = _estimate_dsa_indexer_breakdown(
         hidden_states,

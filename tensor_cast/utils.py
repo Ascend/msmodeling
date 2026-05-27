@@ -19,6 +19,16 @@ DTYPE_FP8 = torch.float8_e5m2
 DTYPE_FP4 = torch.int4
 
 
+def is_fp8_dtype(dtype: torch.dtype) -> bool:
+    return str(dtype).startswith("torch.float8")
+
+
+def performance_dtype(dtype: torch.dtype) -> torch.dtype:
+    if is_fp8_dtype(dtype):
+        return DTYPE_FP8
+    return dtype
+
+
 logger = logging.getLogger(__name__)
 
 

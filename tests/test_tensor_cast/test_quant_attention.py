@@ -7,7 +7,12 @@ from parameterized import parameterized
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
-from tensor_cast.device import TEST_DEVICE
+from tensor_cast.device import (
+    CommGrid,
+    DeviceProfile,
+    InterconnectTopology,
+    TEST_DEVICE,
+)
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.layers.sampler import SamplingMetadata
 from tensor_cast.model_config import (
@@ -17,7 +22,7 @@ from tensor_cast.model_config import (
     ParallelConfig,
     QuantConfig,
 )
-from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
+from tensor_cast.performance_model.analytic import AnalyticPerformanceModel, StatsKey
 from tensor_cast.quantize_utils import AttentionQuantType, LinearQuantType
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.custom_model_registry import (
@@ -26,6 +31,7 @@ from tensor_cast.transformers.custom_model_registry import (
 )
 from tensor_cast.transformers.model import TransformerModel
 from tensor_cast.transformers.utils import AutoModelConfigLoader
+from tensor_cast.utils import DTYPE_FP8, is_fp8_dtype, performance_dtype
 from .test_common import (
     create_attn_metadata_and_kv_cache,
     create_mla_metadata_and_kv_cache,
@@ -76,6 +82,151 @@ def get_mla_quant_config(start_layer_id=-1, end_layer_id=-1):
 class TestQuantAttention(unittest.TestCase):
     QUANT_TYPES = [AttentionQuantType.INT8, AttentionQuantType.FP8]
 
+    def test_all_torch_float8_dtypes_share_fp8_performance_dtype(self):
+        fp8_dtypes = [
+            dtype for name, dtype in vars(torch).items() if name.startswith("float8") and isinstance(dtype, torch.dtype)
+        ]
+        self.assertGreater(len(fp8_dtypes), 0)
+        for dtype in fp8_dtypes:
+            self.assertTrue(is_fp8_dtype(dtype))
+            self.assertEqual(performance_dtype(dtype), DTYPE_FP8)
+
+    def assert_mma_ops_time_positive(self, runtime, op_name):
+        total_mma_ops_time_s = 0
+        for event in runtime.event_list:
+            if op_name not in str(event.op_invoke_info.func):
+                continue
+            for result in event.perf_results.values():
+                total_mma_ops_time_s += result.statistics.get(StatsKey.MMA_OPS, 0)
+        self.assertGreater(total_mma_ops_time_s, 0)
+
+    def test_fp8_mla_quant_mma_ops_time_is_nonzero(self):
+        q = torch.empty((2, 2, 16), dtype=torch.float8_e4m3fn, device="meta")
+        kv_cache = torch.empty((2, 32, 12), dtype=torch.float8_e4m3fn, device="meta")
+        block_table = torch.empty((2, 1), dtype=torch.int32, device="meta")
+        query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+        request_total_seq_lens = torch.tensor([32, 32], dtype=torch.int32)
+        query_lens = torch.tensor([1, 1], dtype=torch.int32)
+        W_UK_T = torch.empty((2, 12, 8), dtype=torch.bfloat16, device="meta")
+        W_UV = torch.empty((2, 8, 16), dtype=torch.bfloat16, device="meta")
+        scale = torch.tensor(1.0)
+
+        machine_config = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(machine_config)
+        with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
+            torch.ops.tensor_cast.multihead_latent_attention_quant(
+                q,
+                kv_cache,
+                block_table,
+                query_start_loc,
+                request_total_seq_lens,
+                query_lens,
+                W_UK_T,
+                W_UV,
+                None,
+                16,
+                None,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                torch.bfloat16,
+            )
+
+        self.assert_mma_ops_time_positive(runtime, "multihead_latent_attention_quant.default")
+
+    def test_fp8_mla_quant_uses_custom_device_fp8_variant(self):
+        device = DeviceProfile(
+            name=f"TEST_DEVICE_CUSTOM_FP8_E5M2_{id(self)}",
+            vendor="TEST_VENDOR",
+            mma_ops={torch.float8_e5m2: 100 * 1e12},
+            gp_ops={torch.float32: 10 * 1e12, torch.half: 10 * 1e12},
+            memory_size_bytes=64 * (1024**3),
+            memory_bandwidth_bytes_ps=1.6 * (1024**4),
+            comm_grid=CommGrid(
+                grid=torch.arange(2),
+                topologies={0: InterconnectTopology(1e9, 1e-6)},
+            ),
+        )
+        self.assertEqual(device.mma_ops, {DTYPE_FP8: 100 * 1e12})
+
+        q = torch.empty((2, 2, 16), dtype=torch.float8_e4m3fn, device="meta")
+        kv_cache = torch.empty((2, 32, 12), dtype=torch.float8_e4m3fn, device="meta")
+        block_table = torch.empty((2, 1), dtype=torch.int32, device="meta")
+        query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+        request_total_seq_lens = torch.tensor([32, 32], dtype=torch.int32)
+        query_lens = torch.tensor([1, 1], dtype=torch.int32)
+        W_UK_T = torch.empty((2, 12, 8), dtype=torch.bfloat16, device="meta")
+        W_UV = torch.empty((2, 8, 16), dtype=torch.bfloat16, device="meta")
+        scale = torch.tensor(1.0)
+
+        perf_model = AnalyticPerformanceModel(device)
+        with Runtime(perf_model, device) as runtime, torch.no_grad():
+            torch.ops.tensor_cast.multihead_latent_attention_quant(
+                q,
+                kv_cache,
+                block_table,
+                query_start_loc,
+                request_total_seq_lens,
+                query_lens,
+                W_UK_T,
+                W_UV,
+                None,
+                16,
+                None,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                torch.bfloat16,
+            )
+
+        self.assert_mma_ops_time_positive(runtime, "multihead_latent_attention_quant.default")
+
+    def test_device_profile_rejects_mismatched_fp8_perf_values(self):
+        with self.assertRaisesRegex(ValueError, "FP8 variants must share the same performance value"):
+            DeviceProfile(
+                name=f"TEST_DEVICE_FP8_CONFLICT_{id(self)}",
+                vendor="TEST_VENDOR",
+                mma_ops={
+                    torch.float8_e4m3fn: 100 * 1e12,
+                    torch.float8_e5m2: 120 * 1e12,
+                },
+                gp_ops={torch.float32: 10 * 1e12},
+                memory_size_bytes=64 * (1024**3),
+                memory_bandwidth_bytes_ps=1.6 * (1024**4),
+                comm_grid=CommGrid(
+                    grid=torch.arange(2),
+                    topologies={0: InterconnectTopology(1e9, 1e-6)},
+                ),
+            )
+
     @parameterized.expand(
         list(
             product(
@@ -116,6 +267,7 @@ class TestQuantAttention(unittest.TestCase):
         self.assertIn("quantize.default", result)
         self.assertIn("reshape_and_cache.default", result)
         self.assertIn("attention_quant.default", result)
+        self.assert_mma_ops_time_positive(runtime, "attention_quant.default")
 
     @parameterized.expand(list(product(["deepseek-ai/DeepSeek-V3.1"], QUANT_TYPES)))
     def test_mla(self, model_id, attn_quant_type):
@@ -151,3 +303,4 @@ class TestQuantAttention(unittest.TestCase):
         self.assertIn("quantize.default", result)
         self.assertIn("concat_and_cache_mla.default", result)
         self.assertIn("multihead_latent_attention_quant.default", result)
+        self.assert_mma_ops_time_positive(runtime, "multihead_latent_attention_quant.default")
