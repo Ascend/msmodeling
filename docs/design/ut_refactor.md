@@ -1,0 +1,634 @@
+# Feature Design
+
+## Functional Description
+
+In the current `msmodeling` testing system, the responsibilities of UT and ST are not clearly defined, overall execution time is high, slow test cases are concentrated, test code and functional verification are duplicated, and some paths trigger weight downloads leading to cache bloat. This feature only rectifies the testing system; it does not add new modeling functions or expand precision data collection links.
+
+1. A unified three-layer directory specification is established. Layers are expressed by directory placement under `tests/smoke/`, `tests/regression/`, and `tests/benchmark/` rather than by pytest layer markers. Pytest markers are reserved for two cross-cutting constraints only: `nightly` for long-running compile paths and `npu` for hardware-dependent cases. Model-level precision guardianship lives under `tests/benchmark/models/`; operator-level guardianship lives under `tests/benchmark/ops/perf_database/`. Incremental CI feedback covers smoke and regression cases that match `not npu and not nightly`; benchmark directories never enter the incremental path.
+2. A split execution model is established. Five shell entry points are provided: `run_smoke.sh`, `run_regression.sh`, `run_benchmark.sh`, `run_nightly.sh`, and `run_ci_gate.sh`. Local developers always run full smoke and full regression. CI PR incremental selection is isolated in `run_ci_gate.sh`, which reads an external `test_map` file maintained by the nightly job. Benchmark and nightly scripts always run full suites.
+3. A coverage and guardianship mechanism is established. The CI gate enforces line and branch thresholds at 70% and 50% respectively after incremental pytest produces `.coverage`. The nightly job reports the same thresholds without blocking the pipeline. Pass rate, duration drift, and slow-case counts are tracked through nightly JSON reports and Feishu notifications.
+4. Slow cases and redundancy are governed through `pytest -n auto` parallelism, session- and module-level fixtures, parametrization, and case merging. Duration is compared against nightly `duration_sec` and pytest `--durations=20` output. Full regression is not rerun solely to collect baselines.
+5. Weights and Hub access are controlled centrally. Local runs allow Hub access when `MSMODELING_OFFLINE` is unset. CI sets `MSMODELING_OFFLINE=1` to forbid implicit downloads. Cache directories are confined to `.msmodeling_cache` at the repository root. Weight shards can be pruned after each session when `MSMODELING_TEST_WEIGHTS_PRUNE=1`.
+6. Quantifiable targets are defined. The mixed baseline total duration is 960 seconds, line coverage is 74%, branch coverage is 61.8%, and 15 test cases exceed 300 seconds. After rectification: incremental CI gate target is approximately 180 seconds, a single full regression run should not exceed 300 seconds, full nightly should not exceed 480 seconds, full-run speed improvement over baseline should be no less than 50%, and test cases exceeding 300 seconds should be no more than 3.
+
+For users, local smoke and regression provide failure feedback without waiting for nightly guardianship. For the system, the scheduled nightly job refreshes the external `test_map`, runs long `nightly`-marked cases and benchmark suites, and drives duration and coverage trend reporting.
+
+## Implementation Ideas
+
+### Step 1: Solidify Directory Layering and Marker Semantics
+
+Layer selection is directory-driven. Global pytest `addopts` excludes `npu` only; each entry script adds its own directory scope and marker expression.
+
+**Directory Semantics**
+
+| Directory | Layer | Semantics | Typical Content | Local / Full CI | Incremental CI |
+|------|------|------|----------|------|------|
+| `tests/smoke/` | UT | Minimum viable paths; PR guard for `@pytest.mark.nightly` compile paths | Core API reachability, lightweight compile, local tiny configs, CLI smoke | `run_smoke.sh` | Selected via `run_ci_gate.sh` when mapped |
+| `tests/regression/` | UT / ST | Module function and integration verification; default destination for new cases | Graph compilation, pass transforms, ServingCast, CLI, Web UI, toolchain UT | `run_regression.sh` | Selected via `run_ci_gate.sh` when mapped |
+| `tests/benchmark/` | ST | Precision and performance baselines | `models/` model-level cases, `ops/perf_database/` operator-level cases | `run_benchmark.sh` | Never selected incrementally |
+| All three layers | ST | Nightly guardianship | Long compile paths, precision baselines, mapping refresh | `run_nightly.sh` | — |
+
+**Marker Semantics**
+
+| Marker | Semantics | Relationship with Directory |
+|--------|------|------------|
+| None | Default case; layer is determined by directory | Most cases in all three directories carry no marker |
+| `nightly` | Long-running compile or optimization paths | Allowed under `tests/smoke/` or `tests/regression/`; excluded from `run_ci_gate.sh`; included in local full smoke/regression and nightly phase 2 |
+| `npu` | Requires NPU hardware | Excluded from all `run_*.sh` entry scripts |
+
+**Smoke Guard for Nightly Compile Paths**
+
+Every test function or class marked `@pytest.mark.nightly` should have one or more corresponding smoke cases under `tests/smoke/` that exercise the same compile or CLI path at reduced cost.
+
+| Layer | Role | Typical Scope |
+|-------|------|---------------|
+| `tests/smoke/` | PR-level basic guard | Local tiny configs in `tests/assets/model_config/` with `num_hidden_layers_override=1`, or remote `config.json` only; asserts `build_model`, `ModelRunner.run_inference`, or CLI exit code |
+| `tests/regression/` + `@pytest.mark.nightly` | Full compile regression | Full model IDs, multi-shape sweeps, fused-op event counts, bandwidth tables, ModelScope load paths |
+
+**Examples**
+
+| Smoke case | Guards nightly |
+|------------|----------------|
+| `tests/smoke/test_compile_paths_smoke.py::test_compile_with_mtp_tokens_deepseek` | `MtpNightlyTestCase`, `MtpEpNightlyTestCase` |
+| `tests/smoke/test_compile_remote_models_smoke.py::test_compile_qwen3_moe` | `GmmPassTestCase`, `SwiGLUFusionPassNightlyTestCase` |
+| `tests/smoke/test_model_runner_compile_smoke.py::test_model_runner_compile_deepseek` | `TestTextGenerateNightly`, `PerfAnalysisNightlyTestCase` |
+| `tests/smoke/test_throughput_optimizer_smoke.py::TestThroughputOptimizerSmoke.test_vl_model_image_args` | `TestThroughputOptimizerNightly` VL paths |
+
+When adding a new `@pytest.mark.nightly` case, a smoke counterpart should be added or extended in the same change; non-obvious mappings should be documented in the smoke module docstring.
+
+**Subsequent Maintenance**
+
+1. New cases are placed by directory first. Model guardianship goes to `tests/benchmark/models/`; operator guardianship goes to `tests/benchmark/ops/`. High-duration regression paths receive `@pytest.mark.nightly` and a smoke guard. NPU dependencies receive `@pytest.mark.npu`.
+2. Legacy cases are migrated into one of the three directories. Markers previously used only for layering are removed; `nightly` and `npu` are retained when still applicable.
+3. Shared model configuration assets live under `tests/assets/model_config/`. Reusable builders and assertions live under `tests/helpers/`. Toolchain unit tests mirror `scripts/helpers/` under `tests/regression/scripts/helpers/`.
+
+**New test case guidelines**: `tests/README.md` provides a step-by-step guide for adding new test cases: (1) choose the directory by test intent, (2) reuse shared helpers from `tests/helpers/`, (3) follow the naming and structure conventions, (4) verify locally with the corresponding `run_*.sh` script, and (5) check that the new case appears in the next nightly `test_map` refresh.
+
+**LLM-assisted test generation**: `tests/SKILL.md` provides a structured prompt template for LLM-based test case generation. It encodes directory-driven layering, marker semantics, shared helper APIs, and code templates for smoke, regression, and benchmark cases. An LLM agent reading `SKILL.md` can produce structurally correct test cases that conform to the framework conventions.
+
+```toml
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+  "nightly: do_compile=True large model cases, only run in nightly",
+  "npu: requires NPU hardware",
+]
+addopts = "-m 'not npu'"
+testpaths = ["tests"]
+```
+
+The `build_test_map` collection scope matches `MSMODELING_TEST_MAP_MARKER`, defaulting to `not npu and not nightly`, over `tests/smoke/` and `tests/regression/`. Benchmark cases never participate in mapping.
+
+### Step 2: External test_map and gate_policy Contracts
+
+The incremental gate reads `test_map` from an external file pointed to by `MSMODELING_TEST_MAP_PATH`. The nightly job writes this file after phase 1 succeeds. Exemptions remain in the repository at `tests/.ci/gate_policy.json`.
+
+**test_map contract example**
+
+```json
+{
+  "schema_version": 1,
+  "map": {
+    "serving_cast/utils.py": {
+      "summarize": [
+        "tests/regression/serving_cast/test_utils.py::TestSummarize::test_summarize_basic"
+      ]
+    }
+  }
+}
+```
+
+Map keys must be repository-relative product source paths under prefixes defined in `coverage_config.PRODUCT_SOURCE_PREFIXES`: `cli/`, `serving_cast/`, `tensor_cast/`, `web_ui/`, `scripts/`, and `tools/`.
+
+**Shallow coverage filter**: `build_test_map` applies a minimum line threshold (`MIN_LINES_PER_SYMBOL = 3`) during `collect_from_coverage`. A test-to-symbol association is registered only when the test hits at least 3 distinct lines within the symbol's span. This prevents single-line hits (e.g., import or constant access) from creating false associations in the map.
+
+**Redundancy detection**: `build_test_map.detect_redundant_cases` analyzes the completed map and returns two types of warnings:
+
+1. **over_covered_symbol**: a symbol mapped to more than `max_per_symbol` (default 5) test cases, indicating potential duplication.
+2. **redundant_pair**: a pair of test cases whose Jaccard similarity over covered symbols exceeds `jaccard_threshold` (default 0.85), indicating near-identical coverage footprints.
+
+Redundancy warnings are consumed by the nightly pipeline and surfaced through Feishu notifications. They are advisory and do not block CI.
+
+**gate_policy contract**
+
+```json
+{
+  "schema_version": 1,
+  "exemptions": [
+    {"file": "tensor_cast/foo.py", "symbol": "legacy_helper", "reason": "deprecated next release"}
+  ]
+}
+```
+
+### Step 3: CI Gate Selection and Policy Rules
+
+Incremental selection is implemented in `scripts/helpers/ci_gate/main.py`. The pipeline resolves a merge base, classifies git changes, builds a `CiGatePlan`, emits a JSON selection report, runs pytest, and enforces the coverage gate.
+
+Change classification covers configuration files, added or removed tests, added or removed product sources, and modified product sources with executable line numbers filtered through AST analysis.
+
+| Phenomenon | Incremental Behavior |
+|---|------------|
+| Configuration change under `tests/.ci/`, `tests/conftest.py`, or standard CI config filenames | Full `tests/smoke/` and `tests/regression/` with marker `not npu and not nightly` |
+| New product source file | Block when top-level symbols lack `test_map` entries and are not exempt |
+| New test file | Execute only the new test paths |
+| Removed product source file | Execute all mapped node ids; block when mapping is missing |
+| Removed test file | Block when the deleted path is the sole mapped coverage for any symbol |
+| Modified product source file | Select mapped node ids by changed symbol; block unmapped non-exempt symbols |
+
+Deleted-source guard tests run in a first pytest phase when present. Incremental or full-suite targets run in a second phase. Both phases use marker `not npu and not nightly` and `-n auto`.
+
+**Per-symbol coverage advisory**: After incremental pytest produces `.coverage`, `_check_symbol_level_coverage` evaluates local coverage for each changed symbol. When a changed symbol's local line coverage falls below 50%, an advisory warning is added to `CiGatePlan.symbol_warnings`. These warnings are printed to stderr but do not block the merge; they serve as early signals that a code path may lack adequate test coverage despite being nominally "mapped" in `test_map`.
+
+**selection_report fields**
+
+| Field | Type | Meaning |
+|------|------|------|
+| `generated_at` | string | ISO 8601 timestamp |
+| `merge_base` | string | Merge-base commit SHA |
+| `full_suite` | boolean | Whether the full smoke and regression incremental scope was selected |
+| `deleted_source_tests` | string[] | Node ids for deleted-source guard phase |
+| `incremental_tests` | string[] | Node ids selected for the main pytest phase |
+| `blocking_errors` | string[] | Policy violations that prevent pytest execution |
+| `symbol_warnings` | string[] | Advisory per-symbol coverage warnings; non-blocking |
+
+### Step 4: Hub Connectivity and Session Cache
+
+`tests/conftest.py` applies Hub offline flags when `MSMODELING_OFFLINE=1`. Cache directories default to `.msmodeling_cache`. After the session, weight shards under that directory are removed when `MSMODELING_TEST_WEIGHTS_PRUNE=1`.
+
+`scripts/lib/common.sh` sets Hub-related defaults before pytest starts: `MSMODELING_HF_TRUST_REMOTE_CODE_TIMEOUT=0` and `MSMODELING_MODELSCOPE_CONFIG_ONLY=1`.
+
+Session-level model reuse is implemented in `tests/regression/tensor_cast/conftest.py` through module-level `_SESSION_MODEL_CACHE` and `_SESSION_HF_CONFIG_CACHE`. The same `model_id` and `do_compile` combination is built once per pytest session and shared across files via `get_session_model()` and `get_session_hf_config()`.
+
+### Step 5: Repository Execution Scripts
+
+Shell scripts are the unified entry point for CodeArts build tasks and local debugging. Python logic for CI gate and nightly is invoked through `run_ci_gate.sh` and `run_nightly.sh`.
+
+| Script | Responsibility | Coverage | Coverage Gate |
+|------|------|------|------|
+| `run_smoke.sh` | Full `tests/smoke/`, marker `not npu`, `-n auto` | No | No |
+| `run_regression.sh` | Full `tests/regression/`, marker `not npu`, `-n auto` | No | No |
+| `run_ci_gate.sh` | Incremental smoke and regression via external `test_map` | Yes | Yes, blocking at 70/50 |
+| `run_benchmark.sh` | Full `tests/benchmark/`, optional `-n auto` when `MSMODELING_BENCHMARK_PARALLEL=1` | No | No |
+| `run_nightly.sh` | Three-phase nightly pipeline via `scripts/helpers/nightly/main.py` | Phase 1 only | Report-only at 70/50 |
+
+Local developers run `run_smoke.sh` and `run_regression.sh` directly. CI PR incremental runs use `run_ci_gate.sh` with `MSMODELING_TEST_MAP_PATH` pointing to the runner-maintained JSON file.
+
+### Step 6: Nightly Three-Phase Pipeline
+
+`scripts/helpers/nightly/main.py` orchestrates the scheduled nightly job.
+
+**Phase 1 — test_map refresh scope**
+
+Runs `tests/smoke/` and `tests/regression/` with marker `not npu and not nightly`, `-n0`, and `--cov-context=test`. On pytest success, `build_test_map` writes the external `test_map` file. Coverage totals are computed and included in the report; threshold failure is logged as non-blocking.
+
+**Phase 2 — nightly-marked cases**
+
+Runs `tests/smoke/` and `tests/regression/` with marker `not npu and nightly`, `-n auto`.
+
+**Phase 3 — benchmark**
+
+Runs `tests/benchmark/` with marker `not npu`. Parallelism follows `MSMODELING_BENCHMARK_PARALLEL`.
+
+The combined pytest output is parsed into `NightlyReport` JSON. When `FEISHU_WEBHOOK_URL` is set, a summary message is POSTed over HTTPS.
+
+**NightlyReport primary fields**
+
+`pytest_exit_code`, `passed`, `failed`, `errors`, `duration_sec`, `failed_cases`, `first_error`, `commit`, `branch`, `timestamp`, `test_map_source_files`, `test_map_symbols`, `test_map_path`, `test_map_written`, optional coverage summary fields, `weak_coverage_symbols`, and `redundancy_warnings`.
+
+**Weak coverage symbol detection**: After phase 1 succeeds, `compute_weak_coverage_symbols` cross-references the refreshed `test_map` with `.coverage` data. Symbols whose local line coverage falls below 50% are listed in `weak_coverage_symbols`. This complements the CI gate per-symbol advisory by providing a full-repository view rather than only changed symbols.
+
+**Redundancy reporting**: `detect_redundant_cases` is invoked on the refreshed map after phase 1. Both `over_covered_symbol` and `redundant_pair` warnings are stored in `redundancy_warnings` and included in the Feishu notification payload.
+
+### Step 7: CodeArts Build Task Integration
+
+Build tasks call scripts from the repository root. Pipeline orchestration, trigger conditions, and environment injection are owned by the CodeArts platform.
+
+| Trigger | Command |
+|---------|---------|
+| PR comment `compile` | `MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh` |
+| Comment `/run_tests smoke` | `bash scripts/run_smoke.sh` |
+| Comment `/run_tests regression` | `bash scripts/run_regression.sh` |
+| Comment `/run_tests benchmark` | `bash scripts/run_benchmark.sh` |
+| Scheduled nightly | `MSMODELING_TEST_MAP_PATH=… bash scripts/run_nightly.sh` |
+
+### Step 8: Shared Test Helpers and Config Prefetch
+
+`tests/helpers/` provides reusable assertion and builder utilities: `assert_utils.py`, `config_factory.py`, `model_builder.py`, `op_registry.py`, and `fake_subprocess.py`. Self-tests live under `tests/helpers/tests/`.
+
+`scripts/prefetch_model_configs.py` scans test sources and prefetches required model configuration files into `tests/assets/cache` for offline or CI preparation.
+
+### Step 9: Slow Test Case Governance
+
+Parallelism defaults to `pytest -n auto` for smoke, regression, CI gate, and nightly phase 2. Only nightly phase 1 uses `-n0` so that `--cov-context=test` aligns with `build_test_map.py`. Incremental CI gate excludes the `nightly` marker; first compile with `do_compile=True` remains in nightly scope only.
+
+After the above steps, directory layering, incremental selection, gating, and ST guardianship are verified together against the quantifiable targets in the Functional Description section.
+
+### Logical Flowchart
+
+```plantuml
+@startuml
+skinparam shadowing false
+participant "Developer / CodeArts" as user
+participant "run_smoke.sh\nrun_regression.sh" as local
+participant "run_ci_gate.sh" as gate
+participant "run_nightly.sh" as night
+participant "run_benchmark.sh" as bench
+
+user --> local : local or /run_tests smoke|regression\nfull directory, no test_map
+user --> gate : PR comment compile\nMSMODELING_TEST_MAP_PATH required
+user --> bench : /run_tests benchmark
+user --> night : scheduled nightly\nMSMODELING_TEST_MAP_PATH output
+
+gate --> gate : diff → CiGatePlan → pytest → coverage gate
+night --> night : phase1 map refresh → phase2 nightly → phase3 benchmark → report
+@enduml
+```
+
+This diagram describes how users and CodeArts jobs reach final test results through the five entry scripts.
+
+Normal path: Local and on-demand CI smoke or regression jobs call `run_smoke.sh` or `run_regression.sh`, which run the full target directory with marker `not npu`. PR incremental jobs call `run_ci_gate.sh`, which selects tests from the external `test_map`, runs pytest, and enforces the coverage gate. Scheduled nightly jobs call `run_nightly.sh`, which refreshes `test_map`, runs nightly-marked and benchmark suites, and emits JSON plus optional Feishu notification.
+
+Exception path: `run_ci_gate.sh` exits non-zero on policy violations or pytest failure, or when the coverage gate fails. Nightly continues report emission when an intermediate phase fails; `pytest_exit_code` and `test_map_written` reflect partial success.
+
+### Sequence Diagram
+
+```plantuml
+@startuml
+skinparam shadowing false
+participant "CodeArts PR Job" as job
+participant "run_ci_gate.sh" as sh
+participant "ci_gate/main.py" as cg
+participant "pytest" as py
+participant "coverage_gate.py" as cov
+
+job -> sh : MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh
+sh -> cg : main()
+cg -> cg : resolve_base_ref + classify_changes\n+ build_ci_gate_plan
+cg --> job : selection_report JSON
+
+alt blocking_errors non-empty
+  cg --> job : exit 1, no pytest
+else plan has targets
+  opt deleted_source_tests
+    cg -> py : pytest guard tests\n-m "not npu and not nightly" -n auto --cov
+  end
+  cg -> py : pytest full or selected targets\nsame marker and parallelism
+  py --> cg : results + .coverage
+  cg -> cov : check_ut_gate 70/50
+  cov --> job : exit 0 or 1
+end
+@enduml
+```
+
+This diagram describes the internal interaction order for the CI incremental gate.
+
+Normal path: The build job invokes `run_ci_gate.sh`, which delegates to `ci_gate/main.py`. The module loads the external baseline, classifies the diff, prints the selection report, runs one or two pytest phases, and calls `check_ut_gate` when `.coverage` exists.
+
+Exception path: Blocking policy errors prevent pytest from starting. Pytest failure returns the pytest exit code before the coverage gate runs. Missing `.coverage` skips the gate with a stderr notice and exit code 0.
+
+### Code Structure Design
+
+```plantuml
+@startuml
+skinparam shadowing false
+package "Shell Entry" <<Shell>> {
+  component run_smoke
+  component run_regression
+  component run_ci_gate
+  component run_nightly
+  component run_benchmark
+  component common_sh
+}
+package "ci_gate" {
+  class "ci_gate/main.py" as cgm {
+    +main()
+    +build_ci_gate_plan()
+    +emit_selection_report()
+    +_check_symbol_level_coverage()
+  }
+  class "ci_gate/diff.py" as cgd {
+    +resolve_base_ref()
+    +fetch_diff_line_map()
+    +classify_changes()
+  }
+  class "ci_gate/rules.py" as cgr {
+    +gate_config()
+    +gate_new_source()
+    +gate_modified_source()
+  }
+  class "ci_gate/models.py" as cgmod
+}
+package "common" {
+  class "common/ast_utils.py" as ast
+  class "common/build_test_map.py" as btm {
+    +collect_from_coverage()
+    +detect_redundant_cases()
+    +write_test_map()
+  }
+  class "common/coverage_gate.py" as cg
+  class "common/coverage_config.py" as cc
+  class "common/test_map_loader.py" as tml
+  class "common/test_map_config.py" as tmc
+}
+package "nightly" {
+  class "nightly/main.py" as nm {
+    +main()
+    +emit_report()
+  }
+  class "nightly/report_builder.py" as rb {
+    +build_report()
+    +compute_weak_coverage_symbols()
+  }
+  class "nightly/feishu_notifier.py" as fn
+  class "nightly/pytest_parser.py" as pp
+  class "nightly/report_models.py" as rm
+}
+class "_config.py" as cfg
+run_ci_gate ..> cgm
+run_nightly ..> nm
+common_sh ..> run_smoke
+cgm --> cgd
+cgm --> cgr
+cgm --> tml
+cgm --> cg
+cgr --> ast
+btm --> ast
+btm --> cc
+nm --> btm
+nm --> cg
+nm --> rb
+nm --> fn
+nm --> pp
+cgm --> cfg
+nm --> cfg
+tml --> tmc
+@enduml
+```
+
+This diagram describes the testing toolchain modules under `scripts/helpers/` and their dependencies.
+
+`run_*.sh` scripts source `scripts/lib/common.sh` for Python and pytest resolution. `ci_gate/main.py` coordinates diff analysis, policy gating, pytest execution, and the blocking coverage gate. `nightly/main.py` chains three pytest phases, invokes `build_test_map`, and emits reports through `report_builder` and `feishu_notifier`. `_config.py` centralizes environment variable parsing for all helpers.
+
+### Interface Design
+
+#### External Interfaces
+
+The complete environment variable list lives in `tests/README.md`. The design document lists items directly tied to script behavior.
+
+| Parameter | Optional/Mandatory | Description |
+|------|----------|------|
+| `MSMODELING_TEST_MAP_PATH` | Required for ci_gate and nightly | Absolute path to external `test_map` JSON file; must exist for ci_gate; created by nightly phase 1 on success |
+| `MSMODELING_TEST_BASE_BRANCH` | Optional | Default `master`; used for `git merge-base HEAD $MSMODELING_TEST_BASE_BRANCH` |
+| `MSMODELING_TEST_LINE_THRESHOLD` / `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | Default **70** / **50**; blocking in ci_gate, report-only in nightly |
+| `MSMODELING_TEST_MAP_MARKER` | Optional | Default `not npu and not nightly`; scopes test_map collection in nightly phase 1 |
+| `MSMODELING_BENCHMARK_PARALLEL` | Optional | Default `0`; set `1` for benchmark `-n auto` |
+| `MSMODELING_OFFLINE` | CI recommends `1` | Enables Hub offline triplet through `tests/conftest.py` |
+| `MSMODELING_TEST_WEIGHTS_PRUNE` | Optional | Default `1`; prunes weight shards after session |
+| `FEISHU_WEBHOOK_URL` | Optional | Nightly Feishu webhook |
+| `PYTHON` | Optional | Interpreter override resolved in `common.sh` |
+
+#### Key Internal Interfaces
+
+| Parameter | Optional/Mandatory | Description |
+|------|----------|------|
+| `ci_gate.main()` | Mandatory | Loads baseline, builds plan, runs pytest phases, enforces coverage gate; returns process exit code |
+| `build_ci_gate_plan(repo_root, changes, baseline)` | Mandatory | Single source of truth for policy aggregation; returns `CiGatePlan` |
+| `load_baseline(repo_root, cfg)` | Mandatory | Loads external `test_map` and repository `gate_policy.json` exemptions |
+| `resolve_base_ref(repo_root, branch)` | Mandatory | Returns merge-base SHA |
+| `classify_changes(repo_root, base_ref, diff)` | Mandatory | Returns `ChangeSet` from git name-status and line map |
+| `build_test_map(output_path, marker_expr)` | Mandatory | Reads `.coverage` with `--cov-context=test`, writes external JSON |
+| `check_ut_gate(config=GateConfig)` | Mandatory | Reads repo-root `.coverage`; returns `(passed, message)`; used blocking in ci_gate |
+| `nightly.main()` | Mandatory | Runs three pytest phases, refreshes map, emits report; returns combined exit code |
+| `emit_report(...)` | Mandatory | Prints `NightlyReport` JSON and optionally pushes Feishu message |
+
+---
+
+## Module and Peripheral Relationships
+
+```plantuml
+@startuml
+skinparam shadowing false
+component "CodeArts Build Job" as job
+component "scripts/run_*.sh" as scripts
+component "scripts/helpers/" as helpers
+component "pytest" as py
+component "External test_map file" as map
+component "tests/.ci/gate_policy.json" as policy
+component "Feishu webhook" as fs
+job --> scripts : bash run_*.sh
+scripts --> helpers : ci_gate / nightly Python entry
+helpers --> py : pytest subprocess
+helpers --> map : read ci_gate / write nightly phase1
+helpers --> policy : read exemptions
+helpers --> fs : nightly HTTPS POST
+@enduml
+```
+
+This diagram describes how CodeArts jobs, shell entry scripts, Python helpers, pytest, external mapping data, and Feishu relate to each other.
+
+Build jobs depend on Python 3.9 or higher, pytest, and coverage packages from project dependencies. The external `test_map` file is maintained on the CI runner filesystem and is not committed to the repository. Nightly pushes to Feishu only when the platform injects `FEISHU_WEBHOOK_URL`.
+
+---
+
+## DFX Capability Design
+
+### Security
+
+| Risk Point | Mitigation |
+|--------|----------|
+| Comment injection triggering arbitrary commands | Build job argv is fixed as `bash scripts/run_*.sh`; scripts do not concatenate external input |
+| Malicious or out-of-bounds path changes | `test_map` keys are validated as repository-relative product prefixes; JSON parsing failure exits |
+| Forged exemptions bypassing gating | `file` and `symbol` in `gate_policy.json` must exactly match mapping keys |
+| Feishu webhook leak or tampering | URL is injected by platform environment only; HTTPS POST failures are logged to stderr and do not mask pytest results |
+| Implicit external weight downloads | CI sets `MSMODELING_OFFLINE=1`; cache directory is confined to `.msmodeling_cache` |
+
+### Reliability
+
+| Anomaly Scenario | Fault Tolerance Mechanism |
+|----------|----------|
+| External `test_map` corrupted or missing | `load_baseline` raises `ConfigError`; ci_gate exits before pytest |
+| Incremental selection yields empty executable set | ci_gate skips pytest meaningfully only when no targets and no blocking errors; coverage gate skipped when no `.coverage` |
+| Nightly phase 1 pytest fails | `test_map` write is skipped; later phases still run; report records `test_map_written=false` |
+| Feishu POST timeout or network error | `feishu_notifier` logs failure; nightly exit code follows pytest outcomes |
+| Deleted-source guard phase fails | ci_gate exits before incremental phase; stderr lists guard node ids |
+| Incremental path excludes `nightly` marker | Local full smoke/regression and nightly phase 2 provide backstop coverage |
+
+### Usability / Performance Metrics
+
+| Metric | Baseline | Target | Measurement Method |
+|------|------|------|----------|
+| Full duration | 960 s | ≤ 480 s, reduction ≥ 50% | Nightly report `duration_sec` |
+| Incremental CI gate duration | — | ≤ 180 s | Duration of `run_ci_gate.sh` on typical PR diffs |
+| Single full regression duration | — | ≤ 300 s | Duration of `run_regression.sh` |
+| Number of >300 s test cases | 15 | ≤ 3 | pytest `--durations=20` |
+| UT line coverage | 74% | ≥ 70% enforced, 80% aspirational for new code | ci_gate blocking gate |
+| UT branch coverage | 61.8% | ≥ 50% enforced | ci_gate blocking gate |
+
+Parallelism uses `pytest -n auto` except nightly phase 1, which uses `-n0` for stable coverage context collection.
+
+### Serviceability
+
+| Scenario | User-Visible Information | Diagnosis Method |
+|------|--------------|----------|
+| CI gate policy failure | `blocking_errors` in selection report JSON | Reproduce with `MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh` |
+| Coverage gate failure | stderr `CI gate failed: coverage below threshold` | Inspect `.coverage`; adjust thresholds or add tests |
+| Incremental pytest failure | pytest FAILED summary above gate stderr | Run listed node ids with `pytest <node id> -x` |
+| Nightly failure | JSON `failed_cases`, `first_error`, optional Feishu text | Re-run `bash scripts/run_nightly.sh` on CI runner |
+| Local smoke/regression failure | pytest `-vv` output | Reproduce with `bash scripts/run_smoke.sh` or `run_regression.sh` |
+
+Operational commands and environment defaults are maintained in `tests/README.md` as the runbook single source of truth.
+
+### Other Metrics
+
+- Exemptions remain in `tests/.ci/gate_policy.json`; implementation lives in `scripts/helpers/`; external entry points are `scripts/run_*.sh`.
+- Selection effectiveness can be traced by comparing selection report JSON with files touched in a defect postmortem.
+
+### Security Design and Security Checklist
+
+| Checklist Content | Check Result |
+|----------------|----------|
+| 1. Are there new inputs? | Y |
+| 1.1 Is documentation update notified? | Y |
+| 1.2 Is security validation designed for inputs? | Y; boolean env vars accept 0/1 only; JSON structure and map key prefixes are validated |
+| 2. Is there cross-trust-domain inter-process interaction? | N |
+| 3. Are there file operations? | Y |
+| 3.1 Is external file reading involved? | Y; reads external `test_map`, repository `gate_policy.json`, and git diff output |
+| 3.2 Is file output generated? | Y; writes external `test_map` and `.coverage`; permissions follow runner umask |
+| 3.3 Are temporary files generated? | Y; `.coverage` and `.msmodeling_cache`; workspace cleaned by runner at session end |
+| 3.4 Is file decompression involved? | N |
+| 4. Is network communication involved? | Y |
+| 4.1 Is port listening involved? | N |
+| 4.2 Is external network access involved? | Y; nightly Feishu HTTPS only; Hub access controlled by `MSMODELING_OFFLINE` |
+| 5. Is injection risk involved? | Y |
+| 5.1 Is command execution involved? | Y; fixed pytest and git command lists via `subprocess`; no user string concatenation |
+| 5.2 Is HTML interface injection risk involved? | N |
+| 5.3 Is the JLabel control used? | N |
+| 5.4 Is XML parsing involved? | N |
+| 5.5 Is YAML parsing involved? | N |
+| 5.6 Is SQL database injection involved? | N; coverage internal sqlite is not exposed |
+| 6. Are third-party libraries introduced? | N |
+| 7. Are new binary deliverables introduced? | N |
+| 8. Is encryption or authentication involved? | N |
+| 9. Is sensitive information processing involved? | N |
+| 10. Are security function libraries used? | N |
+
+### Testability
+
+| Test Case Name | Pre-operation | Operation Method | Expected Result |
+|--------|----------|----------|----------|
+| ci_gate incremental happy path | Valid diff and existing external `test_map` | `MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh` | selection report printed; mapped tests run; coverage gate evaluated |
+| ci_gate policy block | New unmapped product source | Same as above | `blocking_errors` non-empty; exit 1 before pytest |
+| ci_gate coverage failure | Set `MSMODELING_TEST_LINE_THRESHOLD=99` | ci_gate with producing diff | stderr coverage failure; exit 1 |
+| local smoke full | None | `bash scripts/run_smoke.sh` | All `tests/smoke/` cases with marker `not npu`; no coverage gate |
+| local regression full | None | `bash scripts/run_regression.sh` | All `tests/regression/` cases with marker `not npu`; no coverage gate |
+| benchmark full | None | `bash scripts/run_benchmark.sh` | Full `tests/benchmark/`; sequential unless parallel flag set |
+| benchmark parallel | `MSMODELING_BENCHMARK_PARALLEL=1` | `bash scripts/run_benchmark.sh` | pytest uses `-n auto` |
+| nightly map refresh | Valid `MSMODELING_TEST_MAP_PATH` | `bash scripts/run_nightly.sh` | phase 1 success writes `test_map`; report `test_map_written=true` |
+| nightly phase 1 failure | Induced failing case in incremental scope | nightly | `test_map` not written; later phases still run; report shows failure |
+| nightly Feishu push | `FEISHU_WEBHOOK_URL` set | nightly | Feishu receives summary with coverage and map stats |
+| exemption allowance | Symbol listed in `gate_policy.json` | ci_gate on mapped file change | no blocking error for exempt symbol |
+| deleted test sole coverage | Remove only mapped test for a symbol | ci_gate | blocking error names symbol |
+| empty diff doc-only | Change `README.md` only | ci_gate | no blocking errors; empty or minimal selection |
+| toolchain UT | None | `pytest tests/regression/scripts/helpers/` | ci_gate, nightly, and common helper modules covered |
+| shared helpers UT | None | `pytest tests/helpers/tests/` | assert and factory helpers covered |
+| shallow coverage filter | Coverage data with single-line hits | `collect_from_coverage` with `MIN_LINES_PER_SYMBOL=3` | symbols with <3 hit lines per test are excluded from map |
+| redundancy detection | Map with 6+ tests on one symbol or Jaccard ≥ 0.85 pair | `detect_redundant_cases` | over_covered_symbol and redundant_pair warnings returned |
+| per-symbol CI advisory | Changed symbol with local coverage < 50% | `_check_symbol_level_coverage` | warning in `symbol_warnings`; non-blocking |
+| weak coverage nightly | Symbol with local coverage < 50% in full map | `compute_weak_coverage_symbols` | listed in `weak_coverage_symbols` field of report |
+| Feishu weak/redundancy | Report with weak symbols and redundancy warnings | `build_feishu_payload` | payload includes "Weak coverage symbols" and "Over-covered symbols" / "Redundant test pairs" sections |
+
+Toolchain behavior is also covered by unit tests under `tests/regression/scripts/helpers/`, which mirror production modules in `scripts/helpers/`.
+
+---
+
+## Feature Specifications and Limitations
+
+### Platform Responsibility Limitations
+
+The CodeArts platform owns build scheduling, runner filesystem layout for the external `test_map`, and environment injection. Repository scripts own pytest execution, policy decisions, map generation, and report formatting.
+
+### Script Execution Specifications
+
+1. Build tasks call `bash scripts/run_*.sh` from the repository root.
+2. Local smoke and regression always run full directories without external `test_map`.
+3. PR incremental selection runs only through `run_ci_gate.sh` with `MSMODELING_TEST_MAP_PATH`.
+4. Benchmark and nightly always run full suites; nightly additionally refreshes the external map.
+
+### Test Selection Specifications
+
+1. Incremental selection reads the external `test_map`, git diff against merge base, and `tests/.ci/gate_policy.json`.
+2. The external `test_map` is refreshed by nightly phase 1 only when that phase succeeds.
+3. `ci_gate/main.py` prints the selection report as JSON to stdout.
+
+### Gate Specifications
+
+1. Coverage thresholds default to 70% line and 50% branch and block merges in `run_ci_gate.sh`.
+2. Nightly reports the same thresholds without failing the job on threshold miss.
+3. Policy violations in `blocking_errors` always exit before pytest when no guard phase applies.
+
+### Weight and Resource Limitations
+
+Local runs default to online Hub access unless `MSMODELING_OFFLINE=1` is set. Absolute duration remains constrained by runner capacity; acceptance follows the quantifiable targets in the Functional Description section.
+
+### Known Constraints
+
+1. Mapping accuracy depends on coverage dynamic contexts collected with `-n0` in nightly phase 1.
+2. External `test_map` size grows with the repository and requires a successful nightly refresh cadence.
+3. Product path renames require a nightly refresh before incremental ci_gate passes for affected symbols.
+4. Feishu delivery depends on platform egress policy.
+5. Local smoke and regression include `nightly`-marked cases and therefore take longer than CI incremental scope.
+
+### Test Development Conventions
+
+Directory and marker semantics are defined in Implementation Step 1. Environment variables and daily commands are maintained in `tests/README.md`. New `@pytest.mark.nightly` cases require smoke guards as described in Step 1.
+
+---
+
+## Compatibility Statement
+
+This feature is a major overhaul of the testing system and does not guarantee backward compatibility with the legacy flat `tests/` layout, old layer markers, or `tests/run_ut.sh`. Modeling semantics are unchanged; only test triggering, execution, and reporting are altered.
+
+### Incompatible Changes
+
+1. **Directory layering**: Cases must live under `tests/smoke/`, `tests/regression/`, or `tests/benchmark/`. Layer selection is by directory and script entry point, not by smoke/regression/benchmark markers.
+2. **Marker scope**: Only `nightly` and `npu` remain as cross-cutting markers. Markers previously used solely for layering are removed during migration.
+3. **Execution entry**: CI and local workflows use `scripts/run_*.sh`. Incremental selection is isolated in `run_ci_gate.sh`.
+4. **Incremental data contract**: External `test_map` plus repository `gate_policy.json` replace any in-repository mapping file workflow.
+
+### References Requiring Synchronous Modification
+
+| Reference Location | Change Requirement |
+|----------|----------|
+| Test cases | Migrate by directory; remove obsolete layer markers |
+| `pyproject.toml` | Register `nightly` and `npu`; set global `addopts` to exclude `npu` |
+| `tests/README.md` | Directory semantics, environment variables, local commands, CodeArts triggers |
+| Repository root `README.md` | Point local verification to `run_smoke.sh` and `run_regression.sh` |
+| CodeArts build tasks | Map triggers to `run_*.sh`; provide `MSMODELING_TEST_MAP_PATH` on ci_gate and nightly runners |
+
+### Migration Strategy
+
+After merge, a one-time directory migration and build-task script switch must complete. Incremental ci_gate selection takes effect only after the first successful nightly refresh writes the external `test_map`. New or renamed product symbols may trigger ci_gate blocking until mapping exists or an exemption is registered in `gate_policy.json`.
+
+---
+
+## Extensibility
+
+### Trigger Extension
+
+New build task types should map to existing `run_*.sh` entry points. Incremental tasks must supply `MSMODELING_TEST_MAP_PATH`; full tasks call smoke, regression, or benchmark scripts directly.
+
+### Test Selection Extension
+
+`gate_policy.json` exemptions and `PRODUCT_SOURCE_PREFIXES` in `coverage_config.py` can be extended. Changes to the `test_map` schema require synchronized updates to `build_test_map.py`, `test_map_loader.py`, and ci_gate rules.
+
+### Gate Extension
+
+Additional checks such as slow-case upper limits can be chained after `build_ci_gate_plan` resolves and before pytest starts.
+
+### Report Extension
+
+`NightlyReport.to_dict` retains stable primary fields. Trend analysis can consume nightly JSON history or external storage of past reports.
+
+### Platform Extension
+
+Thresholds, map path, and webhooks are injected through environment variables. When switching CI platforms, reuse shell entry scripts and the external `test_map` contract.
