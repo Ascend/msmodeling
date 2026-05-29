@@ -19,10 +19,11 @@ def replace_with_sharded_tensor(
     dim: int = 0,
     head_num: Optional[int] = None,
 ):
-    shard_attr = get_partial_sharded(getattr(module, attr), tp_size, tp_rank, dim, head_num).contiguous()
+    orig_attr = getattr(module, attr)
+    shard_attr = get_partial_sharded(orig_attr, tp_size, tp_rank, dim, head_num).contiguous()
 
     if not is_quant:
-        shard_attr = nn.Parameter(shard_attr)
+        shard_attr = nn.Parameter(shard_attr, requires_grad=orig_attr.requires_grad)
 
     setattr(module, attr, shard_attr)
 

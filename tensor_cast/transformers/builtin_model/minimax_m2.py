@@ -12,6 +12,7 @@ from tensor_cast.transformers.transformations import (
     wrap_model,
 )
 from ...layers.moe_layer import MoELayer
+from ...layers.parallel_linear import replace_with_sharded_tensor
 
 from ..custom_model_registry import (
     ModelProfile,
@@ -19,6 +20,73 @@ from ..custom_model_registry import (
     register_model_profile,
 )
 from ..model import TransformerModel
+
+
+def shard_qk_norm(model: TransformerModel) -> TransformerModel:
+    """
+    Shard q_norm and k_norm weights for MiniMax-M2.5 model with tensor parallelism.
+
+    MiniMax-M2.5 uses QK normalization where:
+    - q_proj output: num_attention_heads * head_dim (e.g., 48 * 128 = 6144)
+    - q_norm weight: num_attention_heads * head_dim
+
+    When TP is applied, q_proj is sharded column-wise, so q_norm must also be sharded
+    to match the reduced dimension.
+    """
+    parallel_group_manager = getattr(model, "parallel_group_manager", None)
+    if parallel_group_manager is None:
+        return model
+
+    tp_group = getattr(parallel_group_manager, "tp_group", None)
+    if tp_group is None:
+        return model
+
+    tp_size = tp_group.world_size
+    if tp_size <= 1:
+        return model
+
+    if not getattr(model.hf_config, "use_qk_norm", False):
+        return model
+
+    unwrapped = model.unwrap()
+    if not hasattr(unwrapped, "layers"):
+        return model
+
+    tp_rank = tp_group.rank_in_group
+    num_attention_heads = model.hf_config.num_attention_heads
+    num_key_value_heads = model.hf_config.num_key_value_heads
+
+    for layer in unwrapped.layers:
+        # Get the self_attn module, handling wrapper layers
+        self_attn = layer
+        while hasattr(self_attn, "_inner"):
+            self_attn = self_attn._inner
+        if hasattr(self_attn, "self_attn"):
+            self_attn = self_attn.self_attn
+
+        # Shard q_norm if it exists
+        if hasattr(self_attn, "q_norm") and hasattr(self_attn.q_norm, "weight"):
+            replace_with_sharded_tensor(
+                self_attn.q_norm,
+                "weight",
+                tp_size,
+                tp_rank,
+                dim=0,
+                head_num=num_attention_heads,
+            )
+
+        # Shard k_norm if it exists
+        if hasattr(self_attn, "k_norm") and hasattr(self_attn.k_norm, "weight"):
+            replace_with_sharded_tensor(
+                self_attn.k_norm,
+                "weight",
+                tp_size,
+                tp_rank,
+                dim=0,
+                head_num=num_key_value_heads,
+            )
+
+    return model
 
 
 class MoELayerWithBias(MoELayer):
@@ -80,6 +148,7 @@ def _(model: TransformerModel):
     model = patch_moe(model, MoELayerWithBias)
     model = quantize_model(model)
     model = shard_model(model)
+    model = shard_qk_norm(model)
     return model
 
 
