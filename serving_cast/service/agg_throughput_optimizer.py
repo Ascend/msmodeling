@@ -157,6 +157,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         summary.set_summary_df(result_df)
         summary.set_early_stop_flag(memory_left, tpot, ttft)
 
+        self._maybe_set_search_info(optimizer_data, memory_left, batch_size, ttft, tpot, summary)
+
         return summary
 
     def _get_or_compute_latency(self, batch_size: int, optimizer_data: OptimizerData, is_decode=False):

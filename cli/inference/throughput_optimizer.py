@@ -193,6 +193,12 @@ def arg_parse():
         default=8,
         help="Number of parallel jobs.",
     )
+    service_group.add_argument(
+        "--concurrency-search-strategy",
+        choices=["exponential", "linear_exponential"],
+        default="exponential",
+        help="Concurrency search strategy. The default is exponential.",
+    )
     parser.add_argument(
         "--dump-original-results",
         action="store_true",

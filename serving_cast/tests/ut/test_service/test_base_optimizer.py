@@ -199,6 +199,127 @@ class TestBaseBackend(unittest.TestCase):
         requests = self.backend.model_runner.run_inference.call_args.args[0]
         self.assertEqual(requests[0].image_batch_size, 8)
 
+    def test_exponential_search_acc_search_clamps_right_boundary_on_early_stop(self):
+        optimizer_data = OptimizerData(
+            concurrency_search_strategy="linear_exponential", tpot_limits=50, ttft_limits=500
+        )
+        summary_left = Mock(spec=OptimizerSummary)
+        summary_left.get_search_info.return_value = {"tpot": 10.0, "ttft": 100.0}
+
+        summary_right = Mock(spec=OptimizerSummary)
+        summary_right.check_early_stop_flag.return_value = True
+        summary_right.get_search_info.return_value = {
+            "per_request_memory_gb": 2.0,
+            "device_memory_available_gb": -10.0,
+            "tpot": 60.0,
+            "ttft": 600.0,
+        }
+
+        with (
+            patch.object(self.backend, "get_inference_info", return_value=summary_right),
+            patch.object(self.backend, "_estimate_right_boundary", return_value=8) as mock_estimate,
+        ):
+            left, right = self.backend._exponential_search(optimizer_data, 1, 512, summary_left, True)
+
+        self.assertEqual((left, right), (1, 8))
+        mock_estimate.assert_called_once()
+
+    def test_exponential_search_acc_search_uses_estimated_boundary_before_stop(self):
+        optimizer_data = OptimizerData(
+            concurrency_search_strategy="linear_exponential", tpot_limits=50, ttft_limits=500
+        )
+        summary_left = Mock(spec=OptimizerSummary)
+        summary_left.get_search_info.return_value = {"tpot": 10.0, "ttft": 100.0}
+
+        summary_right = Mock(spec=OptimizerSummary)
+        summary_right.check_early_stop_flag.return_value = False
+        summary_right.get_search_info.return_value = {
+            "per_request_memory_gb": 0.5,
+            "device_memory_available_gb": 10.0,
+            "tpot": 40.0,
+            "ttft": 400.0,
+        }
+
+        with (
+            patch.object(self.backend, "get_inference_info", return_value=summary_right),
+            patch.object(self.backend, "_estimate_right_boundary", return_value=530),
+        ):
+            left, right = self.backend._exponential_search(optimizer_data, 1, 512, summary_left, True)
+
+        self.assertEqual((left, right), (1, 530))
+
+    def test_compute_per_request_memory_gb_handles_zero_and_positive_batch_size(self):
+        self.assertEqual(
+            self.backend._compute_per_request_memory_gb(
+                total_device_memory_gb=64,
+                model_weight_size_gb=20,
+                reserved_memory_gb=10,
+                memory_left_gb=12,
+                batch_size=0,
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.backend._compute_per_request_memory_gb(
+                total_device_memory_gb=64,
+                model_weight_size_gb=20,
+                reserved_memory_gb=10,
+                memory_left_gb=12,
+                batch_size=4,
+            ),
+            5.5,
+        )
+
+    def test_estimate_right_boundary_falls_back_to_max_search_size(self):
+        optimizer_data = OptimizerData(tpot_limits=None, ttft_limits=None)
+
+        estimated = self.backend._estimate_right_boundary(
+            {"batch_size": 1},
+            {"batch_size": 8, "per_request_memory_gb": 0, "device_memory_available_gb": 0},
+            optimizer_data,
+        )
+        self.assertEqual(estimated, 2**19 - 1)
+
+    def test_estimate_right_boundary_uses_memory_limit_and_skips_fallback(self):
+        optimizer_data = OptimizerData(tpot_limits=None, ttft_limits=None)
+
+        estimated = self.backend._estimate_right_boundary(
+            {"batch_size": 1},
+            {
+                "batch_size": 8,
+                "per_request_memory_gb": 2.0,
+                "device_memory_available_gb": 10.0,
+            },
+            optimizer_data,
+        )
+
+        self.assertEqual(estimated, 14)
+
+    def test_exponential_search_without_acc_search_doubles_until_max_iterations(self):
+        optimizer_data = OptimizerData(concurrency_search_strategy="exponential")
+        summary_left = Mock(spec=OptimizerSummary)
+        summary_right = Mock(spec=OptimizerSummary)
+        summary_right.check_early_stop_flag.return_value = False
+
+        with patch.object(self.backend, "get_inference_info", return_value=summary_right) as mock_get_inference_info:
+            left, right = self.backend._exponential_search(optimizer_data, 1, 2, summary_left)
+
+        self.assertEqual((left, right), (1024, 2048))
+        self.assertEqual(mock_get_inference_info.call_count, 10)
+
+    def test_estimate_by_latency_returns_relaxed_boundary_when_latency_grows(self):
+        estimated = self.backend._estimate_by_latency(
+            bs_left=2,
+            bs_right=6,
+            lat_left=10.0,
+            lat_right=30.0,
+            lat_limit=20.0,
+            relax_factor=1.5,
+            estimated_right=999,
+        )
+
+        self.assertEqual(estimated, 7)
+
 
 if __name__ == "__main__":
     unittest.main()

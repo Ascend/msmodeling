@@ -73,6 +73,7 @@ class ParallelRunner:
             prefill_devices_per_instance=self.args.prefill_devices_per_instance,
             decode_devices_per_instance=self.args.decode_devices_per_instance,
             prefix_cache_hit_rate=self.args.prefix_cache_hit_rate,
+            concurrency_search_strategy=self.args.concurrency_search_strategy,
         )
 
     def run_agg(self) -> list[OptimizerSummary]:

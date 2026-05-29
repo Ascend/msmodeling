@@ -28,3 +28,4 @@ class SimpleArgs:
         self.decode_devices_per_instance = None
         self.enable_optimize_prefill_decode_ratio = False
         self.prefix_cache_hit_rate = 0.0
+        self.concurrency_search_strategy = "exponential"

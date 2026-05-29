@@ -106,4 +106,6 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         summary.set_summary_df(result_df)
         summary.set_early_stop_flag(device_memory_available_gb, tpot, ttft)
 
+        self._maybe_set_search_info(optimizer_data, device_memory_available_gb, batch_size, ttft, tpot, summary)
+
         return summary

@@ -80,12 +80,19 @@ class OptimizerSummary:
         self._early_stop_flag = None
         self._summary_df = None
         self.data_config = data_config
+        self._search_info = None
 
     def set_summary_df(self, summary_df):
         self._summary_df = summary_df
 
     def get_summary_df(self):
         return self._summary_df
+
+    def set_search_info(self, search_info: dict):
+        self._search_info = search_info
+
+    def get_search_info(self) -> dict:
+        return self._search_info
 
     def set_early_stop_flag(self, memory_left, tpot, ttft):
         def check(value, limit):

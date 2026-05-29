@@ -61,6 +61,7 @@ class OptimizerData:
     prefill_devices_per_instance: Optional[int] = None
     decode_devices_per_instance: Optional[int] = None
     prefix_cache_hit_rate: float = 0.0
+    concurrency_search_strategy: str = 'exponential'
 
     def get_effective_input_length(self, is_decode: bool = False):
         if self.input_length is None:

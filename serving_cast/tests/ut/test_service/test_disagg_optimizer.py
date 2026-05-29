@@ -131,6 +131,80 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(captured[0], (False, 100))
         self.assertEqual(captured[1], (True, 200))
 
+    def test_get_inference_info_prefill_acc_search_records_search_info(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=16,
+            input_length=100,
+            output_length=10,
+            serving_cost=0,
+            concurrency_search_strategy="linear_exponential",
+        )
+
+        class DummyMetrics:
+            execution_time_s = {"analytic": 0.005}
+            device_memory_available_gb = 2.0
+            breakdowns = {}
+
+        self.strategy.model_runner.total_device_memory_gb = 64.0
+        self.strategy.model_runner.model_weight_size_gb = 20.0
+        self.strategy.model_runner.user_input.reserved_memory_gb = 10.0
+
+        captured = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode):
+            captured.append((concurrency, is_decode))
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        search_info = result.get_search_info()
+        self.assertEqual(captured, [(64, False)])
+        self.assertAlmostEqual(search_info["per_request_memory_gb"], 2.0)
+        self.assertEqual(search_info["device_memory_available_gb"], 2.0)
+        self.assertEqual(search_info["ttft"], 5.0)
+        self.assertIsNone(search_info["tpot"])
+
+    def test_get_inference_info_decode_acc_search_records_search_info(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=None,
+            tpot_limits=100,
+            batch_size=16,
+            input_length=100,
+            output_length=10,
+            serving_cost=0,
+            num_mtp_tokens=2,
+            mtp_acceptance_rate=[0.5, 0.3],
+            concurrency_search_strategy="linear_exponential",
+        )
+
+        class DummyMetrics:
+            execution_time_s = {"analytic": 0.009}
+            device_memory_available_gb = 2.0
+            breakdowns = {}
+
+        self.strategy.model_runner.total_device_memory_gb = 64.0
+        self.strategy.model_runner.model_weight_size_gb = 20.0
+        self.strategy.model_runner.user_input.reserved_memory_gb = 10.0
+
+        captured = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode):
+            captured.append((concurrency, is_decode))
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        search_info = result.get_search_info()
+        self.assertEqual(captured, [(64, True)])
+        self.assertAlmostEqual(search_info["per_request_memory_gb"], 2.0)
+        self.assertEqual(search_info["device_memory_available_gb"], 2.0)
+        self.assertIsNone(search_info["ttft"])
+        self.assertAlmostEqual(search_info["tpot"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()
