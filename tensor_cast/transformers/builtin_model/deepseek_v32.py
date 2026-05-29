@@ -217,6 +217,7 @@ class DeepseekV32DecoderLayer(nn.Module):
 
 
 class DeepseekV32Model(DeepseekV3Model):
+    config_class = DeepseekV32Config
     config: DeepseekV32Config
 
     def __init__(self, config: DeepseekV32Config):
