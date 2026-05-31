@@ -1,8 +1,4 @@
-"""Load and validate test_map JSON and gate_policy exemptions.
-
-Extracted from scripts.helpers.ci_gate.py — test_map loading, exemption loading, baseline
-assembly, and helper predicates (is_exempt, is_product_source, prune_deleted_sources).
-"""
+"""Load and validate test_map JSON and gate policy baseline."""
 
 from __future__ import annotations
 
@@ -10,7 +6,8 @@ import json
 from pathlib import Path
 
 from scripts.helpers._config import Config, ConfigError
-from scripts.helpers.ci_gate.models import Baseline, Exemption
+from scripts.helpers.ci_gate.gate_policy import load_gate_policy
+from scripts.helpers.ci_gate.models import Baseline
 from scripts.helpers.common.coverage_config import PRODUCT_SOURCE_PREFIXES
 from scripts.helpers.common.test_map_config import resolve_test_map_path
 
@@ -65,40 +62,13 @@ def load_test_map(cfg: Config) -> dict[str, dict[str, list[str]]]:
     return _validate_map_keys(inner)
 
 
-def load_exemptions(repo_root: Path) -> tuple[Exemption, ...]:
-    """Load gate_policy.json exemptions. Returns empty tuple if file absent."""
-    policy_path = repo_root / "tests" / ".ci" / "gate_policy.json"
-    if not policy_path.is_file():
-        return ()
-    try:
-        data = json.loads(policy_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"gate_policy.json: invalid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ConfigError("gate_policy.json: root must be object")
-    out: list[Exemption] = []
-    for item in data.get("exemptions", []):
-        if not isinstance(item, dict):
-            continue
-        file_path = item.get("file")
-        symbol = item.get("symbol")
-        if isinstance(file_path, str) and isinstance(symbol, str):
-            reason = item.get("reason")
-            out.append(
-                Exemption(
-                    file=file_path,
-                    symbol=symbol,
-                    reason=reason if isinstance(reason, str) else None,
-                )
-            )
-    return tuple(out)
-
-
 def load_baseline(repo_root: Path, cfg: Config) -> Baseline:
-    """Load full gate baseline: test_map + exemptions + product prefixes."""
+    """Load full gate baseline: test_map + gate policy + product prefixes."""
+    policy = load_gate_policy(repo_root)
     return Baseline(
         test_map=load_test_map(cfg),
-        exemptions=load_exemptions(repo_root),
+        exemptions=policy.exemptions,
+        discovery=policy.discovery,
         product_prefixes=PRODUCT_SOURCE_PREFIXES,
     )
 
@@ -106,10 +76,6 @@ def load_baseline(repo_root: Path, cfg: Config) -> Baseline:
 # ---------------------------------------------------------------------------
 # Predicates
 # ---------------------------------------------------------------------------
-
-
-def is_exempt(exemptions: tuple[Exemption, ...], file_path: str, symbol: str) -> bool:
-    return any(item.file == file_path and item.symbol == symbol for item in exemptions)
 
 
 def is_product_source(path: str, prefixes: tuple[str, ...]) -> bool:

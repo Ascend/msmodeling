@@ -1,7 +1,7 @@
-"""Build NightlyReport from collected inputs.
+"""Nightly summary helpers: git env, test_map summary, weak-coverage detection.
 
-Git env collection, test_map summary loading, report assembly.
-Pure data collection — no I/O beyond git subprocess and JSON file read.
+Git env collection, test_map summary loading, and weak-coverage symbol
+detection from coverage data.
 """
 
 from __future__ import annotations
@@ -12,12 +12,8 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from scripts.helpers.nightly.pytest_parser import NightlyRunStats
-from scripts.helpers.nightly.report_models import CoverageSummary, EnvInfo, MapCoverageSummary, NightlyReport
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-
+from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.nightly.report_models import EnvInfo, MapCoverageSummary
 
 # ---------------------------------------------------------------------------
 # Git helpers
@@ -65,42 +61,8 @@ def load_test_map_summary(path: Path | None) -> MapCoverageSummary:
 
 
 # ---------------------------------------------------------------------------
-# Report assembly
+# Weak-coverage detection
 # ---------------------------------------------------------------------------
-
-
-def build_report(
-    stats: NightlyRunStats,
-    env: EnvInfo,
-    test_map: MapCoverageSummary,
-    pytest_exit_code: int,
-    *,
-    coverage: CoverageSummary | None,
-    test_map_written: bool,
-    test_map_path: Path | None,
-    weak_coverage_symbols: tuple[str, ...] = (),
-    redundancy_warnings: tuple[dict[str, object], ...] = (),
-) -> NightlyReport:
-    map_path_str = str(test_map_path) if test_map_path is not None else ""
-    return NightlyReport(
-        pytest_exit_code=pytest_exit_code,
-        passed=stats.passed,
-        failed=stats.failed,
-        errors=stats.errors,
-        duration_sec=stats.duration_sec,
-        failed_cases=list(stats.failed_cases),
-        first_error=stats.first_error,
-        commit=env.commit,
-        branch=env.branch,
-        timestamp=env.timestamp,
-        test_map_source_files=test_map.source_files,
-        test_map_symbols=test_map.symbols,
-        test_map_path=map_path_str,
-        test_map_written=test_map_written,
-        coverage=coverage,
-        weak_coverage_symbols=weak_coverage_symbols,
-        redundancy_warnings=redundancy_warnings,
-    )
 
 
 def compute_weak_coverage_symbols(
@@ -132,6 +94,8 @@ def compute_weak_coverage_symbols(
     try:
         cov = CoverageData(str(coverage_path))
         cov.read()
+        if not cov.measured_files():
+            return ()
     except Exception:
         return ()
 
@@ -143,10 +107,10 @@ def compute_weak_coverage_symbols(
         from scripts.helpers.common import ast_utils
 
         spans = ast_utils.iter_qualified_definition_spans(abs_path)
+        ctxmap = cov.contexts_by_lineno(str(abs_path))
         for span in spans:
             qualified = f"{src_file}::{span.qualified_name}"
             span_lines = set(range(span.start_line, span.end_line + 1))
-            ctxmap = cov.contexts_by_lineno(str(abs_path))
             hit = sum(1 for ln in span_lines if ctxmap and ln in ctxmap and ctxmap[ln])
             total = len(span_lines)
             if total > 0 and hit / total < threshold:

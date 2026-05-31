@@ -81,7 +81,7 @@ The `build_test_map` collection scope matches `MSMODELING_TEST_MAP_MARKER`, defa
 
 ### Step 2: External test_map and gate_policy Contracts
 
-The incremental gate reads `test_map` from an external file pointed to by `MSMODELING_TEST_MAP_PATH`. The nightly job writes this file after phase 1 succeeds. Exemptions remain in the repository at `tests/.ci/gate_policy.json`.
+The incremental gate reads `test_map` from an external file pointed to by `MSMODELING_TEST_MAP_PATH`. The nightly job writes this file after phase 1 succeeds. Gate policy lives in `tests/.ci/gate_policy.yaml`; approver whitelist in `tests/.ci/approvers.yaml`.
 
 **test_map contract example**
 
@@ -111,14 +111,23 @@ Redundancy warnings are consumed by the nightly pipeline and surfaced through Fe
 
 **gate_policy contract**
 
-```json
-{
-  "schema_version": 1,
-  "exemptions": [
-    {"file": "tensor_cast/foo.py", "symbol": "legacy_helper", "reason": "deprecated next release"}
-  ]
-}
+`tests/.ci/gate_policy.yaml`:
+
+```yaml
+schema_version: 1
+test_discovery:
+  include: ["**/test_*.py", "**/*_test.py"]
+  exclude: ["tests/helpers/**", "tests/assets/**"]
+exemptions:
+  - symbols: ["tensor_cast/foo.py::legacy_helper"]
+    reason: refactor
+    applicant: alice
+    approver: fangkai
+    deadline: "2026-06-30"
+    ticket: "https://..."  # optional
 ```
+
+`tests/.ci/approvers.yaml` lists allowed `approver` names. When a PR changes `gate_policy.yaml`, approvers are validated against the working-tree `approvers.yaml` (same PR may update both files).
 
 ### Step 3: CI Gate Selection and Policy Rules
 
@@ -189,11 +198,11 @@ Runs `tests/smoke/` and `tests/regression/` with marker `not npu and nightly`, `
 
 Runs `tests/benchmark/` with marker `not npu`. Parallelism follows `MSMODELING_BENCHMARK_PARALLEL`.
 
-The combined pytest output is parsed into `NightlyReport` JSON. When `FEISHU_WEBHOOK_URL` is set, a summary message is POSTed over HTTPS.
+Each phase writes a JUnit XML report (`--junit-xml`). The XML files are parsed into `NightlyRunStats` (passed/failed/errors/duration/failed cases/first error). When `FEISHU_WEBHOOK_URL` is set, a summary message is POSTed over HTTPS; a one-line summary is also printed to stdout at the end of the run. No full JSON report is printed.
 
-**NightlyReport primary fields**
+**Summary fields**
 
-`pytest_exit_code`, `passed`, `failed`, `errors`, `duration_sec`, `failed_cases`, `first_error`, `commit`, `branch`, `timestamp`, `test_map_source_files`, `test_map_symbols`, `test_map_path`, `test_map_written`, optional coverage summary fields, `weak_coverage_symbols`, and `redundancy_warnings`.
+`passed`, `failed`, `errors`, `duration_sec`, `failed_cases`, `first_error`, plus `commit`, `branch`, `timestamp`, `test_map_source_files`, `test_map_symbols`, `test_map_written`, optional coverage summary fields, `weak_coverage_symbols`, and `redundancy_warnings` in the Feishu payload.
 
 **Weak coverage symbol detection**: After phase 1 succeeds, `compute_weak_coverage_symbols` cross-references the refreshed `test_map` with `.coverage` data. Symbols whose local line coverage falls below 50% are listed in `weak_coverage_symbols`. This complements the CI gate per-symbol advisory by providing a full-repository view rather than only changed symbols.
 
@@ -336,7 +345,7 @@ package "nightly" {
     +emit_report()
   }
   class "nightly/report_builder.py" as rb {
-    +build_report()
+    +fetch_env_info()
     +compute_weak_coverage_symbols()
   }
   class "nightly/feishu_notifier.py" as fn
@@ -399,7 +408,7 @@ The complete environment variable list lives in `tests/README.md`. The design do
 | `build_test_map(output_path, marker_expr)` | Mandatory | Reads `.coverage` with `--cov-context=test`, writes external JSON |
 | `check_ut_gate(config=GateConfig)` | Mandatory | Reads repo-root `.coverage`; returns `(passed, message)`; used blocking in ci_gate |
 | `nightly.main()` | Mandatory | Runs three pytest phases, refreshes map, emits report; returns combined exit code |
-| `emit_report(...)` | Mandatory | Prints `NightlyReport` JSON and optionally pushes Feishu message |
+| `emit_report(...)` | Mandatory | Parses JUnit XML into `NightlyRunStats` and optionally pushes Feishu message |
 
 ---
 
@@ -627,7 +636,7 @@ Additional checks such as slow-case upper limits can be chained after `build_ci_
 
 ### Report Extension
 
-`NightlyReport.to_dict` retains stable primary fields. Trend analysis can consume nightly JSON history or external storage of past reports.
+Per-phase JUnit XML is the stable machine-readable artifact. Trend analysis can archive these XML files (or the Feishu payloads) for historical comparison.
 
 ### Platform Extension
 

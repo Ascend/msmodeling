@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # Benchmark tests. No coverage gate.
 #
-# Optional:
-#   MSMODELING_BENCHMARK_PARALLEL   Set to 1 for pytest -n auto (default: unset, sequential)
-#   MSMODELING_TEST_WEIGHTS_PRUNE   session weight cleanup (default: 1)
-#   MSMODELING_OFFLINE              Hub offline for CI (recommended: 1)
+# Optional (defaults below):
+#   MSMODELING_TEST_WEIGHTS_PRUNE      session weight cleanup (default: 0)
+#   MSMODELING_OFFLINE                 Hub offline mode (default: 0)
+#   MSMODELING_CACHE                   cache directory (default: .msmodeling_cache)
+#   MSMODELING_BENCHMARK_PARALLEL      set to 1 for pytest -n auto (default: 0)
+#   PYTHON                             absolute path to interpreter; if unset, uses uv or python3
+#
+# Optional (not set by default):
+#   UV_INDEX_URL                       custom UV package index URL
+#   HF_ENDPOINT                        custom HuggingFace endpoint URL
 #
 # Pytest: tests/benchmark/, -m "not npu", -vv; parallel only when MSMODELING_BENCHMARK_PARALLEL=1.
 set -euo pipefail
 
-export MSMODELING_TEST_WEIGHTS_PRUNE="${MSMODELING_TEST_WEIGHTS_PRUNE:-1}"
+export MSMODELING_TEST_WEIGHTS_PRUNE="${MSMODELING_TEST_WEIGHTS_PRUNE:-0}"
+export MSMODELING_OFFLINE="${MSMODELING_OFFLINE:-0}"
+export MSMODELING_CACHE="${MSMODELING_CACHE:-.msmodeling_cache}"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
@@ -23,7 +31,6 @@ fi
 run_pytest "${TESTS_BENCHMARK}/" \
   -m "not npu" \
   --no-header \
-  -q \
   --durations=20 \
   -vv \
   "${JOBS[@]}"

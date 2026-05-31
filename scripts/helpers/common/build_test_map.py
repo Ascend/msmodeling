@@ -4,17 +4,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Final
 
+from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.common.ast_utils import iter_qualified_definition_spans, symbol_for_line
 from scripts.helpers.common.coverage_config import PRODUCT_SOURCE_PREFIXES
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent.parent.parent
+logger = logging.getLogger(__name__)
+
 UNCLASSIFIED_SYMBOL: Final = "*"
 MIN_LINES_PER_SYMBOL: Final[int] = 3
 
@@ -66,7 +68,7 @@ def _collect_allowed_node_ids(
         check=False,
     )
     if proc.returncode != 0:
-        print(proc.stderr or proc.stdout, file=sys.stderr)
+        logger.error("pytest collect-only failed:\n%s", proc.stderr or proc.stdout)
         raise SystemExit(proc.returncode)
 
     node_ids: set[str] = set()
@@ -95,17 +97,17 @@ def collect_from_coverage(
         coverage_path = REPO_ROOT / ".coverage"
 
     if not coverage_path.is_file():
-        print(f"Coverage data not found: {coverage_path}", file=sys.stderr)
+        logger.warning("Coverage data not found: %s", coverage_path)
         return {}
 
     data = CoverageData(str(coverage_path))
     try:
         data.read()
     except CoverageException as exc:
-        print(f"Failed to read coverage data: {exc}", file=sys.stderr)
+        logger.warning("Failed to read coverage data: %s", exc)
         return {}
     except OSError as exc:
-        print(f"Coverage data file error: {exc}", file=sys.stderr)
+        logger.warning("Coverage data file error: %s", exc)
         return {}
 
     by_file: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
@@ -156,9 +158,11 @@ def write_test_map(output_path: Path, mapping: dict[str, dict[str, list[str]]]) 
         encoding="utf-8",
     )
     symbol_count = sum(len(syms) for syms in mapping.values())
-    print(
-        f"test_map written: {output_path} ({len(mapping)} source files, {symbol_count} symbols)",
-        file=sys.stderr,
+    logger.info(
+        "test_map written: %s (%d source files, %d symbols)",
+        output_path,
+        len(mapping),
+        symbol_count,
     )
 
 
@@ -172,6 +176,20 @@ def build_test_map(
     mapping = collect_from_coverage(allowed, coverage_path=coverage_path)
     mapping = _prune_missing_source_keys(mapping)
     write_test_map(output_path, mapping)
+
+
+def collect_test_map(
+    *,
+    marker_expr: str,
+    coverage_path: Path | None = None,
+) -> dict[str, dict[str, list[str]]]:
+    """Return test_map dict in memory — no file I/O.
+
+    Same logic as build_test_map but returns the mapping directly.
+    """
+    allowed = _collect_allowed_node_ids(marker_expr)
+    mapping = collect_from_coverage(allowed, coverage_path=coverage_path)
+    return _prune_missing_source_keys(mapping)
 
 
 def detect_redundant_cases(
@@ -192,14 +210,20 @@ def detect_redundant_cases(
     warnings: list[dict[str, object]] = []
 
     test_to_symbols: dict[str, set[str]] = defaultdict(set)
+    symbol_to_tests: dict[str, set[str]] = defaultdict(set)
     for src_file, symbols in mapping.items():
         for sym, test_ids in symbols.items():
+            if sym == UNCLASSIFIED_SYMBOL:
+                continue
             qualified = f"{src_file}::{sym}"
             for tid in test_ids:
                 test_to_symbols[tid].add(qualified)
+                symbol_to_tests[qualified].add(tid)
 
     for src_file, symbols in mapping.items():
         for sym, test_ids in symbols.items():
+            if sym == UNCLASSIFIED_SYMBOL:
+                continue
             if len(test_ids) > max_per_symbol:
                 warnings.append(
                     {
@@ -211,29 +235,31 @@ def detect_redundant_cases(
                     }
                 )
 
-    test_ids_sorted = sorted(test_to_symbols)
-    for i in range(len(test_ids_sorted)):
-        for j in range(i + 1, len(test_ids_sorted)):
-            a_id = test_ids_sorted[i]
-            b_id = test_ids_sorted[j]
-            a_syms = test_to_symbols[a_id]
-            b_syms = test_to_symbols[b_id]
-            if not a_syms or not b_syms:
-                continue
-            intersection = a_syms & b_syms
-            union = a_syms | b_syms
-            if not union:
-                continue
-            jaccard = len(intersection) / len(union)
-            if jaccard >= jaccard_threshold:
-                warnings.append(
-                    {
-                        "type": "redundant_pair",
-                        "test_a": a_id,
-                        "test_b": b_id,
-                        "jaccard": round(jaccard, 3),
-                        "shared_symbols": sorted(intersection),
-                    }
-                )
+    compared_pairs: set[tuple[str, str]] = set()
+    for tests in symbol_to_tests.values():
+        test_list = sorted(tests)
+        for i, a_id in enumerate(test_list):
+            for b_id in test_list[i + 1 :]:
+                pair = (a_id, b_id)
+                if pair in compared_pairs:
+                    continue
+                compared_pairs.add(pair)
+                a_syms = test_to_symbols[a_id]
+                b_syms = test_to_symbols[b_id]
+                intersection = a_syms & b_syms
+                union = a_syms | b_syms
+                if not union:
+                    continue
+                jaccard = len(intersection) / len(union)
+                if jaccard >= jaccard_threshold:
+                    warnings.append(
+                        {
+                            "type": "redundant_pair",
+                            "test_a": a_id,
+                            "test_b": b_id,
+                            "jaccard": round(jaccard, 3),
+                            "shared_symbols": sorted(intersection),
+                        }
+                    )
 
     return warnings

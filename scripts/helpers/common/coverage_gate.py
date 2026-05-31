@@ -7,16 +7,18 @@ check_thresholds, check_ut_gate). Single subprocess call per gate check.
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.helpers._config import Config
+from scripts.helpers._paths import REPO_ROOT
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 DEFAULT_COVERAGE_DATA = REPO_ROOT / ".coverage"
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -75,16 +77,18 @@ def load_totals(coverage_data: Path) -> CoverageTotals:
     if not coverage_data.is_file():
         raise FileNotFoundError(f"coverage data not found: {coverage_data}")
 
+    cmd = [
+        sys.executable,
+        "-m",
+        "coverage",
+        "json",
+        "-o",
+        "-",
+        f"--data-file={coverage_data}",
+    ]
+    logger.debug("Running coverage: %s", " ".join(cmd))
     result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "coverage",
-            "json",
-            "-o",
-            "-",
-            f"--data-file={coverage_data}",
-        ],
+        cmd,
         capture_output=True,
         text=True,
         check=False,

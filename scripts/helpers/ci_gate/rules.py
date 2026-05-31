@@ -8,10 +8,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.helpers.ci_gate.diff import _layer_of_test, _regression_layer_for_source
-from scripts.helpers.ci_gate.models import ChangeSet, GateStepResult
+from scripts.helpers.ci_gate.gate_policy import SourceExemption, is_exempt
+from scripts.helpers.ci_gate.models import (
+    ChangeSet,
+    GateError,
+    GateStepResult,
+    layer_of_test,
+    regression_layer_for_source,
+)
 from scripts.helpers.common import ast_utils
-from scripts.helpers.common.test_map_loader import is_exempt, is_product_source
+from scripts.helpers.common.test_map_loader import is_product_source
 
 # ---------------------------------------------------------------------------
 # Cross-layer splitting
@@ -25,8 +31,8 @@ def _split_cross_layer_tests(source_path: str, test_ids: set[str]) -> tuple[set[
     immediately; tests in other layers are deferred. If source_path maps to no
     known layer, or tests are already single-layer, no splitting occurs.
     """
-    preferred = _regression_layer_for_source(source_path)
-    layers = {_layer_of_test(tid) for tid in test_ids} - {None}
+    preferred = regression_layer_for_source(source_path)
+    layers = {layer_of_test(tid) for tid in test_ids} - {None}
     if len(layers) <= 1:
         return test_ids, set()
     if preferred is None:
@@ -39,7 +45,7 @@ def _split_cross_layer_tests(source_path: str, test_ids: set[str]) -> tuple[set[
 
 
 def _merge_step_results(*steps: GateStepResult) -> GateStepResult:
-    errors: list[str] = []
+    errors: list[GateError] = []
     tests: set[str] = set()
     deferred: set[str] = set()
     full_suite = False
@@ -78,10 +84,10 @@ def gate_new_source(
     repo_root: Path,
     changes: ChangeSet,
     test_map: dict[str, dict[str, list[str]]],
-    exemptions: tuple,
+    exemptions: tuple[SourceExemption, ...],
     prefixes: tuple[str, ...],
 ) -> GateStepResult:
-    errors: list[str] = []
+    errors: list[GateError] = []
     for path in changes.new_source:
         if not path.endswith(".py"):
             continue
@@ -94,12 +100,11 @@ def gate_new_source(
             continue
         symbols = ast_utils.top_level_definitions(source_path)
         if not symbols:
-            errors.append(f"New product source {path} has no test_map entry")
+            errors.append(GateError(category="new_source", path=path))
             continue
         unmapped = [sym for sym in symbols if not is_exempt(exemptions, path, sym)]
-        if unmapped:
-            joined = ", ".join(unmapped)
-            errors.append(f"New product source {path} has no test_map entry, unexempted symbols: {joined}")
+        for sym in unmapped:
+            errors.append(GateError(category="new_source", path=path, symbol=sym))
     return GateStepResult(errors=tuple(errors))
 
 
@@ -122,17 +127,22 @@ def gate_deleted_source(
     test_map: dict[str, dict[str, list[str]]],
     prefixes: tuple[str, ...],
 ) -> GateStepResult:
-    errors: list[str] = []
+    errors: list[GateError] = []
     tests: set[str] = set()
     deferred: set[str] = set()
+    deleted_test_files = set(changes.del_test)
     for path in changes.del_source:
         if not is_product_source(path, prefixes):
             continue
         file_map = test_map.get(path)
         if not file_map:
-            errors.append(f"Deleted source {path} has no test_map entry")
+            errors.append(GateError(category="deleted_source", path=path))
             continue
-        all_tests = {tid for tids in file_map.values() for tid in tids}
+        all_tests = {
+            tid for tids in file_map.values() for tid in tids if tid.split("::", 1)[0] not in deleted_test_files
+        }
+        if not all_tests:
+            continue
         immediate, cross = _split_cross_layer_tests(path, all_tests)
         tests.update(immediate)
         deferred.update(cross)
@@ -152,17 +162,21 @@ def gate_deleted_tests(
     changes: ChangeSet,
     test_map: dict[str, dict[str, list[str]]],
 ) -> GateStepResult:
-    errors: list[str] = []
+    errors: list[GateError] = []
+    deleted_source_set = set(changes.del_source)
     for deleted_path in changes.del_test:
         sole_coverage: list[str] = []
+        normalized_deleted = deleted_path.split("::", 1)[0]
         for src_file, symbols in test_map.items():
+            if src_file in deleted_source_set:
+                continue
             for symbol, test_ids in symbols.items():
                 normalized_paths = {test_id.split("::", 1)[0] for test_id in test_ids}
-                if len(normalized_paths) == 1 and deleted_path in normalized_paths:
+                if len(normalized_paths) == 1 and normalized_deleted in normalized_paths:
                     sole_coverage.append(f"{src_file}::{symbol}")
         if sole_coverage:
-            joined = "\n  ".join(sole_coverage)
-            errors.append(f"Deleted test {deleted_path} is the sole coverage for:\n  {joined}")
+            detail = "\n".join(sole_coverage)
+            errors.append(GateError(category="deleted_test", path=deleted_path, detail=detail))
     return GateStepResult(errors=tuple(errors))
 
 
@@ -175,10 +189,10 @@ def gate_modified_source(
     repo_root: Path,
     changes: ChangeSet,
     test_map: dict[str, dict[str, list[str]]],
-    exemptions: tuple,
+    exemptions: tuple[SourceExemption, ...],
     prefixes: tuple[str, ...],
 ) -> GateStepResult:
-    errors: list[str] = []
+    errors: list[GateError] = []
     tests: set[str] = set()
     for path, raw_lines in changes.modified_source:
         if not is_product_source(path, prefixes):
@@ -196,5 +210,5 @@ def gate_modified_source(
             elif is_exempt(exemptions, path, symbol):
                 continue
             else:
-                errors.append(f"Modified symbol {path}::{symbol} has no test_map entry and is not exempt")
+                errors.append(GateError(category="modified_source", path=path, symbol=symbol))
     return GateStepResult(errors=tuple(errors), tests=frozenset(tests))

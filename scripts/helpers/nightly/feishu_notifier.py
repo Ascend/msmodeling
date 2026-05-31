@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-import sys
+import logging
 import urllib.request
 
 FEISHU_TIMEOUT_SEC = 10
+
+logger = logging.getLogger(__name__)
 
 
 def build_feishu_payload(
@@ -29,6 +31,7 @@ def build_feishu_payload(
     first_error: str,
     weak_coverage_symbols: tuple[str, ...] = (),
     redundancy_warnings: tuple[dict[str, object], ...] = (),
+    expired_exemption_section: str = "",
 ) -> dict:
     """Build Feishu text message payload dict. Does not send."""
     status = "All passed" if failed == 0 else f"{failed} failed"
@@ -70,6 +73,8 @@ def build_feishu_payload(
                 lines.append(f"- {w['test_a']} / {w['test_b']} (Jaccard={w['jaccard']:.2f})")
             if len(redundant_pairs) > 10:
                 lines.append(f"- ... and {len(redundant_pairs) - 10} more")
+    if expired_exemption_section:
+        lines.append(expired_exemption_section)
     if failed_cases:
         lines.append("\nFailed cases:")
         lines.extend(f"- {case}" for case in failed_cases[:20])
@@ -84,6 +89,22 @@ def build_feishu_payload(
     }
 
 
+def _parse_feishu_response(body: str) -> None:
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        logger.info("Feishu HTTP response (non-JSON): %s", body)
+        return
+
+    code = parsed.get("code")
+    msg = parsed.get("msg", "")
+    if code is not None and code != 0:
+        logger.warning("Feishu push rejected: code=%s msg=%s", code, msg)
+        return
+
+    logger.info("Feishu push accepted: code=%s msg=%s", code, msg)
+
+
 def push_feishu(webhook_url: str, payload: dict) -> None:
     """Send payload to Feishu webhook. Non-blocking on failure."""
     data = json.dumps(payload).encode()
@@ -94,6 +115,6 @@ def push_feishu(webhook_url: str, payload: dict) -> None:
     )
     try:
         with urllib.request.urlopen(req, timeout=FEISHU_TIMEOUT_SEC) as resp:
-            print(f"Feishu response: {resp.read().decode()}", file=sys.stderr)
+            _parse_feishu_response(resp.read().decode())
     except OSError as exc:
-        print(f"Feishu push failed (non-blocking): {exc}", file=sys.stderr)
+        logger.warning("Feishu push failed (non-blocking): %s", exc)

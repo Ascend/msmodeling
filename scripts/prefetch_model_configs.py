@@ -7,6 +7,7 @@ import argparse
 import ast
 import contextlib
 import json
+import logging
 import os
 import re
 import sys
@@ -218,7 +219,13 @@ def collect_model_ids(scan_dir: Path) -> list[str]:
     for path in scan_dir.rglob("*"):
         if not path.is_file():
             continue
-        rel = path.relative_to(REPO_ROOT).as_posix()
+        try:
+            rel = path.relative_to(REPO_ROOT).as_posix()
+        except ValueError:
+            try:
+                rel = path.relative_to(scan_dir).as_posix()
+            except ValueError:
+                continue
         if rel.startswith(("tests/.ci/", "tests/assets/cache/", "scripts/helpers/")):
             continue
         if path.suffix == ".py":
@@ -286,6 +293,13 @@ def _write_manifest(dest_dir: Path, scan_dir: Path, results: list[PrefetchResult
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
+    logger = logging.getLogger(__name__)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dest-dir",
@@ -307,7 +321,7 @@ def main() -> int:
     dest_dir = Path(args.dest_dir).expanduser().resolve()
     scan_dir = Path(args.scan_dir).expanduser().resolve()
     if not scan_dir.exists():
-        print(f"scan dir not found: {scan_dir}", file=sys.stderr)
+        logger.error("scan dir not found: %s", scan_dir)
         return 2
 
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -320,31 +334,28 @@ def main() -> int:
     with env_overrides.activate():
         model_ids = collect_model_ids(scan_dir)
         if not model_ids:
-            print("No model id discovered from tests scan.", file=sys.stderr)
+            logger.error("No model id discovered from tests scan.")
             return 1
 
-        print(f"Discovered {len(model_ids)} model ids.", file=sys.stderr)
+        logger.info("Discovered %d model ids.", len(model_ids))
         if args.dry_run:
             results = [PrefetchResult(model_id=mid, source="dry-run", success=True) for mid in model_ids]
             for r in results:
-                print(f"[DRY-RUN] {r.model_id}", file=sys.stderr)
+                logger.info("[DRY-RUN] %s", r.model_id)
         else:
             prefetchers = _build_prefetchers()
             if not prefetchers:
-                print(
-                    "Neither transformers nor modelscope is installed.",
-                    file=sys.stderr,
-                )
+                logger.error("Neither transformers nor modelscope is installed.")
                 return 1
             results = _prefetch_all(model_ids, prefetchers)
             for r in results:
                 if r.success:
-                    print(f"[OK] {r.model_id} ({r.source})", file=sys.stderr)
+                    logger.info("[OK] %s (%s)", r.model_id, r.source)
                 else:
-                    print(f"[FAIL] {r.model_id}: {r.error}", file=sys.stderr)
+                    logger.error("[FAIL] %s: %s", r.model_id, r.error)
 
     manifest_path = _write_manifest(dest_dir, scan_dir, results)
-    print(f"manifest written: {manifest_path}", file=sys.stderr)
+    logger.info("manifest written: %s", manifest_path)
 
     failures = [item for item in results if not item.success]
     return 1 if failures else 0

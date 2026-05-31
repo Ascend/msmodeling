@@ -6,15 +6,18 @@ CLI entry point for run_ci_gate.sh. Orchestrates diff → gate plan → executio
 
 from __future__ import annotations
 
-import datetime
-import json
+import logging
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 from scripts.helpers._config import Config, ConfigError
+from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.ci_gate.diff import classify_changes, fetch_diff_line_map, resolve_base_ref
-from scripts.helpers.ci_gate.models import ChangeSet, CiGatePlan, GateStepResult
+from scripts.helpers.ci_gate.errors import format_blocking_errors
+from scripts.helpers.ci_gate.gate_policy import validate_gate_policy_if_changed
+from scripts.helpers.ci_gate.models import ChangeSet, CiGatePlan, GateError, GateStepResult
 from scripts.helpers.ci_gate.rules import (
     _merge_step_results,
     _product_paths,
@@ -26,15 +29,31 @@ from scripts.helpers.ci_gate.rules import (
     gate_new_tests,
 )
 from scripts.helpers.common import ast_utils
+from scripts.helpers.common._logging import log_env_audit, setup_logger
+from scripts.helpers.common.build_test_map import collect_test_map
 from scripts.helpers.common.coverage_config import cov_pytest_args
-from scripts.helpers.common.coverage_gate import GateConfig, check_ut_gate, load_totals
+from scripts.helpers.common.coverage_gate import GateConfig, check_ut_gate
 from scripts.helpers.common.test_map_loader import load_baseline, prune_deleted_sources
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent.parent.parent
-
-_PYTEST_MARKER = "not npu and not nightly"
+_PYTEST_MARKER = "not npu"
 _SYMBOL_COVERAGE_THRESHOLD = 0.50
+
+
+# ---------------------------------------------------------------------------
+# Coverage data probe
+# ---------------------------------------------------------------------------
+
+
+def _has_coverage_data(coverage_path: Path) -> bool:
+    """Check if coverage data exists (handles parallel mode .coverage.* files)."""
+    from coverage.data import CoverageData
+
+    try:
+        data = CoverageData(str(coverage_path))
+        data.read()
+        return bool(data.measured_files())
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -52,9 +71,7 @@ def _check_symbol_level_coverage(
 
     Returns a tuple of warning strings (advisory, not blocking).
     """
-    try:
-        _ = load_totals(coverage_path)
-    except (FileNotFoundError, RuntimeError):
+    if not _has_coverage_data(coverage_path):
         return ()
 
     from coverage.data import CoverageData
@@ -90,6 +107,78 @@ def _check_symbol_level_coverage(
 
 
 # ---------------------------------------------------------------------------
+# New test map: run new tests → collect map in memory → merge with baseline
+# ---------------------------------------------------------------------------
+
+
+def _remap_renamed_sources(
+    test_map: dict[str, dict[str, list[str]]],
+    renames: tuple[tuple[str, str, int], ...],
+) -> dict[str, dict[str, list[str]]]:
+    """Move test_map entries from old path to new path for renamed sources.
+
+    Lets a pure rename pass with no test churn and a renamed-with-edits source
+    resolve its unchanged symbols against the moved map entry.
+    """
+    remapped = dict(test_map)
+    for old_path, new_path, _score in renames:
+        if old_path in remapped:
+            remapped[new_path] = remapped.pop(old_path)
+    return remapped
+
+
+def _merge_test_maps(
+    baseline: dict[str, dict[str, list[str]]],
+    new_map: dict[str, dict[str, list[str]]],
+) -> dict[str, dict[str, list[str]]]:
+    merged: dict[str, dict[str, list[str]]] = {}
+    for key, syms in baseline.items():
+        merged[key] = dict(syms)
+    for key, syms in new_map.items():
+        if key in merged:
+            merged[key].update(syms)
+        else:
+            merged[key] = dict(syms)
+    return merged
+
+
+def _run_new_tests_and_build_map(
+    new_tests: tuple[str, ...],
+    marker_expr: str,
+) -> dict[str, dict[str, list[str]]]:
+    logger = logging.getLogger("ci_gate")
+    logger.info("Phase 0: running %d new test(s) to build new test_map ...", len(new_tests))
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        *new_tests,
+        "-m",
+        marker_expr,
+        "-n0",
+        *cov_pytest_args(cov_context=True),
+        "-q",
+        "--no-header",
+        "--tb=long",
+        "--durations=20",
+    ]
+    logger.info("Running pytest: %s", shlex.join(cmd))
+    proc = subprocess.run(cmd, cwd=REPO_ROOT, check=False)
+    if proc.returncode != 0:
+        print("CI gate failed: new test(s) failed. Fix test failures before gate check.")
+        raise SystemExit(proc.returncode)
+
+    new_test_map = collect_test_map(marker_expr=marker_expr)
+    logger.info(
+        "Phase 0: new test_map — %d source files, %d symbols",
+        len(new_test_map),
+        sum(len(s) for s in new_test_map.values()),
+    )
+    return new_test_map
+
+
+# ---------------------------------------------------------------------------
 # Plan building
 # ---------------------------------------------------------------------------
 
@@ -103,7 +192,7 @@ def build_ci_gate_plan(repo_root: Path, changes: ChangeSet, baseline) -> CiGateP
     exemptions = baseline.exemptions
     prefixes = baseline.product_prefixes
 
-    blocking: list[str] = []
+    blocking: list[GateError] = []
     results: list[GateStepResult] = []
     full_suite = False
 
@@ -151,17 +240,6 @@ def build_ci_gate_plan(repo_root: Path, changes: ChangeSet, baseline) -> CiGateP
     )
 
 
-def apply_gates(repo_root: Path, changes: ChangeSet, baseline) -> GateStepResult:
-    """Legacy wrapper — delegates to build_ci_gate_plan."""
-    plan = build_ci_gate_plan(repo_root, changes, baseline)
-    return GateStepResult(
-        errors=plan.blocking_errors,
-        tests=plan.incremental_tests,
-        cross_layer_deferred=frozenset(),
-        full_suite=plan.full_suite,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Pytest runner
 # ---------------------------------------------------------------------------
@@ -181,11 +259,13 @@ def _run_pytest(targets: list[str], *, coverage: bool, append: bool = False) -> 
         "auto",
         "-q",
         "--no-header",
-        "-vv",
+        "--tb=long",
         "--durations=20",
     ]
     if coverage:
         cmd.extend(cov_pytest_args(append=append))
+    logger = logging.getLogger("ci_gate")
+    logger.info("Running pytest: %s", shlex.join(cmd))
     return subprocess.run(cmd, cwd=REPO_ROOT, check=False).returncode
 
 
@@ -194,46 +274,26 @@ def _run_pytest(targets: list[str], *, coverage: bool, append: bool = False) -> 
 # ---------------------------------------------------------------------------
 
 
-def emit_selection_report(plan: CiGatePlan, merge_base: str) -> None:
-    report = {
-        "generated_at": datetime.datetime.now().isoformat(),
-        "merge_base": merge_base,
-        "full_suite": plan.full_suite,
-        "deleted_source_tests": sorted(plan.deleted_source_tests),
-        "incremental_tests": sorted(plan.incremental_tests),
-        "blocking_errors": list(plan.blocking_errors),
-        "symbol_warnings": list(plan.symbol_warnings),
-    }
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+def _log_blocking_errors(logger: logging.Logger, errors: tuple[GateError, ...]) -> None:
+    logger.error("%s", format_blocking_errors(errors))
 
 
-def _print_blocking_errors(errors: tuple[str, ...]) -> None:
-    print("CI gate failed: policy violation — no tests executed.", file=sys.stderr)
-    print("Resolve the following before merge:", file=sys.stderr)
-    for err in errors:
-        print(f"  - {err}", file=sys.stderr)
-
-
-def _print_deleted_source_failure(tests: frozenset[str]) -> None:
-    print(
-        "CI gate failed: deleted product source but corresponding tests still fail (delete or update orphaned tests).",
-        file=sys.stderr,
+def _log_deleted_source_failure(logger: logging.Logger, tests: frozenset[str]) -> None:
+    logger.error(
+        "CI gate failed: deleted product source but corresponding tests still fail (delete or update orphaned tests)."
     )
-    print("Guard tests for deleted sources:", file=sys.stderr)
+    logger.error("Guard tests for deleted sources:")
     for test_id in sorted(tests):
-        print(f"  - {test_id}", file=sys.stderr)
+        logger.error("  - %s", test_id)
 
 
-def _print_source_change_failure() -> None:
-    print(
-        "CI gate failed: source change caused test failure(s). See pytest output above for all failed cases.",
-        file=sys.stderr,
-    )
+def _log_source_change_failure(logger: logging.Logger) -> None:
+    logger.error("CI gate failed: source change caused test failure(s). See pytest output above for all failed cases.")
 
 
-def _print_coverage_failure(message: str) -> None:
-    print("CI gate failed: coverage below threshold.", file=sys.stderr)
-    print(message, file=sys.stderr)
+def _log_coverage_failure(logger: logging.Logger, message: str) -> None:
+    logger.error("CI gate failed: coverage below threshold.")
+    logger.error("%s", message)
 
 
 # ---------------------------------------------------------------------------
@@ -241,25 +301,13 @@ def _print_coverage_failure(message: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _has_coverage_data(coverage_path: Path) -> bool:
-    """Check if coverage data exists (handles parallel mode .coverage.* files)."""
-    from coverage.data import CoverageData
-
-    try:
-        data = CoverageData(str(coverage_path))
-        data.read()
-        return bool(data.measured_files())
-    except Exception:
-        return False
-
-
-def _check_coverage_gate(cfg: Config) -> int:
+def _check_coverage_gate(cfg: Config, logger: logging.Logger) -> tuple[int, str]:
     passed, message = check_ut_gate(config=GateConfig.from_config(cfg))
     if passed:
-        print(message)
-        return 0
-    _print_coverage_failure(message)
-    return 1
+        logger.info("%s", message)
+        return 0, message
+    _log_coverage_failure(logger, message)
+    return 1, message
 
 
 # ---------------------------------------------------------------------------
@@ -268,32 +316,79 @@ def _check_coverage_gate(cfg: Config) -> int:
 
 
 def main() -> int:
+    logger = setup_logger()
     cfg = Config.from_env()
+    log_env_audit(cfg, logger)
+
+    logger.info("Resolving merge-base against %s ...", cfg.base_branch)
+    try:
+        merge_base = resolve_base_ref(REPO_ROOT, cfg.base_branch)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return 1
+    logger.info("Merge-base: %s", merge_base[:12])
 
     try:
+        validate_gate_policy_if_changed(REPO_ROOT, merge_base)
         baseline = load_baseline(REPO_ROOT, cfg)
     except ConfigError as exc:
-        print(str(exc), file=sys.stderr)
+        logger.error("%s", exc)
         return 1
 
-    merge_base = resolve_base_ref(REPO_ROOT, cfg.base_branch)
+    logger.info("Fetching diff ...")
     diff = fetch_diff_line_map(REPO_ROOT, merge_base)
-    changes = classify_changes(REPO_ROOT, merge_base, diff)
+    logger.info("Diff: %d files changed", len(diff))
+
+    logger.info("Classifying changes ...")
+    changes = classify_changes(REPO_ROOT, merge_base, diff, baseline.discovery)
+    logger.info(
+        "Changes: config=%d new_test=%d del_test=%d new_source=%d del_source=%d modified=%d",
+        len(changes.config),
+        len(changes.new_test),
+        len(changes.del_test),
+        len(changes.new_source),
+        len(changes.del_source),
+        len(changes.modified_source),
+    )
+
+    if changes.renames:
+        logger.info("Remapping test_map for %d renamed source(s) ...", len(changes.renames))
+        baseline = baseline.__class__(
+            test_map=_remap_renamed_sources(baseline.test_map, changes.renames),
+            exemptions=baseline.exemptions,
+            discovery=baseline.discovery,
+            product_prefixes=baseline.product_prefixes,
+        )
+
+    if changes.new_test:
+        new_test_map = _run_new_tests_and_build_map(changes.new_test, _PYTEST_MARKER)
+        merged_map = _merge_test_maps(baseline.test_map, new_test_map)
+        baseline = baseline.__class__(
+            test_map=merged_map,
+            exemptions=baseline.exemptions,
+            discovery=baseline.discovery,
+            product_prefixes=baseline.product_prefixes,
+        )
+
+    logger.info("Building gate plan ...")
     plan = build_ci_gate_plan(REPO_ROOT, changes, baseline)
 
-    emit_selection_report(plan, merge_base)
-
     if plan.blocking_errors:
-        _print_blocking_errors(plan.blocking_errors)
+        _log_blocking_errors(logger, plan.blocking_errors)
         return 1
 
     ran_deleted_phase = False
     if plan.deleted_source_tests:
         ran_deleted_phase = True
+        logger.info(
+            "Phase 1: running %d deleted-source guard tests ...",
+            len(plan.deleted_source_tests),
+        )
         code = _run_pytest(sorted(plan.deleted_source_tests), coverage=True, append=False)
         if code != 0:
-            _print_deleted_source_failure(plan.deleted_source_tests)
+            _log_deleted_source_failure(logger, plan.deleted_source_tests)
             return code
+        logger.info("Phase 1: passed")
 
     if plan.full_suite:
         phase2_targets = ["tests/smoke/", "tests/regression/"]
@@ -303,30 +398,31 @@ def main() -> int:
         phase2_targets = []
 
     if phase2_targets:
+        logger.info("Phase 2: running %d test targets ...", len(phase2_targets))
         code = _run_pytest(phase2_targets, coverage=True, append=ran_deleted_phase)
         if code != 0:
-            _print_source_change_failure()
+            _log_source_change_failure(logger)
             return code
+        logger.info("Phase 2: passed")
 
     coverage_path = REPO_ROOT / ".coverage"
     if not _has_coverage_data(coverage_path):
-        print("No coverage data produced; skipping coverage gate", file=sys.stderr)
+        logger.warning("No coverage data produced; skipping coverage gate")
+        print("CI gate passed: no coverage data to check")
         return 0
 
+    logger.info("Checking per-symbol coverage ...")
     symbol_warnings = _check_symbol_level_coverage(changes, coverage_path)
     if symbol_warnings:
-        print("Per-symbol coverage warnings (advisory, not blocking):", file=sys.stderr)
-        for w in symbol_warnings:
-            print(f"  - {w}", file=sys.stderr)
-        plan = CiGatePlan(
-            blocking_errors=plan.blocking_errors,
-            deleted_source_tests=plan.deleted_source_tests,
-            incremental_tests=plan.incremental_tests,
-            full_suite=plan.full_suite,
-            symbol_warnings=symbol_warnings,
-        )
+        logger.warning("Per-symbol coverage warnings (advisory, not blocking):")
+        for warning in symbol_warnings:
+            logger.warning("  - %s", warning)
 
-    return _check_coverage_gate(cfg)
+    logger.info("Checking coverage gate ...")
+    exit_code, message = _check_coverage_gate(cfg, logger)
+    if exit_code == 0:
+        print(message)
+    return exit_code
 
 
 if __name__ == "__main__":

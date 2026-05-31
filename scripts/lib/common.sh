@@ -22,14 +22,6 @@ PROJECT_DIR=$(readlink -f "${SCRIPT_DIR}/..") || {
 }
 
 HELPERS_DIR="${SCRIPT_DIR}/helpers"
-COV_SOURCES=(
-  --cov=cli
-  --cov=serving_cast
-  --cov=tensor_cast
-  --cov=web_ui
-  --cov=scripts
-)
-COV_BRANCH=(--cov-branch)
 TESTS_SMOKE="${PROJECT_DIR}/tests/smoke"
 TESTS_REGRESSION="${PROJECT_DIR}/tests/regression"
 TESTS_BENCHMARK="${PROJECT_DIR}/tests/benchmark"
