@@ -12,13 +12,19 @@ requires-python = ">=3.9"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 markers = [
-    "npu: mark test as requiring NPU hardware (torch_npu + physical device)",
+    "nightly: do_compile=True large model cases, only run in nightly",
+    "npu: requires NPU hardware",
 ]
-addopts = "-m 'not npu'"
+addopts = "-m 'not npu and not nightly'"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:torch.jit._script",
+]
 
 # Coverage #####################################################################
 
 [tool.coverage.run]
+parallel = true
 branch = true
 omit = [
     "*/test_*.py",
@@ -38,4 +44,9 @@ exclude_lines = [
 [dependency-groups]
 lint = [
     "pre-commit>=4.3.0",
+]
+ci = [
+    "pydantic>=2",
+    "pathspec>=0.12",
+    "pyyaml>=6",
 ]

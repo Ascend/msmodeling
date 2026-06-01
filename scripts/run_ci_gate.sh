@@ -8,7 +8,7 @@
 # Optional (defaults below):
 #   MSMODELING_TEST_WEIGHTS_PRUNE      session weight cleanup (default: 0)
 #   MSMODELING_OFFLINE                 Hub offline mode (default: 0)
-#   MSMODELING_CACHE                   cache directory (default: .msmodeling_cache)
+#   MSMODELING_CACHE                   optional repo-local Hub cache (unset = use ~/.cache like develop)
 #   MSMODELING_TEST_BASE_BRANCH        merge-base branch (default: master)
 #   PYTHON                             absolute path to interpreter; if unset, uses uv or python3
 #
@@ -26,7 +26,6 @@ fi
 
 export MSMODELING_TEST_WEIGHTS_PRUNE="${MSMODELING_TEST_WEIGHTS_PRUNE:-0}"
 export MSMODELING_OFFLINE="${MSMODELING_OFFLINE:-0}"
-export MSMODELING_CACHE="${MSMODELING_CACHE:-.msmodeling_cache}"
 export MSMODELING_TEST_BASE_BRANCH="${MSMODELING_TEST_BASE_BRANCH:-master}"
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

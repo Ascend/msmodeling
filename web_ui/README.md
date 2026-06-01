@@ -8,6 +8,15 @@ Launch from the repository root:
 python -m web_ui.web_ui_start --host 127.0.0.1 --port 2345
 ```
 
+Environment variables (defaults used when CLI flags omitted):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GRADIO_SERVER_NAME` | `0.0.0.0` | Bind address; overridden by `--host` |
+| `GRADIO_SERVER_PORT` | `2345` | Listen port; overridden by `--port` |
+
+See also [Environment Variables](../tests/README.md#environment-variables) for `PYTHONPATH`, `HF_ENDPOINT`, and Hub cache variables.
+
 ## Directory Structure
 
 ```text

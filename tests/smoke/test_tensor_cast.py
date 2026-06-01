@@ -1,9 +1,8 @@
 import torch
-
 from tensor_cast.layers.quant_linear import QuantLinearBase
 from tensor_cast.model_config import ParallelConfig
 from tensor_cast.quantize_utils import LinearQuantType
-from tests.regression.tensor_cast.test_common import get_linear_quant_config  # pylint: disable=no-name-in-module
+from tests.regression.tensor_cast.test_common import get_linear_quant_config
 
 
 def test_tensor_cast_parallel_layer_smoke():

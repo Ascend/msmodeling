@@ -256,7 +256,20 @@ Most `op_replay/*_run.py` scripts share the following arguments:
 
 Environment variable:
 
-- `MSMODELING_OP_REPLAY_REPEAT_COUNT` provides the default replay count when the CLI flag is not set.
+- `MSMODELING_OP_REPLAY_REPEAT_COUNT` provides the default replay count when the CLI flag is not set (code default `30` if unset).
+
+### Environment variables (`tools/perf_data_collection/`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MSMODELING_OP_REPLAY_REPEAT_COUNT` | `30` | Default `--repeat-count` for `op_replay/*_run.py` |
+| `VLLM_ASCEND_PATH` | sibling `../vllm-ascend` | vllm-ascend repo root for custom Triton kernels |
+| `ASCEND_CUSTOM_OPP_PATH` | — | Required for custom OPP operators; see `start_microbench.py` module doc |
+| `LD_LIBRARY_PATH` | — | Custom OPP `op_api/lib`; required with `ASCEND_CUSTOM_OPP_PATH` for some ops |
+| `ASCEND_HOME_PATH` / `ASCEND_TOOLKIT_HOME` / `ASCEND_TOOLKIT_HOME_PATH` / `ASCEND_INSTALL_PATH` | filesystem probes | CANN install root for version detection |
+| `MASTER_ADDR` / `MASTER_PORT` / `RANK` / `WORLD_SIZE` / `LOCAL_RANK` | torchrun defaults | Distributed launch for comm bench / DFC replay |
+
+Full cross-module list: [Environment Variables](../../tests/README.md#environment-variables).
 
 ### `op_replay/run_all_op.py`
 

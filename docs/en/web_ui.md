@@ -69,7 +69,16 @@ set HF_ENDPOINT=https://hf-mirror.com
 
 或在 Web UI 的 `remote-source` 中选择 `modelscope`。
 
----
+### 2.4 Gradio 服务环境变量
+
+`web_ui/web_ui_start.py` 支持以下变量（CLI 参数优先）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `GRADIO_SERVER_NAME` | `0.0.0.0` | 绑定地址，可被 `--host` 覆盖 |
+| `GRADIO_SERVER_PORT` | `2345` | 监听端口，可被 `--port` 覆盖 |
+
+完整环境变量列表见 [环境变量](../../tests/README.md#environment-variables)。
 
 ## 3. Web UI 快速上手
 

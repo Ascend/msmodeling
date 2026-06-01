@@ -47,7 +47,10 @@ def patch_method_for_qwen3_next(_model):
             return attention_mask
 
         try:
-            cache_condition = cache_position[0] > 0 if cache_position.numel() > 0 else False
+            if cache_position is None:
+                cache_condition = False
+            else:
+                cache_condition = cache_position[0] > 0 if cache_position.numel() > 0 else False
             mask_condition = (
                 torch.all(attention_mask == 1).item()
                 if attention_mask is not None and attention_mask.numel() > 0

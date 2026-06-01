@@ -1,5 +1,5 @@
 minimum_pre_commit_version: 4.0.0
-exclude: ^LICENSE|\.(html|csv|svg)$
+exclude: ^(LICENSE|docs/|.*/fixtures/|.*/assets/)|\.(html|csv|svg)$
 
 default_stages: [pre-commit]
 ci:
@@ -12,21 +12,21 @@ repos:
     rev: v4.6.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
       - id: end-of-file-fixer
         types: [python]
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
       - id: check-yaml
         args: ["--allow-multiple-documents"]
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
       - id: check-added-large-files
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
       - id: check-merge-conflict
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
       - id: detect-private-key
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
       - id: check-json
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
 
   # -------------------------- Python checks --------------------------
   # Ruff reads pre-commit/pyproject.toml
@@ -34,11 +34,11 @@ repos:
     rev: v0.14.14
     hooks:
       - id: ruff-check
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
         args: ["--config", "pre-commit/pyproject.toml", "--output-format", "github", "--fix"]
         types: [python]
       - id: ruff-format
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
         args: ["--config", "pre-commit/pyproject.toml"]
         types: [python]
 
@@ -47,7 +47,7 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
         args: [
             "-L",
             "CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,CLOS",
@@ -62,7 +62,7 @@ repos:
       - id: pylint
         name: pylint (Python code quality check)
         types: [python]
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/|tests/regression/scripts/helpers/)
         args: ["--rcfile=pre-commit/pyproject.toml"]
         verbose: false
 
@@ -73,7 +73,7 @@ repos:
       - id: bandit
         name: bandit (Python security checks)
         types: [python]
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
         args: [
           "--config=pre-commit/pyproject.toml",
           "--quiet",
@@ -84,5 +84,5 @@ repos:
     rev: v1.32.0
     hooks:
       - id: typos
-        exclude: ^(tools/|tests/test_tensor_cast/data/|pre-commit/)
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
         args: ["--force-exclude", "--config", "pre-commit/typos.toml"]

@@ -31,7 +31,7 @@ from scripts.helpers.ci_gate.rules import (
 from scripts.helpers.common import ast_utils
 from scripts.helpers.common._logging import log_env_audit, setup_logger
 from scripts.helpers.common.build_test_map import collect_test_map
-from scripts.helpers.common.coverage_config import cov_pytest_args
+from scripts.helpers.common.coverage_config import cov_pytest_args, pytest_xdist_args
 from scripts.helpers.common.coverage_gate import GateConfig, check_ut_gate
 from scripts.helpers.common.test_map_loader import load_baseline, prune_deleted_sources
 
@@ -156,12 +156,13 @@ def _run_new_tests_and_build_map(
         *new_tests,
         "-m",
         marker_expr,
-        "-n0",
+        *pytest_xdist_args(),
         *cov_pytest_args(cov_context=True),
         "-q",
         "--no-header",
-        "--tb=long",
+        "--tb=short",
         "--durations=20",
+        "--disable-warnings",
     ]
     logger.info("Running pytest: %s", shlex.join(cmd))
     proc = subprocess.run(cmd, cwd=REPO_ROOT, check=False)
@@ -255,12 +256,12 @@ def _run_pytest(targets: list[str], *, coverage: bool, append: bool = False) -> 
         *targets,
         "-m",
         _PYTEST_MARKER,
-        "-n",
-        "auto",
+        *pytest_xdist_args(),
         "-q",
         "--no-header",
-        "--tb=long",
+        "--tb=short",
         "--durations=20",
+        "--disable-warnings",
     ]
     if coverage:
         cmd.extend(cov_pytest_args(append=append))

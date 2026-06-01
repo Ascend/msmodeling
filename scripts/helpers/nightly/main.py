@@ -27,7 +27,7 @@ from scripts.helpers.ci_gate.gate_policy import (
 )
 from scripts.helpers.common._logging import log_env_audit, setup_logger
 from scripts.helpers.common.build_test_map import build_test_map, detect_redundant_cases
-from scripts.helpers.common.coverage_config import cov_pytest_args
+from scripts.helpers.common.coverage_config import cov_pytest_args, pytest_xdist_args
 from scripts.helpers.common.coverage_gate import GateConfig, check_thresholds, load_totals
 from scripts.helpers.common.test_map_config import resolve_test_map_path
 from scripts.helpers.nightly.feishu_notifier import build_feishu_payload, push_feishu
@@ -55,11 +55,12 @@ def _build_test_map_pytest_cmd(python_exe: str, cfg: Config, *, junit_xml: Path)
         "tests/regression/",
         "-m",
         _TEST_MAP_MARKER,
-        "-n0",
+        *pytest_xdist_args(),
         *cov_pytest_args(cov_context=True),
         "-q",
         "--no-header",
-        "--tb=long",
+        "--tb=short",
+        "--disable-warnings",
         "--durations=20",
         f"--junit-xml={junit_xml}",
     ]
@@ -79,23 +80,39 @@ def _build_nightly_pytest_cmd(python_exe: str, *, junit_xml: Path) -> list[str]:
         "auto",
         "-q",
         "--no-header",
-        "--tb=long",
+        "--tb=short",
+        "--disable-warnings",
         "--durations=20",
         f"--junit-xml={junit_xml}",
     ]
 
 
+def _benchmark_models_enabled() -> bool:
+    return os.environ.get("MSMODELING_BENCHMARK_MODELS", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _build_benchmark_pytest_cmd(python_exe: str, cfg: Config, *, junit_xml: Path) -> list[str]:
+    benchmark_target = (
+        str(REPO_ROOT / "tests" / "benchmark")
+        if _benchmark_models_enabled()
+        else str(REPO_ROOT / "tests" / "benchmark" / "ops")
+    )
     cmd = [
         python_exe,
         "-m",
         "pytest",
-        "tests/benchmark/",
+        benchmark_target,
         "-m",
         "not npu",
         "-q",
         "--no-header",
-        "--tb=long",
+        "--tb=short",
+        "--disable-warnings",
         "--durations=20",
         f"--junit-xml={junit_xml}",
     ]
@@ -337,7 +354,10 @@ def main() -> int:
             nightly_exit = _stream_pytest(nightly_cmd, cwd=REPO_ROOT)
             logger.info("Phase 2a: pytest exit=%d", nightly_exit)
 
-            logger.info("Phase 2b: benchmark")
+            logger.info(
+                "Phase 2b: benchmark (%s)",
+                "models+ops" if _benchmark_models_enabled() else "ops only",
+            )
             bench_cmd = _build_benchmark_pytest_cmd(sys.executable, cfg, junit_xml=bench_junit)
             logger.info("Running pytest: %s", shlex.join(bench_cmd))
             bench_exit = _stream_pytest(bench_cmd, cwd=REPO_ROOT)

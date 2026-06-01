@@ -75,6 +75,10 @@ markers = [
 ]
 addopts = "-m 'not npu'"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+parallel = true
+branch = true
 ```
 
 The `build_test_map` collection scope matches `MSMODELING_TEST_MAP_MARKER`, defaulting to `not npu and not nightly`, over `tests/smoke/` and `tests/regression/`. Benchmark cases never participate in mapping.
@@ -108,6 +112,8 @@ Map keys must be repository-relative product source paths under prefixes defined
 2. **redundant_pair**: a pair of test cases whose Jaccard similarity over covered symbols exceeds `jaccard_threshold` (default 0.85), indicating near-identical coverage footprints.
 
 Redundancy warnings are consumed by the nightly pipeline and surfaced through Feishu notifications. They are advisory and do not block CI.
+
+**Coverage and pytest-xdist**: `scripts/helpers/common/coverage_config.py` exposes `pytest_xdist_args()` (`-n auto`) and `cov_pytest_args()` (product `--cov`, `--cov-branch`, optional `--cov-context=test`). `[tool.coverage.run] parallel = true` in `pyproject.toml` lets each xdist worker write an independent data file; pytest-cov combines them into `.coverage` after the run. `build_test_map` and `check_ut_gate` always read that merged file — do not invoke `coverage run -m pytest` manually alongside xdist.
 
 **gate_policy contract**
 
@@ -144,7 +150,7 @@ Change classification covers configuration files, added or removed tests, added 
 | Removed test file | Block when the deleted path is the sole mapped coverage for any symbol |
 | Modified product source file | Select mapped node ids by changed symbol; block unmapped non-exempt symbols |
 
-Deleted-source guard tests run in a first pytest phase when present. Incremental or full-suite targets run in a second phase. Both phases use marker `not npu and not nightly` and `-n auto`.
+Deleted-source guard tests run in a first pytest phase when present. Incremental or full-suite targets run in a second phase. New test files run in a phase 0 pass with the same marker, `-n auto`, and coverage flags (including `--cov-context=test` for in-memory map merge). All coverage phases share `parallel = true` and pytest `--cov`.
 
 **Per-symbol coverage advisory**: After incremental pytest produces `.coverage`, `_check_symbol_level_coverage` evaluates local coverage for each changed symbol. When a changed symbol's local line coverage falls below 50%, an advisory warning is added to `CiGatePlan.symbol_warnings`. These warnings are printed to stderr but do not block the merge; they serve as early signals that a code path may lack adequate test coverage despite being nominally "mapped" in `test_map`.
 
@@ -188,7 +194,7 @@ Local developers run `run_smoke.sh` and `run_regression.sh` directly. CI PR incr
 
 **Phase 1 — test_map refresh scope**
 
-Runs `tests/smoke/` and `tests/regression/` with marker `not npu and not nightly`, `-n0`, and `--cov-context=test`. On pytest success, `build_test_map` writes the external `test_map` file. Coverage totals are computed and included in the report; threshold failure is logged as non-blocking.
+Runs `tests/smoke/` and `tests/regression/` with marker `not npu and not nightly`, `-n auto`, product `--cov` flags, and `--cov-context=test`. On pytest success, `build_test_map` reads the merged repo-root `.coverage` and writes the external `test_map` file. Coverage totals are computed and included in the report; threshold failure is logged as non-blocking.
 
 **Phase 2 — nightly-marked cases**
 
@@ -228,7 +234,7 @@ Build tasks call scripts from the repository root. Pipeline orchestration, trigg
 
 ### Step 9: Slow Test Case Governance
 
-Parallelism defaults to `pytest -n auto` for smoke, regression, CI gate, and nightly phase 2. Only nightly phase 1 uses `-n0` so that `--cov-context=test` aligns with `build_test_map.py`. Incremental CI gate excludes the `nightly` marker; first compile with `do_compile=True` remains in nightly scope only.
+Parallelism uses `pytest -n auto` for smoke, regression, CI gate (including new-test and incremental phases), nightly phase 1, and nightly phase 2. Coverage collection shares the same parallelism: `[tool.coverage.run] parallel = true` in `pyproject.toml` plus pytest `--cov` (not manual `coverage run`). Incremental CI gate excludes the `nightly` marker; first compile with `do_compile=True` remains in nightly scope only.
 
 After the above steps, directory layering, incremental selection, gating, and ST guardianship are verified together against the quantifiable targets in the Functional Description section.
 
@@ -405,8 +411,10 @@ The complete environment variable list lives in `tests/README.md`. The design do
 | `load_baseline(repo_root, cfg)` | Mandatory | Loads external `test_map` and repository `gate_policy.json` exemptions |
 | `resolve_base_ref(repo_root, branch)` | Mandatory | Returns merge-base SHA |
 | `classify_changes(repo_root, base_ref, diff)` | Mandatory | Returns `ChangeSet` from git name-status and line map |
-| `build_test_map(output_path, marker_expr)` | Mandatory | Reads `.coverage` with `--cov-context=test`, writes external JSON |
-| `check_ut_gate(config=GateConfig)` | Mandatory | Reads repo-root `.coverage`; returns `(passed, message)`; used blocking in ci_gate |
+| `pytest_xdist_args()` | Mandatory | Returns `["-n", "auto"]` for all coverage pytest invocations |
+| `cov_pytest_args(cov_context=…)` | Mandatory | Product `--cov` flags; requires `[tool.coverage.run] parallel = true` with xdist |
+| `build_test_map(output_path, marker_expr)` | Mandatory | Reads merged `.coverage` after `--cov-context=test` run; writes external JSON |
+| `check_ut_gate(config=GateConfig)` | Mandatory | Reads repo-root `.coverage` (post-combine); returns `(passed, message)`; blocking in ci_gate |
 | `nightly.main()` | Mandatory | Runs three pytest phases, refreshes map, emits report; returns combined exit code |
 | `emit_report(...)` | Mandatory | Parses JUnit XML into `NightlyRunStats` and optionally pushes Feishu message |
 
@@ -473,7 +481,7 @@ Build jobs depend on Python 3.9 or higher, pytest, and coverage packages from pr
 | UT line coverage | 74% | ≥ 70% enforced, 80% aspirational for new code | ci_gate blocking gate |
 | UT branch coverage | 61.8% | ≥ 50% enforced | ci_gate blocking gate |
 
-Parallelism uses `pytest -n auto` except nightly phase 1, which uses `-n0` for stable coverage context collection.
+Parallelism uses `pytest -n auto` for all UT entry scripts; benchmark stays sequential unless `MSMODELING_BENCHMARK_PARALLEL=1`.
 
 ### Serviceability
 
@@ -581,7 +589,7 @@ Local runs default to online Hub access unless `MSMODELING_OFFLINE=1` is set. Ab
 
 ### Known Constraints
 
-1. Mapping accuracy depends on coverage dynamic contexts collected with `-n0` in nightly phase 1.
+1. Mapping accuracy depends on `--cov-context=test` during nightly phase 1 and correct merge of parallel `.coverage.*` fragments (`parallel = true`).
 2. External `test_map` size grows with the repository and requires a successful nightly refresh cadence.
 3. Product path renames require a nightly refresh before incremental ci_gate passes for affected symbols.
 4. Feishu delivery depends on platform egress policy.

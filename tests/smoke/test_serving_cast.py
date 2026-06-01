@@ -1,7 +1,7 @@
 from serving_cast.request import Request
 from serving_cast.utils import summarize
-from tests.helpers.assert_utils import assert_latency_within  # pylint: disable=no-name-in-module
-from tests.helpers.config_factory import build_latency_thresholds  # pylint: disable=no-name-in-module
+from tests.helpers.assert_utils import assert_latency_within
+from tests.helpers.config_factory import build_latency_thresholds
 
 
 def test_serving_cast_ttft_tpot_smoke(ttft_ctx, capfd):

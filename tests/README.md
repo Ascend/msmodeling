@@ -33,10 +33,12 @@ The repository root **`scripts/`** provides CI entry points. Implementation live
 | `bash scripts/run_smoke.sh` | Local; CI `/run_tests smoke` | Full `tests/smoke/`, `-m "not npu"` (includes nightly), `-n auto`; no coverage gate |
 | `bash scripts/run_regression.sh` | Local; CI `/run_tests regression` | Full `tests/regression/`, same as smoke; no coverage gate |
 | `bash scripts/run_benchmark.sh` | Local; CI `/run_tests benchmark` | Full `tests/benchmark/`, no coverage gate |
-| `bash scripts/run_nightly.sh` | Scheduled CI only | UT `-n0` → refresh `test_map` → benchmark; coverage **report-only** 70/50 |
+| `bash scripts/run_nightly.sh` | Scheduled CI only | UT `-n auto` + `--cov` → refresh `test_map` → benchmark; coverage **report-only** 70/50 |
 
 **Local:** always full smoke/regression (no external test_map).
 **CI incremental:** requires `MSMODELING_TEST_MAP_PATH` pointing to a JSON file on the runner (maintained by nightly).
+
+**Coverage + xdist:** Any pytest run that collects coverage (`run_ci_gate.sh`, nightly phase 1, ci_gate new-test phase) uses `-n auto` with `--cov`. `pyproject.toml` sets `[tool.coverage.run] parallel = true` so each worker writes its own fragment; pytest-cov merges into repo-root `.coverage` before `build_test_map` / coverage gates read it.
 
 ### Marker Semantics
 

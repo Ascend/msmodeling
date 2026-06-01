@@ -1,0 +1,11 @@
+schema_version: 1
+
+test_discovery:
+  include:
+    - "**/test_*.py"
+    - "**/*_test.py"
+  exclude:
+    - "tests/helpers/*.py"
+    - "tests/assets/**"
+
+exemptions: []
