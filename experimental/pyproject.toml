@@ -1,0 +1,42 @@
+# Package ######################################################################
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optix"
+description = "Service Parameter Optimizer for LLM inference performance tuning"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = [
+    "filelock",
+    "loguru",
+    "matplotlib",
+    "msguard",
+    "numpy",
+    "pandas",
+    "psutil",
+    "pydantic-settings",
+    "pyswarms",
+    "pyyaml",
+    "requests",
+    "torch",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["optix*"]
+
+[tool.setuptools.package-data]
+"optix" = ["**/*.toml", "**/*.patch"]
+
+# CLI entry points ############################################################
+
+[project.scripts]
+msmodeling = "optix.cli:main"
+
+# Plugin entry points #########################################################
