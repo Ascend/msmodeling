@@ -27,10 +27,8 @@ import psutil
 from loguru import logger
 from msguard.security import open_s
 
-from ...config.base_config import CUSTOM_OUTPUT, MODEL_EVAL_STATE_CONFIG_PATH, \
-    ms_serviceparam_optimizer_config_path
-from ..utils import close_file_fp, remove_file, kill_children, \
-    backup, kill_process
+from ...config.base_config import CUSTOM_OUTPUT, MODEL_EVAL_STATE_CONFIG_PATH, ms_serviceparam_optimizer_config_path
+from ..utils import close_file_fp, remove_file, kill_children, backup, kill_process
 
 # Mapping from field name to CLI flag name, used to remove CLI flags when removing invalid values
 FIELD_TO_CLI_FLAG = {
@@ -41,12 +39,18 @@ FIELD_TO_CLI_FLAG = {
 # Note: non-positive filtering is a semantic constraint for specific fields, not a universal behavior
 NON_POSITIVE_INVALID_FIELDS = frozenset(FIELD_TO_CLI_FLAG.keys())
 
+
 class CustomProcess:
     from ...config.config import OptimizerConfigField
 
-    def __init__(self, bak_path: Optional[Path] = None, command: Optional[List[str]] = None,
-                 work_path: Optional[Path] = None, print_log: bool = False,
-                 process_name: str = ""):
+    def __init__(
+        self,
+        bak_path: Optional[Path] = None,
+        command: Optional[List[str]] = None,
+        work_path: Optional[Path] = None,
+        print_log: bool = False,
+        process_name: str = "",
+    ):
         self.command = command
         self.bak_path = bak_path
         self.work_path = work_path if work_path else os.getcwd()
@@ -58,12 +62,13 @@ class CustomProcess:
         self.process_name = process_name
         self.env = os.environ.copy()
         from ...config.constant import ProcessState, Stage
+
         self._process_stage = ProcessState(stage=Stage.stop)
 
     @property
     def process_stage(self):
         return self._process_stage
-    
+
     @process_stage.setter
     def process_stage(self, value):
         if value.stage == self._process_stage.stage:
@@ -99,20 +104,19 @@ class CustomProcess:
                     logger.error(f"Failed to kill process. {e}")
         time.sleep(1)
 
-
     def _split_merged_args(self):
         """
         Split merged args into independent parts.
-        For example: '--compilation-config \'{"cudagraph_mode": "FULL_DECODE_ONLY"}\'' 
+        For example: '--compilation-config \'{"cudagraph_mode": "FULL_DECODE_ONLY"}\''
         Splits into: '--compilation-config' and '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-        
+
         This resolves the issue where vllm's argument parser converts underscores in JSON keys to hyphens.
         Compatible with all JSON-like parameter input forms: bare JSON/quoted JSON/escaped JSON/fullwidth symbol JSON.
         Does not rely on hardcoded JSON parameter lists; auto-detects whether to split based on value format.
         """
         import re
         import json
-        
+
         def clean_json_string(json_str):
             """
             Generic JSON string cleaning: based on syntax only, not coupled to any parameter names
@@ -121,11 +125,15 @@ class CustomProcess:
             # 1. Restore escaped characters (\\" -> ", \\\\ -> \)
             json_str = json_str.replace('\\"', '"').replace('\\\\', '\\')
             # 2. Remove leading/trailing quotes of all types and extra spaces
-            json_str = json_str.strip().strip("'").strip('"').strip("\u2018").strip("\u2019").strip("\u201c").strip("\u201d")
+            json_str = (
+                json_str.strip().strip("'").strip('"').strip("\u2018").strip("\u2019").strip("\u201c").strip("\u201d")
+            )
             # 3. Convert fullwidth symbols to halfwidth
-            json_str = json_str.replace("\uff0c", ",").replace("\uff1a", ":").replace("\uff08", "(").replace("\uff09", ")")
+            json_str = (
+                json_str.replace("\uff0c", ",").replace("\uff1a", ":").replace("\uff08", "(").replace("\uff09", ")")
+            )
             return json_str
-        
+
         def is_json_like(value):
             """
             Determine if string is JSON format (based on syntax features only, no parameter coupling)
@@ -137,7 +145,7 @@ class CustomProcess:
                 return isinstance(parsed, (dict, list))
             except (json.JSONDecodeError, ValueError, TypeError):
                 return False
-        
+
         new_command = []
         i = 0
         while i < len(self.command):
@@ -146,7 +154,7 @@ class CustomProcess:
                 new_command.append(cmd_element)
                 i += 1
                 continue
-            
+
             # Match pattern: --param_name space quote...quote
             # Use \S+ to match param name (including dots and other chars)
             match = re.match(r'^(-\S+)\s+', cmd_element)
@@ -154,22 +162,22 @@ class CustomProcess:
                 new_command.append(cmd_element)
                 i += 1
                 continue
-            
+
             param_name = match.group(1)
-            rest = cmd_element[match.end():]
-            
+            rest = cmd_element[match.end() :]
+
             if not rest:
                 new_command.append(cmd_element)
                 i += 1
                 continue
-            
+
             # Check if it's JSON format (doesn't depend on hardcoded parameter list)
             if not is_json_like(rest):
                 # Non-JSON format, keep as-is
                 new_command.append(cmd_element)
                 i += 1
                 continue
-            
+
             # Find the first quote
             first_char = rest[0]
             if first_char not in ('"', "'"):
@@ -183,19 +191,19 @@ class CustomProcess:
                     new_command.append(cmd_element)
                 i += 1
                 continue
-            
+
             # Find the last matching quote
             last_idx = rest.rfind(first_char)
             if last_idx <= 0:
                 new_command.append(cmd_element)
                 i += 1
                 continue
-            
+
             json_value = rest[1:last_idx]
-            
+
             # Clean the JSON string
             cleaned_value = clean_json_string(json_value)
-            
+
             # Try to split, let vllm handle it even if it's not standard JSON
             new_command.append(param_name)
             new_command.append(cleaned_value)
@@ -204,7 +212,7 @@ class CustomProcess:
             else:
                 logger.warning(f"[FIX] Non-standard JSON param (vllm may parse it): {param_name} = {cleaned_value}")
             i += 1
-        
+
         self.command = new_command
 
     def backup(self):
@@ -213,6 +221,7 @@ class CustomProcess:
 
     def before_run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None):
         from ...config.config import get_settings
+
         """
         Preparation work before running command
         Args:
@@ -227,13 +236,13 @@ class CustomProcess:
                 # env type data, set environment variables and update variable references in command, all uppercase when setting
                 _env_name = k.name.upper().strip()
                 _var_name = f"${_env_name}"
-                
+
                 # Check if value is empty/invalid
                 if isinstance(k.value, str):
                     value_flag = k.value is None or not k.value.strip()
                 else:
                     value_flag = k.value is None or isnan(k.value) or isinf(k.value)
-                
+
                 if value_flag:
                     # When value is empty, delete from environment, do not set empty value
                     if _env_name in self.env:
@@ -242,7 +251,7 @@ class CustomProcess:
                 else:
                     # When value is valid, set environment variable
                     self.env[_env_name] = str(k.value)
-                
+
                 # Handle variable references in the command line
                 if _var_name not in self.command:
                     continue
@@ -258,7 +267,7 @@ class CustomProcess:
                         self.command.pop(_i - 1)
                 else:
                     self.command[_i] = str(k.value)
-        
+
         # Replace custom variables in the others fields
         # Supports using $VAR_NAME format custom variables in others parameters
         # For example: --speculative-config '{"num_speculative_tokens": $NUM_VAR,"method":"deepseek_mtp"}'
@@ -279,19 +288,18 @@ class CustomProcess:
             for i, cmd_element in enumerate(self.command):
                 if isinstance(cmd_element, str):
                     self.command[i] = pattern.sub(str(k.value), cmd_element)
-        
+
         # Fix: split merged args into independent parts
-        # For example: '--compilation-config \'{"cudagraph_mode": "FULL_DECODE_ONLY"}\'' 
+        # For example: '--compilation-config \'{"cudagraph_mode": "FULL_DECODE_ONLY"}\''
         # Splits into: '--compilation-config' and '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
         self._split_merged_args()
-        
+
         if CUSTOM_OUTPUT not in self.env:
             # Set output directory
             self.env[CUSTOM_OUTPUT] = str(get_settings().output)
         # Set the json file to read
         if MODEL_EVAL_STATE_CONFIG_PATH not in self.env:
             self.env[MODEL_EVAL_STATE_CONFIG_PATH] = str(ms_serviceparam_optimizer_config_path)
-                
 
     def run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None, **kwargs):
         # Start the test
@@ -301,7 +309,7 @@ class CustomProcess:
             except Exception as e:
                 logger.error(f"Failed to kill residual process. {e}")
         self.before_run(run_params)
-        
+
         for i, v in enumerate(self.command):
             if not v.strip():
                 continue
@@ -313,12 +321,16 @@ class CustomProcess:
             if isinstance(k, str) and isinstance(v, str):
                 continue
             else:
-                logger.error(f"Possible Problem with Environment Variable Type. "
-                             f"env: {k}={v}, k type: {type(k)}, v type: {type(v)}")
+                logger.error(
+                    f"Possible Problem with Environment Variable Type. "
+                    f"env: {k}={v}, k type: {type(k)}, v type: {type(v)}"
+                )
         from ...config.constant import ProcessState, Stage
+
         try:
-            self.process = subprocess.Popen(self.command, env=self.env, stdout=self.run_log_fp,
-                                            stderr=subprocess.STDOUT, cwd=self.work_path)
+            self.process = subprocess.Popen(
+                self.command, env=self.env, stdout=self.run_log_fp, stderr=subprocess.STDOUT, cwd=self.work_path
+            )
             self.process_stage = ProcessState(stage=Stage.start)
         except OSError as e:
             logger.error(f"Failed to run {self.command}. error {e}")
@@ -342,6 +354,7 @@ class CustomProcess:
 
     def health(self):
         from ...config.constant import ProcessState, Stage
+
         """
         Check if the task ran successfully
         Returns: returns bool value, check if the program started successfully
@@ -354,11 +367,15 @@ class CustomProcess:
         elif self.process.poll() == 0:
             return ProcessState(stage=Stage.stop)
         else:
-            return ProcessState(stage=Stage.error, info=f"Failed in run {self.command!r}. \
-                                        return code: {self.process.returncode}. log: {self.run_log}")
+            return ProcessState(
+                stage=Stage.error,
+                info=f"Failed in run {self.command!r}. \
+                                        return code: {self.process.returncode}. log: {self.run_log}",
+            )
 
     def stop(self, del_log: bool = True):
         from ...config.constant import ProcessState, Stage
+
         self.run_log_offset = 0
         close_file_fp(self.run_log_fp)
         if del_log and self.run_log:
@@ -395,7 +412,7 @@ class CustomProcess:
         if run_log_path.exists():
             file_lines = []
             encodings_to_try = ["utf-8", "latin-1", "gbk", "cp1252"]
-            
+
             for encoding in encodings_to_try:
                 try:
                     with open_s(run_log_path, "r", encoding=encoding, errors="replace") as f:
@@ -415,12 +432,13 @@ class BaseDataField:
 
     def __init__(self, config: Optional[Any] = None):
         from ...config.config import get_settings
+
         if config:
             self.config = config
         else:
             settings = get_settings()
             self.config = settings.ais_bench
- 
+
     @property
     def data_field(self) -> Tuple[OptimizerConfigField, ...]:
         """
@@ -429,7 +447,7 @@ class BaseDataField:
         if hasattr(self.config, "target_field") and self.config.target_field:
             return tuple(self.config.target_field)
         return ()
- 
+
     @data_field.setter
     def data_field(self, value: Tuple[OptimizerConfigField] = ()) -> None:
         """

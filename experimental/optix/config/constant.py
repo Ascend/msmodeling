@@ -31,11 +31,13 @@ CONCURRENCYS = ("CONCURRENCY", "MAXCONCURRENCY")
 METRIC_TTFT = 'ttft'
 METRIC_TPOT = 'tpot'
 
+
 class Stage(Enum):
     start = "start"
     running = "running"
     error = "error"
     stop = "stop"
+
 
 class ProcessState(BaseModel):
     stage: Stage = Stage.start

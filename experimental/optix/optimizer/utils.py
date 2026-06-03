@@ -111,7 +111,7 @@ def close_file_fp(file_fp):
             os.close(file_fp)
     except (AttributeError, OSError):
         return
-    
+
 
 def get_folder_size(folder_path: Path) -> int:
     folder = Path(folder_path)
@@ -123,8 +123,6 @@ def get_folder_size(folder_path: Path) -> int:
             total_size += os.path.getsize(file_path)
 
     return total_size
-
-
 
 
 def get_required_field_from_json(data, key, max_depth=20, current_depth=0):
@@ -144,7 +142,7 @@ def get_required_field_from_json(data, key, max_depth=20, current_depth=0):
     if "." in key:
         _index = key.find(".")
         _cur_key = key[:_index]
-        _next_key = key[_index + 1:]
+        _next_key = key[_index + 1 :]
     _value = None
     if isinstance(data, dict):
         _value = data[_cur_key]
@@ -156,7 +154,7 @@ def get_required_field_from_json(data, key, max_depth=20, current_depth=0):
         return get_required_field_from_json(_value, _next_key, max_depth, current_depth + 1)
     else:
         return _value
-    
+
 
 def is_root():
-    return os.name != 'nt' and os.getuid() == 0
+    return os.name != 'nt' and os.getuid() == 0  # pylint: disable=E1101

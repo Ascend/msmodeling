@@ -19,8 +19,8 @@ The steps are as follows:
 
   ```python
   from ..config.config import Settings
-  
-  
+
+
   class CusSettings(Settings):
       name: str = "vllm-inference-optimization"
   ```
@@ -52,31 +52,31 @@ The steps are as follows:
   ```python
    class ms_service_profiler...optimizer.simulator.SimulatorInterface()
       Bases: ABC
-  
+
       Operate the service framework. Used for service-related operations.
-      
+
       abstract property data_field: Tuple[OptimizerConfigField] | None
-          Get data field property 
+          Get data field property
           Returns: Optional[Tuple[OptimizerConfigField]]
-          
+
       abstract property setter data_field: Tuple[OptimizerConfigField] | None
-          Set data field property 
+          Set data field property
           Returns: None
-      
+
       abstract update_command() → None
-          Update the service startup command based on data_field before service startup. Update the self.command property. 
+          Update the service startup command based on data_field before service startup. Update the self.command property.
           Returns: None
-      
+
       update_config(params: Tuple[OptimizerConfigField] | None = None) → bool
-          Update the service configuration file or other configurations based on parameters. Modify the configuration file before service startup according to the passed parameter values to make the new configuration take effect. 
+          Update the service configuration file or other configurations based on parameters. Modify the configuration file before service startup according to the passed parameter values to make the new configuration take effect.
           Args:
-      
+
               params: List of tuning parameters, a tuple, defined by the value and config position of each element.
-          
+
           Returns: bool, returns update success or failure.
-          
+
       abstract stop()
-          Other preparations at runtime. 
+          Other preparations at runtime.
           Returns: None
   ```
 
@@ -95,7 +95,7 @@ The steps are as follows:
   ```python
   class VllmBenchMark(BenchmarkInterface):
       def __init__(self, config: Optional[VllmBenchmarkConfig] = None, *args, **kwargs):
-  
+
           if config:
               self.config = config
           else:
@@ -160,10 +160,10 @@ Common Data Structure Definitions
   ```python
   class ..config.config.OptimizerConfigField(*, name: str = 'max_batch_size', config_position: str = 'BackendConfig.ScheduleConfig.maxBatchSize', min: float = 0.0, max: float = 100.0, dtype: str = 'float', value: int | float | bool | None = None, dtype_param: Any = None)
       Bases: BaseModel
-      Structure definition of optimization parameters.    
-      
+      Structure definition of optimization parameters.
+
       config_position: str  # Position definition, currently supports two types: one is BackendConfig.ScheduleConfig, indicating modification of parameters in mindieconfig.json; the other is env, indicating setting this parameter as an environment variable, with the variable name being the name attribute
-      dtype: str # Parameter type definition 
+      dtype: str # Parameter type definition
       dtype_param: Any  # Additional parameters provided when converting data to the specified data type.
       max: float # Indicates the maximum value of this parameter, used as the upper limit of the parameter variation range
       min: float  # Indicates the minimum value of this parameter, used as the lower limit of the parameter variation range
@@ -175,10 +175,10 @@ Common Data Structure Definitions
 
   ```python
   class ..config.config.PerformanceIndex(*, generate_speed: float | None = None, time_to_first_token: float | None = None, time_per_output_token: float | None = None, success_rate: float | None = None, throughput: float | None = None)
-  
+
       Bases: BaseModel
       Performance metrics obtained by benchmark.
-      
+
       generate_speed: float| None  # Output throughput (token/s), recommended to pass
       success_rate: float | None # Percentage of successful request returns, recommended to pass
       throughput: float | None # qps, recommended to pass
@@ -194,8 +194,8 @@ Common Data Structure Definitions
 ..config.config.register_settings(func: Callable | None = None) → None
 Register custom settings, can provide a function to generate.
  Args:
- func: Function to generate settings. 
- 
+ func: Function to generate settings.
+
  Returns: None
 ```
 
@@ -205,31 +205,31 @@ Register custom settings, can provide a function to generate.
 class ..optimizer.benchmark.BenchmarkInterface()
     Bases: ABC
     property num_prompts: Tuple[OptimizerConfigField] | None
-        Get the request count for data retrieval property 
+        Get the request count for data retrieval property
         Returns: Optional[Tuple[OptimizerConfigField]]
-        
+
     property setter num_prompts: Tuple[OptimizerConfigField] | None
-        Set the request count for data retrieval property 
+        Set the request count for data retrieval property
         Returns: None
-        
+
     property data_field: Tuple[OptimizerConfigField] | None
-        Get data field property 
+        Get data field property
         Returns: Optional[Tuple[OptimizerConfigField]]
-        
+
     abstract property setter data_field: Tuple[OptimizerConfigField] | None
-        Set data field property 
+        Set data field property
         Returns: None
-    
+
     abstract get_performance_index() → PerformanceIndex
-        Get performance metrics 
+        Get performance metrics
         Returns: Metrics data class
-    
+
     abstract stop()
-        Other preparations at runtime. 
+        Other preparations at runtime.
         Returns: None
-    
+
     abstract update_command() → None
-        Update the service startup command based on data_field before service startup. Update the self.command property. 
+        Update the service startup command based on data_field before service startup. Update the self.command property.
         Returns: None
 ```
 
@@ -240,29 +240,29 @@ class ..optimizer.simulator.SimulatorInterface()
     Bases: ABC
 
     Operate the service framework. Used for service-related operations.
-    
+
     abstract property data_field: Tuple[OptimizerConfigField] | None
-        Get data field property 
+        Get data field property
         Returns: Optional[Tuple[OptimizerConfigField]]
-        
+
     abstract property setter data_field: Tuple[OptimizerConfigField] | None
-        Set data field property 
+        Set data field property
         Returns: None
-    
+
     abstract update_command() → None
-        Update the service startup command based on data_field before service startup. Update the self.command property. 
+        Update the service startup command based on data_field before service startup. Update the self.command property.
         Returns: None
-    
+
     update_config(params: Tuple[OptimizerConfigField] | None = None) → bool
-        Update the service configuration file or other configurations based on parameters. Modify the configuration file before service startup according to the passed parameter values to make the new configuration take effect. 
+        Update the service configuration file or other configurations based on parameters. Modify the configuration file before service startup according to the passed parameter values to make the new configuration take effect.
         Args:
-    
+
             params: List of tuning parameters, a tuple, defined by the value and config position of each element.
-        
+
         Returns: bool, returns update success or failure.
-        
+
     abstract stop()
-        Other preparations at runtime. 
+        Other preparations at runtime.
         Returns: None
 ```
 

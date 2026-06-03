@@ -15,16 +15,23 @@
 # -------------------------------------------------------------------------
 import json
 import os
-import stat
 import subprocess
 import tempfile
 import time
 from copy import deepcopy
-from typing import Any, Optional, Tuple, List
+from typing import Any, Optional, Tuple
 import shutil
 from dataclasses import dataclass
 
 import yaml
+from loguru import logger
+from msguard.security import open_s
+
+from ..interfaces.simulator import SimulatorInterface
+from ..utils import remove_file, close_file_fp, backup
+from ...config.custom_command import VllmCommand, MindieCommand
+from ...config.config import get_settings, OptimizerConfigField, VllmConfig, MindieConfig, KubectlConfig
+from ...config.constant import ProcessState, Stage
 
 """
 Mindie simulation engine - provides interfaces for starting/stopping mindie simulation services.
@@ -32,18 +39,6 @@ Mindie simulation engine - provides interfaces for starting/stopping mindie simu
 The LocalSimulate class provides comprehensive simulation capabilities for running mindie models
 locally, including configuration management, port resolution, and multi-instance support.
 """
-from ctypes import Union
-from loguru import logger
-from msguard.security import open_s
-
-from ..interfaces.simulator import SimulatorInterface
-from ..utils import remove_file, close_file_fp, backup
-from ...config.custom_command import VllmCommand, MindieCommand
-from ...config.config import (
-    get_settings, OptimizerConfigField, VllmConfig,
-    MindieConfig, KubectlConfig
-)
-from ...config.constant import ProcessState, Stage
 
 
 @dataclass
@@ -74,13 +69,17 @@ class Simulator(SimulatorInterface):
             settings = get_settings()
             self.config = settings.mindie
         super().__init__(*args, process_name=self.config.process_name, **kwargs)
-        logger.debug(f"config path {self.config.config_path}", )
+        logger.debug(
+            f"config path {self.config.config_path}",
+        )
         if not self.config.config_path.exists():
             raise FileNotFoundError(self.config.config_path)
         with open_s(self.config.config_path, "r") as f:
             data = json.load(f)
         self.default_config = data
-        logger.debug(f"config bak path {self.config.config_bak_path}", )
+        logger.debug(
+            f"config bak path {self.config.config_bak_path}",
+        )
         if self.config.config_bak_path.exists():
             self.config.config_bak_path.unlink()
         with open_s(self.config.config_bak_path, 'w') as fout:
@@ -107,32 +106,38 @@ class Simulator(SimulatorInterface):
     @staticmethod
     def set_config_for_dict(context: ConfigContextdict):
         if context.cur_key in context.origin_config:
-            Simulator.set_config(context.origin_config[context.cur_key], context.next_level, context.value, 
-                                 context.current_depth)
+            Simulator.set_config(
+                context.origin_config[context.cur_key], context.next_level, context.value, context.current_depth
+            )
         elif Simulator.is_int(context.cur_key):
             raise KeyError(f"data: {context.origin_config}, key: {context.cur_key}")
         elif Simulator.is_int(context.next_key):
             context.origin_config[context.cur_key] = []
-            Simulator.set_config(context.origin_config[context.cur_key], context.next_level, context.value, 
-                                 context.current_depth)
+            Simulator.set_config(
+                context.origin_config[context.cur_key], context.next_level, context.value, context.current_depth
+            )
         else:
             context.origin_config[context.cur_key] = {}
-            Simulator.set_config(context.origin_config[context.cur_key], context.next_level, context.value, 
-                                 context.current_depth)
+            Simulator.set_config(
+                context.origin_config[context.cur_key], context.next_level, context.value, context.current_depth
+            )
 
     @staticmethod
     def set_config_for_list(context: ConfigContextlist):
         if len(context.origin_config) > int(context.cur_key):
-            Simulator.set_config(context.origin_config[int(context.cur_key)], context.next_level, context.value, 
-                                 context.current_depth)
+            Simulator.set_config(
+                context.origin_config[int(context.cur_key)], context.next_level, context.value, context.current_depth
+            )
         elif len(context.origin_config) == int(context.cur_key) and Simulator.is_int(context.next_key):
             context.origin_config.append([])
-            Simulator.set_config(context.origin_config[int(context.cur_key)], context.next_level, context.value, 
-                                 context.current_depth)
+            Simulator.set_config(
+                context.origin_config[int(context.cur_key)], context.next_level, context.value, context.current_depth
+            )
         elif len(context.origin_config) == int(context.cur_key) and not Simulator.is_int(context.next_key):
             context.origin_config.append({})
-            Simulator.set_config(context.origin_config[int(context.cur_key)], context.next_level, context.value, 
-                                 context.current_depth)
+            Simulator.set_config(
+                context.origin_config[int(context.cur_key)], context.next_level, context.value, context.current_depth
+            )
         else:
             raise IndexError(f"data: {context.origin_config}, index: {context.cur_key}")
 
@@ -144,7 +149,7 @@ class Simulator(SimulatorInterface):
         try:
             if "." in key:
                 _f_index = key.index(".")
-                _cur_key, next_level = key[:_f_index], key[_f_index + 1:]
+                _cur_key, next_level = key[:_f_index], key[_f_index + 1 :]
             else:
                 _cur_key = key
             if next_level is None:
@@ -173,7 +178,7 @@ class Simulator(SimulatorInterface):
                 next_key=_next_key,
                 next_level=next_level,
                 value=value,
-                current_depth=current_depth + 1
+                current_depth=current_depth + 1,
             )
             Simulator.set_config_for_dict(context)
         elif isinstance(origin_config, list):
@@ -183,7 +188,7 @@ class Simulator(SimulatorInterface):
                 next_key=_next_key,
                 next_level=next_level,
                 value=value,
-                current_depth=current_depth + 1
+                current_depth=current_depth + 1,
             )
             Simulator.set_config_for_list(context)
         else:
@@ -195,11 +200,33 @@ class Simulator(SimulatorInterface):
     def before_run(self, run_params: Optional[Tuple[OptimizerConfigField]] = None):
         self.update_config(run_params)
         super().before_run(run_params)
-        subprocess.run(["pkill", "-9", "mindie"], env=self.env, stdout=self.run_log_fp,
-                       stderr=subprocess.STDOUT, text=True, cwd=self.work_path)
-        subprocess.run(["npu-smi", "info"], env=self.env, stdout=self.run_log_fp,
-                       stderr=subprocess.STDOUT, text=True, cwd=self.work_path)
-    
+
+        pkill_path = shutil.which("pkill")
+        if not pkill_path:
+            logger.warning("pkill command not found in PATH")
+            return
+        subprocess.run(
+            [pkill_path, "-9", "mindie"],
+            env=self.env,
+            stdout=self.run_log_fp,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=self.work_path,
+        )
+
+        npu_smi_path = shutil.which("npu-smi")
+        if not npu_smi_path:
+            logger.warning("npu-smi command not found in PATH")
+            return
+        subprocess.run(
+            [npu_smi_path, "info"],
+            env=self.env,
+            stdout=self.run_log_fp,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=self.work_path,
+        )
+
     def backup(self):
         super().backup()
         backup(self.config.config_path, self.bak_path, self.__class__.__name__)
@@ -286,6 +313,7 @@ class VllmSimulator(SimulatorInterface):
         if self.process and self.process.poll() is None:
             try:
                 import psutil
+
                 parent = psutil.Process(self.process.pid)
                 children = parent.children(recursive=True)
 
@@ -322,13 +350,13 @@ class VllmSimulator(SimulatorInterface):
             return False
 
         signals = ["-15", "-9"]  # SIGTERM, SIGKILL
-        
+
         for attempt in range(1, max_attempts + 1):
             for signal in signals:
                 if not self._is_vllm_running():
                     logger.info("vllm process has been terminated")
                     return True
-                
+
                 logger.debug(f"Attempt {attempt}/{max_attempts}: sending signal {signal} to vllm")
                 try:
                     result = subprocess.run(
@@ -336,7 +364,7 @@ class VllmSimulator(SimulatorInterface):
                         stderr=subprocess.STDOUT,
                         stdout=subprocess.PIPE,
                         text=True,
-                        timeout=10
+                        timeout=10,
                     )
                     if result.returncode == 0 or result.returncode == 1:
                         logger.debug(f"Signal {signal} sent successfully (rc={result.returncode})")
@@ -362,7 +390,7 @@ class VllmSimulator(SimulatorInterface):
             return False
         try:
             result = subprocess.run(
-                ["pgrep", "-c", "-f", "vllm serve"],
+                [pgrep_path, "-c", "-f", "vllm serve"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -376,6 +404,7 @@ class VllmSimulator(SimulatorInterface):
     def _wait_for_process_exit(self, timeout: int) -> bool:
         """Wait for process to exit, returns whether exit was successful"""
         import time
+
         start = time.time()
         while time.time() - start < timeout:
             if not self._is_vllm_running():
@@ -385,13 +414,18 @@ class VllmSimulator(SimulatorInterface):
 
     def _log_residual_processes(self):
         """Log residual process info for diagnostics"""
+        pgrep_path = shutil.which("pgrep")
+        if not pgrep_path:
+            logger.warning("pgrep command not found in PATH")
+            return
+
         try:
             result = subprocess.run(
-                ["pgrep", "-a", "-f", "vllm serve"],
+                [pgrep_path, "-a", "-f", "vllm serve"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
-                timeout=5
+                timeout=5,
             )
             if result.stdout:
                 logger.warning(f"Residual vllm processes:\n{result.stdout}")
@@ -427,7 +461,9 @@ class DisaggregationSimulator(SimulatorInterface):
                 logger.error(f"Failed in read ms_controller.json. file: {self.config.config_single_pd_path}")
         self.default_pd_config = pd_data
         self.default_config = data
-        logger.debug(f"config bak path {self.config.config_single_bak_path!r}", )
+        logger.debug(
+            f"config bak path {self.config.config_single_bak_path!r}",
+        )
         if self.config.config_single_bak_path.exists():
             self.config.config_single_bak_path.unlink()
         with open_s(self.config.config_single_bak_path, "w") as fout:
@@ -452,33 +488,40 @@ class DisaggregationSimulator(SimulatorInterface):
     @staticmethod
     def set_config_for_dict(context: ConfigContextdict):
         if context.cur_key in context.origin_config:
-            DisaggregationSimulator.set_config(context.origin_config[context.cur_key], context.next_level, 
-                                               context.value, context.current_depth)
+            DisaggregationSimulator.set_config(
+                context.origin_config[context.cur_key], context.next_level, context.value, context.current_depth
+            )
         elif DisaggregationSimulator.is_int(context.cur_key):
             raise KeyError(f"data: {context.origin_config}, key: {context.cur_key}")
         elif DisaggregationSimulator.is_int(context.next_key):
             context.origin_config[context.cur_key] = []
-            DisaggregationSimulator.set_config(context.origin_config[context.cur_key], context.next_level, 
-                                               context.value, context.current_depth)
+            DisaggregationSimulator.set_config(
+                context.origin_config[context.cur_key], context.next_level, context.value, context.current_depth
+            )
         else:
             context.origin_config[context.cur_key] = {}
-            DisaggregationSimulator.set_config(context.origin_config[context.cur_key], context.next_level, 
-                                               context.value, context.current_depth)
+            DisaggregationSimulator.set_config(
+                context.origin_config[context.cur_key], context.next_level, context.value, context.current_depth
+            )
 
     @staticmethod
     def set_config_for_list(context: ConfigContextlist):
         if len(context.origin_config) > int(context.cur_key):
-            DisaggregationSimulator.set_config(context.origin_config[int(context.cur_key)], context.next_level, 
-                                               context.value, context.current_depth)
+            DisaggregationSimulator.set_config(
+                context.origin_config[int(context.cur_key)], context.next_level, context.value, context.current_depth
+            )
         elif len(context.origin_config) == int(context.cur_key) and DisaggregationSimulator.is_int(context.next_key):
             context.origin_config.append([])
-            DisaggregationSimulator.set_config(context.origin_config[int(context.cur_key)], context.next_level, 
-                                               context.value, context.current_depth)
-        elif len(context.origin_config) == int(context.cur_key) and not \
-            DisaggregationSimulator.is_int(context.next_key):
+            DisaggregationSimulator.set_config(
+                context.origin_config[int(context.cur_key)], context.next_level, context.value, context.current_depth
+            )
+        elif len(context.origin_config) == int(context.cur_key) and not DisaggregationSimulator.is_int(
+            context.next_key
+        ):
             context.origin_config.append({})
-            DisaggregationSimulator.set_config(context.origin_config[int(context.cur_key)], context.next_level, 
-                                               context.value, context.current_depth)
+            DisaggregationSimulator.set_config(
+                context.origin_config[int(context.cur_key)], context.next_level, context.value, context.current_depth
+            )
         else:
             raise IndexError(f"data: {context.origin_config}, index: {context.cur_key}")
 
@@ -490,7 +533,7 @@ class DisaggregationSimulator(SimulatorInterface):
         try:
             if "." in key:
                 _f_index = key.index(".")
-                _cur_key, next_level = key[:_f_index], key[_f_index + 1:]
+                _cur_key, next_level = key[:_f_index], key[_f_index + 1 :]
             else:
                 _cur_key = key
             if next_level is None:
@@ -519,7 +562,7 @@ class DisaggregationSimulator(SimulatorInterface):
                 next_key=_next_key,
                 next_level=next_level,
                 value=value,
-                current_depth=current_depth + 1
+                current_depth=current_depth + 1,
             )
             DisaggregationSimulator.set_config_for_dict(context)
         elif isinstance(origin_config, list):
@@ -529,12 +572,12 @@ class DisaggregationSimulator(SimulatorInterface):
                 next_key=_next_key,
                 next_level=next_level,
                 value=value,
-                current_depth=current_depth + 1
+                current_depth=current_depth + 1,
             )
             DisaggregationSimulator.set_config_for_list(context)
         else:
             raise ValueError(f"Not Support type {type(origin_config)}")
-    
+
     @staticmethod
     def is_int(x):
         try:
@@ -542,16 +585,16 @@ class DisaggregationSimulator(SimulatorInterface):
             return True
         except ValueError:
             return False
-        
+
     def prepare_before_start_server(self):
         bash_path = shutil.which("bash")
         if bash_path is not None:
-            subprocess.run([bash_path, self.config.delete_path, "mindie", "."], 
-                           cwd=self.config.kubectl_default_path)
+            subprocess.run([bash_path, self.config.delete_path, "mindie", "."], cwd=self.config.kubectl_default_path)
             while True:
                 signal = True
-                proc = subprocess.run(self.log_command, stdout=subprocess.PIPE, text=True, 
-                                      cwd=self.config.kubectl_default_path)
+                proc = subprocess.run(
+                    self.log_command, stdout=subprocess.PIPE, text=True, cwd=self.config.kubectl_default_path
+                )
                 lines = proc.stdout.splitlines()
                 for line in lines:
                     if line.startswith('mindie'):
@@ -585,14 +628,15 @@ class DisaggregationSimulator(SimulatorInterface):
             self.config.config_single_pd_path.unlink()
         with open_s(self.config.config_single_pd_path, "w") as fout:
             json.dump(pd_config, fout, indent=4)
-        
+
     def update_command(self):
         self.command = self.KubectlCommand(self.config.command).command
         self.log_command = self.KubectlCommand(self.config.command).log_command
         self.monitor_command = self.KubectlCommand(self.config.command).monitor_command
-        
+
     def test_curl(self):
         import requests
+
         logger.info(f"kubectl_single_path: {self.config.kubectl_single_path}")
         curl_port = None
         yaml_dir = self.config.kubectl_single_path.parent
@@ -620,13 +664,11 @@ class DisaggregationSimulator(SimulatorInterface):
                 "top_k": 5,
                 "do_sample": True,
                 "repetition_penalty": 1.05,
-                "seed": 128
-            }
+                "seed": 128,
+            },
         }
 
-        headers = {
-            "Content-Type": "application/json"
-        }
+        headers = {"Content-Type": "application/json"}
 
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=10)
@@ -635,7 +677,7 @@ class DisaggregationSimulator(SimulatorInterface):
                 return True
             else:
                 return False
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException:
             return False
 
     def health(self):
@@ -663,18 +705,14 @@ class DisaggregationSimulator(SimulatorInterface):
         self.prepare_before_start_server()
         self.mindie_log_fp, self.run_log = tempfile.mkstemp(prefix="ms_serviceparam_optimizer_mindie")
         self.mindie_log_offset = 0
-        if self.config.work_path:
-            cwd = self.config.work_path
-        else:
-            cwd = os.getcwd()
         logger.info(f"start running the command: {self.command}")
-        self.process = subprocess.run(self.command, env=self.env, text=True, 
-                                      cwd=self.config.kubectl_default_path)
+        self.process = subprocess.run(self.command, env=self.env, text=True, cwd=self.config.kubectl_default_path)
         logger.info(f"self.log_command: {self.log_command}")
         while True:
-            proc = subprocess.run(self.log_command, stdout=subprocess.PIPE, text=True, 
-                                cwd=self.config.kubectl_default_path)
-            
+            proc = subprocess.run(
+                self.log_command, stdout=subprocess.PIPE, text=True, cwd=self.config.kubectl_default_path
+            )
+
             lines = proc.stdout.splitlines()
             for line in lines:
                 if line.startswith('mindie'):
@@ -686,9 +724,14 @@ class DisaggregationSimulator(SimulatorInterface):
         kubectl_monitor_command = self.KubectlCommand(self.config.command).monitor_command
         kubectl_monitor_command.append(mindie_name[1])
         logger.debug(f"mindie_name: {mindie_name[1]}")
-        self.log_process = subprocess.Popen(kubectl_monitor_command, stdout=self.mindie_log_fp, 
-                                            stderr=subprocess.STDOUT, env=self.env, text=True, 
-                                            cwd=self.config.kubectl_default_path)
+        self.log_process = subprocess.Popen(
+            kubectl_monitor_command,
+            stdout=self.mindie_log_fp,
+            stderr=subprocess.STDOUT,
+            env=self.env,
+            text=True,
+            cwd=self.config.kubectl_default_path,
+        )
         logger.info(f"Start running the command: {' '.join(kubectl_monitor_command)}, log file: {self.run_log}")
 
     def run(self, run_params: Tuple[OptimizerConfigField]):

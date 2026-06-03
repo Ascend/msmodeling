@@ -37,15 +37,15 @@ class CustomGlobalBestPSO(GlobalBestPSO):
         if (len(self.breakpoint_pos) % self.n_particles) != 0:
             _iter_num += 1
         for i in range(_iter_num):
-            _current_pos = np.array(self.breakpoint_pos[i * self.n_particles:(i + 1) * self.n_particles])
+            _current_pos = np.array(self.breakpoint_pos[i * self.n_particles : (i + 1) * self.n_particles])
             if _current_pos.shape[0] < self.n_particles:
-                _current_pos = np.append(_current_pos, self.swarm.position[_current_pos.shape[0]:], axis=0)
-            _current_cost = np.array(self.breakpoint_cost[i * self.n_particles:(i + 1) * self.n_particles])
+                _current_pos = np.append(_current_pos, self.swarm.position[_current_pos.shape[0] :], axis=0)
+            _current_cost = np.array(self.breakpoint_cost[i * self.n_particles : (i + 1) * self.n_particles])
             if _current_cost.shape[0] < self.n_particles:
                 if self.swarm.current_cost.shape[0] != 0:
-                    _current_cost = np.append(_current_cost, self.swarm.current_cost[_current_cost.shape[0]:], axis=0)
+                    _current_cost = np.append(_current_cost, self.swarm.current_cost[_current_cost.shape[0] :], axis=0)
                 else:
-                    _current_cost = np.append(_current_cost, self.swarm.pbest_cost[_current_cost.shape[0]:], axis=0)
+                    _current_cost = np.append(_current_cost, self.swarm.pbest_cost[_current_cost.shape[0] :], axis=0)
             self.swarm.position = _current_pos
             self.swarm.current_cost = _current_cost
             self.swarm.pbest_pos, self.swarm.pbest_cost = compute_pbest(self.swarm)
@@ -54,10 +54,14 @@ class CustomGlobalBestPSO(GlobalBestPSO):
             vel = self.swarm.velocity
             pos = self.swarm.position
             cost = self.swarm.best_cost
-            mean_neighbor = self.swarm.best_cost
             pcost = np.mean(self.swarm.pbest_cost)
-            hist_ = self.ToHistory(velocity=vel, position=pos, best_cost=cost, mean_pbest_cost=pcost,
-                mean_neighbor_cost=self.swarm.best_cost,)
+            hist_ = self.ToHistory(
+                velocity=vel,
+                position=pos,
+                best_cost=cost,
+                mean_pbest_cost=pcost,
+                mean_neighbor_cost=self.swarm.best_cost,
+            )
             self._populate_history(hist_)
 
         # Perform velocity and position updates

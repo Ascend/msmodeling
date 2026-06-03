@@ -24,7 +24,6 @@ from ..common import get_npu_total_memory
 from ..config.config import get_settings
 
 
-
 class ModelConfig:
     def __init__(self, config_path: Path):
         if not config_path.exists():
@@ -92,7 +91,7 @@ class ModelConfig:
             logger.warning(
                 "The 'torch_dtype' or 'dtype' was not found in the configuration file."
                 "The default value for kvcache_dtype_byte is 2 (bf16/fp16)."
-                )
+            )
             return 2
 
     def get_one_token_cache(self):
@@ -117,10 +116,7 @@ class ModelConfig:
         mlp_intermediate_elements = max_prefill_token * self.intermediate_size
 
         total_elements_at_peak = (
-                input_output_elements +
-                qkv_proj_elements +
-                attn_scores_elements +
-                mlp_intermediate_elements
+            input_output_elements + qkv_proj_elements + attn_scores_elements + mlp_intermediate_elements
         )
 
         peak_activations_bytes = total_elements_at_peak * self.kvcache_dtype_byte
@@ -128,7 +124,6 @@ class ModelConfig:
         return peak_activations_bytes
 
     def calculate_model_weights_size(self) -> float:
-
         embedding_params = self.vocab_size * self.hidden_size
 
         position_embedding_params = self.max_position_embeddings * self.hidden_size
@@ -142,11 +137,11 @@ class ModelConfig:
         final_layernorm_params = 2 * self.hidden_size  # gamma, beta
 
         total_params = (
-                embedding_params +
-                position_embedding_params +
-                total_transformer_params +
-                lm_head_params +
-                final_layernorm_params
+            embedding_params
+            + position_embedding_params
+            + total_transformer_params
+            + lm_head_params
+            + final_layernorm_params
         )
 
         memory_bytes = total_params * self.kvcache_dtype_byte
@@ -162,9 +157,15 @@ class ModelConfig:
 
 
 class MindieModelConfig:
-    def __init__(self, config_path, avg_input_length: int = 254, max_output_length: int = 256,
-                 max_input_length: int = 8192, npu_total_mem: Optional[int] = None,
-                 memory_usage_rate: Optional[int] = None):
+    def __init__(
+        self,
+        config_path,
+        avg_input_length: int = 254,
+        max_output_length: int = 256,
+        max_input_length: int = 8192,
+        npu_total_mem: Optional[int] = None,
+        memory_usage_rate: Optional[int] = None,
+    ):
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path!r}")
         try:
@@ -195,17 +196,22 @@ class MindieModelConfig:
 
     def get_npu_mem_size(self):
         mem_for_kv_cache_gb = int(
-            self.config_data["BackendConfig"]["ModelDeployConfig"]["ModelConfig"][0]["npuMemSize"])
+            self.config_data["BackendConfig"]["ModelDeployConfig"]["ModelConfig"][0]["npuMemSize"]
+        )
         if mem_for_kv_cache_gb != -1:
             return mem_for_kv_cache_gb
         npu_total_mem = self.npu_total_mem / 1024
         npu_available_memory = npu_total_mem * (100 - self.memory_usage_rate) / 100
         model_weights_gb_per_npu = self.model_config.calculate_model_weights_size() / 1024 / self.tp_size
-        activation_gb = self.model_config.get_peak_activations_size(max_prefill_token=self.max_prefill_tokens,
-                                    sequence_length=self.max_input_length) / self.byte_to_gb / self.tp_size
+        activation_gb = (
+            self.model_config.get_peak_activations_size(
+                max_prefill_token=self.max_prefill_tokens, sequence_length=self.max_input_length
+            )
+            / self.byte_to_gb
+            / self.tp_size
+        )
         logger.debug(f"activation_gb: {activation_gb}")
-        mem_for_kv_cache_gb = (
-                npu_available_memory * self.mem_coefficient - model_weights_gb_per_npu - activation_gb)
+        mem_for_kv_cache_gb = npu_available_memory * self.mem_coefficient - model_weights_gb_per_npu - activation_gb
         return mem_for_kv_cache_gb
 
     def get_max_batch_size_bound(self):

@@ -20,6 +20,7 @@ def main():
 
     if args.command == "optix":
         from optix.optimizer.optimizer import main as optix_main
+
         sys.argv = [sys.argv[0]] + remaining
         optix_main()
     else:

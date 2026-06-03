@@ -1,13 +1,13 @@
 # ------------------------- Optimization Parameter Configuration ------------------------------------------------
-n_particles = 10 
-iters = 5 
-ttft_penalty = 1 
-tpot_penalty = 0 
-success_rate_penalty = 5.0 
-ttft_slo = 1 
-tpot_slo = 0.05 
+n_particles = 10
+iters = 5
+ttft_penalty = 1
+tpot_penalty = 0
+success_rate_penalty = 5.0
+ttft_slo = 1
+tpot_slo = 0.05
 service = "master"
-sample_size = 1000 
+sample_size = 1000
 
 # ------------------------- Select top_k for fine-tuning ------------------------------------------------
 [data_storage]
@@ -150,14 +150,14 @@ max = 512
 dtype = "int"
 value = 64
 [[vllm.target_field]]
-name = "CONCURRENCY" 
+name = "CONCURRENCY"
 config_position = "env"
 min = 1
 max = 1000
 dtype = "int"
 value = 100
 [[vllm.target_field]]
-name = "REQUESTRATE" 
+name = "REQUESTRATE"
 config_position = "env"
 min = 0
 max = 0

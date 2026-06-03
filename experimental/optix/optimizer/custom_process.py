@@ -24,17 +24,20 @@ from typing import Tuple, Optional, List
 import psutil
 from loguru import logger
 from msguard.security import open_s
-from ..config.base_config import CUSTOM_OUTPUT, MODEL_EVAL_STATE_CONFIG_PATH, \
-    ms_serviceparam_optimizer_config_path
+from ..config.base_config import CUSTOM_OUTPUT, MODEL_EVAL_STATE_CONFIG_PATH, ms_serviceparam_optimizer_config_path
 from ..config.config import OptimizerConfigField, get_settings
-from ..optimizer.utils import close_file_fp, remove_file, kill_children, \
-    backup, kill_process
+from ..optimizer.utils import close_file_fp, remove_file, kill_children, backup, kill_process
 
 
 class CustomProcess:
-    def __init__(self, bak_path: Optional[Path] = None, command: Optional[List[str]] = None,
-                 work_path: Optional[Path] = None, print_log: bool = False,
-                 process_name: str = ""):
+    def __init__(
+        self,
+        bak_path: Optional[Path] = None,
+        command: Optional[List[str]] = None,
+        work_path: Optional[Path] = None,
+        print_log: bool = False,
+        process_name: str = "",
+    ):
         self.command = command
         self.bak_path = bak_path
         self.work_path = work_path if work_path else os.getcwd()
@@ -76,7 +79,6 @@ class CustomProcess:
                     logger.error(f"Failed to kill process. {e}")
         time.sleep(1)
 
-
     def backup(self):
         # Backup operation, default to backing up log
         backup(self.run_log, self.bak_path, self.__class__.__name__)
@@ -107,7 +109,6 @@ class CustomProcess:
         # Set the json file to read
         if MODEL_EVAL_STATE_CONFIG_PATH not in self.env:
             self.env[MODEL_EVAL_STATE_CONFIG_PATH] = str(ms_serviceparam_optimizer_config_path)
-                
 
     def run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None, **kwargs):
         # Start the test
@@ -128,11 +129,14 @@ class CustomProcess:
             if isinstance(k, str) and isinstance(v, str):
                 continue
             else:
-                logger.error(f"Possible Problem with Environment Variable Type. "
-                             f"env: {k}={v}, k type: {type(k)}, v type: {type(v)}")
+                logger.error(
+                    f"Possible Problem with Environment Variable Type. "
+                    f"env: {k}={v}, k type: {type(k)}, v type: {type(v)}"
+                )
         try:
-            self.process = subprocess.Popen(self.command, env=self.env, stdout=self.run_log_fp,
-                                            stderr=subprocess.STDOUT, cwd=self.work_path)
+            self.process = subprocess.Popen(
+                self.command, env=self.env, stdout=self.run_log_fp, stderr=subprocess.STDOUT, cwd=self.work_path
+            )
         except OSError as e:
             logger.error(f"Failed to run {self.command}. error {e}")
             raise e
@@ -163,7 +167,8 @@ class CustomProcess:
             return True
         else:
             raise subprocess.SubprocessError(
-                f"Failed in run {self.command}. return code: {self.process.returncode}. log: {self.run_log}")
+                f"Failed in run {self.command}. return code: {self.process.returncode}. log: {self.run_log}"
+            )
 
     def stop(self, del_log: bool = True):
         self.run_log_offset = 0

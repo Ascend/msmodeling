@@ -24,7 +24,9 @@ RUN_TIME = time.strftime("%Y%m%d%H%M%S", time.localtime())
 INSTALL_PATH = Path(optix.__path__[0])
 RUN_PATH = Path(os.getcwd())
 MODEL_EVAL_STATE_CONFIG_PATH = "MODEL_EVAL_STATE_CONFIG_PATH"
-ms_serviceparam_optimizer_config_path = os.getenv(MODEL_EVAL_STATE_CONFIG_PATH) or os.getenv(MODEL_EVAL_STATE_CONFIG_PATH.lower())
+ms_serviceparam_optimizer_config_path = os.getenv(MODEL_EVAL_STATE_CONFIG_PATH) or os.getenv(
+    MODEL_EVAL_STATE_CONFIG_PATH.lower()
+)
 if not ms_serviceparam_optimizer_config_path:
     ms_serviceparam_optimizer_config_path = RUN_PATH.joinpath("config.toml")
 ms_serviceparam_optimizer_config_path = Path(ms_serviceparam_optimizer_config_path).absolute().resolve()
@@ -79,7 +81,7 @@ class PDPolicy(Enum):
     competition = "competition"
     disaggregation = "disaggregation"
 
-    
+
 class ServiceType(Enum):
     master = "master"
     slave = "slave"

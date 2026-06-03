@@ -11,28 +11,33 @@ BENCHMARK_LOG_ERROR_MESSAGE = "Detected {error_type} in benchmark logs"
 
 class FatalError(subprocess.SubprocessError):
     """Fatal error, no retry (OOM, device failure, etc.)"""
+
     pass
 
 
 class RetryableError(subprocess.SubprocessError):
     """Retryable error (network jitter, IO error, etc.)"""
+
     pass
 
 
 class ServiceHookPoint(Enum):
     """Service framework hook point"""
+
     STARTUP_POLLING = "startup_polling"
     RUNTIME_MONITOR = "runtime_monitor"
 
 
 class BenchmarkHookPoint(Enum):
     """Benchmark framework hook point"""
+
     RUNTIME_MONITOR = "runtime_monitor"
 
 
 @dataclass
 class ErrorContext:
     """Error context information"""
+
     error_type: Any
     severity: Any
     message: str
@@ -42,6 +47,7 @@ class ErrorContext:
 @dataclass
 class HealthCheckContext:
     """Health check context"""
+
     simulator: Any
     benchmark: Any
     scheduler: Any
@@ -53,6 +59,7 @@ class HealthCheckContext:
 @dataclass
 class HealthCheckResult:
     """Health check result"""
+
     is_healthy: bool
     error_context: Optional[ErrorContext] = None
 
@@ -62,7 +69,7 @@ def _check_log_patterns(
     patterns_dict: Dict[ErrorType, List[str]],
     severity: ErrorSeverity,
     error_message_format: str,
-    log_snippet_length: int
+    log_snippet_length: int,
 ) -> Optional[HealthCheckResult]:
     """Check error patterns in logs (common function)
 
@@ -86,8 +93,8 @@ def _check_log_patterns(
                         error_type=error_type,
                         severity=severity,
                         message=error_message_format.format(error_type=error_type.value),
-                        details={"log_snippet": log_content[-log_snippet_length:]}
-                    )
+                        details={"log_snippet": log_content[-log_snippet_length:]},
+                    ),
                 )
     return None
 
@@ -98,9 +105,11 @@ class HealthCheckHook:
     def __init__(self):
         self._hooks: Dict[Enum, List[Tuple[int, Callable, str]]] = {}
 
-    def register(self, hook_point: Enum, func: Optional[Callable] = None,
-                 *, priority: int = 0, name: Optional[str] = None):
+    def register(
+        self, hook_point: Enum, func: Optional[Callable] = None, *, priority: int = 0, name: Optional[str] = None
+    ):
         """Register hook function (implemented in base class, subclasses directly inherit)"""
+
         def decorator(f):
             hook_name = name or f.__name__
             if hook_point not in self._hooks:
@@ -127,8 +136,8 @@ class HealthCheckHook:
                     error_context=ErrorContext(
                         error_type=ErrorType.UNKNOWN,
                         severity=ErrorSeverity.FATAL,
-                        message=f"Hook {hook_name} raised unexpected exception: {type(e).__name__}: {str(e)}"
-                    )
+                        message=f"Hook {hook_name} raised unexpected exception: {type(e).__name__}: {str(e)}",
+                    ),
                 )
 
         return HealthCheckResult(is_healthy=True)
@@ -136,11 +145,13 @@ class HealthCheckHook:
 
 class ServiceHealthCheckHook(HealthCheckHook):
     """Service framework health check hook (only inherits, no need to re-implement register)"""
+
     pass
 
 
 class BenchmarkHealthCheckHook(HealthCheckHook):
     """Benchmark framework health check hook (only inherits, no need to re-implement register)"""
+
     pass
 
 
@@ -161,7 +172,7 @@ class ServiceHealthChecks:
             patterns_dict=config.fatal_patterns,
             severity=ErrorSeverity.FATAL,
             error_message_format=LOG_ERROR_MESSAGE,
-            log_snippet_length=settings.health_check.log_snippet_length
+            log_snippet_length=settings.health_check.log_snippet_length,
         )
         if result:
             return result
@@ -171,7 +182,7 @@ class ServiceHealthChecks:
             patterns_dict=config.retryable_patterns,
             severity=ErrorSeverity.RETRYABLE,
             error_message_format=LOG_ERROR_MESSAGE,
-            log_snippet_length=settings.health_check.log_snippet_length
+            log_snippet_length=settings.health_check.log_snippet_length,
         )
         if result:
             return result
@@ -195,7 +206,7 @@ class BenchmarkHealthChecks:
             patterns_dict=config.fatal_patterns,
             severity=ErrorSeverity.FATAL,
             error_message_format=BENCHMARK_LOG_ERROR_MESSAGE,
-            log_snippet_length=settings.health_check.log_snippet_length
+            log_snippet_length=settings.health_check.log_snippet_length,
         )
         if result:
             return result
@@ -205,7 +216,7 @@ class BenchmarkHealthChecks:
             patterns_dict=config.retryable_patterns,
             severity=ErrorSeverity.RETRYABLE,
             error_message_format=BENCHMARK_LOG_ERROR_MESSAGE,
-            log_snippet_length=settings.health_check.log_snippet_length
+            log_snippet_length=settings.health_check.log_snippet_length,
         )
         if result:
             return result
@@ -214,9 +225,7 @@ class BenchmarkHealthChecks:
 
 service_health_checks_hooks = [
     (ServiceHookPoint.STARTUP_POLLING, ServiceHealthChecks.check_log_errors, 10),
-    (ServiceHookPoint.RUNTIME_MONITOR, ServiceHealthChecks.check_log_errors, 10)
+    (ServiceHookPoint.RUNTIME_MONITOR, ServiceHealthChecks.check_log_errors, 10),
 ]
 
-benchmark_health_checks_hooks = [
-    (BenchmarkHookPoint.RUNTIME_MONITOR, BenchmarkHealthChecks.check_log_errors, 10)
-]
+benchmark_health_checks_hooks = [(BenchmarkHookPoint.RUNTIME_MONITOR, BenchmarkHealthChecks.check_log_errors, 10)]

@@ -19,8 +19,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from ..config.config import default_support_field, PerformanceIndex, \
-    map_param_with_value, OptimizerConfigField
+from ..config.config import default_support_field, PerformanceIndex, map_param_with_value, OptimizerConfigField
 from ..config.base_config import REQUESTRATES, CONCURRENCYS
 
 
@@ -29,8 +28,16 @@ class StopFineTune(Exception):
 
 
 class FineTune:
-    def __init__(self, ttft_penalty: float = 0, tpot_penalty: float = 0, target_field: Optional[Tuple] = None,
-                 ttft_slo: float = 0.5, tpot_slo: float = 0.05, slo_coefficient: float = 0.1, step_size: float = 0.5):
+    def __init__(
+        self,
+        ttft_penalty: float = 0,
+        tpot_penalty: float = 0,
+        target_field: Optional[Tuple] = None,
+        ttft_slo: float = 0.5,
+        tpot_slo: float = 0.05,
+        slo_coefficient: float = 0.1,
+        step_size: float = 0.5,
+    ):
         self.ttft_penalty = ttft_penalty  # Penalty coefficient in optimization algorithm
         self.tpot_penalty = tpot_penalty
         self.ttft_slo = ttft_slo
@@ -58,8 +65,9 @@ class FineTune:
         self.last_value = {}
 
     @staticmethod
-    def update_field(simulate_run_info, signed_factor, field_names: tuple = REQUESTRATES, 
-                     last: Optional[float] = None) -> bool:
+    def update_field(
+        simulate_run_info, signed_factor, field_names: tuple = REQUESTRATES, last: Optional[float] = None
+    ) -> bool:
         if signed_factor == 0 or isinf(signed_factor) or isnan(signed_factor):
             return False
         for _field in simulate_run_info:
@@ -82,7 +90,7 @@ class FineTune:
                 # Check if value changed by a significant amount (>=0.1)
                 return abs(_field.value - original_value) >= 0.1
         return False
-    
+
     @staticmethod
     def add_history(target, key_name, value):
         if key_name in target:
@@ -93,9 +101,8 @@ class FineTune:
     def reset_history(self):
         self.last_signed_factor = {}
         self.last_value = {}
-    
-    def check_config_and_performance(self, performance_index: PerformanceIndex):
 
+    def check_config_and_performance(self, performance_index: PerformanceIndex):
         if self.ttft_penalty == 0 and self.tpot_penalty == 0:
             raise StopFineTune("No penalties, no need to fine-tune.")
         ttft_flag = self.ttft_penalty != 0 and self.ttft_slo == 0
@@ -106,7 +113,7 @@ class FineTune:
             raise ValueError("Missing performance data for TPOT.")
         if self.ttft_penalty != 0 and performance_index.time_to_first_token is None:
             raise ValueError("Missing performance data for TTFT.")
-        
+
     def direction_of_field_update(self, performance_index: PerformanceIndex):
         actual_tpot = performance_index.time_per_output_token
         actual_ttft = performance_index.time_to_first_token
@@ -119,8 +126,9 @@ class FineTune:
             self.ttft_over_slo = actual_ttft > self.ttft_upper_bound
             self.ttft_under_lower_bound = actual_ttft < self.ttft_lower_bound
 
-    def handle_concurrency(self, simulate_run_info: Tuple[OptimizerConfigField, ...],
-                           performance_index: PerformanceIndex):
+    def handle_concurrency(
+        self, simulate_run_info: Tuple[OptimizerConfigField, ...], performance_index: PerformanceIndex
+    ):
         was_updated_c = False
         signed_factor_c = None
         if self.tpot_over_slo:
@@ -137,15 +145,19 @@ class FineTune:
             last_concurrency = None
             if len(_concurrency_signed_factor or []) >= 2:
                 # Indicates the direction of the last metric differs from the current one, can adjust to middle
-                if (_concurrency_signed_factor[-2] * _concurrency_signed_factor[-1] < 0 and
-                        self.last_value.get(CONCURRENCYS)[-2] != self.last_value.get(CONCURRENCYS)[-1]):
+                if (
+                    _concurrency_signed_factor[-2] * _concurrency_signed_factor[-1] < 0
+                    and self.last_value.get(CONCURRENCYS)[-2] != self.last_value.get(CONCURRENCYS)[-1]
+                ):
                     last_concurrency = self.last_value.get(CONCURRENCYS)[-2]
-            was_updated_c = self.update_field(simulate_run_info, signed_factor_c, field_names=CONCURRENCYS,
-                                              last=last_concurrency)
+            was_updated_c = self.update_field(
+                simulate_run_info, signed_factor_c, field_names=CONCURRENCYS, last=last_concurrency
+            )
         return was_updated_c
- 
-    def handle_request_rate(self, simulate_run_info: Tuple[OptimizerConfigField, ...],
-                            performance_index: PerformanceIndex):
+
+    def handle_request_rate(
+        self, simulate_run_info: Tuple[OptimizerConfigField, ...], performance_index: PerformanceIndex
+    ):
         # Check if ttft is met, adjust request rate
         was_updated_r = False
         signed_factor_r = None
@@ -164,10 +176,11 @@ class FineTune:
                 # Indicates that the direction of the previous and current metrics is inconsistent, can adjust toward the middle
                 if _request_rate_factor[-2] * _request_rate_factor[-1] < 0:
                     last_req_rate = self.last_value.get(REQUESTRATES)[-2]
-            was_updated_r = self.update_field(simulate_run_info, signed_factor_r, field_names=REQUESTRATES,
-                                              last=last_req_rate)
+            was_updated_r = self.update_field(
+                simulate_run_info, signed_factor_r, field_names=REQUESTRATES, last=last_req_rate
+            )
         return was_updated_r
- 
+
     def fine_tune_with_concurrency_and_request_rate(self, params: np.ndarray, performance_index: PerformanceIndex):
         # First time gets concurrency, request rate is minimum
         self.check_config_and_performance(performance_index)

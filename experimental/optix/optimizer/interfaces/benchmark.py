@@ -17,14 +17,15 @@ from abc import ABC, abstractmethod
 from .custom_process import BaseDataField, CustomProcess
 from ...config.config import PerformanceIndex
 
-MS_TO_S = 10 ** 3
-US_TO_S = 10 ** 6
+MS_TO_S = 10**3
+US_TO_S = 10**6
 
 
 class BenchmarkInterface(CustomProcess, BaseDataField, ABC):
     """
     Operate benchmark program, test performance.
     """
+
     @property
     def num_prompts(self) -> int:
         """

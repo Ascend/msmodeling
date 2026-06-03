@@ -13,7 +13,6 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-import importlib
 import json
 import os
 import re
@@ -25,16 +24,15 @@ from loguru import logger
 import pandas as pd
 from msguard.security import open_s, walk_s
 from ...config.base_config import MINDIE_BENCHMARK_PERF_COLUMNS
-from ...config.config import AisBenchConfig, VllmBenchmarkConfig, get_settings, \
-    PerformanceIndex, OptimizerConfigField
+from ...config.config import AisBenchConfig, VllmBenchmarkConfig, get_settings, PerformanceIndex, OptimizerConfigField
 from ...config.custom_command import AisBenchCommand, VllmBenchmarkCommand
 from ...optimizer.interfaces.benchmark import BenchmarkInterface
 
 from ...optimizer.utils import backup, remove_file
 
-  
-MS_TO_S = 10 ** 3
-US_TO_S = 10 ** 6
+
+MS_TO_S = 10**3
+US_TO_S = 10**6
 
 
 def parse_result(res):
@@ -88,9 +86,7 @@ class AisBench(BenchmarkInterface):
         self.command = AisBenchCommand(self.config.command).command
 
     def get_models_config_path(self):
-        cmd = [self.command[0],
-               "--models", self.config.command.models,
-               "--search"]
+        cmd = [self.command[0], "--models", self.config.command.models, "--search"]
         res = subprocess.run(cmd, text=True, capture_output=True)
         if res.returncode != 0:
             raise ValueError(f"The command {cmd} execution failed, with an exit code of {res.returncode}")
@@ -103,11 +99,13 @@ class AisBench(BenchmarkInterface):
             _lines = _line.strip().split()
             if len(_lines) != 7:
                 raise ValueError(
-                    f"The expected data format is Task Type │ Task Name │ Config File Path. But get data is {_lines}")
+                    f"The expected data format is Task Type │ Task Name │ Config File Path. But get data is {_lines}"
+                )
             config_path = Path(_lines[-2].strip())
             return config_path
         raise ValueError(
-            f"The expected data format is Task Type │ Task Name │ Config File Path. But get data is {_output}")
+            f"The expected data format is Task Type │ Task Name │ Config File Path. But get data is {_output}"
+        )
 
     def backup(self, del_log=True):
         backup(self.config.output_path, self.bak_path, self.__class__.__name__)
@@ -118,13 +116,16 @@ class AisBench(BenchmarkInterface):
         output_path = Path(self.config.output_path)
         result_files = glob.glob(f"{output_path}/*/performances/*/*.csv")
         if len(result_files) != 1:
-            logger.error(f"The ais bench result for csv files are not unique, result files {result_files}; "
-                         f"output path: {output_path}. please check")
+            logger.error(
+                f"The ais bench result for csv files are not unique, result files {result_files}; "
+                f"output path: {output_path}. please check"
+            )
         metric_name = metric_name.lower().strip()
         algorithm = algorithm.strip().lower()
         if algorithm not in self.mindie_benchmark_perf_columns:
-            raise ValueError(f"The {algorithm} does not support it; "
-                             f"only {self.mindie_benchmark_perf_columns} are supported.")
+            raise ValueError(
+                f"The {algorithm} does not support it; only {self.mindie_benchmark_perf_columns} are supported."
+            )
         for file in result_files:
             df = pd.read_csv(file)
             _all_metrics = [k.strip().lower() for k in df["Performance Parameters"].tolist()]
@@ -143,8 +144,10 @@ class AisBench(BenchmarkInterface):
         output_path = Path(self.config.output_path)
         csv_files = glob.glob(f"{output_path}/*/performances/*/*.csv")
         if len(csv_files) != 1:
-            logger.error(f"The ais bench result for csv files are not unique, result files {csv_files}; "
-                         f"output path: {output_path}. please check")
+            logger.error(
+                f"The ais bench result for csv files are not unique, result files {csv_files}; "
+                f"output path: {output_path}. please check"
+            )
         dir_path = os.path.dirname(csv_files[0])
         file_name = os.path.splitext(os.path.basename(csv_files[0]))[0]
         # Generate the JSON file path
@@ -154,7 +157,9 @@ class AisBench(BenchmarkInterface):
             try:
                 data = json.load(f)
             except json.decoder.JSONDecodeError as e:
-                raise ValueError(f"JSON file format error, cannot find concurrency value. File path: {json_file}") from e
+                raise ValueError(
+                    f"JSON file format error, cannot find concurrency value. File path: {json_file}"
+                ) from e
         _concurrency = float(data["Concurrency"]["total"])
         _concurrency *= self.config.best_concurrency_coefficient
         _max_concurrency = float(data["Max Concurrency"]["total"])
@@ -171,14 +176,18 @@ class AisBench(BenchmarkInterface):
             logger.error(f"the output of aisbench is not find: {output_path}")
         performance_index.time_to_first_token = self.get_performance_metric(
             self.config.performance_config.time_to_first_token.metric,
-            self.config.performance_config.time_to_first_token.algorithm)
+            self.config.performance_config.time_to_first_token.algorithm,
+        )
         performance_index.time_per_output_token = self.get_performance_metric(
             self.config.performance_config.time_per_output_token.metric,
-            self.config.performance_config.time_per_output_token.algorithm)
+            self.config.performance_config.time_per_output_token.algorithm,
+        )
         csv_files = glob.glob(f"{output_path}/*/performances/*/*.csv")
         if len(csv_files) != 1:
-            logger.error(f"The ais bench result for csv files are not unique, result files {csv_files}; "
-                         f"output path: {output_path}. please check")
+            logger.error(
+                f"The ais bench result for csv files are not unique, result files {csv_files}; "
+                f"output path: {output_path}. please check"
+            )
         dir_path = os.path.dirname(csv_files[0])
         file_name = os.path.splitext(os.path.basename(csv_files[0]))[0]
 
@@ -189,7 +198,9 @@ class AisBench(BenchmarkInterface):
             try:
                 data = json.load(f)
             except json.decoder.JSONDecodeError as e:
-                raise ValueError(f"JSON file format error, cannot find total number of requests. File path: {json_file}") from e
+                raise ValueError(
+                    f"JSON file format error, cannot find total number of requests. File path: {json_file}"
+                ) from e
         total_requests = data["Total Requests"]["total"]
         success_req = data["Success Requests"]["total"]
         performance_index.throughput = float(data["Request Throughput"]["total"].split()[0])
@@ -232,7 +243,7 @@ class AisBench(BenchmarkInterface):
                     if concurrency is None:
                         concurrency = 1000
                     lines[i] = lines[i].replace(_res.group(), f"batch_size = {concurrency},")
- 
+
         # Write the modified content back to the file
         with open_s(self.model_config_path, 'w', encoding='utf-8') as f:
             f.writelines(lines)
@@ -240,7 +251,6 @@ class AisBench(BenchmarkInterface):
 
 class VllmBenchMark(BenchmarkInterface):
     def __init__(self, config: Optional[VllmBenchmarkConfig] = None, *args, **kwargs):
-
         if config:
             self.config = config
         else:
@@ -276,7 +286,7 @@ class VllmBenchMark(BenchmarkInterface):
         remove_file(output_path)
         super().stop(del_log)
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None):# Delete output files
+    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None):  # Delete output files
         # Clean output directory before start because get_performance_index only retrieves one record,
         # to avoid getting wrong data
         output_path = Path(self.config.command.result_dir)

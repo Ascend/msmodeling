@@ -13,7 +13,6 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-from typing import Type
 
 from loguru import logger
 
@@ -21,9 +20,7 @@ simulates = {}
 benchmarks = {}
 
 
-def register_simulator(model_arch: str,
-                       model_cls
-                       ) -> None:
+def register_simulator(model_arch: str, model_cls) -> None:
     """
     Register an external model to be used in ..
 
@@ -32,6 +29,7 @@ def register_simulator(model_arch: str,
     - A :class:`SimulatorInterface` class directly referencing the model.
     """
     from ..optimizer.interfaces.simulator import SimulatorInterface
+
     if not isinstance(model_arch, str):
         msg = f"`model_arch` should be a string, not a {type(model_arch)}"
         raise TypeError(msg)
@@ -39,18 +37,16 @@ def register_simulator(model_arch: str,
     if model_arch in simulates:
         logger.warning(
             f"Model architecture {model_arch} is already registered, and will be "
-            "overwritten by the new model class {model_cls}.")
+            "overwritten by the new model class {model_cls}."
+        )
     if isinstance(model_cls, type) and issubclass(model_cls, SimulatorInterface):
         simulates[model_arch] = model_cls
     else:
-        msg = ("`model_cls` should be a SimulatorInterface class, "
-               f"not a {type(model_arch)}")
+        msg = f"`model_cls` should be a SimulatorInterface class, not a {type(model_arch)}"
         raise TypeError(msg)
 
 
-def register_benchmarks(model_arch: str,
-                        model_cls
-                        ) -> None:
+def register_benchmarks(model_arch: str, model_cls) -> None:
     """
     Register an external model to be used in ..
 
@@ -59,6 +55,7 @@ def register_benchmarks(model_arch: str,
     - A :class:`BenchmarkInterface` class directly referencing the model.
     """
     from ..optimizer.interfaces.benchmark import BenchmarkInterface
+
     if not isinstance(model_arch, str):
         msg = f"`model_arch` should be a string, not a {type(model_arch)}"
         raise TypeError(msg)
@@ -66,12 +63,12 @@ def register_benchmarks(model_arch: str,
     if model_arch in benchmarks:
         logger.warning(
             f"Model architecture {model_arch} is already registered, and will be "
-            "overwritten by the new model class {model_cls}.")
+            "overwritten by the new model class {model_cls}."
+        )
     if isinstance(model_cls, type) and issubclass(model_cls, BenchmarkInterface):
         benchmarks[model_arch] = model_cls
     else:
-        msg = ("`model_cls` should be a BenchmarkInterface class, "
-               f"not a {type(model_arch)}")
+        msg = f"`model_cls` should be a BenchmarkInterface class, not a {type(model_arch)}"
         raise TypeError(msg)
 
 

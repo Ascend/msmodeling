@@ -524,8 +524,7 @@ def _update_ternary_factories_field(field, i, params_field, simulate_run_info, d
     needs_repair = (
         (min_value is not None and result_value < min_value)
         or (max_value is not None and result_value > max_value)
-        or
-        (is_int_dtype and product % divisor != 0)
+        or (is_int_dtype and product % divisor != 0)
     )
     if needs_repair:
         if not _repair_ternary_factories_with_priority(

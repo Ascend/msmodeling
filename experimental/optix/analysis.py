@@ -40,9 +40,11 @@ class PlotConfig:
 
 
 class AnalysisState:
-
     @staticmethod
-    def computer_mean_sigma(data: Dict[State, List], x_field: str, ):
+    def computer_mean_sigma(
+        data: Dict[State, List],
+        x_field: str,
+    ):
         # Merge decode-only and prefill groups
         res = {}
         tmp_data = copy.deepcopy(data)
@@ -149,14 +151,18 @@ class AnalysisState:
         """
         # Merge decode-only and prefill groups
         # Merge decode-only and prefill groups
-        _x, _mean, _positive_sigma, _negative_sigma, = AnalysisState.computer_mean_sigma(config.data, config.x_field)
+        (
+            _x,
+            _mean,
+            _positive_sigma,
+            _negative_sigma,
+        ) = AnalysisState.computer_mean_sigma(config.data, config.x_field)
         plt.figure()
         plt.plot(_x, _mean, label="mean")
         plt.plot(_x, _positive_sigma, label="positive std")
         plt.plot(_x, _negative_sigma, label="negative std")
         _x, _predict, _predict_positive_sigma, _predict_negative_sigma = AnalysisState.computer_mean_sigma(
-            predict_data,
-            config.x_field
+            predict_data, config.x_field
         )
 
         plt.plot(_x, _predict, label="predict")
@@ -186,7 +192,6 @@ class AnalysisState:
                 f.write(json.dumps([float(i) for i in _predict]))
         else:
             plt.show()
-        
 
     @staticmethod
     def plot_pred_and_real(pred, real, save_path: Optional[Path] = None):

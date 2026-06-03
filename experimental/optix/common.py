@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Tuple
+import importlib.util
 import shutil
 import pandas as pd
 from loguru import logger
@@ -61,13 +62,13 @@ class State:
 def computer_speed(line_node, field):
     if getattr(line_node, field) == 0:
         return 1
-    return 1 / (getattr(line_node, field) * 10 ** -3)
+    return 1 / (getattr(line_node, field) * 10**-3)
 
 
 def computer_speed_with_second(line_node, field):
     if getattr(line_node, field) == 0:
         return 1
-    return 1 / (getattr(line_node, field) * 10 ** -6)
+    return 1 / (getattr(line_node, field) * 10**-6)
 
 
 def get_train_sub_path(base_path: Path):
@@ -91,6 +92,7 @@ def get_module_version(module_name):
     try:
         # Method 1: direct import
         import importlib
+
         module = importlib.import_module(module_name)
         if hasattr(module, "__version__"):
             return module.__version__
@@ -102,6 +104,7 @@ def get_module_version(module_name):
     try:
         # Method 2: use pkg_resources
         import pkg_resources
+
         return pkg_resources.get_distribution(module_name).version
     except (ImportError, pkg_resources.DistributionNotFound):
         pass
@@ -109,8 +112,9 @@ def get_module_version(module_name):
     try:
         # Method 3: use importlib.metadata (Python 3.8+)
         import importlib.metadata
+
         return importlib.metadata.version(module_name)
-    except (ImportError):
+    except ImportError:
         pass
 
     raise ValueError("Module is not installed or version cannot be obtained")
@@ -121,31 +125,19 @@ def read_csv_s(path, **kwargs):
     try:
         return pd.read_csv(path, **kwargs)
     except Exception as e:
-        raise ValueError(f"Failed to read csv %r." % path) from e
+        raise ValueError("Failed to read csv %r." % path) from e
 
 
 def is_mindie():
-    try:
-        import mindie_llm
-    except ModuleNotFoundError:
-        return False
-    return True
+    return importlib.util.find_spec("mindie_llm") is not None
 
 
 def is_vllm():
-    try:
-        import vllm
-    except ModuleNotFoundError:
-        return False
-    return True
+    return importlib.util.find_spec("vllm") is not None
 
 
 def ais_bench_exists():
-    try:
-        import ais_bench
-    except ModuleNotFoundError:
-        return False
-    return True
+    return importlib.util.find_spec("ais_bench") is not None
 
 
 def get_npu_total_memory(device_id: int = 0) -> Tuple[int, int]:
@@ -183,20 +175,22 @@ def get_npu_total_memory(device_id: int = 0) -> Tuple[int, int]:
         else:
             cmd.extend(["-i", _npu_id, "-c", _chip_id])
         output = subprocess.check_output(cmd).decode("utf-8")
-        memory_key_word = _KEY_WORD + " Capacity(MB)"	
+        memory_key_word = _KEY_WORD + " Capacity(MB)"
         usage_rate_key_word = _KEY_WORD + " Usage Rate(%)"
         try:
             total_memory_line = [line for line in output.splitlines() if memory_key_word in line][0]
             memory_usage_rate = [line for line in output.splitlines() if usage_rate_key_word in line][0]
-        except IndexError: 
+        except IndexError:
             total_memory_line = [line for line in output.splitlines() if "DDR Capacity(MB)" in line][0]
             memory_usage_rate = [line for line in output.splitlines() if "DDR Hugepages Usage Rate(%)" in line][0]
         total_memory_line = total_memory_line.split(":")[1].strip()
         memory_usage_rate = memory_usage_rate.split(":")[1].strip()
- 
+
         logger.debug(f"cmd: {cmd}, result: {int(total_memory_line), int(memory_usage_rate)}")
         return int(total_memory_line), int(memory_usage_rate)
     except Exception as e:
-        logger.error(f"Failed to retrieve total video memory. Please check if the video memory query command {cmd} "
-                     f"matches the current parsing code. ")
+        logger.error(
+            f"Failed to retrieve total video memory. Please check if the video memory query command {cmd} "
+            f"matches the current parsing code. "
+        )
         raise e

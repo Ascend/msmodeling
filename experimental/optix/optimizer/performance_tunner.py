@@ -17,14 +17,16 @@ from math import exp, inf
 
 
 class PerformanceTuner:
-    def __init__(self,
-                 ttft_penalty: float = 3.0,
-                 tpot_penalty: float = 3.0,
-                 success_rate_penalty: float = 5.0,
-                 ttft_slo: float = 0.5,
-                 tpot_slo: float = 0.05,
-                 success_rate_slo: float = 1,
-                 generate_speed_target: float = 5300):
+    def __init__(
+        self,
+        ttft_penalty: float = 3.0,
+        tpot_penalty: float = 3.0,
+        success_rate_penalty: float = 5.0,
+        ttft_slo: float = 0.5,
+        tpot_slo: float = 0.05,
+        success_rate_slo: float = 1,
+        generate_speed_target: float = 5300,
+    ):
         # Weights sum to 1
         self.w_gen = 0.4
         self.w_ft = 0.2
@@ -71,7 +73,8 @@ class PerformanceTuner:
         if performance_index.success_rate is not None and performance_index.success_rate > 0:
             try:
                 cost_succ = exp(
-                    self.success_rate_penalty * (self.success_rate_slo / performance_index.success_rate - 1))
+                    self.success_rate_penalty * (self.success_rate_slo / performance_index.success_rate - 1)
+                )
                 total_cost += self.w_succ * cost_succ
             except (OverflowError, ZeroDivisionError):
                 return inf
