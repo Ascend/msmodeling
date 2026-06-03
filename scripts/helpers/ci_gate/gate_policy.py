@@ -17,7 +17,7 @@ try:
     import pathspec
     from pydantic import BaseModel, Field, ValidationError, field_validator
 except ImportError as exc:
-    raise ConfigError("ci dependency group required (pydantic, pathspec). Run: uv sync --group ci") from exc
+    raise ConfigError("ci dependency group required (pydantic, pathspec). Run: uv sync --frozen --group ci") from exc
 
 _GIT = shutil.which("git")
 CI_POLICY_REL: Final = Path("tests/.ci")

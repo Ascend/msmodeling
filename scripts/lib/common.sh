@@ -1,6 +1,9 @@
 # Shared setup for CodeArts entry scripts.
 # Caller must set SCRIPT_DIR to scripts/ before sourcing; HELPERS_DIR is scripts/helpers/.
 #
+# When uv is available and PYTHON is unset, sources common.sh runs:
+#   uv sync --frozen --group ci
+#
 # Environment set or consumed here:
 #   PYTHONPATH   Exported to repository root (PROJECT_DIR); overrides any prior value
 #   PYTHON       Optional absolute path to interpreter; if unset, uses uv or python3
@@ -66,3 +69,10 @@ run_pytest() {
   fi
   "${RUN_PYTEST[@]}" "$@"
 }
+
+if $USE_UV; then
+  (
+    cd "${PROJECT_DIR}"
+    uv sync --frozen --group ci
+  )
+fi

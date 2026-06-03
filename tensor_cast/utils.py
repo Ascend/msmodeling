@@ -1,9 +1,6 @@
 import fnmatch
-import importlib
 import logging
 import re
-import subprocess
-import sys
 from typing import List, Optional, Union
 
 import torch
@@ -176,27 +173,3 @@ class EquivalentKeyManager:
         if key not in self.parent:
             return None
         return self._find(key)
-
-
-def check_dependencies():
-    RED = "\033[91m"
-    END = "\033[0m"
-    pkg = "transformers"
-    target_ver = "5.3.0"
-
-    try:
-        curr_ver = importlib.metadata.version(pkg)
-        curr_tup = tuple(map(int, curr_ver.split(".")[:3]))
-        req_tup = tuple(map(int, target_ver.split(".")[:3]))
-        if curr_tup >= req_tup:
-            return
-    except importlib.metadata.PackageNotFoundError:
-        curr_ver = None
-
-    print(RED + "=" * 60 + END)
-    print(RED + "WARNING: Incompatible transformers version detected" + END)
-    print(RED + f"Current: {curr_ver} | Required: >= {target_ver}" + END)
-    print(RED + "Automatically upgrading now..." + END)
-    print(RED + "=" * 60 + END)
-
-    subprocess.check_call([sys.executable, "-m", "pip", "install", f"{pkg}=={target_ver}"])

@@ -23,7 +23,7 @@ from ..performance_model.analytic import AnalyticPerformanceModel
 from ..performance_model.memory_tracker import MemoryTracker
 from ..quantize_utils import QuantGranularity
 from ..runtime import Runtime
-from ..utils import check_dependencies, str_to_dtype
+from ..utils import str_to_dtype
 from .utils import check_positive_integer, LOG_LEVELS, parse_int_range
 
 logger = logging.getLogger(__name__)
@@ -269,7 +269,6 @@ def run_inference(
 
 
 def main():
-    check_dependencies()
     # TODO add parallel config
     # TODO add quant config
     parser = argparse.ArgumentParser(

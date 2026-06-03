@@ -1,8 +1,14 @@
+# Legacy pip install path. Recommended: `uv sync` — see README.
+# Pip-only CPU setup: install torch from the CPU index first, then the rest:
+#   pip install "torch>=2.7,<=2.10" "torchvision>=0.25.0" --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+
 torch>=2.7,<=2.10
+torchvision>=0.25.0
 optree
 
 Pillow
-transformers==5.3.0
+transformers>=5.3.0,<=5.8.0
 modelscope
 diffusers
 compressed-tensors

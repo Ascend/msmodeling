@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # CI PR gate (compile): incremental smoke+regression selection via external test_map.
-# Requires ci dependency group: uv sync --group ci
 #
 # Required:
 #   MSMODELING_TEST_MAP_PATH           Path to test_map JSON file on CI (must exist)

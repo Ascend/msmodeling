@@ -3,7 +3,6 @@ from cli.inference import text_generate
 
 
 def test_export_empirical_metrics_requires_profiling(monkeypatch):
-    monkeypatch.setattr(text_generate, "check_dependencies", lambda: None)
     monkeypatch.setattr(
         "sys.argv",
         [

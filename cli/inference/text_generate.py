@@ -7,7 +7,6 @@ from tensor_cast.core.quantization.datatypes import (
     QuantizeLinearAction,
 )
 from tensor_cast.model_config import WordEmbeddingTPMode
-from tensor_cast.utils import check_dependencies
 from ..utils import (
     check_positive_integer,
     check_prefix_cache_hit_rate,
@@ -21,7 +20,6 @@ SUPPORTED_PERFORMANCE_MODELS = ["analytic", "profiling"]
 
 
 def main():
-    check_dependencies()
     """
     Main function to parse arguments and run the inference simulation.
     """

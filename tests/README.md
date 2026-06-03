@@ -22,7 +22,7 @@ tests/
     └── ops/                 # Operator-level perf_database guardianship
 ```
 
-The repository root **`scripts/`** provides CI entry points. Implementation lives in **`scripts/helpers/`**. **`scripts/lib/common.sh`** provides unified environment initialization and pytest invocation wrappers for all entry scripts.
+The repository root **`scripts/`** provides CI entry points. Implementation lives in **`scripts/helpers/`**. **`scripts/lib/common.sh`** provides unified environment initialization, **`uv sync --frozen --group ci`** when uv is used, and pytest invocation wrappers for all entry scripts.
 
 > Layering is by directory (`smoke` / `regression` / `benchmark`). Markers: `nightly` (long-running), `npu` (hardware), `network` (live Hub access).
 
@@ -133,6 +133,8 @@ The test_map collection scope is **hardcoded** (not an env override): `build_tes
 | Comment `/run_tests regression` | `bash scripts/run_regression.sh` |
 | Comment `/run_tests benchmark` | `bash scripts/run_benchmark.sh` |
 | Scheduled nightly | `MSMODELING_TEST_MAP_PATH=… bash scripts/run_nightly.sh` |
+
+All `run_*.sh` scripts source `common.sh`, which runs `uv sync --frozen --group ci` when uv is on PATH and `PYTHON` is unset.
 
 ---
 

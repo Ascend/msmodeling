@@ -223,7 +223,7 @@ HERO_HTML = """
 def build_app() -> gr.Blocks:
     """Build the Gradio application."""
     if gr is None:
-        raise RuntimeError("gradio is not installed. Please `pip install gradio` first.")
+        raise RuntimeError("gradio is not installed. Run `uv sync` (see README) or `pip install gradio`.")
 
     vendor_map = get_vendor_device_map()
     vendors = list(vendor_map.keys())

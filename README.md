@@ -22,6 +22,8 @@ MindStudio-Modeling is a performance simulation and analysis framework for neura
 
 - [MindStudio Modeling](#mindstudio-modeling)
   - [Installation](#installation)
+    - [Recommended: uv](#recommended-uv)
+    - [Alternative: pip + requirements.txt](#alternative-pip--requirementstxt)
     - [Environment Setup](#environment-setup)
   - [Getting Started](#getting-started)
   - [License](#license)
@@ -30,34 +32,45 @@ MindStudio-Modeling is a performance simulation and analysis framework for neura
 
 ## Installation
 
-```bash
-git clone https://gitcode.com/Ascend/msmodeling.git -b develop
-cd msmodeling
-
-# 1. install uv, Create a virtual environment (Python >= 3.10), take Python 3.13 as an example
-pip install uv
-uv venv --python 3.13 myenv
-
-# 2. activate env
-## Linux or MacOS
-source myenv/bin/activate
-## Windows
-myenv/Scripts/activate # (or myenv\Scripts\activate)
-
-# 3. install dependencies
-uv pip install -r requirements.txt
-```
-
-Alternatively, if you already have a python environment which does not contain `torch_npu` or `cudatoolkit`, you can just run:
-
-```bash
-pip install -r requirements.txt
-```
-
 **Supported Python versions:** 3.10+
 
 > [!Warning]
 > If you are using Windows, note that PyTorch 2.10 may not run properly on your system. For a solution, please refer to [this issue](https://github.com/pytorch/pytorch/issues/166628). If you have not yet installed PyTorch, for optimal compatibility, we strongly recommend using version 2.8 or earlier to ensure the program functions correctly.
+
+### Recommended: uv
+
+```bash
+git clone https://gitcode.com/Ascend/msmodeling.git -b develop
+cd msmodeling
+
+pip install uv
+uv venv --python 3.13 .venv
+
+# Linux or macOS
+source .venv/bin/activate
+# Windows
+# .venv\Scripts\activate
+
+uv sync
+# optional: uv sync --group lint / uv sync --group ci
+```
+
+Use `uv run …` or an activated venv to run commands. Scripts under `scripts/` auto-detect uv when `pyproject.toml` is present.
+
+### Alternative: pip + requirements.txt
+
+```bash
+git clone https://gitcode.com/Ascend/msmodeling.git -b develop
+cd msmodeling
+
+python -m venv .venv
+source .venv/bin/activate   # adjust for Windows
+
+pip install "torch>=2.7,<=2.10" --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+```
+
+See comments at the top of `requirements.txt` for the CPU PyTorch step.
 
 ### Environment Setup
 
@@ -85,17 +98,17 @@ For detailed usage, please refer to the two documentation files:
 Use `pre-commit` to make sure the coding style aligns:
 
 ```bash
-pip install pre-commit
-cd /path/to/msmodeling
-pre-commit install  # run once
+uv sync --group lint
+uv run pre-commit install   # run once
 ```
 
-Later commit will be checked by `pre-commit` automatically.
+Later commits will be checked by `pre-commit` automatically.
 
 ### Unit tests
 
 ```bash
 cd /path/to/msmodeling
+uv sync
 ```
 
 Make sure unit tests pass by running: `bash ./tests/run_ut.sh tensor_cast` or `bash ./tests/run_ut.sh serving_cast`. Please ensure that the ut coverage rate of the newly added code is greater than `80%`
