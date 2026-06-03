@@ -1,12 +1,14 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import re
-import subprocess
 import sys
 from unittest import TestCase
 from unittest.mock import patch
 
 import pytest
 from serving_cast.service.optimizer_summary import SHOW_COLUMNS
+from tests.helpers.cli_runner import run_module_main
+
+THROUGHPUT_OPTIMIZER_MODULE = "cli.inference.throughput_optimizer"
 
 # Match current PD titles and legacy Aggregation / Disaggregation (Prefill|Decode) titles across branches.
 AGG_TABLE_TITLE_RE = r"Top\s+\d+\s+(?:PD\s+Aggregated|Aggregation)\s+Configurations\s*:?"
@@ -37,9 +39,10 @@ class TestThroughputOptimizer(TestCase):
         self.assertEqual(args.reserved_memory_gb, 10.0)
 
     def _run_throughput_optimizer(self, args, check=True):
-        """Run throughput_optimizer script using module execution"""
-        cmd = [sys.executable, "-m", "cli.inference.throughput_optimizer"] + args
-        result = subprocess.run(cmd, capture_output=True, text=True, check=check)
+        """Run throughput_optimizer's main() in-process so coverage sees the core path."""
+        result = run_module_main(THROUGHPUT_OPTIMIZER_MODULE, args)
+        if check and result.returncode != 0:
+            raise RuntimeError(f"throughput_optimizer failed (rc={result.returncode}): {result.stderr}")
         return result
 
     def _validate_table_structure(self, output_text, required_columns, table_start_pattern):

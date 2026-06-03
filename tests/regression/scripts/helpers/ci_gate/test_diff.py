@@ -111,6 +111,19 @@ def test_classify_changes_modified_source_includes_lines(monkeypatch: pytest.Mon
     assert result.modified_source[0][1] == frozenset({10, 11})
 
 
+def test_classify_changes_modified_test_populates_modified_test(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: FakeCompleted(0, "M\ttests/regression/cli/test_foo.py\n", ""),
+    )
+    result = classify_changes(tmp_path, "abc123", {})
+    assert result.modified_test == ("tests/regression/cli/test_foo.py",)
+    assert result.new_test == ()
+    assert result.modified_source == ()
+
+
 def test_classify_changes_deleted_test_populates_del_test(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "subprocess.run",

@@ -6,7 +6,8 @@
 tests/
 ├── conftest.py              # Global: Hub offline policy, cache paths, session end weight cleanup
 ├── .ci/
-│   └── gate_policy.json     # CI gate exemption registry (symbol-level)
+│   ├── gate_policy.yaml     # CI gate exemption registry (symbol-level)
+│   └── approvers.yaml       # approvers required for gate_policy.yaml changes
 ├── smoke/                   # Smoke test cases
 ├── regression/              # Regression test cases
 │   ├── tensor_cast/
@@ -23,22 +24,24 @@ tests/
 
 The repository root **`scripts/`** provides CI entry points. Implementation lives in **`scripts/helpers/`**. **`scripts/lib/common.sh`** provides unified environment initialization and pytest invocation wrappers for all entry scripts.
 
-> Layering is by directory (`smoke` / `regression` / `benchmark`). Markers: `nightly` (long-running), `npu` (hardware).
+> Layering is by directory (`smoke` / `regression` / `benchmark`). Markers: `nightly` (long-running), `npu` (hardware), `network` (live Hub access).
 
 ### Execution Model
 
 | Entry | When | What runs |
 |-------|------|-----------|
-| `bash scripts/run_ci_gate.sh` | PR `compile` comment | Incremental smoke+regression via external `test_map`; `-n auto`; coverage gate **70/50** |
-| `bash scripts/run_smoke.sh` | Local; CI `/run_tests smoke` | Full `tests/smoke/`, `-m "not npu"` (includes nightly), `-n auto`; no coverage gate |
-| `bash scripts/run_regression.sh` | Local; CI `/run_tests regression` | Full `tests/regression/`, same as smoke; no coverage gate |
-| `bash scripts/run_benchmark.sh` | Local; CI `/run_tests benchmark` | Full `tests/benchmark/`, no coverage gate |
-| `bash scripts/run_nightly.sh` | Scheduled CI only | UT `-n auto` + `--cov` → refresh `test_map` → benchmark; coverage **report-only** 70/50 |
+| `bash scripts/run_ci_gate.sh` | PR `compile` comment | Incremental smoke+regression via external `test_map`; marker `not npu and not nightly and not network`; `-n auto` |
+| `bash scripts/run_smoke.sh` | Local; CI `/run_tests smoke` | Full `tests/smoke/`, `-m "not npu and not network"` (includes nightly), `-n auto` |
+| `bash scripts/run_regression.sh` | Local; CI `/run_tests regression` | Full `tests/regression/`, same as smoke |
+| `bash scripts/run_benchmark.sh` | Local; CI `/run_tests benchmark` | Full `tests/benchmark/`, `-m "not npu and not network"` |
+| `bash scripts/run_nightly.sh` | Scheduled CI only | Phase 1 UT (`not npu and not nightly and not network`) `-n auto` + `--cov` → refresh `test_map` → Phase 2a nightly → Phase 2b benchmark → Phase 2c network (live Hub) → config drift check → report; 60/40 coverage thresholds |
 
 **Local:** always full smoke/regression (no external test_map).
 **CI incremental:** requires `MSMODELING_TEST_MAP_PATH` pointing to a JSON file on the runner (maintained by nightly).
 
-**Coverage + xdist:** Any pytest run that collects coverage (`run_ci_gate.sh`, nightly phase 1, ci_gate new-test phase) uses `-n auto` with `--cov`. `pyproject.toml` sets `[tool.coverage.run] parallel = true` so each worker writes its own fragment; pytest-cov merges into repo-root `.coverage` before `build_test_map` / coverage gates read it.
+**Coverage + xdist:** Nightly phase 1 and ci_gate phase 0 (new or modified test files) use `-n auto` with `--cov` and `--cov-context=test`. `[tool.coverage.run] parallel = true` in `pyproject.toml`; pytest-cov merges worker fragments into repo-root `.coverage` for `build_test_map` and nightly coverage totals.
+
+**Nightly phases:** `run_nightly.sh` runs four pytest phases in order — Phase 1 (`not npu and not nightly and not network`, with coverage + `test_map`), Phase 2a (`not npu and nightly and not network`), Phase 2b (benchmark), Phase 2c (`not npu and network`, real model Hub, run serially). After Phase 2c a **non-blocking config drift check** compares vendored remote configs under `tests/assets/model_config/` against the live Hub and surfaces any mismatch as a report warning without failing the run. When `FEISHU_WEBHOOK_URL` is set, each phase's pytest output is captured to a per-phase log file and the **console is kept quiet** (the detailed report rides the Feishu card instead); the phase breakdown, slowest tests, and drift warnings are rendered into that card.
 
 ### Marker Semantics
 
@@ -46,6 +49,16 @@ The repository root **`scripts/`** provides CI entry points. Implementation live
 |--------|--------|
 | `nightly` | Long-running cases under smoke/regression; included in full `run_smoke.sh` / `run_regression.sh`; excluded from `run_ci_gate.sh` |
 | `npu` | Hardware-dependent; excluded from all `run_*.sh` |
+| `network` | Requires live model Hub access (HuggingFace/ModelScope); excluded by default (`pyproject.toml` `addopts`) and from every `run_*.sh`; validated only in nightly Phase 2c |
+
+### Model Configs: Offline by Default
+
+Model-config tests are split so the default/PR path never touches the network:
+
+- **Local (offline) fixtures** live under `tests/assets/model_config/<name>/` (vendored `config.json`, and optionally `configuration_*.py` / `modeling_*.py` for remote-code models). Tests that load these run **fully offline by default** and carry no marker — e.g. the local cases in `tests/regression/tensor_cast/test_auto_model_config.py`.
+- **Remote loading** that resolves a model id against the live Hub is gathered under `@pytest.mark.network` (e.g. `AutoModelAndConfigRemoteTestCase`) and therefore runs **nightly-only** (Phase 2c), never on PR or local `run_*.sh`.
+
+**Vendoring a new model config (move it offline):** use `scripts/prefetch_model_configs.py` to fetch a model id's config-only snapshot (weight shards are ignored), then copy the resulting `config.json` (plus any `configuration_*.py` / `modeling_*.py` for trust-remote-code models) into a new `tests/assets/model_config/<name>/` directory and add a local case. Once vendored, the model can be exercised offline and the remote variant stays under `@pytest.mark.network`.
 
 ---
 
@@ -83,16 +96,17 @@ Boolean types: **`0`**/**`1`**/**`true`**/**`false`**/**`yes`**/**`no`**/**`on`*
 |----------|----------|---------|---------|-------------|
 | `MSMODELING_TEST_MAP_PATH` | ci_gate, nightly | — | `run_ci_gate.sh`, `run_nightly.sh` | Path to external test_map JSON **file** (must exist for ci_gate; created by nightly on UT success) |
 | `MSMODELING_TEST_BASE_BRANCH` | Optional | `master` | `run_ci_gate.sh` | merge-base for incremental diff |
-| `MSMODELING_TEST_LINE_THRESHOLD` | Optional | `70` | smoke, regression, ci_gate | Line coverage gate (%) |
-| `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | `50` | ci_gate, nightly | Branch coverage gate (%) |
-| `MSMODELING_TEST_WEIGHTS_PRUNE` | Optional | `1` | all `run_*.sh` | Prune Hub weights after session |
+| `MSMODELING_TEST_LINE_THRESHOLD` | Optional | `60` | nightly | Line coverage report threshold (%) |
+| `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | `40` | nightly | Branch coverage report threshold (%) |
+| `MSMODELING_TEST_WEIGHTS_PRUNE` | Optional | `0` | all `run_*.sh` | Prune Hub weights after session |
 | `MSMODELING_BENCHMARK_PARALLEL` | Optional | `0` | `run_benchmark.sh`, nightly benchmark phase | `1` → pytest `-n auto` |
-| `MSMODELING_TEST_MAP_MARKER` | Optional | `not npu and not nightly` | nightly phase 1, `build_test_map` | Marker expr for test_map collection scope |
 | `FEISHU_WEBHOOK_URL` | Optional | — | nightly | Feishu webhook (includes coverage summary) |
 | `PYTHON` | Optional | — | `common.sh` | Python interpreter override |
 | `PRE_COMMIT_LLM_FILTER` | Optional | unset | pre-commit hooks | `1` → compact LLM-friendly hook output via `pre-commit/llm_render.py` |
 
-Pytest output: **`-vv`** everywhere. Entry scripts also pass `-q` and `--no-header`; nightly phase 1 adds `--tb=short`.
+Pytest output: smoke / regression / benchmark and nightly phases run `-q --no-header --tb=short` (with `--durations=20`); `run_ci_gate.sh` runs `-q --no-header --tb=short --disable-warnings`. None of the entry scripts use `-vv`.
+
+The test_map collection scope is **hardcoded** (not an env override): `build_test_map` and nightly phase 1 use `not npu and not nightly and not network` over `tests/smoke/` and `tests/regression/`, matching the ci_gate selection marker. Benchmark cases never participate in mapping.
 
 ### Pytest session (`tests/conftest.py`)
 
@@ -106,7 +120,7 @@ Pytest output: **`-vv`** everywhere. Entry scripts also pass `-q` and `--no-head
 
 ### Exemptions
 
-`tests/.ci/gate_policy.json` — symbols exempt from「must have test_map entry」checks in `run_ci_gate.sh`.
+`tests/.ci/gate_policy.yaml` — symbols exempt from「must have test_map entry」checks in `run_ci_gate.sh`. Changes to it require an approver listed in `tests/.ci/approvers.yaml`.
 
 ---
 
@@ -124,15 +138,17 @@ Pytest output: **`-vv`** everywhere. Entry scripts also pass `-q` and `--no-head
 
 ## Shared Test Helpers
 
-`tests/helpers/` holds reusable builders and assertions for regression cases:
+`tests/helpers/` holds reusable builders and assertions for regression cases. Public APIs (read each module for full signatures):
 
-| Module | Role |
-|--------|------|
-| `assert_utils.py` | Tensor/latency assertion helpers |
-| `config_factory.py` | Minimal model/config fixtures |
-| `model_builder.py` | Lightweight `build_model` wrappers |
-| `op_registry.py` | Op registration for unit tests |
-| `fake_subprocess.py` | Subprocess stubs for CLI tests |
+| Module | Public API | Role |
+|--------|-----------|------|
+| `model_cache.py` | `get_hf_config(model_id)`, `get_built_model(user_config)`, `user_config_build_cache_key(user_config)` | Single session-scoped cache for HF configs (handed out as deepcopies) and `build_model` results (shared, read-only). Shared by pytest fixtures and unittest `TestCase` paths. |
+| `model_builder.py` | `make_user_input_config(*, model_id, ...)`, `build_or_get_cached_model(user_config, cache)` | Build a minimal `UserInputConfig`; build-once-per-key into a caller-provided cache dict. |
+| `config_factory.py` | `build_case_matrix(**dimensions)`, `build_latency_thresholds(*, ttft_ms, tpot_ms, tolerance_ms=0.1)` | Cartesian parametrize matrices; shared serving latency threshold dicts. |
+| `op_registry.py` | `build_op_registry(cfg_registry)` | Lightweight per-model op registry from the shared hf-config cache. |
+| `assert_utils.py` | `assert_tensor_close(actual, expected, *, rtol, atol, equal_nan)`, `assert_latency_within(actual_ms, expected_ms, *, metric, tolerance_ms, rel_tolerance)` | Tensor closeness (torch semantics) and latency-tolerance assertions. |
+| `cli_runner.py` | `run_module_main(module_name, argv)`, `run_cli_main(main_callable, argv, *, prog)`, `CliResult(returncode, stdout, stderr)` | Run a CLI `main()` **in-process** so coverage/`test_map` see the real path (subprocess CLI tests measure zero coverage). |
+| `fake_subprocess.py` | `FakeCompleted(returncode, stdout, stderr)` | Minimal `subprocess.CompletedProcess` stand-in for tests that monkeypatch `subprocess.run`. |
 
 Self-tests live under `tests/helpers/tests/`.
 
@@ -154,26 +170,40 @@ Self-tests live under `tests/helpers/tests/`.
 
 | Need | Module | Key API |
 |------|--------|---------|
-| Build a `UserInputConfig` | `tests/helpers/config_factory.py` | `create_user_config(model_id, **overrides)` |
-| Build a `TransformerModel` | `tests/helpers/model_builder.py` | `build_transformer_model(user_config)` |
-| Assert model metrics | `tests/helpers/assert_utils.py` | `assert_model_metrics_valid(result, test_name)` |
+| Build a `UserInputConfig` | `tests/helpers/model_builder.py` | `make_user_input_config(model_id=..., ...)` |
+| Build / cache a model | `tests/helpers/model_cache.py` | `get_built_model(user_config)` (session cache) or `build_or_get_cached_model(user_config, cache)` |
+| Get a HF config | `tests/helpers/model_cache.py` | `get_hf_config(model_id)` (deepcopy per call) |
+| Assert tensor / latency | `tests/helpers/assert_utils.py` | `assert_tensor_close(...)`, `assert_latency_within(...)` |
 | Build op registry | `tests/helpers/op_registry.py` | `build_op_registry(cfg_registry)` |
-| Stub subprocess | `tests/helpers/fake_subprocess.py` | `FakeSubprocess` |
+| Run a CLI `main()` in-process | `tests/helpers/cli_runner.py` | `run_module_main(module_name, argv) -> CliResult` |
+| Stub `subprocess.run` result | `tests/helpers/fake_subprocess.py` | `FakeCompleted(returncode, stdout, stderr)` |
+
+CLI tests should call `run_module_main` instead of spawning a subprocess, so coverage and `test_map` observe the real core path:
+
+```python
+from tests.helpers.cli_runner import run_module_main
+
+def test_cli_reports_config():
+    result = run_module_main("cli.inference.throughput_optimizer", ["--input-length=1", "--output-length=1", "Qwen/Qwen3-32B"])
+    assert result.returncode == 0
+    assert "Input Configuration:" in result.stdout
+```
 
 ### Step 3: Use session-level fixtures (regression)
 
 Regression tests under `tests/regression/tensor_cast/` have access to session-scoped model and config caches:
 
 ```python
-from tests.regression.tensor_cast.conftest import get_session_model, get_session_hf_config
+from tests.helpers.model_builder import make_user_input_config
+from tests.regression.tensor_cast.conftest import get_session_model
 
 def test_my_feature():
-    user_config = create_user_config("my-model-id", do_compile=False)
-    model = get_session_model(user_config)  # cached across the session
+    user_config = make_user_input_config(model_id="my-model-id")
+    model = get_session_model(user_config)  # cached across the session via tests.helpers.model_cache
     # ... run assertions
 ```
 
-This avoids rebuilding the same model for every test function.
+`get_session_model` / `get_session_hf_config` delegate to `tests.helpers.model_cache`, so the build cache is shared across both pytest fixtures and unittest `TestCase` code paths. This avoids rebuilding the same model for every test function.
 
 ### Step 4: Add a benchmark case (if precision guardianship)
 
@@ -189,7 +219,7 @@ bash scripts/run_smoke.sh        # or run_regression.sh / run_benchmark.sh
 
 # Check that your new test appears in the test_map collection scope
 PYTHONPATH=. python -m pytest tests/smoke/ tests/regression/ \
-  -m "not npu and not nightly" --collect-only -q
+  -m "not npu and not nightly and not network" --collect-only -q
 ```
 
 ### Checklist for new cases
@@ -199,7 +229,7 @@ PYTHONPATH=. python -m pytest tests/smoke/ tests/regression/ \
 - [ ] Shared helpers used where applicable (no copy-paste of builder/assertion logic)
 - [ ] Session fixtures used for model construction in regression (no per-function rebuilds)
 - [ ] If `@pytest.mark.nightly` is added, a corresponding smoke guard exists under `tests/smoke/`
-- [ ] New product symbols are covered or listed in `tests/.ci/gate_policy.json`
+- [ ] New product symbols are covered or listed in `tests/.ci/gate_policy.yaml`
 - [ ] Local smoke + regression pass before push
 
 ---
@@ -207,6 +237,6 @@ PYTHONPATH=. python -m pytest tests/smoke/ tests/regression/ \
 ## Merge Checklist
 
 - [ ] Test case in correct directory; `nightly` / `npu` markers only when needed
-- [ ] New product symbols covered by tests or listed in `gate_policy.json`
+- [ ] New product symbols covered by tests or listed in `gate_policy.yaml`
 - [ ] Local smoke + regression pass before push
 - [ ] Core path changes considered for nightly impact

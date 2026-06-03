@@ -1,4 +1,4 @@
-"""Coverage gate: load totals from .coverage, check thresholds.
+"""Coverage totals from .coverage and threshold check.
 
 Merges former coverage_gate.py (load_totals) and check_ut_gate.py (GateConfig,
 check_thresholds, check_ut_gate). Single subprocess call per gate check.

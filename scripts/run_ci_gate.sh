@@ -16,7 +16,7 @@
 #   UV_INDEX_URL                       custom UV package index URL
 #   HF_ENDPOINT                        custom HuggingFace endpoint URL
 #
-# Pytest: -n auto (fixed), -vv, marker "not npu and not nightly", with coverage.
+# Pytest: -n auto (fixed), -vv, marker "not npu and not nightly and not network".
 set -euo pipefail
 
 if [[ -z "${MSMODELING_TEST_MAP_PATH:-}" ]]; then

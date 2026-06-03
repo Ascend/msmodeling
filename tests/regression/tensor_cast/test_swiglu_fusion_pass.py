@@ -16,12 +16,12 @@ from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.memory_tracker import MemoryTracker
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.model import TransformerModel
+from tests.helpers.model_cache import user_config_build_cache_key
 
 from .test_common import (
     count_events,
     create_mla_metadata_and_kv_cache,
     get_cached_build_model,
-    user_config_build_cache_key,
 )
 
 # Core SwiGLU fusion-entry assertions were moved to the unified entry in test_ops.py.

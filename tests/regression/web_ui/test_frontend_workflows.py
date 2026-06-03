@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from web_ui.app import build_app
 from web_ui.callbacks import (
     _case_label_from_mapping,

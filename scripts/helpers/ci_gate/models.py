@@ -60,6 +60,9 @@ class ChangeSet:
     modified_source: tuple[tuple[str, frozenset[int]], ...]
     # (old_path, new_path, similarity_score) for product-source renames (git -M).
     renames: tuple[tuple[str, str, int], ...] = ()
+    # Existing test files edited in place (status M/C). Re-run and remapped like
+    # new tests, since their edits may change which source symbols they cover.
+    modified_test: tuple[str, ...] = ()
 
     @classmethod
     def build(
@@ -72,6 +75,7 @@ class ChangeSet:
         del_source: tuple[str, ...] = (),
         modified_source: dict[str, frozenset[int]] | None = None,
         renames: tuple[tuple[str, str, int], ...] = (),
+        modified_test: tuple[str, ...] = (),
     ) -> ChangeSet:
         mod = tuple(sorted((path, lines) for path, lines in (modified_source or {}).items()))
         return cls(
@@ -82,6 +86,7 @@ class ChangeSet:
             del_source=del_source,
             modified_source=mod,
             renames=renames,
+            modified_test=modified_test,
         )
 
     def modified_source_map(self) -> dict[str, frozenset[int]]:

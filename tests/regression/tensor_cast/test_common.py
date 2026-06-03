@@ -7,6 +7,7 @@ from tensor_cast.model_config import LinearQuantConfig, ModelConfig, QuantConfig
 from tensor_cast.quantize_utils import LinearQuantType
 from tensor_cast.transformers.utils import get_attention_quant_config, strip_module_name
 from tensor_cast.utils import exact_division
+from tests.helpers.model_cache import get_built_model, get_hf_config
 
 
 def assert_close(self, value1, value2, rtol=0.01):
@@ -156,45 +157,14 @@ def update_parallel_parameter(user_input: UserInputConfig, world_size=1, tp_size
     user_input.ep_size = world_size if ep else 1
 
 
-def user_config_build_cache_key(user_config: UserInputConfig) -> tuple:
-    """Fields that affect ConfigResolver.resolve() / build_model()."""
-    return (
-        user_config.model_id,
-        user_config.do_compile,
-        user_config.num_mtp_tokens,
-        user_config.num_hidden_layers_override,
-        user_config.quantize_linear_action,
-        user_config.quantize_attention_action,
-        user_config.remote_source,
-        user_config.allow_graph_break,
-        user_config.enable_multistream,
-        user_config.world_size,
-        user_config.tp_size,
-        user_config.mlp_tp_size,
-        user_config.lmhead_tp_size,
-        user_config.ep_size,
-        user_config.moe_dp_size,
-        user_config.moe_tp_size,
-        user_config.enable_redundant_experts,
-        user_config.enable_external_shared_experts,
-        user_config.enable_shared_expert_tp,
-        user_config.host_external_shared_experts,
-        user_config.disable_repetition,
-    )
-
-
 def get_cached_build_model(
     cache: dict,
     user_config: UserInputConfig,
 ):
     """Return a session-cached TransformerModel from build_model(user_config)."""
-    from .conftest import get_session_model
-
-    return get_session_model(user_config)
+    return get_built_model(user_config)
 
 
 def get_cached_hf_config(cache: dict, model_id: str):
     """Return a session-cached hf config for model_id."""
-    from .conftest import get_session_hf_config
-
-    return get_session_hf_config(model_id)
+    return get_hf_config(model_id)

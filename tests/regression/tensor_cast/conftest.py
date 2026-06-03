@@ -1,49 +1,38 @@
 """tensor_cast regression fixtures.
 
-Session-scoped model / hf_config caches are shared across unittest and pytest tests.
+Session model / hf_config caching is delegated to ``tests.helpers.model_cache``,
+the single source of truth shared across unittest and pytest tests.
 """
 
 from __future__ import annotations
 
-import copy
 from collections.abc import Callable
 
 import pytest
 import tensor_cast.ops  # noqa: F401 — register custom ops for regression tests
 import torch
-from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.transformers.model import TransformerModel
-from tensor_cast.transformers.utils import AutoModelConfigLoader
+from tests.helpers.model_cache import _BUILT_MODEL_CACHE, get_built_model, get_hf_config
 from tests.helpers.op_registry import build_op_registry
-
-from .test_common import user_config_build_cache_key
-
-_SESSION_MODEL_CACHE: dict = {}
-_SESSION_HF_CONFIG_CACHE: dict = {}
 
 
 def get_session_model(user_config: UserInputConfig) -> TransformerModel:
     """Cross-file session-level build_model cache for unittest TestCase usage."""
-    key = user_config_build_cache_key(user_config)
-    if key not in _SESSION_MODEL_CACHE:
-        _SESSION_MODEL_CACHE[key] = build_model(user_config)
-    return _SESSION_MODEL_CACHE[key]
+    return get_built_model(user_config)
 
 
 def get_session_hf_config(model_id: str):
     """Cross-file session-level Hugging Face config cache."""
-    if model_id not in _SESSION_HF_CONFIG_CACHE:
-        _SESSION_HF_CONFIG_CACHE[model_id] = AutoModelConfigLoader().load_config(model_id)
-    return copy.deepcopy(_SESSION_HF_CONFIG_CACHE[model_id])
+    return get_hf_config(model_id)
 
 
 @pytest.fixture(scope="session")
 def session_model_cache():
-    return _SESSION_MODEL_CACHE
+    return _BUILT_MODEL_CACHE
 
 
 @pytest.fixture(scope="session")

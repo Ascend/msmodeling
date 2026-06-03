@@ -114,7 +114,8 @@ def gate_new_source(
 
 
 def gate_new_tests(changes: ChangeSet) -> GateStepResult:
-    return GateStepResult(tests=frozenset(changes.new_test))
+    """Run added and in-place-modified test files directly (their edits may change coverage)."""
+    return GateStepResult(tests=frozenset(changes.new_test + changes.modified_test))
 
 
 # ---------------------------------------------------------------------------

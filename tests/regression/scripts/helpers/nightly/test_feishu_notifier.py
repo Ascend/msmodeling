@@ -175,6 +175,81 @@ def test_payload_omits_redundancy_section_when_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# build_feishu_payload — phase breakdown
+# ---------------------------------------------------------------------------
+
+
+def test_payload_includes_phase_breakdown_section() -> None:
+    phases = (
+        {"label": "phase1 (test_map UT)", "passed": 40, "failed": 0, "duration_sec": 120.0},
+        {"label": "phase2c (network)", "passed": 5, "failed": 2, "duration_sec": 30.0},
+    )
+    payload = build_feishu_payload(**_kwargs(phase_breakdown=phases))
+    text = payload["content"]["text"]
+    assert "Per-phase:" in text
+    assert "phase1 (test_map UT): passed 40 / failed 0 / 120s" in text
+    assert "phase2c (network): passed 5 / failed 2 / 30s" in text
+
+
+def test_payload_omits_phase_breakdown_when_empty() -> None:
+    payload = build_feishu_payload(**_kwargs(phase_breakdown=()))
+    assert "Per-phase:" not in payload["content"]["text"]
+
+
+# ---------------------------------------------------------------------------
+# build_feishu_payload — slowest tests
+# ---------------------------------------------------------------------------
+
+
+def test_payload_includes_slowest_tests_section() -> None:
+    slowest = (("tests/a.py::test_slow", 9.0), ("tests/b.py::test_mid", 3.0))
+    payload = build_feishu_payload(**_kwargs(slowest_tests=slowest))
+    text = payload["content"]["text"]
+    assert "Slowest tests (top 2):" in text
+    assert "9.0s tests/a.py::test_slow" in text
+
+
+def test_payload_omits_slowest_tests_when_empty() -> None:
+    payload = build_feishu_payload(**_kwargs(slowest_tests=()))
+    assert "Slowest tests" not in payload["content"]["text"]
+
+
+# ---------------------------------------------------------------------------
+# build_feishu_payload — config drift warnings
+# ---------------------------------------------------------------------------
+
+
+def test_payload_includes_config_drift_section() -> None:
+    warnings = ("deepseek-ai/DeepSeek-V3.1 [deepseekv3.1_remote] model_type: vendored='a' hub='b'",)
+    payload = build_feishu_payload(**_kwargs(drift_warnings=warnings))
+    text = payload["content"]["text"]
+    assert "Config drift (1):" in text
+    assert warnings[0] in text
+
+
+def test_payload_omits_config_drift_when_empty() -> None:
+    payload = build_feishu_payload(**_kwargs(drift_warnings=()))
+    assert "Config drift" not in payload["content"]["text"]
+
+
+def test_payload_truncates_config_drift_at_10() -> None:
+    warnings = tuple(f"model-{i} drift" for i in range(15))
+    payload = build_feishu_payload(**_kwargs(drift_warnings=warnings))
+    text = payload["content"]["text"]
+    assert "model-0 drift" in text
+    assert "model-9 drift" in text
+    assert "model-10 drift" not in text
+    assert "and 5 more" in text
+
+
+def test_payload_default_kwargs_omit_new_optional_sections() -> None:
+    """Default (empty) phase_breakdown / slowest_tests / drift_warnings leave output unchanged."""
+    baseline = build_feishu_payload(**_kwargs())
+    explicit = build_feishu_payload(**_kwargs(phase_breakdown=(), slowest_tests=(), drift_warnings=()))
+    assert baseline["content"]["text"] == explicit["content"]["text"]
+
+
+# ---------------------------------------------------------------------------
 # build_feishu_payload — truncation
 # ---------------------------------------------------------------------------
 

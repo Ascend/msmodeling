@@ -143,3 +143,31 @@ def parse_junit_xml(paths: Sequence[Path]) -> NightlyRunStats:
         )
 
     return _merge_stats(parsed)
+
+
+def parse_junit_file(path: Path) -> NightlyRunStats | None:
+    """Parse a single JUnit XML file, or None when it is missing."""
+    if not path.is_file():
+        return None
+    return _parse_junit_file(path)
+
+
+def slowest_testcases(paths: Sequence[Path], *, top_n: int = 10) -> tuple[tuple[str, float], ...]:
+    """Return the top-N slowest ``(node_id, seconds)`` across the given files."""
+    durations: list[tuple[str, float]] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        root = ET.parse(path).getroot()
+        for testcase in root.iter("testcase"):
+            time_raw = testcase.get("time")
+            if time_raw is None:
+                continue
+            node_id = _format_testcase_id(
+                testcase.get("classname", ""),
+                testcase.get("name", ""),
+                testcase.get("file", ""),
+            )
+            durations.append((node_id, float(time_raw)))
+    durations.sort(key=lambda item: item[1], reverse=True)
+    return tuple(durations[:top_n])

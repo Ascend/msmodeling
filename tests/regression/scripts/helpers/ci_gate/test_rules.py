@@ -163,6 +163,15 @@ def test_gate_new_tests_selects_new_test_paths() -> None:
     assert result.tests == frozenset({"tests/smoke/test_a.py"})
 
 
+def test_gate_new_tests_also_selects_modified_test_paths() -> None:
+    cs = ChangeSet.build(
+        new_test=("tests/smoke/test_a.py",),
+        modified_test=("tests/regression/cli/test_b.py",),
+    )
+    result = gate_new_tests(cs)
+    assert result.tests == frozenset({"tests/smoke/test_a.py", "tests/regression/cli/test_b.py"})
+
+
 # ---------------------------------------------------------------------------
 # gate_new_source
 # ---------------------------------------------------------------------------

@@ -32,6 +32,9 @@ def build_feishu_payload(
     weak_coverage_symbols: tuple[str, ...] = (),
     redundancy_warnings: tuple[dict[str, object], ...] = (),
     expired_exemption_section: str = "",
+    phase_breakdown: tuple[dict[str, object], ...] = (),
+    slowest_tests: tuple[tuple[str, float], ...] = (),
+    drift_warnings: tuple[str, ...] = (),
 ) -> dict:
     """Build Feishu text message payload dict. Does not send."""
     status = "All passed" if failed == 0 else f"{failed} failed"
@@ -41,6 +44,17 @@ def build_feishu_payload(
         f"Result: {status}",
         f"Passed: {passed} | Failed: {failed} | Duration: {duration_sec:.0f}s",
     ]
+    if phase_breakdown:
+        lines.append("\nPer-phase:")
+        for phase in phase_breakdown:
+            lines.append(
+                f"- {phase['label']}: passed {phase['passed']} / failed {phase['failed']} "
+                f"/ {float(phase['duration_sec']):.0f}s"
+            )
+    if slowest_tests:
+        lines.append(f"\nSlowest tests (top {len(slowest_tests)}):")
+        for node_id, seconds in slowest_tests:
+            lines.append(f"- {seconds:.1f}s {node_id}")
     if coverage_line_percent is not None and coverage_branch_percent is not None:
         cov_status = "PASS" if coverage_gate_passed else "BELOW THRESHOLD"
         lines.append(
@@ -75,6 +89,12 @@ def build_feishu_payload(
                 lines.append(f"- ... and {len(redundant_pairs) - 10} more")
     if expired_exemption_section:
         lines.append(expired_exemption_section)
+    if drift_warnings:
+        lines.append(f"\nConfig drift ({len(drift_warnings)}):")
+        for warning in drift_warnings[:10]:
+            lines.append(f"- {warning}")
+        if len(drift_warnings) > 10:
+            lines.append(f"- ... and {len(drift_warnings) - 10} more")
     if failed_cases:
         lines.append("\nFailed cases:")
         lines.extend(f"- {case}" for case in failed_cases[:20])

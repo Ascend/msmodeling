@@ -1,11 +1,13 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import os
 import shutil
-import subprocess
 import tempfile
 
 import pytest
 import yaml
+from tests.helpers.cli_runner import run_module_main
+
+SERVING_CAST_MODULE = "serving_cast.main"
 
 # Configuration content required by test cases
 VALID_INSTANCE_CONFIG = {
@@ -57,6 +59,17 @@ class TestCLI:
     """Command-line system test class"""
 
     @pytest.fixture(autouse=True)
+    def reset_config_singleton(self):
+        """Reset the process-wide Config singleton so each in-process run starts fresh."""
+        from serving_cast.config import Config
+
+        Config._instance = None
+        Config._initialized = False
+        yield
+        Config._instance = None
+        Config._initialized = False
+
+    @pytest.fixture(autouse=True)
     def setup_and_teardown(self):
         """Environment preparation and cleanup before and after tests"""
         # Create temporary directory
@@ -82,11 +95,9 @@ class TestCLI:
             yaml.dump(content, f)
         return file_path
 
-    def _run_command(self, args, check=True):
-        """Run command line and return result"""
-        cmd = ["python", "-m", "serving_cast.main"] + args
-        result = subprocess.run(cmd, capture_output=True, text=True, check=check)
-        return result
+    def _run_command(self, args):
+        """Run serving_cast.main's main() in-process so coverage sees the core path."""
+        return run_module_main(SERVING_CAST_MODULE, args)
 
     def test_basic_functionality(self):
         """Test basic functionality: run command with valid configuration"""
@@ -109,12 +120,11 @@ class TestCLI:
         args = [f"--instance_config_path={self.valid_instance_path}"]
 
         # Execute command, expected to fail
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            self._run_command(args)
+        result = self._run_command(args)
 
         # Verify error code
-        assert exc_info.value.returncode != 0, "Command should not succeed when required arguments are missing"
-        assert "error: the following arguments are required" in exc_info.value.stderr
+        assert result.returncode != 0, "Command should not succeed when required arguments are missing"
+        assert "error: the following arguments are required" in result.stderr
 
     def test_invalid_file_path(self):
         """Test case of invalid file path"""
@@ -125,11 +135,10 @@ class TestCLI:
         ]
 
         # Execute command, expected to fail
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            self._run_command(args)
+        result = self._run_command(args)
 
         # Verify error message
-        assert "invalid validate_file_path value" in exc_info.value.stderr
+        assert "invalid validate_file_path value" in result.stderr
 
     def test_invalid_config_content(self):
         """Test case of invalid configuration file content"""
@@ -140,8 +149,7 @@ class TestCLI:
         ]
 
         # Execute command, expected to fail
-        with pytest.raises(subprocess.CalledProcessError) as exc_info:
-            self._run_command(args)
+        result = self._run_command(args)
 
         # Verify command execution failed
-        assert exc_info.value.returncode != 0
+        assert result.returncode != 0

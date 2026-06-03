@@ -38,7 +38,11 @@ def format_blocking_errors(errors: tuple[GateError, ...]) -> str:
         by_category.setdefault(e.category, []).append(e)
 
     lines: list[str] = []
-    lines.append("CI gate failed: policy violation — no tests executed.\n")
+    lines.append(
+        "CI gate failed: policy violation — incremental phases (Phase 1/2) were not run.\n"
+        f"Blocking items: {len(errors)}. "
+        "Phase 0 may still have run when this PR modified test files.\n"
+    )
 
     for category in ("new_source", "modified_source", "deleted_source", "deleted_test"):
         group = by_category.get(category)

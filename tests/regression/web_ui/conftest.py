@@ -1,6 +1,6 @@
-import sys
-from pathlib import Path
+"""web_ui regression fixtures.
 
-ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+The repo root (which exposes the top-level ``web_ui`` package) is made
+importable by ``pythonpath = ["."]`` in pyproject's pytest config, so no
+sys.path mutation is needed here.
+"""

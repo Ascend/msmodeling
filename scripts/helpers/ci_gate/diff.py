@@ -172,6 +172,7 @@ def classify_changes(
     config: list[str] = []
     new_test: list[str] = []
     del_test: list[str] = []
+    modified_test: list[str] = []
     new_source: list[str] = []
     del_source: list[str] = []
     modified_source: dict[str, frozenset[int]] = {}
@@ -215,6 +216,8 @@ def classify_changes(
             new_test.append(filepath)
         elif status == "D" and is_test:
             del_test.append(filepath)
+        elif status in ("M", "C") and is_test:
+            modified_test.append(filepath)
         elif status == "A" and not is_test:
             new_source.append(filepath)
         elif status == "D" and not is_test:
@@ -226,6 +229,7 @@ def classify_changes(
         config=tuple(config),
         new_test=tuple(new_test),
         del_test=tuple(del_test),
+        modified_test=tuple(modified_test),
         new_source=tuple(new_source),
         del_source=tuple(del_source),
         modified_source=modified_source,

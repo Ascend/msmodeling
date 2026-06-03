@@ -12,7 +12,7 @@
 #   UV_INDEX_URL                       custom UV package index URL
 #   HF_ENDPOINT                        custom HuggingFace endpoint URL
 #
-# Pytest: tests/benchmark/, -m "not npu", -vv; parallel only when MSMODELING_BENCHMARK_PARALLEL=1.
+# Pytest: tests/benchmark/, -m "not npu and not network", -q --tb=short; parallel only when MSMODELING_BENCHMARK_PARALLEL=1.
 set -euo pipefail
 
 export MSMODELING_TEST_WEIGHTS_PRUNE="${MSMODELING_TEST_WEIGHTS_PRUNE:-0}"
@@ -33,8 +33,9 @@ if [[ "${MSMODELING_BENCHMARK_MODELS:-0}" == "1" ]]; then
 fi
 
 run_pytest "${BENCHMARK_TARGET}" \
-  -m "not npu" \
+  -m "not npu and not network" \
+  -q \
   --no-header \
+  --tb=short \
   --durations=20 \
-  -vv \
   "${JOBS[@]}"

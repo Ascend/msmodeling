@@ -18,7 +18,6 @@ from scripts.helpers.common.coverage_config import PRODUCT_SOURCE_PREFIXES
 logger = logging.getLogger(__name__)
 
 UNCLASSIFIED_SYMBOL: Final = "*"
-MIN_LINES_PER_SYMBOL: Final[int] = 3
 
 
 def _relative_repo_key(abs_path: str) -> str | None:
@@ -134,7 +133,7 @@ def collect_from_coverage(
     for fp, syms in sorted(by_file.items()):
         filtered: dict[str, list[str]] = {}
         for sym, test_lines in sorted(syms.items()):
-            kept = sorted(nid for nid, count in test_lines.items() if count >= MIN_LINES_PER_SYMBOL)
+            kept = sorted(nid for nid, count in test_lines.items() if count)
             if kept:
                 filtered[sym] = kept
         if filtered:

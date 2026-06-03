@@ -11,7 +11,7 @@
 #   UV_INDEX_URL                       custom UV package index URL
 #   HF_ENDPOINT                        custom HuggingFace endpoint URL
 #
-# Pytest: tests/smoke/, -m "not npu" (includes nightly), -n auto, -vv.
+# Pytest: tests/smoke/, -m "not npu and not network" (includes nightly), -n auto, -q --tb=short.
 set -euo pipefail
 
 export MSMODELING_TEST_WEIGHTS_PRUNE="${MSMODELING_TEST_WEIGHTS_PRUNE:-0}"
@@ -22,8 +22,9 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "${SCRIPT_DIR}/lib/common.sh"
 
 run_pytest "${TESTS_SMOKE}/" \
-  -m "not npu" \
+  -m "not npu and not network" \
   -n auto \
+  -q \
   --no-header \
-  --durations=20 \
-  -vv
+  --tb=short \
+  --durations=20

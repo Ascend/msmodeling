@@ -14,15 +14,19 @@ test_deepseek_pd_ratio_mode                       -> TestThroughputOptimizerNigh
                                                      (test_deepseek_model_pd_ratio_with_output_validation)
 """
 
-import subprocess
-import sys
 from unittest import TestCase
+
+from tests.helpers.cli_runner import run_module_main
+
+THROUGHPUT_OPTIMIZER_MODULE = "cli.inference.throughput_optimizer"
 
 
 class TestThroughputOptimizerSmoke(TestCase):
     def _run_throughput_optimizer(self, args, check=True):
-        cmd = [sys.executable, "-m", "cli.inference.throughput_optimizer"] + args
-        return subprocess.run(cmd, capture_output=True, text=True, check=check)
+        result = run_module_main(THROUGHPUT_OPTIMIZER_MODULE, args)
+        if check and result.returncode != 0:
+            raise RuntimeError(f"throughput_optimizer failed (rc={result.returncode}): {result.stderr}")
+        return result
 
     def test_prefix_cache_hit_rate_aggregation_valid(self):
         args = [

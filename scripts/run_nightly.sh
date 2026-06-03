@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Scheduled nightly: two-phase UT + test_map refresh + benchmark + Feishu report.
-# Phase 1: smoke/regression -m "not npu and not nightly" (-n auto, coverage) → test_map on pass.
-# Phase 2: smoke/regression -m "not npu and nightly" + benchmark (remaining full suite).
+# Scheduled nightly: multi-phase UT + test_map refresh + benchmark + network + Feishu report.
+# Phase 1: smoke/regression -m "not npu and not nightly and not network" (-n auto, coverage) → test_map on pass.
+# Phase 2a: smoke/regression -m "not npu and nightly and not network".
+# Phase 2b: benchmark (remaining full suite).
+# Phase 2c: tests/ -m "not npu and network" (real model Hub cases) + non-blocking config drift check.
 #
 # Required:
 #   MSMODELING_TEST_MAP_PATH           Output path for test_map JSON (file; created on UT success)

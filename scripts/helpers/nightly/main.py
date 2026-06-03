@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Nightly: two-phase UT, refresh test_map, nightly + benchmark, report.
+"""Nightly: multi-phase UT, refresh test_map, nightly + benchmark + network, report.
 
 CLI entry point for run_nightly.sh. Phase 1: smoke/regression ``not npu and
-not nightly`` with coverage → test_map on success. Phase 2: smoke/regression
-``not npu and nightly`` + benchmark (remaining full suite) → report.
+not nightly and not network`` with coverage → test_map on success. Phase 2a:
+smoke/regression ``not npu and nightly and not network``. Phase 2b: benchmark.
+Phase 2c: ``not npu and network`` real model Hub cases. A non-blocking config
+drift check then compares vendored remote configs against the live Hub → report.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shlex
@@ -31,13 +34,46 @@ from scripts.helpers.common.coverage_config import cov_pytest_args, pytest_xdist
 from scripts.helpers.common.coverage_gate import GateConfig, check_thresholds, load_totals
 from scripts.helpers.common.test_map_config import resolve_test_map_path
 from scripts.helpers.nightly.feishu_notifier import build_feishu_payload, push_feishu
-from scripts.helpers.nightly.pytest_parser import NightlyRunStats, parse_junit_xml
+from scripts.helpers.nightly.pytest_parser import (
+    NightlyRunStats,
+    parse_junit_file,
+    parse_junit_xml,
+    slowest_testcases,
+)
 from scripts.helpers.nightly.report_builder import compute_weak_coverage_symbols, fetch_env_info, load_test_map_summary
 from scripts.helpers.nightly.report_models import CoverageSummary
 
-_TEST_MAP_MARKER = "not npu and not nightly"
-_NIGHTLY_MARKER = "not npu and nightly"
+_TEST_MAP_MARKER = "not npu and not nightly and not network"
+_NIGHTLY_MARKER = "not npu and nightly and not network"
+_NETWORK_MARKER = "not npu and network"
 _PROCESS_TERMINATE_TIMEOUT_SECONDS: Final[float] = 5.0
+_PHASE_LABELS: Final[tuple[str, ...]] = (
+    "phase1 (test_map UT)",
+    "phase2a (nightly)",
+    "phase2b (benchmark)",
+    "phase2c (network)",
+)
+_SLOWEST_TESTS_TOP_N: Final[int] = 10
+
+# Vendored remote configs whose live Hub counterpart we watch for drift.
+_DRIFT_FIXTURE_MAP: Final[dict[str, str]] = {
+    "deepseek-ai/DeepSeek-V3.1": "deepseekv3.1_remote",
+    "MiniMaxAI/MiniMax-M2": "minimax_m2",
+}
+# network-marked remote ids with no vendored offline baseline yet.
+_DRIFT_REMOTE_NO_BASELINE: Final[tuple[str, ...]] = (
+    "zai-org/GLM-4.6",
+    "moonshotai/Kimi-K2-Base",
+    "XiaomiMiMo/MiMo-V2-Flash",
+    "ZhipuAI/GLM-4.7",
+)
+_DRIFT_COMPARE_KEYS: Final[tuple[str, ...]] = (
+    "model_type",
+    "architectures",
+    "num_hidden_layers",
+    "hidden_size",
+    "vocab_size",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +157,86 @@ def _build_benchmark_pytest_cmd(python_exe: str, cfg: Config, *, junit_xml: Path
     return cmd
 
 
+def _build_network_pytest_cmd(python_exe: str, *, junit_xml: Path) -> list[str]:
+    """Phase 2c: network-marked cases validated against the live model Hub.
+
+    Runs serially: the cases share one Hub cache dir, so concurrent workers
+    could race on the same config-only snapshot download.
+    """
+    return [
+        python_exe,
+        "-m",
+        "pytest",
+        "tests/",
+        "-m",
+        _NETWORK_MARKER,
+        "-q",
+        "--no-header",
+        "--tb=short",
+        "--disable-warnings",
+        "--durations=20",
+        f"--junit-xml={junit_xml}",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Config drift check (non-blocking)
+# ---------------------------------------------------------------------------
+
+
+def _load_vendored_config(fixture_dir: str) -> dict | None:
+    config_path = REPO_ROOT / "tests" / "assets" / "model_config" / fixture_dir / "config.json"
+    if not config_path.is_file():
+        return None
+    try:
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _fetch_hub_config(model_id: str) -> dict:
+    from transformers import AutoConfig
+
+    try:
+        hf_config = AutoConfig.from_pretrained(model_id)
+    except Exception:
+        hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    return hf_config.to_dict()
+
+
+def _diff_config(model_id: str, fixture_dir: str, vendored: dict, hub: dict) -> list[str]:
+    drifts: list[str] = []
+    for key in _DRIFT_COMPARE_KEYS:
+        old = vendored.get(key)
+        new = hub.get(key)
+        if old != new:
+            drifts.append(f"{model_id} [{fixture_dir}] {key}: vendored={old!r} hub={new!r}")
+    return drifts
+
+
+def _run_config_drift_check() -> tuple[str, ...]:
+    """Compare vendored remote configs against the live Hub. Never raises.
+
+    Config-only ``AutoConfig`` fetches (no weight shards) for the mapped
+    fixtures; un-baselined remote ids emit a follow-up TODO line.
+    """
+    warnings: list[str] = []
+    for model_id, fixture_dir in _DRIFT_FIXTURE_MAP.items():
+        vendored = _load_vendored_config(fixture_dir)
+        if vendored is None:
+            warnings.append(f"{model_id}: missing config.json at fixture '{fixture_dir}' (drift baseline absent)")
+            continue
+        try:
+            hub = _fetch_hub_config(model_id)
+        except Exception as exc:
+            warnings.append(f"{model_id}: Hub config fetch failed ({exc}); cannot check drift")
+            continue
+        warnings.extend(_diff_config(model_id, fixture_dir, vendored, hub))
+    for model_id in _DRIFT_REMOTE_NO_BASELINE:
+        warnings.append(f"TODO drift baseline: {model_id} has no vendored copy under tests/assets/model_config/")
+    return tuple(warnings)
+
+
 # ---------------------------------------------------------------------------
 # Pytest runner (streaming)
 # ---------------------------------------------------------------------------
@@ -156,8 +272,13 @@ def _terminate_process_tree(
         proc.wait(timeout=sigterm_timeout_seconds)
 
 
-def _stream_pytest(cmd: list[str], cwd: Path) -> int:
-    """Run pytest, stream stdout line by line, return exit code."""
+def _stream_pytest(cmd: list[str], cwd: Path, *, log_file: Path | None = None) -> int:
+    """Run pytest, return exit code.
+
+    With ``log_file`` unset the output is streamed to the console line by line.
+    When ``log_file`` is provided the output is captured there instead, keeping
+    the console quiet (used when a Feishu webhook carries the detailed report).
+    """
     env = os.environ.copy()
     env["PYTHONPATH"] = str(cwd)
 
@@ -171,18 +292,24 @@ def _stream_pytest(cmd: list[str], cwd: Path) -> int:
         bufsize=1,
         start_new_session=True,
     )
+    sink = log_file.open("w", encoding="utf-8") if log_file is not None else None
     try:
         if proc.stdout is None:
             raise RuntimeError("Failed to capture pytest stdout")
         try:
             for line in proc.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
+                if sink is not None:
+                    sink.write(line)
+                else:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
         except KeyboardInterrupt:
             _terminate_process_tree(proc)
             raise
         return proc.wait()
     finally:
+        if sink is not None:
+            sink.close()
         if proc.stdout is not None:
             proc.stdout.close()
         if proc.poll() is None:
@@ -238,6 +365,7 @@ def emit_report(
     weak_coverage_symbols: tuple[str, ...] = (),
     redundancy_warnings: tuple[dict[str, object], ...] = (),
     expired_exemption_section: str = "",
+    drift_warnings: tuple[str, ...] = (),
 ) -> NightlyRunStats:
     """Parse pytest JUnit XML, push report to Feishu when webhook is set.
 
@@ -252,6 +380,21 @@ def emit_report(
     if not webhook_url:
         logger.warning("FEISHU_WEBHOOK_URL not set — skipping Feishu push")
         return stats
+
+    phase_breakdown: list[dict[str, object]] = []
+    for label, path in zip(_PHASE_LABELS, junit_xml_paths):
+        phase_stats = parse_junit_file(path)
+        if phase_stats is None:
+            continue
+        phase_breakdown.append(
+            {
+                "label": label,
+                "passed": phase_stats.passed,
+                "failed": phase_stats.failed + phase_stats.errors,
+                "duration_sec": phase_stats.duration_sec,
+            }
+        )
+    slowest_tests = slowest_testcases(junit_xml_paths, top_n=_SLOWEST_TESTS_TOP_N)
 
     payload = build_feishu_payload(
         timestamp=env.timestamp,
@@ -273,6 +416,9 @@ def emit_report(
         weak_coverage_symbols=weak_coverage_symbols,
         redundancy_warnings=redundancy_warnings,
         expired_exemption_section=expired_exemption_section,
+        phase_breakdown=tuple(phase_breakdown),
+        slowest_tests=slowest_tests,
+        drift_warnings=drift_warnings,
     )
     push_feishu(webhook_url, payload)
     return stats
@@ -294,17 +440,23 @@ def main() -> int:
         logger.error("%s", exc)
         return 1
 
+    feishu_url = cfg.feishu_webhook_url or None
+
     with tempfile.TemporaryDirectory(prefix="nightly-junit-") as junit_dir:
         junit_root = Path(junit_dir)
         map_junit = junit_root / "phase1_test_map.xml"
         nightly_junit = junit_root / "phase2a_nightly.xml"
         bench_junit = junit_root / "phase2b_benchmark.xml"
+        network_junit = junit_root / "phase2c_network.xml"
+
+        def _phase_log(name: str) -> Path | None:
+            return junit_root / f"{name}.log" if feishu_url else None
 
         try:
             logger.info("Phase 1: test_map — smoke/regression (not npu and not nightly)")
             map_cmd = _build_test_map_pytest_cmd(sys.executable, cfg, junit_xml=map_junit)
             logger.info("Running pytest: %s", shlex.join(map_cmd))
-            map_exit = _stream_pytest(map_cmd, cwd=REPO_ROOT)
+            map_exit = _stream_pytest(map_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase1_test_map"))
             logger.info("Phase 1: pytest exit=%d", map_exit)
 
             coverage = _coverage_summary(cfg)
@@ -351,7 +503,7 @@ def main() -> int:
             logger.info("Phase 2a: nightly — smoke/regression (not npu and nightly)")
             nightly_cmd = _build_nightly_pytest_cmd(sys.executable, junit_xml=nightly_junit)
             logger.info("Running pytest: %s", shlex.join(nightly_cmd))
-            nightly_exit = _stream_pytest(nightly_cmd, cwd=REPO_ROOT)
+            nightly_exit = _stream_pytest(nightly_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2a_nightly"))
             logger.info("Phase 2a: pytest exit=%d", nightly_exit)
 
             logger.info(
@@ -360,21 +512,39 @@ def main() -> int:
             )
             bench_cmd = _build_benchmark_pytest_cmd(sys.executable, cfg, junit_xml=bench_junit)
             logger.info("Running pytest: %s", shlex.join(bench_cmd))
-            bench_exit = _stream_pytest(bench_cmd, cwd=REPO_ROOT)
+            bench_exit = _stream_pytest(bench_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2b_benchmark"))
             logger.info("Phase 2b: pytest exit=%d", bench_exit)
 
-            overall_exit = map_exit or nightly_exit or bench_exit
+            logger.info("Phase 2c: network — real model Hub cases (not npu and network)")
+            network_cmd = _build_network_pytest_cmd(sys.executable, junit_xml=network_junit)
+            logger.info("Running pytest: %s", shlex.join(network_cmd))
+            network_exit = _stream_pytest(network_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2c_network"))
+            logger.info("Phase 2c: pytest exit=%d", network_exit)
+
+            logger.info("Drift check: vendored remote configs vs live Hub (non-blocking)")
+            try:
+                drift_warnings = _run_config_drift_check()
+            except Exception as exc:
+                logger.warning("Config drift check skipped due to error: %s", exc)
+                drift_warnings = ()
+            if drift_warnings:
+                logger.warning("Config drift / baseline warnings (non-blocking, %d):", len(drift_warnings))
+                for warning in drift_warnings:
+                    logger.warning("  - %s", warning)
+
+            overall_exit = map_exit or nightly_exit or bench_exit or network_exit
 
             logger.info("Building report ...")
             stats = emit_report(
-                (map_junit, nightly_junit, bench_junit),
+                (map_junit, nightly_junit, bench_junit, network_junit),
                 coverage=coverage,
                 test_map_written=map_written,
                 test_map_path=test_map_path if map_written else None,
-                webhook_url=cfg.feishu_webhook_url or None,
+                webhook_url=feishu_url,
                 weak_coverage_symbols=weak_symbols,
                 redundancy_warnings=redundancy,
                 expired_exemption_section=expired_section,
+                drift_warnings=drift_warnings,
             )
 
             summary_lines = [
@@ -386,6 +556,8 @@ def main() -> int:
             ]
             if coverage:
                 summary_lines.append(coverage.message)
+            if drift_warnings:
+                summary_lines.append(f"Config drift warnings: {len(drift_warnings)} (see nightly log)")
             print("\n".join(summary_lines))
             return overall_exit
         except KeyboardInterrupt:

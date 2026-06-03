@@ -1,3 +1,11 @@
+"""Unit tests for ``AutoModelConfigLoader`` internals.
+
+Exercises remote-code model-type conversion and the ModelScope config-only
+allowlist using monkeypatched ``transformers``/``modelscope`` — fully offline,
+no Hub access. The live-Hub integration counterpart lives in
+``test_auto_model_config.py``'s network-marked ``AutoModelAndConfigRemoteTestCase``.
+"""
+
 from __future__ import annotations
 
 from types import SimpleNamespace

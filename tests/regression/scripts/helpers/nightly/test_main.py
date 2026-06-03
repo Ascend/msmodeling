@@ -6,16 +6,22 @@ import json
 import logging
 import signal
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from scripts.helpers._config import Config
 from scripts.helpers.nightly.main import (
     _build_benchmark_pytest_cmd,
+    _build_network_pytest_cmd,
     _build_nightly_pytest_cmd,
     _build_test_map_pytest_cmd,
     _coverage_summary,
+    _fetch_hub_config,
+    _load_vendored_config,
+    _run_config_drift_check,
     _stream_pytest,
     _terminate_process_tree,
     emit_report,
@@ -66,7 +72,7 @@ def test_test_map_cmd_contains_smoke_and_regression_and_coverage(base_cfg: Confi
     cmd = _build_test_map_pytest_cmd("python3", base_cfg, junit_xml=junit)
     assert "tests/smoke/" in cmd
     assert "tests/regression/" in cmd
-    assert "not npu and not nightly" in cmd
+    assert "not npu and not nightly and not network" in cmd
     assert "-n" in cmd and "auto" in cmd
     assert "--cov-context=test" in cmd
     assert "--cov-branch" in cmd
@@ -83,7 +89,7 @@ def test_nightly_cmd_contains_smoke_and_regression_with_nightly_marker(tmp_path:
     cmd = _build_nightly_pytest_cmd("python3", junit_xml=junit)
     assert "tests/smoke/" in cmd
     assert "tests/regression/" in cmd
-    assert "not npu and nightly" in cmd
+    assert "not npu and nightly and not network" in cmd
     assert "-n" in cmd
     assert "auto" in cmd
     assert "--cov-context=test" not in cmd
@@ -109,6 +115,55 @@ def test_benchmark_cmd_parallel_adds_auto_flag(parallel_cfg: Config, tmp_path: P
     assert "-n" in cmd
     assert "auto" in cmd
     assert f"--junit-xml={junit}" in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_network_pytest_cmd
+# ---------------------------------------------------------------------------
+
+
+def test_network_cmd_targets_network_marker_and_serial_run(tmp_path: Path) -> None:
+    junit = tmp_path / "network.xml"
+    cmd = _build_network_pytest_cmd("python3", junit_xml=junit)
+    assert cmd[0] == "python3"
+    assert "tests/" in cmd
+    assert "not npu and network" in cmd
+    assert "-n" not in cmd
+    assert f"--junit-xml={junit}" in cmd
+
+
+# ---------------------------------------------------------------------------
+# _load_vendored_config / _fetch_hub_config
+# ---------------------------------------------------------------------------
+
+
+def test_load_vendored_config_reads_repo_fixture() -> None:
+    config = _load_vendored_config("deepseekv3.1_remote")
+    assert config is not None
+    assert isinstance(config, dict)
+    assert "model_type" in config
+
+
+def test_load_vendored_config_missing_fixture_returns_none() -> None:
+    assert _load_vendored_config("__no_such_fixture__") is None
+
+
+def test_fetch_hub_config_returns_config_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConfig:
+        def to_dict(self) -> dict[str, str]:
+            return {"model_type": "fake"}
+
+    def _from_pretrained(_model_id: str, **_kwargs: object) -> _FakeConfig:
+        return _FakeConfig()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=_from_pretrained)),
+    )
+
+    hub = _fetch_hub_config("org/model")
+    assert hub == {"model_type": "fake"}
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +387,49 @@ def test_emit_report_merges_nightly_pipeline_phase_junit_xml(
     assert stats.duration_sec == pytest.approx(750.0)
     assert stats.failed_cases == ("tests/regression/tensor_cast/test_compile.py::test_fail_0",)
     assert "FEISHU_WEBHOOK_URL not set" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# _run_config_drift_check (non-blocking, mocked Hub)
+# ---------------------------------------------------------------------------
+
+
+def test_drift_check_does_not_raise_when_hub_fetch_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.helpers.nightly import main as nightly_main
+
+    monkeypatch.setattr(nightly_main, "_load_vendored_config", lambda _fixture: {"model_type": "deepseek_v3"})
+
+    def _boom(_model_id: str) -> dict:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(nightly_main, "_fetch_hub_config", _boom)
+
+    warnings = _run_config_drift_check()
+    assert isinstance(warnings, tuple)
+    assert any("Hub config fetch failed" in w for w in warnings)
+
+
+def test_drift_check_reports_key_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.helpers.nightly import main as nightly_main
+
+    monkeypatch.setattr(nightly_main, "_DRIFT_FIXTURE_MAP", {"some/Model": "some_fixture"})
+    monkeypatch.setattr(nightly_main, "_DRIFT_REMOTE_NO_BASELINE", ())
+    monkeypatch.setattr(nightly_main, "_load_vendored_config", lambda _fixture: {"model_type": "deepseek_v3"})
+    monkeypatch.setattr(nightly_main, "_fetch_hub_config", lambda _model_id: {"model_type": "deepseek_v4"})
+
+    warnings = _run_config_drift_check()
+    assert any("model_type: vendored='deepseek_v3' hub='deepseek_v4'" in w for w in warnings)
+
+
+def test_drift_check_warns_on_missing_vendored_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.helpers.nightly import main as nightly_main
+
+    monkeypatch.setattr(nightly_main, "_DRIFT_FIXTURE_MAP", {"some/Model": "missing_fixture"})
+    monkeypatch.setattr(nightly_main, "_DRIFT_REMOTE_NO_BASELINE", ())
+    monkeypatch.setattr(nightly_main, "_load_vendored_config", lambda _fixture: None)
+
+    warnings = _run_config_drift_check()
+    assert any("drift baseline absent" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ Concrete implementations live alongside regressions; this package collects share
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.transformers.model import TransformerModel
-from tests.regression.tensor_cast.test_common import user_config_build_cache_key
+from tests.helpers.model_cache import user_config_build_cache_key
 
 
 def make_user_input_config(

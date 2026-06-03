@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from scripts.helpers.nightly.pytest_parser import NightlyRunStats, parse_junit_xml
+from scripts.helpers.nightly.pytest_parser import (
+    NightlyRunStats,
+    parse_junit_file,
+    parse_junit_xml,
+    slowest_testcases,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -126,6 +131,77 @@ def test_parse_skipped_testcase_not_counted_as_passed(tmp_path: Path) -> None:
     assert stats.passed == 0
     assert stats.failed == 0
     assert stats.errors == 0
+
+
+# ---------------------------------------------------------------------------
+# parse_junit_file — single file
+# ---------------------------------------------------------------------------
+
+
+def test_parse_junit_file_returns_stats_for_valid_file(sample_junit_path: Path) -> None:
+    stats = parse_junit_file(sample_junit_path)
+    assert stats is not None
+    assert stats.passed == 3
+    assert stats.failed == 2
+    assert stats.errors == 1
+
+
+def test_parse_junit_file_returns_none_for_missing_file() -> None:
+    assert parse_junit_file(Path("/nonexistent/missing.xml")) is None
+
+
+# ---------------------------------------------------------------------------
+# slowest_testcases
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def timed_junit_path(tmp_path: Path) -> Path:
+    path = tmp_path / "timed.xml"
+    path.write_text(
+        """\
+<testsuite>
+  <testcase classname="pkg.mod" name="test_fast" time="0.5"/>
+  <testcase classname="pkg.mod" name="test_slow" time="9.0"/>
+  <testcase classname="pkg.mod" name="test_mid" time="3.0"/>
+</testsuite>
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_slowest_testcases_sorted_descending(timed_junit_path: Path) -> None:
+    slowest = slowest_testcases((timed_junit_path,))
+    seconds = [s for _node, s in slowest]
+    assert seconds == sorted(seconds, reverse=True)
+    assert slowest[0] == ("pkg/mod.py::test_slow", pytest.approx(9.0))
+
+
+def test_slowest_testcases_respects_top_n(timed_junit_path: Path) -> None:
+    slowest = slowest_testcases((timed_junit_path,), top_n=2)
+    assert len(slowest) == 2
+    assert [s for _node, s in slowest] == [pytest.approx(9.0), pytest.approx(3.0)]
+
+
+def test_slowest_testcases_skips_missing_files(timed_junit_path: Path) -> None:
+    slowest = slowest_testcases((Path("/nonexistent/a.xml"), timed_junit_path))
+    assert len(slowest) == 3
+
+
+def test_slowest_testcases_skips_testcases_without_time_attr(tmp_path: Path) -> None:
+    path = tmp_path / "untimed.xml"
+    path.write_text(
+        """\
+<testsuite>
+  <testcase classname="pkg.mod" name="test_timed" time="2.0"/>
+  <testcase classname="pkg.mod" name="test_untimed"/>
+</testsuite>
+""",
+        encoding="utf-8",
+    )
+    slowest = slowest_testcases((path,))
+    assert slowest == (("pkg/mod.py::test_timed", pytest.approx(2.0)),)
 
 
 # ---------------------------------------------------------------------------

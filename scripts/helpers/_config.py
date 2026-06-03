@@ -67,7 +67,7 @@ class Config:
     # --- git ---
     base_branch: str  # MSMODELING_TEST_BASE_BRANCH
 
-    # --- coverage gate ---
+    # --- nightly coverage report ---
     line_threshold: float  # MSMODELING_TEST_LINE_THRESHOLD
     branch_threshold: float  # MSMODELING_TEST_BRANCH_THRESHOLD
 

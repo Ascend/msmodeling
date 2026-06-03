@@ -11,7 +11,6 @@ After the session ends, optionally remove hub weight shards under the repo-local
 
 from __future__ import annotations
 
-import copy
 import logging
 import os
 from pathlib import Path
@@ -127,16 +126,41 @@ def pytest_sessionfinish(session, exitstatus) -> None:
     _prune_hub_weight_files(_resolve_cache_dir())
 
 
+@pytest.fixture(autouse=True)
+def _seed_rng():
+    """Seed ``random`` and ``torch`` before every test for determinism."""
+    import random
+
+    import torch
+
+    random.seed(0)
+    torch.manual_seed(0)
+
+
+@pytest.fixture(autouse=True)
+def _restore_environ():
+    """Snapshot os.environ per test and restore it afterwards.
+
+    The snapshot is taken after ``pytest_sessionstart`` set the session-level hub
+    env, so session env is part of the snapshot and preserved across tests.
+    """
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+
 @pytest.fixture(scope="session")
 def cfg_registry(model_zoo) -> dict:
-    """Global config registry with lazy HF config loading and cache."""
-    from tensor_cast.transformers.utils import AutoModelConfigLoader
+    """Alias-resolving session view over the shared ``model_cache`` config cache."""
+    from tests.helpers.model_cache import get_hf_config
 
     class _CfgRegistry(dict):
         def __init__(self, alias_to_model_id: dict[str, str]):
             super().__init__()
             self._alias_to_model_id = alias_to_model_id
-            self._loader = AutoModelConfigLoader()
 
         def _normalize_model_id(self, key: str) -> str:
             model_id = self._alias_to_model_id.get(key, key)
@@ -145,14 +169,11 @@ def cfg_registry(model_zoo) -> dict:
                 raise KeyError(f"Unknown model alias '{key}'. Available aliases: {aliases}")
             return model_id
 
-        def _load(self, model_id: str):
-            if model_id not in self:
-                self[model_id] = self._loader.load_config(model_id)
-            return copy.deepcopy(dict.__getitem__(self, model_id))
-
         def __getitem__(self, key):
             model_id = self._normalize_model_id(key)
-            return self._load(model_id)
+            config = get_hf_config(model_id)
+            dict.__setitem__(self, model_id, config)
+            return config
 
         def __setitem__(self, key, value):
             model_id = self._normalize_model_id(key)
