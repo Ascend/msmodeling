@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import auto, Enum
 from typing import ClassVar, Dict, List
 
@@ -198,6 +198,23 @@ class ATLAS_800:
         },
     )
 
+    A3_INTERCONNECT_ROCE = CommGrid(  # For A3 die with RoCE
+        # up to 32 devices (dies), dual-node only; values are placeholders,
+        # actual device mapping is determined by upper layers
+        grid=torch.arange(2 * 8 * 2).reshape(2, 8, 2),
+        topologies={
+            0: InterconnectTopology(  # RoCE
+                bandwidth_bytes_ps=196 * 1e9 / 8, latency_s=5.5 * 1e-6, comm_efficiency=0.7
+            ),
+            1: InterconnectTopology(  # 1-level CLOS
+                bandwidth_bytes_ps=196 * 1e9, latency_s=0.5 * 1e-6, comm_efficiency=0.7
+            ),
+            2: InterconnectTopology(  # SIO
+                bandwidth_bytes_ps=224 * 1e9, latency_s=0.2 * 1e-6, comm_efficiency=0.7
+            ),
+        },
+    )
+
     A2_376T_64G = DeviceProfile(
         name="ATLAS_800_A2_376T_64G",
         vendor="HUAWEI",
@@ -336,6 +353,12 @@ class ATLAS_800:
         static_cost=STATIC_COST,
     )
 
+    A3_752T_128G_DIE_ROCE = replace(  # one die of A3 with RoCE
+        A3_752T_128G_DIE,
+        name="ATLAS_800_A3_752T_128G_DIE_ROCE",
+        comm_grid=A3_INTERCONNECT_ROCE,
+    )
+
     A3_560T_128G_DIE = DeviceProfile(  # one die of A3
         name="ATLAS_800_A3_560T_128G_DIE",
         vendor="HUAWEI",
@@ -357,4 +380,10 @@ class ATLAS_800:
         memory_efficiency=0.6,
         comm_grid=A3_INTERCONNECT,
         static_cost=STATIC_COST,
+    )
+
+    A3_560T_128G_DIE_ROCE = replace(  # one die of A3 with RoCE
+        A3_560T_128G_DIE,
+        name="ATLAS_800_A3_560T_128G_DIE_ROCE",
+        comm_grid=A3_INTERCONNECT_ROCE,
     )
