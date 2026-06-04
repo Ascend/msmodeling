@@ -992,7 +992,12 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
                 return_value=fake_summary,
             ),
         ):
-            runner_cls.return_value.run_inference.return_value = SimpleNamespace(runtime=fake_runtime)
+
+            def run_inference(*, generate_inputs_func, runtime_observer):
+                runtime_observer(fake_runtime)
+                return SimpleNamespace()
+
+            runner_cls.return_value.run_inference.side_effect = run_inference
             result = run_actual_case(case, user_input)
 
         self.assertIs(result.summary, fake_summary)

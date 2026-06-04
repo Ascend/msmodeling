@@ -37,16 +37,17 @@ def run_actual_case(evidence_case: EvidenceCase, user_input: Any) -> ActualRunRe
         if hasattr(case_input, key):
             setattr(case_input, key, value)
     runner = ModelRunner(case_input)
-    metrics = runner.run_inference(generate_inputs_func=generate_inputs)
-    runtime = getattr(metrics, "runtime", None)
-    if runtime is None:
-        raise RuntimeError(
-            "ModelRunnerMetrics does not expose runtime events. Use build_actual_summary_from_runtime "
-            "directly for now or enable runtime capture in ModelRunner."
+    summary = None
+
+    def collect_summary(runtime):
+        nonlocal summary
+        summary = build_actual_summary_from_runtime(
+            runtime,
+            case_name=evidence_case.name,
+            coverage=_collect_empirical_coverage(runtime.perf_models),
         )
-    summary = build_actual_summary_from_runtime(
-        runtime,
-        case_name=evidence_case.name,
-        coverage=_collect_empirical_coverage(runtime.perf_models),
-    )
+
+    metrics = runner.run_inference(generate_inputs_func=generate_inputs, runtime_observer=collect_summary)
+    if summary is None:
+        raise RuntimeError("ModelRunner did not provide runtime events for actual summary collection.")
     return ActualRunResult(metrics=metrics, summary=summary)

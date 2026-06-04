@@ -116,6 +116,7 @@ class ModelRunner:
         requests: Optional[List[RequestInfo]] = None,
         generate_inputs_func: Callable = generate_inputs_varlen,
         with_sampler: bool = False,
+        runtime_observer: Optional[Callable[[Runtime], None]] = None,
     ) -> ModelRunnerMetrics:
         def calculate_single_card_tps(execution_time_s: float) -> float:
             if not execution_time_s or execution_time_s <= 0:
@@ -205,6 +206,9 @@ class ModelRunner:
         if self.user_input.chrome_trace:
             runtime.export_chrome_trace(self.user_input.chrome_trace)
 
+        if runtime_observer is not None:
+            runtime_observer(runtime)
+
         return ModelRunnerMetrics(
             total_device_memory_gb=self.total_device_memory_gb,
             model_weight_size_gb=self.model_weight_size_gb,
@@ -220,7 +224,6 @@ class ModelRunner:
             batch_size=batch_size,
             table_result=table_result,
             breakdowns=runtime.get_breakdowns(),
-            runtime=runtime,
         )
 
     def get_inputs_num_bytes(self, requests: List[RequestInfo]) -> int:
@@ -248,7 +251,6 @@ class ModelRunnerMetrics:
     batch_size: int
     table_result: str = ""
     breakdowns: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    runtime: Optional[Runtime] = None
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")
