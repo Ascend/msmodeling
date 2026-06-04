@@ -398,7 +398,7 @@ def build_host_tensor(shape: tuple[int, ...], dtype):
         runtime_torch.float32,
         runtime_torch.float64,
     }:
-        return runtime_torch.randn(shape).to(dtype)
+        return runtime_torch.empty(shape, dtype=dtype)
     return runtime_torch.randint(0, 8, shape, dtype=dtype)
 
 
@@ -616,6 +616,7 @@ def process_replay_csvs(
     repeat_count: int,
     run_row_fn: Callable[[Path, int, dict[str, str]], None],
     update_mode: str = DEFAULT_UPDATE_MODE,
+    should_skip_row: Callable[[Path, int, dict[str, str]], bool] | None = None,
     on_row_finally: Callable[[], None] | None = None,
     can_write_cleanup: Callable[[], bool] | None = None,
     on_cleanup_written: Callable[[], None] | None = None,
@@ -641,6 +642,10 @@ def process_replay_csvs(
 
         for row_index, row in enumerate(rows, start=2):
             if update_mode == "missing-only" and row_has_valid_duration(row):
+                kept_rows.append(row)
+                skipped_rows += 1
+                continue
+            if should_skip_row is not None and should_skip_row(csv_path, row_index, row):
                 kept_rows.append(row)
                 skipped_rows += 1
                 continue

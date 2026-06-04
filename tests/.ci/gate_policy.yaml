@@ -10,8 +10,46 @@ test_discovery:
 
 exemptions:
   - symbols:
+      - tools/perf_data_collection/grid_generator/model_configs.py::_fetch_from_huggingface
+    reason: "External HuggingFace config loading is covered by static fallback tests; no network dependency in PR UT."
+    applicant: Secluded_Ocean
+    approver: hexiaowu
+    deadline: 2026-06-30
+    ticket: "PR-252"
+
+  - symbols:
+      - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::build_row_case
+      - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::main
+      - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::debug_dfc_tensor_devices
+      - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::run_row
+      - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::execute_dfc_op
+    reason: "DispatchFFNCombine replay execution requires Ascend NPU/runtime; PR UT covers non-NPU argument, validation, and launch safety paths."
+    applicant: Secluded_Ocean
+    approver: hexiaowu
+    deadline: 2026-06-30
+    ticket: "PR-252"
+
+  - symbols:
+      - tools/perf_data_collection/op_replay/run_all_op.py::run_script_inprocess
+      - tools/perf_data_collection/op_replay/run_all_op.py::run_script
+      - tools/perf_data_collection/op_replay/run_all_op.py::main
+    reason: "Replay orchestration entry points run operator scripts and require runtime-specific integration; PR UT covers CLI argument propagation and subprocess command construction."
+    applicant: Secluded_Ocean
+    approver: hexiaowu
+    deadline: 2026-06-30
+    ticket: "PR-252"
+
+  - symbols:
+      - tools/perf_data_collection/start_microbench.py::run_msprof_per_op_fallback
+    reason: "Per-operator msprof fallback depends on Ascend profiler outputs; PR UT covers command construction and mocked msprof execution."
+    applicant: Secluded_Ocean
+    approver: hexiaowu
+    deadline: 2026-06-30
+    ticket: "PR-252"
+
+  - symbols:
       - tensor_cast/transformers/builtin_model/qwen3_vl.py::patch_method_for_qwen3_vl
     reason: "builtin_model paths are omitted from coverage test_map; behavior is covered by adapter regression tests."
     applicant: "kai"
-    approver: "fangkai"
+    approver: "hexiaowu"
     deadline: 2026-12-31

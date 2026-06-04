@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
+import scripts.helpers.ci_gate.main as ci_gate_main
 from scripts.helpers._config import Config
 from scripts.helpers.ci_gate.gate_policy import default_test_discovery
 from scripts.helpers.ci_gate.main import (
@@ -75,15 +78,20 @@ def test_run_new_tests_and_build_map_returns_collected_map(monkeypatch: pytest.M
             ]
         }
     }
-    monkeypatch.setattr(
-        "scripts.helpers.ci_gate.main.collect_test_map",
-        lambda **_kwargs: expected,
-    )
+    captured_map_marker: list[str] = []
+
+    def _fake_collect_test_map(**kwargs: object) -> dict[str, dict[str, list[str]]]:
+        captured_map_marker.append(str(kwargs["marker_expr"]))
+        return expected
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.collect_test_map", _fake_collect_test_map)
     result = _run_new_tests_and_build_map(
         ("tests/regression/scripts/helpers/ci_gate/test_errors.py",),
         "not npu and not nightly and not network",
+        "not nightly and not network",
     )
     assert result == expected
+    assert captured_map_marker == ["not nightly and not network"]
 
 
 def test_run_new_tests_and_build_map_exits_on_pytest_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,7 +100,11 @@ def test_run_new_tests_and_build_map_exits_on_pytest_failure(monkeypatch: pytest
         lambda *_args, **_kwargs: FakeCompleted(1, "", "fail"),
     )
     with pytest.raises(SystemExit) as exc_info:
-        _run_new_tests_and_build_map(("tests/regression/scripts/helpers/ci_gate/test_errors.py",), "not npu")
+        _run_new_tests_and_build_map(
+            ("tests/regression/scripts/helpers/ci_gate/test_errors.py",),
+            "not npu",
+            "not nightly",
+        )
     assert exc_info.value.code == 1
 
 
@@ -125,10 +137,11 @@ def test_main_returns_one_on_unmapped_modified_source(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: empty_baseline)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff_line_map", lambda *_args: {})
+    main_line = inspect.getsourcelines(ci_gate_main.main)[1] + 1
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
         lambda *_args: ChangeSet.build(
-            modified_source={"scripts/helpers/ci_gate/main.py": frozenset({179})},
+            modified_source={"scripts/helpers/ci_gate/main.py": frozenset({main_line})},
         ),
     )
 

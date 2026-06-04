@@ -4,6 +4,7 @@ from .moe import (
     generate_dispatch_ffn_combine_rows,
     generate_grouped_matmul_rows,
 )
+from .rope import generate_split_qkv_rmsnorm_rope_rows
 
 __all__ = [
     "FIA_RUNTIME_COLUMNS",
@@ -11,4 +12,5 @@ __all__ = [
     "generate_dispatch_ffn_combine_rows",
     "generate_fused_attention_rows",
     "generate_grouped_matmul_rows",
+    "generate_split_qkv_rmsnorm_rope_rows",
 ]

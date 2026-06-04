@@ -149,6 +149,41 @@ def build_argparser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dispatch-ffn-combine-nproc-per-node",
+        type=int,
+        default=None,
+        help=(
+            "torchrun processes per node for DispatchFFNCombine EP replay. "
+            "Default: let DispatchFFNCombine_run.py infer it."
+        ),
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-nnodes",
+        type=int,
+        default=1,
+        help="torchrun node count for DispatchFFNCombine EP replay. Default: 1.",
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-node-rank",
+        type=int,
+        default=0,
+        help="torchrun node rank for DispatchFFNCombine EP replay. Default: 0.",
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-master-addr",
+        default="127.0.0.1",
+        help="torchrun master address for DispatchFFNCombine EP replay. Default: 127.0.0.1.",
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-master-port",
+        type=int,
+        default=None,
+        help=(
+            "torchrun master port for DispatchFFNCombine EP replay. "
+            "Required for multi-node; default: auto-selected for single-node."
+        ),
+    )
+    parser.add_argument(
         "--continue-on-error",
         action="store_true",
         help="Continue running remaining operator scripts even if one fails.",
@@ -179,6 +214,33 @@ def has_operator_csv(target_data_dir: Path, csv_name: str) -> bool:
     return any(target_data_dir.rglob(csv_name))
 
 
+def append_dispatch_ffn_combine_args(
+    command: list[str],
+    script_path: Path,
+    *,
+    dispatch_ffn_combine_ep_size: int | None,
+    dispatch_ffn_combine_nproc_per_node: int | None,
+    dispatch_ffn_combine_nnodes: int,
+    dispatch_ffn_combine_node_rank: int,
+    dispatch_ffn_combine_master_addr: str,
+    dispatch_ffn_combine_master_port: int | None,
+) -> None:
+    if normalize_op_name(script_path.stem) != DISPATCH_FFN_COMBINE_OP_NAME:
+        return
+    if dispatch_ffn_combine_ep_size is not None:
+        command.extend(["--ep-size", str(dispatch_ffn_combine_ep_size)])
+    if dispatch_ffn_combine_nproc_per_node is not None:
+        command.extend(["--nproc-per-node", str(dispatch_ffn_combine_nproc_per_node)])
+    if dispatch_ffn_combine_nnodes:
+        command.extend(["--nnodes", str(dispatch_ffn_combine_nnodes)])
+    if dispatch_ffn_combine_node_rank:
+        command.extend(["--node-rank", str(dispatch_ffn_combine_node_rank)])
+    if dispatch_ffn_combine_master_addr:
+        command.extend(["--master-addr", dispatch_ffn_combine_master_addr])
+    if dispatch_ffn_combine_master_port is not None:
+        command.extend(["--master-port", str(dispatch_ffn_combine_master_port)])
+
+
 def run_script_subprocess(
     script_path: Path,
     *,
@@ -190,6 +252,11 @@ def run_script_subprocess(
     repeat_count: int | None,
     update_mode: str,
     dispatch_ffn_combine_ep_size: int | None,
+    dispatch_ffn_combine_nproc_per_node: int | None,
+    dispatch_ffn_combine_nnodes: int,
+    dispatch_ffn_combine_node_rank: int,
+    dispatch_ffn_combine_master_addr: str,
+    dispatch_ffn_combine_master_port: int | None,
 ) -> None:
     command = [
         sys.executable,
@@ -207,8 +274,16 @@ def run_script_subprocess(
     if repeat_count is not None:
         command.extend(["--repeat-count", str(repeat_count)])
     command.extend(["--update-mode", update_mode])
-    if normalize_op_name(script_path.stem) == DISPATCH_FFN_COMBINE_OP_NAME and dispatch_ffn_combine_ep_size is not None:
-        command.extend(["--ep-size", str(dispatch_ffn_combine_ep_size)])
+    append_dispatch_ffn_combine_args(
+        command,
+        script_path,
+        dispatch_ffn_combine_ep_size=dispatch_ffn_combine_ep_size,
+        dispatch_ffn_combine_nproc_per_node=dispatch_ffn_combine_nproc_per_node,
+        dispatch_ffn_combine_nnodes=dispatch_ffn_combine_nnodes,
+        dispatch_ffn_combine_node_rank=dispatch_ffn_combine_node_rank,
+        dispatch_ffn_combine_master_addr=dispatch_ffn_combine_master_addr,
+        dispatch_ffn_combine_master_port=dispatch_ffn_combine_master_port,
+    )
     print(f"[RUN] {script_path.name}")
     subprocess.run(command, check=True, cwd=SCRIPT_DIR)
     print(f"[DONE] {script_path.name}")
@@ -225,6 +300,11 @@ def run_script_inprocess(
     repeat_count: int | None,
     update_mode: str,
     dispatch_ffn_combine_ep_size: int | None,
+    dispatch_ffn_combine_nproc_per_node: int | None,
+    dispatch_ffn_combine_nnodes: int,
+    dispatch_ffn_combine_node_rank: int,
+    dispatch_ffn_combine_master_addr: str,
+    dispatch_ffn_combine_master_port: int | None,
 ) -> None:
     original_argv = sys.argv[:]
     if str(SCRIPT_DIR) not in sys.path:
@@ -243,8 +323,16 @@ def run_script_inprocess(
     if repeat_count is not None:
         sys.argv.extend(["--repeat-count", str(repeat_count)])
     sys.argv.extend(["--update-mode", update_mode])
-    if normalize_op_name(script_path.stem) == DISPATCH_FFN_COMBINE_OP_NAME and dispatch_ffn_combine_ep_size is not None:
-        sys.argv.extend(["--ep-size", str(dispatch_ffn_combine_ep_size)])
+    append_dispatch_ffn_combine_args(
+        sys.argv,
+        script_path,
+        dispatch_ffn_combine_ep_size=dispatch_ffn_combine_ep_size,
+        dispatch_ffn_combine_nproc_per_node=dispatch_ffn_combine_nproc_per_node,
+        dispatch_ffn_combine_nnodes=dispatch_ffn_combine_nnodes,
+        dispatch_ffn_combine_node_rank=dispatch_ffn_combine_node_rank,
+        dispatch_ffn_combine_master_addr=dispatch_ffn_combine_master_addr,
+        dispatch_ffn_combine_master_port=dispatch_ffn_combine_master_port,
+    )
     print(f"[RUN] {script_path.name}")
     try:
         runpy.run_path(str(script_path), run_name="__main__")
@@ -264,6 +352,11 @@ def run_script(
     repeat_count: int | None,
     update_mode: str,
     dispatch_ffn_combine_ep_size: int | None,
+    dispatch_ffn_combine_nproc_per_node: int | None,
+    dispatch_ffn_combine_nnodes: int,
+    dispatch_ffn_combine_node_rank: int,
+    dispatch_ffn_combine_master_addr: str,
+    dispatch_ffn_combine_master_port: int | None,
     execution_mode: str,
 ) -> None:
     if execution_mode == "subprocess":
@@ -277,6 +370,11 @@ def run_script(
             repeat_count=repeat_count,
             update_mode=update_mode,
             dispatch_ffn_combine_ep_size=dispatch_ffn_combine_ep_size,
+            dispatch_ffn_combine_nproc_per_node=dispatch_ffn_combine_nproc_per_node,
+            dispatch_ffn_combine_nnodes=dispatch_ffn_combine_nnodes,
+            dispatch_ffn_combine_node_rank=dispatch_ffn_combine_node_rank,
+            dispatch_ffn_combine_master_addr=dispatch_ffn_combine_master_addr,
+            dispatch_ffn_combine_master_port=dispatch_ffn_combine_master_port,
         )
         return
     run_script_inprocess(
@@ -289,6 +387,11 @@ def run_script(
         repeat_count=repeat_count,
         update_mode=update_mode,
         dispatch_ffn_combine_ep_size=dispatch_ffn_combine_ep_size,
+        dispatch_ffn_combine_nproc_per_node=dispatch_ffn_combine_nproc_per_node,
+        dispatch_ffn_combine_nnodes=dispatch_ffn_combine_nnodes,
+        dispatch_ffn_combine_node_rank=dispatch_ffn_combine_node_rank,
+        dispatch_ffn_combine_master_addr=dispatch_ffn_combine_master_addr,
+        dispatch_ffn_combine_master_port=dispatch_ffn_combine_master_port,
     )
 
 
@@ -338,6 +441,11 @@ def main() -> None:
                 repeat_count=args.repeat_count,
                 update_mode=args.update_mode,
                 dispatch_ffn_combine_ep_size=args.dispatch_ffn_combine_ep_size,
+                dispatch_ffn_combine_nproc_per_node=args.dispatch_ffn_combine_nproc_per_node,
+                dispatch_ffn_combine_nnodes=args.dispatch_ffn_combine_nnodes,
+                dispatch_ffn_combine_node_rank=args.dispatch_ffn_combine_node_rank,
+                dispatch_ffn_combine_master_addr=args.dispatch_ffn_combine_master_addr,
+                dispatch_ffn_combine_master_port=args.dispatch_ffn_combine_master_port,
                 execution_mode=args.execution_mode,
             )
             executed_count += 1

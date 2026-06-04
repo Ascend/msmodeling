@@ -46,6 +46,8 @@ FIA_RUNTIME_COLUMNS = [
 
 _BLOCK_SIZE = 128
 _MIN_TOTAL_BLOCKS = 16
+_DEFAULT_SPARSE_MODE_3_MASK = (2048, 2048)
+_FIA_INPUT_SLOT_COUNT = 31
 
 _QWEN3_DENSE_PREFILL_BATCHES = [1, 2, 4, 8]
 _QWEN3_DENSE_PREFILL_SEQS = [512, 1024, 2048, 3072, 4096, 4112, 4608, 5120, 6144]
@@ -75,6 +77,35 @@ def _build_shape_cell(shapes: list[tuple[int, ...]]) -> str:
 
 def _build_31_slots(slots: list[tuple[int, ...]]) -> list[tuple[int, ...]]:
     return (slots + [()] * (31 - len(slots)))[:31]
+
+
+def _slot_text(values: list[str]) -> str:
+    return ";".join(values[:_FIA_INPUT_SLOT_COUNT])
+
+
+def _fia_input_metadata(input_shapes: list[tuple[int, ...]]) -> dict[str, str]:
+    dtypes = ["DT_UNDEFINED"] * _FIA_INPUT_SLOT_COUNT
+    formats = ["NULL"] * _FIA_INPUT_SLOT_COUNT
+
+    for index in (0, 1, 2, 24, 25):
+        if index < len(input_shapes) and input_shapes[index]:
+            dtypes[index] = "DT_BF16"
+            formats[index] = "ND"
+    for index in (5, 6):
+        if index < len(input_shapes) and input_shapes[index]:
+            dtypes[index] = "INT64"
+            formats[index] = "ND"
+    if len(input_shapes) > 4 and input_shapes[4]:
+        dtypes[4] = "INT8"
+        formats[4] = "ND"
+    if len(input_shapes) > 14 and input_shapes[14]:
+        dtypes[14] = "INT32"
+        formats[14] = "ND"
+
+    return {
+        "Input Data Types": _slot_text(dtypes),
+        "Input Formats": _slot_text(formats),
+    }
 
 
 def _format_int_list(values: list[int]) -> str:
@@ -141,6 +172,23 @@ def _scene_runtime_metadata(scene_name: str, values: dict[str, str]) -> dict[str
     return result
 
 
+def _profile_signature(row: TheoryShapeRow) -> tuple:
+    return (
+        tuple(row.input_shapes),
+        row.extra_values.get("Input Data Types", ""),
+        row.extra_values.get("Input Formats", ""),
+        tuple(row.output_shapes),
+    )
+
+
+def _should_emit(row: TheoryShapeRow, seen: set[tuple]) -> bool:
+    signature = _profile_signature(row)
+    if signature in seen:
+        return False
+    seen.add(signature)
+    return True
+
+
 def _iter_pairs(left: list[int], right: list[int]):
     for first in left:
         for second in right:
@@ -197,7 +245,9 @@ def _build_dense_prefill_row(
     tokens = batch * seq
     query = (tokens, num_heads, head_dim)
     key_value = (tokens, num_kv_heads, head_dim)
-    input_shapes = _build_31_slots([query, key_value, key_value, (), (), (batch,), (batch,)])
+    input_shapes = _build_31_slots(
+        [query, key_value, key_value, (), _DEFAULT_SPARSE_MODE_3_MASK, (batch,), (batch,)]
+    )
     output_shapes = [(tokens, num_heads, head_dim)]
     runtime_values = _scene_runtime_metadata(
         scene_name,
@@ -209,7 +259,7 @@ def _build_dense_prefill_row(
             input_layout="TND",
             raw_input_shapes=input_shapes,
             actual_seq_lengths_values=_cumulative([seq] * batch),
-            actual_seq_lengths_kv_values=[seq] * batch,
+            actual_seq_lengths_kv_values=_cumulative([seq] * batch),
             block_table_shape=None,
             block_table_valid_blocks=None,
         ),
@@ -217,7 +267,7 @@ def _build_dense_prefill_row(
     return TheoryShapeRow(
         input_shapes=input_shapes,
         output_shapes=output_shapes,
-        extra_values=runtime_values,
+        extra_values={**runtime_values, **_fia_input_metadata(input_shapes)},
     )
 
 
@@ -236,7 +286,23 @@ def _build_dense_decode_row(
     key_value = (total_blocks, num_kv_heads, _BLOCK_SIZE, head_dim)
     block_table = (batch, needed_blocks)
     raw_input_shapes = _build_31_slots(
-        [query, key_value, key_value, (), (), (batch,), (batch,), (), (), (), (), (), (), (), block_table]
+        [
+            query,
+            key_value,
+            key_value,
+            (),
+            _DEFAULT_SPARSE_MODE_3_MASK,
+            (batch,),
+            (batch,),
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            block_table,
+        ]
     )
     output_shapes = [(batch, num_heads, head_dim)]
     runtime_values = _scene_runtime_metadata(
@@ -257,7 +323,7 @@ def _build_dense_decode_row(
     return TheoryShapeRow(
         input_shapes=raw_input_shapes,
         output_shapes=output_shapes,
-        extra_values=runtime_values,
+        extra_values={**runtime_values, **_fia_input_metadata(raw_input_shapes)},
     )
 
 
@@ -272,17 +338,20 @@ def _build_mla_prefill_row(
     qk_rope_head_dim: int,
 ) -> TheoryShapeRow:
     tokens = batch * seq
-    raw_query = (batch, num_heads, seq, qk_nope_head_dim)
-    kv = (max(_MIN_TOTAL_BLOCKS, math.ceil(tokens / _BLOCK_SIZE)), 1, _BLOCK_SIZE, kv_lora_rank)
+    needed_blocks = max(1, math.ceil(seq / _BLOCK_SIZE))
+    total_blocks = max(_MIN_TOTAL_BLOCKS, batch * needed_blocks)
+    raw_query = (batch, num_heads, seq, kv_lora_rank)
+    kv = (total_blocks, 1, _BLOCK_SIZE, kv_lora_rank)
+    block_table = (batch, needed_blocks)
     q_rope = (batch, num_heads, seq, qk_rope_head_dim)
-    k_rope = (kv[0], 1, _BLOCK_SIZE, qk_rope_head_dim)
+    k_rope = (total_blocks, 1, _BLOCK_SIZE, qk_rope_head_dim)
     raw_input_shapes = _build_31_slots(
         [
             raw_query,
             kv,
             kv,
             (),
-            (),
+            _DEFAULT_SPARSE_MODE_3_MASK,
             (batch,),
             (batch,),
             (),
@@ -292,7 +361,7 @@ def _build_mla_prefill_row(
             (),
             (),
             (),
-            (),
+            block_table,
             (),
             (),
             (),
@@ -306,28 +375,26 @@ def _build_mla_prefill_row(
             k_rope,
         ]
     )
-    canonical_input_shapes = list(raw_input_shapes)
-    canonical_input_shapes[0] = (tokens, num_heads, qk_nope_head_dim)
-    output_shapes = [(batch, num_heads, seq, kv_lora_rank)]
+    output_shapes = [(num_heads, batch, seq, kv_lora_rank)]
     runtime_values = _scene_runtime_metadata(
         scene_name,
         _runtime_metadata(
             avg_seq_len=seq,
             num_heads=num_heads,
-            num_kv_heads=num_heads,
+            num_kv_heads=1,
             sparse_mode=3,
             input_layout="BNSD_NBSD",
             raw_input_shapes=raw_input_shapes,
-            actual_seq_lengths_values=_cumulative([seq] * batch),
+            actual_seq_lengths_values=[seq] * batch,
             actual_seq_lengths_kv_values=[seq] * batch,
-            block_table_shape=None,
-            block_table_valid_blocks=None,
+            block_table_shape=block_table,
+            block_table_valid_blocks=[needed_blocks] * batch,
         ),
     )
     return TheoryShapeRow(
-        input_shapes=canonical_input_shapes,
+        input_shapes=raw_input_shapes,
         output_shapes=output_shapes,
-        extra_values=runtime_values,
+        extra_values={**runtime_values, **_fia_input_metadata(raw_input_shapes)},
     )
 
 
@@ -377,9 +444,7 @@ def _build_mla_decode_row(
             k_rope,
         ]
     )
-    canonical_input_shapes = list(raw_input_shapes)
-    canonical_input_shapes[0] = (batch, num_heads, kv_lora_rank)
-    output_shapes = [(batch, num_heads, 1, kv_lora_rank)]
+    output_shapes = [(num_heads, batch, 1, kv_lora_rank)]
     runtime_values = _scene_runtime_metadata(
         scene_name,
         _runtime_metadata(
@@ -396,15 +461,16 @@ def _build_mla_decode_row(
         ),
     )
     return TheoryShapeRow(
-        input_shapes=canonical_input_shapes,
+        input_shapes=raw_input_shapes,
         output_shapes=output_shapes,
-        extra_values=runtime_values,
+        extra_values={**runtime_values, **_fia_input_metadata(raw_input_shapes)},
     )
 
 
 def generate_fused_attention_rows(
     model_names: list[str] | None = None,
 ) -> Generator[TheoryShapeRow, None, None]:
+    seen: set[tuple] = set()
     for cfg in resolve_configs(model_names):
         num_heads = cfg.num_attention_heads
         num_kv_heads = cfg.num_kv_heads
@@ -412,7 +478,7 @@ def generate_fused_attention_rows(
         if cfg.is_mla():
             prefill_batches, prefill_seqs, decode_batches, decode_avg_seqs = _mla_scene_grids(cfg.name)
             for batch, seq in _iter_pairs(prefill_batches, prefill_seqs):
-                yield _build_mla_prefill_row(
+                row = _build_mla_prefill_row(
                     scene_name=f"{_normalize_model_name(cfg.name)}_mla_prefill",
                     batch=batch,
                     seq=seq,
@@ -421,8 +487,10 @@ def generate_fused_attention_rows(
                     qk_nope_head_dim=cfg.qk_nope_head_dim,
                     qk_rope_head_dim=cfg.qk_rope_head_dim,
                 )
+                if _should_emit(row, seen):
+                    yield row
             for batch, avg_seq_len in _iter_pairs(decode_batches, decode_avg_seqs):
-                yield _build_mla_decode_row(
+                row = _build_mla_decode_row(
                     scene_name=f"{_normalize_model_name(cfg.name)}_mla_decode",
                     batch=batch,
                     avg_seq_len=avg_seq_len,
@@ -430,11 +498,13 @@ def generate_fused_attention_rows(
                     kv_lora_rank=cfg.kv_lora_rank,
                     qk_rope_head_dim=cfg.qk_rope_head_dim,
                 )
+                if _should_emit(row, seen):
+                    yield row
             continue
 
         prefill_batches, prefill_seqs, decode_batches, decode_avg_seqs = _dense_scene_grids(cfg.name)
         for batch, seq in _iter_pairs(prefill_batches, prefill_seqs):
-            yield _build_dense_prefill_row(
+            row = _build_dense_prefill_row(
                 scene_name=f"{_normalize_model_name(cfg.name)}_dense_prefill",
                 batch=batch,
                 seq=seq,
@@ -442,8 +512,10 @@ def generate_fused_attention_rows(
                 num_kv_heads=num_kv_heads,
                 head_dim=cfg.head_dim,
             )
+            if _should_emit(row, seen):
+                yield row
         for batch, avg_seq_len in _iter_pairs(decode_batches, decode_avg_seqs):
-            yield _build_dense_decode_row(
+            row = _build_dense_decode_row(
                 scene_name=f"{_normalize_model_name(cfg.name)}_dense_decode",
                 batch=batch,
                 avg_seq_len=avg_seq_len,
@@ -451,3 +523,5 @@ def generate_fused_attention_rows(
                 num_kv_heads=num_kv_heads,
                 head_dim=cfg.head_dim,
             )
+            if _should_emit(row, seen):
+                yield row

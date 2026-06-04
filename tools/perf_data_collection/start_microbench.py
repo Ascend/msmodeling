@@ -43,9 +43,10 @@ if str(OP_REPLAY_DIR) not in sys.path:
 from common import (
     DEFAULT_DEVICE, SUPPORTED_DEVICES, build_database_cli_args, check_version,
     csv_has_complete_microbench, ensure_npu_available, get_target_data_dir,
-    load_csv_rows, normalize_op_name, parse_float, row_has_valid_duration,
+    load_csv_rows, parse_float, row_has_valid_duration,
     row_has_only_invalid_durations,
 )
+from signature_utils import get_sig, is_matmul_family, normalize_op_name
 
 # =============================================================================
 # CSV Column Names
@@ -90,6 +91,11 @@ MB_EXTRA_COLS = {
 # Operator Configuration
 # =============================================================================
 DISPATCH_FFN_OP = "DispatchFFNCombine"
+PROFILE_OP_ALIASES = {
+    "MatMulV2": ("MatMulV3", "MatMulCommon"),
+    "MatMulV3": ("MatMulV2", "MatMulCommon"),
+    "MatMulCommon": ("MatMulV2", "MatMulV3"),
+}
 
 # Operators requiring custom OPP environment
 CUSTOM_OPP_OPS = {
@@ -166,7 +172,51 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--cann-version", type=check_version)
     parser.add_argument("--prof-path", help="Existing PROF_* directory")
     parser.add_argument("--op", nargs="+", help=f"Operators. Available: {ops}")
-    parser.add_argument("--dispatch-ffn-combine-ep-size", type=int, default=16)
+    parser.add_argument(
+        "--dispatch-ffn-combine-ep-size",
+        type=int,
+        default=16,
+        help="Expert-parallel size for DispatchFFNCombine replay. Default: 16.",
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-nproc-per-node",
+        type=int,
+        default=None,
+        help=(
+            "torchrun processes per node when launching DispatchFFNCombine "
+            "in EP mode. Default: equal to EP_SIZE for single-node; "
+            "must be set explicitly for multi-node."
+        ),
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-nnodes",
+        type=int,
+        default=1,
+        help="torchrun node count for DispatchFFNCombine EP mode. Default: 1.",
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-node-rank",
+        type=int,
+        default=0,
+        help="torchrun node rank for DispatchFFNCombine EP mode. Default: 0.",
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-master-addr",
+        default="127.0.0.1",
+        help=(
+            "torchrun master address for DispatchFFNCombine EP mode. "
+            "Default: 127.0.0.1 (localhost)."
+        ),
+    )
+    parser.add_argument(
+        "--dispatch-ffn-combine-master-port",
+        type=int,
+        default=None,
+        help=(
+            "torchrun master port for DispatchFFNCombine EP mode. "
+            "Default: auto-selected by torchrun on node 0."
+        ),
+    )
     parser.add_argument("--repeat-count", type=int, default=1)
     parser.add_argument("--update-mode", choices=("all", "missing-only"), default="all")
     parser.add_argument("--fail-fast", action="store_true")
@@ -240,26 +290,12 @@ def ensure_custom_opp_env(selected_ops: list[str] | None) -> None:
 # =============================================================================
 # Profiling Execution
 # =============================================================================
-def run_msprof(target_dir: Path, args: argparse.Namespace,
-               selected_ops: list[str] | None) -> tuple[Path, set[Path]]:
-    """Run msprof to profile operator execution.
-
-    Args:
-        target_dir: Directory for profiler output.
-        args: Parsed CLI arguments.
-        selected_ops: Selected operator names, or None for all.
-
-    Returns:
-        Tuple of (profiler_root_path, set_of_PROF_directories).
-
-    Raises:
-        RuntimeError: If msprof is not found or exits with error.
-        FileNotFoundError: If no PROF_* directories are created.
-    """
-    target_dir.mkdir(parents=True, exist_ok=True)
-    profiler_root = Path(tempfile.mkdtemp(prefix="msprof_run_", dir=target_dir))
-
-    # Build command
+def build_msprof_cmd(
+    profiler_root: Path,
+    args: argparse.Namespace,
+    selected_ops: list[str] | None,
+) -> list[str]:
+    """Build the msprof command for one profiling run."""
     cmd = ["msprof", f"--output={profiler_root}", "python", str(RUN_ALL_SCRIPT),
            "--execution-mode", "inprocess"]
 
@@ -282,20 +318,115 @@ def run_msprof(target_dir: Path, args: argparse.Namespace,
     if args.dispatch_ffn_combine_ep_size:
         cmd += ["--dispatch-ffn-combine-ep-size",
                 str(args.dispatch_ffn_combine_ep_size)]
+    if args.dispatch_ffn_combine_nproc_per_node is not None:
+        cmd += ["--dispatch-ffn-combine-nproc-per-node",
+                str(args.dispatch_ffn_combine_nproc_per_node)]
+    if args.dispatch_ffn_combine_nnodes is not None:
+        cmd += ["--dispatch-ffn-combine-nnodes",
+                str(args.dispatch_ffn_combine_nnodes)]
+    if args.dispatch_ffn_combine_node_rank is not None:
+        cmd += ["--dispatch-ffn-combine-node-rank",
+                str(args.dispatch_ffn_combine_node_rank)]
+    if args.dispatch_ffn_combine_master_addr:
+        cmd += ["--dispatch-ffn-combine-master-addr",
+                args.dispatch_ffn_combine_master_addr]
+    if args.dispatch_ffn_combine_master_port is not None:
+        cmd += ["--dispatch-ffn-combine-master-port",
+                str(args.dispatch_ffn_combine_master_port)]
 
-    # Execute profiler
+    return cmd
+
+
+def run_msprof_cmd(profiler_root: Path, cmd: list[str]) -> tuple[int, set[Path]]:
+    """Execute msprof command and return its code plus generated PROF dirs."""
     try:
         result = subprocess.run(cmd, check=False, cwd=REPO_ROOT)
     except FileNotFoundError as e:
         raise RuntimeError(
             "msprof not found. Activate Ascend toolkit environment.") from e
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"msprof exited with {result.returncode}: {subprocess.list2cmdline(cmd)}")
-
-    # Find output directories
     prof_dirs = {p for p in profiler_root.rglob("PROF_*") if p.is_dir()}
+    return result.returncode, prof_dirs
+
+
+def run_msprof_per_op_fallback(
+    profiler_root: Path,
+    args: argparse.Namespace,
+    selected_ops: list[str],
+) -> set[Path]:
+    """Profile selected operators one-by-one after a combined msprof failure."""
+    all_prof_dirs: set[Path] = set()
+
+    print(
+        "[WARN] Combined msprof run produced no op_summary data. "
+        "Retrying each selected operator in a separate msprof run."
+    )
+    for op in selected_ops:
+        op_root = profiler_root / f"per_op_{op}"
+        op_root.mkdir(parents=True, exist_ok=True)
+        op_cmd = build_msprof_cmd(op_root, args, [op])
+        returncode, prof_dirs = run_msprof_cmd(op_root, op_cmd)
+        summary_files = find_summary_files(prof_dirs, raise_if_missing=False)
+        if returncode != 0 and not summary_files:
+            raise RuntimeError(
+                f"msprof exited with {returncode} while profiling {op}; "
+                f"profiling data kept at {op_root}: {subprocess.list2cmdline(op_cmd)}")
+        if returncode != 0:
+            print(
+                f"[WARN] msprof exited with {returncode} while profiling {op}, "
+                f"but {len(summary_files)} op_summary file(s) were generated."
+            )
+        all_prof_dirs.update(prof_dirs)
+
+    return all_prof_dirs
+
+
+def run_msprof(target_dir: Path, args: argparse.Namespace,
+               selected_ops: list[str] | None,
+               allow_per_op_fallback: bool = True) -> tuple[Path, set[Path]]:
+    """Run msprof to profile operator execution.
+
+    Args:
+        target_dir: Directory for profiler output.
+        args: Parsed CLI arguments.
+        selected_ops: Selected operator names, or None for all.
+        allow_per_op_fallback: Whether to rerun operators one-by-one when the
+            combined msprof command fails without summary data.
+
+    Returns:
+        Tuple of (profiler_root_path, set_of_PROF_directories).
+
+    Raises:
+        RuntimeError: If msprof is not found or exits with error.
+        FileNotFoundError: If no PROF_* directories are created.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    profiler_root = Path(tempfile.mkdtemp(prefix="msprof_run_", dir=target_dir))
+
+    cmd = build_msprof_cmd(profiler_root, args, selected_ops)
+    returncode, prof_dirs = run_msprof_cmd(profiler_root, cmd)
+
+    if returncode != 0:
+        summary_files = find_summary_files(prof_dirs, raise_if_missing=False)
+        if summary_files:
+            print(
+                f"[WARN] msprof exited with {returncode}, but "
+                f"{len(summary_files)} op_summary file(s) were generated under "
+                f"{profiler_root}. Continuing with generated profiling data."
+            )
+        else:
+            if selected_ops is None or not allow_per_op_fallback:
+                raise RuntimeError(
+                    "combined msprof failed without op_summary data; rerun "
+                    "with --op to enable per-op fallback. Profiling data kept "
+                    f"at {profiler_root}: {subprocess.list2cmdline(cmd)}")
+            fallback_ops = selected_ops or list_ops()
+            if len(fallback_ops) <= 1 or args.fail_fast:
+                raise RuntimeError(
+                    f"msprof exited with {returncode}; profiling data kept at "
+                    f"{profiler_root}: {subprocess.list2cmdline(cmd)}")
+            prof_dirs = run_msprof_per_op_fallback(
+                profiler_root, args, fallback_ops)
 
     if not prof_dirs:
         raise FileNotFoundError(f"No PROF_* directories under {profiler_root}")
@@ -303,11 +434,16 @@ def run_msprof(target_dir: Path, args: argparse.Namespace,
     return profiler_root, prof_dirs
 
 
-def find_summary_files(prof_dirs: set[Path]) -> list[Path]:
+def find_summary_files(
+    prof_dirs: set[Path],
+    *,
+    raise_if_missing: bool = True,
+) -> list[Path]:
     """Find op_summary CSV files in profiler output directories.
 
     Args:
         prof_dirs: Set of PROF_* directory paths.
+        raise_if_missing: Raise if no summary files are found.
 
     Returns:
         Sorted list of op_summary_*.csv file paths.
@@ -319,7 +455,7 @@ def find_summary_files(prof_dirs: set[Path]) -> list[Path]:
         f for d in sorted(prof_dirs)
         for f in sorted((d / "mindstudio_profiler_output").glob("op_summary_*.csv"))]
 
-    if not files:
+    if not files and raise_if_missing:
         raise FileNotFoundError("No op_summary_*.csv found")
 
     return files
@@ -340,31 +476,6 @@ def read_status() -> dict[str, Any] | None:
         return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
     except (json.JSONDecodeError, OSError):
         return None
-
-
-def get_sig(row: dict[str, str], as_str: bool = False) -> tuple[str, ...] | str:
-    """Extract signature from CSV row for matching.
-
-    Args:
-        row: CSV row dict.
-        as_str: If True, return string format for display.
-
-    Returns:
-        Tuple of signature values, or string "input -> output" if as_str.
-    """
-    cols = list(MATCH_COLS)
-
-    if normalize_op_name(row.get("OP State", "")) == normalize_op_name(DISPATCH_FFN_OP):
-        cols.append("EP Size")
-
-    vals = tuple((row.get(c, "") or "").strip() for c in cols)
-
-    if as_str:
-        inp = row.get('Input Shapes', '') or 'N/A'
-        out = row.get('Output Shapes', '') or 'N/A'
-        return f"{inp} -> {out}"
-
-    return vals
 
 
 def aggregate_summary(files: list[Path], ep_size: int | None
@@ -388,7 +499,7 @@ def aggregate_summary(files: list[Path], ep_size: int | None
                 if not op_type:
                     continue
 
-                key = (op_type, get_sig(row))
+                key = (op_type, get_sig(row, op_name=op_type))
                 item = grouped.setdefault(key, {"count": 0, "row": row, "min_dur": None,
                                                 "sums": defaultdict(float)})
                 dur = parse_float(row.get("Task Duration(us)", ""))
@@ -467,7 +578,8 @@ def get_cols(fieldnames: list[str] | None) -> list[str]:
 
 
 def update_csv(csv_path: Path, rows_to_merge: list[dict[str, str]],
-               mode: str, prune: bool) -> UpdateResult:
+               mode: str, prune: bool,
+               match_only_rows: list[dict[str, str]] | None = None) -> UpdateResult:
     """Update CSV file with new profiling data rows.
 
     Args:
@@ -499,12 +611,28 @@ def update_csv(csv_path: Path, rows_to_merge: list[dict[str, str]],
                         extra_cols.append(k)
             columns = columns + extra_cols
 
+    if normalize_op_name(csv_path.stem) == normalize_op_name(DISPATCH_FFN_OP) and "EP Size" not in columns:
+        incoming_ep_sizes = {
+            (row.get("EP Size", "") or "").strip()
+            for row in [*(rows_to_merge or []), *((match_only_rows or []))]
+            if (row.get("EP Size", "") or "").strip()
+        }
+        if len(incoming_ep_sizes) == 1:
+            legacy_ep_size = next(iter(incoming_ep_sizes))
+            columns.append("EP Size")
+            for row in existing_rows:
+                row["EP Size"] = legacy_ep_size
+            print(
+                f"[WARN] {csv_path.name} has no EP Size column; "
+                f"using incoming EP Size={legacy_ep_size} for legacy row matching."
+            )
+
     # Build signature index and detect duplicates
     sig_idx: dict[tuple, int] = {}
     dup_counts: dict[tuple, int] = {}
 
     for i, row in enumerate(existing_rows):
-        s = get_sig(row)
+        s = get_sig(row, op_name=csv_path.stem)
         if s in sig_idx:
             dup_counts[s] = dup_counts.get(s, 1) + 1
         else:
@@ -522,22 +650,37 @@ def update_csv(csv_path: Path, rows_to_merge: list[dict[str, str]],
 
     original = [{c: row.get(c, "") for c in columns} for row in existing_rows]
 
-    for new_row in rows_to_merge:
-        s = get_sig(new_row)
+    def merge_row(
+        new_row: dict[str, str],
+        *,
+        allow_add: bool,
+        record_missing: bool,
+        record_unchanged: bool,
+    ) -> None:
+        s = get_sig(new_row, op_name=csv_path.stem)
 
         if s not in sig_idx:
-            result.missing.append(get_sig(new_row, True))
-            if mode == "all":
+            if record_missing:
+                result.missing.append(get_sig(new_row, True))
+            if not allow_add:
+                print(
+                    f"[WARN] match-only profiling row did not match {csv_path.name}: "
+                    f"{get_sig(new_row, True)}"
+                )
+            if allow_add and mode == "all":
                 existing_rows.append(new_row)
                 sig_idx[s] = len(existing_rows) - 1
                 result.added += 1
-            continue
+            return
 
         row = existing_rows[sig_idx[s]]
         can_update = mode == "all" or not row_has_valid_duration(row)
 
         if not can_update:
-            result.unchanged += 1
+            if record_unchanged:
+                result.unchanged += 1
+            else:
+                return
         else:
             old_mb = row.get(MB_DUR, "")
             row[MB_DUR] = new_row.get(MB_DUR, "")
@@ -557,6 +700,22 @@ def update_csv(csv_path: Path, rows_to_merge: list[dict[str, str]],
             result.gaps.append(GapRecord(
                 csv_path.stem, csv_path.name, get_sig(row, True),
                 mb_us, prof_us, abs(mb_us - prof_us), mb_us / prof_us))
+
+    for new_row in rows_to_merge:
+        merge_row(
+            new_row,
+            allow_add=True,
+            record_missing=True,
+            record_unchanged=True,
+        )
+
+    for new_row in match_only_rows or []:
+        merge_row(
+            new_row,
+            allow_add=False,
+            record_missing=False,
+            record_unchanged=False,
+        )
 
     # Prune invalid rows
     kept, norm_orig = [], [{c: r.get(c, "") for c in columns} for r in original]
@@ -604,8 +763,48 @@ def update_db(target_dir: Path, aggregated: dict[str, list[dict[str, str]]],
     csv_by_op = {p.stem: p for p in csv_paths} if csv_paths else {
         op: target_dir / f"{op}.csv" for op in aggregated}
 
-    return [update_csv(path, aggregated.get(op, []), mode, prune)
-            for op, path in sorted(csv_by_op.items())]
+    results = []
+    for op, path in sorted(csv_by_op.items()):
+        rows_to_merge = list(aggregated.get(op, []))
+        match_only_rows = []
+        for alias in PROFILE_OP_ALIASES.get(op, ()):
+            match_only_rows.extend(aggregated.get(alias, []))
+        if is_matmul_family(op):
+            match_only_rows = rows_to_merge + match_only_rows
+            rows_to_merge = []
+        results.append(update_csv(path, rows_to_merge, mode, prune, match_only_rows))
+    return results
+
+
+def get_visible_npu_count() -> int:
+    try:
+        runtime_torch = import_module("torch")
+        npu = getattr(runtime_torch, "npu", None)
+        if npu is None or not npu.is_available():
+            return 0
+        return int(npu.device_count())
+    except Exception:
+        return 0
+
+
+def should_skip_dispatch_ffn_msprof(
+    selected_ops: list[str] | None,
+    *,
+    ep_size: int,
+    nproc_per_node: int | None,
+    visible_devices: int,
+    update_mode: str,
+    has_prof_path: bool,
+) -> bool:
+    if has_prof_path or update_mode != "missing-only" or ep_size <= 1:
+        return False
+    local_required = nproc_per_node or ep_size
+    if visible_devices <= 0 or visible_devices >= local_required:
+        return False
+    if not selected_ops:
+        return True
+    return all(normalize_op_name(op) == normalize_op_name(DISPATCH_FFN_OP)
+               for op in selected_ops)
 
 
 # =============================================================================
@@ -812,9 +1011,55 @@ def main() -> None:
                 "[SUMMARY] All target CSV files already have usable replay durations.")
             return
 
+    profiling_ops = selected_ops
+    visible_devices = get_visible_npu_count()
+    if should_skip_dispatch_ffn_msprof(
+        selected_ops,
+        ep_size=args.dispatch_ffn_combine_ep_size,
+        nproc_per_node=args.dispatch_ffn_combine_nproc_per_node,
+        visible_devices=visible_devices,
+        update_mode=args.update_mode,
+        has_prof_path=bool(args.prof_path),
+    ):
+        skip_ops = selected_ops or [DISPATCH_FFN_OP]
+        csv_paths = [
+            p for op in skip_ops for p in sorted(target_dir.rglob(f"{op}.csv"))
+        ]
+        skipped_rows = sum(
+            1 for p in csv_paths for row in load_csv_rows(p)[1]
+            if not row_has_valid_duration(row)
+        )
+        print(
+            f"[SKIP] {DISPATCH_FFN_OP} requires ep-size "
+            f"{args.dispatch_ffn_combine_nproc_per_node or args.dispatch_ffn_combine_ep_size} "
+            "local rank(s), but only "
+            f"{visible_devices} visible NPU device(s) are available."
+        )
+        print(
+            f"[SUMMARY] {DISPATCH_FFN_OP}: skipped {skipped_rows} row(s) "
+            "because ep-size exceeds visible NPU count in missing-only mode."
+        )
+        if selected_ops is None:
+            profiling_ops = [
+                op for op in list_ops()
+                if normalize_op_name(op) != normalize_op_name(DISPATCH_FFN_OP)
+            ]
+            if not profiling_ops:
+                return
+            print(f"[SKIP] Continuing full run without {DISPATCH_FFN_OP}.")
+        else:
+            profiling_ops = selected_ops
+            results = update_db(
+                target_dir, {}, selected_ops, args.update_mode,
+                args.prune_empty_duration_rows)
+            gaps = collect_gaps(results)
+            report_result = print_report(results, gaps, None, target_dir)
+            if report_result:
+                print(f"\n[REPORT] {report_result[0]}\n[REPORT] {report_result[1]}")
+            return
     # Ensure environment and NPU availability
     if not args.prof_path:
-        ensure_custom_opp_env(selected_ops)
+        ensure_custom_opp_env(profiling_ops)
         ensure_npu_available()
 
     # Run profiling and update database
@@ -827,13 +1072,20 @@ def main() -> None:
         if args.prof_path and not Path(args.prof_path).exists():
             raise FileNotFoundError(f"PROF path does not exist: {args.prof_path}")
         elif not args.prof_path:
-            profiler_root, prof_dirs = run_msprof(target_dir, args, selected_ops)
+            profiler_root, prof_dirs = run_msprof(
+                target_dir,
+                args,
+                profiling_ops,
+                allow_per_op_fallback=selected_ops is not None,
+            )
 
         aggregated = aggregate_summary(
             find_summary_files(prof_dirs), args.dispatch_ffn_combine_ep_size)
 
         if selected_ops:
             sel_set = set(selected_ops)
+            for op in list(sel_set):
+                sel_set.update(PROFILE_OP_ALIASES.get(op, ()))
             aggregated = {
                 op: rows for op, rows in aggregated.items()
                 if normalize_op_name(op) in sel_set}

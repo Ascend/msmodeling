@@ -13,6 +13,7 @@ try:
         generate_dispatch_ffn_combine_rows,
         generate_fused_attention_rows,
         generate_grouped_matmul_rows,
+        generate_split_qkv_rmsnorm_rope_rows,
     )
     from .utils import (
         INPUT_SHAPES_COLUMN,
@@ -42,6 +43,7 @@ except ImportError:
         generate_dispatch_ffn_combine_rows,
         generate_fused_attention_rows,
         generate_grouped_matmul_rows,
+        generate_split_qkv_rmsnorm_rope_rows,
     )
     from .utils import (
         INPUT_SHAPES_COLUMN,
@@ -101,6 +103,16 @@ def generate_from_template(
     constraints = pattern.get("constraints", [])
     input_templates = pattern["inputs"]
     output_templates = pattern["outputs"]
+    extra_values = {}
+    for source_key, csv_key in (
+        ("input_dtypes", "Input Data Types"),
+        ("input_formats", "Input Formats"),
+        ("output_dtypes", "Output Data Types"),
+        ("output_formats", "Output Formats"),
+    ):
+        values = pattern.get(source_key)
+        if values:
+            extra_values[csv_key] = ";".join(str(value) for value in values)
 
     use_nk = pattern.get("model_nk_pairs", False)
 
@@ -118,7 +130,7 @@ def generate_from_template(
                 evaluator.vars.update({"N": n, "K": k})
                 inputs = [_parse_shape_expr(t, evaluator) for t in input_templates]
                 outputs = [_parse_shape_expr(t, evaluator) for t in output_templates]
-                yield TheoryShapeRow(inputs, outputs)
+                yield TheoryShapeRow(inputs, outputs, extra_values=dict(extra_values))
         return
 
     if use_nk:
@@ -135,7 +147,7 @@ def generate_from_template(
             continue
         inputs = [_parse_shape_expr(t, evaluator) for t in input_templates]
         outputs = [_parse_shape_expr(t, evaluator) for t in output_templates]
-        yield TheoryShapeRow(inputs, outputs)
+        yield TheoryShapeRow(inputs, outputs, extra_values=dict(extra_values))
 
 
 def resolve_theory_pattern_name(
@@ -207,6 +219,7 @@ def default_complex_generators() -> dict[str, Callable]:
         "_theory_grouped_matmul": generate_grouped_matmul_rows,
         "_theory_dfc": generate_dispatch_ffn_combine_rows,
         "_theory_fused_attention": generate_fused_attention_rows,
+        "_theory_split_qkv_rmsnorm_rope": generate_split_qkv_rmsnorm_rope_rows,
     }
 
 
@@ -274,11 +287,53 @@ def collect_theory_generated_rows(
     skipped_count = 0
     total_count = 0
 
+    def split_metadata_slots(value: str) -> list[str]:
+        raw = str(value or "").strip().strip('"')
+        if not raw:
+            return []
+        return [part.strip() for part in raw.split(";")]
+
+    def is_absent_slot(value: str) -> bool:
+        return value.strip().upper() in {"", "NULL", "NONE", "UNDEFINED", "DT_UNDEFINED"}
+
+    def clear_absent_shape_slots(
+        shapes: list[tuple[int, ...]],
+        dtype_cell: str,
+        format_cell: str,
+    ) -> list[tuple[int, ...]]:
+        dtypes = split_metadata_slots(dtype_cell)
+        formats = split_metadata_slots(format_cell)
+        sanitized = list(shapes)
+        for index in range(len(sanitized)):
+            dtype_absent = index < len(dtypes) and is_absent_slot(dtypes[index])
+            format_absent = index < len(formats) and is_absent_slot(formats[index])
+            if dtype_absent or format_absent:
+                sanitized[index] = ()
+        return sanitized
+
     def build_theory_generated_row(row: TheoryShapeRow) -> dict[str, str] | None:
         nonlocal skipped_count, total_count
         total_count += 1
         input_shapes = align_shape_slot_count(template_inputs, row.input_shapes)
         output_shapes = align_shape_slot_count(template_outputs, row.output_shapes)
+        input_dtype_cell = row.extra_values.get(
+            "Input Data Types",
+            template_row.get("Input Data Types", ""),
+        )
+        input_format_cell = row.extra_values.get(
+            "Input Formats",
+            template_row.get("Input Formats", ""),
+        )
+        output_dtype_cell = row.extra_values.get(
+            "Output Data Types",
+            template_row.get("Output Data Types", ""),
+        )
+        output_format_cell = row.extra_values.get(
+            "Output Formats",
+            template_row.get("Output Formats", ""),
+        )
+        input_shapes = clear_absent_shape_slots(input_shapes, input_dtype_cell, input_format_cell)
+        output_shapes = clear_absent_shape_slots(output_shapes, output_dtype_cell, output_format_cell)
 
         if memory_filter_active:
             exceeded, est_bytes = exceeds_memory_budget(

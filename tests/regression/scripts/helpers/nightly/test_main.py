@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from scripts.helpers._config import Config
 from scripts.helpers.nightly.main import (
+    _TEST_MAP_MARKER,
     _build_benchmark_pytest_cmd,
     _build_network_pytest_cmd,
     _build_nightly_pytest_cmd,
@@ -77,6 +78,10 @@ def test_test_map_cmd_contains_smoke_and_regression_and_coverage(base_cfg: Confi
     assert "--cov-context=test" in cmd
     assert "--cov-branch" in cmd
     assert f"--junit-xml={junit}" in cmd
+
+
+def test_test_map_write_marker_keeps_npu_tests_collectible() -> None:
+    assert _TEST_MAP_MARKER == "not nightly and not network"
 
 
 # ---------------------------------------------------------------------------

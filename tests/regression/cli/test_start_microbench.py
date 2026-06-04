@@ -5,6 +5,8 @@ End-to-end tests require NPU and are marked with @pytest.mark.npu.
 """
 
 import csv
+import importlib
+from types import SimpleNamespace
 import sys
 from pathlib import Path
 
@@ -15,15 +17,19 @@ PERF_DATA_COLLECTION_DIR = Path(__file__).resolve().parents[3] / "tools" / "perf
 if str(PERF_DATA_COLLECTION_DIR) not in sys.path:
     sys.path.insert(0, str(PERF_DATA_COLLECTION_DIR))
 
-from start_microbench import (  # noqa: E402
-    GapRecord,
-    UpdateResult,
-    aggregate_summary,
-    get_cols,
-    md_table,
-    print_report,
-    update_csv,
-)
+start_microbench = importlib.import_module("start_microbench")
+aggregate_summary = start_microbench.aggregate_summary
+build_msprof_cmd = start_microbench.build_msprof_cmd
+GapRecord = start_microbench.GapRecord
+get_cols = start_microbench.get_cols
+get_sig = start_microbench.get_sig
+md_table = start_microbench.md_table
+print_report = start_microbench.print_report
+run_msprof = start_microbench.run_msprof
+should_skip_dispatch_ffn_msprof = start_microbench.should_skip_dispatch_ffn_msprof
+update_csv = start_microbench.update_csv
+update_db = start_microbench.update_db
+UpdateResult = start_microbench.UpdateResult
 
 
 # =============================================================================
@@ -61,6 +67,48 @@ class TestMdTable:
         lines = result.split("\n")
         # All lines should have same length for each column
         assert len(lines) == 4  # header, separator, 2 data rows
+
+
+class TestDispatchFfnSkip:
+    def test_skip_dfc_msprof_when_ep_size_exceeds_visible_devices(self):
+        assert should_skip_dispatch_ffn_msprof(
+            ["DispatchFFNCombine"],
+            ep_size=16,
+            nproc_per_node=None,
+            visible_devices=2,
+            update_mode="missing-only",
+            has_prof_path=False,
+        )
+
+    def test_skip_dfc_msprof_for_full_run_when_ep_size_exceeds_visible_devices(self):
+        assert should_skip_dispatch_ffn_msprof(
+            None,
+            ep_size=16,
+            nproc_per_node=None,
+            visible_devices=2,
+            update_mode="missing-only",
+            has_prof_path=False,
+        )
+
+    def test_do_not_skip_multinode_dfc_when_local_ranks_fit_visible_devices(self):
+        assert not should_skip_dispatch_ffn_msprof(
+            ["DispatchFFNCombine"],
+            ep_size=32,
+            nproc_per_node=16,
+            visible_devices=16,
+            update_mode="missing-only",
+            has_prof_path=False,
+        )
+
+    def test_do_not_skip_dfc_msprof_for_mixed_operator_runs(self):
+        assert not should_skip_dispatch_ffn_msprof(
+            ["DispatchFFNCombine", "MatMulV2"],
+            ep_size=16,
+            nproc_per_node=None,
+            visible_devices=2,
+            update_mode="missing-only",
+            has_prof_path=False,
+        )
 
 
 class TestGetCols:
@@ -109,6 +157,248 @@ class TestGetCols:
         mb_idx = cols.index("MicroBench aicore_time(us)")
         prof_idx = cols.index("Profiling Average aicore_time(us)")
         assert mb_idx < prof_idx
+
+
+class TestGetSig:
+    """Tests for profiler signature normalization."""
+
+    def test_matmul_uses_file_op_name_when_op_state_is_dynamic(self):
+        csv_row = {
+            "OP State": "dynamic",
+            "Input Shapes": "5,6144;2048,6144",
+            "Input Data Types": "DT_BF16;DT_BF16",
+            "Input Formats": "ND;ND",
+            "Output Shapes": "5,2048",
+            "Output Data Types": "DT_BF16",
+        }
+        profiler_row = {
+            "OP Type": "MatMulV2",
+            "Input Shapes": "5,6144;2048,6144",
+            "Input Data Types": "DT_BF16;DT_BF16",
+            "Input Formats": "ND;ND",
+            "Output Shapes": "5,2048",
+            "Output Data Types": "DT_BF16",
+        }
+
+        assert get_sig(csv_row, op_name="MatMulV2") == get_sig(profiler_row, op_name="MatMulV2")
+
+    def test_matmul_family_accepts_transposed_profiler_rhs(self):
+        csv_row = {
+            "OP State": "static",
+            "Input Shapes": "24,512;4096,512",
+            "Input Data Types": "DT_BF16;DT_BF16",
+            "Input Formats": "ND;ND",
+            "Output Shapes": "24,4096",
+            "Output Data Types": "DT_BF16",
+        }
+        profiler_row = {
+            "OP Type": "MatMulCommon",
+            "Input Shapes": "24,512;512,4096",
+            "Input Data Types": "DT_BF16;DT_BF16",
+            "Input Formats": "ND;ND",
+            "Output Shapes": "24,4096",
+            "Output Data Types": "DT_BF16",
+        }
+
+        assert get_sig(csv_row, op_name="MatMulV2") == get_sig(profiler_row, op_name="MatMulCommon")
+
+    def test_index_ignores_csv_metadata_slots(self):
+        csv_row = {
+            "OP State": "dynamic",
+            "Input Shapes": "64,1728;1;2;16",
+            "Input Data Types": "DT_BF16;INT64;INT64;INT64",
+            "Input Formats": "ND;ND;ND;ND",
+            "Output Shapes": "16,1728",
+            "Output Data Types": "DT_BF16",
+        }
+        profiler_row = {
+            "OP State": "Index",
+            "Input Shapes": "64,1728;16",
+            "Input Data Types": "DT_BF16;INT64",
+            "Input Formats": "ND;ND",
+            "Output Shapes": "16,1728",
+            "Output Data Types": "DT_BF16",
+        }
+
+        assert get_sig(csv_row, op_name="Index") == get_sig(profiler_row, op_name="Index")
+
+    def test_slice_and_transpose_ignore_parameter_slots(self):
+        slice_row = {
+            "OP State": "Slice",
+            "Input Shapes": "4,768;2;2",
+            "Input Data Types": "DT_BF16;INT64;INT64",
+            "Input Formats": "ND;ND;ND",
+            "Output Shapes": "2,768",
+            "Output Data Types": "DT_BF16",
+        }
+        slice_profiler_row = {
+            "OP State": "Slice",
+            "Input Shapes": "4,768",
+            "Input Data Types": "DT_BF16",
+            "Input Formats": "ND",
+            "Output Shapes": "2,768",
+            "Output Data Types": "DT_BF16",
+        }
+        transpose_row = {
+            "OP State": "Transpose",
+            "Input Shapes": "4,896;2",
+            "Input Data Types": "DT_BF16;INT64",
+            "Input Formats": "ND;ND",
+            "Output Shapes": "896,4",
+            "Output Data Types": "DT_BF16",
+        }
+        transpose_profiler_row = {
+            "OP State": "Transpose",
+            "Input Shapes": "4,896",
+            "Input Data Types": "DT_BF16",
+            "Input Formats": "ND",
+            "Output Shapes": "896,4",
+            "Output Data Types": "DT_BF16",
+        }
+
+        assert get_sig(slice_row, op_name="Slice") == get_sig(slice_profiler_row, op_name="Slice")
+        assert get_sig(transpose_row, op_name="Transpose") == get_sig(transpose_profiler_row, op_name="Transpose")
+
+
+class TestRunMsprof:
+    """Tests for msprof wrapper behavior."""
+
+    @staticmethod
+    def _args(database_path: Path) -> SimpleNamespace:
+        return SimpleNamespace(
+            fail_fast=False,
+            database_path=database_path,
+            device="ATLAS_800_A3_752T_128G_DIE",
+            vllm_version=None,
+            torch_version=None,
+            cann_version=None,
+            repeat_count=1,
+            update_mode="all",
+            dispatch_ffn_combine_ep_size=16,
+            dispatch_ffn_combine_nproc_per_node=None,
+            dispatch_ffn_combine_nnodes=1,
+            dispatch_ffn_combine_node_rank=0,
+            dispatch_ffn_combine_master_addr="127.0.0.1",
+            dispatch_ffn_combine_master_port=None,
+        )
+
+    def test_build_msprof_cmd_keeps_zero_node_rank(self, tmp_path: Path):
+        cmd = build_msprof_cmd(
+            tmp_path,
+            self._args(tmp_path),
+            ["DispatchFFNCombine"],
+        )
+
+        assert "--dispatch-ffn-combine-node-rank" in cmd
+        assert cmd[cmd.index("--dispatch-ffn-combine-node-rank") + 1] == "0"
+
+    def test_nonzero_msprof_exit_uses_generated_summary(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        """A failed msprof wrapper should not discard usable op_summary data."""
+        import start_microbench
+
+        def fake_run(cmd, check, cwd):
+            profiler_root = next(tmp_path.glob("msprof_run_*"))
+            output_dir = profiler_root / "PROF_001" / "mindstudio_profiler_output"
+            output_dir.mkdir(parents=True)
+            (output_dir / "op_summary_001.csv").write_text(
+                "OP Type,Task Duration(us)\nMatMulV2,1.0\n",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(returncode=255)
+
+        monkeypatch.setattr(start_microbench.subprocess, "run", fake_run)
+
+        profiler_root, prof_dirs = run_msprof(
+            tmp_path,
+            self._args(tmp_path),
+            ["MatMulV2"],
+        )
+
+        assert profiler_root.exists()
+        assert len(prof_dirs) == 1
+        assert "Continuing with generated profiling data" in capsys.readouterr().out
+
+    def test_nonzero_msprof_exit_without_summary_raises(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Without op_summary output, a failed msprof run is still fatal."""
+        import start_microbench
+
+        monkeypatch.setattr(
+            start_microbench.subprocess,
+            "run",
+            lambda cmd, check, cwd: SimpleNamespace(returncode=255),
+        )
+
+        with pytest.raises(RuntimeError, match="profiling data kept at"):
+            run_msprof(tmp_path, self._args(tmp_path), ["MatMulV2"])
+
+    def test_nonzero_combined_msprof_without_summary_falls_back_per_op(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ):
+        """A combined profiler failure should retry selected ops separately."""
+        import start_microbench
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, check, cwd):
+            calls.append(cmd)
+            output_arg = next(item for item in cmd if item.startswith("--output="))
+            profiler_root = Path(output_arg.split("=", 1)[1])
+            if len(calls) > 1:
+                output_dir = profiler_root / "PROF_001" / "mindstudio_profiler_output"
+                output_dir.mkdir(parents=True)
+                (output_dir / "op_summary_001.csv").write_text(
+                    "OP Type,Task Duration(us)\nMatMulV2,1.0\n",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(returncode=0)
+            return SimpleNamespace(returncode=255)
+
+        monkeypatch.setattr(start_microbench.subprocess, "run", fake_run)
+
+        profiler_root, prof_dirs = run_msprof(
+            tmp_path,
+            self._args(tmp_path),
+            ["MatMulV2", "MaskedFill"],
+        )
+
+        assert profiler_root.exists()
+        assert len(calls) == 3
+        assert len(prof_dirs) == 2
+        captured = capsys.readouterr().out
+        assert "Retrying each selected operator" in captured
+
+    def test_nonzero_full_msprof_without_summary_requires_explicit_ops(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """All-op profiler failure should not fan out into per-op msprof runs."""
+        import start_microbench
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, check, cwd):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=255)
+
+        monkeypatch.setattr(start_microbench.subprocess, "run", fake_run)
+
+        with pytest.raises(RuntimeError, match="rerun with --op"):
+            run_msprof(tmp_path, self._args(tmp_path), None)
+
+        assert len(calls) == 1
 
 
 class TestUpdateCsv:
@@ -185,7 +475,190 @@ class TestUpdateCsv:
         with csv_path.open("r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
-            assert rows[0]["Average Duration(us)"] == "50.0"
+        assert rows[0]["Average Duration(us)"] == "50.0"
+
+    def test_matmul_common_merges_matmulv3_profile_alias(self, tmp_path: Path):
+        csv_path = tmp_path / "MatMulCommon.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "OP State",
+                    "Input Shapes",
+                    "Input Data Types",
+                    "Input Formats",
+                    "Output Shapes",
+                    "Output Data Types",
+                    "Average Duration(us)",
+                ],
+            )
+            w.writeheader()
+            w.writerow(
+                {
+                    "Input Shapes": "1024,55296;6912,55296",
+                    "Input Data Types": "DT_BF16;DT_BF16",
+                    "Input Formats": "ND;ND",
+                    "Output Shapes": "1024,6912",
+                    "Output Data Types": "DT_BF16",
+                    "Average Duration(us)": "",
+                }
+            )
+
+        result = update_db(
+            tmp_path,
+            {
+                "MatMulV3": [
+                    {
+                        "Input Shapes": "1024,55296;6912,55296",
+                        "Input Data Types": "DT_BF16;DT_BF16",
+                        "Input Formats": "ND;ND",
+                        "Output Shapes": "1024,6912",
+                        "Output Data Types": "DT_BF16",
+                        "Average Duration(us)": "12.5",
+                    }
+                ]
+            },
+            ["MatMulCommon"],
+            mode="missing-only",
+            prune=False,
+        )
+
+        assert result[0].updated == 1
+        with csv_path.open("r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        assert rows[0]["Average Duration(us)"] == "12.5"
+
+    def test_matmul_alias_rows_update_but_do_not_add_unmatched_rows(self, tmp_path: Path):
+        csv_path = tmp_path / "MatMulV2.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "OP State",
+                    "Input Shapes",
+                    "Input Data Types",
+                    "Input Formats",
+                    "Output Shapes",
+                    "Output Data Types",
+                    "Average Duration(us)",
+                ],
+            )
+            w.writeheader()
+            w.writerow(
+                {
+                    "OP State": "static",
+                    "Input Shapes": "24,512;4096,512",
+                    "Input Data Types": "DT_BF16;DT_BF16",
+                    "Input Formats": "ND;ND",
+                    "Output Shapes": "24,4096",
+                    "Output Data Types": "DT_BF16",
+                    "Average Duration(us)": "",
+                }
+            )
+
+        result = update_db(
+            tmp_path,
+            {
+                "MatMulCommon": [
+                    {
+                        "Input Shapes": "24,512;512,4096",
+                        "Input Data Types": "DT_BF16;DT_BF16",
+                        "Input Formats": "ND;ND",
+                        "Output Shapes": "24,4096",
+                        "Output Data Types": "DT_BF16",
+                        "Average Duration(us)": "9.5",
+                    },
+                    {
+                        "Input Shapes": "8,512;512,8192",
+                        "Input Data Types": "DT_BF16;DT_BF16",
+                        "Input Formats": "ND;ND",
+                        "Output Shapes": "8,8192",
+                        "Output Data Types": "DT_BF16",
+                        "Average Duration(us)": "99.0",
+                    },
+                ]
+            },
+            ["MatMulV2"],
+            mode="all",
+            prune=False,
+        )
+
+        assert result[0].updated == 1
+        assert result[0].added == 0
+        assert result[0].missing == []
+        with csv_path.open("r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        assert len(rows) == 1
+        assert rows[0]["Average Duration(us)"] == "9.5"
+
+    def test_matmul_family_drift_does_not_report_false_missing_rows(self, tmp_path: Path):
+        csv_path = tmp_path / "MatMulV2.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "OP State",
+                    "Input Shapes",
+                    "Input Data Types",
+                    "Input Formats",
+                    "Output Shapes",
+                    "Output Data Types",
+                    "Average Duration(us)",
+                ],
+            )
+            w.writeheader()
+            w.writerow(
+                {
+                    "OP State": "static",
+                    "Input Shapes": "24,512;4096,512",
+                    "Input Data Types": "DT_BF16;DT_BF16",
+                    "Input Formats": "ND;ND",
+                    "Output Shapes": "24,4096",
+                    "Output Data Types": "DT_BF16",
+                    "Average Duration(us)": "",
+                }
+            )
+
+        result = update_db(
+            tmp_path,
+            {
+                "MatMulV2": [
+                    {
+                        "Input Shapes": "5,512;512,2048",
+                        "Input Data Types": "DT_BF16;DT_BF16",
+                        "Input Formats": "ND;ND",
+                        "Output Shapes": "5,2048",
+                        "Output Data Types": "DT_BF16",
+                        "Average Duration(us)": "9.5",
+                    }
+                ]
+            },
+            ["MatMulV2"],
+            mode="missing-only",
+            prune=False,
+        )
+
+        assert result[0].updated == 0
+        assert result[0].added == 0
+        assert result[0].missing == []
+
+    def test_signature_normalizes_empty_shape_slots(self):
+        generated_style = {
+            "Input Shapes": '"1,128,1,512;();();2,16;()"',
+            "Input Data Types": "DT_BF16;DT_UNDEFINED;DT_BF16;INT32;DT_UNDEFINED",
+            "Input Formats": "ND;NULL;ND;ND;NULL",
+            "Output Shapes": '"128,1,1,512;()"',
+            "Output Data Types": "DT_BF16;FLOAT",
+        }
+        profiler_style = {
+            "Input Shapes": '"1,128,1,512;;;2,16;"',
+            "Input Data Types": "DT_BF16;;;INT32;",
+            "Input Formats": "ND;;;ND;",
+            "Output Shapes": '"128,1,1,512;"',
+            "Output Data Types": "DT_BF16;",
+        }
+
+        assert get_sig(generated_style) == get_sig(profiler_style)
 
     def test_missing_only_mode_skips_valid_rows(self, tmp_path: Path):
         """missing-only mode should skip rows with valid duration."""
@@ -435,6 +908,78 @@ class TestUpdateCsv:
 
             rows = list(reader)
             assert rows[0]["EP Size"] == "8"
+
+    def test_dispatch_ffn_legacy_csv_uses_incoming_ep_size_for_matching(self, tmp_path: Path):
+        csv_path = tmp_path / "DispatchFFNCombine.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "OP State",
+                    "Input Shapes",
+                    "Input Data Types",
+                    "Input Formats",
+                    "Output Shapes",
+                    "Output Data Types",
+                    "Average Duration(us)",
+                ],
+            )
+            w.writeheader()
+            w.writerow(
+                {
+                    "OP State": "static",
+                    "Input Shapes": "4,16;2,16,8",
+                    "Input Data Types": "DT_BF16;DT_BF16",
+                    "Input Formats": "ND;ND",
+                    "Output Shapes": "4,16",
+                    "Output Data Types": "DT_BF16",
+                    "Average Duration(us)": "",
+                }
+            )
+
+        result = update_csv(
+            csv_path,
+            [
+                {
+                    "Input Shapes": "4,16;2,16,8",
+                    "Input Data Types": "DT_BF16;DT_BF16",
+                    "Input Formats": "ND;ND",
+                    "Output Shapes": "4,16",
+                    "Output Data Types": "DT_BF16",
+                    "Average Duration(us)": "12.5",
+                    "EP Size": "32",
+                }
+            ],
+            mode="missing-only",
+            prune=False,
+        )
+
+        assert result.updated == 1
+        with csv_path.open("r", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        assert rows[0]["Average Duration(us)"] == "12.5"
+        assert rows[0]["EP Size"] == "32"
+
+    def test_match_only_unmatched_rows_warn(self, tmp_path: Path, capsys):
+        csv_path = tmp_path / "MatMulV2.csv"
+        update_csv(
+            csv_path,
+            [],
+            mode="all",
+            prune=False,
+            match_only_rows=[
+                {
+                    "Input Shapes": "4,16;16,8",
+                    "Input Data Types": "DT_BF16;DT_BF16",
+                    "Input Formats": "ND;ND",
+                    "Output Shapes": "4,8",
+                    "Output Data Types": "DT_BF16",
+                    "Average Duration(us)": "12.5",
+                }
+            ],
+        )
+
+        assert "match-only profiling row did not match MatMulV2.csv" in capsys.readouterr().out
 
     def test_records_gap_between_mb_and_profiling(self, tmp_path: Path):
         """Should record gap when both MB and profiling durations are valid."""

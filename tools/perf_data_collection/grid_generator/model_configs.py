@@ -106,7 +106,27 @@ class ModelConfig:
 
 # ── Built-in model configs ────────────────────────────────────
 
-# Keys must be lowercase and without hyphens/underscores for normalize_name()
+GLM51_CONFIG = ModelConfig(
+    name="GLM-5.1",
+    hidden_size=6144,
+    intermediate_size=12288,
+    num_attention_heads=64,
+    num_kv_heads=64,  # MLA latent heads
+    head_dim=256,
+    q_lora_rank=2048,
+    kv_lora_rank=512,
+    qk_nope_head_dim=192,
+    qk_rope_head_dim=64,
+    num_experts=256,
+    num_experts_per_card=32,
+    expert_intermediate_size=2048,
+    topk=8,
+    tp_sizes=(1, 2, 4, 8, 16),
+    ep_sizes=(1, 2, 4, 8),
+)
+
+
+# Keys must be lowercase and without punctuation for normalize_name()
 MODELS: dict[str, ModelConfig] = {
     "dsv3": ModelConfig(
         name="DeepSeek-V3",
@@ -144,12 +164,16 @@ MODELS: dict[str, ModelConfig] = {
         head_dim=128,
         tp_sizes=(1, 4, 8, 16),
     ),
+    "glm51": GLM51_CONFIG,
+    "zaiorgglm51": GLM51_CONFIG,
 }
 
 MODELS_HF_PATHS: dict[str, str] = {
     "dsv3": "deepseek-ai/DeepSeek-V3",
     "qwen332b": "Qwen/Qwen3-32B",
     "llama70b": "meta-llama/Meta-Llama-3-70B",
+    "glm51": "zai-org/GLM-5.1",
+    "zaiorgglm51": "zai-org/GLM-5.1",
 }
 
 _RESOLVED_CONFIGS: dict[str, ModelConfig] = {}
@@ -181,13 +205,23 @@ def _fetch_from_huggingface(model_name: str, model_id: str) -> ModelConfig:
     intermediate_size = getattr(cfg, "intermediate_size", 0)
     num_attention_heads = getattr(cfg, "num_attention_heads", 0)
     num_kv_heads = getattr(cfg, "num_key_value_heads", getattr(cfg, "multi_query_group_num", num_attention_heads))
-    head_dim = getattr(cfg, "head_dim", getattr(cfg, "kv_channels", int(hidden_size / num_attention_heads) if num_attention_heads else 128))
-
     # MLA specific (e.g. DeepSeek-V3)
     q_lora_rank = getattr(cfg, "q_lora_rank", 0)
     kv_lora_rank = getattr(cfg, "kv_lora_rank", 0)
     qk_nope_head_dim = getattr(cfg, "qk_nope_head_dim", 0)
     qk_rope_head_dim = getattr(cfg, "qk_rope_head_dim", getattr(cfg, "rotary_dim", 64))
+    if q_lora_rank > 0 or kv_lora_rank > 0:
+        head_dim = getattr(
+            cfg,
+            "v_head_dim",
+            getattr(cfg, "qk_head_dim", getattr(cfg, "head_dim", 128)),
+        )
+    else:
+        head_dim = getattr(
+            cfg,
+            "head_dim",
+            getattr(cfg, "kv_channels", int(hidden_size / num_attention_heads) if num_attention_heads else 128),
+        )
 
     # MoE specific
     num_experts = getattr(cfg, "n_routed_experts", getattr(cfg, "num_experts", 0))
@@ -223,7 +257,14 @@ def _fetch_from_huggingface(model_name: str, model_id: str) -> ModelConfig:
 
 
 def _normalize_name(name: str) -> str:
-    return name.lower().replace("-", "").replace("_", "")
+    return (
+        name.lower()
+        .replace("-", "")
+        .replace("_", "")
+        .replace(".", "")
+        .replace("/", "")
+        .replace(" ", "")
+    )
 
 
 def resolve_configs(model_names: list[str] | None) -> list[ModelConfig]:
@@ -231,7 +272,7 @@ def resolve_configs(model_names: list[str] | None) -> list[ModelConfig]:
     import logging
 
     if model_names is None:
-        return list(MODELS.values())
+        return list(dict.fromkeys(MODELS.values()))
     
     configs = []
     for name in model_names:

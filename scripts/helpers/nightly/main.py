@@ -43,7 +43,9 @@ from scripts.helpers.nightly.pytest_parser import (
 from scripts.helpers.nightly.report_builder import compute_weak_coverage_symbols, fetch_env_info, load_test_map_summary
 from scripts.helpers.nightly.report_models import CoverageSummary
 
-_TEST_MAP_MARKER = "not npu and not nightly and not network"
+_TEST_MAP_EXECUTION_MARKER = "not npu and not nightly and not network"
+# Keep NPU-marked coverage contexts mappable when coverage data comes from an NPU-capable run.
+_TEST_MAP_MARKER = "not nightly and not network"
 _NIGHTLY_MARKER = "not npu and nightly and not network"
 _NETWORK_MARKER = "not npu and network"
 _PROCESS_TERMINATE_TIMEOUT_SECONDS: Final[float] = 5.0
@@ -90,7 +92,7 @@ def _build_test_map_pytest_cmd(python_exe: str, cfg: Config, *, junit_xml: Path)
         "tests/smoke/",
         "tests/regression/",
         "-m",
-        _TEST_MAP_MARKER,
+        _TEST_MAP_EXECUTION_MARKER,
         *pytest_xdist_args(),
         *cov_pytest_args(cov_context=True),
         "-q",

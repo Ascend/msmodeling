@@ -8,6 +8,19 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+try:
+    from ..signature_utils import (
+        MATMUL_FAMILY_OPS,
+        canonicalize_matmul_family_signature,
+        get_sig,
+    )
+except ImportError:
+    from signature_utils import (
+        MATMUL_FAMILY_OPS,
+        canonicalize_matmul_family_signature,
+        get_sig,
+    )
+
 
 KEEP_COLUMNS = {
     "OP State",
@@ -108,7 +121,7 @@ def build_shape_text(shapes: list[tuple[int, ...]]) -> str:
     rendered = []
     for shape in shapes:
         if not shape:
-            rendered.append("()")
+            rendered.append("")
             continue
         rendered.append(",".join(str(dim) for dim in shape))
     return ";".join(rendered)
@@ -119,16 +132,16 @@ def build_shape_cell(shapes: list[tuple[int, ...]]) -> str:
     return f'"{shape_text}"' if shape_text else shape_text
 
 
-
-
 def align_shape_slot_count(
     template_shapes: list[tuple[int, ...]],
     generated_shapes: list[tuple[int, ...]],
 ) -> list[tuple[int, ...]]:
+    # Do not truncate generated slots: FIA kernels may legitimately have more
+    # runtime inputs than the template row used for metadata inheritance.
     target_count = len(template_shapes)
     if target_count == 0:
         return generated_shapes
-    aligned = list(generated_shapes[:target_count])
+    aligned = list(generated_shapes)
     while len(aligned) < target_count:
         aligned.append(())
     return aligned
@@ -186,8 +199,6 @@ def sort_generated_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return sorted(rows, key=build_input_shapes_sort_key)
 
 
-
-
 def replace_csv_with_generated_rows(
     csv_path: Path,
     headers: list[str],
@@ -202,7 +213,56 @@ def replace_csv_with_generated_rows(
         writer.writerows(sort_generated_rows(generated_rows))
     if csv_path.exists():
         os.chmod(csv_path, stat.S_IWRITE | stat.S_IREAD)
-    os.replace(temp_path, csv_path)
+    try:
+        os.replace(temp_path, csv_path)
+    except PermissionError:
+        backup_path = csv_path.with_suffix(csv_path.suffix + ".bak")
+        if csv_path.exists():
+            os.chmod(csv_path, stat.S_IWRITE | stat.S_IREAD)
+            os.replace(csv_path, backup_path)
+        try:
+            os.replace(temp_path, csv_path)
+        except Exception:
+            if backup_path.exists() and not csv_path.exists():
+                os.replace(backup_path, csv_path)
+            raise
+        if backup_path.exists():
+            os.remove(backup_path)
+
+
+def _dedupe_key(headers: list[str], row: dict[str, str]) -> tuple[str, ...]:
+    return tuple((row.get(header, "") or "").strip() for header in headers if not zero_fill_column(header))
+
+
+def _profile_dedupe_key(
+    csv_path: Path | None,
+    headers: list[str],
+    row: dict[str, str],
+) -> tuple[str, ...]:
+    if csv_path is not None and csv_path.stem in MATMUL_FAMILY_OPS:
+        matmul_key = canonicalize_matmul_family_signature(row)
+        if matmul_key is not None:
+            return ("_matmul_family",) + matmul_key
+    if csv_path is not None:
+        return ("_profile",) + tuple(get_sig(row, op_name=csv_path.stem))
+    return _dedupe_key(headers, row)
+
+
+def dedupe_generated_rows(
+    headers: list[str],
+    source_rows: list[dict[str, str]],
+    generated_rows: list[dict[str, str]],
+    csv_path: Path | None = None,
+) -> list[dict[str, str]]:
+    seen = {_profile_dedupe_key(csv_path, headers, row) for row in source_rows}
+    unique_rows = []
+    for row in generated_rows:
+        key = _profile_dedupe_key(csv_path, headers, row)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_rows.append(row)
+    return unique_rows
 
 
 def collect_generated_rows(
@@ -287,5 +347,6 @@ def process_csv_with_generated_rows(
     generated_rows = generated_rows_builder(headers, source_rows)
     if generated_rows is None:
         return None
+    generated_rows = dedupe_generated_rows(headers, source_rows, generated_rows, csv_path)
     replace_csv_with_generated_rows(csv_path, headers, source_rows, generated_rows)
     return len(generated_rows)

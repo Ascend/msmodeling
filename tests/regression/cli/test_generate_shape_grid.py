@@ -4,19 +4,58 @@ import io
 import logging
 import os
 import sys
+import tempfile
 import types
 import unittest
+from unittest import mock
 import warnings
 from pathlib import Path
 
-from tools.perf_data_collection.grid_generator.config import load_op_mapping_metadata, load_shape_grid_config
-from tools.perf_data_collection.grid_generator.evaluator import SafeExprEval, _parse_shape_expr, _split_dims
+from tools.perf_data_collection.grid_generator.config import (
+    load_op_mapping_metadata,
+    load_shape_grid_config,
+)
+from tools.perf_data_collection.grid_generator.generators import TheoryShapeRow
+from tools.perf_data_collection.grid_generator.evaluator import (
+    SafeExprEval,
+    _parse_shape_expr,
+    _split_dims,
+)
+from tools.perf_data_collection.grid_generator.generators.fused_attention import (
+    RUNTIME_ACTUAL_SEQ_LENGTHS_KV_VALUES,
+    RUNTIME_ACTUAL_SEQ_LENGTHS_VALUES,
+    RUNTIME_BLOCK_TABLE_VALID_BLOCKS,
+    RUNTIME_NUM_KEY_VALUE_HEADS,
+    _build_dense_prefill_row,
+    _build_mla_decode_row,
+    _build_mla_prefill_row,
+    generate_fused_attention_rows,
+)
+from tools.perf_data_collection.grid_generator.generators.moe import (
+    generate_dispatch_ffn_combine_rows,
+)
+from tools.perf_data_collection.grid_generator.generators.rope import (
+    generate_split_qkv_rmsnorm_rope_rows,
+)
 from tools.perf_data_collection.grid_generator.shape_grids import M_GRID
 from tools.perf_data_collection.grid_generator.theory_router import (
+    collect_theory_generated_rows,
     get_default_theory_generator,
+    generate_from_template,
 )
-from tools.perf_data_collection.grid_generator.utils import build_shape_cell, build_shape_text, parse_shape_text
-from tools.perf_data_collection.memory_estimator import dtype_to_bytes, estimate_row_memory, exceeds_memory_budget
+from tools.perf_data_collection.grid_generator.utils import (
+    align_shape_slot_count,
+    build_shape_cell,
+    build_shape_text,
+    dedupe_generated_rows,
+    parse_shape_text,
+    replace_csv_with_generated_rows,
+)
+from tools.perf_data_collection.memory_estimator import (
+    dtype_to_bytes,
+    estimate_row_memory,
+    exceeds_memory_budget,
+)
 
 
 def _setup_transformers_compat_mock():
@@ -51,12 +90,173 @@ class TestShapeGridLogic(unittest.TestCase):
         # Custom align func
         self.assertEqual(self.evaluator.eval("align(tokens, 8)"), 128)
         self.assertEqual(self.evaluator.eval("align(1, 8)"), 8)
+
+    def test_dedupe_generated_rows_ignores_duration_columns(self):
+        headers = [
+            "Input Shapes",
+            "Input Data Types",
+            "Input Formats",
+            "Output Shapes",
+            "Output Data Types",
+            "Average Duration(us)",
+            "MicroBench aiv_time(us)",
+        ]
+        source_rows = [
+            {
+                "Input Shapes": '"128,10240;128,10240;10240;10240"',
+                "Input Data Types": "DT_BF16;DT_BF16;DT_BF16;DT_BF16",
+                "Input Formats": "ND;ND;ND;ND",
+                "Output Shapes": '"128,10240;128,1;128,10240"',
+                "Output Data Types": "DT_BF16;DT_FLOAT;DT_BF16",
+                "Average Duration(us)": "17.840000",
+                "MicroBench aiv_time(us)": "16.0",
+            }
+        ]
+        generated_rows = [
+            {
+                **source_rows[0],
+                "Average Duration(us)": "0",
+                "MicroBench aiv_time(us)": "0",
+            },
+            {
+                **source_rows[0],
+                "Input Shapes": '"2048,384;2048,384;384;384"',
+                "Output Shapes": '"2048,384;2048,1;2048,384"',
+                "Average Duration(us)": "0",
+                "MicroBench aiv_time(us)": "0",
+            },
+        ]
+
+        deduped = dedupe_generated_rows(headers, source_rows, generated_rows)
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["Input Shapes"], '"2048,384;2048,384;384;384"')
         self.assertEqual(self.evaluator.eval("align(7, 8)"), 8)
         self.assertEqual(self.evaluator.eval("align(8, 8)"), 8)
         self.assertEqual(self.evaluator.eval("align(9, 8)"), 16)
         # Dot access blocked by regex
         with self.assertRaises(ValueError):
             self.evaluator.eval("().__class__")
+
+    def test_matmul_dedupe_uses_canonical_gemm_signature(self):
+        headers = [
+            "OP State",
+            "Input Shapes",
+            "Input Data Types",
+            "Input Formats",
+            "Output Shapes",
+            "Output Data Types",
+            "Average Duration(us)",
+        ]
+        source_rows = [
+            {
+                "OP State": "static",
+                "Input Shapes": '"32,6144;2048,6144"',
+                "Input Data Types": "DT_BF16;DT_BF16",
+                "Input Formats": "ND;ND",
+                "Output Shapes": '"32,2048"',
+                "Output Data Types": "DT_BF16",
+                "Average Duration(us)": "12.0",
+            }
+        ]
+        generated_rows = [
+            {
+                "OP State": "dynamic",
+                "Input Shapes": '"32,6144;6144,2048"',
+                "Input Data Types": "DT_BF16;DT_BF16",
+                "Input Formats": "ND;ND",
+                "Output Shapes": '"32,2048"',
+                "Output Data Types": "DT_BF16",
+                "Average Duration(us)": "0",
+            },
+            {
+                "OP State": "dynamic",
+                "Input Shapes": '"48,6144;2048,6144"',
+                "Input Data Types": "DT_BF16;DT_BF16",
+                "Input Formats": "ND;ND",
+                "Output Shapes": '"48,2048"',
+                "Output Data Types": "DT_BF16",
+                "Average Duration(us)": "0",
+            },
+        ]
+
+        deduped = dedupe_generated_rows(headers, source_rows, generated_rows, Path("MatMulV2.csv"))
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["Input Shapes"], '"48,6144;2048,6144"')
+
+    def test_replace_csv_keeps_original_when_permission_retry_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            csv_path = Path(tmp_dir) / "review.csv"
+            csv_path.write_text("A\nold\n", encoding="utf-8")
+            with (
+                mock.patch(
+                    "tools.perf_data_collection.grid_generator.utils.os.replace",
+                    side_effect=[
+                        PermissionError("locked"),
+                        None,
+                        OSError("still locked"),
+                    ],
+                ),
+                mock.patch("tools.perf_data_collection.grid_generator.utils.os.remove") as remove_mock,
+            ):
+                with self.assertRaises(OSError):
+                    replace_csv_with_generated_rows(
+                        csv_path,
+                        ["A"],
+                        [{"A": "new"}],
+                        [],
+                    )
+
+            self.assertEqual(csv_path.read_text(encoding="utf-8"), "A\nold\n")
+            remove_mock.assert_not_called()
+
+    def test_dedupe_uses_microbench_profile_signature(self):
+        headers = [
+            "OP State",
+            "Input Shapes",
+            "Input Data Types",
+            "Input Formats",
+            "Output Shapes",
+            "Output Data Types",
+            "Average Duration(us)",
+        ]
+        source_rows = [
+            {
+                "OP State": "static",
+                "Input Shapes": '"1024,12288;2;2"',
+                "Input Data Types": "DT_BF16;INT32;INT32",
+                "Input Formats": "ND;ND;ND",
+                "Output Shapes": '"12288,1024"',
+                "Output Data Types": "DT_BF16",
+                "Average Duration(us)": "12.0",
+            }
+        ]
+        generated_rows = [
+            {
+                "OP State": "dynamic",
+                "Input Shapes": '"1024,12288;1;3"',
+                "Input Data Types": "DT_BF16;INT32;INT32",
+                "Input Formats": "ND;ND;ND",
+                "Output Shapes": '"12288,1024"',
+                "Output Data Types": "DT_BF16",
+                "Average Duration(us)": "0",
+            },
+            {
+                "OP State": "dynamic",
+                "Input Shapes": '"512,12288;1;3"',
+                "Input Data Types": "DT_BF16;INT32;INT32",
+                "Input Formats": "ND;ND;ND",
+                "Output Shapes": '"12288,512"',
+                "Output Data Types": "DT_BF16",
+                "Average Duration(us)": "0",
+            },
+        ]
+
+        deduped = dedupe_generated_rows(headers, source_rows, generated_rows, Path("Transpose.csv"))
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["Input Shapes"], '"512,12288;1;3"')
 
     def test_split_dims(self):
         self.assertEqual(_split_dims("128, 512"), ["128", "512"])
@@ -67,6 +267,131 @@ class TestShapeGridLogic(unittest.TestCase):
         self.assertEqual(_parse_shape_expr("(tokens, D//tp)", self.evaluator), (128, 1280))
         self.assertEqual(_parse_shape_expr("(1,)", self.evaluator), (1,))
         self.assertEqual(_parse_shape_expr("()", self.evaluator), ())
+
+    def test_template_pattern_can_override_metadata(self):
+        pattern = {
+            "iterators": {"tokens": [128]},
+            "constants": {"hidden": 512, "rope_dim": 64},
+            "inputs": [
+                "(tokens, hidden + rope_dim*2)",
+                "(max(tokens, 2048), rope_dim)",
+                "(tokens,)",
+            ],
+            "outputs": ["(tokens, hidden)", "(tokens, rope_dim)"],
+            "input_dtypes": ["DT_BF16", "DT_BF16", "DT_INT64"],
+            "input_formats": ["ND", "ND", "ND"],
+        }
+
+        row = next(generate_from_template(pattern, None))
+
+        self.assertEqual(row.input_shapes, [(128, 640), (2048, 64), (128,)])
+        self.assertEqual(row.extra_values["Input Data Types"], "DT_BF16;DT_BF16;DT_INT64")
+        self.assertEqual(row.extra_values["Input Formats"], "ND;ND;ND")
+
+    def test_theory_rows_clear_absent_optional_input_shape_slots(self):
+        headers = [
+            "Input Shapes",
+            "Input Data Types",
+            "Input Formats",
+            "Output Shapes",
+            "Output Data Types",
+            "Output Formats",
+            "Average Duration(us)",
+        ]
+        source_rows = [
+            {
+                "Input Shapes": '"1,512;1,512;512;"',
+                "Input Data Types": "DT_BF16;DT_BF16;DT_BF16;DT_UNDEFINED",
+                "Input Formats": "ND;ND;ND;NULL",
+                "Output Shapes": '"1,512;1,1;1,512"',
+                "Output Data Types": "DT_BF16;FLOAT;DT_BF16",
+                "Output Formats": "ND;ND;ND",
+                "Average Duration(us)": "1.0",
+            }
+        ]
+        generated = iter(
+            [
+                TheoryShapeRow(
+                    [(128, 512), (128, 512), (512,), (512,)],
+                    [(128, 512), (128, 1), (128, 512)],
+                )
+            ]
+        )
+
+        rows = collect_theory_generated_rows(
+            headers,
+            source_rows,
+            generated,
+            csv_path=Path("AddRmsNormBias.csv"),
+            file_index=1,
+            total_files=1,
+            max_rows=None,
+            rng=None,
+        )
+
+        self.assertEqual(rows[0]["Input Shapes"], '"128,512;128,512;512;"')
+
+    def test_theory_rows_keep_optional_input_shape_when_metadata_overrides_present(
+        self,
+    ):
+        headers = [
+            "Input Shapes",
+            "Input Data Types",
+            "Input Formats",
+            "Output Shapes",
+            "Output Data Types",
+            "Output Formats",
+            "Average Duration(us)",
+        ]
+        source_rows = [
+            {
+                "Input Shapes": '"1,512;1,512;512;"',
+                "Input Data Types": "DT_BF16;DT_BF16;DT_BF16;DT_UNDEFINED",
+                "Input Formats": "ND;ND;ND;NULL",
+                "Output Shapes": '"1,512;1,1;1,512"',
+                "Output Data Types": "DT_BF16;FLOAT;DT_BF16",
+                "Output Formats": "ND;ND;ND",
+                "Average Duration(us)": "1.0",
+            }
+        ]
+        generated = iter(
+            [
+                TheoryShapeRow(
+                    [(128, 512), (128, 512), (512,), (512,)],
+                    [(128, 512), (128, 1), (128, 512)],
+                    extra_values={
+                        "Input Data Types": "DT_BF16;DT_BF16;DT_BF16;DT_BF16",
+                        "Input Formats": "ND;ND;ND;ND",
+                    },
+                )
+            ]
+        )
+
+        rows = collect_theory_generated_rows(
+            headers,
+            source_rows,
+            generated,
+            csv_path=Path("AddRmsNormBias.csv"),
+            file_index=1,
+            total_files=1,
+            max_rows=None,
+            rng=None,
+        )
+
+        self.assertEqual(rows[0]["Input Shapes"], '"128,512;128,512;512;512"')
+
+    def test_tensor_move_theory_rows_skip_small_unprofiled_copies(self):
+        config = load_shape_grid_config(Path("tools/perf_data_collection/grid_generator/config.yaml"))
+        generator = get_default_theory_generator("TensorMove", ["Qwen3-32B"], config, {})
+        self.assertIsNotNone(generator)
+
+        rows = list(generator)
+
+        self.assertTrue(rows)
+        for row in rows:
+            tokens, hidden = row.input_shapes[0]
+            self.assertGreaterEqual(tokens * hidden, 262144)
+            self.assertEqual(row.input_shapes, row.output_shapes)
 
 
 # ── Shared utility tests ────
@@ -89,10 +414,21 @@ class TestParseShapeText(unittest.TestCase):
 
     def test_build_shape_text_matches_database_style(self):
         self.assertEqual(build_shape_text([(136, 7168), (7168, 3584)]), "136,7168;7168,3584")
+        self.assertEqual(build_shape_text([(1,), (), (2,), ()]), "1;;2;")
 
     def test_build_shape_cell_keeps_database_quoting_style(self):
         self.assertEqual(build_shape_cell([(136, 7168)]), '"136,7168"')
         self.assertEqual(build_shape_cell([(136, 7168), (7168, 3584)]), '"136,7168;7168,3584"')
+
+    def test_align_shape_slot_count_keeps_extra_generated_slots(self):
+        self.assertEqual(
+            align_shape_slot_count([(1,), (2,)], [(1,), (2,), (3,)]),
+            [(1,), (2,), (3,)],
+        )
+        self.assertEqual(
+            align_shape_slot_count([(1,), (2,), (3,)], [(1,)]),
+            [(1,), (), ()],
+        )
 
 
 class TestTheoryPadV3(unittest.TestCase):
@@ -237,6 +573,8 @@ class ZTestMemoryEstimation(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 gen = get_default_theory_generator(kernel, model_names, config, op_meta)
                 if not gen:
+                    if config.get("assignments", {}).get(kernel) == "skip":
+                        continue
                     km = op_meta.get(kernel, {})
                     if km.get("zero_cost") or km.get("composite") or km.get("communication"):
                         continue
@@ -322,6 +660,18 @@ class ZTestMemoryEstimation(unittest.TestCase):
         missing = set(BASELINE_M_GRID) - set(M_GRID)
         self.assertEqual(missing, set(), f"M_GRID is missing values from the baseline: {missing}")
 
+    def test_dfc_rows_set_ep_size_from_expert_per_rank(self):
+        """DFC generated rows must not inherit template EP Size blindly."""
+        rows = list(generate_dispatch_ffn_combine_rows(["glm51"]))
+        self.assertGreater(len(rows), 0)
+        for row in rows:
+            expert_per_rank = row.output_shapes[1][0]
+            self.assertEqual(row.extra_values["EP Size"], str(256 // expert_per_rank))
+
+        ep32_rows = [row for row in rows if row.input_shapes[0][1] == 6144 and row.output_shapes[1] == (8,)]
+        self.assertGreater(len(ep32_rows), 0)
+        self.assertTrue(all(row.extra_values["EP Size"] == "32" for row in ep32_rows))
+
     def test_quant_matmul_constraints_block_alignment(self):
         """Verify that all rows generated by the quant_matmul template meet block alignment constraints."""
         if not self.config_path.exists():
@@ -349,6 +699,99 @@ class ZTestMemoryEstimation(unittest.TestCase):
             checked_rows,
             0,
             "No rows matched the 4D weight shape filter — alignment assertions never ran",
+        )
+
+    def test_fia_dense_prefill_uses_cumulative_kv_lengths(self):
+        row = _build_dense_prefill_row(
+            scene_name="test_dense_prefill",
+            batch=2,
+            seq=256,
+            num_heads=64,
+            num_kv_heads=8,
+            head_dim=128,
+        )
+
+        self.assertEqual(row.extra_values[RUNTIME_ACTUAL_SEQ_LENGTHS_VALUES], "256,512")
+        self.assertEqual(row.extra_values[RUNTIME_ACTUAL_SEQ_LENGTHS_KV_VALUES], "256,512")
+
+    def test_fia_mla_decode_uses_replayable_raw_shapes(self):
+        row = _build_mla_decode_row(
+            scene_name="test_mla_decode",
+            batch=2,
+            avg_seq_len=2048,
+            num_heads=128,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+
+        self.assertEqual(row.input_shapes[0], (2, 128, 1, 512))
+        self.assertEqual(row.input_shapes[14], (2, 16))
+        self.assertEqual(row.input_shapes[24], (2, 128, 1, 64))
+        self.assertEqual(row.output_shapes[0], (128, 2, 1, 512))
+        self.assertEqual(row.extra_values[RUNTIME_BLOCK_TABLE_VALID_BLOCKS], "16,16")
+
+    def test_fia_mla_prefill_uses_replayable_paged_rope_shapes(self):
+        row = _build_mla_prefill_row(
+            scene_name="test_mla_prefill",
+            batch=4,
+            seq=2048,
+            num_heads=128,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+        )
+
+        self.assertEqual(row.input_shapes[0], (4, 128, 2048, 512))
+        self.assertEqual(row.input_shapes[14], (4, 16))
+        self.assertEqual(row.input_shapes[24], (4, 128, 2048, 64))
+        self.assertEqual(row.output_shapes[0], (128, 4, 2048, 512))
+        self.assertEqual(
+            row.extra_values[RUNTIME_ACTUAL_SEQ_LENGTHS_VALUES],
+            "2048,2048,2048,2048",
+        )
+        self.assertEqual(row.extra_values[RUNTIME_NUM_KEY_VALUE_HEADS], "1")
+        self.assertEqual(row.extra_values[RUNTIME_BLOCK_TABLE_VALID_BLOCKS], "16,16,16,16")
+
+    def test_fia_generated_rows_have_unique_profile_signatures(self):
+        rows = list(generate_fused_attention_rows())
+        signatures = {
+            (
+                tuple(row.input_shapes),
+                row.extra_values.get("Input Data Types", ""),
+                row.extra_values.get("Input Formats", ""),
+                tuple(row.output_shapes),
+            )
+            for row in rows
+        }
+
+        self.assertEqual(len(rows), len(signatures))
+
+    def test_split_qkv_uses_model_qkv_hidden_sizes(self):
+        rows = list(generate_split_qkv_rmsnorm_rope_rows(["Qwen3-32B"]))
+        self.assertIn(
+            TheoryShapeRow(
+                [(1, 768), (128,)],
+                [(1, 512), (1, 128), (1, 128)],
+                extra_values={
+                    "Input Data Types": "DT_BF16;DT_BF16",
+                    "Input Formats": "ND;ND",
+                    "Output Data Types": "DT_BF16;DT_BF16;DT_BF16",
+                    "Output Formats": "ND;ND;ND",
+                },
+            ),
+            rows,
+        )
+        for row in rows:
+            input_hidden = row.input_shapes[0][1]
+            q_hidden = row.output_shapes[0][1]
+            kv_hidden = row.output_shapes[1][1]
+            self.assertEqual(input_hidden, q_hidden + 2 * kv_hidden)
+            self.assertEqual(row.output_shapes[1], row.output_shapes[2])
+
+    def test_split_qkv_skips_mla_models(self):
+        self.assertEqual(
+            list(generate_split_qkv_rmsnorm_rope_rows(["dsv3", "GLM5.1"])),
+            [],
         )
 
 

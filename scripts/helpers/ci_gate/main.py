@@ -34,6 +34,8 @@ from scripts.helpers.common.coverage_config import cov_pytest_args, pytest_xdist
 from scripts.helpers.common.test_map_loader import load_baseline, prune_deleted_sources
 
 _PYTEST_MARKER = "not npu and not nightly and not network"
+# Keep NPU-marked coverage contexts mappable when coverage data comes from an NPU-capable run.
+_TEST_MAP_MARKER = "not nightly and not network"
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +77,7 @@ def _merge_test_maps(
 def _run_new_tests_and_build_map(
     new_tests: tuple[str, ...],
     marker_expr: str,
+    test_map_marker_expr: str,
 ) -> dict[str, dict[str, list[str]]]:
     logger = logging.getLogger("ci_gate")
     logger.info("Phase 0: running %d new/modified test(s) to build new test_map ...", len(new_tests))
@@ -99,7 +102,7 @@ def _run_new_tests_and_build_map(
         print("CI gate failed: new test(s) failed. Fix test failures before gate check.")
         raise SystemExit(proc.returncode)
 
-    new_test_map = collect_test_map(marker_expr=marker_expr)
+    new_test_map = collect_test_map(marker_expr=test_map_marker_expr)
     logger.info(
         "Phase 0: new test_map — %d source files, %d symbols",
         len(new_test_map),
@@ -280,7 +283,7 @@ def main() -> int:
 
     tests_to_remap = changes.new_test + changes.modified_test
     if tests_to_remap:
-        new_test_map = _run_new_tests_and_build_map(tests_to_remap, _PYTEST_MARKER)
+        new_test_map = _run_new_tests_and_build_map(tests_to_remap, _PYTEST_MARKER, _TEST_MAP_MARKER)
         merged_map = _merge_test_maps(baseline.test_map, new_test_map)
         baseline = baseline.__class__(
             test_map=merged_map,

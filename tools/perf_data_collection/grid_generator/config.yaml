@@ -70,6 +70,12 @@ patterns:
     inputs: ["(tokens, D)"]
     outputs: ["(tokens, D)"]
 
+  tensor_move:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    constraints: ["tokens * D >= 262144"]
+    inputs: ["(tokens, D)"]
+    outputs: ["(tokens, D)"]
+
   # ── Norm ──────────────────────────────────────────────
   rmsnorm:
     iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
@@ -122,12 +128,7 @@ patterns:
     outputs: ["(tokens, heads, dim)", "(tokens, 1, dim)"]
 
   split_qkv_rmsnorm_rope:
-    iterators:
-      tokens: ELEM_TOKENS_GRID
-      hidden: [1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
-    constants: {rope_dim: 64}
-    inputs: ["(tokens, hidden + rope_dim*2)", "(max(tokens, 2048), rope_dim)", "(tokens,)"]
-    outputs: ["(tokens, hidden)", "(tokens, rope_dim)"]
+    generator_function: _theory_split_qkv_rmsnorm_rope
 
   kv_rmsnorm_rope_cache:
     iterators:
@@ -197,7 +198,7 @@ patterns:
       batch: [1, 2, 4, 8, 16, 32, 64, 128]
       vocab: [1024, 4096, 16384, 32000, 65536, 128256, 151936]
     inputs: ["(batch, vocab)", "()"]
-    outputs: ["(1,)"]
+    outputs: ["(batch,)"]
 
   apply_topk_top_p:
     iterators:
@@ -292,7 +293,8 @@ assignments:
   # GEMM
   MatMulV2: matmul
   MatMulV3: matmul
-  MatMulCommon: matmul
+  # Cross-filled from MatMulV2/V3 via PROFILE_OP_ALIASES; no independent theory grid needed.
+  MatMulCommon: skip
   MatMul: matmul
   BatchMatMulV2: matmul
   QuantBatchMatmulV3: quant_matmul
@@ -331,7 +333,7 @@ assignments:
   Muls: elementwise_unary
   Neg: elementwise_unary
   SoftmaxV2: elementwise_unary
-  TensorMove: elementwise_unary
+  TensorMove: tensor_move
   Pack: elementwise_unary
   Cumsum: elementwise_unary
   LinearIndex: elementwise_unary

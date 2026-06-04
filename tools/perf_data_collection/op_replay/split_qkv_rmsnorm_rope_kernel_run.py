@@ -120,22 +120,35 @@ def build_case(row: dict[str, str]):
     input_dtypes = parse_list_field(row["Input Data Types"])
     output_shapes = [parse_shape(item) for item in parse_list_field(row["Output Shapes"])]
 
-    if len(input_shapes) != 3 or len(input_formats) != 3 or len(input_dtypes) != 3:
-        raise ValueError("split_qkv_rmsnorm_rope_kernel expects exactly three inputs")
-    if len(output_shapes) != 2:
-        raise ValueError("split_qkv_rmsnorm_rope_kernel expects exactly two recorded outputs")
+    if len(output_shapes) not in (2, 3):
+        raise ValueError("split_qkv_rmsnorm_rope_kernel expects two legacy outputs or three recorded outputs")
+    if len(input_shapes) not in (2, 3):
+        raise ValueError("split_qkv_rmsnorm_rope_kernel expects two profiled inputs or three replay inputs")
+    if not (len(input_shapes) == len(input_formats) == len(input_dtypes)):
+        raise ValueError(
+            "split_qkv_rmsnorm_rope_kernel input metadata length mismatch: "
+            f"shapes={len(input_shapes)} formats={len(input_formats)} dtypes={len(input_dtypes)}"
+        )
 
     q_hidden_size = output_shapes[0][-1]
     kv_hidden_size = output_shapes[1][-1]
-    rope_dim = input_shapes[1][-1]
+    tokens = input_shapes[0][0]
+    if len(input_shapes) == 2:
+        rope_dim = input_shapes[1][-1]
+        cos_sin_cache_shape = (max(tokens, 2048), rope_dim)
+        positions_shape = (tokens,)
+    else:
+        rope_dim = input_shapes[1][-1]
+        cos_sin_cache_shape = input_shapes[1]
+        positions_shape = input_shapes[2]
     head_dim = infer_head_dim(q_hidden_size, kv_hidden_size, rope_dim)
 
     return {
         "inputs": [],
         "kwargs": {
             "input": build_input_tensor(input_shapes[0], input_formats[0], input_dtypes[0]),
-            "cos_sin_cache": build_input_tensor(input_shapes[1], input_formats[1], input_dtypes[1]),
-            "positions": build_positions_tensor(input_shapes[2], input_shapes[1][0]),
+            "cos_sin_cache": build_input_tensor(cos_sin_cache_shape, input_formats[1], input_dtypes[1]),
+            "positions": build_positions_tensor(positions_shape, cos_sin_cache_shape[0]),
             "q_weight": build_weight_tensor(head_dim, input_dtypes[0]),
             "k_weight": build_weight_tensor(head_dim, input_dtypes[0]),
             "q_hidden_size": q_hidden_size,

@@ -17,11 +17,14 @@ import os
 import socket
 import subprocess
 import sys
+import ctypes
+import importlib
+import importlib.util
+from pathlib import Path
 from typing import Any
 
 try:
     from .common import (
-        MICROBENCH_DURATION,
         build_host_tensor,
         build_standard_argparser,
         csv_has_complete_microbench,
@@ -41,7 +44,6 @@ try:
     )
 except ImportError:
     from common import (
-        MICROBENCH_DURATION,
         build_host_tensor,
         build_standard_argparser,
         csv_has_complete_microbench,
@@ -66,14 +68,121 @@ except ImportError:
 # ============================================================================
 # Default repeat count for DFC benchmarking. The best timing is kept.
 DEFAULT_DFC_REPEAT_COUNT = 20
+DEFAULT_DFC_MAX_OUTPUT_SIZE = 65536
 
 DEFAULT_EP_SIZE = 16
 EP_RANK: int = 0
 EP_GROUP = None
 HCOMM_INFO: str | None = None
-MAX_OUTPUT_SIZE = 65536
+MAX_OUTPUT_SIZE: int | None = None
 EP_SIZE: int = DEFAULT_EP_SIZE
 ENABLE_BALANCED: bool = True
+_PRINTED_DFC_DEVICE_DEBUG = False
+_EXTENSION_LOAD_STATE: list[bool | None] = [None]
+
+
+def warn_vllm_ascend_extension_load_failure(context: str, exc: Exception) -> None:
+    print(
+        f"Warning: failed to load vllm_ascend C extension via {context} ({exc!r}).",
+        file=sys.stderr,
+    )
+
+
+def try_load_shared_object(path: str) -> bool:
+    if not os.path.exists(path):
+        return False
+    ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+    return True
+
+
+def ensure_vllm_ascend_extension_loaded() -> None:
+    """Load the vLLM-Ascend C extension so torch.ops._C_ascend is registered."""
+    if _EXTENSION_LOAD_STATE[0] is not None:
+        return
+    try:
+        from vllm_ascend.utils import enable_custom_op
+
+        enable_custom_op()
+        _EXTENSION_LOAD_STATE[0] = True
+        return
+    except Exception as exc:
+        warn_vllm_ascend_extension_load_failure("enable_custom_op", exc)
+
+    try:
+        import vllm_ascend
+
+        package_dir = os.path.dirname(os.path.abspath(vllm_ascend.__file__))
+        try_load_shared_object(os.path.join(package_dir, "libvllm_ascend_kernels.so"))
+    except Exception as exc:
+        warn_vllm_ascend_extension_load_failure("package lib load", exc)
+
+    try:
+        package_dir = os.environ.get("VLLM_ASCEND_PACKAGE_DIR")
+        if package_dir:
+            try_load_shared_object(os.path.join(package_dir, "libvllm_ascend_kernels.so"))
+            extension_candidates = [
+                name for name in os.listdir(package_dir)
+                if name.startswith("vllm_ascend_C") and name.endswith(".so")
+            ]
+            if extension_candidates:
+                extension_path = os.path.join(package_dir, extension_candidates[0])
+                spec = importlib.util.spec_from_file_location(
+                    "vllm_ascend.vllm_ascend_C",
+                    extension_path,
+                )
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    sys.modules["vllm_ascend.vllm_ascend_C"] = module
+                    spec.loader.exec_module(module)
+                    _EXTENSION_LOAD_STATE[0] = True
+                    return
+
+        package_spec = importlib.util.find_spec("vllm_ascend")
+        if package_spec and package_spec.submodule_search_locations:
+            package_dir = next(iter(package_spec.submodule_search_locations))
+            try_load_shared_object(os.path.join(package_dir, "libvllm_ascend_kernels.so"))
+
+        importlib.import_module("vllm_ascend.vllm_ascend_C")
+        _EXTENSION_LOAD_STATE[0] = True
+    except Exception as exc:
+        _EXTENSION_LOAD_STATE[0] = False
+        print(
+            "Warning: failed to import vllm_ascend.vllm_ascend_C "
+            f"({exc!r}). DispatchFFNCombine replay may fail.",
+            file=sys.stderr,
+        )
+
+
+def debug_dfc_tensor_devices(case: dict[str, Any]) -> None:
+    global _PRINTED_DFC_DEVICE_DEBUG
+
+    if _PRINTED_DFC_DEVICE_DEBUG or os.environ.get("DFC_DEBUG_DEVICES") != "1":
+        return
+    _PRINTED_DFC_DEVICE_DEBUG = True
+
+    def describe(name: str, value: Any) -> str:
+        if isinstance(value, list):
+            return ", ".join(describe(f"{name}[{idx}]", item) for idx, item in enumerate(value[:2]))
+        shape = tuple(value.shape) if hasattr(value, "shape") else None
+        device = getattr(value, "device", None)
+        dtype = getattr(value, "dtype", None)
+        return f"{name}: shape={shape} dtype={dtype} device={device}"
+
+    fields = [
+        ("x", case["x"]),
+        ("weight1", case["weight1_list"]),
+        ("weight2", case["weight2_list"]),
+        ("expert_idx", case["expert_idx"]),
+        ("scale1", case["scale1_list"]),
+        ("scale2", case["scale2_list"]),
+        ("probs", case["probs"]),
+        ("out", case["out"]),
+        ("expert_token_nums", case["expert_token_nums"]),
+    ]
+    print("[DFC debug] legacy dispatch_ffn_combine tensor devices:")
+    for name, value in fields:
+        print(f"[DFC debug] {describe(name, value)}")
+
 
 def find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -81,17 +190,45 @@ def find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def launch_torchrun_and_wait(ep_size: int, args: list[str]) -> None:
+def launch_torchrun_and_wait(
+    ep_size: int,
+    args: list[str],
+    *,
+    nproc_per_node: int,
+    nnodes: int,
+    node_rank: int,
+    master_addr: str,
+    master_port: int | None,
+) -> None:
+    if nproc_per_node * nnodes != ep_size:
+        raise ValueError(
+            "torchrun world size mismatch: "
+            f"nproc_per_node({nproc_per_node}) * nnodes({nnodes}) != ep_size({ep_size})"
+        )
+    if nnodes > 1 and master_port is None:
+        raise ValueError(
+            "--master-port must be set explicitly for multi-node DispatchFFNCombine EP replay."
+        )
+
+    resolved_master_port = master_port if master_port is not None else find_free_port()
+
     torchrun_cmd = [
         sys.executable,
         "-m",
         "torch.distributed.run",
-        f"--nproc_per_node={ep_size}",
-        f"--master_port={find_free_port()}",
+        f"--nproc_per_node={nproc_per_node}",
+        f"--nnodes={nnodes}",
+        f"--node_rank={node_rank}",
+        f"--master_addr={master_addr}",
+        f"--master_port={resolved_master_port}",
         __file__,
         *args,
     ]
-    print(f"[Auto EP] Launching torchrun with {ep_size} ranks...")
+    print(
+        "[Auto EP] Launching torchrun "
+        f"world_size={ep_size} nnodes={nnodes} nproc_per_node={nproc_per_node} "
+        f"node_rank={node_rank} master={master_addr}:{resolved_master_port}..."
+    )
     env = os.environ.copy()
     env["_DFC_AUTO_TORCHRUN"] = "1"
     subprocess.run(torchrun_cmd, env=env, check=True)
@@ -177,10 +314,28 @@ def build_expert_idx_tensor(shape: tuple[int, ...], num_experts: int):
 
 
 def build_balanced_expert_idx_tensor(shape: tuple[int, ...], num_experts: int):
+    """Build deterministic expert ids balanced over this rank's local experts.
+
+    DispatchFFNCombine receives per-rank expert weights, so expert_idx must
+    address the local expert dimension rather than the global EP expert space.
+    In EP32, running the same local round-robin pattern on all 32 ranks still
+    exercises every rank's local experts and avoids out-of-range global ids.
+    """
     runtime_torch, _ = get_runtime_modules()
     num_tokens, topk = shape
     total_slots = num_tokens * topk
-    flat_ids = runtime_torch.arange(total_slots, dtype=runtime_torch.int32) % num_experts
+    if num_experts <= 0:
+        raise ValueError(f"num_experts must be positive, got {num_experts}")
+    if EP_SIZE > 1 and num_experts % EP_SIZE == 0:
+        local_experts = num_experts // EP_SIZE
+        slots = runtime_torch.arange(total_slots, dtype=runtime_torch.int32)
+        # Balance by EP rank first. For small decode rows where slots < global
+        # experts, a plain 0..N expert cycle starves high-rank experts.
+        rank_ids = slots % EP_SIZE
+        local_ids = (slots // EP_SIZE) % local_experts
+        flat_ids = rank_ids * local_experts + local_ids
+    else:
+        flat_ids = runtime_torch.arange(total_slots, dtype=runtime_torch.int32) % num_experts
     return flat_ids.reshape(num_tokens, topk).npu()
 
 
@@ -189,7 +344,13 @@ def build_uniform_probs_tensor(shape: tuple[int, ...], topk: int):
     return runtime_torch.full(shape, 1.0 / topk, dtype=runtime_torch.float32).npu()
 
 
-def build_scale_tensor(flattened_shape: tuple[int, ...], expected_shape: tuple[int, int], dtype_name: str):
+def build_scale_tensor(
+    flattened_shape: tuple[int, ...],
+    expected_shape: tuple[int, int],
+    dtype_name: str,
+    *,
+    fill_value: float = 0.0,
+):
     runtime_torch, _ = get_runtime_modules()
     dtype = resolve_runtime_dtype(dtype_name)
     if len(flattened_shape) == 2:
@@ -197,7 +358,7 @@ def build_scale_tensor(flattened_shape: tuple[int, ...], expected_shape: tuple[i
             raise ValueError(
                 f"scale shape mismatch: actual={flattened_shape} expected={expected_shape}"
             )
-        return runtime_torch.zeros(flattened_shape, dtype=dtype).npu()
+        return runtime_torch.full(flattened_shape, fill_value, dtype=dtype).npu()
     if len(flattened_shape) != 1:
         raise ValueError(f"scale tensor must be 1D or 2D, got {flattened_shape}")
     flat_size = flattened_shape[0]
@@ -205,7 +366,7 @@ def build_scale_tensor(flattened_shape: tuple[int, ...], expected_shape: tuple[i
         raise ValueError(
             f"flattened scale size mismatch: actual={flat_size} expected={expected_shape[0] * expected_shape[1]}"
         )
-    return runtime_torch.zeros(expected_shape, dtype=dtype).reshape(-1).npu()
+    return runtime_torch.full(expected_shape, fill_value, dtype=dtype).reshape(-1).npu()
 
 
 def build_output_tensor(shape: tuple[int, ...], dtype_name: str, tensor_format: str):
@@ -214,6 +375,19 @@ def build_output_tensor(shape: tuple[int, ...], dtype_name: str, tensor_format: 
         raise ValueError(f"invalid output shape: {shape}")
     tensor = build_host_tensor(shape, dtype).npu()
     return maybe_cast_internal_format(tensor, tensor_format)
+
+
+def infer_max_output_size(
+    x_shape: tuple[int, ...],
+    topk: int,
+    max_output_size: int | None = None,
+) -> int:
+    if max_output_size is not None:
+        return max_output_size
+    # GLM5 service code in vLLM-Ascend passes a fixed 65536 here. Keep the
+    # replay default aligned with the production path; smaller values such as
+    # m * topk are useful only for the upstream unit-test shape.
+    return DEFAULT_DFC_MAX_OUTPUT_SIZE
 
 
 def build_row_case(row: dict[str, str], balanced: bool = True) -> dict[str, Any]:
@@ -273,29 +447,44 @@ def build_row_case(row: dict[str, str], balanced: bool = True) -> dict[str, Any]
     weight1 = build_npu_tensor(weight1_shape, input_dtypes[1], input_formats[1])
     weight2 = build_npu_tensor(weight2_shape, input_dtypes[2], input_formats[2])
 
-    ep_size_str = row.get("EP Size", "") or ""
-    if ep_size_str.strip():
-        try:
-            expert_idx_num_experts = num_experts * int(ep_size_str.strip())
-        except ValueError:
-            expert_idx_num_experts = num_experts * EP_SIZE
-    else:
-        expert_idx_num_experts = num_experts * EP_SIZE
-
     topk = expert_idx_shape[1]
+    expert_idx_num_experts = num_experts * EP_SIZE
     if balanced:
-        expert_idx = build_balanced_expert_idx_tensor(expert_idx_shape, expert_idx_num_experts)
+        # DispatchFFNCombine receives one per-rank expert weight shard in replay,
+        # so expert_idx values are local IDs for that shard.
+        expert_idx = build_balanced_expert_idx_tensor(expert_idx_shape, num_experts)
         probs = build_uniform_probs_tensor(probs_shape, topk)
     else:
-        expert_idx = build_expert_idx_tensor(expert_idx_shape, expert_idx_num_experts)
+        # See the balanced path above: random replay also uses local expert IDs.
+        expert_idx = build_expert_idx_tensor(expert_idx_shape, num_experts)
         probs = build_npu_tensor(probs_shape, input_dtypes[6], input_formats[6])
 
-    scale1 = build_scale_tensor(scale1_shape, scale1_expected_shape, input_dtypes[4])
-    scale2 = build_scale_tensor(scale2_shape, scale2_expected_shape, input_dtypes[5])
+    if input_dtypes[1] == "INT8" or input_dtypes[2] == "INT8":
+        # Profiler CSVs can record these auxiliary scale buffers as INT64
+        # shapes, but the quantized DFC replay path consumes numeric scales.
+        scale_dtype = "FLOAT"
+        scale_fill_value = 1.0
+    else:
+        scale_dtype = input_dtypes[4]
+        scale_fill_value = 0.0
+    scale1 = build_scale_tensor(
+        scale1_shape,
+        scale1_expected_shape,
+        scale_dtype,
+        fill_value=scale_fill_value,
+    )
+    scale2 = build_scale_tensor(
+        scale2_shape,
+        scale2_expected_shape,
+        scale_dtype,
+        fill_value=scale_fill_value,
+    )
     out = build_output_tensor(out_shape, output_dtypes[0], output_formats[0])
+    # aclnnDispatchFFNCombine requires int32 expert token counts even when
+    # older CSV rows record this auxiliary output as int64.
     expert_token_nums = build_output_tensor(
         expert_token_nums_shape,
-        output_dtypes[1],
+        "INT32",
         output_formats[1],
     )
 
@@ -308,12 +497,14 @@ def build_row_case(row: dict[str, str], balanced: bool = True) -> dict[str, Any]
         "scale2_list": [scale2],
         "probs": probs,
         "group": get_default_hccl_group_name(),
-        "max_output_size": MAX_OUTPUT_SIZE,
+        "max_output_size": infer_max_output_size(x_shape, topk, MAX_OUTPUT_SIZE),
         "out": out,
         "expert_token_nums": expert_token_nums,
         "expected_output_shapes": output_shapes,
         "weight_kind": input_dtypes[1],
         "num_experts": num_experts,
+        "global_num_experts": expert_idx_num_experts,
+        "expert_idx_num_experts": expert_idx_num_experts,
         "topk": topk,
     }
 
@@ -357,11 +548,53 @@ def build_argparser():
         dest="balanced",
         help="Use random expert distribution instead of balanced.",
     )
+    parser.add_argument(
+        "--max-output-size",
+        type=int,
+        default=None,
+        help=(
+            "Override DispatchFFNCombine max_output_size. "
+            f"Default: {DEFAULT_DFC_MAX_OUTPUT_SIZE}, matching vLLM-Ascend service code."
+        ),
+    )
+    parser.add_argument(
+        "--nproc-per-node",
+        type=int,
+        default=None,
+        help=(
+            "torchrun processes per node when auto-launching EP mode. "
+            "Default: EP size for single-node runs."
+        ),
+    )
+    parser.add_argument(
+        "--nnodes",
+        type=int,
+        default=1,
+        help="torchrun node count when auto-launching EP mode. Default: 1.",
+    )
+    parser.add_argument(
+        "--node-rank",
+        type=int,
+        default=0,
+        help="torchrun node rank when auto-launching EP mode. Default: 0.",
+    )
+    parser.add_argument(
+        "--master-addr",
+        default="127.0.0.1",
+        help="torchrun master address when auto-launching EP mode. Default: 127.0.0.1.",
+    )
+    parser.add_argument(
+        "--master-port",
+        type=int,
+        default=None,
+        help="torchrun master port when auto-launching EP mode. Default: auto-selected on node 0.",
+    )
     return parser
 
 
 def execute_dfc_op(case: dict[str, Any]) -> tuple:
     runtime_torch, _ = get_runtime_modules()
+    ensure_vllm_ascend_extension_loaded()
 
     try:
         out, expert_token_nums = runtime_torch.ops._C_ascend.dispatch_ffn_combine(
@@ -378,8 +611,27 @@ def execute_dfc_op(case: dict[str, Any]) -> tuple:
             expert_token_nums=case["expert_token_nums"],
         )
         return out, expert_token_nums, False
-    except RuntimeError as exc:
-        if "does not support opType [DispatchFFNCombine]" not in str(exc):
+    except (RuntimeError, AttributeError) as exc:
+        message = str(exc)
+        if isinstance(exc, RuntimeError) and "expected at most 10 argument" in message:
+            debug_dfc_tensor_devices(case)
+            out = runtime_torch.ops._C_ascend.dispatch_ffn_combine(
+                case["x"],
+                case["weight1_list"][0],
+                case["weight2_list"][0],
+                case["expert_idx"],
+                case["scale1_list"][0],
+                case["scale2_list"][0],
+                case["probs"],
+                case["group"],
+                case["max_output_size"],
+                case["out"],
+            )
+            return out, case["expert_token_nums"], False
+        if (
+            "does not support opType [DispatchFFNCombine]" not in message
+            and "has no attribute 'dispatch_ffn_combine'" not in message
+        ):
             raise
 
     out, expert_token_nums = runtime_torch.ops._C_ascend.dispatch_gmm_combine_decode(
@@ -432,14 +684,34 @@ def run_row(csv_path, row_index: int, row: dict[str, str], *, balanced: bool) ->
             f"x={tuple(case['x'].shape)} "
             f"w1={tuple(case['weight1_list'][0].shape)} "
             f"w2={tuple(case['weight2_list'][0].shape)} "
-            f"topk={case['topk']} experts={case['num_experts']} "
+            f"topk={case['topk']} local_experts={case['num_experts']} "
+            f"global_experts={case['global_num_experts']} "
+            f"max_output_size={case['max_output_size']} "
             f"weight_kind={case['weight_kind']} "
             f"out={tuple(out.shape)} expert_token_nums={tuple(expert_token_nums.shape)}"
         )
 
 
+def should_skip_row_for_ep_size(csv_path: Path, row_index: int, row: dict[str, str]) -> bool:
+    raw_ep_size = (row.get("EP Size", "") or "").strip()
+    if not raw_ep_size:
+        return False
+    try:
+        row_ep_size = int(raw_ep_size)
+    except ValueError:
+        return False
+    if row_ep_size == EP_SIZE:
+        return False
+    if EP_RANK == 0:
+        print(
+            f"[SKIP] {csv_path}:{row_index} EP Size={row_ep_size} "
+            f"does not match replay --ep-size {EP_SIZE}."
+        )
+    return True
+
+
 def main() -> None:
-    global EP_SIZE, EP_RANK, ENABLE_BALANCED
+    global EP_SIZE, EP_RANK, ENABLE_BALANCED, MAX_OUTPUT_SIZE
 
     args = build_argparser().parse_args()
     
@@ -450,6 +722,7 @@ def main() -> None:
     repeat_count = get_replay_repeat_count(args.repeat_count)
     EP_SIZE = args.ep_size
     ENABLE_BALANCED = args.balanced
+    MAX_OUTPUT_SIZE = args.max_output_size
 
     env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
     env_rank = int(os.environ.get("RANK", "0"))
@@ -505,9 +778,19 @@ def main() -> None:
         cli_args.extend(["--repeat-count", str(repeat_count)])
         cli_args.extend(["--update-mode", args.update_mode])
         cli_args.extend(["--ep-size", str(EP_SIZE)])
+        if args.max_output_size is not None:
+            cli_args.extend(["--max-output-size", str(args.max_output_size)])
         if not ENABLE_BALANCED:
             cli_args.append("--no-balanced")
-        launch_torchrun_and_wait(EP_SIZE, cli_args)
+        launch_torchrun_and_wait(
+            EP_SIZE,
+            cli_args,
+            nproc_per_node=args.nproc_per_node or EP_SIZE,
+            nnodes=args.nnodes,
+            node_rank=args.node_rank,
+            master_addr=args.master_addr,
+            master_port=args.master_port,
+        )
         return
 
     ensure_npu_available()
@@ -538,6 +821,7 @@ def main() -> None:
             balanced=ENABLE_BALANCED,
         ),
         update_mode=args.update_mode,
+        should_skip_row=should_skip_row_for_ep_size,
         on_row_finally=barrier,
         can_write_cleanup=lambda: EP_RANK == 0,
         on_cleanup_written=barrier,

@@ -106,4 +106,5 @@ def generate_dispatch_ffn_combine_rows(
                             (m, topk),               # probs: (M, topK)
                         ],
                         [(m, h), (experts,)],        # out: (M, H), (expertPerRank,)
+                        extra_values={"EP Size": str(cfg.num_experts // experts)},
                     )
