@@ -132,16 +132,22 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
     def reuse_layers(layers):
         # We analyze the structure of sub-modules of each layer to detect repetition patterns.
         # For the first layer of the repetition, we wrap it with RegionMarkerWrapper and then
-        # wrap the rest layers of the same pattern with CopyLayerWrapper. This tells the runtime
-        # that we can copy the execution of the first layer to the rest layers.
-        seen_keys = {}
+        # wrap the rest layers of the same pattern with CopyLayerWrapper. CopyLayerWrapper is a
+        # synthetic module with no children, so later transformations only process representative layers.
+        seen_keys: dict[str, RegionMarkerWrapper] = {}
         for i, layer in enumerate(layers):
             key = get_submodule_structure_key(layer)
             if key not in seen_keys:
-                seen_keys[key] = id(layer)
-                layers[i] = RegionMarkerWrapper(region_id=seen_keys[key], layer=layer)
+                layers[i] = RegionMarkerWrapper(region_id=id(layer), layer=layer)
+                seen_keys[key] = layers[i]
             else:
-                layers[i] = CopyLayerWrapper(region_id=seen_keys[key], layer=layer)
+                region_wrapper = seen_keys[key]
+                region_wrapper.repeat_count += 1
+                layers[i] = CopyLayerWrapper(
+                    region_id=region_wrapper.region_id,
+                    layer=layer,
+                    representative=region_wrapper,
+                )
 
     unwrapped = model.unwrap()
     if hasattr(unwrapped, "layers"):

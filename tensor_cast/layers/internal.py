@@ -4,26 +4,28 @@ from .. import ops  # noqa: F401
 from .utils import ModelWrapperBase
 
 
-is_tuple = False
-
-
 class RegionMarkerWrapper(ModelWrapperBase):
     def __init__(
         self,
         region_id: int,
         layer: torch.nn.Module,
+        repeat_count: int = 1,
     ):
         """
         Wrap a layer with region markers.
         Args:
             region_id: The id of the region to mark.
             layer: Original layer instance to wrap
+            repeat_count: Number of structurally equivalent layers represented by this
+                wrapper. The first occurrence runs the real layer, the rest replay the
+                marked region.
         """
         super().__init__(layer)
         self.region_id = region_id
+        self.repeat_count = repeat_count
+        self.returns_tuple = True
 
     def forward(self, *args, **kwargs):
-        global is_tuple
         hidden_states = args[0]
         hidden_states = torch.ops.tensor_cast._internal_mark_region_begin(
             hidden_states,
@@ -36,7 +38,7 @@ class RegionMarkerWrapper(ModelWrapperBase):
 
         # Handle both single tensor and tuple returns
         if isinstance(result, tuple):
-            is_tuple = True
+            self.returns_tuple = True
             # Extract the first element (hidden_states) from tuple
             hidden_states = result[0]
             hidden_states = torch.ops.tensor_cast._internal_mark_region_end(
@@ -46,7 +48,7 @@ class RegionMarkerWrapper(ModelWrapperBase):
             # Return tuple with marked hidden_states and other elements
             return (hidden_states,) + result[1:]
         else:
-            is_tuple = False
+            self.returns_tuple = False
             # Single tensor return
             hidden_states = result
             hidden_states = torch.ops.tensor_cast._internal_mark_region_end(
@@ -56,20 +58,26 @@ class RegionMarkerWrapper(ModelWrapperBase):
             return hidden_states
 
 
-class CopyLayerWrapper(ModelWrapperBase):
+class CopyLayerWrapper(torch.nn.Module):
     def __init__(
         self,
         region_id: int,
         layer: torch.nn.Module,
+        representative: RegionMarkerWrapper,
     ):
         """
         Wrap a layer with a copy operation that copies a previously marked region.
         Args:
             region_id: The id of the range to repeat.
-            layer: Original layer instance to repeat from
+            layer: Original layer instance used only to copy lightweight metadata.
+            representative: The representative layer whose return format should be mirrored.
         """
-        super().__init__(layer)
+        super().__init__()
         self.region_id = region_id
+        object.__setattr__(self, "representative", representative)
+        for attr_name in ("attention_type", "layer_type"):
+            if hasattr(layer, attr_name):
+                setattr(self, attr_name, getattr(layer, attr_name))
 
     def forward(self, *args, **kwargs):
         hidden_states = args[0]
@@ -90,7 +98,7 @@ class CopyLayerWrapper(ModelWrapperBase):
         use_cache = kwargs.get("use_cache", False)
         output_router_logits = kwargs.get("output_router_logits", False)
 
-        if is_tuple:
+        if self.representative.returns_tuple:
             outputs = (hidden_states,)
 
             if output_attentions:

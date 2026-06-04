@@ -269,6 +269,23 @@ class TransformerModel(ModelWrapperBase):
                 total_size += bytes_of_tensor(param)
             for _, buffer in mod.named_buffers():
                 total_size += bytes_of_tensor(buffer)
+            total_size += TransformerModel.get_represented_extra_weight_size(mod)
+        return total_size
+
+    @staticmethod
+    def get_represented_extra_weight_size(module):
+        from ..layers.internal import RegionMarkerWrapper
+
+        total_size = 0
+        for submodule in module.modules():
+            if not isinstance(submodule, RegionMarkerWrapper):
+                continue
+            repeat_count = submodule.repeat_count
+            if repeat_count <= 1:
+                continue
+            # RegionMarkerWrapper wraps the original representative layer. Its inner layer should not contain another
+            # RegionMarkerWrapper, which keeps represented-weight accounting finite and avoids double counting.
+            total_size += (repeat_count - 1) * TransformerModel.get_weight_size_nested([submodule._inner])
         return total_size
 
     @property

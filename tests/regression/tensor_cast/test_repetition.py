@@ -7,7 +7,7 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
-from tensor_cast.layers.internal import CopyLayerWrapper
+from tensor_cast.layers.internal import CopyLayerWrapper, RegionMarkerWrapper
 from tensor_cast.layers.sampler import SamplingMetadata
 from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
@@ -48,6 +48,19 @@ class RepetitionTestMixin:
         count = sum(1 for layer in layers if not isinstance(layer, CopyLayerWrapper))
         self.assertEqual(count, expected_num, f"{layers}")
 
+    def check_representative_layers(self, layers, expected_repeat_counts):
+        region_layers = [layer for layer in layers if isinstance(layer, RegionMarkerWrapper)]
+        self.assertEqual(len(region_layers), len(expected_repeat_counts), f"{layers}")
+        for layer, expected_repeat_count in zip(region_layers, expected_repeat_counts):
+            self.assertEqual(layer.repeat_count, expected_repeat_count)
+
+    def check_copy_layers_hidden(self, layers):
+        copy_layers = [layer for layer in layers if isinstance(layer, CopyLayerWrapper)]
+        self.assertTrue(copy_layers, f"{layers}")
+        for layer in copy_layers:
+            self.assertEqual(list(layer.children()), [])
+            self.assertEqual(list(layer.named_children()), [])
+
 
 class RepetitionTestCase(RepetitionTestMixin, unittest.TestCase):
     def _run_test_vanilla_transformer_model(self, model_id, do_compile):
@@ -74,6 +87,9 @@ class RepetitionTestCase(RepetitionTestMixin, unittest.TestCase):
         model = self._get_transformer_model(model_id, model_config)
         model_with_repeats = self._get_transformer_model(model_id, model_config_with_repeats)
         self.check_num_effective_layers(model_with_repeats.unwrap().layers, 1)
+        self.assertEqual(len(model_with_repeats.unwrap().layers), 3)
+        self.check_representative_layers(model_with_repeats.unwrap().layers, [3])
+        self.check_copy_layers_hidden(model_with_repeats.unwrap().layers)
         if do_compile:
             model = torch.compile(model, backend=get_backend(), dynamic=True, fullgraph=True)
             model_with_repeats = torch.compile(model_with_repeats, backend=get_backend(), dynamic=True, fullgraph=True)
@@ -132,6 +148,15 @@ class RepetitionTestCase(RepetitionTestMixin, unittest.TestCase):
         self.assertIsNotNone(mtp_block_module_name)
 
         self.check_num_effective_layers(model.unwrap().layers, 2)
+        self.assertEqual(len(model.unwrap().layers), model.text_config.num_hidden_layers)
+        self.check_copy_layers_hidden(model.unwrap().layers)
+        if model_id == "deepseek-ai/DeepSeek-V3.1":
+            self.check_representative_layers(model.unwrap().layers, [3, 58])
+        else:
+            self.assertEqual(
+                sum(layer.repeat_count for layer in model.unwrap().layers if isinstance(layer, RegionMarkerWrapper)),
+                model.text_config.num_hidden_layers,
+            )
         self.check_num_effective_layers(model._inner.mtp.layers, 1)
         attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         # make sure all original attention modules have been replaced
