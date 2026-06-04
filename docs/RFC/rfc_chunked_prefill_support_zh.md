@@ -1,10 +1,14 @@
 # RFC: msmodeling Chunked Prefill 建模支持方案
 
-状态 (Status): Draft
-作者 (Authors): @jiayanan, Codex
-创建日期 (Created): 2026-05-18
-更新日期 (Updated): 2026-05-22
-相关 Issue/PR: 待补充（RFC 合入前需关联 Issue/PR）
+# 1. 概述
+
+| 项目 | 内容 |
+| --- | --- |
+| 状态 (Status) | Approved |
+| 作者 (Authors) | @jiayanan, Codex |
+| 创建日期 (Created) | 2026-05-18 |
+| 更新日期 (Updated) | 2026-05-22 |
+| 相关 Issue/PR | [PR](https://gitcode.com/Ascend/msmodeling/pull/250) |
 
 ---
 

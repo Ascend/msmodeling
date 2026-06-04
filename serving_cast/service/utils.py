@@ -30,6 +30,9 @@ COMMON_COLUMNS = [
     "quantize_attention_action",
     "input_length",
     "output_length",
+    "effective_input_length",
+    "max_batched_tokens",
+    "prefill_num_chunks",
     "concurrency",
     "ttft",
     "tpot",
@@ -44,6 +47,13 @@ DISAGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns"]
 
 
 @dataclass
+class PrefillChunk:
+    index: int
+    query_len: int
+    seq_len: int
+
+
+@dataclass
 class OptimizerData:
     input_length: Optional[int] = None
     output_length: Optional[int] = None
@@ -53,7 +63,7 @@ class OptimizerData:
     image_width: Optional[int] = None
     ttft_limits: Optional[float] = None
     tpot_limits: Optional[float] = None
-    max_prefill_tokens: Optional[int] = None
+    max_batched_tokens: Optional[int] = None
     num_devices: Optional[int] = None
     serving_cost: Optional[float] = None
     num_mtp_tokens: Optional[int] = None
@@ -75,6 +85,30 @@ class OptimizerData:
                 f"Got input_length={self.input_length}, prefix_cache_hit_rate={self.prefix_cache_hit_rate}."
             )
         return effective_input_length
+
+    def get_prefill_chunk_plan(self) -> list[PrefillChunk]:
+        """Split the effective prefill prompt into chunks bounded by max_batched_tokens."""
+        effective_input_length = self.get_effective_input_length(is_decode=False)
+        if effective_input_length is None:
+            return []
+        if self.max_batched_tokens is None or self.max_batched_tokens <= 0:
+            raise ValueError(f"max_batched_tokens must be a positive integer, got {self.max_batched_tokens!r}.")
+
+        chunks = []
+        consumed = 0
+        index = 0
+        while consumed < effective_input_length:
+            query_len = min(self.max_batched_tokens, effective_input_length - consumed)
+            seq_len = consumed + query_len
+            chunks.append(PrefillChunk(index=index, query_len=query_len, seq_len=seq_len))
+            consumed += query_len
+            index += 1
+
+        return chunks
+
+    def get_prefill_num_chunks(self) -> int:
+        """Return the number of prefill chunks produced by the current token budget."""
+        return len(self.get_prefill_chunk_plan())
 
 
 def check_string_valid(string: str, max_len=256):

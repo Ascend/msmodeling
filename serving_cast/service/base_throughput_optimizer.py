@@ -251,12 +251,16 @@ class BaseThroughputOptimizer(ABC):
         concurrency: int,
         optimizer_data: OptimizerData,
         is_decode: bool,
+        *,
+        query_len: int = None,
+        seq_len: int = None,
     ) -> ModelRunnerMetrics:
-        if is_decode:
-            query_len = self.num_mtp_tokens + 1
-            seq_len = optimizer_data.output_length // 2 + optimizer_data.input_length + query_len
-        else:
-            seq_len = query_len = optimizer_data.get_effective_input_length()
+        query_len, seq_len = self._resolve_forward_shape(
+            optimizer_data,
+            is_decode,
+            query_len=query_len,
+            seq_len=seq_len,
+        )
 
         # avoid print duplicate image input log
         _image_batch_size = None
@@ -283,3 +287,32 @@ class BaseThroughputOptimizer(ABC):
         metrics = runner.run_inference(requests, generate_inputs_func=generate_inputs)
 
         return metrics
+
+    def _resolve_forward_shape(
+        self,
+        optimizer_data: OptimizerData,
+        is_decode: bool,
+        *,
+        query_len: int = None,
+        seq_len: int = None,
+    ) -> tuple[int, int]:
+        """Resolve the RequestInfo shape, allowing chunked prefill callers to override it.
+
+        Without overrides, prefill uses the effective input length after prefix-cache reduction,
+        while decode keeps the original prompt length and only computes the next decode/MTP tokens.
+        Chunked prefill passes explicit query_len/seq_len so each chunk can be modeled with its
+        own newly computed token count and accumulated context length.
+        """
+        if is_decode:
+            # Decode computes one normal token plus any MTP speculative tokens.
+            resolved_query_len = query_len or self.num_mtp_tokens + 1
+            resolved_seq_len = seq_len or (
+                optimizer_data.output_length // 2 + optimizer_data.input_length + resolved_query_len
+            )
+        else:
+            # Full prefill defaults to the effective prompt; chunked prefill provides explicit shapes.
+            effective_input_length = optimizer_data.get_effective_input_length()
+            resolved_query_len = query_len or effective_input_length
+            resolved_seq_len = seq_len or resolved_query_len
+
+        return resolved_query_len, resolved_seq_len

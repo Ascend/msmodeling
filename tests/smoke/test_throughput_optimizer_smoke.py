@@ -8,8 +8,8 @@ test_vl_model_image_args                          -> TestThroughputOptimizerNigh
 test_vl_disagg_prefill_smoke                      -> TestThroughputOptimizerNightly.test_vl_model_disaggregation_prefill_with_output_validation
 test_vl_disagg_decode_smoke                       -> TestThroughputOptimizerNightly.test_vl_model_disaggregation_decode_with_output_validation
 test_vl_moe_aggregation_compile_smoke             -> TestThroughputOptimizerNightly.test_VL_MOE_model_aggregation_with_output_validation
-test_prefix_cache_with_max_prefill_tokens_rejects -> TestThroughputOptimizerNightly
-                                                     (test_prefix_cache_hit_rate_respects_effective_input_length)
+test_prefix_cache_with_max_batched_tokens_allows_chunked_prefill -> TestThroughputOptimizerNightly
+                                                                    (test_prefix_cache_hit_rate_allows_chunked_prefill_when_effective_input_exceeds_max_batched_tokens)
 test_deepseek_pd_ratio_mode                       -> TestThroughputOptimizerNightly
                                                      (test_deepseek_model_pd_ratio_with_output_validation)
 """
@@ -160,17 +160,17 @@ class TestThroughputOptimizerSmoke(TestCase):
             "--batch-range",
             "1",
             "1",
-            "--max-prefill-tokens=16",
+            "--max-batched-tokens=16",
         ]
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
-    def test_prefix_cache_with_max_prefill_tokens_rejects(self):
-        """prefix-cache hit-rate + max-prefill-tokens: effective input < max → CLI must reject.
+    def test_prefix_cache_with_max_batched_tokens_allows_chunked_prefill(self):
+        """prefix-cache hit-rate + max-batched-tokens can use chunked prefill.
 
-        Guards test_prefix_cache_hit_rate_respects_effective_input_length_for_max_prefill_tokens.
+        Guards test_prefix_cache_hit_rate_allows_chunked_prefill_when_effective_input_exceeds_max_batched_tokens.
         With input_length=200 and prefix_cache_hit_rate=0.5, effective_input_length=100.
-        max_prefill_tokens=99 < 100 → should return non-zero.
+        max_batched_tokens=99 < 100, so the CLI should model two prefill chunks.
         """
         args = [
             "--input-length=200",
@@ -184,10 +184,10 @@ class TestThroughputOptimizerSmoke(TestCase):
             "1",
             "2",
             "--prefix-cache-hit-rate=0.5",
-            "--max-prefill-tokens=99",
+            "--max-batched-tokens=99",
         ]
         result = self._run_throughput_optimizer(args, check=False)
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
 
     def test_deepseek_pd_ratio_mode(self):
         """PD-ratio optimization mode; guards DeepSeek PD-ratio nightly regression."""

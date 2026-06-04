@@ -788,7 +788,7 @@ jobs: 8
 常见原因：
 
 - TTFT 或 TPOT 约束过严。
-- `max-prefill-tokens` 小于有效输入长度。
+- `max-batched-tokens` 过小导致 chunked prefill 开销过高。
 - batch 搜索范围太小。
 - 卡数不足或 TP 搜索空间不合适。
 - 显存预留过大导致可用显存不足。

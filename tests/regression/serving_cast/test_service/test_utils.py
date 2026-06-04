@@ -6,6 +6,7 @@ import unittest
 from serving_cast.service.utils import (
     BatchRangeAction,
     OptimizerData,
+    PrefillChunk,
     check_positive_float,
     check_positive_integer,
     check_string_valid,
@@ -75,6 +76,53 @@ class TestServiceUtils(unittest.TestCase):
     def test_optimizer_data_effective_input_length_ignores_prefix_cache_in_decode(self):
         config = OptimizerData(input_length=200, prefix_cache_hit_rate=0.5)
         self.assertEqual(config.get_effective_input_length(is_decode=True), 200)
+
+    def test_optimizer_data_prefill_chunk_plan_single_chunk(self):
+        config = OptimizerData(input_length=4096, max_batched_tokens=8192)
+        self.assertEqual(
+            config.get_prefill_chunk_plan(),
+            [PrefillChunk(index=0, query_len=4096, seq_len=4096)],
+        )
+
+    def test_optimizer_data_prefill_chunk_plan_multiple_chunks(self):
+        config = OptimizerData(input_length=10000, max_batched_tokens=4096)
+        self.assertEqual(
+            config.get_prefill_chunk_plan(),
+            [
+                PrefillChunk(index=0, query_len=4096, seq_len=4096),
+                PrefillChunk(index=1, query_len=4096, seq_len=8192),
+                PrefillChunk(index=2, query_len=1808, seq_len=10000),
+            ],
+        )
+
+    def test_optimizer_data_prefill_chunk_plan_applies_prefix_cache(self):
+        config = OptimizerData(input_length=10, max_batched_tokens=3, prefix_cache_hit_rate=0.5)
+
+        self.assertEqual(
+            config.get_prefill_chunk_plan(),
+            [
+                PrefillChunk(index=0, query_len=3, seq_len=3),
+                PrefillChunk(index=1, query_len=2, seq_len=5),
+            ],
+        )
+
+    def test_optimizer_data_prefill_chunk_plan_returns_empty_without_input_length(self):
+        config = OptimizerData(max_batched_tokens=None)
+
+        self.assertEqual(config.get_prefill_chunk_plan(), [])
+
+    def test_optimizer_data_prefill_chunk_plan_rejects_invalid_token_budget(self):
+        for max_batched_tokens in (None, 0, -1):
+            with self.subTest(max_batched_tokens=max_batched_tokens):
+                config = OptimizerData(input_length=10, max_batched_tokens=max_batched_tokens)
+
+                with self.assertRaises(ValueError):
+                    config.get_prefill_chunk_plan()
+
+    def test_optimizer_data_prefill_num_chunks_matches_chunk_plan(self):
+        config = OptimizerData(input_length=9, max_batched_tokens=4)
+
+        self.assertEqual(config.get_prefill_num_chunks(), 3)
 
 
 class TestBatchRangeAction(unittest.TestCase):

@@ -419,7 +419,7 @@ def _build_opt_form(*vals):
         "ttft_list",
         "num_mtp_tokens",
         "mtp_acceptance_rate",
-        "max_prefill_tokens",
+        "max_batched_tokens",
         "image_height",
         "image_width",
         "tp_sizes",
@@ -677,7 +677,7 @@ def _validate_optimizer_form(form: dict[str, Any]) -> list[str]:
         ("input_length", "\u8f93\u5165\u957f\u5ea6"),
         ("output_length", "\u8f93\u51fa\u957f\u5ea6"),
         ("jobs", "\u5e76\u884c\u4efb\u52a1\u6570"),
-        ("max_prefill_tokens", "max-prefill-tokens"),
+        ("max_batched_tokens", "max-batched-tokens"),
         ("mxfp4_group_size", "MXFP4 \u5206\u7ec4\u5927\u5c0f"),
     ]:
         require_positive_int(key, label)

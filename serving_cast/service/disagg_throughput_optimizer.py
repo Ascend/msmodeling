@@ -42,13 +42,71 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
 
         batch_size = optimizer_data.batch_size
         input_length = optimizer_data.input_length
+        effective_input_length = optimizer_data.get_effective_input_length()
+        max_batched_tokens = optimizer_data.max_batched_tokens
+        if decode_flag:
+            chunk_plan = []
+        else:
+            chunk_plan = optimizer_data.get_prefill_chunk_plan()
         output_length = optimizer_data.output_length
         concurrency = batch_size * self.dp * self.pp
 
-        batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
-        latency_ms = batch_result.execution_time_s.get("analytic") * 1000 + optimizer_data.serving_cost
-        device_memory_available_gb = batch_result.device_memory_available_gb
-        breakdowns = format_breakdowns(batch_result.breakdowns)
+        if decode_flag or len(chunk_plan) == 1:
+            batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
+            latency_ms = batch_result.execution_time_s.get("analytic") * 1000 + optimizer_data.serving_cost
+            device_memory_available_gb = batch_result.device_memory_available_gb
+            breakdowns = format_breakdowns(batch_result.breakdowns)
+        else:
+            latency_ms = optimizer_data.serving_cost
+            device_memory_available_gb = float("inf")
+            breakdowns = ""
+            breakdown_sums = {}
+            breakdown_counts = {}
+            # Keep disaggregated prefill modeling simple and deterministic: each wave contains
+            # only one chunk shape and is capped by max_batched_tokens. We do not aggregate
+            # different chunk positions across queries into one wave, so this may be conservative
+            # compared with engines that do cross-query chunk packing.
+            # serving_cost is treated as one fixed phase overhead, while breakdowns are averaged
+            # across all modeled waves to include every chunk shape.
+            for chunk in chunk_plan:
+                wave_size = max(max_batched_tokens // chunk.query_len, 1)
+                remaining = concurrency
+                while remaining > 0:
+                    wave_concurrency = min(wave_size, remaining)
+                    batch_result = self._get_forward_info(
+                        wave_concurrency,
+                        optimizer_data,
+                        decode_flag,
+                        query_len=chunk.query_len,
+                        seq_len=chunk.seq_len,
+                    )
+                    latency_ms += batch_result.execution_time_s.get("analytic") * 1000
+                    device_memory_available_gb = min(
+                        device_memory_available_gb,
+                        batch_result.device_memory_available_gb,
+                    )
+                    for breakdown_name, breakdown in batch_result.breakdowns.items():
+                        total = sum(breakdown.values())
+                        if total == 0:
+                            continue
+                        normalized_breakdown = {}
+                        for category, value in breakdown.items():
+                            if isinstance(value, float):
+                                normalized_breakdown[category] = value / total
+                        if normalized_breakdown:
+                            accumulated = breakdown_sums.setdefault(breakdown_name, {})
+                            for category, value in normalized_breakdown.items():
+                                accumulated[category] = accumulated.get(category, 0.0) + value
+                            breakdown_counts[breakdown_name] = breakdown_counts.get(breakdown_name, 0) + 1
+                    remaining -= wave_concurrency
+            if breakdown_sums:
+                average_breakdowns = {
+                    breakdown_name: {
+                        category: value / breakdown_counts[breakdown_name] for category, value in breakdown.items()
+                    }
+                    for breakdown_name, breakdown in breakdown_sums.items()
+                }
+                breakdowns = format_breakdowns(average_breakdowns)
 
         ttft = tpot = None
         if decode_flag:
@@ -92,6 +150,9 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                     self.model_runner.user_input.quantize_attention_action,
                     input_length,
                     output_length,
+                    effective_input_length,
+                    max_batched_tokens,
+                    len(chunk_plan),
                     concurrency,
                     ttft,
                     tpot,

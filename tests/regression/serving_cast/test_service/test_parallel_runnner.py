@@ -227,7 +227,7 @@ class TestTaskRunner(unittest.TestCase):
             output_length=self.args.output_length,
             ttft_limits=1000,
             tpot_limits=50,
-            max_prefill_tokens=self.args.max_prefill_tokens,
+            max_batched_tokens=self.args.max_batched_tokens,
             num_devices=self.args.num_devices,
             num_mtp_tokens=1,
             mtp_acceptance_rate=[0.9],

@@ -58,6 +58,7 @@ class ParallelRunner:
         self._worker_initializer = worker_initializer or self._init_worker
 
         self.summary_result = []
+        max_batched_tokens = getattr(self.args, "max_batched_tokens", 8192)
         self.optimizer_data = OptimizerData(
             input_length=self.args.input_length,
             output_length=self.args.output_length,
@@ -65,7 +66,7 @@ class ParallelRunner:
             image_height=self.args.image_height,
             image_width=self.args.image_width,
             ttft_limits=self.args.ttft_limits,
-            max_prefill_tokens=self.args.max_prefill_tokens,
+            max_batched_tokens=max_batched_tokens,
             num_devices=self.args.num_devices,
             serving_cost=self.args.serving_cost,
             num_mtp_tokens=self.args.num_mtp_tokens,

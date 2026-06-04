@@ -365,7 +365,7 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
         num_mtp_tokens = int(form.get("num_mtp_tokens") or 0)
         mtp_acceptance_rate_str = form.get("mtp_acceptance_rate") or "0.9,0.6,0.4,0.2"
         mtp_acceptance_rate = [float(r.strip()) for r in mtp_acceptance_rate_str.split(",") if r.strip()]
-        max_prefill_tokens = int(form.get("max_prefill_tokens") or 8192)
+        max_batched_tokens = int(form.get("max_batched_tokens") or 8192)
 
         params = {
             "model_id": form["model_id"],
@@ -380,7 +380,7 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "ttft_limits": ttft,
             "num_mtp_tokens": num_mtp_tokens,
             "mtp_acceptance_rate": mtp_acceptance_rate,
-            "max_prefill_tokens": max_prefill_tokens,
+            "max_batched_tokens": max_batched_tokens,
             "image_height": parse_optional_number(form.get("image_height"), int),
             "image_width": parse_optional_number(form.get("image_width"), int),
             "optimization_mode": _mode_name(ttft, tpot),
@@ -458,8 +458,8 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
         if num_mtp_tokens > 0:
             cmd += ["--num-mtp-tokens", str(num_mtp_tokens)]
             cmd += ["--mtp-acceptance-rate"] + [str(r) for r in mtp_acceptance_rate]
-        if max_prefill_tokens != 8192:
-            cmd += ["--max-prefill-tokens", str(max_prefill_tokens)]
+        if max_batched_tokens != 8192:
+            cmd += ["--max-batched-tokens", str(max_batched_tokens)]
         if params["image_height"] is not None:
             cmd += ["--image-height", str(params["image_height"])]
         if params["image_width"] is not None:

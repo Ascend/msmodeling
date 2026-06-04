@@ -1084,8 +1084,8 @@ def build_app() -> gr.Blocks:
                             )
                         with gr.Row():
                             op_compile_break = gr.Checkbox(label="Allow Graph Breaks", value=False)
-                            op_max_prefill_tokens = gr.Textbox(
-                                label="Prefill Batch Parameter (max-prefill-tokens)",
+                            op_max_batched_tokens = gr.Textbox(
+                                label="Max Batched Tokens (max-batched-tokens)",
                                 value="8192",
                                 placeholder="Default: 8192",
                             )
@@ -1356,7 +1356,7 @@ def build_app() -> gr.Blocks:
                     op_ttft_list,
                     op_mtp_tokens,
                     op_mtp_acceptance_rate,
-                    op_max_prefill_tokens,
+                    op_max_batched_tokens,
                     op_img_h,
                     op_img_w,
                     op_tp_sizes,

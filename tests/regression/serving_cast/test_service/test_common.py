@@ -9,7 +9,7 @@ class SimpleArgs:
         self.quantize_linear_action = "DISABLED"
         self.mxfp4_group_size = 128
         self.quantize_attention_action = "DISABLED"
-        self.max_prefill_tokens = 2048
+        self.max_batched_tokens = 2048
         self.input_length = 100
         self.output_length = 100
         self.ttft_limits = None

@@ -25,7 +25,6 @@ from serving_cast.service.optimizer_curve_plots import (
 )
 from serving_cast.service.utils import (
     BatchRangeAction,
-    OptimizerData,
     check_positive_float,
     check_positive_integer,
     resolve_search_sizes,
@@ -162,10 +161,10 @@ def arg_parse():
         help="TPOT constraints under which to search for the best throughput. None means no constraint.",
     )
     service_group.add_argument(
-        "--max-prefill-tokens",
+        "--max-batched-tokens",
         type=check_positive_integer,
         default=8192,
-        help="Max prefill tokens",
+        help="Max batched tokens for one prefill or mixed prefill/decode step.",
     )
     service_group.add_argument(
         "--batch-range",
@@ -291,24 +290,6 @@ def main():
 
     device_targets = check_device_targets(args, logger)
     if device_targets is None:
-        return 1
-
-    effective_input_length = OptimizerData(
-        input_length=args.input_length,
-        prefix_cache_hit_rate=args.prefix_cache_hit_rate,
-    ).get_effective_input_length()
-
-    if (
-        not args.disagg
-        and not args.enable_optimize_prefill_decode_ratio
-        and args.max_prefill_tokens < effective_input_length
-    ):
-        logger.error(
-            "max_prefill_tokens (%r) is smaller than effective_input_length (%r). "
-            "We currently do not have support for this scenario.",
-            args.max_prefill_tokens,
-            effective_input_length,
-        )
         return 1
 
     if args.num_mtp_tokens > 0 and args.num_mtp_tokens > len(args.mtp_acceptance_rate) + 1:

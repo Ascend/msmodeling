@@ -29,7 +29,7 @@ class TestArgs:
         self.decode_devices_per_instance = 2
         self.num_devices = 8
         self.dump_original_results = False
-        self.max_prefill_tokens = None
+        self.max_batched_tokens = None
         self.batch_range = None
         self.tp_sizes = None
         self.image_height = None
@@ -114,8 +114,8 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
         # Verify QPS calculations
         # P QPS = 10 / 100 * 1000 = 100
         self.assertEqual(result_df.iloc[0]["p_qps"], 100.0)
-        # D QPS = 8 / (10 * 1024) * 1000
-        expected_d_qps = 8 / (10 * self.output_length) * 1000
+        # D QPS = 8 / (10 * max(1024 - 1, 1)) * 1000
+        expected_d_qps = 8 / (10 * max(self.output_length - 1, 1)) * 1000
         self.assertAlmostEqual(result_df.iloc[0]["d_qps"], expected_d_qps, places=5)
 
         # Verify column names have suffixes

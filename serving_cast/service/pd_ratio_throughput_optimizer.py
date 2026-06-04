@@ -30,7 +30,7 @@ class PDRatioThroughputOptimizer:
 
     QPS Formulas:
         P QPS = p_concurrency / ttft * 1000 (req/s)
-        D QPS = d_concurrency / (tpot * output_length) * 1000 (req/s)
+        D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000 (req/s)
 
     PD Ratio Calculation:
         PD ratio = D_QPS / P_QPS
@@ -78,11 +78,11 @@ class PDRatioThroughputOptimizer:
         p_df["p_qps"] = p_df["concurrency"] / p_df["ttft"] * 1000
         p_df = p_df[p_df["p_qps"] > 0]
 
-        # D QPS = d_concurrency / (tpot * output_length) * 1000 (req/s)
+        # D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000 (req/s)
         # Filter out zero tpot to avoid ZeroDivisionError
         d_df = self._d_df.copy()
         d_df = d_df[d_df["tpot"] > 0]
-        d_df["d_qps"] = d_df["concurrency"] / (d_df["tpot"] * self.output_length) * 1000
+        d_df["d_qps"] = d_df["concurrency"] / (d_df["tpot"] * max(self.output_length - 1, 1)) * 1000
         d_df = d_df[d_df["d_qps"] > 0]
 
         if p_df.empty or d_df.empty:

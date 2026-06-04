@@ -250,7 +250,7 @@ class TestThroughputOptimizer(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
-    def test_prefix_cache_hit_rate_respects_effective_input_length_for_max_prefill_tokens(
+    def test_prefix_cache_hit_rate_allows_chunked_prefill_when_effective_input_exceeds_max_batched_tokens(
         self,
     ):
         args = [
@@ -265,42 +265,11 @@ class TestThroughputOptimizer(TestCase):
             "1",
             "2",
             "--prefix-cache-hit-rate=0.5",
-            "--max-prefill-tokens=99",
+            "--max-batched-tokens=99",
         ]
 
         result = self._run_throughput_optimizer(args, check=False)
-        self.assertNotEqual(result.returncode, 0)
-
-    def test_main_uses_optimizer_data_effective_input_length_for_prefill_check(self):
-        from cli.inference import throughput_optimizer as throughput_optimizer_module
-
-        class DummyArgs:
-            log_level = "error"
-            input_length = 200
-            output_length = 16
-            prefix_cache_hit_rate = 0.5
-            max_prefill_tokens = 99
-            num_mtp_tokens = 0
-            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
-            disagg = False
-            enable_optimize_prefill_decode_ratio = False
-            device = ["TEST_DEVICE"]
-            num_devices = 1
-
-        with (
-            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
-            patch.object(
-                throughput_optimizer_module,
-                "check_device_targets",
-                return_value=["TEST_DEVICE"],
-            ),
-            patch(
-                "cli.inference.throughput_optimizer.OptimizerData.get_effective_input_length",
-                return_value=100,
-            ) as mock_get_effective_input_length,
-        ):
-            self.assertEqual(throughput_optimizer_module.main(), 1)
-            mock_get_effective_input_length.assert_called_once_with()
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
 
     def test_deepseek_model_pd_ratio_with_output_validation(self):
         """Test deepseek model PD ratio with comprehensive output validation"""
@@ -448,7 +417,7 @@ class TestThroughputOptimizerNightly(TestCase):
             "--batch-range",
             "1",
             "4",
-            "--max-prefill-tokens=100",
+            "--max-batched-tokens=100",
         ]
 
         result = self._run_throughput_optimizer(args)

@@ -74,6 +74,9 @@ class TestBaseBackend(unittest.TestCase):
                             "DISABLED",
                             128,
                             64,
+                            128,
+                            8192,
+                            1,
                             data_config.batch_size * 2,
                             100.0,
                             50.0,
@@ -166,6 +169,46 @@ class TestBaseBackend(unittest.TestCase):
         requests = self.backend.model_runner.run_inference.call_args.args[0]
         self.assertEqual(requests[0].query_len, 1)
         self.assertEqual(requests[0].seq_len, 233)
+
+    def test_resolve_forward_shape_uses_effective_prefill_by_default(self):
+        optimizer_data = OptimizerData(input_length=200, output_length=64, prefix_cache_hit_rate=0.5)
+
+        query_len, seq_len = self.backend._resolve_forward_shape(optimizer_data, is_decode=False)
+
+        self.assertEqual((query_len, seq_len), (100, 100))
+
+    def test_resolve_forward_shape_accepts_prefill_chunk_overrides(self):
+        optimizer_data = OptimizerData(input_length=200, output_length=64, prefix_cache_hit_rate=0.5)
+
+        query_len, seq_len = self.backend._resolve_forward_shape(
+            optimizer_data,
+            is_decode=False,
+            query_len=32,
+            seq_len=128,
+        )
+
+        self.assertEqual((query_len, seq_len), (32, 128))
+
+    def test_resolve_forward_shape_uses_original_prompt_for_decode(self):
+        self.backend.num_mtp_tokens = 2
+        optimizer_data = OptimizerData(input_length=200, output_length=64, prefix_cache_hit_rate=0.5)
+
+        query_len, seq_len = self.backend._resolve_forward_shape(optimizer_data, is_decode=True)
+
+        self.assertEqual((query_len, seq_len), (3, 235))
+
+    def test_resolve_forward_shape_accepts_decode_overrides(self):
+        self.backend.num_mtp_tokens = 2
+        optimizer_data = OptimizerData(input_length=200, output_length=64, prefix_cache_hit_rate=0.5)
+
+        query_len, seq_len = self.backend._resolve_forward_shape(
+            optimizer_data,
+            is_decode=True,
+            query_len=4,
+            seq_len=256,
+        )
+
+        self.assertEqual((query_len, seq_len), (4, 256))
 
     def test_get_forward_info_uses_explicit_image_batch_size_when_provided(self):
         self.backend.model_runner = Mock()

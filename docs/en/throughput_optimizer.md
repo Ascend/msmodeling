@@ -43,7 +43,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 ### Constraints
 
-- `--max-fill-tokens` must be greater than `--input-length` , which determines the maximum batch size in the Prefill phase.
+- `--max-batched-tokens` sets the token budget for one prefill or mixed prefill/decode step. If `effective_input_length` is greater than `max_batched_tokens`, the optimizer automatically splits Prefill into chunks. Set `--max-batched-tokens` to match the serving engine's scheduling budget.
 
 ## Run in disaggregation mode
 
@@ -247,8 +247,8 @@ Service Options:
                         TTFT constraints under which to search for the best throughput. None means no constraint. (default: None)
   --tpot-limits TPOT_LIMITS
                         TPOT constraints under which to search for the best throughput. None means no constraint. (default: None)
-  --max-prefill-tokens MAX_PREFILL_TOKENS
-                        Max prefill tokens (default: 8192)
+  --max-batched-tokens MAX_BATCHED_TOKENS
+                        Max batched tokens for one prefill or mixed prefill/decode step. (default: 8192)
   --prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE
                         Prefix cache hit rate for token-level prefill reuse approximation. Valid range: [0, 1). (default: 0.0)
   --batch-range BATCH_RANGE [BATCH_RANGE ...]
@@ -275,19 +275,25 @@ PD Ratio Optimization Options:
 
 - TTFT:
 
-  We get average `ttft = sum_for_ttft / concurrency`. For sum_for_ttft, we assume the prefill batch size is the max prefill tokens divided by effective input length.
-  So `prefill_batch_size = max_prefill_tokens // effective_input_length`. And request was processed in
-  prefill_batch_size steps one by one. We can get the total ttft time as follows:
+  When `effective_input_length <= max_batched_tokens`, we keep the original full-prefill formula.
+  We get average `ttft = sum_for_ttft / concurrency`. For sum_for_ttft, we assume the prefill
+  batch size is the max batched tokens divided by effective input length.
+  So `prefill_batch_size = max_batched_tokens // effective_input_length`. And request was
+  processed in prefill_batch_size steps one by one. We can get the total ttft time as follows:
 
   `sum_for_ttft = (prefill_latency * prefill_batch_size) * (1 + calc_nums_for_ttft)) * (calc_nums_for_ttft) / 2`
 
-  For example, if we have 12 requests, and max_prefill_tokens is 8192, input_length is 2048,
+  For example, if we have 12 requests, and max_batched_tokens is 8192, input_length is 2048,
   then prefill_batch_size is 4. And 12 requests was processed in 3 steps.
   so
 
   `sum_for_ttft = (prefill_latency * 4 ) * (1 + 3) * 3 / 2`
 
   `ttft = sum_for_ttft / 12`
+
+  When `effective_input_length > max_batched_tokens`, the optimizer automatically splits prefill
+  into multiple chunks. The first version uses a fixed decode-first mixed scheduler with 15% token
+  budget slack; it does not expose a scheduler selection CLI parameter.
 
 - TPOT:
 
@@ -316,12 +322,12 @@ PD ratio mode uses QPS (Queries Per Second) as the primary metric for matching P
 
   D QPS represents the request processing capacity of a single Decode instance.
 
-  `D QPS = d_concurrency / (tpot * output_length) * 1000` (req/s)
+  `D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000` (req/s)
 
   Where:
   - `d_concurrency`: The batch size (number of concurrent requests) in Decode phase
   - `tpot`: Time-per-output-token in milliseconds
-  - `output_length`: Expected output token length
+  - `max(output_length - 1, 1)`: Number of Decode tokens after the first token has been produced
 
 - **PD Ratio**:
 

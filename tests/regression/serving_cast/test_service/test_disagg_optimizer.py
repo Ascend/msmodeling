@@ -48,6 +48,7 @@ class TestDisaggStrategy(unittest.TestCase):
             batch_size=2,
             input_length=512,
             output_length=128,
+            max_batched_tokens=2048,
             serving_cost=0,
             num_mtp_tokens=1,
             mtp_acceptance_rate=[0.9],
@@ -82,6 +83,7 @@ class TestDisaggStrategy(unittest.TestCase):
             batch_size=5,
             input_length=1024,
             output_length=50,
+            max_batched_tokens=2048,
             serving_cost=0,
         )
 
@@ -97,11 +99,68 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["output_length"], 50)
         self.assertIsNone(row["tpot"])
 
+    def test_chunked_prefill_splits_each_chunk_into_token_budget_waves(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=10,
+            output_length=16,
+            max_batched_tokens=4,
+            serving_cost=2,
+        )
+        captured_calls = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            captured_calls.append((concurrency, query_len, seq_len))
+
+            class DummyMetrics:
+                execution_time_s = {"analytic": 0.001}
+                device_memory_available_gb = 1.0
+                breakdowns = {
+                    "stage": {
+                        "first": float(len(captured_calls)),
+                        "second": float(10 - len(captured_calls)),
+                    }
+                }
+
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        self.assertEqual(
+            captured_calls,
+            [
+                (1, 4, 4),
+                (1, 4, 4),
+                (1, 4, 4),
+                (1, 4, 4),
+                (1, 4, 8),
+                (1, 4, 8),
+                (1, 4, 8),
+                (1, 4, 8),
+                (2, 2, 10),
+                (2, 2, 10),
+            ],
+        )
+        self.assertTrue(
+            all(
+                concurrency * query_len <= optimizer_data.max_batched_tokens
+                for concurrency, query_len, _ in captured_calls
+            )
+        )
+        self.assertEqual(row["prefill_num_chunks"], 3)
+        self.assertEqual(row["ttft"], 12.0)
+        self.assertEqual(row["percentage_breakdowns"], "Mem 55.00 | Comm 45.00 | Cube 0.00 | Vec 0.00")
+
     def test_prefix_cache_changes_prefill_shape_but_not_decode_shape(self):
         optimizer_data = OptimizerData(
             batch_size=2,
             input_length=200,
             output_length=32,
+            max_batched_tokens=2048,
             prefix_cache_hit_rate=0.5,
             serving_cost=0,
             num_mtp_tokens=0,
@@ -138,6 +197,7 @@ class TestDisaggStrategy(unittest.TestCase):
             batch_size=16,
             input_length=100,
             output_length=10,
+            max_batched_tokens=2048,
             serving_cost=0,
             concurrency_search_strategy="linear_exponential",
         )
