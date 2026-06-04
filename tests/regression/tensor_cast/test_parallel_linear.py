@@ -7,6 +7,7 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
+from tensor_cast.layers.parallel_linear import get_qparam_shard_dim
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
 from tensor_cast.model_config import MlaConfig, ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
@@ -20,6 +21,17 @@ from .test_common import create_mla_metadata_and_kv_cache
 from .test_quant_linear import get_quant_config
 
 # Core parallel-topology assertions were moved to test_layers.py::test_parallel_config_topology_flags.
+
+
+class TestGetQparamShardDim(unittest.TestCase):
+    def test_1d_tensor_shards_dim_zero(self):
+        self.assertEqual(get_qparam_shard_dim(torch.randn(128), weight_dim=1), 0)
+
+    def test_2d_tensor_shards_last_dim(self):
+        self.assertEqual(get_qparam_shard_dim(torch.randn(128, 64), weight_dim=1), 1)
+
+    def test_higher_rank_tensor_uses_weight_dim(self):
+        self.assertEqual(get_qparam_shard_dim(torch.randn(2, 128, 64), weight_dim=1), 1)
 
 
 def get_parallel_config(parallel_configuration: tuple):

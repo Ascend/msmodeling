@@ -126,7 +126,7 @@ Metric descriptions:
 
 | Area | Support | Notes |
 | --- | --- | --- |
-| Text models (families) | Supported | Qwen3, Qwen3-Next, GLM-4, DeepSeek V3, DeepSeek V3.2, ERNIE 4.5, Ling, MiMo v2, MinMax M2 |
+| Text models (families) | Supported | DeepSeek V4, Qwen3, Qwen3-Next, GLM-4, DeepSeek V3, DeepSeek V3.2, ERNIE 4.5, Ling, MiMo v2, MinMax M2 |
 | Vision-language models | Supported | Qwen3-VL, GLM-4V, InternVL |
 | Video generation models (Diffusers DiT) | Supported | Wan, HunyuanVideo, HunyuanVideo1.5 |
 | Auto sharding | Supported | DP, TP, EP |

@@ -127,6 +127,9 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         for name, sub_module in module.named_modules():
             submodule_types.append(name)
             submodule_types.append(".".join([type(sub_module).__module__, type(sub_module).__name__]))
+            submodule_types.extend(
+                f"buffer:{buffer_name}" for buffer_name, _ in sub_module.named_buffers(recurse=False)
+            )
         return ",".join(submodule_types)
 
     def reuse_layers(layers):
@@ -296,6 +299,14 @@ def patch_mla(
         target_module_name=mla_config.module_name,
         expected_replacements=_expected_replacements_from_layers(model),
     )
+
+    # Pass `parallel_group_manager` only to MLA classes whose __init__ accepts
+    # it. V4 (Flash/Pro) needs it to pick up `o_proj_tp_group`; V3/V3.2 don't
+    # declare the parameter and should receive the legacy 3-arg call.
+    extra_kwargs = {}
+    if getattr(mla_config.mla_cls, "supports_parallel_group_manager", False):
+        extra_kwargs["parallel_group_manager"] = model.parallel_group_manager
+
     named_modules = list(model._inner.named_modules())
     for name, module in named_modules:
         if type(module).__name__ == mla_config.module_name:
@@ -310,7 +321,12 @@ def patch_mla(
                     _candidate_aliases(module, missing_fields),
                 )
                 continue
-            mla = mla_config.mla_cls(mla_config, module, model.parallel_group_manager.tp_group)
+            mla = mla_config.mla_cls(
+                mla_config,
+                module,
+                model.parallel_group_manager.tp_group,
+                **extra_kwargs,
+            )
             old_type = type(module).__name__
             model._replace_module(name, mla)
             report.add_replacement(name, old_type, type(mla).__name__)
@@ -467,6 +483,7 @@ def shard_model_by_tp(
                 layer_prefixes.append("mtp.layers.*.mtp_block")
             if self.model_config.mla_config:
                 params.update({"head_num": config_info.num_attention_heads})
+                mla_cls = self.model_config.mla_config.mla_cls
                 for prefix in layer_prefixes:
                     tp_plan.update(
                         {
@@ -475,23 +492,7 @@ def shard_model_by_tp(
                             f"{prefix}.*.self_attn.kv_b_proj": (COLWISE_LINEAR, params),
                         }
                     )
-                if self.model_config.mtp_config is not None:
-                    tp_plan.update(
-                        {
-                            "mtp.layers.*.mtp_block.self_attn.q_proj": (
-                                COLWISE_LINEAR,
-                                params,
-                            ),
-                            "mtp.layers.*.mtp_block.self_attn.q_b_proj": (
-                                COLWISE_LINEAR,
-                                params,
-                            ),
-                            "mtp.layers.*.mtp_block.self_attn.kv_b_proj": (
-                                COLWISE_LINEAR,
-                                params,
-                            ),
-                        }
-                    )
+                    tp_plan.update(mla_cls.build_tp_plan_extras(prefix, params, config_info))
             else:
                 params.update({"head_num": config_info.num_attention_heads})
                 tp_plan.update({f"{language_layers}.*.q_proj": (COLWISE_LINEAR, params)})
@@ -520,8 +521,11 @@ def shard_model_by_tp(
                 "global_tp_group": tp_group,
                 "head_num": config_info.num_attention_heads,
             }
+            mla_cls = self.model_config.mla_config.mla_cls if self.model_config.mla_config else None
             for prefix in layer_prefixes:
                 tp_plan.update({f"{prefix}.*.o_proj": (ROWWISE_LINEAR, params)})
+                if mla_cls is not None:
+                    tp_plan.update(mla_cls.build_o_proj_tp_plan_extras(prefix, params, config_info))
 
             params = {
                 "tp_group": mlp_tp_group,

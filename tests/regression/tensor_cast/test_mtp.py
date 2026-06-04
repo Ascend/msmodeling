@@ -1,9 +1,12 @@
 import unittest
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 from parameterized import parameterized
 from tensor_cast.core.user_config import UserInputConfig
+from tensor_cast.layers.deepseek_v4 import HyperConnectedMultiTokenPredictorLayer
+from tensor_cast.layers.mtp import MultiTokenPredictorLayer, _resolve_mtp_layer_cls
 from tensor_cast.layers.sampler import SamplingMetadata
 from tensor_cast.patch_torch import patch_torch
 from tensor_cast.transformers.custom_model_registry import get_mtp_block_module_name
@@ -16,6 +19,17 @@ from .test_common import (
 )
 
 # Core MTP configuration assertions were moved to the unified entry in test_layers.py.
+
+
+class TestResolveMtpLayerCls(unittest.TestCase):
+    def test_v3_style_returns_base_layer(self):
+        hf_config = MagicMock(hc_mult=1)
+        mtp_block = MagicMock(hc_mult=None)
+        assert _resolve_mtp_layer_cls(hf_config, mtp_block) is MultiTokenPredictorLayer
+
+    def test_v4_hc_mult_returns_hyper_connected_layer(self):
+        mtp_block = MagicMock(hc_mult=4)
+        assert _resolve_mtp_layer_cls(MagicMock(), mtp_block) is HyperConnectedMultiTokenPredictorLayer
 
 
 class MtpTestMixin:

@@ -227,6 +227,14 @@ class ModelProfile:
     # Used to structurally modify the model (e.g., operator replacement) at runtime.
     patch_method: Optional[Callable] = None
 
+    # Callable method to resolve model-specific quantization config adjustments.
+    # Used to keep common config resolution free of per-model quant logic.
+    quant_config_resolver: Optional[Callable] = None
+
+    # Optional model-specific MoE gate router callback.
+    # Keeps common MoE routing free of model-specific gate semantics.
+    moe_gate_router: Optional[Callable] = None
+
     # Attribute path to the Vision Encoder instance within the root model.
     # Example: "model.vision_tower"
     visual_module_path: Optional[str] = None
@@ -259,6 +267,8 @@ class ModelProfile:
     def _build_field_names(self, base_class: Type, override_dict: Optional[Dict[str, Any]]) -> Any:
         if not override_dict:
             return base_class()
+        if isinstance(override_dict, base_class):
+            return override_dict
 
         existing_fields = {f.name: getattr(base_class(), f.name) for f in dataclasses.fields(base_class())}
         existing_fields.update(override_dict)
@@ -279,6 +289,7 @@ class ModelProfile:
             fused_moe_cls=fused_moe_cls,
             field_names=self._build_field_names(MoEFieldNames, self.moe_field_names_override),
             gate_returns_raw_logits=self.moe_gate_returns_raw_logits,
+            gate_router=self.moe_gate_router,
             enable_redundant_experts=enable_redundant,
             enable_external_shared_experts=enable_external_shared,
             host_external_shared_experts=host_external_shared,

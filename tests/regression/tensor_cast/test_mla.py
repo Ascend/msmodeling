@@ -1,11 +1,93 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 import torch.nn as nn
-from tensor_cast.layers.mla import DeepseekSparseAttentionIndexer
+from tensor_cast.layers.mla import (
+    DeepseekSparseAttention,
+    DeepseekSparseAttentionIndexer,
+    MultiheadLatentAttentionTensorCast,
+)
+from tensor_cast.layers.quant_linear import TensorCastQuantLinear
+from tensor_cast.model_config import LinearQuantConfig
+from tensor_cast.quantize_utils import LinearQuantType, QuantGranularity, QuantScheme
 from tensor_cast.transformers.builtin_model.deepseek_v32 import DeepseekV32Config
+
+
+class TestMlaIndexerCacheHooks(unittest.TestCase):
+    def test_base_requires_indexer_cache_is_false(self):
+        self.assertFalse(MultiheadLatentAttentionTensorCast.requires_indexer_cache())
+
+    def test_deepseek_sparse_requires_indexer_cache(self):
+        self.assertTrue(DeepseekSparseAttention.requires_indexer_cache())
+
+    def test_base_build_tp_plan_extras_empty(self):
+        self.assertEqual(
+            MultiheadLatentAttentionTensorCast.build_tp_plan_extras("layers", {}, SimpleNamespace()),
+            {},
+        )
+        self.assertEqual(
+            MultiheadLatentAttentionTensorCast.build_o_proj_tp_plan_extras("layers", {}, SimpleNamespace()),
+            {},
+        )
+
+    def test_setup_kv_b_decomposition_splits_projection(self):
+        num_heads = 4
+        kv_lora_rank = 64
+        qk_nope = 32
+        v_head = 16
+        kv_b_proj = nn.Linear(kv_lora_rank, num_heads * (qk_nope + v_head), bias=False)
+        wrapper = SimpleNamespace(
+            kv_b_proj=kv_b_proj,
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope,
+            v_head_dim=v_head,
+            _num_heads_per_rank=num_heads,
+        )
+
+        tp_group = MagicMock(world_size=1, rank_in_group=0)
+        MultiheadLatentAttentionTensorCast._setup_kv_b_decomposition(wrapper, tp_group)
+
+        self.assertEqual(wrapper.W_UV.shape[0], num_heads)
+        self.assertEqual(wrapper.W_UK_T.shape[0], num_heads)
+
+    @patch("torch.ops.tensor_cast.quantize", side_effect=lambda t, *args, **kwargs: t)
+    def test_quantize_kv_b_decomposition(self, _mock_quantize):
+        num_heads = 2
+        kv_lora_rank = 32
+        qk_nope = 16
+        v_head = 8
+        linear_quant_config = LinearQuantConfig(
+            weight_scale=torch.ones(1),
+            quant_type=LinearQuantType.W8A16,
+            weight_quant_granularity=QuantGranularity.PER_TENSOR,
+            weight_quant_scheme=QuantScheme.SYMMETRIC,
+        )
+        linear = nn.Linear(kv_lora_rank, num_heads * (qk_nope + v_head), bias=False)
+        setup_wrapper = SimpleNamespace(
+            kv_b_proj=linear,
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope,
+            v_head_dim=v_head,
+            _num_heads_per_rank=num_heads,
+        )
+        tp_group = MagicMock(world_size=1, rank_in_group=0)
+        MultiheadLatentAttentionTensorCast._setup_kv_b_decomposition(setup_wrapper, tp_group)
+
+        quant_kv_b = TensorCastQuantLinear(linear, linear_quant_config)
+        wrapper = SimpleNamespace(
+            kv_b_proj=quant_kv_b,
+            kv_b_proj_weight_t=setup_wrapper.kv_b_proj_weight_t,
+            W_UK_T=setup_wrapper.W_UK_T,
+            W_UV=setup_wrapper.W_UV,
+            quant_config=MagicMock(get_quant_dtype=MagicMock(return_value=torch.int8)),
+        )
+        MultiheadLatentAttentionTensorCast._quantize_kv_b_decomposition(wrapper)
+
+        self.assertIs(wrapper.kv_b_proj_scale, quant_kv_b.weight_scale)
 
 
 class TestDeepseekSparseAttentionIndexer(unittest.TestCase):

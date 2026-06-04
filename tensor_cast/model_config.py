@@ -6,7 +6,7 @@ try:
 except ImportError:
     # Fallback for Python 3.10
     from strenum import StrEnum
-from typing import Dict, List, Optional, Type, Union
+from typing import Callable, Dict, List, Optional, Type, Union
 
 import torch
 from transformers import PretrainedConfig
@@ -321,6 +321,10 @@ class MoEConfig:
     field_names: MoEFieldNames = MoEFieldNames()
     gate_returns_raw_logits: bool = False
     """whether the gate module returns raw logits or (topk_indices, topk_weights) tuple"""
+    gate_router: Optional[
+        Callable[[torch.nn.Module, torch.Tensor, int, Optional[torch.Tensor]], tuple[torch.Tensor, torch.Tensor]]
+    ] = None
+    """optional model-specific router callback returning (topk_indices, topk_weights)"""
     # TODO: add expert-parallel configuration
     enable_redundant_experts: bool = False
     enable_shared_expert_tp: bool = False
@@ -348,7 +352,7 @@ class MlaFieldNames:
     q_a_proj: Optional[str] = "q_a_proj"
     q_b_proj: Optional[str] = "q_b_proj"
     kv_a_proj_with_mqa: str = "kv_a_proj_with_mqa"
-    kv_b_proj: str = "kv_b_proj"
+    kv_b_proj: Optional[str] = "kv_b_proj"
     o_proj: str = "o_proj"
     q_a_layernorm: Optional[str] = "q_a_layernorm"
     kv_a_layernorm: str = "kv_a_layernorm"

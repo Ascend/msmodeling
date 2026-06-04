@@ -68,6 +68,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast.attention_quant.default,
         torch.ops.tensor_cast.multihead_latent_attention.default,
         torch.ops.tensor_cast.multihead_latent_attention_quant.default,
+        torch.ops.tensor_cast.sparse_attn_sharedkv.default,
     }
     RESOURCE_COMPUTE = "compute"
     RESOURCE_COMM = "comm"

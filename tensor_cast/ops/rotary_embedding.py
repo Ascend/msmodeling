@@ -17,3 +17,18 @@ def _(
     q_embed = q_embed.transpose(1, 2)
     k_embed = k_embed.transpose(1, 2)
     return q_embed.contiguous(), k_embed.contiguous()
+
+
+@register_tensor_cast_op("apply_rope_inplace", mutates_args=("x",))
+def _(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox: bool = True,
+    inverse: bool = False,
+    rope_head_dim: int = -1,
+) -> torch.Tensor:
+    # In-place RoPE on the trailing `rope_head_dim` channels of x.
+    # When rope_head_dim < 0, rotate the full last dimension.
+    del cos, sin, is_neox, inverse, rope_head_dim
+    return x

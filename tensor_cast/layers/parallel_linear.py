@@ -28,6 +28,14 @@ def replace_with_sharded_tensor(
     setattr(module, attr, shard_attr)
 
 
+def get_qparam_shard_dim(tensor: torch.Tensor, weight_dim: int) -> int:
+    if tensor.ndim <= 1:
+        return 0
+    if tensor.ndim <= weight_dim:
+        return tensor.ndim - 1
+    return weight_dim
+
+
 class ParallelLinearBase(ModelWrapperBase):
     """
     A parallel linear layer that replaces a standard torch.nn.Linear layer.
@@ -85,14 +93,14 @@ class RowParallelLinear(ParallelLinearBase):
         self.slice_input_by_last_dim = slice_input_by_last_dim
         self.reduce_output = reduce_output
 
-    def create_weights(self):
+    def create_weights(self, dim: int = 1):
         replace_with_sharded_tensor(
             self._inner,
             self.inner_weight_name,
             self.tp_size,
             self.tp_rank,
             self.is_quant,
-            dim=1,
+            dim=dim,
             head_num=self.head_num,
         )
         if getattr(self._inner, self.inner_bias_name, None) is not None:  # noqa: SIM102
@@ -101,22 +109,24 @@ class RowParallelLinear(ParallelLinearBase):
                 setattr(self._inner, self.inner_bias_name, None)
 
         if self.is_quant and self._inner.weight_scale.ndim > 0 and self._inner.weight_scale.shape[0] > 0:
+            scale_dim = get_qparam_shard_dim(self._inner.weight_scale, dim)
             replace_with_sharded_tensor(
                 self._inner,
                 "weight_scale",
                 self.tp_size,
                 self.tp_rank,
                 self.is_quant,
-                head_num=self.head_num,
+                dim=scale_dim,
             )
             if self._inner.weight_offset is not None:
+                offset_dim = get_qparam_shard_dim(self._inner.weight_offset, dim)
                 replace_with_sharded_tensor(
                     self._inner,
                     "weight_offset",
                     self.tp_size,
                     self.tp_rank,
                     self.is_quant,
-                    head_num=self.head_num,
+                    dim=offset_dim,
                 )
 
         self._inner.in_features = self.in_features_per_partition
@@ -158,6 +168,7 @@ class ColumnParallelLinear(ParallelLinearBase):
         head_num: Optional[int] = None,
         is_replicable: bool = False,
         gather_output: bool = False,
+        dim: int = 0,
     ):
         super().__init__(linear_layer)
         self.tp_group = tp_group
@@ -176,7 +187,7 @@ class ColumnParallelLinear(ParallelLinearBase):
                 self.out_features_per_partition = self.out_features // self.tp_size
 
         self.head_num = head_num
-        self.create_weights()
+        self.create_weights(dim=dim)
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
         self.gather_slice_data = (
@@ -184,13 +195,14 @@ class ColumnParallelLinear(ParallelLinearBase):
         )
         self.gather_output = gather_output
 
-    def create_weights(self):
+    def create_weights(self, dim: int = 0):
         replace_with_sharded_tensor(
             self._inner,
             self.inner_weight_name,
             self.tp_size,
             self.tp_rank,
             self.is_quant,
+            dim=dim,
             head_num=self.head_num,
         )
 
@@ -201,8 +213,30 @@ class ColumnParallelLinear(ParallelLinearBase):
                 self.tp_size,
                 self.tp_rank,
                 self.is_quant,
+                dim=dim,
                 head_num=self.head_num,
             )
+
+        if self.is_quant and self._inner.weight_scale.ndim > 0 and self._inner.weight_scale.shape[0] > 0:
+            scale_dim = get_qparam_shard_dim(self._inner.weight_scale, dim)
+            replace_with_sharded_tensor(
+                self._inner,
+                "weight_scale",
+                self.tp_size,
+                self.tp_rank,
+                self.is_quant,
+                dim=scale_dim,
+            )
+            if self._inner.weight_offset is not None:
+                offset_dim = get_qparam_shard_dim(self._inner.weight_offset, dim)
+                replace_with_sharded_tensor(
+                    self._inner,
+                    "weight_offset",
+                    self.tp_size,
+                    self.tp_rank,
+                    self.is_quant,
+                    dim=offset_dim,
+                )
 
         self._inner.out_features = self.out_features_per_partition
 

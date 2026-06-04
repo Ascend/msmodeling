@@ -53,3 +53,28 @@ exemptions:
     applicant: "kai"
     approver: "hexiaowu"
     deadline: 2026-12-31
+
+  - symbols:
+      - tensor_cast/performance_model/builtin_model/__init__.py::perf_builtin_package_loaded
+      - tensor_cast/performance_model/builtin_model/deepseek_v4.py::_safe_max_int
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4MoE
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4MLP
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::_apply_v4_swiglu_limit
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4Indexer
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4Compressor
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4SparseAttention
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4DecoderLayer
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4Model
+      - tensor_cast/performance_model/builtin_model/deepseek_v4.py::_
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::_safe_register_auto_config
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::_safe_register_auto_model
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::_register_deepseek_v4_family
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::patch_method_for_deepseek_v4
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4Config
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4RMSNorm
+      - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4RotaryEmbedding
+    reason: "CI gate not support omit."
+    applicant: deepseek_v4_adaptation
+    approver: liujiawang
+    deadline: 2026-12-31
+    ticket: deepseek-v4-ci-gate

@@ -2304,4 +2304,6 @@ def _(
     return properties
 
 
+from . import builtin_model  # noqa: E402,F401  # Triggers built-in op registrations at import time.
+
 _load_custom_op()

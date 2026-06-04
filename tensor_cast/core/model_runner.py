@@ -178,10 +178,14 @@ class ModelRunner:
 
         peak_memory_usage_gb = runtime.memory_tracker.peak_mem_usage() / 1024**3
 
-        kv_cache_size_gb = (
-            sum(bytes_of_tensor(kv_cache) for kv_cache in input_kwargs["kv_cache_by_layers"].values()) / 1024**3
+        kv_cache_bytes = sum(bytes_of_tensor(kv_cache) for kv_cache in input_kwargs["kv_cache_by_layers"].values())
+        indexer_cache_bytes = sum(
+            bytes_of_tensor(kv_cache) for kv_cache in input_kwargs.get("indexer_cache_by_layers", {}).values()
         )
-        kv_cache_per_token_gb = input_kwargs["kv_cache_per_token"] / 1024**3
+        kv_cache_size_gb = (kv_cache_bytes + indexer_cache_bytes) / 1024**3
+        kv_cache_per_token_gb = (
+            input_kwargs["kv_cache_per_token"] + input_kwargs.get("indexer_cache_per_token", 0)
+        ) / 1024**3
         if get_visual(self.model) and input_kwargs.get("pixel_values") is None:
             # If there is no image input, the visual part does not participate
             # in the calculation and needs to be removed
@@ -215,6 +219,8 @@ class ModelRunner:
             peak_memory_usage_gb=peak_memory_usage_gb,
             kv_cache_size_gb=kv_cache_size_gb,
             kv_cache_per_token_gb=kv_cache_per_token_gb,
+            indexer_cache_size_gb=indexer_cache_bytes / 1024**3,
+            indexer_cache_per_token_gb=input_kwargs.get("indexer_cache_per_token", 0) / 1024**3,
             model_activation_size_gb=model_activation_size_gb,
             reserved_memory_gb=self.user_input.reserved_memory_gb,
             device_memory_available_gb=device_memory_available_gb,
@@ -249,6 +255,8 @@ class ModelRunnerMetrics:
     """TPS per performance model, keyed by model name."""
     run_time_s: float
     batch_size: int
+    indexer_cache_size_gb: float = 0.0
+    indexer_cache_per_token_gb: float = 0.0
     table_result: str = ""
     breakdowns: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
@@ -265,6 +273,10 @@ class ModelRunnerMetrics:
         print(f"Total device memory: {self.total_device_memory_gb:.3f} GB")
         print(f"  Model weight size: {self.model_weight_size_gb:.3f} GB")
         print(f"  KV cache: {self.kv_cache_size_gb:.3f} GB")
+        if self.indexer_cache_size_gb > 0:
+            print(f"    Main KV cache: {self.kv_cache_size_gb - self.indexer_cache_size_gb:.3f} GB")
+            print(f"    Indexer cache: {self.indexer_cache_size_gb:.3f} GB")
+            print(f"    Indexer cache per token: {self.indexer_cache_per_token_gb:.6f} GB")
         print(f"  Model activation size: {self.model_activation_size_gb:.3f} GB")
         print(f"  Reserved memory: {self.reserved_memory_gb:.3f} GB")
         print(f"  Memory available: {self.device_memory_available_gb:.3f} GB")

@@ -14,6 +14,9 @@ from .utils import get_partial_sharded, ModelWrapperBase
 
 
 class MultiheadLatentAttentionBase(torch.nn.Module, ABC):
+    # Set to True in subclasses that accept parallel_group_manager in __init__
+    supports_parallel_group_manager: bool = False
+
     def __init__(
         self,
         mla_config: MlaConfig,
@@ -89,6 +92,19 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         decode_only: bool = False,
     ):
         super().__init__(mla_config, mla_module, decode_only)
+        self.tp_group = tp_group
+        self._num_heads_per_rank = exact_division(self.num_heads, tp_group.world_size)
+        self._setup_kv_b_decomposition(tp_group)
+
+    def _setup_kv_b_decomposition(self, tp_group: ParallelGroup) -> None:
+        """
+        Hook: shard ``kv_b_proj`` across TP ranks and split it into ``W_UK``/``W_UV``.
+
+        Default behaviour matches the legacy MLA path used by V3 / V3.2: it requires
+        ``self.kv_b_proj`` to be present on the inner module. Subclasses whose
+        attention does not have a ``kv_b_proj`` (e.g. DeepSeek V4 with shared KV) can
+        override this hook with a no-op.
+        """
         sharded_weight = get_partial_sharded(
             self.kv_b_proj.weight.data,
             tp_group.world_size,
@@ -98,14 +114,42 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         self.kv_b_proj_weight_t = sharded_weight.transpose(0, 1)
         kv_b_proj_view = self.kv_b_proj_weight_t.view(
             self.kv_lora_rank,
-            exact_division(self.num_heads, tp_group.world_size),
+            self._num_heads_per_rank,
             self.qk_nope_head_dim + self.v_head_dim,
         )
         W_UK, W_UV = kv_b_proj_view.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         self.W_UV = W_UV.transpose(0, 1)  # (num_heads_per_rank, kv_lora_rank, v_head_dim)
         self.W_UK_T = W_UK.permute(1, 2, 0)  # (num_heads_per_rank, qk_nope_head_dim, kv_lora_rank)
-        self._num_heads_per_rank = self.W_UV.size(0)
-        self.tp_group = tp_group
+
+    @classmethod
+    def requires_indexer_cache(cls) -> bool:
+        """
+        Hook for subclasses that require the auxiliary sparse-attention indexer
+        cache allocated by input_generator.
+
+        The default MLA path does not use an indexer cache.
+        """
+        return False
+
+    @classmethod
+    def build_tp_plan_extras(cls, prefix: str, params: dict, config_info) -> dict[str, tuple[str, dict]]:
+        """
+        Hook for subclasses to inject extra TP sharding rules into the generic MLA
+        q/kv shard plan without adding model-specific branches to transformations.py.
+
+        The default MLA path has no extra modules beyond q/kv_b projections.
+        Subclasses can override this to register additional learned linears that
+        belong to the attention block (e.g. V4 indexer projections).
+        """
+        return {}
+
+    @classmethod
+    def build_o_proj_tp_plan_extras(cls, prefix: str, params: dict, config_info) -> dict[str, tuple[str, dict]]:
+        """
+        Hook for subclasses to inject extra O-projection-related TP sharding rules
+        into the generic MLA shard plan.
+        """
+        return {}
 
     @staticmethod
     def extract_qparams(
@@ -310,6 +354,14 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
 
     def quantize_params(self):
         assert self.quant_config is not None, "quant_config must be set before quantization"
+        self._quantize_kv_b_decomposition()
+
+    def _quantize_kv_b_decomposition(self) -> None:
+        """
+        Hook: quantize the ``kv_b_proj`` decomposition tensors set up by
+        :meth:`_setup_kv_b_decomposition`. Subclasses that override the setup hook
+        should typically override this one as well (see DeepSeek V4 wrapper).
+        """
         out_dtype = self.quant_config.get_quant_dtype()
         kv_b_proj = self.kv_b_proj
         if not isinstance(kv_b_proj, TensorCastQuantLinear):
@@ -361,6 +413,10 @@ def _resolve_sparse_topk_limit(
 
 
 class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
+    @classmethod
+    def requires_indexer_cache(cls) -> bool:
+        return True
+
     def __init__(
         self,
         mla_config: MlaConfig,

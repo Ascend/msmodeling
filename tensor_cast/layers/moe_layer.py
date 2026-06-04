@@ -137,6 +137,12 @@ class MoELayer(torch.nn.Module):
         super().__init__()
         self.moe_config = moe_config
         self.gate = self.get_attr(module, "gate", None)
+        # `moe_layer_idx` is owned by the decoder-layer-specific MoE module
+        # (e.g. DeepseekV4MoE), not the gate, because the gate may be shared
+        # across structurally-identical decoder layers under
+        # `maybe_reuse_layers`.  Reading from the per-layer mlp keeps each
+        # MoELayer wrapper's routing decision tied to its own decoder layer.
+        self.moe_layer_idx = getattr(module, "moe_layer_idx", None)
         self.top_k = self.get_attr(module, "top_k", self.get_attr(self.gate, "top_k", None))
         self.norm_topk_prob = self.get_attr(module, "norm_topk_prob", self.get_attr(self.gate, "norm_topk_prob", None))
 
@@ -154,8 +160,28 @@ class MoELayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         tp_size: int = 1,
         tp_rank: int = 0,
+        input_ids: Optional[torch.Tensor] = None,
     ):
-        if self.moe_config.gate_returns_raw_logits:
+        """Compute top-k expert indices and routing weights.
+
+        Args:
+            hidden_states: Input tensor of shape [batch, seq_len, hidden_dim].
+            tp_size: Tensor parallel world size.
+            tp_rank: Current tensor parallel rank.
+            input_ids: Token IDs for hash-based routing. When hash routing is
+                enabled (e.g., V4 family), the gate uses ``tid2eid[input_ids]``
+                to determine expert indices instead of top-k scoring.
+                Ignored for score-based routing.
+        """
+        if self.moe_config.gate_router is not None:
+            topk_indices, topk_weights = self.moe_config.gate_router(
+                self.gate,
+                hidden_states,
+                self.top_k,
+                input_ids,
+                self.moe_layer_idx,
+            )
+        elif self.moe_config.gate_returns_raw_logits:
             # Branch 1: Custom fused top-k + softmax gating (from raw logits)
             # Uses tensor_cast custom moe_gating_top_k_softmax kernel.
             # Gate runs on full tokens (matching vllm-ascend design where gate is called
@@ -203,8 +229,24 @@ class MoELayer(torch.nn.Module):
 
         return topk_indices, topk_weights
 
-    def forward(self, hidden_states: torch.Tensor):
-        topk_indices, topk_weights = self.route(hidden_states)
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+    ):
+        """Forward pass through the MoE layer.
+
+        Args:
+            hidden_states: Input tensor of shape [batch, seq_len, hidden_dim].
+            input_ids: Token IDs for hash-based routing. When the model uses
+                hash routing (V4 family), ``input_ids`` is used by the gate
+                router to look up the precomputed token-to-expert mapping
+                ``tid2eid[input_ids]`` instead of computing top-k over scores.
+                Ignored for score-based routing layers. Must have shape
+                [batch, seq_len] matching the batch dimension of
+                ``hidden_states``.
+        """
+        topk_indices, topk_weights = self.route(hidden_states, input_ids=input_ids)
         hidden_states = self.fused_moe(hidden_states, topk_indices, topk_weights)
         return hidden_states
 
@@ -248,12 +290,13 @@ class ParallelMoELayer(ModelWrapperBase):
             for _ in range(num_redundant_experts):
                 experts.append(copy.deepcopy(experts[0]))
 
-        self._inner.fused_moe = FusedMoETensorCast(
+        fused_moe_cls = moe_config.fused_moe_cls or FusedMoETensorCast
+        self._inner.fused_moe = fused_moe_cls(
             moe_config,
             experts,
             shared_experts,
             shared_experts_gate,
-            self.top_k,
+            module.top_k,
             self.ep_group,
             num_external_shared_experts=num_external_shared_experts,
             num_global_experts=num_routing_experts + num_redundant_experts,
@@ -304,7 +347,11 @@ class ParallelMoELayer(ModelWrapperBase):
             hidden_states = self.global_dp_group.slice(hidden_states, dim=0)
         return hidden_states[:num_tokens]
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+    ):
         if self.has_ep and self._inner.moe_config.enable_shared_expert_tp:
             origin_shape = hidden_states.shape
             if len(origin_shape) == 3:
@@ -320,9 +367,13 @@ class ParallelMoELayer(ModelWrapperBase):
                 route_after_dp = self._inner.moe_config.route_after_dp_transform
                 if route_after_dp:
                     hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
-                    topk_indices, topk_weights = self._inner.route(hidden_states, tp_size=tp_size, tp_rank=tp_rank)
+                    topk_indices, topk_weights = self._inner.route(
+                        hidden_states, tp_size=tp_size, tp_rank=tp_rank, input_ids=input_ids
+                    )
                 else:
-                    topk_indices, topk_weights = self._inner.route(hidden_states, tp_size=tp_size, tp_rank=tp_rank)
+                    topk_indices, topk_weights = self._inner.route(
+                        hidden_states, tp_size=tp_size, tp_rank=tp_rank, input_ids=input_ids
+                    )
                     hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
                 hidden_states = self._inner.fused_moe(
                     hidden_states,
@@ -332,7 +383,7 @@ class ParallelMoELayer(ModelWrapperBase):
                 )
                 hidden_states = self._dp_transform_exit(hidden_states, num_tokens)
             else:
-                topk_indices, topk_weights = self._inner.route(hidden_states)
+                topk_indices, topk_weights = self._inner.route(hidden_states, input_ids=input_ids)
                 hidden_states = self._inner.fused_moe(
                     hidden_states,
                     topk_indices,
@@ -353,7 +404,7 @@ class ParallelMoELayer(ModelWrapperBase):
                 hidden_states = hidden_states.view(-1, *origin_shape[2:])
             hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
 
-        hidden_states = self._inner(hidden_states)
+        hidden_states = self._inner(hidden_states, input_ids=input_ids)
 
         if self.transform_dp_group:
             hidden_states = self._dp_transform_exit(hidden_states, num_tokens)

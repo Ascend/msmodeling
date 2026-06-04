@@ -106,6 +106,32 @@ def get_partial_sharded(
         return _get_partial_sharded_padding(tensor, world_size, rank, dim)
 
 
+def apply_static_quant_linear(x: torch.Tensor, module: torch.nn.Module) -> torch.Tensor:
+    """Invoke a Linear-like module, preferring its statically-quantized inner path.
+
+    Contract:
+        ``module`` is expected to be either a plain ``torch.nn.Module`` (typically
+        ``torch.nn.Linear`` or a quantized linear that exposes ``qweight``), or a
+        :class:`ModelWrapperBase` whose ``_inner`` attribute holds such a module.
+        No other wrapper conventions are supported.
+
+    Behavior:
+        * If the (optionally unwrapped) target carries a ``qweight`` attribute, it
+          is treated as a statically-quantized linear and invoked directly so the
+          quantized kernel is exercised without any wrapper-side dispatch.
+        * Otherwise, the original ``module`` is called so wrapper-side logic such
+          as dtype casting or hooks is preserved.
+    """
+    if isinstance(module, ModelWrapperBase):
+        target = module._inner
+    else:
+        target = module
+    qweight = getattr(target, "qweight", None)
+    if qweight is None:
+        return module(x)
+    return target(x)
+
+
 class ModelWrapperBase(torch.nn.Module):
     def __init__(self, wrapped: Optional[torch.nn.Module]):
         super().__init__()

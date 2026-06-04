@@ -40,6 +40,22 @@ class MultiTokenPredictorLayer(torch.nn.Module):
         return hidden_states
 
 
+def _resolve_mtp_layer_cls(hf_config, mtp_block):
+    """Select the appropriate MTP layer class based on HC (Hyper-Connection) config.
+
+    V4 models have hc_mult > 1 and require HyperConnectedMultiTokenPredictorLayer
+    to expand [B,S,D] -> [B,S,Hc,D] before the MTP block and reduce after.
+    V3/V3.2 models use the base MultiTokenPredictorLayer.
+    """
+    hc_mult = int(getattr(mtp_block, "hc_mult", None) or getattr(hf_config, "hc_mult", 1) or 1)
+    if hc_mult > 1:
+        # Import here to avoid circular dependency at module level.
+        from .deepseek_v4 import HyperConnectedMultiTokenPredictorLayer
+
+        return HyperConnectedMultiTokenPredictorLayer
+    return MultiTokenPredictorLayer
+
+
 class MultiTokenPredictor(torch.nn.Module):
     def __init__(
         self,
@@ -50,9 +66,13 @@ class MultiTokenPredictor(torch.nn.Module):
         super().__init__()
         self.mtp_start_layer_idx = hf_config.num_hidden_layers
         self.num_mtp_layers = num_mtp_layers
+        # First block determines whether HC layers are needed; all subsequent
+        # blocks share the same model family so the same choice applies to all.
+        first_block = mtp_block_creator(self.mtp_start_layer_idx)
+        layer_cls = _resolve_mtp_layer_cls(hf_config, first_block)
         self.layers = torch.nn.ModuleList(
             [
-                MultiTokenPredictorLayer(
+                layer_cls(
                     hf_config,
                     mtp_block_creator(idx),
                 )

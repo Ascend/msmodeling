@@ -10,7 +10,6 @@ from typing import Any, List, Tuple
 import torch
 
 from ..layers.attention import AttentionMetadataTensorCast
-from ..layers.mla import DeepseekSparseAttention
 from ..layers.sampler import SamplingMetadata
 from ..performance_model import bytes_of_tensor
 from ..transformers.utils import get_attention_quant_config, logger
@@ -128,8 +127,8 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
         "sampling_metadata": sampling_metadata,
     }
 
-    dsa_indexer_cache = get_dsa_indexer_cache_info(model, num_blocks, block_size)
-    kwargs.update(dsa_indexer_cache)
+    sparse_attention_indexer_cache = get_sparse_attention_indexer_cache_info(model, num_blocks, block_size)
+    kwargs.update(sparse_attention_indexer_cache)
 
     if model.model_config.hf_config.model_type in (
         "qwen3_next",
@@ -269,9 +268,70 @@ def generate_image_inputs(model, image_batch_size, image_height, image_width, co
     }
 
 
+def _resolve_sparse_attention_kv_cache_width(model, attention_layer=None) -> int:
+    """Resolve the per-token KV cache width for sparse-attention wrappers.
+
+    This path covers standard MLA-like wrappers as well as V4's custom shared-KV
+    sparse attention wrapper. Prefer runtime layer attributes when available,
+    then fall back to the legacy DeepSeek MLA width formula.
+
+    Args:
+        model: The model wrapper.
+        attention_layer: The attention layer instance, or None if decoder layers
+            cannot be resolved. When None, falls back to
+            ``model.text_config.kv_lora_rank + model.text_config.qk_rope_head_dim``.
+
+    Returns:
+        The per-token KV cache width in bytes.
+    """
+    if attention_layer is not None:
+        for attr in ("_head_dim", "head_dim"):
+            width = getattr(attention_layer, attr, None)
+            if width is not None:
+                return int(width)
+    return int(model.text_config.kv_lora_rank + model.text_config.qk_rope_head_dim)
+
+
+def _resolve_sparse_attention_indexer_cache_width(model, attention_layer) -> int | None:
+    """Resolve the auxiliary indexer cache width for sparse-attention wrappers.
+
+    For V4 ratio=4 layers this picks up the dedicated indexer-local head width
+    (`index_head_dim`), which is intentionally different from the main KV cache
+    width (`head_dim`).
+    """
+    for attr in ("_index_head_dim",):
+        width = getattr(attention_layer, attr, None)
+        if width is not None:
+            return int(width)
+
+    indexer = getattr(attention_layer, "indexer", None)
+    if indexer is not None:
+        width = getattr(indexer, "head_dim", None)
+        if width is not None:
+            return int(width)
+
+    width = getattr(model.text_config, "index_head_dim", None)
+    if width is not None:
+        return int(width)
+    return None
+
+
+def _layer_uses_sparse_attention_indexer(attention_layer) -> bool:
+    use_indexer = getattr(attention_layer, "use_indexer", None)
+    if use_indexer is not None:
+        return bool(use_indexer)
+    return getattr(attention_layer, "indexer", None) is not None
+
+
 def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[Any, Any], int]:
     model_config = model.model_config
     parallel_config = model.model_config.parallel_config
+    decoder_layers = None
+    if model_config.mla_config is not None:
+        try:
+            decoder_layers = _resolve_decoder_layers(model)
+        except AttributeError:
+            decoder_layers = None
     # Initialize the KV cache structure (also on 'meta' device).
     kv_cache_per_token = 0
     kv_cache_by_layers = {}
@@ -281,12 +341,21 @@ def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[An
             kvcache_dtype = attention_config.get_quant_dtype()
 
         if model_config.mla_config is not None:
-            # Shape: [num_blocks, block_size, kv_lora_head_dim + qk_rope_head_dim]
+            # decoder_layers may be None if _resolve_decoder_layers raises
+            # AttributeError (e.g., model not fully wrapped). In that case
+            # attention_layer stays None and the fallback formula below is used.
+            attention_layer = None
+            if decoder_layers is not None and i < len(decoder_layers):
+                attention_layer = decoder_layers[i].self_attn
+            kv_cache_width = _resolve_sparse_attention_kv_cache_width(
+                model,
+                attention_layer,
+            )
             kv_cache_by_layers[i] = torch.empty(
                 [
                     num_blocks,
                     block_size,
-                    model.text_config.kv_lora_rank + model.text_config.qk_rope_head_dim,
+                    kv_cache_width,
                 ],
                 dtype=kvcache_dtype,
                 device="meta",
@@ -320,6 +389,12 @@ def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[An
 def get_kv_cache_info(model, num_blocks, block_size):
     model_config = model.model_config
     tp_size = model_config.parallel_config.tensor_parallel_size
+    decoder_layers = None
+    if model_config.mla_config is not None:
+        try:
+            decoder_layers = _resolve_decoder_layers(model)
+        except AttributeError:
+            decoder_layers = None
     kv_cache_by_layers = {}
     kv_cache_per_token = 0
     for i in range(model.num_hidden_layers):
@@ -329,11 +404,21 @@ def get_kv_cache_info(model, num_blocks, block_size):
             kvcache_dtype = attention_config.get_quant_dtype()
 
         if model_config.mla_config is not None:
+            # decoder_layers may be None if _resolve_decoder_layers raises
+            # AttributeError (e.g., model not fully wrapped). In that case
+            # attention_layer stays None and the fallback formula below is used.
+            attention_layer = None
+            if decoder_layers is not None and i < len(decoder_layers):
+                attention_layer = decoder_layers[i].self_attn
+            kv_cache_width = _resolve_sparse_attention_kv_cache_width(
+                model,
+                attention_layer,
+            )
             kv_cache_by_layers[i] = torch.empty(
                 (
                     num_blocks,
                     block_size,
-                    model.text_config.kv_lora_rank + model.text_config.qk_rope_head_dim,
+                    kv_cache_width,
                 ),
                 dtype=kvcache_dtype,
                 device="meta",
@@ -362,14 +447,74 @@ def get_kv_cache_info(model, num_blocks, block_size):
     return kv_cache_by_layers, kv_cache_per_token
 
 
-def get_dsa_indexer_cache_info(model, num_blocks, block_size):
+def _resolve_decoder_layers(model):
+    """Resolve the decoder layers ``ModuleList`` regardless of how the model
+    is wrapped.
+
+    msmodeling can wrap the underlying HF model in several layouts:
+        * ``TransformerModel(_inner=CausalLmWrapper(_inner=HFModel))``
+        * ``TransformerModel(_inner=ModelWrapper(_inner=HFModel))``
+        * ``OptimizedModule(_orig_mod=TransformerModel(...))`` when --compile is on
+        * ``MtpWrapper(_inner=...)`` when MTP is enabled
+
+    Using ``model.model.layers`` works only when the deepest module follows the
+    ``*ForCausalLM``-with-inner-``*Model`` layout. For modules registered via
+    ``AutoModel.register(Cfg, *Model)`` (e.g. DeepseekV4Model), the deepest
+    module IS the ``*Model`` itself and exposes ``.layers`` directly, so
+    ``model.model`` raises AttributeError under torch.compile / dynamo.
+
+    This helper peels off all known wrappers via ``model.unwrap()`` (when
+    available) and then probes both layout variants.
+
+    Returns:
+        The decoder layers ModuleList.
+
+    Raises:
+        AttributeError: If neither ``unwrap().layers`` nor ``unwrap().model.layers``
+            is available. Callers should catch this and fall back to the
+            legacy formula (kv_lora_rank + qk_rope_head_dim).
+    """
+    inner = model.unwrap() if hasattr(model, "unwrap") else model
+    if hasattr(inner, "layers"):
+        return inner.layers
+    nested = getattr(inner, "model", None)
+    if nested is not None and hasattr(nested, "layers"):
+        return nested.layers
+    raise AttributeError(
+        "Unable to locate decoder layers; neither `unwrap().layers` nor "
+        "`unwrap().model.layers` is available on this model"
+    )
+
+
+def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size):
+    """Allocate per-layer auxiliary indexer caches for sparse-attention wrappers.
+
+    Despite the older DSA-oriented naming in surrounding code, this helper is
+    also used by DeepSeek V4's custom sparse attention path, whose ratio=4
+    layers carry a distinct learned indexer.
+    """
     model_config = model.model_config
-    if model_config.mla_config is None or not issubclass(model_config.mla_config.mla_cls, DeepseekSparseAttention):
+    mla_config = model_config.mla_config
+    if mla_config is None or not mla_config.mla_cls.requires_indexer_cache():
         return {}
 
     indexer_cache_by_layers = {}
     indexer_cache_per_token = 0
+    try:
+        decoder_layers = _resolve_decoder_layers(model)
+    except AttributeError:
+        decoder_layers = None
     for i in range(model.num_hidden_layers):
+        attention_layer = (
+            decoder_layers[i].self_attn if decoder_layers is not None and i < len(decoder_layers) else None
+        )
+        if attention_layer is not None and not _layer_uses_sparse_attention_indexer(attention_layer):
+            continue
+
+        cache_width = _resolve_sparse_attention_indexer_cache_width(model, attention_layer)
+        if cache_width is None:
+            continue
+
         cache_dtype = model_config.dtype
         if (attention_config := get_attention_quant_config(model, i)) is not None:
             cache_dtype = attention_config.get_quant_dtype()
@@ -377,7 +522,7 @@ def get_dsa_indexer_cache_info(model, num_blocks, block_size):
             [
                 num_blocks,
                 block_size,
-                model.text_config.index_head_dim,
+                cache_width,
             ],
             dtype=cache_dtype,
             device="meta",
@@ -453,6 +598,9 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
         "sampling_metadata": sampling_meta,
         "kv_cache_per_token": kv_cache_per_token,
     }
+
+    sparse_attention_indexer_cache = get_sparse_attention_indexer_cache_info(model, num_blocks, block_size)
+    kwargs.update(sparse_attention_indexer_cache)
 
     if model.model_config.hf_config.model_type == "qwen3_next":
         kwargs["cache_position"] = torch.arange(num_tokens, dtype=torch.long, device="cpu")
