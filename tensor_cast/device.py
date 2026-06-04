@@ -353,12 +353,6 @@ class ATLAS_800:
         static_cost=STATIC_COST,
     )
 
-    A3_752T_128G_DIE_ROCE = replace(  # one die of A3 with RoCE
-        A3_752T_128G_DIE,
-        name="ATLAS_800_A3_752T_128G_DIE_ROCE",
-        comm_grid=A3_INTERCONNECT_ROCE,
-    )
-
     A3_560T_128G_DIE = DeviceProfile(  # one die of A3
         name="ATLAS_800_A3_560T_128G_DIE",
         vendor="HUAWEI",

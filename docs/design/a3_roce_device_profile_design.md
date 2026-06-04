@@ -17,7 +17,6 @@
 为准确建模此类双机 RoCE 组网场景，需新增对应的通信网格 `A3_INTERCONNECT_ROCE` 以及配套的设备 Profile：
 
 - `A3_560T_128G_DIE_ROCE`：560T 算力 die + RoCE 互联
-- `A3_752T_128G_DIE_ROCE`：752T 算力 die + RoCE 互联
 
 ### 核心价值
 
@@ -33,7 +32,6 @@
 
 新增的 RoCE 硬件在算力、显存、效率等维度与原 A3 die Profile 完全一致，唯一差异在于通信网格。因此采用**复用算力参数 + 替换通信网格**的策略：
 A3_560T_128G_DIE  ──(替换 comm_grid)──>  A3_560T_128G_DIE_ROCE
-A3_752T_128G_DIE  ──(替换 comm_grid)──>  A3_752T_128G_DIE_ROCE
 
 ### 2.2 通信网格设计：A3_INTERCONNECT_ROCE
 
@@ -73,16 +71,6 @@ gp_ops:   {float32: 8T, bfloat16/half: 16T}
 memory:   64 GB @ 1.6 TB/s
 efficiency: compute=0.7, memory=0.6
 
-#### A3_752T_128G_DIE_ROCE
-
-name:  "ATLAS_800_A3_752T_128G_DIE_ROCE"
-vendor: "HUAWEI"
-comm_grid: A3_INTERCONNECT_ROCE
-mma_ops:  {float32: 99.5T, bfloat16: 353.9T, half: 376T, int8: 752T}
-gp_ops:   {float32: 11T, bfloat16/half: 22T}
-memory:   64 GB @ 1.6 TB/s
-efficiency: compute=0.7, memory=0.6
-
 ### 2.4 代码组织结构
 
 所有新增代码位于单文件 `tensor_cast/device.py` 的 `ATLAS_800` 类内：
@@ -90,7 +78,6 @@ efficiency: compute=0.7, memory=0.6
 | 新增项 | 行位置 | 说明 |
 | --- | --- | --- |
 | `A3_INTERCONNECT_ROCE` | ~L184 | RoCE 通信网格定义 |
-| `A3_752T_128G_DIE_ROCE` | ~L337 | 752T die + RoCE |
 | `A3_560T_128G_DIE_ROCE` | ~L383 | 560T die + RoCE |
 
 ### 2.5 影响范围
@@ -112,12 +99,6 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
     --device ATLAS_800_A3_560T_128G_DIE_ROCE \
     --num-queries 2 \
     --query-length 3500
-
-# 使用 752T RoCE 硬件
-python -m cli.inference.text_generate Qwen/Qwen3-32B \
-    --device ATLAS_800_A3_752T_128G_DIE_ROCE \
-    --num-queries 2 \
-    --query-length 3500
 ```
 
 ### 3.2 编程接口
@@ -135,7 +116,7 @@ print(profile.mma_ops[torch.bfloat16])  # 245.8e12
 ### 3.3 约束与限制
 
 1. **仅双机**：`A3_INTERCONNECT_ROCE` 的 grid 第一维为 2，不支持超过 2 节点的规模配置。
-2. **仅 die 层级**：与 `A3_752T_128G_DIE` 一致，基于单个 die 建模，不涵盖整芯片层级。
+2. **仅 die 层级**：与 `A3_560T_128G_DIE` 一致，基于单个 die 建模，不涵盖整芯片层级。
 3. **不支持 RoCE 超 2 节点**：如需支持更多节点 RoCE，需新建 CommGrid（如 `grid=(N, 8, 2)`）。
 
 ---

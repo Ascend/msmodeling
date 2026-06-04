@@ -132,25 +132,6 @@ _DEVICE_PROFILE_SPECS = [
         "memory_efficiency": 0.6,
     },
     {
-        "name": "ATLAS_800_A3_752T_128G_DIE_ROCE",
-        "comm_grid": ATLAS_800.A3_INTERCONNECT_ROCE,
-        "mma_ops": {
-            torch.float32: 99.5 * 1e12,
-            torch.bfloat16: 353.9 * 1e12,
-            torch.half: 376 * 1e12,
-            torch.int8: 752 * 1e12,
-        },
-        "gp_ops": {
-            torch.float32: 22 / 2 * 1e12,
-            torch.bfloat16: 22 * 1e12,
-            torch.half: 22 * 1e12,
-        },
-        "memory_size_bytes": 64 * (1024**3),
-        "memory_bandwidth_bytes_ps": 1.6 * (1024**4),
-        "compute_efficiency": 0.7,
-        "memory_efficiency": 0.6,
-    },
-    {
         "name": "ATLAS_800_A3_560T_128G_DIE",
         "comm_grid": ATLAS_800.A3_INTERCONNECT,
         "mma_ops": {
