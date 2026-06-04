@@ -9,11 +9,60 @@
 ## Table of Contents
 
 - [msmodeling skills](#msmodeling-skills)
+- [msmodeling-env-installer](#msmodeling-env-installer)
 - [model-adaptation](#model-adaptation)
 - [device_config](#device_config)
 - [op_mapping](#op_mapping)
 - [microbench](#microbench)
 
+
+## msmodeling-env-installer
+
+msmodeling 环境安装器——将“安装 msmodeling 环境依赖”“创建 myenv”“安装当前仓库 requirements.txt”“配置 PYTHONPATH / HF_ENDPOINT”等明确指向 msmodeling 的请求转换为可执行、可验证、可回溯的环境安装流程。用户只说“安装环境”或“安装依赖”时，需要先确认是否安装 msmodeling 当前仓库的环境依赖。
+
+### What it does
+
+引导 AI agent 按 RFC 中定义的流程完成开发环境初始化：
+
+1. **仓库根目录校验**：确认当前目录包含 `README.md` 和 `requirements.txt`。
+2. **Python 与 uv 检查**：要求 Python `3.10+`，缺少 `uv` 时按镜像安装并解析真实可执行路径。
+3. **安装路径选择**：默认用 `uv` 新建 `myenv`；已有环境 fallback 前检查 `torch_npu`、`torch-npu` 和 `cudatoolkit`。
+4. **依赖安装与验证**：安装 `requirements.txt` 后执行 `uv pip check --python <venv-python>` 或 `python -m pip check`。
+5. **环境变量配置**：按需设置当前会话 `PYTHONPATH` 和 `HF_ENDPOINT=https://hf-mirror.com`。
+
+### File layout
+
+| File | Purpose |
+| ---- | ------- |
+| `msmodeling-env-installer/SKILL.md` | Skill 定义、触发场景、安装流程和安全规则 |
+| `msmodeling-env-installer/scripts/install-current-project-deps.ps1` | Windows PowerShell 自动化安装脚本 |
+| `msmodeling-env-installer/scripts/install-current-project-deps.sh` | Linux/macOS/WSL/Git Bash 自动化安装脚本 |
+
+### Quick start
+
+在对话中直接提出明确需求，例如“请帮我安装 msmodeling 环境依赖”“按 README 配置 msmodeling 环境”。如果只说“安装环境”，agent 需要先确认是否安装 msmodeling 当前仓库的环境依赖。
+
+Windows PowerShell 可以从仓库根目录直接运行：
+
+```powershell
+.\.agents\skills\msmodeling-env-installer\scripts\install-current-project-deps.ps1
+```
+
+Linux/macOS/WSL/Git Bash 可以从仓库根目录直接运行：
+
+```bash
+bash ./.agents/skills/msmodeling-env-installer/scripts/install-current-project-deps.sh
+```
+
+### Key constraints
+
+- 不修改 `requirements.txt`、README 或项目源码。
+- 不默认覆盖已有 `myenv`，也不默认持久化系统级环境变量。
+- 网络安装需要用户确认和工具权限授权。
+- `scripts/install-current-project-deps.ps1` 当前仅适用于 Windows PowerShell；Linux/macOS 使用 README 通用命令。
+
+
+---
 
 ## model-adaptation
 
@@ -46,6 +95,8 @@ TensorCast 新模型接入流程 skill——从仿真命令和 MindStudio Insigh
 - `evidence.yaml` 从 `doctor_after_profile.json.evidence_draft` 导出后再人工审阅。
 - 不提交 raw profiling、本地 walkthrough、私人路径或临时材料。
 
+
+---
 
 ## device_config
 
