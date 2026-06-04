@@ -27,7 +27,7 @@ DEFAULT_DATA_DIR = (
     / "profiling_database"
     / "data"
 )
-DEFAULT_ROWS = 10_000
+DEFAULT_ROWS = 1000
 
 
 def resolve_data_dir(
