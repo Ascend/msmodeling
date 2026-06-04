@@ -34,6 +34,7 @@ from .custom_model_registry import (
     get_vl_language_model,
 )
 from .utils import strip_module_name
+from ..adapter.patch_report import PatchReport, attach_patch_report
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +222,8 @@ def patch_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
     return model
 
 
-def _all_required_fields_exist(module: torch.nn.Module, field_names) -> bool:
-    """Helper for MLA/MoE checks."""
+def _missing_required_fields(module: torch.nn.Module, field_names) -> tuple[str, ...]:
+    """Return required configured attributes that are absent from module."""
 
     def is_optional(annotation):
         if typing.get_origin(annotation) is Union:
@@ -233,30 +234,82 @@ def _all_required_fields_exist(module: torch.nn.Module, field_names) -> bool:
         if hasattr(field_names, "__dataclass_fields__"):
             fields_obj = field_names
         else:
-            return False
+            return tuple()
     else:
         fields_obj = field_names
 
+    missing = []
     for field in dataclasses.fields(fields_obj):
         field_name = field.name
         target_attr = getattr(fields_obj, field_name, field_name)
-        if not is_optional(type(fields_obj).__annotations__.get(field_name)) and not hasattr(module, target_attr):
-            return False
-    return True
+        if target_attr is None or is_optional(type(fields_obj).__annotations__.get(field_name)):
+            continue
+        if not hasattr(module, target_attr):
+            missing.append(target_attr)
+    return tuple(missing)
 
 
-def patch_mla(model: "ModelWrapperBase") -> "ModelWrapperBase":
+def _all_required_fields_exist(module: torch.nn.Module, field_names) -> bool:
+    """Helper for MLA/MoE checks."""
+    return not _missing_required_fields(module, field_names)
+
+
+def _candidate_aliases(module: torch.nn.Module, missing_fields: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+    fields = set(vars(module).keys())
+    fields.update(getattr(module, "_modules", {}).keys())
+    fields.update(getattr(module, "_parameters", {}).keys())
+    fields.update(getattr(module, "_buffers", {}).keys())
+    fields = sorted(fields)
+    aliases = {}
+    for missing in missing_fields:
+        compact_missing = missing.replace("_", "")
+        matches = []
+        for field in fields:
+            compact_field = field.replace("_", "")
+            if missing in field or compact_missing in compact_field or compact_field in compact_missing:
+                matches.append(field)
+        aliases[missing] = tuple(matches)
+    return aliases
+
+
+def _expected_replacements_from_layers(model: "ModelWrapperBase") -> int | None:
+    return getattr(model, "num_hidden_layers", None)
+
+
+def patch_mla(
+    model: "ModelWrapperBase",
+    report: PatchReport | None = None,
+    strict: bool = False,
+) -> "ModelWrapperBase":
     mla_config = model.model_config.mla_config
     if mla_config is None:
         return model
 
+    report = report or PatchReport(
+        pass_name="MLA",  # nosec B106
+        target_module_name=mla_config.module_name,
+        expected_replacements=_expected_replacements_from_layers(model),
+    )
     named_modules = list(model._inner.named_modules())
     for name, module in named_modules:
         if type(module).__name__ == mla_config.module_name:
-            if not _all_required_fields_exist(module, mla_config.field_names):
+            report.matched_modules.append(name)
+            missing_fields = _missing_required_fields(module, mla_config.field_names)
+            if missing_fields:
+                report.add_skip(
+                    name,
+                    type(module).__name__,
+                    "missing_required_fields",
+                    missing_fields,
+                    _candidate_aliases(module, missing_fields),
+                )
                 continue
             mla = mla_config.mla_cls(mla_config, module, model.parallel_group_manager.tp_group)
+            old_type = type(module).__name__
             model._replace_module(name, mla)
+            report.add_replacement(name, old_type, type(mla).__name__)
+    attach_patch_report(model, report)
+    report.validate(strict=strict)
     return model
 
 
@@ -293,7 +346,12 @@ def _patch_moe_expert_helper(model: "ModelWrapperBase", module):
     )
 
 
-def patch_moe(model: "ModelWrapperBase", custom_moe_layer=None) -> "ModelWrapperBase":
+def patch_moe(
+    model: "ModelWrapperBase",
+    custom_moe_layer=None,
+    report: PatchReport | None = None,
+    strict: bool = False,
+) -> "ModelWrapperBase":
     # replace the vanilla mixture-of-expert (MOE) module with the fused one
     # so that it can be "meta" and torch.compile traced and easily optimized
     # by the backend.
@@ -311,11 +369,25 @@ def patch_moe(model: "ModelWrapperBase", custom_moe_layer=None) -> "ModelWrapper
     if not moe_config:
         return model
 
+    report = report or PatchReport(
+        pass_name="MoE",  # nosec B106
+        target_module_name=moe_config.module_name,
+        expected_replacements=_expected_replacements_from_layers(model),
+    )
     model.top_k = None
     model.num_routing_experts = None
     for name, module in model._inner.named_modules():
         if type(module).__name__ == moe_config.module_name:
-            if not _all_required_fields_exist(module, moe_config.field_names):
+            report.matched_modules.append(name)
+            missing_fields = _missing_required_fields(module, moe_config.field_names)
+            if missing_fields:
+                report.add_skip(
+                    name,
+                    type(module).__name__,
+                    "missing_required_fields",
+                    missing_fields,
+                    _candidate_aliases(module, missing_fields),
+                )
                 continue
             _patch_moe_expert_helper(model, module)
             if custom_moe_layer is not None:
@@ -328,7 +400,11 @@ def patch_moe(model: "ModelWrapperBase", custom_moe_layer=None) -> "ModelWrapper
                 model.top_k = moe_layer.top_k
                 model.num_routing_experts = expert_num
 
+            old_type = type(module).__name__
             model._replace_module(name, moe_layer)
+            report.add_replacement(name, old_type, type(moe_layer).__name__)
+    attach_patch_report(model, report)
+    report.validate(strict=strict)
     return model
 
 
@@ -345,7 +421,10 @@ def _shard_model_visual_by_tp_helper(model: "ModelWrapperBase"):
             module.num_heads = module.num_heads // tp_size
 
 
-def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
+def shard_model_by_tp(
+    model: "ModelWrapperBase",
+    report: PatchReport | None = None,
+) -> "ModelWrapperBase":
     """
     Replaces all nn.Linear and nn.Embedding modules with Parallel modules based on the
     parallel configuration stored in self.model_config.
@@ -566,15 +645,20 @@ def shard_model_by_tp(model: "ModelWrapperBase") -> "ModelWrapperBase":
             modules[name] = module
             module_stripped_to_names[strip_module_name(name)] = name
 
+    report = report or PatchReport(pass_name="Shard", target_module_name="tp_plan")  # nosec B106
     for pattern, tp_config in tp_plan.items():
         matches = fnmatch.filter(module_stripped_to_names.keys(), pattern)
+        if not matches:
+            report.unmatched_patterns.append(pattern)
         for stripped_name in matches:
             name = module_stripped_to_names[stripped_name]
             module = modules[name]
             parallel_module = PARALLEL_MODULE_CLS[tp_config[0]](module, **tp_config[1])
             model._replace_module(name, parallel_module)
+            report.add_replacement(name, type(module).__name__, type(parallel_module).__name__, {"pattern": pattern})
 
     _shard_model_visual_by_tp_helper(model)
+    attach_patch_report(model, report)
     return model
 
 
@@ -643,7 +727,10 @@ def shard_model(model: "ModelWrapperBase") -> "ModelWrapperBase":
     return model
 
 
-def quantize_linear(model: "ModelWrapperBase") -> "ModelWrapperBase":
+def quantize_linear(
+    model: "ModelWrapperBase",
+    report: PatchReport | None = None,
+) -> "ModelWrapperBase":
     """
     Replaces all nn.Linear modules with QuantLinear modules based on the
     quantization configuration stored in self.model_config.
@@ -660,6 +747,13 @@ def quantize_linear(model: "ModelWrapperBase") -> "ModelWrapperBase":
             if hasattr(model._inner, "blocks")
             else None
         )
+        before = {}
+        if root is not None:
+            before = {
+                name: type(module).__name__
+                for name, module in root.named_modules()
+                if isinstance(module, torch.nn.Linear)
+            }
         quantize_linear_modules(
             root,
             model.model_config.quant_linear_cls,
@@ -667,9 +761,15 @@ def quantize_linear(model: "ModelWrapperBase") -> "ModelWrapperBase":
             default_config_name="default_dit",
             strip_module_fn=None,
         )
+        after_root = root
     else:
         if not model.model_config.quant_linear_cls:
             return model
+        before = {
+            name: type(module).__name__
+            for name, module in model._inner.named_modules()
+            if isinstance(module, torch.nn.Linear)
+        }
         quantize_linear_modules(
             model._inner,
             model.model_config.quant_linear_cls,
@@ -677,10 +777,19 @@ def quantize_linear(model: "ModelWrapperBase") -> "ModelWrapperBase":
             default_config_name=None,
             strip_module_fn=lambda n: n.replace("_inner.", "") if "_inner." in n else n,
         )
+        after_root = model._inner
+
+    if report is not None and after_root is not None:
+        for name, module in after_root.named_modules():
+            if name in before and isinstance(module, QuantLinearBase):
+                report.add_replacement(name, before[name], type(module).__name__)
     return model
 
 
-def quantize_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
+def quantize_attention(
+    model: "ModelWrapperBase",
+    report: PatchReport | None = None,
+) -> "ModelWrapperBase":
     if not hasattr(model.model_config, "quant_config"):
         return model
 
@@ -688,7 +797,7 @@ def quantize_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
     default_attention_config = attention_configs.get(-1)
 
     if model.model_config.mla_config:
-        for _, module in model._inner.named_modules():
+        for name, module in model._inner.named_modules():
             if isinstance(module, MultiheadLatentAttentionBase):
                 if hasattr(module, "layer_idx") and module.layer_idx in attention_configs:
                     module.quant_config = attention_configs[module.layer_idx]
@@ -696,21 +805,40 @@ def quantize_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
                     module.quant_config = default_attention_config
                 if module.quant_config is not None:
                     module.quantize_params()
+                    if report is not None:
+                        report.add_replacement(
+                            name,
+                            type(module).__name__,
+                            type(module).__name__,
+                            {"attention_quantized": True},
+                        )
 
     if hasattr(model, "attention_by_layers"):
         for i in range(model.num_hidden_layers):
             model.attention_by_layers[i].quant_config = attention_configs.get(i, default_attention_config)
+            if report is not None and model.attention_by_layers[i].quant_config is not None:
+                report.add_replacement(
+                    f"attention_by_layers.{i}",
+                    type(model.attention_by_layers[i]).__name__,
+                    type(model.attention_by_layers[i]).__name__,
+                    {"attention_quantized": True},
+                )
     return model
 
 
-def quantize_model(model: "ModelWrapperBase") -> "ModelWrapperBase":
+def quantize_model(
+    model: "ModelWrapperBase",
+    report: PatchReport | None = None,
+) -> "ModelWrapperBase":
     from ..diffusers.diffusers_model import DiffusersTransformerModel
 
+    report = report or PatchReport(pass_name="Quant", target_module_name="quantizable modules")  # nosec B106
     if isinstance(model, DiffusersTransformerModel):
         # TODO quantization on cuda: github NVIDIA/Model-Optimizer/tree/main/examples/diffusers
         # TODO whether linears outside blocks should be quant?
-        pass
+        quantize_linear(model, report=report)
     else:
-        quantize_linear(model)
-        quantize_attention(model)
+        quantize_linear(model, report=report)
+        quantize_attention(model, report=report)
+    attach_patch_report(model, report)
     return model

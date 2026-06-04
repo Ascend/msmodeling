@@ -68,6 +68,17 @@ def check_positive_integer(value):
     return value
 
 
+def check_non_negative_integer(value):
+    try:
+        value = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Invalid integer value: {value!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a non-negative integer")
+
+    return value
+
+
 def check_prefix_cache_hit_rate(value):
     try:
         value = float(value)

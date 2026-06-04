@@ -220,6 +220,7 @@ class ModelRunner:
             batch_size=batch_size,
             table_result=table_result,
             breakdowns=runtime.get_breakdowns(),
+            runtime=runtime,
         )
 
     def get_inputs_num_bytes(self, requests: List[RequestInfo]) -> int:
@@ -247,6 +248,7 @@ class ModelRunnerMetrics:
     batch_size: int
     table_result: str = ""
     breakdowns: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    runtime: Optional[Runtime] = None
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")

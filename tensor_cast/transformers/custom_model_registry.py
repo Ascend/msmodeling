@@ -1,13 +1,15 @@
 import dataclasses
+import contextlib
 import fnmatch
 import importlib
 import logging
 import operator
 import os
-from typing import Any, Callable, Dict, List, Optional, Type, TYPE_CHECKING, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Type, TYPE_CHECKING, Union
 
 import torch
 
+from ..adapter.profile import normalize_profile, validate_profile
 from ..layers.mla import MultiheadLatentAttentionTensorCast
 from ..model_config import MlaConfig, MlaFieldNames, MoEConfig, MoEFieldNames, MtpConfig
 
@@ -182,7 +184,7 @@ class ModelProfile:
     # 【Example: Qwen3Next】
     # Source code: `self.shared_expert = Qwen3NextMLP(...)` (Note the singular 'expert')
     # Assignment:   moe_field_names_override=MoEFieldNames(shared_experts="shared_expert")
-    moe_field_names_override: Optional[MoEFieldNames] = None
+    moe_field_names_override: Optional[Dict[str, Any]] = None
 
     # --- MTP (Multi-Token Prediction) Configuration ---
     # Class name implementing the Multi-Token Prediction (or Speculative Decoding) logic.
@@ -275,7 +277,7 @@ class ModelProfile:
         return MoEConfig(
             module_name=self.moe_module_name,
             fused_moe_cls=fused_moe_cls,
-            field_names=self.moe_field_names_override or MoEFieldNames(),
+            field_names=self._build_field_names(MoEFieldNames, self.moe_field_names_override),
             gate_returns_raw_logits=self.moe_gate_returns_raw_logits,
             enable_redundant_experts=enable_redundant,
             enable_external_shared_experts=enable_external_shared,
@@ -301,6 +303,7 @@ class ModelProfile:
 
         return MlaConfig(
             module_name=self.mla_module_name,
+            mla_cls=self.mla_module_class_type,
             field_names=field_names,
         )
 
@@ -327,6 +330,8 @@ def register_model_profile(profile: ModelProfile):
     Registers a ModelProfile instance.
     Should be used as a decorator or called directly after defining the profile.
     """
+    profile = normalize_profile(profile)
+    validate_profile(profile).raise_for_errors()
     if profile.model_type in _MODEL_PROFILE_REGISTRY:
         raise ValueError(f"ModelProfile for '{profile.model_type}' is already registered.")
 
@@ -340,6 +345,18 @@ def get_model_profile(model_type: str) -> Optional[ModelProfile]:
     Returns None if the model type is not registered.
     """
     return _MODEL_PROFILE_REGISTRY.get(model_type)
+
+
+@contextlib.contextmanager
+def ignore_model_profiles(model_types: Iterable[str]):
+    removed_profiles = {}
+    for model_type in model_types:
+        if model_type in _MODEL_PROFILE_REGISTRY:
+            removed_profiles[model_type] = _MODEL_PROFILE_REGISTRY.pop(model_type)
+    try:
+        yield
+    finally:
+        _MODEL_PROFILE_REGISTRY.update(removed_profiles)
 
 
 def get_moe_config(model_type: str = "") -> Optional[MoEConfig]:

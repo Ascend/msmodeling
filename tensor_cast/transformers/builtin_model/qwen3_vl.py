@@ -42,13 +42,19 @@ def patch_method_for_qwen3_vl(_model):
         Qwen3VLModel,
         Qwen3VLTextModel,
     )
-    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
-        Qwen3VLMoeModel,
-        Qwen3VLMoeTextModel,
-    )
+
+    try:
+        from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
+            Qwen3VLMoeModel,
+            Qwen3VLMoeTextModel,
+        )
+    except ImportError:
+        Qwen3VLMoeModel = Qwen3VLMoeTextModel = None
 
     # Class to be patched
-    TARGET_CLASSES = [Qwen3VLModel, Qwen3VLMoeModel]
+    TARGET_CLASSES = [Qwen3VLModel]
+    if Qwen3VLMoeModel is not None:
+        TARGET_CLASSES.append(Qwen3VLMoeModel)
     # Save the original method of each class.
     ORIGINAL_METHODS = {cls: cls.get_placeholder_mask for cls in TARGET_CLASSES}
 
@@ -61,7 +67,9 @@ def patch_method_for_qwen3_vl(_model):
     for cls in TARGET_CLASSES:
         cls.get_placeholder_mask = patched_get_placeholder_mask
 
-    DEEPSTACK_PROCESS_TARGET_CLASSES = [Qwen3VLTextModel, Qwen3VLMoeTextModel]
+    DEEPSTACK_PROCESS_TARGET_CLASSES = [Qwen3VLTextModel]
+    if Qwen3VLMoeTextModel is not None:
+        DEEPSTACK_PROCESS_TARGET_CLASSES.append(Qwen3VLMoeTextModel)
 
     def _patched_deepstack_process(self, hidden_states, visual_pos_masks, visual_embeds):
         return hidden_states

@@ -8,4 +8,10 @@ test_discovery:
     - "tests/helpers/*.py"
     - "tests/assets/**"
 
-exemptions: []
+exemptions:
+  - symbols:
+      - tensor_cast/transformers/builtin_model/qwen3_vl.py::patch_method_for_qwen3_vl
+    reason: "builtin_model paths are omitted from coverage test_map; behavior is covered by adapter regression tests."
+    applicant: "kai"
+    approver: "fangkai"
+    deadline: 2026-12-31

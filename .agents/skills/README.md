@@ -9,9 +9,42 @@
 ## Table of Contents
 
 - [msmodeling skills](#msmodeling-skills)
+- [model-adaptation](#model-adaptation)
 - [device_config](#device_config)
 - [op_mapping](#op_mapping)
 - [microbench](#microbench)
+
+
+## model-adaptation
+
+TensorCast 新模型接入流程 skill——从仿真命令和 MindStudio Insight raw profiling 出发，引导 agent 运行 `model_adapter doctor`、审阅 `ModelProfile`、处理 patch/bug AI task、导出 `evidence.yaml` 并运行 verify。
+
+### What it does
+
+将新模型接入拆成确定性工具和人工 checkpoint：
+
+1. 收集两个必需输入：仿真命令和匹配的 raw profiling。
+2. 运行 doctor，审阅 candidate profile、evidence draft、human questions 和 ai tasks。
+3. 对需要人工确认的字段生成精确问题，并把确认结果写入 `hints.yaml` 或 `evidence.yaml`。
+4. 对 patch/bug 场景使用 `ai_tasks[].prompt_text` 驱动用户或用户的 AI 助手生成代码，并要求人工 review。
+5. 使用 `export-evidence` 导出 `evidence.yaml`，再运行 verify。
+
+### File layout
+
+| File | Purpose |
+| ---- | ------- |
+| `model-adaptation/SKILL.md` | 新模型接入的核心工作流、人工 checkpoint 和验证要求 |
+
+### Quick start
+
+当用户说“接入新模型”“生成 ModelProfile”“根据 doctor report 继续适配”“处理 patch AI task”“从 doctor report 导出 evidence”时使用该 skill。
+
+### Key constraints
+
+- 不凭模型名猜 profile 字段。
+- doctor 不生成模型专属 patch 代码，只生成 AI task 和 prompt。
+- `evidence.yaml` 从 `doctor_after_profile.json.evidence_draft` 导出后再人工审阅。
+- 不提交 raw profiling、本地 walkthrough、私人路径或临时材料。
 
 
 ## device_config

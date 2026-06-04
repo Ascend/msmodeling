@@ -43,6 +43,9 @@ class Runtime(TorchDispatchMode):
     _INTERNAL_WAIT_AND_BIND = torch.ops.tensor_cast._internal_wait_and_bind.default
     _INTERNAL_RECORD = torch.ops.tensor_cast._internal_record.default
 
+    def __deepcopy__(self, memo):
+        return self
+
     def __init__(
         self,
         perf_models: Union[PerformanceModel, List[PerformanceModel]],
