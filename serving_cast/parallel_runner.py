@@ -100,7 +100,7 @@ class ParallelRunner:
         if self.args.ttft_limits is not None:
             logger.info("Run Prefill with ttft %r ms.", self.args.ttft_limits)
             overwrite_optimizer_data = copy.deepcopy(self.optimizer_data)
-            overwrite_optimizer_data.ttft_limits = self.args.ttft_limits
+            overwrite_optimizer_data.ttft_limits = self.args.ttft_limits or float("inf")
             overwrite_optimizer_data.tpot_limits = None
             df_list = self._get_df_list(overwrite_optimizer_data)
             self._add_summary_result(df_list, overwrite_optimizer_data)
@@ -108,7 +108,7 @@ class ParallelRunner:
         if self.args.tpot_limits is not None:
             logger.info("Run Decode with tpot %r ms.", self.args.tpot_limits)
             overwrite_optimizer_data = copy.deepcopy(self.optimizer_data)
-            overwrite_optimizer_data.tpot_limits = self.args.tpot_limits
+            overwrite_optimizer_data.tpot_limits = self.args.tpot_limits or float("inf")
             overwrite_optimizer_data.ttft_limits = None
             df_list = self._get_df_list(overwrite_optimizer_data)
             self._add_summary_result(df_list, overwrite_optimizer_data)
