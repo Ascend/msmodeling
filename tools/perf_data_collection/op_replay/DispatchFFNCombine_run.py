@@ -99,6 +99,7 @@ def ensure_vllm_ascend_extension_loaded() -> None:
     """Load the vLLM-Ascend C extension so torch.ops._C_ascend is registered."""
     if _EXTENSION_LOAD_STATE[0] is not None:
         return
+    load_errors: list[str] = []
     try:
         from vllm_ascend.utils import enable_custom_op
 
@@ -106,6 +107,7 @@ def ensure_vllm_ascend_extension_loaded() -> None:
         _EXTENSION_LOAD_STATE[0] = True
         return
     except Exception as exc:
+        load_errors.append(f"enable_custom_op: {exc!r}")
         warn_vllm_ascend_extension_load_failure("enable_custom_op", exc)
 
     try:
@@ -114,6 +116,7 @@ def ensure_vllm_ascend_extension_loaded() -> None:
         package_dir = os.path.dirname(os.path.abspath(vllm_ascend.__file__))
         try_load_shared_object(os.path.join(package_dir, "libvllm_ascend_kernels.so"))
     except Exception as exc:
+        load_errors.append(f"package kernels: {exc!r}")
         warn_vllm_ascend_extension_load_failure("package lib load", exc)
 
     try:
@@ -146,9 +149,14 @@ def ensure_vllm_ascend_extension_loaded() -> None:
         _EXTENSION_LOAD_STATE[0] = True
     except Exception as exc:
         _EXTENSION_LOAD_STATE[0] = False
+        detail = (
+            f" Prior load attempts: {'; '.join(load_errors)}."
+            if load_errors
+            else ""
+        )
         print(
             "Warning: failed to import vllm_ascend.vllm_ascend_C "
-            f"({exc!r}). DispatchFFNCombine replay may fail.",
+            f"({exc!r}).{detail} DispatchFFNCombine replay may fail.",
             file=sys.stderr,
         )
 
@@ -384,6 +392,8 @@ def infer_max_output_size(
 ) -> int:
     if max_output_size is not None:
         return max_output_size
+    if MAX_OUTPUT_SIZE is not None:
+        return MAX_OUTPUT_SIZE
     # GLM5 service code in vLLM-Ascend passes a fixed 65536 here. Keep the
     # replay default aligned with the production path; smaller values such as
     # m * topk are useful only for the upstream unit-test shape.
