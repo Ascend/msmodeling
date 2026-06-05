@@ -1,9 +1,14 @@
+import operator
 import unittest
 
 import pytest
 import torch
+import torch.fx as fx
 from parameterized import parameterized
 from tensor_cast.compilation import get_backend
+from tensor_cast.compilation.freezing_passes.grouped_matmul_swiglu_pass import (
+    GroupedMatmulSwigluPass,
+)
 from tensor_cast.core.config_resolver import ConfigResolver
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
@@ -25,6 +30,41 @@ from .test_common import (
 )
 
 # Core SwiGLU fusion-entry assertions were moved to the unified entry in test_ops.py.
+
+
+def _build_grouped_matmul_swiglu_graph(split_target, split_args):
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    w = graph.placeholder("w")
+    bias = graph.placeholder("bias")
+    gmm = graph.call_function(torch.ops.tensor_cast.grouped_matmul.default, args=([x], [w], [bias]))
+    split = graph.call_function(split_target, args=(gmm, *split_args))
+    gate = graph.call_function(operator.getitem, args=(split, 0))
+    up = graph.call_function(operator.getitem, args=(split, 1))
+    swiglu = graph.call_function(torch.ops.tensor_cast.swiglu.default, args=(gate, up))
+    graph.output(swiglu)
+    return fx.GraphModule({}, graph)
+
+
+def test_grouped_matmul_swiglu_pass_fuses_valid_graphs():
+    graph_module = _build_grouped_matmul_swiglu_graph(torch.ops.aten.split.Tensor, (2, -1))
+
+    result = GroupedMatmulSwigluPass()(graph_module)
+
+    targets = [node.target for node in result.graph.nodes if node.op == "call_function"]
+    assert torch.ops.tensor_cast.grouped_matmul_swiglu.default in targets
+    assert torch.ops.tensor_cast.swiglu.default not in targets
+
+
+def test_grouped_matmul_swiglu_pass_rejects_unsafe_shapes_and_users():
+    pass_ = GroupedMatmulSwigluPass()
+    invalid = _build_grouped_matmul_swiglu_graph(torch.ops.aten.split.Tensor, (2, 0))
+    assert pass_(invalid) is invalid
+    assert any(node.target == torch.ops.tensor_cast.swiglu.default for node in invalid.graph.nodes)
+
+    split_sizes = _build_grouped_matmul_swiglu_graph(torch.ops.aten.split_with_sizes.default, ([2, 2], -1))
+    assert pass_(split_sizes) is split_sizes
+    assert not any(node.target == torch.ops.tensor_cast.swiglu.default for node in split_sizes.graph.nodes)
 
 
 class SwiGLUFusionPassTestMixin:

@@ -27,13 +27,19 @@ from tensor_cast.adapter.recipes import (
     materialization_hints_to_dict,
     materialize_profile_candidate,
 )
-from tensor_cast.adapter.profile_draft import render_builtin_profile_draft
+from tensor_cast.adapter.profile_draft import (
+    default_builtin_profile_path,
+    render_builtin_profile_draft,
+)
 from tensor_cast.adapter.questions import build_human_questions
 from tensor_cast.adapter.verifier import verify_evidence_case
 from tensor_cast.adapter.patch_report import PatchReport
 from tensor_cast.adapter.profile import profile_to_review_dict, validate_profile
 from tensor_cast.adapter.runner import run_actual_case
-from tensor_cast.adapter.st_case import build_st_cases_from_report
+from tensor_cast.adapter.st_case import (
+    build_st_case_from_dicts,
+    build_st_cases_from_report,
+)
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
@@ -502,6 +508,27 @@ python -m cli.inference.text_generate MiniMaxAI/MiniMax-M2.7 \
         self.assertEqual(cases[0]["status"], "draft")
         self.assertEqual(cases[0]["verification_issues"][0]["category"], "OP_MAPPING_MISSING")
 
+    def test_st_case_generator_uses_actual_case_name_and_top_operator_limit(self):
+        actual = {
+            "case_name": "fallback-case",
+            "total_forward_time_s": 2.0,
+            "ops": {
+                "slow": {"total_time_s": 0.8, "count": 4},
+                "fast": {"total_time_s": 0.1, "count": 2},
+            },
+        }
+
+        case = build_st_case_from_dicts(
+            {"input": {}},
+            actual,
+            {"model_id": "Tiny/Adapter"},
+            operator_top_n=1,
+        )
+
+        self.assertEqual(case["name"], "fallback-case")
+        self.assertEqual(case["user_input"]["model_id"], "Tiny/Adapter")
+        self.assertEqual(case["operators"], [{"name": "slow", "total_time_s": 0.8, "num_calls": 4}])
+
     def test_evidence_loader_reads_yaml(self):
         content = """
 version: 1
@@ -633,6 +660,7 @@ cases:
         model = SimpleNamespace()
         model._inner = _TinyModel()
         model.num_hidden_layers = 1
+        model.parallel_group_manager = None
         model.model_config = SimpleNamespace(
             mla_config=SimpleNamespace(
                 module_name="_MissingAttention",
@@ -787,7 +815,7 @@ cases:
             image_height=2,
             image_width=2,
             word_embedding_tp=False,
-            word_embedding_tp_mode=WordEmbeddingTPMode.col.value,
+            word_embedding_tp_mode=WordEmbeddingTPMode.col.value,  # pylint: disable=no-member
         )
 
         report = run_model_doctor(
@@ -864,6 +892,24 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
         self.assertIn("register_model_profile", content)
         self.assertIn("model_type='qwen3_vl'", content)
         self.assertIn("patch_method=patch_method_for_qwen3_vl", content)
+
+    def test_profile_draft_normalizes_callable_args_and_default_path(self):
+        content = render_builtin_profile_draft(
+            {
+                "model_type": "demo",
+                "mla_module_class_type": "tensor_cast.layers.mla.DeepseekSparseAttention",
+            },
+            patch_method_name="patch_demo_model",
+            header=["# custom header"],
+        )
+
+        self.assertIn("from tensor_cast.layers.mla import DeepseekSparseAttention", content)
+        self.assertIn("def patch_demo_model", content)
+        self.assertIn("patch_method=patch_demo_model", content)
+        self.assertEqual(
+            default_builtin_profile_path("Foo/Bar.Model"),
+            "tensor_cast/transformers/builtin_model/foo_bar_model.py",
+        )
 
     def test_patch_discovery_profile_draft_uses_review_placeholder(self):
         patch_report = classify_patch_failure(
@@ -942,7 +988,7 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
                 performance_model=["analytic"],
                 num_hidden_layers_override=1,
                 word_embedding_tp=False,
-                word_embedding_tp_mode=WordEmbeddingTPMode.col.value,
+                word_embedding_tp_mode=WordEmbeddingTPMode.col.value,  # pylint: disable=no-member
             )
 
         def summarize_key_ops():
@@ -974,7 +1020,7 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
             context_length=0,
             decode=False,
             word_embedding_tp=False,
-            word_embedding_tp_mode=WordEmbeddingTPMode.col.value,
+            word_embedding_tp_mode=WordEmbeddingTPMode.col.value,  # pylint: disable=no-member
         )
         case = EvidenceCase.from_dict(
             {

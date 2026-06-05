@@ -1,9 +1,16 @@
 import unittest
 
+import pytest
 import torch
+import torch.fx as fx
 from parameterized import parameterized
 from tensor_cast import ops  # noqa: F401
 from tensor_cast.compilation import get_backend
+from tensor_cast.compilation.freezing_passes.freezing_pattern_pass import (
+    FreezingPatternPass,
+)
+from tensor_cast.compilation.pass_base import TensorCastGraphModulePass
+from tensor_cast.compilation.passes.pattern_match_pass import PatternMatchPass
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
@@ -17,6 +24,44 @@ from .conftest import get_session_hf_config
 from .test_common import get_quant_config
 
 # Core RMS pattern-consistency assertions were moved to test_ops.py::test_rms_norm_non_default_eps_path_consistency.
+
+
+def test_pass_uuid_and_pattern_pass_loop():
+    class IdentityPass(TensorCastGraphModulePass):
+        def __call__(self, graph):
+            return graph
+
+    first_uuid = IdentityPass().uuid()
+    assert first_uuid == IdentityPass().uuid()
+    assert len(first_uuid) == 64
+
+    class FakePatternPass:
+        patterns = {}
+
+        def __init__(self):
+            self.calls = 0
+
+        def apply(self, _gm):
+            self.calls += 1
+            return 2 if self.calls == 1 else 0
+
+    gm = fx.symbolic_trace(torch.nn.Identity())
+    pattern_pass = PatternMatchPass()
+    pattern_pass.pattern_pass = FakePatternPass()
+    assert pattern_pass(gm) is gm
+    assert pattern_pass.pattern_pass.calls == 2
+    pattern_pass.pattern_replacements["existing"] = (lambda x: x, lambda x: x)
+    assert pattern_pass.has_pattern("existing")
+    with pytest.raises(ValueError, match="already registered"):
+        pattern_pass.register_pattern("existing", lambda x: x, lambda x: x, [torch.empty(1)])
+
+    freezing_pass = FreezingPatternPass()
+    freezing_pass.pattern_pass = FakePatternPass()
+    assert freezing_pass(gm) is gm
+    freezing_pass.pattern_handlers["existing"] = (object(), lambda *_: None)
+    assert freezing_pass.has_pattern("existing")
+    with pytest.raises(ValueError, match="already registered"):
+        freezing_pass.register_pattern("existing", object(), lambda *_: None)
 
 
 class NonDefaultEpsRMSNormModule(torch.nn.Module):

@@ -2,13 +2,27 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from cli.inference.video_generate import main, process_input, run_inference
 from parameterized import parameterized
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
+from tensor_cast.diffusers.cache_agent.cache import CacheState
+from tensor_cast.diffusers.cache_agent.dit_block_cache import DiTBlockCache
+from tensor_cast.diffusers.dit_cache_registry import (
+    DiTBlockCacheSpec,
+    _get_hunyuanvideo15_blocks_with_setters,
+    _get_hunyuanvideo_blocks_with_setters,
+    _get_wan_blocks_with_setters,
+    _module_list_blocks_with_setters,
+    get_dit_block_cache_spec,
+    register_dit_block_cache_spec,
+    replace_blocks_in_range,
+)
 
 
 class TestVideoGeneration(unittest.TestCase):
@@ -543,6 +557,119 @@ class TestVideoGeneration(unittest.TestCase):
             import shutil
 
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _make_cache_wrapped_forward(agent):
+    def factory(orig_forward):
+        def wrapped(_self, hidden_states, encoder_hidden_states=None, scale=1):
+            return agent.apply(
+                orig_forward,
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                scale=scale,
+            )
+
+        return wrapped
+
+    return factory
+
+
+class _CacheBlock(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.marker = "inner"
+
+    def forward(self, hidden_states, encoder_hidden_states=None, scale=1):
+        hidden = hidden_states + scale
+        if encoder_hidden_states is None:
+            return hidden
+        return hidden, encoder_hidden_states + scale
+
+
+def test_dit_block_cache_update_and_reuse_paths():
+    state = CacheState()
+    block = DiTBlockCache(
+        _CacheBlock(),
+        state,
+        block_index=0,
+        block_start=0,
+        block_end=1,
+        make_wrapped_forward=_make_cache_wrapped_forward,
+    )
+    hidden = torch.ones(2, 2)
+    encoder = torch.full((2, 2), 2.0)
+
+    assert block.marker == "inner"
+    first_hidden, first_encoder = block(hidden, encoder, scale=3)
+    assert torch.equal(first_hidden, hidden + 3)
+    assert torch.equal(first_encoder, encoder + 3)
+    assert torch.equal(state.delta_hidden, torch.full((2, 2), 3.0))
+    assert torch.equal(state.delta_encoder, torch.full((2, 2), 3.0))
+
+    state.reuse = True
+    reused_hidden, reused_encoder = block(hidden, encoder)
+    assert torch.equal(reused_hidden, hidden + 3)
+    assert torch.equal(reused_encoder, encoder + 3)
+
+    later = DiTBlockCache(_CacheBlock(), state, 1, 0, 2, _make_cache_wrapped_forward)
+    assert torch.equal(later(hidden, encoder)[0], hidden)
+
+
+def test_dit_block_cache_validates_error_paths():
+    def make_wrapped_forward(agent):
+        def factory(orig_forward):
+            def wrapped(_self, **kwargs):
+                return agent.apply(orig_forward, **kwargs)
+
+            return wrapped
+
+        return factory
+
+    state = CacheState()
+    block = DiTBlockCache(torch.nn.Identity(), state, 0, 0, 1, make_wrapped_forward)
+    with pytest.raises(ValueError, match="hidden_states"):
+        block()
+
+    state.reuse = True
+    with pytest.raises(RuntimeError, match="Cache delta is empty"):
+        block(hidden_states=torch.ones(1))
+
+    state.delta_hidden = torch.ones(1)
+    state.delta_encoder = torch.ones(1)
+    with pytest.raises(ValueError, match="encoder_hidden_states"):
+        block(hidden_states=torch.ones(1))
+
+
+def test_dit_cache_registry_helpers_replace_and_select_blocks():
+    blocks = [torch.nn.Identity(), torch.nn.ReLU(), torch.nn.Sigmoid()]
+    pairs = _module_list_blocks_with_setters(blocks)
+
+    replaced = replace_blocks_in_range(pairs, 1, 10, lambda block, idx: (idx, block))
+
+    assert replaced == 2
+    assert isinstance(blocks[0], torch.nn.Identity)
+    assert blocks[1][0] == 1
+    assert blocks[2][0] == 2
+
+    spec = DiTBlockCacheSpec("Example", lambda inner: [], lambda agent: lambda forward: forward)
+    register_dit_block_cache_spec("ExampleTransformer", spec)
+    assert get_dit_block_cache_spec("ExampleTransformer") is spec
+    assert get_dit_block_cache_spec("") is None
+
+    wan = types.SimpleNamespace(blocks=[torch.nn.Identity()])
+    assert len(_get_wan_blocks_with_setters(wan)) == 1
+    assert _get_wan_blocks_with_setters(types.SimpleNamespace()) == []
+
+    hunyuan = types.SimpleNamespace(
+        transformer_blocks=[torch.nn.Identity()],
+        single_transformer_blocks=[torch.nn.ReLU()],
+    )
+    assert len(_get_hunyuanvideo_blocks_with_setters(hunyuan)) == 2
+    assert _get_hunyuanvideo_blocks_with_setters(types.SimpleNamespace(transformer_blocks=[])) == []
+
+    hunyuan15 = types.SimpleNamespace(transformer_blocks=[torch.nn.Identity()])
+    assert len(_get_hunyuanvideo15_blocks_with_setters(hunyuan15)) == 1
+    assert _get_hunyuanvideo15_blocks_with_setters(types.SimpleNamespace()) == []
 
 
 if __name__ == "__main__":
