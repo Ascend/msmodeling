@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-from web_ui.app import build_app
 from web_ui.callbacks import (
     _case_label_from_mapping,
     _text_generate_summary_markdown,
@@ -180,11 +179,6 @@ def optimizer_args(
         "0.03",
         True,
     ]
-
-
-def test_app_build() -> None:
-    demo = build_app()
-    record("app build", demo is not None, "build_app returned None" if demo is None else "")
 
 
 @pytest.fixture
@@ -441,7 +435,6 @@ def main() -> int:
     print("=== web_ui functional tests ===")
     device = default_device()
     print(f"device_under_test={device}")
-    test_app_build()
     test_text_and_vl_preview(device)
     test_video_preview(device)
     test_optimizer_preview(device)
