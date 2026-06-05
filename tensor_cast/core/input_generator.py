@@ -323,6 +323,35 @@ def _layer_uses_sparse_attention_indexer(attention_layer) -> bool:
     return getattr(attention_layer, "indexer", None) is not None
 
 
+def _resolve_decoder_attention_layer(layer):
+    """Resolve a decoder layer's attention module through lightweight wrappers."""
+    from ..layers.utils import ModelWrapperBase
+
+    current = layer
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+
+        attention_layer = getattr(current, "self_attn", None)
+        if attention_layer is not None:
+            while isinstance(attention_layer, ModelWrapperBase) and attention_layer._inner is not None:
+                attention_layer = attention_layer._inner
+            if isinstance(attention_layer, torch.nn.Module):
+                nested_attention = attention_layer._modules.get("self_attn")
+                if nested_attention is not None:
+                    attention_layer = nested_attention
+            return attention_layer
+
+        representative = getattr(current, "representative", None)
+        if representative is not None:
+            current = representative
+            continue
+
+        current = current._inner if isinstance(current, ModelWrapperBase) else None
+
+    return None
+
+
 def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[Any, Any], int]:
     model_config = model.model_config
     parallel_config = model.model_config.parallel_config
@@ -346,7 +375,7 @@ def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[An
             # attention_layer stays None and the fallback formula below is used.
             attention_layer = None
             if decoder_layers is not None and i < len(decoder_layers):
-                attention_layer = decoder_layers[i].self_attn
+                attention_layer = _resolve_decoder_attention_layer(decoder_layers[i])
             kv_cache_width = _resolve_sparse_attention_kv_cache_width(
                 model,
                 attention_layer,
@@ -409,7 +438,7 @@ def get_kv_cache_info(model, num_blocks, block_size):
             # attention_layer stays None and the fallback formula below is used.
             attention_layer = None
             if decoder_layers is not None and i < len(decoder_layers):
-                attention_layer = decoder_layers[i].self_attn
+                attention_layer = _resolve_decoder_attention_layer(decoder_layers[i])
             kv_cache_width = _resolve_sparse_attention_kv_cache_width(
                 model,
                 attention_layer,
@@ -506,7 +535,9 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size):
         decoder_layers = None
     for i in range(model.num_hidden_layers):
         attention_layer = (
-            decoder_layers[i].self_attn if decoder_layers is not None and i < len(decoder_layers) else None
+            _resolve_decoder_attention_layer(decoder_layers[i])
+            if decoder_layers is not None and i < len(decoder_layers)
+            else None
         )
         if attention_layer is not None and not _layer_uses_sparse_attention_indexer(attention_layer):
             continue

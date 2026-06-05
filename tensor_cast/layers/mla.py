@@ -13,6 +13,31 @@ from .quant_linear import TensorCastQuantLinear
 from .utils import get_partial_sharded, ModelWrapperBase
 
 
+def tp_plan_module_path(prefix: str, relative_path: str) -> str:
+    """Return a TP-plan glob for a module under ``prefix``.
+
+    Decoder stacks use ``{prefix}.*.{relative_path}`` because each layer index
+    sits between ``prefix`` and the submodule. MTP blocks are already addressed
+    as ``mtp.layers.*.mtp_block``, so their attention/MLP weights live directly
+    under that prefix without an extra layer wildcard.
+
+    Use :func:`tp_plan_nested_module_path` instead when the target module may sit
+    under extra wrapper segments such as ``self_attn._inner`` (e.g. ``o_proj``).
+    """
+    if ".mtp_block" in prefix:
+        return f"{prefix}.{relative_path}"
+    return f"{prefix}.*.{relative_path}"
+
+
+def tp_plan_nested_module_path(prefix: str, relative_path: str) -> str:
+    """Return a TP-plan glob that allows optional wrapper segments before ``relative_path``.
+
+    Example: ``model.layers.*.o_proj`` matches ``model.layers.0.self_attn._inner.o_proj``,
+    and ``mtp.layers.*.mtp_block.*.o_proj`` matches MTP attention outputs.
+    """
+    return f"{prefix}.*.{relative_path}"
+
+
 class MultiheadLatentAttentionBase(torch.nn.Module, ABC):
     # Set to True in subclasses that accept parallel_group_manager in __init__
     supports_parallel_group_manager: bool = False

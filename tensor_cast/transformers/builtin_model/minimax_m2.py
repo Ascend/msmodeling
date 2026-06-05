@@ -1,4 +1,5 @@
 import torch
+from typing import Optional
 
 from tensor_cast.transformers.transformations import (
     maybe_enable_mtp,
@@ -90,7 +91,7 @@ def shard_qk_norm(model: TransformerModel) -> TransformerModel:
 
 
 class MoELayerWithBias(MoELayer):
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, input_ids: Optional[torch.Tensor] = None):
         num_experts = getattr(self.gate, "num_experts", None)
         if num_experts is None and hasattr(self.gate, "weight") and len(self.gate.weight.shape) == 2:
             num_experts = self.gate.weight.shape[0]

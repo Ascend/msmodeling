@@ -18,7 +18,7 @@ from ..layers import (
     ROWWISE_LINEAR,
 )
 from ..layers.internal import CopyLayerWrapper, RegionMarkerWrapper
-from ..layers.mla import MultiheadLatentAttentionBase
+from ..layers.mla import MultiheadLatentAttentionBase, tp_plan_module_path, tp_plan_nested_module_path
 from ..layers.moe_layer import MoELayer, ParallelMoELayer
 from ..layers.quant_linear import QuantLinearBase
 from ..layers.rotary_embedding import CachingRotaryEmb
@@ -304,7 +304,8 @@ def patch_mla(
     # it. V4 (Flash/Pro) needs it to pick up `o_proj_tp_group`; V3/V3.2 don't
     # declare the parameter and should receive the legacy 3-arg call.
     extra_kwargs = {}
-    if getattr(mla_config.mla_cls, "supports_parallel_group_manager", False):
+    mla_cls = mla_config.mla_cls
+    if mla_cls is not None and getattr(mla_cls, "supports_parallel_group_manager", False) is True:
         extra_kwargs["parallel_group_manager"] = model.parallel_group_manager
 
     named_modules = list(model._inner.named_modules())
@@ -487,9 +488,9 @@ def shard_model_by_tp(
                 for prefix in layer_prefixes:
                     tp_plan.update(
                         {
-                            f"{prefix}.*.self_attn.q_proj": (COLWISE_LINEAR, params),
-                            f"{prefix}.*.self_attn.q_b_proj": (COLWISE_LINEAR, params),
-                            f"{prefix}.*.self_attn.kv_b_proj": (COLWISE_LINEAR, params),
+                            tp_plan_module_path(prefix, "self_attn.q_proj"): (COLWISE_LINEAR, params),
+                            tp_plan_module_path(prefix, "self_attn.q_b_proj"): (COLWISE_LINEAR, params),
+                            tp_plan_module_path(prefix, "self_attn.kv_b_proj"): (COLWISE_LINEAR, params),
                         }
                     )
                     tp_plan.update(mla_cls.build_tp_plan_extras(prefix, params, config_info))
@@ -523,7 +524,7 @@ def shard_model_by_tp(
             }
             mla_cls = self.model_config.mla_config.mla_cls if self.model_config.mla_config else None
             for prefix in layer_prefixes:
-                tp_plan.update({f"{prefix}.*.o_proj": (ROWWISE_LINEAR, params)})
+                tp_plan.update({tp_plan_nested_module_path(prefix, "o_proj"): (ROWWISE_LINEAR, params)})
                 if mla_cls is not None:
                     tp_plan.update(mla_cls.build_o_proj_tp_plan_extras(prefix, params, config_info))
 
@@ -534,9 +535,9 @@ def shard_model_by_tp(
             for prefix in layer_prefixes:
                 tp_plan.update(
                     {
-                        f"{prefix}.*.mlp.gate_proj": (COLWISE_LINEAR, params),
-                        f"{prefix}.*.mlp.up_proj": (COLWISE_LINEAR, params),
-                        f"{prefix}.*.mlp.down_proj": (ROWWISE_LINEAR, params),
+                        tp_plan_module_path(prefix, "mlp.gate_proj"): (COLWISE_LINEAR, params),
+                        tp_plan_module_path(prefix, "mlp.up_proj"): (COLWISE_LINEAR, params),
+                        tp_plan_module_path(prefix, "mlp.down_proj"): (ROWWISE_LINEAR, params),
                     }
                 )
             visual_layers_path = get_visual_layers_path(self.hf_config.model_type)

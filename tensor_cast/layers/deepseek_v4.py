@@ -263,9 +263,11 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
 
     @classmethod
     def build_tp_plan_extras(cls, prefix: str, params: dict, config_info) -> dict[str, tuple[str, dict]]:
+        from .mla import tp_plan_module_path
+
         return {
-            f"{prefix}.*.self_attn.indexer.wq_b": (COLWISE_LINEAR, dict(params)),
-            f"{prefix}.*.self_attn.indexer.weights_proj": (
+            tp_plan_module_path(prefix, "self_attn.indexer.wq_b"): (COLWISE_LINEAR, dict(params)),
+            tp_plan_module_path(prefix, "self_attn.indexer.weights_proj"): (
                 COLWISE_LINEAR,
                 {
                     **dict(params),
@@ -276,9 +278,11 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
 
     @classmethod
     def build_o_proj_tp_plan_extras(cls, prefix: str, params: dict, config_info) -> dict[str, tuple[str, dict]]:
+        from .mla import tp_plan_module_path
+
         return {
-            f"{prefix}.*.self_attn.wo_a": (COLWISE_LINEAR, {**dict(params), "dim": 1}),
-            f"{prefix}.*.self_attn.o_proj": (
+            tp_plan_module_path(prefix, "self_attn.wo_a"): (COLWISE_LINEAR, {**dict(params), "dim": 1}),
+            tp_plan_module_path(prefix, "self_attn.o_proj"): (
                 ROWWISE_LINEAR,
                 {
                     **dict(params),

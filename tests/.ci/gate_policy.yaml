@@ -73,6 +73,13 @@ exemptions:
       - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4Config
       - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4RMSNorm
       - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4RotaryEmbedding
+      - tensor_cast/core/input_generator.py::_resolve_decoder_attention_layer
+      - tensor_cast/core/input_generator.py::get_sparse_attention_indexer_cache_info
+      - tensor_cast/layers/deepseek_v4.py::DeepseekV4SparseAttention.build_tp_plan_extras
+      - tensor_cast/layers/deepseek_v4.py::DeepseekV4SparseAttention.build_o_proj_tp_plan_extras
+      - tensor_cast/layers/mla.py::tp_plan_module_path
+      - tensor_cast/transformers/builtin_model/minimax_m2.py::MoELayerWithBias.forward
+      - tensor_cast/layers/mla.py::tp_plan_nested_module_path
     reason: "CI gate not support omit."
     applicant: deepseek_v4_adaptation
     approver: liujiawang
