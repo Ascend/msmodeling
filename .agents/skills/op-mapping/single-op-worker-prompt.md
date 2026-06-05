@@ -14,6 +14,10 @@ You will be given:
 - `repo_urls`: dict of repo URLs with version tags to clone/webfetch
 - `local_repo_paths` (optional): dict of local checkout paths to search directly
 
+Before tracing, confirm every local checkout is at the requested version/tag/branch
+and record `git log -1 --oneline --decorate` in your notes. Do not rely on `main`
+branch paths when the target stack specifies a release tag.
+
 ## The 5-Layer Pipeline Model
 
 Understanding the full call path from Python to device kernel is essential. Every NPU operator traverses these layers:
@@ -51,6 +55,17 @@ Kernel types can change between CANN versions — renames, fusions, or removals.
 - If the L0 OPTYPE you find in CANN source doesn't match what appears in profiling, the CANN version may have renamed it. Check the profiling data as ground truth.
 - Use `alternate_kernel_types` to list both old and new kernel names for cross-version compatibility.
 - Some ops may be fused into larger kernels in newer CANN versions (e.g., separate matmul + activation → single fused kernel). These require updating `kernel_type`, not just adding alternates.
+
+Prefer the CANN/op-plugin branch that matches the target CANN/torch-npu stack.
+Use the user-provided version or profiling metadata to select the branch/tag,
+and verify the resolved ref. For example, CANN 8.5 transformer kernels may use
+`https://gitcode.com/cann/ops-transformer.git` branch `8.5.0`, but that is a
+version-specific example rather than a global default.
+
+If a TC op can take both a public `torch_npu.npu_*` path and a vLLM-Ascend custom
+`torch.ops._C_ascend.*` path, choose the branch actually selected by the
+version-pinned vLLM-Ascend Python code as `kernel_type`, and put the other
+same-abstraction kernel in `alternate_kernel_types`.
 
 **aclgraph parity:** vllm-ascend aclgraph ensures eager mode and graph mode produce exactly the same ops including fusion passes, so profiling from either mode is valid for op_mapping.
 
@@ -139,7 +154,7 @@ START: What is the op?
 1. Search vllm-ascend for the torch_npu API call:
 
    ```bash
-   grep -rn "torch_npu\." $VLLM_ASCEND/vllm_ascend/ops/ --include="*.py" | grep "<keyword>"
+   grep -rn "torch_npu\." $VLLM_ASCEND/vllm_ascend/ --include="*.py" | grep "<keyword>"
    ```
 
 2. Find op-plugin YAML entry for the npu_* function:
@@ -162,6 +177,26 @@ START: What is the op?
 - YAML: `func: npu_swiglu(Tensor self, int dim=-1) -> Tensor`
 - CANN: `ops-transformer/ffn/swiglu/` or `ops-nn/quant/swi_glu_quant/`
 - Profiling: Type=`SwiGlu`
+
+**Example (GLM sparse indexer / tensor_cast.dsa_indexer.default):**
+
+- vLLM-Ascend v0.18.0: `vllm_ascend/attention/sfa_v1.py` sets
+  `use_torch_npu_lightning_indexer=True` for `hf_config.model_type == "glm_moe_dsa"`.
+- Selected path: `torch_npu.npu_lightning_indexer()` -> op-plugin
+  `op_plugin_functions.yaml` -> `LightningIndexerKernelNpuOpApi.cpp`
+  -> `aclnnLightningIndexer`.
+- CANN: ops-transformer branch matching the target CANN version, e.g. 8.5.0
+  for CANN 8.5, `attention/lightning_indexer/`,
+  `OP_NAME LightningIndexer`, `OP_ADD(LightningIndexer)`.
+- Independent vLLM-Ascend custom path:
+  `torch.ops._C_ascend.npu_lightning_indexer` ->
+  `csrc/lightning_indexer_vllm/lightning_indexer_vllm_torch_adpt.h`
+  -> `aclnnLightningIndexerVllm` / `OP_ADD(LightningIndexerVllm)`.
+  Treat `LightningIndexer` and `LightningIndexerVllm` as separate kernel types
+  with separate `op_mapping.yaml` entries, not as `alternate_kernel_types` on the
+  same entry.
+- If `LightningIndexer.csv` is missing after adding the mapping, classify the result as
+  `csv_not_found` data gap, not a mapping failure.
 
 ## Path C: vllm-ascend Custom / Triton
 
@@ -189,6 +224,8 @@ START: What is the op?
 
 4. For Triton kernels: Profiling Type = the `@triton.jit` function name
 5. For csrc/ ops: check op_host/*_def.cpp for OP_ADD registration name
+6. Verify the csrc path in the target tag; custom op directories often move between
+   release tags and `main`.
 
 **Example (Triton kernel):**
 

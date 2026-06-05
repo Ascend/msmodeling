@@ -24,14 +24,22 @@ Collect ALL of these from the user before proceeding:
 
 | Repo | Default URL | Version/Tag |
 |------|-------------|-------------|
-| vLLM | `github.com/vllm-project/vllm` | (ask user) |
-| vLLM-ascend | `github.com/vllm-project/vllm-ascend` | (ask user) |
-| op-plugin | `github.com/Ascend/op-plugin` | (ask user) |
-| pytorch-npu | `github.com/Ascend/pytorch` | (ask user) |
-| CANN ops-nn | `gitee.com/ascend/cann-ops-nn` | (ask user) |
-| CANN ops-transformer | `gitee.com/ascend/cann-ops-transformer` | (ask user) |
-| CANN ops-math | `gitee.com/ascend/cann-ops-math` | (ask user) |
-| CANN ATB | `gitee.com/ascend/ascend-transformer-boost` | (ask user) |
+| vLLM | `https://github.com/vllm-project/vllm.git` | (ask user) |
+| vLLM-ascend | `https://github.com/vllm-project/vllm-ascend.git` | (ask user) |
+| op-plugin | `https://gitcode.com/Ascend/op-plugin.git` | (ask user) |
+| pytorch-npu | `https://github.com/Ascend/pytorch.git` | (ask user) |
+| CANN ops-nn | `https://gitcode.com/cann/ops-nn.git` | (ask user) |
+| CANN ops-transformer | `https://gitcode.com/cann/ops-transformer.git` | (ask user) |
+| CANN ops-math | `https://gitcode.com/cann/ops-math.git` | (ask user) |
+| CANN ATB | `https://gitcode.com/cann/ascend-transformer-boost.git` | (ask user) |
+
+Before relying on any default GitCode URL, verify that the requested branch or
+tag exists and record the resolved commit.
+
+- [ ] **CANN repo branch selection** - use the user-provided CANN version or
+  profiling metadata to choose the branch/tag. For example, CANN 8.5 usually
+  maps to an `8.5.0` branch in CANN operator repos, but do not hard-code this;
+  verify the available refs for the target stack.
 
 - [ ] **Local repo paths** (optional) — if repos are already cloned locally
 - [ ] **msmodeling project root** — path to this repo
@@ -67,6 +75,18 @@ Verify local repo checkouts are at correct versions, or clone fresh:
 cd $LOCAL_PATH && git checkout $VERSION
 # Or: git clone $URL --branch $VERSION --depth 1 /tmp/$REPO_NAME
 ```
+
+Always verify the exact resolved ref after checkout:
+
+```bash
+git -C $LOCAL_PATH describe --tags --exact-match HEAD 2>/dev/null || true
+git -C $LOCAL_PATH branch -a --contains HEAD
+git -C $LOCAL_PATH log -1 --oneline --decorate
+```
+
+Do not write evidence paths from an unpinned `main` checkout. Paths can move between
+release tags and `main` (for example vLLM-Ascend custom csrc operators), so notes
+must cite the file layout from the checked-out target version.
 
 ### 1b: Run TC Simulation
 
@@ -302,6 +322,25 @@ From the output, classify every MISS into one of these categories:
 | **Param mismatch** | Wrong batch/seq/TP caused shape miss | Re-derive params from Step 5a |
 
 **Key distinction:** A shape MISS with correct kernel_type = data coverage gap (not an op_mapping bug). A shape MISS with wrong kernel_type = op_mapping error.
+
+Also distinguish mapping coverage from profiling data coverage:
+
+- `unmapped` means `op_mapping.yaml` lacks an entry or selected branch.
+- `csv_not_found` means the mapping resolved to a kernel_type, but `<kernel_type>.csv`
+  is absent from the profiling database. This is a data collection or CSV generation
+  task, not a mapping bug.
+- `shape_mismatch` means the CSV exists but lacks the current TC shape or the
+  mapping needs a shape transform/query mode.
+
+Use these normalized labels in reports. Map the table categories above as:
+`Op mapping error` -> `unmapped`; `Shape coverage gap` -> `csv_not_found` when
+the CSV file is absent, or `shape_mismatch` when the CSV exists but lacks the
+row; `Param mismatch` -> re-derive params first, then report any remaining
+miss as `shape_mismatch`. Keep `TC decomposition mismatch` and `Structural miss`
+as known limitations with explicit notes.
+
+When an op changes from `unmapped` to `csv_not_found` after a mapping edit, record
+the mapping as effective and move the next action to profiling or microbenchmark data.
 
 ### 5d: Iterate
 

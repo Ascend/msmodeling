@@ -48,6 +48,17 @@ Check `mapped_count` vs total — compute coverage percentage.
 From the TC run log, count lines containing "MISS" or "ANALYTIC_FALLBACK" vs "HIT" or "PROFILING".
 Target: >95% of compute ops should HIT.
 
+Classify MISS reasons before recommending fixes:
+
+- `unmapped`: missing or wrong `op_mapping.yaml` entry. Fix mapping.
+- `csv_not_found`: mapping resolved to a kernel_type, but `<kernel_type>.csv` is absent.
+  Treat this as a profiling database coverage gap; collect/generate CSV data rather
+  than changing the mapping.
+- `shape_mismatch`: CSV exists but lacks the TC shape, or the entry needs a shape
+  transform/query mode. Inspect shapes before changing kernel_type.
+- `elementwise_output_shape_mismatch`: usually a broadcast/output-shape query issue;
+  prefer `query_mode: elementwise` or a shape matching fix over `tc_input_count`.
+
 Expected misses (acceptable):
 
 - communication ops (fallback to analytic is by design)
