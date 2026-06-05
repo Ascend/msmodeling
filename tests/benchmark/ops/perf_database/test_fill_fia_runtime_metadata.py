@@ -5,6 +5,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from tools.perf_data_collection.fill_fia_runtime_metadata import (
     backfill,
     build_csv_key,
@@ -12,6 +14,7 @@ from tools.perf_data_collection.fill_fia_runtime_metadata import (
     build_runtime_payload,
     load_jsonl,
 )
+from tests.helpers.cli_runner import run_module_main
 
 
 class TestBuildCsvKey:
@@ -360,3 +363,122 @@ class TestLoadJsonl:
         assert len(index) == 1  # one unique key
         payloads = next(iter(index.values()))
         assert len(payloads) == 1  # deduped to one payload
+
+
+class TestEnsureFieldnames:
+    def test_adds_missing_columns(self):
+        from tools.perf_data_collection.fill_fia_runtime_metadata import (
+            ensure_fieldnames,
+            BACKFILL_COLUMNS,
+        )
+
+        result = ensure_fieldnames(["Input Shapes", "Duration(us)"])
+        for col in BACKFILL_COLUMNS:
+            assert col in result
+        assert "Input Shapes" in result
+
+    def test_no_duplication(self):
+        from tools.perf_data_collection.fill_fia_runtime_metadata import (
+            ensure_fieldnames,
+            RUNTIME_AVG_SEQ_LEN,
+        )
+
+        result = ensure_fieldnames([RUNTIME_AVG_SEQ_LEN])
+        assert result.count(RUNTIME_AVG_SEQ_LEN) == 1
+
+
+class TestBuildArgparser:
+    def test_required_args(self):
+        from tools.perf_data_collection.fill_fia_runtime_metadata import build_argparser
+
+        parser = build_argparser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([])
+
+    def test_parses_args(self):
+        from tools.perf_data_collection.fill_fia_runtime_metadata import build_argparser
+
+        parser = build_argparser()
+        args = parser.parse_args(
+            [
+                "--csv-path",
+                "fia.csv",
+                "--jsonl-path",
+                "runtime.jsonl",
+            ]
+        )
+        assert args.csv_path == "fia.csv"
+        assert args.jsonl_path == "runtime.jsonl"
+
+    def test_parses_optional_args(self):
+        from tools.perf_data_collection.fill_fia_runtime_metadata import build_argparser
+
+        parser = build_argparser()
+        args = parser.parse_args(
+            [
+                "--csv-path",
+                "fia.csv",
+                "--jsonl-path",
+                "runtime.jsonl",
+                "--output-path",
+                "out.csv",
+                "--metadata-tag",
+                "custom_tag",
+            ]
+        )
+        assert args.output_path == "out.csv"
+        assert args.metadata_tag == "custom_tag"
+
+
+class TestMainCli:
+    def test_main_missing_csv_exits_nonzero(self, tmp_path):
+        result = run_module_main(
+            "tools.perf_data_collection.fill_fia_runtime_metadata",
+            [
+                "--csv-path",
+                str(tmp_path / "nonexistent.csv"),
+                "--jsonl-path",
+                str(tmp_path / "nonexistent.jsonl"),
+            ],
+        )
+        assert result.returncode != 0
+
+    def test_main_success(self, tmp_path):
+        csv_path = tmp_path / "fia.csv"
+        csv_path.write_text(
+            "Input Shapes,Profiling Average Duration(us)\n"
+            '"4099,16,128;4099,16,128;4099,16,128;;2048,2048;;2;;;;;;;;;;;;;;;;;;4099,16,64;4099,16,64;;;;;",600.0\n'
+        )
+        jsonl_path = tmp_path / "runtime.jsonl"
+        jsonl_path.write_text(
+            json.dumps(
+                {
+                    "query_shape": [4099, 16, 128],
+                    "key_shape": [4099, 16, 128],
+                    "value_shape": [4099, 16, 128],
+                    "actual_seq_lengths": [4099],
+                    "actual_seq_lengths_kv": [4099],
+                    "atten_mask_shape": [2048, 2048],
+                    "block_table_shape": None,
+                    "block_table_valid_blocks": None,
+                    "num_heads": 16,
+                    "num_key_value_heads": 16,
+                    "sparse_mode": 3,
+                    "input_layout": "TND",
+                    "block_size": 0,
+                }
+            )
+            + "\n"
+        )
+        result = run_module_main(
+            "tools.perf_data_collection.fill_fia_runtime_metadata",
+            [
+                "--csv-path",
+                str(csv_path),
+                "--jsonl-path",
+                str(jsonl_path),
+                "--output-path",
+                str(tmp_path / "out.csv"),
+            ],
+        )
+        assert result.returncode == 0

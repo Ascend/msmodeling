@@ -10,7 +10,13 @@ sys.path.insert(
     0,
     str(Path(__file__).resolve().parents[4] / "tools" / "perf_data_analysis"),
 )
-from compute_m6 import _sum_kernels_with_dedup, compute_m6
+from compute_m6 import (
+    _format_report,
+    _sum_kernels_with_dedup,
+    build_argparser,
+    compute_m6,
+)
+from tests.helpers.cli_runner import run_module_main
 
 
 def _make_tc_trace(tmp_path, events=None):
@@ -245,3 +251,176 @@ class TestSumKernelsWithDedupPreserved:
         assert compute_us == 0.0
         assert hcom_us == 0.0
         assert kc == 0
+
+    def test_kernel_type_durations_tracked(self):
+        events = [
+            (100.0, 110.0, "MatMulV2", ""),
+            (200.0, 205.0, "RmsNorm", ""),
+        ]
+        _, _, _, _, ktd = _sum_kernels_with_dedup(events)
+        assert ktd["MatMulV2"] == pytest.approx(10.0)
+        assert ktd["RmsNorm"] == pytest.approx(5.0)
+
+
+class TestFormatReport:
+    def test_output_contains_all_fields(self):
+        result = {
+            "m6_ratio": 0.95,
+            "empirical_hit_us": 5952.0,
+            "real_per_fwd_us": 6265.26,
+            "selected_fwd_compute_us": 3200.0,
+            "selected_fwd_hcom_us": 3065.26,
+            "tc_trace": "/path/to/tc.json",
+            "prof_trace": "/path/to/prof.csv",
+            "source_filter": ["MEASURED"],
+        }
+        report = _format_report(result)
+        assert "M6" in report
+        assert "0.950" in report
+        assert "/path/to/tc.json" in report
+        assert "/path/to/prof.csv" in report
+        assert "MEASURED" in report
+        assert "5,952.0" in report
+        assert "6,265.3" in report
+
+    def test_ratio_greater_than_one(self):
+        result = {
+            "m6_ratio": 1.5,
+            "empirical_hit_us": 150.0,
+            "real_per_fwd_us": 100.0,
+            "selected_fwd_compute_us": 80.0,
+            "selected_fwd_hcom_us": 20.0,
+            "tc_trace": "a.json",
+            "prof_trace": "b.csv",
+            "source_filter": ["MEASURED", "INTERPOLATED"],
+        }
+        report = _format_report(result)
+        assert "1.500" in report
+
+
+class TestBuildArgparser:
+    def test_required_args(self):
+        parser = build_argparser()
+        with pytest.raises(SystemExit):
+            parser.parse_args([])
+
+    def test_parses_tc_and_prof_trace(self):
+        parser = build_argparser()
+        args = parser.parse_args(
+            [
+                "--tc-trace",
+                "trace.json",
+                "--prof-trace",
+                "prof.csv",
+            ]
+        )
+        assert args.tc_trace == "trace.json"
+        assert args.prof_trace == "prof.csv"
+        assert args.source_filter is None
+        assert args.json_output is None
+
+    def test_parses_source_filter(self):
+        parser = build_argparser()
+        args = parser.parse_args(
+            [
+                "--tc-trace",
+                "t.json",
+                "--prof-trace",
+                "p.csv",
+                "--source-filter",
+                "MEASURED",
+            ]
+        )
+        assert args.source_filter == "MEASURED"
+
+    def test_parses_json_output(self):
+        parser = build_argparser()
+        args = parser.parse_args(
+            [
+                "--tc-trace",
+                "t.json",
+                "--prof-trace",
+                "p.csv",
+                "--json-output",
+                "out.json",
+            ]
+        )
+        assert args.json_output == "out.json"
+
+
+class TestJsonOutput:
+    def test_json_output_written(self, tmp_path):
+        tc_path = _make_tc_trace(tmp_path)
+        prof_path = _make_prof_trace(tmp_path)
+        json_out = tmp_path / "m6_out.json"
+        result = compute_m6(tc_trace=str(tc_path), prof_trace=str(prof_path))
+        json_out.write_text(json.dumps(result, indent=2))
+        assert json_out.exists()
+        loaded = json.loads(json_out.read_text())
+        assert "m6_ratio" in loaded
+        assert "empirical_hit_us" in loaded
+
+
+class TestMainCli:
+    def test_main_exits_cleanly(self, tmp_path):
+        tc_path = _make_tc_trace(tmp_path)
+        prof_path = _make_prof_trace(tmp_path)
+        result = run_module_main(
+            "tools.perf_data_analysis.compute_m6",
+            [
+                "--tc-trace",
+                str(tc_path),
+                "--prof-trace",
+                str(prof_path),
+            ],
+        )
+        assert result.returncode == 0
+        assert "M6" in result.stdout
+
+    def test_main_with_json_output(self, tmp_path):
+        tc_path = _make_tc_trace(tmp_path)
+        prof_path = _make_prof_trace(tmp_path)
+        json_out = tmp_path / "result.json"
+        result = run_module_main(
+            "tools.perf_data_analysis.compute_m6",
+            [
+                "--tc-trace",
+                str(tc_path),
+                "--prof-trace",
+                str(prof_path),
+                "--json-output",
+                str(json_out),
+            ],
+        )
+        assert result.returncode == 0
+        assert json_out.exists()
+        data = json.loads(json_out.read_text())
+        assert "m6_ratio" in data
+
+    def test_main_with_source_filter(self, tmp_path):
+        tc_path = _make_tc_trace(tmp_path)
+        prof_path = _make_prof_trace(tmp_path)
+        result = run_module_main(
+            "tools.perf_data_analysis.compute_m6",
+            [
+                "--tc-trace",
+                str(tc_path),
+                "--prof-trace",
+                str(prof_path),
+                "--source-filter",
+                "MEASURED",
+            ],
+        )
+        assert result.returncode == 0
+
+    def test_main_file_not_found_exits_nonzero(self, tmp_path):
+        result = run_module_main(
+            "tools.perf_data_analysis.compute_m6",
+            [
+                "--tc-trace",
+                str(tmp_path / "nonexistent.json"),
+                "--prof-trace",
+                str(tmp_path / "prof.csv"),
+            ],
+        )
+        assert result.returncode != 0

@@ -12,6 +12,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parents[4] / "tools" / "perf_data_analysis"),
 )
 from generate_per_shape_comparison import generate_per_shape_comparison
+from tests.helpers.cli_runner import run_module_main
 
 
 def _make_trace(tmp_path, events):
@@ -224,3 +225,87 @@ class TestAggregation:
         assert float(rows[0]["tc_dur_us"]) == pytest.approx(50.0)
         assert float(rows[0]["prof_dur_us"]) == pytest.approx(50.0)
         assert int(rows[0]["tc_count"]) == 2
+
+
+class TestHcomDedupInProf:
+    def test_hcom_dedup_groups_by_start_and_type_and_shape(self, tmp_path):
+        trace = _make_trace(tmp_path, [])
+        prof = tmp_path / "prof.csv"
+        lines = [
+            "Type,Duration(us),Start Time(us),Input Shapes",
+            'hcom_allReduce_,100.0,1000.0,"128,5120"',
+            'hcom_allReduce_,80.0,1000.0,"128,5120"',
+            'MatMulV2,50.0,2000.0,"128,5120"',
+        ]
+        prof.write_text("\n".join(lines))
+        out = tmp_path / "out.csv"
+        generate_per_shape_comparison(trace, str(prof), str(out))
+        rows = list(csv.DictReader(out.open()))
+        hcom_row = next(r for r in rows if r["kernel_type"] == "hcom_allReduce_")
+        assert float(hcom_row["prof_dur_us"]) == pytest.approx(100.0)
+
+    def test_aicpu_excluded_from_prof(self, tmp_path):
+        trace = _make_trace(tmp_path, [])
+        prof = tmp_path / "prof.csv"
+        lines = [
+            "Type,Duration(us),Start Time(us),Input Shapes",
+            'allgatherAicpuKernel,200.0,1000.0,""',
+            'MatMulV2,50.0,2000.0,"128,5120"',
+        ]
+        prof.write_text("\n".join(lines))
+        out = tmp_path / "out.csv"
+        generate_per_shape_comparison(trace, str(prof), str(out))
+        rows = list(csv.DictReader(out.open()))
+        kts = {r["kernel_type"] for r in rows}
+        assert "allgatherAicpuKernel" not in kts
+        assert "MatMulV2" in kts
+
+
+class TestNormalizeShapeKey:
+    def test_invalid_list_literal(self):
+        from generate_per_shape_comparison import _normalize_shape_key
+
+        result = _normalize_shape_key("[")
+        assert result == "["
+
+    def test_empty_quoted_string(self):
+        from generate_per_shape_comparison import _normalize_shape_key
+
+        assert _normalize_shape_key('""') == ""
+
+    def test_bracket_shape_parsing(self):
+        from generate_per_shape_comparison import _normalize_shape_key
+
+        assert _normalize_shape_key("[[100,200],[200,300]]") == "100,200;200,300"
+
+
+class TestMainCli:
+    def test_main_with_output(self, tmp_path):
+        trace = _make_trace(
+            tmp_path,
+            [
+                _x(
+                    "mm",
+                    20,
+                    kernel_type="MatMulV2",
+                    source="MEASURED",
+                    simulation_shapes="[[100,200]]",
+                ),
+            ],
+        )
+        prof = _make_prof(tmp_path, [("MatMulV2", "100,200", 25.0)])
+        out = tmp_path / "out.csv"
+        result = run_module_main(
+            "tools.perf_data_analysis.generate_per_shape_comparison",
+            [
+                "--tc-trace",
+                trace,
+                "--prof-trace",
+                prof,
+                "--output",
+                str(out),
+            ],
+        )
+        assert result.returncode == 0
+        assert out.exists()
+        assert "Generated" in result.stdout

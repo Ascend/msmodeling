@@ -45,11 +45,19 @@ from tools.perf_data_collection.grid_generator.theory_router import (
 )
 from tools.perf_data_collection.grid_generator.utils import (
     align_shape_slot_count,
+    build_generated_row,
+    build_input_shapes_sort_key,
+    build_row_template,
     build_shape_cell,
     build_shape_text,
     dedupe_generated_rows,
+    extend_theory_headers,
+    load_csv_template_rows,
     parse_shape_text,
     replace_csv_with_generated_rows,
+    sort_generated_rows,
+    zero_fill_column,
+    _dedupe_key,
 )
 from tools.perf_data_collection.memory_estimator import (
     dtype_to_bytes,
@@ -793,6 +801,261 @@ class ZTestMemoryEstimation(unittest.TestCase):
             list(generate_split_qkv_rmsnorm_rope_rows(["dsv3", "GLM5.1"])),
             [],
         )
+
+
+class TestZeroFillColumn(unittest.TestCase):
+    def test_duration_header(self):
+        self.assertTrue(zero_fill_column("Average Duration(us)"))
+        self.assertTrue(zero_fill_column("Min Duration(us)"))
+
+    def test_latency_header(self):
+        self.assertTrue(zero_fill_column("Latency(us)"))
+
+    def test_time_header(self):
+        self.assertTrue(zero_fill_column("MicroBench aiv_time(us)"))
+
+    def test_cycles_header(self):
+        self.assertTrue(zero_fill_column("Cycles"))
+
+    def test_ratio_header(self):
+        self.assertTrue(zero_fill_column("Ops/compute ratio"))
+
+    def test_miss_header(self):
+        self.assertTrue(zero_fill_column("Cache miss rate"))
+
+    def test_utilization_header(self):
+        self.assertTrue(zero_fill_column("Utilization(%)"))
+
+    def test_non_matching_header(self):
+        self.assertFalse(zero_fill_column("Input Shapes"))
+        self.assertFalse(zero_fill_column("Output Shapes"))
+        self.assertFalse(zero_fill_column("OP State"))
+
+
+class TestBuildRowTemplate(unittest.TestCase):
+    def test_keeps_keep_columns(self):
+        headers = [
+            "OP State",
+            "Input Data Types",
+            "Input Formats",
+            "Output Data Types",
+            "Output Formats",
+            "Output Shapes",
+            "Input Shapes",
+            "Average Duration(us)",
+        ]
+        source = {
+            "OP State": "static",
+            "Input Data Types": "DT_BF16;DT_BF16",
+            "Input Formats": "ND;ND",
+            "Output Data Types": "DT_BF16",
+            "Output Formats": "ND",
+            "Output Shapes": '"128,5120"',
+            "Input Shapes": '"128,5120;5120,128"',
+            "Average Duration(us)": "12.5",
+        }
+        tmpl = build_row_template(headers, source)
+        self.assertEqual(tmpl["OP State"], "static")
+        self.assertEqual(tmpl["Output Shapes"], '"128,5120"')
+        self.assertEqual(tmpl["Input Shapes"], "")
+
+    def test_zeros_duration_columns(self):
+        headers = ["Input Shapes", "Average Duration(us)", "Min Duration(us)"]
+        source = {
+            "Input Shapes": '"128,5120"',
+            "Average Duration(us)": "12.5",
+            "Min Duration(us)": "10.0",
+        }
+        tmpl = build_row_template(headers, source)
+        self.assertEqual(tmpl["Average Duration(us)"], "0")
+        self.assertEqual(tmpl["Min Duration(us)"], "0")
+
+
+class TestBuildGeneratedRow(unittest.TestCase):
+    def test_basic(self):
+        headers = [
+            "Input Shapes",
+            "Output Shapes",
+            "Input Data Types",
+            "Average Duration(us)",
+        ]
+        source = {
+            "Input Shapes": '"1,5120"',
+            "Output Shapes": '"1,25600"',
+            "Input Data Types": "DT_BF16",
+            "Average Duration(us)": "10.0",
+        }
+        row = build_generated_row(
+            headers,
+            source,
+            input_shapes=[(128, 5120), (5120, 25600)],
+            output_shapes=[(128, 25600)],
+        )
+        self.assertIn("128,5120;5120,25600", row["Input Shapes"])
+        self.assertIn("128,25600", row["Output Shapes"])
+        self.assertEqual(row["Average Duration(us)"], "0")
+
+    def test_with_extra_values(self):
+        headers = ["Input Shapes", "Input Data Types", "Input Formats"]
+        source = {
+            "Input Shapes": '"1,5120"',
+            "Input Data Types": "DT_BF16",
+            "Input Formats": "ND",
+        }
+        row = build_generated_row(
+            headers,
+            source,
+            input_shapes=[(128, 5120)],
+            output_shapes=[],
+            extra_values={"Input Data Types": "DT_INT8", "NewCol": "value"},
+        )
+        self.assertEqual(row["Input Data Types"], "DT_INT8")
+        self.assertEqual(row["NewCol"], "value")
+
+
+class TestExtendTheoryHeaders(unittest.TestCase):
+    def test_adds_missing_headers(self):
+        result = extend_theory_headers(["A", "B"], ["B", "C", "D"])
+        self.assertEqual(result, ["A", "B", "C", "D"])
+
+    def test_no_duplication(self):
+        result = extend_theory_headers(["A"], ["A", "A"])
+        self.assertEqual(result, ["A"])
+
+    def test_empty_extra(self):
+        result = extend_theory_headers(["A", "B"], [])
+        self.assertEqual(result, ["A", "B"])
+
+
+class TestSortGeneratedRows(unittest.TestCase):
+    def test_sorts_by_input_shapes(self):
+        rows = [
+            {"Input Shapes": '"300,5120"', "val": "c"},
+            {"Input Shapes": '"100,5120"', "val": "a"},
+            {"Input Shapes": '"200,5120"', "val": "b"},
+        ]
+        sorted_rows = sort_generated_rows(rows)
+        self.assertEqual(sorted_rows[0]["val"], "a")
+        self.assertEqual(sorted_rows[1]["val"], "b")
+        self.assertEqual(sorted_rows[2]["val"], "c")
+
+
+class TestBuildInputShapesSortKey(unittest.TestCase):
+    def test_single_shape(self):
+        row = {"Input Shapes": '"128,5120"'}
+        key = build_input_shapes_sort_key(row)
+        self.assertEqual(key, ((128, 5120),))
+
+    def test_multiple_shapes(self):
+        row = {"Input Shapes": '"128,5120;5120,25600"'}
+        key = build_input_shapes_sort_key(row)
+        self.assertEqual(key, ((128, 5120), (5120, 25600)))
+
+
+class TestDedupeKey(unittest.TestCase):
+    def test_dedupe_on_non_latency_columns(self):
+        headers = ["Input Shapes", "Average Duration(us)", "OP State"]
+        row = {
+            "Input Shapes": '"128,5120"',
+            "Average Duration(us)": "12.5",
+            "OP State": "static",
+        }
+        key = _dedupe_key(headers, row)
+        self.assertIn('"128,5120"', key)
+        self.assertIn("static", key)
+        self.assertNotIn("12.5", key)
+
+    def test_empty_cell(self):
+        headers = ["Input Shapes"]
+        row = {"Input Shapes": ""}
+        key = _dedupe_key(headers, row)
+        self.assertEqual(key, ("",))
+
+
+class TestParseShapeTextEdgeCases(unittest.TestCase):
+    def test_missing_shape_tokens(self):
+        for token in ["N/A", "NA", "NULL", "NONE", "UNDEFINED"]:
+            with self.subTest(token=token):
+                self.assertEqual(parse_shape_text(token), [])
+
+    def test_quoted_na(self):
+        self.assertEqual(parse_shape_text('"N/A"'), [])
+
+    def test_parenthesized_pair(self):
+        result = parse_shape_text("(128, 5120)")
+        self.assertEqual(result, [(128, 5120)])
+
+    def test_mixed_semicolon_and_empty_slots(self):
+        result = parse_shape_text("128,5120;;")
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0], (128, 5120))
+        self.assertEqual(result[1], ())
+
+
+class TestLoadCsvTemplateRows(unittest.TestCase):
+    def test_require_rows_raises_if_empty(self):
+        import csv
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "empty.csv"
+            with p.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["Input Shapes", "Duration(us)"])
+                writer.writeheader()
+            with self.assertRaises(ValueError):
+                load_csv_template_rows(p, require_rows=True)
+
+    def test_require_rows_false_returns_none_if_empty(self):
+        import csv
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "empty.csv"
+            with p.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["Input Shapes", "Duration(us)"])
+                writer.writeheader()
+            result = load_csv_template_rows(p, require_rows=False)
+            self.assertIsNone(result)
+
+    def test_loads_rows(self):
+        import csv
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "test.csv"
+            with p.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["Input Shapes", "Extra"])
+                writer.writeheader()
+                writer.writerow({"Input Shapes": '"128,5120"', "Extra": "val"})
+            headers, rows = load_csv_template_rows(p, require_rows=True)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["Extra"], "val")
+
+    def test_extra_headers_appended(self):
+        import csv
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "test.csv"
+            with p.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["Input Shapes"])
+                writer.writeheader()
+                writer.writerow({"Input Shapes": '"128,5120"'})
+            headers, _ = load_csv_template_rows(p, require_rows=True, extra_headers=["Runtime col", "Extra"])
+            self.assertIn("Runtime col", headers)
+            self.assertIn("Extra", headers)
+
+    def test_missing_input_shapes_header(self):
+        import csv
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "no_shapes.csv"
+            with p.open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=["OP State"])
+                writer.writeheader()
+            result = load_csv_template_rows(p, require_rows=False)
+            self.assertIsNone(result)
 
 
 if __name__ == "__main__":

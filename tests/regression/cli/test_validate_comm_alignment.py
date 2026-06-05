@@ -15,7 +15,10 @@ from tools.perf_data_collection.comm_bench.validate_comm_alignment import (
     analytic_predict_us,
     validate_csv,
     validate_directory,
+    _parse_row,
+    load_comm_csv,
 )
+from tests.helpers.cli_runner import run_module_main
 
 # ---------------------------------------------------------------------------
 # analytic_predict_us unit tests
@@ -391,3 +394,120 @@ class TestAlignmentRowStatusBoundaries:
     def test_ratio_below_quarter_is_fail(self):
         # ratio = 1/4.01 ≈ 0.249 → FAIL
         assert self._row(24.9).status(2.0) == "FAIL"
+
+
+class TestParseRow:
+    def test_parse_row_valid(self):
+        row = {
+            "message_bytes": "65536",
+            "num_devices": "16",
+            "topology_tier": "1",
+            "Duration(us)": "5.50",
+        }
+        result = _parse_row(row, "all_reduce")
+        assert result is not None
+        assert result.op_type == "all_reduce"
+        assert result.message_bytes == 65536
+        assert result.num_devices == 16
+        assert result.topology_tier == 1
+        assert result.measured_us == pytest.approx(5.50)
+        assert result.predicted_us > 0
+
+    def test_parse_row_average_duration(self):
+        row = {
+            "message_bytes": "65536",
+            "num_devices": "16",
+            "topology_tier": "1",
+            "Average Duration(us)": "5.50",
+        }
+        result = _parse_row(row, "all_reduce")
+        assert result is not None
+        assert result.measured_us == pytest.approx(5.50)
+
+    def test_parse_row_missing_key_returns_none(self):
+        assert _parse_row({}, "all_reduce") is None
+
+    def test_parse_row_invalid_number_returns_none(self):
+        row = {
+            "message_bytes": "not_a_number",
+            "num_devices": "16",
+            "topology_tier": "1",
+            "Duration(us)": "5.50",
+        }
+        assert _parse_row(row, "all_reduce") is None
+
+
+class TestValidateCsvEdgeCases:
+    def test_validate_csv_empty_file(self, tmp_path):
+        _write_comm_csv(tmp_path / "empty.csv", [])
+        report = validate_csv(tmp_path / "empty.csv", "all_reduce", tolerance=2.0)
+        assert len(report.rows) == 0
+        assert report.ok()
+
+    def test_validate_csv_with_invalid_rows(self, tmp_path):
+        path = tmp_path / "mixed.csv"
+        with path.open("w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "message_bytes",
+                    "num_devices",
+                    "topology_tier",
+                    "Duration(us)",
+                ],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "message_bytes": "bad",
+                    "num_devices": "16",
+                    "topology_tier": "1",
+                    "Duration(us)": "5.50",
+                }
+            )
+            writer.writerow(
+                {
+                    "message_bytes": "65536",
+                    "num_devices": "16",
+                    "topology_tier": "1",
+                    "Duration(us)": "5.50",
+                }
+            )
+        report = validate_csv(path, "all_reduce", tolerance=2.0)
+        assert len(report.rows) == 1
+
+
+class TestLoadCommCsv:
+    def test_load_valid_csv(self, tmp_path):
+        path = tmp_path / "test.csv"
+        with path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["a", "b"])
+            writer.writeheader()
+            writer.writerow({"a": "1", "b": "2"})
+        rows = load_comm_csv(path)
+        assert len(rows) == 1
+        assert rows[0]["a"] == "1"
+
+
+class TestMainCli:
+    def test_main_no_csv_dir_exits_nonzero(self, tmp_path):
+        result = run_module_main(
+            "tools.perf_data_collection.comm_bench.validate_comm_alignment",
+            ["--csv-dir", str(tmp_path / "nonexistent")],
+        )
+        assert result.returncode != 0
+
+    def test_main_with_valid_dir(self, comm_csv_dir):
+        result = run_module_main(
+            "tools.perf_data_collection.comm_bench.validate_comm_alignment",
+            ["--csv-dir", str(comm_csv_dir)],
+        )
+        assert result.returncode == 0
+        assert "PASS" in result.stdout
+
+    def test_main_verbose_flag(self, comm_csv_dir):
+        result = run_module_main(
+            "tools.perf_data_collection.comm_bench.validate_comm_alignment",
+            ["--csv-dir", str(comm_csv_dir), "--verbose"],
+        )
+        assert result.returncode == 0

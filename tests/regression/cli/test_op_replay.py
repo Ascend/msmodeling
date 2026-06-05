@@ -677,3 +677,57 @@ class TestRunAllOp:
         assert args.execution_mode == "subprocess"
         assert args.op == ["MatMulV2", "PadV3"]
         assert args.continue_on_error is True
+
+    def test_discover_run_scripts(self):
+        scripts = run_all_op.discover_run_scripts()
+        assert len(scripts) > 0
+        assert run_all_op.SELF_NAME not in [s.name for s in scripts]
+
+    def test_filter_run_scripts_exact_match(self):
+        scripts = [
+            Path("MatMulV2_run.py"),
+            Path("PadV3_run.py"),
+            Path("RmsNorm_run.py"),
+        ]
+        filtered = run_all_op.filter_run_scripts(scripts, {"MatMulV2"})
+        names = [s.name for s in filtered]
+        assert names == ["MatMulV2_run.py"]
+
+    def test_filter_run_scripts_none_returns_all(self):
+        scripts = [Path("MatMulV2_run.py"), Path("PadV3_run.py")]
+        filtered = run_all_op.filter_run_scripts(scripts, None)
+        assert len(filtered) == 2
+
+    def test_get_csv_name(self):
+        assert run_all_op.get_csv_name(Path("MatMulV2_run.py")) == "MatMulV2.csv"
+        assert run_all_op.get_csv_name(Path("PadV3_run.py")) == "PadV3.csv"
+
+    def test_has_operator_csv(self, tmp_path):
+        datadir = Path(tmp_path)
+        sub = datadir / "sub"
+        sub.mkdir(parents=True)
+        (sub / "MatMulV2.csv").write_text("x")
+        assert run_all_op.has_operator_csv(datadir, "MatMulV2.csv")
+        assert not run_all_op.has_operator_csv(datadir, "Nonexistent.csv")
+
+
+class TestDispatchFfnConstants:
+    def test_default_ep_size(self):
+        from DispatchFFNCombine_run import DEFAULT_EP_SIZE, DEFAULT_DFC_REPEAT_COUNT
+
+        assert DEFAULT_EP_SIZE == 16
+        assert DEFAULT_DFC_REPEAT_COUNT > 0
+
+    def test_default_max_output_size(self):
+        from DispatchFFNCombine_run import DEFAULT_DFC_MAX_OUTPUT_SIZE
+
+        assert DEFAULT_DFC_MAX_OUTPUT_SIZE > 0
+
+    def test_build_argparser(self):
+        parser = dispatch_ffn.build_standard_argparser(
+            description="test",
+            usage_examples=["python test.py"],
+            version_help="test",
+        )
+        args = parser.parse_args(["--database-path", "test_dir"])
+        assert args.database_path == Path("test_dir")

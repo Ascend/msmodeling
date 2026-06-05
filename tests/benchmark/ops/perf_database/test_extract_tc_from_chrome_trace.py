@@ -283,3 +283,141 @@ class TestMalformedSubKernelDurations:
         )
         stats = extract_tc_from_chrome_trace(trace, OP_MAPPING)
         assert abs(stats["X"]["total_us"] - 30.0) < 0.1
+
+
+class TestParseProfilingByType:
+    def test_basic_counting(self, tmp_path):
+        csv_path = tmp_path / "prof.csv"
+        csv_path.write_text(
+            "Type,Duration(us),Start Time(us),Input Shapes\n"
+            'MatMulV2,50.0,1000.0,""\n'
+            'MatMulV2,30.0,2000.0,""\n'
+            'RmsNorm,10.0,3000.0,""\n'
+        )
+        from generate_op_comparison import parse_profiling_by_type
+
+        stats = parse_profiling_by_type(str(csv_path))
+        assert stats["MatMulV2"]["total_us"] == pytest.approx(80.0)
+        assert stats["MatMulV2"]["count"] == 2
+        assert stats["RmsNorm"]["total_us"] == pytest.approx(10.0)
+        assert stats["RmsNorm"]["count"] == 1
+
+    def test_aicpu_skipped(self, tmp_path):
+        csv_path = tmp_path / "prof.csv"
+        csv_path.write_text(
+            "Type,Duration(us),Start Time(us),Input Shapes\n"
+            'allgatherAicpuKernel,200.0,1000.0,""\n'
+            'MatMulV2,50.0,2000.0,""\n'
+        )
+        from generate_op_comparison import parse_profiling_by_type
+
+        stats = parse_profiling_by_type(str(csv_path))
+        assert "allgatherAicpuKernel" not in stats
+        assert "MatMulV2" in stats
+
+
+class TestResolveKernelType:
+    def test_resolve_via_op_mapping(self):
+        import yaml
+        from generate_op_comparison import resolve_kernel_type
+
+        mapping = yaml.safe_load("aten.mm: {kernel_type: MatMulV2}")
+        assert resolve_kernel_type("aten.mm", mapping) == "MatMulV2"
+        assert resolve_kernel_type("unknown.op", mapping) is None
+
+
+class TestIsZeroCost:
+    def test_zero_cost_op(self):
+        import yaml
+        from generate_op_comparison import is_zero_cost
+
+        mapping = yaml.safe_load("aten.view: {zero_cost: true}\naten.add: {}")
+        assert is_zero_cost("aten.view", mapping) is True
+        assert is_zero_cost("aten.add", mapping) is False
+        assert is_zero_cost("unknown", mapping) is False
+
+
+class TestLoadOpMapping:
+    def test_missing_file_returns_empty(self, tmp_path):
+        from generate_op_comparison import load_op_mapping
+
+        result = load_op_mapping(str(tmp_path / "nonexistent"))
+        assert result == {}
+
+
+class TestExtractTcEdgeCases:
+    def test_partial_status(self, tmp_path):
+        trace = _make_trace(
+            tmp_path,
+            [
+                _x_event("aten.mm.default", 20, kernel_type="MatMulV2", source="MEASURED"),
+            ],
+        )
+        stats = extract_tc_from_chrome_trace(trace, OP_MAPPING)
+        assert "MatMulV2" in stats
+        assert stats["MatMulV2"]["hit_count"] == 1
+
+    def test_miss_only_status(self, tmp_path):
+        trace = _make_trace(
+            tmp_path,
+            [
+                _x_event("aten.add.Tensor", 5, source=""),
+                _x_event("aten.add.Tensor", 3, source=""),
+            ],
+        )
+        stats = extract_tc_from_chrome_trace(trace, OP_MAPPING)
+        assert "aten.add.Tensor" in stats
+        assert stats["aten.add.Tensor"]["miss_count"] == 2
+        assert stats["aten.add.Tensor"]["hit_count"] == 0
+
+    def test_non_x_events_ignored(self, tmp_path):
+        trace = _make_trace(
+            tmp_path,
+            [
+                {
+                    "name": "process_name",
+                    "ph": "M",
+                    "pid": 1,
+                    "args": {"name": "profiling"},
+                },
+                _x_event("aten.mm", 20, kernel_type="MatMulV2", source="MEASURED", pid=1),
+            ],
+        )
+        stats = extract_tc_from_chrome_trace(trace, OP_MAPPING)
+        assert stats["MatMulV2"]["count"] == 1
+
+
+class TestBuildComparison:
+    def test_basic(self, tmp_path):
+        from generate_op_comparison import build_comparison
+
+        m6_path = tmp_path / "m6.json"
+        m6_path.write_text(json.dumps({"m6_ratio": 0.95}))
+
+        tc_path = tmp_path / "tc.json"
+        tc_path.write_text(
+            json.dumps(
+                {
+                    "traceEvents": [
+                        _x_event("aten.mm", 20, kernel_type="MatMulV2", source="MEASURED"),
+                    ]
+                }
+            )
+        )
+
+        prof_path = tmp_path / "prof.csv"
+        prof_path.write_text(
+            "Type,Duration(us),Start Time(us),Input Shapes\nMatMulV2,50.0,1000.0,\"\"\nRmsNorm,10.0,2000.0,\"\"\n"
+        )
+
+        scenario = {
+            "name": "test",
+            "m6": str(m6_path),
+            "tc_trace": str(tc_path),
+            "trace_csv": str(prof_path),
+        }
+        rows = build_comparison(scenario, OP_MAPPING)
+        assert len(rows) >= 2
+        mm_row = next(r for r in rows if r["kernel_type"] == "MatMulV2")
+        assert mm_row["tc_total_us"] == pytest.approx(20.0)
+        assert mm_row["prof_per_fwd_us"] == pytest.approx(50.0)
