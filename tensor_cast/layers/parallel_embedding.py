@@ -28,6 +28,7 @@ class ParallelEmbedding(ModelWrapperBase):
         self._vocab_size = self.num_embeddings
         self._row_start = 0
         self._row_end = self._vocab_size
+        self._orig_padding_idx = embedding.padding_idx
         self.create_weights()
 
     def create_weights(self):
@@ -40,6 +41,13 @@ class ParallelEmbedding(ModelWrapperBase):
             block_size = self._inner.weight.shape[0]
             self._row_start = self.tp_rank * block_size
             self._row_end = min(self._row_start + block_size, self._vocab_size)
+            orig_padding_idx = self._orig_padding_idx
+            if orig_padding_idx is not None and orig_padding_idx < 0:
+                orig_padding_idx = self._vocab_size + orig_padding_idx
+            if orig_padding_idx is not None and self._row_start <= orig_padding_idx < self._row_end:
+                self._inner.padding_idx = orig_padding_idx - self._row_start
+            else:
+                self._inner.padding_idx = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.tp_size == 1:
