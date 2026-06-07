@@ -5,103 +5,178 @@ from __future__ import annotations
 import json
 import logging
 import urllib.request
+from typing import TYPE_CHECKING, Any, Final
 
-FEISHU_TIMEOUT_SEC = 10
+if TYPE_CHECKING:
+    from scripts.helpers.nightly.report_models import FeishuReportInput, PhaseBreakdownEntry
+
+FEISHU_TIMEOUT_SEC: Final = 10
+_TRUNCATED_LIST_LIMIT: Final = 10
+_FAILED_CASES_LIMIT: Final = 20
 
 logger = logging.getLogger(__name__)
 
 
-def build_feishu_payload(
-    *,
-    timestamp: str,
-    branch: str,
-    commit: str,
-    passed: int,
-    failed: int,
-    duration_sec: float,
-    coverage_line_percent: float | None,
-    coverage_branch_percent: float | None,
-    coverage_line_threshold: float | None,
-    coverage_branch_threshold: float | None,
-    coverage_gate_passed: bool | None,
-    test_map_source_files: int,
-    test_map_symbols: int,
-    test_map_written: bool,
-    failed_cases: tuple[str, ...],
-    first_error: str,
-    weak_coverage_symbols: tuple[str, ...] = (),
-    redundancy_warnings: tuple[dict[str, object], ...] = (),
-    expired_exemption_section: str = "",
-    phase_breakdown: tuple[dict[str, object], ...] = (),
-    slowest_tests: tuple[tuple[str, float], ...] = (),
-    drift_warnings: tuple[str, ...] = (),
-) -> dict:
-    """Build Feishu text message payload dict. Does not send."""
-    status = "All passed" if failed == 0 else f"{failed} failed"
+def _format_duration(duration_sec: float) -> str:
+    return f"{duration_sec:.0f}s" if duration_sec >= 0 else "n/a"
+
+
+def _build_nightly_status(report: FeishuReportInput) -> str:
+    total_failures = report.failed + report.errors
+    if report.overall_exit == 0 and total_failures == 0:
+        return "All passed"
+    if total_failures > 0:
+        return f"{total_failures} failed"
+    return f"FAILED (pytest exit {report.overall_exit}, no JUnit testcase data)"
+
+
+def _render_summary_header(report: FeishuReportInput, status: str) -> list[str]:
     lines = [
-        f"Nightly Report — {timestamp[:10]}",
-        f"Branch: {branch} | Commit: {commit}",
+        f"Nightly Report — {report.timestamp[:10]}",
+        f"Branch: {report.branch} | Commit: {report.commit}",
         f"Result: {status}",
-        f"Passed: {passed} | Failed: {failed} | Duration: {duration_sec:.0f}s",
+        (
+            f"Passed: {report.passed} | Failed: {report.failed} | Errors: {report.errors} "
+            f"| Duration: {_format_duration(report.duration_sec)}"
+        ),
     ]
-    if phase_breakdown:
-        lines.append("\nPer-phase:")
-        for phase in phase_breakdown:
-            lines.append(
-                f"- {phase['label']}: passed {phase['passed']} / failed {phase['failed']} "
-                f"/ {float(phase['duration_sec']):.0f}s"
-            )
-    if slowest_tests:
-        lines.append(f"\nSlowest tests (top {len(slowest_tests)}):")
-        for node_id, seconds in slowest_tests:
-            lines.append(f"- {seconds:.1f}s {node_id}")
-    if coverage_line_percent is not None and coverage_branch_percent is not None:
-        cov_status = "PASS" if coverage_gate_passed else "BELOW THRESHOLD"
-        lines.append(
-            f"Coverage ({cov_status}): line {coverage_line_percent:.1f}% "
-            f"(>={coverage_line_threshold:.0f}%) | branch {coverage_branch_percent:.1f}% "
-            f"(>={coverage_branch_threshold:.0f}%)"
+    if report.overall_exit != 0:
+        lines.append(f"Overall exit code: {report.overall_exit}")
+    return lines
+
+
+def _render_phase_line(phase: PhaseBreakdownEntry) -> str:
+    line = f"- {phase.label}: passed {phase.passed} / failed {phase.failed} / {_format_duration(phase.duration_sec)}"
+    if phase.exit_code != 0:
+        line += f" (exit {phase.exit_code})"
+    if phase.infra_failure:
+        line += " — no JUnit details"
+    return line
+
+
+def _render_phase_breakdown(phases: tuple[PhaseBreakdownEntry, ...]) -> list[str]:
+    if not phases:
+        return []
+    lines = ["\nPer-phase:"]
+    lines.extend(_render_phase_line(phase) for phase in phases)
+    return lines
+
+
+def _render_slowest_tests(slowest_tests: tuple[tuple[str, float], ...]) -> list[str]:
+    if not slowest_tests:
+        return []
+    lines = [f"\nSlowest tests (top {len(slowest_tests)}):"]
+    lines.extend(f"- {seconds:.1f}s {node_id}" for node_id, seconds in slowest_tests)
+    return lines
+
+
+def _render_coverage_section(report: FeishuReportInput) -> list[str]:
+    if report.coverage_line_percent is None or report.coverage_branch_percent is None:
+        return []
+    cov_status = "PASS" if report.coverage_gate_passed else "BELOW THRESHOLD"
+    return [
+        (
+            f"Coverage ({cov_status}): line {report.coverage_line_percent:.1f}% "
+            f"(>={report.coverage_line_threshold:.0f}%) | branch {report.coverage_branch_percent:.1f}% "
+            f"(>={report.coverage_branch_threshold:.0f}%)"
         )
-    if test_map_written:
-        lines.append(f"Test map: {test_map_source_files} files / {test_map_symbols} symbols (updated)")
-    else:
-        lines.append("Test map: not updated (UT phase failed)")
-    if weak_coverage_symbols:
-        lines.append(f"\nWeak coverage symbols ({len(weak_coverage_symbols)}):")
-        for sym in weak_coverage_symbols[:10]:
-            lines.append(f"- {sym}")
-        if len(weak_coverage_symbols) > 10:
-            lines.append(f"- ... and {len(weak_coverage_symbols) - 10} more")
-    if redundancy_warnings:
-        over_covered = [w for w in redundancy_warnings if w.get("type") == "over_covered_symbol"]
-        redundant_pairs = [w for w in redundancy_warnings if w.get("type") == "redundant_pair"]
-        if over_covered:
-            lines.append(f"\nOver-covered symbols ({len(over_covered)}):")
-            for w in over_covered[:10]:
-                lines.append(f"- {w['symbol']} ({w['test_count']} tests, threshold {w['threshold']})")
-            if len(over_covered) > 10:
-                lines.append(f"- ... and {len(over_covered) - 10} more")
-        if redundant_pairs:
-            lines.append(f"\nRedundant test pairs ({len(redundant_pairs)}):")
-            for w in redundant_pairs[:10]:
-                lines.append(f"- {w['test_a']} / {w['test_b']} (Jaccard={w['jaccard']:.2f})")
-            if len(redundant_pairs) > 10:
-                lines.append(f"- ... and {len(redundant_pairs) - 10} more")
-    if expired_exemption_section:
-        lines.append(expired_exemption_section)
-    if drift_warnings:
-        lines.append(f"\nConfig drift ({len(drift_warnings)}):")
-        for warning in drift_warnings[:10]:
-            lines.append(f"- {warning}")
-        if len(drift_warnings) > 10:
-            lines.append(f"- ... and {len(drift_warnings) - 10} more")
-    if failed_cases:
-        lines.append("\nFailed cases:")
-        lines.extend(f"- {case}" for case in failed_cases[:20])
-        if len(failed_cases) > 20:
-            lines.append(f"- ... and {len(failed_cases) - 20} more")
-    if first_error:
-        lines.append(f"\nFirst error: {first_error}")
+    ]
+
+
+def _render_test_map_line(report: FeishuReportInput) -> list[str]:
+    if report.test_map_written:
+        return [f"Test map: {report.test_map_source_files} files / {report.test_map_symbols} symbols (updated)"]
+    return ["Test map: not updated (UT phase failed)"]
+
+
+def _render_truncated_bullets(title: str, items: tuple[str, ...], *, limit: int) -> list[str]:
+    if not items:
+        return []
+    lines = [title]
+    lines.extend(f"- {item}" for item in items[:limit])
+    remaining = len(items) - limit
+    if remaining > 0:
+        lines.append(f"- ... and {remaining} more")
+    return lines
+
+
+def _render_weak_coverage(symbols: tuple[str, ...]) -> list[str]:
+    if not symbols:
+        return []
+    return _render_truncated_bullets(
+        f"\nWeak coverage symbols ({len(symbols)}):",
+        symbols,
+        limit=_TRUNCATED_LIST_LIMIT,
+    )
+
+
+def _render_redundancy_warnings(warnings: tuple[dict[str, object], ...]) -> list[str]:
+    if not warnings:
+        return []
+    lines: list[str] = []
+    over_covered = [warning for warning in warnings if warning.get("type") == "over_covered_symbol"]
+    redundant_pairs = [warning for warning in warnings if warning.get("type") == "redundant_pair"]
+
+    if over_covered:
+        lines.append(f"\nOver-covered symbols ({len(over_covered)}):")
+        lines.extend(
+            f"- {warning['symbol']} ({warning['test_count']} tests, threshold {warning['threshold']})"
+            for warning in over_covered[:_TRUNCATED_LIST_LIMIT]
+        )
+        remaining = len(over_covered) - _TRUNCATED_LIST_LIMIT
+        if remaining > 0:
+            lines.append(f"- ... and {remaining} more")
+
+    if redundant_pairs:
+        lines.append(f"\nRedundant test pairs ({len(redundant_pairs)}):")
+        lines.extend(
+            f"- {warning['test_a']} / {warning['test_b']} (Jaccard={warning['jaccard']:.2f})"
+            for warning in redundant_pairs[:_TRUNCATED_LIST_LIMIT]
+        )
+        remaining = len(redundant_pairs) - _TRUNCATED_LIST_LIMIT
+        if remaining > 0:
+            lines.append(f"- ... and {remaining} more")
+    return lines
+
+
+def _render_drift_warnings(warnings: tuple[str, ...]) -> list[str]:
+    if not warnings:
+        return []
+    return _render_truncated_bullets(f"\nConfig drift ({len(warnings)}):", warnings, limit=_TRUNCATED_LIST_LIMIT)
+
+
+def _render_failed_cases(failed_cases: tuple[str, ...]) -> list[str]:
+    if not failed_cases:
+        return []
+    lines = ["\nFailed cases:"]
+    lines.extend(f"- {case}" for case in failed_cases[:_FAILED_CASES_LIMIT])
+    remaining = len(failed_cases) - _FAILED_CASES_LIMIT
+    if remaining > 0:
+        lines.append(f"- ... and {remaining} more")
+    return lines
+
+
+def _render_first_error(first_error: str) -> list[str]:
+    if not first_error:
+        return []
+    return [f"\nFirst error: {first_error}"]
+
+
+def build_feishu_payload(report: FeishuReportInput) -> dict[str, Any]:
+    """Build Feishu text message payload dict. Does not send."""
+    status = _build_nightly_status(report)
+    lines = _render_summary_header(report, status)
+    lines.extend(_render_phase_breakdown(report.phase_breakdown))
+    lines.extend(_render_slowest_tests(report.slowest_tests))
+    lines.extend(_render_coverage_section(report))
+    lines.extend(_render_test_map_line(report))
+    lines.extend(_render_weak_coverage(report.weak_coverage_symbols))
+    lines.extend(_render_redundancy_warnings(report.redundancy_warnings))
+    if report.expired_exemption_section:
+        lines.append(report.expired_exemption_section)
+    lines.extend(_render_drift_warnings(report.drift_warnings))
+    lines.extend(_render_failed_cases(report.failed_cases))
+    lines.extend(_render_first_error(report.first_error))
 
     return {
         "msg_type": "text",
@@ -125,7 +200,7 @@ def _parse_feishu_response(body: str) -> None:
     logger.info("Feishu push accepted: code=%s msg=%s", code, msg)
 
 
-def push_feishu(webhook_url: str, payload: dict) -> None:
+def push_feishu(webhook_url: str, payload: dict[str, Any]) -> None:
     """Send payload to Feishu webhook. Non-blocking on failure."""
     data = json.dumps(payload).encode()
     req = urllib.request.Request(

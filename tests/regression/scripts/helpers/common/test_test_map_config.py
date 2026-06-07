@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from scripts.helpers._config import Config, ConfigError
 from scripts.helpers.common.test_map_config import CONFIG_FILE_NAMES, is_config_path, resolve_test_map_path
 
@@ -120,6 +121,10 @@ def test_is_config_path_conftest_returns_true() -> None:
     assert is_config_path("tests/conftest.py") is True
 
 
+def test_is_config_path_subdirectory_conftest_returns_true() -> None:
+    assert is_config_path("tests/regression/web_ui/conftest.py") is True
+
+
 @pytest.mark.parametrize("fname", sorted(CONFIG_FILE_NAMES))
 def test_is_config_path_config_filenames_return_true(fname: str) -> None:
     assert is_config_path(fname) is True
@@ -131,3 +136,7 @@ def test_is_config_path_source_file_returns_false() -> None:
 
 def test_is_config_path_test_file_returns_false() -> None:
     assert is_config_path("tests/smoke/test_x.py") is False
+
+
+def test_is_config_path_tests_prefix_without_conftest_returns_false() -> None:
+    assert is_config_path("tests/helpers/foo.py") is False

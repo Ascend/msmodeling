@@ -115,7 +115,7 @@ Map keys must be repository-relative product source paths under prefixes defined
 
 Redundancy warnings are consumed by the nightly pipeline and surfaced through Feishu notifications. They are advisory and do not block CI.
 
-**Coverage and pytest-xdist**: `scripts/helpers/common/coverage_config.py` exposes `pytest_xdist_args()` (`-n auto`) and `cov_pytest_args()` (product `--cov`, `--cov-branch`, optional `--cov-context=test`). `[tool.coverage.run] parallel = true` in `pyproject.toml` lets each xdist worker write an independent data file; pytest-cov combines them into `.coverage` after the run. Nightly phase 1 and ci_gate phase 0 (new/modified tests) use these flags; `build_test_map` and nightly `check_ut_gate` read the merged file — do not invoke `coverage run -m pytest` manually alongside xdist.
+**Coverage and pytest-xdist**: `scripts/helpers/common/coverage_config.py` exposes `pytest_xdist_args()` (`-n auto --dist=worksteal`) and `cov_pytest_args()` (product `--cov`, `--cov-branch`, optional `--cov-context=test`). `[tool.coverage.run] parallel = true` in `pyproject.toml` lets each xdist worker write an independent data file; pytest-cov combines them into `.coverage` after the run. Nightly phase 1 and ci_gate phase 0 (new/modified tests) use these flags; `build_test_map` and nightly `check_ut_gate` read the merged file — do not invoke `coverage run -m pytest` manually alongside xdist.
 
 **gate_policy contract**
 
@@ -145,7 +145,7 @@ Change classification covers configuration files, added or removed tests, added 
 
 | Phenomenon | Incremental Behavior |
 |---|------------|
-| Configuration change under `tests/.ci/`, `tests/conftest.py`, or standard CI config filenames | Full `tests/smoke/` and `tests/regression/` with marker `not npu and not nightly and not network` |
+| Configuration change under `tests/.ci/`, any `tests/**/conftest.py`, or standard CI config filenames | Full `tests/smoke/` and `tests/regression/` with marker `not npu and not nightly and not network` |
 | New product source file | Block when top-level symbols lack `test_map` entries and are not exempt |
 | New test file | Execute only the new test paths |
 | Removed product source file | Execute all mapped node ids; block when mapping is missing |
@@ -167,7 +167,7 @@ Deleted-source guard tests run in a first pytest phase when present. Incremental
 
 ### Step 4: Hub Connectivity and Session Cache
 
-`tests/conftest.py` applies Hub offline flags when `MSMODELING_OFFLINE=1`. Cache directories default to `.msmodeling_cache`. After the session, weight shards under that directory are removed when `MSMODELING_TEST_WEIGHTS_PRUNE=1`.
+`tests/conftest.py` applies Hub offline flags when `MSMODELING_OFFLINE=1`. Subdirectory `conftest.py` files must not mutate `sys.modules` for product packages at import time; `tests/smoke/test_conftest_hygiene.py` guards against cross-suite pollution. Cache directories default to `.msmodeling_cache`. After the session, weight shards under that directory are removed when `MSMODELING_TEST_WEIGHTS_PRUNE=1`.
 
 `scripts/lib/common.sh` sets Hub-related defaults before pytest starts: `MSMODELING_HF_TRUST_REMOTE_CODE_TIMEOUT=0` and `MSMODELING_MODELSCOPE_CONFIG_ONLY=1`.
 
@@ -416,7 +416,7 @@ The complete environment variable list lives in `tests/README.md`. The design do
 | `load_baseline(repo_root, cfg)` | Mandatory | Loads external `test_map` and repository `gate_policy.yaml` exemptions |
 | `resolve_base_ref(repo_root, branch)` | Mandatory | Returns merge-base SHA |
 | `classify_changes(repo_root, base_ref, diff)` | Mandatory | Returns `ChangeSet` from git name-status and line map |
-| `pytest_xdist_args()` | Mandatory | Returns `["-n", "auto"]` for all coverage pytest invocations |
+| `pytest_xdist_args()` | Mandatory | Returns `["-n", "auto", "--dist=worksteal"]` for all coverage pytest invocations |
 | `cov_pytest_args(cov_context=…)` | Mandatory | Product `--cov` flags; requires `[tool.coverage.run] parallel = true` with xdist |
 | `build_test_map(output_path, marker_expr)` | Mandatory | Reads merged `.coverage` after `--cov-context=test` run; writes external JSON |
 | `check_ut_gate(config=GateConfig)` | Mandatory | Reads repo-root `.coverage` (post-combine); returns `(passed, message)`; used by nightly |

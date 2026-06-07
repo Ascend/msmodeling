@@ -29,6 +29,9 @@ TESTS_SMOKE="${PROJECT_DIR}/tests/smoke"
 TESTS_REGRESSION="${PROJECT_DIR}/tests/regression"
 TESTS_BENCHMARK="${PROJECT_DIR}/tests/benchmark"
 
+# pytest-xdist: worksteal balances workers when case durations vary widely.
+PYTEST_XDIST_ARGS=(-n auto --dist=worksteal)
+
 export PYTHONPATH="${PROJECT_DIR}"
 
 # Determine if uv should be used (cache the result)

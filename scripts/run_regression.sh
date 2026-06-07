@@ -11,7 +11,7 @@
 #   UV_INDEX_URL                       custom UV package index URL
 #   HF_ENDPOINT                        custom HuggingFace endpoint URL
 #
-# Pytest: tests/regression/, -m "not npu and not network" (includes nightly), -n auto, -q --tb=short.
+# Pytest: tests/regression/, -m "not npu and not network" (includes nightly), -n auto --dist=worksteal, -q --tb=short.
 set -euo pipefail
 
 export MSMODELING_TEST_WEIGHTS_PRUNE="${MSMODELING_TEST_WEIGHTS_PRUNE:-0}"
@@ -23,7 +23,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 run_pytest "${TESTS_REGRESSION}/" \
   -m "not npu and not network" \
-  -n auto \
+  "${PYTEST_XDIST_ARGS[@]}" \
   -q \
   --no-header \
   --tb=short \

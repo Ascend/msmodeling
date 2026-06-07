@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+from scripts.helpers.nightly.pytest_parser import NightlyRunStats
 from scripts.helpers.nightly.report_builder import (
+    build_phase_breakdown,
     compute_weak_coverage_symbols,
     fetch_env_info,
     load_test_map_summary,
+    resolve_first_error,
 )
+from scripts.helpers.nightly.report_models import PhaseBreakdownEntry
 from tests.helpers.fake_subprocess import FakeCompleted
 
 # ---------------------------------------------------------------------------
@@ -21,7 +29,7 @@ from tests.helpers.fake_subprocess import FakeCompleted
 def test_fetch_env_info_returns_commit_and_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _fake_run(cmd, **_kwargs):
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
         if "rev-parse" in cmd:
             return FakeCompleted(0, "abc1234\n", "")
         if "--show-current" in cmd:
@@ -101,8 +109,8 @@ def test_load_test_map_summary_map_not_dict_returns_zeroes(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_compute_weak_coverage_symbols_returns_empty_when_no_test_map() -> None:
-    result = compute_weak_coverage_symbols(None, Path("/tmp/.coverage"))
+def test_compute_weak_coverage_symbols_returns_empty_when_no_test_map(tmp_path: Path) -> None:
+    result = compute_weak_coverage_symbols(None, tmp_path / ".coverage")
     assert result == ()
 
 
@@ -133,3 +141,42 @@ def test_compute_weak_coverage_symbols_returns_empty_when_no_coverage_data(
         assert result == ()
     finally:
         monkeypatch_local.undo()
+
+
+# ---------------------------------------------------------------------------
+# build_phase_breakdown / resolve_first_error
+# ---------------------------------------------------------------------------
+
+
+def test_build_phase_breakdown_marks_missing_junit_with_infra_failure(
+    tmp_path: Path,
+) -> None:
+    entries = build_phase_breakdown(
+        ("phase1 (test_map UT)",),
+        (tmp_path / "missing.xml",),
+        (1,),
+    )
+    assert entries == (
+        PhaseBreakdownEntry(
+            label="phase1 (test_map UT)",
+            passed=0,
+            failed=0,
+            duration_sec=-1.0,
+            exit_code=1,
+            infra_failure=True,
+        ),
+    )
+
+
+def test_resolve_first_error_falls_back_to_phase_log(tmp_path: Path) -> None:
+    log_path = tmp_path / "phase1.log"
+    log_path.write_text("collecting ...\nE   ValueError: duplicate config name\n", encoding="utf-8")
+    stats = NightlyRunStats(
+        passed=0,
+        failed=0,
+        errors=0,
+        duration_sec=-1.0,
+        failed_cases=(),
+        first_error="",
+    )
+    assert resolve_first_error(stats, (1,), (log_path,)) == "ValueError: duplicate config name"

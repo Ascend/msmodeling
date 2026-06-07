@@ -5,7 +5,7 @@
 #   MSMODELING_TEST_WEIGHTS_PRUNE      session weight cleanup (default: 0)
 #   MSMODELING_OFFLINE                 Hub offline mode (default: 0)
 #   MSMODELING_CACHE                   optional repo-local Hub cache (unset = use ~/.cache like develop)
-#   MSMODELING_BENCHMARK_PARALLEL      set to 1 for pytest -n auto (default: 0)
+#   MSMODELING_BENCHMARK_PARALLEL      set to 1 for pytest -n auto --dist=worksteal (default: 0)
 #   PYTHON                             absolute path to interpreter; if unset, uses uv or python3
 #
 # Optional (not set by default):
@@ -24,7 +24,7 @@ source "${SCRIPT_DIR}/lib/common.sh"
 
 JOBS=()
 if [[ "${MSMODELING_BENCHMARK_PARALLEL:-0}" == "1" ]]; then
-  JOBS=(-n auto)
+  JOBS=("${PYTEST_XDIST_ARGS[@]}")
 fi
 
 BENCHMARK_TARGET="${TESTS_BENCHMARK}/ops/"

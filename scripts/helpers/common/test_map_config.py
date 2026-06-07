@@ -46,6 +46,6 @@ def is_config_path(path: str) -> bool:
     """Return True if *path* is a CI config file that triggers full-suite."""
     if path.startswith("tests/.ci/"):
         return True
-    if path == "tests/conftest.py":
+    if path.startswith("tests/") and path.endswith("/conftest.py"):
         return True
     return path.rsplit("/", 1)[-1] in CONFIG_FILE_NAMES

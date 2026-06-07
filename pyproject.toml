@@ -33,7 +33,7 @@ dependencies = [
     "strenum>=0.4.15",
     "torch>=2.7,<=2.10",
     "torchvision>=0.25.0",
-    "transformers>=5.3.0,<=5.8.0",
+    "transformers>=5.3.0,<5.8.0",
 ]
 
 # Test tools ###################################################################
@@ -57,7 +57,6 @@ filterwarnings = [
 parallel = true
 branch = true
 omit = [
-    "*/test_*.py",
     "*/tests/*",
     "*/__pycache__/*",
     "*/.pytest_cache/*",

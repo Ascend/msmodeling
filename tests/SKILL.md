@@ -19,7 +19,7 @@ Generate structurally correct test cases that conform to the msmodeling three-la
 ## When NOT to Use
 
 - User asks to modify production source code under `cli/`, `serving_cast/`, `tensor_cast/`, `web_ui/`, or `scripts/helpers/` — this skill only generates test code under `tests/`
-- User asks to change `pyproject.toml`, `conftest.py`, or shell scripts — out of scope
+- User asks to change `pyproject.toml`, `conftest.py`, or shell scripts — out of scope (see **conftest hygiene** below if the user only needs guidance)
 - User asks to debug a failing test — this skill generates new cases, not triage
 - User asks to generate mock data, model weights, or asset files — only test `.py` or benchmark `.json` files
 - User asks to generate tests for third-party libraries or external dependencies — only msmodeling product code
@@ -120,6 +120,19 @@ from tests.regression.tensor_cast.conftest import get_session_model, get_session
 
 **Always use these** instead of calling `build_model()` inside each test function.
 
+### `conftest.py` Hygiene
+
+When the user asks for mocks, torch avoidance, or a new `conftest.py` under a regression subdirectory:
+
+| Do | Do not |
+|----|--------|
+| Use fixture-scoped `monkeypatch` / `@patch` in the test file | Set `sys.modules["tensor_cast"] = MagicMock()` (or similar) at conftest import time |
+| Rely on real `torch` / `tensor_cast` (project dependencies) | Assume web_ui or CLI tests can mock product packages globally |
+| Add directory-local fixtures only | Add `pytest_plugins` in a subdirectory conftest (only valid in `tests/conftest.py`) |
+| Mention that `tests/**/conftest.py` changes trigger CI full suite | Expect incremental CI gate to catch cross-directory pollution from conftest alone |
+
+Regression guard: `tests/smoke/test_conftest_hygiene.py`. Root `pytest_plugins` in `tests/conftest.py` shares `tensor_cast` / `serving_cast` fixtures across layers — that is separate from import mocking.
+
 ## Templates
 
 ### Smoke Test
@@ -212,6 +225,8 @@ class Test<Feature>Nightly(unittest.TestCase):
 - **Do not** hardcode model weights or file paths — use `tests/assets/model_config/` for configs and `create_user_config()` for construction
 - **Do not** generate tests for third-party library internals — only test msmodeling product code
 - **Do not** skip the smoke guard when generating a nightly test — every `@pytest.mark.nightly` case must have a corresponding smoke counterpart
+- **Do not** generate conftest code that mutates `sys.modules` for `tensor_cast`, `serving_cast`, or other product packages at import time
+- **Do not** suggest `pytest_plugins` in subdirectory conftest files — register cross-layer fixtures only in `tests/conftest.py`
 
 ## Checklist (verify before outputting)
 
@@ -220,4 +235,5 @@ class Test<Feature>Nightly(unittest.TestCase):
 - [ ] Shared helpers used (no copy-paste of builder/assertion logic)
 - [ ] Session fixtures used for model construction in regression
 - [ ] If `@pytest.mark.nightly`, a smoke guard is mentioned or co-generated
-- [ ] New product symbols are covered or noted for `gate_policy.json`
+- [ ] No generated conftest uses module-level `sys.modules` mocks for product packages
+- [ ] New product symbols are covered or noted for `gate_policy.yaml`

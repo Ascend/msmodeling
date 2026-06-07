@@ -54,4 +54,4 @@ def test_cov_args_both_context_and_append() -> None:
 
 
 def test_pytest_xdist_args() -> None:
-    assert pytest_xdist_args() == ["-n", "auto"]
+    assert pytest_xdist_args() == ["-n", "auto", "--dist=worksteal"]

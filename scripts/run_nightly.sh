@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scheduled nightly: multi-phase UT + test_map refresh + benchmark + network + Feishu report.
-# Phase 1: smoke/regression -m "not npu and not nightly and not network" (-n auto, coverage) → test_map on pass.
+# Phase 1: smoke/regression -m "not npu and not nightly and not network" (-n auto --dist=worksteal, coverage) → test_map on pass.
 # Phase 2a: smoke/regression -m "not npu and nightly and not network".
 # Phase 2b: benchmark (remaining full suite).
 # Phase 2c: tests/ -m "not npu and network" (real model Hub cases) + non-blocking config drift check.
@@ -12,7 +12,7 @@
 #   MSMODELING_TEST_WEIGHTS_PRUNE      session weight cleanup (default: 0)
 #   MSMODELING_OFFLINE                 Hub offline mode (default: 0)
 #   MSMODELING_CACHE                   optional repo-local Hub cache (unset = use ~/.cache like develop)
-#   MSMODELING_BENCHMARK_PARALLEL      set to 1 for benchmark -n auto (default: 0)
+#   MSMODELING_BENCHMARK_PARALLEL      set to 1 for benchmark -n auto --dist=worksteal (default: 0)
 #   MSMODELING_TEST_LINE_THRESHOLD     coverage report line % (default: 60)
 #   MSMODELING_TEST_BRANCH_THRESHOLD   coverage report branch % (default: 40)
 #   FEISHU_WEBHOOK_URL                 Feishu webhook (optional)

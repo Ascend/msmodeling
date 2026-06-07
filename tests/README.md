@@ -30,16 +30,16 @@ The repository root **`scripts/`** provides CI entry points. Implementation live
 
 | Entry | When | What runs |
 |-------|------|-----------|
-| `bash scripts/run_ci_gate.sh` | PR `compile` comment | Incremental smoke+regression via external `test_map`; marker `not npu and not nightly and not network`; `-n auto` |
-| `bash scripts/run_smoke.sh` | Local; CI `/run_tests smoke` | Full `tests/smoke/`, `-m "not npu and not network"` (includes nightly), `-n auto` |
+| `bash scripts/run_ci_gate.sh` | PR `compile` comment | Incremental smoke+regression via external `test_map`; marker `not npu and not nightly and not network`; `-n auto --dist=worksteal` |
+| `bash scripts/run_smoke.sh` | Local; CI `/run_tests smoke` | Full `tests/smoke/`, `-m "not npu and not network"` (includes nightly), `-n auto --dist=worksteal` |
 | `bash scripts/run_regression.sh` | Local; CI `/run_tests regression` | Full `tests/regression/`, same as smoke |
 | `bash scripts/run_benchmark.sh` | Local; CI `/run_tests benchmark` | Full `tests/benchmark/`, `-m "not npu and not network"` |
-| `bash scripts/run_nightly.sh` | Scheduled CI only | Phase 1 UT (`not npu and not nightly and not network`) `-n auto` + `--cov` → refresh `test_map` → Phase 2a nightly → Phase 2b benchmark → Phase 2c network (live Hub) → config drift check → report; 60/40 coverage thresholds |
+| `bash scripts/run_nightly.sh` | Scheduled CI only | Phase 1 UT (`not npu and not nightly and not network`) `-n auto --dist=worksteal` + `--cov` → refresh `test_map` → Phase 2a nightly → Phase 2b benchmark → Phase 2c network (live Hub) → config drift check → report; 60/40 coverage thresholds |
 
 **Local:** always full smoke/regression (no external test_map).
 **CI incremental:** requires `MSMODELING_TEST_MAP_PATH` pointing to a JSON file on the runner (maintained by nightly).
 
-**Coverage + xdist:** Nightly phase 1 and ci_gate phase 0 (new or modified test files) use `-n auto` with `--cov` and `--cov-context=test`. `[tool.coverage.run] parallel = true` in `pyproject.toml`; pytest-cov merges worker fragments into repo-root `.coverage` for `build_test_map` and nightly coverage totals.
+**Coverage + xdist:** Nightly phase 1 and ci_gate phase 0 (new or modified test files) use `-n auto --dist=worksteal` with `--cov` and `--cov-context=test`. Worksteal scheduling helps when case durations vary widely. `[tool.coverage.run] parallel = true` in `pyproject.toml`; pytest-cov merges worker fragments into repo-root `.coverage` for `build_test_map` and nightly coverage totals.
 
 **Nightly phases:** `run_nightly.sh` runs four pytest phases in order — Phase 1 (`not npu and not nightly and not network`, with coverage + `test_map`), Phase 2a (`not npu and nightly and not network`), Phase 2b (benchmark), Phase 2c (`not npu and network`, real model Hub, run serially). After Phase 2c a **non-blocking config drift check** compares vendored remote configs under `tests/assets/model_config/` against the live Hub and surfaces any mismatch as a report warning without failing the run. When `FEISHU_WEBHOOK_URL` is set, each phase's pytest output is captured to a per-phase log file and the **console is kept quiet** (the detailed report rides the Feishu card instead); the phase breakdown, slowest tests, and drift warnings are rendered into that card.
 
@@ -99,7 +99,7 @@ Boolean types: **`0`**/**`1`**/**`true`**/**`false`**/**`yes`**/**`no`**/**`on`*
 | `MSMODELING_TEST_LINE_THRESHOLD` | Optional | `60` | nightly | Line coverage report threshold (%) |
 | `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | `40` | nightly | Branch coverage report threshold (%) |
 | `MSMODELING_TEST_WEIGHTS_PRUNE` | Optional | `0` | all `run_*.sh` | Prune Hub weights after session |
-| `MSMODELING_BENCHMARK_PARALLEL` | Optional | `0` | `run_benchmark.sh`, nightly benchmark phase | `1` → pytest `-n auto` |
+| `MSMODELING_BENCHMARK_PARALLEL` | Optional | `0` | `run_benchmark.sh`, nightly benchmark phase | `1` → pytest `-n auto --dist=worksteal` |
 | `FEISHU_WEBHOOK_URL` | Optional | — | nightly | Feishu webhook (includes coverage summary) |
 | `PYTHON` | Optional | — | `common.sh` | Python interpreter override |
 | `PRE_COMMIT_LLM_FILTER` | Optional | unset | pre-commit hooks | `1` → compact LLM-friendly hook output via `pre-commit/llm_render.py` |
@@ -153,6 +153,24 @@ All `run_*.sh` scripts source `common.sh`, which runs `uv sync --frozen --group 
 | `fake_subprocess.py` | `FakeCompleted(returncode, stdout, stderr)` | Minimal `subprocess.CompletedProcess` stand-in for tests that monkeypatch `subprocess.run`. |
 
 Self-tests live under `tests/helpers/tests/`.
+
+---
+
+## `conftest.py` Rules
+
+Pytest loads every `tests/**/conftest.py` during collection. Side effects at **import time** leak across the whole suite (including unrelated directories and xdist workers).
+
+| Rule | Why |
+|------|-----|
+| **Never** assign `sys.modules["tensor_cast"]` (or other product packages) in a conftest | Replaces real modules with mocks → `tensor_cast.__spec__ is not set`, pickle failures in other layers |
+| Use **fixture-scoped** `monkeypatch` / `@patch` in individual tests when isolation is needed | Scope stays inside one test |
+| Put `pytest_plugins = (...)` only in **`tests/conftest.py`** | Subdirectory `pytest_plugins` is invalid; root registration shares fixtures across smoke/regression |
+| Subdirectory conftest is for **directory-local fixtures** only | No global import hacks; project already depends on `torch` |
+| Any change under `tests/**/conftest.py` triggers **CI full smoke+regression** | See `is_config_path()` in `scripts/helpers/common/test_map_config.py` |
+
+Guard test: `tests/smoke/test_conftest_hygiene.py` — loads conftest modules like pytest and asserts `tensor_cast.__spec__` stays valid.
+
+Cross-layer fixtures (`tensor_cast` / `serving_cast` session caches) are registered in root `tests/conftest.py` via `pytest_plugins`, not by mocking imports in leaf conftests.
 
 ---
 
@@ -231,6 +249,7 @@ PYTHONPATH=. python -m pytest tests/smoke/ tests/regression/ \
 - [ ] Shared helpers used where applicable (no copy-paste of builder/assertion logic)
 - [ ] Session fixtures used for model construction in regression (no per-function rebuilds)
 - [ ] If `@pytest.mark.nightly` is added, a corresponding smoke guard exists under `tests/smoke/`
+- [ ] New or edited `conftest.py` has no module-level `sys.modules` / global mocks (see **`conftest.py` Rules** above)
 - [ ] New product symbols are covered or listed in `tests/.ci/gate_policy.yaml`
 - [ ] Local smoke + regression pass before push
 

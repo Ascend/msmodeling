@@ -18,7 +18,7 @@ COV_PACKAGES: Final[tuple[str, ...]] = tuple(p.rstrip("/") for p in PRODUCT_SOUR
 
 def pytest_xdist_args() -> list[str]:
     """pytest-xdist parallelism; safe with pytest-cov when ``[tool.coverage.run] parallel`` is set."""
-    return ["-n", "auto"]
+    return ["-n", "auto", "--dist=worksteal"]
 
 
 def cov_pytest_args(*, cov_context: bool = False, append: bool = False) -> list[str]:
