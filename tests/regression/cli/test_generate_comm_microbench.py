@@ -20,6 +20,7 @@ Tests are split into two categories:
 # pylint: disable=no-name-in-module
 import csv
 import inspect
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -609,3 +610,271 @@ class TestMainNoDoRun:
         assert exc_info.value.code == 1
         captured = capsys.readouterr()
         assert "--do-run is required" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Shell entry point: run_comm_bench.sh multi-node dispatch
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash stub (chmod 0o755 + #!/bin/bash) is not portable to Windows CI",
+)
+class TestRunCommBenchShellMultiNode:
+    """Smoke test for the multi-node (inter-pod) branch of run_comm_bench.sh.
+
+    The shell script is a thin dispatcher; this single test asserts the
+    NNODES>=2 path actually calls torchrun with the expected multi-node
+    flags and forwards --topology-tier 0 to the Python script.
+
+    Strategy: stub torchrun on PATH to record argv, then inspect calls.
+    """
+
+    def test_multinode_dispatches_inter_pod_torchrun(self, tmp_path):
+        import os
+        import subprocess
+        import textwrap
+
+        repo_root = Path(__file__).resolve().parents[3]
+        script = repo_root / "tools" / "perf_data_collection" / "comm_bench" / "run_comm_bench.sh"
+
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        log_file = tmp_path / "torchrun.log"
+        stub = stub_dir / "torchrun"
+        stub.write_text(
+            textwrap.dedent(f"""\
+                #!/bin/bash
+                for a in "$@"; do
+                    printf '%s\\n' "$a" >> "{log_file}"
+                done
+                printf '%s\\n' '---END---' >> "{log_file}"
+                exit 0
+            """)
+        )
+        stub.chmod(0o755)
+
+        env = os.environ.copy()
+        env["PATH"] = f"{stub_dir}:{env['PATH']}"
+        env.update(
+            {
+                "NNODES": "2",
+                "NODE_RANK": "1",
+                "MASTER_ADDR": "127.0.0.1",
+                "QUICK": "1",  # 5-point grid, keeps stub log small
+            }
+        )
+
+        proc = subprocess.run(
+            ["bash", str(script), str(tmp_path / "out")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+        # Recover per-call argv from stub log.
+        calls, current = [], []
+        for line in log_file.read_text().splitlines():
+            if line == "---END---":
+                if current:
+                    calls.append(current)
+                current = []
+            else:
+                current.append(line)
+
+        # 3 rounds (allReduce / allGather+reduceScatter / alltoallv).
+        assert len(calls) == 3, f"expected 3 inter-pod rounds, got {len(calls)}"
+
+        for argv in calls:
+            # Multi-node torchrun flags
+            assert "--nnodes=2" in argv
+            assert "--node_rank=1" in argv
+            assert "--master_addr=127.0.0.1" in argv
+            # Inter-pod marker forwarded to the Python script
+            assert "--topology-tier" in argv
+            assert argv[argv.index("--topology-tier") + 1] == "0"
+            # World size = NNODES * NPROC = 2 * 16
+            assert argv[argv.index("--num-devices") + 1] == "32"
+
+    def test_multinode_aborts_when_world_size_below_min_group(self, tmp_path):
+        """world_size < 32 yields an empty ND_LIST; the script must abort.
+
+        Regression for the case NPROC=1, NNODES=2 (world_size=2): the
+        reachable-group loop starts at 32, so ND_LIST is empty and a bare
+        ``--num-devices`` would otherwise be forwarded to torchrun. The
+        guard must exit non-zero with a clear error and never call torchrun.
+        """
+        import os
+        import subprocess
+        import textwrap
+
+        repo_root = Path(__file__).resolve().parents[3]
+        script = repo_root / "tools" / "perf_data_collection" / "comm_bench" / "run_comm_bench.sh"
+
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        log_file = tmp_path / "torchrun.log"
+        stub = stub_dir / "torchrun"
+        stub.write_text(
+            textwrap.dedent(f"""\
+                #!/bin/bash
+                printf 'CALLED\\n' >> "{log_file}"
+                exit 0
+            """)
+        )
+        stub.chmod(0o755)
+
+        env = os.environ.copy()
+        env["PATH"] = f"{stub_dir}:{env['PATH']}"
+        env.update(
+            {
+                "NNODES": "2",
+                "NODE_RANK": "0",
+                "MASTER_ADDR": "127.0.0.1",
+                "NPROC": "1",  # world_size = 2 * 1 = 2 < 32 -> empty ND_LIST
+            }
+        )
+
+        proc = subprocess.run(
+            ["bash", str(script), str(tmp_path / "out")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "empty device list" in proc.stderr
+        assert "WORLD_SIZE=2" in proc.stderr
+        # torchrun must never be invoked when the device list is empty.
+        assert not log_file.exists(), "torchrun was called despite empty ND_LIST"
+
+    def test_multinode_nd_list_scales_past_legacy_ceiling(self, tmp_path):
+        """ND_LIST is generated dynamically up to WORLD_SIZE, not capped at 768.
+
+        Regression for the hardcoded ``32 64 128 256 384 512 768`` sequence:
+        a 1024-rank cluster must collect a 1024 group, and the list forwarded
+        to ``--num-devices`` must be ascending, unique, and bounded by
+        WORLD_SIZE (no value above it).
+        """
+        import os
+        import subprocess
+        import textwrap
+
+        repo_root = Path(__file__).resolve().parents[3]
+        script = repo_root / "tools" / "perf_data_collection" / "comm_bench" / "run_comm_bench.sh"
+
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        log_file = tmp_path / "torchrun.log"
+        stub = stub_dir / "torchrun"
+        stub.write_text(
+            textwrap.dedent(f"""\
+                #!/bin/bash
+                for a in "$@"; do
+                    printf '%s\\n' "$a" >> "{log_file}"
+                done
+                printf '%s\\n' '---END---' >> "{log_file}"
+                exit 0
+            """)
+        )
+        stub.chmod(0o755)
+
+        env = os.environ.copy()
+        env["PATH"] = f"{stub_dir}:{env['PATH']}"
+        env.update(
+            {
+                "NNODES": "64",  # world_size = 64 * 16 = 1024 > legacy 768 ceiling
+                "NODE_RANK": "0",
+                "MASTER_ADDR": "127.0.0.1",
+                "QUICK": "1",
+            }
+        )
+
+        proc = subprocess.run(
+            ["bash", str(script), str(tmp_path / "out")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+        argv = log_file.read_text().splitlines()
+        start = argv.index("--num-devices") + 1
+        end = argv.index("--topology-tier")
+        nd = [int(x) for x in argv[start:end]]
+
+        # Dynamic generation: powers of 2 from 32 to 1024 plus 384/768.
+        assert nd == [32, 64, 128, 256, 384, 512, 768, 1024], nd
+        # Explicitly proves the legacy 768 cap was removed.
+        assert max(nd) == 1024
+        # Bounded by WORLD_SIZE, ascending, no duplicates.
+        assert all(v <= 1024 for v in nd)
+        assert nd == sorted(nd)
+        assert len(nd) == len(set(nd))
+
+    def test_multinode_port_is_base_plus_round_index(self, tmp_path):
+        """Each round's --master_port is MASTER_PORT base + round index (1..3).
+
+        Regression for the fragile ``MASTER_PORT=$((MASTER_PORT+1))`` outer-var
+        mutation: ports must be derived from base + idx so the dispatch is
+        subshell-safe and the three rounds use distinct, ordered ports.
+        """
+        import os
+        import subprocess
+        import textwrap
+
+        repo_root = Path(__file__).resolve().parents[3]
+        script = repo_root / "tools" / "perf_data_collection" / "comm_bench" / "run_comm_bench.sh"
+
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir()
+        log_file = tmp_path / "torchrun.log"
+        stub = stub_dir / "torchrun"
+        stub.write_text(
+            textwrap.dedent(f"""\
+                #!/bin/bash
+                for a in "$@"; do
+                    printf '%s\\n' "$a" >> "{log_file}"
+                done
+                printf '%s\\n' '---END---' >> "{log_file}"
+                exit 0
+            """)
+        )
+        stub.chmod(0o755)
+
+        env = os.environ.copy()
+        env["PATH"] = f"{stub_dir}:{env['PATH']}"
+        env.update(
+            {
+                "NNODES": "2",
+                "NODE_RANK": "0",
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": "30000",
+                "QUICK": "1",
+            }
+        )
+
+        proc = subprocess.run(
+            ["bash", str(script), str(tmp_path / "out")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+        calls, current = [], []
+        for line in log_file.read_text().splitlines():
+            if line == "---END---":
+                if current:
+                    calls.append(current)
+                current = []
+            else:
+                current.append(line)
+
+        ports = [a.split("=", 1)[1] for c in calls for a in c if a.startswith("--master_port=")]
+        # Round i (i=1..3) -> base + i, distinct and ordered.
+        assert ports == ["30001", "30002", "30003"], ports
