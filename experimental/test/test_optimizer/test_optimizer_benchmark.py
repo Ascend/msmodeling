@@ -19,9 +19,11 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch, MagicMock
 import pytest
-from msguard import GlobalConfig
-from ms_serviceparam_optimizer.config.config import PerformanceIndex, get_settings
-from ms_serviceparam_optimizer.optimizer.plugins.benchmark import parse_result, VllmBenchMark
+from experimental.optix.config.config import PerformanceIndex, get_settings
+from experimental.optix.optimizer.plugins.benchmark import (
+    parse_result,
+    VllmBenchMark,
+)
 
 
 settings = get_settings()
@@ -98,7 +100,7 @@ def results_per_request_file(tmpdir):
 
 
 class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
-    @patch("ms_serviceparam_optimizer.config.custom_command.shutil.which")
+    @patch("experimental.optix.config.custom_command.shutil.which")
     def setUp(self, mock_which):
         # Create a mock benchmark_config object
         self.mock_benchmark_config = MagicMock()
@@ -120,7 +122,7 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
             "completed": 10,
             "request_throughput": 4.0,
         }
-        with open(self.json_path, 'w', encoding='utf-8') as f:
+        with open(self.json_path, "w", encoding="utf-8") as f:
             json.dump(json_data, f)
 
     def tearDown(self):
@@ -128,7 +130,6 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
         shutil.rmtree(self.test_dir)
 
     def test_get_performance_index_normal(self):
-        GlobalConfig.custom_return = True
         """Test the get_performance_index method in normal case"""
 
         # Call the method
@@ -141,5 +142,3 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
         self.assertEqual(result.time_per_output_token, 0.14)
         self.assertEqual(result.success_rate, 1.0)
         self.assertEqual(result.throughput, 4.0)
-
-        GlobalConfig.reset()

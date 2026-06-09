@@ -25,17 +25,15 @@ from ..common import get_train_sub_path, is_mindie, is_vllm
 from ..config.base_config import REAL_EVALUATION
 from ..config.config import (
     get_settings,
+    DecodeContext,
     PerformanceIndex,
     OptimizerConfigField,
     map_param_with_value,
-    CommunicationConfig,
     ErrorSeverity,
-    DecodeContext,
 )
 from ..config.base_config import FOLDER_LIMIT_SIZE, REQUESTRATES
 from ..config.constant import Stage
-from ..optimizer.communication import CommunicationForFile, CustomCommand
-from ..optimizer.plugins.simulate import Simulator, DisaggregationSimulator
+from ..optimizer.plugins.simulate import Simulator
 from ..optimizer.store import DataStorage
 from ..optimizer.utils import get_folder_size
 from ..optimizer.health_check import (
@@ -185,7 +183,7 @@ class Scheduler:
                 if self.benchmark.check_success():
                     return
             if hasattr(self.simulator, "health"):
-                if not isinstance(self.simulator, (DisaggregationSimulator, Simulator)):
+                if not isinstance(self.simulator, Simulator):
                     res = self.simulator.health()
                     if res.stage != Stage.running:
                         raise subprocess.SubprocessError(
@@ -274,7 +272,7 @@ class Scheduler:
         self,
         params: np.ndarray,
         params_field: Tuple[OptimizerConfigField],
-        decode_context: Optional['DecodeContext'] = None,
+        decode_context: Optional[DecodeContext] = None,
     ) -> PerformanceIndex:
         """
         1. Start mindie simulation
@@ -310,7 +308,7 @@ class Scheduler:
         self,
         params: np.ndarray,
         params_field: Tuple[OptimizerConfigField],
-        decode_context: Optional['DecodeContext'] = None,
+        decode_context: Optional[DecodeContext] = None,
     ) -> PerformanceIndex:
         """
         Run the service: first run at max concurrency to get request rate,
@@ -339,7 +337,10 @@ class Scheduler:
             if not need_second_run:
                 logger.info("REQUESTRATE is fixed (min == max), skipping second run.")
             else:
-                logger.info("second run param info {}", {v.name: v.value for v in self.simulate_run_info})
+                logger.info(
+                    "second run param info {}",
+                    {v.name: v.value for v in self.simulate_run_info},
+                )
                 if hasattr(self.benchmark, "data_field"):
                     self.benchmark.data_field = params_field
                 self.benchmark.update_command()
@@ -368,63 +369,3 @@ class Scheduler:
             self.error_info = e
             self.del_log = False
         return self.performance_index
-
-
-class ScheduleWithMultiMachine(Scheduler):
-    def __init__(self, communication_config: CommunicationConfig, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.communication_config = communication_config
-        self.communication = CommunicationForFile(
-            self.communication_config.cmd_file,
-            self.communication_config.res_file,
-        )
-        self.cmd = CustomCommand()
-        _cmd = self.cmd.init
-        self.communication.send_command(_cmd)
-        self.communication.clear_command(_cmd)
-
-    def set_back_up_path(self):
-        if self.bak_path:
-            if get_folder_size(self.bak_path) > FOLDER_LIMIT_SIZE:
-                self.simulator.bak_path = None
-                self.benchmark.bak_path = None
-            else:
-                _cur_bak_path = get_train_sub_path(self.bak_path)
-                self.simulator.bak_path = _cur_bak_path
-                self.benchmark.bak_path = _cur_bak_path
-                _cmd = f"{self.cmd.backup} params:{_cur_bak_path}"
-                self.communication.send_command(_cmd)
-                self.communication.clear_command(_cmd)
-
-    def monitoring_status(self):
-        logger.debug("Start monitoring")
-        while True:
-            _cmd = self.cmd.process_poll
-            self.communication.send_command(_cmd)
-            all_poll = [self.simulator.process.poll(), self.communication.clear_command(_cmd)]
-            if any(_i is not None for _i in all_poll):
-                self.stop_target_server(del_log=False)
-                raise subprocess.SubprocessError(f"Failed in run simulator. all status: {all_poll}.")
-            if self.benchmark.check_success():
-                return
-            time.sleep(1)
-
-    def run_simulate(self, params: np.ndarray, params_field: Tuple[OptimizerConfigField]):
-        self.benchmark.prepare()
-        _cmd = f"{self.cmd.start} params:{params.tolist()}"
-        self.cmd.history = _cmd
-        self.communication.send_command(_cmd)
-        self.communication.clear_command(_cmd)
-        self.simulator.run(tuple(self.simulate_run_info))
-        self.wait_simulate()
-        _cmd = self.cmd.check_success
-        self.cmd.history = _cmd
-        self.communication.send_command(_cmd)
-        self.communication.clear_command(_cmd)
-
-    def stop_target_server(self, del_log: bool = True):
-        super().stop_target_server(del_log)
-        _cmd = f"{self.cmd.stop} params:{del_log}"
-        self.communication.send_command(_cmd)
-        self.communication.clear_command(_cmd)
-        self.cmd.history = _cmd

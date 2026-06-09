@@ -106,7 +106,12 @@ class HealthCheckHook:
         self._hooks: Dict[Enum, List[Tuple[int, Callable, str]]] = {}
 
     def register(
-        self, hook_point: Enum, func: Optional[Callable] = None, *, priority: int = 0, name: Optional[str] = None
+        self,
+        hook_point: Enum,
+        func: Optional[Callable] = None,
+        *,
+        priority: int = 0,
+        name: Optional[str] = None,
     ):
         """Register hook function (implemented in base class, subclasses directly inherit)"""
 
@@ -161,7 +166,7 @@ class ServiceHealthChecks:
     @staticmethod
     def check_log_errors(context: HealthCheckContext) -> HealthCheckResult:
         """Check error messages in logs"""
-        if not hasattr(context.simulator, 'get_last_log'):
+        if not hasattr(context.simulator, "get_last_log"):
             return HealthCheckResult(is_healthy=True)
         settings = get_settings()
         config = settings.health_check.service_errors
@@ -195,7 +200,7 @@ class BenchmarkHealthChecks:
     @staticmethod
     def check_log_errors(context: HealthCheckContext) -> HealthCheckResult:
         """Check error messages in benchmark logs"""
-        if not hasattr(context.benchmark, 'get_last_log'):
+        if not hasattr(context.benchmark, "get_last_log"):
             return HealthCheckResult(is_healthy=True)
         settings = get_settings()
         config = settings.health_check.benchmark_errors

@@ -19,7 +19,7 @@ from typing import Optional
 
 import numpy as np
 from loguru import logger
-from msguard.security import open_s
+from ..io_utils import open_file
 from ..common import get_npu_total_memory
 from ..config.config import get_settings
 
@@ -29,20 +29,20 @@ class ModelConfig:
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path!r}")
         try:
-            with open_s(config_path, 'r', encoding='utf-8') as f:
+            with open_file(config_path, "r", encoding="utf-8") as f:
                 config_data = json.load(f)
         except json.JSONDecodeError as e:
             raise ValueError(f"The JSON format of the configuration file '{config_path!r}' is invalid") from e
         except Exception as e:
             raise IOError(f"An error occurred while reading the configuration file '{config_path!r}'") from e
         logger.debug(f"Successfully loaded configuration file: {config_path!r} ")
-        self.hidden_size = self._get_required_param(config_data, 'hidden_size')
-        self.intermediate_size = self._get_required_param(config_data, 'intermediate_size')
-        self.num_attention_heads = self._get_required_param(config_data, 'num_attention_heads')
-        self.num_hidden_layers = self._get_required_param(config_data, 'num_hidden_layers')
-        self.num_key_value_heads = self._get_required_param(config_data, 'num_key_value_heads')
-        self.vocab_size = self._get_required_param(config_data, 'vocab_size')
-        self.max_position_embeddings = self._get_required_param(config_data, 'max_position_embeddings')
+        self.hidden_size = self._get_required_param(config_data, "hidden_size")
+        self.intermediate_size = self._get_required_param(config_data, "intermediate_size")
+        self.num_attention_heads = self._get_required_param(config_data, "num_attention_heads")
+        self.num_hidden_layers = self._get_required_param(config_data, "num_hidden_layers")
+        self.num_key_value_heads = self._get_required_param(config_data, "num_key_value_heads")
+        self.vocab_size = self._get_required_param(config_data, "vocab_size")
+        self.max_position_embeddings = self._get_required_param(config_data, "max_position_embeddings")
         self.kvcache_dtype_byte = self._get_kvcache_dtype_byte(config_data)
         logger.debug(f"kvcache_dtype_byte: {self.kvcache_dtype_byte}")
 
@@ -75,14 +75,14 @@ class ModelConfig:
 
     @staticmethod
     def _get_kvcache_dtype_byte(config_data: dict) -> int:
-        dtype_str = config_data.get('torch_dtype') or config_data.get('dtype')
+        dtype_str = config_data.get("torch_dtype") or config_data.get("dtype")
         if dtype_str:
             dtype_str = str(dtype_str).lower()
-            if '16' in dtype_str:  # e.g., "fp16", "bfloat16", "float16"
+            if "16" in dtype_str:  # e.g., "fp16", "bfloat16", "float16"
                 return 2
-            elif 'int8' in dtype_str:
+            elif "int8" in dtype_str:
                 return 1
-            elif '32' in dtype_str:  # e.g., "fp32", "float32"
+            elif "32" in dtype_str:  # e.g., "fp32", "float32"
                 return 4
             else:
                 logger.warning(f"Unrecognized dtype: '{dtype_str}'. kvcache_dtype_byte defaults to 2 (bf16/fp16).")
@@ -169,7 +169,7 @@ class MindieModelConfig:
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path!r}")
         try:
-            with open_s(config_path, 'r', encoding='utf-8') as f:
+            with open_file(config_path, "r", encoding="utf-8") as f:
                 self.config_data = json.load(f)
         except json.JSONDecodeError as e:
             raise ValueError(f"The JSON format of the configuration file '{config_path!r}' is invalid") from e
@@ -185,11 +185,17 @@ class MindieModelConfig:
         _model_path = Path(self.config_data["BackendConfig"]["ModelDeployConfig"]["ModelConfig"][0]["modelWeightPath"])
         self.model_config = ModelConfig(_model_path.joinpath("config.json"))
         self.byte_to_gb = 1024 * 1024 * 1024
-        self.tp_size = max(1, self.config_data["BackendConfig"]["ModelDeployConfig"]["ModelConfig"][0].get("tp", 1))
+        self.tp_size = max(
+            1,
+            self.config_data["BackendConfig"]["ModelDeployConfig"]["ModelConfig"][0].get("tp", 1),
+        )
         if npu_total_mem is None and memory_usage_rate is None:
             self.npu_total_mem, self.memory_usage_rate = get_npu_total_memory(self.npu_device_ids[0][0])
         else:
-            self.npu_total_mem, self.memory_usage_rate = npu_total_mem, memory_usage_rate
+            self.npu_total_mem, self.memory_usage_rate = (
+                npu_total_mem,
+                memory_usage_rate,
+            )
         self.mem_for_kv_cache_gb = self.get_npu_mem_size()
         self.mem_for_kv_cache = self.mem_for_kv_cache_gb * self.byte_to_gb
         logger.debug(f"mem_for_kv_cache_gb, {self.mem_for_kv_cache_gb}")
@@ -205,7 +211,8 @@ class MindieModelConfig:
         model_weights_gb_per_npu = self.model_config.calculate_model_weights_size() / 1024 / self.tp_size
         activation_gb = (
             self.model_config.get_peak_activations_size(
-                max_prefill_token=self.max_prefill_tokens, sequence_length=self.max_input_length
+                max_prefill_token=self.max_prefill_tokens,
+                sequence_length=self.max_input_length,
             )
             / self.byte_to_gb
             / self.tp_size

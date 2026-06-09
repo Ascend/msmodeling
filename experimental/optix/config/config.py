@@ -28,23 +28,30 @@ from typing import Any, List, Tuple, Type, Optional, Union, Dict
 import numpy as np
 from loguru import logger
 from pydantic import BaseModel, field_validator, Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict, PydanticBaseSettingsSource, TomlConfigSettingsSource
-from msguard.security import open_s, mkdir_s
+from pydantic_settings import (
+    BaseSettings,
+    SettingsConfigDict,
+    PydanticBaseSettingsSource,
+    TomlConfigSettingsSource,
+)
 from ..common import is_vllm, is_mindie, ais_bench_exists
+from ..io_utils import open_file
 from ..config.custom_command import (
     VllmBenchmarkCommandConfig,
     MindieCommandConfig,
     VllmCommandConfig,
     AisBenchCommandConfig,
-    KubectlCommandConfig,
 )
 
 from . import base_config
-from .base_config import INSTALL_PATH, RUN_PATH, ServiceType, ms_serviceparam_optimizer_config_path
+from .base_config import (
+    INSTALL_PATH,
+    RUN_PATH,
+    ServiceType,
+    ms_serviceparam_optimizer_config_path,
+)
 
-BenchMarkPolicy = base_config.BenchMarkPolicy
 CUSTOM_OUTPUT = base_config.CUSTOM_OUTPUT
-DeployPolicy = base_config.DeployPolicy
 MODEL_EVAL_STATE_CONFIG_PATH = base_config.MODEL_EVAL_STATE_CONFIG_PATH
 
 
@@ -528,7 +535,14 @@ def _update_ternary_factories_field(field, i, params_field, simulate_run_info, d
     )
     if needs_repair:
         if not _repair_ternary_factories_with_priority(
-            field, simulate_run_info, params_field, product, min_value, max_value, conv, context=decode_context
+            field,
+            simulate_run_info,
+            params_field,
+            product,
+            min_value,
+            max_value,
+            conv,
+            context=decode_context,
         ):
             repaired = False
             if min_value is not None and result_value < min_value:
@@ -608,7 +622,7 @@ def update_optimizer_value(
     params_field: Tuple[OptimizerConfigField, ...],
     simulate_run_info: Tuple[OptimizerConfigField, ...],
     support_select_is_false,
-    decode_context: Optional['DecodeContext'] = None,
+    decode_context: Optional["DecodeContext"] = None,
 ):
     """
     Post-process and assign derived field values in simulate_run_info based on inter-field dependencies.
@@ -660,7 +674,9 @@ def update_optimizer_value(
 
 
 def map_param_with_value(
-    params: np.ndarray, params_field: Tuple[OptimizerConfigField, ...], decode_context: Optional['DecodeContext'] = None
+    params: np.ndarray,
+    params_field: Tuple[OptimizerConfigField, ...],
+    decode_context: Optional["DecodeContext"] = None,
 ):
     _simulate_run_info = []
     _support_select_is_false = False
@@ -720,7 +736,12 @@ def map_param_with_value(
                 _field.value = params[i]
         i += 1
         _simulate_run_info.append(_field)
-    update_optimizer_value(params_field, tuple(_simulate_run_info), _support_select_is_false, decode_context)
+    update_optimizer_value(
+        params_field,
+        tuple(_simulate_run_info),
+        _support_select_is_false,
+        decode_context,
+    )
     return _simulate_run_info
 
 
@@ -793,12 +814,6 @@ class PerformanceIndex(BaseModel):
     throughput: Optional[float] = None
 
 
-class CommunicationConfig(BaseModel):
-    base_path: Path = Path("communication")
-    cmd_file: Optional[Path] = Field(default_factory=lambda data: data["base_path"].joinpath("cmd.txt").resolve())
-    res_file: Optional[Path] = Field(default_factory=lambda data: data["base_path"].joinpath("res.txt").resolve())
-
-
 class DataStorageConfig(BaseModel):
     store_dir: Path = Path("store")
     pso_top_k: int = 3
@@ -813,20 +828,21 @@ class DataStorageConfig(BaseModel):
 class LatencyModel(BaseModel):
     base_path: Path = Path("latency_model")
     model_path: Optional[Path] = Field(
-        default_factory=lambda data: data["base_path"].joinpath("bak/base/xgb_model.ubj").resolve()
+        default_factory=lambda data: (data["base_path"].joinpath("bak/base/xgb_model.ubj").resolve())
     )
     static_file_dir: Optional[Path] = Field(
-        default_factory=lambda data: data["base_path"].joinpath("model_static_file").resolve(), validate_default=True
+        default_factory=lambda data: (data["base_path"].joinpath("model_static_file").resolve()),
+        validate_default=True,
     )
     req_and_decode_file: Optional[Path] = Field(
-        default_factory=lambda data: data["base_path"].joinpath("req_id_and_decode_num.json").resolve()
+        default_factory=lambda data: (data["base_path"].joinpath("req_id_and_decode_num.json").resolve())
     )
     cache_data: Optional[Path] = Field(default_factory=lambda data: data["base_path"].joinpath("cache").resolve())
 
     @field_validator("base_path", "cache_data", "static_file_dir")
     @classmethod
     def create_path(cls, path: Path) -> Path:
-        mkdir_s(path)
+        path.mkdir(parents=True, exist_ok=True)
         return path
 
 
@@ -854,34 +870,6 @@ class MindieConfig(BaseModel):
     config_bak_path: Path = Field(default_factory=lambda: _get_mindie_config_paths()[1])
     command: MindieCommandConfig = MindieCommandConfig()
     target_field: List[OptimizerConfigField] = default_support_field
-
-
-class KubectlConfig(BaseModel):
-    process_name: str = ""
-    kubectl_default_path: Path = Path("")
-    kubectl_single_path: Optional[Path] = Field(
-        default_factory=lambda data: data["kubectl_default_path"].joinpath("deploy.sh").resolve()
-    )
-    config_single_path: Optional[Path] = Field(
-        default_factory=lambda data: data["kubectl_default_path"].joinpath("conf/config.json").resolve()
-    )
-    config_single_pd_path: Optional[Path] = Field(
-        default_factory=lambda data: data["kubectl_default_path"].joinpath("conf/ms_controller.json").resolve()
-    )
-    config_single_pd_bak_path: Optional[Path] = Field(
-        default_factory=lambda data: data["kubectl_default_path"].joinpath("conf/ms_controller_bak.json").resolve()
-    )
-    config_single_bak_path: Optional[Path] = Field(
-        default_factory=lambda data: data["kubectl_default_path"].joinpath("conf/config_bak.json").resolve()
-    )
-    delete_path: Optional[Path] = Field(
-        default_factory=lambda data: data["kubectl_default_path"].joinpath("delete.sh").resolve()
-    )
-    work_path: Path = Field(default_factory=lambda: Path(os.getcwd()).resolve())
-    command: KubectlCommandConfig = Field(
-        default_factory=lambda data: KubectlCommandConfig(kubectl_default_path=data["kubectl_default_path"])
-    )
-    target_field: List[OptimizerConfigField] = Field(default_factory=list)
 
 
 class AisBenchConfig(BaseModel):
@@ -932,7 +920,10 @@ class ErrorPatternConfig(BaseModel):
     """Error pattern configuration - 3-tier design: ErrorType -> patterns -> severity"""
 
     fatal_patterns: Dict[ErrorType, List[str]] = Field(
-        default_factory=lambda: {ErrorType.OUT_OF_MEMORY: [], ErrorType.DEVICE_ERROR: []}
+        default_factory=lambda: {
+            ErrorType.OUT_OF_MEMORY: [],
+            ErrorType.DEVICE_ERROR: [],
+        }
     )
     retryable_patterns: Dict[ErrorType, List[str]] = Field(
         default_factory=lambda: {ErrorType.NETWORK_ERROR: [], ErrorType.IO_ERROR: []}
@@ -945,7 +936,8 @@ class HealthCheckConfig(BaseModel):
     service_errors: ErrorPatternConfig = Field(default_factory=ErrorPatternConfig)
     benchmark_errors: ErrorPatternConfig = Field(
         default_factory=lambda: ErrorPatternConfig(
-            fatal_patterns={}, retryable_patterns={ErrorType.NETWORK_ERROR: [], ErrorType.IO_ERROR: []}
+            fatal_patterns={},
+            retryable_patterns={ErrorType.NETWORK_ERROR: [], ErrorType.IO_ERROR: []},
         )
     )
     log_snippet_length: int = 50
@@ -970,7 +962,10 @@ class Settings(BaseSettings):
         env_prefix="model_eval_state_",
     )
 
-    output: Path = Field(default_factory=lambda: Path(os.getcwd()).joinpath("result").resolve(), validate_default=True)
+    output: Path = Field(
+        default_factory=lambda: Path(os.getcwd()).joinpath("result").resolve(),
+        validate_default=True,
+    )
     simulator_output: Path = Field(default_factory=lambda data: data["output"].joinpath("simulator").resolve())
     pso_options: PsoOptions = PsoOptions()
     pso_strategy: PsoStrategy = PsoStrategy()
@@ -995,22 +990,17 @@ class Settings(BaseSettings):
     step_size: float = 0.6
     theory_guided_enable: bool = True
     service: str = ServiceType.master.value
-    communication: CommunicationConfig = Field(
-        default_factory=lambda data: CommunicationConfig(base_path=data["output"].joinpath("communication")),
-        validate_default=True,
-    )
     latency_model: LatencyModel = Field(
         default_factory=lambda data: LatencyModel(base_path=data["output"].joinpath("latency_model")),
         validate_default=True,
     )
     vllm: VllmConfig = Field(
-        default_factory=lambda data: VllmConfig(output=data["output"].joinpath("vllm")), validate_default=True
+        default_factory=lambda data: VllmConfig(output=data["output"].joinpath("vllm")),
+        validate_default=True,
     )
     mindie: MindieConfig = Field(
-        default_factory=lambda data: MindieConfig(output=data["output"].joinpath("mindie")), validate_default=True
-    )
-    kubectl: KubectlConfig = Field(
-        default_factory=lambda data: KubectlConfig(output=data["output"].joinpath("k8s")), validate_default=True
+        default_factory=lambda data: MindieConfig(output=data["output"].joinpath("mindie")),
+        validate_default=True,
     )
     ais_bench: AisBenchConfig = AisBenchConfig()
 
@@ -1032,7 +1022,12 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> Tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings, env_settings, TomlConfigSettingsSource(settings_cls), file_secret_settings)
+        return (
+            init_settings,
+            env_settings,
+            TomlConfigSettingsSource(settings_cls),
+            file_secret_settings,
+        )
 
     @field_validator("output", "simulator_output")
     @classmethod
@@ -1087,7 +1082,7 @@ class Settings(BaseSettings):
         if not self.mindie.config_path.exists():
             logger.error(f"File Not Found. file: {self.mindie.config_path!r}")
             return self
-        with open_s(self.mindie.config_path, "r") as f:
+        with open_file(self.mindie.config_path, "r") as f:
             try:
                 json.load(f)
             except json.decoder.JSONDecodeError as e:

@@ -20,8 +20,7 @@ from pathlib import Path
 import psutil
 from loguru import logger
 
-from msguard import Rule
-from msguard.security import walk_s
+from ..io_utils import walk_files
 
 
 def remove_file(output_path: Path):
@@ -86,14 +85,10 @@ def backup(target, bak, class_name="", max_depth=10, current_depth=0):
 
     new_file = bak.joinpath(class_name).joinpath(target.name)
     if target.is_file():
-        if not Rule.input_file_read.is_satisfied_by(target):
-            return
         new_file.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
         if not new_file.exists():
             shutil.copy(target, new_file)
     else:
-        if not Rule.input_dir_traverse.is_satisfied_by(target):
-            return
         if new_file.exists():
             for child in new_file.iterdir():
                 backup(child, new_file, class_name, max_depth, current_depth + 1)
@@ -105,7 +100,7 @@ def close_file_fp(file_fp):
     if not file_fp:
         return
     try:
-        if hasattr(file_fp, 'close'):
+        if hasattr(file_fp, "close"):
             file_fp.close()
         else:
             os.close(file_fp)
@@ -118,7 +113,7 @@ def get_folder_size(folder_path: Path) -> int:
     if not folder.exists():
         return 0
     total_size = 0
-    for file_path in walk_s(folder):
+    for file_path in walk_files(folder):
         if os.path.isfile(file_path):
             total_size += os.path.getsize(file_path)
 
@@ -157,4 +152,4 @@ def get_required_field_from_json(data, key, max_depth=20, current_depth=0):
 
 
 def is_root():
-    return os.name != 'nt' and os.getuid() == 0  # pylint: disable=E1101
+    return os.name != "nt" and os.getuid() == 0  # pylint: disable=E1101

@@ -15,60 +15,16 @@
 # -------------------------------------------------------------------------
 
 import subprocess
-from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Tuple
 import importlib.util
 import shutil
 import pandas as pd
 from loguru import logger
-from msguard import validate_params, Rule
+from .io_utils import ensure_existing_file
 
 
-_PREFILL = "prefill"
-_DECODE = "decode"
 _KEY_WORD = "H" + "B" + "M"
-
-
-class StateType(Enum):
-    DEFAULT = 0
-    LINE = 1
-
-
-@dataclass
-class State:
-    prefill: int = 0
-    decode: int = 0
-    batch_prefill: int = 0
-    batch_decode: int = 0
-
-    def __repr__(self):
-        return f"TT_{self.prefill}_{self.decode}_{self.batch_prefill}_{self.batch_decode}"
-
-    def __hash__(self):
-        return hash(self.__repr__())
-
-    def __eq__(self, other):
-        return self.__repr__() == other.__repr__()
-
-    def __ne__(self, other):
-        return self.__repr__() != other.__repr__()
-
-    def sum(self):
-        return self.prefill + self.decode + self.batch_prefill + self.batch_decode
-
-
-def computer_speed(line_node, field):
-    if getattr(line_node, field) == 0:
-        return 1
-    return 1 / (getattr(line_node, field) * 10**-3)
-
-
-def computer_speed_with_second(line_node, field):
-    if getattr(line_node, field) == 0:
-        return 1
-    return 1 / (getattr(line_node, field) * 10**-6)
 
 
 def get_train_sub_path(base_path: Path):
@@ -81,48 +37,9 @@ def get_train_sub_path(base_path: Path):
     return _sub_dir
 
 
-def update_global_coefficient(global_coefficient: Dict, key: State, value: float) -> None:
-    if key not in global_coefficient:
-        global_coefficient[key] = [value]
-    else:
-        global_coefficient[key].append(value)
-
-
-def get_module_version(module_name):
-    try:
-        # Method 1: direct import
-        import importlib
-
-        module = importlib.import_module(module_name)
-        if hasattr(module, "__version__"):
-            return module.__version__
-        elif hasattr(module, "version"):
-            return module.version
-    except ImportError:
-        pass
-
-    try:
-        # Method 2: use pkg_resources
-        import pkg_resources
-
-        return pkg_resources.get_distribution(module_name).version
-    except (ImportError, pkg_resources.DistributionNotFound):
-        pass
-
-    try:
-        # Method 3: use importlib.metadata (Python 3.8+)
-        import importlib.metadata
-
-        return importlib.metadata.version(module_name)
-    except ImportError:
-        pass
-
-    raise ValueError("Module is not installed or version cannot be obtained")
-
-
-@validate_params({"path": Rule.input_file_read})
 def read_csv_s(path, **kwargs):
     try:
+        ensure_existing_file(path)
         return pd.read_csv(path, **kwargs)
     except Exception as e:
         raise ValueError("Failed to read csv %r." % path) from e
@@ -155,7 +72,14 @@ def get_npu_total_memory(device_id: int = 0) -> Tuple[int, int]:
                 continue
             _result = _line.split()
             try:
-                _npu_id, _chip_id, _chip_logic_id, _chip_phy_id, _chip_name, *_chip_other = _result
+                (
+                    _npu_id,
+                    _chip_id,
+                    _chip_logic_id,
+                    _chip_phy_id,
+                    _chip_name,
+                    *_chip_other,
+                ) = _result
             except ValueError:
                 # A2 does not have phy_id
                 flag = True

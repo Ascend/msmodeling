@@ -18,7 +18,6 @@ from enum import Enum
 from pydantic import BaseModel
 
 MODEL_EVAL_STATE_SIMULATE = "MODEL_EVAL_STATE_SIMULATE"
-MODEL_EVAL_STATE_ALL = "MODEL_EVAL_STATE_ALL"
 SIMULATE = "simulate"
 
 simulate_env = os.getenv(MODEL_EVAL_STATE_SIMULATE) or os.getenv(MODEL_EVAL_STATE_SIMULATE.lower())
@@ -28,8 +27,8 @@ REAL_EVALUATION = "real_evaluation"
 
 REQUESTRATES = ("REQUESTRATE",)
 CONCURRENCYS = ("CONCURRENCY", "MAXCONCURRENCY")
-METRIC_TTFT = 'ttft'
-METRIC_TPOT = 'tpot'
+METRIC_TTFT = "ttft"
+METRIC_TPOT = "tpot"
 
 
 class Stage(Enum):

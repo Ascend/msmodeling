@@ -16,7 +16,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from ms_serviceparam_optimizer.optimizer.health_check import (
+from experimental.optix.optimizer.health_check import (
     FatalError,
     RetryableError,
     ServiceHookPoint,
@@ -28,7 +28,7 @@ from ms_serviceparam_optimizer.optimizer.health_check import (
     ServiceHealthChecks,
     BenchmarkHealthChecks,
 )
-from ms_serviceparam_optimizer.config.config import ErrorSeverity, ErrorType
+from experimental.optix.config.config import ErrorSeverity, ErrorType
 
 
 class TestHealthCheckExceptions(unittest.TestCase):
@@ -78,13 +78,19 @@ class TestDataClasses(unittest.TestCase):
 class TestHealthCheckHooks(unittest.TestCase):
     def test_service_hook_register_and_run(self):
         hook = ServiceHealthCheckHook()
-        hook.register(ServiceHookPoint.STARTUP_POLLING, lambda ctx: HealthCheckResult(is_healthy=True))
+        hook.register(
+            ServiceHookPoint.STARTUP_POLLING,
+            lambda ctx: HealthCheckResult(is_healthy=True),
+        )
         result = hook.run(ServiceHookPoint.STARTUP_POLLING, MagicMock())
         self.assertTrue(result.is_healthy)
 
     def test_benchmark_hook_register_and_run(self):
         hook = BenchmarkHealthCheckHook()
-        hook.register(BenchmarkHookPoint.RUNTIME_MONITOR, lambda ctx: HealthCheckResult(is_healthy=True))
+        hook.register(
+            BenchmarkHookPoint.RUNTIME_MONITOR,
+            lambda ctx: HealthCheckResult(is_healthy=True),
+        )
         result = hook.run(BenchmarkHookPoint.RUNTIME_MONITOR, MagicMock())
         self.assertTrue(result.is_healthy)
 
@@ -125,7 +131,7 @@ class TestHealthCheckHooks(unittest.TestCase):
 
 
 class TestServiceHealthChecks(unittest.TestCase):
-    @patch('ms_serviceparam_optimizer.optimizer.health_check.get_settings')
+    @patch("experimental.optix.optimizer.health_check.get_settings")
     def test_no_error(self, mock_get_settings):
         mock_config = MagicMock()
         mock_config.fatal_patterns = {}
@@ -139,12 +145,16 @@ class TestServiceHealthChecks(unittest.TestCase):
         simulator = MagicMock()
         simulator.get_last_log.return_value = "INFO: Service started"
         context = HealthCheckContext(
-            simulator=simulator, benchmark=MagicMock(), scheduler=MagicMock(), current_time=100.0, elapsed_time=10.0
+            simulator=simulator,
+            benchmark=MagicMock(),
+            scheduler=MagicMock(),
+            current_time=100.0,
+            elapsed_time=10.0,
         )
         result = ServiceHealthChecks.check_log_errors(context)
         self.assertTrue(result.is_healthy)
 
-    @patch('ms_serviceparam_optimizer.optimizer.health_check.get_settings')
+    @patch("experimental.optix.optimizer.health_check.get_settings")
     def test_detect_fatal_error(self, mock_get_settings):
         mock_config = MagicMock()
         mock_config.fatal_patterns = {
@@ -165,7 +175,11 @@ class TestServiceHealthChecks(unittest.TestCase):
         simulator.get_last_log.return_value = "ERROR: out of memory, cannot allocate 1GB"
 
         context = HealthCheckContext(
-            simulator=simulator, benchmark=MagicMock(), scheduler=MagicMock(), current_time=100.0, elapsed_time=10.0
+            simulator=simulator,
+            benchmark=MagicMock(),
+            scheduler=MagicMock(),
+            current_time=100.0,
+            elapsed_time=10.0,
         )
 
         result = ServiceHealthChecks.check_log_errors(context)
@@ -173,7 +187,7 @@ class TestServiceHealthChecks(unittest.TestCase):
         self.assertEqual(result.error_context.error_type, ErrorType.OUT_OF_MEMORY)
         self.assertEqual(result.error_context.severity, ErrorSeverity.FATAL)
 
-    @patch('ms_serviceparam_optimizer.optimizer.health_check.get_settings')
+    @patch("experimental.optix.optimizer.health_check.get_settings")
     def test_detect_retryable_error(self, mock_get_settings):
         mock_config = MagicMock()
         mock_config.fatal_patterns = {}
@@ -194,7 +208,11 @@ class TestServiceHealthChecks(unittest.TestCase):
         simulator.get_last_log.return_value = "ERROR: connection reset, network unreachable"
 
         context = HealthCheckContext(
-            simulator=simulator, benchmark=MagicMock(), scheduler=MagicMock(), current_time=100.0, elapsed_time=10.0
+            simulator=simulator,
+            benchmark=MagicMock(),
+            scheduler=MagicMock(),
+            current_time=100.0,
+            elapsed_time=10.0,
         )
 
         result = ServiceHealthChecks.check_log_errors(context)
@@ -205,14 +223,18 @@ class TestServiceHealthChecks(unittest.TestCase):
     def test_no_get_last_log_method(self):
         simulator = MagicMock(spec=[])
         context = HealthCheckContext(
-            simulator=simulator, benchmark=MagicMock(), scheduler=MagicMock(), current_time=100.0, elapsed_time=10.0
+            simulator=simulator,
+            benchmark=MagicMock(),
+            scheduler=MagicMock(),
+            current_time=100.0,
+            elapsed_time=10.0,
         )
         result = ServiceHealthChecks.check_log_errors(context)
         self.assertTrue(result.is_healthy)
 
 
 class TestBenchmarkHealthChecks(unittest.TestCase):
-    @patch('ms_serviceparam_optimizer.optimizer.health_check.get_settings')
+    @patch("experimental.optix.optimizer.health_check.get_settings")
     def test_no_error(self, mock_get_settings):
         mock_config = MagicMock()
         mock_config.fatal_patterns = {}
@@ -230,13 +252,17 @@ class TestBenchmarkHealthChecks(unittest.TestCase):
         benchmark.get_last_log.return_value = "INFO: Benchmark started"
 
         context = HealthCheckContext(
-            simulator=MagicMock(), benchmark=benchmark, scheduler=MagicMock(), current_time=100.0, elapsed_time=10.0
+            simulator=MagicMock(),
+            benchmark=benchmark,
+            scheduler=MagicMock(),
+            current_time=100.0,
+            elapsed_time=10.0,
         )
 
         result = BenchmarkHealthChecks.check_log_errors(context)
         self.assertTrue(result.is_healthy)
 
-    @patch('ms_serviceparam_optimizer.optimizer.health_check.get_settings')
+    @patch("experimental.optix.optimizer.health_check.get_settings")
     def test_detect_network_error(self, mock_get_settings):
         mock_config = MagicMock()
         mock_config.fatal_patterns = {}
@@ -254,7 +280,11 @@ class TestBenchmarkHealthChecks(unittest.TestCase):
         benchmark.get_last_log.return_value = "ERROR: connection refused"
 
         context = HealthCheckContext(
-            simulator=MagicMock(), benchmark=benchmark, scheduler=MagicMock(), current_time=100.0, elapsed_time=10.0
+            simulator=MagicMock(),
+            benchmark=benchmark,
+            scheduler=MagicMock(),
+            current_time=100.0,
+            elapsed_time=10.0,
         )
 
         result = BenchmarkHealthChecks.check_log_errors(context)
@@ -263,5 +293,5 @@ class TestBenchmarkHealthChecks(unittest.TestCase):
         self.assertEqual(result.error_context.severity, ErrorSeverity.RETRYABLE)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -19,9 +19,14 @@ from typing import Dict, Optional, List, Tuple
 
 import numpy as np
 from loguru import logger
-from msguard.security import open_s, sanitize_csv_value
-from ..config.config import DataStorageConfig, PerformanceIndex, OptimizerConfigField, get_settings
+from ..config.config import (
+    DataStorageConfig,
+    PerformanceIndex,
+    OptimizerConfigField,
+    get_settings,
+)
 from ..config.base_config import RUN_TIME
+from ..io_utils import open_file, sanitize_csv_value
 from ..optimizer.plugins.benchmark import VllmBenchMark, AisBench
 from ..common import read_csv_s
 
@@ -54,7 +59,10 @@ class DataStorage:
         if not load_dir.is_dir():
             raise ValueError("Expect a directory, not a file.")
         history_data = []
-        for file in sorted([f for f in load_dir.iterdir() if f.is_file()], key=lambda x: x.stat().st_ctime):
+        for file in sorted(
+            [f for f in load_dir.iterdir() if f.is_file()],
+            key=lambda x: x.stat().st_ctime,
+        ):
             if file.name.startswith("data_storage") and file.suffix == ".csv":
                 data = read_csv_s(file).to_dict(orient="records")
                 history_data.extend(data)
@@ -101,20 +109,24 @@ class DataStorage:
             _run_info[NUM_PROMPTS] = self.benchmark.num_prompts
         return _run_info
 
-    def save(self, performance_index: PerformanceIndex, params: Tuple[OptimizerConfigField], **kwargs):
+    def save(
+        self,
+        performance_index: PerformanceIndex,
+        params: Tuple[OptimizerConfigField],
+        **kwargs,
+    ):
         logger.info(f"Save result with DataStorage. File path: {self.save_file!r}")
 
         def safe_sanitize_csv_value(value):
             """
             Safely handle CSV values, particularly parameter values with -- prefix.
-            The msguard library treats strings with -- prefix as malicious and blocks writes,
-            so we replace -- with __ to bypass the security check.
+            Preserve CSV formula escaping while keeping command-line strings writable.
             """
             if isinstance(value, str):
-                if value.startswith('--'):
+                if value.startswith("--"):
                     value = "" + value[2:]
-                elif '--' in value:
-                    value = value.replace('--', '')
+                elif "--" in value:
+                    value = value.replace("--", "")
             return sanitize_csv_value(value)
 
         _column = []
@@ -132,11 +144,11 @@ class DataStorage:
             _column.append(k)
             _value.append(v)
         if self.save_file.exists():
-            with open_s(self.save_file, "a+") as f:
+            with open_file(self.save_file, "a+") as f:
                 data_writer = csv.writer(f)
                 data_writer.writerow([safe_sanitize_csv_value(_v) for _v in _value])
         else:
-            with open_s(self.save_file, "w") as f:
+            with open_file(self.save_file, "w") as f:
                 data_writer = csv.writer(f)
                 data_writer.writerow(_column)
                 data_writer.writerow([safe_sanitize_csv_value(_v) for _v in _value])
@@ -148,7 +160,7 @@ class DataStorage:
         pso_result = optimizer_result
         if self.benchmark:
             command = self.benchmark.config.command
-            if hasattr(command, 'num_prompts'):
+            if hasattr(command, "num_prompts"):
                 request_nums = command.num_prompts
                 pso_result = optimizer_result[optimizer_result[NUM_PROMPTS] == request_nums]
         pso_result = pso_result.dropna(subset="fitness")

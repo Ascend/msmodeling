@@ -22,7 +22,13 @@ from pyswarms.single.global_best import GlobalBestPSO
 
 
 class CustomGlobalBestPSO(GlobalBestPSO):
-    def __init__(self, *args, breakpoint_cost: Optional[List] = None, breakpoint_pos: Optional[List] = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        breakpoint_cost: Optional[List] = None,
+        breakpoint_pos: Optional[List] = None,
+        **kwargs,
+    ):
         super(CustomGlobalBestPSO, self).__init__(*args, **kwargs)
         self.breakpoint_cost = breakpoint_cost
         self.breakpoint_pos = breakpoint_pos
@@ -43,9 +49,17 @@ class CustomGlobalBestPSO(GlobalBestPSO):
             _current_cost = np.array(self.breakpoint_cost[i * self.n_particles : (i + 1) * self.n_particles])
             if _current_cost.shape[0] < self.n_particles:
                 if self.swarm.current_cost.shape[0] != 0:
-                    _current_cost = np.append(_current_cost, self.swarm.current_cost[_current_cost.shape[0] :], axis=0)
+                    _current_cost = np.append(
+                        _current_cost,
+                        self.swarm.current_cost[_current_cost.shape[0] :],
+                        axis=0,
+                    )
                 else:
-                    _current_cost = np.append(_current_cost, self.swarm.pbest_cost[_current_cost.shape[0] :], axis=0)
+                    _current_cost = np.append(
+                        _current_cost,
+                        self.swarm.pbest_cost[_current_cost.shape[0] :],
+                        axis=0,
+                    )
             self.swarm.position = _current_pos
             self.swarm.current_cost = _current_cost
             self.swarm.pbest_pos, self.swarm.pbest_cost = compute_pbest(self.swarm)

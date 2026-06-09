@@ -163,6 +163,3 @@ min = 0
 max = 0
 dtype = "float"
 value = 0
-# ------------------------- kubectl Related Configuration ------------------------------------------------
-[kubectl]
-kubectl_default_path = ""

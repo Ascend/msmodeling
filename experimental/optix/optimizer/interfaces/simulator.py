@@ -90,7 +90,10 @@ class SimulatorInterface(CustomProcess, BaseDataField, ABC):
             if res.status_code == 200:
                 return ProcessState(stage=Stage.running)
             else:
-                return ProcessState(stage=Stage.error, info=f"return code {res.status_code}. text {res.text}")
+                return ProcessState(
+                    stage=Stage.error,
+                    info=f"return code {res.status_code}. text {res.text}",
+                )
 
     @contextmanager
     def enable_simulation_model(self):

@@ -46,11 +46,11 @@ The steps are as follows:
 
 **Custom Service Framework**
 
-- Inherit msserviceprofiler...optimizer.simulator.SimulatorInterface, implement the base_url and data_field properties, implement the update_command method, etc.
+- Inherit msserviceprofiler...optimizer.interfaces.simulator.SimulatorInterface, implement the base_url and data_field properties, implement the update_command method, etc.
   For example:
 
   ```python
-   class ms_service_profiler...optimizer.simulator.SimulatorInterface()
+   class ms_service_profiler...optimizer.interfaces.simulator.SimulatorInterface()
       Bases: ABC
 
       Operate the service framework. Used for service-related operations.
@@ -236,7 +236,7 @@ class ..optimizer.benchmark.BenchmarkInterface()
 Register benchmark in the init file
 
 ```python
-class ..optimizer.simulator.SimulatorInterface()
+class ..optimizer.interfaces.simulator.SimulatorInterface()
     Bases: ABC
 
     Operate the service framework. Used for service-related operations.

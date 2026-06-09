@@ -17,12 +17,7 @@
 import subprocess
 import shutil
 
-from experimental.optix.common import get_module_version, get_npu_total_memory
-
-
-def test_module_version():
-    version = get_module_version("xgboost")
-    assert version == "2.0.0"
+from experimental.optix.common import get_npu_total_memory
 
 
 def test_get_npu_total_memory_success_ascend910(monkeypatch):

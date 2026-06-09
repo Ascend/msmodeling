@@ -22,10 +22,16 @@ from typing import Optional, Tuple
 import glob
 from loguru import logger
 import pandas as pd
-from msguard.security import open_s, walk_s
 from ...config.base_config import MINDIE_BENCHMARK_PERF_COLUMNS
-from ...config.config import AisBenchConfig, VllmBenchmarkConfig, get_settings, PerformanceIndex, OptimizerConfigField
+from ...config.config import (
+    AisBenchConfig,
+    VllmBenchmarkConfig,
+    get_settings,
+    PerformanceIndex,
+    OptimizerConfigField,
+)
 from ...config.custom_command import AisBenchCommand, VllmBenchmarkCommand
+from ...io_utils import open_file, walk_files
 from ...optimizer.interfaces.benchmark import BenchmarkInterface
 
 from ...optimizer.utils import backup, remove_file
@@ -60,7 +66,7 @@ class AisBench(BenchmarkInterface):
         self.work_path = self.config.work_path
         self.update_command()
         self.model_config_path = self.get_models_config_path()
-        with open_s(self.model_config_path, 'r', encoding='utf-8') as f:
+        with open_file(self.model_config_path, "r", encoding="utf-8") as f:
             self.default_data = f.read()
         self.mindie_benchmark_perf_columns = [k.lower().strip() for k in MINDIE_BENCHMARK_PERF_COLUMNS]
 
@@ -153,7 +159,7 @@ class AisBench(BenchmarkInterface):
         # Generate the JSON file path
         json_file = os.path.join(dir_path, f"{file_name}.json")
 
-        with open_s(json_file, "r") as f:
+        with open_file(json_file, "r") as f:
             try:
                 data = json.load(f)
             except json.decoder.JSONDecodeError as e:
@@ -194,7 +200,7 @@ class AisBench(BenchmarkInterface):
         # Generate JSON file path
         json_file = os.path.join(dir_path, f"{file_name}.json")
 
-        with open_s(json_file, "r") as f:
+        with open_file(json_file, "r") as f:
             try:
                 data = json.load(f)
             except json.decoder.JSONDecodeError as e:
@@ -225,19 +231,19 @@ class AisBench(BenchmarkInterface):
             except ValueError:
                 logger.warning(f"the {k.name} is not number; please check: {k.value}")
                 concurrency = rate = None
-        with open_s(self.model_config_path, 'r', encoding='utf-8') as f:
+        with open_file(self.model_config_path, "r", encoding="utf-8") as f:
             lines = f.readlines()
         _request_rate_pattern = re.compile(r"(request_rate\s*=\s*)\d{1,10}(?:\.\d{1,30})?\s*,")
         _batch_size_pattern = re.compile(r"(batch_size\s*=\s*)\d{1,10}(?:\.\d{1,30})?\s*,")
         # Modify request_rate and batch_size
         for i, line in enumerate(lines):
-            if 'request_rate' in line:
+            if "request_rate" in line:
                 _res = _request_rate_pattern.search(lines[i])
                 if _res:
                     if rate is None:
                         rate = 0
                     lines[i] = lines[i].replace(_res.group(), f"request_rate = {rate},")
-            if 'batch_size' in line:
+            if "batch_size" in line:
                 _res = _batch_size_pattern.search(lines[i])
                 if _res:
                     if concurrency is None:
@@ -245,7 +251,7 @@ class AisBench(BenchmarkInterface):
                     lines[i] = lines[i].replace(_res.group(), f"batch_size = {concurrency},")
 
         # Write the modified content back to the file
-        with open_s(self.model_config_path, 'w', encoding='utf-8') as f:
+        with open_file(self.model_config_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
 
 
@@ -296,11 +302,11 @@ class VllmBenchMark(BenchmarkInterface):
     def get_performance_index(self):
         output_path = Path(self.config.command.result_dir)
         performance_index = PerformanceIndex()
-        for file in walk_s(output_path):
+        for file in walk_files(output_path):
             file = Path(file)
             if not file.name.endswith(".json"):
                 continue
-            with open_s(file, mode='r', encoding="utf-8") as f:
+            with open_file(file, mode="r", encoding="utf-8") as f:
                 try:
                     data = json.load(f)
                 except json.JSONDecodeError:

@@ -23,10 +23,10 @@ _PLUGINS_LOADED_FLAG = False
 def _iter_entry_points(group: str):
     """Iterate over entry points for a given group, handling compatibility across different Python versions"""
     eps = entry_points()
-    if hasattr(eps, 'select'):
+    if hasattr(eps, "select"):
         yield from eps.select(group=group)
     else:
-        for ep in eps.get(group, []):  # pylint: disable=E1101
+        for ep in eps.get(group, []):
             yield ep
 
 
@@ -62,7 +62,7 @@ def load_general_plugins():
         return None
     _PLUGINS_LOADED_FLAG = True
 
-    plugins = load_plugins_by_group(group='optix.plugins')
+    plugins = load_plugins_by_group(group="optix.plugins")
     for name, func in plugins.items():
         try:
             func()

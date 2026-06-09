@@ -25,9 +25,13 @@ from typing import Any, Tuple, Optional, List
 
 import psutil
 from loguru import logger
-from msguard.security import open_s
 
-from ...config.base_config import CUSTOM_OUTPUT, MODEL_EVAL_STATE_CONFIG_PATH, ms_serviceparam_optimizer_config_path
+from ...config.base_config import (
+    CUSTOM_OUTPUT,
+    MODEL_EVAL_STATE_CONFIG_PATH,
+    ms_serviceparam_optimizer_config_path,
+)
+from ...io_utils import open_file
 from ..utils import close_file_fp, remove_file, kill_children, backup, kill_process
 
 # Mapping from field name to CLI flag name, used to remove CLI flags when removing invalid values
@@ -123,7 +127,7 @@ class CustomProcess:
             Handles: escape chars, outer quotes (single/double/fullwidth), fullwidth symbols, extra spaces
             """
             # 1. Restore escaped characters (\\" -> ", \\\\ -> \)
-            json_str = json_str.replace('\\"', '"').replace('\\\\', '\\')
+            json_str = json_str.replace('\\"', '"').replace("\\\\", "\\")
             # 2. Remove leading/trailing quotes of all types and extra spaces
             json_str = (
                 json_str.strip().strip("'").strip('"').strip("\u2018").strip("\u2019").strip("\u201c").strip("\u201d")
@@ -157,7 +161,7 @@ class CustomProcess:
 
             # Match pattern: --param_name space quote...quote
             # Use \S+ to match param name (including dots and other chars)
-            match = re.match(r'^(-\S+)\s+', cmd_element)
+            match = re.match(r"^(-\S+)\s+", cmd_element)
             if not match:
                 new_command.append(cmd_element)
                 i += 1
@@ -284,7 +288,7 @@ class CustomProcess:
                 continue
             # Replace variables in each element of the command (including variables in others fields)
             # Use while loop to ensure all occurrences are replaced (a variable may appear multiple times in one element)
-            pattern = re.compile(rf'(?<![A-Z0-9_]){re.escape(_var_name)}(?![A-Z0-9_])')
+            pattern = re.compile(rf"(?<![A-Z0-9_]){re.escape(_var_name)}(?![A-Z0-9_])")
             for i, cmd_element in enumerate(self.command):
                 if isinstance(cmd_element, str):
                     self.command[i] = pattern.sub(str(k.value), cmd_element)
@@ -313,7 +317,7 @@ class CustomProcess:
         for i, v in enumerate(self.command):
             if not v.strip():
                 continue
-            if '-' not in v and '--' not in v:
+            if "-" not in v and "--" not in v:
                 continue
             if v in self.command[:i]:
                 logger.warning("{} field appears multiple times in the command. please confirm.", v)
@@ -329,7 +333,11 @@ class CustomProcess:
 
         try:
             self.process = subprocess.Popen(
-                self.command, env=self.env, stdout=self.run_log_fp, stderr=subprocess.STDOUT, cwd=self.work_path
+                self.command,
+                env=self.env,
+                stdout=self.run_log_fp,
+                stderr=subprocess.STDOUT,
+                cwd=self.work_path,
             )
             self.process_stage = ProcessState(stage=Stage.start)
         except OSError as e:
@@ -344,7 +352,7 @@ class CustomProcess:
         run_log_path = Path(self.run_log)
         if run_log_path.exists():
             try:
-                with open_s(run_log_path, "r", encoding="utf-8", errors="ignore") as f:
+                with open_file(run_log_path, "r", encoding="utf-8", errors="ignore") as f:
                     f.seek(self.run_log_offset)
                     output = f.read()
                     self.run_log_offset = f.tell()
@@ -415,7 +423,7 @@ class CustomProcess:
 
             for encoding in encodings_to_try:
                 try:
-                    with open_s(run_log_path, "r", encoding=encoding, errors="replace") as f:
+                    with open_file(run_log_path, "r", encoding=encoding, errors="replace") as f:
                         file_lines = f.readlines()
                     break
                 except (UnicodeError, OSError) as e:
@@ -423,7 +431,7 @@ class CustomProcess:
                         logger.error(f"Failed read {self.command} log after trying all encodings. error {e}")
                     continue
             number = min(number, len(file_lines))
-            output = '\n'.join(file_lines[-number:])
+            output = "\n".join(file_lines[-number:])
         return output
 
 

@@ -24,9 +24,13 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
 from loguru import logger
-from msguard import Rule
 from ..common import is_mindie
-from ..config.base_config import DeployPolicy, REAL_EVALUATION, PDPolicy, REQUESTRATES, simulate_flag, CONCURRENCYS
+from ..config.base_config import (
+    REAL_EVALUATION,
+    REQUESTRATES,
+    simulate_flag,
+    CONCURRENCYS,
+)
 from ..optimizer.register import benchmarks, simulates
 from ..optimizer.performance_tunner import PerformanceTuner
 from ..optimizer.utils import get_required_field_from_json, is_root
@@ -131,7 +135,13 @@ class PSOOptimizer(PerformanceTuner):
             raise ValueError("Failed in computer_fitness.")
         return all_position, all_cost
 
-    def _normalize_particle_position(self, position: np.ndarray, particle_index: int, n_particles: int, iteration: int):
+    def _normalize_particle_position(
+        self,
+        position: np.ndarray,
+        particle_index: int,
+        n_particles: int,
+        iteration: int,
+    ):
         """
         Apply constraint normalization to a single particle position: apply field derivation rule repairs
         (e.g., ternary_factories constraints), convert repaired actual params back to continuous-space position vector.
@@ -159,7 +169,12 @@ class PSOOptimizer(PerformanceTuner):
             return position, decode_context
 
     def _skip_if_duplicate(
-        self, param_key: tuple, particle_index: int, iteration: int, position: np.ndarray, decode_context
+        self,
+        param_key: tuple,
+        particle_index: int,
+        iteration: int,
+        position: np.ndarray,
+        decode_context,
     ) -> bool:
         from ..config.config import PerformanceIndex
 
@@ -312,7 +327,11 @@ class PSOOptimizer(PerformanceTuner):
         if self.tpot_penalty == 0 and self.ttft_penalty == 0:
             _generate_speed = [p.generate_speed for p in performance_index_list]
             _best_index = _generate_speed.index(max(_generate_speed))
-            return fitnese_list[_best_index], params_list[_best_index], performance_index_list[_best_index]
+            return (
+                fitnese_list[_best_index],
+                params_list[_best_index],
+                performance_index_list[_best_index],
+            )
         if self.ttft_penalty == 0 and self.tpot_penalty != 0:
             _tpot_threshold = self.fine_tune.tpot_upper_bound
             if _tpot_threshold == 0:
@@ -321,9 +340,17 @@ class PSOOptimizer(PerformanceTuner):
             _tpot_lt_slo_index = [i for i, v in enumerate(_tpot_diff) if v < 0]
             if _tpot_lt_slo_index:
                 _best_index = self.get_max_generate_speed_index(performance_index_list, _tpot_lt_slo_index)
-                return fitnese_list[_best_index], params_list[_best_index], performance_index_list[_best_index]
+                return (
+                    fitnese_list[_best_index],
+                    params_list[_best_index],
+                    performance_index_list[_best_index],
+                )
             _best_index = _tpot_diff.index(min(_tpot_diff))
-            return fitnese_list[_best_index], params_list[_best_index], performance_index_list[_best_index]
+            return (
+                fitnese_list[_best_index],
+                params_list[_best_index],
+                performance_index_list[_best_index],
+            )
         if self.ttft_penalty != 0 and self.tpot_penalty != 0:
             _tpot_threshold = self.fine_tune.tpot_upper_bound
             _ttft_threshold = self.fine_tune.ttft_upper_bound
@@ -339,10 +366,18 @@ class PSOOptimizer(PerformanceTuner):
             _performance_lt_slo_index = [i for i, v in enumerate(_performance_diff) if all(kv < 0 for kv in v)]
             if _performance_lt_slo_index:
                 _best_index = self.get_max_generate_speed_index(performance_index_list, _performance_lt_slo_index)
-                return fitnese_list[_best_index], params_list[_best_index], performance_index_list[_best_index]
+                return (
+                    fitnese_list[_best_index],
+                    params_list[_best_index],
+                    performance_index_list[_best_index],
+                )
             _performance_diff_sum = [sum(v) for v in _performance_diff]
             _best_index = _performance_diff_sum.index(min(_performance_diff_sum))
-            return fitnese_list[_best_index], params_list[_best_index], performance_index_list[_best_index]
+            return (
+                fitnese_list[_best_index],
+                params_list[_best_index],
+                performance_index_list[_best_index],
+            )
         return fitnese_list[0], params_list[0], performance_index_list[0]
 
     def mindie_prepare(self, mc):
@@ -398,9 +433,9 @@ class PSOOptimizer(PerformanceTuner):
         from ..config.config import get_settings
         from ..config.model_config import MindieModelConfig
         from ..optimizer.plugins.benchmark import AisBench
-        from ..optimizer.plugins.simulate import Simulator, DisaggregationSimulator
+        from ..optimizer.plugins.simulate import Simulator
 
-        if isinstance(self.scheduler.simulator, (Simulator, DisaggregationSimulator)):
+        if isinstance(self.scheduler.simulator, Simulator):
             settings = get_settings()
             mc = None
             if is_mindie() and settings.theory_guided_enable:
@@ -452,7 +487,10 @@ class PSOOptimizer(PerformanceTuner):
                 "Please check if the benchmark is running successfully. "
             )
 
-        self.target_field = [*self.scheduler.simulator.data_field, *self.scheduler.benchmark.data_field]
+        self.target_field = [
+            *self.scheduler.simulator.data_field,
+            *self.scheduler.benchmark.data_field,
+        ]
 
     def run_plugin(self):
         from ..optimizer.global_best_custom import CustomGlobalBestPSO
@@ -462,7 +500,10 @@ class PSOOptimizer(PerformanceTuner):
             if self.load_breakpoint:
                 self.load_history_data = self.scheduler.data_storage.load_history_position(
                     self.scheduler.data_storage.config.store_dir,
-                    filter_field={**self.scheduler.data_storage.get_run_info(), REAL_EVALUATION: True},
+                    filter_field={
+                        **self.scheduler.data_storage.get_run_info(),
+                        REAL_EVALUATION: True,
+                    },
                 )
             if self.load_history_data and self.load_breakpoint:
                 self.history_pos, self.history_cost = self.computer_fitness()
@@ -564,14 +605,15 @@ def enable_simulate(scheduler):
 
 
 def main():
-    import argparse
-
     from ..optimizer.store import DataStorage
     from ..config.config import Settings, get_settings, register_settings
     from ..optimizer.experience_fine_tunning import FineTune
     from ..optimizer.scheduler import Scheduler
-    from ..optimizer.plugins.simulate import DisaggregationSimulator
-    from ..optimizer.register import benchmarks as _benchmarks, simulates as _simulates, register_ori_functions
+    from ..optimizer.register import (
+        benchmarks as _benchmarks,
+        simulates as _simulates,
+        register_ori_functions,
+    )
 
     register_ori_functions()
 
@@ -590,23 +632,10 @@ def main():
         help="Continue from where the last optimization was aborted.",
     )
     parser.add_argument(
-        "-d",
-        "--deploy_policy",
-        default=DeployPolicy.single.value,
-        choices=[k.value for k in list(DeployPolicy)],
-        help="Indicates whether the multi-node running policy is used.",
-    )
-    parser.add_argument(
         "--backup",
         default=False,
         action="store_true",
         help="Whether to back up data.",
-    )
-    parser.add_argument(
-        "--pd",
-        default=PDPolicy.competition.value,
-        choices=[k.value for k in list(PDPolicy)],
-        help="whether pd competition or pd disaggregation",
     )
     parser.add_argument(
         "-b",
@@ -635,7 +664,7 @@ def main():
 
     if args.config:
         custom_config_path = Path(args.config).expanduser().resolve()
-        if not Rule.input_file_read.is_satisfied_by(custom_config_path):
+        if not custom_config_path.is_file():
             logger.error("Custom config file not found: {}", custom_config_path)
             return
 
@@ -688,10 +717,7 @@ def main():
     _simu = _bench = None
     _target_field = []
     if args.engine:
-        if args.engine == 'mindie' and args.pd == PDPolicy.disaggregation.value:
-            _simu = DisaggregationSimulator(bak_path=bak_path)
-        else:
-            _simu = simulates[args.engine](bak_path=bak_path)
+        _simu = simulates[args.engine](bak_path=bak_path)
         _target_field.extend(_simu.data_field)
     if args.benchmark_policy:
         _bench = benchmarks[args.benchmark_policy](bak_path=bak_path)
@@ -735,58 +761,3 @@ def main():
         pso.run_plugin()
     except Exception as e:
         logger.error(f"Failed to run optimizer. Please check. error: {e}")
-
-
-def arg_parse(subparsers):
-    from ..plugins import load_general_plugins
-
-    load_general_plugins()
-    sims = ["vllm", "mindie"]
-    benches = ["ais_bench", "vllm_benchmark"]
-    parser = subparsers.add_parser(
-        "optimizer", formatter_class=argparse.ArgumentDefaultsHelpFormatter, help="optimize for performance"
-    )
-    parser.add_argument(
-        "-lb",
-        "--load_breakpoint",
-        default=False,
-        action="store_true",
-        help="Continue from where the last optimization was aborted.",
-    )
-    parser.add_argument(
-        "-d",
-        "--deploy_policy",
-        default=DeployPolicy.single.value,
-        choices=[k.value for k in list(DeployPolicy)],
-        help="Indicates whether the multi-node running policy is used.",
-    )
-    parser.add_argument("--backup", default=False, action="store_true", help="Whether to back up data.")
-    parser.add_argument(
-        "--pd",
-        default=PDPolicy.competition.value,
-        choices=[k.value for k in list(PDPolicy)],
-        help="whether pd competition or pd disaggregation",
-    )
-    parser.add_argument(
-        "-b",
-        "--benchmark_policy",
-        default='ais_bench',
-        choices=list(benchmarks.keys()) + benches,
-        help="Whether to use custom performance indicators.",
-    )
-    parser.add_argument(
-        "-e",
-        "--engine",
-        default='mindie',
-        choices=list(simulates.keys()) + sims,
-        help="The engine used for model evaluation.",
-    )
-    parser.add_argument(
-        "-c",
-        "--config",
-        default=None,
-        type=str,
-        help="Path to custom configuration file (TOML format). "
-        "Supports absolute path, relative path, or filename in current directory.",
-    )
-    parser.set_defaults(func=main)

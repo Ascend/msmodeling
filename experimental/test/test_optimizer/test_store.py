@@ -17,7 +17,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from experimental.optix.config.config import PerformanceIndex, OptimizerConfigField, get_settings
+from experimental.optix.config.config import (
+    PerformanceIndex,
+    OptimizerConfigField,
+    get_settings,
+)
 from experimental.optix.optimizer.store import DataStorage
 
 
@@ -25,9 +29,9 @@ class TestDataStorage(unittest.TestCase):
     def setUp(self):
         self.data_storage = DataStorage(get_settings().data_storage, MagicMock(), MagicMock())
 
-    @patch('experimental.optix.optimizer.store.Path')
-    @patch('experimental.optix.optimizer.store.csv')
-    @patch('msguard.security.sanitize_csv_value')
+    @patch("experimental.optix.optimizer.store.Path")
+    @patch("experimental.optix.optimizer.store.csv")
+    @patch("experimental.optix.optimizer.store.sanitize_csv_value")
     def test_save_existing_file(self, mock_sanitize_csv_value, mock_csv, mock_path):
         # Configure mock behavior.
         mock_path.exists.return_value = True
@@ -37,32 +41,35 @@ class TestDataStorage(unittest.TestCase):
 
         # Create a DataStorage instance.
         config = MagicMock()
-        config.store_dir = Path('/tmp/fake/dir')
+        config.store_dir = Path("/tmp/fake/dir")
         storage = DataStorage(config)
 
         # Create test data.
         performance_index = PerformanceIndex()
-        params = [OptimizerConfigField(name='param1', value=1), OptimizerConfigField(name='param2', value=2)]
-        kwargs = {'key1': 'value1', 'key2': 'value2'}
+        params = [
+            OptimizerConfigField(name="param1", value=1),
+            OptimizerConfigField(name="param2", value=2),
+        ]
+        kwargs = {"key1": "value1", "key2": "value2"}
 
         # Call the save method.
         storage.save(performance_index, params, **kwargs)
 
-    @patch('experimental.optix.optimizer.store.Path')
+    @patch("experimental.optix.optimizer.store.Path")
     def test_load_history_position_dir_not_exist(self, mock_path):
         mock_path.exists.return_value = False
         with self.assertRaises(FileNotFoundError):
             DataStorage.load_history_position(mock_path)
 
-    @patch('experimental.optix.optimizer.store.Path')
+    @patch("experimental.optix.optimizer.store.Path")
     def test_load_history_position_not_a_dir(self, mock_path):
         mock_path.exists.return_value = True
         mock_path.is_dir.return_value = False
         with self.assertRaises(ValueError):
             DataStorage.load_history_position(mock_path)
 
-    @patch('experimental.optix.optimizer.store.Path')
-    @patch('experimental.optix.optimizer.store.read_csv_s')
+    @patch("experimental.optix.optimizer.store.Path")
+    @patch("experimental.optix.optimizer.store.read_csv_s")
     def test_load_history_position_no_data(self, mock_read_csv_s, mock_path):
         mock_path.exists.return_value = True
         mock_path.is_dir.return_value = True
@@ -70,41 +77,47 @@ class TestDataStorage(unittest.TestCase):
         result = DataStorage.load_history_position(mock_path)
         self.assertIsNone(result)
 
-    @patch('experimental.optix.optimizer.store.Path')
-    @patch('experimental.optix.optimizer.store.read_csv_s')
+    @patch("experimental.optix.optimizer.store.Path")
+    @patch("experimental.optix.optimizer.store.read_csv_s")
     def test_load_history_position_with_data(self, mock_read_csv_s, mock_path):
         mock_path.exists.return_value = True
         mock_path.is_dir.return_value = True
         mock_file = MagicMock()
         mock_file.name.startswith.return_value = True
-        mock_file.suffix = '.csv'
+        mock_file.suffix = ".csv"
         mock_path.iterdir.return_value = [mock_file]
-        mock_read_csv_s.return_value.to_dict.return_value = [{'data': 'value'}]
+        mock_read_csv_s.return_value.to_dict.return_value = [{"data": "value"}]
 
         result = DataStorage.load_history_position(mock_path)
-        self.assertEqual(result, [{'data': 'value'}])
+        self.assertEqual(result, [{"data": "value"}])
 
     def test_filter_data_no_filter_field(self):
-        data_rows = [{'data': 'value'}, {'data': 'value2'}]
+        data_rows = [{"data": "value"}, {"data": "value2"}]
         result = DataStorage.filter_data(data_rows)
         self.assertEqual(result, data_rows)
 
     def test_filter_data_with_filter_field(self):
         data_rows = [
-            {'data': 'value', 'filter': 'field1'},
-            {'data': 'value2', 'filter': 'field2'},
-            {'data': 'value3', 'filter': 'field1'},
+            {"data": "value", "filter": "field1"},
+            {"data": "value2", "filter": "field2"},
+            {"data": "value3", "filter": "field1"},
         ]
-        filter_field = {'filter': 'field1'}
+        filter_field = {"filter": "field1"}
         result = DataStorage.filter_data(data_rows, filter_field)
-        self.assertEqual(result, [{'data': 'value', 'filter': 'field1'}, {'data': 'value3', 'filter': 'field1'}])
+        self.assertEqual(
+            result,
+            [
+                {"data": "value", "filter": "field1"},
+                {"data": "value3", "filter": "field1"},
+            ],
+        )
 
     def test_filter_data_with_non_matching_filter_field(self):
         data_rows = [
-            {'data': 'value', 'filter': 'field1'},
-            {'data': 'value2', 'filter': 'field2'},
-            {'data': 'value3', 'filter': 'field1'},
+            {"data": "value", "filter": "field1"},
+            {"data": "value2", "filter": "field2"},
+            {"data": "value3", "filter": "field1"},
         ]
-        filter_field = {'filter': 'field3'}
+        filter_field = {"filter": "field3"}
         result = DataStorage.filter_data(data_rows, filter_field)
         self.assertEqual(result, [])

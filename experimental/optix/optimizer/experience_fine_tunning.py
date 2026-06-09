@@ -19,7 +19,12 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from ..config.config import default_support_field, PerformanceIndex, map_param_with_value, OptimizerConfigField
+from ..config.config import (
+    default_support_field,
+    PerformanceIndex,
+    map_param_with_value,
+    OptimizerConfigField,
+)
 from ..config.base_config import REQUESTRATES, CONCURRENCYS
 
 
@@ -66,7 +71,10 @@ class FineTune:
 
     @staticmethod
     def update_field(
-        simulate_run_info, signed_factor, field_names: tuple = REQUESTRATES, last: Optional[float] = None
+        simulate_run_info,
+        signed_factor,
+        field_names: tuple = REQUESTRATES,
+        last: Optional[float] = None,
     ) -> bool:
         if signed_factor == 0 or isinf(signed_factor) or isnan(signed_factor):
             return False
@@ -127,7 +135,9 @@ class FineTune:
             self.ttft_under_lower_bound = actual_ttft < self.ttft_lower_bound
 
     def handle_concurrency(
-        self, simulate_run_info: Tuple[OptimizerConfigField, ...], performance_index: PerformanceIndex
+        self,
+        simulate_run_info: Tuple[OptimizerConfigField, ...],
+        performance_index: PerformanceIndex,
     ):
         was_updated_c = False
         signed_factor_c = None
@@ -151,12 +161,17 @@ class FineTune:
                 ):
                     last_concurrency = self.last_value.get(CONCURRENCYS)[-2]
             was_updated_c = self.update_field(
-                simulate_run_info, signed_factor_c, field_names=CONCURRENCYS, last=last_concurrency
+                simulate_run_info,
+                signed_factor_c,
+                field_names=CONCURRENCYS,
+                last=last_concurrency,
             )
         return was_updated_c
 
     def handle_request_rate(
-        self, simulate_run_info: Tuple[OptimizerConfigField, ...], performance_index: PerformanceIndex
+        self,
+        simulate_run_info: Tuple[OptimizerConfigField, ...],
+        performance_index: PerformanceIndex,
     ):
         # Check if ttft is met, adjust request rate
         was_updated_r = False
@@ -177,7 +192,10 @@ class FineTune:
                 if _request_rate_factor[-2] * _request_rate_factor[-1] < 0:
                     last_req_rate = self.last_value.get(REQUESTRATES)[-2]
             was_updated_r = self.update_field(
-                simulate_run_info, signed_factor_r, field_names=REQUESTRATES, last=last_req_rate
+                simulate_run_info,
+                signed_factor_r,
+                field_names=REQUESTRATES,
+                last=last_req_rate,
             )
         return was_updated_r
 

@@ -24,7 +24,7 @@ class MockVllmCommandConfig:
 
 
 class TestVllmCommand:
-    @patch('shutil.which')
+    @patch("shutil.which")
     def test_init_success(self, mock_which):
         """Test successful initialization when vllm is found in PATH"""
         # Setup
@@ -38,7 +38,7 @@ class TestVllmCommand:
         assert command.process == "/usr/bin/vllm"
         assert command.command_config == config
 
-    @patch('shutil.which')
+    @patch("shutil.which")
     def test_init_failure_vllm_not_found(self, mock_which):
         """Test initialization fails when vllm is not found in PATH"""
         # Setup
