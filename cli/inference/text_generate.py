@@ -1,6 +1,7 @@
 import argparse
 import logging
 
+from cli.logo import print_logo
 from tensor_cast import config, device_profiles  # noqa: F401
 from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
@@ -298,6 +299,7 @@ def main():
     )
 
     args = parser.parse_args()
+    print_logo()
     logging.basicConfig(
         level=LOG_LEVELS[args.log_level.lower()],
         format=LOG_FORMAT,

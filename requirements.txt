@@ -16,6 +16,7 @@ compressed-tensors
 strenum
 aenum
 overrides
+colorama>=0.4.6
 
 # serving_cast
 salabim

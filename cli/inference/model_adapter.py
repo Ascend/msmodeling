@@ -2,6 +2,7 @@ import argparse
 import json
 import logging
 
+from cli.logo import print_logo
 from tensor_cast import config, device_profiles  # noqa: F401
 from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
@@ -402,6 +403,7 @@ def main() -> None:
     getattr(tensor_cast_utils, "check_dependencies")()
     parser, command_parsers = _build_parser()
     args = parser.parse_args()
+    print_logo()
     args.handler(args, command_parsers[args.command])
 
 

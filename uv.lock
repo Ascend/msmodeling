@@ -1245,6 +1245,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "aenum" },
     { name = "blinker" },
+    { name = "colorama" },
     { name = "compressed-tensors" },
     { name = "diffusers" },
     { name = "gradio" },
@@ -1282,6 +1283,7 @@ ci = [
     { name = "pydantic" },
     { name = "pytest-cov" },
     { name = "pyyaml" },
+    { name = "types-colorama" },
 ]
 lint = [
     { name = "pre-commit" },
@@ -1291,6 +1293,7 @@ lint = [
 requires-dist = [
     { name = "aenum", specifier = ">=3.1.17" },
     { name = "blinker", specifier = ">=1.9.0" },
+    { name = "colorama", specifier = ">=0.4.6" },
     { name = "compressed-tensors", specifier = ">=0.16.0" },
     { name = "diffusers", specifier = ">=0.37.1" },
     { name = "gradio", specifier = ">=5,<6" },
@@ -1315,7 +1318,7 @@ requires-dist = [
     { name = "strenum", specifier = ">=0.4.15" },
     { name = "torch", specifier = ">=2.7,<=2.10", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", specifier = ">=0.25.0", index = "https://download.pytorch.org/whl/cpu" },
-    { name = "transformers", specifier = ">=5.3.0,<=5.8.0" },
+    { name = "transformers", specifier = ">=5.3.0,<5.8.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1324,6 +1327,7 @@ ci = [
     { name = "pydantic", specifier = ">=2" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "types-colorama", specifier = ">=0.4.15" },
 ]
 lint = [{ name = "pre-commit", specifier = ">=4.3.0" }]
 
@@ -3398,7 +3402,7 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.8.0"
+version = "5.7.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -3412,9 +3416,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/f2/36/390075693b76d4fb4a2bea360fb6080347763bd1f1147c49ed0ed938778c/transformers-5.8.0.tar.gz", hash = "sha256:6cc9a1f0291d16b1c1b735bad775e78ebefff7722701d4e28f98aaaa2bd6fb91" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/4d/fe/7e84d20ac7d4d5d14bac2eab5976088d86342959fc2c0da54b4c2fc99856/transformers-5.7.0.tar.gz", hash = "sha256:a9d35cf39804e3456c1f9bc1a79ad5ffa878640a61f51f66f71c97f4b4e2ce10" }
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/97/7b/5621d08b34ac35deb9fa14b58d27d124d21ef125ee1c64bc724ca47dfb63/transformers-5.8.0-py3-none-any.whl", hash = "sha256:e9d2cae6d195a7e1e05164c5ebf26142a7044e4dc4267274f4809204f92827e4" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/60/60/86a9fe3037bec221094e2acb680219ad88b77006edba42fc0407a577ca93/transformers-5.7.0-py3-none-any.whl", hash = "sha256:869660cd8fc92badc041f5551bf755a42f4b9558c93341bf3fa3eeed7065079c" },
 ]
 
 [[package]]
@@ -3430,6 +3434,15 @@ dependencies = [
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/e4/51/9aed62104cea109b820bbd6c14245af756112017d309da813ef107d42e7e/typer-0.25.1.tar.gz", hash = "sha256:9616eb8853a09ffeabab1698952f33c6f29ffdbceb4eaeecf571880e8d7664cc" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/3f/f9/2b3ff4e56e5fa7debfaf9eb135d0da96f3e9a1d5b27222223c7296336e5f/typer-0.25.1-py3-none-any.whl", hash = "sha256:75caa44ed46a03fb2dab8808753ffacdbfea88495e74c85a28c5eefcf5f39c89" },
+]
+
+[[package]]
+name = "types-colorama"
+version = "0.4.15.20260508"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/be/d5/4870d88c6c87adf786ef33d674cbf82b3a2d5fcbe6deec29282cff80e8b3/types_colorama-0.4.15.20260508.tar.gz", hash = "sha256:3a8916039e57452bd21f57e674e1f221ca9e4f319893c5e3bbd37b845c27d8e6" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/56/33/a3449e3e93c43861b92d0a93ed4ea5505756463e507625812cfb29c91c7a/types_colorama-0.4.15.20260508-py3-none-any.whl", hash = "sha256:b0c39908a3e5171ef1f8bf3d59fae082e9eaff3a19ca49b6d640b83f78cff61c" },
 ]
 
 [[package]]

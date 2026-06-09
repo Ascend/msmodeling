@@ -9,6 +9,7 @@ requires-python = ">=3.10"
 dependencies = [
     "aenum>=3.1.17",
     "blinker>=1.9.0",
+    "colorama>=0.4.6",
     "compressed-tensors>=0.16.0",
     "diffusers>=0.37.1",
     "gradio>=5,<6",
@@ -88,4 +89,5 @@ ci = [
     "pathspec>=0.12",
     "pyyaml>=6",
     "pytest-cov>=7.1.0",
+    "types-colorama>=0.4.15",
 ]

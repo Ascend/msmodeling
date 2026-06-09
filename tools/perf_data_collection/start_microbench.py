@@ -37,9 +37,12 @@ REPO_ROOT = CURRENT_DIR.parents[1]
 OP_REPLAY_DIR = CURRENT_DIR / "op_replay"
 RUN_ALL_SCRIPT = OP_REPLAY_DIR / "run_all_op.py"
 
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 if str(OP_REPLAY_DIR) not in sys.path:
     sys.path.insert(0, str(OP_REPLAY_DIR))
 
+from cli.logo import print_logo
 from common import (
     DEFAULT_DEVICE, SUPPORTED_DEVICES, build_database_cli_args, check_version,
     csv_has_complete_microbench, ensure_npu_available, get_target_data_dir,
@@ -990,6 +993,7 @@ def main() -> None:
     the database CSV files with new microbench duration data.
     """
     args = build_argparser().parse_args()
+    print_logo()
     selected_ops = validate_ops(args.op)
     target_dir = get_target_data_dir(
         args.device, args.vllm_version, database_path=args.database_path,

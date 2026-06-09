@@ -47,6 +47,12 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Callable, Dict, List, Optional, Tuple
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from cli.logo import print_logo
+
 WARMUP_ITERS = 20
 BENCH_ITERS = 100
 
@@ -907,6 +913,7 @@ def _iter_configs(
 
 def main() -> None:
     args = build_argparser().parse_args()
+    print_logo()
     bytes_grid = args.bytes_grid or _DEFAULT_BYTES_GRID
     grid_shape = args.grid_shape
 

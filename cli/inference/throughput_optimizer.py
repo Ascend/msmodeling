@@ -19,6 +19,7 @@ import logging
 import sys
 import time
 
+from cli.logo import print_logo
 from serving_cast.service.optimizer_curve_plots import (
     render_cross_hardware_summary,
     run_multi_device_loop,
@@ -282,6 +283,7 @@ def arg_parse():
 def main():
     start_time = time.time()
     args = arg_parse()
+    print_logo()
     logging.basicConfig(
         level=LOG_LEVELS[args.log_level.lower()],
         format=LOG_FORMAT,

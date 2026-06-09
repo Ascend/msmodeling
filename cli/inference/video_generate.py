@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 
+from cli.logo import print_logo
 from tensor_cast import device_profiles  # noqa: F401
 from tensor_cast.core.quantization.config import create_quant_config
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
@@ -395,6 +396,7 @@ def main():
     )
 
     args = parser.parse_args()
+    print_logo()
     try:
         logging.basicConfig(level=LOG_LEVELS[args.log_level.lower()], force=True)
     except TypeError:

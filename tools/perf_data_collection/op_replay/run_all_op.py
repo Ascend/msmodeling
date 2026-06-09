@@ -23,6 +23,11 @@ import runpy
 import subprocess
 import sys
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from cli.logo import print_logo
 from common import (
     DEFAULT_DEVICE,
     DEFAULT_UPDATE_MODE,
@@ -397,6 +402,7 @@ def run_script(
 
 def main() -> None:
     args = build_argparser().parse_args()
+    print_logo()
     if args.execution_mode == "inprocess":
         # Global invalid-row tracking only works when every operator runs in this process.
         reset_invalid_replay_rows()

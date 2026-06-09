@@ -28,6 +28,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from cli.logo import print_logo
+
 # ---------------------------------------------------------------------------
 # A3 topology constants (mirrors device.py ATLAS_800_A3_752T_128G_DIE)
 # ---------------------------------------------------------------------------
@@ -314,6 +320,7 @@ Examples:
         help="Print all rows, not just WARN/FAIL",
     )
     args = parser.parse_args()
+    print_logo()
 
     csv_dir = Path(args.csv_dir)
     if not csv_dir.is_dir():

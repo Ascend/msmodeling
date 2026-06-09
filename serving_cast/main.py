@@ -2,6 +2,7 @@
 import argparse
 import os
 
+from cli.logo import print_logo
 from serving_cast.config import Config
 from serving_cast.instance import Instance
 from serving_cast.load_gen import FixedLengthLoadGen
@@ -123,9 +124,7 @@ def get_load_gen(load_gen_config):
         )
         return load_gen
     else:
-        raise ValueError(
-            f"Unknown load generator type: {load_gen_config.load_gen_type!r}"
-        )
+        raise ValueError(f"Unknown load generator type: {load_gen_config.load_gen_type!r}")
 
 
 def init_profiling(args):
@@ -142,6 +141,7 @@ def parse_profiling_results(profiling_path_with_timestamp):
 
 def main():
     args = parse_command_line_args()
+    print_logo()
     if args.enable_profiling:
         profiling_path_with_timestamp = init_profiling(args)
 

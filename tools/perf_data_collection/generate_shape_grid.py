@@ -11,21 +11,23 @@ import sys
 from pathlib import Path
 
 CURRENT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = CURRENT_DIR.parents[1]
 OP_REPLAY_DIR = CURRENT_DIR / "op_replay"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 if str(OP_REPLAY_DIR) not in sys.path:
     sys.path.insert(0, str(OP_REPLAY_DIR))
 
 from common import DEFAULT_DEVICE, SUPPORTED_DEVICES, check_version, get_target_data_dir
-
 from grid_generator.runner import load_csv_files, run_theory_mode
 from grid_generator.utils import clear_progress
 
+from cli.logo import print_logo
+
 DEFAULT_DATA_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "tensor_cast"
-    / "performance_model"
-    / "profiling_database"
-    / "data"
+    Path(__file__).resolve().parents[2] / "tensor_cast" / "performance_model" / "profiling_database" / "data"
 )
 DEFAULT_ROWS = 1000
 
@@ -52,7 +54,7 @@ def resolve_data_dir(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Append shape-grid rows to perf database CSV files "
-                    "using deterministic grid from theoretical dimension ranges.",
+        "using deterministic grid from theoretical dimension ranges.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -60,7 +62,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Comma-separated model names (e.g. 'dsv3,qwen3-32b') to prune GEMM (N,K) pairs. "
-             "Only used in theory mode. If omitted, uses full NK_GRID cartesian product.",
+        "Only used in theory mode. If omitted, uses full NK_GRID cartesian product.",
     )
     parser.add_argument(
         "--data-dir",
@@ -105,26 +107,22 @@ def parse_args() -> argparse.Namespace:
         help=f"Cap per CSV (randomly sampled from full grid; 0 = no cap). Default: {DEFAULT_ROWS}",
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Random seed for reproducible output (theory mode sampling)."
+        "--seed", type=int, default=None, help="Random seed for reproducible output (theory mode sampling)."
     )
     parser.add_argument(
         "--max-hbm-gb",
         type=float,
         default=32.0,
         help="Maximum HBM memory budget in GiB per operator shape row (theory mode only). "
-             "Shapes whose estimated input+output tensor size exceeds this limit are "
-             "filtered out during generation. Set to 0 to disable. Default: 32.0",
+        "Shapes whose estimated input+output tensor size exceeds this limit are "
+        "filtered out during generation. Set to 0 to disable. Default: 32.0",
     )
     return parser.parse_args()
 
 
-
-
 def main() -> None:
     args = parse_args()
+    print_logo()
     data_dir = resolve_data_dir(
         args.data_dir,
         args.device,
