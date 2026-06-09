@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from tensor_cast.device import (
+    A5,
     ATLAS_800,
     CommGrid,
     DeviceProfile,
@@ -10,6 +11,7 @@ from tensor_cast.device import (
     InterconnectType,
     StaticCost,
 )
+from tensor_cast.utils import DTYPE_FP4, DTYPE_FP8
 
 # ---------------------------------------------------------------------------
 # Device profile specs for parameterized tests
@@ -168,6 +170,351 @@ _DEVICE_PROFILE_SPECS = [
         "memory_bandwidth_bytes_ps": 1.6 * (1024**4),
         "compute_efficiency": 0.7,
         "memory_efficiency": 0.6,
+    },
+]
+
+_A5_DEVICE_PROFILE_SPECS = [
+    # ── ATLAS 350 (workstation, PCIE + UB) ──
+    {
+        "name": "ATLAS_350_425T_112G",
+        "comm_grid": A5.Interconnect.PCIE2_UB4,
+        "mma_ops": {
+            torch.float32: 189 * 1e12,
+            torch.bfloat16: 378 * 1e12,
+            torch.half: 378 * 1e12,
+            DTYPE_FP8: 756 * 1e12,
+            torch.int8: 756 * 1e12,
+            DTYPE_FP4: 1512 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 24 * 1e12,
+            torch.bfloat16: 47 * 1e12,
+            torch.half: 47 * 1e12,
+        },
+        "memory_size_bytes": 112 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.4 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_350_425T_84G",
+        "comm_grid": A5.Interconnect.PCIE2_UB4,
+        "mma_ops": {
+            torch.float32: 189 * 1e12,
+            torch.bfloat16: 378 * 1e12,
+            torch.half: 378 * 1e12,
+            DTYPE_FP8: 756 * 1e12,
+            torch.int8: 756 * 1e12,
+            DTYPE_FP4: 1512 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 24 * 1e12,
+            torch.bfloat16: 47 * 1e12,
+            torch.half: 47 * 1e12,
+        },
+        "memory_size_bytes": 84 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.4 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    # ── ATLAS 850 (server, UB 1K) ──
+    {
+        "name": "ATLAS_850_486T_112G",
+        "comm_grid": A5.Interconnect.SERVER_UB_1K,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 112 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.4 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_850_486T_128G",
+        "comm_grid": A5.Interconnect.SERVER_UB_1K,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 128 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.6 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    # ── ATLAS 850E (server, HBM2e high BW) ──
+    {
+        "name": "ATLAS_850E_486T_96G",
+        "comm_grid": A5.Interconnect.SERVER_UB_1K,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 96 * (1024**3),
+        "memory_bandwidth_bytes_ps": 4.0 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_850E_425T_96G",
+        "comm_grid": A5.Interconnect.SERVER_UB_1K,
+        "mma_ops": {
+            torch.float32: 189 * 1e12,
+            torch.bfloat16: 378 * 1e12,
+            torch.half: 378 * 1e12,
+            DTYPE_FP8: 756 * 1e12,
+            torch.int8: 756 * 1e12,
+            DTYPE_FP4: 1512 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 24 * 1e12,
+            torch.bfloat16: 47 * 1e12,
+            torch.half: 47 * 1e12,
+        },
+        "memory_size_bytes": 96 * (1024**3),
+        "memory_bandwidth_bytes_ps": 4.0 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    # ── ATLAS 850 RoCE variants ──
+    {
+        "name": "ATLAS_850_486T_112G_ROCE",
+        "comm_grid": A5.Interconnect.SERVER_ROCE_64,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 112 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.4 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_850_486T_128G_ROCE",
+        "comm_grid": A5.Interconnect.SERVER_ROCE_64,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 128 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.6 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_850E_486T_96G_ROCE",
+        "comm_grid": A5.Interconnect.SERVER_ROCE_64,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 96 * (1024**3),
+        "memory_bandwidth_bytes_ps": 4.0 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_850E_425T_96G_ROCE",
+        "comm_grid": A5.Interconnect.SERVER_ROCE_64,
+        "mma_ops": {
+            torch.float32: 189 * 1e12,
+            torch.bfloat16: 378 * 1e12,
+            torch.half: 378 * 1e12,
+            DTYPE_FP8: 756 * 1e12,
+            torch.int8: 756 * 1e12,
+            DTYPE_FP4: 1512 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 24 * 1e12,
+            torch.bfloat16: 47 * 1e12,
+            torch.half: 47 * 1e12,
+        },
+        "memory_size_bytes": 96 * (1024**3),
+        "memory_bandwidth_bytes_ps": 4.0 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    # ── ATLAS 850 FM16 variants ──
+    {
+        "name": "ATLAS_850_486T_112G_FM16",
+        "comm_grid": A5.Interconnect.SERVER_FM16,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 112 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.4 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_850_486T_128G_FM16",
+        "comm_grid": A5.Interconnect.SERVER_FM16,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 128 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.6 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_850E_486T_96G_FM16",
+        "comm_grid": A5.Interconnect.SERVER_FM16,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 96 * (1024**3),
+        "memory_bandwidth_bytes_ps": 4.0 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_850E_425T_96G_FM16",
+        "comm_grid": A5.Interconnect.SERVER_FM16,
+        "mma_ops": {
+            torch.float32: 189 * 1e12,
+            torch.bfloat16: 378 * 1e12,
+            torch.half: 378 * 1e12,
+            DTYPE_FP8: 756 * 1e12,
+            torch.int8: 756 * 1e12,
+            DTYPE_FP4: 1512 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 24 * 1e12,
+            torch.bfloat16: 47 * 1e12,
+            torch.half: 47 * 1e12,
+        },
+        "memory_size_bytes": 96 * (1024**3),
+        "memory_bandwidth_bytes_ps": 4.0 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    # ── ATLAS 950 (POD 1K) ──
+    {
+        "name": "ATLAS_950_486T_128G",
+        "comm_grid": A5.Interconnect.POD_1K,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 128 * (1024**3),
+        "memory_bandwidth_bytes_ps": 1.6 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
+    },
+    {
+        "name": "ATLAS_950_486T_96G",
+        "comm_grid": A5.Interconnect.POD_1K,
+        "mma_ops": {
+            torch.float32: 216 * 1e12,
+            torch.bfloat16: 432 * 1e12,
+            torch.half: 432 * 1e12,
+            DTYPE_FP8: 865 * 1e12,
+            torch.int8: 865 * 1e12,
+            DTYPE_FP4: 1730 * 1e12,
+        },
+        "gp_ops": {
+            torch.float32: 27 * 1e12,
+            torch.bfloat16: 54 * 1e12,
+            torch.half: 54 * 1e12,
+        },
+        "memory_size_bytes": 96 * (1024**3),
+        "memory_bandwidth_bytes_ps": 4.0 * (1024**4),
+        "compute_efficiency": 0.9,
+        "memory_efficiency": 0.8,
     },
 ]
 
@@ -349,6 +696,333 @@ class StaticCostTestCase(unittest.TestCase):
         self.assertEqual(cost.mma_op_cost_s, 5 * 1e-6)
         self.assertEqual(cost.gp_op_cost_s, 2 * 1e-6)
         self.assertEqual(cost.comm_op_cost_s, 10 * 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# A5 Chip specs
+# ---------------------------------------------------------------------------
+class A5ChipTestCase(unittest.TestCase):
+    def test_c486t_mma_ops(self):
+        chip = A5.Chip.C486T["mma_ops"]
+        self.assertEqual(chip[torch.float32], 216 * 1e12)
+        self.assertEqual(chip[torch.bfloat16], 432 * 1e12)
+        self.assertEqual(chip[torch.half], 432 * 1e12)
+        self.assertEqual(chip[torch.float8_e5m2], 865 * 1e12)
+        self.assertEqual(chip[torch.int8], 865 * 1e12)
+        self.assertEqual(chip[DTYPE_FP4], 1730 * 1e12)
+
+    def test_c486t_gp_ops(self):
+        chip = A5.Chip.C486T["gp_ops"]
+        self.assertEqual(chip[torch.float32], 27 * 1e12)
+        self.assertEqual(chip[torch.bfloat16], 54 * 1e12)
+        self.assertEqual(chip[torch.half], 54 * 1e12)
+
+    def test_c486t_compute_efficiency(self):
+        self.assertEqual(A5.Chip.C486T["compute_efficiency"], 0.9)
+
+    def test_c425t_mma_ops(self):
+        chip = A5.Chip.C425T["mma_ops"]
+        self.assertEqual(chip[torch.float32], 189 * 1e12)
+        self.assertEqual(chip[torch.bfloat16], 378 * 1e12)
+        self.assertEqual(chip[torch.half], 378 * 1e12)
+        self.assertEqual(chip[torch.float8_e5m2], 756 * 1e12)
+        self.assertEqual(chip[torch.int8], 756 * 1e12)
+        self.assertEqual(chip[DTYPE_FP4], 1512 * 1e12)
+
+    def test_c425t_gp_ops(self):
+        chip = A5.Chip.C425T["gp_ops"]
+        self.assertEqual(chip[torch.float32], 24 * 1e12)
+        self.assertEqual(chip[torch.bfloat16], 47 * 1e12)
+        self.assertEqual(chip[torch.half], 47 * 1e12)
+
+    def test_c425t_compute_efficiency(self):
+        self.assertEqual(A5.Chip.C425T["compute_efficiency"], 0.9)
+
+
+# ---------------------------------------------------------------------------
+# A5 Mem specs
+# ---------------------------------------------------------------------------
+class A5MemTestCase(unittest.TestCase):
+    def test_m128g_1_6t(self):
+        mem = A5.Mem.M128G_1_6T
+        self.assertEqual(mem["memory_size_bytes"], 128 * (1024**3))
+        self.assertEqual(mem["memory_bandwidth_bytes_ps"], 1.6 * (1024**4))
+        self.assertEqual(mem["memory_efficiency"], 0.8)
+
+    def test_m112g_1_4t(self):
+        mem = A5.Mem.M112G_1_4T
+        self.assertEqual(mem["memory_size_bytes"], 112 * (1024**3))
+        self.assertEqual(mem["memory_bandwidth_bytes_ps"], 1.4 * (1024**4))
+        self.assertEqual(mem["memory_efficiency"], 0.8)
+
+    def test_m96g_4_0t(self):
+        mem = A5.Mem.M96G_4_0T
+        self.assertEqual(mem["memory_size_bytes"], 96 * (1024**3))
+        self.assertEqual(mem["memory_bandwidth_bytes_ps"], 4.0 * (1024**4))
+        self.assertEqual(mem["memory_efficiency"], 0.8)
+
+    def test_m84g_1_4t(self):
+        mem = A5.Mem.M84G_1_4T
+        self.assertEqual(mem["memory_size_bytes"], 84 * (1024**3))
+        self.assertEqual(mem["memory_bandwidth_bytes_ps"], 1.4 * (1024**4))
+        self.assertEqual(mem["memory_efficiency"], 0.8)
+
+
+# ---------------------------------------------------------------------------
+# A5 Interconnect topologies
+# ---------------------------------------------------------------------------
+class A5InterconnectTestCase(unittest.TestCase):
+    # ── PCIE2_UB4 ──
+    def test_pcie2_ub4_grid_shape(self):
+        ic = A5.Interconnect.PCIE2_UB4
+        self.assertEqual(ic.grid.shape, (2, 2, 4))
+
+    def test_pcie2_ub4_ndim(self):
+        self.assertEqual(A5.Interconnect.PCIE2_UB4.grid.ndim, 3)
+
+    def test_pcie2_ub4_topologies_count(self):
+        ic = A5.Interconnect.PCIE2_UB4
+        self.assertEqual(len(ic.topologies), ic.grid.ndim)
+
+    def test_pcie2_ub4_tier0_cpu_pcie(self):
+        t = A5.Interconnect.PCIE2_UB4.topologies[0]
+        self.assertEqual(t.bandwidth_bytes_ps, 24 * 1e9)
+        self.assertEqual(t.latency_s, 4.5 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.75 * 0.7)
+
+    def test_pcie2_ub4_tier1_group_pcie(self):
+        t = A5.Interconnect.PCIE2_UB4.topologies[1]
+        self.assertEqual(t.bandwidth_bytes_ps, 32 * 1e9)
+        self.assertEqual(t.latency_s, 3 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.8 * 0.7)
+
+    def test_pcie2_ub4_tier2_ub_fullmesh(self):
+        t = A5.Interconnect.PCIE2_UB4.topologies[2]
+        self.assertEqual(t.bandwidth_bytes_ps, 53 * 3 * 1e9)
+        self.assertEqual(t.latency_s, 1.5 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+        self.assertEqual(t.type, InterconnectType.FULL_MESH)
+
+    def test_pcie2_ub4_max_devices(self):
+        self.assertEqual(A5.Interconnect.PCIE2_UB4.grid.numel(), 16)
+
+    # ── SERVER_ROCE_64 ──
+    def test_server_roce_64_grid_shape(self):
+        ic = A5.Interconnect.SERVER_ROCE_64
+        self.assertEqual(ic.grid.shape, (8, 8))
+
+    def test_server_roce_64_ndim(self):
+        self.assertEqual(A5.Interconnect.SERVER_ROCE_64.grid.ndim, 2)
+
+    def test_server_roce_64_tier0_roce(self):
+        t = A5.Interconnect.SERVER_ROCE_64.topologies[0]
+        self.assertEqual(t.bandwidth_bytes_ps, 50 * 1e9)
+        self.assertEqual(t.latency_s, 10 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+
+    def test_server_roce_64_tier1_fullmesh(self):
+        t = A5.Interconnect.SERVER_ROCE_64.topologies[1]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 7 * 1e9)
+        self.assertEqual(t.latency_s, 1.5 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+        self.assertEqual(t.type, InterconnectType.FULL_MESH)
+
+    def test_server_roce_64_max_devices(self):
+        self.assertEqual(A5.Interconnect.SERVER_ROCE_64.grid.numel(), 64)
+
+    # ── SERVER_UB_128 ──
+    def test_server_ub_128_grid_shape(self):
+        self.assertEqual(A5.Interconnect.SERVER_UB_128.grid.shape, (16, 8))
+
+    def test_server_ub_128_ndim(self):
+        self.assertEqual(A5.Interconnect.SERVER_UB_128.grid.ndim, 2)
+
+    def test_server_ub_128_tier0_5808(self):
+        t = A5.Interconnect.SERVER_UB_128.topologies[0]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 8 * 1e9)
+        self.assertEqual(t.latency_s, 3 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+
+    def test_server_ub_128_tier1_fullmesh(self):
+        t = A5.Interconnect.SERVER_UB_128.topologies[1]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 15 * 1e9)
+        self.assertEqual(t.latency_s, 3 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+
+    def test_server_ub_128_max_devices(self):
+        self.assertEqual(A5.Interconnect.SERVER_UB_128.grid.numel(), 128)
+
+    # ── SERVER_UB_1K ──
+    def test_server_ub_1k_grid_shape(self):
+        self.assertEqual(A5.Interconnect.SERVER_UB_1K.grid.shape, (128, 8))
+
+    def test_server_ub_1k_ndim(self):
+        self.assertEqual(A5.Interconnect.SERVER_UB_1K.grid.ndim, 2)
+
+    def test_server_ub_1k_tier0_5808_unions(self):
+        t = A5.Interconnect.SERVER_UB_1K.topologies[0]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 8 * 1e9)
+        self.assertEqual(t.latency_s, 4.5 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+
+    def test_server_ub_1k_tier1_fullmesh(self):
+        t = A5.Interconnect.SERVER_UB_1K.topologies[1]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 15 * 1e9)
+        self.assertEqual(t.latency_s, 2.3 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+
+    def test_server_ub_1k_max_devices(self):
+        self.assertEqual(A5.Interconnect.SERVER_UB_1K.grid.numel(), 1024)
+
+    # ── SERVER_FM16 ──
+    def test_server_fm16_grid_shape(self):
+        self.assertEqual(A5.Interconnect.SERVER_FM16.grid.shape, (16,))
+
+    def test_server_fm16_ndim(self):
+        self.assertEqual(A5.Interconnect.SERVER_FM16.grid.ndim, 1)
+
+    def test_server_fm16_tier0_fullmesh(self):
+        t = A5.Interconnect.SERVER_FM16.topologies[0]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 15 * 1e9)
+        self.assertEqual(t.latency_s, 1.5 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+        self.assertEqual(t.type, InterconnectType.FULL_MESH)
+
+    def test_server_fm16_max_devices(self):
+        self.assertEqual(A5.Interconnect.SERVER_FM16.grid.numel(), 16)
+
+    # ── POD_1K ──
+    def test_pod_1k_grid_shape(self):
+        self.assertEqual(A5.Interconnect.POD_1K.grid.shape, (16, 8, 8))
+
+    def test_pod_1k_ndim(self):
+        self.assertEqual(A5.Interconnect.POD_1K.grid.ndim, 3)
+
+    def test_pod_1k_topologies_count(self):
+        ic = A5.Interconnect.POD_1K
+        self.assertEqual(len(ic.topologies), ic.grid.ndim)
+
+    def test_pod_1k_tier0_5808(self):
+        t = A5.Interconnect.POD_1K.topologies[0]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 4 * 1e9)
+        self.assertEqual(t.latency_s, 4.5 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+
+    def test_pod_1k_tier1_unions(self):
+        t = A5.Interconnect.POD_1K.topologies[1]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 8 * 1e9)
+        self.assertEqual(t.latency_s, 4.5 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+
+    def test_pod_1k_tier2_fullmesh(self):
+        t = A5.Interconnect.POD_1K.topologies[2]
+        self.assertEqual(t.bandwidth_bytes_ps, 56 * 15 * 1e9)
+        self.assertEqual(t.latency_s, 2.3 * 1e-6)
+        self.assertEqual(t.comm_efficiency, 0.85)
+
+    def test_pod_1k_max_devices(self):
+        self.assertEqual(A5.Interconnect.POD_1K.grid.numel(), 1024)
+
+
+# ---------------------------------------------------------------------------
+# A5 DeviceProfile parameterized tests
+# ---------------------------------------------------------------------------
+class A5DeviceProfileTestCase(unittest.TestCase):
+    def test_registered_in_all_device_profiles(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                self.assertIn(spec["name"], DeviceProfile.all_device_profiles)
+
+    def test_name(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                self.assertEqual(profile.name, spec["name"])
+
+    def test_vendor(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                self.assertEqual(profile.vendor, "HUAWEI")
+
+    def test_comm_grid(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                self.assertIs(profile.comm_grid, spec["comm_grid"])
+
+    def test_mma_ops(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                for dtype, expected in spec["mma_ops"].items():
+                    with self.subTest(dtype=str(dtype)):
+                        self.assertEqual(profile.mma_ops[dtype], expected)
+
+    def test_gp_ops(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                for dtype, expected in spec["gp_ops"].items():
+                    with self.subTest(dtype=str(dtype)):
+                        self.assertEqual(profile.gp_ops[dtype], expected)
+
+    def test_memory_size_bytes(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                self.assertEqual(profile.memory_size_bytes, spec["memory_size_bytes"])
+
+    def test_memory_bandwidth(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                self.assertEqual(profile.memory_bandwidth_bytes_ps, spec["memory_bandwidth_bytes_ps"])
+
+    def test_compute_efficiency(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                self.assertEqual(profile.compute_efficiency, spec["compute_efficiency"])
+
+    def test_memory_efficiency(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                self.assertEqual(profile.memory_efficiency, spec["memory_efficiency"])
+
+    def test_static_cost(self):
+        for spec in _A5_DEVICE_PROFILE_SPECS:
+            with self.subTest(device=spec["name"]):
+                profile = DeviceProfile.all_device_profiles[spec["name"]]
+                self.assertIs(profile.static_cost, A5.STATIC_COST)
+
+
+# ---------------------------------------------------------------------------
+# A5 StaticCost
+# ---------------------------------------------------------------------------
+class A5StaticCostTestCase(unittest.TestCase):
+    def test_values(self):
+        cost = A5.STATIC_COST
+        self.assertEqual(cost.mma_op_cost_s, 5 * 1e-6)
+        self.assertEqual(cost.gp_op_cost_s, 2 * 1e-6)
+        self.assertEqual(cost.comm_op_cost_s, 5 * 1e-6)
+
+
+# ---------------------------------------------------------------------------
+# A5 registration guard
+# ---------------------------------------------------------------------------
+class A5RegistrationTestCase(unittest.TestCase):
+    def test_duplicate_name_raises(self):
+        name = "ATLAS_350_425T_112G"
+        before = set(DeviceProfile.all_device_profiles.keys())
+        with self.assertRaises(ValueError):
+            DeviceProfile(
+                name=name,
+                vendor="TEST",
+                comm_grid=A5.Interconnect.PCIE2_UB4,
+            )
+        self.assertEqual(set(DeviceProfile.all_device_profiles.keys()), before)
 
 
 if __name__ == "__main__":
