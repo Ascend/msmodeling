@@ -127,6 +127,33 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
 
     patched = False
 
+    # ----------------------------------------------------------------
+    # Patch 4a: Windows SIGALRM — resolve trust_remote_code without alarm
+    # ----------------------------------------------------------------
+    # WHY:   Windows lacks signal.SIGALRM, which breaks transformers'
+    #        trust_remote_code interactive prompt.  Default
+    #        trust_remote_code=True on platforms without SIGALRM so
+    #        that headless simulation never blocks on stdin.
+    #        This was previously a global monkey-patch in utils.py;
+    #        moved here to limit its scope to Kimi K2.5 only.
+    # WITHOUT: Blocking on stdin / AttributeError from signal.SIGALRM
+    #          when loading remote model code.
+    import signal as _signal
+
+    if not hasattr(_signal, "SIGALRM"):
+        import transformers.dynamic_module_utils
+
+        _orig_resolve = transformers.dynamic_module_utils.resolve_trust_remote_code
+        if not getattr(_orig_resolve, "_tensor_cast_patched", False):
+
+            def _patched_resolve(trust_remote_code, *args, **kwargs):
+                if trust_remote_code is None:
+                    trust_remote_code = True
+                return _orig_resolve(trust_remote_code, *args, **kwargs)
+
+            _patched_resolve._tensor_cast_patched = True
+            transformers.dynamic_module_utils.resolve_trust_remote_code = _patched_resolve
+
     try:
         # ----------------------------------------------------------------
         # Patch 4: Filter KimiK25ForConditionalGeneration.forward kwargs
@@ -272,14 +299,40 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                             import math
 
                             seq_length = q.shape[0]
+                            num_heads = q.shape[1]
+                            head_dim = q.shape[-1]
+
                             if q.device.type == 'meta':
-                                head_dim = q.shape[-1]
-                                num_heads = q.shape[1]
-                                return torch.empty(
-                                    seq_length,
-                                    num_heads * head_dim,
-                                    device='meta',
-                                    dtype=q.dtype,
+                                # -------------------------------------------------------
+                                # Call the fused tensor_cast.attention op so that
+                                # `tensor_cast.attention.default` appears in the chrome
+                                # trace, enabling accurate analytic performance modeling.
+                                #
+                                # Shape mapping (varlen → tensor_cast convention):
+                                #   q: (seq_len, num_heads, head_dim)
+                                #      → query: (seq_len, num_heads * head_dim)
+                                #   k: (seq_len, num_heads, head_dim)
+                                #      → key:   (seq_len, num_heads, head_dim)
+                                #   v: (seq_len, num_heads, head_dim)
+                                #      → value: (seq_len, num_heads, head_dim)
+                                #
+                                # Metadata is passed as None — matching the standard
+                                # visual attention path in flash_attention_forward()
+                                # (attention.py L80: attention_meta = None).  The
+                                # performance model falls back to deriving seq_lens
+                                # and query_lens from query.shape, avoiding
+                                # .item() on meta tensors.
+                                # -------------------------------------------------------
+                                query = q.reshape(seq_length, num_heads * head_dim)
+                                return torch.ops.tensor_cast.attention(
+                                    query,
+                                    k,
+                                    v,
+                                    None,  # attention_mask
+                                    None,  # block_table
+                                    None,  # query_start_loc
+                                    None,  # seq_lens
+                                    None,  # query_lens
                                 )
 
                             if seq_length > 4096:
@@ -288,8 +341,6 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                                     "threshold. Skipping O(n²) attention to avoid OOM.",
                                     seq_length,
                                 )
-                                head_dim = q.shape[-1]
-                                num_heads = q.shape[1]
                                 return torch.zeros(
                                     seq_length,
                                     num_heads * head_dim,
@@ -297,17 +348,22 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                                     dtype=q.dtype,
                                 )
 
-                            attention_mask = torch.zeros(
+                            # Build causal-like attention mask: allow attention
+                            # only within each image chunk (diagonal blocks).
+                            # Using -inf for masked positions (correct additive mask)
+                            # instead of boolean True/False (which would add 1.0/0.0).
+                            attention_mask = torch.full(
                                 [1, seq_length, seq_length],
+                                float('-inf'),
                                 device=q.device,
-                                dtype=torch.bool,
+                                dtype=q.dtype,
                             )
 
                             q_cu_seqlens_list = q_cu_seqlens.tolist()
                             for i in range(1, len(q_cu_seqlens_list)):
                                 start = q_cu_seqlens_list[i - 1]
                                 end = q_cu_seqlens_list[i]
-                                attention_mask[..., start:end, start:end] = True
+                                attention_mask[..., start:end, start:end] = 0.0
 
                             q = q.transpose(0, 1)
                             k = k.transpose(0, 1)
@@ -467,6 +523,27 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #          missing attention_meta leading to broken KV cache ops.
         class_ref_decoder = "modeling_deepseek.DeepseekV3DecoderLayer"
         decoder_cls = get_class_from_dynamic_module(class_ref_decoder, model_id, force_download=False)
+
+        # ----------------------------------------------------------------
+        # Patch 10a: Register 'tensor_cast' in ATTENTION_CLASSES
+        # ----------------------------------------------------------------
+        # WHY:   Patch 2 downgrades config._attn_implementation from
+        #        'flash_attention_2' to 'tensor_cast'.  Later, MTP block
+        #        creation calls ATTENTION_CLASSES[config._attn_implementation]
+        #        which only knows 'eager' / 'sdpa' / 'flash_attention_2'.
+        # WITHOUT: KeyError: 'tensor_cast' during MTP block construction.
+        import sys
+
+        remote_module = sys.modules.get(decoder_cls.__module__)
+        if remote_module is not None and hasattr(remote_module, 'ATTENTION_CLASSES'):
+            if 'tensor_cast' not in remote_module.ATTENTION_CLASSES:
+                fallback = remote_module.ATTENTION_CLASSES.get('sdpa') or remote_module.ATTENTION_CLASSES.get('eager')
+                if fallback is None:
+                    raise ValueError(
+                        f"ATTENTION_CLASSES lacks 'sdpa' or 'eager' fallback. "
+                        f"Available: {list(remote_module.ATTENTION_CLASSES.keys())}"
+                    )
+                remote_module.ATTENTION_CLASSES['tensor_cast'] = fallback
 
         if not hasattr(decoder_cls, "_original_decoder_forward"):
             decoder_cls._original_decoder_forward = decoder_cls.forward
@@ -650,13 +727,399 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                         "Verify that the model's shared expert count matches this default."
                     )
 
+        # ----------------------------------------------------------------
+        # Patch 13: ModelWrapper — add output_intermediate_hidden_states for MTP
+        #           and apply selected_token_indices for prefill token pruning
+        # ----------------------------------------------------------------
+        # WHY:   (a) The generic ``ModelWrapper`` only returns a single tensor
+        #        from ``forward()``, but ``MtpWrapper`` expects
+        #        ``(logits, hidden_states)`` when MTP is enabled.
+        #        (b) ``ModelWrapper`` delegates directly to the HF model
+        #        which has its own internal ``lm_head`` — it cannot apply
+        #        ``selected_token_indices`` *before* the lm_head like
+        #        ``CausalLmWrapper`` can.  Instead we apply it *after* the
+        #        HF model's forward to select only the desired logit rows.
+        #        (c) For the MTP branch we also prune the intermediate
+        #        hidden_states so MTP layers only process the selected tokens.
+        #
+        #        The patch is additive and backwards-compatible: the default
+        #        path (no MTP, no selected_indices) is identical to the
+        #        original behaviour.
+        # WITHOUT: (a) ``AssertionError: Can't unpack a tensor of 1 rows
+        #          into a tuple of 2 elements`` in ``MtpWrapper.forward()``.
+        #          (b) 42000×7168×163840 lm_head matmul instead of
+        #          12×7168×163840 during prefill, inflating compute cost
+        #          ~3500×.
+        from tensor_cast.transformers.model import ModelWrapper
+
+        if not hasattr(ModelWrapper, "_patched_for_mtp"):
+            _original_mw_forward = ModelWrapper.forward
+
+            def patched_mw_forward(
+                self,
+                input_ids: Optional[torch.Tensor],
+                position_ids: torch.Tensor,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                output_intermediate_hidden_states: bool = False,
+                **kwargs: object,
+            ):
+                # Extract selected_token_indices from sampling_metadata
+                # (injected by generate_inputs() for prefill token pruning).
+                sampling_metadata = kwargs.get("sampling_metadata")
+                selected_indices = sampling_metadata.selected_token_indices if sampling_metadata is not None else None
+
+                if output_intermediate_hidden_states:
+                    # MTP path: delegate to HF model, prune logits only.
+                    # intermediate_hidden_states must NOT be pruned here
+                    # because MtpWrapper needs the full seq_len for
+                    # rotary_emb and the MTP layers will apply
+                    # selected_token_indices themselves (see
+                    # MultiTokenPredictor.forward in mtp.py).
+                    kwargs_with_hidden = {**kwargs, "output_hidden_states": True}
+                    outputs = self._inner(
+                        input_ids=input_ids,
+                        use_cache=False,
+                        position_ids=position_ids,
+                        inputs_embeds=inputs_embeds,
+                        return_dict=False,
+                        **kwargs_with_hidden,
+                    )
+                    logits = outputs[0]
+                    intermediate_hidden_states = outputs[1][-1]
+                    if selected_indices is not None:
+                        logits = logits.index_select(1, selected_indices)
+                    return logits, intermediate_hidden_states
+
+                # Non-MTP path
+                if selected_indices is not None and inputs_embeds is None:
+                    # ------------------------------------------------------------
+                    # Fix: Check whether image inputs are present.  If the user
+                    # supplied pixel_values / image_grid_thw, we must route
+                    # through the full VL forward (KimiK25ForConditionalGeneration)
+                    # so that the visual encoder is executed and image features
+                    # are merged with text embeddings.  Bypassing the VL forward
+                    # would silently drop the image, producing wrong results
+                    # and a misleading trace (no visual ops).
+                    # ------------------------------------------------------------
+                    has_image_input = kwargs.get("pixel_values") is not None or kwargs.get("image_grid_thw") is not None
+                    if not has_image_input:
+                        # Optimization: prune hidden_states BEFORE lm_head.
+                        # Bypass the HF VL forward (KimiK25ForConditionalGeneration)
+                        # and directly call the language model's transformer body,
+                        # then apply lm_head on only the selected tokens.
+                        # This avoids computing lm_head on all tokens.
+                        #
+                        # We must inject tensor_cast kwargs (attention_meta,
+                        # kv_cache_by_layers, etc.) into each attention layer's
+                        # _extra_forward_kwargs side-channel, replicating what
+                        # Patch 4 does for the normal VL forward path.  Without
+                        # this the MLA layers see None kv_cache and the
+                        # performance estimator crashes.
+                        from tensor_cast.transformers.model import _EXTRA_TC_KWARGS_KEYS
+
+                        lm = self._inner.language_model
+                        _tc_extra = {
+                            k: kwargs[k] for k in _EXTRA_TC_KWARGS_KEYS if k in kwargs and kwargs[k] is not None
+                        }
+                        if _tc_extra:
+                            for layer in lm.model.layers:
+                                if hasattr(layer, "self_attn"):
+                                    layer.self_attn._extra_forward_kwargs = _tc_extra
+
+                        body_outputs = lm.model(
+                            input_ids=input_ids,
+                            position_ids=position_ids,
+                            use_cache=False,
+                            return_dict=True,
+                        )
+                        hidden_states = body_outputs.last_hidden_state
+                        hidden_states = hidden_states.index_select(1, selected_indices)
+                        logits = lm.lm_head(hidden_states)
+                        return logits
+
+                # Default / fallback path
+                logits = _original_mw_forward(self, input_ids, position_ids, inputs_embeds, **kwargs)
+                if selected_indices is not None:
+                    logits = logits.index_select(1, selected_indices)
+                return logits
+
+            ModelWrapper.forward = patched_mw_forward
+            ModelWrapper._patched_for_mtp = True
+            patched = True
+
+        # ----------------------------------------------------------------
+        # Patch 14: DeepseekV3RotaryEmbedding — handle position_ids as seq_len
+        # ----------------------------------------------------------------
+        # WHY:   ``maybe_enable_mtp`` (line 228) runs BEFORE
+        #        ``patch_rotary_emb`` (line 231), so ``MtpWrapper.__init__``
+        #        captures the inner ``DeepseekV3RotaryEmbedding`` (not the
+        #        ``CachingRotaryEmb`` wrapper that is applied later).
+        #        The inner ``forward(x, seq_len)`` expects an integer
+        #        ``seq_len``, but ``MtpWrapper`` passes ``position_ids``
+        #        (a tensor).  This patch makes the inner rotary embedding
+        #        tolerate a tensor ``seq_len`` by extracting its maximum
+        #        value.
+        # WITHOUT: ``TypeError: arange() received an invalid combination
+        #          of arguments - got (Tensor, ...)`` at the
+        #          ``rotary_emb`` call in ``MtpWrapper.forward()``.
+        class_ref_rotary = "modeling_deepseek.DeepseekV3RotaryEmbedding"
+        rotary_cls = get_class_from_dynamic_module(class_ref_rotary, model_id, force_download=False)
+
+        if not hasattr(rotary_cls, "_patched_for_kimi_k25"):
+            _original_rotary_forward = rotary_cls.forward
+
+            def patched_rotary_forward(self, x, seq_len=None):
+                if isinstance(seq_len, torch.Tensor):
+                    # MtpWrapper passes position_ids (tensor) as seq_len.
+                    # Determine the sequence-length integer for arange/slicing.
+                    if seq_len.device.type == "meta":
+                        # TorchDynamo tracing on meta: use config value as a
+                        # safe upper bound. The cache will be rebuilt with the
+                        # real max position at runtime.
+                        max_pos = self.max_position_embeddings
+                    else:
+                        # Runtime (eager, after graph-break resume).
+                        # +1 because position_ids are 0-based (e.g. [0..N-1]).
+                        max_pos = int(seq_len.max().item()) + 1
+                    if self.max_seq_len_cached is None or max_pos > self.max_seq_len_cached:
+                        self._set_cos_sin_cache(
+                            seq_len=max_pos,
+                            device=x.device,
+                            dtype=x.dtype,
+                        )
+                    return (
+                        self.cos_cached[:max_pos].to(dtype=x.dtype),
+                        self.sin_cached[:max_pos].to(dtype=x.dtype),
+                    )
+                return _original_rotary_forward(self, x, seq_len)
+
+            rotary_cls.forward = patched_rotary_forward
+            rotary_cls._patched_for_kimi_k25 = True
+            patched = True
+
+        # ----------------------------------------------------------------
+        # Patch 15: MultiTokenPredictorLayer — unpack tuple from decoder
+        # ----------------------------------------------------------------
+        # WHY:   Both the original and patched
+        #        ``DeepseekV3DecoderLayer.forward`` return a tuple
+        #        ``(hidden_states, ...)``.  ``MultiTokenPredictorLayer``
+        #        passes this tuple through to ``MultiTokenPredictor``,
+        #        which tries to call ``.index_select()`` on it — tuples
+        #        don't have that method.  Unpack the first tensor element.
+        # WITHOUT: ``AttributeError: 'tuple' object has no attribute
+        #          'index_select'`` at ``MultiTokenPredictor.forward()``.
+        from tensor_cast.layers.mtp import MultiTokenPredictorLayer
+
+        if not hasattr(MultiTokenPredictorLayer, "_patched_for_kimi_k25"):
+            _original_mtp_layer_forward = MultiTokenPredictorLayer.forward
+
+            def patched_mtp_layer_forward(
+                self,
+                inputs_embeds: torch.Tensor,
+                position_ids: torch.Tensor,
+                previous_hidden_states: torch.Tensor,
+                position_embeddings: Optional[torch.Tensor] = None,
+                **kwargs,
+            ):
+                hidden_states = _original_mtp_layer_forward(
+                    self,
+                    inputs_embeds,
+                    position_ids,
+                    previous_hidden_states,
+                    position_embeddings=position_embeddings,
+                    **kwargs,
+                )
+                # The decoder layer (e.g. DeepseekV3DecoderLayer) returns
+                # a tuple (hidden_states, ...).  Unpack the first tensor.
+                if isinstance(hidden_states, tuple):
+                    hidden_states = hidden_states[0]
+                return hidden_states
+
+            MultiTokenPredictorLayer.forward = patched_mtp_layer_forward
+            MultiTokenPredictorLayer._patched_for_kimi_k25 = True
+            patched = True
+
     except Exception as e:
         logger.warning(f"Could not patch remote modules: {e}")
 
     return patched
 
 
+def _shard_lm_head_for_kimi_vl(model):
+    """Manually apply ``ColumnParallelLinear`` to the nested lm_head.
+
+    Kimi K2.5 is a VL model where ``lm_head`` lives inside the
+    ``language_model`` submodule (``_inner.language_model.lm_head``),
+    not at the top level.  The standard ``shard_model_by_tp`` uses a
+    fnmatch pattern ``"lm_head"`` which only matches a top-level
+    (unprefixed) name.  After ``strip_module_name``, the nested path
+    becomes ``"language_model.lm_head"`` → no match → lm_head stays as
+    a raw ``nn.Linear`` and escapes TP sharding.
+
+    This function is called AFTER ``shard_model`` in the custom
+    pipeline and replaces the still-unsharded lm_head with a
+    ``ColumnParallelLinear`` that gathers output across the TP group.
+
+    Args:
+        model: A ``TransformerModel`` whose ``_inner`` is a ``ModelWrapper``
+               wrapping the Kimi HF model.
+    """
+    from tensor_cast.layers.parallel_linear import ColumnParallelLinear
+
+    pgm = model.parallel_group_manager
+    lmhead_tp_group = pgm.lmhead_tp_group
+    tp_group = pgm.tp_group
+
+    if lmhead_tp_group.world_size <= 1:
+        return  # No TP configured — nothing to do.
+
+    # Two nested lm_head instances escape the standard
+    # ``shard_model_by_tp`` fnmatch pattern ``"lm_head"``:
+    # 1. VL model:  ``*language_model.lm_head``
+    # 2. MTP block: ``*mtp.lm_head``
+    #
+    # Iterate all modules and shard every still-raw nn.Linear
+    # whose path ends with one of those suffixes.
+    _LMIHEAD_SUFFIXES = ("language_model.lm_head", "mtp.lm_head")
+    for name, module in model._inner.named_modules():
+        if isinstance(module, torch.nn.Linear) and name.endswith(_LMIHEAD_SUFFIXES):
+            params = {
+                "tp_group": lmhead_tp_group,
+                "global_tp_group": tp_group,
+                "gather_output": True,
+            }
+            parallel_module = ColumnParallelLinear(module, **params)
+            model._replace_module(name, parallel_module)
+
+
 _patched_kimi_k25 = False
+_shard_model_patched = False
+
+
+def _patch_shard_model_for_kimi_vl():
+    """Monkey-patch ``shard_model`` to automatically shard nested lm_head.
+
+    Kimi K2.5's ``lm_head`` lives at ``language_model.lm_head`` (not top-level),
+    so the standard ``shard_model_by_tp`` fnmatch pattern ``"lm_head"``
+    misses it (``strip_module_name`` yields ``"language_model.lm_head"``).
+
+    This patch wraps ``shard_model`` to call ``_shard_lm_head_for_kimi_vl``
+    after the standard sharding.
+
+    IMPORTANT:  Two references must be patched because ``model.py`` imports
+    ``shard_model`` via ``from ... import shard_model``, creating a local
+    binding that bypasses a module-attribute monkey-patch.
+    """
+    global _shard_model_patched
+    if _shard_model_patched:
+        return
+
+    from tensor_cast.transformers import transformations as _t
+    from tensor_cast.transformers import model as _model
+
+    _original_shard_model = _t.shard_model
+
+    def _patched_shard_model(model):
+        result = _original_shard_model(model)
+        _shard_lm_head_for_kimi_vl(result)
+        return result
+
+    # Patch both references:
+    # 1. transformations.shard_model — for callers that use the module attribute
+    # 2. model.shard_model         — for model.py's ``from ... import shard_model``
+    _t.shard_model = _patched_shard_model
+    _model.shard_model = _patched_shard_model
+    _shard_model_patched = True
+
+
+# ----------------------------------------------------------------
+# Patch 16: resize_image — Kimi K2.5 specific image resize logic
+# ----------------------------------------------------------------
+_resize_image_patched = False
+
+
+def _patch_resize_image_for_kimi_k25(model_id):
+    """Monkey-patch ``resize_image`` to use Kimi K2.5's resize logic.
+
+    WHY:   The generic ``resize_image`` in ``input_generator.py`` delegates
+           to Qwen2-VL's ``smart_resize``, which relies on the image
+           processor's ``size`` attribute for min/max pixel limits.
+           Kimi K2.5's ``KimiK25VisionProcessor`` (from remote code) does
+           NOT expose a standard ``size`` attribute — it uses
+           ``media_proc_cfg["in_patch_limit"]`` instead.  Without this
+           patch, ``smart_resize`` falls back to its hardcoded defaults
+           (``max_pixels=1_003_520``), which are too restrictive for
+           Kimi K2.5's larger images (e.g. 1080×1920 = 2 073 600 pixels),
+           causing the image to be incorrectly downscaled.
+
+    HOW:   When ``model_id`` contains "kimi" (case-insensitive), the
+           patched ``resize_image`` bypasses ``smart_resize`` entirely and
+           computes resized dimensions directly by rounding the original
+           image dimensions to multiples of ``patch_size * merge_size``.
+           This preserves the full resolution (limited only by
+           ``in_patch_limit``, which is generous enough for common
+           resolutions).
+
+    WITHOUT: Vision token count mismatch — e.g. 4888 tokens instead of
+             the expected 10764 for a 1080×1920 image.
+    """
+    global _resize_image_patched
+    if _resize_image_patched:
+        return
+
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    from tensor_cast.core import input_generator as _ig
+
+    _original_resize_image = _ig.resize_image
+
+    def _kimi_resize_image(
+        mid,
+        mtype,
+        image_height,
+        image_width,
+        patch_size,
+        merge_size,
+        temporal_patch_size,
+    ):
+        # Only intercept Kimi K2.5 (model_id check is case-insensitive).
+        if "kimi" not in mid.lower():
+            return _original_resize_image(
+                mid,
+                mtype,
+                image_height,
+                image_width,
+                patch_size,
+                merge_size,
+                temporal_patch_size,
+            )
+
+        # Kimi K2.5 does NOT use Qwen2-VL's smart_resize.
+        # MoonViT processes images at (near) full resolution: dimensions are
+        # simply rounded to multiples of ``patch_size * merge_size``.
+        #
+        # The processor's ``media_proc_cfg["in_patch_limit"]`` defines the
+        # maximum number of patches (typically 16384), which translates to a
+        # generous pixel budget (16384 * 14 * 14 = 3 211 264 px for
+        # patch_size=14).  Common resolutions like 1080×1920 (2 073 600 px)
+        # fall well within this limit, so no downscaling is needed.
+        factor = patch_size * merge_size
+        resized_height = ((image_height + factor - 1) // factor) * factor
+        resized_width = ((image_width + factor - 1) // factor) * factor
+        logger.info(
+            "Kimi K2.5 image resize: %dx%d -> %dx%d (factor=%d, bypassed Qwen2-VL smart_resize)",
+            image_height,
+            image_width,
+            resized_height,
+            resized_width,
+            factor,
+        )
+        return resized_height, resized_width
+
+    _ig.resize_image = _kimi_resize_image
+    _resize_image_patched = True
 
 
 def _hf_config_patch_for_kimi_k25(config, model_id=None):
@@ -664,24 +1127,51 @@ def _hf_config_patch_for_kimi_k25(config, model_id=None):
 
     Called by :func:`AutoModelConfigLoader._apply_hf_config_patches` BEFORE
     the HuggingFace model is instantiated.
+
+    The patching is split into two tiers:
+
+    * **Per-config patches** (always run):  ``_attn_implementation``
+      downgrade, vision-config attribute bridging, environment checks
+      (e.g. ``is_torch_fx_available``).  These operate on the config
+      *object* and MUST execute for every new config instance, even
+      when class-level monkey-patches have already been applied.
+
+    * **Class-level patches** (run once):  model-class monkey-patching,
+      ``shard_model`` wrapping, ``resize_image`` patching.  These
+      modify global state (module attributes / function references)
+      and are guarded by ``_patched_kimi_k25`` to avoid redundant work.
     """
     import logging
 
     logger = logging.getLogger(__name__)
 
-    global _patched_kimi_k25
-    if _patched_kimi_k25:
-        return
-
     model_type = getattr(config, "model_type", None)
     if model_type != "kimi_k25":
         return
 
-    # Phase 1 – environment / config-level patches (no model_id needed).
+    # ----------------------------------------------------------------
+    # Phase 1 – config-level patches (always run for every new config)
+    # ----------------------------------------------------------------
     config_patched = _patch_hf_config_for_kimi_k25(config)
+
+    # ----------------------------------------------------------------
+    # Phases 2-4 – class-level / global patches (run once per process)
+    # ----------------------------------------------------------------
+    # These modify module-level state (monkey-patches, function
+    # references, etc.).  They are idempotent but expensive, so we
+    # guard them with a global flag.
+    global _patched_kimi_k25
+    if _patched_kimi_k25:
+        return
 
     # Phase 2 – model class monkey-patches (requires model_id).
     classes_patched = _patch_model_classes_for_kimi_k25(config, model_id)
+
+    # Phase 3 – wrap shard_model to handle nested lm_head.
+    _patch_shard_model_for_kimi_vl()
+
+    # Phase 4 – patch resize_image for Kimi K2.5's image resize logic.
+    _patch_resize_image_for_kimi_k25(model_id)
 
     if config_patched or classes_patched:
         _patched_kimi_k25 = True
@@ -693,6 +1183,7 @@ register_model_profile(
         model_type="kimi_k25",
         moe_module_name="DeepseekV3MoE",
         mla_module_name="DeepseekV3Attention",
+        mtp_block_module_name="DeepseekV3DecoderLayer",
         moe_num_experts_key="n_routed_experts",
         language_layers_path_str="language_model.model.layers",
         visual_module_path="vision_tower",

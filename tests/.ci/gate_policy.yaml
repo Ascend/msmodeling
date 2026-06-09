@@ -55,6 +55,18 @@ exemptions:
     deadline: 2026-12-31
 
   - symbols:
+      - tensor_cast/transformers/builtin_model/kimi_k25.py::_hf_config_patch_for_kimi_k25
+      - tensor_cast/transformers/builtin_model/kimi_k25.py::_patch_resize_image_for_kimi_k25
+      - tensor_cast/transformers/builtin_model/kimi_k25.py::_patch_shard_model_for_kimi_vl
+      - tensor_cast/transformers/builtin_model/kimi_k25.py::_patch_model_classes_for_kimi_k25
+      - tensor_cast/transformers/builtin_model/kimi_k25.py::_shard_lm_head_for_kimi_vl
+    reason: "builtin_model monkey-patch functions are covered by integration tests in TestKimiK25 nightly suite and guard tests in TestKimiK25Patches; builtin_model paths are omitted from coverage test_map collection."
+    applicant: "kimi_k25_adaptation"
+    approver: "hexiaowu"
+    deadline: 2026-12-31
+    ticket: "kimi-k25-ci-gate"
+
+  - symbols:
       - tensor_cast/performance_model/builtin_model/__init__.py::perf_builtin_package_loaded
       - tensor_cast/performance_model/builtin_model/deepseek_v4.py::_safe_max_int
       - tensor_cast/transformers/builtin_model/deepseek_v4.py::DeepseekV4MoE

@@ -1463,8 +1463,8 @@ def _estimate_default_without_static_cost(
                 logger.warning(
                     "Ignoring mma compute ops of %s for %s since it is not supported on %s",
                     dtype,
-                    op_invoke_info,
-                    device_profile,
+                    op_invoke_info.func,
+                    device_profile.name,
                 )
         if compute_ops.gp_ops > 0:
             device_gp_ops = _get_device_ops_for_dtype(device_profile.gp_ops, dtype)
@@ -1475,8 +1475,8 @@ def _estimate_default_without_static_cost(
                 logger.warning(
                     "Ignoring gp compute ops of %s for %s since it is not supported on %s",
                     dtype,
-                    op_invoke_info,
-                    device_profile,
+                    op_invoke_info.func,
+                    device_profile.name,
                 )
     compute_time_s = mma_ops_time_s + gp_ops_time_s
     memory_bandwidth = device_profile.memory_bandwidth_bytes_ps * device_profile.memory_efficiency

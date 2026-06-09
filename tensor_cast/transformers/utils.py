@@ -17,7 +17,6 @@
 import contextlib
 import logging
 import os
-import signal
 import torch
 
 from typing import List, Optional, Tuple
@@ -35,34 +34,6 @@ from ..model_config import AttentionQuantConfig, ModelConfig, RemoteSource
 
 logger = logging.getLogger(__name__)
 
-
-# ----------------------------------------------------------------
-# Global fix: Windows lacks signal.SIGALRM, which breaks
-# transformers' trust_remote_code interactive prompt.  Default
-# trust_remote_code=True on platforms without SIGALRM so that
-# headless simulation never blocks on stdin.
-# ----------------------------------------------------------------
-def _ensure_windows_trust_remote_code_compat():
-    """Monkey-patch resolve_trust_remote_code to skip SIGALRM on Windows."""
-    if hasattr(signal, "SIGALRM"):
-        return  # Unix — no patch needed
-
-    import transformers.dynamic_module_utils
-
-    _orig_resolve = transformers.dynamic_module_utils.resolve_trust_remote_code
-    if getattr(_orig_resolve, "_tensor_cast_patched", False):
-        return  # Already patched
-
-    def _patched_resolve(trust_remote_code, *args, **kwargs):
-        if trust_remote_code is None:
-            trust_remote_code = True
-        return _orig_resolve(trust_remote_code, *args, **kwargs)
-
-    _patched_resolve._tensor_cast_patched = True
-    transformers.dynamic_module_utils.resolve_trust_remote_code = _patched_resolve
-
-
-_ensure_windows_trust_remote_code_compat()
 
 # When resolving a ModelScope Hub id, only fetch files needed for config + trust_remote_code
 # Python; never pull weight shards into ~/.cache (avoids multi‑GB ._____temp / hub dirs for UT).

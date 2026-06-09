@@ -124,14 +124,14 @@ Metric descriptions:
 
 **Models & optimization**
 
-| Area | Support | Notes |
-| --- | --- | --- |
+| Area | Support | Notes                                                                                                  |
+| --- | --- |--------------------------------------------------------------------------------------------------------|
 | Text models (families) | Supported | DeepSeek V4, Qwen3, Qwen3-Next, GLM-4, DeepSeek V3, DeepSeek V3.2, ERNIE 4.5, Ling, MiMo v2, MinMax M2 |
-| Vision-language models | Supported | Qwen3-VL, GLM-4V, InternVL |
-| Video generation models (Diffusers DiT) | Supported | Wan, HunyuanVideo, HunyuanVideo1.5 |
-| Auto sharding | Supported | DP, TP, EP |
-| Quantization (linear) | Supported | W8A16/W8A8/W4A8 (static & dynamic), FP8, MXFP4 |
-| Quantization (attention) | Supported (text only) | INT8 |
+| Vision-language models | Supported | Qwen3-VL, GLM-4V, Kimi k2.5, Kimi k2.6, InternVL                                                       |
+| Video generation models (Diffusers DiT) | Supported | Wan, HunyuanVideo, HunyuanVideo1.5                                                                     |
+| Auto sharding | Supported | DP, TP, EP                                                                                             |
+| Quantization (linear) | Supported | W8A16/W8A8/W4A8 (static & dynamic), FP8, MXFP4                                                         |
+| Quantization (attention) | Supported (text only) | INT8                                                                                                   |
 
 ## Supported Accelerators
 

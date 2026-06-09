@@ -14,7 +14,7 @@ Kimi K2.5（`moonshotai/Kimi-K2.5`）是 Moonshot AI 发布的多模态大语言
 
 如果直接尝试在 TensorCast 中加载并编译 Kimi K2.5，会遇到以下核心问题：
 
-1. **Transformers 环境兼容**：Kimi K2.5 依赖 `is_torch_fx_available`（transformers v5.x 已移除）、`flash_attention_2`（未安装环境无法使用），且 Windows 平台缺少 `signal.SIGALRM` 导致 `trust_remote_code` 交互式弹窗阻塞。
+1. **Transformers 环境兼容**：Kimi K2.5 依赖 `is_torch_fx_available`（transformers v5.x 已移除）、`flash_attention_2`（未安装环境无法使用），且 Windows 平台缺少 `signal.SIGALRM` 导致 `trust_remote_code` 交互式弹窗阻塞，出于安全考虑，transformers 库要求显式授权才能执行这些代码。
 2. **Vision Config 字段缺失**：Kimi K2.5 的 vision config 使用 `merge_kernel_size` 命名，但 `input_generator` 期望 `spatial_merge_size`、`temporal_patch_size`、`in_channels` 等标准字段，缺失导致 `AttributeError`。
 3. **VL Forward 接口差异**：TensorCast 通过 `model_runner` 注入额外 kwargs（如 `attention_meta`），但 Kimi K2.5 原始 VL forward 仅接受标准 HF 参数名；`image_grid_thw` 与 `grid_thws` 参数名不一致。
 4. **Meta Device 图捕获**：`torch.compile` 图追踪时 `input_ids` 位于 `meta` 设备上，原始 `_merge_input_ids_with_image_features` 内部调用 embedding 层会在 meta tensor 上失败。
@@ -33,31 +33,17 @@ Kimi K2.5（`moonshotai/Kimi-K2.5`）是 Moonshot AI 发布的多模态大语言
 
 ### 2.1 整体设计思路
 
-本方案将 Kimi K2.5 适配拆分为三个层次：
+本方案将 Kimi K2.5 适配拆分为两个层次：
 
-1. **环境兼容层（跨模型全局修复）**：
-   - Windows SIGALRM 修复位于 `tensor_cast/transformers/utils.py`，模块级自动执行
-   - 因为这是所有远端模型在 Windows 上的共性问题，不宜放在单模型适配文件内
-
-2. **配置修补 + 类 Monkey-Patch 层**：
+1. **配置修补 + 类 Monkey-Patch 层**：
    - 所有 Kimi K2.5 特有逻辑集中在 `tensor_cast/transformers/builtin_model/kimi_k25.py`
    - 分为两个阶段执行：Phase 1（config 层修补）→ Phase 2（类的 monkey-patch）
    - 通过 `hf_config_patch_method` 在模型加载前注入到 `ModelProfile` 注册表中
 
-3. **ModelProfile 注册层**：
+2. **ModelProfile 注册层**：
    - 在 `kimi_k25.py` 模块底部注册 `ModelProfile`
    - 声明 MoE 模块名、MLA 模块名、专家计数字段、视觉路径等元数据
    - 关键字段：`moe_route_after_dp_transform=True`（DP≠EP 时路由在 DP 切片后执行）
-
-### 2.2 全局 Windows SIGALRM 修复
-
-`tensor_cast/transformers/utils.py` 在模块加载时执行 `_ensure_windows_trust_remote_code_compat()`：
-
-- 检测 `signal.SIGALRM` 是否存在
-- 若不存在（Windows），monkey-patch `transformers.dynamic_module_utils.resolve_trust_remote_code`
-- 当 `trust_remote_code is None` 时默认设为 `True`，跳过交互式弹窗
-- 通过 `_tensor_cast_patched` 标记防重复 patch
-- Unix 平台不受影响，直接 return
 
 ### 2.3 Phase 1：配置层修补（`_patch_hf_config_for_kimi_k25`）
 
@@ -114,9 +100,6 @@ ModelProfile(
 ┌────────────────────────────────────────────────────────────┐
 │                 tensor_cast/transformers/                   │
 ├────────────────────────────────────────────────────────────┤
-│  utils.py                           ← 全局共性问题           │
-│  └─ _ensure_windows_trust_remote_code_compat()  (SIGALRM)  │
-├────────────────────────────────────────────────────────────┤
 │  custom_model_registry.py            ← 框架通用注册表        │
 │  └─ ModelProfile.hf_config_patch_method  (回调入口)          │
 ├────────────────────────────────────────────────────────────┤
@@ -129,36 +112,17 @@ ModelProfile(
 └────────────────────────────────────────────────────────────┘
 ```
 
-### 2.7 关键设计决策
-
-**1. P9（MLA RoPE 解析）从 `mla.py` 迁移到 `kimi_k25.py`**
-
-最初 `_resolve_position_embeddings` 方法被添加在通用 `layers/mla.py` 的 `MultiheadLatentAttentionTensorCast` 类中，但该方法仅服务于 Kimi K2.5（因其 decoder 只传 `position_ids` 而不传显式 RoPE 张量）。为了保持通用 MLA 层不被模型特有逻辑污染，最终将该方法以 monkey-patch 形式移至 `kimi_k25.py` 的 P9，通过 `hasattr` 检查注入到类上，同时从 `mla.py` 中彻底移除了该方法。
-
-**2. SIGALRM 修复从 `kimi_k25.py` 上提至 `utils.py`**
-
-最初 SIGALRM 修复（原 P3）位于 `kimi_k25.py` 的 Phase 1 中，但它是所有 `trust_remote_code=True` 远端模型在 Windows 上的共性问题。将其上提至 `tensor_cast/transformers/utils.py` 模块级执行，避免每个远端模型适配文件都需要重复处理。
-
-**3. `moe_route_after_dp_transform=True`**
-
-当数据并行度（DP）不等于专家并行度（EP）时，Kimi K2.5 的路由操作需要在 DP 切片**之后**执行，否则会在路由阶段对全量 token 执行导致性能膨胀。该字段已在 `custom_model_registry.py` 中新增为 `ModelProfile` 标准字段。
-
 ---
 
 ## 3. 使用说明
 
-### 3.1 运行环境
-
-- Python ≥ 3.10（官方推荐 3.13）
-- 需要 Hugging Face 连接（国内建议 `$env:HF_ENDPOINT = "https://hf-mirror.com"`）
-- `PYTHONPATH` 需包含项目根目录
-- Windows 用户建议 PyTorch ≤ 2.8（规避兼容性问题）
-
-### 3.2 仿真命令
+### 3.1 仿真命令
 
 注：cli.inference.text_generate 中“设备数”参数名为 num-devices ，tensor_cast.scripts.text_generate 中“设备数”参数名为 world-size
 
 **纯文本推理仿真**（W4A8 动态量化 + TP8/EP16/DP2）：
+
+prefill阶段：
 
 ```bash
 python -m cli.inference.text_generate "moonshotai/Kimi-K2.5" \
@@ -175,7 +139,7 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K2.5" \
   --enable-shared-expert-tp
 ```
 
-**多模态推理仿真**（带图像输入-目前没有实测数据，无法保证精度，后续等实测数据到了同步更新文档）：
+decode阶段(一般decode阶段会指定--num-mtp-tokens 3)：
 
 ```bash
 python -m cli.inference.text_generate "moonshotai/Kimi-K2.5" \
@@ -183,6 +147,26 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K2.5" \
   --num-queries 24 \
   --query-length 1 \
   --context-length 4250 \
+  --compile \
+  --quantize-linear-action W4A8_DYNAMIC \
+  --num-devices 16 \
+  --tp-size 8 \
+  --dp-size 2 \
+  --ep-size 16 \
+  --num-mtp-tokens 3 \
+  --enable-shared-expert-tp
+```
+
+**多模态推理仿真**：
+
+prefill阶段：
+
+```bash
+python -m cli.inference.text_generate "moonshotai/Kimi-K2.5" \
+  --device ATLAS_800_A3_560T_128G_DIE \
+  --num-queries 24 \
+  --query-length 1 \
+  --context-length 30 \
   --image-batch-size 1 \
   --image-height 1080 \
   --image-width 1920 \
@@ -195,22 +179,37 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K2.5" \
   --enable-shared-expert-tp
 ```
 
-### 3.3 Trace 与性能分析结果
+decode阶段(一般decode阶段会指定--num-mtp-tokens 3，多模态场景下decode阶段会指定--decode)：
+
+```bash
+python -m cli.inference.text_generate "moonshotai/Kimi-K2.5" \
+  --device ATLAS_800_A3_560T_128G_DIE \
+  --num-queries 24 \
+  --query-length 1 \
+  --context-length 30 \
+  --image-batch-size 1 \
+  --image-height 1080 \
+  --image-width 1920 \
+  --compile \
+  --quantize-linear-action W4A8_DYNAMIC \
+  --num-devices 16 \
+  --tp-size 8 \
+  --dp-size 2 \
+  --ep-size 16 \
+  --num-mtp-tokens 3 \
+  --enable-shared-expert-tp \
+  --decode
+```
+
+### 3.2 Trace 与性能分析结果
 
 Kimi K2.5 的 trace 表应体现以下关键语义块：
 
 - `tensor_cast.mlapo_quant.default` — MLA projection-out 融合 + 量化
 - `tensor_cast.all_to_all.default` — EP 通信（ep_size=16）
-- `tensor_cast.multihead_latent_attention_quant.default` — MLA attention 量化
-- `aten.addmm.default` — 视觉编码器计算（VL 场景）
-
-### 3.4 配置约束
-
-1. Kimi K2.5 必须使用 `trust_remote_code=True`（Windows 上自动处理，Unix 需手动确认或传参）。
-2. `flash_attention_2` 未安装时自动降级为 `tensor_cast` attention 实现。
-3. 视觉编码器长序列（>4096）自动退回 `zeros` 占位，防止 OOM。
-4. `n_routed_experts` 实际值从远端 config 读取，fallback 值为 384。
-5. 所有 Monkey-Patch 通过 `_patched_*` / `getattr` 标记防重复，仅首次加载时执行。
+- `tensor_cast.multihead_latent_attention.default` — MLA attention 量化
+- `aten.native_layer_norm.default`、`tensor_cast.attention.default` — 视觉编码器计算（多模态仿真 场景prefill阶段）
+- `aten.addmm.default` — 视觉编码器计算（多模态仿真 场景prefill & decode阶段）
 
 ---
 
