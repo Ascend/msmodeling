@@ -5,7 +5,7 @@ input_generation
 
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 
@@ -106,7 +106,12 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
     num_tokens = batch_size * query_len
     input_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
-    kv_cache_by_layers, kv_cache_per_token = _get_kv_cache_info(model, num_blocks, block_size)
+    # total_kv_tokens mirrors the numerator behind num_blocks (max_context_length
+    # per request, summed over the batch); V4 sizing compresses this footprint.
+    total_kv_tokens = max_context_length * batch_size
+    kv_cache_by_layers, kv_cache_per_token = _get_kv_cache_info(
+        model, num_blocks, block_size, batch_size, total_kv_tokens
+    )
     sampling_metadata = SamplingMetadata(
         query_start_loc=attn_meta.query_start_loc,
     )
@@ -127,7 +132,9 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
         "sampling_metadata": sampling_metadata,
     }
 
-    sparse_attention_indexer_cache = get_sparse_attention_indexer_cache_info(model, num_blocks, block_size)
+    sparse_attention_indexer_cache = get_sparse_attention_indexer_cache_info(
+        model, num_blocks, block_size, batch_size, total_kv_tokens
+    )
     kwargs.update(sparse_attention_indexer_cache)
 
     if model.model_config.hf_config.model_type in (
@@ -352,7 +359,51 @@ def _resolve_decoder_attention_layer(layer):
     return None
 
 
-def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[Any, Any], int]:
+def _is_v4_model(model) -> bool:
+    """Return True when the loaded model is DeepSeek V4."""
+    for config in (
+        getattr(getattr(model, "model_config", None), "hf_config", None),
+        getattr(model, "text_config", None),
+    ):
+        if config is not None and getattr(config, "model_type", None) == "deepseek_v4":
+            return True
+    return False
+
+
+def _resolve_main_kv_cache_dtype(model, layer_idx: int) -> torch.dtype:
+    """Resolve storage dtype for the primary (attention) KV cache.
+
+    DeepSeek V4's reference inference model keeps the shared attention KV cache
+    in the model working dtype (bf16/fp16) even when activations are FP8-quantized
+    elsewhere (model.py:506-507, 527). Indexer cache may still use FP8; see
+    ``_resolve_indexer_cache_dtype``.
+    """
+    model_config = model.model_config
+    if _is_v4_model(model):
+        return model_config.dtype
+
+    kvcache_dtype = model_config.dtype
+    if (attention_config := get_attention_quant_config(model, layer_idx)) is not None:
+        kvcache_dtype = attention_config.get_quant_dtype()
+    return kvcache_dtype
+
+
+def _resolve_indexer_cache_dtype(model, layer_idx: int) -> torch.dtype:
+    """Resolve storage dtype for sparse-attention indexer auxiliary cache."""
+    model_config = model.model_config
+    cache_dtype = model_config.dtype
+    if (attention_config := get_attention_quant_config(model, layer_idx)) is not None:
+        cache_dtype = attention_config.get_quant_dtype()
+    return cache_dtype
+
+
+def _get_kv_cache_info(
+    model,
+    num_blocks: int,
+    block_size: int,
+    batch_size: Optional[int] = None,
+    total_kv_tokens: Optional[int] = None,
+) -> Tuple[dict[Any, Any], int]:
     model_config = model.model_config
     parallel_config = model.model_config.parallel_config
     decoder_layers = None
@@ -362,12 +413,11 @@ def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[An
         except AttributeError:
             decoder_layers = None
     # Initialize the KV cache structure (also on 'meta' device).
+    is_v4_model = _is_v4_model(model)
     kv_cache_per_token = 0
     kv_cache_by_layers = {}
     for i in range(model.num_hidden_layers):
-        kvcache_dtype = model_config.dtype
-        if (attention_config := get_attention_quant_config(model, i)) is not None:
-            kvcache_dtype = attention_config.get_quant_dtype()
+        kvcache_dtype = _resolve_main_kv_cache_dtype(model, i)
 
         if model_config.mla_config is not None:
             # decoder_layers may be None if _resolve_decoder_layers raises
@@ -376,19 +426,29 @@ def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[An
             attention_layer = None
             if decoder_layers is not None and i < len(decoder_layers):
                 attention_layer = _resolve_decoder_attention_layer(decoder_layers[i])
-            kv_cache_width = _resolve_sparse_attention_kv_cache_width(
-                model,
-                attention_layer,
-            )
-            kv_cache_by_layers[i] = torch.empty(
-                [
-                    num_blocks,
-                    block_size,
-                    kv_cache_width,
-                ],
-                dtype=kvcache_dtype,
-                device="meta",
-            )
+            if is_v4_model:
+                kv_cache_shape = _resolve_v4_kv_cache_size(
+                    model, attention_layer, num_blocks, block_size, batch_size, total_kv_tokens
+                )
+                kv_cache_by_layers[i] = torch.empty(
+                    kv_cache_shape,
+                    dtype=kvcache_dtype,
+                    device="meta",
+                )
+            else:
+                kv_cache_width = _resolve_sparse_attention_kv_cache_width(
+                    model,
+                    attention_layer,
+                )
+                kv_cache_by_layers[i] = torch.empty(
+                    [
+                        num_blocks,
+                        block_size,
+                        kv_cache_width,
+                    ],
+                    dtype=kvcache_dtype,
+                    device="meta",
+                )
         else:
             # Shape: [2 (K/V), num_blocks, block_size, num_heads, head_dim]
             if model.text_config.num_key_value_heads >= parallel_config.tensor_parallel_size:
@@ -415,65 +475,88 @@ def _get_kv_cache_info(model, num_blocks: int, block_size: int) -> Tuple[dict[An
     return kv_cache_by_layers, kv_cache_per_token
 
 
-def get_kv_cache_info(model, num_blocks, block_size):
-    model_config = model.model_config
-    tp_size = model_config.parallel_config.tensor_parallel_size
-    decoder_layers = None
-    if model_config.mla_config is not None:
-        try:
-            decoder_layers = _resolve_decoder_layers(model)
-        except AttributeError:
-            decoder_layers = None
-    kv_cache_by_layers = {}
-    kv_cache_per_token = 0
-    for i in range(model.num_hidden_layers):
-        kvcache_dtype = model_config.dtype
-        attention_config = get_attention_quant_config(model, i)
-        if attention_config is not None:
-            kvcache_dtype = attention_config.get_quant_dtype()
+def _resolve_v4_kv_cache_size(
+    model,
+    attention_layer=None,
+    num_blocks: int = 1,
+    block_size: int = 1,
+    batch_size: Optional[int] = None,
+    total_kv_tokens: Optional[int] = None,
+) -> List[int]:
+    """
+    Resolve V4 KV cache shape based on compress_ratio.
 
-        if model_config.mla_config is not None:
-            # decoder_layers may be None if _resolve_decoder_layers raises
-            # AttributeError (e.g., model not fully wrapped). In that case
-            # attention_layer stays None and the fallback formula below is used.
-            attention_layer = None
-            if decoder_layers is not None and i < len(decoder_layers):
-                attention_layer = _resolve_decoder_attention_layer(decoder_layers[i])
-            kv_cache_width = _resolve_sparse_attention_kv_cache_width(
-                model,
-                attention_layer,
-            )
-            kv_cache_by_layers[i] = torch.empty(
-                (
-                    num_blocks,
-                    block_size,
-                    kv_cache_width,
-                ),
-                dtype=kvcache_dtype,
-                device="meta",
-            )
-        else:
-            n_kv = model.text_config.num_key_value_heads
-            if n_kv >= tp_size:
-                assert n_kv % tp_size == 0
-                kv_heads = n_kv // tp_size
-            else:
-                assert tp_size % n_kv == 0
-                kv_heads = 1
-            kv_cache_by_layers[i] = torch.empty(
-                (
-                    2,
-                    num_blocks,
-                    block_size,
-                    kv_heads,
-                    model.head_dim,
-                ),
-                dtype=kvcache_dtype,
-                device="meta",
-            )
-        kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (num_blocks * block_size)
+    Per the reference implementation (ds-model-v4-pro/inference/model.py:473-474):
+        kv_cache_size = window_size + (max_seq_len // compress_ratio if compress_ratio else 0)
+        kv_cache = zeros(max_batch_size, kv_cache_size, head_dim)
 
-    return kv_cache_by_layers, kv_cache_per_token
+    The reference allocates the cache PER request (``max_batch_size`` rows) and,
+    along the sequence axis, only keeps a *compressed* footprint:
+
+      Layer type | per-request sequence slots
+      -----------|------------------------------------------------
+      ratio=0    | window_size                  (pure sliding window)
+      ratio=4    | window_size + seq_len // 4    (window + compressed KV)
+      ratio=128  | window_size + seq_len // 128  (window + heavily compressed KV)
+
+    msmodeling stores caches in a paged ``[num_blocks, block_size, head_dim]``
+    layout, so we translate the compressed per-request footprint into a block
+    count over the whole batch:
+
+        total_slots = batch_size * window_size + total_kv_tokens // compress_ratio
+        num_blocks  = ceil(total_slots / block_size)
+
+    where ``total_kv_tokens`` is the sum of per-request sequence lengths in the
+    batch (the number of real token positions that flow through the KV cache).
+
+    NOTE: the previous implementation divided ``max_position_embeddings`` by the
+    compress ratio and compared the single-request result against the whole
+    batch-wide pool (``num_blocks * block_size``). Those two quantities are not
+    dimensionally comparable, so the branch never triggered and every V4 layer
+    fell back to the full (uncompressed) pool size, over-counting KV memory.
+
+    Args:
+        model: The model wrapper.
+        attention_layer: The attention layer instance.
+        num_blocks: Paged-pool block count, used for the non-V4 / fallback path.
+        block_size: Size of each cache block.
+        batch_size: Number of sequences in the batch. Required together with
+            ``total_kv_tokens`` to apply V4 compressed sizing.
+        total_kv_tokens: Sum of per-request sequence lengths across the batch.
+
+    Returns:
+        List representing the tensor shape: ``[num_blocks, block_size, head_dim]``.
+    """
+    head_dim = _resolve_sparse_attention_kv_cache_width(model, attention_layer)
+
+    # window_size from config (sliding_window). Non-V4 MLA models (e.g. V3.2)
+    # have no sliding window, so this stays 0 and we keep the full pool below.
+    window_size = int(getattr(model.text_config, "sliding_window", 0) or 0)
+
+    compress_ratio = 0
+    if attention_layer is not None:
+        compress_ratio = int(getattr(attention_layer, "compress_ratio", 0) or 0)
+
+    # A V4 sparse layer either keeps a sliding window (ratio==0) or a
+    # window + compressed cache (ratio>0). Standard MLA layers have neither.
+    is_v4_sparse_layer = window_size > 0 or compress_ratio > 0
+    if is_v4_sparse_layer and batch_size is not None and total_kv_tokens is not None:
+        # Sliding-window ring buffer: window_size slots per request.
+        window_slots = batch_size * window_size
+        # Compressed KV: the reference Compressor pools every `compress_ratio`
+        # consecutive tokens into a single cache row, so the compressed segment
+        # holds total_kv_tokens // compress_ratio slots across the batch.
+        compressed_slots = (total_kv_tokens // compress_ratio) if compress_ratio > 0 else 0
+        total_slots = window_slots + compressed_slots
+        adjusted_num_blocks = max(1, (total_slots + block_size - 1) // block_size)
+        return [adjusted_num_blocks, block_size, head_dim]
+
+    # Non-V4 MLA or missing batch info: keep the full paged pool.
+    return [num_blocks, block_size, head_dim]
+
+
+def get_kv_cache_info(model, num_blocks, block_size, batch_size=None, total_kv_tokens=None):
+    return _get_kv_cache_info(model, num_blocks, block_size, batch_size, total_kv_tokens)
 
 
 def _resolve_decoder_layers(model):
@@ -515,18 +598,29 @@ def _resolve_decoder_layers(model):
     )
 
 
-def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size):
+def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch_size=None, total_kv_tokens=None):
     """Allocate per-layer auxiliary indexer caches for sparse-attention wrappers.
 
     Despite the older DSA-oriented naming in surrounding code, this helper is
     also used by DeepSeek V4's custom sparse attention path, whose ratio=4
     layers carry a distinct learned indexer.
+
+    For V4 the indexer cache is purely compressed (no sliding window): the
+    reference allocates ``[max_batch_size, max_seq_len // compress_ratio,
+    index_head_dim]`` (model.py:399). When ``batch_size`` and
+    ``total_kv_tokens`` are provided we size the paged cache to
+    ``total_kv_tokens // compress_ratio`` slots instead of the full pool.
     """
     model_config = model.model_config
     mla_config = model_config.mla_config
     if mla_config is None or not mla_config.mla_cls.requires_indexer_cache():
         return {}
 
+    # Compressed indexer-cache sizing is a DeepSeek V4-only behavior. Other
+    # sparse-attention models (e.g. DeepSeek V3.2 / DSA) also reach this helper
+    # via requires_indexer_cache(), so we must not let the compression branch
+    # alter their cache size. Gate it explicitly on the V4 model type.
+    is_v4_model = _is_v4_model(model)
     indexer_cache_by_layers = {}
     indexer_cache_per_token = 0
     try:
@@ -546,12 +640,26 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size):
         if cache_width is None:
             continue
 
-        cache_dtype = model_config.dtype
-        if (attention_config := get_attention_quant_config(model, i)) is not None:
-            cache_dtype = attention_config.get_quant_dtype()
+        cache_dtype = _resolve_indexer_cache_dtype(model, i)
+
+        # Indexer cache is purely compressed (no window). Size it to
+        # total_kv_tokens // compress_ratio slots when batch info is available,
+        # otherwise fall back to the full paged pool for backward compatibility.
+        # Only DeepSeek V4 uses this compressed sizing; every other model keeps
+        # the full paged pool unchanged.
+        indexer_num_blocks = num_blocks
+        compress_ratio = (
+            int(getattr(attention_layer, "compress_ratio", 0) or 0)
+            if (is_v4_model and attention_layer is not None)
+            else 0
+        )
+        if batch_size is not None and total_kv_tokens is not None and compress_ratio > 0:
+            compressed_slots = total_kv_tokens // compress_ratio
+            indexer_num_blocks = max(1, (compressed_slots + block_size - 1) // block_size)
+
         indexer_cache_by_layers[i] = torch.empty(
             [
-                num_blocks,
+                indexer_num_blocks,
                 block_size,
                 cache_width,
             ],
@@ -591,7 +699,8 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
     seq_lens_t = torch.tensor(seq_lens, dtype=torch.long)
     query_len_t = torch.tensor(query_lens, dtype=torch.long)
 
-    num_blocks = (sum(seq_lens) + batch_size * (num_mtp_tokens + 1) + block_size - 1) // block_size
+    total_kv_tokens = sum(seq_lens) + batch_size * (num_mtp_tokens + 1)
+    num_blocks = (total_kv_tokens + block_size - 1) // block_size
     max_num_blocks_per_seq = (max(seq_lens) + block_size - 1) // block_size
     block_table_tensor = torch.empty((batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta")
     slot_mapping = torch.empty((num_tokens,), dtype=torch.long, device="meta")
@@ -607,7 +716,9 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
     input_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
 
-    kv_cache_by_layers, kv_cache_per_token = get_kv_cache_info(model, num_blocks, block_size)
+    kv_cache_by_layers, kv_cache_per_token = get_kv_cache_info(
+        model, num_blocks, block_size, batch_size, total_kv_tokens
+    )
 
     sampling_meta = SamplingMetadata(query_start_loc=query_start_loc)
     selected_token_indices = []
@@ -630,7 +741,9 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
         "kv_cache_per_token": kv_cache_per_token,
     }
 
-    sparse_attention_indexer_cache = get_sparse_attention_indexer_cache_info(model, num_blocks, block_size)
+    sparse_attention_indexer_cache = get_sparse_attention_indexer_cache_info(
+        model, num_blocks, block_size, batch_size, total_kv_tokens
+    )
     kwargs.update(sparse_attention_indexer_cache)
 
     if model.model_config.hf_config.model_type == "qwen3_next":

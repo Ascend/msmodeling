@@ -178,7 +178,12 @@ def build_ci_gate_plan(repo_root: Path, changes: ChangeSet, baseline) -> CiGateP
 # ---------------------------------------------------------------------------
 
 
-def _run_pytest(targets: list[str]) -> int:
+def _run_pytest(
+    targets: list[str],
+    *,
+    use_marker: bool = True,
+    use_xdist: bool = True,
+) -> int:
     if not targets:
         return 0
     cmd = [
@@ -186,14 +191,19 @@ def _run_pytest(targets: list[str]) -> int:
         "-m",
         "pytest",
         *targets,
-        "-m",
-        _PYTEST_MARKER,
-        *pytest_xdist_args(),
-        "-vv",
-        "--tb=short",
-        "--durations=20",
-        "--disable-warnings",
     ]
+    if use_marker:
+        cmd.extend(["-m", _PYTEST_MARKER])
+    if use_xdist:
+        cmd.extend(pytest_xdist_args())
+    cmd.extend(
+        [
+            "-vv",
+            "--tb=short",
+            "--durations=20",
+            "--disable-warnings",
+        ]
+    )
     logger = logging.getLogger("ci_gate")
     logger.info("Running pytest: %s", shlex.join(cmd))
     return subprocess.run(cmd, cwd=REPO_ROOT, check=False).returncode
@@ -319,7 +329,7 @@ def main() -> int:
 
     if phase2_targets:
         logger.info("Phase 2: running %d test targets ...", len(phase2_targets))
-        code = _run_pytest(phase2_targets)
+        code = _run_pytest(phase2_targets, use_marker=False, use_xdist=False)
         if code != 0:
             _log_source_change_failure(logger)
             return code

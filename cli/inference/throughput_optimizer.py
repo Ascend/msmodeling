@@ -112,6 +112,17 @@ def arg_parse():
         help="Quantize all linear layers in the model from choices (currently only support symmetric quant)",
     )
     model_group.add_argument(
+        "--quantize-backbone-linear-action",
+        type=QuantizeLinearAction,
+        choices=list(QuantizeLinearAction),
+        default=QuantizeLinearAction.DISABLED,
+        help=(
+            "Override the quant type of backbone linear layers (attention, dense MLP and shared experts), "
+            "excluding routed MoE experts. Combine with --quantize-linear-action to quantize routed experts "
+            "and backbone differently, e.g. --quantize-linear-action MXFP4 --quantize-backbone-linear-action FP8"
+        ),
+    )
+    model_group.add_argument(
         "--mxfp4-group-size",
         type=check_positive_integer,
         default=32,

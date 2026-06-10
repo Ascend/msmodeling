@@ -6,10 +6,14 @@ import torch
 
 from tensor_cast.core.input_generator import (
     RequestInfo,
+    _is_v4_model,
     _layer_uses_sparse_attention_indexer,
     _resolve_decoder_layers,
+    _resolve_indexer_cache_dtype,
+    _resolve_main_kv_cache_dtype,
     _resolve_sparse_attention_indexer_cache_width,
     _resolve_sparse_attention_kv_cache_width,
+    _resolve_v4_kv_cache_size,
     generate_image_inputs,
     generate_inputs,
     generate_inputs_varlen,
@@ -195,3 +199,124 @@ class TestSparseAttentionCacheHelpers:
         assert 1 in info["indexer_cache_by_layers"]
         assert info["indexer_cache_by_layers"][1].shape == (4, 16, 128)
         assert info["indexer_cache_per_token"] > 0
+
+
+class TestDeepseekV4KvCacheHelpers:
+    @pytest.mark.parametrize(
+        ("hf_model_type", "text_model_type", "expected"),
+        [
+            ("deepseek_v4", None, True),
+            (None, "deepseek_v4", True),
+            ("deepseek_v32", "deepseek_v32", False),
+            (None, None, False),
+        ],
+    )
+    def test_is_v4_model(self, hf_model_type, text_model_type, expected):
+        model = MagicMock()
+        model.model_config.hf_config = MagicMock(model_type=hf_model_type) if hf_model_type is not None else None
+        model.text_config = MagicMock(model_type=text_model_type) if text_model_type is not None else None
+        assert _is_v4_model(model) is expected
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config")
+    def test_resolve_main_kv_cache_dtype_v4_ignores_attention_quant(self, mock_get_attn_quant):
+        mock_get_attn_quant.return_value = MagicMock(get_quant_dtype=lambda: torch.float8_e4m3fn)
+        model = MagicMock()
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = MagicMock(model_type="deepseek_v4")
+        model.text_config = None
+
+        assert _resolve_main_kv_cache_dtype(model, 0) == torch.bfloat16
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config")
+    def test_resolve_main_kv_cache_dtype_non_v4_uses_attention_quant(self, mock_get_attn_quant):
+        mock_get_attn_quant.return_value = MagicMock(get_quant_dtype=lambda: torch.float8_e4m3fn)
+        model = MagicMock()
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = MagicMock(model_type="deepseek_v32")
+        model.text_config = None
+
+        assert _resolve_main_kv_cache_dtype(model, 0) == torch.float8_e4m3fn
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_resolve_main_kv_cache_dtype_non_v4_fallback_to_model_dtype(self, _mock_get_attn_quant):
+        model = MagicMock()
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = MagicMock(model_type="deepseek_v32")
+        model.text_config = None
+
+        assert _resolve_main_kv_cache_dtype(model, 0) == torch.bfloat16
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config")
+    def test_resolve_indexer_cache_dtype_uses_attention_quant(self, mock_get_attn_quant):
+        mock_get_attn_quant.return_value = MagicMock(get_quant_dtype=lambda: torch.int8)
+        model = MagicMock()
+        model.model_config.dtype = torch.bfloat16
+
+        assert _resolve_indexer_cache_dtype(model, 0) == torch.int8
+
+    @patch("tensor_cast.core.input_generator._resolve_sparse_attention_kv_cache_width", return_value=576)
+    def test_resolve_v4_kv_cache_size_compressed_sparse_layer(self, _mock_head_dim):
+        model = MagicMock()
+        model.text_config.sliding_window = 128
+        model.text_config.kv_lora_rank = 512
+        model.text_config.qk_rope_head_dim = 64
+        attention_layer = MagicMock(compress_ratio=4, head_dim=576)
+
+        shape = _resolve_v4_kv_cache_size(
+            model,
+            attention_layer=attention_layer,
+            num_blocks=100,
+            block_size=128,
+            batch_size=2,
+            total_kv_tokens=8192,
+        )
+
+        # window_slots=256, compressed_slots=2048 -> total_slots=2304 -> 18 blocks
+        assert shape == [18, 128, 576]
+
+    @patch("tensor_cast.core.input_generator._resolve_sparse_attention_kv_cache_width", return_value=480)
+    def test_resolve_v4_kv_cache_size_fallback_without_batch_info(self, _mock_head_dim):
+        model = MagicMock()
+        model.text_config.sliding_window = 128
+        attention_layer = MagicMock(compress_ratio=4)
+
+        shape = _resolve_v4_kv_cache_size(
+            model,
+            attention_layer=attention_layer,
+            num_blocks=42,
+            block_size=128,
+        )
+
+        assert shape == [42, 128, 480]
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_v4_indexer_cache_compression_only_for_v4_model(self, _mock_attn_quant):
+        model = MagicMock()
+        model.num_hidden_layers = 1
+        model.model_config.mla_config = MagicMock(mla_cls=DeepseekV4SparseAttention)
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = MagicMock(model_type="deepseek_v32")
+        model.text_config = None
+        model.unwrap.return_value = MagicMock(
+            layers=[
+                MagicMock(
+                    self_attn=MagicMock(
+                        use_indexer=True,
+                        _index_head_dim=128,
+                        indexer=None,
+                        compress_ratio=4,
+                    )
+                )
+            ]
+        )
+
+        info = get_sparse_attention_indexer_cache_info(
+            model,
+            num_blocks=100,
+            block_size=128,
+            batch_size=2,
+            total_kv_tokens=8192,
+        )
+
+        # Non-V4 models must keep the full paged pool even when compress_ratio is set.
+        assert info["indexer_cache_by_layers"][0].shape[0] == 100

@@ -101,6 +101,17 @@ def main():
         help="Quantize all linear layers in the model from choices (currently only support symmetric quant)",
     )
     quant_group.add_argument(
+        "--quantize-backbone-linear-action",
+        type=QuantizeLinearAction,
+        choices=list(QuantizeLinearAction),
+        default=QuantizeLinearAction.DISABLED,
+        help=(
+            "Override the quant type of backbone linear layers (attention, dense MLP and shared experts), "
+            "excluding routed MoE experts. Combine with --quantize-linear-action to quantize routed experts "
+            "and backbone differently, e.g. --quantize-linear-action MXFP4 --quantize-backbone-linear-action FP8"
+        ),
+    )
+    quant_group.add_argument(
         "--quantize-lmhead",
         action="store_true",
         help="Whether to quantize LM Head, off by default since quantizing LM Head usually impact accuracy a lot",
@@ -313,7 +324,7 @@ def main():
 
     selected_embedding_tp_mode = args.word_embedding_tp
     args.word_embedding_tp = selected_embedding_tp_mode is not None
-    args.word_embedding_tp_mode = selected_embedding_tp_mode or WordEmbeddingTPMode.col.value
+    args.word_embedding_tp_mode = selected_embedding_tp_mode or WordEmbeddingTPMode.col
 
     # Set default performance_model if not specified
     if args.performance_model is None:

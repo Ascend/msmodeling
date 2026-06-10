@@ -15,7 +15,8 @@
 #   UV_INDEX_URL                       custom UV package index URL
 #   HF_ENDPOINT                        custom HuggingFace endpoint URL
 #
-# Pytest: -n auto --dist=worksteal (fixed), -vv, marker "not npu and not nightly and not network".
+# Pytest: Phase 0/1 use marker "not npu and not nightly and not network" and -n auto;
+# Phase 2 relies on pyproject.toml addopts (no extra -m/-n).
 set -euo pipefail
 
 if [[ -z "${MSMODELING_TEST_MAP_PATH:-}" ]]; then

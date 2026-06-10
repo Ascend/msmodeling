@@ -63,7 +63,29 @@ def test_run_pytest_invokes_subprocess_for_targets(monkeypatch: pytest.MonkeyPat
     assert code == 0
     assert captured
     assert "-m" in captured[0]
+    assert "not npu and not nightly and not network" in captured[0]
+    assert "-n" in captured[0]
     assert "pytest" in captured[0]
+
+
+def test_run_pytest_phase2_skips_marker_and_xdist(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> FakeCompleted:
+        captured.append(cmd)
+        return FakeCompleted(0, "", "")
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.subprocess.run", _fake_run)
+    code = _run_pytest(
+        ["tests/regression/scripts/helpers/ci_gate/test_errors.py"],
+        use_marker=False,
+        use_xdist=False,
+    )
+    assert code == 0
+    assert captured
+    cmd = captured[0]
+    assert "not npu and not nightly and not network" not in cmd
+    assert "-n" not in cmd
 
 
 def test_run_new_tests_and_build_map_returns_collected_map(monkeypatch: pytest.MonkeyPatch) -> None:

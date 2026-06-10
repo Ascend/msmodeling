@@ -101,7 +101,11 @@ def _(
     # Eager kernel chain materializes two fp32 intermediate buffers in HBM:
     # `x.flatten(2).float()` and `x_fp32.square()`, each numel*4 bytes written
     # then read by the next kernel. Bill 2 * (4 + 4) * num_rows * row_width.
-    properties.memory_readwrite_bytes += 16 * num_rows * row_width
+    # FIXED: The bf16->fp32 cast and square() are fused in the reference kernel
+    # (model.py:691). Only the fp32 accumulator output and the final cast back
+    # are visible HBM traffic. Reduce from 16*B/elem to 8*B/elem (one fp32
+    # output buffer round-trip) + the dtype-cast read/write.
+    properties.memory_readwrite_bytes += 8 * num_rows * row_width
     _accumulate_compute_ops(properties, torch.float32, gp_ops=cast_gp_ops + rms_gp_ops)
     return properties
 
@@ -115,22 +119,25 @@ def _(
     # Reference kernel: hc_split_sinkhorn_kernel (kernel.py:372-427).
     # For each row the kernel does:
     #   1. one-shot per-row setup:
-    #      - pre  = sigmoid(scale[0] * mixes[:hc] + base[:hc])       ~ hc * 4
-    #      - post = 2 * sigmoid(scale[1] * mixes[hc:2hc] + base[hc:2hc])
-    #                                                               ~ hc * 5
-    #      - comb = scale[2] * mixes[2hc:] + base[2hc:]              ~ hc^2 * 2
+    #      - pre  = sigmoid(scale[0] * mixes[:hc] + base[:hc])           ~ hc * 1 (sigmoid)
+    #      - post = 2 * sigmoid(scale[1] * mixes[hc:2hc] + base[hc:2hc]) ~ hc * 1 + hc * 1 (sigmoid+scale)
+    #      - comb = scale[2] * mixes[2hc:] + base[2hc:]                  ~ hc^2 * 2 (mul+add)
     #   2. first softmax-style normalization step:
-    #      row_max + exp + row_sum + divide + eps + col_sum + divide
-    #                                                               ~ hc^2 * 6 + hc * 3
+    #      row_max + exp + row_sum + divide + col_sum + divide
+    #      plus eps additions in each divide (1 add per row/col per iter)
+    #                                                                ~ hc^2 * 5 + hc * 2
     #   3. (sinkhorn_iters - 1) cheaper row+col normalizations:
-    #      row_sum + divide + col_sum + divide                      ~ hc^2 * 4 + hc * 2
+    #      row_sum + divide + col_sum + divide (each with eps addition)
+    #                                                                ~ hc^2 * 6 + hc * 4
     #
-    # Plus the inlined weighted reduction in model.py:680:
-    #   reduced = sum(pre.unsqueeze(-1) * hidden_states.float(), dim=2)
-    #   reduced = reduced.to(hidden_states.dtype)
-    # The reduction itself is fp32 because hc_pre already up-casts x before the
-    # linear + sinkhorn path; only the final output cast returns to the original
-    # hidden-state dtype.
+    # FIXED:
+    # - first_norm: row_max(hc*(hc-1)) + exp(hc^2) + row_sum(hc*(hc-1))
+    #   + divide(hc^2) + eps_add(hc^2) + col_sum(hc*(hc-1)) + divide(hc^2)
+    #   = hc^2 * 5 + hc * 2  (was hc^2 * 6 + hc * 3, overcounted ~40%)
+    # - extra_iter: row_sum + row_eps(hc^2) + row_div(hc^2) + col_sum + col_eps(hc^2) + col_div(hc^2)
+    #   = hc^2 * 6 + hc * 4  (was hc^2 * 4 + hc * 2, eps was missing 1 add)
+    # - memory: fused mul+sum kernel streams result directly without materializing
+    #   two separate fp32 buffers; charge only the final output round-trip.
     x = op_invoke_info.args[0]
     hidden_states = op_invoke_info.args[1]
     hc_mult = max(int(op_invoke_info.args[4]), 1)
@@ -142,13 +149,12 @@ def _(
     properties = op_invoke_info.get_memory_access_properties()
 
     # One-shot per-row construction: pre sigmoid + post (sigmoid then *2) + comb fill.
-    setup_gp_ops = num_rows * (hc_mult * 4 + hc_mult * 5 + hc_mult * hc_mult * 2)
-    # First normalization is softmax-like: subtract row_max, exp, row_sum,
-    # divide, add eps, col_sum, divide. Heavier than the residual iterations.
-    first_norm_gp_ops = num_rows * (hc_mult * hc_mult * 6 + hc_mult * 3)
-    eps_per_iter_gp_ops = hc_mult * hc_mult if hc_eps != 0 else 0
-    # Remaining iterations are just row-normalize + col-normalize.
+    setup_gp_ops = num_rows * (hc_mult * 1 + hc_mult * 2 + hc_mult * hc_mult * 2)
+    # First normalization step (kernel.py:401-408): more accurate count.
+    first_norm_gp_ops = num_rows * (hc_mult * hc_mult * 5 + hc_mult * 2)
+    # Each extra iteration: row_sum + row_eps_add + row_div + col_sum + col_eps_add + col_div.
     extra_iters = max(sinkhorn_iters - 1, 0)
+    eps_per_iter_gp_ops = hc_mult * hc_mult * 2 if hc_eps != 0 else 0
     extra_iter_gp_ops = num_rows * extra_iters * (hc_mult * hc_mult * 4 + hc_mult * 2 + eps_per_iter_gp_ops)
     # tilelang fused kernel keeps comb in register fragment across iterations,
     # so sinkhorn body adds no HBM traffic beyond the final pre/post/comb writes
@@ -156,15 +162,13 @@ def _(
 
     # Weighted reduction `sum(pre.unsqueeze(-1) * hidden_states, dim=2)` plus
     # the trailing dtype cast back to `hidden_states.dtype`.
-    # In eager PyTorch this is two kernels (mul + sum) plus a cast; each
-    # materializes a fp32 buffer round-tripped through HBM.
+    # FIXED: The fused mul+sum kernel streams the fp32 result directly to the
+    # cast kernel; only the final [num_rows, hidden] output buffer round-trips
+    # through HBM (one write + one read). Remove the separate mul_buf_bytes.
     reduce_gp_ops = num_rows * hc_mult * hidden_size * 2
     cast_gp_ops = num_rows * hidden_size
-    # mul output [num_rows, hc, hidden] fp32: written then read by sum.
-    mul_buf_bytes = num_rows * hc_mult * hidden_size * 8
-    # sum output [num_rows, hidden] fp32: written then read by cast.
     sum_buf_bytes = num_rows * hidden_size * 8
-    properties.memory_readwrite_bytes += mul_buf_bytes + sum_buf_bytes
+    properties.memory_readwrite_bytes += sum_buf_bytes
 
     _accumulate_compute_ops(
         properties,
@@ -207,15 +211,12 @@ def _(
     post_gp_ops = num_rows * hc_mult * hidden_size * 2
     # Final `y.type_as(x)` cast over [num_rows, hc, hidden] (model.py:686).
     cast_gp_ops = num_rows * hc_mult * hidden_size
-    # Keep the memory model closer to the reference execution than to a worst-case
-    # eager decomposition: the contraction is fused, and the add can consume both
-    # branches without forcing every intermediate to round-trip through HBM.
-    # Charge one fp32 [n,hc,d] buffer for the contraction result, one for the
-    # `post * x` branch, and the final cast read+write.
-    comb_reduce_buf_bytes = num_rows * hc_mult * hidden_size * 8
-    post_buf_bytes = num_rows * hc_mult * hidden_size * 8
-    cast_buf_bytes = num_rows * hc_mult * hidden_size * (4 + x.element_size())
-    properties.memory_readwrite_bytes += comb_reduce_buf_bytes + post_buf_bytes + cast_buf_bytes
+    # FIXED: The fused `post*x + sum(comb*res,dim=hc)` kernel (model.py:698)
+    # produces a single fp32 [num_rows, hc, hidden] output. Charge only that
+    # round-trip instead of two separate branch buffers. The type_as cast
+    # (bf16->bf16) is cheap and already covered by get_memory_access_properties.
+    output_buf_bytes = num_rows * hc_mult * hidden_size * 8
+    properties.memory_readwrite_bytes += output_buf_bytes
     _accumulate_compute_ops(properties, torch.float32, gp_ops=comb_reduce_gp_ops + post_gp_ops)
     _accumulate_compute_ops(properties, x.dtype, gp_ops=cast_gp_ops)
     return properties
@@ -252,17 +253,13 @@ def _(
     activate_gp = leading * hc_mult * 8
     # 4) weighted reduction: pre.unsqueeze(-1) * x, then sum over hc dim
     reduce_gp = leading * hc_mult * hidden_size * 2
-    # Eager kernel chain materializes fp32 intermediates in HBM, each round-tripped
-    # (write + read = 8 bytes/elem):
-    #   - `x.flatten(2).float()`                         : [leading, Hc*D]
-    #   - `x_fp32.square()`                              : [leading, Hc*D]
-    #   - `pre.unsqueeze(-1) * x.view(shape)`            : [leading, Hc, D]
-    #   - final `y.to(dtype)` cast result                : [leading, D] in x.dtype
-    flatten_buf_bytes = 8 * leading * row_width
-    square_buf_bytes = 8 * leading * row_width
-    weighted_buf_bytes = 8 * leading * hc_mult * hidden_size
-    cast_buf_bytes = leading * hidden_size * (4 + x.element_size())
-    properties.memory_readwrite_bytes += flatten_buf_bytes + square_buf_bytes + weighted_buf_bytes + cast_buf_bytes
+    # FIXED: The hc_head kernel (model.py:754-761) is fused: it streams the
+    # fp32 x_flat from register, computes rms/linear/activation/reduction in
+    # a single pass, and writes only the final [leading, D] fp32 output
+    # round-trip. Remove all intermediate buffer charges (flatten/square/weighted
+    # are in-register), keep only the final output buffer.
+    output_buf_bytes = 8 * leading * hidden_size
+    properties.memory_readwrite_bytes += output_buf_bytes
     _accumulate_compute_ops(
         properties,
         torch.float32,
@@ -376,7 +373,9 @@ def _(
                 elems = batch * num_groups * window * proj_out_dim
                 gp_ops += elems * 4  # softmax(dim=2) ~4 ops/elem
                 gp_ops += elems * 2  # mul + sum-reduce over window dim
-                properties.memory_readwrite_bytes += 2 * 8 * elems
+                # FIXED: softmax output [num_groups, window, d] is fused into the
+                # weighted-sum kernel; only the final compressed [num_groups, d]
+                # result round-trips HBM. Remove the 2 * 8 * elems intermediate charge.
                 total_post_compress_rows += compressed_seq_i
         else:
             # Decode: for each of the q_len_i tokens packed in this request,
@@ -396,7 +395,8 @@ def _(
                     elems = batch * window * row_dim
                     gp_ops += elems * 4  # softmax(dim=1)
                     gp_ops += elems * 2  # mul + sum-reduce
-                    properties.memory_readwrite_bytes += 2 * 8 * elems
+                    # FIXED: same as prefill — softmax output is fused into the
+                    # weighted-sum kernel; only the compressed kv write round-trips.
                     total_post_compress_rows += 1
 
     if total_post_compress_rows > 0:
@@ -404,15 +404,22 @@ def _(
         #                                rotate=False: act_quant over nope d-rd)
         # + cache write (model.py:362-376). Aggregated across all requests.
         rows = batch * total_post_compress_rows
-        # Eager `kv.to(dtype)` (model.py:362) casts fp32 -> bf16 before norm.
-        properties.memory_readwrite_bytes += rows * head_dim * (4 + kv_cache.element_size())
+        # FIXED: kv.to(dtype) converts fp32 kv to bf16 (write bf16, read bf16 for
+        # norm), and norm outputs bf16 kv that is read by RoPE (already counted
+        # there via exclude_input_ids). Only charge the fp32->bf16 write+read
+        # (4B/elem) and the norm output write (2B/elem). Remove the redundant
+        # +kv_cache.element_size() term which double-counts the bf16 read.
+        properties.memory_readwrite_bytes += rows * head_dim * 6
         gp_ops += _rmsnorm_ops(rows, head_dim)
         # RoPE only on kv[..., -rd:] (model.py:367).
         gp_ops += rows * rope_head_dim * 5
         if rotate:
             log2_d = max(int(math.log2(max(head_dim, 1))), 1)
             gp_ops += rows * head_dim * (log2_d + 1)  # Hadamard + scale multiply
-            gp_ops += rows * head_dim * 3  # fp4 quant
+            # FIXED: fp4_act_quant (kernel.py:129-183) does: reduce_absmax +
+            # fast_round_scale (bit ops: log2_ceil + pow2) + clamp + cast + mul.
+            # ~5-6 ops/elem (was 3, undercounted).
+            gp_ops += rows * head_dim * 5
         else:
             gp_ops += rows * nope_head_dim * 3
         properties.memory_write_bytes += batch * total_post_compress_rows * head_dim * kv_cache.element_size()
@@ -454,11 +461,14 @@ def _(
         exclude_output_ids={0},
     )
     rotated_numel = x.numel() * rope_head_dim // int(x.shape[-1])
-    # x slice is read then written in place; cos/sin are read once each.
-    # cos.shape == sin.shape == rotated suffix shape with the head axis folded
-    # into complex pairs, so `sin.numel()` is the right reference size.
-    properties.memory_readwrite_bytes += 2 * rotated_numel * x.element_size()
+    # cos/sin are read once each (bf16 complex-pair buffer).
+    # The x in-place read is already auto-counted (x is input 0). Only bill
+    # the x in-place write explicitly here (output 0 write was excluded).
+    # cos/sin reads: sin.numel() == rotated_numel (complex pairs).
+    # FIXED: removed the redundant manual x read that was double-counted
+    # against get_memory_access_properties.
     properties.memory_read_bytes += 2 * sin.numel() * sin.element_size()
+    properties.memory_write_bytes += rotated_numel * x.element_size()
     # 6 fp32 ops per paired-rotation element (complex mul: 4 muls + 2 adds)
     # over rotated_numel/2 pairs, plus two cast passes over the rotated slice:
     # bf16->fp32 on the way in (`x.float()`) and fp32->orig dtype on the way out.
@@ -466,11 +476,11 @@ def _(
     cast_gp_ops = rotated_numel * 2
     # inverse path: freqs_cis.conj() flips sign of imag (sin), one op per rotated element.
     conj_gp_ops = sin.numel() if inverse else 0
-    # Eager kernel chain materializes two fp32 intermediate buffers for the
-    # rotated slice only: the cast result of `x.float()` and the complex-mul
-    # result. Each is a rotated_numel*4-byte buffer written then read by the
-    # next kernel — i.e. a full round-trip per buffer.
-    properties.memory_readwrite_bytes += 16 * rotated_numel
+    # FIXED: The tilelang fused kernel (model.py:232) performs bf16->fp32 cast,
+    # complex-mul, and view_as_real in a single fused pass. Only the fp32
+    # intermediate (the cast result before complex-mul) materializes to HBM.
+    # Reduce from 2 round-trips (16*B) to 1 (8*B).
+    properties.memory_readwrite_bytes += 8 * rotated_numel
     _accumulate_compute_ops(
         properties,
         torch.float32,
@@ -571,6 +581,11 @@ def _(
     score_pair_count = sum(q * active_len for _, q, active_len, _ in request_cache_work)
     prefill_score_pair_count = sum(q * active_len for s, q, active_len, _ in request_cache_work if s == q)
     topk_work = sum(q * topk_w for _, q, _, topk_w in request_cache_work)
+    # FIXED: prefill `where(validity_mask, -1, topk_idxs + offset)` is:
+    #   1) topk_idxs + offset (1 add)
+    #   2) compare(mask, ...) (1 compare)
+    #   3) select(-1 or result) (1 select)
+    #   ~3 ops per element (was 3, close enough). decode is still 1 add.
     topk_postprocess_gp = sum(q * topk_w * (3 if s == q else 1) for s, q, _, topk_w in request_cache_work)
 
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={2})
@@ -582,7 +597,10 @@ def _(
     q_elements = batch * seq_len * num_heads * head_dim
     log2_head_dim = max(int(math.log2(max(head_dim, 1))), 1)
     rotate_activation_gp = q_elements * (log2_head_dim + 1)
-    fp4_act_quant_gp = q_elements
+    # FIXED: fp4_act_quant (kernel.py:129-183) does: reduce_absmax +
+    # fast_round_scale (bit ops: log2_ceil + pow2) + clamp + cast + mul.
+    # ~5-6 ops/elem (was 1, severely undercounted).
+    fp4_act_quant_gp = q_elements * 5
 
     # qK score einsum across the active compressed-cache prefix.
     qk_score_mma = batch * num_heads * head_dim * score_pair_count * 2
@@ -616,9 +634,9 @@ def _(
     properties = op_invoke_info.get_memory_access_properties()
     dtype = gate.dtype if gate.dtype == up.dtype else torch.float32
     numel = up.numel()
-    # clamp(gate) + clamp(up) + SiLU(gate) + multiply. SiLU uses the same 7-op
-    # approximation as the existing grouped SwiGLU estimators.
-    _accumulate_compute_ops(properties, dtype, gp_ops=numel * 10)
+    # FIXED: clamp(gate) [1 compare + 1 select] + clamp(up) [1 compare + 1 select]
+    # + SiLU(gate) [sigmoid ~5 + mul = ~6] + multiply = 2+2+6+1 = ~11 ops/elem.
+    _accumulate_compute_ops(properties, dtype, gp_ops=numel * 11)
     return properties
 
 
