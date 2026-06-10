@@ -37,6 +37,46 @@ html, body {
   background: var(--page-bg);
 }
 .gradio-container {
+  --block-background-fill: rgba(255,255,255,0.78);
+  --block-border-color: rgba(166, 184, 224, 0.58);
+  --block-border-width: 1px;
+  --block-label-background-fill: rgba(248,251,255,0.96);
+  --block-label-border-color: rgba(166, 184, 224, 0.44);
+  --block-label-text-color: var(--text-main);
+  --block-radius: 12px;
+  --block-shadow: none;
+  --border-color-primary: var(--border-color);
+  --button-border-width: 1px;
+  --button-large-radius: 10px;
+  --button-medium-radius: 10px;
+  --button-primary-background-fill: var(--accent);
+  --button-primary-background-fill-hover: var(--accent-strong);
+  --button-primary-border-color: rgba(33, 64, 154, 0.18);
+  --button-primary-border-color-hover: rgba(33, 64, 154, 0.28);
+  --button-secondary-background-fill: rgba(255,255,255,0.92);
+  --button-secondary-background-fill-hover: rgba(245,248,255,0.98);
+  --button-secondary-border-color: rgba(166, 184, 224, 0.52);
+  --button-secondary-border-color-hover: rgba(33, 64, 154, 0.30);
+  --button-secondary-shadow: none;
+  --button-secondary-shadow-hover: 0 8px 18px rgba(25, 40, 78, 0.08);
+  --button-secondary-text-color: var(--text-main);
+  --checkbox-border-color: rgba(166, 184, 224, 0.78);
+  --checkbox-border-color-focus: rgba(33, 64, 154, 0.58);
+  --checkbox-border-color-hover: rgba(33, 64, 154, 0.34);
+  --checkbox-border-color-selected: var(--accent);
+  --checkbox-border-radius: 6px;
+  --input-background-fill: rgba(255,255,255,0.96);
+  --input-background-fill-focus: #ffffff;
+  --input-border-color: rgba(166, 184, 224, 0.72);
+  --input-border-color-focus: rgba(33, 64, 154, 0.52);
+  --input-border-color-hover: rgba(33, 64, 154, 0.28);
+  --input-border-width: 1px;
+  --input-radius: 10px;
+  --input-shadow: inset 0 1px 0 rgba(255,255,255,0.78);
+  --input-shadow-focus: 0 0 0 3px rgba(33, 64, 154, 0.10);
+  --panel-border-color: rgba(166, 184, 224, 0.44);
+  --panel-border-width: 1px;
+  --table-border-color: rgba(166, 184, 224, 0.50);
   background:
     radial-gradient(circle at top left, var(--page-glow-a), transparent 30%),
     radial-gradient(circle at top right, var(--page-glow-b), transparent 28%),
@@ -50,6 +90,14 @@ html, body {
 
 .gradio-container, .gradio-container * {
   font-family: var(--font-sans) !important;
+}
+.gradio-container .block,
+.gradio-container .group,
+.gradio-container .form,
+.gradio-container .panel,
+.gradio-container fieldset {
+  border-color: rgba(166, 184, 224, 0.44) !important;
+  box-shadow: none !important;
 }
 .block-title h1, .block-title h2, .block-title h3 {
   color: var(--text-main);
@@ -256,6 +304,99 @@ html, body {
 }
 .sim-mode-tabs button[role="tab"][aria-selected="true"] {
   box-shadow: 0 10px 20px rgba(33, 64, 154, 0.12);
+}
+.gradio-container [role="tablist"] {
+  border-color: rgba(166, 184, 224, 0.40) !important;
+}
+.gradio-container button[role="tab"] {
+  border-color: transparent !important;
+  color: var(--text-sub) !important;
+}
+.gradio-container button[role="tab"][aria-selected="true"] {
+  background: rgba(237,243,255,0.92) !important;
+  color: var(--accent-strong) !important;
+  border-color: rgba(166, 184, 224, 0.44) !important;
+}
+.gradio-container details,
+.gradio-container .accordion {
+  border: 1px solid rgba(166, 184, 224, 0.56) !important;
+  border-radius: 12px !important;
+  background: rgba(255,255,255,0.74) !important;
+  box-shadow: none !important;
+  overflow: hidden;
+}
+.gradio-container details > summary,
+.gradio-container .accordion > .label-wrap {
+  min-height: 36px;
+  border: 0 !important;
+  background: rgba(248,251,255,0.94) !important;
+  box-shadow: none !important;
+  color: var(--text-main) !important;
+}
+.gradio-container details[open] > summary,
+.gradio-container .accordion.open > .label-wrap {
+  border-bottom: 1px solid rgba(166, 184, 224, 0.38) !important;
+}
+.gradio-container input[type="text"],
+.gradio-container input[type="number"],
+.gradio-container textarea,
+.gradio-container select {
+  border-color: rgba(166, 184, 224, 0.72) !important;
+  border-radius: 10px !important;
+  background-color: rgba(255,255,255,0.96) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.78) !important;
+}
+.gradio-container input[type="text"]:focus,
+.gradio-container input[type="number"]:focus,
+.gradio-container textarea:focus,
+.gradio-container select:focus {
+  border-color: rgba(33, 64, 154, 0.50) !important;
+  box-shadow: 0 0 0 3px rgba(33, 64, 154, 0.10) !important;
+}
+.gradio-container input[type="checkbox"],
+.gradio-container input[type="radio"] {
+  border-color: rgba(166, 184, 224, 0.78) !important;
+  box-shadow: none !important;
+}
+.gradio-container input[type="checkbox"]:checked,
+.gradio-container input[type="radio"]:checked {
+  border-color: var(--accent) !important;
+  background-color: var(--accent) !important;
+}
+.gradio-container button:not([role="tab"]) {
+  border-color: rgba(166, 184, 224, 0.52) !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+.gradio-container button:not([role="tab"]):hover {
+  border-color: rgba(33, 64, 154, 0.30) !important;
+  box-shadow: 0 8px 18px rgba(25, 40, 78, 0.08) !important;
+}
+.gradio-container .primary,
+.gradio-container button.primary {
+  border-color: rgba(33, 64, 154, 0.18) !important;
+  background: var(--accent) !important;
+  color: #ffffff !important;
+}
+.gradio-container .primary:hover,
+.gradio-container button.primary:hover {
+  border-color: rgba(33, 64, 154, 0.28) !important;
+  background: var(--accent-strong) !important;
+}
+.gradio-container .table-wrap,
+.gradio-container .dataframe {
+  border-color: rgba(166, 184, 224, 0.50) !important;
+  border-radius: 10px !important;
+}
+.gradio-container .table-wrap table,
+.gradio-container .dataframe table {
+  border-color: rgba(166, 184, 224, 0.44) !important;
+}
+.gradio-container .table-wrap th,
+.gradio-container .table-wrap td,
+.gradio-container .dataframe th,
+.gradio-container .dataframe td {
+  border-color: rgba(166, 184, 224, 0.36) !important;
 }
 .progress-shell {
   background: rgba(255,255,255,0.92);

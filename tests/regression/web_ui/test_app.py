@@ -55,6 +55,30 @@ class TestBuildApp:
         app_module.gr = original_gr
 
 
+class TestBuildTheme:
+    """Tests for build_theme function."""
+
+    def test_build_theme_requires_gradio(self) -> None:
+        """Test that build_theme raises RuntimeError without gradio."""
+        original_gr = app_module.gr
+        app_module.gr = None
+        with pytest.raises(RuntimeError, match="gradio is not installed"):
+            app_module.build_theme()
+        app_module.gr = original_gr
+
+    def test_build_theme_returns_theme(self) -> None:
+        """Test that the theme carries critical border tokens."""
+        theme = app_module.build_theme()
+
+        assert theme.block_border_color == "rgba(166, 184, 224, 0.58)"
+        assert theme.border_color_primary == "rgba(166, 184, 224, 0.44)"
+        assert theme.panel_border_color == "rgba(166, 184, 224, 0.44)"
+        assert theme.input_border_color == "rgba(166, 184, 224, 0.72)"
+        assert theme.button_secondary_border_color == "rgba(166, 184, 224, 0.52)"
+        assert theme.shadow_drop == "0 1px 4px 0 rgba(25, 40, 78, 0.08)"
+        assert theme.shadow_drop_lg == "0 2px 6px 0 rgba(25, 40, 78, 0.10)"
+
+
 class TestLaunchApp:
     """Tests for launch_app function."""
 
@@ -65,6 +89,7 @@ class TestLaunchApp:
         mock_demo = Mock()
         mock_build.return_value = mock_demo
         mock_demo.launch = Mock(return_value=Mock())
+        expected_theme = mock_gr.themes.Soft.return_value.set.return_value
 
         app_module.launch_app()
 
@@ -75,6 +100,9 @@ class TestLaunchApp:
             share=False,
             inbrowser=False,
             show_error=True,
+            theme=expected_theme,
+            css=app_module.APP_CSS,
+            head=app_module.APP_HEAD,
         )
 
     @patch("web_ui.app.gr")
@@ -84,6 +112,7 @@ class TestLaunchApp:
         mock_demo = Mock()
         mock_build.return_value = mock_demo
         mock_demo.launch = Mock(return_value=Mock())
+        expected_theme = mock_gr.themes.Soft.return_value.set.return_value
 
         app_module.launch_app(server_name="127.0.0.1", server_port=8080, share=True)
 
@@ -93,6 +122,9 @@ class TestLaunchApp:
             share=True,
             inbrowser=False,
             show_error=True,
+            theme=expected_theme,
+            css=app_module.APP_CSS,
+            head=app_module.APP_HEAD,
         )
 
     @patch("web_ui.app.gr")

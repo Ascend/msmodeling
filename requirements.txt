@@ -7,10 +7,10 @@ torch>=2.7,<=2.10
 torchvision>=0.25.0
 optree
 
-Pillow
+Pillow>=12.2.0
 transformers>=5.3.0,<5.8.0
 modelscope
-diffusers
+diffusers>=0.38.0
 compressed-tensors
 
 strenum
@@ -37,5 +37,5 @@ pytest-xdist
 parameterized
 
 # web ui
-gradio>=5,<6
+gradio>=6.7.0,<7
 openpyxl

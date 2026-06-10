@@ -32,7 +32,7 @@ from .components import (
     video_generate_result_section,
     wire_export,
 )
-from .styles import APP_CSS
+from .styles import APP_CSS, COLORS
 
 # Initialize matplotlib
 setup_matplotlib()
@@ -220,6 +220,80 @@ HERO_HTML = """
 """
 
 
+def build_theme():
+    """Build the Gradio theme with web UI CSS loaded after theme variables."""
+    if gr is None:
+        raise RuntimeError("gradio is not installed")
+    theme = gr.themes.Soft(primary_hue="indigo", secondary_hue="slate", neutral_hue="slate").set(
+        body_background_fill=COLORS["page_bg"],
+        body_text_color=COLORS["text_main"],
+        body_text_color_subdued=COLORS["text_sub"],
+        block_background_fill="rgba(255,255,255,0.78)",
+        block_background_fill_dark="rgba(255,255,255,0.78)",
+        block_border_color="rgba(166, 184, 224, 0.58)",
+        block_border_color_dark="rgba(166, 184, 224, 0.58)",
+        block_border_width="1px",
+        block_label_background_fill="rgba(248,251,255,0.96)",
+        block_label_background_fill_dark="rgba(248,251,255,0.96)",
+        block_label_border_color="rgba(166, 184, 224, 0.44)",
+        block_label_border_color_dark="rgba(166, 184, 224, 0.44)",
+        block_label_text_color=COLORS["text_main"],
+        block_label_text_color_dark=COLORS["text_main"],
+        block_radius="12px",
+        block_shadow="none",
+        block_shadow_dark="none",
+        block_title_background_fill="rgba(248,251,255,0.96)",
+        block_title_background_fill_dark="rgba(248,251,255,0.96)",
+        block_title_border_color="rgba(166, 184, 224, 0.44)",
+        block_title_border_color_dark="rgba(166, 184, 224, 0.44)",
+        border_color_primary="rgba(166, 184, 224, 0.44)",
+        border_color_primary_dark="rgba(166, 184, 224, 0.44)",
+        button_border_width="1px",
+        button_large_radius="10px",
+        button_medium_radius="10px",
+        button_primary_background_fill=COLORS["primary"],
+        button_primary_background_fill_hover="#152a6a",
+        button_primary_border_color="rgba(33, 64, 154, 0.18)",
+        button_primary_border_color_hover="rgba(33, 64, 154, 0.28)",
+        button_primary_text_color="#ffffff",
+        button_secondary_background_fill="rgba(255,255,255,0.92)",
+        button_secondary_background_fill_hover="rgba(245,248,255,0.98)",
+        button_secondary_border_color="rgba(166, 184, 224, 0.52)",
+        button_secondary_border_color_hover="rgba(33, 64, 154, 0.30)",
+        button_secondary_shadow="none",
+        button_secondary_shadow_hover="0 8px 18px rgba(25, 40, 78, 0.08)",
+        button_secondary_text_color=COLORS["text_main"],
+        checkbox_background_color="#ffffff",
+        checkbox_background_color_focus="#ffffff",
+        checkbox_background_color_hover="#ffffff",
+        checkbox_background_color_selected=COLORS["primary"],
+        checkbox_border_color="rgba(166, 184, 224, 0.78)",
+        checkbox_border_color_focus="rgba(33, 64, 154, 0.58)",
+        checkbox_border_color_hover="rgba(33, 64, 154, 0.34)",
+        checkbox_border_color_selected=COLORS["primary"],
+        checkbox_border_radius="6px",
+        checkbox_shadow="none",
+        input_background_fill="rgba(255,255,255,0.96)",
+        input_background_fill_focus="#ffffff",
+        input_background_fill_hover="#ffffff",
+        input_border_color="rgba(166, 184, 224, 0.72)",
+        input_border_color_focus="rgba(33, 64, 154, 0.52)",
+        input_border_color_hover="rgba(33, 64, 154, 0.28)",
+        input_border_width="1px",
+        input_radius="10px",
+        input_shadow="inset 0 1px 0 rgba(255,255,255,0.78)",
+        input_shadow_focus="0 0 0 3px rgba(33, 64, 154, 0.10)",
+        panel_border_color="rgba(166, 184, 224, 0.44)",
+        panel_border_color_dark="rgba(166, 184, 224, 0.44)",
+        shadow_drop="0 1px 4px 0 rgba(25, 40, 78, 0.08)",
+        shadow_drop_lg="0 2px 6px 0 rgba(25, 40, 78, 0.10)",
+        shadow_inset="rgba(25, 40, 78, 0.04) 0px 2px 4px 0px inset",
+        table_border_color="rgba(166, 184, 224, 0.50)",
+        table_border_color_dark="rgba(166, 184, 224, 0.50)",
+    )
+    return theme
+
+
 def build_app() -> gr.Blocks:
     """Build the Gradio application."""
     if gr is None:
@@ -231,9 +305,7 @@ def build_app() -> gr.Blocks:
     default_devices = vendor_map.get(default_vendor, [])
     default_device = default_devices[0] if default_devices else None
 
-    theme = gr.themes.Soft(primary_hue="indigo", secondary_hue="slate", neutral_hue="slate")
-
-    with gr.Blocks(title=APP_TITLE, theme=theme, css=APP_CSS, head=APP_HEAD) as demo:
+    with gr.Blocks(title=APP_TITLE) as demo:
         gr.HTML(HERO_HTML)
 
         def _build_text_generate_workspace(
@@ -1424,12 +1496,16 @@ def launch_app(server_name: str = "0.0.0.0", server_port: int = 2345, share: boo
         share: Whether to create a public sharing link.
     """
     demo = build_app()
+    theme = build_theme()
     return demo.launch(
         server_name=server_name,
         server_port=server_port,
         share=share,
         inbrowser=False,
         show_error=True,
+        theme=theme,
+        css=APP_CSS,
+        head=APP_HEAD,
     )
 
 
