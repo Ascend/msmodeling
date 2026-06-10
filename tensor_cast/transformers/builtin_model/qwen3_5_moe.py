@@ -146,6 +146,7 @@ register_model_profile(
             shared_experts="shared_expert",
             shared_experts_gate="shared_expert_gate",
         ),
+        mtp_block_module_name="Qwen3_5MoeDecoderLayer",
         model_family="qwen3_5",
         patch_method=patch_method_for_qwen3_5,
         **QWEN3_5_VISUAL_CONFIG,
