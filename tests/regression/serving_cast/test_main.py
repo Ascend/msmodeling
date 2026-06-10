@@ -88,6 +88,40 @@ class TestParseCommandLineArgs(unittest.TestCase):
         finally:
             sys.argv = original_argv
 
+    def test_parse_args_output_json_default_none(self):
+        """Test that --output_json defaults to None when not provided."""
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "main.py",
+                "--instance_config_path",
+                self.instance_config_path,
+                "--common_config_path",
+                self.common_config_path,
+            ]
+            args = parse_command_line_args()
+            self.assertIsNone(args.output_json)
+        finally:
+            sys.argv = original_argv
+
+    def test_parse_args_with_output_json(self):
+        """Test parsing with --output_json provided."""
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "main.py",
+                "--instance_config_path",
+                self.instance_config_path,
+                "--common_config_path",
+                self.common_config_path,
+                "--output_json",
+                "/tmp/summary.json",
+            ]
+            args = parse_command_line_args()
+            self.assertEqual(args.output_json, "/tmp/summary.json")
+        finally:
+            sys.argv = original_argv
+
     def test_parse_args_missing_instance_config(self):
         """Test parsing with missing instance config path."""
         original_argv = sys.argv

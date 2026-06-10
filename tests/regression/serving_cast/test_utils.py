@@ -171,6 +171,61 @@ class TestSummarize(unittest.TestCase):
 
         summarize([request])
 
+    def test_summarize_writes_output_json(self):
+        """summarize() writes structured per-metric and overall summaries to JSON."""
+        request1 = Request(num_input_tokens=100, num_output_tokens=50)
+        request1.leaves_client_time = 0.0
+        request1.arrives_server_time = 0.1
+        request1.prefill_done_time = 1.0
+        request1.decode_done_time = 5.0
+        request1._state = RequestState.DECODE_DONE
+
+        request2 = Request(num_input_tokens=200, num_output_tokens=100)
+        request2.leaves_client_time = 0.5
+        request2.arrives_server_time = 0.6
+        request2.prefill_done_time = 2.0
+        request2.decode_done_time = 10.0
+        request2._state = RequestState.DECODE_DONE
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_path = os.path.join(tmpdir, "nested", "summary.json")
+            summarize([request1, request2], output_json_path=json_path)
+
+            self.assertTrue(os.path.exists(json_path))
+            with open(json_path, encoding="utf-8") as f:
+                payload = json.load(f)
+
+            self.assertIn("per_metric_summary", payload)
+            self.assertIn("overall_summary", payload)
+
+            per_metric = payload["per_metric_summary"]
+            for column in (
+                "E2E_TIME(s)",
+                "TTFT(s)",
+                "TPOT(s)",
+                "INPUT_TOKENS",
+                "OUTPUT_TOKENS",
+                "OUTPUT_TOKEN_THROUGHPUT(tok/s)",
+            ):
+                self.assertIn(column, per_metric)
+                for row in ("AVERAGE", "MIN", "MAX", "MEDIAN", "P75", "P90", "P99"):
+                    self.assertIn(row, per_metric[column])
+                    self.assertIsInstance(per_metric[column][row], float)
+
+            overall = payload["overall_summary"]
+            for key in (
+                "benchmark_duration(s)",
+                "total_requests",
+                "request_throughput(req/s)",
+                "total_input_tokens",
+                "input_token_throughput(tok/s)",
+                "total_output_tokens",
+                "output_token_throughput(tok/s)",
+            ):
+                self.assertIn(key, overall)
+                self.assertIsInstance(overall[key], float)
+            self.assertEqual(overall["total_requests"], 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

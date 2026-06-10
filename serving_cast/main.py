@@ -62,6 +62,13 @@ def parse_command_line_args():
         help="Path to directory where profiling results will be saved (default: ./profiling_results)",
     )
 
+    parser.add_argument(
+        "--output_json",
+        default=None,
+        help="If set, write the benchmark summary (per-metric table and overall summary) "
+        "as a structured JSON to this file path.",
+    )
+
     args = parser.parse_args()
 
     return args
@@ -156,7 +163,7 @@ def main():
     _ = stime.CallableTask(main_processing, serving, load_gen)
     stime.start_simulation()
 
-    summarize(load_gen.get_finished_requests().values())
+    summarize(load_gen.get_finished_requests().values(), output_json_path=args.output_json)
 
     if args.enable_profiling:
         parse_profiling_results(profiling_path_with_timestamp)

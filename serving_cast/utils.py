@@ -27,7 +27,7 @@ def main_processing(serving, load_gen):
     return
 
 
-def summarize(requests_list):
+def summarize(requests_list, output_json_path: str = None):
     """
     Compute and print performance metrics for a completed request trace.
 
@@ -42,6 +42,9 @@ def summarize(requests_list):
         - decode_done_time     : float  # full response completion timestamp
         - num_input_tokens     : int
         - num_output_tokens    : int
+    output_json_path : str, optional
+        If given, the summary (per-metric table and overall summary) is also
+        serialized as JSON to this file path.
 
     Returns
     -------
@@ -129,6 +132,22 @@ def summarize(requests_list):
         output_str += f"\n{k:<30} {v:.3f}"
 
     print(output_str)
+
+    if output_json_path:
+        per_metric_summary = {
+            column: {row: float(summary.at[row, column]) for row in summary.index} for column in summary.columns
+        }
+        overall_summary = {k: float(v) for k, v in report.items()}
+        payload = {
+            "per_metric_summary": per_metric_summary,
+            "overall_summary": overall_summary,
+        }
+        out_dir = os.path.dirname(output_json_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(output_json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info("Summary JSON written to %s", output_json_path)
 
 
 def _convert_value(value: Any, *, skip_none: bool) -> Any:
