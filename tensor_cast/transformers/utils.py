@@ -287,9 +287,15 @@ class AutoModelConfigLoader:
                 model_id, "config.json"
             )  # When there's only one configuration file, you should pass the path to the configuration file itself.
 
-        # First, try loading with the native Transformers code; if it's not supported, fall back to using remote code.
+        # First, probe whether the model is natively supported by Transformers.
+        # We pass trust_remote_code=False explicitly (rather than None) so the
+        # probe never enters the interactive prompt branch — it returns
+        # immediately if the config requires remote code, letting the except
+        # branch fall back to trust_remote_code=True.  Passing None would
+        # trigger transformers' interactive y/N prompt (or signal.SIGALRM on
+        # platforms that support it), which blocks headless simulation runs.
         try:
-            hf_config = AutoConfig.from_pretrained(model_id)
+            hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=False)
             self.is_transformers_natively_supported = True
         except Exception:
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)

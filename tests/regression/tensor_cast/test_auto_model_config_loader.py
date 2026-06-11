@@ -61,6 +61,38 @@ def test_load_config_remote_code_converts_real_model_type(monkeypatch) -> None:
     assert loader.is_transformers_natively_supported is True
 
 
+def test_load_config_probe_passes_trust_remote_code_false(monkeypatch) -> None:
+    """The native-support probe must pass trust_remote_code=False explicitly.
+
+    With ``False`` (rather than ``None``), transformers never enters the
+    interactive y/N prompt branch when the model id resolves to a config
+    that does not require remote code.
+    """
+
+    seen: list[dict] = []
+
+    class FakeNativeConfig:
+        model_type = "llama"
+
+        def to_dict(self):
+            return {"model_type": "llama"}
+
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            seen.append(kwargs)
+            return FakeNativeConfig()
+
+    monkeypatch.setattr("transformers.AutoConfig", FakeAutoConfig)
+
+    loader = AutoModelConfigLoader()
+    config = loader.load_config("meta-llama/Llama-3-8B")
+
+    assert seen == [{"trust_remote_code": False}]
+    assert isinstance(config, FakeNativeConfig)
+    assert loader.is_transformers_natively_supported is True
+
+
 def test_modelscope_snapshot_config_only_uses_allowlist(monkeypatch) -> None:
     call: dict = {}
 
