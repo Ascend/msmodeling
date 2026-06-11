@@ -145,7 +145,7 @@ class ModelScopePrefetcher:
         """Detect which ignore-pattern kwarg the installed modelscope accepts."""
         import inspect
 
-        sig = inspect.signature(self._snapshot_download)
+        sig = inspect.signature(self._snapshot_download)  # pylint: disable=no-member
         if "ignore_file_pattern" in sig.parameters:
             return {"ignore_file_pattern": _MODELSCOPE_WEIGHT_IGNORE_PATTERNS}
         return {"ignore_patterns": _MODELSCOPE_WEIGHT_IGNORE_PATTERNS}

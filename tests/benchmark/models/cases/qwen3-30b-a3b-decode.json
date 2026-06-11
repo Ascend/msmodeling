@@ -3,7 +3,7 @@
   "name": "qwen3-30b-a3b-decode",
   "description": "Qwen3-30B-A3B decode, 1 query, ctx=3450, TP=4, compile",
   "initial_time_s": 0.012712,
-  "baseline_time_s": 0.008871,
+  "baseline_time_s": 0.012706,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.45,
   "operator_top_n": 10,
@@ -86,7 +86,7 @@
     },
     {
       "name": "tensor_cast.swiglu.default",
-      "total_time_s": 0.000769676,
+      "total_time_s": 0.0007696760000000001,
       "num_calls": 384
     },
     {
@@ -95,19 +95,14 @@
       "num_calls": 48
     },
     {
-      "name": "aten.sum.dim_IntList",
-      "total_time_s": 0.000291378,
-      "num_calls": 144
-    },
-    {
       "name": "tensor_cast.rms_norm.default",
-      "total_time_s": 0.000290803,
+      "total_time_s": 0.00029080299999999996,
       "num_calls": 145
     },
     {
-      "name": "prims.convert_element_type.default",
-      "total_time_s": 0.000192594,
-      "num_calls": 96
+      "name": "aten.sum.dim_IntList",
+      "total_time_s": 0.000289701,
+      "num_calls": 144
     },
     {
       "name": "aten.div.Tensor",
@@ -115,8 +110,13 @@
       "num_calls": 96
     },
     {
-      "name": "aten.mul.Tensor",
-      "total_time_s": 0.000100472,
+      "name": "prims.convert_element_type.default",
+      "total_time_s": 0.000192037,
+      "num_calls": 96
+    },
+    {
+      "name": "tensor_cast.unpermute_tokens.default",
+      "total_time_s": 9.8983e-05,
       "num_calls": 48
     }
   ]

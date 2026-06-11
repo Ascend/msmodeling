@@ -27,12 +27,7 @@ if [[ "${MSMODELING_BENCHMARK_PARALLEL:-0}" == "1" ]]; then
   JOBS=("${PYTEST_XDIST_ARGS[@]}")
 fi
 
-BENCHMARK_TARGET="${TESTS_BENCHMARK}/ops/"
-if [[ "${MSMODELING_BENCHMARK_MODELS:-0}" == "1" ]]; then
-  BENCHMARK_TARGET="${TESTS_BENCHMARK}/"
-fi
-
-run_pytest "${BENCHMARK_TARGET}" \
+run_pytest "${TESTS_BENCHMARK}/" \
   -m "not npu and not network" \
   -q \
   --no-header \

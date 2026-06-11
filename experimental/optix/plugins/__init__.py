@@ -26,7 +26,7 @@ def _iter_entry_points(group: str):
     if hasattr(eps, "select"):
         yield from eps.select(group=group)
     else:
-        for ep in eps.get(group, []):
+        for ep in eps.get(group, []):  # pylint: disable=no-member
             yield ep
 
 

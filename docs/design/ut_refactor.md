@@ -201,7 +201,7 @@ Runs `tests/smoke/` and `tests/regression/` with marker `not npu and nightly and
 
 **Phase 2b — benchmark**
 
-Runs the benchmark suite with marker `not npu` (`tests/benchmark/ops/` by default; full `tests/benchmark/` when `MSMODELING_BENCHMARK_MODELS=1`). Parallelism follows `MSMODELING_BENCHMARK_PARALLEL`.
+Runs the benchmark suite with marker `not npu` over full `tests/benchmark/`. Parallelism follows `MSMODELING_BENCHMARK_PARALLEL`.
 
 **Phase 2c — network**
 

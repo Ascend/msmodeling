@@ -20,7 +20,7 @@ import os
 from collections.abc import Callable
 from copy import deepcopy
 from enum import Enum
-from inspect import isfunction
+from inspect import isfunction  # pylint: disable=no-name-in-module
 from math import isinf, isclose, isnan
 from pathlib import Path
 from typing import Any, List, Tuple, Type, Optional, Union, Dict

@@ -3,7 +3,7 @@
   "name": "qwen3-30b-a3b-prefill",
   "description": "Qwen3-30B-A3B prefill, 1 query, qlen=3200, TP=4, compile",
   "initial_time_s": 0.163197,
-  "baseline_time_s": 0.1032,
+  "baseline_time_s": 0.151281,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.59,
   "operator_top_n": 10,
@@ -80,16 +80,6 @@
       "num_calls": 48
     },
     {
-      "name": "aten.mul.Tensor",
-      "total_time_s": 0.014406,
-      "num_calls": 48
-    },
-    {
-      "name": "aten.sum.dim_IntList",
-      "total_time_s": 0.011097,
-      "num_calls": 144
-    },
-    {
       "name": "tensor_cast.grouped_matmul.default",
       "total_time_s": 0.010480000000000001,
       "num_calls": 48
@@ -97,6 +87,11 @@
     {
       "name": "tensor_cast.unpermute_tokens.default",
       "total_time_s": 0.009642,
+      "num_calls": 48
+    },
+    {
+      "name": "aten.mul.Tensor",
+      "total_time_s": 0.009635,
       "num_calls": 48
     },
     {
@@ -113,6 +108,11 @@
       "name": "tensor_cast.matmul_all_reduce.default",
       "total_time_s": 0.007502,
       "num_calls": 48
+    },
+    {
+      "name": "aten.sum.dim_IntList",
+      "total_time_s": 0.005732999999999999,
+      "num_calls": 144
     },
     {
       "name": "tensor_cast.init_routing_v2.default",

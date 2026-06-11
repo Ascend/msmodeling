@@ -506,7 +506,7 @@ view, permute, split, split_with_sizes, select, slice, transpose, unsqueeze, exp
 
 ## 13. 相关文档
 
-- [Op Mapping 技能](../skills/op-mapping/SKILL.md) —— 使用并行子代理的自动化 op_mapping 生成
+- [Op Mapping 技能](../../../.agents/skills/op-mapping/SKILL.md) —— 使用并行子代理的自动化 op_mapping 生成
 - 更多 Skill 用法和协作流程见 §16
 
 ## 14. 新增融合算子映射 SOP

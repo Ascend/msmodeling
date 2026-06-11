@@ -23,6 +23,6 @@ class TensorCastGraphModulePass(ABC):
         By default, the object source is hashed.
         """
         hasher = hashlib.sha256()
-        src = inspect.getsource(self.__class__)
+        src = inspect.getsource(self.__class__)  # pylint: disable=no-member
         hasher.update(src.encode("utf-8"))
         return hasher.hexdigest()

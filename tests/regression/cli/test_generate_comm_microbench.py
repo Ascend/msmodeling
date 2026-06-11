@@ -270,7 +270,7 @@ def test_run_bench_profiler_batch_signature():
         _run_bench_profiler_batch,
     )
 
-    sig = inspect.signature(_run_bench_profiler_batch)
+    sig = inspect.signature(_run_bench_profiler_batch)  # pylint: disable=no-member
     assert "parse_fn" in sig.parameters
     assert sig.parameters["parse_fn"].default is None
     assert "no_sync" in sig.parameters
@@ -551,7 +551,7 @@ class TestMainKernelPath:
             generate_comm_microbench as mod,
         )
 
-        return inspect.getsource(mod.main)
+        return inspect.getsource(mod.main)  # pylint: disable=no-member
 
     def test_kernel_branch_exists(self):
         """main() must have an explicit 'bench_mode == kernel' branch."""
@@ -572,7 +572,7 @@ class TestMainKernelPath:
             generate_comm_microbench as mod,
         )
 
-        source = inspect.getsource(mod._run_bench_profiler_batch)
+        source = inspect.getsource(mod._run_bench_profiler_batch)  # pylint: disable=no-member
         assert "return {}" in source, "_run_bench_profiler_batch must return empty dict for tolerant error handling"
         assert "if not durations:" in source
 

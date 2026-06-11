@@ -64,7 +64,7 @@ def test_tensor_cast_spec_intact_after_conftest_plugins_loaded() -> None:
 
         from tensor_cast.device import DeviceProfile
 
-        assert inspect.isclass(DeviceProfile)
+        assert inspect.isclass(DeviceProfile)  # pylint: disable=no-member
         assert not isinstance(DeviceProfile, MagicMock)
         assert DeviceProfile.__module__ == "tensor_cast.device"
     finally:

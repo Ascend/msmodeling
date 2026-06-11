@@ -135,26 +135,12 @@ def _build_nightly_pytest_cmd(python_exe: str, *, junit_xml: Path) -> list[str]:
     ]
 
 
-def _benchmark_models_enabled() -> bool:
-    return os.environ.get("MSMODELING_BENCHMARK_MODELS", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
 def _build_benchmark_pytest_cmd(python_exe: str, cfg: Config, *, junit_xml: Path) -> list[str]:
-    benchmark_target = (
-        str(REPO_ROOT / "tests" / "benchmark")
-        if _benchmark_models_enabled()
-        else str(REPO_ROOT / "tests" / "benchmark" / "ops")
-    )
     cmd = [
         python_exe,
         "-m",
         "pytest",
-        benchmark_target,
+        str(REPO_ROOT / "tests" / "benchmark"),
         "-m",
         "not npu",
         "-q",
@@ -536,10 +522,7 @@ def _run_nightly_pipeline(
     nightly_exit = _stream_pytest(nightly_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2a_nightly"))
     logger.info("Phase 2a: pytest exit=%d", nightly_exit)
 
-    logger.info(
-        "Phase 2b: benchmark (%s)",
-        "models+ops" if _benchmark_models_enabled() else "ops only",
-    )
+    logger.info("Phase 2b: benchmark (full tests/benchmark)")
     bench_cmd = _build_benchmark_pytest_cmd(sys.executable, cfg, junit_xml=bench_junit)
     logger.info("Running pytest: %s", shlex.join(bench_cmd))
     bench_exit = _stream_pytest(bench_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2b_benchmark"))
