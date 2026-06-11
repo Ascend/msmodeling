@@ -24,7 +24,7 @@ The Throughput Optimizer automatically searches for the optimal model configurat
 - Disaggregation mode: Separates Prefill and Decode phases for independent optimization
 - PD Ratio Optimization: Calculates optimal Prefill-to-Decode instance ratio for maximum system throughput
 
-See [Throughput Optimizer Guide](./throughput_optimizer.md) for detailed usage.
+See [Throughput Optimizer Guide](./msmodeling_throughput_optimizer_user_guide.md) for detailed usage.
 
 ### 2. Serving Simulation
 
@@ -43,4 +43,4 @@ The Serving Simulation simulates end-to-end serving scenarios with multiple inst
 - Support for heterogeneous instance groups
 - Comprehensive metrics: E2E latency, TTFT, TPOT, token throughput
 
-See [Serving Simulation Guide](./serving_cast_simulation.md) for detailed usage.
+See [Serving Simulation Guide](./msmodeling_serving_cast_simulation_user_guide.md) for detailed usage.

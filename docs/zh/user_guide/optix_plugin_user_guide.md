@@ -4,10 +4,31 @@
 
 寻优工具支持自定义插件，用户可通过开发自定义插件实现：自定义搜索参数配置、自定义服务框架，以及自定义性能测试工具。
 
+## 适用对象与前置条件
+
+本文适用于需要扩展 OptiX 寻优能力的开发者。开始前请确认：
+
+- 已完成 msModeling 与 OptiX 的安装，可正常执行 `msmodeling optix -h`。
+- 熟悉 Python 包结构、`pyproject.toml` 与 entry points 机制。
+- 已明确需要扩展的对象：搜索参数配置、服务框架或性能测试工具。
+
+> [!NOTE]
+> 以下示例中的 `optix.*` 模块路径以已安装的 OptiX 版本为准；如果当前仓库分支未包含 OptiX 源码，请先切换到包含 OptiX 代码的发布分支或安装对应发布包。
+
 自定义插件开发流程如下：
 
 1. 创建自己的Python项目作为插件。
 2. 自定义插件开发。
+
+## 插件接入流程概览
+
+| 步骤 | 目标 | 关键操作 |
+| --- | --- | --- |
+| 1 | 创建插件工程 | 创建独立 Python 项目，并准备 `pyproject.toml`。 |
+| 2 | 实现扩展类 | 按需继承 `Settings`、`SimulatorInterface` 或 `BenchmarkInterface`。 |
+| 3 | 注册扩展 | 在插件包中实现 `register()`，调用 OptiX 的注册函数。 |
+| 4 | 声明入口点 | 在 `pyproject.toml` 中添加 `[project.entry-points.'optix.plugins']`。 |
+| 5 | 安装并验证 | 执行 `pip install -e .`，通过 `msmodeling optix -h` 确认扩展已加载。 |
 
 ## 自定义插件开发操作步骤
 

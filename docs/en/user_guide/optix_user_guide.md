@@ -67,7 +67,7 @@ pip uninstall optix
 
 1. Complete the operations described in [Preparations](#preparations).
 
-2. Modify the configuration file. Before starting optimization, configure [`config.toml`](../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
+2. Modify the configuration file. Before starting optimization, configure [`config.toml`](../../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
 
 3. Start optimization. After the preceding steps are complete, start automatic optimization with a single command:
 
@@ -108,7 +108,7 @@ msmodeling optix [options]
 
 **Example (vLLM Service Parameter Optimization)**
 
-1. Modify the configuration file. Before starting optimization, configure [<idp:inline displayname="code" id="code151415418558">config.toml</idp:inline>](../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
+1. Modify the configuration file. Before starting optimization, configure [<idp:inline displayname="code" id="code151415418558">config.toml</idp:inline>](../../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
 
 2. To set environment variables for the vLLM/MindIE services, configure them before running the tool. For example:
 
@@ -132,7 +132,7 @@ msmodeling optix [options]
 
 **Example (MindIE Serving Parameter Optimization)**
 
-1. Modify the configuration file. Before starting optimization, configure [<idp:inline displayname="code" id="code121419465514">config.toml</idp:inline>](../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
+1. Modify the configuration file. Before starting optimization, configure [<idp:inline displayname="code" id="code121419465514">config.toml</idp:inline>](../../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
 2. To set environment variables for the vLLM/MindIE services, configure them before running the tool. For example:
 
     ```bash
@@ -331,7 +331,7 @@ You can also define parameters relative to others. For example, to set `max_pref
 
 ### Plugin Mode
 
-Serviceparam Optimizer supports user-defined search parameter configuration and benchmark tools. You can configure them as needed by adapting to the plugin interface and registering the corresponding plugin. For details, see [Plugin Development Guide](optix_plugin_instruct.md).
+Serviceparam Optimizer supports user-defined search parameter configuration and benchmark tools. You can configure them as needed by adapting to the plugin interface and registering the corresponding plugin. For details, see [Plugin Development Guide](./optix_plugin_user_guide.md).
 
 ### Log Description
 

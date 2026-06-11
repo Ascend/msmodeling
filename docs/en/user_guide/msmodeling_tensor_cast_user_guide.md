@@ -1,5 +1,29 @@
 ﻿# TensorCast
 
+## Supported Matrix
+
+**Core capabilities**
+
+| Area | Support | Notes |
+| --- | --- | --- |
+| Runtime output | Supported | Perf summary, Chrome trace |
+| Device modeling | Supported | Interconnect modeling |
+| Device profiles | Supported | Custom device profiles (user-defined) |
+| Perf model | Supported | Empirical model, analytic model |
+
+**Models & optimization**
+
+| Area | Support | Notes |
+| --- | --- | --- |
+| Text models (families) | Supported | Qwen3, Qwen3-Next, GLM-4, DeepSeek V3, DeepSeek V3.2, ERNIE 4.5, Ling, MiMo v2, MinMax M2, MoE supported |
+| Vision-language models | Supported | Qwen3-VL, GLM-4V, InternVL |
+| Video generation models (Diffusers DiT) | Supported | Wan, HunyuanVideo, HunyuanVideo1.5 |
+| Auto sharding | Supported | DP, TP, EP, automatic parallel strategy search |
+| Quantization (linear) | Supported | W8A16/W8A8/W4A8 (static & dynamic), FP8, MXFP4 |
+| Quantization (attention) | Supported (text only) | INT8 |
+| Serving simulation | Supported | Multi-instance multi-request end-to-end serving simulation, outputs TTFT/TPOT/throughput |
+| Throughput optimization | Supported | Automatic configuration search under SLO constraints with cross-hardware comparison tables |
+
 ## Introduction
 
 TensorCast is a performance simulation and analysis framework for PyTorch programs. It empowers developers and researchers to predict the performance of their neural network models on specific hardware configurations without needing access to the physical machine.
@@ -111,28 +135,6 @@ Metric descriptions:
 - `# of Calls`: Number of times the operator is invoked.
 - `Total time for analytic`: Sum of analytic operator time.
 
-### Supported Matrix
-
-**Core capabilities**
-
-| Area | Support | Notes |
-| --- | --- | --- |
-| Runtime output | Supported | Perf summary, Chrome trace |
-| Device modeling | Supported | Interconnect modeling |
-| Device profiles | Supported | Custom device profiles (user-defined) |
-| Perf model | Supported | Empirical model, analytic model |
-
-**Models & optimization**
-
-| Area | Support | Notes                                                                                                  |
-| --- | --- |--------------------------------------------------------------------------------------------------------|
-| Text models (families) | Supported | DeepSeek V4, Qwen3, Qwen3-Next, GLM-4, DeepSeek V3, DeepSeek V3.2, ERNIE 4.5, Ling, MiMo v2, MinMax M2 |
-| Vision-language models | Supported | Qwen3-VL, GLM-4V, Kimi k2.5, Kimi k2.6, InternVL                                                       |
-| Video generation models (Diffusers DiT) | Supported | Wan, HunyuanVideo, HunyuanVideo1.5                                                                     |
-| Auto sharding | Supported | DP, TP, EP                                                                                             |
-| Quantization (linear) | Supported | W8A16/W8A8/W4A8 (static & dynamic), FP8, MXFP4                                                         |
-| Quantization (attention) | Supported (text only) | INT8                                                                                                   |
-
 ## Supported Accelerators
 
 We provide built-in support for the following device profiles (defined in `tensor_cast/device.py`):
@@ -148,7 +150,7 @@ We provide built-in support for the following device profiles (defined in `tenso
 
 ### Custom device types
 
-For other hardware, define a custom device profile as a Python file under `tensor_cast/device_profiles`. TensorCast will load it automatically, and you can then reference the profile name from the CLI. Custom device guide: [device_profiles/README.md](../../tensor_cast/device_profiles/README.md)
+For other hardware, define a custom device profile as a Python file under `tensor_cast/device_profiles`. TensorCast will load it automatically, and you can then reference the profile name from the CLI. Custom device guide: [device_profiles/README.md](../../../tensor_cast/device_profiles/README.md)
 
 ## Detailed Usage
 

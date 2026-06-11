@@ -1,141 +1,93 @@
-# MindStudio Modeling
+<h1 align="center">MindStudio Modeling</h1>
 
-MindStudio-Modeling is a performance simulation and analysis framework for neural network inference workloads, consisting of two core components for predicting and optimizing model performance on target hardware:
+<div align="center">
+<p><b><span style="font-size:24px;">昇腾 AI 模型性能建模与仿真工具</span></b></p>
 
-1. **TensorCast**
-    * **Core Purpose**: A PyTorch program performance simulator, functioning as a "virtual machine."
-    * **Main Function**: Intercepts a model's PyTorch computational graph and simulates its execution on a user-defined hardware profile (`DeviceProfile`) without requiring physical hardware.
-    * **Supported Tasks**:
-        * **Text Generation**: Simulates Large Language Model (LLM) inference (e.g., Qwen) via `cli.inference.text_generate`.
-        * **Video Generation**: Simulates the forward pass of diffusion transformer models (e.g., Stable Video Diffusion-like architectures) via `cli.inference.video_generate`.
-    * **Output**: Provides operator-level performance breakdown, memory footprint analysis, FLOPs analysis, and can generate Chrome Trace files for visualization.
+ [![快速入门](https://badgen.net/badge/快速入门/QuickStart/blue)](./docs/zh/quick_start/tensorcast_serving_cast_quick_start.md)
+ [![AI问答(DeepWiki)](https://badgen.net/badge/AI问答/DeepWiki/blue)](https://deepwiki.com/mindstudio-docs/master)
+ [![AI问答(ZRead)](https://badgen.net/badge/AI问答/ZRead/blue)](https://zread.ai/mindstudio-docs/master)
+ [![精确搜索](https://badgen.net/badge/精确搜索/ReadTheDocs/blue)](https://mindstudio-docs-master.readthedocs.io)
+ [![昇腾社区](https://badgen.net/badge/昇腾社区/Community/blue)](https://www.hiascend.com/cn/developer/software/mindstudio)
+ [![报告问题](https://badgen.net/badge/报告问题/Issues/blue)](https://gitcode.com/Ascend/msmodeling/issues)
 
-2. **ServingCast**
-    * **Core Purpose**: A suite of tools for system-level inference serving simulation and throughput optimization.
-    * **Main Function**:
-        * **Service Simulation**: Driven by `main.py`, it simulates end-to-end serving scenarios with multiple instances and requests based on YAML configuration files, outputting system-level metrics like throughput, latency (TTFT, TPOT).
-        * **Throughput Optimization**: Via `cli.inference.throughput_optimizer.py`, it automatically searches for the optimal model configuration (parallelism strategy, batch size) to maximize token throughput under specified Service Level Objective (SLO) constraints (e.g., limits on TTFT, TPOT). Supports benchmarking multiple `--device` profiles with cross-hardware comparison tables and terminal ASCII sweep curves for single-device analysis.
+</div>
 
-**Core Value**: It enables developers to predict model performance, identify bottlenecks, and optimize configurations for target hardware without needing access to the physical devices.
+## ✨ 最新消息
 
-<!-- toc -->
+<span style="font-size:14px;">
 
-- [MindStudio-Modeling](#mindstudio-modeling)
-  - [Installation](#installation)
-    - [Recommended: uv](#recommended-uv)
-    - [Alternative: pip + requirements.txt](#alternative-pip--requirementstxt)
-    - [Environment Setup](#environment-setup)
-  - [Getting Started](#getting-started)
-  - [Contributions](#contributions)
-    - [Coding style](#coding-style)
-    - [Unit tests](#unit-tests)
-  - [Suggestions \& Community](#suggestions--community)
-  - [Weekly Meeting](#weekly-meeting)
-  - [About the MindStudio Team](#about-the-mindstudio-team)
-  - [License](#license)
+🔹 **[2026.06.10]**：msModeling 新增 **DeepSeek-V4** 模型支持  
+🔹 **[2026.04.02]**：msModeling 新增 **GLM5** 模型支持
 
-<!-- tocstop -->
+</span>
 
-## Installation
+## ℹ️ 简介
 
-**Supported Python versions:** 3.10+
+MindStudio Modeling（msModeling）是专为昇腾 AI 处理器打造的神经网络推理性能仿真与分析框架，提供单模型性能仿真、服务级吞吐优化、服务化参数自动寻优与可视化分析能力，帮助开发者在无物理硬件或部署前期预测模型性能、识别瓶颈并优化配置。
 
-> [!Warning]
-> If you are using Windows, note that PyTorch 2.10 may not run properly on your system. For a solution, please refer to [this issue](https://github.com/pytorch/pytorch/issues/166628). If you have not yet installed PyTorch, for optimal compatibility, we strongly recommend using version 2.8 or earlier to ensure the program functions correctly.
+## ⚙️ 功能介绍
 
-### Recommended: uv
+msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 OptiX 等功能模块，覆盖单模型性能仿真、吞吐优化、服务级仿真、可视化交互与服务化参数自动寻优等场景。模型与特性覆盖范围请参见《[模型支持与特性支持矩阵](./docs/zh/user_guide/support_matrix/support_matrix_user_guide.md)》。
 
-```bash
-git clone https://gitcode.com/Ascend/msmodeling.git -b develop
-cd msmodeling
+| 功能名称 | 功能描述 |
+|---------|--------|
+| [**TensorCast**](./docs/zh/user_guide/msmodeling_tensor_cast_user_guide.md) | 算子仿真模块，拦截 PyTorch 计算图，在指定 DeviceProfile 上模拟推理过程，输出算子级性能分解、内存占用、算子 shape 及 Chrome Trace。 |
+| [**Throughput Optimizer**](./docs/zh/user_guide/msmodeling_throughput_optimizer_user_guide.md) | 吞吐优化模块，在 SLO 约束下自动搜索最优并行策略与 batch 配置，支持 PD 混部、PD 分离、PD 配比三种模式。 |
+| [**ServingCast**](./docs/zh/user_guide/msmodeling_serving_cast_user_guide.md) | 服务级推理仿真模块，基于 YAML 配置模拟多实例、多请求的端到端 serving 场景，输出吞吐、TTFT、TPOT 等系统级指标。 |
+| [**Web UI**](./docs/zh/user_guide/msmodeling_web_ui_user_guide.md) | 可视化交互界面，支持通过页面配置模型、芯片、并行、量化和 workload 参数，并查看曲线、表格和导出结果。 |
+| [**OptiX**](./docs/zh/user_guide/optix_user_guide.md) | 服务化参数自动寻优工具，基于 PSO 粒子寻优算法对 vLLM、MindIE 等服务框架进行参数寻优与验证。 |
 
-pip install uv
-uv venv --python 3.13 .venv
+## 🚀 快速入门
 
-# Linux or macOS
-source .venv/bin/activate
-# Windows
-# .venv\Scripts\activate
+以 TensorCast 单模型仿真与 ServingCast 服务仿真为例，快速跑通核心流程，请参见《[TensorCast 与 ServingCast 快速入门](./docs/zh/quick_start/tensorcast_serving_cast_quick_start.md)》。
 
-uv sync
-# optional: uv sync --group lint / uv sync --group ci
-```
+## 📦 安装指南
 
-Use `uv run …` or an activated venv to run commands. Scripts under `scripts/` auto-detect uv when `pyproject.toml` is present.
+介绍工具的环境依赖与安装方法，请参见《[msModeling 安装指南](./docs/zh/install_guide/msmodeling_install_guide.md)》。
 
-### Alternative: pip + requirements.txt
+## 📘 使用指南
 
-```bash
-git clone https://gitcode.com/Ascend/msmodeling.git -b develop
-cd msmodeling
+各工具的详细使用说明请参阅其源码仓库中的 README 文件，也可通过上方功能介绍表格中的链接直接跳转。
 
-python -m venv .venv
-source .venv/bin/activate   # adjust for Windows
+## 💡 典型案例
 
-pip install "torch>=2.7,<=2.10" --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
-```
+通过典型问题场景帮助用户理解并掌握工具使用，请参见《[吞吐优化指南](./docs/zh/user_guide/msmodeling_throughput_optimizer_user_guide.md)》与《[服务仿真指南](./docs/zh/user_guide/msmodeling_serving_cast_simulation_user_guide.md)》中的示例。
 
-See comments at the top of `requirements.txt` for the CPU PyTorch step.
+## ❓ FAQ
 
-### Environment Setup
+常见问题及解决方案，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues) 或参见各模块使用指南。
 
-If you are not using the tools within the msmodeling directory, please set the `PYTHONPATH` before running:
+## 🌌 智能检索
 
-```bash
-export PYTHONPATH=/path/to/msmodeling:$PYTHONPATH
-```
+为提升文档查阅效率，我们提供多种高效检索方式：  
+🔹 [AI 问答（DeepWiki）](https://deepwiki.com/mindstudio-docs/master)：自然语言问答，快速把握项目架构与模块关系。  
+🔹 [AI 问答（ZRead）](https://zread.ai/mindstudio-docs/master)：中文问答体验更优，精准定位功能用法与细节。  
+🔹 [精确搜索（ReadTheDocs）](https://mindstudio-docs-master.readthedocs.io)：关键词全文检索，直达接口、参数与报错等信息。
 
-> [!Warning]
-> When the tool is running, it will read the model configuration file from Hugging Face. Please ensure that your device can access [Hugging Face](https://huggingface.co/). Or you can set: `export HF_ENDPOINT="https://hf-mirror.com"`
+## 🛠️ 贡献指南
 
-## Getting Started
+欢迎参与项目贡献。提交代码前请使用 `pre-commit` 保证代码风格一致，并确保相关单元测试通过。如有疑问，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues)。
 
-For detailed usage, please refer to the two documentation files:
+## ⚖️ 相关说明
 
-* [For service simulation and throughput optimization.](./docs/en/serving_cast_instruct.md)
+🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》  
+🔹 《[许可证声明](./LICENSE)》  
+🔹 《[安全声明](https://www.hiascend.com/)》  
+🔹 免责声明：本工具仿真与优化结果仅供性能评估参考，最终性能表现请以真实环境实测为准
 
-* [For TensorCast performance simulation framework.](./docs/en/tensor_cast_instruct.md)
+## 🤝 建议与交流
 
-## Contributions
+欢迎大家为社区做贡献。如果有任何疑问或建议，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues)，我们会尽快回复。感谢您的支持。
 
-### Coding style
+**SIG 例会**：MindStudio Modeling Weekly Meeting 每周三 10:00-12:00（UTC+8）举行，会议纪要与议题请参见 [sig-msit-modeling](https://etherpad.ascend.osinfra.cn/p/sig-msit-modeling)，也可使用 [时区转换](https://dateful.com/convert/gmt8?t=15) 查看本地时间。
 
-Use `pre-commit` to make sure the coding style aligns:
+| 即时互动（微信群） | 官方资讯（公众号） | 深度支持（助手/论坛） |
+|:--:|:--:|:--|
+| <img src="https://raw.gitcode.com/mengguangxin/docs/files/dev_0526/common/Writing_Template/figures/qr_code_wechat_work.png" width="120"><br><sub>*扫码加入技术交流群*</sub> | <img src="https://raw.gitcode.com/mengguangxin/docs/files/dev_0526/common/Writing_Template/figures/qr_code_wechat_official_account.png" width="120"><br><sub>*扫码关注官方公众号*</sub> | 扫码入群并关注公众号，直达 MindStudio 用户与开发者最快捷的交流平台：<br>**快速提问：** 与社区小伙伴即时探讨技术问题<br>**掌握动态：** 第一时间获取版本发布与功能更新通知<br>**经验共享：** 与广大开发者交流最佳实践与实战心得<br><br>**更多支持渠道**：👉 昇腾助手：[![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://gitcode.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png) 👉 昇腾论坛：[![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
 
-```bash
-uv sync --group lint
-uv run pre-commit install   # run once
-```
+## 🙏 致谢
 
-Later commits will be checked by `pre-commit` automatically.
-
-### Unit tests
-
-```bash
-cd /path/to/msmodeling
-uv sync
-```
-
-Make sure unit tests pass by running: `bash ./tests/run_ut.sh tensor_cast` or `bash ./tests/run_ut.sh serving_cast`. Please ensure that the ut coverage rate of the newly added code is greater than `80%`
-
-## Suggestions & Community
-
-We welcome everyone to contribute to the community. If you have any questions or suggestions, please submit an [Issue](https://gitcode.com/Ascend/msmodeling/issues) and we will respond as soon as possible. Thank you for your support.
-
-| Technical Chat Groups | Official Account | More Ways to Connect |
-| :---: | :---: | :--- |
-| <img src="https://raw.gitcode.com/user-images/assets/8428112/368af17d-bd72-4bb6-ae94-f10fac88fd00/30be980e7fd65b2486d251b48a7999f3.jpg" width="120"><br><sub>*Scan to join the technical chat*</sub> | <img src="https://raw.gitcode.com/user-images/assets/8428112/2a22a707-de26-4bb3-b312-4952035e021b/30be980e7fd65b2486d251b48a7999f3.jpg" width="120"><br><sub>*Scan to follow for the latest updates*</sub> |Scan the codes to join our technical chat and follow our official account—the fastest way for MindStudio users and developers to connect:<br> **Quick Q&A:** Discuss technical issues instantly with community members<br>**Stay Updated:** Be the first to receive notifications on version releases and feature updates<br> **Knowledge Sharing:** Exchange best practices with fellow developers  <br>🛠️ **Other Channels**:<br> Ascend Assistant：[![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://gitcode.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png)<br> Ascend Forum：[![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
-
-## Weekly Meeting
-
-- MindStudio Modeling Weekly Meeting: [https://etherpad.ascend.osinfra.cn/p/sig-msit-modeling](https://etherpad.ascend.osinfra.cn/p/sig-msit-modeling)
-- Wednesday, 10:00 - 12:00 (UTC+8, [Convert to your timezone](https://dateful.com/convert/gmt8?t=15))
-
-## About the MindStudio Team
-
-The Huawei MindStudio end-to-end development toolchain team is dedicated to providing comprehensive Ascend AI application development solutions, empowering developers to efficiently complete training development, inference development, and operator development.
-
-## License
-
-msmodeling has a MulanPSL2-style license, as found in the [LICENSE](LICENSE) file.
+本工具由华为公司的下列部门联合贡献：  
+🔹 昇腾计算 MindStudio 开发部  
+🔹 昇腾计算生态使能部  
+感谢来自社区的每一个 PR，欢迎贡献！

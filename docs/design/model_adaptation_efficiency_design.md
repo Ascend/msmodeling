@@ -39,7 +39,7 @@ The primary goals are:
 
 The design intentionally separates user-facing operating instructions from
 software design. Detailed commands, input formats, and output review steps are
-documented in `docs/en/tensor_cast_new_model_adaptation.md`.
+documented in `docs/en/user_guide/msmodeling_tensor_cast_new_model_adaptation_user_guide.md`.
 
 ## 2. Design
 
@@ -593,7 +593,7 @@ This design document provides only the conceptual usage case and constraints.
 All step-by-step guidance, including exact commands, required files, optional
 hints, doctor outputs, patch authoring handoff, evidence export, verification,
 ST case generation, and Qwen3-VL replay/audit procedure, shall be maintained in
-`docs/en/tensor_cast_new_model_adaptation.md`.
+`docs/en/user_guide/msmodeling_tensor_cast_new_model_adaptation_user_guide.md`.
 
 The user-facing workflow shall expose these public operations:
 
