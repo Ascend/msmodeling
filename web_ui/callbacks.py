@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Sequence, TYPE_CHECKING
 
 import pandas as pd
@@ -28,7 +29,7 @@ from .command_builder import (
 )
 from .components import df_to_records, progress_html
 from .result_store import ResultStore
-from .runner import ExperimentRunner
+from .runner import ExperimentRunner, PROJECT_ROOT
 from .utils import parse_optional_number, parse_scalar_or_list
 
 if TYPE_CHECKING:
@@ -250,8 +251,16 @@ def _round_numeric_columns(df: pd.DataFrame, digits: int = 3) -> pd.DataFrame:
 
 
 def _normalize_op_columns(columns: Sequence[str] | None) -> list[str]:
-    selected = [str(col) for col in (columns or []) if str(col) in OP_TABLE_COLUMNS]
-    return selected or OP_TABLE_DEFAULT_COLUMNS.copy()
+    # Compatibility mapping for column name variations
+    col_mapping = {
+        "Avg Time (ms)": "Average Time (ms)",
+    }
+    normalized = []
+    for col in columns or []:
+        mapped = col_mapping.get(str(col), str(col))
+        if mapped in OP_TABLE_COLUMNS:
+            normalized.append(mapped)
+    return normalized or OP_TABLE_DEFAULT_COLUMNS.copy()
 
 
 def _op_table_from_records(
@@ -294,7 +303,12 @@ def _op_table_from_records(
     df["Category"] = df.get("category", "Other")
     df["Device"] = df.get("device", "-")
 
-    sort_col = sort_by if sort_by in OP_TABLE_SORT_OPTIONS else "Total Time (ms)"
+    # Compatibility mapping for sort_by
+    sort_mapping = {
+        "Avg Time (ms)": "Average Time (ms)",
+    }
+    normalized_sort_by = sort_mapping.get(sort_by, sort_by) if sort_by else None
+    sort_col = normalized_sort_by if normalized_sort_by in OP_TABLE_SORT_OPTIONS else "Total Time (ms)"
     ascending = sort_col == "Operator"
     df = df.sort_values(by=sort_col, ascending=ascending, kind="stable").head(int(top_n or 20))
     display_df = df[OP_TABLE_COLUMNS].copy()
@@ -334,6 +348,7 @@ def _build_text_form(*vals):
         "prefix_cache_hit_rate",
         "reserved_memory_gb",
         "log_level",
+        "enable_multistream",
         "compile_allow_graph_break",
         "disable_repetition",
         "quantize_lmhead",
@@ -354,9 +369,13 @@ def _build_text_form(*vals):
         "enable_redundant_experts",
         "enable_external_shared_experts",
         "host_external_shared_experts",
+        "enable_sequence_parallel",
+        "enable_shared_expert_tp",
+        "enable_dispatch_ffn_combine",
         "remote_source",
         "performance_model",
         "profiling_database",
+        "export_empirical_metrics",
     ]
     data = dict(zip(keys, vals))
     data["num_queries_sweep"] = data.pop("num_queries_list")
@@ -420,21 +439,26 @@ def _build_opt_form(*vals):
         "num_mtp_tokens",
         "mtp_acceptance_rate",
         "max_batched_tokens",
+        "image_batch_size",
         "image_height",
         "image_width",
         "tp_sizes",
+        "ep_sizes",
+        "moe_dp_sizes",
         "batch_range",
         "jobs",
         "deployment_mode",
         "prefix_cache_hit_rate",
         "prefill_devices_per_instance",
         "decode_devices_per_instance",
+        "enable_multistream",
         "compile_allow_graph_break",
         "mxfp4_group_size",
         "reserved_memory_gb",
         "log_level",
         "serving_cost",
         "dump_original_results",
+        "concurrency_search_strategy",
     ]
     data = dict(zip(keys, vals))
     data["quant_linear_sweep"] = data.pop("quant_linear_list")
@@ -588,60 +612,73 @@ def _validate_video_form(form: dict[str, Any]) -> list[str]:
         try:
             value = int(form.get(key))
         except (TypeError, ValueError):
-            errors.append(f"{label}\u5fc5\u987b\u662f\u6b63\u6574\u6570\u3002")
+            errors.append(f"{label} must be a positive integer.")
             return None
         if value <= 0:
-            errors.append(f"{label}\u5fc5\u987b\u5927\u4e8e0\u3002")
+            errors.append(f"{label} must be greater than 0.")
             return None
         return value
 
     for key, label in [
-        ("batch_size", "batch\u6570\u91cf"),
-        ("seq_len", "prompt\u957f\u5ea6"),
-        ("height", "\u9ad8\u5ea6"),
-        ("width", "\u5bbd\u5ea6"),
-        ("frame_num", "\u5e27\u6570"),
-        ("sample_step", "\u91c7\u6837\u6b65\u6570"),
+        ("batch_size", "Batch Size"),
+        ("seq_len", "Prompt Length"),
+        ("height", "Height"),
+        ("width", "Width"),
+        ("frame_num", "Frame Count"),
+        ("sample_step", "Sample Step"),
     ]:
         positive_int(key, label)
 
-    world_size = positive_int("world_size", "\u90e8\u7f72\u5361\u6570")
+    world_size = positive_int("world_size", "Device Count")
     if world_size:
         try:
             ulysses_values = parse_scalar_or_list(form.get("ulysses_sweep") or form.get("ulysses_size"), int)
         except Exception as exc:
-            errors.append(f"Ulysses \u5217\u8868\u89e3\u6790\u5931\u8d25\uff1a{exc}")
+            errors.append(f"Failed to parse Ulysses list: {exc}")
             ulysses_values = []
         for ulysses in ulysses_values:
             if ulysses <= 0:
-                errors.append("Ulysses \u5e76\u884c\u6570\u5fc5\u987b\u5927\u4e8e0\u3002")
+                errors.append("Ulysses parallel size must be greater than 0.")
             elif ulysses > world_size:
-                errors.append("Ulysses \u5e76\u884c\u6570\u4e0d\u80fd\u5927\u4e8e\u90e8\u7f72\u5361\u6570\u3002")
+                errors.append("Ulysses parallel size cannot be greater than Device Count.")
             elif world_size % ulysses != 0:
-                errors.append(
-                    "\u90e8\u7f72\u5361\u6570\u5fc5\u987b\u80fd\u88ab Ulysses \u5e76\u884c\u6570\u6574\u9664\u3002"
-                )
+                errors.append("Device Count must be divisible by Ulysses parallel size.")
 
     if form.get("cache_step_interval") not in (None, ""):
-        positive_int("cache_step_interval", "Cache \u6b65\u95f4\u9694")
+        positive_int("cache_step_interval", "Cache Step Interval")
     for key, label in [
-        ("cache_step_range", "Cache \u6b65\u8303\u56f4"),
-        ("cache_block_range", "Cache Block \u8303\u56f4"),
+        ("cache_step_range", "Cache Step Range"),
+        ("cache_block_range", "Cache Block Range"),
     ]:
         raw = str(form.get(key) or "").strip()
         if not raw:
             continue
         parts = [p.strip() for p in raw.split(",")]
         if len(parts) != 2:
-            errors.append(f"{label}\u9700\u8981\u586b\u5199\u4e3a start,end \u683c\u5f0f\u3002")
+            errors.append(f"{label} must use the format start,end.")
             continue
         try:
             start, end = [int(p) for p in parts]
         except ValueError:
-            errors.append(f"{label}\u5fc5\u987b\u7531\u6574\u6570\u7ec4\u6210\u3002")
+            errors.append(f"{label} must contain integers only.")
             continue
         if start < 0 or end <= start:
-            errors.append(f"{label}\u9700\u8981\u6ee1\u8db3 0 <= start < end\u3002")
+            errors.append(f"{label} must satisfy 0 <= start < end.")
+
+    model_id = str(form.get("model_id") or "").strip()
+    if not model_id:
+        errors.append("model-id cannot be empty.")
+    else:
+        model_dir = Path(model_id)
+        if not model_dir.is_absolute():
+            model_dir = PROJECT_ROOT / model_id
+        if not model_dir.is_dir():
+            errors.append(
+                "Video Models currently requires a local Diffusers model directory, for example "
+                "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers."
+            )
+        elif not (model_dir / "transformer" / "config.json").is_file():
+            errors.append("Video Models requires a Diffusers model directory that contains transformer/config.json.")
 
     return errors
 
@@ -1392,6 +1429,31 @@ def _run_tasks(sim_type: str, tasks):
             display_rows,
             full_rows,
         )
+
+
+def _stop_run_feedback(title: str) -> tuple[str, str]:
+    stopped = RUNNER.stop_all()
+    progress = progress_html(0, 1, title, f"cancelled {stopped} task(s)")
+    summary = "\n".join(
+        [
+            "### Run Cancelled",
+            f"- Requested stop for **{stopped}** active task(s).",
+            "- You can adjust parameters and start a new run at any time.",
+        ]
+    )
+    return progress, summary
+
+
+def stop_text_generate_run():
+    return _stop_run_feedback("Text Generate Cancelled")
+
+
+def stop_video_generate_run():
+    return _stop_run_feedback("Video Generate Cancelled")
+
+
+def stop_optimizer_run():
+    return _stop_run_feedback("Optimizer Cancelled")
 
 
 # -----------------------------

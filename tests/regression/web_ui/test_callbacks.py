@@ -66,6 +66,10 @@ from web_ui.callbacks import (
     _video_validation_empty_outputs,
     _optimizer_metric_plot,
     _optimizer_candidate_rows_from_records,
+    stop_text_generate_run,
+    stop_video_generate_run,
+    stop_optimizer_run,
+    _stop_run_feedback,
     OPT_DEPLOY_PD_MIXED,
     OPT_DEPLOY_PD_SPLIT,
     OPT_DEPLOY_PD_RATIO,
@@ -943,6 +947,7 @@ class TestValidateVideoForm:
             "cache_step_interval": None,
             "cache_step_range": None,
             "cache_block_range": None,
+            "model_id": "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers",
         }
         result = _validate_video_form(form)
         assert result == []
@@ -6322,3 +6327,53 @@ class TestValidateTextFormWithDisableRepetition:
         errors = _validate_text_form(form)
         # Should handle the parameter
         assert isinstance(errors, list)
+
+
+class TestStopRunFeedback:
+    """Tests for _stop_run_feedback function."""
+
+    def test_stop_run_feedback_returns_tuple(self) -> None:
+        """Test that _stop_run_feedback returns progress and summary tuple."""
+        progress, summary = _stop_run_feedback("Test Cancelled")
+        assert isinstance(progress, str)
+        assert isinstance(summary, str)
+        assert "cancelled" in progress.lower()
+        assert "Run Cancelled" in summary
+
+    def test_stop_run_feedback_contains_stop_count(self) -> None:
+        """Test that feedback includes count of stopped tasks."""
+        progress, summary = _stop_run_feedback("Test")
+        assert "task(s)" in progress
+
+
+class TestStopTextGenerateRun:
+    """Tests for stop_text_generate_run function."""
+
+    def test_stop_text_generate_run(self) -> None:
+        """Test stop_text_generate_run returns feedback."""
+        progress, summary = stop_text_generate_run()
+        assert "Text Generate Cancelled" in progress
+        assert "Run Cancelled" in summary
+        assert isinstance(progress, str)
+
+
+class TestStopVideoGenerateRun:
+    """Tests for stop_video_generate_run function."""
+
+    def test_stop_video_generate_run(self) -> None:
+        """Test stop_video_generate_run returns feedback."""
+        progress, summary = stop_video_generate_run()
+        assert "Video Generate Cancelled" in progress
+        assert "Run Cancelled" in summary
+        assert isinstance(progress, str)
+
+
+class TestStopOptimizerRun:
+    """Tests for stop_optimizer_run function."""
+
+    def test_stop_optimizer_run(self) -> None:
+        """Test stop_optimizer_run returns feedback."""
+        progress, summary = stop_optimizer_run()
+        assert "Optimizer Cancelled" in progress
+        assert "Run Cancelled" in summary
+        assert isinstance(progress, str)

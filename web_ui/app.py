@@ -16,6 +16,9 @@ from .callbacks import (
     run_optimizer_v2,
     run_text_generate_v2,
     run_video_generate_v2,
+    stop_optimizer_run,
+    stop_text_generate_run,
+    stop_video_generate_run,
     update_bandwidth_analysis_by_device,
     update_category_stats_by_device,
     update_compare_table_by_mode,
@@ -51,6 +54,7 @@ QUANT_LINEAR_OPTIONS = [
 ]
 QUANT_ATTENTION_OPTIONS = ["DISABLED", "INT8", "FP8"]
 APP_TITLE = "Modeling Compass"
+DEFAULT_VIDEO_MODEL_DIR = "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers"
 APP_ICON = (
     "data:image/svg+xml,"
     "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E"
@@ -65,7 +69,7 @@ APP_ICON = (
     "%3Cpath d='M32 48l6-16-6 3-6-3z' fill='%2321409a'/%3E%3C/g%3E"
     "%3Ccircle cx='32' cy='32' r='4' fill='%2312203d'/%3E%3C/svg%3E"
 )
-APP_HEAD = """
+APP_HEAD = r"""
 <meta charset="utf-8" />
 <link rel="icon" type="image/svg+xml" href="__APP_ICON__" />
 <style>
@@ -107,6 +111,29 @@ APP_HEAD = """
 <script>
 (() => {
   const MIN_WIDTH = 80;
+  const PROCESSING_RUNTIME_RE = /^processing\s*\|\s*(\d+(?:\.\d+)?)(?:\/\d+(?:\.\d+)?)?s?$/i;
+
+  function normalizeProgressRuntime(root = document) {
+    if (root instanceof Text) {
+      root = root.parentElement;
+    }
+    const progressNodes = [];
+    if (root instanceof Element && root.matches('.progress-text')) {
+      progressNodes.push(root);
+    }
+    if (root instanceof Element || root instanceof Document) {
+      progressNodes.push(...root.querySelectorAll('.progress-text'));
+    }
+    progressNodes.forEach((node) => {
+      const text = node.textContent.replace(/\s+/g, ' ').trim();
+      const match = text.match(PROCESSING_RUNTIME_RE);
+      if (match) {
+        node.dataset.runtimeText = `processing | ${match[1]} s`;
+      } else {
+        delete node.dataset.runtimeText;
+      }
+    });
+  }
 
   function bindResizableColumns(root = document) {
     const wraps = root.querySelectorAll('.table-wrap[role="grid"]');
@@ -151,15 +178,17 @@ APP_HEAD = """
 
   function initResizableColumns() {
     bindResizableColumns(document);
+    normalizeProgressRuntime(document);
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
+      normalizeProgressRuntime(mutation.target);
+        mutation.addedNodes.forEach((node) => normalizeProgressRuntime(node));
         if (mutation.type === 'childList' && (mutation.addedNodes.length || mutation.removedNodes.length)) {
           bindResizableColumns(document);
-          break;
         }
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true,  characterData: true, subtree: true });
   }
 
   if (document.readyState === 'loading') {
@@ -417,6 +446,10 @@ def build_app() -> gr.Blocks:
                             label="log-level",
                         )
                     with gr.Row():
+                        tg_enable_multistream = gr.Checkbox(
+                            label="enable-multistream",
+                            value=True,
+                        )
                         tg_compile_allow_graph_break = gr.Checkbox(
                             label="compile-allow-graph-break",
                             value=False,
@@ -475,6 +508,19 @@ def build_app() -> gr.Blocks:
                                 label="host-external-shared-experts",
                                 value=False,
                             )
+                        with gr.Row():
+                            tg_enable_sequence_parallel = gr.Checkbox(
+                                label="enable-sequence-parallel",
+                                value=False,
+                            )
+                            tg_enable_shared_expert_tp = gr.Checkbox(
+                                label="enable-shared-expert-tp",
+                                value=False,
+                            )
+                            tg_enable_dispatch_ffn_combine = gr.Checkbox(
+                                label="enable-dispatch-ffn-combine",
+                                value=False,
+                            )
                     with gr.Row():
                         tg_remote_source = gr.Dropdown(
                             ["huggingface", "modelscope"],
@@ -487,9 +533,11 @@ def build_app() -> gr.Blocks:
                             label="performance-model",
                         )
                         tg_profiling_database = gr.Textbox(label="profiling-database", value="")
+                        tg_export_empirical_metrics = gr.Textbox(label="export-empirical-metrics", value="")
                 with gr.Row():
                     tg_preview_btn = gr.Button("Preview Configuration")
                     tg_run = gr.Button("Run", variant="primary")
+                    tg_stop = gr.Button("Stop", variant="stop")
                 tg_preview_summary = gr.Markdown(
                     "### Configuration Summary\n"
                     "Click Preview to review the model, device, device "
@@ -633,6 +681,7 @@ def build_app() -> gr.Blocks:
                 tg_prefix_cache_hit_rate,
                 tg_reserved_memory_gb,
                 tg_log_level,
+                tg_enable_multistream,
                 tg_compile_allow_graph_break,
                 tg_disable_repetition,
                 tg_quantize_lmhead,
@@ -653,9 +702,13 @@ def build_app() -> gr.Blocks:
                 tg_enable_redundant_experts,
                 tg_enable_external_shared_experts,
                 tg_host_external_shared_experts,
+                tg_enable_sequence_parallel,
+                tg_enable_shared_expert_tp,
+                tg_enable_dispatch_ffn_combine,
                 tg_remote_source,
                 tg_performance_model,
                 tg_profiling_database,
+                tg_export_empirical_metrics,
             ]
 
             def _toggle_mtp_acceptance_rate(mtp_tokens):
@@ -691,7 +744,7 @@ def build_app() -> gr.Blocks:
                 inputs=tg_inputs,
                 outputs=[tg_preview_summary, tg_preview],
             )
-            tg_run.click(
+            tg_run_event = tg_run.click(
                 run_text_generate_v2,
                 inputs=tg_inputs,
                 outputs=[
@@ -723,6 +776,11 @@ def build_app() -> gr.Blocks:
                     tg_current_model_state,
                     tg_mtp_acceptance_state,
                 ],
+            )
+            tg_stop.click(
+                stop_text_generate_run,
+                outputs=[tg_progress, tg_summary],
+                cancels=[tg_run_event],
             )
             wire_export(tg_export_btn, tg_display_state, tg_export_file, "text_generate_results")
             tg_memory_device.change(
@@ -776,7 +834,7 @@ def build_app() -> gr.Blocks:
                 "Cache combinations, and cross-device comparison.",
             )
             with gr.Group(elem_classes=["section-card"]):
-                vg_model = gr.Textbox(label="model-id", value="Wan2.2-T2V-A14B-Diffusers")
+                vg_model = gr.Textbox(label="model-id", value=DEFAULT_VIDEO_MODEL_DIR)
                 with gr.Row():
                     vg_vendor = gr.Dropdown(vendors, value=default_vendor, label="Vendor")
                     vg_device = gr.Dropdown(
@@ -827,9 +885,21 @@ def build_app() -> gr.Blocks:
                 with gr.Accordion("DiT Cache", open=False):
                     vg_cache = gr.Checkbox(label="dit-cache", value=False)
                     with gr.Row():
-                        vg_cache_range = gr.Textbox(label="cache-step-range", value="20,30")
-                        vg_cache_interval = gr.Textbox(label="cache-step-interval", value="5")
-                        vg_cache_block = gr.Textbox(label="cache-block-range", value="")
+                        vg_cache_range = gr.Textbox(
+                            label="cache-step-range",
+                            value="20,30",
+                            placeholder="Format: start,end (e.g. 20,30)",
+                        )
+                        vg_cache_interval = gr.Textbox(
+                            label="cache-step-interval",
+                            value="5",
+                            placeholder="Step interval (e.g. 5)",
+                        )
+                        vg_cache_block = gr.Textbox(
+                            label="cache-block-range",
+                            value="",
+                            placeholder="Format: start,end (e.g. 10,20)",
+                        )
                 with gr.Accordion("Other Parameters", open=False):
                     gr.Markdown(
                         "The fields below keep the `video_generate.py` "
@@ -847,6 +917,7 @@ def build_app() -> gr.Blocks:
                 with gr.Row():
                     vg_preview_btn = gr.Button("Preview Configuration")
                     vg_run = gr.Button("Run", variant="primary")
+                    vg_stop = gr.Button("Stop", variant="stop")
                 vg_preview_summary = gr.Markdown(
                     "### \u914d\u7f6e\u6458\u8981\n"
                     "\u70b9\u51fb\u9884\u89c8\u540e\u663e\u793a\u6a21\u578b\u3001"
@@ -963,7 +1034,7 @@ def build_app() -> gr.Blocks:
                 inputs=vg_inputs,
                 outputs=[vg_preview_summary, vg_preview],
             )
-            vg_run.click(
+            vg_run_event = vg_run.click(
                 run_video_generate_v2,
                 inputs=vg_inputs,
                 outputs=[
@@ -981,6 +1052,11 @@ def build_app() -> gr.Blocks:
                     vg_full_state,
                     vg_op_breakdown_state,
                 ],
+            )
+            vg_stop.click(
+                stop_video_generate_run,
+                outputs=[vg_progress, vg_summary],
+                cancels=[vg_run_event],
             )
 
         with gr.Tabs():
@@ -1123,6 +1199,16 @@ def build_app() -> gr.Blocks:
                                 value="",
                                 placeholder="e.g. [1,2,4,8], leave empty for automatic calculation",
                             )
+                            op_ep_sizes = gr.Textbox(
+                                label="EP Parallel Size List",
+                                value="",
+                                placeholder="e.g. [1,2,4,8], leave empty for automatic calculation",
+                            )
+                            op_moe_dp_sizes = gr.Textbox(
+                                label="MoE DP Size List",
+                                value="",
+                                placeholder="e.g. [1,2,4,8], leave empty for automatic calculation",
+                            )
                             op_batch_range = gr.Textbox(
                                 label="Batch Size Range",
                                 value="",
@@ -1155,6 +1241,7 @@ def build_app() -> gr.Blocks:
                                 placeholder="Required in PD Ratio mode",
                             )
                         with gr.Row():
+                            op_enable_multistream = gr.Checkbox(label="enable-multistream", value=True)
                             op_compile_break = gr.Checkbox(label="Allow Graph Breaks", value=False)
                             op_max_batched_tokens = gr.Textbox(
                                 label="Max Batched Tokens (max-batched-tokens)",
@@ -1172,9 +1259,11 @@ def build_app() -> gr.Blocks:
                                 value="0.9,0.6,0.4,0.2",
                                 placeholder="e.g. 0.9,0.6,0.4,0.2",
                             )
-                    with gr.Accordion("VL Parameters", open=False), gr.Row():
-                        op_img_h = gr.Textbox(label="image-height", value="")
-                        op_img_w = gr.Textbox(label="image-width", value="")
+                    with gr.Accordion("VL Parameters", open=False):
+                        with gr.Row():
+                            op_img_bs = gr.Textbox(label="image-batch-size", value="")
+                            op_img_h = gr.Textbox(label="image-height", value="")
+                            op_img_w = gr.Textbox(label="image-width", value="")
                     with gr.Accordion("Other Parameters", open=False):
                         gr.Markdown(
                             "\u4ee5\u4e0b\u53c2\u6570\u9ed8\u8ba4\u4fdd\u6301 "
@@ -1195,9 +1284,16 @@ def build_app() -> gr.Blocks:
                                 label="\u5bfc\u51fa\u539f\u59cb\u5bfb\u4f18\u7ed3\u679c",
                                 value=False,
                             )
+                        with gr.Row():
+                            op_concurrency_search_strategy = gr.Dropdown(
+                                ["exponential", "linear_exponential"],
+                                value="exponential",
+                                label="concurrency-search-strategy",
+                            )
                     with gr.Row():
                         op_preview_btn = gr.Button("Preview Configuration")
                         op_run = gr.Button("Run", variant="primary")
+                        op_stop = gr.Button("Stop", variant="stop")
                     op_preview_summary = gr.Markdown(
                         "### Configuration Summary\n"
                         "Click Preview to review the model, device, "
@@ -1429,28 +1525,33 @@ def build_app() -> gr.Blocks:
                     op_mtp_tokens,
                     op_mtp_acceptance_rate,
                     op_max_batched_tokens,
+                    op_img_bs,
                     op_img_h,
                     op_img_w,
                     op_tp_sizes,
+                    op_ep_sizes,
+                    op_moe_dp_sizes,
                     op_batch_range,
                     op_jobs,
                     op_mode,
                     op_prefix_cache_hit_rate,
                     op_prefill_devices_per_instance,
                     op_decode_devices_per_instance,
+                    op_enable_multistream,
                     op_compile_break,
                     op_mxfp4_group_size,
                     op_reserved_memory_gb,
                     op_log_level,
                     op_serving_cost,
                     op_dump_original_results,
+                    op_concurrency_search_strategy,
                 ]
                 op_preview_btn.click(
                     preview_optimizer,
                     inputs=op_inputs,
                     outputs=[op_preview_summary, op_preview],
                 )
-                op_run.click(
+                op_run_event = op_run.click(
                     run_optimizer_v2,
                     inputs=op_inputs,
                     outputs=[
@@ -1477,6 +1578,11 @@ def build_app() -> gr.Blocks:
                         op_candidate_state,
                     ],
                 )
+                op_stop.click(
+                    stop_optimizer_run,
+                    outputs=[op_progress, op_summary],
+                    cancels=[op_run_event],
+                )
                 wire_export(
                     op_export_btn,
                     op_display_state,
@@ -1487,11 +1593,11 @@ def build_app() -> gr.Blocks:
     return demo
 
 
-def launch_app(server_name: str = "0.0.0.0", server_port: int = 2345, share: bool = False):
+def launch_app(server_name: str = "127.0.0.1", server_port: int = 2345, share: bool = False):
     """Launch the application
 
     Args:
-        server_name: Bind address. Default `0.0.0.0` listens on all interfaces.
+        server_name: Bind address. Default `127.0.0.1` allows local access only.
         server_port: Bind port.
         share: Whether to create a public sharing link.
     """

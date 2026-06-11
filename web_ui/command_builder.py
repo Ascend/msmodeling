@@ -116,6 +116,7 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "prefix_cache_hit_rate": float(form.get("prefix_cache_hit_rate") or 0.0),
             "reserved_memory_gb": float(form.get("reserved_memory_gb") or 0.0),
             "log_level": str(form.get("log_level") or "error"),
+            "enable_multistream": _as_bool(form.get("enable_multistream", True)),
             "compile_allow_graph_break": _as_bool(form.get("compile_allow_graph_break", False)),
             "disable_repetition": _as_bool(form.get("disable_repetition", False)),
             "quantize_lmhead": _as_bool(form.get("quantize_lmhead", False)),
@@ -136,9 +137,13 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "enable_redundant_experts": _as_bool(form.get("enable_redundant_experts", False)),
             "enable_external_shared_experts": _as_bool(form.get("enable_external_shared_experts", False)),
             "host_external_shared_experts": _as_bool(form.get("host_external_shared_experts", False)),
+            "enable_sequence_parallel": _as_bool(form.get("enable_sequence_parallel", False)),
+            "enable_shared_expert_tp": _as_bool(form.get("enable_shared_expert_tp", False)),
+            "enable_dispatch_ffn_combine": _as_bool(form.get("enable_dispatch_ffn_combine", False)),
             "remote_source": str(form.get("remote_source") or "huggingface"),
             "performance_model": _performance_models(form.get("performance_model")),
             "profiling_database": _optional_str(form.get("profiling_database")),
+            "export_empirical_metrics": _optional_str(form.get("export_empirical_metrics")),
         }
         cmd = _base_cmd("cli.inference.text_generate")
         cmd += [
@@ -170,6 +175,8 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd.append("--disable-repetition")
         if params["compile"]:
             cmd.append("--compile")
+        if params["enable_multistream"]:
+            cmd.append("--enable-multistream")
         if params["compile_allow_graph_break"]:
             cmd.append("--compile-allow-graph-break")
         cmd += ["--quantize-linear-action", qlin, "--quantize-attention-action", qattn]
@@ -206,6 +213,12 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd.append("--enable-external-shared-experts")
         if params["host_external_shared_experts"]:
             cmd.append("--host-external-shared-experts")
+        if params["enable_sequence_parallel"]:
+            cmd.append("--enable-sequence-parallel")
+        if params["enable_shared_expert_tp"]:
+            cmd.append("--enable-shared-expert-tp")
+        if params["enable_dispatch_ffn_combine"]:
+            cmd.append("--enable-dispatch-ffn-combine")
         if params["image_batch_size"] is not None:
             cmd += ["--image-batch-size", str(params["image_batch_size"])]
         if params["image_height"] is not None:
@@ -234,6 +247,8 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
                 cmd += ["--performance-model", perf_model]
         if params["profiling_database"]:
             cmd += ["--profiling-database", params["profiling_database"]]
+        if params["export_empirical_metrics"]:
+            cmd += ["--export-empirical-metrics", params["export_empirical_metrics"]]
         thash = stable_hash({"sim_type": "text_generate", **normalize_value(params)})
         label = (
             f"{params['model_id']} | {device} | nq={params['num_queries']} | tp={params['tp_size']} | {qlin}/{qattn}"
@@ -336,8 +351,16 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
     tp_sizes_str = form.get("tp_sizes", "")
     tp_sizes = parse_scalar_or_list(tp_sizes_str, int) if tp_sizes_str else None
 
+    ep_sizes_str = form.get("ep_sizes", "")
+    ep_sizes = parse_scalar_or_list(ep_sizes_str, int) if ep_sizes_str else None
+
+    moe_dp_sizes_str = form.get("moe_dp_sizes", "")
+    moe_dp_sizes = parse_scalar_or_list(moe_dp_sizes_str, int) if moe_dp_sizes_str else None
+
     batch_range_str = form.get("batch_range", "")
     batch_range = parse_scalar_or_list(batch_range_str, int) if batch_range_str else None
+
+    concurrency_search_strategy = str(form.get("concurrency_search_strategy") or "exponential")
 
     jobs = int(form.get("jobs") or 8)
     deployment_mode = _normalize_optimizer_deployment_mode(form.get("deployment_mode"))
@@ -346,6 +369,7 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
         form.get("enable_optimize_prefill_decode_ratio", False)
     )
     compile_allow_graph_break = bool(form.get("compile_allow_graph_break", False))
+    enable_multistream = bool(form.get("enable_multistream", True))
     mxfp4_group_size = int(form.get("mxfp4_group_size") or 32)
     prefix_cache_hit_rate = float(form.get("prefix_cache_hit_rate") or 0.0)
 
@@ -381,12 +405,16 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "num_mtp_tokens": num_mtp_tokens,
             "mtp_acceptance_rate": mtp_acceptance_rate,
             "max_batched_tokens": max_batched_tokens,
+            "image_batch_size": parse_optional_number(form.get("image_batch_size"), int),
             "image_height": parse_optional_number(form.get("image_height"), int),
             "image_width": parse_optional_number(form.get("image_width"), int),
             "optimization_mode": _mode_name(ttft, tpot),
             "deployment_mode": deployment_mode,
             "tp_sizes": tp_sizes,
+            "ep_sizes": ep_sizes,
+            "moe_dp_sizes": moe_dp_sizes,
             "batch_range": batch_range,
+            "concurrency_search_strategy": concurrency_search_strategy,
             "jobs": jobs,
             "disagg": disagg,
             "prefix_cache_hit_rate": prefix_cache_hit_rate,
@@ -394,6 +422,7 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "decode_devices_per_instance": decode_devices_per_instance,
             "enable_optimize_prefill_decode_ratio": enable_pd_ratio,
             "compile_allow_graph_break": compile_allow_graph_break,
+            "enable_multistream": enable_multistream,
             "mxfp4_group_size": mxfp4_group_size,
             "reserved_memory_gb": float(form.get("reserved_memory_gb") or 0.0),
             "log_level": str(form.get("log_level") or "error"),
@@ -416,6 +445,8 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
         ]
         if params["compile"]:
             cmd.append("--compile")
+        if enable_multistream:
+            cmd.append("--enable-multistream")
         if compile_allow_graph_break:
             cmd.append("--compile-allow-graph-break")
         cmd += ["--quantize-linear-action", qlin, "--quantize-attention-action", qattn]
@@ -425,6 +456,10 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd += ["--ttft-limits", str(ttft)]
         if tp_sizes:
             cmd += ["--tp-sizes"] + [str(t) for t in tp_sizes]
+        if ep_sizes:
+            cmd += ["--ep-sizes"] + [str(t) for t in ep_sizes]
+        if moe_dp_sizes:
+            cmd += ["--moe-dp-sizes"] + [str(t) for t in moe_dp_sizes]
         if batch_range:
             cmd += ["--batch-range"] + [str(b) for b in batch_range]
         if jobs != 8:
@@ -460,10 +495,14 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd += ["--mtp-acceptance-rate"] + [str(r) for r in mtp_acceptance_rate]
         if max_batched_tokens != 8192:
             cmd += ["--max-batched-tokens", str(max_batched_tokens)]
+        if params["image_batch_size"] is not None:
+            cmd += ["--image-batch-size", str(params["image_batch_size"])]
         if params["image_height"] is not None:
             cmd += ["--image-height", str(params["image_height"])]
         if params["image_width"] is not None:
             cmd += ["--image-width", str(params["image_width"])]
+        if concurrency_search_strategy != "exponential":
+            cmd += ["--concurrency-search-strategy", concurrency_search_strategy]
 
         thash = stable_hash({"sim_type": "throughput_optimizer", **normalize_value(params)})
         label = f"{params['model_id']} | {device} | {params['optimization_mode']} | {deployment_mode} | {qlin}/{qattn}"

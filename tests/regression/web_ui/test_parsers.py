@@ -5,8 +5,11 @@ from __future__ import annotations
 
 from web_ui.parsers import (
     _extract_execution_error,
+    _extract_parallel_config,
     _optimizer_no_result_reason,
+    _parse_disagg_row,
     _parse_optimizer_row,
+    _parse_pd_ratio_row,
     _parse_table,
     _pick_bottleneck,
     _strip_ansi,
@@ -685,3 +688,155 @@ Runtime: 50.0MS
         log = "Total Analysis Time: 100ms"
         result = parse_video_generate(task, log, "success")
         assert result.params.get("model") == "CustomModel"
+
+
+class TestParsePDRatioRow:
+    """Tests for _parse_pd_ratio_row function."""
+
+    def test_parse_pd_ratio_valid_row(self) -> None:
+        """Test parsing valid PD Ratio row."""
+        cells = ["1", "0.5", "1000.0", "800.0", "200.0", "50.0", "10.0", "TP=4", "DP=2", "8", "4", "32", "16", "1", "4"]
+        result = _parse_pd_ratio_row(cells)
+        assert result is not None
+        assert result["rank"] == 1
+        assert result["pd_ratio"] == 0.5
+        assert result["balanced_qps"] == 1000.0
+        assert result["p_qps"] == 800.0
+        assert result["d_qps"] == 200.0
+        assert result["ttft_ms"] == 50.0
+        assert result["tpot_ms"] == 10.0
+        assert result["p_parallel"] == "TP=4"
+        assert result["d_parallel"] == "DP=2"
+        assert result["prefill_devices_per_instance"] == 8
+        assert result["decode_devices_per_instance"] == 4
+        assert result["p_batch_size"] == 32
+        assert result["d_batch_size"] == 16
+        assert result["p_concurrency"] == 1
+        assert result["d_concurrency"] == 4
+        assert result["throughput_token_s"] == 1000.0
+
+    def test_parse_pd_ratio_too_short(self) -> None:
+        """Test parsing row with too few cells."""
+        cells = ["1", "0.5", "1000.0"]
+        result = _parse_pd_ratio_row(cells)
+        assert result is None
+
+    def test_parse_pd_ratio_non_digit_rank(self) -> None:
+        """Test parsing row with non-digit first cell."""
+        cells = ["x", "0.5", "1000.0", "800.0", "200.0", "50.0", "10.0", "TP=4", "DP=2", "8", "4", "32", "16", "1", "4"]
+        result = _parse_pd_ratio_row(cells)
+        assert result is None
+
+    def test_parse_pd_ratio_invalid_float(self) -> None:
+        """Test parsing row with invalid float values."""
+        cells = [
+            "1",
+            "invalid",
+            "1000.0",
+            "800.0",
+            "200.0",
+            "50.0",
+            "10.0",
+            "TP=4",
+            "DP=2",
+            "8",
+            "4",
+            "32",
+            "16",
+            "1",
+            "4",
+        ]
+        result = _parse_pd_ratio_row(cells)
+        assert result is None
+
+
+class TestParseDisaggRow:
+    """Tests for _parse_disagg_row function."""
+
+    def test_parse_disagg_prefill_row(self) -> None:
+        """Test parsing valid PD Disaggregated prefill row."""
+        cells = ["1", "42334.84", "211.67", "982.64", "208", "8", "TP=1 | PP=1 | DP=8", "26"]
+        result = _parse_disagg_row(cells, is_prefill=True)
+        assert result is not None
+        assert result["rank"] == 1
+        assert result["throughput_token_s"] == 42334.84
+        assert result["qps"] == 211.67
+        assert result["ttft_ms"] == 982.64
+        assert result["concurrency"] == 208
+        assert result["num_devices"] == 8
+        assert result["parallel"] == "TP=1 | PP=1 | DP=8"
+        assert result["batch_size"] == 26
+        assert "tpot_ms" not in result
+
+    def test_parse_disagg_decode_row(self) -> None:
+        """Test parsing valid PD Disaggregated decode row."""
+        cells = ["1", "20073.67", "100.37", "25.51", "512", "8", "TP=2 | PP=1 | DP=4", "128"]
+        result = _parse_disagg_row(cells, is_prefill=False)
+        assert result is not None
+        assert result["rank"] == 1
+        assert result["throughput_token_s"] == 20073.67
+        assert result["qps"] == 100.37
+        assert result["tpot_ms"] == 25.51
+        assert result["concurrency"] == 512
+        assert result["num_devices"] == 8
+        assert result["parallel"] == "TP=2 | PP=1 | DP=4"
+        assert result["batch_size"] == 128
+        assert "ttft_ms" not in result
+
+    def test_parse_disagg_too_short(self) -> None:
+        """Test parsing row with too few cells."""
+        cells = ["1", "42334.84", "211.67"]
+        result = _parse_disagg_row(cells, is_prefill=True)
+        assert result is None
+
+    def test_parse_disagg_non_digit_rank(self) -> None:
+        """Test parsing row with non-digit first cell."""
+        cells = ["x", "42334.84", "211.67", "982.64", "208", "8", "TP=1", "26"]
+        result = _parse_disagg_row(cells, is_prefill=True)
+        assert result is None
+
+    def test_parse_disagg_invalid_float(self) -> None:
+        """Test parsing row with invalid float values."""
+        cells = ["1", "invalid", "211.67", "982.64", "208", "8", "TP=1", "26"]
+        result = _parse_disagg_row(cells, is_prefill=True)
+        assert result is None
+
+
+class TestExtractParallelConfig:
+    """Tests for _extract_parallel_config function."""
+
+    def test_extract_parallel_tp_only(self) -> None:
+        """Test extracting TP only."""
+        result = _extract_parallel_config("TP=4")
+        assert result["parallel"] == "TP=4"
+        assert result["tp"] == 4
+        assert result["pp"] is None
+        assert result["dp"] is None
+
+    def test_extract_parallel_tp_pp_dp(self) -> None:
+        """Test extracting TP, PP, DP."""
+        result = _extract_parallel_config("TP=2 | PP=1 | DP=2")
+        assert result["parallel"] == "TP=2 | PP=1 | DP=2"
+        assert result["tp"] == 2
+        assert result["pp"] == 1
+        assert result["dp"] == 2
+
+    def test_extract_parallel_with_spaces(self) -> None:
+        """Test extracting with extra spaces."""
+        result = _extract_parallel_config("TP=4  |  DP=2")
+        assert result["tp"] == 4
+        assert result["dp"] == 2
+
+    def test_extract_parallel_invalid_value(self) -> None:
+        """Test extracting with invalid value."""
+        result = _extract_parallel_config("TP=abc | DP=2")
+        assert result["tp"] is None
+        assert result["dp"] == 2
+
+    def test_extract_parallel_empty_string(self) -> None:
+        """Test extracting from empty string."""
+        result = _extract_parallel_config("")
+        assert result["parallel"] == ""
+        assert result["tp"] is None
+        assert result["pp"] is None
+        assert result["dp"] is None

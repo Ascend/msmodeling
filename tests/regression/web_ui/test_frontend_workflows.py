@@ -111,7 +111,7 @@ def text_args(
 
 def video_args(*, device: str, world: str = "8", ulysses: str = "4") -> list:
     return [
-        "Wan2.2-T2V-A14B-Diffusers",
+        "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers",
         device,
         [],
         "1",

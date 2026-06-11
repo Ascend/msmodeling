@@ -161,6 +161,16 @@ html, body {
   letter-spacing: 0.18em;
   text-transform: uppercase;
 }
+.progress-text[data-runtime-text] {
+  font-size: 0 !important;
+  line-height: 0 !important;
+}
+.progress-text[data-runtime-text]::before {
+  content: attr(data-runtime-text);
+  color: var(--body-text-color);
+  font-size: 13px;
+  line-height: 1.4;
+}
 .hero-kicker::before {
   content: "";
   width: 34px;
@@ -476,5 +486,22 @@ html, body {
     font-size: 14px;
     line-height: 1.7;
   }
+}
+/* ASCII chart output - use monospace font for proper alignment */
+.ascii-chart-output {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important;
+  font-size: 13px !important;
+  line-height: 1.2 !important;
+  letter-spacing: 0 !important;
+  white-space: pre !important;
+  overflow-x: auto !important;
+}
+.ascii-chart-output textarea {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace !important;
+  font-size: 13px !important;
+  line-height: 1.2 !important;
+  letter-spacing: 0 !important;
+  white-space: pre !important;
+  tab-size: 8 !important;
 }
 """

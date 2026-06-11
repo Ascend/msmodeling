@@ -160,8 +160,8 @@ class TestExperimentRunner:
         assert result.summary.get("cached") is True
         assert result.source == "cache"
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_task_failed_cache_overridden(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_task_failed_cache_overridden(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test _run_task re-runs failed cached results."""
         # Save a failed result
         failed = ExperimentResult(
@@ -176,7 +176,11 @@ class TestExperimentRunner:
         runner.store.save_result(failed)
 
         # Mock successful run
-        mock_run.return_value = Mock(returncode=0, stdout=b"Success", stderr=b"")
+        mock_process = Mock()
+        mock_process.poll.return_value = None
+        mock_process.communicate.return_value = (b"Success", b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         task = ExperimentTask("text_generate", {"model": "failed"}, [], "failed_hash", "failed")
         result = runner._run_task(task)
@@ -185,34 +189,46 @@ class TestExperimentRunner:
         assert result.status == "success"
         assert result.source == "run"  # New run, not cached
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_task_execute_success(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_task_execute_success(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test _run_task executes successfully."""
-        mock_run.return_value = Mock(returncode=0, stdout=b"Success output", stderr=b"")
+        mock_process = Mock()
+        mock_process.poll.return_value = None
+        mock_process.communicate.return_value = (b"Success output", b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         task = ExperimentTask("text_generate", {"model": "test"}, [], "new_hash", "new_test")
         result = runner._run_task(task)
 
         assert result.status == "success"
         assert result.source == "run"
-        mock_run.assert_called_once()
+        mock_popen.assert_called_once()
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_task_execute_failure(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_task_execute_failure(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test _run_task handles failure."""
-        mock_run.return_value = Mock(returncode=1, stdout=b"", stderr=b"Error output")
+        mock_process = Mock()
+        mock_process.poll.return_value = None
+        mock_process.communicate.return_value = (b"", b"Error output")
+        mock_process.returncode = 1
+        mock_popen.return_value = mock_process
 
         task = ExperimentTask("text_generate", {"model": "fail"}, [], "fail_hash", "fail_test")
         result = runner._run_task(task)
 
         assert result.status == "failed"
         assert "Process exited with code 1" in result.error
-        mock_run.assert_called_once()
+        mock_popen.assert_called_once()
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_task_saves_to_store(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_task_saves_to_store(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test _run_task saves result to store."""
-        mock_run.return_value = Mock(returncode=0, stdout=b"Output", stderr=b"")
+        mock_process = Mock()
+        mock_process.poll.return_value = None
+        mock_process.communicate.return_value = (b"Output", b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         task = ExperimentTask("text_generate", {"model": "save"}, [], "save_hash", "save_test")
         runner._run_task(task)
@@ -222,10 +238,14 @@ class TestExperimentRunner:
         assert cached is not None
         assert cached.status == "success"
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_task_with_special_output(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_task_with_special_output(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test _run_task handles special output."""
-        mock_run.return_value = Mock(returncode=0, stdout="TestOutput".encode("gb18030"), stderr=b"")
+        mock_process = Mock()
+        mock_process.poll.return_value = None
+        mock_process.communicate.return_value = ("TestOutput".encode("gb18030"), b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         task = ExperimentTask("text_generate", {"model": "special"}, [], "sp_hash", "sp_test")
         result = runner._run_task(task)
@@ -238,10 +258,14 @@ class TestExperimentRunner:
         results = list(runner.run_matrix([]))
         assert results == []
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_matrix_single_task(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_matrix_single_task(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test run_matrix with single task."""
-        mock_run.return_value = Mock(returncode=0, stdout=b"Output", stderr=b"")
+        mock_process = Mock()
+        mock_process.poll.return_value = None
+        mock_process.communicate.return_value = (b"Output", b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         task = ExperimentTask("text_generate", {"model": "single"}, [], "single_hash", "single")
         results = list(runner.run_matrix([task]))
@@ -252,10 +276,14 @@ class TestExperimentRunner:
         assert total == 1
         assert result.status == "success"
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_matrix_multiple_tasks(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_matrix_multiple_tasks(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test run_matrix with multiple tasks."""
-        mock_run.return_value = Mock(returncode=0, stdout=b"Output", stderr=b"")
+        mock_process = Mock()
+        mock_process.poll.return_value = None
+        mock_process.communicate.return_value = (b"Output", b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         tasks = [ExperimentTask("text_generate", {"model": f"test{i}"}, [], f"hash{i}", f"test{i}") for i in range(3)]
         results = list(runner.run_matrix(tasks))
@@ -265,10 +293,14 @@ class TestExperimentRunner:
         completed_counts = [r[0] for r in results]
         assert set(completed_counts) == {1, 2, 3}
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_matrix_updates_progress(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_matrix_updates_progress(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test that run_matrix yields correct progress."""
-        mock_run.return_value = Mock(returncode=0, stdout=b"Output", stderr=b"")
+        mock_process = Mock()
+        mock_process.poll.return_value = None
+        mock_process.communicate.return_value = (b"Output", b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
 
         tasks = [ExperimentTask("text_generate", {"model": f"prog{i}"}, [], f"prog{i}", f"prog{i}") for i in range(5)]
 
@@ -315,18 +347,24 @@ class TestExperimentRunner:
             # Verify max_workers was passed
             mock_pool.assert_called_once()
 
-    @patch("web_ui.runner.subprocess.run")
-    def test_run_matrix_with_mixed_success_failure(self, mock_run, runner: ExperimentRunner) -> None:
+    @patch("web_ui.runner.subprocess.Popen")
+    def test_run_matrix_with_mixed_success_failure(self, mock_popen, runner: ExperimentRunner) -> None:
         """Test run_matrix with mixed success and failure."""
         call_count = [0]
 
-        def side_effect(*args, **kwargs):
+        def create_process(*args, **kwargs):
             call_count[0] += 1
+            mock_process = Mock()
+            mock_process.poll.return_value = None
             if call_count[0] % 2 == 0:
-                return Mock(returncode=1, stdout=b"", stderr=b"Error")
-            return Mock(returncode=0, stdout=b"Success", stderr=b"")
+                mock_process.communicate.return_value = (b"", b"Error")
+                mock_process.returncode = 1
+            else:
+                mock_process.communicate.return_value = (b"Success", b"")
+                mock_process.returncode = 0
+            return mock_process
 
-        mock_run.side_effect = side_effect
+        mock_popen.side_effect = create_process
 
         tasks = [ExperimentTask("text_generate", {}, [], f"h{i}", f"t{i}") for i in range(4)]
 
@@ -342,8 +380,12 @@ class TestExperimentRunner:
         """Test that tasks are executed but completion order may vary."""
         runner = ExperimentRunner(store=temp_store, max_workers=2)
 
-        with patch("web_ui.runner.subprocess.run") as mock_run:
-            mock_run.return_value = Mock(returncode=0, stdout=b"Output", stderr=b"")
+        with patch("web_ui.runner.subprocess.Popen") as mock_popen:
+            mock_process = Mock()
+            mock_process.poll.return_value = None
+            mock_process.communicate.return_value = (b"Output", b"")
+            mock_process.returncode = 0
+            mock_popen.return_value = mock_process
 
             tasks = [ExperimentTask("text_generate", {}, [], f"hash{i}", f"label{i}") for i in range(3)]
 
@@ -353,3 +395,76 @@ class TestExperimentRunner:
             # All tasks should be executed
             labels = [r[2].label for r in results]
             assert len(set(labels)) == 3  # All unique
+
+    def test_stop_all_no_active_processes(self, runner: ExperimentRunner) -> None:
+        """Test stop_all when no active processes."""
+        stopped = runner.stop_all()
+        assert stopped == 0
+        assert runner._stop_requested is True
+
+    def test_stop_all_with_active_processes(self, runner: ExperimentRunner) -> None:
+        """Test stop_all terminates active processes."""
+        mock_proc1 = Mock()
+        mock_proc1.poll.return_value = None  # Still running
+        mock_proc1.terminate.return_value = None
+        mock_proc1.wait.return_value = None
+
+        mock_proc2 = Mock()
+        mock_proc2.poll.return_value = None  # Still running
+        mock_proc2.terminate.return_value = None
+        mock_proc2.wait.return_value = None
+
+        # Simulate active processes
+        runner._active_processes.add(mock_proc1)
+        runner._active_processes.add(mock_proc2)
+
+        stopped = runner.stop_all()
+
+        assert stopped == 2
+        assert runner._stop_requested is True
+        mock_proc1.terminate.assert_called_once()
+        mock_proc2.terminate.assert_called_once()
+
+    def test_stop_all_skips_terminated_processes(self, runner: ExperimentRunner) -> None:
+        """Test stop_all skips already terminated processes."""
+        mock_proc = Mock()
+        mock_proc.poll.return_value = 0  # Already terminated
+
+        runner._active_processes.add(mock_proc)
+
+        stopped = runner.stop_all()
+
+        # Returns count of processes in active list, not stopped count
+        assert stopped == 1
+        # But terminate should not be called on already dead process
+        mock_proc.terminate.assert_not_called()
+
+    def test_stop_all_handles_timeout(self, runner: ExperimentRunner) -> None:
+        """Test stop_all handles process timeout."""
+        import subprocess
+
+        mock_proc = Mock()
+        mock_proc.poll.return_value = None
+        mock_proc.terminate.return_value = None
+        mock_proc.wait.side_effect = subprocess.TimeoutExpired("cmd", 3)
+        mock_proc.kill.return_value = None
+
+        runner._active_processes.add(mock_proc)
+
+        stopped = runner.stop_all()
+
+        assert stopped == 1
+        mock_proc.kill.assert_called_once()
+
+    def test_stop_all_handles_os_error(self, runner: ExperimentRunner) -> None:
+        """Test stop_all handles OSError gracefully."""
+        mock_proc = Mock()
+        mock_proc.poll.return_value = None
+        mock_proc.terminate.side_effect = OSError("Process already gone")
+
+        runner._active_processes.add(mock_proc)
+
+        # Should not raise, just continue
+        stopped = runner.stop_all()
+
+        assert stopped == 1

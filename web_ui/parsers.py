@@ -79,6 +79,7 @@ def _optimizer_no_result_reason(task: ExperimentTask) -> str:
 
 
 def _parse_optimizer_row(cells: list[str]) -> dict[str, Any] | None:
+    """Parse standard optimizer table row (non-PD-Ratio mode)."""
     if len(cells) < 8 or not cells[0].isdigit():
         return None
     try:
@@ -94,6 +95,84 @@ def _parse_optimizer_row(cells: list[str]) -> dict[str, Any] | None:
         }
     except ValueError:
         return None
+
+
+def _parse_pd_ratio_row(cells: list[str]) -> dict[str, Any] | None:
+    """Parse PD Ratio mode table row."""
+    # Expected columns: Top, PD Ratio, Balanced QPS, P QPS, D QPS, TTFT, TPOT,
+    #                    P Parallel, D Parallel, P Devices/Instance, D Devices/Instance,
+    #                    P Batch Size, D Batch Size, P Concurrency, D Concurrency
+    if len(cells) < 15 or not cells[0].isdigit():
+        return None
+    try:
+        return {
+            "rank": int(cells[0]),
+            "pd_ratio": float(cells[1]),
+            "balanced_qps": float(cells[2]),
+            "p_qps": float(cells[3]),
+            "d_qps": float(cells[4]),
+            "ttft_ms": float(cells[5]),
+            "tpot_ms": float(cells[6]),
+            "p_parallel": cells[7].strip(),
+            "d_parallel": cells[8].strip(),
+            "prefill_devices_per_instance": int(cells[9]),
+            "decode_devices_per_instance": int(cells[10]),
+            "p_batch_size": int(cells[11]),
+            "d_batch_size": int(cells[12]),
+            "p_concurrency": int(cells[13]),
+            "d_concurrency": int(cells[14]),
+            "throughput_token_s": float(cells[2]),  # Use balanced_qps as throughput
+        }
+    except (ValueError, IndexError):
+        return None
+
+
+def _parse_disagg_row(cells: list[str], is_prefill: bool) -> dict[str, Any] | None:
+    """Parse PD Disaggregated mode table row.
+
+    Prefill columns: Top, Throughput, QPS, TTFT, concurrency, num_devices, parallel, batch_size
+    Decode columns: Top, Throughput, QPS, TPOT, concurrency, num_devices, parallel, batch_size
+    """
+    if len(cells) < 8 or not cells[0].isdigit():
+        return None
+    try:
+        result = {
+            "rank": int(cells[0]),
+            "throughput_token_s": float(cells[1]),
+            "qps": float(cells[2]),
+            "concurrency": int(cells[4]),
+            "num_devices": int(cells[5]),
+            "parallel": " | ".join(part for part in cells[6:-1] if part),
+            "batch_size": int(cells[-1]),
+        }
+        if is_prefill:
+            result["ttft_ms"] = float(cells[3])
+        else:
+            result["tpot_ms"] = float(cells[3])
+        return result
+    except (ValueError, IndexError):
+        return None
+
+
+def _extract_parallel_config(parallel_str: str) -> dict[str, Any]:
+    """Extract TP, PP, DP from parallel string like 'TP=2 | PP=1 | DP=2'."""
+    result = {"parallel": parallel_str, "tp": None, "pp": None, "dp": None}
+    for part in parallel_str.split("|"):
+        part = part.strip()
+        if "=" in part:
+            key, val = part.split("=", 1)
+            key = key.strip().lower()
+            val = val.strip()
+            try:
+                if key == "tp":
+                    result["tp"] = int(val)
+                elif key == "pp":
+                    result["pp"] = int(val)
+                elif key == "dp":
+                    result["dp"] = int(val)
+            except ValueError:
+                pass
+    return result
 
 
 def _parse_table(lines: list[str]) -> list[dict[str, Any]]:
@@ -276,39 +355,146 @@ def parse_optimizer(task: ExperimentTask, log: str, status: str, error: str | No
     infos = []
     table_lines = []
     in_table = False
+
+    # Detect mode by checking command parameters
+    is_pd_ratio_mode = "--enable-optimize-prefill-decode-ratio" in task.command
+    is_disagg_mode = "--disagg" in task.command
+
     for line in log.splitlines():
         stripped = _strip_ansi(line.strip())
         if stripped.startswith("WARNING"):
             warnings.append(stripped)
         elif stripped.startswith("INFO"):
             infos.append(stripped)
-        if stripped.startswith("Best Throughput:"):
-            summary["best_throughput"] = float(stripped.split(":", 1)[1].strip().split()[0])
-        elif stripped.startswith("TTFT:"):
-            summary["best_ttft_ms"] = float(stripped.split(":", 1)[1].strip().split()[0])
-        elif stripped.startswith("TPOT:"):
-            summary["best_tpot_ms"] = float(stripped.split(":", 1)[1].strip().split()[0])
-        elif stripped.startswith("TTFT Limits:"):
-            raw = stripped.split(":", 1)[1].strip().split()[0]
-            summary["ttft_limits_ms"] = None if raw == "None" else float(raw)
-        elif stripped.startswith("TPOT Limits:"):
-            raw = stripped.split(":", 1)[1].strip().split()[0]
-            summary["tpot_limits_ms"] = None if raw == "None" else float(raw)
-        if stripped.startswith("| Top | Throughput"):
-            in_table = True
-            table_lines = [line]
-        elif in_table:
-            table_lines.append(line)
+
+        # Parse PD Ratio mode - Overall Best Configuration section
+        if is_pd_ratio_mode:
+            if stripped.strip().startswith("PD Ratio:"):
+                # PD Ratio: 0.28 (P Instance:D Instance)
+                match = re.search(r"PD Ratio:\s+([0-9.]+)", stripped)
+                if match:
+                    summary["pd_ratio"] = float(match.group(1))
+            elif stripped.strip().startswith("Prefill QPS:"):
+                # Prefill QPS: 82.11 req/s  (TTFT: 998.63 ms, Parallel: TP=2 | PP=1 | DP=2, Batch: 41, Concurrency: 82)
+                match = re.search(r"Prefill QPS:\s+([0-9.]+)", stripped)
+                if match:
+                    summary["p_qps"] = float(match.group(1))
+                ttft_match = re.search(r"TTFT:\s+([0-9.]+)\s*ms", stripped)
+                if ttft_match:
+                    summary["best_ttft_ms"] = float(ttft_match.group(1))
+                parallel_match = re.search(r"Parallel:\s*(.+?),\s*Batch:", stripped)
+                if parallel_match:
+                    summary["p_parallel"] = parallel_match.group(1).strip()
+                batch_match = re.search(r"Batch:\s+(\d+),\s*Concurrency:", stripped)
+                if batch_match:
+                    summary["p_batch_size"] = int(batch_match.group(1))
+                concurrency_match = re.search(r"Concurrency:\s+(\d+)", stripped)
+                if concurrency_match:
+                    summary["p_concurrency"] = int(concurrency_match.group(1))
+            elif stripped.strip().startswith("Decode QPS:"):
+                # Decode QPS:  23.36 req/s  (TPOT: 27.54 ms, Parallel: TP=4 | PP=1 | DP=1, Batch: 128, Concurrency: 128)
+                match = re.search(r"Decode QPS:\s+([0-9.]+)", stripped)
+                if match:
+                    summary["d_qps"] = float(match.group(1))
+                tpot_match = re.search(r"TPOT:\s+([0-9.]+)\s*ms", stripped)
+                if tpot_match:
+                    summary["best_tpot_ms"] = float(tpot_match.group(1))
+                parallel_match = re.search(r"Parallel:\s*(.+?),\s*Batch:", stripped)
+                if parallel_match:
+                    summary["d_parallel"] = parallel_match.group(1).strip()
+                batch_match = re.search(r"Batch:\s+(\d+),\s*Concurrency:", stripped)
+                if batch_match:
+                    summary["d_batch_size"] = int(batch_match.group(1))
+                concurrency_match = re.search(r"Concurrency:\s+(\d+)", stripped)
+                if concurrency_match:
+                    summary["d_concurrency"] = int(concurrency_match.group(1))
+            elif stripped.strip().startswith("Balanced QPS:") or stripped.strip().startswith("Balanced:"):
+                # Some formats might have Balanced QPS on its own line
+                match = re.search(r"Balanced[^:]*:\s+([0-9.]+)", stripped)
+                if match:
+                    summary["balanced_qps"] = float(match.group(1))
+                    # Use balanced_qps as best_throughput for compatibility
+                    summary["best_throughput"] = float(match.group(1))
+
+            # Detect PD Ratio table
+            if "Top" in stripped and "PD Ratio" in stripped and "Balanced QPS" in stripped:
+                in_table = True
+                table_lines = [line]
+            elif in_table:
+                table_lines.append(line)
+
+        # Parse standard mode (non-PD-Ratio)
+        else:
+            if stripped.startswith("Best Throughput:"):
+                summary["best_throughput"] = float(stripped.split(":", 1)[1].strip().split()[0])
+            elif stripped.startswith("TTFT:"):
+                summary["best_ttft_ms"] = float(stripped.split(":", 1)[1].strip().split()[0])
+            elif stripped.startswith("TPOT:"):
+                summary["best_tpot_ms"] = float(stripped.split(":", 1)[1].strip().split()[0])
+            elif stripped.startswith("TTFT Limits:"):
+                raw = stripped.split(":", 1)[1].strip().split()[0]
+                summary["ttft_limits_ms"] = None if raw == "None" else float(raw)
+            elif stripped.startswith("TPOT Limits:"):
+                raw = stripped.split(":", 1)[1].strip().split()[0]
+                summary["tpot_limits_ms"] = None if raw == "None" else float(raw)
+            if stripped.startswith("| Top | Throughput"):
+                in_table = True
+                table_lines = [line]
+            elif in_table:
+                table_lines.append(line)
 
     summary.setdefault("ttft_limits_ms", task.params.get("ttft_limits"))
     summary.setdefault("tpot_limits_ms", task.params.get("tpot_limits"))
 
-    rows = _parse_table(table_lines)
+    # Parse table rows
+    rows = []
+    is_prefill_table = False  # Track if current table is prefill (for disagg mode)
+    for line in table_lines:
+        stripped = _strip_ansi(line.rstrip())
+        if not stripped or stripped.startswith(("-", "+")):
+            continue
+        # Detect table type for disagg mode
+        if is_disagg_mode and "TTFT" in stripped:
+            is_prefill_table = True
+        elif is_disagg_mode and "TPOT" in stripped:
+            is_prefill_table = False
+        if stripped.startswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if is_pd_ratio_mode:
+                row = _parse_pd_ratio_row(cells)
+            elif is_disagg_mode:
+                row = _parse_disagg_row(cells, is_prefill_table)
+            else:
+                row = _parse_optimizer_row(cells)
+            if row is not None:
+                rows.append(row)
+
     if rows:
         top1 = rows[0]
-        summary["best_parallel"] = top1["parallel"]
-        summary["best_batch_size"] = top1["batch_size"]
-        summary["best_concurrency"] = top1["concurrency"]
+        if is_pd_ratio_mode:
+            # For PD Ratio mode, use d_parallel for best_parallel
+            summary["best_parallel"] = top1.get("d_parallel", top1.get("p_parallel", ""))
+            summary["best_batch_size"] = top1.get("d_batch_size", top1.get("p_batch_size", 0))
+            summary["best_concurrency"] = top1.get("d_concurrency", top1.get("p_concurrency", 0))
+            # Ensure PD Ratio specific fields are set
+            summary.setdefault("balanced_qps", top1.get("balanced_qps"))
+            summary.setdefault("p_qps", top1.get("p_qps"))
+            summary.setdefault("d_qps", top1.get("d_qps"))
+            summary.setdefault("pd_ratio", top1.get("pd_ratio"))
+            summary.setdefault("prefill_devices_per_instance", top1.get("prefill_devices_per_instance"))
+            summary.setdefault("decode_devices_per_instance", top1.get("decode_devices_per_instance"))
+        elif is_disagg_mode:
+            # For PD Disaggregated mode
+            summary["best_parallel"] = top1.get("parallel", "")
+            summary["best_batch_size"] = top1.get("batch_size", 0)
+            summary["best_concurrency"] = top1.get("concurrency", 0)
+            summary.setdefault("qps", top1.get("qps"))
+            summary.setdefault("best_ttft_ms", top1.get("ttft_ms"))
+            summary.setdefault("best_tpot_ms", top1.get("tpot_ms"))
+        else:
+            summary["best_parallel"] = top1["parallel"]
+            summary["best_batch_size"] = top1["batch_size"]
+            summary["best_concurrency"] = top1["concurrency"]
     else:
         if status == "success":
             summary["no_result_reason"] = _optimizer_no_result_reason(task)

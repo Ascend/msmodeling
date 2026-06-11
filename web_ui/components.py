@@ -522,8 +522,10 @@ def optimizer_result_section():
             op_detail_output = gr.Textbox(
                 label="Single-Device Full Output",
                 interactive=False,
-                lines=18,
-                max_lines=36,
+                lines=20,
+                show_copy_button=True,
+                container=True,
+                elem_classes=["ascii-chart-output"],
             )
 
     with gr.Group(elem_classes=["section-card"]):

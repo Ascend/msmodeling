@@ -78,7 +78,7 @@ class TestMain:
 
         mock_ensure.assert_called_once()
         mock_launch.assert_called_once_with(
-            server_name="0.0.0.0",
+            server_name="127.0.0.1",
             server_port=2345,
             share=False,
         )
@@ -104,7 +104,7 @@ class TestMain:
         main()
 
         mock_launch.assert_called_once_with(
-            server_name="0.0.0.0",
+            server_name="127.0.0.1",
             server_port=2345,
             share=True,
         )
