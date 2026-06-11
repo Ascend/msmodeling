@@ -147,6 +147,20 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             _ = func(x)
         self.assertEqual(len(runtime.event_list), 3)
 
+    def test_runtime_closes_torch_patches(self):
+        from torch import _prims_common
+
+        original_dtype_to_type = _prims_common.dtype_to_type
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+
+        with self.assertRaisesRegex(RuntimeError, "stop runtime"):
+            with Runtime(perf_model, device_profile):
+                self.assertIsNot(_prims_common.dtype_to_type, original_dtype_to_type)
+                raise RuntimeError("stop runtime")
+
+        self.assertIs(_prims_common.dtype_to_type, original_dtype_to_type)
+
     def test_attention_dit_eager(self):
         B, S, num_heads, head_dim = 2, 256, 6, 64
         dtype = torch.float16

@@ -20,6 +20,7 @@ def _set_meta_autocast_enabled(enabled):
 
 
 _in_support_autocast_for_meta = False
+_DTYPE_TO_TYPE_ORIGINAL_ATTR = "_tensor_cast_original_dtype_to_type"
 
 
 @contextlib.contextmanager
@@ -71,13 +72,15 @@ def support_autocast_for_meta():
     torch.set_autocast_enabled = set_autocast_enabled
     torch._C._is_autocast_available = is_autocast_available
     config.meta_nonzero_assume_all_nonzero = True
-    yield
-    torch._C._is_autocast_available = _C_is_autocast_available_orig
-    torch.set_autocast_enabled = set_autocast_enabled_orig
-    torch.is_autocast_enabled = is_autocast_enabled_orig
-    torch.get_autocast_dtype = get_autocast_dtype_orig
-    _in_support_autocast_for_meta = False
-    config.meta_nonzero_assume_all_nonzero = meta_nonzero_assume_all_nonzero_orig
+    try:
+        yield
+    finally:
+        torch._C._is_autocast_available = _C_is_autocast_available_orig
+        torch.set_autocast_enabled = set_autocast_enabled_orig
+        torch.is_autocast_enabled = is_autocast_enabled_orig
+        torch.get_autocast_dtype = get_autocast_dtype_orig
+        _in_support_autocast_for_meta = False
+        config.meta_nonzero_assume_all_nonzero = meta_nonzero_assume_all_nonzero_orig
 
 
 @contextlib.contextmanager
@@ -89,8 +92,10 @@ def specialize_float():
     """
     old_flag = torch._dynamo.config.specialize_float
     torch._dynamo.config.specialize_float = True
-    yield
-    torch._dynamo.config.specialize_float = old_flag
+    try:
+        yield
+    finally:
+        torch._dynamo.config.specialize_float = old_flag
 
 
 @contextlib.contextmanager
@@ -111,8 +116,10 @@ def patch_fallback_node_due_to_unsupported_type():
         return False
 
     pattern_matcher.fallback_node_due_to_unsupported_type = always_false
-    yield
-    pattern_matcher.fallback_node_due_to_unsupported_type = original_func
+    try:
+        yield
+    finally:
+        pattern_matcher.fallback_node_due_to_unsupported_type = original_func
 
 
 @contextlib.contextmanager
@@ -123,8 +130,10 @@ def prepare_freezing():
     """
     old_flag = torch._dynamo.config.prepare_freezing
     torch._dynamo.config.prepare_freezing = True
-    yield
-    torch._dynamo.config.prepare_freezing = old_flag
+    try:
+        yield
+    finally:
+        torch._dynamo.config.prepare_freezing = old_flag
 
 
 @contextlib.contextmanager
@@ -145,9 +154,11 @@ def patch_dtype_abbrs():
             torch.int4: "i4",
         }
     )
-    yield
-    dtype_abbrs.clear()
-    dtype_abbrs.update(original_dtype_abbrs)
+    try:
+        yield
+    finally:
+        dtype_abbrs.clear()
+        dtype_abbrs.update(original_dtype_abbrs)
 
 
 @contextlib.contextmanager
@@ -162,16 +173,25 @@ def patch_dtype_to_type():
         yield
         return
 
-    original_dtype_to_type = _prims_common.dtype_to_type
+    current_dtype_to_type = _prims_common.dtype_to_type
+    if hasattr(current_dtype_to_type, _DTYPE_TO_TYPE_ORIGINAL_ATTR):
+        yield
+        return
+
+    original_dtype_to_type = current_dtype_to_type
 
     def dtype_to_type_patched(dtype: torch.dtype) -> type:
         if dtype == torch.int4:
             return int
         return original_dtype_to_type(dtype)
 
+    setattr(dtype_to_type_patched, _DTYPE_TO_TYPE_ORIGINAL_ATTR, original_dtype_to_type)
     _prims_common.dtype_to_type = dtype_to_type_patched
-    yield
-    _prims_common.dtype_to_type = original_dtype_to_type
+    try:
+        yield
+    finally:
+        if _prims_common.dtype_to_type is dtype_to_type_patched:
+            _prims_common.dtype_to_type = original_dtype_to_type
 
 
 @contextlib.contextmanager
@@ -192,13 +212,15 @@ def patch_masked_scatter():
             return original_masked_scatter(self, mask, source)
 
         torch.Tensor.masked_scatter = masked_scatter_meta_safe
-        try:
-            yield
-        finally:
-            torch.Tensor.masked_scatter = original_masked_scatter
     except Exception:
         # Fallback to plain context if patching fails
         yield
+        return
+
+    try:
+        yield
+    finally:
+        torch.Tensor.masked_scatter = original_masked_scatter
 
 
 @contextlib.contextmanager
