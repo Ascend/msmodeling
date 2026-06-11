@@ -381,3 +381,86 @@ class ATLAS_800:
         name="ATLAS_800_A3_560T_128G_DIE_ROCE",
         comm_grid=A3_INTERCONNECT_ROCE,
     )
+
+
+class A5:
+    # TODO(jgong5): double-confirm static cost
+    STATIC_COST = StaticCost(mma_op_cost_s=5 * 1e-6, gp_op_cost_s=2 * 1e-6, comm_op_cost_s=5 * 1e-6)
+
+    class Chip:
+        C425T = {
+            "mma_ops": {
+                torch.float32: 189 * 1e12,  # assume using HF32
+                torch.bfloat16: 378 * 1e12,
+                torch.half: 378 * 1e12,
+                torch.float8_e5m2: 756 * 1e12,
+                torch.int8: 756 * 1e12,
+                DTYPE_FP4: 1512 * 1e12,
+            },
+            "gp_ops": {
+                torch.float32: 24 * 1e12,
+                torch.bfloat16: 47 * 1e12,
+                torch.half: 47 * 1e12,
+            },
+            "compute_efficiency": 0.9,
+        }
+
+    class Mem:
+        M112G_1_4T = {
+            "memory_size_bytes": 112 * (1024**3),
+            "memory_bandwidth_bytes_ps": 1.4 * (1024**4),
+            "memory_efficiency": 0.8,
+        }
+
+        M84G_1_4T = {
+            "memory_size_bytes": 84 * (1024**3),
+            "memory_bandwidth_bytes_ps": 1.4 * (1024**4),
+            "memory_efficiency": 0.8,
+        }
+
+    class Interconnect:
+        # UB interconnect RTT: 1.5us, PCIE/UPI interconnect RTT: 1.5us
+        # UB bandwidth: 53GB/s with 106Gbps serdes and 56GB/s with 112Gbps, PCIE bandwidth 64GB/s
+        PCIE2_UB4 = CommGrid(
+            # 4 devices connected via UB, then each group of them connected by a PCIE switch to CPU via 2 PCIE x16 links
+            # then two CPUs connected with equivalently 3 PCIE x16 links
+            grid=torch.arange(16).reshape(2, 2, 4),  # up to 16 devices
+            topologies={
+                0: InterconnectTopology(
+                    bandwidth_bytes_ps=24
+                    * 1e9,  # equivalently 3 x16 PCIE links between two CPUs, shared by eight devices
+                    latency_s=4.5 * 1e-6,
+                    comm_efficiency=0.75 * 0.7,  # additional 70% discount for PCIE
+                ),
+                1: InterconnectTopology(
+                    bandwidth_bytes_ps=32
+                    * 1e9,  # 2 x16 PCIE links between two groups of four devices, shared by four devices
+                    latency_s=3 * 1e-6,  # TODO(jgong5): correct me
+                    comm_efficiency=0.8 * 0.7,  # additional 70% discount for PCIE
+                ),
+                2: InterconnectTopology(
+                    bandwidth_bytes_ps=53 * 3 * 1e9,  # 3 Full-mesh UB links
+                    latency_s=1.5 * 1e-6,
+                    comm_efficiency=0.85,
+                    type=InterconnectType.FULL_MESH,
+                ),
+            },
+        )
+
+    A350_112G = DeviceProfile(
+        name="ATLAS_350_425T_112G",
+        vendor="HUAWEI",
+        **Chip.C425T,
+        **Mem.M112G_1_4T,
+        comm_grid=Interconnect.PCIE2_UB4,
+        static_cost=STATIC_COST,
+    )
+
+    A350_84G = DeviceProfile(
+        name="ATLAS_350_425T_84G",
+        vendor="HUAWEI",
+        **Chip.C425T,
+        **Mem.M84G_1_4T,
+        comm_grid=Interconnect.PCIE2_UB4,
+        static_cost=STATIC_COST,
+    )
