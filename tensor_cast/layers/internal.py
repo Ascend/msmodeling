@@ -24,6 +24,7 @@ class RegionMarkerWrapper(ModelWrapperBase):
         self.region_id = region_id
         self.repeat_count = repeat_count
         self.returns_tuple = True
+        self.return_length = 1
 
     def forward(self, *args, **kwargs):
         hidden_states = args[0]
@@ -39,6 +40,7 @@ class RegionMarkerWrapper(ModelWrapperBase):
         # Handle both single tensor and tuple returns
         if isinstance(result, tuple):
             self.returns_tuple = True
+            self.return_length = len(result)
             # Extract the first element (hidden_states) from tuple
             hidden_states = result[0]
             hidden_states = torch.ops.tensor_cast._internal_mark_region_end(
@@ -100,6 +102,7 @@ class CopyLayerWrapper(torch.nn.Module):
 
         if self.representative.returns_tuple:
             outputs = (hidden_states,)
+            return_length = getattr(self.representative, "return_length", 1)
 
             if output_attentions:
                 outputs += (None,)  # self_attn_weights
@@ -109,6 +112,9 @@ class CopyLayerWrapper(torch.nn.Module):
 
             if output_router_logits:
                 outputs += (None,)  # router_logits
+
+            while len(outputs) < return_length:
+                outputs += (None,)
         else:
             outputs = hidden_states
 

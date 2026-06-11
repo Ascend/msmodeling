@@ -36,6 +36,8 @@ class MultiTokenPredictorLayer(torch.nn.Module):
             position_embeddings=position_embeddings,
             **kwargs,
         )
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]
 
         return hidden_states
 

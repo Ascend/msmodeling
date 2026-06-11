@@ -108,6 +108,8 @@ def maybe_enable_mtp(model: "ModelWrapperBase") -> "ModelWrapperBase":
         and hf_config.mlp_layer_types
     ):
         hf_config.mlp_layer_types.extend([hf_config.mlp_layer_types[-1]] * mtp_config.num_mtp_layers)
+    if hasattr(hf_config, "indexer_types") and isinstance(hf_config.indexer_types, list) and hf_config.indexer_types:
+        hf_config.indexer_types.extend([hf_config.indexer_types[-1]] * mtp_config.num_mtp_layers)
 
     orig_dtype = torch.get_default_dtype()
     torch.set_default_dtype(model.model_config.dtype)

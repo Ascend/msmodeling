@@ -32,6 +32,7 @@ def test_representative_layer_wrapper_metadata_and_weight_size():
 
     assert representative.region_id == 11
     assert representative.repeat_count == 4
+    assert representative.return_length == 1
     assert copy_layer.region_id == 11
     assert copy_layer.representative == representative
     assert copy_layer.attention_type == layer.attention_type
