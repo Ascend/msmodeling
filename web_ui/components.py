@@ -523,7 +523,6 @@ def optimizer_result_section():
                 label="Single-Device Full Output",
                 interactive=False,
                 lines=20,
-                show_copy_button=True,
                 container=True,
                 elem_classes=["ascii-chart-output"],
             )

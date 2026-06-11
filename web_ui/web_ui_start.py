@@ -17,15 +17,17 @@ def ensure_localhost_bypass_proxy():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("GRADIO_SERVER_PORT", "2345")))
     parser.add_argument("--share", action="store_true", default=False)
     args = parser.parse_args()
 
+    # Host is fixed to 127.0.0.1
+    host = "127.0.0.1"
+
     ensure_localhost_bypass_proxy()
 
     launch_app(
-        server_name=args.host,
+        server_name=host,
         server_port=args.port,
         share=args.share,
     )

@@ -85,7 +85,7 @@ class TestMain:
 
     @patch("web_ui.web_ui_start.launch_app")
     @patch("web_ui.web_ui_start.ensure_localhost_bypass_proxy")
-    @patch("sys.argv", ["web_ui_start.py", "--host", "127.0.0.1", "--port", "8080"])
+    @patch("sys.argv", ["web_ui_start.py", "--port", "8080"])
     def test_main_custom_args(self, mock_ensure, mock_launch) -> None:
         """Test main with custom arguments."""
         main()
@@ -114,11 +114,11 @@ class TestMain:
     @patch.dict(os.environ, {"GRADIO_SERVER_NAME": "192.168.1.1", "GRADIO_SERVER_PORT": "9000"})
     @patch("sys.argv", ["web_ui_start.py"])
     def test_main_with_env_vars(self, mock_ensure, mock_launch) -> None:
-        """Test main with environment variables."""
+        """Test main with environment variables (GRADIO_SERVER_NAME is ignored, host is fixed to 127.0.0.1)."""
         main()
 
         mock_launch.assert_called_once_with(
-            server_name="192.168.1.1",
+            server_name="127.0.0.1",
             server_port=9000,
             share=False,
         )
