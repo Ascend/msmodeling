@@ -1,8 +1,13 @@
+import json
 import sys
+import tempfile
 import unittest
 from dataclasses import asdict
 from io import StringIO
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Union
+import unittest.mock
 from unittest.mock import patch
 
 import pytest
@@ -1710,6 +1715,373 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
         self.assertIn("compute", output)
         self.assertIn("matmul", output)
         self.assertIn("attention", output)
+
+    def test_dump_json_writes_expected_payload(self):
+        """ModelRunnerMetrics.dump_json should write the full metrics payload."""
+        self.metrics.perf_model_name = "analytic"
+        self.metrics.runtime_event_list = [
+            {
+                "name": "aten.matmul",
+                "perf_model": "analytic",
+                "perf_total": 0.4,
+                "perf_avg": 0.2,
+                "call_times": 2,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "metrics.json"
+            self.metrics.dump_json(str(output_path))
+
+            self.assertTrue(output_path.exists())
+            with output_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+        self.assertEqual(payload["batch_size"], 4)
+        self.assertAlmostEqual(payload["run_time_s"], 0.06)
+        self.assertEqual(payload["execution_time_s"], {"analytic": 0.05})
+        self.assertEqual(payload["tps_per_model"], {"analytic": 200.0})
+
+        memory = payload["memory_gb"]
+        self.assertAlmostEqual(memory["total_device"], 24.0)
+        self.assertAlmostEqual(memory["model_weight"], 5.0)
+        self.assertAlmostEqual(memory["peak_usage"], 12.0)
+        self.assertAlmostEqual(memory["kv_cache"], 3.0)
+        self.assertAlmostEqual(memory["kv_cache_per_token"], 0.001)
+        self.assertAlmostEqual(memory["model_activation"], 4.0)
+        self.assertAlmostEqual(memory["reserved"], 1.0)
+        self.assertAlmostEqual(memory["available"], 6.0)
+
+        # breakdowns_raw is the unmodified mapping
+        self.assertEqual(payload["breakdowns_raw"]["memory"], {"activation": 2.0, "weights": 3.0})
+        # breakdowns_percent sums to 100 per category
+        for category, percent in payload["breakdowns_percent"].items():
+            self.assertAlmostEqual(sum(percent.values()), 100.0, places=2, msg=category)
+
+        self.assertEqual(payload["perf_model_name"], "analytic")
+        self.assertEqual(payload["runtime_event_list"], self.metrics.runtime_event_list)
+
+    def test_dump_json_skips_zero_total_breakdowns_in_percent(self):
+        """Breakdowns whose values sum to zero should not appear in breakdowns_percent."""
+        self.metrics.breakdowns = {
+            "empty": {"a": 0.0, "b": 0.0},
+            "non_empty": {"a": 1.0, "b": 3.0},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "metrics.json"
+            self.metrics.dump_json(str(output_path))
+            with output_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+        self.assertNotIn("empty", payload["breakdowns_percent"])
+        self.assertIn("non_empty", payload["breakdowns_percent"])
+        self.assertAlmostEqual(payload["breakdowns_percent"]["non_empty"]["a"], 25.0)
+        self.assertAlmostEqual(payload["breakdowns_percent"]["non_empty"]["b"], 75.0)
+
+
+class TestAggregateRuntimeEvents(unittest.TestCase):
+    """Unit tests for ModelRunner._aggregate_runtime_events."""
+
+    @staticmethod
+    def _event(func_name: str, perf_results):
+        return SimpleNamespace(
+            op_invoke_info=SimpleNamespace(func=func_name),
+            perf_results=perf_results,
+        )
+
+    @staticmethod
+    def _result(t: float):
+        return SimpleNamespace(execution_time_s=t)
+
+    def test_aggregates_by_func_and_sorts_by_total_descending(self):
+        events = [
+            self._event("aten.matmul", {"empirical": self._result(0.1)}),
+            self._event("aten.softmax", {"empirical": self._result(0.05)}),
+            self._event("aten.matmul", {"empirical": self._result(0.3)}),
+        ]
+
+        # _aggregate_runtime_events does not use self; call as unbound.
+        result = ModelRunner._aggregate_runtime_events(None, events, perf_model_name="empirical")
+
+        self.assertEqual([entry["name"] for entry in result], ["aten.matmul", "aten.softmax"])
+        matmul = next(entry for entry in result if entry["name"] == "aten.matmul")
+        self.assertEqual(matmul["perf_model"], "empirical")
+        self.assertAlmostEqual(matmul["perf_total"], 0.4)
+        self.assertAlmostEqual(matmul["perf_avg"], 0.2)
+        self.assertEqual(matmul["call_times"], 2)
+
+        softmax = next(entry for entry in result if entry["name"] == "aten.softmax")
+        self.assertAlmostEqual(softmax["perf_total"], 0.05)
+        self.assertAlmostEqual(softmax["perf_avg"], 0.05)
+        self.assertEqual(softmax["call_times"], 1)
+
+    def test_counts_event_when_perf_model_missing(self):
+        """Events without the requested perf model still increment call count."""
+        events = [
+            self._event("aten.add", {"analytic": self._result(0.2)}),
+            self._event("aten.add", {"empirical": self._result(0.1)}),
+        ]
+
+        result = ModelRunner._aggregate_runtime_events(None, events, perf_model_name="empirical")
+
+        self.assertEqual(len(result), 1)
+        entry = result[0]
+        self.assertEqual(entry["name"], "aten.add")
+        self.assertEqual(entry["call_times"], 2)
+        self.assertAlmostEqual(entry["perf_total"], 0.1)
+        # avg is total / count regardless of which events had the perf result
+        self.assertAlmostEqual(entry["perf_avg"], 0.05)
+
+    def test_respects_custom_perf_model_name(self):
+        events = [
+            self._event("aten.matmul", {"analytic": self._result(0.4)}),
+            self._event("aten.matmul", {"empirical": self._result(0.9)}),
+        ]
+
+        result = ModelRunner._aggregate_runtime_events(None, events, perf_model_name="analytic")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["perf_model"], "analytic")
+        self.assertAlmostEqual(result[0]["perf_total"], 0.4)
+        self.assertEqual(result[0]["call_times"], 2)
+
+    def test_no_perf_model_name_records_counts_only(self):
+        """When perf_model_name is None, durations are zero but counts still aggregate."""
+        events = [
+            self._event("aten.add", {"analytic": self._result(0.2)}),
+            self._event("aten.add", {"empirical": self._result(0.1)}),
+        ]
+
+        result = ModelRunner._aggregate_runtime_events(None, events)
+
+        self.assertEqual(len(result), 1)
+        entry = result[0]
+        self.assertIsNone(entry["perf_model"])
+        self.assertEqual(entry["call_times"], 2)
+        self.assertEqual(entry["perf_total"], 0.0)
+        self.assertEqual(entry["perf_avg"], 0.0)
+
+    def test_empty_event_list_returns_empty(self):
+        self.assertEqual(ModelRunner._aggregate_runtime_events(None, []), [])
+
+
+class TestTextGenerateScriptMainArgs(unittest.TestCase):
+    """PR-UT coverage for tensor_cast/scripts/text_generate.py::main.
+
+    Heavy paths (real ModelRunner / model load) are exercised by the nightly
+    TestTextGenerateScriptMain. These tests stub UserInputConfig.from_args
+    and ModelRunner so the argparse and post-run dispatch in main() are
+    reachable in PR UT without GPU/NPU or model weights.
+    """
+
+    @staticmethod
+    def _patched_main():
+        return patch.multiple(
+            "tensor_cast.scripts.text_generate",
+            UserInputConfig=unittest.mock.MagicMock(),
+            ModelRunner=unittest.mock.MagicMock(),
+            config=unittest.mock.MagicMock(),
+        )
+
+    def _run_main(self, argv):
+        from tensor_cast.scripts.text_generate import main as scripts_main
+
+        original_argv = sys.argv
+        try:
+            sys.argv = argv
+            with self._patched_main():
+                scripts_main()
+        finally:
+            sys.argv = original_argv
+
+    def test_main_invokes_dump_json_when_output_json_set(self):
+        from tensor_cast.scripts import text_generate as script_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "metrics.json"
+            original_argv = sys.argv
+            try:
+                sys.argv = [
+                    "text_generate.py",
+                    "Qwen/Qwen3-32B",
+                    "--num-queries",
+                    "2",
+                    "--query-length",
+                    "10",
+                    "--output-json",
+                    str(output_path),
+                ]
+                with (
+                    patch.object(script_mod, "UserInputConfig") as mock_cfg,
+                    patch.object(script_mod, "ModelRunner") as mock_runner_cls,
+                    patch.object(script_mod, "config"),
+                ):
+                    mock_cfg.from_args.return_value = unittest.mock.MagicMock()
+                    metrics = unittest.mock.MagicMock()
+                    mock_runner_cls.return_value.run_inference.return_value = metrics
+                    script_mod.main()
+                    metrics.dump_json.assert_called_once_with(str(output_path))
+            finally:
+                sys.argv = original_argv
+
+    def test_main_skips_dump_json_when_flag_absent(self):
+        from tensor_cast.scripts import text_generate as script_mod
+
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "text_generate.py",
+                "Qwen/Qwen3-32B",
+                "--num-queries",
+                "2",
+                "--query-length",
+                "10",
+            ]
+            with (
+                patch.object(script_mod, "UserInputConfig") as mock_cfg,
+                patch.object(script_mod, "ModelRunner") as mock_runner_cls,
+                patch.object(script_mod, "config"),
+            ):
+                mock_cfg.from_args.return_value = unittest.mock.MagicMock()
+                metrics = unittest.mock.MagicMock()
+                mock_runner_cls.return_value.run_inference.return_value = metrics
+                script_mod.main()
+                metrics.dump_json.assert_not_called()
+        finally:
+            sys.argv = original_argv
+
+    def test_main_rejects_invalid_log_level(self):
+        from tensor_cast.scripts import text_generate as script_mod
+
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "text_generate.py",
+                "Qwen/Qwen3-32B",
+                "--num-queries",
+                "2",
+                "--query-length",
+                "10",
+                "--log-level",
+                "bogus",
+            ]
+            with self.assertRaises(SystemExit) as cm:
+                script_mod.main()
+            self.assertEqual(cm.exception.code, 2)
+        finally:
+            sys.argv = original_argv
+
+    def test_main_rejects_export_empirical_without_profiling(self):
+        from tensor_cast.scripts import text_generate as script_mod
+
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "text_generate.py",
+                "Qwen/Qwen3-32B",
+                "--num-queries",
+                "2",
+                "--query-length",
+                "10",
+                "--export-empirical-metrics",
+                "/tmp/m1m5.json",
+            ]
+            with self.assertRaises(SystemExit) as cm:
+                script_mod.main()
+            self.assertEqual(cm.exception.code, 2)
+        finally:
+            sys.argv = original_argv
+
+
+@pytest.mark.nightly
+class TestTextGenerateScriptMain(unittest.TestCase):
+    """Cover tensor_cast/scripts/text_generate.py::main, including --output-json."""
+
+    def setUp(self):
+        self.model_id = "Qwen/Qwen3-32B"
+        torch.compiler.reset()
+
+    def test_main_writes_output_json_when_flag_set(self):
+        from tensor_cast.scripts.text_generate import main as scripts_main
+
+        original_argv = sys.argv
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "metrics.json"
+            try:
+                sys.argv = [
+                    "text_generate.py",
+                    self.model_id,
+                    "--num-queries",
+                    "2",
+                    "--query-length",
+                    "10",
+                    "--quantize-linear-action",
+                    "DISABLED",
+                    "--output-json",
+                    str(output_path),
+                ]
+                scripts_main()
+            finally:
+                sys.argv = original_argv
+
+            self.assertTrue(output_path.exists())
+            with output_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+        for key in (
+            "batch_size",
+            "run_time_s",
+            "execution_time_s",
+            "tps_per_model",
+            "memory_gb",
+            "breakdowns_raw",
+            "breakdowns_percent",
+            "runtime_event_list",
+        ):
+            self.assertIn(key, payload)
+        self.assertGreater(payload["batch_size"], 0)
+        self.assertGreater(payload["run_time_s"], 0)
+        self.assertIsInstance(payload["runtime_event_list"], list)
+
+    def test_main_without_output_json_skips_dump(self):
+        from tensor_cast.scripts.text_generate import main as scripts_main
+
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "text_generate.py",
+                self.model_id,
+                "--num-queries",
+                "2",
+                "--query-length",
+                "10",
+                "--quantize-linear-action",
+                "DISABLED",
+            ]
+            scripts_main()
+        finally:
+            sys.argv = original_argv
+
+    def test_main_rejects_invalid_log_level(self):
+        from tensor_cast.scripts.text_generate import main as scripts_main
+
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "text_generate.py",
+                self.model_id,
+                "--num-queries",
+                "2",
+                "--query-length",
+                "10",
+                "--log-level",
+                "bogus",
+            ]
+            with self.assertRaises(SystemExit) as cm:
+                scripts_main()
+            self.assertEqual(cm.exception.code, 2)
+        finally:
+            sys.argv = original_argv
 
 
 if __name__ == "__main__":

@@ -313,6 +313,13 @@ def main():
         help="(developer only) Export M1-M5 metrics report as JSON for offline M6 computation. "
         "Requires --performance-model profiling",
     )
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default=None,
+        help="Dump the runtime metrics (batch size, run/execution time, TPS, memory usage, "
+        "stats breakdowns and table result) to the given JSON file path.",
+    )
 
     args = parser.parse_args()
     log_level = LOG_LEVELS[args.log_level.lower()]
@@ -337,6 +344,9 @@ def main():
     model_runner = ModelRunner(user_input)
     metrics = model_runner.run_inference(generate_inputs_func=generate_inputs)
     metrics.print_info()
+
+    if args.output_json:
+        metrics.dump_json(args.output_json)
 
     # Export metrics JSON for offline M6 computation
     if args.export_empirical_metrics:

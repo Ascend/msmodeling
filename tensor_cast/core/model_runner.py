@@ -6,6 +6,7 @@ ModelRuner
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -170,6 +171,9 @@ class ModelRunner:
 
         table_result = runtime.table_averages(group_by_input_shapes=self.user_input.dump_input_shapes)
 
+        perf_model_name = self.perf_models[0].name if self.perf_models else None
+        runtime_event_list = self._aggregate_runtime_events(runtime.event_list, perf_model_name=perf_model_name)
+
         # Calculate TPS for each model
         tps_per_model: Dict[str, float] = {}
         for model_name, exec_time in all_execution_time_s.items():
@@ -230,6 +234,8 @@ class ModelRunner:
             batch_size=batch_size,
             table_result=table_result,
             breakdowns=runtime.get_breakdowns(),
+            runtime_event_list=runtime_event_list,
+            perf_model_name=perf_model_name,
         )
 
     def get_inputs_num_bytes(self, requests: List[RequestInfo]) -> int:
@@ -237,6 +243,34 @@ class ModelRunner:
 
     def get_kv_cache_num_bytes(self, num_tokens: int) -> int:
         return get_kv_cache_info(self.model, 1, 1) * num_tokens
+
+    def _aggregate_runtime_events(self, event_list, perf_model_name: Optional[str] = None) -> List[Dict]:
+        aggregated: Dict[str, Dict[str, float]] = {}
+        for event in event_list:
+            name = str(event.op_invoke_info.func)
+            entry = aggregated.setdefault(name, {"total": 0.0, "count": 0})
+            entry["count"] += 1
+            if perf_model_name is None:
+                continue
+            result = event.perf_results.get(perf_model_name)
+            if result is not None:
+                entry["total"] += result.execution_time_s
+
+        items: List[Dict] = []
+        for name, entry in aggregated.items():
+            count = entry["count"]
+            total = entry["total"]
+            items.append(
+                {
+                    "name": name,
+                    "perf_model": perf_model_name,
+                    "perf_total": total,
+                    "perf_avg": total / count if count else 0.0,
+                    "call_times": count,
+                }
+            )
+        items.sort(key=lambda x: x["perf_total"], reverse=True)
+        return items
 
 
 @dataclass
@@ -259,6 +293,8 @@ class ModelRunnerMetrics:
     indexer_cache_per_token_gb: float = 0.0
     table_result: str = ""
     breakdowns: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    runtime_event_list: List[Dict] = field(default_factory=list)
+    perf_model_name: Optional[str] = None
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")
@@ -288,3 +324,33 @@ class ModelRunnerMetrics:
                 continue
             formatted = ", ".join(f"{key}: {val * 100 / total:.2f}" for key, val in breakdown.items())
             print(f"  {breakdown_name}: {formatted}")
+
+    def dump_json(self, path: str) -> None:
+        breakdowns_percent: Dict[str, Dict[str, float]] = {}
+        for name, breakdown in self.breakdowns.items():
+            total = sum(breakdown.values())
+            if total == 0:
+                continue
+            breakdowns_percent[name] = {k: round(v * 100 / total, 4) for k, v in breakdown.items()}
+        payload = {
+            "batch_size": self.batch_size,
+            "run_time_s": self.run_time_s,
+            "execution_time_s": dict(self.execution_time_s),
+            "tps_per_model": dict(self.tps_per_model),
+            "memory_gb": {
+                "total_device": self.total_device_memory_gb,
+                "model_weight": self.model_weight_size_gb,
+                "peak_usage": self.peak_memory_usage_gb,
+                "kv_cache": self.kv_cache_size_gb,
+                "kv_cache_per_token": self.kv_cache_per_token_gb,
+                "model_activation": self.model_activation_size_gb,
+                "reserved": self.reserved_memory_gb,
+                "available": self.device_memory_available_gb,
+            },
+            "breakdowns_raw": {k: dict(v) for k, v in self.breakdowns.items()},
+            "breakdowns_percent": breakdowns_percent,
+            "perf_model_name": self.perf_model_name,
+            "runtime_event_list": self.runtime_event_list,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
