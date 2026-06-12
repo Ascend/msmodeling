@@ -39,3 +39,4 @@ parameterized
 # web ui
 gradio>=6.7.0,<7
 openpyxl
+psutil
