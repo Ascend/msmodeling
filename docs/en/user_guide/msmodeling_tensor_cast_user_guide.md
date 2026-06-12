@@ -221,8 +221,10 @@ The allocation logic is identical to the "External Shared Experts Only" mode, wi
 To run a prefill of Qwen3-32B with two requests with 3500-token input length each on A2. You can run the following command:
 
 ```bash
-python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --device TEST_DEVICE
+python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 3500 --device TEST_DEVICE
 ```
+
+In prefill mode, omit `--decode`; `--query-length` is the new input length and `--context-length` sets the context length for each query.
 
 You can also quantize the linear with various quantization schemes, such as W8A8 dynamic quantization and with 4500-token context as the prefix:
 

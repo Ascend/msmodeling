@@ -236,7 +236,7 @@ If `vllm_benchmark` is used for the test, modify the following parameters:
 **vLLM serving parameters**:
 When the vLLM framework is used, you need to modify the `[vllm.command]` parameter in the `config.toml` file. For example:
 
-```shell
+```toml
 [vllm.command]
 host = "127.0.0.1"
 port = "8000"
@@ -308,7 +308,7 @@ others = "$COMPILATION_CONFIG"
 **MindIE serving parameters**: Modify these parameters as described in [MindIE Server Configuration Parameter Description] (<https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindieservice/servicedev/mindie_service0285.html>).
 You can define search ranges directly using these parameters. For example, to set the optimization search space for `max_batch_size` to 10 to 400:
 
-```shell
+```toml
 [[mindie.target_field]]
 "name": "max_batch_size," # Serving parameter name
 "config_position": "BackendConfig.ScheduleConfig.maxBatchSize",    # Path to the serving parameters in MindIE Server config
@@ -319,7 +319,7 @@ You can define search ranges directly using these parameters. For example, to se
 
 You can also define parameters relative to others. For example, to set `max_prefill_batch_size` as a ratio of `max_batch_size`, that is, `max_prefill_batch_size = ratio * max_batch_size (0 < ratio < 1)`:
 
-```shell
+```toml
 [[mindie.target_field]]
 "name": "max_prefill_batch_size",
 "config_position": "BackendConfig.ScheduleConfig.maxPrefillBatchSize",

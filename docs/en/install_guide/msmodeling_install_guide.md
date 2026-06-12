@@ -35,6 +35,8 @@ uv pip install -r requirements.txt
 > [!NOTE]
 > If you already have a Python environment, you can also run `pip install -r requirements.txt` directly.
 
+<!---->
+
 > [!WARNING]
 > PyTorch 2.10 may not run properly on Windows. If you encounter issues, use PyTorch 2.8 or earlier.
 

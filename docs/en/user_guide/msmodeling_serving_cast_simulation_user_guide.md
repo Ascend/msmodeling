@@ -27,8 +27,8 @@ required arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
-  --enable_profiling    Enable profiling during simulation (default: False)​
-  --profiling_output_path PROFILING_OUTPUT_PATH​
+  --enable_profiling    Enable profiling during simulation (default: False)
+  --profiling_output_path PROFILING_OUTPUT_PATH
                         Path to directory where profiling results will be saved (default: ./profiling_results)
 ```
 
@@ -43,7 +43,7 @@ python -m serving_cast.main --instance_config_path=./serving_cast/example/instan
 - enable profiling
 
 ```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling​
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling
 ```
 
 - enable profiling with custom output path
@@ -93,7 +93,7 @@ Use the following command to enable profiling:
 - enable profiling
 
 ```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling​
+python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling
 ```
 
 - enable profiling with custom output path
@@ -102,7 +102,7 @@ python -m serving_cast.main --instance_config_path=./serving_cast/example/instan
 python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling --profiling_output_path=/path/to/custom/profiling_dir
 ```
 
-The original collected profiling result is stored in the directory ```profiling_output_path/{$time_stamp}```.
-The parsed profiling result is stored in the directory ```profiling_output_path/{$time_stamp}_parsed_result```.
+The original collected profiling result is stored in the directory `profiling_output_path/{$time_stamp}`.
+The parsed profiling result is stored in the directory `profiling_output_path/{$time_stamp}_parsed_result`.
 
-A ```chrome_tracing.json``` and a ```profiler.db``` will be generated in parsed_result directory, you can view it by ```chrome://tracing``` or MindStudio Insight
+A `chrome_tracing.json` and a `profiler.db` will be generated in parsed_result directory, you can view it by `chrome://tracing` or MindStudio Insight

@@ -235,8 +235,10 @@ Run a simulated diffusion transformer forward and dump perf stats.
 要在 A2 上对 Qwen3-32B 运行 prefill，两个请求各 3500 token 输入长度，可运行以下命令：
 
 ```bash
-python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --device TEST_DEVICE
+python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 3500 --device TEST_DEVICE
 ```
+
+Prefill 模式下不添加 `--decode`；`--query-length` 表示新输入长度，`--context-length` 表示每个请求的 context 长度。
 
 也可使用多种量化方案对线性层进行量化，例如 W8A8 动态量化，并以 4500 token 的 context 作为前缀：
 

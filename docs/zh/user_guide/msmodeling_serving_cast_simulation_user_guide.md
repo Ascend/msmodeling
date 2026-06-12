@@ -33,8 +33,8 @@ required arguments:
 
 optional arguments:
   -h, --help            show this help message and exit
-  --enable_profiling    Enable profiling during simulation (default: False)​
-  --profiling_output_path PROFILING_OUTPUT_PATH​
+  --enable_profiling    Enable profiling during simulation (default: False)
+  --profiling_output_path PROFILING_OUTPUT_PATH
                         Path to directory where profiling results will be saved (default: ./profiling_results)
 ```
 
@@ -115,7 +115,7 @@ python -m serving_cast.main --instance_config_path=./serving_cast/example/instan
 python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling --profiling_output_path=/path/to/custom/profiling_dir
 ```
 
-原始采集的 profiling 结果保存在目录 ```profiling_output_path/{$time_stamp}``` 中。
-解析后的 profiling 结果保存在目录 ```profiling_output_path/{$time_stamp}_parsed_result``` 中。
+原始采集的 profiling 结果保存在目录 `profiling_output_path/{$time_stamp}` 中。
+解析后的 profiling 结果保存在目录 `profiling_output_path/{$time_stamp}_parsed_result` 中。
 
-在 parsed_result 目录下会生成 ```chrome_tracing.json``` 与 ```profiler.db```，您可通过 ```chrome://tracing``` 或 MindStudio Insight 查看。
+在 parsed_result 目录下会生成 `chrome_tracing.json` 与 `profiler.db`，您可通过 `chrome://tracing` 或 MindStudio Insight 查看。

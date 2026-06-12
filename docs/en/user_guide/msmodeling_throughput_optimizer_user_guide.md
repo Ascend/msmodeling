@@ -226,7 +226,7 @@ General Options:
 Model & Quantization Options:
   --compile             If set, invoke torch.compile() on the model before inference. (default: False)
   --compile-allow-graph-break
-                        If set, invoke torch.compile() on the model before inference. (default: False)
+                        If set, allows graph breaks during torch.compile() to improve compilation speed or handle unsupported ops. (default: False)
   --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9}
                         Number of MTP tokens, 0 means disabled - only support models having MTP like DeepSeek (default: 0)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -388,7 +388,7 @@ When two or more device profiles are specified, the optimizer prints per-device 
 
 This table shows core modeling parameters for all requested devices (compute, memory bandwidth, communication bandwidth, etc.):
 
-```
+```plaintext
 ************************************************************************************************************
   Cross-hardware - device profile summary (modeling abstraction vs performance merge tables)
   Device profile parameter comparison (effective compute / memory BW / comm BW)
@@ -405,7 +405,7 @@ This table shows core modeling parameters for all requested devices (compute, me
 
 A ranked table of the best configuration per device under the active SLO constraints. Example for Aggregation mode:
 
-```
+```plaintext
 ****************************************************************************************************
   Cross-hardware - PD Aggregated (best throughput config per device under TTFT/TPOT limits)
   ------------------------------------------------------------------------------------------------

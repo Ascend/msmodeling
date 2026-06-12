@@ -16,7 +16,7 @@
 
 - **参数寻优模块**：利用PSO粒子寻优算法自动生成服务化参数组合，不断逼近最优解；同时，Early Rejection算法通过理论建模、调优经验及部分实测数据对服务化参数完成早期评估；
 
-- **参数验证模块**：自动化启动服务化进程与测评工具进程，进行参数测试，获取性能结果。当前已支持的测评工具包括AISBench，vllm_benchmark。
+- **参数验证模块**：自动化启动服务化进程与测评工具进程，进行参数测试，获取性能结果。当前已支持的测评工具包括 `AISBench`、`vllm_benchmark`。
 
 > [!NOTE]
 >
@@ -29,7 +29,7 @@
 **基本概念**
 
 - `VLLM`、`MindIE`：服务化框架，支持对模型进行服务化部署。
-- `VLLM_Benchmark`、`AISBench`：推理性能评测工具，支持对服务化进行推理性能评测。
+- `vllm_benchmark`、`AISBench`：推理性能评测工具，支持对服务化进行推理性能评测。
 
 ## 产品支持情况<a name="ZH-CN_TOPIC_0000002479925980"></a>
 
@@ -189,8 +189,8 @@ msmodeling optix -e vllm -b vllm_benchmark -c ../configs/vllm_config.toml
 | 字段 | 说明 |
 | --- | --- |
 | generate_speed | 吞吐。 |
-| time_to_first_token | ttft时延，单位为秒。 |
-| time_per_output_token | tpot时延，单位为秒。 |
+| time_to_first_token | TTFT 时延，单位为秒。 |
+| time_per_output_token | TPOT 时延，单位为秒。 |
 | success_rate | 测试返回请求成功率。 |
 | throughput | 测试吞吐，单位为请求数/秒。 |
 | CONCURRENCY | 并发数。 |
@@ -250,7 +250,7 @@ msmodeling optix -e vllm -b vllm_benchmark -c ../configs/vllm_config.toml
 **VLLM服务化参数**：
 使用VLLM框架时，需修改`config.toml`中的`[vllm.command]`参数，如：
 
-```shell
+```toml
 [vllm.command]
 host = "127.0.0.1"
 port = "8000"
@@ -322,7 +322,7 @@ others = "$COMPILATION_CONFIG"
 **MindIE服务化参数**： 可以参考[MindIE server 配置参数说明](https://www.hiascend.com/document/detail/zh/mindie/20RC1/mindieservice/servicedev/mindie_service0285.html)进行修改。
 服务化参数可直接指定参数的范围，如配置服务化参数 `max_batch_size` 的寻优搜索空间为 10 ~ 400，则可设置：
 
-```shell
+```toml
 [[mindie.target_field]]
 "name": "max_batch_size",    # 服务化参数名称
 "config_position": "BackendConfig.ScheduleConfig.maxBatchSize",    # 服务化参数在MindIE Server中的位置
@@ -333,7 +333,7 @@ others = "$COMPILATION_CONFIG"
 
 此外，也可设置参数与另一参数相关，如 `max_prefill_batch_size` 与 `max_batch_size` 相关，`max_prefill_batch_size = ratio * max_batch_size (0 < ratio < 1)`则可设置：
 
-```shell
+```toml
 [[mindie.target_field]]
 "name": "max_prefill_batch_size",
 "config_position": "BackendConfig.ScheduleConfig.maxPrefillBatchSize",
@@ -375,7 +375,7 @@ others = "$COMPILATION_CONFIG"
 > - **显式设置范围**：在 `dtype_param` 中配置 `min_value` / `max_value` 可覆盖上下界。
 > - **最佳实践**：限制 `tp`、`pp` 的枚举候选使乘积可整除 `product`，避免依赖降级处理。
 
-```shell
+```toml
 # 方式一（最佳实践）：限制 tp 和 pp 的枚举候选值，保证 tp × pp ≤ 16
 [[mindie.target_field]]
 name = "tp"
@@ -404,7 +404,7 @@ dtype_param = {target_names = ["tp", "pp"], product = 16, dtype = "int"}
 #        tp=8, pp=2 → dp = 16 ÷ (8 × 2) = 1
 ```
 
-```shell
+```toml
 # 方式二：配置 min_value 作为修复失败后的下界保护，并输出警告
 [[mindie.target_field]]
 name = "dp"
@@ -425,7 +425,7 @@ dtype_param = {target_names = ["tp", "pp"], product = 16, dtype = "int", min_val
 | `balanced`（默认） | 将粒子均分两组：前半用 `target_names` 顺序修复，后半用反序修复，降低单一解码顺序带来的结构性偏置 | 用户没有明确字段优先偏好，默认使用 |
 | `fixed` | 用户显式指定修复顺序：高优先级字段尽量保持不动，优先调整低优先级字段 | 用户明确知道哪个字段更应该稳定 |
 
-```shell
+```toml
 # balanced（默认）策略示例
 # 适用：用户没有指定哪个字段更重要，系统自动均衡分配修复方向
 [[mindie.target_field]]
@@ -442,7 +442,7 @@ dtype_param = {
 }
 ```
 
-```shell
+```toml
 # fixed 策略示例
 # 适用：用户明确知道 tp 应保持稳定，优先调整 pp
 [[mindie.target_field]]
@@ -473,7 +473,7 @@ dtype_param = {
 
 场景二：`seq_len`、`prefill_batch_size` 为可调参数，`max_prefill_tokens` 自动设为二者之积的 2 倍（`max_prefill_tokens = 2 × seq_len × prefill_batch_size`）：
 
-```shell
+```toml
 [[mindie.target_field]]
 name = "seq_len"
 config_position = "BackendConfig.ModelConfig.seqLen"

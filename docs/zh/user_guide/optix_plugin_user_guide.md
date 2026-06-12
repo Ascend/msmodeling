@@ -175,7 +175,7 @@
     msmodeling optix -h
     ```
 
-    ```ColdFusion
+    ```text
     options:
     -h, --help show this help message and exit
     -lb, --load_breakpoint
