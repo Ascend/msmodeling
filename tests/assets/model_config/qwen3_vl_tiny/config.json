@@ -1,0 +1,35 @@
+{
+  "architectures": [
+    "Qwen3VLModel"
+  ],
+  "model_type": "qwen3_vl",
+  "text_config": {
+    "head_dim": 4,
+    "hidden_size": 16,
+    "intermediate_size": 32,
+    "max_position_embeddings": 64,
+    "model_type": "qwen3_vl_text",
+    "num_attention_heads": 4,
+    "num_hidden_layers": 1,
+    "num_key_value_heads": 4,
+    "rope_parameters": {
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    },
+    "vocab_size": 128
+  },
+  "vision_config": {
+    "deepstack_visual_indexes": [],
+    "depth": 1,
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 16,
+    "in_channels": 3,
+    "intermediate_size": 32,
+    "num_heads": 4,
+    "num_position_embeddings": 64,
+    "out_hidden_size": 16,
+    "patch_size": 2,
+    "spatial_merge_size": 1,
+    "temporal_patch_size": 1
+  }
+}

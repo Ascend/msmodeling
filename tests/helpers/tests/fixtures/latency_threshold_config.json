@@ -1,0 +1,6 @@
+{
+  "ttft_ms": 20.0,
+  "tpot_ms": 2.0,
+  "tolerance_ms": 0.5,
+  "source": "tests/helpers/tests/fixtures/latency_threshold_config.json"
+}

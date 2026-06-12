@@ -1,0 +1,403 @@
+# shape_grid_config.yaml — theory 模式生成器配置
+# 用法: generate_shape_grid.py --mode theory
+# 设计文档: OPERATOR_PERF_DATABASE_DESIGN_zh_v1.5.md §7.3 + 附录 I
+
+# ═══════════════════════════════════════════════════════════════
+#  Generator Patterns
+# ═══════════════════════════════════════════════════════════════
+# 每个 pattern 定义一类算子的 shape 结构和采样网格。
+#
+# 模板模式 (iterators + inputs/outputs):
+#   iterators: 变量名 → 网格名(字符串, 引用 shape_grids.py) 或内联列表
+#   constants: 固定值变量 (不参与笛卡尔积)
+#   constraints: 过滤条件 (Python 表达式, 可选)
+#   inputs/outputs: shape 模板表达式, 支持 +, *, //, max(), min()
+#
+# 函数模式 (generator_function):
+#   指向 Python 函数名, 用于复杂算子
+
+patterns:
+
+  # ── GEMM ──────────────────────────────────────────────
+  matmul:
+    iterators: {M: M_GRID}
+    model_nk_pairs: true
+    fallback_iterators: {N: NK_GRID, K: NK_GRID}
+    # CSV stores physical shape (N,K); replay applies transpose=True internally
+    inputs: ["(M, K)", "(N, K)"]
+    outputs: ["(M, N)"]
+
+  quant_matmul:
+    iterators: {M: M_GRID}
+    model_nk_pairs: true
+    fallback_iterators: {N: NK_GRID, K: NK_GRID}
+    constants: {block_h: 16, block_w: 32}
+    constraints:
+      - "N >= 128"
+      - "K >= 128"
+      - "N % block_w == 0"
+      - "K % block_h == 0"
+    # Input[3] bias must have shape (N,) to match npu_quant_matmul hardware constraint
+    inputs: ["(M, K)", "(max(1, N//block_w), max(1, K//block_h), block_h, block_w)", "(N,)", "(N,)"]
+    outputs: ["(M, N)"]
+
+  transpose_batch_matmul:
+    iterators:
+      batch: HEADS_GRID
+      M: M_GRID
+      K: [64, 128, 256, 512]
+      N: [64, 128, 256, 512, 1024]
+    inputs: ["(batch, M, K)", "(batch, K, N)"]
+    outputs: ["(M, batch, N)"]
+
+  batch_matmul_nd:
+    iterators:
+      batch: [1, 2, 4, 8, 16, 32]
+      M: M_GRID
+      K: [64, 128, 256, 512, 1024]
+      N: [64, 128, 256, 512, 1024]
+    inputs: ["(batch, M, K)", "(batch, K, N)"]
+    outputs: ["(batch, M, N)"]
+
+  # ── Elementwise ───────────────────────────────────────
+  elementwise_binary:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)", "(tokens, D)"]
+    outputs: ["(tokens, D)"]
+
+  elementwise_unary:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)"]
+    outputs: ["(tokens, D)"]
+
+  tensor_move:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    constraints: ["tokens * D >= 262144"]
+    inputs: ["(tokens, D)"]
+    outputs: ["(tokens, D)"]
+
+  # ── Norm ──────────────────────────────────────────────
+  rmsnorm:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)", "(D,)"]
+    outputs: ["(tokens, D)", "(tokens, 1)"]
+
+  add_rmsnorm:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)", "(tokens, D)", "(D,)"]
+    outputs: ["(tokens, D)", "(tokens, 1)", "(tokens, D)"]
+
+  add_rmsnorm_bias:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)", "(tokens, D)", "(D,)", "(D,)"]
+    outputs: ["(tokens, D)", "(tokens, 1)", "(tokens, D)"]
+
+  add_rmsnorm_dynamic_quant:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)", "(tokens, D)", "(D,)", "(D,)"]
+    outputs: ["(tokens, D)", "(tokens, D)", "(tokens, D)", "(tokens,)", "(tokens,)"]
+
+  # ── Quantize ──────────────────────────────────────────
+  quant:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)", "(D,)", "(D,)"]
+    outputs: ["(tokens, D)"]
+
+  dynamic_quant:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)"]
+    outputs: ["(tokens, D)", "(tokens,)"]
+
+  # ── Activation ────────────────────────────────────────
+  swiglu:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D*2)"]
+    outputs: ["(tokens, D)"]
+
+  # ── RoPE ──────────────────────────────────────────────
+  interleave_rope:
+    iterators: {seq: ELEM_TOKENS_GRID, heads: HEADS_GRID}
+    constants: {dim: 64}
+    inputs: ["(seq, heads, 1, dim)", "(seq, 1, 1, dim)", "(seq, 1, 1, dim)"]
+    outputs: ["(seq, heads, 1, dim)"]
+
+  triton_rope:
+    iterators: {tokens: ELEM_TOKENS_GRID, heads: HEADS_GRID}
+    constants: {dim: 64}
+    inputs: ["(tokens, heads, dim)", "(tokens, 1, dim)", "(max(tokens, 2048), dim)"]
+    outputs: ["(tokens, heads, dim)", "(tokens, 1, dim)"]
+
+  split_qkv_rmsnorm_rope:
+    generator_function: _theory_split_qkv_rmsnorm_rope
+
+  kv_rmsnorm_rope_cache:
+    iterators:
+      tokens: ELEM_TOKENS_GRID
+      d: [512]
+    constants: {dim: 64, max_slots: 4096}
+    # NPU kernel requires 4D tensors for kv inputs (PA_BNSD cache_mode).
+    # Slot layout matches profiling data: (tokens,1,1,D), gamma=(d,),
+    # caches=(slots,block,1,dim). heads=1 is hardcoded per MLA convention.
+    inputs: ["(tokens, 1, 1, d+dim)", "(d,)", "(tokens, 1, 1, dim)", "(tokens, 1, 1, dim)", "(tokens,)", "(min(max_slots, max(16, tokens*8)), 128, 1, dim)", "(min(max_slots, max(16, tokens*8)), 128, 1, d)", "()", "()", "()", "()", "()"]
+    outputs: ["(min(max_slots, max(16, tokens*8)), 128, 1, dim)", "(min(max_slots, max(16, tokens*8)), 128, 1, d)", "(tokens, 1, 1, dim)", "(tokens, 1, 1, d)"]
+
+  # ── Shape Manipulation ───────────────────────────────
+  broadcast_to:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(1, D)", "(2,)"]
+    outputs: ["(tokens, D)"]
+
+  slice_op:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)", "(2,)", "(2,)", "(2,)", "(2,)"]
+    outputs: ["(max(1, tokens//2), D)"]
+
+  transpose_op:
+    iterators: {tokens: ELEM_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    inputs: ["(tokens, D)", "(2,)"]
+    outputs: ["(D, tokens)"]
+
+  as_strided:
+    iterators:
+      batch: [1, 2, 4, 8, 16, 32, 64]
+      heads: [1, 4, 8, 16, 32, 64, 128]
+      dim: [64, 128, 256]
+    inputs: ["(batch*heads*dim*2,)", "(3,)", "(3,)", "(1,)"]
+    outputs: ["(batch, heads, dim)"]
+
+  sort_op:
+    iterators:
+      tokens: ELEM_TOKENS_GRID
+      D: [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    inputs: ["(tokens, D)"]
+    outputs: ["(tokens, D)", "(tokens, D)"]
+
+  tile:
+    iterators:
+      tokens: ELEM_TOKENS_GRID
+      D: [64, 128, 256, 512, 1024, 2048]
+    inputs: ["(tokens, D)", "(2,)"]
+    outputs: ["(tokens, D*2)"]
+
+  pad:
+    iterators: {tokens: PAD_TOKENS_GRID, D: ELEM_HIDDEN_GRID}
+    constraints: ["tokens % 8 != 0"]
+    inputs: ["(tokens, D)", "(4,)", "()"]
+    outputs: ["(align(tokens, 8), D)"]
+
+  concat:
+    iterators:
+      tokens: ELEM_TOKENS_GRID
+      D: [64, 128, 256, 512, 1024, 2048, 4096]
+    inputs: ["(tokens, D)", "(tokens, D)"]
+    outputs: ["(tokens, D*2)"]
+
+  # ── Sampling ──────────────────────────────────────────
+  argmax:
+    iterators:
+      batch: [1, 2, 4, 8, 16, 32, 64, 128]
+      vocab: [1024, 4096, 16384, 32000, 65536, 128256, 151936]
+    inputs: ["(batch, vocab)", "()"]
+    outputs: ["(batch,)"]
+
+  apply_topk_top_p:
+    iterators:
+      batch: [1, 2, 4, 8, 16, 32, 64, 128]
+      vocab: [1024, 4096, 16384, 32000, 65536, 128256, 151936]
+    inputs: ["(batch, vocab)", "(batch, vocab)", "(batch,)", "(batch,)"]
+    outputs: ["(batch, vocab)"]
+
+  # ── Gather / Index ────────────────────────────────────
+  gather:
+    iterators:
+      vocab: [1024, 4096, 8192, 16384, 32000, 65536, 128256, 151936, 152064]
+      D: ELEM_HIDDEN_GRID
+      idx_count: ELEM_TOKENS_GRID
+    inputs: ["(vocab, D)", "(idx_count,)", "(1,)"]
+    outputs: ["(idx_count, D)"]
+
+  gather_v3:
+    iterators:
+      tokens: ELEM_TOKENS_GRID
+      D: ELEM_HIDDEN_GRID
+      idx_count: ELEM_TOKENS_GRID
+    inputs: ["(tokens, D)", "(idx_count,)", "(1,)"]
+    outputs: ["(idx_count, D)"]
+
+  index:
+    iterators:
+      D: ELEM_HIDDEN_GRID
+      seq: ELEM_TOKENS_GRID
+      out_rows: ELEM_TOKENS_GRID
+    constraints: ["out_rows <= seq"]
+    inputs: ["(seq, D)", "(1,)", "(out_rows,)", "(1,)"]
+    outputs: ["(out_rows, D)"]
+
+  # ── KV Cache ──────────────────────────────────────────
+  reshape_and_cache:
+    iterators:
+      seq: ELEM_TOKENS_GRID
+      kv_heads: KV_HEADS_GRID
+      dim: HEAD_DIM_GRID
+    constants: {block_size: 128}
+    inputs: ["(seq, kv_heads, dim)", "(seq, kv_heads, dim)", "(max(16, seq*8), block_size, kv_heads, dim)", "(max(16, seq*8), block_size, kv_heads, dim)", "(seq,)"]
+    outputs: ["(max(16, seq*8), block_size, kv_heads, dim)", "(max(16, seq*8), block_size, kv_heads, dim)"]
+
+  paged_cache_load:
+    iterators:
+      tokens: ELEM_TOKENS_GRID
+      dim: HEAD_DIM_GRID
+      batch: [1, 2, 4, 8, 16, 32, 64]
+    constants: {rope_dim: 64}
+    inputs: ["(max(16, tokens*8), 128, 1, dim)", "(max(16, tokens*8), 128, 1, rope_dim)", "(batch, dim)", "(batch,)", "(tokens, 1, dim)", "(tokens, 1, rope_dim)", "(batch,)"]
+    outputs: ["(tokens, 1, dim)", "(tokens, 1, rope_dim)"]
+
+  # ── Attention ─────────────────────────────────────────
+  attention_update:
+    iterators:
+      batch: ATTN_BATCH_GRID
+      heads: HEADS_GRID
+      dim: HEAD_DIM_GRID
+    inputs: ["(batch, heads, 1, dim)", "(batch, heads, 1, dim)", "(batch, heads, 1, dim)", "(batch, heads, 1, dim)"]
+    outputs: ["(batch, heads, 1, dim)", "(batch, heads, 1, dim)"]
+
+  moe_gating_topk:
+    iterators:
+      tokens: ELEM_TOKENS_GRID
+      experts: [64, 128, 256]
+      topk: [2, 4, 8]
+    inputs: ["(tokens, experts)", "()", "()"]
+    outputs: ["(tokens, topk)", "(tokens, topk)", "(tokens,)"]
+
+  # ── Complex patterns (Python functions) ───────────────
+  grouped_matmul:
+    generator_function: _theory_grouped_matmul
+
+  dispatch_ffn_combine:
+    generator_function: _theory_dfc
+
+  fused_attention:
+    generator_function: _theory_fused_attention
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Kernel Assignments
+# ═══════════════════════════════════════════════════════════════
+# kernel_type → pattern name
+# 未列出的 kernel 自动解析:
+#   - op_mapping.yaml 的 alternate_kernel_types → 继承主 kernel 的 pattern
+#   - op_mapping.yaml 的 query_mode: elementwise → elementwise_binary
+#   - op_mapping.yaml 的 zero_cost / composite / communication → skip
+
+assignments:
+  # GEMM
+  MatMulV2: matmul
+  MatMulV3: matmul
+  # Cross-filled from MatMulV2/V3 via PROFILE_OP_ALIASES; no independent theory grid needed.
+  MatMulCommon: skip
+  MatMul: matmul
+  BatchMatMulV2: matmul
+  QuantBatchMatmulV3: quant_matmul
+  TransposeBatchMatMul: transpose_batch_matmul
+  BatchMatMulNd: batch_matmul_nd
+
+  # Elementwise binary
+  Add: elementwise_binary
+  AddAiCore: elementwise_binary
+  Mul: elementwise_binary
+  MulAiCore: elementwise_binary
+  Sub: elementwise_binary
+  SubAiCore: elementwise_binary
+  Equal: elementwise_binary
+  FloorDiv: elementwise_binary
+  FloorMod: elementwise_binary
+  GreaterEqual: elementwise_binary
+  Less: elementwise_binary
+  LessAiCore: elementwise_binary
+  LogicalAnd: elementwise_binary
+  LogicalAndAiCore: elementwise_binary
+  MaskedFill: elementwise_binary
+  MaskedFillAiCore: elementwise_binary
+  NotEqual: elementwise_binary
+  RealDiv: elementwise_binary
+  muls_add_kernel: elementwise_binary
+
+  # Elementwise unary
+  Cast: elementwise_unary
+  CastAiCore: elementwise_unary
+  ZerosLike: elementwise_unary
+  Fill: elementwise_unary
+  Log: elementwise_unary
+  LogicalNot: elementwise_unary
+  LogicalNotAiCore: elementwise_unary
+  Muls: elementwise_unary
+  Neg: elementwise_unary
+  SoftmaxV2: elementwise_unary
+  TensorMove: tensor_move
+  Pack: elementwise_unary
+  Cumsum: elementwise_unary
+  LinearIndex: elementwise_unary
+  ReduceSum: elementwise_unary
+
+  # Norm
+  RmsNorm: rmsnorm
+  AddRmsNorm: add_rmsnorm
+  InplaceAddRmsNorm: add_rmsnorm
+  AddRmsNormBias: add_rmsnorm_bias
+  AddRmsNormDynamicQuant: add_rmsnorm_dynamic_quant
+  AddRmsNormDynamicQuantAiCore: add_rmsnorm_dynamic_quant
+
+  # Quantize
+  AscendQuantV2: quant
+  AscendQuantV2Aicore: quant
+  DynamicQuant: dynamic_quant
+
+  # Activation
+  SwiGlu: swiglu
+
+  # RoPE
+  InterleaveRope: interleave_rope
+  _triton_rope: triton_rope
+  split_qkv_rmsnorm_rope_kernel: split_qkv_rmsnorm_rope
+  split_qkv_rmsnorm_rope_kernel_0: split_qkv_rmsnorm_rope
+  KvRmsNormRopeCache: kv_rmsnorm_rope_cache
+
+  # Attention
+  FusedInferAttentionScore: fused_attention
+  AttentionUpdate: attention_update
+
+  # Gather / Index
+  GatherV2: gather
+  GatherV2AiCore: gather
+  GatherV3: gather_v3
+  Index: index
+
+  # Shape manipulation
+  Slice: slice_op
+  SliceAiCore: slice_op
+  Transpose: transpose_op
+  TransposeAiCore: transpose_op
+  AsStrided: as_strided
+  AsStridedAiCore: as_strided
+  BroadcastTo: broadcast_to
+  ConcatD: concat
+  Tile: tile
+  PadV3: pad
+  PadV3AiCore: pad
+  Sort: sort_op
+
+  # Sampling
+  ArgMaxV2: argmax
+  ApplyTopKTopPCustom: apply_topk_top_p
+  ApplyTopKTopPWithSorted: apply_topk_top_p
+
+  # KV Cache
+  ReshapeAndCacheNdKernel: reshape_and_cache
+  reshape_and_cache_200000000: reshape_and_cache
+  PagedCacheLoadNdKernel: paged_cache_load
+
+  # MoE
+  GroupedMatmul: grouped_matmul
+  GroupedMatmulSwigluQuant: grouped_matmul
+  DispatchFFNCombine: dispatch_ffn_combine
+  MoeGatingTopK: moe_gating_topk

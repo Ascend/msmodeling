@@ -1,0 +1,30 @@
+model_config:
+  name: Qwen/Qwen3-32B
+  num_mtp_tokens: 0
+  quantize_linear_action: W8A8_DYNAMIC
+  quantize_lmhead: False
+  mxfp4_group_size: 32
+  quantize_attention_action: DISABLED
+  do_compile: False
+  allow_graph_break: False
+  dump_input_shapes: False
+  chrome_trace: null
+  enable_multi_process: False
+  num_processes: 10
+  predict_steps: 20
+  enable_interpolate: True
+  interpolation_seed: 1234
+  enable_preprocessing_modeling: True
+  enable_kv_transfer_modeling: True
+
+load_gen:
+  load_gen_type: fixed_length
+  num_requests: 500
+  num_input_tokens: 3500
+  num_output_tokens: 1500
+  request_rate: 2.0
+
+serving_config:
+  max_concurrency: 100
+  block_size: 128
+  max_tokens_budget: 8192

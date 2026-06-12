@@ -1,0 +1,8 @@
+{
+  "source": "tests/helpers/tests/fixtures/latency_sample_measurements.json",
+  "recorded_at": "synthetic-helper-fixture-v1",
+  "measurements": {
+    "ttft_ms": 20.3,
+    "tpot_ms": 1.9
+  }
+}

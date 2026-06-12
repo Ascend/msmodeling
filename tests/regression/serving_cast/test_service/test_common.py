@@ -1,0 +1,31 @@
+class SimpleArgs:
+    def __init__(self):
+        self.model_id = "Qwen/Qwen3-8B"
+        self.device = "TEST_DEVICE"
+        self.compile = True
+        self.compile_allow_graph_break = False
+        self.num_mtp_tokens = 0
+        self.mtp_acceptance_rate = [0.9, 0.8]
+        self.quantize_linear_action = "DISABLED"
+        self.mxfp4_group_size = 128
+        self.quantize_attention_action = "DISABLED"
+        self.max_batched_tokens = 2048
+        self.input_length = 100
+        self.output_length = 100
+        self.ttft_limits = None
+        self.tpot_limits = 100
+        self.disagg = False
+        self.tp_sizes = []
+        self.ep_sizes = None
+        self.moe_dp_sizes = None
+        self.num_devices = 1
+        self.batch_range = None
+        self.log_level = "INFO"
+        self.image_batch_size = None
+        self.image_height = 520
+        self.image_width = 520
+        self.prefill_devices_per_instance = None
+        self.decode_devices_per_instance = None
+        self.enable_optimize_prefill_decode_ratio = False
+        self.prefix_cache_hit_rate = 0.0
+        self.concurrency_search_strategy = "exponential"

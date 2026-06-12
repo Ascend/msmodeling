@@ -1,0 +1,47 @@
+name: ✨ Feature request
+description: 新功能的讨论提案
+title: "[Feature]: "
+labels: ["feature"]
+body:
+- type: textarea
+  id: problem
+  attributes:
+    label: Problem/Pain Point Description | 问题/痛点描述
+    description: Why can the current design not meet the needs? Is it related to specific scenarios? | 为何当前设计无法满足需求？是否与特定场景相关？
+  validations:
+    required: true
+- type: textarea
+  id: solution
+  attributes:
+    label: Proposed Solution | 建议方案
+    description: Describe the envisioned solution or optimization direction | 描述解决方案或优化方向
+  validations:
+    required: true
+- type: textarea
+  id: alternatives
+  attributes:
+    label: Alternative Solutions | 替代方案
+    description: Have you considered other implementation methods? | 是否考虑过其他实现方法？
+    placeholder: E.g., Implementation via extended plugins vs. modifying core code | 例如，通过扩展插件实现 vs. 修改核心代码
+  validations:
+    required: false
+- type: textarea
+  id: value
+  attributes:
+    label: Expected Value | 预期价值
+    description: Which user groups will benefit from this feature? How will it improve the experience? | 哪些用户组将从该功能受益？它将如何改进用户体验？
+  validations:
+    required: true
+- type: checkboxes
+  id: contribution
+  attributes:
+    label: Contribution Intent | 贡献意向
+    options:
+      - label: "I am willing to participate in the development or testing of this feature | 我愿意参与此功能的开发或测试"
+        required: false
+- type: markdown
+  attributes:
+    value: |
+      Welcome to join the community and thank you for your contribution 🎉!
+
+      欢迎加入社区，感谢您对社区的贡献 🎉!

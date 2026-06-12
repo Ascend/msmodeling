@@ -1,0 +1,89 @@
+minimum_pre_commit_version: 4.0.0
+exclude: ^(LICENSE|docs/|.*/fixtures/|.*/assets/)|\.(html|csv|svg)|uv\.lock$
+
+default_stages: [pre-commit]
+ci:
+  autofix_prs: false
+  autoupdate_schedule: monthly
+
+repos:
+  # Core pre-commit-hooks
+  - repo: https://gitcode.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+      - id: end-of-file-fixer
+        types: [python]
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+      - id: check-yaml
+        args: ["--allow-multiple-documents"]
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+      - id: check-added-large-files
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+      - id: check-merge-conflict
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+      - id: detect-private-key
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+      - id: check-json
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+
+  # -------------------------- Python checks --------------------------
+  # Ruff reads pre-commit/pyproject.toml
+  - repo: https://gitcode.com/gh_mirrors/ru/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff-check
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+        args: ["--config", "pre-commit/pyproject.toml", "--output-format", "github", "--fix"]
+        types: [python]
+      - id: ruff-format
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+        args: ["--config", "pre-commit/pyproject.toml"]
+        types: [python]
+
+  # codespell
+  - repo: https://gitcode.com/gh_mirrors/co/codespell
+    rev: v2.4.1
+    hooks:
+      - id: codespell
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+        args: [
+            "-L",
+            "CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,CLOS",
+            "--skip",
+            "*.toml,*.py,*.cpp,*.hpp,*.c,*.h",
+          ]
+
+  # pylint uses pre-commit/pyproject.toml as rcfile
+  - repo: https://gitcode.com/gh_mirrors/pyl/pylint
+    rev: v4.0.5
+    hooks:
+      - id: pylint
+        name: pylint (Python code quality check)
+        types: [python]
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/|tests/regression/scripts/helpers/)
+        args: ["--rcfile=pre-commit/pyproject.toml"]
+        verbose: false
+
+  # Bandit uses pre-commit/pyproject.toml
+  - repo: https://gitcode.com/gh_mirrors/ba/bandit
+    rev: 1.9.4
+    hooks:
+      - id: bandit
+        name: bandit (Python security checks)
+        additional_dependencies: ["bandit[toml]"]
+        types: [python]
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+        args: [
+          "--config=pre-commit/pyproject.toml",
+          "--quiet",
+        ]
+
+  # typos
+  - repo: https://gitcode.com/gh_mirrors/ty/typos
+    rev: v1.32.0
+    hooks:
+      - id: typos
+        exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
+        args: ["--force-exclude", "--config", "pre-commit/typos.toml"]

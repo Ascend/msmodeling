@@ -1,0 +1,49 @@
+name: 📜 Request for comments (RFC)
+description: 征集重大架构调整的反馈意见
+title: "[RFC]: "
+labels: ["rfc"]
+
+body:
+- type: markdown
+  attributes:
+    value: |
+      **Before submitting a proposal, please first search the warehouse to see if there are any identical proposals. If so, please discuss them in the same proposal.**
+
+      **提交提案之前，请先检索仓库内是否已有相同的提案，如已有请在同一提案中进行讨论。**
+- type: textarea
+  attributes:
+    label: Problem Statement | 概述
+    description: Explain background and the problems to address. Summarize the proposal concisely in 1-2 sentences. |
+                 解释问题背景，并用一两句话清晰概括整个提案。
+    placeholder: e.g.:Resolve the inconsistency of xx configurations and consolidate the access entries of xx and xx into xx. |
+                 例：解决xx配置不归一的问题，使xx和xx的入口收编至xx。
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: Proposed solution | 提议方案
+    placeholder: |
+      Combine text and diagrams as needed. Clarify the following key aspects of the proposed solution:
+      Module Changes: Specify which modules need to be added or modified
+      Interface Definitions: Define input and output parameters for all interfaces
+      Integration Logic: Describe how the solution interacts with existing modules
+      Key Algorithms: Outline any critical algorithms or implementation approaches
+      可以图文结合，请重点澄清以下方案细节：需要在哪里添加什么模块，接口是什么（输入输出），和已有模块的关系是什么（交互），以及核心算法（如有）。
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: Plan | 实施计划
+    description: Describe the implementation plan. | 描述实施计划。
+    placeholder: |
+      - Rough timeline, milestones, and phased rollout strategy | 大致的时间线、里程碑、如何分阶段上线
+      - Test plan | 测试计划
+      - Follow-up considerations, e.g., impacts on existing systems, security hardening, performance optimization, etc. | 后续需考虑的问题，如对现有系统的影响、安全加固、性能等
+  validations:
+    required: true
+- type: markdown
+  attributes:
+    value: |
+      Welcome to join the community and thank you for your contribution 🎉!
+
+      欢迎加入社区，感谢您对社区的贡献 🎉!

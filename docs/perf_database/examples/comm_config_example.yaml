@@ -1,0 +1,83 @@
+# comm_config.yaml — 通信配置表
+# 路径: tensor_cast/performance_model/perf_database/data/{device}/hccl/{cann_version}/comm_config.yaml
+#
+# 映射验证来源:
+#   - DSV3 Decode Profiling (32 卡): hcom_allReduce_(82x), HcomAllGather(164x),
+#     HcomReduceScatter(82x), hcom_alltoallv_(82x), hcom_allGather_(41x), allgatherAicpuKernel(41x)
+#   - Qwen3-30B Prefill Profiling (16 卡): hcom_allReduce_(276x), hcom_allGather_(8x)
+#   - op-plugin: 仅有 fused MC2 变体 (npu_mm_all_reduce_base, npu_all_gather_base_mm 等)
+#     standalone collectives 直接走 HCCL, 不经过 op-plugin
+
+device: ATLAS_800_A3_752T_128G_DIE
+cann_version: "8.1.RC1"
+collection_date: "2026-03-04"
+
+# ============================================================================
+#                             拓扑 (Topology)
+# ============================================================================
+# ATLAS 800 A3: grid_shape 维度从外到内 [pod 数, node/pod, die/node]
+
+topology:
+  grid_shape: [48, 8, 2]
+  tiers:
+    0: {name: "inter_pod", bandwidth_gbps: 196, latency_us: 5.5, type: "CLOS"}
+    1: {name: "intra_pod", bandwidth_gbps: 196, latency_us: 0.5, type: "CLOS"}
+    2: {name: "die_level", bandwidth_gbps: 224, latency_us: 0.2, type: "SIO"}
+
+
+# ============================================================================
+#                  通信算子映射 (comm_operator_mappings)
+# ============================================================================
+# 基于 Profiling 实际观察到的 HCCL kernel type
+# kernel_type_variants 列出同一逻辑操作的不同 NPU kernel 名称变体
+
+comm_operator_mappings:
+
+  "tensor_cast.all_reduce.default":
+    kernel_type: hcom_allReduce_
+    notes: >
+      [HIGH] HCCL direct; standalone all_reduce.
+      MC2 fused npu_mm_all_reduce_base 不产生独立 hcom_allReduce_.
+      Profiling: DSV3(82x), Qwen3(276x) — 唯一观察到的变体.
+    hccl_test_op: allreduce
+
+  "tensor_cast.all_gather.default":
+    kernel_type: hcom_allGather_
+    notes: >
+      [MEDIUM] HCCL direct; 三种 profiling 变体:
+      hcom_allGather_(41x DSV3, 8x Qwen3, standalone PyTorch dispatch),
+      HcomAllGather(164x DSV3, graph-compiled torchair, 可能来自 MC2 pipeline 分片),
+      allgatherAicpuKernel(41x DSV3, AICPU 协调路径, MC2 ai_cpu comm_mode).
+      TC standalone all_gather → hcom_allGather_; 聚合查询时应包含所有变体.
+    hccl_test_op: allgather
+
+  "tensor_cast.reduce_scatter.default":
+    kernel_type: HcomReduceScatter
+    notes: >
+      [MEDIUM] HCCL direct; DSV3 仅见 HcomReduceScatter(82x, CamelCase = graph-compiled torchair);
+      hcom_reduceScatter_(snake_case) 可能在非 torchair 场景出现.
+      Qwen3 Prefill 无 reduce_scatter (使用 all_reduce for TP).
+    hccl_test_op: reducescatter
+
+  "tensor_cast.all_to_all.default":
+    kernel_type: hcom_alltoallv_
+    notes: >
+      [HIGH] HCCL direct; TC 使用 variable split sizes → alltoallv (非 fixed alltoall).
+      op-plugin 有融合 npu_gmm_alltoallv (aclnnGroupedMatMulAlltoAllv), TC 独立建模.
+      Profiling: DSV3 Decode hcom_alltoallv_(82x = 2x41 MoE layers, dispatch+combine 各一次).
+    hccl_test_op: alltoall
+
+
+# ============================================================================
+#             HCCL 测试工具说明 (microbenchmark 数据采集)
+# ============================================================================
+# 文档: https://www.hiascend.com/document/detail/zh/mindstudio/70RC1/mscommandtoolug/mscommandug/auxiliarydevtool_0017.html
+#
+# 基本用法:
+#   hccl_test -b <min_bytes> -e <max_bytes> -f <factor> -p <operation>
+#
+# 推荐采集矩阵:
+#   - 设备数: [2, 4, 8, 16, 32, 64]
+#   - Message size: 1KB ~ 1GB (2x 递增)
+#   - 数据类型: [BF16, FP16, INT8, FP8]
+#   - 拓扑层级: die_level (2 dies), intra_pod (8 dies), inter_pod (跨 pod)

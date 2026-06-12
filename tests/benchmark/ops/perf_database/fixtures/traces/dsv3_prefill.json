@@ -1,0 +1,2719 @@
+{
+  "model": "deepseek-ai/DeepSeek-V3",
+  "scenario": "prefill",
+  "total_ops": 18360,
+  "unique_ops": 46,
+  "mapped_count": 40,
+  "unmapped_count": 6,
+  "unmapped_ops": [
+    "aten.bitwise_and.Tensor",
+    "aten.constant_pad_nd.default",
+    "aten.copy.default",
+    "aten.ge.Scalar",
+    "aten.lt.Scalar",
+    "aten.sub.Tensor"
+  ],
+  "mapped_ops": [
+    "aten.add.Tensor",
+    "aten.alias.default",
+    "aten.bitwise_not.default",
+    "aten.cat.default",
+    "aten.clone.default",
+    "aten.copy_.default",
+    "aten.div.Tensor",
+    "aten.embedding.default",
+    "aten.expand.default",
+    "aten.full.default",
+    "aten.gather.default",
+    "aten.index.Tensor",
+    "aten.mm.default",
+    "aten.mul.Tensor",
+    "aten.scatter.value",
+    "aten.sigmoid.default",
+    "aten.slice.Tensor",
+    "aten.split.Tensor",
+    "aten.split_with_sizes.default",
+    "aten.sum.dim_IntList",
+    "aten.topk.default",
+    "aten.unsqueeze.default",
+    "aten.view.default",
+    "aten.where.self",
+    "prims.convert_element_type.default",
+    "tensor_cast.add_rms_norm2.default",
+    "tensor_cast.add_rms_norm_quant2.default",
+    "tensor_cast.all_gather.default",
+    "tensor_cast.all_reduce.default",
+    "tensor_cast.all_to_all.default",
+    "tensor_cast.concat_and_cache_mla.default",
+    "tensor_cast.mlapo_quant.default",
+    "tensor_cast.multihead_latent_attention.default",
+    "tensor_cast.init_routing_v2.default",
+    "tensor_cast.quantize.default",
+    "tensor_cast.rms_norm.default",
+    "tensor_cast.static_quant_linear.default",
+    "tensor_cast.static_quant_linear_all_reduce.default",
+    "tensor_cast.swiglu.default",
+    "tensor_cast.unpermute_tokens.default"
+  ],
+  "ops": [
+    {
+      "op_name": "tensor_cast.all_gather.default",
+      "count": 2843,
+      "total_duration_us": 60739.0,
+      "unique_shape_variants": 4,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(16, 2048)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(128, 2048)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(16, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(128, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(2048, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 1, 16160)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 1, 129280)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "hcom_allGather_",
+      "zero_cost": false,
+      "composite": false,
+      "category": "communication",
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.static_quant_linear.default",
+      "count": 1975,
+      "total_duration_us": 51856.0,
+      "unique_shape_variants": 5,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 7168)",
+            "(7168, 4608)"
+          ],
+          "input_dtypes": [
+            "int8",
+            "int8"
+          ],
+          "output_shapes": [
+            "(256, 4608)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(16, 7168)",
+            "(7168, 4096)"
+          ],
+          "input_dtypes": [
+            "int8",
+            "int8"
+          ],
+          "output_shapes": [
+            "(16, 4096)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(16, 2048)",
+            "(2048, 7168)"
+          ],
+          "input_dtypes": [
+            "int8",
+            "int8"
+          ],
+          "output_shapes": [
+            "(16, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 7168)",
+            "(7168, 4096)"
+          ],
+          "input_dtypes": [
+            "int8",
+            "int8"
+          ],
+          "output_shapes": [
+            "(256, 4096)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 2048)",
+            "(2048, 7168)"
+          ],
+          "input_dtypes": [
+            "int8",
+            "int8"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "QuantBatchMatmulV3",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.all_to_all.default",
+      "count": 116,
+      "total_duration_us": 26216.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(2048, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(2048, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "hcom_alltoallv_",
+      "zero_cost": false,
+      "composite": false,
+      "category": "communication",
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.mul.Tensor",
+      "count": 117,
+      "total_duration_us": 5055.0,
+      "unique_shape_variants": 3,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 7168)",
+            "(1, 256, 1)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 8)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(256, 8, 7168)",
+            "(256, 8, 1)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 8, 7168)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "Mul",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.quantize.default",
+      "count": 2036,
+      "total_duration_us": 4487.0,
+      "unique_shape_variants": 6,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 16, 128)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 16, 128)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 256, 2304)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 2304)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(16, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(16, 7168)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(16, 2048)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(16, 2048)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 2048)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 2048)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "AscendQuantV2",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.static_quant_linear_all_reduce.default",
+      "count": 64,
+      "total_duration_us": 4096.0,
+      "unique_shape_variants": 2,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 2048)",
+            "(2048, 7168)"
+          ],
+          "input_dtypes": [
+            "int8",
+            "int8"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 2304)",
+            "(2304, 7168)"
+          ],
+          "input_dtypes": [
+            "int8",
+            "int8"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": true,
+      "category": null,
+      "sub_kernels": [
+        "QuantBatchMatmulV3",
+        "hcom_allReduce_"
+      ]
+    },
+    {
+      "op_name": "aten.sum.dim_IntList",
+      "count": 174,
+      "total_duration_us": 4002.0,
+      "unique_shape_variants": 3,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 8, 2)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(256, 8)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 1)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(256, 8, 7168)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "ReduceSumD",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.cat.default",
+      "count": 58,
+      "total_duration_us": 3364.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(2048, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "ConcatD",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.unpermute_tokens.default",
+      "count": 58,
+      "total_duration_us": 3364.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(2048, 7168)",
+            "(256, 8)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "int64"
+          ],
+          "output_shapes": [
+            "(256, 8, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "MoeDistributeCombineV2",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.swiglu.default",
+      "count": 989,
+      "total_duration_us": 3089.0,
+      "unique_shape_variants": 3,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 2304)",
+            "(1, 256, 2304)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 2304)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(128, 2048)",
+            "(128, 2048)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(128, 2048)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 2048)",
+            "(256, 2048)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 2048)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "SwiGlu",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.add.Tensor",
+      "count": 235,
+      "total_duration_us": 2066.0,
+      "unique_shape_variants": 5,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 7168)",
+            "(256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 256)",
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 256)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(256, 1)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 1)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(256, 7168)",
+            "(256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(1, 256, 7168)",
+            "(1, 256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "Add",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.constant_pad_nd.default",
+      "count": 58,
+      "total_duration_us": 1914.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(2048, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": false,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.init_routing_v2.default",
+      "count": 58,
+      "total_duration_us": 1914.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 7168)",
+            "(256, 8)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "int64"
+          ],
+          "output_shapes": [
+            "(2048, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "MoeDistributeDispatchV2",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.copy.default",
+      "count": 928,
+      "total_duration_us": 1856.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(16, 2048)",
+            "(16, 2048)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(16, 2048)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": false,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.mlapo_quant.default",
+      "count": 61,
+      "total_duration_us": 1586.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 7168)",
+            "(1, 256, 64)",
+            "(1, 256, 64)",
+            "(1536, 7168)",
+            "(1536)",
+            "(384, 1536)",
+            "(576, 7168)",
+            "(512)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16",
+            "float16",
+            "int8",
+            "float16",
+            "int8",
+            "int8",
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 16, 192)",
+            "(256, 512)",
+            "(256, 64)"
+          ],
+          "output_dtypes": [
+            "float16",
+            "float16",
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": true,
+      "category": null,
+      "sub_kernels": [
+        "QuantBatchMatmulV3",
+        "KvRmsNormRopeCache"
+      ]
+    },
+    {
+      "op_name": "prims.convert_element_type.default",
+      "count": 175,
+      "total_duration_us": 1510.0,
+      "unique_shape_variants": 4,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 1)"
+          ],
+          "input_dtypes": [
+            "bool"
+          ],
+          "output_shapes": [
+            "(1, 256, 1)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(256, 256)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 256)"
+          ],
+          "output_dtypes": [
+            "bool"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 7168)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.mm.default",
+      "count": 59,
+      "total_duration_us": 1327.0,
+      "unique_shape_variants": 2,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 7168)",
+            "(7168, 256)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 256)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(1, 7168)",
+            "(7168, 16160)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 16160)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "MatMulV2",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.add_rms_norm2.default",
+      "count": 58,
+      "total_duration_us": 928.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 7168)",
+            "(256, 7168)",
+            "(7168)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)",
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16",
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "AddRmsNorm",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.multihead_latent_attention.default",
+      "count": 61,
+      "total_duration_us": 732.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 16, 192)",
+            "(3, 128, 576)",
+            "(1, 2)",
+            "(16, 128, 512)",
+            "(16, 512, 128)",
+            "(512, 4096)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16",
+            "int64",
+            "float16",
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 16, 128)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": true,
+      "category": null,
+      "sub_kernels": [
+        "TransposeBatchMatMul",
+        "FusedInferAttentionScore"
+      ]
+    },
+    {
+      "op_name": "tensor_cast.rms_norm.default",
+      "count": 62,
+      "total_duration_us": 558.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 7168)",
+            "(7168)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "RmsNorm",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.topk.default",
+      "count": 174,
+      "total_duration_us": 348.0,
+      "unique_shape_variants": 3,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 8, 32)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8, 2)",
+            "(256, 8, 2)"
+          ],
+          "output_dtypes": [
+            "int64"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 8)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 4)",
+            "(256, 4)"
+          ],
+          "output_dtypes": [
+            "int64"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 256)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8)",
+            "(256, 8)"
+          ],
+          "output_dtypes": [
+            "int64"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "TopKV2",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.full.default",
+      "count": 117,
+      "total_duration_us": 234.0,
+      "unique_shape_variants": 3,
+      "shape_variants": [
+        {
+          "input_shapes": [],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(1, 256)"
+          ],
+          "output_dtypes": [
+            "int64"
+          ]
+        },
+        {
+          "input_shapes": [],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(16, 2048)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.concat_and_cache_mla.default",
+      "count": 61,
+      "total_duration_us": 183.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 512)",
+            "(256, 64)",
+            "(3, 128, 576)",
+            "(256)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16",
+            "float16",
+            "int64"
+          ],
+          "output_shapes": [],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "ReshapeAndCacheNdKernel",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.where.self",
+      "count": 59,
+      "total_duration_us": 176.0,
+      "unique_shape_variants": 2,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256)",
+            "(1, 256)",
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "bool",
+            "int64",
+            "int64"
+          ],
+          "output_shapes": [
+            "(1, 256)"
+          ],
+          "output_dtypes": [
+            "int64"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 256)",
+            "()",
+            "(256, 256)"
+          ],
+          "input_dtypes": [
+            "bool"
+          ],
+          "output_shapes": [
+            "(256, 256)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "SelectV2",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.sigmoid.default",
+      "count": 58,
+      "total_duration_us": 116.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 256)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 256)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "Sigmoid",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.scatter.value",
+      "count": 58,
+      "total_duration_us": 116.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 8)",
+            "(256, 4)"
+          ],
+          "input_dtypes": [
+            "int64"
+          ],
+          "output_shapes": [
+            "(256, 8)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "ScatterElements",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.clone.default",
+      "count": 58,
+      "total_duration_us": 116.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 8, 32)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8, 32)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "TensorMove",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.bitwise_not.default",
+      "count": 58,
+      "total_duration_us": 116.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 256)"
+          ],
+          "input_dtypes": [
+            "bool"
+          ],
+          "output_shapes": [
+            "(256, 256)"
+          ],
+          "output_dtypes": [
+            "bool"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "BitwiseNot",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.gather.default",
+      "count": 58,
+      "total_duration_us": 116.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 256)",
+            "(256, 8)"
+          ],
+          "input_dtypes": [
+            "int64"
+          ],
+          "output_shapes": [
+            "(256, 8)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "GatherV2",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.div.Tensor",
+      "count": 58,
+      "total_duration_us": 116.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 8)",
+            "(256, 1)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "Div",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.all_reduce.default",
+      "count": 1,
+      "total_duration_us": 64.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "hcom_allReduce_",
+      "zero_cost": false,
+      "composite": false,
+      "category": "communication",
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.index.Tensor",
+      "count": 2,
+      "total_duration_us": 47.0,
+      "unique_shape_variants": 2,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(163840, 128)",
+            "(256)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "int64"
+          ],
+          "output_shapes": [
+            "(256, 128)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 256, 7168)",
+            "(1)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "int64"
+          ],
+          "output_shapes": [
+            "(1, 1, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "Index",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "tensor_cast.add_rms_norm_quant2.default",
+      "count": 3,
+      "total_duration_us": 42.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 7168)",
+            "(256, 7168)",
+            "(7168)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)",
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "int8",
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "AddRmsNormQuant",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.embedding.default",
+      "count": 1,
+      "total_duration_us": 9.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(16160, 7168)",
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "int64"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "GatherV2",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.copy_.default",
+      "count": 2,
+      "total_duration_us": 6.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(3, 128, 576)",
+            "(3, 128, 576)"
+          ],
+          "input_dtypes": [
+            "float16",
+            "float16"
+          ],
+          "output_shapes": [
+            "(3, 128, 576)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": "TensorMove",
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.ge.Scalar",
+      "count": 1,
+      "total_duration_us": 2.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "int64"
+          ],
+          "output_shapes": [
+            "(1, 256)"
+          ],
+          "output_dtypes": [
+            "bool"
+          ]
+        }
+      ],
+      "is_mapped": false,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.lt.Scalar",
+      "count": 1,
+      "total_duration_us": 2.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "int64"
+          ],
+          "output_shapes": [
+            "(1, 256)"
+          ],
+          "output_dtypes": [
+            "bool"
+          ]
+        }
+      ],
+      "is_mapped": false,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.bitwise_and.Tensor",
+      "count": 1,
+      "total_duration_us": 2.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256)",
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "bool",
+            "bool"
+          ],
+          "output_shapes": [
+            "(1, 256)"
+          ],
+          "output_dtypes": [
+            "bool"
+          ]
+        }
+      ],
+      "is_mapped": false,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.sub.Tensor",
+      "count": 1,
+      "total_duration_us": 2.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "int64"
+          ],
+          "output_shapes": [
+            "(1, 256)"
+          ],
+          "output_dtypes": [
+            "int64"
+          ]
+        }
+      ],
+      "is_mapped": false,
+      "kernel_type": null,
+      "zero_cost": false,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.unsqueeze.default",
+      "count": 117,
+      "total_duration_us": 0.0,
+      "unique_shape_variants": 2,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "bool"
+          ],
+          "output_shapes": [
+            "(1, 256, 1)"
+          ],
+          "output_dtypes": [
+            "bool"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 8)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8, 1)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.view.default",
+      "count": 431,
+      "total_duration_us": 0.0,
+      "unique_shape_variants": 13,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256)"
+          ],
+          "input_dtypes": [
+            "int64"
+          ],
+          "output_shapes": [
+            "(256)"
+          ],
+          "output_dtypes": [
+            "int64"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 128)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 128)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 16, 128)"
+          ],
+          "input_dtypes": [
+            "int8"
+          ],
+          "output_shapes": [
+            "(1, 256, 2048)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 256, 2048)"
+          ],
+          "input_dtypes": [
+            "int8"
+          ],
+          "output_shapes": [
+            "(256, 2048)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "input_dtypes": [
+            "int8"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 2304)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 2304)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 256, 2304)"
+          ],
+          "input_dtypes": [
+            "int8"
+          ],
+          "output_shapes": [
+            "(256, 2304)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 256)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8, 32)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(256, 8, 32)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 256)"
+          ],
+          "output_dtypes": []
+        },
+        {
+          "input_shapes": [
+            "(256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 1, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 16160)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 1, 16160)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.split.Tensor",
+      "count": 1,
+      "total_duration_us": 0.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(1, 256, 128)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 64)",
+            "(1, 256, 64)"
+          ],
+          "output_dtypes": [
+            "float16",
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.slice.Tensor",
+      "count": 2036,
+      "total_duration_us": 0.0,
+      "unique_shape_variants": 5,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(3072, 1536)"
+          ],
+          "input_dtypes": [
+            "int8"
+          ],
+          "output_shapes": [
+            "(384, 1536)"
+          ],
+          "output_dtypes": [
+            "int8"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(2048, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(128, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(16, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(128, 2048)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(16, 2048)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 256, 7168)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.split_with_sizes.default",
+      "count": 1975,
+      "total_duration_us": 0.0,
+      "unique_shape_variants": 5,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 4608)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 2304)",
+            "(256, 2304)"
+          ],
+          "output_dtypes": [
+            "float16",
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(2048, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)",
+            "(128, 7168)"
+          ],
+          "output_dtypes": [
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(16, 4096)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(16, 2048)",
+            "(16, 2048)"
+          ],
+          "output_dtypes": [
+            "float16",
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(128, 7168)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)",
+            "(8, 7168)"
+          ],
+          "output_dtypes": [
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16",
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(256, 4096)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(256, 2048)",
+            "(256, 2048)"
+          ],
+          "output_dtypes": [
+            "float16",
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.expand.default",
+      "count": 58,
+      "total_duration_us": 0.0,
+      "unique_shape_variants": 1,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(256, 8, 1)"
+          ],
+          "input_dtypes": [],
+          "output_shapes": [
+            "(256, 8, 32)"
+          ],
+          "output_dtypes": []
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    },
+    {
+      "op_name": "aten.alias.default",
+      "count": 2785,
+      "total_duration_us": 0.0,
+      "unique_shape_variants": 2,
+      "shape_variants": [
+        {
+          "input_shapes": [
+            "(16, 2048)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(16, 2048)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        },
+        {
+          "input_shapes": [
+            "(1, 1, 129280)"
+          ],
+          "input_dtypes": [
+            "float16"
+          ],
+          "output_shapes": [
+            "(1, 1, 129280)"
+          ],
+          "output_dtypes": [
+            "float16"
+          ]
+        }
+      ],
+      "is_mapped": true,
+      "kernel_type": null,
+      "zero_cost": true,
+      "composite": false,
+      "category": null,
+      "sub_kernels": null
+    }
+  ]
+}

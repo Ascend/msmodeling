@@ -1,0 +1,69 @@
+roots:
+  - cli/
+  - serving_cast/
+  - tensor_cast/
+  - web_ui/
+  - scripts/
+  - tools/
+
+exemptions:
+  sources:
+    - symbols:
+        - tools/perf_data_collection/grid_generator/model_configs.py::_fetch_from_huggingface
+      reason: "External HuggingFace config loading is covered by static fallback tests; no network dependency in PR UT."
+      applicant: Secluded_Ocean
+      approver: hexiaowu
+      deadline: 2026-06-30
+      ticket: "PR-252"
+
+    - symbols:
+        - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::build_row_case
+        - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::main
+        - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::debug_dfc_tensor_devices
+        - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::run_row
+        - tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py::execute_dfc_op
+      reason: "DispatchFFNCombine replay execution requires Ascend NPU/runtime; PR UT covers non-NPU argument, validation, and launch safety paths."
+      applicant: Secluded_Ocean
+      approver: hexiaowu
+      deadline: 2026-06-30
+      ticket: "PR-252"
+
+    - symbols:
+        - tools/perf_data_collection/op_replay/run_all_op.py::run_script_inprocess
+        - tools/perf_data_collection/op_replay/run_all_op.py::run_script
+        - tools/perf_data_collection/op_replay/run_all_op.py::main
+      reason: "Replay orchestration entry points run operator scripts and require runtime-specific integration; PR UT covers CLI argument propagation and subprocess command construction."
+      applicant: Secluded_Ocean
+      approver: hexiaowu
+      deadline: 2026-06-30
+      ticket: "PR-252"
+
+    - symbols:
+        - tools/perf_data_collection/start_microbench.py::run_msprof_per_op_fallback
+      reason: "Per-operator msprof fallback depends on Ascend profiler outputs; PR UT covers command construction and mocked msprof execution."
+      applicant: Secluded_Ocean
+      approver: hexiaowu
+      deadline: 2026-06-30
+      ticket: "PR-252"
+
+    - symbols:
+        - tensor_cast/core/input_generator.py::_resolve_decoder_attention_layer
+        - tensor_cast/core/input_generator.py::get_sparse_attention_indexer_cache_info
+        - tensor_cast/layers/deepseek_v4.py::DeepseekV4SparseAttention.build_tp_plan_extras
+        - tensor_cast/layers/deepseek_v4.py::DeepseekV4SparseAttention.build_o_proj_tp_plan_extras
+        - tensor_cast/layers/mla.py::tp_plan_module_path
+        - tensor_cast/layers/mla.py::tp_plan_nested_module_path
+      reason: "DeepSeek V4 sparse-attention helpers are covered by integration paths; dedicated unit tests pending."
+      applicant: deepseek_v4_adaptation
+      approver: liujiawang
+      deadline: 2026-12-31
+      ticket: deepseek-v4-ci-gate
+  tests: []
+
+test_discovery:
+  include:
+    - "**/test_*.py"
+    - "**/*_test.py"
+  exclude:
+    - "tests/helpers/**"
+    - "tests/assets/**"

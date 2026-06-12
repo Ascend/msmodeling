@@ -1,0 +1,3 @@
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Average Duration(us)
+"4,16,128;16,128,512",DT_BF16;DT_BF16,ND;ND,"4,16,512",DT_BF16,ND,15.0
+"4,16,512;16,512,128",DT_BF16;DT_BF16,ND;ND,"4,16,128",DT_BF16,ND,12.0

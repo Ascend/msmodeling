@@ -1,0 +1,41 @@
+name: 🗺️ Roadmap
+description: 提出项目路线图、阶段性目标或长期规划的建议
+title: "[Roadmap] "
+labels: ["roadmap"]
+body:
+- type: textarea
+  id: current_status
+  attributes:
+    label: Current Status Analysis | 当前状态分析
+    description: Please analyze the current development stage and status of the project | 请分析项目当前的发展阶段和现状
+    placeholder: |
+      例：当前项目已完成基础功能开发，下一阶段适合重点关注性能优化和生态建设
+  validations:
+    required: true
+- type: textarea
+  id: roadmap_vision
+  attributes:
+    label: Roadmap Vision | 路线图愿景
+    description: Please describe the envisioned project development direction and goals | 请描述您设想的项目发展方向和目标
+  validations:
+    required: true
+- type: textarea
+  id: phases
+  attributes:
+    label: Phased Goals | 阶段性目标
+    description: Please list the phased goals and time nodes you suggest | 请列出您建议的阶段性目标和时间节点
+  validations:
+    required: true
+- type: textarea
+  id: key_tasks
+  attributes:
+    label: Key Tasks | 关键任务
+    description: Please list the key tasks and milestones to implement the roadmap | 请列出实现路线图的关键任务和里程碑
+  validations:
+    required: true
+- type: markdown
+  attributes:
+    value: |
+      Welcome to join the community and thank you for your contribution 🎉!
+
+      欢迎加入社区，感谢您对社区的贡献 🎉!

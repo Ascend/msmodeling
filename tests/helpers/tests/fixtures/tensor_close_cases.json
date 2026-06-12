@@ -1,0 +1,38 @@
+{
+  "source": "tests/helpers/tests/fixtures/tensor_close_cases.json",
+  "cases": [
+    {
+      "meta": {
+        "model_id": "Qwen/Qwen3-32B",
+        "precision": "fp16",
+        "batch": 1
+      },
+      "actual": [1.0, 2.0001, 2.9999],
+      "expected": [1.0, 2.0, 3.0],
+      "atol": 0.001,
+      "rtol": 0.0
+    },
+    {
+      "meta": {
+        "model_id": "Qwen/Qwen3-32B",
+        "precision": "bf16",
+        "batch": 2
+      },
+      "actual": [0.5, 1.0002, 1.4998],
+      "expected": [0.5, 1.0, 1.5],
+      "atol": 0.001,
+      "rtol": 0.0
+    },
+    {
+      "meta": {
+        "model_id": "deepseek-ai/DeepSeek-V3.2",
+        "precision": "fp8",
+        "batch": 4
+      },
+      "actual": [10.0, 10.0003, 9.9997],
+      "expected": [10.0, 10.0, 10.0],
+      "atol": 0.001,
+      "rtol": 0.0
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+version: "0.15.0"
+device: ATLAS_800_A3_752T_128G_DIE
+cann_version: "8.5"
+
+interpolation_policy:
+  default_method: linear
+  kernel_overrides:
+    FusedInferAttentionScore:
+      shape_transform: sqrt
+
+operator_mappings:
+  "tensor_cast.attention.default":
+    kernel_type: FusedInferAttentionScore
+    query_mode: attention_special
+
+  "tensor_cast.attention_quant.default":
+    kernel_type: FusedInferAttentionScore
+    query_mode: attention_special
+
+  "tensor_cast.multihead_latent_attention.default":
+    composite: true
+    sub_kernels: [TransposeBatchMatMul, FusedInferAttentionScore, RINGMLAPrefillBF16Kernel]
+
+  "tensor_cast.multihead_latent_attention_quant.default":
+    composite: true
+    sub_kernels: [TransposeBatchMatMul, FusedInferAttentionScore, RINGMLAPrefillBF16Kernel]
+
+  "profiling.RINGMLAPrefillBF16Kernel":
+    kernel_type: RINGMLAPrefillBF16Kernel

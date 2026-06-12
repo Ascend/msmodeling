@@ -1,0 +1,2 @@
+tensor_cast/performance_model/profiling_database/data/**/*.csv filter=lfs diff=lfs merge=lfs -text
+docs/perf_database/forward_pass_traces/**/*.csv filter=lfs diff=lfs merge=lfs -text

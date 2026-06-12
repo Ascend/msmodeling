@@ -1,0 +1,77 @@
+name: 🐛 Bug report
+description: 反馈程序 Bug
+title: "[Bug] "
+labels: ["bug"]
+assignees: []  # 可添加默认指派用户，如 ["user1"]
+# 需替换快速入门文档，待补充FAQ文档
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 👉 遇到问题先看这里
+        ### 🌟 第一次使用工具遇到问题？
+        按[🚀 快速入门](https://gitcode.com/Ascend/msmodeling/blob/develop/tensor_cast/README.md)
+
+        ### ❓ 搜索历史issue，查看冷门的同类问题
+        在[🔖 Issue](https://gitcode.com/Ascend/msmodeling/issues)中搜索历史类似问题
+  - type: input
+    id: os_and_version
+    attributes:
+      label: 操作系统及版本
+      placeholder: 例：ubuntu 20.04等
+    validations:
+      required: true
+  - type: dropdown
+    id: python_version
+    attributes:
+      label: python版本
+      options:
+        - "3.10"
+        - "3.11"
+        - "3.12"
+        - "3.13"
+        - "其他"
+    validations:
+      required: true
+  - type: input
+    id: tool_version
+    attributes:
+      label: MsModeling 工具版本
+      description: 请附上工具版本文本
+      placeholder: 例:commit 0c7ea0ee6bc0a0596e173815d0a16b97c11dd5e9 (通过git log命令查看)
+    validations:
+      required: true
+  - type: dropdown
+    id: is_reproducible
+    attributes:
+      label: 是否必现
+      options:
+        - "是"
+        - "否"
+    validations:
+      required: true
+  - type: input
+    id: input_cmd
+    attributes:
+      label: MsModeling 执行命令
+      description: 请附上执行命令文本
+      placeholder: 例:python -m tensor_cast.scripts.text_generate deepseek-ai/DeepSeek-V3.1 --num-queries 2 --query-length 3500 --device TEST_DEVICE --compile
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: false
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 附错误日志文本(若截图请确保完成上传！）
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: >
+        欢迎加入社区，感谢您对社区的贡献 🎉!

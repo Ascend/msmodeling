@@ -1,0 +1,94 @@
+# Package ######################################################################
+
+[project]
+name = "liuren_modeling"
+description = "Light-weight full-system simulation framework"
+readme = "README.md"
+version = "0.2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "aenum>=3.1.17",
+    "blinker>=1.9.0",
+    "colorama>=0.4.6",
+    "compressed-tensors>=0.16.0",
+    "diffusers>=0.38.0",
+    "gradio>=6.7.0,<7",
+    "greenlet>=3.5.1",
+    "matplotlib>=3.10.9",
+    "modelscope>=1.37.1",
+    "openpyxl>=3.1.5",
+    "optree>=0.13.0",
+    "overrides>=7.7.0",
+    "pandas>=2.3.3",
+    "parameterized>=0.9.0",
+    "pillow>=12.2.0",
+    "plotext>=5.3.2",
+    "prettytable>=3.17.0",
+    "psutil>=7.2.2",
+    "pytest>=8.4.2",
+    "pytest-xdist>=3.8.0",
+    "pyyaml>=6.0.3",
+    "salabim>=26.0.6",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.15.3",
+    "strenum>=0.4.15",
+    "torch>=2.7,<=2.10",
+    "torchvision>=0.25.0",
+    "transformers>=5.3.0,<5.8.0",
+]
+
+# Test tools ###################################################################
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "nightly: do_compile=True large model cases, only run in nightly",
+    "npu: requires NPU hardware",
+    "network: requires live model Hub access (HuggingFace/ModelScope); excluded by default, run in nightly",
+]
+addopts = "-m 'not npu and not nightly and not network'"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:torch.jit._script",
+]
+
+# Coverage #####################################################################
+
+[tool.coverage.run]
+parallel = true
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/.pytest_cache/*",
+    "*/builtin_model/*"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "@abstractmethod",
+    "raise NotImplementedError",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[dependency-groups]
+lint = [
+    "pre-commit>=4.3.0",
+]
+ci = [
+    "pydantic>=2",
+    "pathspec>=0.12",
+    "pyyaml>=6",
+    "pytest-cov>=7.1.0",
+    "tomli>=2.0; python_version < '3.11'",
+    "types-colorama>=0.4.15",
+]

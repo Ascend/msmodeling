@@ -1,0 +1,7 @@
+.vscode
+**/__pycache__
+.idea
+
+# DT coverage report
+**/coverage
+.coverage*

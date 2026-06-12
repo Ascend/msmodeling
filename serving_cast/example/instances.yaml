@@ -1,0 +1,21 @@
+instance_groups:
+  - num_instances: 1
+    num_devices_per_instance: 1
+    device_type: TEST_DEVICE
+    pd_role: both
+    parallel_config:
+      world_size: 1
+      tp_size: 1
+      dp_size: 1
+      mlp_tp_size: null
+      mlp_dp_size: null
+      lmhead_tp_size: null
+      lmhead_dp_size: null
+      ep_size: 1
+      moe_tp_size: 1
+      moe_dp_size: 1
+    communication_config:
+      host2device_bandwidth: 10000000000  # 10 GB/s
+      host2device_rate: 0.5
+      device2device_bandwidth: 4000000000 # 4 GB/s
+      device2device_rate: 0.5

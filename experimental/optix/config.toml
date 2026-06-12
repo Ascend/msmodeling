@@ -1,0 +1,165 @@
+# ------------------------- Optimization Parameter Configuration ------------------------------------------------
+n_particles = 10
+iters = 5
+ttft_penalty = 1
+tpot_penalty = 0
+success_rate_penalty = 5.0
+ttft_slo = 1
+tpot_slo = 0.05
+service = "master"
+sample_size = 1000
+
+# ------------------------- Select top_k for fine-tuning ------------------------------------------------
+[data_storage]
+pso_top_k = 0
+# ------------------------- Runtime Log Anomaly Detection ------------------------------------------------
+# The log detection feature automatically monitors the running logs of the serving framework and benchmark tools,
+# adopting different handling strategies based on error types:
+# - Fatal errors (FATAL): immediately stop the scheduler, no retry
+# - Retryable errors (RETRYABLE): trigger the retry mechanism (up to 3 retries)
+# Configuration suggestions:
+# 1. Start from the strictest mode and gradually relax based on actual conditions
+# 2. Avoid overly broad patterns (e.g., "error", "exception", "failed")
+# 3. Prefer complete error messages (e.g., "out of memory" instead of "memory")
+# 4. Distinguish error patterns between the serving framework and benchmark tools
+#
+# Default configuration is empty, please configure the following based on actual scenarios:
+# [health_check.service_errors.fatal_patterns]
+# out_of_memory = ["out of memory", "OOM killed", "MemoryError"]
+# device_error = ["NPU error", "device fault", "Ascend error"]
+
+# [health_check.service_errors.retryable_patterns]
+# network_error = ["connection reset", "connection refused", "timeout"]
+# io_error = ["file not found", "permission denied", "IO error"]
+[health_check]
+log_snippet_length = 200
+[health_check.service_errors.fatal_patterns]
+out_of_memory = []
+device_error = []
+[health_check.service_errors.retryable_patterns]
+network_error = []
+io_error = []
+[health_check.benchmark_errors.fatal_patterns]
+out_of_memory = []
+device_error = []
+[health_check.benchmark_errors.retryable_patterns]
+network_error = []
+io_error = []
+
+# ------------------------- mindie Related Configuration ------------------------------------------------
+[mindie]
+[[mindie.target_field]]
+name = "max_batch_size"
+config_position = "BackendConfig.ScheduleConfig.maxBatchSize"
+min = 10
+max = 1000
+dtype = "int"
+[[mindie.target_field]]
+name = "max_prefill_batch_size"
+config_position = "BackendConfig.ScheduleConfig.maxPrefillBatchSize"  # This value must not exceed maxBatchSize
+min = 0.1
+max = 0.7
+dtype = "ratio"
+dtype_param = "max_batch_size"
+[[mindie.target_field]]
+name = "prefill_time_ms_per_req"
+config_position = "BackendConfig.ScheduleConfig.prefillTimeMsPerReq"
+min = 0
+max = 1000
+dtype = "range"
+dtype_param = 10
+[[mindie.target_field]]
+name = "decode_time_ms_per_req"
+config_position = "BackendConfig.ScheduleConfig.decodeTimeMsPerReq"
+min = 0
+max = 1000
+dtype = "range"
+dtype_param = 10
+[[mindie.target_field]]
+name = "support_select_batch"
+config_position = "BackendConfig.ScheduleConfig.supportSelectBatch"
+min = 0
+max = 1
+dtype = "bool"
+[[mindie.target_field]]
+name = "max_queue_deloy_mircroseconds"
+config_position = "BackendConfig.ScheduleConfig.maxQueueDelayMicroseconds"
+min = 500
+max = 1000000
+dtype = "range"
+dtype_param = 100
+[[mindie.target_field]]
+name = "max_preempt_count"
+config_position = "BackendConfig.ScheduleConfig.maxPreemptCount"
+min = 0
+max = 1
+dtype = "ratio"
+dtype_param = "max_batch_size"
+[[mindie.target_field]]
+name = "CONCURRENCY"  # Supports range 0-1000
+config_position = "env"
+min = 1
+max = 1001
+dtype = "int"
+value = 100
+[[mindie.target_field]]
+name = "REQUESTRATE" # Supports range 0-10000
+config_position = "env"
+min = 1
+max = 1001
+dtype = "float"
+value = 100
+
+# ------------------------- Benchmark Tool Related Configuration ------------------------------------------------
+[ais_bench.command]
+models = "models"
+datasets = "datasets"
+mode = "perf"
+num_prompts = 3000
+
+[vllm_benchmark.command]
+host = "127.0.0.1"
+port = "port"
+model = "model_path"
+served_model_name = "model_name"
+dataset_name = "dataset_name"
+num_prompts = 3000
+others = ""
+
+
+# ------------------------- vllm Related Configuration ------------------------------------------------
+[vllm]
+[vllm.command]
+host = "127.0.0.1"
+port = "port"
+model = "model_path"
+served_model_name = "model_name"
+others = ""
+[[vllm.target_field]]
+name = "MAX_NUM_BATCHED_TOKENS"
+config_position = "env"
+min = 8192
+max = 65536
+dtype = "int"
+value = 8192
+[[vllm.target_field]]
+name = "MAX_NUM_SEQS"
+config_position = "env"
+min = 32
+max = 512
+dtype = "int"
+value = 64
+[[vllm.target_field]]
+name = "CONCURRENCY"
+config_position = "env"
+min = 1
+max = 1000
+dtype = "int"
+value = 100
+[[vllm.target_field]]
+name = "REQUESTRATE"
+config_position = "env"
+min = 0
+max = 0
+dtype = "float"
+value = 0
