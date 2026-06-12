@@ -91,27 +91,90 @@ def test_product_paths_empty_input_returns_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_gate_new_tests_selects_new_test_paths() -> None:
+@pytest.fixture(autouse=True)
+def _stub_collect_test_node_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_collect(targets: tuple[str, ...] | list[str], *, marker: str) -> tuple[str, ...]:
+        return tuple(f"{path}::test_case" for path in targets)
+
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.collect_test_node_ids",
+        _fake_collect,
+    )
+
+
+def test_gate_new_tests_selects_collected_node_ids() -> None:
     cs = ChangeSet.build(new_test=("tests/smoke/test_a.py",))
-    result = gate_new_tests(cs)
-    assert result.tests == frozenset({"tests/smoke/test_a.py"})
+    result = gate_new_tests(cs, (), marker="not npu")
+    assert result.tests == frozenset({"tests/smoke/test_a.py::test_case"})
 
 
-def test_gate_new_tests_also_selects_modified_test_paths() -> None:
+def test_gate_new_tests_also_selects_modified_test_nodes() -> None:
     cs = ChangeSet.build(
         new_test=("tests/smoke/test_a.py",),
         modified_test=("tests/regression/cli/test_b.py",),
     )
-    result = gate_new_tests(cs)
-    assert result.tests == frozenset({"tests/smoke/test_a.py", "tests/regression/cli/test_b.py"})
-
-
-def test_gate_new_tests_returns_all_new_and_modified_paths_even_when_exempted() -> None:
-    cs = ChangeSet.build(
-        new_test=("tests/smoke/test_a.py", "tests/regression/nightly/test_x.py"),
+    result = gate_new_tests(cs, (), marker="not npu")
+    assert result.tests == frozenset(
+        {
+            "tests/smoke/test_a.py::test_case",
+            "tests/regression/cli/test_b.py::test_case",
+        }
     )
-    result = gate_new_tests(cs)
-    assert result.tests == frozenset({"tests/smoke/test_a.py", "tests/regression/nightly/test_x.py"})
+
+
+def test_gate_new_tests_skips_when_full_suite() -> None:
+    cs = ChangeSet.build(
+        config=("pyproject.toml",),
+        new_test=("tests/smoke/test_a.py",),
+    )
+    result = gate_new_tests(cs, (), marker="not npu", full_suite=True)
+    assert result.tests == frozenset()
+
+
+def test_gate_new_tests_batch_collects_all_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_collect(targets: list[str], *, marker: str) -> tuple[str, ...]:
+        calls.append(list(targets))
+        return tuple(f"{path}::test_case" for path in targets)
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.rules.collect_test_node_ids", _fake_collect)
+    cs = ChangeSet.build(
+        new_test=("tests/smoke/test_a.py",),
+        modified_test=("tests/regression/cli/test_b.py",),
+    )
+    result = gate_new_tests(cs, (), marker="not npu")
+    assert calls == [["tests/smoke/test_a.py", "tests/regression/cli/test_b.py"]]
+    assert result.tests == frozenset(
+        {
+            "tests/smoke/test_a.py::test_case",
+            "tests/regression/cli/test_b.py::test_case",
+        }
+    )
+
+
+def test_gate_new_tests_skips_file_when_all_nodes_exempt() -> None:
+    from scripts.helpers.ci_gate.gate_policy import TestExemption
+
+    cs = ChangeSet.build(new_test=("tests/smoke/test_a.py", "tests/regression/nightly/test_x.py"))
+    exemptions = (
+        TestExemption(
+            test_id="tests/smoke/test_a.py::test_case",
+            reason="x",
+            applicant="a",
+            approver="fangkai",
+            deadline=date(2099, 12, 31),
+        ),
+        TestExemption(
+            test_id="tests/regression/nightly/test_x.py::test_case",
+            reason="x",
+            applicant="a",
+            approver="fangkai",
+            deadline=date(2099, 12, 31),
+        ),
+    )
+    result = gate_new_tests(cs, exemptions, marker="not npu")
+    assert result.tests == frozenset()
 
 
 # ---------------------------------------------------------------------------

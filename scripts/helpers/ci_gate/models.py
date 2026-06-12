@@ -78,5 +78,27 @@ class Baseline:
 class CiGatePlan:
     blocking_errors: tuple[GateError, ...]
     deleted_source_tests: frozenset[str]
-    incremental_tests: frozenset[str]
+    changed_test_nodes: frozenset[str]
+    regression_tests: frozenset[str]
     full_suite: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TestRunWave:
+    """One pytest invocation: targets (node ids or directories) share a marker."""
+
+    targets: tuple[str, ...]
+    marker: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPlan:
+    """Deduplicated pytest schedule produced after policy checks pass."""
+
+    full_suite: bool
+    waves: tuple[TestRunWave, ...]
+    reasons: dict[str, str]
+
+    @property
+    def has_work(self) -> bool:
+        return bool(self.waves)

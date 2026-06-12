@@ -10,7 +10,7 @@ import importlib
 import json
 import shutil
 import subprocess
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -50,7 +50,7 @@ def _run_git(args: list[str], cwd: pathlib.Path) -> str:
 def fetch_env_info() -> EnvInfo:
     commit = _run_git(["rev-parse", "--short", "HEAD"], cwd=REPO_ROOT) or "unknown"
     branch = _run_git(["branch", "--show-current"], cwd=REPO_ROOT) or "unknown"
-    timestamp = datetime.now(UTC).isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     return EnvInfo(commit=commit, branch=branch, timestamp=timestamp)
 
 
@@ -82,6 +82,7 @@ def compute_weak_coverage_symbols(
     test_map_path: pathlib.Path | None,
     coverage_path: pathlib.Path,
     *,
+    mapping: dict[str, dict[str, list[str]]] | None = None,
     threshold: float = 0.50,
 ) -> tuple[str, ...]:
     """Return symbols with local coverage below *threshold*.
@@ -90,17 +91,18 @@ def compute_weak_coverage_symbols(
     to compute per-symbol line hit rates. Symbols below threshold
     are returned as ``"src_file::symbol_name"`` strings.
     """
-    if test_map_path is None or not test_map_path.is_file():
-        return ()
+    if mapping is None:
+        if test_map_path is None or not test_map_path.is_file():
+            return ()
 
-    try:
-        data = json.loads(test_map_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ()
+        try:
+            data = json.loads(test_map_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ()
 
-    mapping = data.get("map", data)
-    if not isinstance(mapping, dict):
-        return ()
+        mapping = data.get("map", data)
+        if not isinstance(mapping, dict):
+            return ()
 
     try:
         coverage_mod = importlib.import_module("coverage")

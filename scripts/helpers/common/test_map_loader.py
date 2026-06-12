@@ -8,7 +8,7 @@ from pathlib import Path
 from scripts.helpers._config import Config, ConfigError
 from scripts.helpers.ci_gate.gate_policy import load_gate_policy
 from scripts.helpers.ci_gate.models import Baseline
-from scripts.helpers.common.coverage_config import PRODUCT_SOURCE_PREFIXES
+from scripts.helpers.common.coverage_config import product_roots
 from scripts.helpers.common.test_map_config import resolve_test_map_path
 
 # ---------------------------------------------------------------------------
@@ -49,9 +49,10 @@ def _validate_map_keys(
 def load_test_map(
     cfg: Config,
     *,
-    roots: tuple[str, ...] = PRODUCT_SOURCE_PREFIXES,
+    roots: tuple[str, ...] | None = None,
 ) -> dict[str, dict[str, list[str]]]:
     """Load and validate test_map JSON from the path given in *cfg*."""
+    resolved_roots = roots if roots is not None else product_roots()
     map_path = resolve_test_map_path(cfg, must_exist=True)
     try:
         data = json.loads(map_path.read_text(encoding="utf-8"))
@@ -64,7 +65,7 @@ def load_test_map(
     inner = data.get("map")
     if not isinstance(inner, dict):
         raise ConfigError("test_map: map must be object")
-    return _validate_map_keys(inner, roots)
+    return _validate_map_keys(inner, resolved_roots)
 
 
 def load_baseline(repo_root: Path, cfg: Config) -> Baseline:

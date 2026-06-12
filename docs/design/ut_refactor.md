@@ -33,7 +33,7 @@ Layer selection is directory-driven. Global pytest `addopts` excludes `npu`, `ni
 | Marker | Semantics | Relationship with Directory |
 |--------|------|------------|
 | None | Default case; layer is determined by directory | Most cases in all three directories carry no marker |
-| `nightly` | Long-running compile or optimization paths | Allowed under `tests/smoke/` or `tests/regression/`; excluded from `run_ci_gate.sh`; included in local full smoke/regression and nightly phase 2a |
+| `nightly` | Long-running compile or optimization paths | Allowed under `tests/smoke/` or `tests/regression/`; excluded from ci_gate mapped/guard wave; included in local full smoke/regression, changed-test ci_gate wave (`-m not npu`), and nightly phase 2a |
 | `npu` | Requires NPU hardware | Excluded from all `run_*.sh` entry scripts |
 | `network` | Requires live model Hub access (HuggingFace/ModelScope) | Excluded by default and from all UT entry scripts; run only in nightly phase 2c over `tests/` |
 
@@ -104,7 +104,7 @@ The incremental gate reads `test_map` from an external file pointed to by `MSMOD
 }
 ```
 
-Map keys must be repository-relative product source paths under `gate_policy.yaml` `roots` (defaults match `coverage_config.PRODUCT_SOURCE_PREFIXES`): `cli/`, `serving_cast/`, `tensor_cast/`, `web_ui/`, `scripts/`, and `tools/`.
+Map keys must be repository-relative product source paths under `gate_policy.yaml` `roots` (single source of truth): `cli/`, `serving_cast/`, `tensor_cast/`, `web_ui/`, `scripts/`, and `tools/`. `coverage_config.product_roots()` and `COV_PACKAGES` are derived from the same `roots` list (`rstrip('/')` for `--cov` package names).
 
 **Coverage-to-symbol association**: `collect_from_coverage` registers a test for a symbol when coverage records at least one executed line inside that symbol's span (no minimum line threshold). The map therefore prefers breadth over precision: CI may run extra tests when a symbol changes. A follow-up feature should define how to reject shallow or cosmetic tests without blocking thin delegators; see the tracking issue on the project tracker.
 
@@ -115,7 +115,16 @@ Map keys must be repository-relative product source paths under `gate_policy.yam
 
 Redundancy warnings are consumed by the nightly pipeline and surfaced through Feishu notifications. They are advisory and do not block CI.
 
-**Coverage and pytest-xdist**: `scripts/helpers/common/coverage_config.py` exposes `pytest_xdist_args()` (`-n auto --dist=worksteal`) and `cov_pytest_args()` (product `--cov`, `--cov-branch`, optional `--cov-context=test`). `[tool.coverage.run] parallel = true` in `pyproject.toml` lets each xdist worker write an independent data file; pytest-cov combines them into `.coverage` after the run. Nightly phase 1 and ci_gate phase 0 (new/modified tests) use these flags; `build_test_map` and nightly `check_ut_gate` read the merged file — do not invoke `coverage run -m pytest` manually alongside xdist.
+**Coverage and pytest-xdist**: `scripts/helpers/common/coverage_config.py` exposes `pytest_xdist_args()` (`-n auto --dist=worksteal`) and `cov_pytest_args()` (product `--cov`, `--cov-branch`, optional `--cov-context=test`). `COV_PACKAGES` is loaded from `gate_policy.yaml` `roots` via `product_roots()` — not a separate hardcoded list. `[tool.coverage.run] parallel = true` in `pyproject.toml` lets each xdist worker write an independent data file; pytest-cov combines them into `.coverage` after the run. Nightly phase 1 uses these flags; `build_test_map` and nightly `check_ut_gate` read the merged file — do not invoke `coverage run -m pytest` manually alongside xdist. ci_gate does not collect coverage during pytest.
+
+**Product roots wiring** (`gate_policy.yaml` `roots` → downstream):
+
+| Stage | Module | Usage |
+|-------|--------|-------|
+| Coverage `--cov` | `coverage_config.cov_pytest_args` | `COV_PACKAGES` = `roots` with trailing `/` stripped |
+| Gate diff classification | `ci_gate.diff.classify_changes` | `baseline.roots` from `load_gate_policy` |
+| `test_map` validation / build | `test_map_loader`, `build_test_map` | Keys and coverage scan limited to `roots` |
+| Nightly refresh | `nightly.main` → `build_test_map(..., roots=gate_policy.roots)` | Same scope as ci_gate baseline |
 
 **gate_policy contract**
 
@@ -149,32 +158,25 @@ Product source **omit** (e.g. `*/builtin_model/*`) lives in `pyproject.toml` `[t
 
 ### Step 3: CI Gate Selection and Policy Rules
 
-Incremental selection is implemented in `scripts/helpers/ci_gate/main.py`. The pipeline resolves a merge base, classifies git changes, builds a `CiGatePlan`, emits a JSON selection report, and runs pytest.
+Incremental selection is implemented in `scripts/helpers/ci_gate/main.py`. The pipeline resolves a merge base, validates `gate_policy.yaml` when changed, classifies git changes, builds a `CiGatePlan`, derives a deduplicated `ExecutionPlan`, and runs pytest.
 
-Change classification covers configuration files, added or removed tests, added or removed product sources, and modified product sources with executable line numbers filtered through AST analysis.
+Change classification covers configuration files, added or removed tests, added or removed product sources, and modified product sources with executable line numbers filtered through AST analysis. Renamed product sources remap `test_map` entries before planning.
 
 | Phenomenon | Incremental Behavior |
 |---|------------|
 | Configuration change under any `tests/**/conftest.py`, `requirements.txt`, `uv.lock`, or standard CI config filenames (`pyproject.toml`, `pytest.ini`, `tox.ini`, `setup.cfg`, `.coveragerc`) | Full `tests/` with `-m not npu` only (nightly/network cases under `tests/` still execute) |
 | Change to `tests/.ci/gate_policy.yaml` only | No full-suite trigger; `validate_gate_policy_if_changed` enforces approver whitelist |
-| New product source file | Block when top-level symbols lack `test_map` entries and are not exempt |
-| New test file | Execute only the new test paths |
-| Removed product source file | Execute all mapped node ids; block when mapping is missing |
+| New product source file | Block when top-level symbols lack `test_map` entries and are not exempt (optional `.coverage` fallback for executed lines — see below) |
+| New or modified test file | Collect runnable pytest node ids (`-m not npu`); skip files whose nodes are all in `exemptions.tests` |
+| Removed product source file | Schedule mapped guard node ids; block when mapping is missing |
 | Removed test file | Block when the deleted path is the sole mapped coverage for any symbol |
-| Modified product source file | Select mapped node ids by changed symbol; block unmapped non-exempt symbols |
+| Modified product source file | Schedule mapped node ids by changed symbol; block unmapped non-exempt symbols (optional `.coverage` fallback) |
 
-Deleted-source guard tests run in Phase 1 when present (`-m "not npu and not nightly and not network"`, xdist, `-vv`). Incremental or config-triggered full-suite targets run in Phase 2. New or modified test files run in Phase 0 with `-m not npu` only (nightly/network cases still execute), `-n auto --dist=worksteal` (collect-then-xdist), coverage flags (including `--cov-context=test` for in-memory map merge), and `-vv`. `collect_test_map` after Phase 0 still filters node ids with `not nightly and not network`. Phase 2 incremental node ids run serially with no explicit `-m` (pyproject `addopts` applies). Config-triggered full suite runs `tests/` with `-m not npu` only. Shell entry scripts (`run_smoke.sh`, `run_regression.sh`, `run_benchmark.sh`) pass `-o addopts=` so explicit `-m` expressions are not stacked on pyproject defaults. Nightly phase 1 uses the same coverage flags when writing the external `test_map`.
+**Pre-run policy blocking:** `build_ci_gate_plan` aggregates all gate rules into `blocking_errors`. When non-empty, ci_gate logs categorized violations, prints `format_blocking_errors`, and exits before any pytest wave.
 
-**selection_report fields**
+**Union deduplicated execution:** `compute_execution_plan` unions changed-test nodes, regression nodes, and deleted-source guard nodes into one schedule keyed by pytest node id. Changed-test nodes form wave 1 (`-m not npu`); mapped regression and guard nodes form wave 2 (`-m "not npu and not nightly and not network"`), excluding `exemptions.tests`. Duplicate node ids appear once (changed-test reason wins). Config-triggered full suite bypasses node selection and runs `tests/` with `-m not npu`. Shell entry scripts (`run_smoke.sh`, `run_regression.sh`, `run_benchmark.sh`) pass `-o addopts=` so explicit `-m` expressions are not stacked on pyproject defaults. Nightly phase 1 uses coverage flags when writing the external `test_map`.
 
-| Field | Type | Meaning |
-|------|------|------|
-| `generated_at` | string | ISO 8601 timestamp |
-| `merge_base` | string | Merge-base commit SHA |
-| `full_suite` | boolean | Whether the full smoke and regression incremental scope was selected |
-| `deleted_source_tests` | string[] | Node ids for deleted-source guard phase |
-| `incremental_tests` | string[] | Node ids selected for the main pytest phase |
-| `blocking_errors` | string[] | Policy violations that prevent pytest execution |
+**Coverage fallback for import-time symbols:** `gate_new_source` and `gate_modified_source` accept optional repo-root `.coverage`. When a changed symbol lacks a `test_map` entry, `symbol_lines_covered_in_data` may clear the block if any changed line was executed — including import-time or conftest paths (empty coverage context). This replaces the legacy Phase 0 flow that ran new tests with `--cov`, merged an in-memory map, and re-validated policy. ci_gate reads the nightly-maintained external `test_map` only; it does not refresh the map during PR runs.
 
 ### Step 4: Hub Connectivity and Session Cache
 
@@ -192,7 +194,7 @@ Shell scripts are the unified entry point for CodeArts build tasks and local deb
 |------|------|------|
 | `run_smoke.sh` | Full `tests/smoke/`; `-o addopts=`; marker `not npu and not network`; collect-then-xdist; `-vv` | — |
 | `run_regression.sh` | Full `tests/regression/`; same as smoke | — |
-| `run_ci_gate.sh` | Incremental smoke and regression via external `test_map` | Phase 0: `--cov-context=test` for in-memory map merge |
+| `run_ci_gate.sh` | Incremental smoke and regression via external `test_map` | Plan-first: pre-run policy, deduplicated pytest waves; no `--cov` |
 | `run_benchmark.sh` | Full `tests/benchmark/`, marker `not npu and not network`, optional `-n auto` when `MSMODELING_BENCHMARK_PARALLEL=1` | — |
 | `run_nightly.sh` | Four-phase nightly pipeline via `scripts/helpers/nightly/main.py` | Phase 1: `--cov`; 60/40 thresholds in report |
 
@@ -252,7 +254,7 @@ Build tasks call scripts from the repository root. Pipeline orchestration, trigg
 
 ### Step 9: Slow Test Case Governance
 
-Parallelism uses `pytest -n auto` for smoke, regression, CI gate (all phases), nightly phase 1, and nightly phase 2a. Coverage collection uses the same xdist setup but only in nightly phase 1 and ci_gate phase 0 (`--cov` with `[tool.coverage.run] parallel = true`; not manual `coverage run`). Incremental CI gate excludes the `nightly` marker; first compile with `do_compile=True` remains in nightly scope only.
+Parallelism uses `pytest -n auto` for smoke, regression, ci_gate (collect-first xdist sizing), nightly phase 1, and nightly phase 2a. Coverage collection uses xdist only in nightly phase 1 (`--cov` with `[tool.coverage.run] parallel = true`; not manual `coverage run`). Incremental CI gate excludes the `nightly` marker in the mapped/guard wave; new/changed test files still run under `-m not npu`. First compile with `do_compile=True` remains in nightly scope only.
 
 After the above steps, directory layering, incremental selection, gating, and ST guardianship are verified together against the quantifiable targets in the Functional Description section.
 
@@ -272,16 +274,16 @@ user --> gate : PR comment compile\nMSMODELING_TEST_MAP_PATH required
 user --> bench : /run_tests benchmark
 user --> night : scheduled nightly\nMSMODELING_TEST_MAP_PATH output
 
-gate --> gate : diff → CiGatePlan → pytest
+gate --> gate : diff → CiGatePlan → ExecutionPlan → pytest waves
 night --> night : phase1 map refresh → phase2a nightly → phase2b benchmark → phase2c network → drift check → report
 @enduml
 ```
 
 This diagram describes how users and CodeArts jobs reach final test results through the five entry scripts.
 
-Normal path: Local and on-demand CI smoke or regression jobs call `run_smoke.sh` or `run_regression.sh`, which run the full target directory with marker `not npu and not network`. PR incremental jobs call `run_ci_gate.sh`, which selects tests from the external `test_map` and runs pytest. Scheduled nightly jobs call `run_nightly.sh`, which refreshes `test_map`, runs nightly-marked, benchmark, and network suites, performs a non-blocking config drift check, and emits per-phase JUnit XML plus a one-line summary and optional Feishu notification.
+Normal path: Local and on-demand CI smoke or regression jobs call `run_smoke.sh` or `run_regression.sh`, which run the full target directory with marker `not npu and not network`. PR incremental jobs call `run_ci_gate.sh`, which classifies the diff, validates policy before pytest, schedules a deduplicated union of changed tests and mapped regression/guard nodes (or a config-triggered full suite), and runs one or two pytest waves. Scheduled nightly jobs call `run_nightly.sh`, which refreshes `test_map`, runs nightly-marked, benchmark, and network suites, performs a non-blocking config drift check, and emits per-phase JUnit XML plus a one-line summary and optional Feishu notification.
 
-Exception path: `run_ci_gate.sh` exits non-zero on policy violations or pytest failure. Nightly continues report emission when an intermediate phase fails; `pytest_exit_code` and `test_map_written` reflect partial success.
+Exception path: `run_ci_gate.sh` exits non-zero on pre-run policy violations (`blocking_errors`) or pytest failure. Nightly continues report emission when an intermediate phase fails; `pytest_exit_code` and `test_map_written` reflect partial success.
 
 ### Sequence Diagram
 
@@ -295,34 +297,30 @@ participant "pytest" as py
 
 job -> sh : MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh
 sh -> cg : main()
-cg -> cg : resolve_base_ref + classify_changes\n+ build_ci_gate_plan
-cg --> job : selection_report JSON
+cg -> cg : resolve_base_ref + validate_gate_policy\n+ classify_changes + build_ci_gate_plan
 
 alt blocking_errors non-empty
   cg --> job : exit 1, no pytest
-else plan has targets
-  opt new/modified tests (phase 0)
-    cg -> py : pytest with --cov-context=test\n(in-memory test_map merge)
+else policy passed
+  cg -> cg : compute_execution_plan (deduplicated union)
+  alt no pytest targets
+    cg --> job : exit 0
+  else has targets
+    loop each TestRunWave
+      cg -> py : pytest wave.targets\n-o addopts= + wave.marker\n+ collect-first xdist -vv
+    end
+    py --> cg : pytest exit code
+    cg --> job : exit 0 or pytest code
   end
-  opt deleted_source_tests (phase 1)
-    cg -> py : pytest guard tests\n-m "not npu and not nightly and not network" -n auto -vv
-  end
-  alt config full suite
-    cg -> py : pytest tests/\n-m "not npu" -vv (serial)
-  else incremental targets (phase 2)
-    cg -> py : pytest selected node ids\n(pyproject addopts; serial) -vv
-  end
-  py --> cg : pytest exit code
-  cg --> job : exit 0 or pytest code
 end
 @enduml
 ```
 
 This diagram describes the internal interaction order for the CI incremental gate.
 
-Normal path: The build job invokes `run_ci_gate.sh`, which delegates to `ci_gate/main.py`. The module loads the external baseline, classifies the diff, prints the selection report, and runs pytest phases.
+Normal path: The build job invokes `run_ci_gate.sh`, which delegates to `ci_gate/main.py`. The module loads the external baseline, classifies the diff, runs pre-run policy checks, builds a deduplicated execution plan, and runs one or two pytest waves.
 
-Exception path: Blocking policy errors prevent pytest from starting. Pytest failure returns the pytest exit code.
+Exception path: Blocking policy errors prevent pytest from starting. Pytest failure returns the pytest exit code; selected-test failures include an `exemptions.tests` YAML hint.
 
 ### Code Structure Design
 
@@ -341,7 +339,7 @@ package "ci_gate" {
   class "ci_gate/main.py" as cgm {
     +main()
     +build_ci_gate_plan()
-    +emit_selection_report()
+    +compute_execution_plan()
   }
   class "ci_gate/diff.py" as cgd {
     +resolve_base_ref()
@@ -426,8 +424,9 @@ The complete environment variable list lives in `tests/README.md`. The design do
 
 | Parameter | Optional/Mandatory | Description |
 |------|----------|------|
-| `ci_gate.main()` | Mandatory | Loads baseline, builds plan, runs pytest phases; returns process exit code |
-| `build_ci_gate_plan(repo_root, changes, baseline)` | Mandatory | Single source of truth for policy aggregation; returns `CiGatePlan` |
+| `ci_gate.main()` | Mandatory | Loads baseline, validates policy, builds plan and execution schedule, runs deduplicated pytest waves; returns process exit code |
+| `build_ci_gate_plan(repo_root, changes, baseline)` | Mandatory | Pre-run policy aggregation; returns `CiGatePlan` with `blocking_errors` and selection sets |
+| `compute_execution_plan(plan, test_exemptions)` | Mandatory | Deduplicated pytest wave schedule from a passing `CiGatePlan`; returns `ExecutionPlan` |
 | `load_baseline(repo_root, cfg)` | Mandatory | Loads external `test_map` and repository `gate_policy.yaml` exemptions |
 | `resolve_base_ref(repo_root, branch)` | Mandatory | Returns merge-base SHA |
 | `classify_changes(repo_root, base_ref, diff)` | Mandatory | Returns `ChangeSet` from git name-status and line map |
@@ -487,8 +486,8 @@ Build jobs depend on Python 3.9 or higher, pytest, and coverage packages from pr
 | Incremental selection yields empty executable set | ci_gate exits 0 when no blocking errors and no pytest targets |
 | Nightly phase 1 pytest fails | `test_map` write is skipped; later phases still run; report records `test_map_written=false` |
 | Feishu POST timeout or network error | `feishu_notifier` logs failure; nightly exit code follows pytest outcomes |
-| Deleted-source guard phase fails | ci_gate exits before incremental phase; stderr lists guard node ids |
-| Incremental path excludes `nightly` marker | Local full smoke/regression and nightly phase 2a provide backstop coverage |
+| Deleted-source guard phase fails | ci_gate exits on failed pytest wave; stderr lists failed node ids |
+| Incremental path excludes `nightly` marker in mapped/guard wave | Local full smoke/regression and nightly phase 2a provide backstop coverage |
 
 ### Usability / Performance Metrics
 
@@ -507,7 +506,7 @@ Parallelism uses `pytest -n auto` for all UT entry scripts; benchmark stays sequ
 
 | Scenario | User-Visible Information | Diagnosis Method |
 |------|--------------|----------|
-| CI gate policy failure | `blocking_errors` in selection report JSON | Reproduce with `MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh` |
+| CI gate policy failure | Categorized blocking error output on stderr | Reproduce with `MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh` |
 | Incremental pytest failure | pytest FAILED summary on stderr | Run listed node ids with `pytest <node id> -x` |
 | Nightly coverage below threshold | stderr / report `BELOW THRESHOLD` | Inspect phase 1 `.coverage`; add tests or adjust thresholds |
 | Nightly failure | JSON `failed_cases`, `first_error`, optional Feishu text | Re-run `bash scripts/run_nightly.sh` on CI runner |
@@ -518,7 +517,7 @@ Operational commands and environment defaults are maintained in `tests/README.md
 ### Other Metrics
 
 - Exemptions remain in `tests/.ci/gate_policy.yaml`; implementation lives in `scripts/helpers/`; external entry points are `scripts/run_*.sh`.
-- Selection effectiveness can be traced by comparing selection report JSON with files touched in a defect postmortem.
+- Selection effectiveness can be traced by comparing ci_gate log output (scheduled reasons and wave count) with files touched in a defect postmortem.
 
 ### Security Design and Security Checklist
 
@@ -553,8 +552,8 @@ Operational commands and environment defaults are maintained in `tests/README.md
 
 | Test Case Name | Pre-operation | Operation Method | Expected Result |
 |--------|----------|----------|----------|
-| ci_gate incremental happy path | Valid diff and existing external `test_map` | `MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh` | selection report printed; mapped tests run; exit 0 on pytest pass |
-| ci_gate policy block | New unmapped product source | Same as above | `blocking_errors` non-empty; exit 1 before pytest |
+| ci_gate incremental happy path | Valid diff and existing external `test_map` | `MSMODELING_TEST_MAP_PATH=… bash scripts/run_ci_gate.sh` | Deduplicated pytest waves run; exit 0 on pytest pass |
+| ci_gate policy block | New unmapped product source | Same as above | Pre-run `blocking_errors`; exit 1 before pytest |
 | local smoke full | None | `bash scripts/run_smoke.sh` | All `tests/smoke/` cases with marker `not npu and not network` |
 | local regression full | None | `bash scripts/run_regression.sh` | All `tests/regression/` cases with marker `not npu and not network` |
 | benchmark full | None | `bash scripts/run_benchmark.sh` | Full `tests/benchmark/`; sequential unless parallel flag set |
@@ -593,13 +592,13 @@ The CodeArts platform owns build scheduling, runner filesystem layout for the ex
 
 1. Incremental selection reads the external `test_map`, git diff against merge base, and `tests/.ci/gate_policy.yaml`.
 2. The external `test_map` is refreshed by nightly phase 1 only when that phase succeeds.
-3. `ci_gate/main.py` prints the selection report as JSON to stdout.
+3. `ci_gate/main.py` validates policy before pytest; blocking violations exit without running tests.
 
 ### Gate Specifications
 
-1. CI incremental gate blocks on `test_map` policy violations (`blocking_errors`) and pytest failure.
+1. CI incremental gate blocks on pre-run `test_map` policy violations (`blocking_errors`) and pytest failure.
 2. Nightly reports line/branch coverage against default **60% / 40%** thresholds.
-3. Policy violations in `blocking_errors` exit before pytest when no guard phase applies.
+3. Policy violations in `blocking_errors` exit before pytest when no runnable targets remain after exemptions.
 
 ### Weight and Resource Limitations
 
@@ -654,7 +653,7 @@ New build task types should map to existing `run_*.sh` entry points. Incremental
 
 ### Test Selection Extension
 
-`gate_policy.yaml` exemptions and `PRODUCT_SOURCE_PREFIXES` in `coverage_config.py` can be extended. Changes to the `test_map` schema require synchronized updates to `build_test_map.py`, `test_map_loader.py`, and ci_gate rules.
+`gate_policy.yaml` `roots` and exemptions are the extension points for product scope and waivers; `coverage_config` reads `roots` from policy — do not add parallel prefix lists in Python. Changes to the `test_map` schema require synchronized updates to `build_test_map.py`, `test_map_loader.py`, and ci_gate rules.
 
 ### Gate Extension
 

@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import os
-from typing import Final
+from pathlib import Path
 
+from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.ci_gate.gate_policy import load_gate_policy
 from scripts.helpers.common.pytest_runner import xdist_worker_args
 
-PRODUCT_SOURCE_PREFIXES: Final[tuple[str, ...]] = (
-    "cli/",
-    "serving_cast/",
-    "tensor_cast/",
-    "web_ui/",
-    "scripts/",
-    "tools/",
-)
 
-COV_PACKAGES: Final[tuple[str, ...]] = tuple(p.rstrip("/") for p in PRODUCT_SOURCE_PREFIXES)
+def product_roots(repo_root: Path | None = None) -> tuple[str, ...]:
+    """Product source path prefixes from tests/.ci/gate_policy.yaml ``roots``."""
+    return load_gate_policy(repo_root or REPO_ROOT).roots
 
 
 def pytest_xdist_args(*, collected_count: int | None = None) -> list[str]:
@@ -34,7 +30,8 @@ def cov_pytest_args(*, cov_context: bool = False, append: bool = False) -> list[
 
     Requires ``parallel = true`` under ``[tool.coverage.run]`` when used with ``pytest_xdist_args()``.
     """
-    args: list[str] = [f"--cov={pkg}" for pkg in COV_PACKAGES]
+    cov_packages = tuple(p.rstrip("/") for p in product_roots())
+    args: list[str] = [f"--cov={pkg}" for pkg in cov_packages]
     args.append("--cov-branch")
     if cov_context:
         args.append("--cov-context=test")

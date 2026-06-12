@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import date
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from scripts.helpers.ci_gate.gate_policy import (
     GatePolicy,
     SourceExemption,
     TestExemption,
+    _load_gate_policy_cached,
     default_test_discovery,
     find_expired_test_exemptions,
     find_expired_unmapped,
@@ -82,6 +85,23 @@ def _empty_policy(*, source_exemptions: tuple[SourceExemption, ...] = ()) -> Gat
         test_exemptions=(),
         approvers=frozenset({"fangkai"}),
     )
+
+
+def test_load_gate_policy_cached_until_yaml_mtime_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _write_ci_policy(repo)
+    _load_gate_policy_cached.cache_clear()
+    first = load_gate_policy(repo)
+    second = load_gate_policy(repo)
+    assert first is second
+
+    policy_path = repo / "tests" / ".ci" / "gate_policy.yaml"
+    policy_path.write_text(policy_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    time.sleep(0.01)
+    bumped_mtime = time.time() + 1.0
+    os.utime(policy_path, (bumped_mtime, bumped_mtime))
+    third = load_gate_policy(repo)
+    assert third is not first
 
 
 def test_load_gate_policy_expands_symbols(tmp_path: Path) -> None:

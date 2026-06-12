@@ -7,9 +7,8 @@ import os
 import pytest
 
 from scripts.helpers.common.coverage_config import (
-    COV_PACKAGES,
-    PRODUCT_SOURCE_PREFIXES,
     cov_pytest_args,
+    product_roots,
     pytest_xdist_args,
 )
 
@@ -18,12 +17,15 @@ from scripts.helpers.common.coverage_config import (
 # ---------------------------------------------------------------------------
 
 
-def test_product_source_prefixes_not_empty() -> None:
-    assert len(PRODUCT_SOURCE_PREFIXES) > 0
+def test_product_roots_not_empty() -> None:
+    assert len(product_roots()) > 0
 
 
-def test_cov_packages_match_prefixes() -> None:
-    assert tuple(p.rstrip("/") for p in PRODUCT_SOURCE_PREFIXES) == COV_PACKAGES
+def test_cov_pytest_args_packages_match_gate_policy_roots() -> None:
+    expected = tuple(p.rstrip("/") for p in product_roots())
+    args = cov_pytest_args()
+    for pkg in expected:
+        assert f"--cov={pkg}" in args
 
 
 # ---------------------------------------------------------------------------
@@ -32,8 +34,9 @@ def test_cov_packages_match_prefixes() -> None:
 
 
 def test_cov_args_default_no_context_no_append() -> None:
+    expected = tuple(p.rstrip("/") for p in product_roots())
     args = cov_pytest_args()
-    for pkg in COV_PACKAGES:
+    for pkg in expected:
         assert f"--cov={pkg}" in args
     assert "--cov-branch" in args
     assert "--cov-context=test" not in args

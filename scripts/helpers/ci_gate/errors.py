@@ -12,9 +12,9 @@ _CATEGORY_LABEL: dict[str, str] = {
 }
 
 _CATEGORY_HEADER: dict[str, str] = {
-    "new_source": "new source file(s) have no test_map entry and are not exempt",
-    "modified_source": "modified symbol(s) have no test_map entry and are not exempt",
-    "deleted_source": "deleted source file(s) have no test_map entry",
+    "new_source": "new source file(s) have no coverage mapping entry and are not exempt",
+    "modified_source": "modified symbol(s) have no coverage mapping entry and are not exempt",
+    "deleted_source": "deleted source file(s) have no coverage mapping entry",
     "deleted_test": "deleted test(s) are sole coverage for source symbols",
 }
 
@@ -27,22 +27,23 @@ _CATEGORY_SUGGESTION: dict[str, str] = {
         "Add test cases or register an exemption in tests/.ci/gate_policy.yaml.\n"
         "  → If already exempted, ensure symbols matches path::symbol above exactly."
     ),
-    "deleted_source": "Remove orphaned test_map entries or restore source file.",
+    "deleted_source": "Remove orphaned coverage mapping entries or restore source file.",
     "deleted_test": "Add replacement test cases or delete the corresponding source symbols.",
 }
 
 
-def format_blocking_errors(errors: tuple[GateError, ...]) -> str:
+def format_blocking_errors(errors: tuple[GateError, ...], *, pytest_ran: bool = False) -> str:
     by_category: dict[str, list[GateError]] = {}
     for e in errors:
         by_category.setdefault(e.category, []).append(e)
 
     lines: list[str] = []
-    lines.append(
-        "CI gate failed: policy violation — incremental phases (Phase 1/2) were not run.\n"
-        f"Blocking items: {len(errors)}. "
-        "Phase 0 may still have run when this PR modified test files.\n"
-    )
+    if pytest_ran:
+        lines.append(
+            f"CI gate failed: coverage mapping policy not satisfied after pytest.\nBlocking items: {len(errors)}."
+        )
+    else:
+        lines.append(f"CI gate failed: policy violation — pytest was not run.\nBlocking items: {len(errors)}.")
 
     for category in ("new_source", "modified_source", "deleted_source", "deleted_test"):
         group = by_category.get(category)
@@ -64,10 +65,10 @@ def format_blocking_errors(errors: tuple[GateError, ...]) -> str:
     return "\n".join(lines)
 
 
-def format_phase0_failure_hint(node_ids: tuple[str, ...]) -> str:
-    """Format Phase 0 pytest failure guidance with optional test exemption YAML."""
+def format_pytest_failure_hint(node_ids: tuple[str, ...]) -> str:
+    """Format pytest failure guidance with optional test exemption YAML."""
     lines = [
-        "CI gate failed: new test(s) failed. Fix test failures before gate check.",
+        "CI gate failed: selected test(s) failed. Fix test failures before gate check.",
         "",
         "Executed node(s):",
     ]
@@ -76,7 +77,7 @@ def format_phase0_failure_hint(node_ids: tuple[str, ...]) -> str:
     lines.extend(
         [
             "",
-            "To exempt failing test(s) from Phase 0/2, add entries under exemptions.tests",
+            "To exempt failing test(s), add entries under exemptions.tests",
             "in tests/.ci/gate_policy.yaml:",
             "  exemptions:",
             "    tests:",

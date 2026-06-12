@@ -32,7 +32,12 @@ from scripts.helpers.ci_gate.gate_policy import (
     load_gate_policy,
 )
 from scripts.helpers.common._logging import log_env_audit, setup_logger
-from scripts.helpers.common.build_test_map import build_test_map, detect_redundant_cases
+from scripts.helpers.common.build_test_map import (
+    _collect_allowed_node_ids,
+    collect_test_map,
+    detect_redundant_cases,
+    write_test_map,
+)
 from scripts.helpers.common.coverage_config import cov_pytest_args, pytest_xdist_args
 from scripts.helpers.common.coverage_gate import (
     GateConfig,
@@ -43,6 +48,7 @@ from scripts.helpers.common.test_map_config import resolve_test_map_path
 from scripts.helpers.nightly.feishu_notifier import build_feishu_payload, push_feishu
 from scripts.helpers.nightly.pytest_parser import (
     NightlyRunStats,
+    parse_junit_file,
     parse_junit_xml,
     slowest_testcases,
 )
@@ -62,10 +68,10 @@ _NIGHTLY_MARKER = "not npu and nightly and not network"
 _NETWORK_MARKER = "not npu and network"
 _PROCESS_TERMINATE_TIMEOUT_SECONDS: Final[float] = 5.0
 _PHASE_LABELS: Final[tuple[str, ...]] = (
-    "phase1 (test_map UT)",
-    "phase2a (nightly)",
-    "phase2b (benchmark)",
-    "phase2c (network)",
+    "smoke UT (coverage mapping)",
+    "long-running tests",
+    "benchmark",
+    "network Hub tests",
 )
 _SLOWEST_TESTS_TOP_N: Final[int] = 10
 
@@ -74,13 +80,6 @@ _DRIFT_FIXTURE_MAP: Final[dict[str, str]] = {
     "deepseek-ai/DeepSeek-V3.1": "deepseekv3.1_remote",
     "MiniMaxAI/MiniMax-M2": "minimax_m2",
 }
-# network-marked remote ids with no vendored offline baseline yet.
-_DRIFT_REMOTE_NO_BASELINE: Final[tuple[str, ...]] = (
-    "zai-org/GLM-4.6",
-    "moonshotai/Kimi-K2-Base",
-    "XiaomiMiMo/MiMo-V2-Flash",
-    "ZhipuAI/GLM-4.7",
-)
 _DRIFT_COMPARE_KEYS: Final[tuple[str, ...]] = (
     "model_type",
     "architectures",
@@ -231,8 +230,7 @@ def _diff_config(
 def _run_config_drift_check() -> tuple[str, ...]:
     """Compare vendored remote configs against the live Hub. Never raises.
 
-    Config-only ``AutoConfig`` fetches (no weight shards) for the mapped
-    fixtures; un-baselined remote ids emit a follow-up TODO line.
+    Config-only ``AutoConfig`` fetches (no weight shards) for mapped fixtures.
     """
     warnings: list[str] = []
     for model_id, fixture_dir in _DRIFT_FIXTURE_MAP.items():
@@ -246,10 +244,6 @@ def _run_config_drift_check() -> tuple[str, ...]:
             warnings.append(f"{model_id}: Hub config fetch failed ({exc}); cannot check drift")
             continue
         warnings.extend(_diff_config(model_id, fixture_dir, vendored, hub))
-    warnings.extend(
-        f"TODO drift baseline: {model_id} has no vendored copy under tests/assets/model_config/"
-        for model_id in _DRIFT_REMOTE_NO_BASELINE
-    )
     return tuple(warnings)
 
 
@@ -437,6 +431,53 @@ def emit_report(
 
 
 # ---------------------------------------------------------------------------
+# Terminal summary (stdout)
+# ---------------------------------------------------------------------------
+
+
+def _build_terminal_summary(
+    *,
+    overall_exit: int,
+    stats: NightlyRunStats,
+    phase_labels: tuple[str, ...],
+    junit_paths: tuple[Path, ...],
+    phase_exits: tuple[int, ...],
+    coverage: CoverageSummary | None,
+    drift_warnings: tuple[str, ...],
+    phase_log_paths: tuple[Path | None, ...],
+    include_phase_logs: bool,
+) -> list[str]:
+    """Build human-readable nightly stdout summary lines."""
+    lines: list[str] = []
+    for label, junit_path, exit_code in zip(phase_labels, junit_paths, phase_exits, strict=True):
+        phase_stats = parse_junit_file(junit_path)
+        if phase_stats is None:
+            passed = 0
+            failed = 0
+            duration = "n/a"
+        else:
+            passed = phase_stats.passed
+            failed = phase_stats.failed + phase_stats.errors
+            duration = f"{phase_stats.duration_sec:.0f}s" if phase_stats.duration_sec >= 0 else "n/a"
+        lines.append(f"{label}: exit={exit_code} passed={passed} failed={failed} duration={duration}")
+
+    lines.append(
+        f"Nightly exit={overall_exit}: passed={stats.passed} "
+        f"failed={stats.failed} errors={stats.errors} "
+        f"duration={stats.duration_sec:.0f}s"
+    )
+    if coverage is not None:
+        lines.append(coverage.message)
+    if drift_warnings:
+        lines.append(f"Config drift: {drift_warnings[0]}")
+    if include_phase_logs:
+        for label, log_path in zip(phase_labels, phase_log_paths, strict=True):
+            if log_path is not None:
+                lines.append(f"{label} log: {log_path}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -446,31 +487,38 @@ def _write_test_map_artifacts(
     cfg: Config,
     test_map_path: Path,
     map_exit: int,
+    *,
+    allowed_node_ids: frozenset[str] | None = None,
 ) -> tuple[bool, tuple[str, ...], tuple[dict[str, object], ...], str]:
     if map_exit != 0:
-        logger.warning("Skipping test_map write: smoke/regression (not npu and not nightly) failed")
+        logger.warning("Skipping coverage mapping write: smoke UT failed")
         return False, (), (), ""
 
-    logger.info("Building test_map ...")
+    logger.info("Building coverage mapping from collected coverage data ...")
     gate_policy = load_gate_policy(REPO_ROOT)
-    build_test_map(test_map_path, marker_expr=_TEST_MAP_MARKER, roots=gate_policy.roots)
-
-    from scripts.helpers.common.test_map_loader import load_test_map as _load_tm
-
-    baseline_map = _load_tm(cfg)
-    redundancy = tuple(detect_redundant_cases(baseline_map))
-    weak_symbols = compute_weak_coverage_symbols(test_map_path, REPO_ROOT / ".coverage")
-    expired = find_expired_unmapped(gate_policy, baseline_map)
+    fresh_map = collect_test_map(
+        marker_expr=_TEST_MAP_MARKER,
+        roots=gate_policy.roots,
+        allowed_node_ids=allowed_node_ids,
+    )
+    write_test_map(test_map_path, fresh_map)
+    redundancy = tuple(detect_redundant_cases(fresh_map))
+    weak_symbols = compute_weak_coverage_symbols(
+        test_map_path,
+        REPO_ROOT / ".coverage",
+        mapping=fresh_map,
+    )
+    expired = find_expired_unmapped(gate_policy, fresh_map)
     expired_tests = find_expired_test_exemptions(gate_policy)
     expired_section = format_expired_exemptions_section(expired) + format_expired_test_exemptions_section(expired_tests)
     if expired:
         logger.warning(
-            "Found %d expired exemption(s) still unmapped in test_map",
+            "Found %d expired exemption(s) still without coverage mapping",
             len(expired),
         )
     if expired_tests:
         logger.warning("Found %d expired test exemption(s)", len(expired_tests))
-    logger.info("test_map written: %s", test_map_path)
+    logger.info("Coverage mapping written: %s", test_map_path)
     return True, weak_symbols, redundancy, expired_section
 
 
@@ -496,11 +544,17 @@ def _run_nightly_pipeline(
         _phase_log("phase2c_network"),
     )
 
-    logger.info("Phase 1: test_map — smoke/regression (not npu and not nightly)")
+    logger.info(
+        "Starting smoke UT (coverage mapping): tests/smoke + tests/regression, marker=%s", _TEST_MAP_EXECUTION_MARKER
+    )
     map_cmd = _build_test_map_pytest_cmd(sys.executable, junit_xml=map_junit)
     logger.info("Running pytest: %s", shlex.join(map_cmd))
     map_exit = _stream_pytest(map_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase1_test_map"))
-    logger.info("Phase 1: pytest exit=%d", map_exit)
+    logger.info("Smoke UT finished with exit=%d", map_exit)
+
+    allowed_node_ids: frozenset[str] | None = None
+    if map_exit == 0:
+        allowed_node_ids = _collect_allowed_node_ids(_TEST_MAP_MARKER)
 
     coverage = _coverage_summary(cfg)
     if coverage:
@@ -517,25 +571,26 @@ def _run_nightly_pipeline(
         cfg,
         test_map_path,
         map_exit,
+        allowed_node_ids=allowed_node_ids,
     )
 
-    logger.info("Phase 2a: nightly — smoke/regression (not npu and nightly)")
+    logger.info("Starting long-running tests: tests/smoke + tests/regression, marker=%s", _NIGHTLY_MARKER)
     nightly_cmd = _build_nightly_pytest_cmd(sys.executable, junit_xml=nightly_junit)
     logger.info("Running pytest: %s", shlex.join(nightly_cmd))
     nightly_exit = _stream_pytest(nightly_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2a_nightly"))
-    logger.info("Phase 2a: pytest exit=%d", nightly_exit)
+    logger.info("Long-running tests finished with exit=%d", nightly_exit)
 
-    logger.info("Phase 2b: benchmark (full tests/benchmark)")
+    logger.info("Starting benchmark: tests/benchmark")
     bench_cmd = _build_benchmark_pytest_cmd(sys.executable, cfg, junit_xml=bench_junit)
     logger.info("Running pytest: %s", shlex.join(bench_cmd))
     bench_exit = _stream_pytest(bench_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2b_benchmark"))
-    logger.info("Phase 2b: pytest exit=%d", bench_exit)
+    logger.info("Benchmark finished with exit=%d", bench_exit)
 
-    logger.info("Phase 2c: network — real model Hub cases (not npu and network)")
+    logger.info("Starting network Hub tests: tests/, marker=%s", _NETWORK_MARKER)
     network_cmd = _build_network_pytest_cmd(sys.executable, junit_xml=network_junit)
     logger.info("Running pytest: %s", shlex.join(network_cmd))
     network_exit = _stream_pytest(network_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2c_network"))
-    logger.info("Phase 2c: pytest exit=%d", network_exit)
+    logger.info("Network Hub tests finished with exit=%d", network_exit)
 
     logger.info("Drift check: vendored remote configs vs live Hub (non-blocking)")
     drift_warnings = _run_config_drift_check()
@@ -565,17 +620,17 @@ def _run_nightly_pipeline(
         drift_warnings=drift_warnings,
     )
 
-    summary_lines = [
-        (
-            f"Nightly exit={overall_exit}: passed={stats.passed} "
-            f"failed={stats.failed} errors={stats.errors} "
-            f"duration={stats.duration_sec:.0f}s"
-        ),
-    ]
-    if coverage:
-        summary_lines.append(coverage.message)
-    if drift_warnings:
-        summary_lines.append(f"Config drift warnings: {len(drift_warnings)} (see nightly log)")
+    summary_lines = _build_terminal_summary(
+        overall_exit=overall_exit,
+        stats=stats,
+        phase_labels=_PHASE_LABELS,
+        junit_paths=(map_junit, nightly_junit, bench_junit, network_junit),
+        phase_exits=(map_exit, nightly_exit, bench_exit, network_exit),
+        coverage=coverage,
+        drift_warnings=drift_warnings,
+        phase_log_paths=phase_log_paths,
+        include_phase_logs=feishu_url is not None,
+    )
     print("\n".join(summary_lines))
     return overall_exit
 

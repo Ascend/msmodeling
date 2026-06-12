@@ -30,7 +30,7 @@ The repository root **`scripts/`** provides CI entry points. Implementation live
 
 | Entry | When | What runs |
 |-------|------|-----------|
-| `bash scripts/run_ci_gate.sh` | PR `compile` comment | Incremental selection via external `test_map`. **Phase 0** (new/mod test files): collect pytest node ids per changed file with `-m not npu`, drop `exemptions.tests` nodes, run remainder with xdist + `--cov` + `-vv`; per-file or global all-exempt → log skip success (no pytest). Phase 0 pytest failure prints copy-paste `exemptions.tests` YAML for executed nodes. **Phase 1** (deleted-source guards): `-m "not npu and not nightly and not network"`, xdist, `-vv` (no exemption hint on failure). **Phase 2** (incremental `test_map` node ids): filter `exemptions.tests`, then `-m "not npu and not nightly and not network"`, xdist, `-vv`; all exempt → log skip success. **Config-triggered full suite**: `tests/` with `-m not npu` only (includes nightly/network under `tests/`). `collect_test_map` after Phase 0 filters with `not nightly and not network`. |
+| `bash scripts/run_ci_gate.sh` | PR `compile` comment | Plan-first incremental gate via external `test_map` (`scripts/helpers/ci_gate/main.py`). **Pre-run policy**: classify diff, validate `gate_policy.yaml` if changed, build `CiGatePlan`; `blocking_errors` → exit 1, pytest skipped. **Execution** (after policy passes): deduplicated union of (1) new/changed test node ids, (2) `test_map` regression nodes for modified source, (3) deleted-source guard nodes — up to two pytest waves: changed tests `-m not npu`; mapped/guard tests `-m "not npu and not nightly and not network"`. Same node id scheduled once (changed-test reason wins). All targets exempt → skip pytest, exit 0. **Config-triggered full suite**: `tests/` with `-m not npu` only (includes nightly/network under `tests/`). Selected-test pytest failure prints copy-paste `exemptions.tests` YAML; full-suite failures do not. Collect-first xdist sizing, `-vv --tb=short`, no `--cov`. |
 | `bash scripts/run_smoke.sh` | Local; CI `/run_tests smoke` | Full `tests/smoke/`; `-o addopts=` clears pyproject default markers; `-m "not npu and not network"` (includes nightly); collect-then-xdist (`-n auto --dist=worksteal`); `-vv --tb=short` |
 | `bash scripts/run_regression.sh` | Local; CI `/run_tests regression` | Full `tests/regression/`; same flags as smoke |
 | `bash scripts/run_benchmark.sh` | Local; CI `/run_tests benchmark` | Full `tests/benchmark/`; `-o addopts=`; `-m "not npu and not network"`; `-vv --tb=short`; xdist only when `MSMODELING_BENCHMARK_PARALLEL=1` |
@@ -39,9 +39,9 @@ The repository root **`scripts/`** provides CI entry points. Implementation live
 **Local:** always full smoke/regression (no external test_map).
 **CI incremental:** requires `MSMODELING_TEST_MAP_PATH` pointing to a JSON file on the runner (maintained by nightly).
 
-**Coverage + xdist:** Nightly phase 1 and ci_gate Phase 0 (new or modified test files) use `-n auto --dist=worksteal` with `--cov` and `--cov-context=test`. pytest-xdist collects on the controller, then distributes items to workers (collect-then-xdist). Worksteal scheduling helps when case durations vary widely. `[tool.coverage.run] parallel = true` in `pyproject.toml`; pytest-cov merges worker fragments into repo-root `.coverage` for `build_test_map` and nightly coverage totals.
+**Coverage + xdist:** Nightly phase 1 uses `-n auto --dist=worksteal` with `--cov` and `--cov-context=test`. ci_gate uses collect-first xdist sizing only (no `--cov`). pytest-xdist collects on the controller, then distributes items to workers (collect-then-xdist). Worksteal scheduling helps when case durations vary widely. `[tool.coverage.run] parallel = true` in `pyproject.toml`; pytest-cov merges worker fragments into repo-root `.coverage` for nightly `build_test_map` and coverage totals.
 
-**`-o addopts=`:** `pyproject.toml` sets `addopts = "-m 'not npu and not nightly and not network'"`. Shell entry scripts pass `-o addopts=` so their explicit `-m` expressions are not stacked on top of the global default. ci_gate passes `-o addopts=` on every phase and supplies its own `-m` (Phase 0: `not npu`; Phase 1/2: `not npu and not nightly and not network`; config-triggered full suite: `not npu`).
+**`-o addopts=`:** `pyproject.toml` sets `addopts = "-m 'not npu and not nightly and not network'"`. Shell entry scripts pass `-o addopts=` so their explicit `-m` expressions are not stacked on top of the global default. ci_gate passes `-o addopts=` on every wave and supplies its own `-m` (changed-test wave: `not npu`; mapped/guard wave: `not npu and not nightly and not network`; config-triggered full suite: `not npu`).
 
 **Nightly phases:** `run_nightly.sh` runs four pytest phases in order — Phase 1 (`not npu and not nightly and not network`, with coverage + `test_map`), Phase 2a (`not npu and nightly and not network`), Phase 2b (benchmark), Phase 2c (`not npu and network`, real model Hub, run serially). After Phase 2c a **non-blocking config drift check** compares vendored remote configs under `tests/assets/model_config/` against the live Hub and surfaces any mismatch as a report warning without failing the run. When `FEISHU_WEBHOOK_URL` is set, each phase's pytest output is captured to a per-phase log file and the **console is kept quiet** (the detailed report rides the Feishu card instead); the phase breakdown, slowest tests, and drift warnings are rendered into that card.
 
@@ -49,7 +49,7 @@ The repository root **`scripts/`** provides CI entry points. Implementation live
 
 | Marker | Usage |
 |--------|--------|
-| `nightly` | Long-running cases under smoke/regression; included in full `run_smoke.sh` / `run_regression.sh`; excluded from incremental Phase 2 selection, but **new/modified test files always run in ci_gate Phase 0** (`-m not npu` only — nightly cases execute) |
+| `nightly` | Long-running cases under smoke/regression; included in full `run_smoke.sh` / `run_regression.sh`; excluded from mapped/guard ci_gate wave (`not npu and not nightly and not network`), but **new/modified test files run in the changed-test wave** (`-m not npu` only — nightly cases execute) |
 | `npu` | Hardware-dependent; excluded from all `run_*.sh` |
 | `network` | Requires live model Hub access (HuggingFace/ModelScope); excluded by default (`pyproject.toml` `addopts`) and from every `run_*.sh`; validated only in nightly Phase 2c |
 
@@ -106,9 +106,9 @@ Boolean types: **`0`**/**`1`**/**`true`**/**`false`**/**`yes`**/**`no`**/**`on`*
 | `PYTHON` | Optional | — | `common.sh` | Python interpreter override |
 | `PRE_COMMIT_LLM_FILTER` | Optional | unset | pre-commit hooks | `1` → compact LLM-friendly hook output via `pre-commit/llm_render.py` |
 
-Pytest output: smoke / regression / benchmark run `-vv --no-header --tb=short` (with `--durations=20`). Nightly phases run `-q --no-header --tb=short`. `run_ci_gate.sh` delegates to `ci_gate/main.py`, which logs all pytest phases as `-vv --tb=short --disable-warnings` (Phase 2 incremental runs serially, no xdist).
+Pytest output: smoke / regression / benchmark run `-vv --no-header --tb=short` (with `--durations=20`). Nightly phases run `-q --no-header --tb=short`. `run_ci_gate.sh` delegates to `ci_gate/main.py`, which plans tests before any pytest run and logs selection as `-vv --tb=short --disable-warnings` with collect-first xdist sizing.
 
-The test_map collection scope is **hardcoded** (not an env override): `build_test_map` and nightly phase 1 use `not npu and not nightly and not network` over `tests/smoke/` and `tests/regression/`, matching the ci_gate selection marker. Benchmark cases never participate in mapping.
+The test_map collection scope is **hardcoded** (not an env override): `build_test_map` and nightly phase 1 use `not npu and not nightly and not network` over `tests/smoke/` and `tests/regression/` — same marker as the ci_gate mapped/guard pytest wave. Benchmark cases never participate in mapping.
 
 ### Pytest session (`tests/conftest.py`)
 
@@ -124,11 +124,22 @@ The test_map collection scope is **hardcoded** (not an env override): `build_tes
 
 Gate policy is read by `run_ci_gate.sh`. **Source omit** is **not** in gate_policy — use `pyproject.toml` `[tool.coverage.run] omit` as the single source of truth (`scripts/helpers/common/coverage_omit.py`).
 
+**Product roots (single source of truth):** `gate_policy.yaml` `roots` is the authoritative list of product source prefixes. The same list drives:
+
+| Consumer | How `roots` is used |
+|----------|---------------------|
+| `coverage_config.product_roots()` / `COV_PACKAGES` | `load_gate_policy()` → `roots`; coverage `--cov` flags use `rstrip('/')` package names |
+| `classify_changes` / ci_gate diff | Product vs test vs config classification under merge-base diff |
+| `test_map` keys (`load_test_map`, `build_test_map`) | Map keys must start with a `roots` prefix |
+| Nightly `build_test_map` | `collect_from_coverage` scopes measured files to `roots` |
+
+To add a new product tree (e.g. a top-level package), append one `roots` entry in `gate_policy.yaml` only — do not duplicate prefixes in Python constants.
+
 | Section | Purpose |
 |---------|---------|
-| `roots` | Product source path prefixes (each ends with `/`) used for diff classification, `test_map` key validation, and gate rules — e.g. `cli/`, `tensor_cast/`, `tools/` |
+| `roots` | Product source path prefixes (each ends with `/`) — SSOT for diff classification, `test_map` key validation, coverage packages, and gate rules — e.g. `cli/`, `tensor_cast/`, `tools/` |
 | `exemptions.sources` | Temporary **product-symbol** waivers when `test_map` coverage is not yet available. Each `symbols` entry is `product/path.py::qualified_name` (exactly one `::`, path under `roots`). Skips coverage checks for that source symbol. Requires `reason`, `applicant`, `approver`, `deadline`. |
-| `exemptions.tests` | Temporary **pytest-node** waivers (same metadata shape). Each `symbols` entry is a pytest node id: `tests/.../test_foo.py::test_bar` — must include `::`, must name a concrete test function/method (no class-only `::TestClass`, no parametrized bracket ids like `::test_x[param]`). Skips matching nodes in **Phase 0** (after collect-only per changed file) and **Phase 2** (incremental `test_map` node ids). Phase 0 pytest failure prints a copy-paste YAML hint; Phase 1/2 failures do not. |
+| `exemptions.tests` | Temporary **pytest-node** waivers (same metadata shape). Each `symbols` entry is a pytest node id: `tests/.../test_foo.py::test_bar` — must include `::`, must name a concrete test function/method (no class-only `::TestClass`, no parametrized bracket ids like `::test_x[param]`). Skips matching nodes when scheduling changed tests and mapped regression tests. When every node in a changed test file is exempt, that file is not run. Selected-test pytest failure prints a copy-paste YAML hint; full-suite failures do not. |
 | `test_discovery` | Which paths under `tests/` count as gate test modules |
 
 **Exemption semantics:** `exemptions.sources` waives **product code symbols** (AST qualified names under `roots`). `exemptions.tests` waives **individual pytest nodes** (test functions/methods), not whole directories. Prefer fixing or narrowing tests over broad file-level entries.
@@ -149,7 +160,7 @@ exemptions:
 
 **Coverage omit (SSOT):** `pyproject.toml` `[tool.coverage.run] omit` (e.g. `*/builtin_model/*`) — gate and nightly `test_map` skip matching product sources under `roots`.
 
-**Coverage fallback:** after Phase 0, if a changed symbol is missing from both baseline and merged `test_map` but Phase 0 `.coverage` shows the line executed (including import/conftest paths with empty context), the gate does not block.
+**Coverage fallback (import-time symbols):** during pre-run policy in `build_ci_gate_plan`, unmapped changed symbols may pass when repo-root `.coverage` shows an executed line in the symbol span — including import-time or conftest contexts (empty coverage context). Implemented in `coverage_symbol_check.symbol_lines_covered_in_data`; no separate Phase 0 pytest+cov or in-memory `test_map` merge. Nightly phase 1 maintains the external `test_map`; ci_gate reads it only.
 
 Changes to `gate_policy.yaml` require an approver listed in `tests/.ci/approvers.yaml`.
 

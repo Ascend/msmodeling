@@ -1,19 +1,23 @@
 """Gate rules: individual policy checks that produce GateStepResult.
 
 Each _gate_* function is a self-contained rule. No orchestration here —
-build_ci_gate_plan in gate.py decides which rules to run and merges results.
+build_ci_gate_plan in main.py decides which rules to run and merges results.
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from scripts.helpers.ci_gate.gate_policy import SourceExemption, is_exempt
+from scripts.helpers.ci_gate.gate_policy import SourceExemption, TestExemption, is_exempt, is_test_exempt
 from scripts.helpers.ci_gate.models import ChangeSet, GateError, GateStepResult
 from scripts.helpers.common import ast_utils
 from scripts.helpers.common.coverage_omit import is_coverage_omitted_source
 from scripts.helpers.common.coverage_symbol_check import symbol_lines_covered_in_data
+from scripts.helpers.common.pytest_runner import collect_test_node_ids
 from scripts.helpers.common.test_map_loader import is_product_source
+
+logger = logging.getLogger(__name__)
 
 
 def _merge_step_results(*steps: GateStepResult) -> GateStepResult:
@@ -56,7 +60,15 @@ def _coverage_fallback_passes(
 ) -> bool:
     if not coverage_path or not lines:
         return False
-    return symbol_lines_covered_in_data(repo_root, file_path, symbol, lines, coverage_path)
+    if symbol_lines_covered_in_data(repo_root, file_path, symbol, lines, coverage_path):
+        logger.info(
+            "Coverage fallback accepted %s::%s (%d executable line(s))",
+            file_path,
+            symbol,
+            len(lines),
+        )
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +84,10 @@ def gate_new_source(
     roots: tuple[str, ...],
     *,
     coverage_path: Path | None = None,
+    check_mapping: bool = True,
 ) -> GateStepResult:
+    if not check_mapping:
+        return GateStepResult()
     errors: list[GateError] = []
     for path in changes.new_source:
         if not path.endswith(".py"):
@@ -109,10 +124,32 @@ def gate_new_source(
 # ---------------------------------------------------------------------------
 
 
-def gate_new_tests(changes: ChangeSet) -> GateStepResult:
-    """Run added and in-place-modified test files directly (their edits may change coverage)."""
-    candidates = changes.new_test + changes.modified_test
-    return GateStepResult(tests=frozenset(candidates))
+def gate_new_tests(
+    changes: ChangeSet,
+    test_exemptions: tuple[TestExemption, ...],
+    *,
+    marker: str,
+    full_suite: bool = False,
+) -> GateStepResult:
+    """Collect runnable pytest node ids from new or modified test files.
+
+    Files whose collected nodes are all listed in exemptions.tests contribute
+    nothing — they must not be scheduled for execution.
+    """
+    if full_suite:
+        return GateStepResult()
+    test_files = changes.new_test + changes.modified_test
+    if not test_files:
+        return GateStepResult()
+    collected = collect_test_node_ids(list(test_files), marker=marker)
+    nodes: list[str] = []
+    for test_file in test_files:
+        file_nodes = [node_id for node_id in collected if node_id.split("::", 1)[0] == test_file]
+        runnable = tuple(node_id for node_id in file_nodes if not is_test_exempt(test_exemptions, node_id))
+        if file_nodes and not runnable:
+            continue
+        nodes.extend(runnable)
+    return GateStepResult(tests=frozenset(nodes))
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +219,7 @@ def gate_modified_source(
     roots: tuple[str, ...],
     *,
     coverage_path: Path | None = None,
+    check_mapping: bool = True,
 ) -> GateStepResult:
     errors: list[GateError] = []
     tests: set[str] = set()
@@ -200,12 +238,16 @@ def gate_modified_source(
             mapped = file_map.get(symbol)
             if mapped:
                 tests.update(mapped)
-            elif is_exempt(exemptions, path, symbol) or _coverage_fallback_passes(
-                repo_root,
-                path,
-                symbol,
-                _symbol_lines_from_diff(source_path, symbol, executable),
-                coverage_path=coverage_path,
+            elif (
+                not check_mapping
+                or is_exempt(exemptions, path, symbol)
+                or _coverage_fallback_passes(
+                    repo_root,
+                    path,
+                    symbol,
+                    _symbol_lines_from_diff(source_path, symbol, executable),
+                    coverage_path=coverage_path,
+                )
             ):
                 continue
             else:

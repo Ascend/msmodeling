@@ -191,14 +191,14 @@ def test_payload_omits_redundancy_section_when_empty() -> None:
 
 def test_payload_includes_phase_breakdown_section() -> None:
     phases = (
-        PhaseBreakdownEntry(label="phase1 (test_map UT)", passed=40, failed=0, duration_sec=120.0),
-        PhaseBreakdownEntry(label="phase2c (network)", passed=5, failed=2, duration_sec=30.0),
+        PhaseBreakdownEntry(label="smoke UT (coverage mapping)", passed=40, failed=0, duration_sec=120.0),
+        PhaseBreakdownEntry(label="network Hub tests", passed=5, failed=2, duration_sec=30.0),
     )
     payload = build_feishu_payload(_report(phase_breakdown=phases))
     text = payload["content"]["text"]
     assert "Per-phase:" in text
-    assert "phase1 (test_map UT): passed 40 / failed 0 / 120s" in text
-    assert "phase2c (network): passed 5 / failed 2 / 30s" in text
+    assert "smoke UT (coverage mapping): passed 40 / failed 0 / 120s" in text
+    assert "network Hub tests: passed 5 / failed 2 / 30s" in text
 
 
 def test_payload_omits_phase_breakdown_when_empty() -> None:
@@ -285,7 +285,7 @@ def test_payload_exit_without_junit_details_shows_infra_failure_status() -> None
             test_map_written=False,
             phase_breakdown=(
                 PhaseBreakdownEntry(
-                    label="phase1 (test_map UT)",
+                    label="smoke UT (coverage mapping)",
                     passed=0,
                     failed=0,
                     duration_sec=-1.0,

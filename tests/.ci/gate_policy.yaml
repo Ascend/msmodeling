@@ -65,5 +65,5 @@ test_discovery:
     - "**/test_*.py"
     - "**/*_test.py"
   exclude:
-    - "tests/helpers/*.py"
+    - "tests/helpers/**"
     - "tests/assets/**"

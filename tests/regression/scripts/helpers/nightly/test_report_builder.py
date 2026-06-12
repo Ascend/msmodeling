@@ -121,6 +121,27 @@ def test_compute_weak_coverage_symbols_returns_empty_when_test_map_missing(
     assert result == ()
 
 
+def test_compute_weak_coverage_symbols_uses_in_memory_mapping_without_file_read(
+    tmp_path: Path,
+) -> None:
+    from scripts.helpers.nightly import report_builder
+
+    in_memory = {"cli/main.py": {"run": ["test_a"]}}
+    monkeypatch_local = pytest.MonkeyPatch()
+    monkeypatch_local.setattr(report_builder, "REPO_ROOT", tmp_path)
+    (tmp_path / "cli").mkdir()
+    (tmp_path / "cli" / "main.py").write_text("def run():\n    x = 1\n", encoding="utf-8")
+    try:
+        result = compute_weak_coverage_symbols(
+            tmp_path / "missing-map.json",
+            tmp_path / ".coverage",
+            mapping=in_memory,
+        )
+        assert result == ()
+    finally:
+        monkeypatch_local.undo()
+
+
 def test_compute_weak_coverage_symbols_returns_empty_when_no_coverage_data(
     tmp_path: Path,
 ) -> None:
@@ -152,13 +173,13 @@ def test_build_phase_breakdown_marks_missing_junit_with_infra_failure(
     tmp_path: Path,
 ) -> None:
     entries = build_phase_breakdown(
-        ("phase1 (test_map UT)",),
+        ("smoke UT (coverage mapping)",),
         (tmp_path / "missing.xml",),
         (1,),
     )
     assert entries == (
         PhaseBreakdownEntry(
-            label="phase1 (test_map UT)",
+            label="smoke UT (coverage mapping)",
             passed=0,
             failed=0,
             duration_sec=-1.0,

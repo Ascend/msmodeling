@@ -86,10 +86,12 @@ def test_ci_gate_plan_all_fields_accessible() -> None:
     plan = CiGatePlan(
         blocking_errors=(err,),
         deleted_source_tests=frozenset({"test_a"}),
-        incremental_tests=frozenset({"test_b"}),
+        changed_test_nodes=frozenset({"test_b"}),
+        regression_tests=frozenset({"test_c"}),
         full_suite=False,
     )
     assert plan.blocking_errors == (err,)
     assert plan.deleted_source_tests == frozenset({"test_a"})
-    assert plan.incremental_tests == frozenset({"test_b"})
+    assert plan.changed_test_nodes == frozenset({"test_b"})
+    assert plan.regression_tests == frozenset({"test_c"})
     assert plan.full_suite is False

@@ -45,12 +45,16 @@ def symbol_lines_covered_in_data(
     if measured is None:
         return False
 
+    executed_lines: set[int] = set()
+    lines_fn = getattr(data, "lines", None)
+    if lines_fn is not None:
+        executed_lines = set(lines_fn(measured) or ())
+
     ctxmap = data.contexts_by_lineno(measured)
-    if not ctxmap:
-        return False
 
     for line_no in lines:
-        contexts = ctxmap.get(line_no)
-        if contexts:
+        if line_no in executed_lines:
+            return True
+        if ctxmap and ctxmap.get(line_no):
             return True
     return False

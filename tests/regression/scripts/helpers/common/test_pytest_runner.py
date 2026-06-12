@@ -11,6 +11,7 @@ from scripts.helpers.common.pytest_runner import (
     build_pytest_cmd,
     collect_test_node_ids,
     count_collected_tests,
+    filter_collectable_node_ids,
     xdist_worker_args,
 )
 from tests.helpers.fake_subprocess import FakeCompleted
@@ -94,6 +95,57 @@ def test_collect_test_node_ids_nonzero_exit_raises_config_error(monkeypatch: pyt
     )
     with pytest.raises(ConfigError, match="collect-only failed"):
         collect_test_node_ids(["tests/smoke"], marker="not npu")
+
+
+def test_filter_collectable_node_ids_exit_four_batch_falls_back_per_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    lenient_calls: list[tuple[str, ...]] = []
+    stale = "tests/regression/cli/test_b.py::test_stale"
+    valid = "tests/regression/cli/test_a.py::test_a"
+
+    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+        return FakeCompleted(4, "", f"ERROR: not found: {stale}\n(no match in any of [<Module test_b.py>])")
+
+    def _fake_lenient(targets: tuple[str, ...], *, marker: str) -> tuple[str, ...]:
+        del marker
+        lenient_calls.append(targets)
+        if targets[0].endswith("::test_stale"):
+            return ()
+        return (targets[0],)
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
+    monkeypatch.setattr(
+        "scripts.helpers.common.pytest_runner._collect_test_node_ids_lenient",
+        _fake_lenient,
+    )
+    result = filter_collectable_node_ids((valid, stale), marker="not npu")
+    assert result == (valid,)
+    assert (valid,) in lenient_calls
+    assert (stale,) in lenient_calls
+
+
+def test_filter_collectable_node_ids_all_stale_skips_per_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    collect_calls: list[tuple[str, ...]] = []
+    stale = "tests/regression/cli/test_old.py::test_renamed"
+
+    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+        collect_calls.append(tuple(arg for arg in cmd if "::" in arg))
+        return FakeCompleted(4, "", f"ERROR: not found: {stale}\n(no match in any of [<Module test_old.py>])")
+
+    per_node_calls: list[tuple[str, ...]] = []
+
+    def _unexpected_lenient(targets: tuple[str, ...], *, marker: str) -> tuple[str, ...]:
+        del marker
+        per_node_calls.append(targets)
+        return ()
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
+    monkeypatch.setattr(
+        "scripts.helpers.common.pytest_runner._collect_test_node_ids_lenient",
+        _unexpected_lenient,
+    )
+    assert filter_collectable_node_ids((stale,), marker="not npu") == ()
+    assert collect_calls == [(stale,)]
+    assert per_node_calls == []
 
 
 def test_collect_test_node_ids_includes_ignore_addopts(monkeypatch: pytest.MonkeyPatch) -> None:

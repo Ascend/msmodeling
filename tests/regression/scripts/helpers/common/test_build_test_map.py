@@ -13,10 +13,11 @@ from scripts.helpers.common.build_test_map import (
     _prune_missing_source_keys,
     _relative_repo_key,
     collect_from_coverage,
+    collect_test_map,
     detect_redundant_cases,
     write_test_map,
 )
-from scripts.helpers.common.coverage_config import PRODUCT_SOURCE_PREFIXES
+from scripts.helpers.common.coverage_config import product_roots
 from scripts.helpers.common.pytest_runner import PYTEST_IGNORE_ADDOPTS
 from tests.helpers.fake_subprocess import FakeCompleted
 
@@ -33,7 +34,7 @@ def test_relative_repo_key_product_prefix_returns_rel_path(tmp_path: Path, monke
     abs_file.write_text("", encoding="utf-8")
 
     monkeypatch.setattr(build_test_map, "REPO_ROOT", tmp_path)
-    result = _relative_repo_key(str(abs_file), PRODUCT_SOURCE_PREFIXES)
+    result = _relative_repo_key(str(abs_file), product_roots())
     assert result == "cli/main.py"
 
 
@@ -41,7 +42,7 @@ def test_relative_repo_key_outside_repo_returns_none(tmp_path: Path, monkeypatch
     from scripts.helpers.common import build_test_map
 
     monkeypatch.setattr(build_test_map, "REPO_ROOT", tmp_path)
-    assert _relative_repo_key("/other/path/file.py", PRODUCT_SOURCE_PREFIXES) is None
+    assert _relative_repo_key("/other/path/file.py", product_roots()) is None
 
 
 def test_relative_repo_key_non_product_prefix_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,7 +52,7 @@ def test_relative_repo_key_non_product_prefix_returns_none(tmp_path: Path, monke
     (tmp_path / "other").mkdir()
     abs_file = tmp_path / "other" / "file.py"
     abs_file.write_text("", encoding="utf-8")
-    result = _relative_repo_key(str(abs_file), PRODUCT_SOURCE_PREFIXES)
+    result = _relative_repo_key(str(abs_file), product_roots())
     assert result is None
 
 
@@ -112,6 +113,33 @@ def test_collect_allowed_node_ids_includes_ignore_addopts(monkeypatch: pytest.Mo
     monkeypatch.setattr("subprocess.run", _fake_run)
     _collect_allowed_node_ids("not npu")
     assert PYTEST_IGNORE_ADDOPTS[0] in captured[0]
+
+
+def test_collect_test_map_skips_collect_when_allowed_node_ids_provided(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.helpers.common import build_test_map
+
+    allowed = frozenset({"tests/smoke/test_a.py::test_foo"})
+    collect_calls: list[str] = []
+    (tmp_path / "cli").mkdir()
+    (tmp_path / "cli" / "main.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(build_test_map, "REPO_ROOT", tmp_path)
+
+    def _fail_collect(_marker_expr: str, _pytest_args: list[str] | None = None) -> frozenset[str]:
+        collect_calls.append(_marker_expr)
+        raise AssertionError("must not call _collect_allowed_node_ids")
+
+    monkeypatch.setattr(build_test_map, "_collect_allowed_node_ids", _fail_collect)
+    monkeypatch.setattr(
+        build_test_map,
+        "collect_from_coverage",
+        lambda node_ids, **_kwargs: {"cli/main.py": {"run": sorted(node_ids)}} if node_ids else {},
+    )
+    result = collect_test_map(marker_expr="not npu", allowed_node_ids=allowed)
+    assert collect_calls == []
+    assert result == {"cli/main.py": {"run": ["tests/smoke/test_a.py::test_foo"]}}
 
 
 # ---------------------------------------------------------------------------

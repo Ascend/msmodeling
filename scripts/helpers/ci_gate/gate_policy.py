@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 import subprocess
@@ -362,13 +363,27 @@ def _validate_approvers_in_registry(doc: GatePolicyDoc, approvers: frozenset[str
 # ---------------------------------------------------------------------------
 
 
-def load_gate_policy(repo_root: Path) -> GatePolicy:
-    """Load gate policy and approver registry from tests/.ci/."""
+def _policy_mtime_key(repo_root: Path) -> tuple[float, float]:
+    policy_path, approvers_path = _policy_paths(repo_root)
+    return (policy_path.stat().st_mtime, approvers_path.stat().st_mtime)
+
+
+def _load_gate_policy_uncached(repo_root: Path) -> GatePolicy:
     policy_path, approvers_path = _policy_paths(repo_root)
     approvers_doc = _load_approvers_doc(approvers_path)
     policy_doc = _load_gate_policy_doc(policy_path)
     approver_names = frozenset(approvers_doc.approvers)
     return _doc_to_policy(policy_doc, approver_names)
+
+
+@functools.lru_cache(maxsize=32)
+def _load_gate_policy_cached(repo_root: Path, _mtime_key: tuple[float, float]) -> GatePolicy:
+    return _load_gate_policy_uncached(repo_root)
+
+
+def load_gate_policy(repo_root: Path) -> GatePolicy:
+    """Load gate policy and approver registry from tests/.ci/."""
+    return _load_gate_policy_cached(repo_root, _policy_mtime_key(repo_root))
 
 
 def gate_policy_changed_in_diff(repo_root: Path, base_ref: str) -> bool:
@@ -403,14 +418,26 @@ def validate_gate_policy_if_changed(repo_root: Path, base_ref: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+@functools.lru_cache(maxsize=32)
+def _path_specs_for_discovery(
+    include_patterns: tuple[str, ...],
+    exclude_patterns: tuple[str, ...],
+) -> tuple[pathspec.PathSpec, pathspec.PathSpec]:
+    exclude_spec = pathspec.PathSpec.from_lines("gitignore", exclude_patterns)
+    include_spec = pathspec.PathSpec.from_lines("gitignore", include_patterns)
+    return exclude_spec, include_spec
+
+
 def is_gate_test_path(path: str, discovery: TestDiscovery) -> bool:
     """Return True when *path* is a collectible test module for the gate."""
     if not path.startswith("tests/") or not path.endswith(".py"):
         return False
-    exclude_spec = pathspec.PathSpec.from_lines("gitignore", discovery.exclude_patterns)
+    exclude_spec, include_spec = _path_specs_for_discovery(
+        discovery.include_patterns,
+        discovery.exclude_patterns,
+    )
     if exclude_spec.match_file(path):
         return False
-    include_spec = pathspec.PathSpec.from_lines("gitignore", discovery.include_patterns)
     return include_spec.match_file(path)
 
 
