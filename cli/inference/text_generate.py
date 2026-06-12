@@ -141,6 +141,11 @@ def main():
         help="If set, group the table average by input shapes",
     )
     debug_group.add_argument(
+        "--dump-op-bound-results",
+        action="store_true",
+        help="If set, dump per-operator memory/communication/MMA/GP bound ratios in the result table.",
+    )
+    debug_group.add_argument(
         "--chrome-trace",
         help="Generate chrome trace file",
     )

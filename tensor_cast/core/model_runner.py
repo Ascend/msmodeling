@@ -169,7 +169,10 @@ class ModelRunner:
         all_execution_time_s = runtime.total_execution_time_s()
         run_time_s = run_end - run_start
 
-        table_result = runtime.table_averages(group_by_input_shapes=self.user_input.dump_input_shapes)
+        table_result = runtime.table_averages(
+            group_by_input_shapes=self.user_input.dump_input_shapes,
+            dump_op_bound_results=self.user_input.dump_op_bound_results,
+        )
 
         perf_model_name = self.perf_models[0].name if self.perf_models else None
         runtime_event_list = self._aggregate_runtime_events(runtime.event_list, perf_model_name=perf_model_name)

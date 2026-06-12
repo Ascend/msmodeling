@@ -20,6 +20,7 @@ from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, Qua
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.layers.parallel_embedding import ParallelEmbedding
 from tensor_cast.model_config import WordEmbeddingTPMode
+from tests.helpers.cli_runner import run_module_main
 
 
 class TextGenerateTestMixin:
@@ -2082,6 +2083,101 @@ class TestTextGenerateScriptMain(unittest.TestCase):
             self.assertEqual(cm.exception.code, 2)
         finally:
             sys.argv = original_argv
+
+
+class TestUserInputConfigPrintInfo(unittest.TestCase):
+    """Unit tests for UserInputConfig._print_info."""
+
+    @patch("sys.stdout", new_callable=StringIO)
+    def test_print_info_includes_multimodal_and_bound_options(self, mock_stdout):
+        user_config = UserInputConfig(
+            device="TEST_DEVICE",
+            model_id="Qwen/Qwen3-VL-8B-Instruct",
+            num_queries=2,
+            query_len=128,
+            context_length=256,
+            decode=True,
+            dump_input_shapes=True,
+            dump_op_bound_results=True,
+            image_batch_size=1,
+            image_height=720,
+            image_width=1080,
+            quantize_linear_action=QuantizeLinearAction.MXFP4,
+            quantize_attention_action=QuantizeAttentionAction.INT8,
+        )
+
+        user_config._print_info()
+
+        output = mock_stdout.getvalue()
+        self.assertIn("Device: TEST_DEVICE", output)
+        self.assertIn("Model ID: Qwen/Qwen3-VL-8B-Instruct", output)
+        self.assertIn("Number of Queries: 2", output)
+        self.assertIn("Input Length (per query): 128", output)
+        self.assertIn("Context Length (per query): 256", output)
+        self.assertIn("Is Decode: True", output)
+        self.assertIn("Quantization Linear: MXFP4", output)
+        self.assertIn("MXFP4 group size: 32", output)
+        self.assertIn("Quantization Attention: INT8", output)
+        self.assertIn("Group table averages by input shapes: True", output)
+        self.assertIn("Dump operator bound ratios: True", output)
+        self.assertIn("image_batch_size: 1", output)
+        self.assertIn("image_height: 720", output)
+        self.assertIn("image_width: 1080", output)
+
+
+class TestTensorCastScriptsTextGenerateMain(unittest.TestCase):
+    """Coverage anchor for tensor_cast.scripts.text_generate.main."""
+
+    def test_main_builds_user_config_and_runs_model_runner(self):
+        class FakeMetrics:
+            def __init__(self):
+                self.printed = False
+
+            def print_info(self):
+                self.printed = True
+
+        captured = {}
+        fake_metrics = FakeMetrics()
+
+        class FakeModelRunner:
+            def __init__(self, user_config):
+                captured["user_config"] = user_config
+
+            def run_inference(self, generate_inputs_func):
+                captured["generate_inputs_func"] = generate_inputs_func
+                return fake_metrics
+
+        with patch("tensor_cast.scripts.text_generate.ModelRunner", FakeModelRunner):
+            result = run_module_main(
+                "tensor_cast.scripts.text_generate",
+                [
+                    "--device",
+                    "TEST_DEVICE",
+                    "Qwen/Qwen3-32B",
+                    "--num-queries",
+                    "2",
+                    "--query-length",
+                    "8",
+                    "--context-length",
+                    "4",
+                    "--decode",
+                    "--dump-op-bound-results",
+                    "--quantize-linear-action",
+                    "DISABLED",
+                    "--quantize-attention-action",
+                    "DISABLED",
+                ],
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(fake_metrics.printed)
+        self.assertEqual(captured["user_config"].model_id, "Qwen/Qwen3-32B")
+        self.assertEqual(captured["user_config"].num_queries, 2)
+        self.assertEqual(captured["user_config"].query_len, 8)
+        self.assertEqual(captured["user_config"].context_length, 4)
+        self.assertTrue(captured["user_config"].decode)
+        self.assertTrue(captured["user_config"].dump_op_bound_results)
+        self.assertIs(captured["generate_inputs_func"], generate_inputs)
 
 
 if __name__ == "__main__":

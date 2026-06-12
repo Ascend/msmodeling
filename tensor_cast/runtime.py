@@ -11,6 +11,13 @@ import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .device import DeviceProfile
+from .performance_model.bound_analyzer import (
+    COMMUNICATION_BOUND,
+    COMPUTE_BOUND_GP,
+    COMPUTE_BOUND_MMA,
+    MEMORY_BOUND,
+    BoundAnalyzer,
+)
 from .patch_torch import patch_torch
 from .performance_model.base import CachingPerformanceModel, PerformanceModel
 from .performance_model.memory_tracker import MemoryTracker
@@ -25,6 +32,19 @@ def current_runtime():
     return getattr(_current_runtime, "value", None)
 
 
+BoundComponentTotals = Dict[str, float]
+BoundComponentsByModel = Dict[str, BoundComponentTotals]
+_BOUND_COMPONENT_KEYS = (MEMORY_BOUND, COMMUNICATION_BOUND, COMPUTE_BOUND_MMA, COMPUTE_BOUND_GP)
+
+
+def _default_bound_component_totals() -> BoundComponentTotals:
+    return {key: 0.0 for key in _BOUND_COMPONENT_KEYS}
+
+
+def _default_bound_components_by_model() -> BoundComponentsByModel:
+    return collections.defaultdict(_default_bound_component_totals)
+
+
 @dataclasses.dataclass
 class RuntimeEvent:
     op_invoke_info: OpInvokeInfo
@@ -33,6 +53,20 @@ class RuntimeEvent:
     dependency_token_ids: tuple[int, ...] = ()
     produced_token_ids: List[int] = dataclasses.field(default_factory=list)
     memory_aliases: List[tuple[torch.Tensor, torch.Tensor]] = dataclasses.field(default_factory=list)
+
+
+@dataclasses.dataclass(frozen=True)
+class OpAverageGroupKey:
+    op_name: str
+    bound: str = ""
+    input_shapes: str = ""
+
+
+@dataclasses.dataclass
+class OpAverageGroupData:
+    count: int = 0
+    total_runtimes: Dict[str, float] = dataclasses.field(default_factory=lambda: collections.defaultdict(float))
+    bound_components: BoundComponentsByModel = dataclasses.field(default_factory=_default_bound_components_by_model)
 
 
 class Runtime(TorchDispatchMode):
@@ -307,115 +341,155 @@ class Runtime(TorchDispatchMode):
             _current_runtime.value = None
             self.exit_stack.close()
 
-    def table_averages(self, group_by_input_shapes=False) -> str:
-        """
-        Dump pretty-print table, grouped by ops by default.
+    @classmethod
+    def _bound_components(cls, result: PerformanceModel.Result) -> Dict[str, float]:
+        return BoundAnalyzer.components(result).as_dict()
 
-        TODO: consider to separate the data (event_list) and view (table)
+    @classmethod
+    def _dominant_bound(cls, result: PerformanceModel.Result) -> str:
+        return BoundAnalyzer.dominant(result)
 
-        Args:
-            group_by_input_shapes: group the events by input shapes when turned on.
-        """
-        if not self.event_list:
-            return "No events recorded."
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        """Formats time in seconds to a human-readable string (ms, us, ns)."""
+        if seconds >= 1.0:
+            return f"{seconds:.3f}s"
+        if seconds >= 1e-3:
+            return f"{seconds * 1e3:.3f}ms"
+        if seconds >= 1e-6:
+            return f"{seconds * 1e6:.3f}us"
+        return f"{seconds * 1e9:.3f}ns"
 
-        def _format_time(seconds: float) -> str:
-            """Formats time in seconds to a human-readable string (ms, us, ns)."""
-            if seconds >= 1.0:
-                return f"{seconds:.3f}s"
-            if seconds >= 1e-3:
-                return f"{seconds * 1e3:.3f}ms"
-            if seconds >= 1e-6:
-                return f"{seconds * 1e6:.3f}us"
-            return f"{seconds * 1e9:.3f}ns"
+    @staticmethod
+    def _get_input_shapes_str(op_info: "OpInvokeInfo") -> str:
+        """Extracts tensor shapes from operator arguments for display."""
+        shapes = []
+        for arg in op_info.args:
+            if isinstance(arg, torch.Tensor):
+                shapes.append(str(list(arg.shape)))
+        return ", ".join(shapes)
 
-        def _get_input_shapes_str(op_info: "OpInvokeInfo") -> str:
-            """Extracts tensor shapes from operator arguments for display."""
-            shapes = []
-            # A simple search for tensors in args; can be expanded for kwargs or nested structures
-            for arg in op_info.args:
-                if isinstance(arg, torch.Tensor):
-                    shapes.append(str(list(arg.shape)))
-            return ", ".join(shapes)
-
-        # --- Data Aggregation ---
-        # The key is either the op name or (op name, input shapes)
-        # The value stores the aggregated metrics for that key.
-        aggregated_data = collections.defaultdict(
-            lambda: {
-                "count": 0,
-                "total_runtimes": collections.defaultdict(float),
-            }
-        )
-
+    def _aggregate_average_table_data(
+        self,
+        first_model: Optional[str],
+        group_by_input_shapes: bool,
+        dump_op_bound_results: bool,
+    ) -> Dict[OpAverageGroupKey, OpAverageGroupData]:
+        aggregated_data: Dict[OpAverageGroupKey, OpAverageGroupData] = collections.defaultdict(OpAverageGroupData)
         for event in self.event_list:
             op_name = str(event.op_invoke_info.func)
-            if group_by_input_shapes:
-                shapes_str = _get_input_shapes_str(event.op_invoke_info)
-                key = (op_name, shapes_str)
-            else:
-                key = op_name
+            first_result = event.perf_results.get(first_model) if first_model else None
+            key = OpAverageGroupKey(
+                op_name=op_name,
+                bound=self._dominant_bound(first_result) if dump_op_bound_results and first_result else "",
+                input_shapes=self._get_input_shapes_str(event.op_invoke_info) if group_by_input_shapes else "",
+            )
 
             entry = aggregated_data[key]
-            entry["count"] += 1
+            entry.count += 1
             for model_name, result in event.perf_results.items():
-                entry["total_runtimes"][model_name] += result.execution_time_s
+                entry.total_runtimes[model_name] += result.execution_time_s
+                if dump_op_bound_results:
+                    components = self._bound_components(result)
+                    # Ratios are rendered from this model-specific total, not across models.
+                    for bound_name, value in components.items():
+                        entry.bound_components[model_name][bound_name] += value
+        return dict(aggregated_data)
 
-        if not aggregated_data:
-            return "No performance results to display."
-
-        # --- Prepare for Formatting ---
-        model_names = [model.name for model in self.perf_models]
-
-        # Sort entries by the total time of the first performance model, descending
-        # This brings the most expensive operations to the top.
-        first_model = model_names[0] if model_names else None
-
+    @staticmethod
+    def _sort_average_table_items(
+        aggregated_data: Dict[OpAverageGroupKey, OpAverageGroupData],
+        first_model: Optional[str],
+    ) -> List[tuple[OpAverageGroupKey, OpAverageGroupData]]:
         def sort_key(item):
             if first_model:
-                return item[1]["total_runtimes"].get(first_model, 0)
+                return item[1].total_runtimes.get(first_model, 0)
             return 0
 
-        sorted_items = sorted(aggregated_data.items(), key=sort_key, reverse=True)
+        return sorted(aggregated_data.items(), key=sort_key, reverse=True)
 
-        # --- Define Headers and Calculate Column Widths ---
+    @staticmethod
+    def _average_table_headers(
+        model_names: List[str],
+        bound_header: str,
+        group_by_input_shapes: bool,
+        dump_op_bound_results: bool,
+    ) -> List[str]:
         headers = ["Name"]
+        if dump_op_bound_results:
+            headers.append(bound_header)
         if group_by_input_shapes:
-            for name in model_names:
-                headers.append(f"{name} total")
             headers.append("Input Shapes")
         for name in model_names:
             headers.extend([f"{name} total", f"{name} avg"])
+            if dump_op_bound_results:
+                headers.extend([f"{name} memory %", f"{name} comm %", f"{name} mma %", f"{name} gp %"])
         headers.append("# of Calls")
+        return headers
 
-        # Initialize widths with header lengths
+    @classmethod
+    def _average_table_col_widths(
+        cls,
+        sorted_items: List[tuple[OpAverageGroupKey, OpAverageGroupData]],
+        headers: List[str],
+        model_names: List[str],
+        bound_header: str,
+        group_by_input_shapes: bool,
+        dump_op_bound_results: bool,
+    ) -> Dict[str, int]:
         col_widths = {h: len(h) for h in headers}
-
-        # Update widths based on data length
         for key, data in sorted_items:
-            # Update Name column width
-            name_str = key if isinstance(key, str) else key[0]
-            col_widths["Name"] = max(col_widths["Name"], len(name_str))
+            col_widths["Name"] = max(col_widths["Name"], len(key.op_name))
+
+            if dump_op_bound_results:
+                col_widths[bound_header] = max(col_widths[bound_header], len(key.bound))
 
             if group_by_input_shapes:
-                shapes_str = key[1]
-                col_widths["Input Shapes"] = max(col_widths["Input Shapes"], len(shapes_str))
-                for model_name in model_names:
-                    total_time_str = _format_time(data["total_runtimes"][model_name])
-                    col_widths[f"{model_name} total"] = max(col_widths[f"{model_name} total"], len(total_time_str))
-            col_widths["# of Calls"] = max(col_widths["# of Calls"], len(str(data["count"])))
+                col_widths["Input Shapes"] = max(col_widths["Input Shapes"], len(key.input_shapes))
+            col_widths["# of Calls"] = max(col_widths["# of Calls"], len(str(data.count)))
             for model_name in model_names:
-                total_time = data["total_runtimes"][model_name]
-                avg_time = total_time / data["count"]
+                total_time = data.total_runtimes[model_name]
+                avg_time = total_time / data.count
                 col_widths[f"{model_name} total"] = max(
-                    col_widths[f"{model_name} total"], len(_format_time(total_time))
+                    col_widths[f"{model_name} total"], len(cls._format_time(total_time))
                 )
-                col_widths[f"{model_name} avg"] = max(col_widths[f"{model_name} avg"], len(_format_time(avg_time)))
+                col_widths[f"{model_name} avg"] = max(col_widths[f"{model_name} avg"], len(cls._format_time(avg_time)))
+                if dump_op_bound_results:
+                    for header in (
+                        f"{model_name} memory %",
+                        f"{model_name} comm %",
+                        f"{model_name} mma %",
+                        f"{model_name} gp %",
+                    ):
+                        col_widths[header] = max(col_widths[header], len("100.00%"))
+        return col_widths
 
-        # --- Build Table String ---
+    @staticmethod
+    def _format_bound_ratio(components: Dict[str, float], bound_name: str) -> str:
+        component_total = sum(components.get(key, 0.0) for key in _BOUND_COMPONENT_KEYS)
+        if component_total <= 0:
+            return "0.00%"
+        return f"{components.get(bound_name, 0.0) * 100 / component_total:.2f}%"
+
+    @classmethod
+    def _render_average_table(
+        cls,
+        sorted_items: List[tuple[OpAverageGroupKey, OpAverageGroupData]],
+        model_names: List[str],
+        headers: List[str],
+        bound_header: str,
+        group_by_input_shapes: bool,
+        dump_op_bound_results: bool,
+    ) -> str:
+        col_widths = cls._average_table_col_widths(
+            sorted_items,
+            headers,
+            model_names,
+            bound_header,
+            group_by_input_shapes,
+            dump_op_bound_results,
+        )
         output_lines = []
-
-        # Create header and separator lines
         header_line = "  ".join(h.center(col_widths[h]) for h in headers)
         separator_line = "  ".join("-" * col_widths[h] for h in headers)
 
@@ -423,40 +497,90 @@ class Runtime(TorchDispatchMode):
         output_lines.append(header_line)
         output_lines.append(separator_line)
 
-        # Create data rows
         for key, data in sorted_items:
             row = []
-            name_str = key if isinstance(key, str) else key[0]
-            row.append(name_str.ljust(col_widths["Name"]))
+            row.append(key.op_name.ljust(col_widths["Name"]))
+
+            if dump_op_bound_results:
+                row.append(key.bound.ljust(col_widths[bound_header]))
 
             if group_by_input_shapes:
-                for model_name in model_names:
-                    total_time_str = _format_time(data["total_runtimes"][model_name])
-                    row.append(total_time_str.rjust(col_widths[f"{model_name} total"]))
-                shapes_str = key[1]
-                row.append(shapes_str.ljust(col_widths["Input Shapes"]))
+                row.append(key.input_shapes.ljust(col_widths["Input Shapes"]))
             for model_name in model_names:
-                total_time = data["total_runtimes"][model_name]
-                avg_time = total_time / data["count"]
-                row.append(_format_time(total_time).rjust(col_widths[f"{model_name} total"]))
-                row.append(_format_time(avg_time).rjust(col_widths[f"{model_name} avg"]))
-            row.append(str(data["count"]).rjust(col_widths["# of Calls"]))
+                total_time = data.total_runtimes[model_name]
+                avg_time = total_time / data.count
+                row.append(cls._format_time(total_time).rjust(col_widths[f"{model_name} total"]))
+                row.append(cls._format_time(avg_time).rjust(col_widths[f"{model_name} avg"]))
+                if dump_op_bound_results:
+                    components = data.bound_components[model_name]
+                    row.append(
+                        cls._format_bound_ratio(components, MEMORY_BOUND).rjust(col_widths[f"{model_name} memory %"])
+                    )
+                    row.append(
+                        cls._format_bound_ratio(components, COMMUNICATION_BOUND).rjust(
+                            col_widths[f"{model_name} comm %"]
+                        )
+                    )
+                    row.append(
+                        cls._format_bound_ratio(components, COMPUTE_BOUND_MMA).rjust(col_widths[f"{model_name} mma %"])
+                    )
+                    row.append(
+                        cls._format_bound_ratio(components, COMPUTE_BOUND_GP).rjust(col_widths[f"{model_name} gp %"])
+                    )
+            row.append(str(data.count).rjust(col_widths["# of Calls"]))
 
             output_lines.append("  ".join(row))
 
         output_lines.append(separator_line)
 
-        # --- Add Summary Footer ---
         summary_totals = collections.defaultdict(float)
-        for data in aggregated_data.values():
-            for model_name, total_time in data["total_runtimes"].items():
+        for _, data in sorted_items:
+            for model_name, total_time in data.total_runtimes.items():
                 summary_totals[model_name] += total_time
 
         for model_name in model_names:
-            total_str = _format_time(summary_totals[model_name])
+            total_str = cls._format_time(summary_totals[model_name])
             output_lines.append(f"Total time for {model_name}: {total_str}")
 
         return "\n".join(output_lines)
+
+    def table_averages(self, group_by_input_shapes=False, dump_op_bound_results=False) -> str:
+        """
+        Dump pretty-print table, grouped by ops by default.
+
+        Args:
+            group_by_input_shapes: group the events by input shapes when turned on.
+            dump_op_bound_results: dump memory/communication/MMA/GP time ratios for each grouped row.
+        """
+        if not self.event_list:
+            return "No events recorded."
+
+        model_names = [model.name for model in self.perf_models]
+        first_model = model_names[0] if model_names else None
+        aggregated_data = self._aggregate_average_table_data(
+            first_model=first_model,
+            group_by_input_shapes=group_by_input_shapes,
+            dump_op_bound_results=dump_op_bound_results,
+        )
+        if not aggregated_data:
+            return "No performance results to display."
+
+        sorted_items = self._sort_average_table_items(aggregated_data, first_model)
+        bound_header = f"Bound ({first_model})" if first_model else "Bound"
+        headers = self._average_table_headers(
+            model_names=model_names,
+            bound_header=bound_header,
+            group_by_input_shapes=group_by_input_shapes,
+            dump_op_bound_results=dump_op_bound_results,
+        )
+        return self._render_average_table(
+            sorted_items=sorted_items,
+            model_names=model_names,
+            headers=headers,
+            bound_header=bound_header,
+            group_by_input_shapes=group_by_input_shapes,
+            dump_op_bound_results=dump_op_bound_results,
+        )
 
     def get_trace_events(self):
         """

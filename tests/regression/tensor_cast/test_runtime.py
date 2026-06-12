@@ -10,8 +10,9 @@ from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.performance_model import _estimate_dsa_indexer_breakdown
-from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
+from tensor_cast.performance_model.analytic import AnalyticPerformanceModel, OpBoundClassifier
 from tensor_cast.performance_model.base import PerformanceModel
+from tensor_cast.performance_model.bound_analyzer import BoundAnalyzer, StatsKey
 from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
 from tensor_cast.performance_model.memory_tracker import MemoryTracker
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
@@ -20,8 +21,7 @@ from tensor_cast.performance_model.profiling_database.data_source import (
     QueryResult,
     QuerySource,
 )
-from tensor_cast.runtime import Runtime
-
+from tensor_cast.runtime import Runtime, RuntimeEvent
 from .test_common import (
     assert_close,
     create_attn_metadata_and_kv_cache,
@@ -758,6 +758,289 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         self.assertIn("aten.add", result)
         self.assertIn("aten.mul", result)
         self.assertIn("# of Calls", result)
+
+    def test_table_averages_splits_same_op_by_dominant_bound(self):
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        runtime = Runtime(perf_model, device_profile)
+        x = torch.randn([10, 10], device="meta")
+        op_info = OpInvokeInfo(torch.ops.aten.add.Tensor, (x, x), {}, x)
+        runtime.event_list = [
+            RuntimeEvent(
+                op_invoke_info=op_info,
+                perf_results={
+                    "analytic": PerformanceModel.Result(
+                        execution_time_s=2e-6,
+                        statistics={
+                            StatsKey.MEMORY_ACCESS: 2e-6,
+                            StatsKey.COMPUTE: 1e-6,
+                            StatsKey.MMA_OPS: 1e-6,
+                            StatsKey.GP_OPS: 0.0,
+                        },
+                    )
+                },
+            ),
+            RuntimeEvent(
+                op_invoke_info=op_info,
+                perf_results={
+                    "analytic": PerformanceModel.Result(
+                        execution_time_s=3e-6,
+                        statistics={
+                            StatsKey.MEMORY_ACCESS: 1e-6,
+                            StatsKey.COMPUTE: 3e-6,
+                            StatsKey.MMA_OPS: 3e-6,
+                            StatsKey.GP_OPS: 0.0,
+                        },
+                    )
+                },
+            ),
+        ]
+
+        result = runtime.table_averages(dump_op_bound_results=True)
+
+        self.assertIn("Bound (analytic)", result)
+        self.assertIn("memory_bound", result)
+        self.assertIn("compute_bound_mma", result)
+        self.assertEqual(result.count("aten.add.Tensor"), 2)
+
+    def test_table_averages_does_not_group_by_bound_by_default(self):
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        runtime = Runtime(perf_model, device_profile)
+        x = torch.randn([10, 10], device="meta")
+        op_info = OpInvokeInfo(torch.ops.aten.add.Tensor, (x, x), {}, x)
+        runtime.event_list = [
+            RuntimeEvent(
+                op_invoke_info=op_info,
+                perf_results={
+                    "analytic": PerformanceModel.Result(
+                        execution_time_s=2e-6,
+                        statistics={
+                            StatsKey.MEMORY_ACCESS: 2e-6,
+                            StatsKey.COMPUTE: 1e-6,
+                            StatsKey.MMA_OPS: 1e-6,
+                            StatsKey.GP_OPS: 0.0,
+                        },
+                    )
+                },
+            ),
+            RuntimeEvent(
+                op_invoke_info=op_info,
+                perf_results={
+                    "analytic": PerformanceModel.Result(
+                        execution_time_s=3e-6,
+                        statistics={
+                            StatsKey.MEMORY_ACCESS: 1e-6,
+                            StatsKey.COMPUTE: 3e-6,
+                            StatsKey.MMA_OPS: 3e-6,
+                            StatsKey.GP_OPS: 0.0,
+                        },
+                    )
+                },
+            ),
+        ]
+
+        result = runtime.table_averages()
+
+        self.assertNotIn("Bound (analytic)", result)
+        self.assertNotIn("memory_bound", result)
+        self.assertNotIn("compute_bound_mma", result)
+        self.assertEqual(result.count("aten.add.Tensor"), 1)
+
+    def test_table_averages_dump_op_bound_ratios(self):
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        runtime = Runtime(perf_model, device_profile)
+        x = torch.randn([10, 10], device="meta")
+        runtime.event_list = [
+            RuntimeEvent(
+                op_invoke_info=OpInvokeInfo(torch.ops.aten.mm.default, (x, x), {}, x),
+                perf_results={
+                    "analytic": PerformanceModel.Result(
+                        execution_time_s=4e-6,
+                        statistics={
+                            StatsKey.MEMORY_ACCESS: 1e-6,
+                            StatsKey.COMMUNICATION: 1e-6,
+                            StatsKey.COMPUTE: 2e-6,
+                            StatsKey.MMA_OPS: 2e-6,
+                            StatsKey.GP_OPS: 0.0,
+                        },
+                    )
+                },
+            )
+        ]
+
+        result = runtime.table_averages(dump_op_bound_results=True)
+
+        self.assertIn("analytic memory %", result)
+        self.assertIn("analytic comm %", result)
+        self.assertIn("analytic mma %", result)
+        self.assertIn("analytic gp %", result)
+        mm_lines = [line for line in result.splitlines() if "aten.mm.default" in line]
+        self.assertEqual(len(mm_lines), 1)
+        self.assertRegex(mm_lines[0], r"25\.00%\s+25\.00%\s+50\.00%\s+0\.00%")
+
+    def test_table_averages_uses_compute_first_bound_semantics(self):
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        runtime = Runtime(perf_model, device_profile)
+        x = torch.randn([10, 10], device="meta")
+        runtime.event_list = [
+            RuntimeEvent(
+                op_invoke_info=OpInvokeInfo(torch.ops.aten.mm.default, (x, x), {}, x),
+                perf_results={
+                    "analytic": PerformanceModel.Result(
+                        execution_time_s=10e-6,
+                        statistics={
+                            StatsKey.MEMORY_ACCESS: 5e-6,
+                            StatsKey.COMMUNICATION: 1e-6,
+                            StatsKey.COMPUTE: 10e-6,
+                            StatsKey.MMA_OPS: 1e-6,
+                            StatsKey.GP_OPS: 2e-6,
+                        },
+                    )
+                },
+            )
+        ]
+
+        result = runtime.table_averages(dump_op_bound_results=True)
+
+        self.assertIn("compute_bound_gp", result)
+        self.assertNotIn("memory_bound", result)
+
+    def test_runtime_and_op_bound_classifier_share_bound_semantics(self):
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        runtime = Runtime(perf_model, device_profile)
+        x = torch.randn([10, 10], device="meta")
+        result = PerformanceModel.Result(
+            execution_time_s=10e-6,
+            statistics={
+                StatsKey.MEMORY_ACCESS: 5e-6,
+                StatsKey.COMMUNICATION: 1e-6,
+                StatsKey.COMPUTE: 10e-6,
+                StatsKey.MMA_OPS: 1e-6,
+                StatsKey.GP_OPS: 2e-6,
+            },
+        )
+        op_info = OpInvokeInfo(torch.ops.aten.mm.default, (x, x), {}, x)
+        runtime.event_list = [RuntimeEvent(op_invoke_info=op_info, perf_results={"analytic": result})]
+
+        table_result = runtime.table_averages(dump_op_bound_results=True)
+        classifier_result = OpBoundClassifier().classify([(op_info, result)])
+
+        self.assertIn("compute_bound_gp", table_result)
+        self.assertEqual(classifier_result["memory_bound"], 0)
+        self.assertEqual(classifier_result["communication_bound"], 0)
+        self.assertEqual(classifier_result["compute_bound_mma"], 1e-6)
+        self.assertEqual(classifier_result["compute_bound_gp"], 2e-6)
+
+    def test_table_averages_bound_fallback_for_incomplete_estimator_fields(self):
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        runtime = Runtime(perf_model, device_profile)
+        x = torch.randn([10, 10], device="meta")
+        runtime.event_list = [
+            RuntimeEvent(
+                op_invoke_info=OpInvokeInfo(torch.ops.tensor_cast.dispatch_ffn_combine.default, (x,), {}, x),
+                perf_results={
+                    "analytic": PerformanceModel.Result(
+                        execution_time_s=3e-6,
+                        statistics={
+                            StatsKey.COMPUTE: 3e-6,
+                            StatsKey.MEMORY_ACCESS: 1e-6,
+                            StatsKey.COMMUNICATION: 0.0,
+                        },
+                    )
+                },
+            )
+        ]
+
+        result = runtime.table_averages(dump_op_bound_results=True)
+
+        self.assertIn("compute_bound_mma", result)
+        self.assertIn("75.00%", result)
+
+    def test_bound_analyzer_collects_flat_prefixed_stats(self):
+        result = PerformanceModel.Result(
+            execution_time_s=4e-6,
+            statistics={
+                "matmul.mma_ops_time_s": 3e-6,
+                "matmul.gp_ops_time_s": 0.0,
+                "all_reduce.comm_time_s": 1e-6,
+            },
+        )
+
+        components = BoundAnalyzer.components(result)
+
+        self.assertEqual(components.mma_ops_time_s, 3e-6)
+        self.assertEqual(components.gp_ops_time_s, 0.0)
+        self.assertEqual(components.communication_time_s, 1e-6)
+        self.assertEqual(BoundAnalyzer.dominant(result), "compute_bound_mma")
+
+    def test_bound_analyzer_collects_nested_stats(self):
+        result = PerformanceModel.Result(
+            execution_time_s=4.5e-6,
+            statistics={
+                "matmul": {
+                    "mma_ops_time_s": 3e-6,
+                    "gp_ops_time_s": 0.5e-6,
+                },
+                "all_reduce": {
+                    "comm_time_s": 1e-6,
+                },
+            },
+        )
+
+        components = BoundAnalyzer.components(result)
+
+        self.assertEqual(components.mma_ops_time_s, 3e-6)
+        self.assertEqual(components.gp_ops_time_s, 0.5e-6)
+        self.assertEqual(components.communication_time_s, 1e-6)
+        self.assertEqual(BoundAnalyzer.dominant(result), "compute_bound_mma")
+
+    def test_bound_analyzer_falls_back_compute_time_to_mma(self):
+        result = PerformanceModel.Result(
+            execution_time_s=3e-6,
+            statistics={
+                StatsKey.COMPUTE: 3e-6,
+                StatsKey.MEMORY_ACCESS: 1e-6,
+            },
+        )
+
+        components = BoundAnalyzer.components(result)
+
+        self.assertEqual(components.memory_time_s, 1e-6)
+        self.assertEqual(components.mma_ops_time_s, 3e-6)
+        self.assertEqual(components.gp_ops_time_s, 0.0)
+        self.assertEqual(BoundAnalyzer.dominant(result), "compute_bound_mma")
+
+    def test_table_averages_bound_fallback_for_prefixed_estimator_fields(self):
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        runtime = Runtime(perf_model, device_profile)
+        x = torch.randn([10, 10], device="meta")
+        runtime.event_list = [
+            RuntimeEvent(
+                op_invoke_info=OpInvokeInfo(torch.ops.tensor_cast.matmul_all_reduce.default, (x,), {}, x),
+                perf_results={
+                    "analytic": PerformanceModel.Result(
+                        execution_time_s=4e-6,
+                        statistics={
+                            "matmul.mma_ops_time_s": 3e-6,
+                            "matmul.gp_ops_time_s": 0.0,
+                            "all_reduce.comm_time_s": 1e-6,
+                            StatsKey.MEMORY_ACCESS: 0.0,
+                        },
+                    )
+                },
+            )
+        ]
+
+        result = runtime.table_averages(dump_op_bound_results=True)
+
+        self.assertIn("compute_bound_mma", result)
+        self.assertIn("75.00%", result)
 
     def test_export_chrome_trace(self):
         def func(x):

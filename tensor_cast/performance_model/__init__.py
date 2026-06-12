@@ -8,7 +8,7 @@ import torch
 from .. import ops  # noqa: F401
 from ..device import DeviceProfile
 from ..utils import is_fp8_dtype, performance_dtype
-from .analytic import StatsKey
+from .bound_analyzer import StatsKey
 from .base import PerformanceModel
 from .op_estimator_registry import register_op_estimator
 from .op_invoke_info import OpInvokeInfo

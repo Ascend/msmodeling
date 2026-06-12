@@ -6,7 +6,7 @@ from overrides import override
 
 from .. import ops  # noqa: F401
 from ..device import DeviceProfile, InterconnectType
-from .analytic import StatsKey
+from .bound_analyzer import StatsKey
 from .base import PerformanceModel
 from .op_invoke_info import OpInvokeInfo
 from .utils import bytes_of_elements, bytes_of_tensor

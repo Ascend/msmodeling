@@ -20,7 +20,8 @@ from tensor_cast.model_config import (
     ParallelConfig,
     QuantConfig,
 )
-from tensor_cast.performance_model.analytic import AnalyticPerformanceModel, StatsKey
+from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
+from tensor_cast.performance_model.bound_analyzer import StatsKey
 from tensor_cast.quantize_utils import AttentionQuantType, LinearQuantType
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.custom_model_registry import get_moe_config, get_mtp_block_module_name
