@@ -327,10 +327,6 @@ def main():
     config.compilation.passes.enable_sequence_parallel = args.enable_sequence_parallel
     config.compilation.fusion_patterns.enable_dispatch_ffn_combine = args.enable_dispatch_ffn_combine
 
-    selected_embedding_tp_mode = args.word_embedding_tp
-    args.word_embedding_tp = selected_embedding_tp_mode is not None
-    args.word_embedding_tp_mode = selected_embedding_tp_mode or WordEmbeddingTPMode.col
-
     # Set default performance_model if not specified
     if args.performance_model is None:
         args.performance_model = ["analytic"]

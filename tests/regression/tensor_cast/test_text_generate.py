@@ -1020,8 +1020,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
             quantize_linear_action=QuantizeLinearAction.DISABLED,
             world_size=4,
             tp_size=2,
-            word_embedding_tp=True,
-            word_embedding_tp_mode=embedding_tp_mode,
+            word_embedding_tp=embedding_tp_mode,
         )
         model_runner = ModelRunner(user_input)
         embedding_layers = [module for module in model_runner.model.modules() if isinstance(module, ParallelEmbedding)]

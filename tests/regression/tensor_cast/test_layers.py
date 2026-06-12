@@ -1,6 +1,6 @@
 import pytest
 from tensor_cast.core.user_config import UserInputConfig
-from tensor_cast.model_config import ParallelConfig
+from tensor_cast.model_config import ParallelConfig, WordEmbeddingTPMode
 
 
 def _get_parallel_config(parallel_configuration: tuple):
@@ -12,7 +12,7 @@ def _get_parallel_config(parallel_configuration: tuple):
         lmhead_tensor_parallel_size=parallel_configuration[4],
     )
     if len(parallel_configuration) > 5:
-        parallel_config.embedding_parallel = parallel_configuration[5]
+        parallel_config.embedding_parallel = WordEmbeddingTPMode.col if parallel_configuration[5] else None
     return parallel_config
 
 

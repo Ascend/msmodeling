@@ -10,7 +10,6 @@ from tensor_cast.core.quantization.datatypes import (
 )
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
-from tensor_cast.model_config import WordEmbeddingTPMode
 import tensor_cast.utils as tensor_cast_utils
 
 from ..utils import (
@@ -145,8 +144,7 @@ def _add_doctor_runtime_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _make_doctor_user_input(args: argparse.Namespace) -> UserInputConfig:
-    args.word_embedding_tp = False
-    args.word_embedding_tp_mode = str(WordEmbeddingTPMode.col)
+    args.word_embedding_tp = None
     args.performance_model = getattr(args, "performance_model", None) or ["analytic"]
     if isinstance(args.quantize_linear_action, str):
         args.quantize_linear_action = QuantizeLinearAction(args.quantize_linear_action)
@@ -248,8 +246,7 @@ def _add_verify_case_options(parser: argparse.ArgumentParser) -> None:
 
 
 def _make_verify_user_input(args: argparse.Namespace) -> UserInputConfig:
-    args.word_embedding_tp = False
-    args.word_embedding_tp_mode = str(WordEmbeddingTPMode.col)
+    args.word_embedding_tp = None
     if args.performance_model is None:
         args.performance_model = ["analytic"]
     return UserInputConfig.from_args(args)

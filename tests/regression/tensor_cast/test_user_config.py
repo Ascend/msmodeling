@@ -1,7 +1,12 @@
 """Unit tests for tensor_cast.core.user_config."""
 
+from dataclasses import fields
+
+import pytest
+
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
+from tensor_cast.model_config import WordEmbeddingTPMode
 
 
 class TestUserInputConfigPrintInfo:
@@ -55,3 +60,33 @@ class TestUserInputConfigPrintInfo:
         assert expert_cfg.quant_type == LinearQuantType.MXFP4
         assert expert_cfg.weight_group_size == 32
         assert expert_cfg.weight_quant_granularity == QuantGranularity.PER_GROUP
+
+
+class TestUserInputConfigWordEmbeddingTp:
+    def test_word_embedding_tp_is_single_nullable_mode(self):
+        user_config = UserInputConfig(word_embedding_tp="row")
+
+        assert user_config.word_embedding_tp == WordEmbeddingTPMode.row
+        removed_user_field = "word_embedding_tp" + "_mode"
+        removed_parallel_field = "embedding_parallel" + "_mode"
+        assert removed_user_field not in {field.name for field in fields(UserInputConfig)}
+
+        parallel_config = user_config.get_parallel_config()
+        assert parallel_config.embedding_parallel == WordEmbeddingTPMode.row
+        assert removed_parallel_field not in {field.name for field in fields(type(parallel_config))}
+
+    def test_legacy_bool_word_embedding_tp_is_still_normalized(self):
+        enabled_config = UserInputConfig(word_embedding_tp=True)
+        disabled_config = UserInputConfig(word_embedding_tp=False)
+
+        assert enabled_config.word_embedding_tp == WordEmbeddingTPMode.col
+        assert enabled_config.get_parallel_config().embedding_parallel == WordEmbeddingTPMode.col
+        assert disabled_config.word_embedding_tp is None
+        assert disabled_config.get_parallel_config().embedding_parallel is None
+
+    def test_word_embedding_tp_invalid_value_raises(self):
+        with pytest.raises(ValueError, match="word_embedding_tp must be one of"):
+            UserInputConfig(word_embedding_tp="invalid")
+
+        with pytest.raises(ValueError, match="word_embedding_tp must be one of"):
+            UserInputConfig(word_embedding_tp=123)

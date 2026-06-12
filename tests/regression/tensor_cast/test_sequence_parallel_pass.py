@@ -57,8 +57,7 @@ class SequenceParallelPassTestCase(unittest.TestCase):
             num_hidden_layers_override=1,
             world_size=tp_size,
             tp_size=tp_size,
-            word_embedding_tp=True,
-            word_embedding_tp_mode=WordEmbeddingTPMode.row.value,
+            word_embedding_tp=WordEmbeddingTPMode.row.value,
             quantize_linear_action=QuantizeLinearAction.DISABLED,
         )
 

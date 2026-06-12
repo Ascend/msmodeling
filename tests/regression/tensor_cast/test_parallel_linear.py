@@ -9,7 +9,7 @@ from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
 from tensor_cast.layers.parallel_linear import get_qparam_shard_dim
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
-from tensor_cast.model_config import MlaConfig, ModelConfig, ParallelConfig, QuantConfig
+from tensor_cast.model_config import MlaConfig, ModelConfig, ParallelConfig, QuantConfig, WordEmbeddingTPMode
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.quantize_utils import LinearQuantType, QuantGranularity, QuantScheme
 from tensor_cast.runtime import Runtime
@@ -43,7 +43,7 @@ def get_parallel_config(parallel_configuration: tuple):
         lmhead_tensor_parallel_size=parallel_configuration[4],
     )
     if len(parallel_configuration) > 5:
-        parallel_config.embedding_parallel = parallel_configuration[5]
+        parallel_config.embedding_parallel = WordEmbeddingTPMode.col if parallel_configuration[5] else None
     return parallel_config
 
 

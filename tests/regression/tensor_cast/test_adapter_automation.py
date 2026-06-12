@@ -48,7 +48,6 @@ from tensor_cast.model_config import (
     MlaFieldNames,
     MoEFieldNames,
     QuantConfig,
-    WordEmbeddingTPMode,
 )
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
 from tensor_cast.performance_model.base import PerformanceModel
@@ -814,8 +813,7 @@ cases:
             image_batch_size=1,
             image_height=2,
             image_width=2,
-            word_embedding_tp=False,
-            word_embedding_tp_mode=WordEmbeddingTPMode.col.value,  # pylint: disable=no-member
+            word_embedding_tp=None,
         )
 
         report = run_model_doctor(
@@ -987,8 +985,7 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
                 device="TEST_DEVICE",
                 performance_model=["analytic"],
                 num_hidden_layers_override=1,
-                word_embedding_tp=False,
-                word_embedding_tp_mode=WordEmbeddingTPMode.col.value,  # pylint: disable=no-member
+                word_embedding_tp=None,
             )
 
         def summarize_key_ops():
@@ -1019,8 +1016,7 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
             query_len=1,
             context_length=0,
             decode=False,
-            word_embedding_tp=False,
-            word_embedding_tp_mode=WordEmbeddingTPMode.col.value,  # pylint: disable=no-member
+            word_embedding_tp=None,
         )
         case = EvidenceCase.from_dict(
             {

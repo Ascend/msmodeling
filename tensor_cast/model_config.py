@@ -212,8 +212,7 @@ class ParallelConfig:
     mlp_data_parallel_size: Optional[int] = None
     lmhead_tensor_parallel_size: Optional[int] = None
     lmhead_data_parallel_size: Optional[int] = None
-    embedding_parallel: bool = False
-    embedding_parallel_mode: WordEmbeddingTPMode = WordEmbeddingTPMode.col
+    embedding_parallel: Optional[WordEmbeddingTPMode] = None
     expert_parallel_size: int = 1
     moe_tensor_parallel_size: Optional[int] = None
     moe_data_parallel_size: int = 1
@@ -235,6 +234,7 @@ class ParallelConfig:
         return self.expert_parallel_size > 1
 
     def __post_init__(self) -> None:
+        self._normalize_embedding_parallel()
         if self.data_parallel_size is None:
             self.data_parallel_size = self.world_size // self.tensor_parallel_size // self.pipeline_parallel_size
 
@@ -302,6 +302,20 @@ class ParallelConfig:
                 f"pipeline_parallel_size ({self.pipeline_parallel_size}) "
                 f"must equal world_size ({self.world_size})"
             )
+
+    def _normalize_embedding_parallel(self) -> None:
+        if self.embedding_parallel is None or self.embedding_parallel == "":
+            self.embedding_parallel = None
+            return
+        if isinstance(self.embedding_parallel, bool):
+            self.embedding_parallel = WordEmbeddingTPMode.col if self.embedding_parallel else None
+            return
+        try:
+            self.embedding_parallel = WordEmbeddingTPMode(self.embedding_parallel)
+        except ValueError as err:
+            raise ValueError(
+                f"embedding_parallel must be one of {{'col', 'row'}} or None, got {self.embedding_parallel!r}."
+            ) from err
 
 
 @dataclasses.dataclass(frozen=True)

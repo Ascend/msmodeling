@@ -468,10 +468,11 @@ def shard_model_by_tp(
             # 2. we can define a class to represent the data with clearer semantics
             tp_plan = {}
 
-            if self.model_config.parallel_config.embedding_parallel:
+            embedding_parallel = self.model_config.parallel_config.embedding_parallel
+            if embedding_parallel:
                 params = {
                     "tp_group": tp_group,
-                    "shard_mode": self.model_config.parallel_config.embedding_parallel_mode,
+                    "shard_mode": embedding_parallel,
                 }
                 tp_plan.update({"embed_tokens": (PARALLEL_EMBEDDING, params)})
 

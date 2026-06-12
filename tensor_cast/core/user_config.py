@@ -64,8 +64,7 @@ class UserInputConfig:
     ep_size: int = 1
     moe_dp_size: int = 1
     moe_tp_size: Optional[int] = None
-    word_embedding_tp: bool = False
-    word_embedding_tp_mode: WordEmbeddingTPMode = WordEmbeddingTPMode.col
+    word_embedding_tp: Optional[WordEmbeddingTPMode] = None
     enable_redundant_experts: bool = False
     """Pad routing-expert count to a multiple of EP size for load balancing."""
     enable_shared_expert_tp: bool = False
@@ -95,7 +94,7 @@ class UserInputConfig:
     def __post_init__(self):
         self._validate_device()
         self._normalize_performance_model()
-        self._normalize_embedding_tp_mode()
+        self._normalize_word_embedding_tp()
 
     def _normalize_performance_model(self):
         """Normalize performance_model to a list of model type strings."""
@@ -107,12 +106,18 @@ class UserInputConfig:
         if self.device not in DeviceProfile.all_device_profiles:
             raise ValueError(f"Device '{self.device}' not recognized.")
 
-    def _normalize_embedding_tp_mode(self):
+    def _normalize_word_embedding_tp(self):
+        if self.word_embedding_tp is None or self.word_embedding_tp == "":
+            self.word_embedding_tp = None
+            return
+        if isinstance(self.word_embedding_tp, bool):
+            self.word_embedding_tp = WordEmbeddingTPMode.col if self.word_embedding_tp else None
+            return
         try:
-            self.word_embedding_tp_mode = WordEmbeddingTPMode(self.word_embedding_tp_mode)
+            self.word_embedding_tp = WordEmbeddingTPMode(self.word_embedding_tp)
         except ValueError as err:
             raise ValueError(
-                f"word_embedding_tp_mode must be one of {{'col', 'row'}}, got {self.word_embedding_tp_mode!r}."
+                f"word_embedding_tp must be one of {{'col', 'row'}} or None, got {self.word_embedding_tp!r}."
             ) from err
 
     def _print_info(self):
@@ -167,7 +172,6 @@ class UserInputConfig:
             moe_tensor_parallel_size=self.moe_tp_size,
             moe_data_parallel_size=self.moe_dp_size,
             embedding_parallel=self.word_embedding_tp,
-            embedding_parallel_mode=self.word_embedding_tp_mode,
             pipeline_parallel_size=self.pp_size,
         )
 
