@@ -38,6 +38,7 @@ _ADD_RMS_NORM2 = torch.ops.tensor_cast.add_rms_norm2.default
 _ADD_RMS_NORM = torch.ops.tensor_cast.add_rms_norm.default
 _ADD_OPS = {torch.ops.aten.add.Tensor}
 _VIEW_OPS = {torch.ops.aten.view.default, torch.ops.aten.reshape.default}
+_TRANSPARENT_OPS = _VIEW_OPS | {_REGION_BEGIN, _REGION_END, _COPY_REGION}
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -49,6 +50,145 @@ def _shard_dim(node: Node) -> int:
     if meta is not None and hasattr(meta, "dim") and meta.dim() == 2:
         return 0
     return 1
+
+
+def _world_size(rank_group) -> int:
+    return len(rank_group) if isinstance(rank_group, (list, tuple)) else 1
+
+
+def _meta_shape(node):
+    meta = node.meta.get("val") if isinstance(node, Node) else None
+    if meta is None or not hasattr(meta, "shape"):
+        return None
+    return tuple(meta.shape)
+
+
+def _is_sp_local_shape(shape, expected_shape) -> bool:
+    """Return True only when *shape* proves local-sequence shard layout.
+
+    The rank-reduced case is for compiler IR that drops a leading batch
+    dimension, so it is accepted only when the expected batch size is one.
+    """
+    if shape is None or expected_shape is None:
+        return False
+    shape = tuple(shape)
+    expected_shape = tuple(expected_shape)
+    if shape == expected_shape:
+        return True
+    if len(shape) == len(expected_shape) - 1 and expected_shape[0] == 1:
+        return shape == expected_shape[1:]
+    return False
+
+
+def _infer_rs_shape(comm_node: Node, world_size: int):
+    """Return the reduce_scatter output shape after any required view repair."""
+    if not comm_node.args:
+        return None
+    inp = comm_node.args[0]
+    inp_meta = inp.meta.get("val") if isinstance(inp, Node) else None
+    if inp_meta is None or not hasattr(inp_meta, "dim"):
+        return None
+
+    comm_meta = comm_node.meta.get("val")
+    if comm_meta is not None and hasattr(comm_meta, "dim") and inp_meta.dim() != comm_meta.dim():
+        if abs(inp_meta.dim() - comm_meta.dim()) != 1:
+            return None
+        comm_shape = list(comm_meta.shape)
+        # This path repairs compiler IR that squeezes the leading batch dim:
+        # the input RS dim and comm-output RS dim name the same sequence axis.
+        dim = _shard_dim(comm_node)
+        if dim >= len(comm_shape) or comm_shape[dim] % world_size != 0:
+            return None
+        comm_shape[dim] = comm_shape[dim] // world_size
+        return tuple(comm_shape)
+
+    dim = _shard_dim(inp)
+    if dim >= inp_meta.dim() or inp_meta.shape[dim] % world_size != 0:
+        return None
+    shape = list(inp_meta.shape)
+    shape[dim] = shape[dim] // world_size
+    return tuple(shape)
+
+
+def _insert_reduce_scatter(graph, comm_node, rank, rank_group):
+    """Insert reduce_scatter and repair 2-D/3-D shape mismatches with a view."""
+    inp = comm_node.args[0]
+    rs_dim = _shard_dim(comm_node.args[0])
+    ws = _world_size(rank_group)
+    target_shape = _infer_rs_shape(comm_node, ws)
+    with graph.inserting_after(comm_node):
+        rs = graph.call_function(_REDUCE_SCATTER, (inp, rs_dim, rank, rank_group))
+    if target_shape is None:
+        return rs
+
+    inp_meta = inp.meta.get("val") if isinstance(inp, Node) else None
+    comm_meta = comm_node.meta.get("val")
+    if (
+        inp_meta is None
+        or comm_meta is None
+        or not hasattr(inp_meta, "dim")
+        or not hasattr(comm_meta, "dim")
+        or inp_meta.dim() == comm_meta.dim()
+    ):
+        return rs
+
+    with graph.inserting_after(rs):
+        return graph.call_function(torch.ops.aten.view.default, (rs, list(target_shape)))
+
+
+def _infer_comm_rs_shape(comm_node):
+    if not isinstance(comm_node, Node) or len(comm_node.args) < 3:
+        return None
+    return _infer_rs_shape(comm_node, _world_size(comm_node.args[2]))
+
+
+def _is_comm_shardable(comm_node) -> bool:
+    return _infer_comm_rs_shape(comm_node) is not None
+
+
+def _is_sp_local_value(node, expected_shape=None, visited=None) -> bool:
+    """Return True when node is proven to be on the local sequence shard."""
+    if not isinstance(node, Node):
+        return False
+    if visited is None:
+        visited = set()
+    if node in visited:
+        return False
+    visited.add(node)
+
+    if node.op == "call_function" and node.target is _ALL_GATHER:
+        return False
+    if node.op == "call_function" and node.target in _TRANSPARENT_OPS:
+        return bool(node.args) and _is_sp_local_value(node.args[0], expected_shape, visited)
+    if _is_sp_local_shape(_meta_shape(node), expected_shape):
+        return True
+    if node.op != "call_function":
+        return False
+    if node.target is _REDUCE_SCATTER:
+        return True
+    if node.target is operator.getitem and len(node.args) >= 2 and node.args[1] == 1 and isinstance(node.args[0], Node):
+        return bool(node.args[0].meta.get("tensor_cast_sp_local"))
+    return False
+
+
+def _p2_match(node):
+    if node.op != "call_function" or node.target is not _ADD_RMS_NORM2:
+        return None
+    ar_inputs = [
+        arg
+        for arg in node.args[:2]
+        if isinstance(arg, Node) and arg.op == "call_function" and arg.target is _ALL_REDUCE
+    ]
+    if len(ar_inputs) != 1:
+        return None
+    comm = ar_inputs[0]
+    other = node.args[1] if node.args[0] is comm else node.args[0]
+    expected_shape = _infer_comm_rs_shape(comm)
+    if expected_shape is None:
+        return None
+    if not _is_sp_local_value(other, expected_shape):
+        return None
+    return comm, node
 
 
 def _insert_all_gather(graph, node, dim, rank, rank_group):
@@ -64,12 +204,12 @@ def _insert_all_gather(graph, node, dim, rank, rank_group):
 
 def _unwrap_comm(node):
     """Return (all_reduce_node, output_node) or (None, None)."""
-    if isinstance(node, torch.fx.Node) and node.op == "call_function":
+    if isinstance(node, Node) and node.op == "call_function":
         if node.target is _ALL_REDUCE:
             return node, node
         if node.target in _VIEW_OPS:
             src = node.args[0] if node.args else None
-            if isinstance(src, torch.fx.Node) and src.target is _ALL_REDUCE:
+            if isinstance(src, Node) and src.target is _ALL_REDUCE:
                 return src, node
     return None, None
 
@@ -114,7 +254,7 @@ def _is_p3_tail(getitem_node):
         return False
     if tail_node.target is _ADD_RMS_NORM and len(tail_node.args) >= 2:
         comm, _ = _unwrap_comm(tail_node.args[1])
-        return comm is not None
+        return comm is not None and _is_comm_shardable(comm)
     if tail_node.target not in _ADD_OPS:
         return False
     other = None
@@ -127,7 +267,7 @@ def _is_p3_tail(getitem_node):
     comm, _ = _unwrap_comm(other)
     if comm is None:
         return False
-    return _find_norm_after_add(tail_node) is not None
+    return _is_comm_shardable(comm) and _find_norm_after_add(tail_node) is not None
 
 
 def _is_p2_chain_tail(getitem_node):
@@ -149,7 +289,9 @@ def _is_p2_chain_tail(getitem_node):
             continue
         if arg.op != "call_function":
             continue
-        if arg.target in {_ALL_REDUCE, _REDUCE_SCATTER}:
+        if arg.target is _ALL_REDUCE:
+            return _is_comm_shardable(arg)
+        if arg.target is _REDUCE_SCATTER:
             return True
     return False
 
@@ -200,6 +342,8 @@ class Pattern3Rewriter:
                 and node.args[0].target is _ADD_RMS_NORM2
             ):
                 continue
+            if not node.args[0].meta.get("tensor_cast_sp_local"):
+                continue
             fused_users = [u for u in node.users if u.op == "call_function" and u.target is _ADD_RMS_NORM]
             if len(fused_users) == 1:
                 norm = fused_users[0]
@@ -208,6 +352,8 @@ class Pattern3Rewriter:
                 other = norm.args[1] if len(norm.args) >= 2 else None
                 comm, comm_out = _unwrap_comm(other)
                 if comm is None:
+                    continue
+                if not _is_comm_shardable(comm):
                     continue
                 seen.add(id(norm))
                 out.append(_P3Match(comm, comm_out, norm, norm))
@@ -220,13 +366,15 @@ class Pattern3Rewriter:
                 continue
             other = None
             for a in add_node.args:
-                if isinstance(a, torch.fx.Node) and a is not node:
+                if isinstance(a, Node) and a is not node:
                     other = a
                     break
             if other is None:
                 continue
             comm, comm_out = _unwrap_comm(other)
             if comm is None:
+                continue
+            if not _is_comm_shardable(comm):
                 continue
             norm = _find_norm_after_add(add_node)
             if norm is None:
@@ -237,9 +385,7 @@ class Pattern3Rewriter:
 
     def _rewrite(self, graph, m):
         rank, rg = m.comm_node.args[1], m.comm_node.args[2]
-        rs_dim = _shard_dim(m.comm_node.args[0])
-        with graph.inserting_after(m.comm_node):
-            rs = graph.call_function(_REDUCE_SCATTER, (m.comm_node.args[0], rs_dim, rank, rg))
+        rs = _insert_reduce_scatter(graph, m.comm_node, rank, rg)
         if m.comm_output is m.comm_node:
             m.add_node.replace_input_with(m.comm_node, rs)
         else:
@@ -267,8 +413,9 @@ class Pattern1Rewriter:
             if not isinstance(inp, Node):
                 continue
             if inp.target is _REGION_BEGIN and isinstance(inp.args[0], Node) and inp.args[0].target is _ALL_REDUCE:
-                out.append((inp.args[0], inp, node))
-            elif inp.target is _ALL_REDUCE:
+                if _is_comm_shardable(inp.args[0]):
+                    out.append((inp.args[0], inp, node))
+            elif inp.target is _ALL_REDUCE and _is_comm_shardable(inp):
                 out.append((inp, None, node))
         return out
 
@@ -277,9 +424,7 @@ class Pattern1Rewriter:
         if not comm.args:
             return
         rank, rg = comm.args[1], comm.args[2]
-        rs_dim = _shard_dim(comm.args[0])
-        with graph.inserting_after(comm):
-            rs = graph.call_function(_REDUCE_SCATTER, (comm.args[0], rs_dim, rank, rg))
+        rs = _insert_reduce_scatter(graph, comm, rank, rg)
         if marker is not None:
             marker.replace_input_with(comm, rs)
         else:
@@ -306,34 +451,24 @@ class Pattern2Rewriter:
     """P2: all_reduce -> add_rms_norm2 with selective gather on outputs."""
 
     def apply(self, graph):
-        matches = self._find(graph)
-        for comm, norm2 in matches:
+        count = 0
+        for node in list(graph.nodes):
+            match = _p2_match(node)
+            if match is None:
+                continue
+            comm, norm2 = match
+            # Keep find+rewrite inline: downstream P2/P3 candidates may rely on
+            # tensor_cast_sp_local metadata set by an earlier P2 in this walk.
             self._rewrite(graph, comm, norm2)
-        return len(matches)
-
-    @staticmethod
-    def _find(graph):
-        matches = []
-        for node in graph.nodes:
-            if node.op != "call_function" or node.target is not _ADD_RMS_NORM2:
-                continue
-            ar_inputs = [
-                arg
-                for arg in node.args[:2]
-                if isinstance(arg, torch.fx.Node) and arg.op == "call_function" and arg.target is _ALL_REDUCE
-            ]
-            if len(ar_inputs) != 1:
-                continue
-            matches.append((ar_inputs[0], node))
-        return matches
+            count += 1
+        return count
 
     @staticmethod
     def _rewrite(graph, comm, norm2):
         rank, rg = comm.args[1], comm.args[2]
-        rs_dim = _shard_dim(comm.args[0])
-        with graph.inserting_after(comm):
-            rs = graph.call_function(_REDUCE_SCATTER, (comm.args[0], rs_dim, rank, rg))
+        rs = _insert_reduce_scatter(graph, comm, rank, rg)
         norm2.replace_input_with(comm, rs)
+        norm2.meta["tensor_cast_sp_local"] = True
         ag_dim = _shard_dim(norm2)
         for u in list(norm2.users):
             if u.op != "call_function" or u.target is not operator.getitem:
