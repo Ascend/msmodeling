@@ -104,7 +104,7 @@ The incremental gate reads `test_map` from an external file pointed to by `MSMOD
 }
 ```
 
-Map keys must be repository-relative product source paths under prefixes defined in `coverage_config.PRODUCT_SOURCE_PREFIXES`: `cli/`, `serving_cast/`, `tensor_cast/`, `web_ui/`, `scripts/`, and `tools/`.
+Map keys must be repository-relative product source paths under `gate_policy.yaml` `roots` (defaults match `coverage_config.PRODUCT_SOURCE_PREFIXES`): `cli/`, `serving_cast/`, `tensor_cast/`, `web_ui/`, `scripts/`, and `tools/`.
 
 **Coverage-to-symbol association**: `collect_from_coverage` registers a test for a symbol when coverage records at least one executed line inside that symbol's span (no minimum line threshold). The map therefore prefers breadth over precision: CI may run extra tests when a symbol changes. A follow-up feature should define how to reject shallow or cosmetic tests without blocking thin delegators; see the tracking issue on the project tracker.
 
@@ -122,18 +122,28 @@ Redundancy warnings are consumed by the nightly pipeline and surfaced through Fe
 `tests/.ci/gate_policy.yaml`:
 
 ```yaml
-schema_version: 1
+roots:
+  - cli/
+  - serving_cast/
+  - tensor_cast/
+  - web_ui/
+  - scripts/
+  - tools/
 test_discovery:
   include: ["**/test_*.py", "**/*_test.py"]
   exclude: ["tests/helpers/**", "tests/assets/**"]
 exemptions:
-  - symbols: ["tensor_cast/foo.py::legacy_helper"]
-    reason: refactor
-    applicant: alice
-    approver: fangkai
-    deadline: "2026-06-30"
-    ticket: "https://..."  # optional
+  sources:
+    - symbols: ["tensor_cast/foo.py::legacy_helper"]
+      reason: refactor
+      applicant: alice
+      approver: fangkai
+      deadline: "2026-06-30"
+      ticket: "https://..."  # optional
+  tests: []
 ```
+
+Product source **omit** (e.g. `*/builtin_model/*`) lives in `pyproject.toml` `[tool.coverage.run] omit`, not gate_policy. `scripts/helpers/common/coverage_omit.py` loads omit patterns for gate rules and `test_map` collection.
 
 `tests/.ci/approvers.yaml` lists allowed `approver` names. When a PR changes `gate_policy.yaml`, approvers are validated against the working-tree `approvers.yaml` (same PR may update both files).
 
@@ -145,14 +155,15 @@ Change classification covers configuration files, added or removed tests, added 
 
 | Phenomenon | Incremental Behavior |
 |---|------------|
-| Configuration change under `tests/.ci/`, any `tests/**/conftest.py`, or standard CI config filenames | Full `tests/smoke/` and `tests/regression/` with marker `not npu and not nightly and not network` |
+| Configuration change under any `tests/**/conftest.py`, `requirements.txt`, `uv.lock`, or standard CI config filenames (`pyproject.toml`, `pytest.ini`, `tox.ini`, `setup.cfg`, `.coveragerc`) | Full `tests/` with `-m not npu` only (nightly/network cases under `tests/` still execute) |
+| Change to `tests/.ci/gate_policy.yaml` only | No full-suite trigger; `validate_gate_policy_if_changed` enforces approver whitelist |
 | New product source file | Block when top-level symbols lack `test_map` entries and are not exempt |
 | New test file | Execute only the new test paths |
 | Removed product source file | Execute all mapped node ids; block when mapping is missing |
 | Removed test file | Block when the deleted path is the sole mapped coverage for any symbol |
 | Modified product source file | Select mapped node ids by changed symbol; block unmapped non-exempt symbols |
 
-Deleted-source guard tests run in a first pytest phase when present. Incremental or full-suite targets run in a second phase. New or modified test files run in a phase 0 pass with the same marker, `-n auto`, and coverage flags (including `--cov-context=test` for in-memory map merge). Nightly phase 1 uses the same coverage flags when writing the external `test_map`.
+Deleted-source guard tests run in Phase 1 when present (`-m "not npu and not nightly and not network"`, xdist, `-vv`). Incremental or config-triggered full-suite targets run in Phase 2. New or modified test files run in Phase 0 with `-m not npu` only (nightly/network cases still execute), `-n auto --dist=worksteal` (collect-then-xdist), coverage flags (including `--cov-context=test` for in-memory map merge), and `-vv`. `collect_test_map` after Phase 0 still filters node ids with `not nightly and not network`. Phase 2 incremental node ids run serially with no explicit `-m` (pyproject `addopts` applies). Config-triggered full suite runs `tests/` with `-m not npu` only. Shell entry scripts (`run_smoke.sh`, `run_regression.sh`, `run_benchmark.sh`) pass `-o addopts=` so explicit `-m` expressions are not stacked on pyproject defaults. Nightly phase 1 uses the same coverage flags when writing the external `test_map`.
 
 **selection_report fields**
 
@@ -179,8 +190,8 @@ Shell scripts are the unified entry point for CodeArts build tasks and local deb
 
 | Script | Responsibility | Coverage |
 |------|------|------|
-| `run_smoke.sh` | Full `tests/smoke/`, marker `not npu and not network`, `-n auto` | — |
-| `run_regression.sh` | Full `tests/regression/`, marker `not npu and not network`, `-n auto` | — |
+| `run_smoke.sh` | Full `tests/smoke/`; `-o addopts=`; marker `not npu and not network`; collect-then-xdist; `-vv` | — |
+| `run_regression.sh` | Full `tests/regression/`; same as smoke | — |
 | `run_ci_gate.sh` | Incremental smoke and regression via external `test_map` | Phase 0: `--cov-context=test` for in-memory map merge |
 | `run_benchmark.sh` | Full `tests/benchmark/`, marker `not npu and not network`, optional `-n auto` when `MSMODELING_BENCHMARK_PARALLEL=1` | — |
 | `run_nightly.sh` | Four-phase nightly pipeline via `scripts/helpers/nightly/main.py` | Phase 1: `--cov`; 60/40 thresholds in report |
@@ -294,9 +305,13 @@ else plan has targets
     cg -> py : pytest with --cov-context=test\n(in-memory test_map merge)
   end
   opt deleted_source_tests (phase 1)
-    cg -> py : pytest guard tests\n-m "not npu and not nightly and not network" -n auto
+    cg -> py : pytest guard tests\n-m "not npu and not nightly and not network" -n auto -vv
   end
-  cg -> py : pytest full or selected targets\n-m "not npu and not nightly and not network" -n auto
+  alt config full suite
+    cg -> py : pytest tests/\n-m "not npu" -vv (serial)
+  else incremental targets (phase 2)
+    cg -> py : pytest selected node ids\n(pyproject addopts; serial) -vv
+  end
   py --> cg : pytest exit code
   cg --> job : exit 0 or pytest code
 end

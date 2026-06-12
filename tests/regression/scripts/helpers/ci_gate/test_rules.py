@@ -1,6 +1,4 @@
-"""Tests for ci_gate.rules — gate_* functions, _split_cross_layer_tests,
-_merge_step_results, _product_paths.
-"""
+"""Tests for ci_gate.rules — gate_* functions, _merge_step_results, _product_paths."""
 
 from __future__ import annotations
 
@@ -8,13 +6,12 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+
 from scripts.helpers.ci_gate.gate_policy import SourceExemption
 from scripts.helpers.ci_gate.models import ChangeSet, GateError, GateStepResult
 from scripts.helpers.ci_gate.rules import (
     _merge_step_results,
     _product_paths,
-    _split_cross_layer_tests,
-    gate_config,
     gate_deleted_source,
     gate_deleted_tests,
     gate_modified_source,
@@ -49,50 +46,6 @@ def new_source_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# _split_cross_layer_tests
-# ---------------------------------------------------------------------------
-
-
-def test_split_single_layer_returns_all_immediate() -> None:
-    immediate, deferred = _split_cross_layer_tests(
-        "tensor_cast/ops.py",
-        {"tests/regression/tensor_cast/test_a.py::test_x"},
-    )
-    assert immediate == {"tests/regression/tensor_cast/test_a.py::test_x"}
-    assert deferred == set()
-
-
-def test_split_cross_layer_defers_other_layer() -> None:
-    immediate, deferred = _split_cross_layer_tests(
-        "tensor_cast/ops.py",
-        {
-            "tests/regression/tensor_cast/test_a.py::test_x",
-            "tests/regression/cli/test_b.py::test_y",
-        },
-    )
-    assert immediate == {"tests/regression/tensor_cast/test_a.py::test_x"}
-    assert deferred == {"tests/regression/cli/test_b.py::test_y"}
-
-
-def test_split_no_preferred_prefix_returns_all_immediate() -> None:
-    immediate, deferred = _split_cross_layer_tests(
-        "other/unknown.py",
-        {
-            "tests/regression/tensor_cast/test_a.py::test_x",
-            "tests/regression/cli/test_b.py::test_y",
-        },
-    )
-    assert len(immediate) == 2
-    assert deferred == set()
-
-
-def test_split_empty_tests_returns_both_empty() -> None:
-    immediate, deferred = _split_cross_layer_tests("tensor_cast/ops.py", set())
-    assert immediate == set()
-    assert deferred == set()
-
-
-# ---------------------------------------------------------------------------
 # _merge_step_results
 # ---------------------------------------------------------------------------
 
@@ -106,19 +59,11 @@ def test_merge_combines_errors_from_all_steps() -> None:
     assert merged.errors == (e1, e2)
 
 
-def test_merge_unions_tests_and_deferred() -> None:
-    a = GateStepResult(tests=frozenset({"t1"}), cross_layer_deferred=frozenset({"d1"}))
-    b = GateStepResult(tests=frozenset({"t2"}), cross_layer_deferred=frozenset({"d2"}))
+def test_merge_unions_tests() -> None:
+    a = GateStepResult(tests=frozenset({"t1"}))
+    b = GateStepResult(tests=frozenset({"t2"}))
     merged = _merge_step_results(a, b)
     assert merged.tests == frozenset({"t1", "t2"})
-    assert merged.cross_layer_deferred == frozenset({"d1", "d2"})
-
-
-def test_merge_full_suite_true_if_any_true() -> None:
-    a = GateStepResult(full_suite=False)
-    b = GateStepResult(full_suite=True)
-    merged = _merge_step_results(a, b)
-    assert merged.full_suite is True
 
 
 def test_merge_empty_returns_defaults() -> None:
@@ -142,17 +87,6 @@ def test_product_paths_empty_input_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# gate_config
-# ---------------------------------------------------------------------------
-
-
-def test_gate_config_triggers_full_suite() -> None:
-    result = gate_config()
-    assert result.full_suite is True
-    assert result.errors == ()
-
-
-# ---------------------------------------------------------------------------
 # gate_new_tests
 # ---------------------------------------------------------------------------
 
@@ -170,6 +104,14 @@ def test_gate_new_tests_also_selects_modified_test_paths() -> None:
     )
     result = gate_new_tests(cs)
     assert result.tests == frozenset({"tests/smoke/test_a.py", "tests/regression/cli/test_b.py"})
+
+
+def test_gate_new_tests_returns_all_new_and_modified_paths_even_when_exempted() -> None:
+    cs = ChangeSet.build(
+        new_test=("tests/smoke/test_a.py", "tests/regression/nightly/test_x.py"),
+    )
+    result = gate_new_tests(cs)
+    assert result.tests == frozenset({"tests/smoke/test_a.py", "tests/regression/nightly/test_x.py"})
 
 
 # ---------------------------------------------------------------------------
@@ -319,11 +261,11 @@ def test_gate_modified_source_non_product_prefix_skipped(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# gate_new_source / gate_deleted_source — cross-layer deferred
+# gate_deleted_source
 # ---------------------------------------------------------------------------
 
 
-def test_gate_deleted_source_defers_cross_layer_tests() -> None:
+def test_gate_deleted_source_includes_all_guard_tests() -> None:
     cs = ChangeSet.build(del_source=("tensor_cast/ops.py",))
     test_map = {
         "tensor_cast/ops.py": {
@@ -334,8 +276,104 @@ def test_gate_deleted_source_defers_cross_layer_tests() -> None:
         },
     }
     result = gate_deleted_source(cs, test_map, ("tensor_cast/", "cli/"))
-    assert "tests/regression/tensor_cast/test_ops.py::test_add" in result.tests
-    assert "tests/regression/cli/test_cross.py::test_cross" in result.cross_layer_deferred
+    assert result.tests == frozenset(
+        {
+            "tests/regression/tensor_cast/test_ops.py::test_add",
+            "tests/regression/cli/test_cross.py::test_cross",
+        }
+    )
+
+
+def test_gate_modified_source_coverage_omitted_path_returns_no_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "tensor_cast" / "builtin_model" / "foo.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def run():\n    x = 1\n", encoding="utf-8")
+    cs = ChangeSet.build(modified_source={"tensor_cast/builtin_model/foo.py": frozenset({2})})
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.is_coverage_omitted_source",
+        lambda path, _roots: path.endswith("builtin_model/foo.py"),
+    )
+    result = gate_modified_source(
+        tmp_path,
+        cs,
+        {},
+        (),
+        ("tensor_cast/",),
+    )
+    assert result.errors == ()
+
+
+def test_gate_modified_source_coverage_fallback_skips_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def run():\n    x = 1\n", encoding="utf-8")
+    cs = ChangeSet.build(modified_source={"cli/main.py": frozenset({2})})
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.symbol_lines_covered_in_data",
+        lambda *_args, **_kwargs: True,
+    )
+
+    result = gate_modified_source(
+        tmp_path,
+        cs,
+        {},
+        (),
+        ("cli/",),
+        coverage_path=coverage_path,
+    )
+
+    assert result.errors == ()
+
+
+def test_gate_new_source_coverage_omitted_path_returns_no_errors(
+    new_source_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cs = ChangeSet.build(new_source=("tensor_cast/new_mod.py",))
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.is_coverage_omitted_source",
+        lambda path, _roots: path == "tensor_cast/new_mod.py",
+    )
+    result = gate_new_source(
+        new_source_file.parent.parent,
+        cs,
+        {},
+        (),
+        ("tensor_cast/",),
+    )
+    assert result.errors == ()
+
+
+def test_gate_new_source_coverage_fallback_skips_block(
+    new_source_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cs = ChangeSet.build(new_source=("tensor_cast/new_mod.py",))
+    coverage_path = new_source_file.parent.parent / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.symbol_lines_covered_in_data",
+        lambda *_args, **_kwargs: True,
+    )
+
+    result = gate_new_source(
+        new_source_file.parent.parent,
+        cs,
+        {},
+        (),
+        ("tensor_cast/",),
+        coverage_path=coverage_path,
+    )
+
+    assert result.errors == ()
 
 
 def test_gate_deleted_source_skips_concurrently_deleted_test_file() -> None:

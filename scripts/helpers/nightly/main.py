@@ -25,8 +25,10 @@ from typing import Final
 from scripts.helpers._config import Config, ConfigError
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.ci_gate.gate_policy import (
+    find_expired_test_exemptions,
     find_expired_unmapped,
     format_expired_exemptions_section,
+    format_expired_test_exemptions_section,
     load_gate_policy,
 )
 from scripts.helpers.common._logging import log_env_audit, setup_logger
@@ -93,7 +95,7 @@ _DRIFT_COMPARE_KEYS: Final[tuple[str, ...]] = (
 # ---------------------------------------------------------------------------
 
 
-def _build_test_map_pytest_cmd(python_exe: str, cfg: Config, *, junit_xml: Path) -> list[str]:
+def _build_test_map_pytest_cmd(python_exe: str, *, junit_xml: Path) -> list[str]:
     """Phase 1: incremental-scope smoke/regression for coverage + test_map."""
     return [
         python_exe,
@@ -126,6 +128,8 @@ def _build_nightly_pytest_cmd(python_exe: str, *, junit_xml: Path) -> list[str]:
         _NIGHTLY_MARKER,
         "-n",
         "auto",
+        "--dist",
+        "worksteal",
         "-q",
         "--no-header",
         "--tb=short",
@@ -151,7 +155,7 @@ def _build_benchmark_pytest_cmd(python_exe: str, cfg: Config, *, junit_xml: Path
         f"--junit-xml={junit_xml}",
     ]
     if cfg.benchmark_parallel:
-        cmd.extend(["-n", "auto"])
+        cmd.extend(["-n", "auto", "--dist", "worksteal"])
     return cmd
 
 
@@ -448,25 +452,24 @@ def _write_test_map_artifacts(
         return False, (), (), ""
 
     logger.info("Building test_map ...")
-    build_test_map(test_map_path, marker_expr=_TEST_MAP_MARKER)
+    gate_policy = load_gate_policy(REPO_ROOT)
+    build_test_map(test_map_path, marker_expr=_TEST_MAP_MARKER, roots=gate_policy.roots)
 
     from scripts.helpers.common.test_map_loader import load_test_map as _load_tm
 
     baseline_map = _load_tm(cfg)
     redundancy = tuple(detect_redundant_cases(baseline_map))
     weak_symbols = compute_weak_coverage_symbols(test_map_path, REPO_ROOT / ".coverage")
-    expired_section = ""
-    try:
-        gate_policy = load_gate_policy(REPO_ROOT)
-        expired = find_expired_unmapped(gate_policy, baseline_map)
-        expired_section = format_expired_exemptions_section(expired)
-        if expired:
-            logger.warning(
-                "Found %d expired exemption(s) still unmapped in test_map",
-                len(expired),
-            )
-    except ConfigError as exc:
-        logger.warning("Skipping expired exemption audit: %s", exc)
+    expired = find_expired_unmapped(gate_policy, baseline_map)
+    expired_tests = find_expired_test_exemptions(gate_policy)
+    expired_section = format_expired_exemptions_section(expired) + format_expired_test_exemptions_section(expired_tests)
+    if expired:
+        logger.warning(
+            "Found %d expired exemption(s) still unmapped in test_map",
+            len(expired),
+        )
+    if expired_tests:
+        logger.warning("Found %d expired test exemption(s)", len(expired_tests))
     logger.info("test_map written: %s", test_map_path)
     return True, weak_symbols, redundancy, expired_section
 
@@ -494,7 +497,7 @@ def _run_nightly_pipeline(
     )
 
     logger.info("Phase 1: test_map — smoke/regression (not npu and not nightly)")
-    map_cmd = _build_test_map_pytest_cmd(sys.executable, cfg, junit_xml=map_junit)
+    map_cmd = _build_test_map_pytest_cmd(sys.executable, junit_xml=map_junit)
     logger.info("Running pytest: %s", shlex.join(map_cmd))
     map_exit = _stream_pytest(map_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase1_test_map"))
     logger.info("Phase 1: pytest exit=%d", map_exit)
@@ -535,11 +538,7 @@ def _run_nightly_pipeline(
     logger.info("Phase 2c: pytest exit=%d", network_exit)
 
     logger.info("Drift check: vendored remote configs vs live Hub (non-blocking)")
-    try:
-        drift_warnings = _run_config_drift_check()
-    except Exception as exc:
-        logger.warning("Config drift check skipped due to error: %s", exc)
-        drift_warnings = ()
+    drift_warnings = _run_config_drift_check()
     if drift_warnings:
         logger.warning(
             "Config drift / baseline warnings (non-blocking, %d):",

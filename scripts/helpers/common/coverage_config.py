@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import Final
+
+from scripts.helpers.common.pytest_runner import xdist_worker_args
 
 PRODUCT_SOURCE_PREFIXES: Final[tuple[str, ...]] = (
     "cli/",
@@ -16,9 +19,14 @@ PRODUCT_SOURCE_PREFIXES: Final[tuple[str, ...]] = (
 COV_PACKAGES: Final[tuple[str, ...]] = tuple(p.rstrip("/") for p in PRODUCT_SOURCE_PREFIXES)
 
 
-def pytest_xdist_args() -> list[str]:
-    """pytest-xdist parallelism; safe with pytest-cov when ``[tool.coverage.run] parallel`` is set."""
-    return ["-n", "auto", "--dist=worksteal"]
+def pytest_xdist_args(*, collected_count: int | None = None) -> list[str]:
+    """pytest-xdist parallelism; safe with pytest-cov when ``[tool.coverage.run] parallel`` is set.
+
+    When *collected_count* is omitted, worker count defaults to ``os.cpu_count()`` (legacy callers).
+    """
+    if collected_count is None:
+        collected_count = os.cpu_count() or 1
+    return xdist_worker_args(collected_count)
 
 
 def cov_pytest_args(*, cov_context: bool = False, append: bool = False) -> list[str]:

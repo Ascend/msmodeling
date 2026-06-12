@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from scripts.helpers.common.coverage_config import (
     COV_PACKAGES,
     PRODUCT_SOURCE_PREFIXES,
@@ -53,5 +57,13 @@ def test_cov_args_both_context_and_append() -> None:
     assert "--cov-append" in args
 
 
-def test_pytest_xdist_args() -> None:
-    assert pytest_xdist_args() == ["-n", "auto", "--dist=worksteal"]
+def test_pytest_xdist_args_default_uses_cpu_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default path reads cpu_count in coverage_config and caps again in pytest_runner."""
+    monkeypatch.setattr(os, "cpu_count", lambda: 4)
+    assert pytest_xdist_args() == ["-n", "4", "--dist", "worksteal"]
+
+
+def test_pytest_xdist_args_with_collected_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """collected_count bypasses coverage_config cpu_count; xdist_worker_args still caps by cpu."""
+    monkeypatch.setattr(os, "cpu_count", lambda: 8)
+    assert pytest_xdist_args(collected_count=3) == ["-n", "3", "--dist", "worksteal"]

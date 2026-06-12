@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+
 from scripts.helpers._config import Config, ConfigError
 from scripts.helpers.ci_gate.gate_policy import SourceExemption, is_exempt
 from scripts.helpers.common.test_map_loader import (
@@ -40,11 +41,23 @@ def _write_ci_files(repo: Path) -> None:
     ci_dir = repo / "tests" / ".ci"
     ci_dir.mkdir(parents=True, exist_ok=True)
     (ci_dir / "gate_policy.yaml").write_text(
-        yaml.dump({"schema_version": 1, "exemptions": []}),
+        yaml.dump(
+            {
+                "roots": [
+                    "cli/",
+                    "serving_cast/",
+                    "tensor_cast/",
+                    "web_ui/",
+                    "scripts/",
+                    "tools/",
+                ],
+                "exemptions": {"sources": [], "tests": []},
+            }
+        ),
         encoding="utf-8",
     )
     (ci_dir / "approvers.yaml").write_text(
-        yaml.dump({"schema_version": 1, "approvers": ["fangkai"]}),
+        yaml.dump({"approvers": ["fangkai"]}),
         encoding="utf-8",
     )
 
@@ -89,7 +102,7 @@ def test_load_test_map_key_not_product_prefix_raises_config_error(
     map_path = tmp_path / "map.json"
     map_path.write_text(payload, encoding="utf-8")
     cfg = _cfg_with_path(str(map_path))
-    with pytest.raises(ConfigError, match="must start with a product prefix.*'other/file.py'"):
+    with pytest.raises(ConfigError, match="must start with a product root.*'other/file.py'"):
         load_test_map(cfg)
 
 
@@ -107,7 +120,7 @@ def test_load_test_map_path_traversal_key_raises_config_error(tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def test_load_baseline_assembles_test_map_and_prefixes(tmp_path: Path) -> None:
+def test_load_baseline_assembles_test_map_and_roots(tmp_path: Path) -> None:
     map_path = tmp_path / "map.json"
     map_path.write_text(_VALID_MAP_JSON, encoding="utf-8")
     repo = tmp_path / "repo"
@@ -115,7 +128,7 @@ def test_load_baseline_assembles_test_map_and_prefixes(tmp_path: Path) -> None:
     cfg = _cfg_with_path(str(map_path))
     baseline = load_baseline(repo, cfg)
     assert "tensor_cast/foo.py" in baseline.test_map
-    assert baseline.product_prefixes is not None
+    assert baseline.roots
     assert baseline.discovery.include_patterns
 
 

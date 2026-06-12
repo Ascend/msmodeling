@@ -22,9 +22,6 @@ resolution-markers = [
     "python_full_version < '3.11' and sys_platform == 'darwin'",
 ]
 
-[options]
-prerelease-mode = "allow"
-
 [[package]]
 name = "aenum"
 version = "3.1.17"
@@ -1281,6 +1278,7 @@ ci = [
     { name = "pydantic" },
     { name = "pytest-cov" },
     { name = "pyyaml" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "types-colorama" },
 ]
 lint = [
@@ -1325,6 +1323,7 @@ ci = [
     { name = "pydantic", specifier = ">=2" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "types-colorama", specifier = ">=0.4.15" },
 ]
 lint = [{ name = "pre-commit", specifier = ">=4.3.0" }]

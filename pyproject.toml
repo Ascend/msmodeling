@@ -89,5 +89,6 @@ ci = [
     "pathspec>=0.12",
     "pyyaml>=6",
     "pytest-cov>=7.1.0",
+    "tomli>=2.0; python_version < '3.11'",
     "types-colorama>=0.4.15",
 ]

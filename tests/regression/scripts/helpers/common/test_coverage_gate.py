@@ -1,4 +1,4 @@
-"""Tests for common.coverage_gate — GateConfig, check_thresholds, check_ut_gate."""
+"""Tests for common.coverage_gate — GateConfig, check_thresholds, load_totals."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from scripts.helpers.common.coverage_gate import GateConfig, check_thresholds, check_ut_gate
+from scripts.helpers.common.coverage_gate import GateConfig, check_thresholds, load_totals
 from tests.helpers.fake_subprocess import FakeCompleted
 
 # ---------------------------------------------------------------------------
@@ -49,19 +49,7 @@ def test_check_thresholds_both_below_reports_two_failures(
 
 
 # ---------------------------------------------------------------------------
-# check_ut_gate — no data file
-# ---------------------------------------------------------------------------
-
-
-def test_check_ut_gate_missing_file_returns_false(tmp_path: Path, gate_config: GateConfig) -> None:
-    missing = tmp_path / ".coverage"
-    passed, message = check_ut_gate(missing, config=gate_config)
-    assert passed is False
-    assert f"not found: {missing}" in message
-
-
-# ---------------------------------------------------------------------------
-# check_ut_gate — with mocked subprocess
+# load_totals
 # ---------------------------------------------------------------------------
 
 
@@ -76,6 +64,12 @@ _COVERAGE_JSON_STDOUT = json.dumps(
 )
 
 
+def test_load_totals_missing_file_raises(tmp_path: Path) -> None:
+    missing = tmp_path / ".coverage"
+    with pytest.raises(FileNotFoundError, match="not found"):
+        load_totals(missing)
+
+
 @pytest.fixture(scope="module")
 def coverage_data_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
     path = tmp_path_factory.mktemp("cov") / ".coverage"
@@ -83,36 +77,14 @@ def coverage_data_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
-def test_check_ut_gate_passes_when_thresholds_met(
-    monkeypatch: pytest.MonkeyPatch, coverage_data_file: Path, gate_config: GateConfig
-) -> None:
+def test_load_totals_parses_subprocess_json(monkeypatch: pytest.MonkeyPatch, coverage_data_file: Path) -> None:
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, _COVERAGE_JSON_STDOUT, ""))
-    passed, message = check_ut_gate(coverage_data_file, config=gate_config)
-    assert passed is True
-    assert "passed" in message
+    totals = load_totals(coverage_data_file)
+    assert totals.line_percent == 85.0
+    assert totals.branch_percent == 80.0
 
 
-def test_check_ut_gate_fails_when_below_threshold(
-    monkeypatch: pytest.MonkeyPatch, coverage_data_file: Path, gate_config: GateConfig
-) -> None:
-    low = json.dumps(
-        {
-            "totals": {
-                "percent_covered_display": "60.0%",
-                "num_branches": 10,
-                "covered_branches": 4,
-            },
-        }
-    )
-    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, low, ""))
-    passed, message = check_ut_gate(coverage_data_file, config=gate_config)
-    assert passed is False
-    assert "line coverage 60.0% < 70.0%" in message
-
-
-def test_check_ut_gate_subprocess_failure_returns_false(
-    monkeypatch: pytest.MonkeyPatch, coverage_data_file: Path, gate_config: GateConfig
-) -> None:
+def test_load_totals_subprocess_failure_raises(monkeypatch: pytest.MonkeyPatch, coverage_data_file: Path) -> None:
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(1, "", "coverage error"))
-    passed, _ = check_ut_gate(coverage_data_file, config=gate_config)
-    assert passed is False
+    with pytest.raises(RuntimeError, match="coverage json failed"):
+        load_totals(coverage_data_file)

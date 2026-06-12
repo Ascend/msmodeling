@@ -50,13 +50,15 @@ def baseline() -> Baseline:
     return Baseline(
         test_map=test_map,
         exemptions=(),
+        test_exemptions=(),
         discovery=default_test_discovery(),
-        product_prefixes=(
+        roots=(
             "cli/",
             "tensor_cast/",
             "serving_cast/",
             "web_ui/",
             "scripts/",
+            "tools/",
         ),
     )
 

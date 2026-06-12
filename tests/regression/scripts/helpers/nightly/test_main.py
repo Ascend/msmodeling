@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 
 import pytest
 
-from scripts.helpers._config import Config, ConfigError
+from scripts.helpers._config import Config
+from scripts.helpers.ci_gate.gate_policy import GatePolicy, default_test_discovery
 from scripts.helpers.nightly.main import (
     _TEST_MAP_MARKER,
     _build_benchmark_pytest_cmd,
@@ -70,12 +71,13 @@ _PARALLEL_CFG = Config(
 
 def test_test_map_cmd_contains_smoke_and_regression_and_coverage(tmp_path: Path) -> None:
     junit = tmp_path / "phase1.xml"
-    cmd = _build_test_map_pytest_cmd("python3", _BASE_CFG, junit_xml=junit)
+    cmd = _build_test_map_pytest_cmd("python3", junit_xml=junit)
     assert "tests/smoke/" in cmd
     assert "tests/regression/" in cmd
     assert "not npu and not nightly and not network" in cmd
     assert "-n" in cmd
-    assert "auto" in cmd
+    assert "--dist" in cmd
+    assert "worksteal" in cmd
     assert "--cov-context=test" in cmd
     assert "--cov-branch" in cmd
     assert f"--junit-xml={junit}" in cmd
@@ -598,6 +600,16 @@ def _cfg_with_map_path(map_path: Path) -> Config:
     )
 
 
+def _minimal_gate_policy() -> GatePolicy:
+    return GatePolicy(
+        discovery=default_test_discovery(),
+        roots=("cli/", "tensor_cast/", "serving_cast/", "web_ui/", "scripts/", "tools/"),
+        source_exemptions=(),
+        test_exemptions=(),
+        approvers=frozenset({"fangkai"}),
+    )
+
+
 # ---------------------------------------------------------------------------
 # _write_test_map_artifacts
 # ---------------------------------------------------------------------------
@@ -631,12 +643,13 @@ def test_write_test_map_artifacts_writes_map_and_returns_audit(
     from scripts.helpers.nightly import main as nightly_main
 
     map_path = tmp_path / "map.json"
-    build_calls: list[Path] = []
+    build_calls: list[tuple[Path, str, tuple[str, ...]]] = []
 
-    def _fake_build(path: Path, *, marker_expr: str) -> None:
-        build_calls.append(path)
+    def _fake_build(path: Path, *, marker_expr: str, roots: tuple[str, ...]) -> None:
+        build_calls.append((path, marker_expr, roots))
         path.write_text('{"schema_version": 1, "map": {}}', encoding="utf-8")
 
+    gate_policy = _minimal_gate_policy()
     monkeypatch.setattr(nightly_main, "build_test_map", _fake_build)
     monkeypatch.setattr(nightly_main, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(
@@ -649,9 +662,11 @@ def test_write_test_map_artifacts_writes_map_and_returns_audit(
         "compute_weak_coverage_symbols",
         lambda _p, _c: ("cli/main.py::run",),
     )
-    monkeypatch.setattr(nightly_main, "load_gate_policy", lambda _root: object())
+    monkeypatch.setattr(nightly_main, "load_gate_policy", lambda _root: gate_policy)
     monkeypatch.setattr(nightly_main, "find_expired_unmapped", lambda _p, _m: ())
+    monkeypatch.setattr(nightly_main, "find_expired_test_exemptions", lambda _p: ())
     monkeypatch.setattr(nightly_main, "format_expired_exemptions_section", lambda _e: "")
+    monkeypatch.setattr(nightly_main, "format_expired_test_exemptions_section", lambda _e: "")
 
     cfg = _cfg_with_map_path(map_path)
     logger = logging.getLogger("nightly.test")
@@ -662,47 +677,58 @@ def test_write_test_map_artifacts_writes_map_and_returns_audit(
         map_exit=0,
     )
     assert written is True
-    assert build_calls == [map_path]
+    assert build_calls == [(map_path, _TEST_MAP_MARKER, gate_policy.roots)]
     assert weak == ("cli/main.py::run",)
     assert redundancy == ({"case": "x"},)
     assert expired == ""
 
 
-def test_write_test_map_artifacts_skips_expired_audit_on_config_error(
+def test_write_test_map_artifacts_includes_expired_test_section(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
+    from datetime import date
+
+    from scripts.helpers.ci_gate.gate_policy import ExpiredExemptionReport
     from scripts.helpers.nightly import main as nightly_main
 
     map_path = tmp_path / "map.json"
+    expired_report = ExpiredExemptionReport(
+        symbol_key="tests/regression/cli/test_old.py",
+        deadline=date(2020, 1, 1),
+        reason="legacy",
+        applicant="alice",
+        approver="fangkai",
+        ticket=None,
+    )
 
-    def _fake_build(path: Path, *, marker_expr: str) -> None:
+    def _fake_build(path: Path, *, marker_expr: str, roots: tuple[str, ...]) -> None:
         path.write_text('{"schema_version": 1, "map": {}}', encoding="utf-8")
 
+    gate_policy = _minimal_gate_policy()
     monkeypatch.setattr(nightly_main, "build_test_map", _fake_build)
     monkeypatch.setattr(nightly_main, "REPO_ROOT", tmp_path)
     monkeypatch.setattr("scripts.helpers.common.test_map_loader.load_test_map", lambda _cfg: {})
     monkeypatch.setattr(nightly_main, "detect_redundant_cases", lambda _m: ())
     monkeypatch.setattr(nightly_main, "compute_weak_coverage_symbols", lambda _p, _c: ())
+    monkeypatch.setattr(nightly_main, "load_gate_policy", lambda _root: gate_policy)
+    monkeypatch.setattr(nightly_main, "find_expired_unmapped", lambda _p, _m: ())
+    monkeypatch.setattr(nightly_main, "find_expired_test_exemptions", lambda _p: (expired_report,))
+    monkeypatch.setattr(nightly_main, "format_expired_exemptions_section", lambda _e: "")
     monkeypatch.setattr(
         nightly_main,
-        "load_gate_policy",
-        lambda _root: (_ for _ in ()).throw(ConfigError("policy missing")),
+        "format_expired_test_exemptions_section",
+        lambda reports: f"expired-tests:{len(reports)}",
     )
 
     cfg = _cfg_with_map_path(map_path)
     logger = logging.getLogger("nightly.test")
     with caplog.at_level(logging.WARNING, logger="nightly.test"):
-        written, _, _, expired = _write_test_map_artifacts(
-            logger,
-            cfg,
-            map_path,
-            map_exit=0,
-        )
+        written, _, _, expired = _write_test_map_artifacts(logger, cfg, map_path, map_exit=0)
     assert written is True
-    assert expired == ""
-    assert "Skipping expired exemption audit" in caplog.text
+    assert expired == "expired-tests:1"
+    assert "Found 1 expired test exemption(s)" in caplog.text
 
 
 def test_main_returns_130_on_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:

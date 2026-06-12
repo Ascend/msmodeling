@@ -1,8 +1,4 @@
-"""Coverage totals from .coverage and threshold check.
-
-Merges former coverage_gate.py (load_totals) and check_ut_gate.py (GateConfig,
-check_thresholds, check_ut_gate). Single subprocess call per gate check.
-"""
+"""Coverage totals from .coverage and threshold check."""
 
 from __future__ import annotations
 
@@ -106,35 +102,3 @@ def load_totals(coverage_data: Path) -> CoverageTotals:
     else:
         branch = 100.0 * totals["covered_branches"] / num_branches
     return CoverageTotals(line_percent=line, branch_percent=branch)
-
-
-# ---------------------------------------------------------------------------
-# Gate convenience
-# ---------------------------------------------------------------------------
-
-
-def check_ut_gate(
-    coverage_data: Path = DEFAULT_COVERAGE_DATA,
-    config: GateConfig | None = None,
-) -> tuple[bool, str]:
-    """Return (passed, message). Loads totals via subprocess.
-
-    Prefer load_totals + check_thresholds when caller already has CoverageTotals.
-    """
-    if not coverage_data.is_file():
-        return False, f"coverage data not found: {coverage_data}"
-
-    try:
-        totals = load_totals(coverage_data)
-    except (FileNotFoundError, RuntimeError) as exc:
-        return False, str(exc)
-
-    cfg = config if config is not None else GateConfig.from_config(Config.from_env())
-    failures = check_thresholds(totals.line_percent, totals.branch_percent, cfg)
-
-    if failures:
-        return False, "Coverage gate failed: " + "; ".join(failures)
-    return (
-        True,
-        f"Coverage gate passed: line={totals.line_percent:.1f}% branch={totals.branch_percent:.1f}%",
-    )

@@ -42,11 +42,6 @@ def test_changeset_build_modified_source_stored_as_sorted_tuples() -> None:
     assert cs.modified_source[1][0] == "b.py"
 
 
-def test_changeset_modified_source_map_returns_dict() -> None:
-    cs = ChangeSet.build(modified_source={"a.py": frozenset({1, 2})})
-    assert cs.modified_source_map() == {"a.py": frozenset({1, 2})}
-
-
 def test_changeset_build_config_as_tuple() -> None:
     cs = ChangeSet.build(config=("pyproject.toml",))
     assert cs.config == ("pyproject.toml",)
@@ -61,21 +56,6 @@ def test_gate_step_result_defaults() -> None:
     gs = GateStepResult()
     assert gs.errors == ()
     assert gs.tests == frozenset()
-    assert gs.cross_layer_deferred == frozenset()
-    assert gs.full_suite is False
-
-
-def test_gate_step_result_all_tests_merges_tests_and_deferred() -> None:
-    gs = GateStepResult(
-        tests=frozenset({"a", "b"}),
-        cross_layer_deferred=frozenset({"c"}),
-    )
-    assert gs.all_tests == frozenset({"a", "b", "c"})
-
-
-def test_gate_step_result_full_suite_preserved() -> None:
-    gs = GateStepResult(full_suite=True)
-    assert gs.full_suite is True
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +68,12 @@ def test_baseline_creation_stores_all_fields() -> None:
         test_map={"a.py": {}},
         exemptions=(_sample_exemption("a.py", "fn"),),
         discovery=default_test_discovery(),
-        product_prefixes=("cli/",),
+        test_exemptions=(),
+        roots=("cli/",),
     )
     assert "a.py" in b.test_map
     assert len(b.exemptions) == 1
-    assert b.product_prefixes == ("cli/",)
+    assert b.roots == ("cli/",)
 
 
 # ---------------------------------------------------------------------------

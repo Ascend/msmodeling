@@ -16,17 +16,18 @@ from scripts.helpers.common.test_map_config import resolve_test_map_path
 # ---------------------------------------------------------------------------
 
 
-def _validate_map_keys(inner: dict[str, object]) -> dict[str, dict[str, list[str]]]:
+def _validate_map_keys(
+    inner: dict[str, object],
+    roots: tuple[str, ...],
+) -> dict[str, dict[str, list[str]]]:
     validated: dict[str, dict[str, list[str]]] = {}
     for key, symbols in inner.items():
         if not isinstance(key, str):
             raise ConfigError(f"test_map: map key must be string, got {type(key).__name__}")
         if ".." in key or key.startswith("/"):
             raise ConfigError(f"test_map: invalid map key: {key!r}")
-        if not any(key.startswith(prefix) for prefix in PRODUCT_SOURCE_PREFIXES):
-            raise ConfigError(
-                f"test_map: map key must start with a product prefix ({', '.join(PRODUCT_SOURCE_PREFIXES)}): {key!r}"
-            )
+        if not any(key.startswith(prefix) for prefix in roots):
+            raise ConfigError(f"test_map: map key must start with a product root ({', '.join(roots)}): {key!r}")
         if not isinstance(symbols, dict):
             raise ConfigError(f"test_map: value for {key!r} must be object")
         sym_map: dict[str, list[str]] = {}
@@ -45,7 +46,11 @@ def _validate_map_keys(inner: dict[str, object]) -> dict[str, dict[str, list[str
 # ---------------------------------------------------------------------------
 
 
-def load_test_map(cfg: Config) -> dict[str, dict[str, list[str]]]:
+def load_test_map(
+    cfg: Config,
+    *,
+    roots: tuple[str, ...] = PRODUCT_SOURCE_PREFIXES,
+) -> dict[str, dict[str, list[str]]]:
     """Load and validate test_map JSON from the path given in *cfg*."""
     map_path = resolve_test_map_path(cfg, must_exist=True)
     try:
@@ -59,17 +64,18 @@ def load_test_map(cfg: Config) -> dict[str, dict[str, list[str]]]:
     inner = data.get("map")
     if not isinstance(inner, dict):
         raise ConfigError("test_map: map must be object")
-    return _validate_map_keys(inner)
+    return _validate_map_keys(inner, roots)
 
 
 def load_baseline(repo_root: Path, cfg: Config) -> Baseline:
-    """Load full gate baseline: test_map + gate policy + product prefixes."""
+    """Load full gate baseline: test_map + gate policy + product roots."""
     policy = load_gate_policy(repo_root)
     return Baseline(
-        test_map=load_test_map(cfg),
-        exemptions=policy.exemptions,
+        test_map=load_test_map(cfg, roots=policy.roots),
+        exemptions=policy.source_exemptions,
+        test_exemptions=policy.test_exemptions,
         discovery=policy.discovery,
-        product_prefixes=PRODUCT_SOURCE_PREFIXES,
+        roots=policy.roots,
     )
 
 

@@ -17,6 +17,8 @@ CONFIG_FILE_NAMES: frozenset[str] = frozenset(
         "tox.ini",
         "setup.cfg",
         ".coveragerc",
+        "requirements.txt",
+        "uv.lock",
     }
 )
 
@@ -44,8 +46,6 @@ def resolve_test_map_path(cfg: Config, *, must_exist: bool) -> Path:
 
 def is_config_path(path: str) -> bool:
     """Return True if *path* is a CI config file that triggers full-suite."""
-    if path.startswith("tests/.ci/"):
-        return True
     if path.startswith("tests/") and path.endswith("/conftest.py"):
         return True
     return path.rsplit("/", 1)[-1] in CONFIG_FILE_NAMES

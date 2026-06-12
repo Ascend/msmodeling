@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final
 
 import yaml
+
 from scripts.helpers._config import ConfigError
-from scripts.helpers.common.coverage_config import PRODUCT_SOURCE_PREFIXES
 
 try:
     import pathspec
-    from pydantic import BaseModel, Field, ValidationError, field_validator
+    from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 except ImportError as exc:
     raise ConfigError("ci dependency group required (pydantic, pathspec). Run: uv sync --frozen --group ci") from exc
 
@@ -26,6 +27,7 @@ APPROVERS_REL: Final = CI_POLICY_REL / "approvers.yaml"
 
 _DEFAULT_INCLUDE: Final = ("**/test_*.py", "**/*_test.py")
 _DEFAULT_EXCLUDE: Final = ("tests/helpers/**", "tests/assets/**")
+_CLASS_ONLY_TEST_NODE: Final = re.compile(r"^Test[A-Za-z0-9_]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +57,16 @@ class SourceExemption:
 
 
 @dataclass(frozen=True, slots=True)
+class TestExemption:
+    test_id: str
+    reason: str
+    applicant: str
+    approver: str
+    deadline: date
+    ticket: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ExpiredExemptionReport:
     symbol_key: str
     deadline: date
@@ -67,7 +79,9 @@ class ExpiredExemptionReport:
 @dataclass(frozen=True, slots=True)
 class GatePolicy:
     discovery: TestDiscovery
-    exemptions: tuple[SourceExemption, ...]
+    roots: tuple[str, ...]
+    source_exemptions: tuple[SourceExemption, ...]
+    test_exemptions: tuple[TestExemption, ...]
     approvers: frozenset[str]
 
 
@@ -101,22 +115,76 @@ class ExemptionDoc(BaseModel):
 
     @field_validator("symbols")
     @classmethod
-    def validate_symbols(cls, value: list[str]) -> list[str]:
+    def validate_source_symbols(cls, value: list[str]) -> list[str]:
         if not value:
             raise ValueError("must not be empty")
-        for raw in value:
-            _parse_symbol_key(raw)
         return value
 
 
+class TestExemptionDoc(BaseModel):
+    symbols: list[str]
+    reason: str
+    applicant: str
+    approver: str
+    deadline: date
+    ticket: str | None = None
+
+    @field_validator("symbols")
+    @classmethod
+    def validate_test_symbols(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("must not be empty")
+        return value
+
+
+class ExemptionsDoc(BaseModel):
+    sources: list[ExemptionDoc] = Field(default_factory=list)
+    tests: list[TestExemptionDoc] = Field(default_factory=list)
+
+
 class GatePolicyDoc(BaseModel):
-    schema_version: Literal[1]
+    schema_version: int | None = None
+    roots: list[str]
+    exemptions: ExemptionsDoc = Field(default_factory=ExemptionsDoc)
     test_discovery: TestDiscoveryDoc = Field(default_factory=TestDiscoveryDoc)
-    exemptions: list[ExemptionDoc] = Field(default_factory=list)
+
+    @field_validator("roots")
+    @classmethod
+    def validate_roots(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("must not be empty")
+        for root in value:
+            if not isinstance(root, str) or not root.strip():
+                raise ValueError(f"invalid root: {root!r}")
+            if not root.endswith("/"):
+                raise ValueError(f"root must end with '/': {root!r}")
+        return value
+
+    @model_validator(mode="after")
+    def validate_source_symbols_under_roots(self) -> GatePolicyDoc:
+        roots = tuple(self.roots)
+        for entry in self.exemptions.sources:
+            for raw in entry.symbols:
+                _parse_symbol_key(raw, roots)
+        return self
+
+    @model_validator(mode="after")
+    def validate_test_symbols_format(self) -> GatePolicyDoc:
+        discovery = TestDiscovery(
+            include_patterns=tuple(self.test_discovery.include),
+            exclude_patterns=tuple(self.test_discovery.exclude),
+        )
+        for entry in self.exemptions.tests:
+            for raw in entry.symbols:
+                _parse_test_exemption_id(raw)
+                file_part = raw.split("::", 1)[0]
+                if not is_gate_test_path(file_part, discovery):
+                    raise ValueError(f"test exemption file {file_part!r} is not a collectible test module")
+        return self
 
 
 class ApproversDoc(BaseModel):
-    schema_version: Literal[1]
+    schema_version: int | None = None
     approvers: list[str]
 
     @field_validator("approvers")
@@ -147,7 +215,7 @@ def _policy_paths(repo_root: Path) -> tuple[Path, Path]:
     return repo_root / GATE_POLICY_REL, repo_root / APPROVERS_REL
 
 
-def _parse_symbol_key(raw: str) -> tuple[str, str]:
+def _parse_symbol_key_format(raw: str) -> tuple[str, str]:
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError(f"expected 'path::symbol', got {raw!r}")
     if raw.count("::") != 1:
@@ -155,10 +223,34 @@ def _parse_symbol_key(raw: str) -> tuple[str, str]:
     file_path, symbol = raw.split("::", 1)
     if not file_path or not symbol:
         raise ValueError(f"expected 'path::symbol', got {raw!r}")
-    if not any(file_path.startswith(prefix) for prefix in PRODUCT_SOURCE_PREFIXES):
-        prefixes = ", ".join(PRODUCT_SOURCE_PREFIXES)
-        raise ValueError(f"path {file_path!r} must start with a product prefix ({prefixes})")
     return file_path, symbol
+
+
+def _parse_symbol_key(raw: str, roots: tuple[str, ...]) -> tuple[str, str]:
+    file_path, symbol = _parse_symbol_key_format(raw)
+    if not any(file_path.startswith(prefix) for prefix in roots):
+        prefixes = ", ".join(roots)
+        raise ValueError(f"path {file_path!r} must start with a product root ({prefixes})")
+    return file_path, symbol
+
+
+def _parse_test_exemption_id(raw: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"invalid test exemption id: {raw!r}")
+    if "[" in raw:
+        raise ValueError(f"test exemption id must not contain '[': {raw!r}")
+    if not raw.startswith("tests/"):
+        raise ValueError(f"test exemption id must start with 'tests/': {raw!r}")
+    if "::" not in raw:
+        raise ValueError(f"test exemption id must contain '::': {raw!r}")
+    file_part, node_part = raw.split("::", 1)
+    if not file_part.endswith(".py"):
+        raise ValueError(f"test exemption file part must end with '.py': {raw!r}")
+    if not node_part:
+        raise ValueError(f"test exemption id must include a test node: {raw!r}")
+    if raw.count("::") == 1 and _CLASS_ONLY_TEST_NODE.match(node_part):
+        raise ValueError(f"test exemption id must target a test function or method, not a class: {raw!r}")
+    return raw
 
 
 def _load_yaml(path: Path, label: str) -> object:
@@ -178,15 +270,11 @@ def _format_pydantic_error(path: Path, exc: ValidationError) -> str:
     return "\n".join(parts)
 
 
-def _doc_to_policy(doc: GatePolicyDoc, approvers: frozenset[str]) -> GatePolicy:
-    discovery = TestDiscovery(
-        include_patterns=tuple(doc.test_discovery.include),
-        exclude_patterns=tuple(doc.test_discovery.exclude),
-    )
+def _expand_source_exemptions(entries: list[ExemptionDoc], roots: tuple[str, ...]) -> tuple[SourceExemption, ...]:
     exemptions: list[SourceExemption] = []
-    for entry in doc.exemptions:
+    for entry in entries:
         for raw in entry.symbols:
-            file_path, symbol = _parse_symbol_key(raw)
+            file_path, symbol = _parse_symbol_key(raw, roots)
             exemptions.append(
                 SourceExemption(
                     file=file_path,
@@ -198,9 +286,37 @@ def _doc_to_policy(doc: GatePolicyDoc, approvers: frozenset[str]) -> GatePolicy:
                     ticket=entry.ticket,
                 )
             )
+    return tuple(exemptions)
+
+
+def _expand_test_exemptions(entries: list[TestExemptionDoc]) -> tuple[TestExemption, ...]:
+    exemptions: list[TestExemption] = []
+    for entry in entries:
+        for raw in entry.symbols:
+            exemptions.append(
+                TestExemption(
+                    test_id=raw,
+                    reason=entry.reason,
+                    applicant=entry.applicant,
+                    approver=entry.approver,
+                    deadline=entry.deadline,
+                    ticket=entry.ticket,
+                )
+            )
+    return tuple(exemptions)
+
+
+def _doc_to_policy(doc: GatePolicyDoc, approvers: frozenset[str]) -> GatePolicy:
+    roots = tuple(doc.roots)
+    discovery = TestDiscovery(
+        include_patterns=tuple(doc.test_discovery.include),
+        exclude_patterns=tuple(doc.test_discovery.exclude),
+    )
     return GatePolicy(
         discovery=discovery,
-        exemptions=tuple(exemptions),
+        roots=roots,
+        source_exemptions=_expand_source_exemptions(doc.exemptions.sources, roots),
+        test_exemptions=_expand_test_exemptions(doc.exemptions.tests),
         approvers=approvers,
     )
 
@@ -227,12 +343,16 @@ def _load_gate_policy_doc(policy_path: Path) -> GatePolicyDoc:
 
 def _validate_approvers_in_registry(doc: GatePolicyDoc, approvers: frozenset[str]) -> None:
     errors: list[str] = []
-    for index, entry in enumerate(doc.exemptions):
-        if entry.approver not in approvers:
-            errors.append(
-                f"{GATE_POLICY_REL.as_posix()}: exemptions[{index}].approver "
-                f"{entry.approver!r} not in approver registry ({APPROVERS_REL.as_posix()})"
-            )
+    for section, entries in (
+        ("sources", doc.exemptions.sources),
+        ("tests", doc.exemptions.tests),
+    ):
+        for index, entry in enumerate(entries):
+            if entry.approver not in approvers:
+                errors.append(
+                    f"{GATE_POLICY_REL.as_posix()}: exemptions.{section}[{index}].approver "
+                    f"{entry.approver!r} not in approver registry ({APPROVERS_REL.as_posix()})"
+                )
     if errors:
         raise ConfigError("\n".join(errors))
 
@@ -279,7 +399,7 @@ def validate_gate_policy_if_changed(repo_root: Path, base_ref: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test path matching
+# Path matching
 # ---------------------------------------------------------------------------
 
 
@@ -295,8 +415,19 @@ def is_gate_test_path(path: str, discovery: TestDiscovery) -> bool:
 
 
 def is_exempt(exemptions: tuple[SourceExemption, ...], file_path: str, symbol: str) -> bool:
-    """Return True when (file_path, symbol) has a registered exemption."""
+    """Return True when (file_path, symbol) has a registered source exemption."""
     return any(item.file == file_path and item.symbol == symbol for item in exemptions)
+
+
+def is_test_exempt(test_exemptions: tuple[TestExemption, ...], test_node_id: str) -> bool:
+    """Return True when *test_node_id* matches a registered node-level test exemption."""
+    if not test_exemptions:
+        return False
+    for entry in test_exemptions:
+        exempt_id = entry.test_id
+        if test_node_id == exempt_id or test_node_id.startswith(f"{exempt_id}["):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -310,10 +441,10 @@ def find_expired_unmapped(
     *,
     today: date | None = None,
 ) -> tuple[ExpiredExemptionReport, ...]:
-    """Return exemptions past deadline that still lack test_map coverage."""
+    """Return source exemptions past deadline that still lack test_map coverage."""
     check_date = today or date.today()
     reports: list[ExpiredExemptionReport] = []
-    for entry in policy.exemptions:
+    for entry in policy.source_exemptions:
         if entry.deadline >= check_date:
             continue
         file_map = test_map.get(entry.file, {})
@@ -322,6 +453,30 @@ def find_expired_unmapped(
         reports.append(
             ExpiredExemptionReport(
                 symbol_key=entry.symbol_key,
+                deadline=entry.deadline,
+                reason=entry.reason,
+                applicant=entry.applicant,
+                approver=entry.approver,
+                ticket=entry.ticket,
+            )
+        )
+    return tuple(reports)
+
+
+def find_expired_test_exemptions(
+    policy: GatePolicy,
+    *,
+    today: date | None = None,
+) -> tuple[ExpiredExemptionReport, ...]:
+    """Return test exemptions past deadline."""
+    check_date = today or date.today()
+    reports: list[ExpiredExemptionReport] = []
+    for entry in policy.test_exemptions:
+        if entry.deadline >= check_date:
+            continue
+        reports.append(
+            ExpiredExemptionReport(
+                symbol_key=entry.test_id,
                 deadline=entry.deadline,
                 reason=entry.reason,
                 applicant=entry.applicant,
@@ -347,4 +502,22 @@ def format_expired_exemptions_section(reports: tuple[ExpiredExemptionReport, ...
     if len(reports) > 10:
         lines.append(f"- ... and {len(reports) - 10} more")
     lines.append("→ Add tests or renew the exemption in tests/.ci/gate_policy.yaml")
+    return "\n".join(lines)
+
+
+def format_expired_test_exemptions_section(reports: tuple[ExpiredExemptionReport, ...]) -> str:
+    """Build Feishu body text for expired test exemptions."""
+    if not reports:
+        return ""
+    lines = [
+        f"\nExpired test exemptions ({len(reports)} past deadline):",
+    ]
+    for report in reports[:10]:
+        ticket = f", ticket {report.ticket}" if report.ticket else ""
+        lines.append(
+            f"- {report.symbol_key} (deadline {report.deadline.isoformat()}, approver {report.approver}{ticket})"
+        )
+    if len(reports) > 10:
+        lines.append(f"- ... and {len(reports) - 10} more")
+    lines.append("→ Remove the exemption or renew it in tests/.ci/gate_policy.yaml")
     return "\n".join(lines)

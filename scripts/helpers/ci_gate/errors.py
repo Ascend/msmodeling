@@ -62,3 +62,30 @@ def format_blocking_errors(errors: tuple[GateError, ...]) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def format_phase0_failure_hint(node_ids: tuple[str, ...]) -> str:
+    """Format Phase 0 pytest failure guidance with optional test exemption YAML."""
+    lines = [
+        "CI gate failed: new test(s) failed. Fix test failures before gate check.",
+        "",
+        "Executed node(s):",
+    ]
+    for node_id in sorted(node_ids):
+        lines.append(f"  - {node_id}")
+    lines.extend(
+        [
+            "",
+            "To exempt failing test(s) from Phase 0/2, add entries under exemptions.tests",
+            "in tests/.ci/gate_policy.yaml:",
+            "  exemptions:",
+            "    tests:",
+            "      - symbols:",
+            "          - tests/path/to/test_file.py::test_name",
+            '        reason: "<why this test is exempt from PR gate>"',
+            "        applicant: <your-id>",
+            "        approver: <approver-from-tests/.ci/approvers.yaml>",
+            "        deadline: YYYY-MM-DD",
+        ]
+    )
+    return "\n".join(lines)

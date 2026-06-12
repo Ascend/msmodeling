@@ -74,7 +74,7 @@ Test intent is expressed by **directory placement**, not by markers.
 
 **Never** add layer markers (`smoke`, `regression`, `benchmark`). Only two markers exist:
 
-- `@pytest.mark.nightly` — long-running compile paths (excluded from CI gate, included in nightly)
+- `@pytest.mark.nightly` — long-running compile paths (excluded from incremental Phase 2 selection; **new/modified test files still run in ci_gate Phase 0 with `-m not npu` only**)
 - `@pytest.mark.npu` — requires NPU hardware (excluded from all `run_*.sh`)
 
 ### Decision Tree
@@ -236,4 +236,39 @@ class Test<Feature>Nightly(unittest.TestCase):
 - [ ] Session fixtures used for model construction in regression
 - [ ] If `@pytest.mark.nightly`, a smoke guard is mentioned or co-generated
 - [ ] No generated conftest uses module-level `sys.modules` mocks for product packages
-- [ ] New product symbols are covered or noted for `gate_policy.yaml`
+- [ ] New product symbols are covered, hit by Phase 0 coverage, omitted via `pyproject.toml` `[tool.coverage.run] omit` when appropriate, or registered under `exemptions.sources`; failing or blocked test nodes may be listed under `exemptions.tests` (pytest node id with `::`)
+
+## CI Gate Policy
+
+When adding tests for product code under `cli/`, `tensor_cast/`, `serving_cast/`, `web_ui/`, `scripts/`, or `tools/`:
+
+1. **Prefer real coverage** — regression tests should execute changed symbols so nightly `test_map` and Phase 0 `.coverage` can map them.
+2. **ci_gate pytest phases** (`scripts/helpers/ci_gate/main.py`):
+   - **Phase 0** (new/mod test files): for each changed test file, collect pytest node ids with `-m not npu`, drop nodes listed in `exemptions.tests`, run the remainder with `-o addopts=`, collect-first xdist, `--cov`, `-vv`; when every collected node in a file is exempt, log skip and continue (no pytest, no failure); when all changed files yield no runnable nodes, skip pytest with success; `collect_test_map` filters with `not nightly and not network`. On pytest failure, print a copy-paste `exemptions.tests` YAML hint listing the executed node ids — Phase 1/2 failures do **not** print exemption hints.
+   - **Phase 1** (deleted-source guards): `-o addopts=`, `-m "not npu and not nightly and not network"`, collect-first xdist, `-vv`
+   - **Phase 2** (incremental node ids from `test_map`): filter out `exemptions.tests` node ids, then `-o addopts=`, `-m "not npu and not nightly and not network"`, collect-first xdist, `-vv`; all targets exempt → log skip success
+   - **Config-triggered full suite**: `-o addopts=`, `tests/` with `-m not npu` only (dependency/conftest/config changes — not `gate_policy.yaml`)
+3. **`tests/.ci/gate_policy.yaml`**:
+   - `roots` — product source prefixes for gate scope (must end with `/`)
+   - `exemptions.sources` — temporary **product-symbol** waivers (`path::symbol` under `roots`); skips `test_map` coverage checks for matching source symbols in Phase 0 blocking / Phase 2 planning
+   - `exemptions.tests` — temporary **pytest-node** waivers; each `symbols` entry is a pytest node id (`tests/.../test_foo.py::test_bar`); skips matching nodes in Phase 0 collection/run and Phase 2 incremental selection. Both exemption kinds require `reason`, `applicant`, `approver`, `deadline`.
+   - **Symbol formats** — `exemptions.sources`: `product/path.py::qualified_name` (exactly one `::`). `exemptions.tests`: pytest node id with `::` (file + test function or unittest method); no parametrized bracket ids (`[...]`); no class-only ids (`::TestClass` without a method) — register the concrete test node id instead.
+   - `test_discovery` — which paths under `tests/` count as gate test modules
+   - Changing `gate_policy.yaml` does **not** trigger full-suite pytest; approver validation runs via `validate_gate_policy_if_changed`
+4. **Source omit SSOT** — `pyproject.toml` `[tool.coverage.run] omit` (not gate_policy); e.g. `*/builtin_model/*` skips gate checks and `test_map` collection for matching product paths under `roots`.
+5. **Coverage fallback** — if a symbol is not in `test_map` but Phase 0 coverage recorded the changed line (even via import), gate may pass; still add a real test when practical.
+6. **Local verify** — shell scripts use `-o addopts=` to clear pyproject default markers, then apply their own `-m`; run smoke/regression with `-vv` before merge.
+
+Example test exemption (node-level):
+
+```yaml
+exemptions:
+  tests:
+    - symbols:
+        - tests/regression/cli/test_run.py::test_run
+      reason: "Blocked on upstream fixture; tracked in issue-123"
+      applicant: alice
+      approver: fangkai
+      deadline: 2026-12-31
+      ticket: "issue-123"
+```

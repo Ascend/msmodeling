@@ -15,8 +15,14 @@
 #   UV_INDEX_URL                       custom UV package index URL
 #   HF_ENDPOINT                        custom HuggingFace endpoint URL
 #
-# Pytest: Phase 0/1 use marker "not npu and not nightly and not network" and -n auto;
-# Phase 2 relies on pyproject.toml addopts (no extra -m/-n).
+# Pytest (ci_gate/main.py):
+#   Phase 0 — new/mod test files: -m "not npu", xdist (collect-then-xdist), --cov, -vv;
+#             collect_test_map filters with "not nightly and not network".
+#   Phase 1 — deleted-source guards: -m "not npu and not nightly and not network", xdist, -vv.
+#   Phase 2 — incremental node ids: no explicit -m (pyproject addopts), serial, -vv.
+#   Config-triggered full suite: tests/ with -m "not npu" only.
+# Config full-suite triggers: requirements.txt, uv.lock, tests/**/conftest.py, and standard
+# pytest/coverage config filenames — NOT gate_policy.yaml (approver validation only).
 set -euo pipefail
 
 if [[ -z "${MSMODELING_TEST_MAP_PATH:-}" ]]; then

@@ -105,6 +105,7 @@ def _classify_rename(
     score: int,
     diff: dict[str, set[int]],
     discovery: TestDiscovery,
+    roots: tuple[str, ...],
 ) -> tuple[list[str], list[str], list[str], list[tuple[str, str, int]], dict[str, frozenset[int]]]:
     """Classify one git rename (R status) into gate buckets."""
     del_test: list[str] = []
@@ -121,7 +122,7 @@ def _classify_rename(
             del_test.append(old_path)
         if new_is_test:
             new_test.append(new_path)
-        if not old_is_test and is_product_source(old_path, PRODUCT_SOURCE_PREFIXES):
+        if not old_is_test and is_product_source(old_path, roots):
             del_source.append(old_path)
         return del_test, new_test, del_source, renames, modified
 
@@ -139,6 +140,7 @@ def classify_changes(
     base_ref: str,
     diff: dict[str, set[int]],
     discovery: TestDiscovery | None = None,
+    roots: tuple[str, ...] = PRODUCT_SOURCE_PREFIXES,
 ) -> ChangeSet:
     """Return a ChangeSet from git diff --name-status.
 
@@ -204,7 +206,7 @@ def classify_changes(
                 rename_del_source,
                 rename_entries,
                 rename_modified,
-            ) = _classify_rename(old_path, new_path, score, diff, test_discovery)
+            ) = _classify_rename(old_path, new_path, score, diff, test_discovery, roots)
             del_test.extend(rename_del_test)
             new_test.extend(rename_new_test)
             del_source.extend(rename_del_source)

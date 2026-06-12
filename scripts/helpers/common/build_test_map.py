@@ -14,19 +14,21 @@ from typing import Final
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.common.ast_utils import iter_qualified_definition_spans, symbol_for_line
 from scripts.helpers.common.coverage_config import PRODUCT_SOURCE_PREFIXES
+from scripts.helpers.common.coverage_omit import is_coverage_omitted_source
+from scripts.helpers.common.pytest_runner import PYTEST_IGNORE_ADDOPTS
 
 logger = logging.getLogger(__name__)
 
 UNCLASSIFIED_SYMBOL: Final = "*"
 
 
-def _relative_repo_key(abs_path: str) -> str | None:
+def _relative_repo_key(abs_path: str, roots: tuple[str, ...]) -> str | None:
     try:
         rel = Path(abs_path).resolve().relative_to(REPO_ROOT)
     except ValueError:
         return None
     key = rel.as_posix()
-    if key.startswith(PRODUCT_SOURCE_PREFIXES):
+    if key.startswith(roots):
         return key
     return None
 
@@ -51,6 +53,7 @@ def _collect_allowed_node_ids(
             sys.executable,
             "-m",
             "pytest",
+            *PYTEST_IGNORE_ADDOPTS,
             str(REPO_ROOT / "tests" / "smoke"),
             str(REPO_ROOT / "tests" / "regression"),
             "-m",
@@ -83,6 +86,7 @@ def collect_from_coverage(
     allowed_node_ids: frozenset[str],
     *,
     coverage_path: Path | None = None,
+    roots: tuple[str, ...] = PRODUCT_SOURCE_PREFIXES,
 ) -> dict[str, dict[str, list[str]]]:
     """Read .coverage data, resolve symbols, return {rel_path: {symbol: [test_ids]}}.
 
@@ -112,8 +116,10 @@ def collect_from_coverage(
     by_file: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 
     for measured in data.measured_files():
-        key = _relative_repo_key(measured)
+        key = _relative_repo_key(measured, roots)
         if key is None:
+            continue
+        if is_coverage_omitted_source(key, roots):
             continue
         ctxmap = data.contexts_by_lineno(measured)
         if not ctxmap:
@@ -170,9 +176,10 @@ def build_test_map(
     *,
     marker_expr: str,
     coverage_path: Path | None = None,
+    roots: tuple[str, ...] = PRODUCT_SOURCE_PREFIXES,
 ) -> None:
     allowed = _collect_allowed_node_ids(marker_expr)
-    mapping = collect_from_coverage(allowed, coverage_path=coverage_path)
+    mapping = collect_from_coverage(allowed, coverage_path=coverage_path, roots=roots)
     mapping = _prune_missing_source_keys(mapping)
     write_test_map(output_path, mapping)
 
@@ -181,13 +188,14 @@ def collect_test_map(
     *,
     marker_expr: str,
     coverage_path: Path | None = None,
+    roots: tuple[str, ...] = PRODUCT_SOURCE_PREFIXES,
 ) -> dict[str, dict[str, list[str]]]:
     """Return test_map dict in memory — no file I/O.
 
     Same logic as build_test_map but returns the mapping directly.
     """
     allowed = _collect_allowed_node_ids(marker_expr)
-    mapping = collect_from_coverage(allowed, coverage_path=coverage_path)
+    mapping = collect_from_coverage(allowed, coverage_path=coverage_path, roots=roots)
     return _prune_missing_source_keys(mapping)
 
 

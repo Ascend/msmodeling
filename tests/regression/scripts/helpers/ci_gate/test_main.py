@@ -43,13 +43,15 @@ def baseline() -> Baseline:
     return Baseline(
         test_map=test_map,
         exemptions=(),
+        test_exemptions=(),
         discovery=default_test_discovery(),
-        product_prefixes=(
+        roots=(
             "cli/",
             "tensor_cast/",
             "serving_cast/",
             "web_ui/",
             "scripts/",
+            "tools/",
         ),
     )
 
@@ -69,6 +71,18 @@ def test_plan_new_test_selected(baseline: Baseline) -> None:
     cs = ChangeSet.build(new_test=("tests/smoke/test_new.py::test_x",))
     plan = build_ci_gate_plan(Path("/tmp"), cs, baseline)
     assert "tests/smoke/test_new.py::test_x" in plan.incremental_tests
+
+
+def test_plan_skips_new_test_incremental_when_phase0_ran(baseline: Baseline) -> None:
+    cs = ChangeSet.build(new_test=("tests/smoke/test_new.py",))
+    plan = build_ci_gate_plan(Path("/tmp"), cs, baseline, phase0_ran_pytest=True)
+    assert "tests/smoke/test_new.py" not in plan.incremental_tests
+
+
+def test_plan_keeps_new_test_incremental_when_phase0_skipped(baseline: Baseline) -> None:
+    cs = ChangeSet.build(new_test=("tests/smoke/test_new.py",))
+    plan = build_ci_gate_plan(Path("/tmp"), cs, baseline, phase0_ran_pytest=False)
+    assert "tests/smoke/test_new.py" in plan.incremental_tests
 
 
 def test_plan_deleted_test_sole_coverage_blocking(baseline: Baseline) -> None:
@@ -111,8 +125,9 @@ def test_plan_new_source_with_exemption_no_error(baseline: Baseline, tmp_path: P
     exempt_baseline = Baseline(
         test_map=baseline.test_map,
         exemptions=(_sample_exemption("tensor_cast/new_mod.py", "fn"),),
+        test_exemptions=(),
         discovery=baseline.discovery,
-        product_prefixes=baseline.product_prefixes,
+        roots=baseline.roots,
     )
     plan = build_ci_gate_plan(tmp_path, cs, exempt_baseline)
     assert len(plan.blocking_errors) == 0

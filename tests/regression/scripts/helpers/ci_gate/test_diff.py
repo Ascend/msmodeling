@@ -1,12 +1,11 @@
-"""Tests for ci_gate.diff — resolve_base_ref, fetch_diff_line_map, classify_changes,
-regression_layer_for_source, layer_of_test.
-"""
+"""Tests for ci_gate.diff — resolve_base_ref, fetch_diff_line_map, classify_changes."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+
 from scripts.helpers._config import ConfigError
 from scripts.helpers.ci_gate.diff import (
     _classify_rename,
@@ -15,7 +14,7 @@ from scripts.helpers.ci_gate.diff import (
     resolve_base_ref,
 )
 from scripts.helpers.ci_gate.gate_policy import default_test_discovery
-from scripts.helpers.ci_gate.models import layer_of_test, regression_layer_for_source
+from scripts.helpers.common.coverage_config import PRODUCT_SOURCE_PREFIXES
 from tests.helpers.fake_subprocess import FakeCompleted
 
 # ---------------------------------------------------------------------------
@@ -139,6 +138,29 @@ def test_classify_changes_config_triggers_full_suite(monkeypatch: pytest.MonkeyP
     assert result.config == ("pyproject.toml",)
 
 
+def test_classify_changes_requirements_txt_triggers_full_suite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "M\trequirements.txt\n", ""))
+    result = classify_changes(tmp_path, "abc123", {})
+    assert result.config == ("requirements.txt",)
+
+
+def test_classify_changes_uv_lock_triggers_full_suite(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "M\tuv.lock\n", ""))
+    result = classify_changes(tmp_path, "abc123", {})
+    assert result.config == ("uv.lock",)
+
+
+def test_classify_changes_gate_policy_yaml_does_not_trigger_full_suite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: FakeCompleted(0, "M\ttests/.ci/gate_policy.yaml\n", ""),
+    )
+    result = classify_changes(tmp_path, "abc123", {})
+    assert result.config == ()
+
+
 def test_classify_changes_deleted_source_populates_del_source(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "D\tcli/old_main.py\n", ""))
     result = classify_changes(tmp_path, "abc123", {})
@@ -242,6 +264,7 @@ def test_classify_rename_paths(
         score,
         diff,
         discovery,
+        PRODUCT_SOURCE_PREFIXES,
     )
 
     assert del_test == expected["del_test"]
@@ -294,37 +317,3 @@ def test_classify_changes_rename_product_populates_renames(monkeypatch: pytest.M
     assert result.renames == (("tensor_cast/foo.py", "tensor_cast/bar.py", 100),)
     assert result.del_test == ()
     assert result.new_test == ()
-
-
-# ---------------------------------------------------------------------------
-# regression_layer_for_source
-# ---------------------------------------------------------------------------
-
-
-def test_regression_layer_tensor_cast_returns_tensor_cast_layer() -> None:
-    assert regression_layer_for_source("tensor_cast/ops.py") == "tests/regression/tensor_cast/"
-
-
-def test_regression_layer_serving_cast_returns_serving_cast_layer() -> None:
-    assert regression_layer_for_source("serving_cast/api.py") == "tests/regression/serving_cast/"
-
-
-def test_regression_layer_unknown_prefix_returns_none() -> None:
-    assert regression_layer_for_source("cli/main.py") is None
-
-
-# ---------------------------------------------------------------------------
-# layer_of_test
-# ---------------------------------------------------------------------------
-
-
-def test_layer_of_test_tensor_cast_returns_tensor_cast_layer() -> None:
-    assert layer_of_test("tests/regression/tensor_cast/test_ops.py::test_x") == "tests/regression/tensor_cast/"
-
-
-def test_layer_of_test_cli_returns_cli_layer() -> None:
-    assert layer_of_test("tests/regression/cli/test_run.py::test_y") == "tests/regression/cli/"
-
-
-def test_layer_of_test_smoke_returns_none() -> None:
-    assert layer_of_test("tests/smoke/test_a.py::test_z") is None

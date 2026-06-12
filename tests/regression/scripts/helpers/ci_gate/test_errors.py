@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.helpers.ci_gate.errors import format_blocking_errors
+from scripts.helpers.ci_gate.errors import format_blocking_errors, format_phase0_failure_hint
 from scripts.helpers.ci_gate.models import GateError
 
 
@@ -12,6 +12,19 @@ def test_format_blocking_errors_mentions_skipped_incremental_phases() -> None:
     assert "Phase 1/2" in text
     assert "Blocking items: 1" in text
     assert "no tests executed" not in text
+
+
+def test_format_phase0_failure_hint_lists_nodes_and_yaml_template() -> None:
+    nodes = (
+        "tests/regression/cli/test_a.py::test_one",
+        "tests/regression/cli/test_b.py::test_two",
+    )
+    text = format_phase0_failure_hint(nodes)
+    assert "new test(s) failed" in text
+    assert "tests/regression/cli/test_a.py::test_one" in text
+    assert "exemptions.tests" in text
+    assert "symbols:" in text
+    assert "test_id:" not in text
 
 
 def test_format_blocking_errors_groups_modified_source() -> None:

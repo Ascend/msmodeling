@@ -9,70 +9,54 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.helpers.ci_gate.gate_policy import SourceExemption, is_exempt
-from scripts.helpers.ci_gate.models import (
-    ChangeSet,
-    GateError,
-    GateStepResult,
-    layer_of_test,
-    regression_layer_for_source,
-)
+from scripts.helpers.ci_gate.models import ChangeSet, GateError, GateStepResult
 from scripts.helpers.common import ast_utils
+from scripts.helpers.common.coverage_omit import is_coverage_omitted_source
+from scripts.helpers.common.coverage_symbol_check import symbol_lines_covered_in_data
 from scripts.helpers.common.test_map_loader import is_product_source
-
-# ---------------------------------------------------------------------------
-# Cross-layer splitting
-# ---------------------------------------------------------------------------
-
-
-def _split_cross_layer_tests(source_path: str, test_ids: set[str]) -> tuple[set[str], set[str]]:
-    """Split test_ids into (immediate, deferred) when source spans regression layers.
-
-    If source_path maps to a specific regression layer, tests in that layer run
-    immediately; tests in other layers are deferred. If source_path maps to no
-    known layer, or tests are already single-layer, no splitting occurs.
-    """
-    preferred = regression_layer_for_source(source_path)
-    layers = {layer_of_test(tid) for tid in test_ids} - {None}
-    if len(layers) <= 1:
-        return test_ids, set()
-    if preferred is None:
-        return test_ids, set()
-    immediate = {tid for tid in test_ids if tid.startswith(preferred)}
-    deferred = test_ids - immediate
-    if immediate and deferred:
-        return immediate, deferred
-    return test_ids, set()
 
 
 def _merge_step_results(*steps: GateStepResult) -> GateStepResult:
     errors: list[GateError] = []
     tests: set[str] = set()
-    deferred: set[str] = set()
-    full_suite = False
     for step in steps:
         errors.extend(step.errors)
         tests.update(step.tests)
-        deferred.update(step.cross_layer_deferred)
-        full_suite = full_suite or step.full_suite
-    return GateStepResult(
-        errors=tuple(errors),
-        tests=frozenset(tests),
-        cross_layer_deferred=frozenset(deferred),
-        full_suite=full_suite,
-    )
+    return GateStepResult(errors=tuple(errors), tests=frozenset(tests))
 
 
 def _product_paths(paths: tuple[str, ...], prefixes: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(path for path in paths if is_product_source(path, prefixes))
 
 
-# ---------------------------------------------------------------------------
-# Gate: config changes
-# ---------------------------------------------------------------------------
+def _executable_lines_for_symbol(source_path: Path, symbol: str) -> set[int]:
+    spans = ast_utils.iter_qualified_definition_spans(source_path)
+    symbol_lines: set[int] = set()
+    for span in spans:
+        if span.qualified_name == symbol:
+            symbol_lines = set(range(span.start_line, span.end_line + 1))
+            break
+    if not symbol_lines:
+        return set()
+    return ast_utils.filter_executable_lines(source_path, symbol_lines)
 
 
-def gate_config() -> GateStepResult:
-    return GateStepResult(full_suite=True)
+def _symbol_lines_from_diff(source_path: Path, symbol: str, executable: set[int]) -> set[int]:
+    spans = ast_utils.iter_qualified_definition_spans(source_path)
+    return {line_no for line_no in executable if ast_utils.symbol_for_line(spans, line_no) == symbol}
+
+
+def _coverage_fallback_passes(
+    repo_root: Path,
+    file_path: str,
+    symbol: str,
+    lines: set[int],
+    *,
+    coverage_path: Path | None,
+) -> bool:
+    if not coverage_path or not lines:
+        return False
+    return symbol_lines_covered_in_data(repo_root, file_path, symbol, lines, coverage_path)
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +69,17 @@ def gate_new_source(
     changes: ChangeSet,
     test_map: dict[str, dict[str, list[str]]],
     exemptions: tuple[SourceExemption, ...],
-    prefixes: tuple[str, ...],
+    roots: tuple[str, ...],
+    *,
+    coverage_path: Path | None = None,
 ) -> GateStepResult:
     errors: list[GateError] = []
     for path in changes.new_source:
         if not path.endswith(".py"):
             continue
-        if not is_product_source(path, prefixes):
+        if not is_product_source(path, roots):
+            continue
+        if is_coverage_omitted_source(path, roots):
             continue
         if test_map.get(path):
             continue
@@ -104,6 +92,14 @@ def gate_new_source(
             continue
         unmapped = [sym for sym in symbols if not is_exempt(exemptions, path, sym)]
         for sym in unmapped:
+            if _coverage_fallback_passes(
+                repo_root,
+                path,
+                sym,
+                _executable_lines_for_symbol(source_path, sym),
+                coverage_path=coverage_path,
+            ):
+                continue
             errors.append(GateError(category="new_source", path=path, symbol=sym))
     return GateStepResult(errors=tuple(errors))
 
@@ -115,7 +111,8 @@ def gate_new_source(
 
 def gate_new_tests(changes: ChangeSet) -> GateStepResult:
     """Run added and in-place-modified test files directly (their edits may change coverage)."""
-    return GateStepResult(tests=frozenset(changes.new_test + changes.modified_test))
+    candidates = changes.new_test + changes.modified_test
+    return GateStepResult(tests=frozenset(candidates))
 
 
 # ---------------------------------------------------------------------------
@@ -126,32 +123,23 @@ def gate_new_tests(changes: ChangeSet) -> GateStepResult:
 def gate_deleted_source(
     changes: ChangeSet,
     test_map: dict[str, dict[str, list[str]]],
-    prefixes: tuple[str, ...],
+    roots: tuple[str, ...],
 ) -> GateStepResult:
     errors: list[GateError] = []
     tests: set[str] = set()
-    deferred: set[str] = set()
     deleted_test_files = set(changes.del_test)
     for path in changes.del_source:
-        if not is_product_source(path, prefixes):
+        if not is_product_source(path, roots):
             continue
         file_map = test_map.get(path)
         if not file_map:
             errors.append(GateError(category="deleted_source", path=path))
             continue
-        all_tests = {
+        guard_tests = {
             tid for tids in file_map.values() for tid in tids if tid.split("::", 1)[0] not in deleted_test_files
         }
-        if not all_tests:
-            continue
-        immediate, cross = _split_cross_layer_tests(path, all_tests)
-        tests.update(immediate)
-        deferred.update(cross)
-    return GateStepResult(
-        errors=tuple(errors),
-        tests=frozenset(tests),
-        cross_layer_deferred=frozenset(deferred),
-    )
+        tests.update(guard_tests)
+    return GateStepResult(errors=tuple(errors), tests=frozenset(tests))
 
 
 # ---------------------------------------------------------------------------
@@ -191,12 +179,16 @@ def gate_modified_source(
     changes: ChangeSet,
     test_map: dict[str, dict[str, list[str]]],
     exemptions: tuple[SourceExemption, ...],
-    prefixes: tuple[str, ...],
+    roots: tuple[str, ...],
+    *,
+    coverage_path: Path | None = None,
 ) -> GateStepResult:
     errors: list[GateError] = []
     tests: set[str] = set()
     for path, raw_lines in changes.modified_source:
-        if not is_product_source(path, prefixes):
+        if not is_product_source(path, roots):
+            continue
+        if is_coverage_omitted_source(path, roots):
             continue
         source_path = repo_root / path
         executable = ast_utils.filter_executable_lines(source_path, set(raw_lines))
@@ -208,7 +200,13 @@ def gate_modified_source(
             mapped = file_map.get(symbol)
             if mapped:
                 tests.update(mapped)
-            elif is_exempt(exemptions, path, symbol):
+            elif is_exempt(exemptions, path, symbol) or _coverage_fallback_passes(
+                repo_root,
+                path,
+                symbol,
+                _symbol_lines_from_diff(source_path, symbol, executable),
+                coverage_path=coverage_path,
+            ):
                 continue
             else:
                 errors.append(GateError(category="modified_source", path=path, symbol=symbol))

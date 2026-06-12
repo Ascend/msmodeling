@@ -113,8 +113,9 @@ def test_resolve_must_exist_missing_file_raises_config_error(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_is_config_path_dot_ci_directory_returns_true() -> None:
-    assert is_config_path("tests/.ci/some_config.yaml") is True
+def test_is_config_path_dot_ci_directory_returns_false() -> None:
+    assert is_config_path("tests/.ci/some_config.yaml") is False
+    assert is_config_path("tests/.ci/gate_policy.yaml") is False
 
 
 def test_is_config_path_conftest_returns_true() -> None:
@@ -140,3 +141,16 @@ def test_is_config_path_test_file_returns_false() -> None:
 
 def test_is_config_path_tests_prefix_without_conftest_returns_false() -> None:
     assert is_config_path("tests/helpers/foo.py") is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "requirements.txt",
+        "uv.lock",
+        "subdir/requirements.txt",
+        "deep/nested/path/uv.lock",
+    ],
+)
+def test_is_config_path_dependency_lock_files_return_true(path: str) -> None:
+    assert is_config_path(path) is True
