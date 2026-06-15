@@ -278,6 +278,7 @@ def _(
     topk_indices: torch.Tensor,
     softmax_scale: float,
     head_dim: int,
+    kv_dependency: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Semantic op for V4 sparse attention with shared KV.
 
@@ -287,6 +288,10 @@ def _(
     reference sparse-attention call signature.
     """
     del attn_sink, softmax_scale
+    if kv_dependency is not None:
+        # Keep optional cache-update handles live in the graph without spelling
+        # out a full-tensor arithmetic dependency in Python.
+        _ = kv_dependency.shape
     batch_size, seq_length, num_heads, _ = q.shape
     # Reference V4 attention keeps the shared-KV / output stream in the model
     # working dtype; q may be transiently promoted for compute, but the attention

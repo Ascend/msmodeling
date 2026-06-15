@@ -706,7 +706,7 @@ def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
     """sparse_attn cost aligned to kernel.py:277-368 (block=64 online softmax)."""
-    # args: (q, kv, attn_sink, topk_indices, softmax_scale, head_dim)
+    # args: (q, kv, attn_sink, topk_indices, softmax_scale, head_dim, kv_dependency?)
     q = op_invoke_info.args[0]
     kv = op_invoke_info.args[1]
     attn_sink = op_invoke_info.args[2]
@@ -727,7 +727,12 @@ def _(
     pipelined_ctx = padded_topk
     context_sum = query_tokens * pipelined_ctx
 
-    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={1})
+    exclude_input_ids = {1}
+    if len(op_invoke_info.args) > 6:
+        exclude_input_ids.add(6)
+    elif "kv_dependency" in op_invoke_info.kwargs:
+        exclude_input_ids.add(len(op_invoke_info.args) + list(op_invoke_info.kwargs).index("kv_dependency"))
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids=exclude_input_ids)
     # Two GEMMs per iter (Q*K^T and S*V), both [h, block]x[block, d].
     mma_ops = context_sum * num_heads * q_head_dim * 2 + context_sum * num_heads * v_head_dim * 2
     # Per-iter scalar work (kernel.py:321-343):

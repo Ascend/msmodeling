@@ -172,6 +172,22 @@ def get_compress_topk_idxs(
     return torch.arange(width, device=device, dtype=torch.long).view(1, 1, -1).expand(int(batch_size), sl, -1)
 
 
+def _is_decode_attention_batch(
+    seq_length: int,
+    attention_meta: Optional[AttentionMetadataBase],
+    batch_size: int = 1,
+) -> bool:
+    effective_query_length = int(seq_length)
+    query_lens = attention_meta.query_lens if attention_meta is not None else None
+    if query_lens is not None:
+        request_count = int(query_lens.shape[0])
+        if int(batch_size) == 1 and request_count > 1 and effective_query_length % request_count == 0:
+            effective_query_length = effective_query_length // request_count
+    # Keep aligned with performance_model's predictive-decoding rule:
+    # query length < 5 is treated as decode, covering one sampled token plus MTP tokens.
+    return effective_query_length < 5
+
+
 # ============================================================
 # V4 attention wrapper
 # ============================================================
@@ -555,7 +571,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
 
         meta_query_lens = attention_meta.query_lens if attention_meta is not None else None
         meta_seq_lens = attention_meta.seq_lens if attention_meta is not None else None
-        is_decode = sl == int(meta_query_lens.shape[0]) if meta_query_lens is not None else sl == 1
+        is_decode = _is_decode_attention_batch(sl, attention_meta, batch_size)
 
         # 1. window topk (model.py:507). Keep the full construction in tensor
         # ops so torch.compile does not pull query_lens / seq_lens back through
@@ -623,12 +639,10 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                 )
                 kv_for_attn = torch.cat([kv_for_attn, kv_compress], dim=1)
                 kv_attn_handle = kv_cache
-            # Bind the two tensors so torch.compile cannot DCE the upstream KV
-            # producer chain (wkv → kv_norm → RoPE → scatter → compressor).
-            # The sum is "live" because its result is consumed by
-            # sparse_attn_sharedkv; multiplying by zero prevents any numerical
-            # contribution from kv_for_attn's original value.
-            kv_for_attn = kv_attn_handle + kv_for_attn.reshape(-1)[0].to(kv_attn_handle.dtype) * 0
+            # Bind the post-write cache handle to sparse_attn_sharedkv so
+            # torch.compile cannot DCE the upstream cache-update chain
+            # (wkv -> kv_norm -> RoPE -> scatter -> compressor).
+            # This avoids materializing a full-cache elementwise add.
             attn_output = torch.ops.tensor_cast.sparse_attn_sharedkv(
                 q_states,
                 kv_for_attn,
@@ -636,6 +650,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                 topk_indices,
                 softmax_scale,
                 head_dim,
+                kv_dependency=kv_attn_handle,
             )
         else:
             # Decode (incl. packed multi-decode where sl=N>1 with all

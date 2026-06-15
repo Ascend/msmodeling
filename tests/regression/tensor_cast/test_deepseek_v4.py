@@ -22,11 +22,13 @@ from tensor_cast.transformers.builtin_model.deepseek_v4 import (
 from tensor_cast.layers.deepseek_v4 import (
     DeepseekV4SparseAttention,
     DeepseekV4SparseAttentionIndexer,
+    _is_decode_attention_batch,
     route_deepseek_v4_gate,
     has_deepseek_v4_hash_routing,
     get_window_topk_idxs,
     get_compress_topk_idxs,
 )
+from tensor_cast.layers.attention import AttentionMetadataTensorCast
 from tensor_cast.layers.mla import (
     DeepseekSparseAttention,
     MultiheadLatentAttentionBase,
@@ -259,7 +261,13 @@ class TestDeepseekV4AttentionOperators(unittest.TestCase):
         topk_indices = torch.randint(0, 16, (2, 8, 4))  # [B, S, topk]
 
         result = torch.ops.tensor_cast.sparse_attn_sharedkv(
-            q, kv, attn_sink, topk_indices, softmax_scale=0.01, head_dim=512
+            q,
+            kv,
+            attn_sink,
+            topk_indices,
+            softmax_scale=0.01,
+            head_dim=512,
+            kv_dependency=kv,
         )
         # Result shape: [B, S, H, D]
         assert result.shape == (2, 8, 8, 512)
@@ -465,6 +473,38 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
         tp_group.world_size = world_size
         return tp_group
 
+    def _create_tiny_forward_inner_module(self):
+        """Create a small V4 attention module that can execute forward in CPU UT."""
+        inner = MagicMock()
+        inner.hidden_size = 8
+        inner.num_heads = 2
+        inner.head_dim = 4
+        inner.qk_rope_head_dim = 2
+        inner.q_lora_rank = 4
+        inner.qk_nope_head_dim = 2
+        inner.kv_lora_rank = 4
+        inner.v_head_dim = 2
+        inner.config = self._create_mock_config(ratio=0)
+        inner.compress_ratio = 0
+        inner.use_indexer = False
+        inner.use_compressor = False
+        inner.window_size = 4
+        inner.n_groups = 1
+        inner.o_lora_rank = 6
+        inner.softmax_scale = 0.5
+        inner.scaling = 0.5
+
+        inner.q_a_proj = nn.Linear(8, 4, bias=False)
+        inner.q_a_layernorm = nn.LayerNorm(4)
+        inner.q_b_proj = nn.Linear(4, 2 * 4, bias=False)
+        inner.kv_a_proj_with_mqa = nn.Linear(8, 4, bias=False)
+        inner.kv_a_layernorm = nn.LayerNorm(4)
+        inner.wo_a = nn.Linear(2 * 4, 6, bias=False)
+        inner.o_proj = nn.Linear(6, 8, bias=False)
+        inner.attention_sink = nn.Parameter(torch.zeros(2))
+        inner.indexer = None
+        return inner
+
     def test_v4_attention_wrapper_initialization(self):
         """Test V4 attention wrapper initialization."""
         inner = self._create_mock_inner_module(ratio=0)
@@ -494,6 +534,84 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
         assert wrapper.compress_ratio == 4
         assert wrapper.use_indexer is True
         assert wrapper.use_compressor is True
+
+    def test_short_query_length_is_decode_for_mtp_shape(self):
+        """MTP decode uses one sampled token plus speculative tokens."""
+        attn_meta = AttentionMetadataTensorCast(
+            query_start_loc=torch.tensor([0, 4, 8], dtype=torch.long),
+            seq_lens=torch.tensor([4254, 4254], dtype=torch.long),
+            query_lens=torch.tensor([4, 4], dtype=torch.long),
+        )
+
+        assert _is_decode_attention_batch(4, attn_meta) is True
+
+    def test_query_length_five_is_prefill(self):
+        """The V4 decode heuristic is seq_length < 5, not <= 5."""
+        attn_meta = AttentionMetadataTensorCast(
+            query_start_loc=torch.tensor([0, 5, 10], dtype=torch.long),
+            seq_lens=torch.tensor([5, 5], dtype=torch.long),
+            query_lens=torch.tensor([5, 5], dtype=torch.long),
+        )
+
+        assert _is_decode_attention_batch(5, attn_meta) is False
+
+    def test_flattened_short_query_length_is_decode(self):
+        """Flattened input should use per-request query length."""
+        attn_meta = AttentionMetadataTensorCast(
+            query_start_loc=torch.tensor([0, 4, 8], dtype=torch.long),
+            seq_lens=torch.tensor([1000004, 1000004], dtype=torch.long),
+            query_lens=torch.tensor([4, 4], dtype=torch.long),
+        )
+
+        assert _is_decode_attention_batch(8, attn_meta, batch_size=1) is True
+
+    def test_v4_attention_forward_window_only_prefill_with_cache(self):
+        """Exercise the V4 forward cache path without full-size model tensors."""
+        inner = self._create_tiny_forward_inner_module()
+        mla_config = MlaConfig(module_name="DeepseekV4SparseAttention")
+
+        with patch(
+            "tensor_cast.layers.mla.MultiheadLatentAttentionTensorCast.__init__",
+            _stub_mla_tensor_cast_init,
+        ):
+            wrapper = DeepseekV4SparseAttention(mla_config, inner, self._mock_tp_group())
+        wrapper.layer_idx = 0
+
+        hidden_states = torch.randn(1, 5, 8)
+        cos = torch.ones(1, 5, 2)
+        sin = torch.zeros(1, 5, 2)
+        attention_meta = AttentionMetadataTensorCast(
+            query_start_loc=torch.tensor([0, 5], dtype=torch.long),
+            seq_lens=torch.tensor([5], dtype=torch.long),
+            query_lens=torch.tensor([5], dtype=torch.long),
+            slot_mapping=torch.tensor([0, 1, 2, 3, 4], dtype=torch.long),
+        )
+        kv_cache = torch.randn(1, 4, 4)
+
+        def _dynamic_quantize_symmetric(x, *_args, **_kwargs):
+            return x, torch.ones(1, dtype=torch.float32, device=x.device)
+
+        def _sparse_attn_sharedkv(q, _kv, *_args, kv_dependency=None, **_kwargs):
+            assert kv_dependency is kv_cache
+            return q
+
+        with (
+            patch("torch.ops.tensor_cast.rms_norm", side_effect=lambda x, *_args, **_kwargs: x),
+            patch("torch.ops.tensor_cast.apply_rope_inplace", side_effect=lambda *_args, **_kwargs: None),
+            patch("torch.ops.tensor_cast.dynamic_quantize_symmetric", side_effect=_dynamic_quantize_symmetric),
+            patch("torch.ops.tensor_cast.scatter_nd_update_mla", side_effect=lambda _kv, cache, *_args: cache),
+            patch("torch.ops.tensor_cast.sparse_attn_sharedkv", side_effect=_sparse_attn_sharedkv),
+        ):
+            result, cache = wrapper(
+                hidden_states,
+                (cos, sin),
+                attention_mask=None,
+                attention_meta=attention_meta,
+                kv_cache_by_layers={0: kv_cache},
+            )
+
+        assert result.shape == hidden_states.shape
+        assert cache is None
 
 
 class TestDeepseekV4Helpers(unittest.TestCase):
