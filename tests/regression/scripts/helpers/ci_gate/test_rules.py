@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from scripts.helpers.ci_gate.gate_policy import SourceExemption
 from scripts.helpers.ci_gate.models import ChangeSet, GateError, GateStepResult
@@ -17,6 +20,7 @@ from scripts.helpers.ci_gate.rules import (
     gate_modified_source,
     gate_new_source,
     gate_new_tests,
+    gate_unscoped_source,
 )
 
 
@@ -84,6 +88,24 @@ def test_product_paths_filters_non_product_prefixes() -> None:
 
 def test_product_paths_empty_input_returns_empty() -> None:
     assert _product_paths((), ("cli/",)) == ()
+
+
+# ---------------------------------------------------------------------------
+# gate_unscoped_source
+# ---------------------------------------------------------------------------
+
+
+def test_gate_unscoped_source_reports_unscoped_paths() -> None:
+    cs = ChangeSet.build(unscoped_source=("misc/outside.py",))
+    result = gate_unscoped_source(cs)
+    assert len(result.errors) == 1
+    assert result.errors[0].category == "unscoped_source"
+    assert result.errors[0].path == "misc/outside.py"
+
+
+def test_gate_unscoped_source_empty_returns_no_errors() -> None:
+    result = gate_unscoped_source(ChangeSet.build())
+    assert result.errors == ()
 
 
 # ---------------------------------------------------------------------------

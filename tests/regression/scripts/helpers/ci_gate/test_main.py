@@ -74,6 +74,12 @@ def test_plan_config_change_triggers_full_suite(baseline: Baseline) -> None:
     assert plan.full_suite is True
 
 
+def test_plan_gate_policy_change_triggers_full_suite(baseline: Baseline) -> None:
+    cs = ChangeSet.build()
+    plan = build_ci_gate_plan(Path("/tmp"), cs, baseline, gate_policy_changed=True)
+    assert plan.full_suite is True
+
+
 def test_plan_new_test_selects_collected_nodes(baseline: Baseline) -> None:
     cs = ChangeSet.build(new_test=("tests/smoke/test_new.py",))
     plan = build_ci_gate_plan(Path("/tmp"), cs, baseline)

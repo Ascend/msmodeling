@@ -11,10 +11,12 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -50,6 +52,8 @@ _IGNORE_PREFIXES = (
 )
 _IGNORE_OWNERS = frozenset({"tests", "tensor_cast", "serving_cast", "trace", "docs", "web_ui"})
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_HUB_ALLOWLIST_REL: Final = Path("tests/assets/hub_model_allowlist.txt")
+_MODEL_ASSIGNMENT_NAME_HINTS: Final = ("MODEL", "model_id", "pretrained")
 _KNOWN_EXTENSIONS = frozenset({".yaml", ".yml", ".json", ".py", ".md", ".txt", ".csv"})
 
 
@@ -177,44 +181,78 @@ def _looks_like_model_id(value: str) -> bool:
     return True
 
 
-def _iter_string_values(data: Any) -> Iterator[str]:
-    if isinstance(data, str):
-        yield data
-    elif isinstance(data, dict):
-        for value in data.values():
-            yield from _iter_string_values(value)
-    elif isinstance(data, list):
-        for item in data:
-            yield from _iter_string_values(item)
+def _hub_model_allowlist(scan_dir: Path) -> frozenset[str]:
+    ids: set[str] = set()
+    for base in (scan_dir, REPO_ROOT):
+        path = base / _HUB_ALLOWLIST_REL
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                ids.add(stripped)
+    return frozenset(ids)
 
 
-def _collect_from_python(path: Path) -> set[str]:
+def _is_model_assignment_target(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _MODEL_ASSIGNMENT_NAME_HINTS)
+
+
+def _candidate_from_literal(value: str, allowlist: frozenset[str]) -> str | None:
+    candidate = value.strip()
+    if candidate not in allowlist or not _looks_like_model_id(candidate):
+        return None
+    return candidate
+
+
+def _string_literal(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _collect_from_python(path: Path, allowlist: frozenset[str]) -> set[str]:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except (OSError, SyntaxError):
         return set()
     found: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            candidate = node.value.strip()
-            if _looks_like_model_id(candidate):
+        if isinstance(node, ast.Assign):
+            literal = _string_literal(node.value)
+            if literal is None:
+                continue
+            candidate = _candidate_from_literal(literal, allowlist)
+            if candidate is None:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and _is_model_assignment_target(target.id):
+                    found.add(candidate)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            candidate = _candidate_from_literal(node.value, allowlist)
+            if candidate is not None:
                 found.add(candidate)
     return found
 
 
-def _collect_from_json(path: Path) -> set[str]:
+def _collect_from_json(path: Path, allowlist: frozenset[str]) -> set[str]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return set()
     found: set[str] = set()
     for value in _iter_string_values(data):
-        if _looks_like_model_id(value):
-            found.add(value.strip())
+        candidate = _candidate_from_literal(value, allowlist)
+        if candidate is not None:
+            found.add(candidate)
     return found
 
 
 def collect_model_ids(scan_dir: Path) -> list[str]:
+    allowlist = _hub_model_allowlist(scan_dir)
+    if not allowlist:
+        return []
     model_ids: set[str] = set()
     for path in scan_dir.rglob("*"):
         if not path.is_file():
@@ -229,22 +267,29 @@ def collect_model_ids(scan_dir: Path) -> list[str]:
         if rel.startswith(("tests/.ci/", "tests/assets/cache/", "scripts/helpers/")):
             continue
         if path.suffix == ".py":
-            model_ids.update(_collect_from_python(path))
+            model_ids.update(_collect_from_python(path, allowlist))
         elif path.suffix == ".json":
-            model_ids.update(_collect_from_json(path))
+            model_ids.update(_collect_from_json(path, allowlist))
     return sorted(model_ids)
+
+
+def _iter_string_values(data: Any) -> Iterator[str]:
+    if isinstance(data, str):
+        yield data
+    elif isinstance(data, dict):
+        for value in data.values():
+            yield from _iter_string_values(value)
+    elif isinstance(data, list):
+        for item in data:
+            yield from _iter_string_values(item)
 
 
 def _build_prefetchers() -> list[ConfigPrefetcher]:
     prefetchers: list[ConfigPrefetcher] = []
-    try:
+    with contextlib.suppress(ImportError):
         prefetchers.append(HuggingFacePrefetcher())
-    except ImportError:
-        pass
-    try:
+    with contextlib.suppress(ImportError):
         prefetchers.append(ModelScopePrefetcher())
-    except ImportError:
-        pass
     return prefetchers
 
 

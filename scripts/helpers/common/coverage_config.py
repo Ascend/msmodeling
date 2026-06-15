@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.ci_gate.gate_policy import load_gate_policy
 from scripts.helpers.common.pytest_runner import xdist_worker_args
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def product_roots(repo_root: Path | None = None) -> tuple[str, ...]:

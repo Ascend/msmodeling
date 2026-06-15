@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Final
@@ -14,9 +13,24 @@ from scripts.helpers.common.test_map_loader import is_product_source
 _PYPROJECT_REL: Final = Path("pyproject.toml")
 
 
-@lru_cache(maxsize=1)
-def load_coverage_omit_patterns() -> tuple[str, ...]:
-    """Return ``[tool.coverage.run].omit`` patterns from repo pyproject.toml."""
+def _decode_pyproject(raw: bytes) -> dict[str, object]:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib
+        except ImportError as exc:
+            raise ConfigError(
+                "tomli required to parse pyproject.toml on Python < 3.11. Run: uv sync --frozen --group ci"
+            ) from exc
+
+    try:
+        return tomllib.loads(raw.decode("utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: invalid TOML: {exc}") from exc
+
+
+def _read_pyproject_data() -> dict[str, object]:
     pyproject_path = REPO_ROOT / _PYPROJECT_REL
     if not pyproject_path.is_file():
         raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: file not found")
@@ -25,26 +39,13 @@ def load_coverage_omit_patterns() -> tuple[str, ...]:
         raw = pyproject_path.read_bytes()
     except OSError as exc:
         raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: cannot read file: {exc}") from exc
+    return _decode_pyproject(raw)
 
-    if sys.version_info >= (3, 11):
-        import tomllib
 
-        try:
-            data = tomllib.loads(raw.decode("utf-8"))
-        except tomllib.TOMLDecodeError as exc:
-            raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: invalid TOML: {exc}") from exc
-    else:
-        try:
-            import tomli
-        except ImportError as exc:
-            raise ConfigError(
-                "tomli required to parse pyproject.toml on Python < 3.11. Run: uv sync --frozen --group ci"
-            ) from exc
-        try:
-            data = tomli.loads(raw.decode("utf-8"))
-        except tomli.TOMLDecodeError as exc:
-            raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: invalid TOML: {exc}") from exc
-
+@lru_cache(maxsize=1)
+def load_coverage_omit_patterns() -> tuple[str, ...]:
+    """Return ``[tool.coverage.run].omit`` patterns from repo pyproject.toml."""
+    data = _read_pyproject_data()
     coverage_run = data.get("tool", {}).get("coverage", {}).get("run")
     if not isinstance(coverage_run, dict):
         raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: [tool.coverage.run] section missing")

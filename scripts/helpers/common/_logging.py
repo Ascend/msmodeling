@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from typing import TYPE_CHECKING
 
-from scripts.helpers._config import Config
+if TYPE_CHECKING:
+    from scripts.helpers._config import Config
 
 _LOG_FORMAT = "%(levelname)-5s %(asctime)s.%(msecs)03d [%(filename)s:%(lineno)d] %(message)s"
 _LOG_DATE_FORMAT = "%m-%d %H:%M:%S"

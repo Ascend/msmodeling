@@ -45,10 +45,7 @@ def _end_line(node: ast.AST) -> int:
 def top_level_definitions(path: Path) -> list[str]:
     """Return names of top-level functions, async functions, and classes."""
     tree = _get_cached_tree(path)
-    out: list[str] = []
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or isinstance(node, ast.ClassDef):
-            out.append(node.name)
+    out = [node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
     return out
 
 
@@ -64,15 +61,15 @@ def iter_qualified_definition_spans(path: Path) -> list[DefinitionSpan]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             spans.append(DefinitionSpan(node.name, node.lineno, _end_line(node)))
         elif isinstance(node, ast.ClassDef):
-            for item in node.body:
-                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    spans.append(
-                        DefinitionSpan(
-                            f"{node.name}.{item.name}",
-                            item.lineno,
-                            _end_line(item),
-                        )
-                    )
+            spans.extend(
+                DefinitionSpan(
+                    f"{node.name}.{item.name}",
+                    item.lineno,
+                    _end_line(item),
+                )
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
     return spans
 
 
@@ -96,13 +93,16 @@ def _collect_non_executable_lines(tree: ast.AST) -> set[int]:
 
     for node in ast.walk(tree):
         # Docstring: first statement of function/class/module body that is a string expr
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
-            if node.body and isinstance(node.body[0], ast.Expr):
-                value = node.body[0].value
-                if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    start = node.body[0].lineno
-                    end = _end_line(node.body[0])
-                    lines.update(range(start, end + 1))
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+        ):
+            value = node.body[0].value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                start = node.body[0].lineno
+                end = _end_line(node.body[0])
+                lines.update(range(start, end + 1))
 
         # Type-only annotation (no value): AnnAssign with value=None
         if isinstance(node, ast.AnnAssign) and node.value is None:

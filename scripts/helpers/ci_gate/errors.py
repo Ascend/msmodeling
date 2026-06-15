@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from scripts.helpers.ci_gate.models import GateError
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from scripts.helpers.ci_gate.models import GateError
 
 _CATEGORY_LABEL: dict[str, str] = {
     "new_source": "[A]",
     "modified_source": "[M]",
     "deleted_source": "[D]",
     "deleted_test": "[D]",
+    "unscoped_source": "[U]",
 }
 
 _CATEGORY_HEADER: dict[str, str] = {
@@ -16,6 +20,7 @@ _CATEGORY_HEADER: dict[str, str] = {
     "modified_source": "modified symbol(s) have no coverage mapping entry and are not exempt",
     "deleted_source": "deleted source file(s) have no coverage mapping entry",
     "deleted_test": "deleted test(s) are sole coverage for source symbols",
+    "unscoped_source": "source file(s) are outside configured gate roots",
 }
 
 _CATEGORY_SUGGESTION: dict[str, str] = {
@@ -29,6 +34,7 @@ _CATEGORY_SUGGESTION: dict[str, str] = {
     ),
     "deleted_source": "Remove orphaned coverage mapping entries or restore source file.",
     "deleted_test": "Add replacement test cases or delete the corresponding source symbols.",
+    "unscoped_source": "Move the file under a gate root in tests/.ci/gate_policy.yaml or add the root prefix.",
 }
 
 
@@ -45,7 +51,7 @@ def format_blocking_errors(errors: tuple[GateError, ...], *, pytest_ran: bool = 
     else:
         lines.append(f"CI gate failed: policy violation — pytest was not run.\nBlocking items: {len(errors)}.")
 
-    for category in ("new_source", "modified_source", "deleted_source", "deleted_test"):
+    for category in ("unscoped_source", "new_source", "modified_source", "deleted_source", "deleted_test"):
         group = by_category.get(category)
         if not group:
             continue
@@ -57,8 +63,7 @@ def format_blocking_errors(errors: tuple[GateError, ...], *, pytest_ran: bool = 
             label = f"{e.path}::{e.symbol}" if e.symbol else e.path
             lines.append(f"  - {label} {tag}")
             if e.detail:
-                for dline in e.detail.splitlines():
-                    lines.append(f"    {dline}")
+                lines.extend(f"    {dline}" for dline in e.detail.splitlines())
         lines.append(f"  → {suggestion}")
         lines.append("")
 
@@ -71,9 +76,8 @@ def format_pytest_failure_hint(node_ids: tuple[str, ...]) -> str:
         "CI gate failed: selected test(s) failed. Fix test failures before gate check.",
         "",
         "Executed node(s):",
+        *[f"  - {node_id}" for node_id in sorted(node_ids)],
     ]
-    for node_id in sorted(node_ids):
-        lines.append(f"  - {node_id}")
     lines.extend(
         [
             "",

@@ -272,39 +272,35 @@ def _format_pydantic_error(path: Path, exc: ValidationError) -> str:
 
 
 def _expand_source_exemptions(entries: list[ExemptionDoc], roots: tuple[str, ...]) -> tuple[SourceExemption, ...]:
-    exemptions: list[SourceExemption] = []
-    for entry in entries:
-        for raw in entry.symbols:
-            file_path, symbol = _parse_symbol_key(raw, roots)
-            exemptions.append(
-                SourceExemption(
-                    file=file_path,
-                    symbol=symbol,
-                    reason=entry.reason,
-                    applicant=entry.applicant,
-                    approver=entry.approver,
-                    deadline=entry.deadline,
-                    ticket=entry.ticket,
-                )
-            )
-    return tuple(exemptions)
+    return tuple(
+        SourceExemption(
+            file=file_path,
+            symbol=symbol,
+            reason=entry.reason,
+            applicant=entry.applicant,
+            approver=entry.approver,
+            deadline=entry.deadline,
+            ticket=entry.ticket,
+        )
+        for entry in entries
+        for raw in entry.symbols
+        for file_path, symbol in (_parse_symbol_key(raw, roots),)
+    )
 
 
 def _expand_test_exemptions(entries: list[TestExemptionDoc]) -> tuple[TestExemption, ...]:
-    exemptions: list[TestExemption] = []
-    for entry in entries:
-        for raw in entry.symbols:
-            exemptions.append(
-                TestExemption(
-                    test_id=raw,
-                    reason=entry.reason,
-                    applicant=entry.applicant,
-                    approver=entry.approver,
-                    deadline=entry.deadline,
-                    ticket=entry.ticket,
-                )
-            )
-    return tuple(exemptions)
+    return tuple(
+        TestExemption(
+            test_id=raw,
+            reason=entry.reason,
+            applicant=entry.applicant,
+            approver=entry.approver,
+            deadline=entry.deadline,
+            ticket=entry.ticket,
+        )
+        for entry in entries
+        for raw in entry.symbols
+    )
 
 
 def _doc_to_policy(doc: GatePolicyDoc, approvers: frozenset[str]) -> GatePolicy:

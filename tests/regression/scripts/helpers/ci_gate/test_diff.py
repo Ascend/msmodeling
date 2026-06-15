@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from scripts.helpers._config import ConfigError
 from scripts.helpers.ci_gate.diff import (
     DiffEntry,
     GitDiffResult,
     _classify_rename,
+    _fetch_deepen,
+    _parse_fetch_remote_branch,
     classify_changes,
     fetch_diff_line_map,
     resolve_base_ref,
+    resolve_head_commit,
 )
 from scripts.helpers.ci_gate.gate_policy import default_test_discovery
 from scripts.helpers.common.coverage_config import product_roots
@@ -33,6 +39,17 @@ def _diff_result(
 # ---------------------------------------------------------------------------
 # resolve_base_ref
 # ---------------------------------------------------------------------------
+
+
+def test_resolve_head_commit_returns_full_sha(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "abc123deadbeef\n", ""))
+    assert resolve_head_commit(tmp_path) == "abc123deadbeef"
+
+
+def test_resolve_head_commit_git_failure_raises_config_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(1, "", "fatal: not a git repository"))
+    with pytest.raises(ConfigError, match=r"Cannot resolve HEAD commit"):
+        resolve_head_commit(tmp_path)
 
 
 def test_resolve_base_ref_merge_base_success_returns_sha(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -57,8 +74,55 @@ def test_resolve_base_ref_both_fail_raises_config_error_with_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(1, "", "not found"))
-    with pytest.raises(ConfigError, match="Cannot resolve base ref.*'nonexistent'.*not found either"):
+    with pytest.raises(ConfigError, match=r"Cannot resolve base ref.*'nonexistent'.*not found either"):
         resolve_base_ref(tmp_path, "nonexistent")
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("origin/master", ("origin", "master")),
+        ("center/develop", ("center", "develop")),
+        ("master", ("origin", "master")),
+    ],
+)
+def test_parse_fetch_remote_branch_splits_remote_and_branch(ref: str, expected: tuple[str, str]) -> None:
+    assert _parse_fetch_remote_branch(ref) == expected
+
+
+def test_fetch_deepen_invokes_git_fetch_with_remote_and_branch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    recorded: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        recorded.append(cmd)
+        return FakeCompleted(0, "", "")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    _fetch_deepen(tmp_path, "origin/master")
+    assert recorded[-1][-4:] == ["fetch", "--depth=50", "origin", "master"]
+
+
+def test_resolve_base_ref_deepens_with_split_fetch_before_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = iter(
+        [
+            FakeCompleted(1, "", ""),
+            FakeCompleted(1, "", ""),
+            FakeCompleted(0, "", ""),
+            FakeCompleted(0, "mergebase\n", ""),
+        ]
+    )
+    recorded: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        recorded.append(cmd)
+        return next(calls)
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    result = resolve_base_ref(tmp_path, "master")
+    assert result == "mergebase"
+    assert recorded[2][-4:] == ["fetch", "--depth=50", "origin", "master"]
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +147,15 @@ def test_fetch_diff_line_map_single_line_hunk_returns_single_line(
     )
     result = fetch_diff_line_map(tmp_path, "abc123")
     assert result["a.py"] == {1}
+
+
+def test_fetch_diff_line_map_pure_deletion_hunk_records_touch_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    diff_output = "+++ b/tensor_cast/ops.py\n@@ -10,3 +9,0 @@\n"
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, diff_output, ""))
+    result = fetch_diff_line_map(tmp_path, "abc123")
+    assert result["tensor_cast/ops.py"] == {9}
 
 
 def test_fetch_diff_line_map_empty_diff_returns_empty_dict(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -209,7 +282,7 @@ def test_classify_changes_uv_lock_triggers_full_suite(tmp_path: Path) -> None:
     assert result.config == ("uv.lock",)
 
 
-def test_classify_changes_gate_policy_yaml_does_not_trigger_full_suite(tmp_path: Path) -> None:
+def test_classify_changes_gate_policy_yaml_triggers_full_suite(tmp_path: Path) -> None:
     result = classify_changes(
         tmp_path,
         "abc123",
@@ -220,7 +293,62 @@ def test_classify_changes_gate_policy_yaml_does_not_trigger_full_suite(tmp_path:
         ),
         roots=_DEFAULT_ROOTS,
     )
-    assert result.config == ()
+    assert result.config == ("tests/.ci/gate_policy.yaml",)
+
+
+def test_classify_changes_deleted_config_triggers_full_suite(tmp_path: Path) -> None:
+    result = classify_changes(
+        tmp_path,
+        "abc123",
+        _diff_result(entries=(DiffEntry(status="D", old_path="requirements.txt", new_path=None),)),
+        roots=_DEFAULT_ROOTS,
+    )
+    assert result.config == ("requirements.txt",)
+
+
+def test_classify_changes_renamed_config_triggers_full_suite(tmp_path: Path) -> None:
+    result = classify_changes(
+        tmp_path,
+        "abc123",
+        _diff_result(
+            entries=(
+                DiffEntry(
+                    status="R100",
+                    old_path="pytest.ini",
+                    new_path="setup.cfg",
+                ),
+            ),
+        ),
+        roots=_DEFAULT_ROOTS,
+    )
+    assert result.config == ("pytest.ini", "setup.cfg")
+
+
+def test_classify_changes_deleted_conftest_triggers_config_not_del_source(tmp_path: Path) -> None:
+    result = classify_changes(
+        tmp_path,
+        "abc123",
+        _diff_result(
+            entries=(DiffEntry(status="D", old_path="tests/regression/conftest.py", new_path=None),),
+        ),
+        roots=_DEFAULT_ROOTS,
+    )
+    assert result.config == ("tests/regression/conftest.py",)
+    assert result.del_source == ()
+
+
+def test_classify_changes_added_conftest_triggers_config_not_unscoped(tmp_path: Path) -> None:
+    result = classify_changes(
+        tmp_path,
+        "abc123",
+        _diff_result(
+            entries=(DiffEntry(status="A", old_path=None, new_path="tests/regression/conftest.py"),),
+        ),
+        roots=_DEFAULT_ROOTS,
+    )
+    assert result.config == ("tests/regression/conftest.py",)
+    assert result.unscoped_source == ()
+    assert result.new_source == ()
 
 
 def test_classify_changes_deleted_source_populates_del_source(tmp_path: Path) -> None:

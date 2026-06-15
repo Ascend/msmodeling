@@ -7,14 +7,18 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from scripts.helpers._config import ConfigError
 from scripts.helpers.ci_gate.gate_policy import TestDiscovery, default_test_discovery, is_gate_test_path
 from scripts.helpers.ci_gate.models import ChangeSet
 from scripts.helpers.common.coverage_config import product_roots
-from scripts.helpers.common.test_map_config import is_config_path
+from scripts.helpers.common.test_map_config import is_config_path, is_full_suite_trigger_path
 from scripts.helpers.common.test_map_loader import is_product_source
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
 _git_path = shutil.which("git")
 if _git_path is None:
@@ -23,36 +27,70 @@ _GIT: str = _git_path
 
 logger = logging.getLogger(__name__)
 
-_HUNK_RE = re.compile(r"\+(\d+)(?:,(\d+))?")
+_HUNK_HEADER_RE = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
-# ---------------------------------------------------------------------------
-# Base ref
-# ---------------------------------------------------------------------------
+def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [_GIT, *args],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        check=False,
+    )
+
+
+def _parse_fetch_remote_branch(ref: str) -> tuple[str, str]:
+    """Split *ref* into ``(remote, branch)`` for ``git fetch remote branch``.
+
+    MR CI runs on the feature branch (e.g. ``mr255``); *ref* is
+    ``MSMODELING_TEST_BASE_BRANCH`` (e.g. ``master`` or ``origin/master``).
+    """
+    if "/" in ref:
+        remote, branch = ref.split("/", 1)
+        return remote, branch
+    return "origin", ref
+
+
+def _fetch_deepen(repo_root: Path, ref: str) -> None:
+    remote, branch = _parse_fetch_remote_branch(ref)
+    logger.info("Deepening shallow clone with git fetch --depth=50 %s %s", remote, branch)
+    proc = _run_git(repo_root, "fetch", "--depth=50", remote, branch)
+    if proc.returncode != 0:
+        logger.warning("git fetch failed for %s (%s %s): %s", ref, remote, branch, proc.stderr.strip())
+
+
+def resolve_head_commit(repo_root: Path) -> str:
+    """Return full SHA for HEAD."""
+    proc = _run_git(repo_root, "rev-parse", "HEAD")
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise ConfigError(f"Cannot resolve HEAD commit: {proc.stderr.strip()}")
+    return proc.stdout.strip()
 
 
 def resolve_base_ref(repo_root: Path, branch: str) -> str:
-    """Resolve merge-base between HEAD and <branch>.
+    """Resolve merge-base between HEAD and *branch* (``MSMODELING_TEST_BASE_BRANCH``).
 
-    If *branch* contains '/', it is used as-is (e.g. ``center/develop``).
-    Otherwise, tries bare *branch* first, then ``origin/<branch>`` as fallback.
+    CI runs on the MR branch; *branch* is the comparison target (e.g. ``master``,
+    ``develop``, or ``origin/master``). If *branch* contains ``/``, it is used
+    as-is (e.g. ``center/develop``). Otherwise tries bare *branch* first, then
+    ``origin/<branch>``.
     """
-    if "/" in branch:
-        refs = [branch]
-    else:
-        refs = [branch, f"origin/{branch}"]
+    refs = [branch] if "/" in branch else [branch, f"origin/{branch}"]
 
     last_stderr = ""
     for ref in refs:
-        proc = subprocess.run(
-            [_GIT, "merge-base", "HEAD", ref],
-            capture_output=True,
-            text=True,
-            cwd=repo_root,
-            check=False,
-        )
+        proc = _run_git(repo_root, "merge-base", "HEAD", ref)
         if proc.returncode == 0 and proc.stdout.strip():
             logger.info("Resolved base ref using %s", ref)
+            return proc.stdout.strip()
+        last_stderr = proc.stderr.strip()
+
+    for ref in refs:
+        _fetch_deepen(repo_root, ref)
+        proc = _run_git(repo_root, "merge-base", "HEAD", ref)
+        if proc.returncode == 0 and proc.stdout.strip():
+            logger.info("Resolved base ref using %s after deepen fetch", ref)
             return proc.stdout.strip()
         last_stderr = proc.stderr.strip()
 
@@ -106,79 +144,114 @@ def _flush_diff_entry(
     return DiffEntry(status="M", old_path=old_path, new_path=new_path)
 
 
-def _parse_unified_diff(stdout: str) -> GitDiffResult:
-    line_map: dict[str, set[int]] = {}
-    entries: list[DiffEntry] = []
-
+@dataclass
+class _DiffParseState:
+    line_map: dict[str, set[int]]
+    entries: list[DiffEntry]
     current_file: str | None = None
     old_path: str | None = None
     new_path: str | None = None
-    is_new = False
-    is_deleted = False
-    is_rename = False
-    is_copy = False
-    rename_similarity = 100
+    is_new: bool = False
+    is_deleted: bool = False
+    is_rename: bool = False
+    is_copy: bool = False
+    rename_similarity: int = 100
 
-    def _commit_entry() -> None:
-        nonlocal current_file, old_path, new_path, is_new, is_deleted, is_rename, is_copy, rename_similarity
+    def commit_entry(self) -> None:
         entry = _flush_diff_entry(
-            old_path=old_path,
-            new_path=new_path,
-            is_new=is_new,
-            is_deleted=is_deleted,
-            is_rename=is_rename,
-            rename_similarity=rename_similarity,
-            is_copy=is_copy,
+            old_path=self.old_path,
+            new_path=self.new_path,
+            is_new=self.is_new,
+            is_deleted=self.is_deleted,
+            is_rename=self.is_rename,
+            rename_similarity=self.rename_similarity,
+            is_copy=self.is_copy,
         )
         if entry is not None:
-            entries.append(entry)
-        old_path = None
-        new_path = None
-        is_new = False
-        is_deleted = False
-        is_rename = False
-        is_copy = False
-        rename_similarity = 100
-        current_file = None
+            self.entries.append(entry)
+        self.old_path = None
+        self.new_path = None
+        self.is_new = False
+        self.is_deleted = False
+        self.is_rename = False
+        self.is_copy = False
+        self.rename_similarity = 100
+        self.current_file = None
 
+
+def _apply_diff_git_header(line: str, state: _DiffParseState) -> bool:
+    if not line.startswith("diff --git "):
+        return False
+    state.commit_entry()
+    parts = line.split()
+    if len(parts) >= 4:
+        state.old_path = parts[2].removeprefix("a/")
+        state.new_path = parts[3].removeprefix("b/")
+    return True
+
+
+def _apply_diff_file_meta(line: str, state: _DiffParseState) -> bool:
+    if line.startswith("new file mode"):
+        state.is_new = True
+        return True
+    if line.startswith("deleted file mode"):
+        state.is_deleted = True
+        return True
+    if line.startswith("copy from "):
+        state.is_copy = True
+        state.old_path = line[len("copy from ") :]
+        return True
+    if line.startswith("copy to "):
+        state.new_path = line[len("copy to ") :]
+        return True
+    if line.startswith("similarity index "):
+        state.is_rename = True
+        state.rename_similarity = int(line.split()[2].rstrip("%"))
+        return True
+    if line.startswith("rename from "):
+        state.old_path = line[len("rename from ") :]
+        return True
+    if line.startswith("rename to "):
+        state.new_path = line[len("rename to ") :]
+        return True
+    return False
+
+
+def _apply_diff_hunk(line: str, state: _DiffParseState) -> None:
+    if not line.startswith("+++ b/"):
+        if not line.startswith("@@") or state.current_file is None:
+            return
+        match = _HUNK_HEADER_RE.search(line)
+        if not match:
+            return
+        old_count = int(match.group(2)) if match.group(2) is not None else 1
+        new_start = int(match.group(3))
+        new_count = int(match.group(4)) if match.group(4) is not None else 1
+        if new_count > 0:
+            state.line_map[state.current_file].update(range(new_start, new_start + new_count))
+        elif old_count > 0:
+            state.line_map[state.current_file].add(new_start)
+        return
+
+    state.current_file = line[6:]
+    if state.current_file != "/dev/null":
+        state.line_map.setdefault(state.current_file, set())
+
+
+def _apply_unified_diff_line(line: str, state: _DiffParseState) -> None:
+    if _apply_diff_git_header(line, state):
+        return
+    if _apply_diff_file_meta(line, state):
+        return
+    _apply_diff_hunk(line, state)
+
+
+def _parse_unified_diff(stdout: str) -> GitDiffResult:
+    state = _DiffParseState(line_map={}, entries=[])
     for line in stdout.splitlines():
-        if line.startswith("diff --git "):
-            _commit_entry()
-            parts = line.split()
-            if len(parts) >= 4:
-                old_path = parts[2].removeprefix("a/")
-                new_path = parts[3].removeprefix("b/")
-            continue
-
-        if line.startswith("new file mode"):
-            is_new = True
-        elif line.startswith("deleted file mode"):
-            is_deleted = True
-        elif line.startswith("copy from "):
-            is_copy = True
-            old_path = line[len("copy from ") :]
-        elif line.startswith("copy to "):
-            new_path = line[len("copy to ") :]
-        elif line.startswith("similarity index "):
-            is_rename = True
-            rename_similarity = int(line.split()[2].rstrip("%"))
-        elif line.startswith("rename from "):
-            old_path = line[len("rename from ") :]
-        elif line.startswith("rename to "):
-            new_path = line[len("rename to ") :]
-        elif line.startswith("+++ b/"):
-            current_file = line[6:]
-            if current_file != "/dev/null":
-                line_map.setdefault(current_file, set())
-        elif line.startswith("@@") and current_file is not None:
-            match = _HUNK_RE.search(line)
-            if match:
-                start = int(match.group(1))
-                count = int(match.group(2)) if match.group(2) else 1
-                line_map[current_file].update(range(start, start + count))
-
-    _commit_entry()
-    return GitDiffResult(line_map=line_map, entries=tuple(entries))
+        _apply_unified_diff_line(line, state)
+    state.commit_entry()
+    return GitDiffResult(line_map=state.line_map, entries=tuple(state.entries))
 
 
 def fetch_diff(repo_root: Path, base_ref: str) -> GitDiffResult:
@@ -241,13 +314,54 @@ def _classify_rename(
 
 def _entry_paths(entry: DiffEntry) -> tuple[str, ...]:
     if entry.status.startswith("R"):
-        assert entry.old_path is not None and entry.new_path is not None
+        assert entry.old_path is not None
+        assert entry.new_path is not None
         return (entry.old_path, entry.new_path)
     if entry.status == "D":
         assert entry.old_path is not None
         return (entry.old_path,)
     assert entry.new_path is not None
     return (entry.new_path,)
+
+
+def _classify_py_entry(
+    status: str,
+    filepath: str,
+    *,
+    line_map: dict[str, set[int]],
+    test_discovery: TestDiscovery,
+    resolved_roots: tuple[str, ...],
+    new_test: list[str],
+    del_test: list[str],
+    modified_test: list[str],
+    new_source: list[str],
+    del_source: list[str],
+    modified_source: dict[str, frozenset[int]],
+    track_unscoped: Callable[[str], None],
+) -> None:
+    is_test = is_gate_test_path(filepath, test_discovery)
+    is_config = is_config_path(filepath)
+
+    if status == "A" and is_test:
+        new_test.append(filepath)
+    elif status == "D" and is_test:
+        del_test.append(filepath)
+    elif status in ("M", "C") and is_test:
+        modified_test.append(filepath)
+    elif is_config:
+        return
+    elif status == "A" and not is_test:
+        if is_product_source(filepath, resolved_roots):
+            new_source.append(filepath)
+        else:
+            track_unscoped(filepath)
+    elif status == "D" and not is_test:
+        del_source.append(filepath)
+    elif status in ("M", "C") and not is_test:
+        if is_product_source(filepath, resolved_roots):
+            modified_source[filepath] = frozenset(line_map.get(filepath, set()))
+        else:
+            track_unscoped(filepath)
 
 
 def classify_changes(
@@ -270,13 +384,21 @@ def classify_changes(
     new_source: list[str] = []
     del_source: list[str] = []
     modified_source: dict[str, frozenset[int]] = {}
+    unscoped_source: list[str] = []
     renames: list[tuple[str, str, int]] = []
     test_discovery = discovery or default_test_discovery()
 
+    def _track_unscoped(filepath: str) -> None:
+        if (
+            filepath.endswith(".py")
+            and not is_gate_test_path(filepath, test_discovery)
+            and not is_config_path(filepath)
+            and not is_product_source(filepath, resolved_roots)
+        ):
+            unscoped_source.append(filepath)
+
     for entry in diff_result.entries:
-        for filepath in _entry_paths(entry):
-            if is_config_path(filepath):
-                config.append(filepath)
+        config.extend(filepath for filepath in _entry_paths(entry) if is_full_suite_trigger_path(filepath))
 
         status = entry.status
         if status.startswith("R"):
@@ -302,23 +424,20 @@ def classify_changes(
         candidate_path = entry.new_path if entry.new_path is not None else entry.old_path
         if candidate_path is None or not candidate_path.endswith(".py"):
             continue
-        filepath = candidate_path
-
-        is_test = is_gate_test_path(filepath, test_discovery)
-        is_config = is_config_path(filepath)
-
-        if status == "A" and is_test:
-            new_test.append(filepath)
-        elif status == "D" and is_test:
-            del_test.append(filepath)
-        elif status in ("M", "C") and is_test:
-            modified_test.append(filepath)
-        elif status == "A" and not is_test:
-            new_source.append(filepath)
-        elif status == "D" and not is_test:
-            del_source.append(filepath)
-        elif status in ("M", "C") and not is_test and not is_config:
-            modified_source[filepath] = frozenset(line_map.get(filepath, set()))
+        _classify_py_entry(
+            entry.status,
+            candidate_path,
+            line_map=line_map,
+            test_discovery=test_discovery,
+            resolved_roots=resolved_roots,
+            new_test=new_test,
+            del_test=del_test,
+            modified_test=modified_test,
+            new_source=new_source,
+            del_source=del_source,
+            modified_source=modified_source,
+            track_unscoped=_track_unscoped,
+        )
 
     return ChangeSet.build(
         config=tuple(config),
@@ -329,4 +448,5 @@ def classify_changes(
         del_source=tuple(del_source),
         modified_source=modified_source,
         renames=tuple(renames),
+        unscoped_source=tuple(sorted(set(unscoped_source))),
     )

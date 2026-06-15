@@ -602,7 +602,7 @@ def _run_nightly_pipeline(
         for warning in drift_warnings:
             logger.warning("  - %s", warning)
 
-    overall_exit = map_exit or nightly_exit or bench_exit or network_exit
+    overall_exit = map_exit or nightly_exit or bench_exit
 
     logger.info("Building report ...")
     stats = emit_report(

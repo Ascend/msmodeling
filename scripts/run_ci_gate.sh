@@ -17,11 +17,11 @@
 #
 # Pytest (ci_gate/main.py):
 #   Plan-first: classify diff, validate policy, build gate plan, then run deduplicated selection.
-#   Full suite (config change): one run of tests/ with -m "not npu".
+#   Full suite (config / gate_policy / scripts/helpers change): one run of tests/ with -m "not npu".
 #   Otherwise: union of changed-test nodes (-m "not npu") and mapped regression nodes
 #   (-m "not npu and not nightly and not network"), deduplicated by node id.
-# Config full-suite triggers: requirements.txt, uv.lock, tests/**/conftest.py, and standard
-# pytest/coverage config filenames — NOT gate_policy.yaml (approver validation only).
+# Config full-suite triggers: requirements.txt, uv.lock, tests/**/conftest.py, scripts/helpers/**,
+# tests/.ci/gate_policy.yaml, and standard pytest/coverage config filenames.
 set -euo pipefail
 
 if [[ -z "${MSMODELING_TEST_MAP_PATH:-}" ]]; then

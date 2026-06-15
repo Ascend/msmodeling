@@ -15,7 +15,9 @@ from scripts.helpers.common.test_map_loader import (
     is_product_source,
     load_baseline,
     load_test_map,
+    load_test_map_with_commit,
     prune_deleted_sources,
+    validate_test_map_freshness,
 )
 
 # ---------------------------------------------------------------------------
@@ -115,6 +117,26 @@ def test_load_test_map_path_traversal_key_raises_config_error(tmp_path: Path) ->
         load_test_map(cfg)
 
 
+def test_load_test_map_with_commit_reads_built_from_commit(tmp_path: Path) -> None:
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "built_from_commit": "abc123",
+            "map": {"cli/main.py": {"run": ["tests/regression/cli/test_run.py::test_run"]}},
+        }
+    )
+    map_path = tmp_path / "map.json"
+    map_path.write_text(payload, encoding="utf-8")
+    mapping, commit = load_test_map_with_commit(_cfg_with_path(str(map_path)))
+    assert commit == "abc123"
+    assert "cli/main.py" in mapping
+
+
+def test_validate_test_map_freshness_rejects_missing_commit(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="built_from_commit is required"):
+        validate_test_map_freshness(tmp_path, None, "abc123")
+
+
 # ---------------------------------------------------------------------------
 # load_baseline
 # ---------------------------------------------------------------------------
@@ -126,7 +148,8 @@ def test_load_baseline_assembles_test_map_and_roots(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _write_ci_files(repo)
     cfg = _cfg_with_path(str(map_path))
-    baseline = load_baseline(repo, cfg)
+    baseline, commit = load_baseline(repo, cfg)
+    assert commit is None
     assert "tensor_cast/foo.py" in baseline.test_map
     assert baseline.roots
     assert baseline.discovery.include_patterns

@@ -66,14 +66,14 @@ def test_collect_from_python_returns_empty_for_syntax_error(tmp_path: Path) -> N
     path = tmp_path / "broken.py"
     path.write_text('x = "unterminated', encoding="utf-8")
 
-    assert prefetch._collect_from_python(path) == set()
+    assert prefetch._collect_from_python(path, frozenset()) == set()
 
 
 def test_collect_from_json_returns_empty_for_invalid_json(tmp_path: Path) -> None:
     path = tmp_path / "broken.json"
     path.write_text("{bad json", encoding="utf-8")
 
-    assert prefetch._collect_from_json(path) == set()
+    assert prefetch._collect_from_json(path, frozenset()) == set()
 
 
 def test_collect_model_ids_discovers_from_python_and_json_and_skips_ignored_paths(tmp_path: Path) -> None:
@@ -84,7 +84,7 @@ def test_collect_model_ids_discovers_from_python_and_json_and_skips_ignored_path
     (scan_dir / "scripts" / "helpers").mkdir(parents=True)
 
     (scan_dir / "suite" / "case.py").write_text(
-        '\n'.join(
+        "\n".join(
             [
                 'MODEL_A = "Qwen/Qwen3-32B"',
                 'MODEL_B = "deepseek-ai/DeepSeek-R1"',
@@ -454,7 +454,7 @@ def test_main_returns_1_when_no_prefetchers_are_available(
     scan_dir = tmp_path / "tests"
     scan_dir.mkdir()
     (scan_dir / "case.py").write_text('MODEL = "Qwen/Qwen3-32B"', encoding="utf-8")
-    monkeypatch.setattr(prefetch, "_build_prefetchers", lambda: [])
+    monkeypatch.setattr(prefetch, "_build_prefetchers", list)
 
     with caplog.at_level(logging.ERROR, logger="scripts.prefetch_model_configs"):
         result = run_module_main(

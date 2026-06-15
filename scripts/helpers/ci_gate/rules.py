@@ -7,7 +7,7 @@ build_ci_gate_plan in main.py decides which rules to run and merges results.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from scripts.helpers.ci_gate.gate_policy import SourceExemption, TestExemption, is_exempt, is_test_exempt
 from scripts.helpers.ci_gate.models import ChangeSet, GateError, GateStepResult
@@ -16,6 +16,9 @@ from scripts.helpers.common.coverage_omit import is_coverage_omitted_source
 from scripts.helpers.common.coverage_symbol_check import symbol_lines_covered_in_data
 from scripts.helpers.common.pytest_runner import collect_test_node_ids
 from scripts.helpers.common.test_map_loader import is_product_source
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +74,50 @@ def _coverage_fallback_passes(
     return False
 
 
+def gate_unscoped_source(changes: ChangeSet) -> GateStepResult:
+    """Block product-like .py paths that fall outside configured gate roots."""
+    errors = tuple(GateError(category="unscoped_source", path=path) for path in changes.unscoped_source)
+    return GateStepResult(errors=errors)
+
+
 # ---------------------------------------------------------------------------
 # Gate: new source files
 # ---------------------------------------------------------------------------
+
+
+def _new_source_errors_for_path(
+    repo_root: Path,
+    path: str,
+    test_map: dict[str, dict[str, list[str]]],
+    exemptions: tuple[SourceExemption, ...],
+    roots: tuple[str, ...],
+    *,
+    coverage_path: Path | None,
+) -> list[GateError]:
+    if not path.endswith(".py") or not is_product_source(path, roots):
+        return []
+    if is_coverage_omitted_source(path, roots) or test_map.get(path):
+        return []
+    source_path = repo_root / path
+    if not source_path.is_file():
+        return []
+    symbols = ast_utils.top_level_definitions(source_path)
+    if not symbols:
+        return [GateError(category="new_source", path=path)]
+    errors: list[GateError] = []
+    for sym in symbols:
+        if is_exempt(exemptions, path, sym):
+            continue
+        if _coverage_fallback_passes(
+            repo_root,
+            path,
+            sym,
+            _executable_lines_for_symbol(source_path, sym),
+            coverage_path=coverage_path,
+        ):
+            continue
+        errors.append(GateError(category="new_source", path=path, symbol=sym))
+    return errors
 
 
 def gate_new_source(
@@ -90,32 +134,16 @@ def gate_new_source(
         return GateStepResult()
     errors: list[GateError] = []
     for path in changes.new_source:
-        if not path.endswith(".py"):
-            continue
-        if not is_product_source(path, roots):
-            continue
-        if is_coverage_omitted_source(path, roots):
-            continue
-        if test_map.get(path):
-            continue
-        source_path = repo_root / path
-        if not source_path.is_file():
-            continue
-        symbols = ast_utils.top_level_definitions(source_path)
-        if not symbols:
-            errors.append(GateError(category="new_source", path=path))
-            continue
-        unmapped = [sym for sym in symbols if not is_exempt(exemptions, path, sym)]
-        for sym in unmapped:
-            if _coverage_fallback_passes(
+        errors.extend(
+            _new_source_errors_for_path(
                 repo_root,
                 path,
-                sym,
-                _executable_lines_for_symbol(source_path, sym),
+                test_map,
+                exemptions,
+                roots,
                 coverage_path=coverage_path,
-            ):
-                continue
-            errors.append(GateError(category="new_source", path=path, symbol=sym))
+            )
+        )
     return GateStepResult(errors=tuple(errors))
 
 

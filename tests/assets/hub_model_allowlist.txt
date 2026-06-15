@@ -1,0 +1,6 @@
+# Hub model ids approved for scripts/prefetch_model_configs.py discovery.
+Qwen/Qwen3-32B
+THUDM/GLM-4-9B
+deepseek-ai/DeepSeek-R1
+deepseek-ai/DeepSeek-V3.1
+MiniMaxAI/MiniMax-M2

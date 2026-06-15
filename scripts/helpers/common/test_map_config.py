@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.helpers._config import Config, ConfigError
+from scripts.helpers.ci_gate.gate_policy import GATE_POLICY_REL
 
 CONFIG_FILE_NAMES: frozenset[str] = frozenset(
     {
@@ -49,3 +50,12 @@ def is_config_path(path: str) -> bool:
     if path.startswith("tests/") and path.endswith("/conftest.py"):
         return True
     return path.rsplit("/", 1)[-1] in CONFIG_FILE_NAMES
+
+
+def is_full_suite_trigger_path(path: str) -> bool:
+    """Return True when a change should run the full PR gate test suite."""
+    if is_config_path(path):
+        return True
+    if path.startswith("scripts/helpers/"):
+        return True
+    return path == GATE_POLICY_REL.as_posix()

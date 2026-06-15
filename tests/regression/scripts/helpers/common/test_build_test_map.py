@@ -230,11 +230,16 @@ def test_prune_keeps_existing_files_drops_missing(tmp_path: Path, monkeypatch: p
 # ---------------------------------------------------------------------------
 
 
-def test_write_test_map_creates_valid_json(tmp_path: Path) -> None:
+def test_write_test_map_creates_valid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "scripts.helpers.common.build_test_map.resolve_head_commit",
+        lambda _root: "deadbeef" * 5,
+    )
     output = tmp_path / "out" / "map.json"
     write_test_map(output, {"a.py": {"fn": ["test_x"]}})
     data = json.loads(output.read_text(encoding="utf-8"))
     assert data["schema_version"] == 1
+    assert data["built_from_commit"] == "deadbeef" * 5
     assert data["map"]["a.py"]["fn"] == ["test_x"]
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Final
 
 from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.ci_gate.diff import resolve_head_commit
 from scripts.helpers.common.ast_utils import iter_qualified_definition_spans, symbol_for_line
 from scripts.helpers.common.coverage_config import product_roots
 from scripts.helpers.common.coverage_omit import is_coverage_omitted_source
@@ -82,6 +83,46 @@ def _collect_allowed_node_ids(
     return frozenset(node_ids)
 
 
+def _accumulate_measured_file(
+    measured: str,
+    *,
+    data: object,
+    allowed_node_ids: frozenset[str],
+    resolved_roots: tuple[str, ...],
+    by_file: dict[str, dict[str, dict[str, int]]],
+) -> None:
+    key = _relative_repo_key(measured, resolved_roots)
+    if key is None or is_coverage_omitted_source(key, resolved_roots):
+        return
+    ctxmap = data.contexts_by_lineno(measured)
+    if not ctxmap:
+        return
+
+    spans = iter_qualified_definition_spans(Path(measured).resolve())
+    for line_no, ctxs in ctxmap.items():
+        sym = symbol_for_line(spans, line_no)
+        bucket = sym if sym is not None else UNCLASSIFIED_SYMBOL
+        for ctx in ctxs:
+            nid = _normalize_pytest_context(ctx)
+            if nid and nid in allowed_node_ids:
+                by_file[key][bucket][nid] += 1
+
+
+def _finalize_coverage_by_file(
+    by_file: dict[str, dict[str, dict[str, int]]],
+) -> dict[str, dict[str, list[str]]]:
+    result: dict[str, dict[str, list[str]]] = {}
+    for fp, syms in sorted(by_file.items()):
+        filtered: dict[str, list[str]] = {}
+        for sym, test_lines in sorted(syms.items()):
+            kept = sorted(nid for nid, count in test_lines.items() if count)
+            if kept:
+                filtered[sym] = kept
+        if filtered:
+            result[fp] = filtered
+    return result
+
+
 def collect_from_coverage(
     allowed_node_ids: frozenset[str],
     *,
@@ -115,38 +156,16 @@ def collect_from_coverage(
         return {}
 
     by_file: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-
     for measured in data.measured_files():
-        key = _relative_repo_key(measured, resolved_roots)
-        if key is None:
-            continue
-        if is_coverage_omitted_source(key, resolved_roots):
-            continue
-        ctxmap = data.contexts_by_lineno(measured)
-        if not ctxmap:
-            continue
+        _accumulate_measured_file(
+            measured,
+            data=data,
+            allowed_node_ids=allowed_node_ids,
+            resolved_roots=resolved_roots,
+            by_file=by_file,
+        )
 
-        spans = iter_qualified_definition_spans(Path(measured).resolve())
-
-        for line_no, ctxs in ctxmap.items():
-            sym = symbol_for_line(spans, line_no)
-            bucket = sym if sym is not None else UNCLASSIFIED_SYMBOL
-            for ctx in ctxs:
-                nid = _normalize_pytest_context(ctx)
-                if nid and nid in allowed_node_ids:
-                    by_file[key][bucket][nid] += 1
-
-    result: dict[str, dict[str, list[str]]] = {}
-    for fp, syms in sorted(by_file.items()):
-        filtered: dict[str, list[str]] = {}
-        for sym, test_lines in sorted(syms.items()):
-            kept = sorted(nid for nid, count in test_lines.items() if count)
-            if kept:
-                filtered[sym] = kept
-        if filtered:
-            result[fp] = filtered
-
-    return result
+    return _finalize_coverage_by_file(by_file)
 
 
 def _prune_missing_source_keys(
@@ -158,7 +177,11 @@ def _prune_missing_source_keys(
 
 def write_test_map(output_path: Path, mapping: dict[str, dict[str, list[str]]]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"schema_version": 1, "map": mapping}
+    payload = {
+        "schema_version": 1,
+        "built_from_commit": resolve_head_commit(REPO_ROOT),
+        "map": mapping,
+    }
     output_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -202,23 +225,9 @@ def collect_test_map(
     return _prune_missing_source_keys(mapping)
 
 
-def detect_redundant_cases(
+def _index_redundancy_mapping(
     mapping: dict[str, dict[str, list[str]]],
-    *,
-    jaccard_threshold: float = 0.85,
-    max_per_symbol: int = 5,
-) -> list[dict[str, object]]:
-    """Return redundancy warnings from a test_map.
-
-    Two checks:
-    1. Symbols covered by more than *max_per_symbol* test cases.
-    2. Pairs of test cases whose covered-symbol sets have Jaccard similarity
-       >= *jaccard_threshold*.
-
-    Returns a list of warning dicts suitable for nightly report inclusion.
-    """
-    warnings: list[dict[str, object]] = []
-
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     test_to_symbols: dict[str, set[str]] = defaultdict(set)
     symbol_to_tests: dict[str, set[str]] = defaultdict(set)
     for src_file, symbols in mapping.items():
@@ -229,22 +238,38 @@ def detect_redundant_cases(
             for tid in test_ids:
                 test_to_symbols[tid].add(qualified)
                 symbol_to_tests[qualified].add(tid)
+    return test_to_symbols, symbol_to_tests
 
+
+def _over_covered_symbol_warnings(
+    mapping: dict[str, dict[str, list[str]]],
+    *,
+    max_per_symbol: int,
+) -> list[dict[str, object]]:
+    warnings: list[dict[str, object]] = []
     for src_file, symbols in mapping.items():
         for sym, test_ids in symbols.items():
-            if sym == UNCLASSIFIED_SYMBOL:
+            if sym == UNCLASSIFIED_SYMBOL or len(test_ids) <= max_per_symbol:
                 continue
-            if len(test_ids) > max_per_symbol:
-                warnings.append(
-                    {
-                        "type": "over_covered_symbol",
-                        "symbol": f"{src_file}::{sym}",
-                        "test_count": len(test_ids),
-                        "threshold": max_per_symbol,
-                        "tests": sorted(test_ids),
-                    }
-                )
+            warnings.append(
+                {
+                    "type": "over_covered_symbol",
+                    "symbol": f"{src_file}::{sym}",
+                    "test_count": len(test_ids),
+                    "threshold": max_per_symbol,
+                    "tests": sorted(test_ids),
+                }
+            )
+    return warnings
 
+
+def _redundant_pair_warnings(
+    test_to_symbols: dict[str, set[str]],
+    symbol_to_tests: dict[str, set[str]],
+    *,
+    jaccard_threshold: float,
+) -> list[dict[str, object]]:
+    warnings: list[dict[str, object]] = []
     compared_pairs: set[tuple[str, str]] = set()
     for tests in symbol_to_tests.values():
         test_list = sorted(tests)
@@ -271,5 +296,31 @@ def detect_redundant_cases(
                             "shared_symbols": sorted(intersection),
                         }
                     )
+    return warnings
 
+
+def detect_redundant_cases(
+    mapping: dict[str, dict[str, list[str]]],
+    *,
+    jaccard_threshold: float = 0.85,
+    max_per_symbol: int = 5,
+) -> list[dict[str, object]]:
+    """Return redundancy warnings from a test_map.
+
+    Two checks:
+    1. Symbols covered by more than *max_per_symbol* test cases.
+    2. Pairs of test cases whose covered-symbol sets have Jaccard similarity
+       >= *jaccard_threshold*.
+
+    Returns a list of warning dicts suitable for nightly report inclusion.
+    """
+    test_to_symbols, symbol_to_tests = _index_redundancy_mapping(mapping)
+    warnings = _over_covered_symbol_warnings(mapping, max_per_symbol=max_per_symbol)
+    warnings.extend(
+        _redundant_pair_warnings(
+            test_to_symbols,
+            symbol_to_tests,
+            jaccard_threshold=jaccard_threshold,
+        )
+    )
     return warnings

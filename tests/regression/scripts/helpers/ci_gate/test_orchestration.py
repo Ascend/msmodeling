@@ -194,6 +194,23 @@ def test_run_pytest_adds_cov_args_when_requested(monkeypatch: pytest.MonkeyPatch
     assert "--cov-context=test" in extra_args
 
 
+def test_run_pytest_cov_append_passes_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[tuple[str, ...]] = []
+
+    def _fake_build(*_args, extra_args: tuple[str, ...] = (), **_kwargs: object) -> list[str]:
+        captured.append(extra_args)
+        return ["pytest"]
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.build_pytest_cmd", _fake_build)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.subprocess.run", lambda *_args, **_kwargs: FakeCompleted(0, "", "")
+    )
+    monkeypatch.setattr("scripts.helpers.ci_gate.main._collected_count_for_targets", lambda *_args, **_kwargs: 1)
+
+    _run_pytest(["tests"], marker="not npu", use_cov=True, cov_append=True)
+    assert "--cov-append" in captured[-1]
+
+
 def test_run_pytest_full_suite_marker_uses_not_npu_only(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[list[str]] = []
 
@@ -219,7 +236,9 @@ def test_main_passes_when_no_gate_work(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.Config.from_env", lambda: gate_cfg)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda _root, _branch: "abc" * 10)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: empty_baseline)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (empty_baseline, "a" * 40))
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -237,7 +256,9 @@ def test_main_returns_one_on_unmapped_modified_source(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.Config.from_env", lambda: gate_cfg)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda _root, _branch: "abc" * 10)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: empty_baseline)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (empty_baseline, "a" * 40))
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     main_line = inspect.getsourcelines(ci_gate_main.main)[1] + 1
     monkeypatch.setattr(
@@ -278,7 +299,9 @@ def test_main_skips_all_exempt_changed_test_file(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.Config.from_env", lambda: gate_cfg)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda _root, _branch: "abc" * 10)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: baseline)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -287,7 +310,13 @@ def test_main_skips_all_exempt_changed_test_file(
         ),
     )
 
-    def _fake_run_pytest(targets: list[str], *, marker: str) -> int:
+    def _fake_run_pytest(
+        targets: list[str],
+        *,
+        marker: str,
+        use_cov: bool = False,
+        cov_append: bool = False,
+    ) -> int:
         pytest_calls.append(targets)
         return 0
 

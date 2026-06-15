@@ -69,6 +69,14 @@ def test_remap_renamed_sources_moves_map_entries() -> None:
     assert remapped == {"cli/new.py": {"run": ["tests/regression/cli/test_old.py::test_old"]}}
 
 
+def test_remap_renamed_sources_skips_partial_renames() -> None:
+    test_map = {"cli/old.py": {"run": ["tests/regression/cli/test_old.py::test_old"]}}
+
+    remapped = _remap_renamed_sources(test_map, (("cli/old.py", "cli/new.py", 95),))
+
+    assert remapped == test_map
+
+
 def test_log_blocking_errors_emits_category_summary(caplog: pytest.LogCaptureFixture) -> None:
     errors = (
         GateError(category="deleted_source", path="cli/old.py"),
@@ -149,7 +157,9 @@ def test_main_remaps_before_plan_without_phase0_merge(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.log_env_audit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda *_args: "abc" * 10)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: baseline)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -193,7 +203,9 @@ def test_main_runs_deleted_source_guards_in_union(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.log_env_audit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda *_args: "abc" * 10)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: baseline)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -210,7 +222,13 @@ def test_main_runs_deleted_source_guards_in_union(
         ),
     )
 
-    def _fake_run_pytest(targets: list[str], *, marker: str, use_cov: bool = False) -> int:
+    def _fake_run_pytest(
+        targets: list[str],
+        *,
+        marker: str,
+        use_cov: bool = False,
+        cov_append: bool = False,
+    ) -> int:
         pytest_calls.append((targets, marker))
         return 1
 
@@ -237,7 +255,9 @@ def test_main_uses_full_suite_targets_when_config_changes(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.log_env_audit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda *_args: "abc" * 10)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: baseline)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -254,7 +274,13 @@ def test_main_uses_full_suite_targets_when_config_changes(
         ),
     )
 
-    def _fake_run_pytest(targets: list[str], *, marker: str, use_cov: bool = False) -> int:
+    def _fake_run_pytest(
+        targets: list[str],
+        *,
+        marker: str,
+        use_cov: bool = False,
+        cov_append: bool = False,
+    ) -> int:
         pytest_calls.append((targets, marker))
         return 0
 
@@ -291,7 +317,9 @@ def test_main_skips_exempt_regression_targets(
         discovery=baseline.discovery,
         roots=baseline.roots,
     )
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: exempt_baseline)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (exempt_baseline, "a" * 40))
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -308,7 +336,13 @@ def test_main_skips_exempt_regression_targets(
         ),
     )
 
-    def _fake_run_pytest(targets: list[str], *, marker: str, use_cov: bool = False) -> int:
+    def _fake_run_pytest(
+        targets: list[str],
+        *,
+        marker: str,
+        use_cov: bool = False,
+        cov_append: bool = False,
+    ) -> int:
         pytest_calls.append(targets)
         return 0
 
@@ -331,7 +365,9 @@ def test_main_runs_union_targets_when_available(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.log_env_audit", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda *_args: "abc" * 10)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: baseline)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -348,7 +384,13 @@ def test_main_runs_union_targets_when_available(
         ),
     )
 
-    def _fake_run_pytest(targets: list[str], *, marker: str, use_cov: bool = False) -> int:
+    def _fake_run_pytest(
+        targets: list[str],
+        *,
+        marker: str,
+        use_cov: bool = False,
+        cov_append: bool = False,
+    ) -> int:
         pytest_calls.append((targets, marker))
         return 0
 

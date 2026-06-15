@@ -7,8 +7,10 @@ All frozen dataclasses — no I/O, no logic beyond property accessors.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from scripts.helpers.ci_gate.gate_policy import SourceExemption, TestDiscovery, TestExemption
+if TYPE_CHECKING:
+    from scripts.helpers.ci_gate.gate_policy import SourceExemption, TestDiscovery, TestExemption
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +34,8 @@ class ChangeSet:
     # Existing test files edited in place (status M/C). Re-run and remapped like
     # new tests, since their edits may change which source symbols they cover.
     modified_test: tuple[str, ...] = ()
+    # Product .py paths outside configured gate roots (ungated if ignored).
+    unscoped_source: tuple[str, ...] = ()
 
     @classmethod
     def build(
@@ -45,6 +49,7 @@ class ChangeSet:
         modified_source: dict[str, frozenset[int]] | None = None,
         renames: tuple[tuple[str, str, int], ...] = (),
         modified_test: tuple[str, ...] = (),
+        unscoped_source: tuple[str, ...] = (),
     ) -> ChangeSet:
         mod = tuple(sorted((path, lines) for path, lines in (modified_source or {}).items()))
         return cls(
@@ -56,6 +61,7 @@ class ChangeSet:
             modified_source=mod,
             renames=renames,
             modified_test=modified_test,
+            unscoped_source=unscoped_source,
         )
 
 

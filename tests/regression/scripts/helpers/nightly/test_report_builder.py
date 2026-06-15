@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 from scripts.helpers.nightly.pytest_parser import NightlyRunStats
 from scripts.helpers.nightly.report_builder import (
+    _weak_symbols_for_file,
     build_phase_breakdown,
     compute_weak_coverage_symbols,
     fetch_env_info,
@@ -102,6 +103,38 @@ def test_load_test_map_summary_map_not_dict_returns_zeroes(tmp_path: Path) -> No
     path.write_text(json.dumps({"schema_version": 1, "map": []}), encoding="utf-8")
     summary = load_test_map_summary(path)
     assert summary.source_files == 0
+
+
+# ---------------------------------------------------------------------------
+# _weak_symbols_for_file
+# ---------------------------------------------------------------------------
+
+
+class _FakeCoverageData:
+    def __init__(self, ctxmap: dict[int, list[str]]) -> None:
+        self._ctxmap = ctxmap
+
+    def contexts_by_lineno(self, path: str) -> dict[int, list[str]]:
+        del path
+        return self._ctxmap
+
+
+def test_weak_symbols_for_file_flags_symbols_below_threshold(tmp_path: Path) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def run():\n    x = 1\n    y = 2\n", encoding="utf-8")
+    coverage_data = _FakeCoverageData({2: ["tests/foo.py::test_bar"]})
+    weak = _weak_symbols_for_file("cli/main.py", src.resolve(), coverage_data, threshold=0.5)
+    assert weak == ["cli/main.py::run"]
+
+
+def test_weak_symbols_for_file_skips_symbols_above_threshold(tmp_path: Path) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def run():\n    x = 1\n", encoding="utf-8")
+    coverage_data = _FakeCoverageData({1: ["t"], 2: ["t"]})
+    weak = _weak_symbols_for_file("cli/main.py", src.resolve(), coverage_data, threshold=0.5)
+    assert weak == []
 
 
 # ---------------------------------------------------------------------------

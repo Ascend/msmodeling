@@ -78,6 +78,27 @@ def load_test_map_summary(path: pathlib.Path | None) -> MapCoverageSummary:
 # ---------------------------------------------------------------------------
 
 
+def _weak_symbols_for_file(
+    src_file: str,
+    abs_path: pathlib.Path,
+    coverage_data: object,
+    *,
+    threshold: float,
+) -> list[str]:
+    from scripts.helpers.common import ast_utils
+
+    spans = ast_utils.iter_qualified_definition_spans(abs_path)
+    ctxmap = coverage_data.contexts_by_lineno(str(abs_path))
+    weak: list[str] = []
+    for span in spans:
+        span_lines = set(range(span.start_line, span.end_line + 1))
+        hit = sum(1 for ln in span_lines if ctxmap and ln in ctxmap and ctxmap[ln])
+        total = len(span_lines)
+        if total > 0 and hit / total < threshold:
+            weak.append(f"{src_file}::{span.qualified_name}")
+    return weak
+
+
 def compute_weak_coverage_symbols(
     test_map_path: pathlib.Path | None,
     coverage_path: pathlib.Path,
@@ -119,17 +140,7 @@ def compute_weak_coverage_symbols(
         abs_path = REPO_ROOT / src_file
         if not abs_path.is_file():
             continue
-        from scripts.helpers.common import ast_utils
-
-        spans = ast_utils.iter_qualified_definition_spans(abs_path)
-        ctxmap = coverage_data.contexts_by_lineno(str(abs_path))
-        for span in spans:
-            qualified = f"{src_file}::{span.qualified_name}"
-            span_lines = set(range(span.start_line, span.end_line + 1))
-            hit = sum(1 for ln in span_lines if ctxmap and ln in ctxmap and ctxmap[ln])
-            total = len(span_lines)
-            if total > 0 and hit / total < threshold:
-                weak.append(qualified)
+        weak.extend(_weak_symbols_for_file(src_file, abs_path, coverage_data, threshold=threshold))
 
     return tuple(sorted(weak))
 

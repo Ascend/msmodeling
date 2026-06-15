@@ -12,8 +12,14 @@ def _measured_path_for_source(data: object, repo_root: Path, source_rel_path: st
         return None
     for measured in measured_files():
         if Path(measured).resolve() == target:
-            return measured
+            return str(measured)
     return None
+
+
+def _is_pytest_test_context(ctx: str) -> bool:
+    """Return True when *ctx* names a pytest test node (not import-time or conftest)."""
+    normalized = ctx.split("|", 1)[0].strip()
+    return normalized.startswith("tests/") and "::" in normalized
 
 
 def symbol_lines_covered_in_data(
@@ -23,9 +29,9 @@ def symbol_lines_covered_in_data(
     lines: set[int],
     coverage_path: Path,
 ) -> bool:
-    """Return True when any *lines* was executed (any coverage context).
+    """Return True when any *lines* was executed under a pytest test context.
 
-    Context may be a pytest node id, empty string (import-time), or conftest.
+    Import-time, conftest-only, and empty contexts do not satisfy the gate.
     *symbol* is part of the public API for call-site clarity.
     """
     _ = symbol
@@ -45,16 +51,12 @@ def symbol_lines_covered_in_data(
     if measured is None:
         return False
 
-    executed_lines: set[int] = set()
-    lines_fn = getattr(data, "lines", None)
-    if lines_fn is not None:
-        executed_lines = set(lines_fn(measured) or ())
-
     ctxmap = data.contexts_by_lineno(measured)
+    if not ctxmap:
+        return False
 
     for line_no in lines:
-        if line_no in executed_lines:
-            return True
-        if ctxmap and ctxmap.get(line_no):
+        contexts = ctxmap.get(line_no, [])
+        if any(_is_pytest_test_context(ctx) for ctx in contexts):
             return True
     return False
