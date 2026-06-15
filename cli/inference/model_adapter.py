@@ -141,6 +141,7 @@ def _add_doctor_runtime_options(parser: argparse.ArgumentParser) -> None:
     parallel_group.add_argument("--ep-size", type=check_positive_integer, default=1)
     parallel_group.add_argument("--moe-tp-size", type=check_positive_integer, default=None)
     parallel_group.add_argument("--moe-dp-size", type=check_positive_integer, default=1)
+    parallel_group.add_argument("--vision-tp-size", type=check_positive_integer, default=1)
 
 
 def _make_doctor_user_input(args: argparse.Namespace) -> UserInputConfig:
@@ -237,6 +238,7 @@ def _add_verify_case_options(parser: argparse.ArgumentParser) -> None:
     parallel_group.add_argument("--ep-size", type=check_positive_integer, default=1)
     parallel_group.add_argument("--moe-tp-size", type=check_positive_integer, default=None)
     parallel_group.add_argument("--moe-dp-size", type=check_positive_integer, default=1)
+    parallel_group.add_argument("--vision-tp-size", type=check_positive_integer, default=1)
 
     parser.add_argument(
         "--remote-source",

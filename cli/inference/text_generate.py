@@ -260,6 +260,12 @@ def main():
         action="store_true",
         help="Whether to have the current device host the external shared experts",
     )
+    par_group.add_argument(
+        "--vision-tp-size",
+        type=check_positive_integer,
+        default=1,
+        help="Vision tensor parallel degree. Default 1 keeps vision modules unsharded.",
+    )
 
     multimodal_group = parser.add_argument_group("MultiModal Options")
     multimodal_group.add_argument(

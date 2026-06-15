@@ -51,6 +51,7 @@ def user_config_build_cache_key(user_config: UserInputConfig) -> tuple:
         user_config.tp_size,
         user_config.mlp_tp_size,
         user_config.lmhead_tp_size,
+        user_config.vision_tp_size,
         user_config.ep_size,
         user_config.moe_dp_size,
         user_config.moe_tp_size,

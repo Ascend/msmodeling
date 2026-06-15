@@ -240,3 +240,16 @@ class ParallelGroupManager:
             expert_parallel_size=self.parallel_config.expert_parallel_size,
             pipeline_parallel_size=pipeline_parallel_size,
         )
+
+        self.vision_tp_group = initialize_parallel(
+            ParallelGroupType.TENSOR_PARALLEL,
+            self.parallel_config.vision_tensor_parallel_size,
+            self.parallel_config.vision_data_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+        )
+        self.vision_dp_group = initialize_parallel(
+            ParallelGroupType.DATA_PARALLEL,
+            self.parallel_config.vision_tensor_parallel_size,
+            self.parallel_config.vision_data_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+        )

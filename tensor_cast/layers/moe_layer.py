@@ -620,7 +620,24 @@ class FusedMoETensorCast(FusedMoEBase):
         )
         final_hidden_states = (combined_hidden_states * expert_weights.unsqueeze(-1)).sum(dim=-2)
 
-        final_hidden_states = final_hidden_states.view(original_shape)
+        # Handle shape mismatch when input is 2D (e.g., Qwen3.5 with certain configurations)
+        # The combined_hidden_states may have extra tokens due to TP sharding padding
+        # Use pure Python operation to avoid TorchDynamo graph break
+        expected_num_elements = 1
+        for dim in original_shape:
+            expected_num_elements *= dim
+        actual_num_elements = final_hidden_states.numel()
+        if actual_num_elements != expected_num_elements:
+            # Truncate to expected size if there are extra tokens
+            logger.warning(
+                "MoE output shape mismatch: expected %d elements, got %d. "
+                "Truncating extra tokens from TP sharding padding.",
+                expected_num_elements,
+                actual_num_elements,
+            )
+            final_hidden_states = final_hidden_states.view(-1)[:expected_num_elements].view(original_shape)
+        else:
+            final_hidden_states = final_hidden_states.view(original_shape)
         if self.shared_experts and self.num_external_shared_experts == 0 and not skip_shared_experts:
             final_hidden_states = final_hidden_states + self._run_shared_experts(hidden_states)
 

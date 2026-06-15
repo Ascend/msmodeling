@@ -3,8 +3,11 @@
 input_generation
 """
 
+import json
 from dataclasses import dataclass
+from functools import lru_cache
 from importlib import import_module
+from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -142,9 +145,14 @@ def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
         "qwen3_5",
         "qwen3_5_moe",
     ):
-        kwargs["cache_position"] = torch.arange(
-            context_length, context_length + num_tokens, dtype=torch.long, device="cpu"
-        )
+        cache_position = torch.arange(context_length, context_length + num_tokens, dtype=torch.long, device="cpu")
+        cache_position.tensor_cast_query_lens = tuple(query_len for _ in range(batch_size))
+        cache_position.tensor_cast_is_decode = tuple(is_decode for _ in range(batch_size))
+        cache_position.tensor_cast_has_previous_state = context_length > 0
+        cache_position.tensor_cast_base_decode_query_len = 1 if is_decode and num_mtp_tokens > 0 else query_len
+        cache_position.tensor_cast_num_mtp_tokens = num_mtp_tokens
+        cache_position.tensor_cast_effective_decode_steps = query_len if is_decode else 0
+        kwargs["cache_position"] = cache_position
     kwargs.update(image_kwargs)
     return kwargs
 
@@ -201,18 +209,66 @@ def resize_image(
     return smart_resize(**params_builder())
 
 
+def _read_preprocessor_config(path: Path):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        logger.debug("Failed to read preprocessor config from %s.", path, exc_info=True)
+        return None
+
+
+def _resolve_local_preprocessor_config(model_id: str) -> Path | None:
+    model_path = Path(model_id)
+    if model_path.is_dir():
+        config_path = model_path / "preprocessor_config.json"
+        if config_path.is_file():
+            return config_path
+
+    try:
+        from transformers.utils import cached_file
+
+        cached_path = cached_file(model_id, "preprocessor_config.json", local_files_only=True)
+        if cached_path:
+            return Path(cached_path)
+    except Exception:
+        logger.debug("No local cached preprocessor_config.json for model_id=%s.", model_id, exc_info=True)
+    return None
+
+
+def _extract_pixel_limits(config: dict | None):
+    if not config:
+        return None, None
+    size = config.get("size")
+    if hasattr(size, "get"):
+        min_pixels = size.get("shortest_edge") or size.get("min_pixels")
+        max_pixels = size.get("longest_edge") or size.get("max_pixels")
+        if min_pixels is not None and max_pixels is not None:
+            return min_pixels, max_pixels
+    min_pixels = config.get("min_pixels") or config.get("shortest_edge")
+    max_pixels = config.get("max_pixels") or config.get("longest_edge")
+    return min_pixels, max_pixels
+
+
+@lru_cache(maxsize=128)
 def _load_preprocessor_pixel_limits(model_id: str):
     """
-    Load image pixel limits from instantiated HF processor.
+    Load image pixel limits from a local HF processor config.
     """
     if not model_id:
         logger.warning("model_id is empty; falling back to smart_resize defaults.")
         return None, None
 
+    local_config = _resolve_local_preprocessor_config(model_id)
+    if local_config is not None:
+        min_pixels, max_pixels = _extract_pixel_limits(_read_preprocessor_config(local_config))
+        if min_pixels is not None and max_pixels is not None:
+            return min_pixels, max_pixels
+
     try:
         from transformers import AutoImageProcessor
 
-        image_processor = AutoImageProcessor.from_pretrained(model_id)
+        image_processor = AutoImageProcessor.from_pretrained(model_id, local_files_only=True)
         size = getattr(image_processor, "size", None)
         if size is None or not hasattr(size, "get"):
             return None, None
@@ -221,7 +277,7 @@ def _load_preprocessor_pixel_limits(model_id: str):
         return min_pixels, max_pixels
     except Exception:
         logger.warning(
-            "Failed to load processor/image size for model_id=%s; falling back to smart_resize defaults.",
+            "Failed to load local processor/image size for model_id=%s; falling back to smart_resize defaults.",
             model_id,
             exc_info=True,
         )
@@ -746,8 +802,38 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
     )
     kwargs.update(sparse_attention_indexer_cache)
 
-    if model.model_config.hf_config.model_type == "qwen3_next":
-        kwargs["cache_position"] = torch.arange(num_tokens, dtype=torch.long, device="cpu")
+    if model.model_config.hf_config.model_type in (
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_moe",
+    ):
+        cache_positions = []
+        first_context_length = 0
+        for request in requests:
+            context_length = request.context_length or max(request.seq_len - request.query_len, 0)
+            if not cache_positions:
+                first_context_length = context_length
+            cache_positions.append(
+                torch.arange(
+                    context_length,
+                    context_length + request.query_len,
+                    dtype=torch.long,
+                    device="cpu",
+                )
+            )
+        cache_position = torch.cat(cache_positions)
+        cache_position.tensor_cast_query_lens = tuple(query_lens)
+        cache_position.tensor_cast_is_decode = tuple(is_decode_list)
+        cache_position.tensor_cast_has_previous_state = first_context_length > 0
+        cache_position.tensor_cast_base_decode_query_lens = tuple(
+            1 if is_decode and num_mtp_tokens > 0 else query_len
+            for query_len, is_decode in zip(query_lens, is_decode_list)
+        )
+        cache_position.tensor_cast_num_mtp_tokens = num_mtp_tokens
+        cache_position.tensor_cast_effective_decode_steps = tuple(
+            query_len if is_decode else 0 for query_len, is_decode in zip(query_lens, is_decode_list)
+        )
+        kwargs["cache_position"] = cache_position
 
     return kwargs
 

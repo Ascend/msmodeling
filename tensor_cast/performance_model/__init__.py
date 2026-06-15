@@ -380,6 +380,108 @@ def _accumulate_compute_ops(
     properties.combine(delta, compute_only=True)
 
 
+def _bytes(num_elements: int, dtype: torch.dtype) -> int:
+    return int(bytes_of_elements(num_elements, dtype))
+
+
+def _linear_attention_state_bytes(
+    batch_size: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    state_dtype: torch.dtype = torch.float32,
+) -> int:
+    return _bytes(batch_size * num_v_heads * head_k_dim * head_v_dim, state_dtype)
+
+
+_LA_SCRATCH_ROUND_TRIP_TRAFFIC_FACTOR = 2
+_LA_CHUNK_ACTIVATION_TOKEN_SCRATCH_ROUND_TRIPS = 2
+_LA_CHUNK_FP32_VECTOR_SCRATCH_ROUND_TRIPS = 2
+_LA_CHUNK_FP32_MATRIX_SCRATCH_BUFFERS = 4
+_LA_CHUNK_FP32_SCALAR_VECTOR_WIDTH = 3
+_LA_CHUNK_EXTRA_STATIC_KERNELS = 8
+
+
+def _add_linear_attention_chunk_scratch_memory(
+    properties: OpInvokeInfo.PerformanceProperties,
+    batch_size: int,
+    seq_len: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    chunk_size: int,
+    activation_dtype: torch.dtype,
+) -> None:
+    if chunk_size <= 0:
+        raise ValueError(f"chunk_size must be positive, got {chunk_size}.")
+
+    padded_seq_len = ((seq_len + chunk_size - 1) // chunk_size) * chunk_size
+    num_chunks = padded_seq_len // chunk_size
+    batch_heads = batch_size * num_v_heads
+    padded_positions = batch_heads * padded_seq_len
+
+    # Fused LA keeps one semantic op, but the chunk rule still needs scratch for
+    # k_beta/v_beta, fp32 normalized/cast vectors, decay vectors, and triangular
+    # chunk matrices. Count this as HBM round-trip traffic, not as persistent IO.
+    activation_token_scratch = _bytes(padded_positions * (head_k_dim + head_v_dim), activation_dtype)
+    fp32_vector_scratch = _bytes(
+        padded_positions * (2 * head_k_dim + head_v_dim + _LA_CHUNK_FP32_SCALAR_VECTOR_WIDTH),
+        torch.float32,
+    )
+    fp32_matrix_scratch = _bytes(
+        batch_heads * num_chunks * chunk_size * chunk_size * _LA_CHUNK_FP32_MATRIX_SCRATCH_BUFFERS,
+        torch.float32,
+    )
+    properties.memory_readwrite_bytes += (
+        _LA_CHUNK_ACTIVATION_TOKEN_SCRATCH_ROUND_TRIPS * activation_token_scratch
+        + _LA_CHUNK_FP32_VECTOR_SCRATCH_ROUND_TRIPS * fp32_vector_scratch
+        + _LA_SCRATCH_ROUND_TRIP_TRAFFIC_FACTOR * fp32_matrix_scratch
+    )
+    properties.extra_static_cost_count += _LA_CHUNK_EXTRA_STATIC_KERNELS
+
+
+def _add_linear_attention_state_memory(
+    properties: OpInvokeInfo.PerformanceProperties,
+    batch_size: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    state_read_passes: int,
+    state_write_passes: int,
+) -> None:
+    if state_read_passes < 0 or state_write_passes < 0:
+        raise ValueError(
+            "Linear attention state pass counts must be non-negative, "
+            f"got read={state_read_passes}, write={state_write_passes}."
+        )
+    state_bytes = _linear_attention_state_bytes(batch_size, num_v_heads, head_k_dim, head_v_dim)
+    properties.memory_read_bytes += state_read_passes * state_bytes
+    properties.memory_write_bytes += state_write_passes * state_bytes
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_apply_padding_mask.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return op_invoke_info.get_memory_access_properties()
+
+
+def _la_causal_conv_properties(op_invoke_info: OpInvokeInfo, include_state: bool) -> OpInvokeInfo.PerformanceProperties:
+    mixed_qkv = op_invoke_info.args[0]
+    conv_kernel_size = op_invoke_info.args[1]
+    batch_size = mixed_qkv.size(0)
+    conv_dim = mixed_qkv.size(1)
+    seq_len = mixed_qkv.size(2)
+    properties = op_invoke_info.get_memory_access_properties()
+
+    conv_gp_ops = batch_size * seq_len * conv_dim * conv_kernel_size * 2 + _elementwise_silu_ops(
+        batch_size * seq_len * conv_dim
+    )
+    _accumulate_compute_ops(properties, mixed_qkv.dtype, gp_ops=conv_gp_ops)
+    properties.memory_read_bytes += _bytes(conv_dim * conv_kernel_size, mixed_qkv.dtype)
+    if include_state:
+        properties.memory_readwrite_bytes += _bytes(batch_size * conv_dim * conv_kernel_size, mixed_qkv.dtype)
+    return properties
+
+
 def _linear_attention_common_ops(
     batch_size: int,
     seq_len: int,
@@ -564,6 +666,138 @@ def _(
         mma_ops=attn_mma_ops,
         gp_ops=fp32_common_gp_ops + fp32_gp_ops,
     )
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_causal_conv.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return _la_causal_conv_properties(op_invoke_info, include_state=False)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_causal_conv_update.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return _la_causal_conv_properties(op_invoke_info, include_state=True)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_fused_gdn_gating.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    query = op_invoke_info.args[0]
+    b = op_invoke_info.args[2]
+    a_log = op_invoke_info.args[4]
+    dt_bias = op_invoke_info.args[5]
+    num_v_heads = op_invoke_info.args[6]
+
+    batch_size = query.size(0)
+    seq_len = query.size(1)
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={4, 5})
+    properties.memory_read_bytes += _bytes(num_v_heads, a_log.dtype)
+    properties.memory_read_bytes += _bytes(num_v_heads, dt_bias.dtype)
+
+    num_gate_elements = batch_size * seq_len * num_v_heads
+    beta_gp_ops = _elementwise_sigmoid_ops(num_gate_elements)
+    g_gp_ops = num_v_heads + num_gate_elements * (1 + _elementwise_softplus_ops(1) + 1 + 1)
+    _accumulate_compute_ops(properties, b.dtype, gp_ops=beta_gp_ops)
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=g_gp_ops)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    query = op_invoke_info.args[0]
+    value = op_invoke_info.args[2]
+    chunk_size = op_invoke_info.args[5]
+    state_read_passes = op_invoke_info.args[6]
+    state_write_passes = op_invoke_info.args[7]
+
+    batch_size = query.size(0)
+    seq_len = query.size(1)
+    num_v_heads = query.size(2)
+    head_k_dim = query.size(3)
+    head_v_dim = value.size(3)
+
+    properties = op_invoke_info.get_memory_access_properties()
+    _add_linear_attention_state_memory(
+        properties,
+        batch_size,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        state_read_passes,
+        state_write_passes,
+    )
+    _add_linear_attention_chunk_scratch_memory(
+        properties,
+        batch_size,
+        seq_len,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        chunk_size,
+        query.dtype,
+    )
+    attn_mma_ops, hidden_gp_ops, fp32_gp_ops = _linear_attention_chunk_gated_delta_ops(
+        batch_size,
+        seq_len,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        chunk_size,
+    )
+    _accumulate_compute_ops(properties, query.dtype, gp_ops=hidden_gp_ops)
+    _accumulate_compute_ops(properties, torch.float32, mma_ops=attn_mma_ops, gp_ops=fp32_gp_ops)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_recurrent_gated_delta_rule.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    query = op_invoke_info.args[0]
+    value = op_invoke_info.args[2]
+    state_read_passes = op_invoke_info.args[5]
+    state_write_passes = op_invoke_info.args[6]
+
+    batch_size = query.size(0)
+    seq_len = query.size(1)
+    num_v_heads = query.size(2)
+    head_k_dim = query.size(3)
+    head_v_dim = value.size(3)
+
+    properties = op_invoke_info.get_memory_access_properties()
+    _add_linear_attention_state_memory(
+        properties,
+        batch_size,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+        state_read_passes,
+        state_write_passes,
+    )
+    recurrent_mma_ops, hidden_gp_ops, fp32_gp_ops = _linear_attention_recurrent_gated_delta_ops(
+        batch_size,
+        seq_len,
+        num_v_heads,
+        head_k_dim,
+        head_v_dim,
+    )
+    _accumulate_compute_ops(properties, query.dtype, gp_ops=hidden_gp_ops)
+    _accumulate_compute_ops(properties, torch.float32, mma_ops=recurrent_mma_ops, gp_ops=fp32_gp_ops)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.linear_attn_gated_rmsnorm.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    core_attn_out = op_invoke_info.args[0]
+    batch_size = core_attn_out.size(0)
+    seq_len = core_attn_out.size(1)
+    num_v_heads = core_attn_out.size(2)
+    head_v_dim = core_attn_out.size(3)
+    num_rows = batch_size * seq_len * num_v_heads
+    num_elements = num_rows * head_v_dim
+
+    properties = op_invoke_info.get_memory_access_properties()
+    gated_rmsnorm_gp_ops = (
+        _rmsnorm_ops(num_rows, head_v_dim) + num_elements + _elementwise_silu_ops(num_elements) + num_elements
+    )
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=gated_rmsnorm_gp_ops)
     return properties
 
 
@@ -1434,8 +1668,10 @@ def _(
     return properties
 
 
-def _estimate_static_cost(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile) -> float:
-    perf_properties = op_invoke_info.get_perf_properties()
+def _estimate_static_cost(
+    perf_properties: OpInvokeInfo.PerformanceProperties,
+    device_profile: DeviceProfile,
+) -> float:
     for dtype, compute_ops in perf_properties.compute_ops.items():
         if _get_device_ops_for_dtype(device_profile.mma_ops, dtype) is None:
             continue
@@ -1505,7 +1741,12 @@ def _estimate_default(op_invoke_info: OpInvokeInfo, device_profile: DeviceProfil
     result = _estimate_default_without_static_cost(op_invoke_info, device_profile)
     if result.execution_time_s == 0:
         return result
-    result.execution_time_s += _estimate_static_cost(op_invoke_info, device_profile)
+    perf_properties = op_invoke_info.get_perf_properties()
+    static_cost_time_s = _estimate_static_cost(perf_properties, device_profile) * (
+        1 + perf_properties.extra_static_cost_count
+    )
+    result.execution_time_s += static_cost_time_s
+    result.statistics["static_cost_time_s"] = static_cost_time_s
     return result
 
 

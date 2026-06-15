@@ -217,6 +217,8 @@ class ParallelConfig:
     moe_tensor_parallel_size: Optional[int] = None
     moe_data_parallel_size: int = 1
     ulysses_size: int = 1
+    vision_tensor_parallel_size: int = 1
+    vision_data_parallel_size: Optional[int] = None
 
     def has_attn_tp(self) -> bool:
         return self.tensor_parallel_size > 1
@@ -233,8 +235,17 @@ class ParallelConfig:
     def has_ep(self) -> bool:
         return self.expert_parallel_size > 1
 
+    def has_vision_tp(self) -> bool:
+        return self.vision_tensor_parallel_size > 1
+
     def __post_init__(self) -> None:
-        self._normalize_embedding_parallel()
+        if self.vision_tensor_parallel_size < 1:
+            raise ValueError(f"vision_tensor_parallel_size must be at least 1, got {self.vision_tensor_parallel_size}")
+        if self.vision_tensor_parallel_size > self.world_size:
+            raise ValueError(
+                f"vision_tensor_parallel_size ({self.vision_tensor_parallel_size}) "
+                f"must not exceed world_size ({self.world_size})"
+            )
         if self.data_parallel_size is None:
             self.data_parallel_size = self.world_size // self.tensor_parallel_size // self.pipeline_parallel_size
 
@@ -299,6 +310,21 @@ class ParallelConfig:
             raise ValueError(
                 f"lmhead_tensor_parallel_size ({self.lmhead_tensor_parallel_size}) * "
                 f"lmhead_data_parallel_size ({self.lmhead_data_parallel_size}) * "
+                f"pipeline_parallel_size ({self.pipeline_parallel_size}) "
+                f"must equal world_size ({self.world_size})"
+            )
+
+        if self.vision_data_parallel_size is None:
+            self.vision_data_parallel_size = (
+                self.world_size // self.vision_tensor_parallel_size // self.pipeline_parallel_size
+            )
+        if (
+            self.vision_tensor_parallel_size * self.vision_data_parallel_size * self.pipeline_parallel_size
+            != self.world_size
+        ):
+            raise ValueError(
+                f"vision_tensor_parallel_size ({self.vision_tensor_parallel_size}) * "
+                f"vision_data_parallel_size ({self.vision_data_parallel_size}) * "
                 f"pipeline_parallel_size ({self.pipeline_parallel_size}) "
                 f"must equal world_size ({self.world_size})"
             )

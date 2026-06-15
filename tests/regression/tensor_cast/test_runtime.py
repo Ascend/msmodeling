@@ -9,6 +9,8 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
+from tensor_cast.layers.parallel_linear import ColumnParallelLinear
+from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tensor_cast.performance_model import _estimate_dsa_indexer_breakdown
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel, OpBoundClassifier
 from tensor_cast.performance_model.base import PerformanceModel
@@ -224,6 +226,189 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         )
         assert_close(self, actual_execution_time, 5.0e-6, rtol=0.05)
 
+    def test_linear_attn_chunk_rule_includes_scratch_memory_and_extra_static(self):
+        batch_size, seq_len, num_heads, head_dim = 1, 65, 4, 16
+        query = torch.randn(batch_size, seq_len, num_heads, head_dim, device="meta", dtype=torch.float16)
+        key = torch.randn(batch_size, seq_len, num_heads, head_dim, device="meta", dtype=torch.float16)
+        value = torch.randn(batch_size, seq_len, num_heads, head_dim, device="meta", dtype=torch.float16)
+        beta = torch.randn(batch_size, seq_len, num_heads, device="meta", dtype=torch.float16)
+        g = torch.randn(batch_size, seq_len, num_heads, device="meta", dtype=torch.float32)
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule(query, key, value, beta, g, 64, 0, 1)
+
+        self.assertEqual(len(runtime.event_list), 1)
+        properties = runtime.event_list[0].op_invoke_info.get_perf_properties()
+        self.assertGreater(properties.memory_readwrite_bytes, 0)
+        self.assertGreater(properties.extra_static_cost_count, 0)
+
+    def test_linear_attn_causal_conv_eager(self):
+        batch_size, conv_dim, seq_len = 1, 1536, 8
+        conv_kernel_size = 4
+        mixed_qkv = torch.randn(batch_size, conv_dim, seq_len, device="meta", dtype=torch.float16)
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = torch.ops.tensor_cast.linear_attn_causal_conv(mixed_qkv, conv_kernel_size)
+
+        self.assertEqual(out.shape, (batch_size, conv_dim, seq_len))
+        self.assertEqual(len(runtime.event_list), 1)
+        properties = runtime.event_list[0].op_invoke_info.get_perf_properties()
+        self.assertGreater(properties.memory_read_bytes, 0)
+        self.assertGreater(properties.memory_write_bytes, 0)
+        # linear_attn_causal_conv does NOT include state memory
+        self.assertEqual(properties.memory_readwrite_bytes, 0)
+
+    def test_linear_attn_causal_conv_update_eager(self):
+        batch_size, conv_dim, seq_len = 1, 1536, 1
+        conv_kernel_size = 4
+        mixed_qkv = torch.randn(batch_size, conv_dim, seq_len, device="meta", dtype=torch.float16)
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = torch.ops.tensor_cast.linear_attn_causal_conv_update(mixed_qkv, conv_kernel_size)
+
+        self.assertEqual(out.shape, (batch_size, conv_dim, seq_len))
+        self.assertEqual(len(runtime.event_list), 1)
+        properties = runtime.event_list[0].op_invoke_info.get_perf_properties()
+        self.assertGreater(properties.memory_read_bytes, 0)
+        self.assertGreater(properties.memory_write_bytes, 0)
+        # linear_attn_causal_conv_update includes state memory
+        self.assertGreater(properties.memory_readwrite_bytes, 0)
+
+    def test_linear_attn_apply_padding_mask_eager(self):
+        batch_size, seq_len, hidden_size = 2, 8, 256
+        hidden_states = torch.randn(batch_size, seq_len, hidden_size, device="meta", dtype=torch.float16)
+        attention_mask = torch.ones(batch_size, 1, 1, seq_len, device="meta")
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = torch.ops.tensor_cast.linear_attn_apply_padding_mask(hidden_states, attention_mask)
+
+        self.assertEqual(out.shape, (batch_size, seq_len, hidden_size))
+        self.assertEqual(len(runtime.event_list), 1)
+
+    def test_linear_attn_fused_gdn_gating_eager(self):
+        batch_size, seq_len, num_k_heads, head_k_dim = 1, 4, 4, 16
+        num_v_heads = 4
+        query = torch.randn(batch_size, seq_len, num_k_heads, head_k_dim, device="meta", dtype=torch.float16)
+        key = torch.randn(batch_size, seq_len, num_k_heads, head_k_dim, device="meta", dtype=torch.float16)
+        b = torch.randn(batch_size, seq_len, num_v_heads, device="meta", dtype=torch.float16)
+        a = torch.randn(batch_size, seq_len, num_v_heads, device="meta", dtype=torch.float16)
+        a_log = torch.randn(num_v_heads, device="meta", dtype=torch.float32)
+        dt_bias = torch.randn(num_v_heads, device="meta", dtype=torch.float32)
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            query_out, key_out, beta, g = torch.ops.tensor_cast.linear_attn_fused_gdn_gating(
+                query, key, b, a, a_log, dt_bias, num_v_heads
+            )
+
+        expected_shape = (batch_size, seq_len, num_v_heads, head_k_dim)
+        self.assertEqual(query_out.shape, expected_shape)
+        self.assertEqual(key_out.shape, expected_shape)
+        self.assertEqual(beta.shape, (batch_size, seq_len, num_v_heads))
+        self.assertEqual(g.shape, (batch_size, seq_len, num_v_heads))
+        self.assertEqual(len(runtime.event_list), 1)
+
+    def test_linear_attn_recurrent_gated_delta_rule_eager(self):
+        batch_size, seq_len, num_heads, head_dim = 1, 1, 4, 16
+        query = torch.randn(batch_size, seq_len, num_heads, head_dim, device="meta", dtype=torch.float16)
+        key = torch.randn(batch_size, seq_len, num_heads, head_dim, device="meta", dtype=torch.float16)
+        value = torch.randn(batch_size, seq_len, num_heads, head_dim, device="meta", dtype=torch.float16)
+        beta = torch.randn(batch_size, seq_len, num_heads, device="meta", dtype=torch.float16)
+        g = torch.randn(batch_size, seq_len, num_heads, device="meta", dtype=torch.float32)
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = torch.ops.tensor_cast.linear_attn_recurrent_gated_delta_rule(query, key, value, beta, g, 1, 1)
+
+        self.assertEqual(out.shape, (batch_size, seq_len, num_heads, head_dim))
+        self.assertEqual(len(runtime.event_list), 1)
+        properties = runtime.event_list[0].op_invoke_info.get_perf_properties()
+        # State memory read/write should be present
+        self.assertGreater(properties.memory_read_bytes, 0)
+        self.assertGreater(properties.memory_write_bytes, 0)
+
+    def test_linear_attn_gated_rmsnorm_eager(self):
+        batch_size, seq_len, num_heads, head_dim = 1, 8, 4, 16
+        core_attn_out = torch.randn(batch_size, seq_len, num_heads, head_dim, device="meta", dtype=torch.float16)
+        z = torch.randn(batch_size, seq_len, num_heads, head_dim, device="meta", dtype=torch.float16)
+        weight = torch.randn(head_dim, device="meta", dtype=torch.float32)
+        eps = 1e-6
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = torch.ops.tensor_cast.linear_attn_gated_rmsnorm(core_attn_out, z, weight, eps)
+
+        self.assertEqual(out.shape, (batch_size, seq_len, num_heads, head_dim))
+        self.assertEqual(len(runtime.event_list), 1)
+
+    def test_extra_static_cost_count_combines(self):
+        p1 = OpInvokeInfo.PerformanceProperties()
+        p1.extra_static_cost_count = 3
+        p2 = OpInvokeInfo.PerformanceProperties()
+        p2.extra_static_cost_count = 5
+        p1.combine(p2)
+        self.assertEqual(p1.extra_static_cost_count, 8)
+
+    def test_qwen3_5_linear_attention_with_padding_mask(self):
+        user_config = UserInputConfig(
+            model_id="Qwen/Qwen3.5-397B-A17B",
+            tp_size=16,
+            world_size=16,
+            ep_size=16,
+            do_compile=False,
+            num_hidden_layers_override=1,
+            quantize_linear_action=QuantizeLinearAction.DISABLED,
+        )
+        model = build_model(user_config)
+        linear_attn = model.unwrap().language_model.layers[0].linear_attn
+        hidden_states = torch.randn(1, 8, model.hidden_size, device="meta")
+        attention_mask = torch.ones(1, 1, 1, 8, device="meta")
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = linear_attn(hidden_states, attention_mask=attention_mask)
+
+        self.assertEqual(out.shape, hidden_states.shape)
+        op_names = {str(event.op_invoke_info.func) for event in runtime.event_list}
+        self.assertIn("tensor_cast.linear_attn_apply_padding_mask.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_chunk_gated_delta_rule.default", op_names)
+
     def test_qwen3_5_linear_attention_uses_local_tp_heads(self):
         user_config = UserInputConfig(
             model_id="Qwen/Qwen3.5-397B-A17B",
@@ -232,6 +417,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             ep_size=16,
             do_compile=False,
             num_hidden_layers_override=1,
+            quantize_linear_action=QuantizeLinearAction.DISABLED,
         )
         model = build_model(user_config)
         linear_attn = model.unwrap().language_model.layers[0].linear_attn
@@ -247,8 +433,92 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
 
         self.assertEqual(out.shape, hidden_states.shape)
         self.assertEqual(getattr(linear_attn, "tensor_cast_tp_size", None), 16)
-        self.assertEqual(runtime.event_list[0].op_invoke_info.args[3], 1)
-        self.assertEqual(runtime.event_list[0].op_invoke_info.args[4], 4)
+        op_names = {str(event.op_invoke_info.func) for event in runtime.event_list}
+        self.assertIn("tensor_cast.linear_attn_fused_gdn_gating.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_chunk_gated_delta_rule.default", op_names)
+
+        hidden_states = torch.randn(1, 1, model.hidden_size, device="meta")
+        cache_position = torch.tensor([8], dtype=torch.long, device="cpu")
+        cache_position.tensor_cast_query_lens = (1,)
+        cache_position.tensor_cast_is_decode = (True,)
+        cache_position.tensor_cast_has_previous_state = True
+
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = linear_attn(hidden_states, cache_position=cache_position)
+
+        self.assertEqual(out.shape, hidden_states.shape)
+        op_names = {str(event.op_invoke_info.func) for event in runtime.event_list}
+        self.assertIn("tensor_cast.linear_attn_causal_conv_update.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_recurrent_gated_delta_rule.default", op_names)
+        self.assertNotIn("tensor_cast.linear_attn_chunk_gated_delta_rule.default", op_names)
+
+        decoder_layer = model.unwrap().language_model.layers[0]
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = decoder_layer(
+                hidden_states,
+                position_embeddings=None,
+                cache_position=cache_position,
+            )
+
+        self.assertEqual(out.shape, hidden_states.shape)
+        op_names = {str(event.op_invoke_info.func) for event in runtime.event_list}
+        self.assertIn("tensor_cast.linear_attn_causal_conv_update.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_recurrent_gated_delta_rule.default", op_names)
+        self.assertNotIn("tensor_cast.linear_attn_chunk_gated_delta_rule.default", op_names)
+
+        hidden_states = torch.randn(1, 1, model.hidden_size, device="meta")
+        cache_position = torch.tensor([8], dtype=torch.long, device="cpu")
+        cache_position.tensor_cast_query_lens = (1,)
+        cache_position.tensor_cast_is_decode = (True,)
+        cache_position.tensor_cast_has_previous_state = True
+        cache_position.tensor_cast_num_mtp_tokens = 3
+
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = linear_attn(hidden_states, cache_position=cache_position)
+
+        self.assertEqual(out.shape, hidden_states.shape)
+        op_names = {str(event.op_invoke_info.func) for event in runtime.event_list}
+        self.assertIn("tensor_cast.linear_attn_causal_conv_update.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_recurrent_gated_delta_rule.default", op_names)
+        self.assertNotIn("tensor_cast.linear_attn_chunk_gated_delta_rule.default", op_names)
+
+    def test_qwen3_5_linear_attention_w8a8_reuses_quant_linear(self):
+        user_config = UserInputConfig(
+            model_id="Qwen/Qwen3.5-397B-A17B",
+            tp_size=16,
+            world_size=16,
+            ep_size=16,
+            do_compile=False,
+            num_hidden_layers_override=1,
+            quantize_linear_action=QuantizeLinearAction.W8A8_STATIC,
+        )
+        model = build_model(user_config)
+        linear_attn = model.unwrap().language_model.layers[0].linear_attn
+        hidden_states = torch.randn(1, 8, model.hidden_size, device="meta")
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = linear_attn(hidden_states)
+
+        self.assertEqual(out.shape, hidden_states.shape)
+        op_names = {str(event.op_invoke_info.func) for event in runtime.event_list}
+        self.assertIn("tensor_cast.quantize.default", op_names)
+        self.assertIn("tensor_cast.static_quant_linear.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_chunk_gated_delta_rule.default", op_names)
+        self.assertNotIn("tensor_cast.linear_attention.default", op_names)
 
     def test_qwen3_5_linear_attention_rejects_invalid_tp_size(self):
         user_config = UserInputConfig(
@@ -258,6 +528,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             ep_size=16,
             do_compile=False,
             num_hidden_layers_override=1,
+            quantize_linear_action=QuantizeLinearAction.DISABLED,
         )
 
         with self.assertRaises(ValueError) as cm:
@@ -265,6 +536,57 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
 
         self.assertIn("num_k_heads=16", str(cm.exception))
         self.assertIn("tp_size=32", str(cm.exception))
+
+    def test_qwen3_5_vision_tp_defaults_to_unsharded(self):
+        user_config = UserInputConfig(
+            model_id="Qwen/Qwen3.5-27B",
+            tp_size=2,
+            world_size=2,
+            do_compile=False,
+            num_hidden_layers_override=1,
+            quantize_linear_action=QuantizeLinearAction.DISABLED,
+        )
+
+        model = build_model(user_config)
+        vision_attn = model.unwrap().visual.blocks[0].attn
+
+        self.assertEqual(model.parallel_group_manager.vision_tp_group.world_size, 1)
+        self.assertEqual(vision_attn.num_heads, 16)
+        self.assertNotIsInstance(vision_attn.qkv, ColumnParallelLinear)
+
+    def test_qwen3_5_vision_tp_can_be_enabled_explicitly(self):
+        user_config = UserInputConfig(
+            model_id="Qwen/Qwen3.5-27B",
+            tp_size=2,
+            vision_tp_size=2,
+            world_size=2,
+            do_compile=False,
+            num_hidden_layers_override=1,
+            quantize_linear_action=QuantizeLinearAction.DISABLED,
+        )
+
+        model = build_model(user_config)
+        vision_attn = model.unwrap().visual.blocks[0].attn
+
+        self.assertEqual(model.parallel_group_manager.vision_tp_group.world_size, 2)
+        self.assertEqual(vision_attn.num_heads, 8)
+        self.assertIsInstance(vision_attn.qkv, ColumnParallelLinear)
+
+    def test_qwen3_5_mtp_lm_head_uses_lmhead_tp_plan(self):
+        user_config = UserInputConfig(
+            model_id="Qwen/Qwen3.5-27B",
+            tp_size=2,
+            world_size=2,
+            num_mtp_tokens=1,
+            do_compile=False,
+            num_hidden_layers_override=1,
+            quantize_linear_action=QuantizeLinearAction.DISABLED,
+        )
+
+        model = build_model(user_config)
+
+        self.assertIsInstance(model._inner.mtp.lm_head, ColumnParallelLinear)
+        self.assertEqual(model._inner.mtp.lm_head.tp_group.world_size, 2)
 
     def test_dsa_indexer_breakdown_helper_bf16(self):
         hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)

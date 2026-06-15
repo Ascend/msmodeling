@@ -266,6 +266,12 @@ def main():
         help="Whether to have the current device host the external shared experts",
     )
     parser.add_argument(
+        "--vision-tp-size",
+        type=check_positive_integer,
+        default=1,
+        help="The tp size for vision modules. Default 1 keeps vision unsharded even when --tp-size > 1.",
+    )
+    parser.add_argument(
         "--performance-model",
         nargs="+",
         default=["analytic"],

@@ -79,6 +79,7 @@ class UserInputConfig:
     """Place external shared experts on the host (CPU) side instead of device.
     Mutually exclusive with ``enable_shared_expert_tp``.
     """
+    vision_tp_size: int = 1
     block_size: int = 128
     remote_source: str = RemoteSource.huggingface
     image_batch_size: Optional[int] = None
@@ -93,6 +94,7 @@ class UserInputConfig:
 
     def __post_init__(self):
         self._validate_device()
+        self._validate_vision_parallelism()
         self._normalize_performance_model()
         self._normalize_word_embedding_tp()
 
@@ -105,6 +107,19 @@ class UserInputConfig:
     def _validate_device(self):
         if self.device not in DeviceProfile.all_device_profiles:
             raise ValueError(f"Device '{self.device}' not recognized.")
+
+    def _validate_vision_parallelism(self):
+        if self.vision_tp_size < 1:
+            raise ValueError(f"vision_tp_size must be at least 1, got {self.vision_tp_size}")
+        if self.vision_tp_size > self.world_size:
+            raise ValueError(
+                f"vision_tp_size ({self.vision_tp_size}) must not exceed num_devices/world_size ({self.world_size})"
+            )
+        if self.world_size % self.vision_tp_size != 0:
+            raise ValueError(
+                f"num_devices/world_size ({self.world_size}) must be divisible by vision_tp_size "
+                f"({self.vision_tp_size})"
+            )
 
     def _normalize_word_embedding_tp(self):
         if self.word_embedding_tp is None or self.word_embedding_tp == "":
@@ -155,6 +170,7 @@ class UserInputConfig:
             print(f"image_batch_size: {self.image_batch_size}")
             print(f"image_height: {self.image_height}")
             print(f"image_width: {self.image_width}")
+            print(f"vision_tp_size: {self.vision_tp_size}")
         print("---------------------\n")
 
     def get_parallel_config(self) -> ParallelConfig:
@@ -172,6 +188,7 @@ class UserInputConfig:
             moe_tensor_parallel_size=self.moe_tp_size,
             moe_data_parallel_size=self.moe_dp_size,
             embedding_parallel=self.word_embedding_tp,
+            vision_tensor_parallel_size=self.vision_tp_size,
             pipeline_parallel_size=self.pp_size,
         )
 

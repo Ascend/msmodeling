@@ -8,6 +8,7 @@ from tensor_cast.core.input_generator import (
     RequestInfo,
     _is_v4_model,
     _layer_uses_sparse_attention_indexer,
+    _load_preprocessor_pixel_limits,
     _resolve_decoder_layers,
     _resolve_indexer_cache_dtype,
     _resolve_main_kv_cache_dtype,
@@ -18,6 +19,7 @@ from tensor_cast.core.input_generator import (
     generate_inputs,
     generate_inputs_varlen,
     get_sparse_attention_indexer_cache_info,
+    resize_image,
 )
 from tensor_cast.layers.deepseek_v4 import DeepseekV4SparseAttention
 from tensor_cast.device import TEST_DEVICE
@@ -79,6 +81,124 @@ def test_varlen_selected_token_indices_for_lmhead(qwen3_32b_lmhead_attention_tra
     with Runtime(perf_model, machine_config), torch.no_grad():
         outputs = model.forward(**inputs)
     assert outputs.shape == output_shape
+
+
+@patch("tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info", return_value={})
+@patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
+def test_varlen_qwen3_5_cache_position_starts_at_context(_mock_kv_cache, _mock_sparse_cache):
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="qwen3_5"),
+            mtp_config=None,
+        )
+    )
+    requests = [
+        RequestInfo(query_len=1, seq_len=2199, is_decode=True, context_length=2198),
+        RequestInfo(query_len=2, seq_len=12, is_decode=True, context_length=10),
+    ]
+
+    inputs = generate_inputs_varlen(model, requests, 128)
+
+    assert torch.equal(inputs["cache_position"], torch.tensor([2198, 10, 11], dtype=torch.long))
+    assert inputs["cache_position"].tensor_cast_query_lens == (1, 2)
+    assert inputs["cache_position"].tensor_cast_is_decode == (True, True)
+    assert inputs["cache_position"].tensor_cast_has_previous_state
+
+
+@patch("tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info", return_value={})
+@patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
+def test_qwen3_5_decode_mtp_cache_position_metadata(_mock_kv_cache, _mock_sparse_cache):
+    model = SimpleNamespace(
+        is_vl_model=False,
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="qwen3_5"),
+            mtp_config=SimpleNamespace(num_mtp_layers=3),
+            parallel_config=SimpleNamespace(data_parallel_size=1),
+        ),
+    )
+
+    inputs = generate_inputs(
+        model,
+        [
+            RequestInfo(
+                query_len=4,
+                seq_len=2202,
+                concurrency=21,
+                is_decode=True,
+                context_length=2198,
+            )
+        ],
+    )
+
+    cache_position = inputs["cache_position"]
+    assert torch.equal(cache_position, torch.arange(2198, 2198 + 84, dtype=torch.long))
+    assert cache_position.tensor_cast_query_lens == (4,) * 21
+    assert cache_position.tensor_cast_is_decode == (True,) * 21
+    assert cache_position.tensor_cast_has_previous_state
+    assert cache_position.tensor_cast_base_decode_query_len == 1
+    assert cache_position.tensor_cast_num_mtp_tokens == 3
+    assert cache_position.tensor_cast_effective_decode_steps == 4
+
+
+def test_resize_image_uses_local_preprocessor_config(tmp_path):
+    _load_preprocessor_pixel_limits.cache_clear()
+    (tmp_path / "preprocessor_config.json").write_text(
+        '{"size": {"shortest_edge": 65536, "longest_edge": 16777216}}',
+        encoding="utf-8",
+    )
+
+    resized_height, resized_width = resize_image(
+        str(tmp_path),
+        "qwen3_5",
+        1080,
+        1920,
+        patch_size=16,
+        merge_size=2,
+        temporal_patch_size=2,
+    )
+
+    _load_preprocessor_pixel_limits.cache_clear()
+    assert (resized_height, resized_width) == (1088, 1920)
+
+
+def test_read_preprocessor_config_invalid_json_returns_none(tmp_path):
+    _load_preprocessor_pixel_limits.cache_clear()
+    (tmp_path / "preprocessor_config.json").write_text("not valid json", encoding="utf-8")
+
+    with patch("tensor_cast.core.input_generator.logger") as mock_logger:
+        from tensor_cast.core.input_generator import _read_preprocessor_config
+
+        result = _read_preprocessor_config(tmp_path / "preprocessor_config.json")
+        mock_logger.debug.assert_called_once()
+
+    assert result is None
+
+
+def test_read_preprocessor_config_missing_file_returns_none(tmp_path):
+    _load_preprocessor_pixel_limits.cache_clear()
+
+    from tensor_cast.core.input_generator import _read_preprocessor_config
+
+    result = _read_preprocessor_config(tmp_path / "nonexistent.json")
+    assert result is None
+
+
+def test_resolve_local_preprocessor_config_non_dir_returns_none():
+    _load_preprocessor_pixel_limits.cache_clear()
+
+    from tensor_cast.core.input_generator import _resolve_local_preprocessor_config
+
+    result = _resolve_local_preprocessor_config("not/a/real/path")
+    assert result is None
+
+
+def test_load_preprocessor_pixel_limits_no_config_json_returns_none(tmp_path):
+    _load_preprocessor_pixel_limits.cache_clear()
+
+    # Directory exists but has no preprocessor_config.json
+    min_px, max_px = _load_preprocessor_pixel_limits(str(tmp_path))
+    assert min_px is None
+    assert max_px is None
 
 
 _DSA_INDEXER_CACHE_QUERY_LEN = 32

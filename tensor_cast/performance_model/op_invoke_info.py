@@ -33,6 +33,8 @@ class OpInvokeInfo:
         """Write-only bytes"""
         memory_readwrite_bytes: int = 0
         """Read-write bytes"""
+        extra_static_cost_count: int = 0
+        """Extra static cost multiplier for decomposed ops (e.g. chunk delta rule kernel launches)"""
 
         def combine(self, other: "OpInvokeInfo.PerformanceProperties", compute_only=False):
             for dtype, compute_ops in other.compute_ops.items():
@@ -44,6 +46,7 @@ class OpInvokeInfo:
                 self.memory_read_bytes += other.memory_read_bytes
                 self.memory_write_bytes += other.memory_write_bytes
                 self.memory_readwrite_bytes += other.memory_readwrite_bytes
+                self.extra_static_cost_count += other.extra_static_cost_count
 
     def __init__(self, func, args, kwargs, out, cache_key=None):
         self.func = func

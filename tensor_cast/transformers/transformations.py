@@ -435,14 +435,20 @@ def patch_moe(
 
 def _shard_model_visual_by_tp_helper(model: "ModelWrapperBase"):
     """Helper for visual sharding."""
-    tp_size = model.parallel_group_manager.tp_group.world_size
+    vision_tp_group = getattr(model.parallel_group_manager, "vision_tp_group", model.parallel_group_manager.tp_group)
+    tp_size = vision_tp_group.world_size
     visual_layers_path = get_visual_layers_path(model.hf_config.model_type)
     if tp_size <= 1 or visual_layers_path is None:
         return
     pattern = f"{visual_layers_path}.*.attn"
     for name, module in model._inner.named_modules():
         if fnmatch.fnmatchcase(strip_module_name(name), pattern) and hasattr(module, "qkv"):
-            assert module.num_heads % tp_size == 0
+            if module.num_heads % tp_size != 0:
+                raise ValueError(
+                    "Vision attention TP requires vision_tp_size to divide num_heads exactly, "
+                    f"but got module={strip_module_name(name)}, num_heads={module.num_heads}, "
+                    f"vision_tp_size={tp_size}."
+                )
             module.num_heads = module.num_heads // tp_size
 
 
@@ -460,6 +466,7 @@ def shard_model_by_tp(
         o_proj_tp_group = self.parallel_group_manager.o_proj_tp_group
         mlp_tp_group = self.parallel_group_manager.mlp_tp_group
         lmhead_tp_group = self.parallel_group_manager.lmhead_tp_group
+        vision_tp_group = self.parallel_group_manager.vision_tp_group
         moe_tp_group = self.parallel_group_manager.moe_tp_group
 
         def get_tp_plan():
@@ -531,6 +538,71 @@ def shard_model_by_tp(
                 if mla_cls is not None:
                     tp_plan.update(mla_cls.build_o_proj_tp_plan_extras(prefix, params, config_info))
 
+            model_profile = get_model_profile(self.hf_config.model_type)
+            if model_profile is not None and model_profile.model_family == "qwen3_5":
+                linear_num_key_heads = getattr(config_info, "linear_num_key_heads", None)
+                linear_num_value_heads = getattr(config_info, "linear_num_value_heads", None)
+                linear_key_head_dim = getattr(config_info, "linear_key_head_dim", None)
+                linear_value_head_dim = getattr(config_info, "linear_value_head_dim", None)
+                if None in (
+                    linear_num_key_heads,
+                    linear_num_value_heads,
+                    linear_key_head_dim,
+                    linear_value_head_dim,
+                ):
+                    raise ValueError("Qwen3.5 linear attention TP plan requires linear attention config fields.")
+                if linear_key_head_dim != linear_value_head_dim:
+                    raise ValueError(
+                        "Qwen3.5 linear attention TP plan requires linear_key_head_dim to equal "
+                        f"linear_value_head_dim, but got {linear_key_head_dim} and {linear_value_head_dim}."
+                    )
+                if linear_num_key_heads % tp_group.world_size != 0:
+                    raise ValueError(
+                        "Qwen3.5 linear attention TP plan requires tp_size to divide "
+                        f"linear_num_key_heads, but got {linear_num_key_heads} and {tp_group.world_size}."
+                    )
+                if linear_num_value_heads % tp_group.world_size != 0:
+                    raise ValueError(
+                        "Qwen3.5 linear attention TP plan requires tp_size to divide "
+                        f"linear_num_value_heads, but got {linear_num_value_heads} and {tp_group.world_size}."
+                    )
+
+                linear_attn_col_params = {
+                    "tp_group": tp_group,
+                    "global_tp_group": tp_group,
+                }
+                qkv_head_num = 2 * linear_num_key_heads + linear_num_value_heads
+                for prefix in layer_prefixes:
+                    tp_plan.update(
+                        {
+                            tp_plan_module_path(prefix, "linear_attn.in_proj_qkv"): (
+                                COLWISE_LINEAR,
+                                {**linear_attn_col_params, "head_num": qkv_head_num},
+                            ),
+                            tp_plan_module_path(prefix, "linear_attn.in_proj_z"): (
+                                COLWISE_LINEAR,
+                                {**linear_attn_col_params, "head_num": linear_num_value_heads},
+                            ),
+                            tp_plan_module_path(prefix, "linear_attn.in_proj_b"): (
+                                COLWISE_LINEAR,
+                                {**linear_attn_col_params, "head_num": linear_num_value_heads},
+                            ),
+                            tp_plan_module_path(prefix, "linear_attn.in_proj_a"): (
+                                COLWISE_LINEAR,
+                                {**linear_attn_col_params, "head_num": linear_num_value_heads},
+                            ),
+                            tp_plan_module_path(prefix, "linear_attn.out_proj"): (
+                                ROWWISE_LINEAR,
+                                {
+                                    "tp_group": o_proj_tp_group,
+                                    "global_tp_group": tp_group,
+                                    "head_num": linear_num_value_heads,
+                                    "reduce_output": True,
+                                },
+                            ),
+                        }
+                    )
+
             params = {
                 "tp_group": mlp_tp_group,
                 "global_tp_group": tp_group,
@@ -544,10 +616,10 @@ def shard_model_by_tp(
                     }
                 )
             visual_layers_path = get_visual_layers_path(self.hf_config.model_type)
-            if visual_layers_path is not None:
+            if visual_layers_path is not None and vision_tp_group.world_size > 1:
                 params = {
-                    "tp_group": tp_group,
-                    "global_tp_group": tp_group,
+                    "tp_group": vision_tp_group,
+                    "global_tp_group": vision_tp_group,
                 }
                 tp_plan.update(
                     {
@@ -560,8 +632,8 @@ def shard_model_by_tp(
                     tp_plan[key] = (parallel_type, params)
 
                 params = {
-                    "tp_group": mlp_tp_group,
-                    "global_tp_group": tp_group,
+                    "tp_group": vision_tp_group,
+                    "global_tp_group": vision_tp_group,
                 }
                 visual_mlp_linear = get_visual_mlp_linear(self.hf_config.model_type)
                 for key, parallel_type in visual_mlp_linear.items():
@@ -645,6 +717,8 @@ def shard_model_by_tp(
                 "gather_output": True,
             }
             tp_plan.update({"lm_head": (COLWISE_LINEAR, params)})
+            if self.model_config.mtp_config is not None:
+                tp_plan.update({"mtp.lm_head": (COLWISE_LINEAR, params)})
             return tp_plan
 
         return {"tp_plan": get_tp_plan()}

@@ -44,6 +44,7 @@ _INT_OPTIONS = {
     "pp_size",
     "query_length",
     "tp_size",
+    "vision_tp_size",
 }
 
 _FLOAT_OPTIONS = {
