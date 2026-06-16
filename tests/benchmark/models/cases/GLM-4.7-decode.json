@@ -80,7 +80,7 @@
     },
     {
       "name": "aten.mm.default",
-      "total_time_s": 0.005435,
+      "total_time_s": 0.001527,
       "num_calls": 96
     },
     {
@@ -110,8 +110,8 @@
     },
     {
       "name": "tensor_cast.all_gather.default",
-      "total_time_s": 0.001578,
-      "num_calls": 93
+      "total_time_s": 0.001893,
+      "num_calls": 96
     },
     {
       "name": "aten.cat.default",

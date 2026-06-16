@@ -79,29 +79,34 @@
       "num_calls": 128
     },
     {
-      "name": "tensor_cast.all_reduce.default",
-      "total_time_s": 0.056699,
-      "num_calls": 58
-    },
-    {
       "name": "tensor_cast.attention.default",
-      "total_time_s": 0.039259999999999996,
+      "total_time_s": 0.058733,
       "num_calls": 91
     },
     {
       "name": "aten.addmm.default",
-      "total_time_s": 0.014714000000000001,
+      "total_time_s": 0.028848,
       "num_calls": 116
     },
     {
       "name": "aten.add.Tensor",
-      "total_time_s": 0.010208,
+      "total_time_s": 0.013092,
       "num_calls": 184
     },
     {
       "name": "tensor_cast.swiglu.default",
       "total_time_s": 0.009767,
       "num_calls": 64
+    },
+    {
+      "name": "aten.mul.Tensor",
+      "total_time_s": 0.008316,
+      "num_calls": 119
+    },
+    {
+      "name": "aten._to_copy.default",
+      "total_time_s": 0.005995,
+      "num_calls": 112
     },
     {
       "name": "tensor_cast.rms_norm.default",
@@ -112,11 +117,6 @@
       "name": "tensor_cast.add_rms_norm2.default",
       "total_time_s": 0.0052699999999999995,
       "num_calls": 64
-    },
-    {
-      "name": "aten.mul.Tensor",
-      "total_time_s": 0.004468,
-      "num_calls": 119
     }
   ]
 }
