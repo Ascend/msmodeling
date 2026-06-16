@@ -209,7 +209,8 @@ General Options:
                         Device profile(s) to evaluate. One or more registered DeviceProfile names.
                         Supported values: TEST_DEVICE, ATLAS_800_A2_376T_64G, ATLAS_800_A2_313T_64G,
                         ATLAS_800_A2_280T_64G, ATLAS_800_A2_280T_64G_PCIE, ATLAS_800_A2_280T_32G_PCIE,
-                        ATLAS_800_A3_752T_128G_DIE, ATLAS_800_A3_560T_128G_DIE.
+                        ATLAS_800_A3_752T_128G_DIE, ATLAS_800_A3_560T_128G_DIE,
+                        ATLAS_800_A3_560T_128G_DIE_ROCE, ATLAS_350_425T_112G, ATLAS_350_425T_84G.
                         Multiple values enable cross-hardware comparison tables.
                         Duplicate names are removed; input order is preserved.
                         If omitted, defaults to TEST_DEVICE. (default: TEST_DEVICE)

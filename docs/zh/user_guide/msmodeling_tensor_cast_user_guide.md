@@ -161,6 +161,9 @@ Total time for analytic: 29.350s
 - `ATLAS_800_A2_280T_32G_PCIE`
 - `ATLAS_800_A3_752T_128G_DIE`
 - `ATLAS_800_A3_560T_128G_DIE`
+- `ATLAS_800_A3_560T_128G_DIE_ROCE`
+- `ATLAS_350_425T_112G`
+- `ATLAS_350_425T_84G`
 
 ### 自定义设备类型
 
@@ -176,7 +179,7 @@ Total time for analytic: 29.350s
 
 ```text
 usage: text_generate.py [-h]
-                        [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE}]
+                        [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
                         [--num-devices NUM_DEVICES] [--reserved-memory-gb RESERVED_MEMORY_GB] [--log-level {debug,info,warning,error,critical}] --num-queries NUM_QUERIES --query-length QUERY_LENGTH
                         [--context-length CONTEXT_LENGTH] [--decode] [--num-mtp-tokens NUM_MTP_TOKENS] [--disable-repetition] [--compile] [--compile-allow-graph-break]
                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}] [--quantize-lmhead] [--mxfp4-group-size MXFP4_GROUP_SIZE]
@@ -200,7 +203,7 @@ Run a simulated LLM inference pass and dump the perf result.
 
 ```text
 usage: video_generate.py [-h]
-                         [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE}]
+                         [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
                          --batch-size BATCH_SIZE --seq-len SEQ_LEN [--chrome-trace CHROME_TRACE] [--height HEIGHT] [--width WIDTH] [--frame-num FRAME_NUM] [--sample-step SAMPLE_STEP]
                          [--log-level {debug,info,warning,error,critical}] [--dtype {float16,float32,bfloat16}]
                          [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}] [--use-cfg] [--world-size WORLD_SIZE]
