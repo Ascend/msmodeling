@@ -2037,6 +2037,173 @@ class TestUpdateCompareTableByMode:
         assert not df.empty
 
 
+class TestUpdateCompareTableByModeExtended:
+    """Extended tests for update_compare_table_by_mode function."""
+
+    def test_compare_table_with_total_time_mode(self) -> None:
+        """Test with Total Time mode."""
+        breakdown = [
+            {"name": "op1", "category": "Linear", "analytic_total_us": 5000, "device": "D1"},
+            {"name": "op2", "category": "Linear", "analytic_total_us": 3000, "device": "D1"},
+            {"name": "op1", "category": "Linear", "analytic_total_us": 4000, "device": "D2"},
+        ]
+        df = update_compare_table_by_mode(breakdown, mode="Total Time", top_n=10)
+        assert not df.empty
+
+    def test_compare_table_with_top_n_filtering(self) -> None:
+        """Test top N filtering."""
+        breakdown = [
+            {"name": f"op{i}", "category": "Linear", "analytic_total_us": i * 1000, "device": "D1"}
+            for i in range(1, 11)
+        ]
+        df = update_compare_table_by_mode(breakdown, mode="Total Time", top_n=5)
+        assert len(df) == 5
+
+    def test_compare_table_with_average_time_mode(self) -> None:
+        """Test with Avg Time mode."""
+        breakdown = [
+            {"name": "op1", "category": "Linear", "analytic_total_us": 5000, "analytic_avg_us": 100, "device": "D1"},
+            {"name": "op2", "category": "Linear", "analytic_total_us": 3000, "analytic_avg_us": 200, "device": "D1"},
+        ]
+        df = update_compare_table_by_mode(breakdown, mode="Avg Time", top_n=10)
+        assert not df.empty
+
+    def test_compare_table_with_multiple_devices(self) -> None:
+        """Test with multiple devices."""
+        breakdown = [
+            {"name": "op1", "category": "Linear", "analytic_total_us": 5000, "device": "D1"},
+            {"name": "op1", "category": "Linear", "analytic_total_us": 3000, "device": "D2"},
+            {"name": "op2", "category": "Linear", "analytic_total_us": 2000, "device": "D1"},
+        ]
+        df = update_compare_table_by_mode(breakdown, mode="Total Time", top_n=10)
+        assert "D1" in df.columns
+        assert "D2" in df.columns
+
+
+class TestOptimizerParetoChartExtended:
+    """Extended tests for _optimizer_pareto_chart function."""
+
+    def test_pareto_chart_with_multiple_candidates_same_rank(self) -> None:
+        """Test with multiple candidates having the same rank."""
+        df = pd.DataFrame(
+            [
+                {"ttft_ms": 100, "throughput_token_s": 1000, "rank": 1},
+                {"ttft_ms": 150, "throughput_token_s": 800, "rank": 1},
+                {"ttft_ms": 200, "throughput_token_s": 500, "rank": 2},
+            ]
+        )
+        result = _optimizer_pareto_chart(df, "Device1")
+        assert result is not None
+
+    def test_pareto_chart_with_varied_ranks(self) -> None:
+        """Test with candidates having different ranks."""
+        df = pd.DataFrame(
+            [
+                {"ttft_ms": 100, "throughput_token_s": 1000, "rank": 1},
+                {"ttft_ms": 120, "throughput_token_s": 900, "rank": 2},
+                {"ttft_ms": 150, "throughput_token_s": 700, "rank": 3},
+                {"ttft_ms": 200, "throughput_token_s": 500, "rank": 4},
+            ]
+        )
+        result = _optimizer_pareto_chart(df, "Device1")
+        assert result is not None
+
+    def test_pareto_chart_with_missing_device(self) -> None:
+        """Test with missing device column."""
+        df = pd.DataFrame(
+            [
+                {"ttft_ms": 100, "throughput_token_s": 1000},
+                {"ttft_ms": 200, "throughput_token_s": 500},
+            ]
+        )
+        result = _optimizer_pareto_chart(df, "Device1")
+        assert result is not None
+
+
+class TestOptimizerCandidateRowsExtended:
+    """Extended tests for _optimizer_candidate_rows_from_records function."""
+
+    def test_candidate_rows_with_standard_mode(self) -> None:
+        """Test with standard optimizer mode candidates."""
+        records = [
+            {
+                "model_id": "model1",
+                "device": "D1",
+                "top_configs": [
+                    {"parallel": "TP=4 | PP=1", "batch_size": 32, "concurrency": 1, "rank": 1},
+                    {"parallel": "TP=8 | DP=2", "batch_size": 64, "concurrency": 2, "rank": 2},
+                ],
+            }
+        ]
+        result = _optimizer_candidate_rows_from_records(records)
+        assert len(result) == 2
+
+    def test_candidate_rows_with_pd_ratio_mode(self) -> None:
+        """Test with PD Ratio mode candidates."""
+        records = [
+            {
+                "model_id": "model1",
+                "device": "D1",
+                "top_configs": [
+                    {
+                        "pd_ratio": 0.5,
+                        "d_parallel": "DP=2",
+                        "d_batch_size": 16,
+                        "d_concurrency": 1,
+                        "rank": 1,
+                    },
+                    {
+                        "pd_ratio": 0.3,
+                        "d_parallel": "TP=4 | DP=1",
+                        "d_batch_size": 32,
+                        "d_concurrency": 2,
+                        "rank": 2,
+                    },
+                ],
+            }
+        ]
+        result = _optimizer_candidate_rows_from_records(records)
+        assert len(result) == 2
+
+    def test_candidate_rows_empty_list(self) -> None:
+        """Test with empty records."""
+        result = _optimizer_candidate_rows_from_records([])
+        assert result == []
+
+    def test_candidate_rows_with_missing_fields(self) -> None:
+        """Test with candidates missing required fields."""
+        records = [
+            {
+                "model_id": "model1",
+                "device": "D1",
+                "top_configs": [
+                    {"parallel": "TP=4", "batch_size": 32},  # Missing concurrency
+                    {"parallel": "TP=8"},  # Missing batch_size and concurrency
+                ],
+            }
+        ]
+        result = _optimizer_candidate_rows_from_records(records)
+        # Candidates with missing fields should be skipped
+        assert len(result) == 0
+
+    def test_candidate_rows_with_multiple_records(self) -> None:
+        """Test with multiple records."""
+        records = [
+            {
+                "model_id": "model1",
+                "device": "D1",
+                "top_configs": [{"parallel": "TP=4", "batch_size": 32, "concurrency": 1, "rank": 1}],
+            },
+            {
+                "model_id": "model2",
+                "device": "D2",
+                "top_configs": [{"parallel": "TP=8", "batch_size": 64, "concurrency": 2, "rank": 1}],
+            },
+        ]
+        result = _optimizer_candidate_rows_from_records(records)
+        assert len(result) == 2
+
+
 class TestCategorizeOpExtended:
     """Extended tests for _categorize_op function."""
 

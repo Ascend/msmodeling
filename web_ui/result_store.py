@@ -23,6 +23,7 @@ def _resolve_log_path(path_str: str) -> Path:
 
 
 def _extract_optimizer_top1_from_log(raw_log: str) -> dict[str, Any]:
+    """Extract top 1 configuration from standard optimizer log (8-column table)."""
     if not raw_log:
         return {}
     raw_log = ANSI_RE.sub("", raw_log)
@@ -42,6 +43,93 @@ def _extract_optimizer_top1_from_log(raw_log: str) -> dict[str, Any]:
         "best_parallel": m.group(6).strip(),
         "best_batch_size": int(m.group(7)),
     }
+
+
+def _extract_pd_ratio_top1_from_log(raw_log: str) -> dict[str, Any]:
+    """Extract top 1 configuration from PD Ratio mode log (15-column table)."""
+    if not raw_log:
+        return {}
+    raw_log = ANSI_RE.sub("", raw_log)
+
+    # Try to extract from the "Overall Best Configuration" section first
+    # This section has explicit key-value pairs
+    result = {}
+
+    # Extract PD Ratio
+    pd_match = re.search(r"PD Ratio:\s+([0-9.]+)", raw_log)
+    if pd_match:
+        result["pd_ratio"] = float(pd_match.group(1))
+
+    # Extract Prefill QPS and TTFT
+    p_qps_match = re.search(r"Prefill QPS:\s+([0-9.]+)", raw_log)
+    if p_qps_match:
+        result["p_qps"] = float(p_qps_match.group(1))
+    ttft_match = re.search(r"TTFT:\s+([0-9.]+)\s*ms", raw_log)
+    if ttft_match:
+        result["best_ttft_ms"] = float(ttft_match.group(1))
+
+    # Extract Decode QPS and TPOT
+    d_qps_match = re.search(r"Decode QPS:\s+([0-9.]+)", raw_log)
+    if d_qps_match:
+        result["d_qps"] = float(d_qps_match.group(1))
+    tpot_match = re.search(r"TPOT:\s+([0-9.]+)\s*ms", raw_log)
+    if tpot_match:
+        result["best_tpot_ms"] = float(tpot_match.group(1))
+
+    # Extract Balanced QPS - this is the key metric for best_throughput
+    balanced_match = re.search(r"Balanced[^:]*:\s+([0-9.]+)", raw_log)
+    if balanced_match:
+        balanced_qps = float(balanced_match.group(1))
+        result["balanced_qps"] = balanced_qps
+
+    # Extract Decode parallel info (used for best_parallel)
+    d_parallel_match = re.search(r"D Parallel:\s*([^,\n]+)", raw_log)
+    if d_parallel_match:
+        result["best_parallel"] = d_parallel_match.group(1).strip()
+
+    # Extract batch sizes and concurrency
+    p_batch_match = re.search(r"P Batch:\s*(\d+)", raw_log)
+    if p_batch_match:
+        result["p_batch_size"] = int(p_batch_match.group(1))
+    d_batch_match = re.search(r"D Batch:\s*(\d+)", raw_log)
+    if d_batch_match:
+        result["best_batch_size"] = int(d_batch_match.group(1))
+    d_concurrency_match = re.search(r"D Concurrency:\s*(\d+)", raw_log)
+    if d_concurrency_match:
+        result["best_concurrency"] = int(d_concurrency_match.group(1))
+
+    # If we have the key fields, return the result
+    if result.get("best_throughput") is not None:
+        return result
+
+    # Fallback: try to parse from the PD Ratio table (15 columns)
+    # Table header: | Top | PD Ratio | Balanced QPS | P QPS | D QPS | TTFT | TPOT | P Parallel | D Parallel | P Devices/Instance | D Devices/Instance | P Batch Size | D Batch Size | P Concurrency | D Concurrency |
+    pattern = re.compile(
+        r"^\|\s*1\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*"
+        r"\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|"
+        r"\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|$",
+        flags=re.MULTILINE,
+    )
+    m = pattern.search(raw_log)
+    if m:
+        balanced_qps = float(m.group(2))
+        return {
+            "pd_ratio": float(m.group(1)),
+            "balanced_qps": balanced_qps,
+            "p_qps": float(m.group(3)),
+            "d_qps": float(m.group(4)),
+            "best_ttft_ms": float(m.group(5)),
+            "best_tpot_ms": float(m.group(6)),
+            "best_parallel": m.group(8).strip(),
+            "prefill_devices_per_instance": int(m.group(9)),
+            "decode_devices_per_instance": int(m.group(10)),
+            "p_batch_size": int(m.group(11)),
+            "best_batch_size": int(m.group(12)),
+            "p_concurrency": int(m.group(13)),
+            "best_concurrency": int(m.group(14)),
+        }
+
+    return {}
 
 
 def _infer_optimizer_no_result_reason_from_params(params: dict[str, Any]) -> str:
@@ -74,20 +162,52 @@ def _enrich_optimizer_summary(
     if isinstance(top_rows, list) and top_rows:
         top1 = top_rows[0]
         if isinstance(top1, dict):
-            summary.setdefault("best_parallel", top1.get("parallel"))
-            summary.setdefault("best_batch_size", top1.get("batch_size"))
-            summary.setdefault("best_concurrency", top1.get("concurrency"))
-            summary.setdefault("best_throughput", top1.get("throughput_token_s"))
-            summary.setdefault("best_ttft_ms", top1.get("ttft_ms"))
-            summary.setdefault("best_tpot_ms", top1.get("tpot_ms"))
+            # For PD Ratio mode, fields have different names
+            is_pd_ratio = top1.get("pd_ratio") is not None
+            if is_pd_ratio:
+                # PD Ratio mode uses different field names
+                if top1.get("d_parallel") and summary.get("best_parallel") in (None, ""):
+                    summary["best_parallel"] = top1.get("d_parallel")
+                if top1.get("d_batch_size") and summary.get("best_batch_size") in (None, ""):
+                    summary["best_batch_size"] = top1.get("d_batch_size")
+                if top1.get("d_concurrency") and summary.get("best_concurrency") in (None, ""):
+                    summary["best_concurrency"] = top1.get("d_concurrency")
+                # throughput_token_s is used in PD Ratio mode
+                if top1.get("throughput_token_s") and summary.get("best_throughput") in (None, ""):
+                    summary["best_throughput"] = top1.get("throughput_token_s")
+            else:
+                # Standard mode
+                if top1.get("parallel") and summary.get("best_parallel") in (None, ""):
+                    summary["best_parallel"] = top1.get("parallel")
+                if top1.get("batch_size") and summary.get("best_batch_size") in (None, ""):
+                    summary["best_batch_size"] = top1.get("batch_size")
+                if top1.get("concurrency") and summary.get("best_concurrency") in (None, ""):
+                    summary["best_concurrency"] = top1.get("concurrency")
+                if top1.get("throughput_token_s") and summary.get("best_throughput") in (None, ""):
+                    summary["best_throughput"] = top1.get("throughput_token_s")
+            # Common fields
+            if top1.get("ttft_ms") and summary.get("best_ttft_ms") in (None, ""):
+                summary["best_ttft_ms"] = top1.get("ttft_ms")
+            if top1.get("tpot_ms") and summary.get("best_tpot_ms") in (None, ""):
+                summary["best_tpot_ms"] = top1.get("tpot_ms")
 
     if (
         any(summary.get(k) in (None, "") for k in ["best_parallel", "best_batch_size", "best_concurrency"])
         or not top_rows
     ):
-        summary.update(
-            {k: v for k, v in _extract_optimizer_top1_from_log(raw_log).items() if summary.get(k) in (None, "")}
+        # Detect if this is PD Ratio mode
+        is_pd_ratio_mode = (
+            params.get("enable_optimize_prefill_decode_ratio", False)
+            or "PD Ratio" in raw_log
+            or summary.get("pd_ratio") is not None
+            or (top_rows and top_rows[0].get("pd_ratio") is not None)
         )
+        # Use the appropriate extraction function based on mode
+        if is_pd_ratio_mode:
+            extracted = _extract_pd_ratio_top1_from_log(raw_log)
+        else:
+            extracted = _extract_optimizer_top1_from_log(raw_log)
+        summary.update({k: v for k, v in extracted.items() if summary.get(k) in (None, "")})
 
     summary.setdefault("ttft_limits_ms", params.get("ttft_limits"))
     summary.setdefault("tpot_limits_ms", params.get("tpot_limits"))

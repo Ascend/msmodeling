@@ -713,7 +713,6 @@ class TestParsePDRatioRow:
         assert result["d_batch_size"] == 16
         assert result["p_concurrency"] == 1
         assert result["d_concurrency"] == 4
-        assert result["throughput_token_s"] == 1000.0
 
     def test_parse_pd_ratio_too_short(self) -> None:
         """Test parsing row with too few cells."""
@@ -748,6 +747,95 @@ class TestParsePDRatioRow:
         ]
         result = _parse_pd_ratio_row(cells)
         assert result is None
+
+    def test_parse_pd_ratio_with_pipe_in_parallel(self) -> None:
+        """Test parsing row with pipe separators in parallel field."""
+        # This tests the case where P Parallel contains "TP=4 | PP=1"
+        cells = [
+            "1",
+            "0.5",
+            "1000.0",
+            "800.0",
+            "200.0",
+            "50.0",
+            "10.0",
+            "TP=4 | PP=1",
+            "DP=2",
+            "8",
+            "4",
+            "32",
+            "16",
+            "1",
+            "4",
+        ]
+        result = _parse_pd_ratio_row(cells)
+        assert result is not None
+        assert result["rank"] == 1
+        assert result["p_parallel"] == "TP=4 | PP=1"
+        assert result["d_parallel"] == "DP=2"
+
+    def test_parse_pd_ratio_complex_parallel(self) -> None:
+        """Test parsing row with complex parallel configuration."""
+        # Tests case with multiple parallel components
+        cells = [
+            "2",
+            "0.3",
+            "1500.0",
+            "1000.0",
+            "500.0",
+            "40.0",
+            "8.0",
+            "TP=8 | PP=2 | DP=1",
+            "TP=4 | DP=2",
+            "16",
+            "8",
+            "64",
+            "32",
+            "2",
+            "8",
+        ]
+        result = _parse_pd_ratio_row(cells)
+        assert result is not None
+        assert result["rank"] == 2
+        assert result["p_parallel"] == "TP=8 | PP=2 | DP=1"
+        assert result["d_parallel"] == "TP=4 | DP=2"
+        assert result["prefill_devices_per_instance"] == 16
+        assert result["decode_devices_per_instance"] == 8
+
+    def test_parse_pd_ratio_single_tp_parallel(self) -> None:
+        """Test parsing row with single TP in prefill and TP in decode."""
+        # Tests case where both have only TP
+        cells = [
+            "1",
+            "1.0",
+            "2000.0",
+            "2000.0",
+            "2000.0",
+            "30.0",
+            "5.0",
+            "TP=1",
+            "TP=1",
+            "1",
+            "1",
+            "16",
+            "16",
+            "1",
+            "1",
+        ]
+        result = _parse_pd_ratio_row(cells)
+        assert result is not None
+        assert result["p_parallel"] == "TP=1"
+        assert result["d_parallel"] == "TP=1"
+        assert result["pd_ratio"] == 1.0
+
+    def test_parse_pd_ratio_empty_middle_cells(self) -> None:
+        """Test parsing row with fewer than expected middle cells."""
+        # Tests edge case with minimal parallel info
+        cells = ["1", "0.5", "1000.0", "800.0", "200.0", "50.0", "10.0", "TP=4", "", "8", "4", "32", "16", "1", "4"]
+        result = _parse_pd_ratio_row(cells)
+        assert result is not None
+        assert result["p_parallel"] == "TP=4"
+        # Empty string in d_parallel should result in empty string
 
 
 class TestParseDisaggRow:

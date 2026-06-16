@@ -1037,22 +1037,21 @@ def _optimizer_pareto_chart(candidate_df: pd.DataFrame, device: str) -> Any:
         lambda row: (f"{row.get('parallel', '-')} | B{row.get('batch_size', '-')} | C{row.get('concurrency', '-')}"),
         axis=1,
     )
+
+    # Find rank 1 (best candidate)
+    if "rank" in work_df.columns:
+        rank1_idx = work_df[work_df["rank"] == 1].index
+    else:
+        # Fallback: find best throughput
+        best_idx = work_df["throughput_token_s"].idxmax()
+        rank1_idx = [best_idx]
+
+    # Mark rank 1 as Pareto Frontier, others as Candidate Configurations
     work_df["series"] = "Candidate Configurations"
+    work_df.loc[rank1_idx, "series"] = "Pareto Frontier"
 
-    frontier_rows: list[int] = []
-    best_throughput = float("-inf")
-    ordered = work_df.sort_values(by=["ttft_ms", "throughput_token_s"], ascending=[True, False], kind="stable")
-    for idx, row in ordered.iterrows():
-        throughput = float(row.get("throughput_token_s", 0) or 0)
-        if throughput > best_throughput:
-            frontier_rows.append(idx)
-            best_throughput = throughput
-
-    frontier_df = work_df.loc[frontier_rows].copy()
-    frontier_df["series"] = "Pareto Frontier"
-    plot_df = pd.concat([work_df, frontier_df], ignore_index=True)
     return scatter_plot(
-        plot_df,
+        work_df,
         "ttft_ms",
         "throughput_token_s",
         f"Single-Device Pareto Frontier - {device}",
@@ -2435,17 +2434,52 @@ def update_op_table_from_breakdown(
     columns_or_sort: Sequence[str] | str | None = None,
     sort_by: str | None = None,
 ):
-    """Refresh operator table; supports both old and case-aware callback signatures."""
-    if isinstance(case_or_top_n, (int, float)) or case_or_top_n is None:
-        case_label = None
-        top_n = int(case_or_top_n or 20)
-        columns = top_n_or_columns if isinstance(top_n_or_columns, (list, tuple)) else None
-        effective_sort = columns_or_sort if isinstance(columns_or_sort, str) else sort_by
-    else:
+    """Refresh operator table; supports both old and case-aware callback signatures.
+
+    The function signature is ambiguous to support two calling patterns:
+    1. Case-aware: (op_breakdown, device, case_label, top_n, columns, sort_by)
+    2. Simple: (op_breakdown, device, top_n, columns, sort_by, extra_param)
+
+    We detect the pattern by checking the type of the 3rd parameter.
+    """
+    # Check if we're in case-aware mode by looking at the 3rd and 4th parameters
+    # Case-aware: 3rd is str (case), 4th is int (top_n)
+    # Simple: 3rd is int/None (top_n), 4th is list (columns)
+    is_case_mode = (
+        isinstance(case_or_top_n, str)
+        and case_or_top_n  # 3rd is non-empty string
+        and isinstance(top_n_or_columns, (int, float))  # 4th is numeric
+    )
+
+    if is_case_mode:
+        # Case-aware mode
         case_label = str(case_or_top_n)
         top_n = int(top_n_or_columns or 20)
         columns = columns_or_sort if isinstance(columns_or_sort, (list, tuple)) else None
         effective_sort = sort_by
+    else:
+        # Simple mode: 3rd param is top_n (or None), 4th param is columns, 5th param is sort_by
+        case_label = None
+        # Extract top_n from 3rd or 4th parameter
+        if isinstance(case_or_top_n, (int, float)):
+            top_n = int(case_or_top_n)
+        elif isinstance(top_n_or_columns, (int, float)):
+            top_n = int(top_n_or_columns)
+        else:
+            top_n = 20
+        # Extract columns from 4th or 5th parameter
+        if isinstance(top_n_or_columns, (list, tuple)):
+            columns = top_n_or_columns
+        elif isinstance(columns_or_sort, (list, tuple)):
+            columns = columns_or_sort
+        else:
+            columns = None
+        # Extract sort_by from 5th or 6th parameter
+        if isinstance(columns_or_sort, str) and not isinstance(columns_or_sort, (list, tuple)):
+            effective_sort = columns_or_sort
+        else:
+            effective_sort = sort_by
+
     return _op_table_from_records(op_breakdown, device, top_n, columns, effective_sort, case_label)
 
 
@@ -2905,9 +2939,17 @@ def _optimizer_candidate_rows_from_records(
         for candidate in top_configs:
             if not isinstance(candidate, dict):
                 continue
-            parallel = candidate.get("parallel")
-            batch_size = candidate.get("batch_size")
-            concurrency = candidate.get("concurrency")
+            # For PD Ratio mode, use d_parallel, d_batch_size, d_concurrency
+            # For standard mode, use parallel, batch_size, concurrency
+            is_pd_ratio = candidate.get("pd_ratio") is not None
+            if is_pd_ratio:
+                parallel = candidate.get("d_parallel")
+                batch_size = candidate.get("d_batch_size")
+                concurrency = candidate.get("d_concurrency")
+            else:
+                parallel = candidate.get("parallel")
+                batch_size = candidate.get("batch_size")
+                concurrency = candidate.get("concurrency")
             if parallel in (None, "") or batch_size in (None, "") or concurrency in (None, ""):
                 continue
             candidates.append(
@@ -2928,6 +2970,7 @@ def _optimizer_candidate_rows_from_records(
                     "ttft_ms": candidate.get("ttft_ms"),
                     "tpot_ms": candidate.get("tpot_ms"),
                     "rank": candidate.get("rank"),
+                    "pd_ratio": candidate.get("pd_ratio"),
                 }
             )
     return candidates
@@ -3648,7 +3691,8 @@ def update_compare_table_by_mode(op_breakdown: list[dict], mode: str, top_n: int
     unique_ops = list(set(top_ops_per_device))[:top_n]
 
     # Select the metric column for the chosen mode
-    if mode == "Average Time":
+    # Note: Radio choices are "Total Time" and "Avg Time" (not "Average Time")
+    if mode == "Avg Time" or mode == "Average Time":  # Support both for compatibility
         value_col = "analytic_avg_us"
     else:  # Total time
         value_col = "analytic_total_us"

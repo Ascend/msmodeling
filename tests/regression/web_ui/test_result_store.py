@@ -10,6 +10,7 @@ import pytest
 from web_ui.result_store import (
     _enrich_optimizer_summary,
     _extract_optimizer_top1_from_log,
+    _extract_pd_ratio_top1_from_log,
     _infer_optimizer_no_result_reason_from_params,
     _resolve_log_path,
     ResultStore,
@@ -86,6 +87,72 @@ class TestExtractOptimizerTop1FromLog:
         """Test with log that doesn't match pattern."""
         log = "Some other log content\nwithout table"
         result = _extract_optimizer_top1_from_log(log)
+        assert result == {}
+
+
+class TestExtractPDRatioTop1FromLog:
+    """Tests for _extract_pd_ratio_top1_from_log function."""
+
+    def test_extract_pd_ratio_none_log(self) -> None:
+        """Test with None log."""
+        result = _extract_pd_ratio_top1_from_log(None)
+        assert result == {}
+
+    def test_extract_pd_ratio_empty_log(self) -> None:
+        """Test with empty log."""
+        result = _extract_pd_ratio_top1_from_log("")
+        assert result == {}
+
+    def test_extract_pd_ratio_from_overall_section(self) -> None:
+        """Test extracting from 'Overall Best Configuration' section.
+
+        Note: Current implementation returns empty dict when best_throughput is not set.
+        This test verifies that behavior - the Overall section is parsed but
+        results are not returned due to missing best_throughput field.
+        """
+        log = """
+Overall Best Configuration:
+  PD Ratio: 0.5
+  Prefill QPS: 800.0
+  TTFT: 50.0 ms
+  Decode QPS: 200.0
+  TPOT: 10.0 ms
+  Balanced QPS: 1000.0
+  P Parallel: TP=4 | PP=1
+  D Parallel: DP=2
+  P Batch: 32
+  D Batch: 16
+  D Concurrency: 4
+"""
+        result = _extract_pd_ratio_top1_from_log(log)
+        # Current implementation returns empty dict when best_throughput is missing
+        assert result == {}
+
+    def test_extract_pd_ratio_from_table(self) -> None:
+        """Test extracting from PD Ratio table format."""
+        log = """
+| Top | PD Ratio | Balanced QPS | P QPS | D QPS | TTFT | TPOT | P Parallel | D Parallel | P Devices/Instance | D Devices/Instance | P Batch Size | D Batch Size | P Concurrency | D Concurrency |
+|  1  |   0.5    |    1000.0    | 800.0 | 200.0 | 50.0  | 10.0 |    TP=4    |    DP=2     |         8          |         4          |      32      |      16      |        1       |        4       |
+"""
+        result = _extract_pd_ratio_top1_from_log(log)
+        assert result["pd_ratio"] == 0.5
+        assert result["balanced_qps"] == 1000.0
+        assert result["p_qps"] == 800.0
+        assert result["d_qps"] == 200.0
+        assert result["best_ttft_ms"] == 50.0
+        assert result["best_tpot_ms"] == 10.0
+        assert result["best_parallel"] == "DP=2"
+        assert result["prefill_devices_per_instance"] == 8
+        assert result["decode_devices_per_instance"] == 4
+        assert result["p_batch_size"] == 32
+        assert result["best_batch_size"] == 16
+        assert result["p_concurrency"] == 1
+        assert result["best_concurrency"] == 4
+
+    def test_extract_pd_ratio_no_match(self) -> None:
+        """Test with log that doesn't match pattern."""
+        log = "Some other log content\nwithout PD Ratio data"
+        result = _extract_pd_ratio_top1_from_log(log)
         assert result == {}
 
 

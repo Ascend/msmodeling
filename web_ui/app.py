@@ -1597,7 +1597,10 @@ def launch_app(server_name: str = "127.0.0.1", server_port: int = 2345, share: b
     """Launch the application
 
     Args:
-        server_name: Bind address. Default `127.0.0.1` allows local access only.
+        server_name: Bind address. Default `127.0.0.1` for IPv4 localhost.
+                     Use `[::1]` for IPv6 localhost (Gradio requires bracket notation).
+                     For production, use `get_bind_address()` in web_ui_start.py
+                     to auto-detect the appropriate address.
         server_port: Bind port.
         share: Whether to create a public sharing link.
     """
