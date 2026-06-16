@@ -1412,6 +1412,8 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             if col_info is None:
                 return None
 
+            if pd.isna(row[col_info.avg_seq_col]):
+                return None
             csv_avg_seq = int(row[col_info.avg_seq_col])
             if csv_avg_seq < 0:
                 return None
@@ -1432,14 +1434,16 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             if tc_N != csv_N or tc_D != csv_D:
                 return None
 
-            if col_info.has_sparse and target_sparse is not None and int(row["Runtime sparse_mode"]) != target_sparse:
-                return None
-            if (
-                col_info.has_kv_heads
-                and target_kv_heads is not None
-                and int(row["Runtime num_key_value_heads"]) != target_kv_heads
-            ):
-                return None
+            if col_info.has_sparse and target_sparse is not None:
+                sparse_val = row["Runtime sparse_mode"]
+                if pd.isna(sparse_val) or int(sparse_val) != target_sparse:
+                    return None
+
+            if col_info.has_kv_heads and target_kv_heads is not None:
+                kv_heads_val = row["Runtime num_key_value_heads"]
+                if pd.isna(kv_heads_val) or int(kv_heads_val) != target_kv_heads:
+                    return None
+
             if col_info.has_layout and target_layout is not None:
                 csv_layout = str(row.get("Runtime input_layout", "")).strip()
                 if csv_layout and csv_layout != target_layout:
@@ -1927,8 +1931,10 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             rule = self._inputs_match(tc_inputs, row, kt, tc_input_count)
             if rule is None:
                 return None
-            if has_ep_col and ep_size is not None and int(row["EP Size"]) != ep_size:
-                return None
+            if has_ep_col and ep_size is not None:
+                ep_val = row["EP Size"]
+                if pd.isna(ep_val) or int(ep_val) != ep_size:
+                    return None
             csv_shapes = [list(s) for s in _parse_shape_str(str(row.get("Input Shapes", "")))]
             return Candidate(
                 latency_us=float(row[lat_col]),

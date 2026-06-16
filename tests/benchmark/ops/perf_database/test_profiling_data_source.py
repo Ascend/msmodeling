@@ -1472,6 +1472,228 @@ def test_attention_miss_no_seq_lens(attn_data_dir):
     assert result is None, "No seq_lens -> can't compute batch/seq, return None"
 
 
+def test_attention_nan_avg_seq_len(tmp_path):
+    """Attention query should return None when CSV row has NaN avg_seq_len."""
+    data_dir = tmp_path / "attn_nan"
+    data_dir.mkdir()
+
+    op_mapping = (
+        'version: "test"\n'
+        "device: TEST_DEVICE\n"
+        "operator_mappings:\n"
+        '  "tensor_cast.attention.default":\n'
+        "    kernel_type: FusedInferAttentionScore\n"
+        "    query_mode: attention_special\n"
+    )
+    (data_dir / "op_mapping.yaml").write_text(op_mapping)
+
+    csv_with_nan = (
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Duration(us),avg_seq_len\n"
+        + _make_fia_row(
+            "7000,4,128;56,128,4,128;56,128,4,128;;;;7000;;;;;;;;7000,56;;;;;;;;;;;;;;",
+            "7000,4,128;",
+            98.50,
+            "",  # Empty string will be parsed as NaN
+        )
+        + "\n"
+        + _make_fia_row(
+            "10,4,128;360,128,4,128;360,128,4,128;;;;10;;;;;;;;10,36;;;;;;;;;;;;;;",
+            "10,4,128;",
+            890.70,
+            4500,  # Valid value
+        )
+    )
+    (data_dir / "FusedInferAttentionScore.csv").write_text(csv_with_nan.strip())
+
+    ds = ProfilingDataSource(data_dir)
+
+    op_with_nan_seq = _make_op_info(
+        torch.ops.tensor_cast.attention.default,
+        [
+            torch.empty(7000, 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(56, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(56, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            torch.empty(2, 28, device="meta", dtype=torch.int32),
+            torch.empty(3, device="meta", dtype=torch.int64),
+            torch.tensor([3500, 3500], dtype=torch.int64),
+            torch.tensor([3500, 3500], dtype=torch.int64),
+        ],
+    )
+
+    result = ds.lookup(op_with_nan_seq)
+    assert result is None, "Should skip rows with NaN avg_seq_len and return None"
+
+    op_with_valid_seq = _make_op_info(
+        torch.ops.tensor_cast.attention.default,
+        [
+            torch.empty(10, 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(360, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(360, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            torch.empty(10, 36, device="meta", dtype=torch.int32),
+            torch.empty(11, device="meta", dtype=torch.int64),
+            torch.tensor([4500] * 10, dtype=torch.int64),
+            torch.tensor([1] * 10, dtype=torch.int64),
+        ],
+    )
+
+    result = ds.lookup(op_with_valid_seq)
+    assert result is not None, "Should match row with valid avg_seq_len"
+    assert abs(result.latency_us - 890.70) < 0.01
+
+
+def test_attention_nan_sparse_mode(tmp_path):
+    """Rows with NaN sparse_mode should be skipped during matching."""
+    data_dir = tmp_path / "nan_sparse"
+    data_dir.mkdir()
+    op_mapping = (
+        'version: "test"\n'
+        "device: TEST_DEVICE\n"
+        "operator_mappings:\n"
+        '  "tensor_cast.attention.default":\n'
+        "    kernel_type: FusedInferAttentionScore\n"
+        "    query_mode: attention_special\n"
+    )
+    (data_dir / "op_mapping.yaml").write_text(op_mapping)
+
+    fia_header = (
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Duration(us),avg_seq_len,Runtime sparse_mode\n"
+    )
+    csv_with_nan_sparse = (
+        fia_header
+        + _make_fia_row_with_sparse(
+            "10,4,128;360,128,4,128;360,128,4,128;;;;10;;;;;;;;10,36;;;;;;;;;;;;;;",
+            "10,4,128;",
+            100.0,
+            4500,
+            "",
+        )
+        + "\n"
+        + _make_fia_row_with_sparse(
+            "10,4,128;360,128,4,128;360,128,4,128;;;;10;;;;;;;;10,36;;;;;;;;;;;;;;",
+            "10,4,128;",
+            200.0,
+            4500,
+            "3",
+        )
+    )
+    (data_dir / "FusedInferAttentionScore.csv").write_text(csv_with_nan_sparse.strip())
+
+    ds = ProfilingDataSource(data_dir)
+
+    op = _make_op_info(
+        torch.ops.tensor_cast.attention.default,
+        [
+            torch.empty(10, 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(360, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(360, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            torch.empty(10, 36, device="meta", dtype=torch.int32),
+            torch.empty(11, device="meta", dtype=torch.int64),
+            torch.tensor([4500] * 10, dtype=torch.int64),
+            torch.tensor([1] * 10, dtype=torch.int64),
+        ],
+    )
+
+    result = ds.lookup(op)
+    assert result is not None, "Should match row with valid sparse_mode"
+    assert abs(result.latency_us - 200.0) < 0.01
+
+
+def test_attention_nan_kv_heads(tmp_path):
+    """Rows with NaN num_key_value_heads should be skipped during matching."""
+    data_dir = tmp_path / "nan_kv_heads"
+    data_dir.mkdir()
+    op_mapping = (
+        'version: "test"\n'
+        "device: TEST_DEVICE\n"
+        "operator_mappings:\n"
+        '  "tensor_cast.attention.default":\n'
+        "    kernel_type: FusedInferAttentionScore\n"
+        "    query_mode: attention_special\n"
+    )
+    (data_dir / "op_mapping.yaml").write_text(op_mapping)
+
+    fia_header = (
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Duration(us),avg_seq_len,Runtime num_key_value_heads\n"
+    )
+    csv_with_nan_kv = (
+        fia_header
+        + _make_fia_row_with_kv_heads(
+            "10,4,128;360,128,4,128;360,128,4,128;;;;10;;;;;;;;10,36;;;;;;;;;;;;;;",
+            "10,4,128;",
+            100.0,
+            4500,
+            "",
+        )
+        + "\n"
+        + _make_fia_row_with_kv_heads(
+            "10,4,128;360,128,4,128;360,128,4,128;;;;10;;;;;;;;10,36;;;;;;;;;;;;;;",
+            "10,4,128;",
+            200.0,
+            4500,
+            "4",
+        )
+    )
+    (data_dir / "FusedInferAttentionScore.csv").write_text(csv_with_nan_kv.strip())
+
+    ds = ProfilingDataSource(data_dir)
+
+    op = _make_op_info(
+        torch.ops.tensor_cast.attention.default,
+        [
+            torch.empty(10, 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(360, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(360, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            torch.empty(10, 36, device="meta", dtype=torch.int32),
+            torch.empty(11, device="meta", dtype=torch.int64),
+            torch.tensor([4500] * 10, dtype=torch.int64),
+            torch.tensor([1] * 10, dtype=torch.int64),
+        ],
+    )
+
+    result = ds.lookup(op)
+    assert result is not None, "Should match row with valid num_key_value_heads"
+    assert abs(result.latency_us - 200.0) < 0.01
+
+
+def _make_fia_row_with_sparse(q_shape_str, out_shape_str, duration, avg_seq_len, sparse_mode):
+    """Build one enriched FIA CSV row with Runtime sparse_mode column."""
+    return (
+        f'"{q_shape_str}"'
+        ',"DT_BF16;DT_BF16;DT_BF16;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;'
+        "INT64;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;"
+        "DT_UNDEFINED;DT_UNDEFINED;INT32;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;"
+        "DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;"
+        "DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;"
+        'DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED"'
+        ',"ND;ND;ND;NULL;NULL;NULL;ND;NULL;NULL;NULL;NULL;NULL;NULL;NULL;ND;'
+        'NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL"'
+        f',"""{out_shape_str}""","DT_BF16;FLOAT","ND;ND",{duration},{avg_seq_len},{sparse_mode}'
+    )
+
+
+def _make_fia_row_with_kv_heads(q_shape_str, out_shape_str, duration, avg_seq_len, kv_heads):
+    """Build one enriched FIA CSV row with Runtime num_key_value_heads column."""
+    return (
+        f'"{q_shape_str}"'
+        ',"DT_BF16;DT_BF16;DT_BF16;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;'
+        "INT64;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;"
+        "DT_UNDEFINED;DT_UNDEFINED;INT32;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;"
+        "DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;"
+        "DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED;"
+        'DT_UNDEFINED;DT_UNDEFINED;DT_UNDEFINED"'
+        ',"ND;ND;ND;NULL;NULL;NULL;ND;NULL;NULL;NULL;NULL;NULL;NULL;NULL;ND;'
+        'NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL;NULL"'
+        f',"""{out_shape_str}""","DT_BF16;FLOAT","ND;ND",{duration},{avg_seq_len},{kv_heads}'
+    )
+
+
 # --- topology_tier matching tests ---
 #
 # Test grid: [2, 4] — 2 pods, 4 devices per pod
@@ -3083,6 +3305,30 @@ class TestLookupMoe:
         result = ds.lookup(op)
         assert result is None
         assert ds.last_miss_reason == "ep_size_not_configured"
+
+    def test_ep_size_nan_skipped(self, tmp_path):
+        """Rows with NaN EP Size should be skipped during matching."""
+        data_dir = tmp_path / "nan_ep_size"
+        data_dir.mkdir()
+        (data_dir / "op_mapping.yaml").write_text(MOE_OP_MAPPING)
+        csv_with_nan_ep = """\
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,EP Size,Average Duration(us)
+"513,7168","DT_BF16","ND","513,7168","DT_BF16","ND",,100.0
+"513,7168","DT_BF16","ND","513,7168","DT_BF16","ND",16,200.0
+"""
+        (data_dir / "DispatchFFNCombine.csv").write_text(csv_with_nan_ep.strip())
+
+        ds = ProfilingDataSource(data_dir, parallel_config=_make_parallel_config(ep_size=16))
+        op = _make_op_info(
+            torch.ops.tensor_cast.dispatch_ffn_combine.default,
+            [
+                torch.empty(513, 7168, device="meta", dtype=torch.bfloat16),
+                torch.empty(513, dtype=torch.int64, device="meta"),
+            ],
+        )
+        result = ds.lookup(op)
+        assert result is not None, "Should match row with valid EP Size"
+        assert abs(result.latency_us - 200.0) < 0.01
 
     def test_shape_miss(self, dfc_data_dir):
         """Shape doesn't match any CSV row.
