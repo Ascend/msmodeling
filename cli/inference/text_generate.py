@@ -101,14 +101,18 @@ def main():
         help="Quantize all linear layers in the model from choices (currently only support symmetric quant)",
     )
     quant_group.add_argument(
-        "--quantize-backbone-linear-action",
+        "--quantize-non-expert-linear-action",
         type=QuantizeLinearAction,
         choices=list(QuantizeLinearAction),
         default=QuantizeLinearAction.DISABLED,
         help=(
-            "Override the quant type of backbone linear layers (attention, dense MLP and shared experts), "
-            "excluding routed MoE experts. Combine with --quantize-linear-action to quantize routed experts "
-            "and backbone differently, e.g. --quantize-linear-action MXFP4 --quantize-backbone-linear-action FP8"
+            "Set a separate quantization type for non-expert linear layers, such as attention projections, "
+            "dense MLP layers, and shared experts, while routed MoE experts keep the broad "
+            "--quantize-linear-action setting. In MoE models, routed experts often benefit from different "
+            "quantization settings than attention, dense MLP, and shared-expert layers; for example, "
+            "--quantize-linear-action MXFP4 "
+            "--quantize-non-expert-linear-action FP8. For non-MoE models, this parameter does not create a "
+            "separate expert/non-expert split beyond --quantize-linear-action."
         ),
     )
     quant_group.add_argument(

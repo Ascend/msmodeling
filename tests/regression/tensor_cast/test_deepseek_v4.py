@@ -28,14 +28,16 @@ from tensor_cast.layers.deepseek_v4 import (
     get_window_topk_idxs,
     get_compress_topk_idxs,
 )
+from tensor_cast.layers.quant_linear import TensorCastQuantLinear
 from tensor_cast.layers.attention import AttentionMetadataTensorCast
 from tensor_cast.layers.mla import (
     DeepseekSparseAttention,
     MultiheadLatentAttentionBase,
     _resolve_sparse_topk_limit,
 )
-from tensor_cast.model_config import MlaConfig
+from tensor_cast.model_config import LinearQuantConfig, MlaConfig
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
+from tensor_cast.quantize_utils import LinearQuantType
 
 
 def _v4_perf_props(op):
@@ -613,6 +615,24 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
         assert result.shape == hidden_states.shape
         assert cache is None
 
+    def test_w4a8_wo_a_weight_is_unpacked_before_grouped_einsum(self):
+        inner = self._create_tiny_forward_inner_module()
+        inner.wo_a = TensorCastQuantLinear(
+            inner.wo_a,
+            LinearQuantConfig(
+                quant_type=LinearQuantType.W4A8,
+                weight_scale=torch.tensor(1.0),
+            ),
+        )
+        inner.wo_a.out_features = 2
+        inner.wo_a.in_features = 4
+
+        weight = DeepseekV4SparseAttention._extract_logical_linear_weight(inner.wo_a)
+
+        assert weight.shape == (inner.wo_a.qweight.shape[0], inner.wo_a.qweight.shape[1] * 2)
+        assert inner.wo_a.qweight.shape[-1] * 2 == weight.shape[-1]
+        weight.reshape(inner.n_groups, inner.o_lora_rank, inner.num_heads * inner.head_dim // inner.n_groups)
+
 
 class TestDeepseekV4Helpers(unittest.TestCase):
     """Test V4 helper functions."""
@@ -1140,7 +1160,7 @@ class TestDeepseekV4MlaHooks(unittest.TestCase):
         params = {"tp_group": MagicMock(), "global_tp_group": MagicMock()}
         plan = DeepseekV4SparseAttention.build_o_proj_tp_plan_extras("model.layers", params, MagicMock())
         assert "model.layers.*.self_attn.wo_a" in plan
-        assert "model.layers.*.self_attn.o_proj" in plan
+        assert "model.layers.*.self_attn.o_proj" not in plan
 
     def test_v4_attention_wrapper_skips_legacy_kv_b_setup(self):
         inner = TestDeepseekV4SparseAttention()._create_mock_inner_module(ratio=4, use_indexer=True)

@@ -158,6 +158,7 @@ python -m cli.inference.text_generate <model_id> [options]
 | `num-mtp-tokens` | MTP token 数，DeepSeek 等支持 MTP 的模型可用 |
 | `prefix-cache-hit-rate` | Prefix Cache 命中率，取值 `[0,1)`，用于估计 prefill token 复用收益 |
 | `quantize-linear-action` | Linear 层量化方式，如 `W8A8_DYNAMIC`、`FP8`、`MXFP4` |
+| `quantize-non-expert-linear-action` | Non-expert Linear 层量化覆盖项，主要用于 DeepSeek V4；作用于 attention projections、dense MLP 和 shared experts；routed MoE experts 仍使用 `quantize-linear-action` |
 | `quantize-attention-action` | KV Cache / Attention 量化方式，如 `DISABLED`、`INT8`、`FP8` |
 | `image-height/image-width` | VL 图像尺寸 |
 

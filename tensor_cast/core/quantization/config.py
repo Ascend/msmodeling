@@ -64,14 +64,14 @@ def create_attention_quant_config(quantize_attention_action: QuantizeAttentionAc
 
 # MXFP4-only weight-group kwargs. They must never leak into a non-MXFP4 config:
 # LinearQuantConfig.__post_init__ would otherwise promote the activation
-# granularity to PER_GROUP (e.g. turning an FP8 backbone into per-group dynamic).
+# granularity to PER_GROUP (e.g. turning FP8 non-expert layers into per-group dynamic).
 _MXFP4_ONLY_KWARGS = ("weight_group_size", "weight_quant_granularity")
 
-# Backbone (non-routed-expert) linear layers: attention projections, dense MLP,
+# Non-expert linear layers: attention projections, dense MLP,
 # and shared experts across the model families TensorCast supports. Routed MoE
 # experts (``*.experts.<id>.*``) are intentionally excluded so they keep the
 # broad ``--quantize-linear-action`` quant type.
-_BACKBONE_LINEAR_PATTERNS = (
+_NON_EXPERT_LINEAR_PATTERNS = (
     "*.self_attn.*",
     "*.attn.qkv",
     "*.attn.proj",
@@ -112,23 +112,23 @@ def _set_linear_patterns(quant_config: QuantConfig, patterns, quantize_linear_ac
 
 def create_quant_config(
     quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.DISABLED,
-    quantize_backbone_linear_action: QuantizeLinearAction = QuantizeLinearAction.DISABLED,
+    quantize_non_expert_linear_action: QuantizeLinearAction = QuantizeLinearAction.DISABLED,
     quantize_lmhead: bool = False,
     quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED,
     **kwargs,
 ):
     quant_config = QuantConfig()
 
-    # Register the backbone override BEFORE the broad patterns. get_quant_config()
-    # returns the first matching wildcard in insertion order, so backbone-specific
+    # Register the non-expert override BEFORE the broad patterns. get_quant_config()
+    # returns the first matching wildcard in insertion order, so non-expert-specific
     # patterns must come first to override the broad action for those modules
-    # (e.g. ``--quantize-linear-action MXFP4`` for experts + backbone FP8).
-    if quantize_backbone_linear_action != QuantizeLinearAction.DISABLED:
+    # (e.g. ``--quantize-linear-action MXFP4`` for experts + non-expert FP8).
+    if quantize_non_expert_linear_action != QuantizeLinearAction.DISABLED:
         _set_linear_patterns(
             quant_config,
-            _BACKBONE_LINEAR_PATTERNS,
-            quantize_backbone_linear_action,
-            **_filter_action_kwargs(quantize_backbone_linear_action, kwargs),
+            _NON_EXPERT_LINEAR_PATTERNS,
+            quantize_non_expert_linear_action,
+            **_filter_action_kwargs(quantize_non_expert_linear_action, kwargs),
         )
 
     if quantize_linear_action != QuantizeLinearAction.DISABLED:

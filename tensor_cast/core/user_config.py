@@ -40,7 +40,7 @@ class UserInputConfig:
     graph_log_url: Optional[str] = None
     log_level: Optional[str] = None
     quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.W8A8_DYNAMIC
-    quantize_backbone_linear_action: QuantizeLinearAction = QuantizeLinearAction.DISABLED
+    quantize_non_expert_linear_action: QuantizeLinearAction = QuantizeLinearAction.DISABLED
     quantize_lmhead: bool = False
     mxfp4_group_size: int = 32
     quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED
@@ -152,8 +152,8 @@ class UserInputConfig:
                 print(f"  MXFP4 group size: {self.mxfp4_group_size}")
         else:
             print("Quantization Linear: Disabled")
-        if self.quantize_backbone_linear_action != QuantizeLinearAction.DISABLED:
-            print(f"Quantization Backbone Linear (override): {self.quantize_backbone_linear_action}")
+        if self.quantize_non_expert_linear_action != QuantizeLinearAction.DISABLED:
+            print(f"Quantization Non-Expert Linear (override): {self.quantize_non_expert_linear_action}")
         if self.quantize_attention_action != QuantizeAttentionAction.DISABLED:
             print(f"Quantization Attention: {self.quantize_attention_action}")
         else:
@@ -195,14 +195,14 @@ class UserInputConfig:
     def get_quant_config(self) -> QuantConfig:
         if (
             self.quantize_linear_action == QuantizeLinearAction.DISABLED
-            and self.quantize_backbone_linear_action == QuantizeLinearAction.DISABLED
+            and self.quantize_non_expert_linear_action == QuantizeLinearAction.DISABLED
             and self.quantize_attention_action == QuantizeAttentionAction.DISABLED
         ):
             return QuantConfig()
         extra_kwargs = {}
         linear_actions = [
             self.quantize_linear_action,
-            self.quantize_backbone_linear_action,
+            self.quantize_non_expert_linear_action,
         ]
         if QuantizeLinearAction.MXFP4 in linear_actions:
             from ..quantize_utils import QuantGranularity
@@ -213,7 +213,7 @@ class UserInputConfig:
             )
         return create_quant_config(
             self.quantize_linear_action,
-            quantize_backbone_linear_action=self.quantize_backbone_linear_action,
+            quantize_non_expert_linear_action=self.quantize_non_expert_linear_action,
             quantize_lmhead=self.quantize_lmhead,
             quantize_attention_action=self.quantize_attention_action,
             **extra_kwargs,

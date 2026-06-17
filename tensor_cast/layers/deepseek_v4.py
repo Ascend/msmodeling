@@ -20,13 +20,14 @@ from ..model_config import MlaConfig
 from ..parallel_group import ParallelGroup, ParallelGroupManager
 from ..utils import exact_division
 from .attention import AttentionMetadataBase
-from . import COLWISE_LINEAR, ROWWISE_LINEAR
+from . import COLWISE_LINEAR
 from .mla import (
     DeepseekSparseAttention,
     MultiheadLatentAttentionTensorCast,
     _resolve_sparse_topk_limit,
 )
 from .mtp import MultiTokenPredictorLayer
+from .quant_linear import TensorCastQuantLinear
 from .utils import apply_static_quant_linear, ModelWrapperBase
 
 
@@ -277,6 +278,25 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             raise AttributeError(f"Unable to resolve local out_features from {type(module).__name__}")
         return int(out_features)
 
+    @staticmethod
+    def _extract_logical_linear_weight(module: torch.nn.Module) -> torch.Tensor:
+        target = module._inner if hasattr(module, "_inner") else module
+        if isinstance(target, TensorCastQuantLinear) and target.quant_config.quant_type.name == "W4A8":
+            packed_weight = target.qweight
+            high_bits = (packed_weight >> 4).to(torch.int8) - 8
+            low_bits = (packed_weight & 0x0F).to(torch.int8) - 8
+            unpacked = torch.empty(
+                packed_weight.shape[0],
+                packed_weight.shape[1] * 2,
+                dtype=torch.int8,
+                device=packed_weight.device,
+            )
+            unpacked[:, ::2] = high_bits
+            unpacked[:, 1::2] = low_bits
+            return unpacked
+        weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(module)
+        return weight
+
     @classmethod
     def build_tp_plan_extras(cls, prefix: str, params: dict, config_info) -> dict[str, tuple[str, dict]]:
         from .mla import tp_plan_module_path
@@ -298,14 +318,6 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
 
         return {
             tp_plan_module_path(prefix, "self_attn.wo_a"): (COLWISE_LINEAR, {**dict(params), "dim": 1}),
-            tp_plan_module_path(prefix, "self_attn.o_proj"): (
-                ROWWISE_LINEAR,
-                {
-                    **dict(params),
-                    "tp_group": params["global_tp_group"],
-                    "global_tp_group": params["tp_group"],
-                },
-            ),
         }
 
     def __init__(
@@ -707,7 +719,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         # `wo_a` is already sharded by the transformation pass using the
         # dedicated o-projection TP group, so the runtime only needs to reshape
         # the local shard into per-group blocks before the grouped einsum.
-        wo_a_weight, _, _ = MultiheadLatentAttentionTensorCast.extract_qparams(self._inner.wo_a)
+        wo_a_weight = self._extract_logical_linear_weight(self._inner.wo_a)
         # MXFP4 qweight uses a packed layout (strides may be non-contiguous), so
         # use reshape instead of view when grouping for the per-group einsum.
         wo_a_grouped = wo_a_weight.reshape(self._n_local_groups, self._o_lora_rank, per_group_in_dim).to(

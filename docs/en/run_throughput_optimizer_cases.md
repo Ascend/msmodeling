@@ -188,6 +188,7 @@ Benchmark Cases Runner internally calls [Throughput Optimizer](./throughput_opti
 | `compile` | `--compile` |
 | `mode` | `--disagg` (when set to `disagg`) |
 | `quantize_linear_action` | `--quantize-linear-action` |
+| `quantize_non_expert_linear_action` | `--quantize-non-expert-linear-action` |
 | `quantize_attention_action` | `--quantize-attention-action` |
 | `tp_sizes` | `--tp-sizes` |
 | `ep_sizes` | `--ep-sizes` |
