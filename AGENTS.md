@@ -1,26 +1,20 @@
-# msmodeling Agent & Contributor Guide
+# msmodeling Agent Guide
 
-本项目使用 Claude Code 进行 AI辅助开发。本文档定义了 human contributors 和 AI agents 在 msmodeling 项目中的工作规范。
+本项目使用 Claude Code 进行 AI 辅助开发。本文档定义了 AI agents 在 msmodeling 项目中的工作规范。
 
-> **AI agents 必读**：首次在本项目中执行任务前，请完整阅读本文档。它解释了项目结构、skills 体系、代码规范和提交约定。
+> **AI agents 必读**：首次在本项目中执行任务前，请完整阅读本文档。人类贡献者规范请参见 [CONTRIBUTING.md](CONTRIBUTING.md)，本文档仅包含 Agent 专有内容。
 
 ---
 
 ## Table of Contents
 
-- [msmodeling Agent & Contributor Guide](#msmodeling-agent--contributor-guide)
-  - [项目概览](#项目概览)
-  - [Skills 体系](#skills-体系)
-  - [环境与工具链](#环境与工具链)
-    - [pre-commit](#pre-commit)
-    - [Python 规范](#python-规范)
-  - [Commit 规范](#commit-规范)
-  - [测试规范](#测试规范)
-  - [Skill 开发规范](#skill-开发规范)
-  - [代码架构注意事项](#代码架构注意事项)
-  - [项目结构](#项目结构)
-  - [快速开始](#快速开始)
-  - [Review Checklist](#review-checklist)
+- [项目概览](#项目概览)
+- [贡献规范（引用）](#贡献规范引用)
+- [Skills 体系](#skills-体系)
+- [Skill 开发规范](#skill-开发规范)
+- [代码架构注意事项](#代码架构注意事项)
+- [项目结构](#项目结构)
+- [Review Checklist](#review-checklist)
 
 ---
 
@@ -57,110 +51,18 @@ msmodeling（MindStudio Modeling）是一个全系统性能仿真与分析框架
 
 ---
 
-## 环境与工具链
+## 贡献规范（引用）
 
-### pre-commit
+以下规范的权威来源为 [CONTRIBUTING.md](CONTRIBUTING.md)，Agent 按需读取对应章节即可，无需全量加载：
 
-所有代码提交前必须通过 pre-commit 检查：
-
-```bash
-pip install pre-commit
-pre-commit install  # 只需运行一次
-```
-
-提交时自动触发（若需手动运行）：
-
-```bash
-pre-commit run --all-files
-```
-
-检查项：trailing-whitespace、end-of-file-fixer、yaml/json 格式、ruff（lint + format）、codespell、pylint、bandit、typos。
-
-> **注意**：pre-commit 的 `--fix` 标志会自动修复部分问题（如 ruff format），修复后请重新 `git add` 并提交。
-
-### Python 规范
-
-| 规范 | 要求 |
-|------|------|
-| Python 版本 | ≥ 3.10 |
-| 行长度 | ≤ 120 字符 |
-| 命名 | Classes: `PascalCase`；Functions/Methods: `snake_case`；Constants: `ALL_UPPER_CASE` |
-| 导入 | 统一在文件顶部，例外：循环导入（inline import）、懒加载、TYPE_CHECKING 包裹 |
-| Magic Numbers | 禁止，必须用命名常量 |
-| Docstrings | 多行 docstring 的闭合 `"""` 必须独占一行（`D209`） |
-| 打开文件 | 优先使用 context manager（`with open(...)` 而非 `try/finally`） |
-
-配置位于 `pre-commit/pyproject.toml`，主配置通过 `ruff` 和 `pylint` 实现。
-
----
-
-## Commit 规范
-
-遵循 **Conventional Commits** 格式：
-
-```text
-<type>: <简短描述>
-
-<详细说明（可选）>
-
-Signed-off-by: Your Name <your.email@example.com>
-```
-
-**有效 type**：
-
-- `feat`：新功能
-- `fix`：Bug 修复
-- `perf`：性能相关改动
-- `refactor`：重构（无功能变化）
-- `test`：测试相关
-- `docs`：文档相关
-- `chore`：杂项（依赖更新、CI 配置等）
-
-**推荐格式示例**：
-
-```text
-feat(device_config): 添加 ATLAS_800_A3_560T_128G_DIE profile
-
-- 新增单 die profile，算力 560T，显存 64GiB
-- 复用现有 A3 die 互联拓扑
-
-feat(skills): 新增 op_mapping SKILL
-
-- 引入六阶段并行子 Agent 工作流
-- 支持 TC op → NPU kernel 的自动化映射
-
-fix(tensor_cast): 修正 DeepSeek V3.1 MoE 专家路由逻辑
-
-- 修复 expert_indices 计算错误导致的精度问题
-- 添加回归测试
-```
-
-**强制要求**：
-
-- 所有 commits 必须 sign-off（`git commit -s`）
-- PR 从 fork 仓库提交，而非直接推送到 main
-
----
-
-## 测试规范
-
-| 测试类型 | 位置 | 执行命令 |
-|----------|------|----------|
-| Unit Tests (UT) | `tests/test_tensor_cast/`、`tests/test_skill/` 等 | `bash ./tests/run_ut.sh tensor_cast` |
-| System Tests (ST) | `tests/st/` | 通过 `pytest` 或项目 ST 框架运行 |
-
-**要求**：
-
-- 新功能必须附带对应测试
-- Bug 修复必须包含回归测试
-- UT 覆盖率新增代码应 ≥ 80%
-- NPU 专用测试标记为 `@pytest.mark.npu`（默认跳过）
-
-**跳过标记测试**：
-
-```bash
-pytest -m "not npu"  # 默认行为
-```
+| 规范 | 链接 | 要点速查 |
+|------|------|----------|
+| 环境搭建 | [CONTRIBUTING.md#3-搭建开发环境](CONTRIBUTING.md#3-搭建开发环境) | Python ≥ 3.10，使用 uv 管理 |
+| pre-commit | [CONTRIBUTING.md#5-本地测试与检查](CONTRIBUTING.md#5-本地测试与检查) | `pre-commit run --all-files` |
+| 代码规范 | [CONTRIBUTING.md#代码规范](CONTRIBUTING.md#代码规范) | 以 pre-commit 检查为准 |
+| Commit 规范 | [CONTRIBUTING.md#commit-规范](CONTRIBUTING.md#commit-规范) | Conventional Commits，必须 sign-off |
+| 测试要求 | [CONTRIBUTING.md#测试要求](CONTRIBUTING.md#测试要求) | 新功能必须附带测试，覆盖率 ≥ 80% |
+| PR 规范 | [CONTRIBUTING.md#pr-规范](CONTRIBUTING.md#pr-规范) | 功能单一，避免超大 PR |
 
 ---
 
@@ -288,51 +190,6 @@ msmodeling/
 ├── cli/                     # CLI 入口
 ├── pre-commit/              # pre-commit 配置
 └── tools/                   # 辅助工具
-```
-
----
-
-## 快速开始
-
-### 首次设置
-
-```bash
-# 1. 克隆并设置环境
-git clone https://gitcode.com/Ascend/msmodeling.git -b develop
-cd msmodeling
-pip install uv
-uv venv --python 3.10 myenv
-source myenv/bin/activate
-uv pip install -r requirements.txt
-
-# 2. 安装 pre-commit
-pip install pre-commit
-pre-commit install
-
-# 3. 验证环境
-python -c "import tensor_cast; print(tensor_cast.__version__)"
-```
-
-### 提交代码
-
-```bash
-# 1. 创建功能分支
-git checkout -b feat/your-feature-name
-
-# 2. 开发 + 测试
-python -m pytest tests/test_tensor_cast/test_xxx.py -v
-bash ./tests/run_ut.sh tensor_cast
-
-# 3. 运行 pre-commit
-pre-commit run --all-files
-
-# 4. 提交（必须 sign-off）
-git add .
-git commit -s -m "feat(module): add feature description"
-
-# 5. 推送到 fork 并创建 PR
-git remote add myfork https://github.com/YOUR_USERNAME/msmodeling.git
-git push -u myfork your-branch-name
 ```
 
 ---

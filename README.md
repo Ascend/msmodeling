@@ -66,7 +66,7 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 ## 🛠️ 贡献指南
 
-欢迎参与项目贡献。提交代码前请使用 `pre-commit` 保证代码风格一致，并确保相关单元测试通过。如有疑问，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues)。
+欢迎参与项目贡献！详细的贡献流程、代码规范、Commit 规范、测试要求等，请参见《[CONTRIBUTING.md](CONTRIBUTING.md)》。如有疑问，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues)。
 
 ## ⚖️ 相关说明
 
@@ -83,7 +83,7 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 | 即时互动（微信群） | 官方资讯（公众号） | 深度支持（助手/论坛） |
 |:--:|:--:|:--|
-| <img src="https://raw.gitcode.com/user-images/assets/8428112/368af17d-bd72-4bb6-ae94-f10fac88fd00/30be980e7fd65b2486d251b48a7999f3.jpg" width="120"><br><sub>*扫码加入技术交流群*</sub> | <img src="https://raw.gitcode.com/Ascend/msot/files/master/docs/zh/figures/readme/officialAccount.png" width="120"><br><sub>*扫码关注官方公众号*</sub> | 扫码入群并关注公众号，直达 MindStudio 用户与开发者最快捷的交流平台：<br>**快速提问：** 与社区小伙伴即时探讨技术问题<br>**掌握动态：** 第一时间获取版本发布与功能更新通知<br>**经验共享：** 与广大开发者交流最佳实践与实战心得<br><br>**更多支持渠道**：👉 昇腾助手：[![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://gitcode.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png) 👉 昇腾论坛：[![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
+| <img src="https://raw.gitcode.com/mengguangxin/docs/files/dev_0526/common/Writing_Template/figures/qr_code_wechat_work.png" width="120"><br><sub>*扫码加入技术交流群*</sub> | <img src="https://raw.gitcode.com/mengguangxin/docs/files/dev_0526/common/Writing_Template/figures/qr_code_wechat_official_account.png" width="120"><br><sub>*扫码关注官方公众号*</sub> | 扫码入群并关注公众号，直达 MindStudio 用户与开发者最快捷的交流平台：<br>**快速提问：** 与社区小伙伴即时探讨技术问题<br>**掌握动态：** 第一时间获取版本发布与功能更新通知<br>**经验共享：** 与广大开发者交流最佳实践与实战心得<br><br>**更多支持渠道**：👉 昇腾助手：[![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white)](https://gitcode.com/Ascend/msit/blob/master/docs/zh/figures/readme/xiaozhushou.png) 👉 昇腾论坛：[![Website](https://img.shields.io/badge/Website-%231e37ff?style=flat-square&logo=RSS&logoColor=white)](https://www.hiascend.com/forum/) |
 
 ## 🙏 致谢
 
