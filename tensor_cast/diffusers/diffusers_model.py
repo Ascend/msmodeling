@@ -13,6 +13,7 @@ from ..model_config import (
     DiffusersConfig,
     DiffusersTransformerConfig,
     DiffusersVaeConfig,
+    RemoteSource,
 )
 from ..parallel_group import ParallelGroup
 from ..transformers.model import ModelWrapperBase
@@ -22,6 +23,7 @@ from .cache_agent import CacheConfig, CacheState
 from .cache_agent.dit_block_cache import DiTBlockCache
 from .diffusers_utils import get_diffusers_transformer_module
 from .dit_cache_registry import get_dit_block_cache_spec, replace_blocks_in_range
+from .model_resolver import resolve_diffusers_model_path
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +33,13 @@ def build_diffusers_transformer_model(
     parallel_config: None,
     quant_config: None,
     dtype: torch.dtype,
+    remote_source: str = RemoteSource.huggingface,
+    resolved_model_path: str | None = None,
 ):
+    if resolved_model_path is None:
+        resolved_model_path = resolve_diffusers_model_path(model_id, remote_source)
     model_config = load_config_from_file(
-        model_path=model_id,
+        model_path=resolved_model_path,
         parallel_config=parallel_config,
         quant_config=quant_config,
         quant_linear_cls=TensorCastQuantLinear,
@@ -65,29 +71,28 @@ def load_config_from_file(
             config_path = os.path.abspath(config_path)
             config_path_dict[folder_name] = config_path
 
-    config_dict: Dict[str, Dict] = {}
-    for key, config_path in config_path_dict.items():
+    def _load_config(config_path: str) -> Dict:
         with open(config_path, encoding="utf-8") as f:
-            config = json.load(f)
-        config_dict[key] = config
+            return json.load(f)
 
     transformer_config_json_path = config_path_dict.get("transformer")
-    transformer_config = config_dict.get("transformer")
-    if transformer_config_json_path is None or transformer_config is None:
-        # Fall back to a single candidate that looks like a Diffusers Transformer config.
+    transformer_config = None
+    if transformer_config_json_path is not None:
+        transformer_config = _load_config(transformer_config_json_path)
+    else:
+
         def _looks_like_transformer_config(cfg: Dict) -> bool:
             class_name = cfg.get("_class_name")
             return isinstance(class_name, str) and "Transformer" in class_name
 
-        transformer_candidates: Dict[str, str] = {}
-        for folder_name, cfg in config_dict.items():
-            if _looks_like_transformer_config(cfg):
-                transformer_candidates[folder_name] = config_path_dict[folder_name]
+        transformer_candidates: Dict[str, tuple[str, Dict]] = {}
+        for folder_name, config_path in config_path_dict.items():
+            config = _load_config(config_path)
+            if _looks_like_transformer_config(config):
+                transformer_candidates[folder_name] = (config_path, config)
 
         if len(transformer_candidates) == 1:
-            folder_name, path = next(iter(transformer_candidates.items()))
-            transformer_config_json_path = path
-            transformer_config = config_dict[folder_name]
+            transformer_config_json_path, transformer_config = next(iter(transformer_candidates.values()))
         else:
             raise ValueError(
                 "No transformer/config.json found in input model path. "

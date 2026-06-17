@@ -10,14 +10,12 @@ from ..core.quantization.config import create_quant_config
 from ..core.quantization.datatypes import QuantizeLinearAction
 from ..device import DeviceProfile
 from ..diffusers.cache_agent import CacheConfig
-from ..diffusers.diffusers_attention import set_sp_group, use_custom_sdpa
-from ..diffusers.diffusers_model import build_diffusers_transformer_model
 from ..diffusers.diffusers_utils import (
     get_ulysses_split_dim,
     model_class_to_input,
     model_class_to_vae_stride,
 )
-from ..model_config import ParallelConfig, QuantConfig
+from tensor_cast.model_config import ParallelConfig, QuantConfig, RemoteSource
 from ..parallel_group import ParallelGroup
 from ..performance_model.analytic import AnalyticPerformanceModel
 from ..performance_model.memory_tracker import MemoryTracker
@@ -138,6 +136,7 @@ def run_inference(
     frame_num: int = 81,
     sample_step: int = 50,
     dtype: str = "float16",
+    remote_source: str = RemoteSource.huggingface,
     quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.W8A8_DYNAMIC,
     mxfp4_group_size: int = 32,
     use_cfg: bool = False,
@@ -149,6 +148,10 @@ def run_inference(
     cache_step_interval: int = 1,
     cache_block_range: Optional[str] = None,
 ):
+    from tensor_cast.diffusers.diffusers_attention import set_sp_group, use_custom_sdpa
+    from tensor_cast.diffusers.diffusers_model import build_diffusers_transformer_model
+    from tensor_cast.diffusers.model_resolver import resolve_diffusers_model_path
+
     if device not in DeviceProfile.all_device_profiles:
         raise ValueError(f"Device '{device}' not recognized.")
     device_profile = DeviceProfile.all_device_profiles[device]
@@ -171,12 +174,15 @@ def run_inference(
             **extra_kwargs,
         )
     dtype = str_to_dtype(dtype)
+    resolved_model_path = resolve_diffusers_model_path(model_id, remote_source)
 
     model, model_config = build_diffusers_transformer_model(
         model_id,
         parallel_config,
         quant_config,
         dtype,
+        remote_source=remote_source,
+        resolved_model_path=resolved_model_path,
     )
 
     def _duplicate_batch_tensors_for_cfg(inputs: dict, batch: int) -> dict:
@@ -212,6 +218,8 @@ def run_inference(
                 parallel_config,
                 quant_config,
                 dtype,
+                remote_source=remote_source,
+                resolved_model_path=resolved_model_path,
             )
             cache_state = cache_model.enable_dit_block_cache(CacheConfig(block_start=block_start, block_end=block_end))
             if cache_state is None:
@@ -286,7 +294,10 @@ def main():
     parser.add_argument(
         "model_id",
         type=str,
-        help="Diffusers model dir (needs transformer/config.json).",
+        help=(
+            "Diffusers model dir, remote repo id, or remote repo id plus subfolder "
+            "(needs transformer/config.json or a compatible transformer config)."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -336,6 +347,12 @@ def main():
         type=str,
         choices=["float16", "float32", "bfloat16"],
         default="float16",
+    )
+    parser.add_argument(
+        "--remote-source",
+        choices=[source.value for source in RemoteSource],
+        default=RemoteSource.huggingface.value,
+        help="The remote source for non-local Diffusers repo ids.",
     )
     parser.add_argument(
         "--quantize-linear-action",
@@ -416,6 +433,7 @@ def main():
         frame_num=args.frame_num,
         sample_step=args.sample_step,
         dtype=args.dtype,
+        remote_source=args.remote_source,
         use_cfg=args.use_cfg,
         world_size=args.world_size,
         ulysses_size=args.ulysses_size,

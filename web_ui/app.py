@@ -7,6 +7,8 @@ try:
 except ImportError:  # pragma: no cover
     gr = None
 
+from tensor_cast.model_config import RemoteSource
+
 from .callbacks import (
     preview_optimizer,
     preview_text_generate,
@@ -55,6 +57,8 @@ QUANT_LINEAR_OPTIONS = [
 QUANT_ATTENTION_OPTIONS = ["DISABLED", "INT8", "FP8"]
 APP_TITLE = "Modeling Compass"
 DEFAULT_VIDEO_MODEL_DIR = "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers"
+REMOTE_SOURCE_OPTIONS = [source.value for source in RemoteSource]
+DEFAULT_REMOTE_SOURCE = RemoteSource.huggingface.value
 APP_ICON = (
     "data:image/svg+xml,"
     "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E"
@@ -523,8 +527,8 @@ def build_app() -> gr.Blocks:
                             )
                     with gr.Row():
                         tg_remote_source = gr.Dropdown(
-                            ["huggingface", "modelscope"],
-                            value="huggingface",
+                            REMOTE_SOURCE_OPTIONS,
+                            value=DEFAULT_REMOTE_SOURCE,
                             label="remote-source",
                         )
                         tg_performance_model = gr.CheckboxGroup(
@@ -835,6 +839,11 @@ def build_app() -> gr.Blocks:
             )
             with gr.Group(elem_classes=["section-card"]):
                 vg_model = gr.Textbox(label="model-id", value=DEFAULT_VIDEO_MODEL_DIR)
+                vg_remote_source = gr.Dropdown(
+                    REMOTE_SOURCE_OPTIONS,
+                    value=DEFAULT_REMOTE_SOURCE,
+                    label="remote-source",
+                )
                 with gr.Row():
                     vg_vendor = gr.Dropdown(vendors, value=default_vendor, label="Vendor")
                     vg_device = gr.Dropdown(
@@ -1006,6 +1015,7 @@ def build_app() -> gr.Blocks:
             )
             vg_inputs = [
                 vg_model,
+                vg_remote_source,
                 vg_device,
                 vg_comp,
                 vg_batch,

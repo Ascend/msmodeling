@@ -31,27 +31,12 @@ from transformers.utils.quantization_config import (
 from .custom_model_registry import get_model_profile
 from ..layers.mla import MultiheadLatentAttentionBase
 from ..model_config import AttentionQuantConfig, ModelConfig, RemoteSource
+from ..model_hub import (
+    MODELSCOPE_WEIGHT_IGNORE_PATTERNS as _MODELSCOPE_WEIGHT_IGNORE_PATTERNS,  # noqa: F401
+    snapshot_modelscope_without_weights,
+)
 
 logger = logging.getLogger(__name__)
-
-
-# When resolving a ModelScope Hub id, only fetch files needed for config + trust_remote_code
-# Python; never pull weight shards into ~/.cache (avoids multi‑GB ._____temp / hub dirs for UT).
-_MODELSCOPE_WEIGHT_IGNORE_PATTERNS = [
-    "*.safetensors",
-    "*.safetensors.index.json",
-    "*.bin",
-    "*.pt",
-    "*.pth",
-    "*.ckpt",
-    "*.h5",
-    "*.npz",
-    "*.onnx",
-    "*.gguf",
-    "*.zip",
-    "*.tar",
-    "*.tar.gz",
-]
 
 
 def _modelscope_snapshot_config_only(model_id: str) -> str:
@@ -60,14 +45,7 @@ def _modelscope_snapshot_config_only(model_id: str) -> str:
 
     ModelScope ``AutoConfig.from_pretrained`` may otherwise sync the full repository.
     """
-    from modelscope import snapshot_download
-
-    try:
-        return snapshot_download(model_id, ignore_patterns=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS)
-    except TypeError as e:
-        if "ignore_patterns" not in str(e):
-            raise
-        return snapshot_download(model_id, ignore_file_pattern=_MODELSCOPE_WEIGHT_IGNORE_PATTERNS)
+    return snapshot_modelscope_without_weights(model_id)
 
 
 def replace_module(model, name: str, new_module: torch.nn.Module):

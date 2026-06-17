@@ -1,10 +1,13 @@
+import contextlib
 import json
 import os
 import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+from tests.helpers.cli_runner import run_module_main
 
 import pytest
 import torch
@@ -665,11 +668,134 @@ def test_dit_cache_registry_helpers_replace_and_select_blocks():
         single_transformer_blocks=[torch.nn.ReLU()],
     )
     assert len(_get_hunyuanvideo_blocks_with_setters(hunyuan)) == 2
-    assert _get_hunyuanvideo_blocks_with_setters(types.SimpleNamespace(transformer_blocks=[])) == []
 
     hunyuan15 = types.SimpleNamespace(transformer_blocks=[torch.nn.Identity()])
     assert len(_get_hunyuanvideo15_blocks_with_setters(hunyuan15)) == 1
     assert _get_hunyuanvideo15_blocks_with_setters(types.SimpleNamespace()) == []
+
+
+class TestTensorCastScriptsVideoGenerateMain(unittest.TestCase):
+    """Coverage anchor for tensor_cast.scripts.video_generate.main."""
+
+    def test_main_forwards_arguments_into_run_inference(self):
+        captured: dict[str, object] = {}
+
+        def fake_run_inference(**kwargs: object) -> None:
+            captured.update(kwargs)
+
+        with patch("tensor_cast.scripts.video_generate.run_inference", fake_run_inference):
+            result = run_module_main(
+                "tensor_cast.scripts.video_generate",
+                [
+                    "--device",
+                    "TEST_DEVICE",
+                    "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+                    "--batch-size",
+                    "1",
+                    "--seq-len",
+                    "128",
+                    "--quantize-linear-action",
+                    "DISABLED",
+                    "--sample-step",
+                    "2",
+                ],
+            )
+
+        assert result.returncode == 0, result.stderr
+        assert captured["model_id"] == "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+        assert captured["device"] == "TEST_DEVICE"
+        assert captured["batch_size"] == 1
+        assert captured["seq_len"] == 128
+        assert captured["sample_step"] == 2
+        assert captured["remote_source"] == "huggingface"
+
+
+class TestTensorCastScriptsVideoGenerateRunInference(unittest.TestCase):
+    """Coverage anchor for tensor_cast.scripts.video_generate.run_inference."""
+
+    def test_cfg_batch_concat_path_doubles_batch_dimension(self):
+        from tensor_cast.scripts import video_generate as script_mod
+
+        captured: dict[str, object] = {}
+
+        class DummyRuntime:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def __enter__(self) -> "DummyRuntime":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                pass
+
+            def table_averages(self, *args: object, **kwargs: object) -> str:
+                return "runtime table"
+
+        class DummyModel:
+            sp_group = None
+
+            def forward(self, **kwargs: object) -> torch.Tensor:
+                captured.setdefault("forward_batch_shapes", []).append(kwargs["hidden_states"].shape[0])
+                return torch.zeros([1], device="meta")
+
+        model_config = types.SimpleNamespace(
+            transformer_config=types.SimpleNamespace(
+                parallel_config=types.SimpleNamespace(ulysses_size=1),
+                model_config={"_class_name": "WanTransformer3DModel"},
+                dtype=torch.float16,
+            )
+        )
+
+        def fake_build_diffusers_transformer_model(*args: object, **kwargs: object) -> tuple[DummyModel, object]:
+            return DummyModel(), model_config
+
+        with (
+            patch.object(script_mod, "AnalyticPerformanceModel", lambda device_profile: object()),
+            patch.object(script_mod, "MemoryTracker", lambda device_profile: object()),
+            patch.object(script_mod, "Runtime", DummyRuntime),
+            patch.object(
+                script_mod,
+                "generate_diffusers_inputs",
+                lambda *args, **kwargs: {"hidden_states": torch.zeros([1, 3], device="meta")},
+            ),
+            patch.object(
+                script_mod,
+                "process_input",
+                lambda input_kwargs, model_config: (input_kwargs, None),
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "tensor_cast.diffusers.diffusers_attention": types.SimpleNamespace(
+                        set_sp_group=lambda group: None,
+                        use_custom_sdpa=contextlib.nullcontext,
+                    ),
+                    "tensor_cast.diffusers.diffusers_model": types.SimpleNamespace(
+                        build_diffusers_transformer_model=fake_build_diffusers_transformer_model
+                    ),
+                    "tensor_cast.diffusers.model_resolver": types.SimpleNamespace(
+                        resolve_diffusers_model_path=lambda model_id, remote_source: model_id
+                    ),
+                },
+            ),
+        ):
+            script_mod.run_inference(
+                device="TEST_DEVICE",
+                model_id="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+                batch_size=1,
+                seq_len=128,
+                sample_step=1,
+                use_cfg=True,
+                cfg_parallel=False,
+                quantize_linear_action=QuantizeLinearAction.DISABLED,
+            )
+
+        assert captured["forward_batch_shapes"] == [2]
+
+    def test_hunyuanvideo15_registry_helpers_select_blocks(self):
+        hunyuan15 = types.SimpleNamespace(transformer_blocks=[torch.nn.Identity()])
+        assert len(_get_hunyuanvideo15_blocks_with_setters(hunyuan15)) == 1
+        assert _get_hunyuanvideo15_blocks_with_setters(types.SimpleNamespace()) == []
 
 
 if __name__ == "__main__":

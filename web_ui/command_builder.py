@@ -4,6 +4,8 @@ import itertools
 import sys
 from typing import Any
 
+from tensor_cast.model_config import RemoteSource
+
 from .schemas import ExperimentTask
 from .utils import (
     normalize_value,
@@ -15,6 +17,8 @@ from .utils import (
 OPT_DEPLOY_PD_MIXED = "PD Aggregated"
 OPT_DEPLOY_PD_SPLIT = "PD Disaggregated"
 OPT_DEPLOY_PD_RATIO = "PD Ratio"
+DEFAULT_REMOTE_SOURCE = RemoteSource.huggingface.value
+
 OPT_DEPLOY_MODE_ALIASES = {
     "": OPT_DEPLOY_PD_MIXED,
     "Aggregation": OPT_DEPLOY_PD_MIXED,
@@ -140,7 +144,7 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "enable_sequence_parallel": _as_bool(form.get("enable_sequence_parallel", False)),
             "enable_shared_expert_tp": _as_bool(form.get("enable_shared_expert_tp", False)),
             "enable_dispatch_ffn_combine": _as_bool(form.get("enable_dispatch_ffn_combine", False)),
-            "remote_source": str(form.get("remote_source") or "huggingface"),
+            "remote_source": str(form.get("remote_source") or DEFAULT_REMOTE_SOURCE),
             "performance_model": _performance_models(form.get("performance_model")),
             "profiling_database": _optional_str(form.get("profiling_database")),
             "export_empirical_metrics": _optional_str(form.get("export_empirical_metrics")),
@@ -225,7 +229,7 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd += ["--image-height", str(params["image_height"])]
         if params["image_width"] is not None:
             cmd += ["--image-width", str(params["image_width"])]
-        if params["remote_source"] != "huggingface":
+        if params["remote_source"] != DEFAULT_REMOTE_SOURCE:
             cmd += ["--remote-source", params["remote_source"]]
         if params["reserved_memory_gb"] != 0.0:
             cmd += ["--reserved-memory-gb", str(params["reserved_memory_gb"])]
@@ -265,6 +269,7 @@ def build_video_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
     for device, qlin, ulysses in itertools.product(devices, quant_linear_list, ulysses_list):
         params = {
             "model_id": form["model_id"],
+            "remote_source": str(form.get("remote_source") or DEFAULT_REMOTE_SOURCE),
             "device": device,
             "batch_size": int(form["batch_size"]),
             "seq_len": int(form["seq_len"]),
@@ -323,6 +328,8 @@ def build_video_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd += ["--chrome-trace", params["chrome_trace"]]
         if params["log_level"] != "info":
             cmd += ["--log-level", params["log_level"]]
+        if params["remote_source"] != DEFAULT_REMOTE_SOURCE:
+            cmd += ["--remote-source", params["remote_source"]]
         thash = stable_hash({"sim_type": "video_generate", **normalize_value(params)})
         label = f"{params['model_id']} | {device} | usp={params['ulysses_size']} | {qlin}"
         tasks.append(ExperimentTask("video_generate", params, cmd, thash, label))

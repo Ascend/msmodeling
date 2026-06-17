@@ -54,6 +54,14 @@ class TestBuildApp:
             app_module.build_app()
         app_module.gr = original_gr
 
+    def test_build_app_returns_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Test that build_app constructs the Gradio Blocks tree."""
+        monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
+
+        demo = app_module.build_app()
+
+        assert demo is not None
+
 
 class TestBuildTheme:
     """Tests for build_theme function."""

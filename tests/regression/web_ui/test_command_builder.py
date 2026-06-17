@@ -589,6 +589,54 @@ class TestBuildTextGenerateTasks:
 class TestBuildVideoGenerateTasks:
     """Tests for build_video_generate_tasks function."""
 
+    def _basic_video_form(self, remote_source: str | None = None) -> dict[str, object]:
+        form: dict[str, object] = {
+            "model_id": "Wan2.2-T2V-A14B-Diffusers",
+            "device": "D1",
+            "competitor_devices": [],
+            "batch_size": 1,
+            "seq_len": 128,
+            "height": 1280,
+            "width": 720,
+            "frame_num": 129,
+            "sample_step": 50,
+            "dtype": "float16",
+            "quantize_linear_action": "W8A8_DYNAMIC",
+            "quant_linear_sweep": None,
+            "world_size": 8,
+            "ulysses_size": 4,
+            "ulysses_sweep": None,
+            "use_cfg": True,
+            "cfg_parallel": True,
+            "dit_cache": False,
+            "cache_step_range": None,
+            "cache_step_interval": None,
+            "cache_block_range": None,
+            "chrome_trace": None,
+            "log_level": "info",
+        }
+        if remote_source is not None:
+            form["remote_source"] = remote_source
+        return form
+
+    def test_build_video_task_defaults_to_huggingface_without_flag(self) -> None:
+        tasks = build_video_generate_tasks(self._basic_video_form())
+
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task.params["remote_source"] == "huggingface"
+        assert "--remote-source" not in task.command
+
+    def test_build_video_task_adds_modelscope_remote_source_flag(self) -> None:
+        tasks = build_video_generate_tasks(self._basic_video_form(remote_source="modelscope"))
+
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task.params["remote_source"] == "modelscope"
+        assert "--remote-source" in task.command
+        idx = task.command.index("--remote-source")
+        assert task.command[idx + 1] == "modelscope"
+
     def test_build_basic_video_task(self) -> None:
         """Test building a basic video generation task."""
         form = {

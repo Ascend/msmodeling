@@ -96,9 +96,9 @@ def test_load_config_probe_passes_trust_remote_code_false(monkeypatch) -> None:
 def test_modelscope_snapshot_config_only_uses_allowlist(monkeypatch) -> None:
     call: dict = {}
 
-    def fake_snapshot_download(model_id, **kwargs):
+    def fake_snapshot_download(model_id, ignore_patterns=None):
         call["model_id"] = model_id
-        call["kwargs"] = kwargs
+        call["kwargs"] = {"ignore_patterns": ignore_patterns}
         return "/tmp/snapshot"
 
     monkeypatch.setattr("modelscope.snapshot_download", fake_snapshot_download)

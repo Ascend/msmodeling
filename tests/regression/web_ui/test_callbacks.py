@@ -743,6 +743,7 @@ class TestBuildVideoForm:
         """Test basic form building."""
         vals = [
             "model",
+            "modelscope",
             "device",
             None,
             1,
@@ -765,10 +766,11 @@ class TestBuildVideoForm:
             None,
             None,
             None,
-            None,
         ]
+        assert len(vals) == 24
         result = _build_video_form(*vals)
         assert result["model_id"] == "model"
+        assert result["remote_source"] == "modelscope"
         assert result["batch_size"] == 1
         assert result["height"] == 720
 
@@ -951,6 +953,76 @@ class TestValidateVideoForm:
         }
         result = _validate_video_form(form)
         assert result == []
+
+    def test_validate_video_form_allows_modelscope_remote_repo_id(self) -> None:
+        """Test remote repo IDs are allowed when remote-source is modelscope."""
+        form = {
+            "batch_size": 1,
+            "seq_len": 256,
+            "height": 720,
+            "width": 1280,
+            "frame_num": 100,
+            "sample_step": 50,
+            "world_size": 8,
+            "ulysses_size": 4,
+            "ulysses_sweep": None,
+            "cache_step_interval": None,
+            "cache_step_range": None,
+            "cache_block_range": None,
+            "model_id": "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+            "remote_source": "modelscope",
+        }
+        result = _validate_video_form(form)
+        assert result == []
+
+    def test_validate_video_form_allows_single_variant_transformer_config(self, tmp_path) -> None:
+        variant_dir = tmp_path / "transformer" / "720p_i2v_distilled_sparse"
+        variant_dir.mkdir(parents=True)
+        (variant_dir / "config.json").write_text(
+            '{"_class_name": "HunyuanVideo_1_5_DiffusionTransformer"}',
+            encoding="utf-8",
+        )
+        form = {
+            "batch_size": 1,
+            "seq_len": 256,
+            "height": 720,
+            "width": 1280,
+            "frame_num": 100,
+            "sample_step": 50,
+            "world_size": 8,
+            "ulysses_size": 4,
+            "ulysses_sweep": None,
+            "cache_step_interval": None,
+            "cache_step_range": None,
+            "cache_block_range": None,
+            "model_id": str(tmp_path),
+            "remote_source": "modelscope",
+        }
+
+        result = _validate_video_form(form)
+
+        assert result == []
+
+    def test_validate_video_form_rejects_local_dir_without_transformer_config(self, tmp_path) -> None:
+        """Test local directories still require a Diffusers transformer config."""
+        form = {
+            "batch_size": 1,
+            "seq_len": 256,
+            "height": 720,
+            "width": 1280,
+            "frame_num": 100,
+            "sample_step": 50,
+            "world_size": 8,
+            "ulysses_size": 4,
+            "ulysses_sweep": None,
+            "cache_step_interval": None,
+            "cache_step_range": None,
+            "cache_block_range": None,
+            "model_id": str(tmp_path),
+            "remote_source": "modelscope",
+        }
+        result = _validate_video_form(form)
+        assert any("transformer/config.json" in error for error in result)
 
     def test_validate_video_form_negative_batch_size(self) -> None:
         """Test negative batch_size."""
@@ -4401,13 +4473,16 @@ class TestBuildVideoFormEdgeCases:
 
     def test_build_video_form_with_all_none(self) -> None:
         """Test with all None values."""
-        vals = [None] * 25
+        vals = [None] * 24
+        assert len(vals) == 24
         result = _build_video_form(*vals)
         assert isinstance(result, dict)
+        assert result["remote_source"] == "huggingface"
 
     def test_build_video_form_with_zero_values(self) -> None:
         """Test with zero numeric values."""
-        vals = ["model", "D1", None, 0, 0, 0, 0, 0, 0, None] + [None] * 14
+        vals = ["model", "huggingface", "D1", None, 0, 0, 0, 0, 0, 0, None] + [None] * 13
+        assert len(vals) == 24
         result = _build_video_form(*vals)
         assert result["batch_size"] == 0
 
@@ -4655,7 +4730,8 @@ class TestOptimizerValidationMarkdownExtended:
     def test_optimizer_validation_markdown_with_long_message(self) -> None:
         """Test with very long error message."""
         errors = [
-            "This is a very long error message that should be included in the output without any truncation or modification"
+            "This is a very long error message that should be included in the output without "
+            "any truncation or modification"
         ]
         result = _optimizer_validation_markdown(errors)
         assert "very long" in result

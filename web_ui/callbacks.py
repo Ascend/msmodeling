@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Sequence, TYPE_CHECKING
 
 import pandas as pd
+
+from tensor_cast.model_config import RemoteSource
 
 try:
     import gradio as gr
@@ -39,6 +42,8 @@ if TYPE_CHECKING:
 STORE = ResultStore()
 RUNNER = ExperimentRunner(STORE, max_workers=2)
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+DEFAULT_REMOTE_SOURCE = RemoteSource.huggingface.value
+REMOTE_SOURCE_VALUES = {source.value for source in RemoteSource}
 
 OPT_DEPLOY_PD_MIXED = "PD Aggregated"
 OPT_DEPLOY_PD_SPLIT = "PD Disaggregated"
@@ -389,6 +394,7 @@ def _build_video_form(*vals):
     """Build the video generation form payload."""
     keys = [
         "model_id",
+        "remote_source",
         "device",
         "competitor_devices",
         "batch_size",
@@ -413,6 +419,7 @@ def _build_video_form(*vals):
         "log_level",
     ]
     data = dict(zip(keys, vals))
+    data["remote_source"] = data.get("remote_source") or DEFAULT_REMOTE_SOURCE
     data["quant_linear_sweep"] = data.pop("quant_linear_list")
     data["ulysses_sweep"] = data.pop("ulysses_list")
     return data
@@ -605,6 +612,24 @@ def _validate_text_form(form: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _has_supported_diffusers_transformer_config(model_dir: Path) -> bool:
+    if (model_dir / "transformer" / "config.json").is_file():
+        return True
+
+    transformer_candidates = 0
+    for config_path in model_dir.rglob("config.json"):
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        class_name = config.get("_class_name")
+        if isinstance(class_name, str) and "Transformer" in class_name:
+            transformer_candidates += 1
+            if transformer_candidates > 1:
+                return False
+    return transformer_candidates == 1
+
+
 def _validate_video_form(form: dict[str, Any]) -> list[str]:
     errors: list[str] = []
 
@@ -665,6 +690,11 @@ def _validate_video_form(form: dict[str, Any]) -> list[str]:
         if start < 0 or end <= start:
             errors.append(f"{label} must satisfy 0 <= start < end.")
 
+    remote_source = str(form.get("remote_source") or DEFAULT_REMOTE_SOURCE)
+    if remote_source not in REMOTE_SOURCE_VALUES:
+        accepted = " or ".join(sorted(REMOTE_SOURCE_VALUES))
+        errors.append(f"remote-source must be either {accepted}.")
+
     model_id = str(form.get("model_id") or "").strip()
     if not model_id:
         errors.append("model-id cannot be empty.")
@@ -672,12 +702,7 @@ def _validate_video_form(form: dict[str, Any]) -> list[str]:
         model_dir = Path(model_id)
         if not model_dir.is_absolute():
             model_dir = PROJECT_ROOT / model_id
-        if not model_dir.is_dir():
-            errors.append(
-                "Video Models currently requires a local Diffusers model directory, for example "
-                "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers."
-            )
-        elif not (model_dir / "transformer" / "config.json").is_file():
+        if model_dir.is_dir() and not _has_supported_diffusers_transformer_config(model_dir):
             errors.append("Video Models requires a Diffusers model directory that contains transformer/config.json.")
 
     return errors

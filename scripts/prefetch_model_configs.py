@@ -18,26 +18,12 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+from tensor_cast.model_hub import MODELSCOPE_WEIGHT_IGNORE_PATTERNS as _MODELSCOPE_WEIGHT_IGNORE_PATTERNS
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_SCAN_DIR = REPO_ROOT / "tests"
 DEFAULT_DEST_DIR = REPO_ROOT / "tests" / "assets" / "cache"
-
-_MODELSCOPE_WEIGHT_IGNORE_PATTERNS = [
-    "*.safetensors",
-    "*.safetensors.index.json",
-    "*.bin",
-    "*.pt",
-    "*.pth",
-    "*.ckpt",
-    "*.h5",
-    "*.npz",
-    "*.onnx",
-    "*.gguf",
-    "*.zip",
-    "*.tar",
-    "*.tar.gz",
-]
 
 _IGNORE_PREFIXES = (
     "tests/",

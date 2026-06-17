@@ -109,9 +109,17 @@ def text_args(
     ]
 
 
-def video_args(*, device: str, world: str = "8", ulysses: str = "4") -> list:
+def video_args(
+    *,
+    device: str,
+    world: str = "8",
+    ulysses: str = "4",
+    model_id: str = "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers",
+    remote_source: str = "huggingface",
+) -> list:
     return [
-        "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers",
+        model_id,
+        remote_source,
         device,
         [],
         "1",
@@ -238,7 +246,7 @@ def test_text_and_vl_preview(web_ui_device: str) -> None:
     assert_contains("text tp sweep command", sweep_command, "--tp-size 1")
 
 
-def test_video_preview(web_ui_device: str) -> None:
+def test_video_generate_preview_and_invalid_parallelism(web_ui_device: str) -> None:
     summary, command = preview_video_generate(*video_args(device=web_ui_device))
     record(
         "video preview summary",
@@ -247,6 +255,16 @@ def test_video_preview(web_ui_device: str) -> None:
     )
     assert_contains("video chrome trace", command, "--chrome-trace")
     assert_contains("video log level", command, "--log-level")
+
+    remote_summary, remote_command = preview_video_generate(
+        *video_args(
+            device=web_ui_device,
+            model_id="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+            remote_source="modelscope",
+        )
+    )
+    assert "Parameter Validation Failed" not in remote_summary
+    assert "--remote-source modelscope" in remote_command
 
     bad = video_args(device=web_ui_device, world="6", ulysses="4")
     bad_summary, bad_command = preview_video_generate(*bad)
@@ -436,7 +454,7 @@ def main() -> int:
     device = default_device()
     print(f"device_under_test={device}")
     test_text_and_vl_preview(device)
-    test_video_preview(device)
+    test_video_generate_preview_and_invalid_parallelism(device)
     test_optimizer_preview(device)
     test_optimizer_pp_table_parsing()
     test_text_generate_hf_error_summary()
