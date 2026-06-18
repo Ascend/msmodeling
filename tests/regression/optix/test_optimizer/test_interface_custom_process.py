@@ -20,12 +20,12 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from experimental.optix.config.config import (
+from optix.config.config import (
     CUSTOM_OUTPUT,
     MODEL_EVAL_STATE_CONFIG_PATH,
     OptimizerConfigField,
 )
-from experimental.optix.optimizer.interfaces.custom_process import (
+from optix.optimizer.interfaces.custom_process import (
     CustomProcess,
     BaseDataField,
 )
@@ -111,7 +111,7 @@ def test_check_success_process_succeeded(tmpdir):
 
 
 @patch("psutil.process_iter")
-@patch("experimental.optix.optimizer.interfaces.custom_process.kill_process")
+@patch("optix.optimizer.interfaces.custom_process.kill_process")
 def test_check_env_no_residual_process(mock_kill_process, mock_process_iter):
     # Mock no residual processes
     mock_process_iter.return_value = [
@@ -128,7 +128,7 @@ def test_check_env_no_residual_process(mock_kill_process, mock_process_iter):
 
 
 @patch("psutil.process_iter")
-@patch("experimental.optix.optimizer.interfaces.custom_process.kill_process")
+@patch("optix.optimizer.interfaces.custom_process.kill_process")
 def test_check_env_with_residual_process(mock_kill_process, mock_process_iter):
     # Mock with residual processes
     mock_process_iter.return_value = [
@@ -145,7 +145,7 @@ def test_check_env_with_residual_process(mock_kill_process, mock_process_iter):
 
 
 @patch("psutil.process_iter")
-@patch("experimental.optix.optimizer.interfaces.custom_process.kill_process")
+@patch("optix.optimizer.interfaces.custom_process.kill_process")
 def test_check_env_kill_process_exception(mock_kill_process, mock_process_iter):
     # Mock exception when trying to kill process
     mock_process_iter.return_value = [MagicMock(info={"pid": 1, "name": "target_process"})]
@@ -158,9 +158,9 @@ def test_check_env_kill_process_exception(mock_kill_process, mock_process_iter):
 
 
 # Test case 1: process_name exists and check_env succeeds
-@patch("experimental.optix.optimizer.interfaces.custom_process.CustomProcess.kill_residual_process")
-@patch("experimental.optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
-@patch("experimental.optix.optimizer.interfaces.custom_process.subprocess.Popen")
+@patch("optix.optimizer.interfaces.custom_process.CustomProcess.kill_residual_process")
+@patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+@patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
 def test_run_process_name_exists_and_check_env_success(mock_popen, mock_before_run, mock_check_env):
     process = CustomProcess()
     process.process_name = "test_process"
@@ -174,9 +174,9 @@ def test_run_process_name_exists_and_check_env_success(mock_popen, mock_before_r
 
 
 # Test case 2: process_name exists but check_env fails
-@patch("experimental.optix.optimizer.interfaces.custom_process.CustomProcess.kill_residual_process")
-@patch("experimental.optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
-@patch("experimental.optix.optimizer.interfaces.custom_process.subprocess.Popen")
+@patch("optix.optimizer.interfaces.custom_process.CustomProcess.kill_residual_process")
+@patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+@patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
 def test_run_process_name_exists_and_check_env_fail(mock_popen, mock_before_run, mock_check_env):
     process = CustomProcess()
     process.process_name = "test_process"
@@ -192,8 +192,8 @@ def test_run_process_name_exists_and_check_env_fail(mock_popen, mock_before_run,
 
 
 # Test case 3: process_name does not exist
-@patch("experimental.optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
-@patch("experimental.optix.optimizer.interfaces.custom_process.subprocess.Popen")
+@patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+@patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
 def test_run_process_name_not_exists(mock_popen, mock_before_run):
     process = CustomProcess()
     process.process_name = None
@@ -206,8 +206,8 @@ def test_run_process_name_not_exists(mock_popen, mock_before_run):
 
 
 # Test case 4: subprocess.Popen raises OSError
-@patch("experimental.optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
-@patch("experimental.optix.optimizer.interfaces.custom_process.subprocess.Popen")
+@patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+@patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
 def test_run_subprocess_popen_os_error(mock_popen, mock_before_run):
     process = CustomProcess()
     process.process_name = None

@@ -2,9 +2,9 @@
 
 ## Introduction
 
-Benchmark Cases Runner is a batch execution tool for [Throughput Optimizer](./throughput_optimizer.md). While the Throughput Optimizer evaluates a single hardware/configuration combination per invocation, Benchmark Cases Runner drives multiple cases sequentially from a CSV input file, aggregates all results into a single output CSV, and enables cross-hardware and cross-scenario performance comparison without writing custom scripts.
+Benchmark Cases Runner is a batch execution tool for [Throughput Optimizer](./user_guide/msmodeling_throughput_optimizer_user_guide.md). While the Throughput Optimizer evaluates a single hardware/configuration combination per invocation, Benchmark Cases Runner drives multiple cases sequentially from a CSV input file, aggregates all results into a single output CSV, and enables cross-hardware and cross-scenario performance comparison without writing custom scripts.
 
-> **Module Location**: This tool is located at `experimental/optix/run_throughput_optimizer_cases.py` within the [Optix](./optix_instruct.md) experimental module.
+> **Module Location**: This tool is located at `optix/run_throughput_optimizer_cases.py` in the msmodeling package.
 
 **Use Cases:**
 
@@ -89,7 +89,6 @@ The input CSV must include a header row with column names matching the template.
 > `ttft_limits` and `tpot_limits` accept **at most one value** per case. If multiple values are provided (e.g., `50;100`), the tool raises an error. Split them into separate CSV rows instead.
 >
 > All limit values use **milliseconds (ms)** as the unit, consistent with Throughput Optimizer.
-
 > [!Note]
 > If any required column (`device`, `num_devices`, `model_id`, `input_length`, `output_length`) is missing from the CSV header, the tool raises an error immediately rather than silently using wrong defaults.
 
@@ -174,7 +173,7 @@ Options:
 
 ## Relationship to Throughput Optimizer
 
-Benchmark Cases Runner internally calls [Throughput Optimizer](./throughput_optimizer.md)'s `ParallelRunner` for each case. The mapping from CSV columns to Throughput Optimizer arguments is:
+Benchmark Cases Runner internally calls [Throughput Optimizer](./user_guide/msmodeling_throughput_optimizer_user_guide.md)'s `ParallelRunner` for each case. The mapping from CSV columns to Throughput Optimizer arguments is:
 
 | CSV Column | Throughput Optimizer Argument |
 |------------|-------------------------------|
@@ -217,4 +216,4 @@ The following Throughput Optimizer arguments are set to defaults since they are 
 | `decode_devices_per_instance` | `None` | PD ratio optimization not exposed |
 | `moe_dp_sizes` | `None` | MOE-DP search not exposed |
 
-For detailed parameter descriptions, see the [Throughput Optimizer documentation](./throughput_optimizer.md).
+For detailed parameter descriptions, see the [Throughput Optimizer documentation](./user_guide/msmodeling_throughput_optimizer_user_guide.md).

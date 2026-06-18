@@ -13,20 +13,22 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
+"""Regression tests for optix.optimizer.plugins.benchmark."""
+
 import json
-import shutil
+import tempfile
 from pathlib import Path
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
+
 import pytest
-from experimental.optix.config.config import PerformanceIndex, get_settings
-from experimental.optix.optimizer.plugins.benchmark import (
+
+from optix.config.config import PerformanceIndex, VllmBenchmarkConfig
+from optix.config.custom_command import VllmBenchmarkCommandConfig
+from optix.optimizer.plugins.benchmark import (
     parse_result,
     VllmBenchMark,
 )
-
-
-settings = get_settings()
 
 
 class TestParseResult(unittest.TestCase):
@@ -100,20 +102,20 @@ def results_per_request_file(tmpdir):
 
 
 class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
-    @patch("experimental.optix.config.custom_command.shutil.which")
+    @patch("optix.config.custom_command.shutil.which")
     def setUp(self, mock_which):
-        # Create a mock benchmark_config object
-        self.mock_benchmark_config = MagicMock()
         mock_which.return_value = "/usr/local/bin/vllm"
-        # Create test object and pass benchmark_config
-        self.benchmark = VllmBenchMark(self.mock_benchmark_config)
-
-        # Set command attribute
-        self.benchmark.config.command = MagicMock()
-        self.test_dir = Path("test_dir")
-        self.benchmark.config.command.result_dir = self.test_dir
-        self.test_dir.mkdir(exist_ok=True)
-        self.json_path = self.test_dir / "result.json"
+        self._tmpdir = tempfile.TemporaryDirectory()
+        test_dir = Path(self._tmpdir.name)
+        benchmark_config = VllmBenchmarkConfig(
+            command=VllmBenchmarkCommandConfig(
+                num_prompts=10,
+                result_dir=str(test_dir),
+                others="",
+            ),
+        )
+        self.benchmark = VllmBenchMark(benchmark_config)
+        self.json_path = test_dir / "result.json"
         json_data = {
             "output_throughput": 2000.0,
             "mean_ttft_ms": 600.0,
@@ -126,8 +128,7 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
             json.dump(json_data, f)
 
     def tearDown(self):
-        # Clean up temporary directory
-        shutil.rmtree(self.test_dir)
+        self._tmpdir.cleanup()
 
     def test_get_performance_index_normal(self):
         """Test the get_performance_index method in normal case"""

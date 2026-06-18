@@ -17,7 +17,7 @@
 import subprocess
 import shutil
 
-from experimental.optix.common import get_npu_total_memory
+from optix.common import get_npu_total_memory
 
 
 def test_get_npu_total_memory_success_ascend910(monkeypatch):

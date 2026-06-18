@@ -13,7 +13,7 @@ from scripts.helpers._config import ConfigError
 from scripts.helpers.ci_gate.gate_policy import TestDiscovery, default_test_discovery, is_gate_test_path
 from scripts.helpers.ci_gate.models import ChangeSet
 from scripts.helpers.common.coverage_config import product_roots
-from scripts.helpers.common.test_map_config import is_config_path, is_full_suite_trigger_path
+from scripts.helpers.common.test_map_config import is_config_path, is_full_suite_trigger_path, is_gate_ignored_path
 from scripts.helpers.common.test_map_loader import is_product_source
 
 if TYPE_CHECKING:
@@ -306,6 +306,9 @@ def _classify_rename(
     if is_config_path(old_path) or is_config_path(new_path):
         return del_test, new_test, del_source, renames, modified
 
+    if is_gate_ignored_path(old_path) or is_gate_ignored_path(new_path):
+        return del_test, new_test, del_source, renames, modified
+
     renames.append((old_path, new_path, score))
     if score < 100:
         modified[new_path] = frozenset(diff.get(new_path, set()))
@@ -348,7 +351,7 @@ def _classify_py_entry(
         del_test.append(filepath)
     elif status in ("M", "C") and is_test:
         modified_test.append(filepath)
-    elif is_config:
+    elif is_config or is_gate_ignored_path(filepath):
         return
     elif status == "A" and not is_test:
         if is_product_source(filepath, resolved_roots):
@@ -391,6 +394,7 @@ def classify_changes(
     def _track_unscoped(filepath: str) -> None:
         if (
             filepath.endswith(".py")
+            and not is_gate_ignored_path(filepath)
             and not is_gate_test_path(filepath, test_discovery)
             and not is_config_path(filepath)
             and not is_product_source(filepath, resolved_roots)

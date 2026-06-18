@@ -282,7 +282,7 @@ def test_classify_changes_uv_lock_triggers_full_suite(tmp_path: Path) -> None:
     assert result.config == ("uv.lock",)
 
 
-def test_classify_changes_gate_policy_yaml_triggers_full_suite(tmp_path: Path) -> None:
+def test_classify_changes_gate_policy_yaml_does_not_trigger_full_suite(tmp_path: Path) -> None:
     result = classify_changes(
         tmp_path,
         "abc123",
@@ -293,7 +293,26 @@ def test_classify_changes_gate_policy_yaml_triggers_full_suite(tmp_path: Path) -
         ),
         roots=_DEFAULT_ROOTS,
     )
-    assert result.config == ("tests/.ci/gate_policy.yaml",)
+    assert result.config == ()
+
+
+def test_classify_changes_agents_skill_scripts_not_unscoped(tmp_path: Path) -> None:
+    result = classify_changes(
+        tmp_path,
+        "abc123",
+        _diff_result(
+            entries=(
+                DiffEntry(
+                    status="M",
+                    old_path=".agents/skills/optix-config/scripts/auto_config.py",
+                    new_path=".agents/skills/optix-config/scripts/auto_config.py",
+                ),
+            ),
+        ),
+        roots=_DEFAULT_ROOTS,
+    )
+    assert result.unscoped_source == ()
+    assert result.modified_source == ()
 
 
 def test_classify_changes_deleted_config_triggers_full_suite(tmp_path: Path) -> None:

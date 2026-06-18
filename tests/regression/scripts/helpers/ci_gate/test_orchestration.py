@@ -238,7 +238,6 @@ def test_main_passes_when_no_gate_work(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (empty_baseline, "a" * 40))
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -258,7 +257,6 @@ def test_main_returns_one_on_unmapped_modified_source(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (empty_baseline, "a" * 40))
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     main_line = inspect.getsourcelines(ci_gate_main.main)[1] + 1
     monkeypatch.setattr(
@@ -301,7 +299,6 @@ def test_main_skips_all_exempt_changed_test_file(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",

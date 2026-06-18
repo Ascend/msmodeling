@@ -18,16 +18,16 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from experimental.optix.config.config import (
+from optix.config.config import (
     OptimizerConfigField,
     PerformanceIndex,
     ErrorSeverity,
     ErrorType,
 )
-from experimental.optix.config.constant import Stage
-from experimental.optix.optimizer.scheduler import Scheduler
-from experimental.optix.config.base_config import FOLDER_LIMIT_SIZE
-from experimental.optix.optimizer.health_check import (
+from optix.config.constant import Stage
+from optix.optimizer.scheduler import Scheduler
+from optix.config.base_config import FOLDER_LIMIT_SIZE
+from optix.optimizer.health_check import (
     FatalError,
     ErrorContext,
     RetryableError,
@@ -46,13 +46,13 @@ class TestScheduler(unittest.TestCase):
         # Initialize simulate_run_info to avoid repeated setup in each test method
         self.scheduler.simulate_run_info = ()
 
-    @patch("experimental.optix.optimizer.utils.get_folder_size")
+    @patch("optix.optimizer.utils.get_folder_size")
     def test_set_back_up_path_folder_size_exceeds_limit(self, mock_get_folder_size):
         mock_get_folder_size.return_value = FOLDER_LIMIT_SIZE + 1
         self.scheduler.set_back_up_path()
 
-    @patch("experimental.optix.optimizer.utils.get_folder_size")
-    @patch("experimental.optix.common.get_train_sub_path")
+    @patch("optix.optimizer.utils.get_folder_size")
+    @patch("optix.common.get_train_sub_path")
     def test_set_back_up_path_folder_size_within_limit(self, mock_get_train_sub_path, mock_get_folder_size):
         mock_get_folder_size.return_value = FOLDER_LIMIT_SIZE - 1
         mock_get_train_sub_path.return_value = "sub_path"
@@ -126,7 +126,7 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(str(cm.exception), "Network error")
 
     @patch("time.sleep")
-    @patch("experimental.optix.optimizer.scheduler.Scheduler.wait_simulate")
+    @patch("optix.optimizer.scheduler.Scheduler.wait_simulate")
     def test_run_target_server_fatal_no_retry(self, mock_wait, _):
         """Test fatal error is raised immediately without retry"""
         mock_wait.side_effect = FatalError("OOM error")
@@ -135,8 +135,8 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(mock_wait.call_count, 1)
 
     @patch("time.sleep")
-    @patch("experimental.optix.optimizer.scheduler.Scheduler.monitoring_status")
-    @patch("experimental.optix.optimizer.scheduler.Scheduler.wait_simulate")
+    @patch("optix.optimizer.scheduler.Scheduler.monitoring_status")
+    @patch("optix.optimizer.scheduler.Scheduler.wait_simulate")
     def test_run_target_server_retryable_with_retry(self, mock_wait, _, mock_sleep):
         """Test retryable error triggers retry"""
         mock_wait.side_effect = [
@@ -187,7 +187,7 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.assertEqual(req_rate_field.max, 50.0)
 
     @patch("time.time")
-    @patch("experimental.optix.optimizer.scheduler.logger")
+    @patch("optix.optimizer.scheduler.logger")
     def test_run_logging(self, mock_logger, mock_time):
         """Test logging in run method"""
         mock_time.return_value = 1000.0

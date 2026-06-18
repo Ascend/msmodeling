@@ -1,5 +1,6 @@
 roots:
   - cli/
+  - optix/
   - serving_cast/
   - tensor_cast/
   - web_ui/

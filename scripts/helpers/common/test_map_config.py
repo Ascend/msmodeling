@@ -9,7 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.helpers._config import Config, ConfigError
-from scripts.helpers.ci_gate.gate_policy import GATE_POLICY_REL
 
 CONFIG_FILE_NAMES: frozenset[str] = frozenset(
     {
@@ -22,6 +21,13 @@ CONFIG_FILE_NAMES: frozenset[str] = frozenset(
         "uv.lock",
     }
 )
+
+GATE_IGNORED_PATH_PREFIXES: tuple[str, ...] = (".agents/",)
+
+
+def is_gate_ignored_path(path: str) -> bool:
+    """Return True for paths outside product/test gate scope (agent skills, etc.)."""
+    return path.startswith(GATE_IGNORED_PATH_PREFIXES)
 
 
 def resolve_test_map_path(cfg: Config, *, must_exist: bool) -> Path:
@@ -54,8 +60,4 @@ def is_config_path(path: str) -> bool:
 
 def is_full_suite_trigger_path(path: str) -> bool:
     """Return True when a change should run the full PR gate test suite."""
-    if is_config_path(path):
-        return True
-    if path.startswith("scripts/helpers/"):
-        return True
-    return path == GATE_POLICY_REL.as_posix()
+    return is_config_path(path) or path.startswith("scripts/helpers/")

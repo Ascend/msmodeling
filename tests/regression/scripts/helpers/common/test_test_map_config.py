@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from scripts.helpers._config import Config, ConfigError
-from scripts.helpers.common.test_map_config import CONFIG_FILE_NAMES, is_config_path, resolve_test_map_path
+from scripts.helpers.common.test_map_config import (
+    CONFIG_FILE_NAMES,
+    is_config_path,
+    is_gate_ignored_path,
+    resolve_test_map_path,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -141,6 +146,11 @@ def test_is_config_path_test_file_returns_false() -> None:
 
 def test_is_config_path_tests_prefix_without_conftest_returns_false() -> None:
     assert is_config_path("tests/helpers/foo.py") is False
+
+
+def test_is_gate_ignored_path_agents_prefix() -> None:
+    assert is_gate_ignored_path(".agents/skills/optix-config/scripts/auto_config.py") is True
+    assert is_gate_ignored_path("cli/main.py") is False
 
 
 @pytest.mark.parametrize(

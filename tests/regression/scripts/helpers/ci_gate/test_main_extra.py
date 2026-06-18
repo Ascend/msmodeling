@@ -159,7 +159,6 @@ def test_main_remaps_before_plan_without_phase0_merge(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -205,7 +204,6 @@ def test_main_runs_deleted_source_guards_in_union(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -257,7 +255,6 @@ def test_main_uses_full_suite_targets_when_config_changes(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -319,7 +316,6 @@ def test_main_skips_exempt_regression_targets(
     )
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (exempt_baseline, "a" * 40))
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -367,7 +363,6 @@ def test_main_runs_union_targets_when_available(
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
     monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.gate_policy_changed_in_diff", lambda *_args: False)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",

@@ -238,6 +238,61 @@ def test_gate_new_source_non_python_file_skipped(new_source_file: Path) -> None:
     assert result.errors == ()
 
 
+def test_gate_new_source_docstring_only_module_passes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    init_path = repo / "cli" / "__init__.py"
+    init_path.parent.mkdir(parents=True)
+    init_path.write_text('"""CLI package docstring only."""\n', encoding="utf-8")
+    cs = ChangeSet.build(new_source=("cli/__init__.py",))
+    result = gate_new_source(repo, cs, {}, (), ("cli/",))
+    assert result.errors == ()
+
+
+def test_gate_new_source_script_module_without_coverage_reports_file_error(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    main_path = repo / "optix" / "__main__.py"
+    main_path.parent.mkdir(parents=True)
+    main_path.write_text(
+        '"""entry"""\n\nfrom optix import main\n\nif __name__ == "__main__":\n    main()\n',
+        encoding="utf-8",
+    )
+    cs = ChangeSet.build(new_source=("optix/__main__.py",))
+    result = gate_new_source(repo, cs, {}, (), ("optix/",))
+    assert len(result.errors) == 1
+    assert result.errors[0].category == "new_source"
+    assert result.errors[0].path == "optix/__main__.py"
+    assert result.errors[0].symbol is None
+
+
+def test_gate_new_source_script_module_coverage_fallback_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    main_path = repo / "optix" / "__main__.py"
+    main_path.parent.mkdir(parents=True)
+    main_path.write_text(
+        '"""entry"""\n\nfrom optix import main\n\nif __name__ == "__main__":\n    main()\n',
+        encoding="utf-8",
+    )
+    coverage_path = repo / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.symbol_lines_covered_in_data",
+        lambda *_args, **_kwargs: True,
+    )
+    cs = ChangeSet.build(new_source=("optix/__main__.py",))
+    result = gate_new_source(
+        repo,
+        cs,
+        {},
+        (),
+        ("optix/",),
+        coverage_path=coverage_path,
+    )
+    assert result.errors == ()
+
+
 # ---------------------------------------------------------------------------
 # gate_deleted_source
 # ---------------------------------------------------------------------------

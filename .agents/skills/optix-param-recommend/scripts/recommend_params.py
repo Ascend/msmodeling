@@ -19,7 +19,7 @@ GB = 1024**3
 DEFAULT_BENCHMARK = "ais_bench"
 TARGETS = {"throughput", "ttft", "tpot", "balanced"}
 CONFIG_SKILL_SCRIPT = ".agents/skills/optix-config/scripts/auto_config.py"
-CONFIG_PATH_HINT = "experimental/optix/config.toml"
+CONFIG_PATH_HINT = "optix/config.toml"
 VLLM_COMMAND_ARG_BY_NAME = {
     "MAX_MODEL_LEN": "--max-model-len",
     "TENSOR_PARALLEL_SIZE": "--tensor_parallel_size",

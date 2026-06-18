@@ -22,7 +22,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from experimental.optix.config.config import (
+from optix.config.config import (
     DecodeContext,
     ErrorPatternConfig,
     ErrorType,
@@ -279,7 +279,7 @@ def test_mindie_config_paths_fallback_to_default_without_env(mock_is_file, monke
     assert _get_mindie_config_paths() == (DEFAULT_MINDIE_CONFIG, DEFAULT_MINDIE_BACKUP)
 
 
-@patch("experimental.optix.config.config._get_mindie_config_paths")
+@patch("optix.config.config._get_mindie_config_paths")
 def test_mindie_config_defaults_are_bound_from_path_resolver(mock_get_paths):
     mock_get_paths.return_value = (
         Path("/test/config.json"),
@@ -296,7 +296,7 @@ def test_mindie_config_defaults_are_bound_from_path_resolver(mock_get_paths):
     assert config.target_field
 
 
-@patch("experimental.optix.config.config._get_mindie_config_paths")
+@patch("optix.config.config._get_mindie_config_paths")
 def test_mindie_config_allows_custom_output(mock_get_paths):
     mock_get_paths.return_value = (
         Path("/test/config.json"),

@@ -36,6 +36,19 @@ def _product_paths(paths: tuple[str, ...], prefixes: tuple[str, ...]) -> tuple[s
     return tuple(path for path in paths if is_product_source(path, prefixes))
 
 
+_MODULE_COVERAGE_SYMBOL = "<module>"
+
+
+def _all_executable_lines(source_path: Path) -> set[int]:
+    try:
+        line_count = len(source_path.read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return set()
+    if line_count == 0:
+        return set()
+    return ast_utils.filter_executable_lines(source_path, set(range(1, line_count + 1)))
+
+
 def _executable_lines_for_symbol(source_path: Path, symbol: str) -> set[int]:
     spans = ast_utils.iter_qualified_definition_spans(source_path)
     symbol_lines: set[int] = set()
@@ -103,6 +116,17 @@ def _new_source_errors_for_path(
         return []
     symbols = ast_utils.top_level_definitions(source_path)
     if not symbols:
+        executable = _all_executable_lines(source_path)
+        if not executable:
+            return []
+        if _coverage_fallback_passes(
+            repo_root,
+            path,
+            _MODULE_COVERAGE_SYMBOL,
+            executable,
+            coverage_path=coverage_path,
+        ):
+            return []
         return [GateError(category="new_source", path=path)]
     errors: list[GateError] = []
     for sym in symbols:

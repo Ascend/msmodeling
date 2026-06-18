@@ -13,6 +13,7 @@ tests/
 │   ├── tensor_cast/
 │   ├── serving_cast/
 │   ├── cli/
+│   ├── optix/
 │   ├── scripts/             # ci_gate / nightly toolchain UT (mirrors scripts/helpers/)
 │   └── web_ui/
 ├── assets/

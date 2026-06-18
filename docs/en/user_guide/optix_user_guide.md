@@ -49,25 +49,23 @@ Set up an environment where serving tools (such as [vLLM Server](https://docs.vl
 
 ## Tool Installation
 
-optix is a sub-tool of the msmodeling project and is already integrated. Installation command:
+optix is integrated into the msmodeling package. Installation command:
 
 ```bash
-git clone https://gitcode.com/Ascend/msmodeling.git # Skip this if the repository is already cloned.
-cd msmodeling/experimental
-pip install -e .  # Install optix
+pip install msmodeling
 ```
 
 ## Tool Uninstallation
 
 ```bash
-pip uninstall optix
+pip uninstall msmodeling
 ```
 
 ## Quick Start
 
 1. Complete the operations described in [Preparations](#preparations).
 
-2. Modify the configuration file. Before starting optimization, configure [`config.toml`](../../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
+2. Modify the configuration file. Before starting optimization, configure [`config.toml`](../../../optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
 
 3. Start optimization. After the preceding steps are complete, start automatic optimization with a single command:
 
@@ -108,7 +106,7 @@ msmodeling optix [options]
 
 **Example (vLLM Service Parameter Optimization)**
 
-1. Modify the configuration file. Before starting optimization, configure [<idp:inline displayname="code" id="code151415418558">config.toml</idp:inline>](../../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
+1. Modify the configuration file. Before starting optimization, configure [<idp:inline displayname="code" id="code151415418558">config.toml</idp:inline>](../../../optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
 
 2. To set environment variables for the vLLM/MindIE services, configure them before running the tool. For example:
 
@@ -132,7 +130,7 @@ msmodeling optix [options]
 
 **Example (MindIE Serving Parameter Optimization)**
 
-1. Modify the configuration file. Before starting optimization, configure [<idp:inline displayname="code" id="code121419465514">config.toml</idp:inline>](../../../experimental/optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
+1. Modify the configuration file. Before starting optimization, configure [<idp:inline displayname="code" id="code121419465514">config.toml</idp:inline>](../../../optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
 2. To set environment variables for the vLLM/MindIE services, configure them before running the tool. For example:
 
     ```bash
@@ -230,7 +228,7 @@ If `vllm_benchmark` is used for the test, modify the following parameters:
 |served_model_name|Yes| Model name, which must match `served_model_name` in `[vllm.command]`.|
 |dataset_name|Yes| Dataset name|
 |dataset_path|Yes| Dataset path|
-|num_prompts|Yes| Specifies the number of prompts to run from the dataset.| The value is an integer ranging from 1 to 10000.|
+|num_prompts|Yes| Specifies the number of prompts to run from the dataset. The value is an integer ranging from 1 to 10000.|
 |others|No| Additional parameters. Use spaces to separate them, and no space is allowed within the parameters, for example, `--ignore-eos --custom-output-len 1500`. This parameter is left empty by default.|
 
 **vLLM serving parameters**:

@@ -21,26 +21,15 @@ import shutil
 import sys
 import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-# Ensure experimental directory is on sys.path so that optix package is importable
-experimental_dir = str(Path(__file__).resolve().parents[1])
-if experimental_dir not in sys.path:
-    sys.path.insert(0, experimental_dir)
-
-# Ensure project root is on sys.path so that tensor_cast package is importable
-project_root = str(Path(__file__).resolve().parents[2])
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-from optix.run_throughput_optimizer_cases import (  # noqa: E402
+from optix.run_throughput_optimizer_cases import (
+    CSV_CONFIG_HEADER,
     DEFAULT_TPOT_LIMIT_MS,
     FLUSH_BATCH_SIZE,
     LOG_LEVELS,
     BenchmarkCase,
     BenchmarkResult,
-    CSV_CONFIG_HEADER,
     _build_optimizer_args,
     _configure_logging,
     _csv_header_and_ref_row,
@@ -59,9 +48,9 @@ from optix.run_throughput_optimizer_cases import (  # noqa: E402
     save_results_to_csv,
     write_template_csv,
 )
-from tensor_cast.core.quantization.datatypes import (  # noqa: E402
-    QuantizeLinearAction,
+from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
+    QuantizeLinearAction,
 )
 
 
@@ -511,7 +500,7 @@ class TestWriteTemplateCsv(unittest.TestCase):
         # Template CSV header matches CSV_CONFIG_HEADER exactly
         path = os.path.join(self.tmpdir, "template.csv")
         write_template_csv(path)
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             reader = csv.reader(f)
             header = next(reader)
         self.assertEqual(header, CSV_CONFIG_HEADER)
@@ -520,7 +509,7 @@ class TestWriteTemplateCsv(unittest.TestCase):
         # Template contains multiple example rows with known case_names and model_ids
         path = os.path.join(self.tmpdir, "template.csv")
         write_template_csv(path)
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             reader = csv.reader(f)
             next(reader)
             rows = list(reader)
@@ -535,7 +524,7 @@ class TestWriteTemplateCsv(unittest.TestCase):
         # All template example rows use the default TPOT limit of 50 ms
         path = os.path.join(self.tmpdir, "template.csv")
         write_template_csv(path)
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             reader = csv.reader(f)
             next(reader)
             for row in reader:
@@ -638,7 +627,7 @@ class TestBenchmarkResult(unittest.TestCase):
             )
             path = os.path.join(tmpdir, "results.csv")
             save_results_to_csv([result], path)
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 reader = csv.reader(f)
                 next(reader)  # ref header
                 next(reader)  # ref row
@@ -731,7 +720,7 @@ class TestSaveResultsToCsv(unittest.TestCase):
             ]
             path = os.path.join(tmpdir, "results.csv")
             save_results_to_csv(results, path)
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 content = f.read()
             self.assertIn("case1", content)
             self.assertIn("case2", content)
@@ -1231,7 +1220,7 @@ class TestIntegrationExampleCase(unittest.TestCase):
         # Save to CSV and read back
         out_path = os.path.join(self.tmpdir, "results.csv")
         save_results_to_csv([result], out_path)
-        with open(out_path, "r", encoding="utf-8") as f:
+        with open(out_path, encoding="utf-8") as f:
             reader = csv.reader(f)
             header = next(reader)
             ref_row = next(reader)

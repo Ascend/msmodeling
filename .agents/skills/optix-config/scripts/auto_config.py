@@ -902,8 +902,8 @@ Examples:
     )
     parser.add_argument(
         "--config-path",
-        default="experimental/optix/config.toml",
-        help="Config file path (default: experimental/optix/config.toml)",
+        default="optix/config.toml",
+        help="Config file path (default: optix/config.toml)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without writing")
 

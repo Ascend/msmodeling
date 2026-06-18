@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-import experimental.optix.config.model_config as model_config
-from experimental.optix.config.model_config import MindieModelConfig, ModelConfig
+import optix.config.model_config as model_config
+from optix.config.model_config import MindieModelConfig, ModelConfig
 
 
 MODEL_SHAPE = {

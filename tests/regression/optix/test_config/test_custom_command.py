@@ -16,7 +16,7 @@
 from unittest.mock import patch
 import pytest
 
-from experimental.optix.config.custom_command import VllmCommand
+from optix.config.custom_command import VllmCommand
 
 
 class MockVllmCommandConfig:

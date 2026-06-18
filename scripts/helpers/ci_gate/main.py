@@ -20,7 +20,6 @@ from scripts.helpers.ci_gate.errors import format_blocking_errors, format_pytest
 from scripts.helpers.ci_gate.gate_policy import (
     SourceExemption,
     TestExemption,
-    gate_policy_changed_in_diff,
     is_test_exempt,
     validate_gate_policy_if_changed,
 )
@@ -148,14 +147,12 @@ def build_ci_gate_plan(
     repo_root: Path,
     changes: ChangeSet,
     baseline: Baseline,
-    *,
-    gate_policy_changed: bool = False,
 ) -> CiGatePlan:
     """Build pytest schedule without pre-run new/modified source mapping checks."""
     test_map = baseline.test_map
     roots = baseline.roots
 
-    full_suite = bool(changes.config) or gate_policy_changed
+    full_suite = bool(changes.config)
 
     deleted_source_tests: frozenset[str] = frozenset()
     changed_test_nodes: frozenset[str] = frozenset()
@@ -421,7 +418,7 @@ def _soft_mapping_exit_code(
 def _prepare_gate_inputs(
     cfg: Config,
     logger: logging.Logger,
-) -> tuple[Baseline, ChangeSet, bool] | int:
+) -> tuple[Baseline, ChangeSet] | int:
     logger.info("Resolving merge-base against %s ...", cfg.base_branch)
     try:
         merge_base = resolve_base_ref(REPO_ROOT, cfg.base_branch)
@@ -457,10 +454,7 @@ def _prepare_gate_inputs(
         print(format_blocking_errors(hard_errors))
         return 1
 
-    policy_changed = gate_policy_changed_in_diff(REPO_ROOT, merge_base)
-    if policy_changed:
-        logger.info("gate_policy.yaml changed; scheduling full test suite")
-    return baseline, changes, policy_changed
+    return baseline, changes
 
 
 def main() -> int:
@@ -473,10 +467,10 @@ def main() -> int:
     prepared = _prepare_gate_inputs(cfg, logger)
     if isinstance(prepared, int):
         return prepared
-    baseline, changes, policy_changed = prepared
+    baseline, changes = prepared
 
     logger.info("Building gate plan ...")
-    plan = build_ci_gate_plan(REPO_ROOT, changes, baseline, gate_policy_changed=policy_changed)
+    plan = build_ci_gate_plan(REPO_ROOT, changes, baseline)
 
     execution = compute_execution_plan(plan, baseline.test_exemptions)
     _log_execution_plan(logger, execution)

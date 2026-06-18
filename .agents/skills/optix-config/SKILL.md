@@ -10,7 +10,7 @@ description: Automates the configuration of msmodeling optix config.toml for par
 使用本 skill 前，请确保：
 
 1. **已完成 optix 安装**（推荐按 `docs/zh/user_guide/optix_user_guide.md` 在 OptiX 源码目录执行 `pip install -e .`）
-2. **config.toml 文件已存在**（位于 `experimental/optix/config.toml`，也可通过 `-c` 参数指定其他路径）
+2. **config.toml 文件已存在**（位于 `optix/config.toml`，也可通过 `-c` 参数指定其他路径）
 3. **了解寻优参数类型**（见下文参数类型说明）
 
 ## 快速开始
@@ -254,7 +254,7 @@ python ./.agents/skills/optix-config/scripts/auto_config.py --set-vllm-benchmark
 
 ```bash
 # 检查 TOML 语法
-python -c "import tomllib; tomllib.load(open('experimental/optix/config.toml', 'rb'))"
+python -c "import tomllib; tomllib.load(open('optix/config.toml', 'rb'))"
 
 # 查看帮助确认工具可用
 msmodeling optix --help

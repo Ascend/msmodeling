@@ -17,25 +17,25 @@ import argparse
 import os
 from contextlib import contextmanager
 from copy import deepcopy
-from math import inf, isinf, isnan, isclose
+from math import inf, isclose, isinf, isnan
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 from loguru import logger
+
 from ..common import is_mindie
 from ..config.base_config import (
+    CONCURRENCYS,
     REAL_EVALUATION,
     REQUESTRATES,
     simulate_flag,
-    CONCURRENCYS,
 )
-from ..optimizer.register import benchmarks, simulates
+from ..config.config import DecodeContext, field_to_param, map_param_with_value
 from ..optimizer.performance_tunner import PerformanceTuner
+from ..optimizer.register import benchmarks, simulates
 from ..optimizer.utils import get_required_field_from_json, is_root
-from ..config.config import map_param_with_value, field_to_param, DecodeContext
-
 
 MAX_ITER_NUM = 200
 
@@ -47,10 +47,10 @@ class PSOOptimizer(PerformanceTuner):
         n_particles: int = 10,
         iters=100,
         pso_options=None,
-        target_field: Optional[Tuple] = None,
-        load_history_data: Optional[List] = None,
+        target_field: Optional[tuple] = None,
+        load_history_data: Optional[list] = None,
         load_breakpoint: bool = False,
-        pso_init_kwargs: Optional[Dict] = None,
+        pso_init_kwargs: Optional[dict] = None,
         fine_tune=None,
         max_fine_tune: int = 10,
         **kwargs,
@@ -61,7 +61,7 @@ class PSOOptimizer(PerformanceTuner):
         self.scheduler = scheduler
         self.n_particles = min(n_particles, MAX_ITER_NUM)
         self.iters = min(iters, MAX_ITER_NUM)
-        self.target_field = target_field if target_field else default_support_field
+        self.target_field = target_field or default_support_field
         if not pso_options:
             self.pso_options = PsoOptions()
         else:
@@ -104,7 +104,7 @@ class PSOOptimizer(PerformanceTuner):
             _field.value = _case_value
         return _target_field
 
-    def computer_fitness(self) -> Tuple:
+    def computer_fitness(self) -> tuple:
         from ..config.config import PerformanceIndex
 
         all_position = []
@@ -217,7 +217,7 @@ class PSOOptimizer(PerformanceTuner):
             generate_speed.append(_fitness)
         return np.array(generate_speed)
 
-    def constructing_bounds(self) -> Tuple[Tuple, Tuple]:
+    def constructing_bounds(self) -> tuple[tuple, tuple]:
         """
         Returns example: ((0, 10), (0, 10))
         """
@@ -604,16 +604,23 @@ def enable_simulate(scheduler):
         yield False
 
 
-def main():
-    from ..optimizer.store import DataStorage
+def main() -> None:
+    from optix import configure_logger
+
+    configure_logger()
     from ..config.config import Settings, get_settings, register_settings
     from ..optimizer.experience_fine_tunning import FineTune
-    from ..optimizer.scheduler import Scheduler
     from ..optimizer.register import (
         benchmarks as _benchmarks,
-        simulates as _simulates,
+    )
+    from ..optimizer.register import (
         register_ori_functions,
     )
+    from ..optimizer.register import (
+        simulates as _simulates,
+    )
+    from ..optimizer.scheduler import Scheduler
+    from ..optimizer.store import DataStorage
 
     register_ori_functions()
 
@@ -661,6 +668,10 @@ def main():
     )
 
     args = parser.parse_args()
+
+    from cli.logo import print_logo
+
+    print_logo()
 
     if args.config:
         custom_config_path = Path(args.config).expanduser().resolve()

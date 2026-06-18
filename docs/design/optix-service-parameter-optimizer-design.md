@@ -7,7 +7,7 @@
 `MAX_NUM_BATCHED_TOKENS`、`MAX_NUM_SEQS`、并发数和请求速率等。手工调参依赖经验，验证周期长，且不同服务框架、
 benchmark 工具和日志格式之间缺少统一编排能力，导致参数搜索、服务启动、压测、指标采集和失败恢复难以标准化。
 
-`experimental/optix` 提供服务化参数自动寻优能力，定位为 LLM 推理性能调优工具。该工具通过统一 CLI 入口读取
+`optix` 提供服务化参数自动寻优能力，定位为 LLM 推理性能调优工具。该工具通过统一 CLI 入口读取
 TOML 配置，按用户选择的推理引擎和 benchmark 工具生成待优化参数空间，使用 PSO（Particle Swarm Optimization，
 粒子群优化）搜索候选配置，并由调度器负责服务启动、benchmark 执行、健康检查、结果落盘、断点续跑和日志备份。
 
@@ -214,18 +214,18 @@ Scheduler 的职责是执行一次候选参数评测：
 
 | 路径 | 作用 |
 | -- | -- |
-| `experimental/pyproject.toml` | optix 独立包配置和 `msmodeling` 入口 |
-| `experimental/optix/cli.py` | CLI 顶层入口，转发 `msmodeling optix` |
-| `experimental/optix/config.toml` | 默认配置模板 |
-| `experimental/optix/config/config.py` | Settings、参数字段、性能指标、参数映射和派生字段规则 |
-| `experimental/optix/config/custom_command.py` | MindIE/vLLM/AISBench/vLLM benchmark 命令构造 |
-| `experimental/optix/optimizer/optimizer.py` | PSOOptimizer、fine tune 编排和主函数 |
-| `experimental/optix/optimizer/scheduler.py` | 服务、benchmark、健康检查、重试和保存调度 |
-| `experimental/optix/optimizer/store.py` | CSV 持久化、历史数据加载和最佳结果筛选 |
-| `experimental/optix/optimizer/health_check.py` | 健康检查 hook 和错误分类 |
-| `experimental/optix/optimizer/interfaces/` | simulator、benchmark、custom process 抽象接口 |
-| `experimental/optix/optimizer/plugins/` | 内置 MindIE/vLLM simulator 与 AISBench/vLLM benchmark |
-| `experimental/test/` | 当前 optix 单元测试 |
+| `pyproject.toml` | optix 独立包配置和 `msmodeling` 入口 |
+| `cli/main.py` | CLI 顶层入口，转发 `msmodeling inference` / `msmodeling optix` |
+| `optix/config.toml` | 默认配置模板 |
+| `optix/config/config.py` | Settings、参数字段、性能指标、参数映射和派生字段规则 |
+| `optix/config/custom_command.py` | MindIE/vLLM/AISBench/vLLM benchmark 命令构造 |
+| `optix/optimizer/optimizer.py` | PSOOptimizer、fine tune 编排和主函数 |
+| `optix/optimizer/scheduler.py` | 服务、benchmark、健康检查、重试和保存调度 |
+| `optix/optimizer/store.py` | CSV 持久化、历史数据加载和最佳结果筛选 |
+| `optix/optimizer/health_check.py` | 健康检查 hook 和错误分类 |
+| `optix/optimizer/interfaces/` | simulator、benchmark、custom process 抽象接口 |
+| `optix/optimizer/plugins/` | 内置 MindIE/vLLM simulator 与 AISBench/vLLM benchmark |
+| `tests/regression/optix/` | 当前 optix 单元测试 |
 
 运行期输出：
 
@@ -279,7 +279,7 @@ Scheduler 的职责是执行一次候选参数评测：
 
 ### 安装与入口
 
-`experimental/optix` 作为独立包存在，包配置位于 `experimental/pyproject.toml`。安装后提供入口：
+`optix` 已并入 `msmodeling` 主 wheel，通过根目录 `pyproject.toml` 打包。安装后提供入口：
 
 ```bash
 msmodeling optix [OPTIONS]
@@ -464,7 +464,7 @@ io_error = ["IO error"]
 
 兼容与迁移：
 
-1. 该功能位于 `experimental/optix`，对 `tensor_cast/`、`serving_cast/` 主流程无直接运行时影响。
+1. 该功能位于 `optix`，对 `tensor_cast/`、`serving_cast/` 主流程无直接运行时影响。
 2. 旧用户可继续通过默认 `config.toml` 使用，新增字段通过 pydantic-settings 允许扩展。
 3. 回滚路径是停止 optix 进程并恢复原始服务配置；MindIE simulator 停止时会写回默认配置。
 4. 若启用 `--backup`，可从 `output/bak` 查看每轮变更前后的日志和配置。
@@ -473,8 +473,7 @@ io_error = ["IO error"]
 
 ### 单元测试
 
-当前单元测试位于 `experimental/test/`，覆盖 optix 的主要模块。后续按照仓库测试规范，建议迁移到
-`tests/regression/experimental/optix/` 统一纳入 regression 层。
+当前单元测试位于 `tests/regression/optix/`，由 `bash scripts/run_regression.sh` 统一收集执行。
 
 | 用例名 | 测试类型 | 前置条件 | 操作方式 | 预期结果 |
 | -- | -- | -- | -- | -- |
@@ -543,7 +542,7 @@ io_error = ["IO error"]
 
 完成标准：
 
-1. `experimental/test/` 现有 UT 全部通过。
-2. 将测试迁移到 `tests/regression/experimental/optix/` 后，`bash scripts/run_regression.sh` 能收集并运行相关用例。
+1. `tests/regression/optix/` 现有 UT 全部通过。
+2. `bash scripts/run_regression.sh` 能收集并运行 optix regression 用例。
 3. 在具备外部依赖的环境中完成至少一组 MindIE + AISBench 或 vLLM + vLLM benchmark 端到端验证。
 4. 失败场景下 CSV、日志和备份信息足够定位问题。

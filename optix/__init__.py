@@ -13,12 +13,26 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
+"""OptiX service parameter optimizer for LLM inference tuning."""
 
+import functools
 import os
 import sys
 
 from loguru import logger
 
-log_level = os.getenv("MODELEVALSTATE_LEVEL", "INFO").upper()
-logger.remove()
-logger.add(sys.stderr, level=log_level, enqueue=True)
+
+@functools.cache
+def configure_logger() -> None:
+    """Configure optix loguru handler without clearing unrelated handlers."""
+    log_level = os.getenv("MODELEVALSTATE_LEVEL", "INFO").upper()
+    logger.remove(0)
+    logger.add(sys.stderr, level=log_level, enqueue=True)
+
+
+def main() -> None:
+    """CLI entry for ``python -m optix`` and coverage tests."""
+    configure_logger()
+    from optix.optimizer.optimizer import main as optimizer_main
+
+    optimizer_main()

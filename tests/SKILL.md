@@ -85,7 +85,7 @@ Test intent is expressed by **directory placement**, not by markers.
    - Keep it under 10 seconds
 
 2. **Is it functional/integration verification?** → `tests/regression/`
-   - Place under the appropriate subdirectory (`tensor_cast/`, `serving_cast/`, `cli/`, `web_ui/`, `scripts/`)
+   - Place under the appropriate subdirectory (`tensor_cast/`, `serving_cast/`, `cli/`, `optix/`, `web_ui/`, `scripts/`)
    - Use `get_session_model` / `get_session_hf_config` for model construction
    - Use `tests/helpers/assert_utils.py` for assertions
    - If the test takes > 300 seconds with `do_compile=True`, add `@pytest.mark.nightly` and create a corresponding smoke guard under `tests/smoke/`

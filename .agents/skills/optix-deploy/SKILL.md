@@ -53,7 +53,7 @@ https://mirrors.aliyun.com/pypi/simple/
 寻优工具已集成在 msmodeling 项目的 `experimental/` 子目录中。检查安装入口与默认配置：
 
 ```bash
-ls experimental/pyproject.toml experimental/optix/config.toml
+ls optix/config.toml
 ```
 
 若仓库不存在，**直接克隆**：

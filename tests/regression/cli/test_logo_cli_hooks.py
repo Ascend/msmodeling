@@ -17,6 +17,7 @@ _HELP_MODULES = (
     "cli.inference.video_generate",
     "cli.inference.throughput_optimizer",
     "cli.inference.model_adapter",
+    "optix",
     "serving_cast.main",
     "tools.perf_data_collection.comm_bench.validate_comm_alignment",
     "tools.perf_data_collection.generate_shape_grid",

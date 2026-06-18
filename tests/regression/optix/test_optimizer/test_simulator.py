@@ -16,7 +16,7 @@
 import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
-from experimental.optix.optimizer.plugins.simulate import Simulator
+from optix.optimizer.plugins.simulate import Simulator
 
 
 class TestSimulate(unittest.TestCase):
@@ -71,32 +71,32 @@ class TestVllmSimulator(unittest.TestCase):
         self.mock_config.command.served_model_name = "gpt2"
         self.mock_config.command.others = ""
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
+    @patch("optix.config.custom_command.shutil.which")
     def test_init(self, mock_which):
         """Test VllmSimulator initialization."""
         mock_which.return_value = "/usr/local/bin/vllm"
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         self.assertEqual(simulator.config, self.mock_config)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
+    @patch("optix.config.custom_command.shutil.which")
     def test_base_url_property(self, mock_which):
         """Test the base_url property."""
         mock_which.return_value = "/usr/local/bin/vllm"
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         expected_url = "http://localhost:8000/health"
         self.assertEqual(simulator.base_url, expected_url)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.subprocess.run")
-    @patch("experimental.optix.optimizer.interfaces.custom_process.CustomProcess.stop")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.subprocess.run")
+    @patch("optix.optimizer.interfaces.custom_process.CustomProcess.stop")
     def test_stop(self, mock_super_stop, mock_run, mock_which):
         """Test the stop method."""
         mock_which.return_value = "/usr/local/bin/vllm"
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         # Mock _is_vllm_running to return False, indicating no process needs to be stopped.
@@ -104,13 +104,13 @@ class TestVllmSimulator(unittest.TestCase):
             simulator.stop()
         mock_super_stop.assert_called_once()
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.subprocess.run")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_stop_vllm_process_success(self, mock_run, mock_which):
         """Test _stop_vllm_process successfully stopping a process."""
         mock_which.return_value = "/usr/local/bin/vllm"
         mock_run.return_value = MagicMock(returncode=0)
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
 
@@ -119,12 +119,12 @@ class TestVllmSimulator(unittest.TestCase):
             result = simulator._stop_vllm_process(max_attempts=1, timeout=1)
             self.assertTrue(result)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.subprocess.run")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_stop_vllm_process_already_stopped(self, mock_run, mock_which):
         """Test _stop_vllm_process when the process is already stopped."""
         mock_which.return_value = "/usr/local/bin/vllm"
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
 
@@ -133,72 +133,72 @@ class TestVllmSimulator(unittest.TestCase):
             result = simulator._stop_vllm_process(max_attempts=1, timeout=1)
             self.assertTrue(result)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
+    @patch("optix.config.custom_command.shutil.which")
     def test_stop_vllm_process_no_pkill(self, mock_which):
         """Test _stop_vllm_process when pkill is unavailable."""
         mock_which.return_value = "/usr/local/bin/vllm"
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         # Simulate a running process with pkill unavailable.
         with patch.object(simulator, "_is_vllm_running", return_value=True):
             # Also mock shutil.which in the simulate module.
             with patch(
-                "experimental.optix.optimizer.plugins.simulate.shutil.which",
+                "optix.optimizer.plugins.simulate.shutil.which",
                 return_value=None,
             ):
                 result = simulator._stop_vllm_process()
                 self.assertFalse(result)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.subprocess.run")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_is_vllm_running_true(self, mock_run, mock_simulate_which, mock_config_which):
         """Test _is_vllm_running returning True."""
         mock_config_which.return_value = "/usr/local/bin/vllm"
         mock_simulate_which.return_value = "/usr/bin/pgrep"  # _is_vllm_running uses shutil.which from simulate.
         mock_run.return_value = MagicMock(stdout="5\n", returncode=0)
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         result = simulator._is_vllm_running()
         self.assertTrue(result)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.subprocess.run")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_is_vllm_running_false(self, mock_run, mock_simulate_which, mock_config_which):
         """Test _is_vllm_running returning False."""
         mock_config_which.return_value = "/usr/local/bin/vllm"
         mock_simulate_which.return_value = "/usr/bin/pgrep"
         mock_run.return_value = MagicMock(stdout="0\n", returncode=0)
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         result = simulator._is_vllm_running()
         self.assertFalse(result)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.subprocess.run")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_is_vllm_running_exception(self, mock_run, mock_simulate_which, mock_config_which):
         """Test _is_vllm_running exception handling."""
         mock_config_which.return_value = "/usr/local/bin/vllm"
         mock_simulate_which.return_value = "/usr/bin/pgrep"
         mock_run.side_effect = subprocess.SubprocessError("Command failed")
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         result = simulator._is_vllm_running()
         self.assertFalse(result)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.time.time")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.time.time")
     def test_wait_for_process_exit_success(self, mock_time, mock_which):
         """Test _wait_for_process_exit on successful exit."""
         mock_which.return_value = "/usr/local/bin/vllm"
         mock_time.side_effect = [0, 0.3, 0.6]  # Simulate elapsed time.
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
 
@@ -206,13 +206,13 @@ class TestVllmSimulator(unittest.TestCase):
             result = simulator._wait_for_process_exit(timeout=1)
             self.assertTrue(result)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.time.time")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.time.time")
     def test_wait_for_process_exit_timeout(self, mock_time, mock_which):
         """Test _wait_for_process_exit timeout."""
         mock_which.return_value = "/usr/local/bin/vllm"
         mock_time.side_effect = [0, 1, 2, 3]  # Simulate timeout.
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
 
@@ -220,34 +220,34 @@ class TestVllmSimulator(unittest.TestCase):
             result = simulator._wait_for_process_exit(timeout=1)
             self.assertFalse(result)
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.subprocess.run")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_log_residual_processes(self, mock_run, mock_which):
         """Test the _log_residual_processes method."""
         mock_which.return_value = "/usr/local/bin/vllm"
         mock_run.return_value = MagicMock(stdout="1234 /usr/bin/vllm\n5678 /usr/bin/vllm\n")
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         simulator._log_residual_processes()
         mock_run.assert_called_once()
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
-    @patch("experimental.optix.optimizer.plugins.simulate.subprocess.run")
+    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_log_residual_processes_exception(self, mock_run, mock_which):
         """Test _log_residual_processes exception handling."""
         mock_which.return_value = "/usr/local/bin/vllm"
         mock_run.side_effect = subprocess.SubprocessError("Command failed")
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         simulator._log_residual_processes()  # Should not raise an exception.
 
-    @patch("experimental.optix.config.custom_command.shutil.which")
+    @patch("optix.config.custom_command.shutil.which")
     def test_update_command(self, mock_which):
         """Test the update_command method."""
         mock_which.return_value = "/usr/local/bin/vllm"
-        from experimental.optix.optimizer.plugins.simulate import VllmSimulator
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         simulator = VllmSimulator(self.mock_config)
         simulator.update_command()

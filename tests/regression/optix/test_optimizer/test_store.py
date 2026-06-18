@@ -17,21 +17,21 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from experimental.optix.config.config import (
+from optix.config.config import (
     PerformanceIndex,
     OptimizerConfigField,
     get_settings,
 )
-from experimental.optix.optimizer.store import DataStorage
+from optix.optimizer.store import DataStorage
 
 
 class TestDataStorage(unittest.TestCase):
     def setUp(self):
         self.data_storage = DataStorage(get_settings().data_storage, MagicMock(), MagicMock())
 
-    @patch("experimental.optix.optimizer.store.Path")
-    @patch("experimental.optix.optimizer.store.csv")
-    @patch("experimental.optix.optimizer.store.sanitize_csv_value")
+    @patch("optix.optimizer.store.Path")
+    @patch("optix.optimizer.store.csv")
+    @patch("optix.optimizer.store.sanitize_csv_value")
     def test_save_existing_file(self, mock_sanitize_csv_value, mock_csv, mock_path):
         # Configure mock behavior.
         mock_path.exists.return_value = True
@@ -55,21 +55,21 @@ class TestDataStorage(unittest.TestCase):
         # Call the save method.
         storage.save(performance_index, params, **kwargs)
 
-    @patch("experimental.optix.optimizer.store.Path")
+    @patch("optix.optimizer.store.Path")
     def test_load_history_position_dir_not_exist(self, mock_path):
         mock_path.exists.return_value = False
         with self.assertRaises(FileNotFoundError):
             DataStorage.load_history_position(mock_path)
 
-    @patch("experimental.optix.optimizer.store.Path")
+    @patch("optix.optimizer.store.Path")
     def test_load_history_position_not_a_dir(self, mock_path):
         mock_path.exists.return_value = True
         mock_path.is_dir.return_value = False
         with self.assertRaises(ValueError):
             DataStorage.load_history_position(mock_path)
 
-    @patch("experimental.optix.optimizer.store.Path")
-    @patch("experimental.optix.optimizer.store.read_csv_s")
+    @patch("optix.optimizer.store.Path")
+    @patch("optix.optimizer.store.read_csv_s")
     def test_load_history_position_no_data(self, mock_read_csv_s, mock_path):
         mock_path.exists.return_value = True
         mock_path.is_dir.return_value = True
@@ -77,8 +77,8 @@ class TestDataStorage(unittest.TestCase):
         result = DataStorage.load_history_position(mock_path)
         self.assertIsNone(result)
 
-    @patch("experimental.optix.optimizer.store.Path")
-    @patch("experimental.optix.optimizer.store.read_csv_s")
+    @patch("optix.optimizer.store.Path")
+    @patch("optix.optimizer.store.read_csv_s")
     def test_load_history_position_with_data(self, mock_read_csv_s, mock_path):
         mock_path.exists.return_value = True
         mock_path.is_dir.return_value = True
