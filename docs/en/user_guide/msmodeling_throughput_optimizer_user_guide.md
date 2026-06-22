@@ -228,6 +228,7 @@ Model & Quantization Options:
   --compile             If set, invoke torch.compile() on the model before inference. (default: False)
   --compile-allow-graph-break
                         If set, allows graph breaks during torch.compile() to improve compilation speed or handle unsupported ops. (default: False)
+  --enable-multistream  Enable compiler-driven multi-stream simulation for torch.compile path. Enabled by default. (default: True)
   --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9}
                         Number of MTP tokens, 0 means disabled - only support models having MTP like DeepSeek (default: 0)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -260,6 +261,16 @@ Service Options:
                         Serving cost represents the cost of service delivery (default: 0)
   --disagg              If set, run disaggregation mode. disagg means disaggregation mode. (default: False)
   --jobs JOBS           Number of parallel jobs. (default: 8)
+  --concurrency-search-strategy {exponential,linear_exponential}
+                        Concurrency search strategy. The default is exponential. (default: exponential)
+
+MultiModal Options:
+  --image-batch-size IMAGE_BATCH_SIZE
+                        Number of images per request. If omitted, reuse batch_size for backward compatibility. (default: None)
+  --image-height IMAGE_HEIGHT
+                        Height of the input images (default: None)
+  --image-width IMAGE_WIDTH
+                        Width of the input images (default: None)
 
 PD Ratio Optimization Options:
   --enable-optimize-prefill-decode-ratio
