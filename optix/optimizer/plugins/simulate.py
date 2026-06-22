@@ -178,8 +178,14 @@ class Simulator(SimulatorInterface):
                 elif isinstance(origin_config, list):
                     if len(origin_config) > int(_cur_key):
                         origin_config[int(_cur_key)] = value
-                    else:
+                    elif len(origin_config) == int(_cur_key):
                         origin_config.append(value)
+                    else:
+                        raise IndexError(
+                            f"Cannot set index {_cur_key} on list of length "
+                            f"{len(origin_config)}. Index must be <= current "
+                            f"length (append) or < length (overwrite)."
+                        )
                 return
             if "." in next_level:
                 _next_index = next_level.index(".")
