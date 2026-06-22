@@ -5,14 +5,13 @@ This directory contains the Gradio frontend for Modeling Compass. It wraps the C
 Launch from the repository root:
 
 ```bash
-python -m web_ui.web_ui_start --host 127.0.0.1 --port 2345
+python -m web_ui.web_ui_start --port 2345
 ```
 
 Environment variables (defaults used when CLI flags omitted):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GRADIO_SERVER_NAME` | `0.0.0.0` | Bind address; overridden by `--host` |
 | `GRADIO_SERVER_PORT` | `2345` | Listen port; overridden by `--port` |
 
 See also [Environment Variables](../tests/README.md#environment-variables) for `PYTHONPATH`, `HF_ENDPOINT`, and Hub cache variables.
@@ -33,6 +32,8 @@ web_ui/
   styles.py                    Shared CSS, theme helpers, and header styles.
   schemas.py                   Dataclasses shared by builder, runner, parser, and store.
   utils.py                     Shared parsing, hashing, and normalization helpers.
+  time_tracker.py              Tracks and displays simulation time information.
+  web_ui_start.py              Entry point for launching the Web UI server.
   tests/
     test_frontend_workflows.py Functional tests for UI callbacks and command previews.
 ```
@@ -287,14 +288,14 @@ The raw command is also stored in each `ExperimentTask`, so preview output and r
 Before pushing UI changes:
 
 ```bash
-python -m py_compile web_ui/app.py web_ui/callbacks.py web_ui/command_builder.py web_ui/components.py web_ui/charts.py web_ui/parsers.py web_ui/result_store.py web_ui/runner.py web_ui/schemas.py web_ui/utils.py
+python -m py_compile web_ui/__init__.py web_ui/app.py web_ui/callbacks.py web_ui/command_builder.py web_ui/components.py web_ui/charts.py web_ui/parsers.py web_ui/result_store.py web_ui/runner.py web_ui/schemas.py web_ui/styles.py web_ui/time_tracker.py web_ui/utils.py web_ui/web_ui_start.py
 python web_ui/tests/test_frontend_workflows.py
 ```
 
 Also manually launch the app when changing layout or styling:
 
 ```bash
-python -m web_ui.web_ui_start --host 127.0.0.1 --port 2345
+python -m web_ui.web_ui_start --port 2345
 ```
 
 Then check the main workflows in the browser:
