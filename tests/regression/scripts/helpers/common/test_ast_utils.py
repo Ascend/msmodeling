@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 from scripts.helpers.common.ast_utils import (
     DefinitionSpan,
+    executable_lines_for_symbol,
     filter_executable_lines,
     iter_qualified_definition_spans,
+    is_dataclass_only_class,
     symbol_for_line,
     symbols_for_lines,
     top_level_definitions,
@@ -54,6 +56,79 @@ def test_spans_includes_top_level_and_methods(spans: list[DefinitionSpan]) -> No
 def test_spans_line_ranges_are_valid(spans: list[DefinitionSpan]) -> None:
     foo = next(s for s in spans if s.qualified_name == "foo")
     assert foo.start_line <= foo.end_line
+
+
+# ---------------------------------------------------------------------------
+# executable_lines_for_symbol
+# ---------------------------------------------------------------------------
+
+
+def test_executable_lines_for_symbol_class_includes_method_lines(sample_py_file: Path) -> None:
+    tree = ast.parse(sample_py_file.read_text(encoding="utf-8"))
+    method_return_line = next(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant) and node.value.value == "hello"
+    )
+
+    assert method_return_line in executable_lines_for_symbol(sample_py_file, "Bar")
+
+
+def test_executable_lines_for_symbol_top_level_function_matches_span_filter(sample_py_file: Path) -> None:
+    foo = next(s for s in iter_qualified_definition_spans(sample_py_file) if s.qualified_name == "foo")
+    expected = filter_executable_lines(sample_py_file, set(range(foo.start_line, foo.end_line + 1)))
+
+    assert executable_lines_for_symbol(sample_py_file, "foo") == expected
+
+
+# ---------------------------------------------------------------------------
+# is_dataclass_only_class
+# ---------------------------------------------------------------------------
+
+
+def test_is_dataclass_only_class_true_for_class_without_methods(tmp_path: Path) -> None:
+    src = tmp_path / "types_mod.py"
+    src.write_text(
+        "from dataclasses import dataclass\n\n@dataclass\nclass Row:\n    key: str\n",
+        encoding="utf-8",
+    )
+
+    assert is_dataclass_only_class(src, "Row") is True
+
+
+def test_is_dataclass_only_class_true_for_dataclasses_module_decorator(tmp_path: Path) -> None:
+    src = tmp_path / "types_mod.py"
+    src.write_text(
+        "import dataclasses\n\n@dataclasses.dataclass(frozen=True)\nclass Row:\n    key: str\n",
+        encoding="utf-8",
+    )
+
+    assert is_dataclass_only_class(src, "Row") is True
+
+
+def test_is_dataclass_only_class_false_for_plain_class_without_methods(tmp_path: Path) -> None:
+    src = tmp_path / "types_mod.py"
+    src.write_text(
+        "class Row:\n    key: str\n",
+        encoding="utf-8",
+    )
+
+    assert is_dataclass_only_class(src, "Row") is False
+
+
+def test_is_dataclass_only_class_false_for_class_with_method(tmp_path: Path) -> None:
+    src = tmp_path / "types_mod.py"
+    src.write_text(
+        "from dataclasses import dataclass\n\n"
+        "@dataclass\n"
+        "class Row:\n"
+        "    key: str\n\n"
+        "    def value(self) -> str:\n"
+        "        return self.key\n",
+        encoding="utf-8",
+    )
+
+    assert is_dataclass_only_class(src, "Row") is False
 
 
 # ---------------------------------------------------------------------------

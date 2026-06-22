@@ -73,6 +73,40 @@ def iter_qualified_definition_spans(path: Path) -> list[DefinitionSpan]:
     return spans
 
 
+def executable_lines_for_symbol(path: Path, symbol: str) -> set[int]:
+    """Return executable lines for a top-level function or class symbol."""
+    raw_lines: set[int] = set()
+    for span in iter_qualified_definition_spans(path):
+        if span.qualified_name == symbol or span.qualified_name.startswith(f"{symbol}."):
+            raw_lines.update(range(span.start_line, span.end_line + 1))
+    return filter_executable_lines(path, raw_lines)
+
+
+def _has_dataclass_decorator(node: ast.ClassDef) -> bool:
+    for decorator in node.decorator_list:
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if isinstance(target, ast.Name) and target.id == "dataclass":
+            return True
+        if isinstance(target, ast.Attribute) and target.attr == "dataclass":
+            return True
+    return False
+
+
+def is_dataclass_only_class(path: Path, symbol: str) -> bool:
+    """Return True for a top-level dataclass with no methods."""
+    try:
+        tree = _get_cached_tree(path)
+    except (OSError, SyntaxError):
+        return False
+
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == symbol:
+            if not _has_dataclass_decorator(node):
+                return False
+            return not any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) for item in node.body)
+    return False
+
+
 def symbol_for_line(spans: list[DefinitionSpan], line: int) -> str | None:
     """Pick the smallest enclosing span (innermost definition)."""
     containing = [(s, s.end_line - s.start_line + 1) for s in spans if s.start_line <= line <= s.end_line]

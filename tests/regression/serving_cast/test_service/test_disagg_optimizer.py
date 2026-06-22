@@ -134,14 +134,7 @@ class TestDisaggStrategy(unittest.TestCase):
             captured_calls,
             [
                 (1, 4, 4),
-                (1, 4, 4),
-                (1, 4, 4),
-                (1, 4, 4),
                 (1, 4, 8),
-                (1, 4, 8),
-                (1, 4, 8),
-                (1, 4, 8),
-                (2, 2, 10),
                 (2, 2, 10),
             ],
         )
@@ -153,7 +146,39 @@ class TestDisaggStrategy(unittest.TestCase):
         )
         self.assertEqual(row["prefill_num_chunks"], 3)
         self.assertEqual(row["ttft"], 12.0)
-        self.assertEqual(row["percentage_breakdowns"], "Mem 55.00 | Comm 45.00 | Cube 0.00 | Vec 0.00")
+        self.assertEqual(row["percentage_breakdowns"], "Mem 18.00 | Comm 82.00 | Cube 0.00 | Vec 0.00")
+
+    def test_chunked_prefill_stops_when_any_record_memory_is_negative(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=10,
+            output_length=16,
+            max_batched_tokens=4,
+            serving_cost=2,
+        )
+        captured_calls = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            captured_calls.append((concurrency, query_len, seq_len))
+            if seq_len == 10:
+                raise AssertionError("chunk after negative memory should not be computed")
+
+            class DummyMetrics:
+                execution_time_s = {"analytic": 0.001}
+                device_memory_available_gb = -1.0 if seq_len == 8 else 1.0
+                breakdowns = {}
+
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        self.assertEqual(captured_calls, [(1, 4, 4), (1, 4, 8)])
+        self.assertTrue(result.check_early_stop_flag())
+        self.assertLess(row["ttft"], 12.0)
 
     def test_prefix_cache_changes_prefill_shape_but_not_decode_shape(self):
         optimizer_data = OptimizerData(

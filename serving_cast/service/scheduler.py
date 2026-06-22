@@ -32,7 +32,11 @@ class Scheduler(ABC):
 
     @abstractmethod
     def decide(self, state: SchedulerState) -> StepDecision:
-        """Return how many prefill and decode requests should run next."""
+        """Return how many prefill and decode requests should run next.
+
+        Implementations must base the decision only on SchedulerState. Latency is unavailable
+        during dry-run schedule construction and is applied later during replay via step_latency().
+        """
         ...
 
     @abstractmethod

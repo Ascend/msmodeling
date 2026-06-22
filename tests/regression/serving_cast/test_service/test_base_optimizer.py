@@ -1,9 +1,11 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pandas as pd
 from serving_cast.service.base_throughput_optimizer import BaseThroughputOptimizer
+from serving_cast.service.latency_table import ForwardLatencyRecord, ForwardShapeKey
 from serving_cast.service.optimizer_summary import OptimizerSummary
 from serving_cast.service.utils import AGG_COLUMNS, OptimizerData
 
@@ -20,6 +22,21 @@ class ConcreteThroughputOptimizer(BaseThroughputOptimizer):
         summary.check_early_stop_flag.return_value = False
         summary.get_summary_df.return_value = pd.DataFrame(columns=AGG_COLUMNS)
         return summary
+
+
+class FakeModelRunner:
+    def __init__(self):
+        self.requests = []
+        self.run_count = 0
+
+    def run_inference(self, requests, generate_inputs_func):
+        self.run_count += 1
+        self.requests.extend(requests)
+        return SimpleNamespace(
+            execution_time_s={"analytic": 0.012},
+            device_memory_available_gb=3.5,
+            breakdowns={"stage": {"mem": 1.0, "comm": 3.0}},
+        )
 
 
 class TestBaseBackend(unittest.TestCase):
@@ -41,6 +58,15 @@ class TestBaseBackend(unittest.TestCase):
     def test_name_attribute(self):
         """Test that name attribute is set correctly"""
         self.assertEqual(self.backend.name, "base")
+
+    def test_parallel_fields_default_to_single_rank_values(self):
+        self.assertEqual(self.backend.dp, 1)
+        self.assertEqual(self.backend.tp, 1)
+        self.assertEqual(self.backend.pp, 1)
+        self.assertEqual(self.backend.ep, 1)
+        self.assertEqual(self.backend.moe_tp, 1)
+        self.assertEqual(self.backend.moe_dp, 1)
+        self.assertFalse(self.backend.is_moe_model)
 
     @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
     def test_optimizer_basic(self, mock_get_inference_info):
@@ -209,6 +235,67 @@ class TestBaseBackend(unittest.TestCase):
         )
 
         self.assertEqual((query_len, seq_len), (4, 256))
+
+    def test_make_forward_shape_key_includes_resolved_shape_and_image_fields(self):
+        self.backend.num_mtp_tokens = 2
+        optimizer_data = OptimizerData(
+            input_length=200,
+            output_length=64,
+            prefix_cache_hit_rate=0.5,
+            batch_size=8,
+            image_batch_size=1,
+            image_height=1080,
+            image_width=1920,
+        )
+
+        prefill_key = self.backend._make_forward_shape_key(4, optimizer_data, is_decode=False)
+        decode_key = self.backend._make_forward_shape_key(4, optimizer_data, is_decode=True)
+
+        self.assertEqual(prefill_key, ForwardShapeKey(False, 4, 100, 100, 1, 1080, 1920))
+        self.assertEqual(decode_key, ForwardShapeKey(True, 4, 3, 235, 1, 1080, 1920))
+
+    def test_compute_forward_latency_record_caches_raw_forward_metrics(self):
+        fake_runner = FakeModelRunner()
+        self.backend.model_runner = fake_runner
+        optimizer_data = OptimizerData(
+            input_length=12,
+            output_length=8,
+            batch_size=2,
+            image_height=224,
+            image_width=336,
+        )
+        key = self.backend._make_forward_shape_key(
+            5,
+            optimizer_data,
+            is_decode=False,
+            query_len=6,
+            seq_len=12,
+        )
+
+        record = self.backend._compute_forward_latency_record(key, optimizer_data)
+        cached_record = self.backend._compute_forward_latency_record(key, optimizer_data)
+
+        self.assertIs(record, cached_record)
+        self.assertEqual(fake_runner.run_count, 1)
+        self.assertEqual(record.latency_ms, 12.0)
+        self.assertEqual(record.memory_left_gb, 3.5)
+        self.assertEqual(record.breakdowns, "Mem 25.00 | Comm 75.00 | Cube 0.00 | Vec 0.00")
+        self.assertEqual(record.raw_breakdowns, {"stage": {"mem": 1.0, "comm": 3.0}})
+        request = fake_runner.requests[0]
+        self.assertEqual((request.query_len, request.seq_len, request.concurrency), (6, 12, 5))
+        self.assertEqual((request.image_batch_size, request.image_height, request.image_width), (2, 224, 336))
+
+    def test_get_forward_latency_ms_applies_mtp_only_to_decode_records(self):
+        optimizer_data = OptimizerData(num_mtp_tokens=2, mtp_acceptance_rate=[0.5, 0.25, 1.0])
+        prefill_key = ForwardShapeKey(False, 4, 100, 100)
+        decode_key = ForwardShapeKey(True, 4, 3, 235)
+        record = ForwardLatencyRecord(140.0, 1.0, "")
+
+        prefill_latency = self.backend._get_forward_latency_ms(prefill_key, record, optimizer_data)
+        decode_latency = self.backend._get_forward_latency_ms(decode_key, record, optimizer_data)
+
+        self.assertEqual(prefill_latency, 140.0)
+        self.assertAlmostEqual(decode_latency, 80.0)
 
     def test_get_forward_info_uses_explicit_image_batch_size_when_provided(self):
         self.backend.model_runner = Mock()

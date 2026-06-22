@@ -516,6 +516,157 @@ def test_gate_new_source_coverage_fallback_skips_block(
     assert result.errors == ()
 
 
+def test_gate_new_source_dataclass_only_uses_sibling_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "tensor_cast" / "types_mod.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "from dataclasses import dataclass\n\n"
+        "@dataclass\n"
+        "class Row:\n"
+        "    key: str\n\n"
+        "def helper() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.symbol_lines_covered_in_data",
+        lambda _repo, _path, symbol, _lines, _coverage_path: symbol == "helper",
+    )
+
+    result = gate_new_source(
+        tmp_path,
+        ChangeSet.build(new_source=("tensor_cast/types_mod.py",)),
+        {},
+        (),
+        ("tensor_cast/",),
+        coverage_path=coverage_path,
+    )
+
+    assert result.errors == ()
+
+
+def test_gate_new_source_plain_class_without_methods_does_not_use_sibling_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "tensor_cast" / "types_mod.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "class Row:\n    key: str\n\ndef helper() -> int:\n    return 1\n",
+        encoding="utf-8",
+    )
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.symbol_lines_covered_in_data",
+        lambda _repo, _path, symbol, _lines, _coverage_path: symbol == "helper",
+    )
+
+    result = gate_new_source(
+        tmp_path,
+        ChangeSet.build(new_source=("tensor_cast/types_mod.py",)),
+        {},
+        (),
+        ("tensor_cast/",),
+        coverage_path=coverage_path,
+    )
+
+    assert result.errors == (GateError(category="new_source", path="tensor_cast/types_mod.py", symbol="Row"),)
+
+
+def test_gate_new_source_dataclass_only_without_sibling_pass_reports_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "tensor_cast" / "types_mod.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "from dataclasses import dataclass\n\n"
+        "@dataclass\n"
+        "class Row:\n"
+        "    key: str\n\n"
+        "def helper() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.symbol_lines_covered_in_data",
+        lambda *_args, **_kwargs: False,
+    )
+
+    result = gate_new_source(
+        tmp_path,
+        ChangeSet.build(new_source=("tensor_cast/types_mod.py",)),
+        {},
+        (),
+        ("tensor_cast/",),
+        coverage_path=coverage_path,
+    )
+
+    assert GateError(category="new_source", path="tensor_cast/types_mod.py", symbol="Row") in result.errors
+
+
+def test_gate_new_source_exemption_does_not_count_as_sibling_pass(tmp_path: Path) -> None:
+    src = tmp_path / "tensor_cast" / "types_mod.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "from dataclasses import dataclass\n\n"
+        "@dataclass\n"
+        "class Row:\n"
+        "    key: str\n\n"
+        "def helper() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    exemptions = (_sample_exemption("tensor_cast/types_mod.py", "helper"),)
+
+    result = gate_new_source(
+        tmp_path,
+        ChangeSet.build(new_source=("tensor_cast/types_mod.py",)),
+        {},
+        exemptions,
+        ("tensor_cast/",),
+    )
+
+    assert result.errors == (GateError(category="new_source", path="tensor_cast/types_mod.py", symbol="Row"),)
+
+
+def test_gate_new_source_class_with_method_coverage_pass_does_not_need_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "tensor_cast" / "types_mod.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "class Row:\n    def value(self) -> int:\n        return 1\n",
+        encoding="utf-8",
+    )
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.symbol_lines_covered_in_data",
+        lambda _repo, _path, symbol, _lines, _coverage_path: symbol == "Row",
+    )
+
+    result = gate_new_source(
+        tmp_path,
+        ChangeSet.build(new_source=("tensor_cast/types_mod.py",)),
+        {},
+        (),
+        ("tensor_cast/",),
+        coverage_path=coverage_path,
+    )
+
+    assert result.errors == ()
+
+
 def test_gate_deleted_source_skips_concurrently_deleted_test_file() -> None:
     """del_test holds file paths; test_map holds full node ids — must match by prefix."""
     cs = ChangeSet.build(

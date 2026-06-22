@@ -13,16 +13,17 @@
 # limitations under the License.
 
 import logging
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass
 
 import pandas as pd
 
 from tensor_cast.core.model_runner import ModelRunner
 from .base_throughput_optimizer import BaseThroughputOptimizer
+from .latency_table import ForwardLatencyTable, ForwardShapeKey
 from .optimizer_summary import OptimizerSummary
 from .scheduler import DecodeFirstWithSlack, Scheduler, SchedulerState
-from .utils import AGG_COLUMNS, format_breakdowns, format_parallel_label, OptimizerData
+from .utils import AGG_COLUMNS, format_parallel_label, OptimizerData
 
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,14 @@ class _DecodeGroup:
     count: int
     remaining_decode_tokens: int
     first_token_time: float
+
+
+@dataclass(frozen=True)
+class _ScheduleStep:
+    prefill_key: ForwardShapeKey | None
+    decode_key: ForwardShapeKey | None
+    p_step: int
+    d_step: int
 
 
 @dataclass
@@ -72,8 +81,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         self.moe_tp = self.model_runner.model.model_config.parallel_config.moe_tensor_parallel_size
         self.moe_dp = self.model_runner.model.model_config.parallel_config.moe_data_parallel_size
         self.is_moe_model = self.model_runner.model.model_config.moe_config is not None
-        self._prefill_cache = defaultdict(lambda: None)
-        self._decode_cache = defaultdict(lambda: None)
+        self._forward_record_cache.clear()
         self.scheduler = DecodeFirstWithSlack()
 
     def get_inference_info(self, optimizer_data: OptimizerData) -> OptimizerSummary:
@@ -169,19 +177,41 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         calc_nums_for_ttft = concurrency // prefill_batch_size
         left_calc_num = concurrency % prefill_batch_size
 
-        prefill_latency, prefill_memory_left_gb, prefill_breakdowns = self._get_or_compute_latency(
-            prefill_batch_size, optimizer_data, is_decode=False
-        )
-        prefill_last_latency = prefill_latency
-        prefill_min_memory_left_gb = prefill_memory_left_gb
+        prefill_latency = 0
+        prefill_last_latency = 0
+        prefill_min_memory_left_gb = float("inf")
+        prefill_breakdowns = ""
+        if calc_nums_for_ttft > 0:
+            prefill_latency, prefill_memory_left_gb, prefill_breakdowns = self._get_or_compute_latency(
+                prefill_batch_size, optimizer_data, is_decode=False
+            )
+            prefill_last_latency = prefill_latency
+            prefill_min_memory_left_gb = prefill_memory_left_gb
+            if prefill_memory_left_gb < 0:
+                return _ChunkedAggMetrics(
+                    ttft=float("inf"),
+                    tpot=float("inf"),
+                    output_throughput=0,
+                    memory_left_gb=prefill_memory_left_gb,
+                    prefill_latency=prefill_latency,
+                    prefill_last_latency=prefill_last_latency,
+                    prefill_memory_left_gb=prefill_memory_left_gb,
+                    decode_latency=0,
+                    prefill_breakdowns=prefill_breakdowns,
+                    decode_breakdowns="",
+                )
+
         left_latency = 0
         if left_calc_num != 0:
-            left_latency, left_memory_left_gb, _ = self._get_or_compute_latency(
+            left_latency, left_memory_left_gb, left_breakdowns = self._get_or_compute_latency(
                 left_calc_num,
                 optimizer_data,
                 is_decode=False,
             )
             prefill_last_latency = left_latency
+            if calc_nums_for_ttft == 0:
+                prefill_latency = left_latency
+                prefill_breakdowns = left_breakdowns
             if calc_nums_for_ttft > 0:
                 prefill_min_memory_left_gb = min(prefill_memory_left_gb, left_memory_left_gb)
             else:
@@ -192,6 +222,20 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             1 + calc_nums_for_ttft
         ) * calc_nums_for_ttft / 2 + left_batch_time
         ttft = sum_for_ttft / concurrency
+
+        if prefill_min_memory_left_gb < 0:
+            return _ChunkedAggMetrics(
+                ttft=float("inf"),
+                tpot=float("inf"),
+                output_throughput=0,
+                memory_left_gb=prefill_min_memory_left_gb,
+                prefill_latency=prefill_latency,
+                prefill_last_latency=prefill_last_latency,
+                prefill_memory_left_gb=prefill_min_memory_left_gb,
+                decode_latency=0,
+                prefill_breakdowns=prefill_breakdowns,
+                decode_breakdowns="",
+            )
 
         decode_latency, decode_memory_left_gb, decode_breakdowns = self._get_or_compute_latency(
             batch_size, optimizer_data, is_decode=True
@@ -227,6 +271,124 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         The scheduler is injected by the caller so upper layers can select a scheduling
         policy without changing the simulation loop.
         """
+        schedule = self._build_chunked_prefill_schedule(optimizer_data, chunk_plan, concurrency, scheduler)
+        latency_table = ForwardLatencyTable(
+            self,
+            optimizer_data,
+        )
+        latency_table.prefetch(self._collect_schedule_keys(schedule))
+        return self._replay_chunked_prefill_schedule(
+            optimizer_data,
+            chunk_plan,
+            concurrency,
+            scheduler,
+            schedule,
+            latency_table,
+        )
+
+    def _build_chunked_prefill_schedule(
+        self,
+        optimizer_data: OptimizerData,
+        chunk_plan: list,
+        concurrency: int,
+        scheduler: Scheduler,
+    ) -> list[_ScheduleStep]:
+        """Build a latency-free schedule plan for chunked prefill."""
+        # pending_prefill keeps requests that have not emitted the first visible token yet.
+        pending_prefill = deque([_PrefillGroup(count=concurrency, chunk_index=0)])
+        # ready_decode keeps requests whose final prefill chunk has completed and can decode immediately.
+        ready_decode = deque()
+
+        # The last prefill chunk produces the first token, so decode only needs output_length - 1 steps.
+        remaining_decode_tokens = max(optimizer_data.output_length - 1, 0)
+        finished = 0
+        schedule = []
+
+        while finished < concurrency:
+            chunk = chunk_plan[pending_prefill[0].chunk_index] if pending_prefill else None
+            pending_count = self._count_front_prefill_group(pending_prefill)
+            ready_decode_count = sum(group.count for group in ready_decode)
+            state = SchedulerState(
+                ready_decode=ready_decode_count,
+                pending_prefill=pending_count,
+                chunk_query_len=chunk.query_len if chunk is not None else optimizer_data.max_batched_tokens,
+                max_batched_tokens=optimizer_data.max_batched_tokens,
+            )
+            decision = scheduler.decide(state)
+            p_step = decision.p_step
+            d_step = decision.d_step
+
+            if p_step == 0 and d_step == 0:
+                raise RuntimeError("Chunked prefill simulation made no progress.")
+
+            prefill_key = None
+            if p_step > 0:
+                prefill_key = self._make_forward_shape_key(
+                    p_step,
+                    optimizer_data,
+                    is_decode=False,
+                    query_len=chunk.query_len,
+                    seq_len=chunk.seq_len,
+                )
+
+            decode_key = None
+            if d_step > 0:
+                decode_key = self._make_forward_shape_key(d_step, optimizer_data, is_decode=True)
+
+            schedule.append(
+                _ScheduleStep(
+                    prefill_key=prefill_key,
+                    decode_key=decode_key,
+                    p_step=p_step,
+                    d_step=d_step,
+                )
+            )
+
+            if p_step > 0:
+                _, finished, _ = self._advance_prefill_groups(
+                    pending_prefill,
+                    ready_decode,
+                    chunk_plan,
+                    p_step,
+                    current_time=0.0,
+                    remaining_decode_tokens=remaining_decode_tokens,
+                    first_token_time_sum=0.0,
+                    finished=finished,
+                    max_finish_time=0.0,
+                )
+
+            if d_step > 0:
+                _, finished, _ = self._advance_decode_groups(
+                    ready_decode,
+                    d_step,
+                    current_time=0.0,
+                    initial_decode_tokens=remaining_decode_tokens,
+                    tpot_sum=0.0,
+                    finished=finished,
+                    max_finish_time=0.0,
+                )
+
+        return schedule
+
+    @staticmethod
+    def _collect_schedule_keys(schedule: list[_ScheduleStep]) -> list[ForwardShapeKey]:
+        keys = []
+        for step in schedule:
+            if step.prefill_key is not None:
+                keys.append(step.prefill_key)
+            if step.decode_key is not None:
+                keys.append(step.decode_key)
+        return keys
+
+    def _replay_chunked_prefill_schedule(
+        self,
+        optimizer_data: OptimizerData,
+        chunk_plan: list,
+        concurrency: int,
+        scheduler: Scheduler,
+        schedule: list[_ScheduleStep],
+        latency_table: ForwardLatencyTable,
+    ) -> _ChunkedAggMetrics:
         # pending_prefill keeps requests that have not emitted the first visible token yet.
         pending_prefill = deque([_PrefillGroup(count=concurrency, chunk_index=0)])
         # ready_decode keeps requests whose final prefill chunk has completed and can decode immediately.
@@ -246,64 +408,60 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         last_prefill_latency = 0.0
         last_decode_latency = 0.0
 
-        while finished < concurrency:
-            chunk = chunk_plan[pending_prefill[0].chunk_index] if pending_prefill else None
-            # Only batch prefill groups with the same chunk shape in one model-runner call.
-            pending_count = self._count_front_prefill_group(pending_prefill)
-            ready_decode_count = sum(group.count for group in ready_decode)
-            # The scheduler owns policy decisions such as decode-first and 15% slack.
-            state = SchedulerState(
-                ready_decode=ready_decode_count,
-                pending_prefill=pending_count,
-                chunk_query_len=chunk.query_len if chunk is not None else optimizer_data.max_batched_tokens,
-                max_batched_tokens=optimizer_data.max_batched_tokens,
-            )
-            decision = scheduler.decide(state)
-            p_step = decision.p_step
-            d_step = decision.d_step
-
-            if p_step == 0 and d_step == 0:
-                raise RuntimeError("Chunked prefill simulation made no progress.")
-
+        for step in schedule:
             prefill_step_latency = 0.0
-            if p_step > 0:
-                # p_step is already the model-level request count chosen by the scheduler.
-                prefill_step_latency, prefill_memory_left, current_prefill_breakdowns = self._get_or_compute_latency(
-                    p_step,
-                    optimizer_data,
-                    is_decode=False,
-                    query_len=chunk.query_len,
-                    seq_len=chunk.seq_len,
-                    concurrency_is_model=True,
-                )
-                memory_left_gb = min(memory_left_gb, prefill_memory_left)
-                prefill_memory_left_gb = min(prefill_memory_left_gb, prefill_memory_left)
-                prefill_breakdowns = prefill_breakdowns or current_prefill_breakdowns
+            if step.prefill_key is not None:
+                prefill_record = latency_table.get(step.prefill_key)
+                prefill_step_latency = self._get_forward_latency_ms(step.prefill_key, prefill_record, optimizer_data)
+                memory_left_gb = min(memory_left_gb, prefill_record.memory_left_gb)
+                prefill_memory_left_gb = min(prefill_memory_left_gb, prefill_record.memory_left_gb)
+                prefill_breakdowns = prefill_breakdowns or prefill_record.breakdowns
                 last_prefill_latency = prefill_step_latency
+                if prefill_record.memory_left_gb < 0:
+                    return _ChunkedAggMetrics(
+                        ttft=current_time + prefill_step_latency,
+                        tpot=float("inf"),
+                        output_throughput=0,
+                        memory_left_gb=memory_left_gb,
+                        prefill_latency=last_prefill_latency,
+                        prefill_last_latency=last_prefill_latency,
+                        prefill_memory_left_gb=prefill_memory_left_gb,
+                        decode_latency=last_decode_latency,
+                        prefill_breakdowns=prefill_breakdowns,
+                        decode_breakdowns=decode_breakdowns,
+                    )
 
             decode_step_latency = 0.0
-            if d_step > 0:
-                # d_step counts active decode requests; each request consumes one token budget in this step.
-                decode_step_latency, decode_memory_left, current_decode_breakdowns = self._get_or_compute_latency(
-                    d_step,
-                    optimizer_data,
-                    is_decode=True,
-                    concurrency_is_model=True,
-                )
-                memory_left_gb = min(memory_left_gb, decode_memory_left)
-                decode_breakdowns = decode_breakdowns or current_decode_breakdowns
+            if step.decode_key is not None:
+                decode_record = latency_table.get(step.decode_key)
+                decode_step_latency = self._get_forward_latency_ms(step.decode_key, decode_record, optimizer_data)
+                memory_left_gb = min(memory_left_gb, decode_record.memory_left_gb)
+                decode_breakdowns = decode_breakdowns or decode_record.breakdowns
                 last_decode_latency = decode_step_latency
+                if decode_record.memory_left_gb < 0:
+                    return _ChunkedAggMetrics(
+                        ttft=current_time + decode_step_latency,
+                        tpot=float("inf"),
+                        output_throughput=0,
+                        memory_left_gb=memory_left_gb,
+                        prefill_latency=last_prefill_latency,
+                        prefill_last_latency=last_prefill_latency,
+                        prefill_memory_left_gb=prefill_memory_left_gb,
+                        decode_latency=last_decode_latency,
+                        prefill_breakdowns=prefill_breakdowns,
+                        decode_breakdowns=decode_breakdowns,
+                    )
 
             # The default mixed scheduler models prefill and decode as overlapping in the same step.
             step_latency = scheduler.step_latency(prefill_step_latency, decode_step_latency)
             current_time += step_latency
 
-            if p_step > 0:
+            if step.p_step > 0:
                 first_token_time_sum, finished, max_finish_time = self._advance_prefill_groups(
                     pending_prefill,
                     ready_decode,
                     chunk_plan,
-                    p_step,
+                    step.p_step,
                     current_time,
                     remaining_decode_tokens,
                     first_token_time_sum,
@@ -311,16 +469,19 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                     max_finish_time,
                 )
 
-            if d_step > 0:
+            if step.d_step > 0:
                 tpot_sum, finished, max_finish_time = self._advance_decode_groups(
                     ready_decode,
-                    d_step,
+                    step.d_step,
                     current_time,
                     remaining_decode_tokens,
                     tpot_sum,
                     finished,
                     max_finish_time,
                 )
+
+        if finished < concurrency:
+            raise RuntimeError("Chunked prefill schedule replay ended before all requests finished.")
 
         ttft = first_token_time_sum / concurrency
         tpot = 0 if remaining_decode_tokens == 0 else tpot_sum / concurrency
@@ -470,76 +631,3 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             selected -= take
 
         return tpot_sum, finished, max_finish_time
-
-    def _get_or_compute_latency(
-        self,
-        batch_size: int,
-        optimizer_data: OptimizerData,
-        is_decode=False,
-        *,
-        query_len: int = None,
-        seq_len: int = None,
-        concurrency_is_model: bool = False,
-    ):
-        """
-        Unified method for computing prefill or decode latency with caching.
-
-        Args:
-            batch_size: The batch size for processing
-            optimizer_data: OptimizerData
-            is_decode: Whether this is a decode operation (affects latency calculation)
-
-        Returns:
-            Tuple of (latency_ms, memory_left_gb, breakdowns)
-
-        Optional query_len/seq_len override the default request shape for chunked prefill.
-        When concurrency_is_model is true, batch_size is already model-level concurrency
-        and should not be multiplied by DP/PP.
-        """
-        # Select appropriate cache based on operation type
-        cache = self._decode_cache if is_decode else self._prefill_cache
-        model_concurrency = (
-            batch_size if concurrency_is_model else batch_size * self.dp * self.pp if is_decode else batch_size
-        )
-        query_len, seq_len = self._resolve_forward_shape(
-            optimizer_data,
-            is_decode,
-            query_len=query_len,
-            seq_len=seq_len,
-        )
-        # Shape is part of the key because chunked prefill calls the runner with different query/seq lengths.
-        cache_key = (is_decode, model_concurrency, query_len, seq_len)
-
-        # Check if result already exists in cache
-        batch_flag = cache.get(cache_key)
-
-        if batch_flag is not None:
-            (latency, memory_left_gb, breakdowns) = cache[cache_key]
-        else:
-            # Compute result
-            batch_result = self._get_forward_info(
-                model_concurrency,
-                optimizer_data,
-                is_decode,
-                query_len=query_len,
-                seq_len=seq_len,
-            )
-
-            # Convert execution time to milliseconds
-            latency = batch_result.execution_time_s.get("analytic") * 1000
-            memory_left_gb = batch_result.device_memory_available_gb
-            breakdowns = format_breakdowns(batch_result.breakdowns)
-
-            # Apply decode-specific adjustments
-            if is_decode:
-                num_mtp_tokens = optimizer_data.num_mtp_tokens or 0
-                mtp_acceptance_rate = optimizer_data.mtp_acceptance_rate or []
-                average_tokens = sum(mtp_acceptance_rate[:num_mtp_tokens]) + 1
-                # average_tokens is always greater than 0
-                latency /= average_tokens
-
-            # Cache result
-            if memory_left_gb > 0:
-                cache[cache_key] = (latency, memory_left_gb, breakdowns)
-
-        return latency, memory_left_gb, breakdowns

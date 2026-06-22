@@ -6,6 +6,7 @@ import pandas as pd
 
 from tensor_cast.core.model_runner import ModelRunner
 from .base_throughput_optimizer import BaseThroughputOptimizer
+from .latency_table import ForwardLatencyTable
 from .optimizer_summary import OptimizerSummary
 from .utils import (
     DISAGG_COLUMNS,
@@ -35,6 +36,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         self.moe_tp = self.model_runner.model.model_config.parallel_config.moe_tensor_parallel_size
         self.moe_dp = self.model_runner.model.model_config.parallel_config.moe_data_parallel_size
         self.is_moe_model = self.model_runner.model.model_config.moe_config is not None
+        self._forward_record_cache.clear()
 
     def get_inference_info(self, optimizer_data: OptimizerData) -> OptimizerSummary:
         # check prefill or decode
@@ -62,6 +64,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             breakdowns = ""
             breakdown_sums = {}
             breakdown_counts = {}
+            wave_keys = []
             # Keep disaggregated prefill modeling simple and deterministic: each wave contains
             # only one chunk shape and is capped by max_batched_tokens. We do not aggregate
             # different chunk positions across queries into one wave, so this may be conservative
@@ -73,32 +76,48 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 remaining = concurrency
                 while remaining > 0:
                     wave_concurrency = min(wave_size, remaining)
-                    batch_result = self._get_forward_info(
-                        wave_concurrency,
-                        optimizer_data,
-                        decode_flag,
-                        query_len=chunk.query_len,
-                        seq_len=chunk.seq_len,
+                    wave_keys.append(
+                        self._make_forward_shape_key(
+                            wave_concurrency,
+                            optimizer_data,
+                            decode_flag,
+                            query_len=chunk.query_len,
+                            seq_len=chunk.seq_len,
+                        )
                     )
-                    latency_ms += batch_result.execution_time_s.get("analytic") * 1000
-                    device_memory_available_gb = min(
-                        device_memory_available_gb,
-                        batch_result.device_memory_available_gb,
-                    )
-                    for breakdown_name, breakdown in batch_result.breakdowns.items():
-                        total = sum(breakdown.values())
-                        if total == 0:
-                            continue
-                        normalized_breakdown = {}
-                        for category, value in breakdown.items():
-                            if isinstance(value, float):
-                                normalized_breakdown[category] = value / total
-                        if normalized_breakdown:
-                            accumulated = breakdown_sums.setdefault(breakdown_name, {})
-                            for category, value in normalized_breakdown.items():
-                                accumulated[category] = accumulated.get(category, 0.0) + value
-                            breakdown_counts[breakdown_name] = breakdown_counts.get(breakdown_name, 0) + 1
                     remaining -= wave_concurrency
+
+            latency_table = ForwardLatencyTable(
+                self,
+                optimizer_data,
+            )
+            latency_table.prefetch(wave_keys)
+
+            for key in wave_keys:
+                record = latency_table.get(key)
+                latency_ms += record.latency_ms
+                device_memory_available_gb = min(
+                    device_memory_available_gb,
+                    record.memory_left_gb,
+                )
+                if record.memory_left_gb < 0:
+                    break
+                # Preserve the historical per-wave weighting: each wave contributes one normalized
+                # breakdown distribution, even when multiple waves reuse the same latency table record.
+                for breakdown_name, breakdown in record.raw_breakdowns.items():
+                    total = sum(breakdown.values())
+                    if total == 0:
+                        continue
+                    normalized_breakdown = {}
+                    for category, value in breakdown.items():
+                        if isinstance(value, float):
+                            normalized_breakdown[category] = value / total
+                    if normalized_breakdown:
+                        accumulated = breakdown_sums.setdefault(breakdown_name, {})
+                        for category, value in normalized_breakdown.items():
+                            accumulated[category] = accumulated.get(category, 0.0) + value
+                        breakdown_counts[breakdown_name] = breakdown_counts.get(breakdown_name, 0) + 1
+
             if breakdown_sums:
                 average_breakdowns = {
                     breakdown_name: {

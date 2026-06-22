@@ -13,15 +13,15 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-
 from typing import Optional
 
 import pandas as pd
 
 from tensor_cast.core.input_generator import generate_inputs, RequestInfo
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
+from .latency_table import ForwardLatencyRecord, ForwardShapeKey
 from .optimizer_summary import OptimizerSummary
-from .utils import AGG_COLUMNS, MAX_ITER_NUMS, OptimizerData
+from .utils import AGG_COLUMNS, format_breakdowns, MAX_ITER_NUMS, OptimizerData
 
 
 class BaseThroughputOptimizer(ABC):
@@ -40,6 +40,14 @@ class BaseThroughputOptimizer(ABC):
     def __init__(self) -> None:
         self.model_runner: Optional[ModelRunner] = None
         self.num_mtp_tokens: int = 0
+        self.dp: int = 1
+        self.tp: int = 1
+        self.pp: int = 1
+        self.ep: int = 1
+        self.moe_tp: int = 1
+        self.moe_dp: int = 1
+        self.is_moe_model: bool = False
+        self._forward_record_cache: dict[ForwardShapeKey, ForwardLatencyRecord] = {}
 
     @abstractmethod
     def initialize(self, model_runner: ModelRunner):
@@ -246,6 +254,126 @@ class BaseThroughputOptimizer(ABC):
                 }
             )
 
+    def _make_forward_shape_key(
+        self,
+        concurrency: int,
+        optimizer_data: OptimizerData,
+        is_decode: bool,
+        *,
+        query_len: int = None,
+        seq_len: int = None,
+    ) -> ForwardShapeKey:
+        query_len, seq_len = self._resolve_forward_shape(
+            optimizer_data,
+            is_decode,
+            query_len=query_len,
+            seq_len=seq_len,
+        )
+
+        return ForwardShapeKey(
+            is_decode=is_decode,
+            model_concurrency=concurrency,
+            query_len=query_len,
+            seq_len=seq_len,
+            image_batch_size=self._resolve_image_batch_size(optimizer_data),
+            image_height=optimizer_data.image_height,
+            image_width=optimizer_data.image_width,
+        )
+
+    def _compute_forward_latency_record(
+        self,
+        key: ForwardShapeKey,
+        optimizer_data: OptimizerData,
+    ) -> ForwardLatencyRecord:
+        cached_record = self._get_cached_forward_latency_record(key)
+        if cached_record is not None:
+            return cached_record
+
+        batch_result = self._get_forward_info(
+            key.model_concurrency,
+            optimizer_data,
+            key.is_decode,
+            query_len=key.query_len,
+            seq_len=key.seq_len,
+        )
+
+        record = ForwardLatencyRecord(
+            latency_ms=batch_result.execution_time_s.get("analytic") * 1000,
+            memory_left_gb=batch_result.device_memory_available_gb,
+            breakdowns=format_breakdowns(batch_result.breakdowns),
+            raw_breakdowns=batch_result.breakdowns,
+        )
+        self._cache_forward_latency_record(key, record)
+        return record
+
+    def _get_cached_forward_latency_record(self, key: ForwardShapeKey) -> ForwardLatencyRecord | None:
+        return self._forward_record_cache.get(key)
+
+    def _cache_forward_latency_record(self, key: ForwardShapeKey, record: ForwardLatencyRecord) -> None:
+        self._forward_record_cache[key] = record
+
+    def _get_forward_latency_ms(
+        self,
+        key: ForwardShapeKey,
+        record: ForwardLatencyRecord,
+        optimizer_data: OptimizerData,
+    ) -> float:
+        if not key.is_decode:
+            return record.latency_ms
+        num_mtp_tokens = optimizer_data.num_mtp_tokens or 0
+        mtp_acceptance_rate = optimizer_data.mtp_acceptance_rate or []
+        average_tokens = sum(mtp_acceptance_rate[:num_mtp_tokens]) + 1
+        return record.latency_ms / average_tokens
+
+    def _get_or_compute_latency(
+        self,
+        batch_size: int,
+        optimizer_data: OptimizerData,
+        is_decode=False,
+        *,
+        query_len: int = None,
+        seq_len: int = None,
+        concurrency_is_model: bool = False,
+    ):
+        """
+        Unified method for computing prefill or decode latency with caching.
+
+        Args:
+            batch_size: The batch size for processing.
+            optimizer_data: OptimizerData.
+            is_decode: Whether this is a decode operation.
+
+        Returns:
+            Tuple of (latency_ms, memory_left_gb, breakdowns).
+
+        Optional query_len/seq_len override the default request shape for chunked prefill.
+        When concurrency_is_model is true, batch_size is already model-level concurrency
+        and should not be multiplied by DP/PP.
+        """
+        model_concurrency = (
+            batch_size if concurrency_is_model else batch_size * self.dp * self.pp if is_decode else batch_size
+        )
+        query_len, seq_len = self._resolve_forward_shape(
+            optimizer_data,
+            is_decode,
+            query_len=query_len,
+            seq_len=seq_len,
+        )
+
+        key = self._make_forward_shape_key(
+            model_concurrency,
+            optimizer_data,
+            is_decode,
+            query_len=query_len,
+            seq_len=seq_len,
+        )
+        record = self._compute_forward_latency_record(key, optimizer_data)
+        latency = self._get_forward_latency_ms(key, record, optimizer_data)
+        memory_left_gb = record.memory_left_gb
+        breakdowns = record.breakdowns
+
+        return latency, memory_left_gb, breakdowns
+
     def _get_forward_info(
         self,
         concurrency: int,
@@ -262,19 +390,11 @@ class BaseThroughputOptimizer(ABC):
             seq_len=seq_len,
         )
 
-        # avoid print duplicate image input log
-        _image_batch_size = None
-        if optimizer_data.image_height is not None:
-            _image_batch_size = (
-                optimizer_data.image_batch_size
-                if optimizer_data.image_batch_size is not None
-                else optimizer_data.batch_size
-            )
         requests = [
             RequestInfo(
                 query_len=query_len,
                 seq_len=seq_len,
-                image_batch_size=_image_batch_size,
+                image_batch_size=self._resolve_image_batch_size(optimizer_data),
                 image_height=optimizer_data.image_height,
                 image_width=optimizer_data.image_width,
                 concurrency=concurrency,
@@ -287,6 +407,14 @@ class BaseThroughputOptimizer(ABC):
         metrics = runner.run_inference(requests, generate_inputs_func=generate_inputs)
 
         return metrics
+
+    @staticmethod
+    def _resolve_image_batch_size(optimizer_data: OptimizerData) -> int | None:
+        if optimizer_data.image_height is None:
+            return None
+        if optimizer_data.image_batch_size is not None:
+            return optimizer_data.image_batch_size
+        return optimizer_data.batch_size
 
     def _resolve_forward_shape(
         self,
@@ -302,6 +430,10 @@ class BaseThroughputOptimizer(ABC):
         while decode keeps the original prompt length and only computes the next decode/MTP tokens.
         Chunked prefill passes explicit query_len/seq_len so each chunk can be modeled with its
         own newly computed token count and accumulated context length.
+
+        Prefix-cache hit rate is intentionally represented through the resolved shape instead of
+        being added to ForwardShapeKey separately: prefill changes query_len/seq_len or the chunk
+        plan, while decode continues to use the original prompt length.
         """
         if is_decode:
             # Decode computes one normal token plus any MTP speculative tokens.

@@ -47,6 +47,12 @@ from .configuration_mimo_v2_flash import MiMoV2FlashConfig
 
 logger = logging.get_logger(__name__)
 
+MIMOV2_CACHE_POSITION_DOCSTRING = r"""
+        cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
+            Indices depicting the position of the input sequence tokens in the sequence. It is used to update the cache
+            in the correct position and infer complete sequence length.
+"""
+
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -509,7 +515,7 @@ class MiMoV2Model(PreTrainedModel):
             for i in range(config.num_hidden_layers)
         ]
 
-    @auto_docstring
+    @auto_docstring(custom_args=MIMOV2_CACHE_POSITION_DOCSTRING)
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -604,7 +610,7 @@ class MiMoV2FlashForCausalLM(PreTrainedModel, GenerationMixin):
         self.post_init()
 
     @can_return_tuple
-    @auto_docstring
+    @auto_docstring(custom_args=MIMOV2_CACHE_POSITION_DOCSTRING)
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,

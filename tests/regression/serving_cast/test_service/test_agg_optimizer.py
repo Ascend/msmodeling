@@ -5,7 +5,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
-from serving_cast.service.agg_throughput_optimizer import AggThroughputOptimizer, _DecodeGroup, _PrefillGroup
+from serving_cast.service.agg_throughput_optimizer import (
+    AggThroughputOptimizer,
+    _DecodeGroup,
+    _PrefillGroup,
+    _ScheduleStep,
+)
+from serving_cast.service.latency_table import ForwardLatencyRecord, ForwardShapeKey
 from serving_cast.service.utils import OptimizerData, PrefillChunk
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
@@ -169,6 +175,64 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(metrics.prefill_breakdowns, "prefill")
         self.assertEqual(metrics.decode_breakdowns, "decode")
 
+    def test_get_full_prefill_metrics_stops_before_decode_when_prefill_memory_is_negative(self):
+        optimizer_data = OptimizerData(
+            input_length=10,
+            output_length=5,
+            batch_size=3,
+            max_batched_tokens=20,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        calls = []
+
+        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
+            calls.append((batch_size, is_decode))
+            if is_decode:
+                raise AssertionError("decode should not be computed after negative prefill memory")
+            return (10.0, -1.0, "prefill-oom")
+
+        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
+            metrics = self.strategy._get_full_prefill_metrics(optimizer_data, concurrency=5)
+
+        self.assertEqual(calls, [(2, False)])
+        self.assertEqual(metrics.ttft, float("inf"))
+        self.assertEqual(metrics.tpot, float("inf"))
+        self.assertEqual(metrics.output_throughput, 0)
+        self.assertLess(metrics.memory_left_gb, 0)
+        self.assertEqual(metrics.decode_latency, 0)
+        self.assertEqual(metrics.decode_breakdowns, "")
+
+    def test_get_full_prefill_metrics_stops_before_decode_when_remainder_memory_is_negative(self):
+        optimizer_data = OptimizerData(
+            input_length=10,
+            output_length=5,
+            batch_size=3,
+            max_batched_tokens=20,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        calls = []
+
+        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
+            calls.append((batch_size, is_decode))
+            if is_decode:
+                raise AssertionError("decode should not be computed after negative prefill memory")
+            if batch_size == 1:
+                return (4.0, -1.0, "remainder-oom")
+            return (10.0, 8.0, "prefill")
+
+        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
+            metrics = self.strategy._get_full_prefill_metrics(optimizer_data, concurrency=5)
+
+        self.assertEqual(calls, [(2, False), (1, False)])
+        self.assertEqual(metrics.ttft, float("inf"))
+        self.assertEqual(metrics.tpot, float("inf"))
+        self.assertEqual(metrics.output_throughput, 0)
+        self.assertLess(metrics.memory_left_gb, 0)
+        self.assertEqual(metrics.prefill_memory_left_gb, -1.0)
+        self.assertEqual(metrics.decode_latency, 0)
+
     def test_simulate_chunked_prefill_accumulates_scheduler_metrics(self):
         optimizer_data = OptimizerData(
             input_length=5,
@@ -196,17 +260,17 @@ class TestAggThroughputOptimizer(unittest.TestCase):
 
         scheduler = ScriptedScheduler()
 
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            calls.append((batch_size, is_decode, kwargs))
-            if is_decode:
-                return (5.0, 7.0, "decode")
-            if kwargs["query_len"] == 3:
-                return (10.0, 9.0, "prefill-0")
-            if kwargs["query_len"] == 2:
-                return (20.0, 8.0, "prefill-1")
-            raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}, kwargs={kwargs}")
+        def fake_record(key, optimizer_data):
+            calls.append((key.model_concurrency, key.is_decode, key.query_len, key.seq_len))
+            if key.is_decode:
+                return ForwardLatencyRecord(5.0, 7.0, "decode")
+            if key.query_len == 3:
+                return ForwardLatencyRecord(10.0, 9.0, "prefill-0")
+            if key.query_len == 2:
+                return ForwardLatencyRecord(20.0, 8.0, "prefill-1")
+            raise AssertionError(f"unexpected key: {key}")
 
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
+        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
             metrics = self.strategy._simulate_chunked_prefill(
                 optimizer_data,
                 chunk_plan,
@@ -217,10 +281,9 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                (2, False, {"query_len": 3, "seq_len": 3, "concurrency_is_model": True}),
-                (2, False, {"query_len": 2, "seq_len": 5, "concurrency_is_model": True}),
-                (2, True, {"concurrency_is_model": True}),
-                (2, True, {"concurrency_is_model": True}),
+                (2, False, 3, 3),
+                (2, False, 2, 5),
+                (2, True, 1, 7),
             ],
         )
         self.assertEqual(
@@ -256,15 +319,59 @@ class TestAggThroughputOptimizer(unittest.TestCase):
                 scheduler=StalledScheduler(),
             )
 
+    def test_collect_schedule_keys_preserves_step_order_and_skips_empty_slots(self):
+        prefill_key = ForwardShapeKey(False, 2, 3, 3)
+        decode_key = ForwardShapeKey(True, 2, 1, 7)
+        later_prefill_key = ForwardShapeKey(False, 1, 2, 5)
+        schedule = [
+            _ScheduleStep(prefill_key=prefill_key, decode_key=None, p_step=2, d_step=0),
+            _ScheduleStep(prefill_key=None, decode_key=decode_key, p_step=0, d_step=2),
+            _ScheduleStep(prefill_key=later_prefill_key, decode_key=decode_key, p_step=1, d_step=1),
+        ]
+
+        keys = self.strategy._collect_schedule_keys(schedule)
+
+        self.assertEqual(keys, [prefill_key, decode_key, later_prefill_key, decode_key])
+
+    def test_simulate_chunked_prefill_stops_when_any_record_memory_is_negative(self):
+        optimizer_data = OptimizerData(
+            input_length=10,
+            output_length=1,
+            batch_size=1,
+            max_batched_tokens=4,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        chunk_plan = optimizer_data.get_prefill_chunk_plan()
+        calls = []
+
+        def fake_record(key, optimizer_data):
+            calls.append((key.query_len, key.seq_len))
+            if key.seq_len == 8:
+                return ForwardLatencyRecord(2.0, -1.0, "oom")
+            if key.seq_len == 10:
+                raise AssertionError("chunk after negative memory should not be computed")
+            return ForwardLatencyRecord(1.0, 1.0, "ok")
+
+        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
+            metrics = self.strategy._simulate_chunked_prefill(
+                optimizer_data,
+                chunk_plan,
+                concurrency=1,
+                scheduler=self.strategy.scheduler,
+            )
+
+        self.assertEqual(calls, [(4, 4), (4, 8)])
+        self.assertLess(metrics.memory_left_gb, 0)
+
     def test_get_or_compute_prefill_latency_cached(self):
         """Test _get_or_compute_prefill_latency with cached value"""
-        # Set up cache with a pre-computed value
         optimizer_data = OptimizerData(input_length=10, output_length=10)
-        self.strategy._prefill_cache[(False, 4, 10, 10)] = (50.0, 2.0, "")
+        key = self.strategy._make_forward_shape_key(4, optimizer_data, is_decode=False)
+        self.strategy._forward_record_cache[key] = ForwardLatencyRecord(50.0, 2.0, "")
 
         latency, memory_left, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
 
-        # Should return cached value
         self.assertEqual(latency, 50.0)
         self.assertEqual(memory_left, 2.0)
 
@@ -277,21 +384,100 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         latency, memory_left, breakdown = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
 
         # Should cache the result
-        self.assertEqual(
-            self.strategy._prefill_cache[(False, 4, 10, 10)],
-            (latency, memory_left, breakdown),
-        )
+        key = self.strategy._make_forward_shape_key(4, optimizer_data, is_decode=False)
+        record = self.strategy._forward_record_cache[key]
+        self.assertEqual(record.latency_ms, latency)
+        self.assertEqual(record.memory_left_gb, memory_left)
+        self.assertEqual(record.breakdowns, breakdown)
 
     def test_get_or_compute_decode_latency_cached(self):
         """Test _get_or_compute_decode_latency with cached value"""
-        # Set up cache with a pre-computed value
         optimizer_data = OptimizerData(input_length=10, output_length=10)
-        self.strategy._decode_cache[(True, 4, 1, 16)] = (10.0, 2.0, "")
+        key = self.strategy._make_forward_shape_key(4, optimizer_data, is_decode=True)
+        self.strategy._forward_record_cache[key] = ForwardLatencyRecord(10.0, 2.0, "")
 
         latency, memory_left, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=True)
 
         self.assertEqual(latency, 10.0)
         self.assertEqual(memory_left, 2.0)
+
+    def test_get_or_compute_decode_latency_applies_current_mtp_rate_to_cached_raw_record(self):
+        optimizer_data_a = OptimizerData(
+            input_length=10,
+            output_length=10,
+            batch_size=4,
+            num_mtp_tokens=2,
+            mtp_acceptance_rate=[0.5, 0.5],
+        )
+        optimizer_data_b = OptimizerData(
+            input_length=10,
+            output_length=10,
+            batch_size=4,
+            num_mtp_tokens=2,
+            mtp_acceptance_rate=[1.0, 1.0],
+        )
+        calls = []
+
+        class DummyMetrics:
+            execution_time_s = {"analytic": 0.1}
+            device_memory_available_gb = 2.0
+            breakdowns = {}
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            calls.append((concurrency, is_decode, query_len, seq_len))
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            latency_a, _, _ = self.strategy._get_or_compute_latency(
+                4,
+                optimizer_data_a,
+                is_decode=True,
+                query_len=3,
+                seq_len=20,
+            )
+            latency_b, _, _ = self.strategy._get_or_compute_latency(
+                4,
+                optimizer_data_b,
+                is_decode=True,
+                query_len=3,
+                seq_len=20,
+            )
+
+        self.assertEqual(calls, [(4, True, 3, 20)])
+        self.assertAlmostEqual(latency_a, 50.0)
+        self.assertAlmostEqual(latency_b, 100.0 / 3.0)
+
+    def test_get_or_compute_latency_separates_image_shape_cache_entries(self):
+        optimizer_data_a = OptimizerData(
+            input_length=10,
+            output_length=10,
+            batch_size=4,
+            image_height=224,
+            image_width=224,
+        )
+        optimizer_data_b = OptimizerData(
+            input_length=10,
+            output_length=10,
+            batch_size=4,
+            image_height=448,
+            image_width=224,
+        )
+        calls = []
+
+        class DummyMetrics:
+            execution_time_s = {"analytic": 0.01}
+            device_memory_available_gb = 2.0
+            breakdowns = {}
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            calls.append((optimizer_data.image_height, optimizer_data.image_width))
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            self.strategy._get_or_compute_latency(4, optimizer_data_a, is_decode=False)
+            self.strategy._get_or_compute_latency(4, optimizer_data_b, is_decode=False)
+
+        self.assertEqual(calls, [(224, 224), (448, 224)])
 
     def test_get_inference_info_prefill_batch_size_uses_effective_input_length(self):
         optimizer_data = OptimizerData(
@@ -329,10 +515,10 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             mtp_acceptance_rate=[],
         )
 
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            return (1.0, 1.0, "")
+        def fake_record(key, optimizer_data):
+            return ForwardLatencyRecord(1.0, 1.0, "")
 
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
+        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
             summary = self.strategy.get_inference_info(optimizer_data)
 
         row = summary.get_summary_df().iloc[0]
@@ -474,10 +660,10 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             mtp_acceptance_rate=[],
         )
 
-        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            return (1.0, 1.0, "")
+        def fake_record(key, optimizer_data):
+            return ForwardLatencyRecord(1.0, 1.0, "")
 
-        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
+        with patch.object(self.strategy, "_compute_forward_latency_record", side_effect=fake_record):
             summary = self.strategy.get_inference_info(optimizer_data)
 
         row = summary.get_summary_df().iloc[0]

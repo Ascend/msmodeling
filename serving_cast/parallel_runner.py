@@ -232,7 +232,7 @@ class ParallelRunner:
         Returns:
             List of result DataFrames (non-None results only).
         """
-        configs = user_configs if user_configs is not None else list(self._get_user_config())
+        configs = list(user_configs) if user_configs is not None else list(self._get_user_config())
 
         with self._executor_class(max_workers=self.args.jobs, initializer=self._worker_initializer) as executor:
             results = executor.map(

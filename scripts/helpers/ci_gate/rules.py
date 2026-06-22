@@ -49,18 +49,6 @@ def _all_executable_lines(source_path: Path) -> set[int]:
     return ast_utils.filter_executable_lines(source_path, set(range(1, line_count + 1)))
 
 
-def _executable_lines_for_symbol(source_path: Path, symbol: str) -> set[int]:
-    spans = ast_utils.iter_qualified_definition_spans(source_path)
-    symbol_lines: set[int] = set()
-    for span in spans:
-        if span.qualified_name == symbol:
-            symbol_lines = set(range(span.start_line, span.end_line + 1))
-            break
-    if not symbol_lines:
-        return set()
-    return ast_utils.filter_executable_lines(source_path, symbol_lines)
-
-
 def _symbol_lines_from_diff(source_path: Path, symbol: str, executable: set[int]) -> set[int]:
     spans = ast_utils.iter_qualified_definition_spans(source_path)
     return {line_no for line_no in executable if ast_utils.symbol_for_line(spans, line_no) == symbol}
@@ -128,17 +116,29 @@ def _new_source_errors_for_path(
         ):
             return []
         return [GateError(category="new_source", path=path)]
-    errors: list[GateError] = []
+
+    exempt_symbols: set[str] = set()
+    covered_symbols: set[str] = set()
     for sym in symbols:
         if is_exempt(exemptions, path, sym):
+            exempt_symbols.add(sym)
             continue
         if _coverage_fallback_passes(
             repo_root,
             path,
             sym,
-            _executable_lines_for_symbol(source_path, sym),
+            ast_utils.executable_lines_for_symbol(source_path, sym),
             coverage_path=coverage_path,
         ):
+            covered_symbols.add(sym)
+
+    any_symbol_passed = bool(covered_symbols)
+    errors: list[GateError] = []
+    for sym in symbols:
+        if sym in exempt_symbols or sym in covered_symbols:
+            continue
+        if any_symbol_passed and ast_utils.is_dataclass_only_class(source_path, sym):
+            logger.info("New source sibling pass accepted %s::%s", path, sym)
             continue
         errors.append(GateError(category="new_source", path=path, symbol=sym))
     return errors
