@@ -300,12 +300,6 @@ def _print_report(op_type: str, report: AlignmentReport, verbose: bool) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="C9 comm data alignment: validate HCCL CSVs vs CommAnalyticModel.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python validate_comm_alignment.py --csv-dir ./hccl/v8.5/
-  python validate_comm_alignment.py --csv-dir ./hccl/v8.5/ --tolerance 1.5 --verbose
-""",
     )
     parser.add_argument(
         "--csv-dir", required=True,

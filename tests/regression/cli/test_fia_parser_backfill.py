@@ -1,15 +1,33 @@
 # pylint: disable=no-name-in-module
+"""Regression coverage for FIA parser/replay helpers.
+
+The JSONL enrichment utility was removed, but this file remains as the
+regression coverage home for FIA metadata parsing and replay inference helpers.
+"""
+
 import csv
 
-from tools.perf_data_collection.fill_fia_runtime_metadata import backfill, build_csv_key, build_jsonl_key
+from tools.perf_data_collection import fia_common
 from tools.perf_data_collection.op_replay.FusedInferAttentionScore_run import (
+    build_scalar_length_list,
+    cumulative_lengths,
+    distribute_total,
+    infer_block_size,
     infer_case_args,
+    infer_kv_block_shape,
+    infer_query_lens,
+    infer_seq_lens_kv,
+    infer_sparse_mode,
     resolve_input_shapes,
     validate_case_for_replay,
 )
 from tools.perf_data_collection.parsers.parse_kernel_details import (
     EXTRA_NUMERIC_COLUMNS,
+    FiaRuntimeMetadata,
     KernelDetailsParser,
+    extract_fia_profile_metadata,
+    infer_avg_seq_len,
+    profiling_column_name,
 )
 
 
@@ -31,17 +49,45 @@ def _base_kernel_row(input_shapes: str, output_shapes: str) -> dict[str, str]:
     return row
 
 
-def _build_input_shapes(*, query: str, key: str, value: str, seq_kv_len: str, block: str) -> str:
-    slots = [""] * 15
+def _build_input_shapes(
+    *,
+    query: str = "5,16,1,512",
+    key: str = "1171,1,128,512",
+    value: str = "1171,1,128,512",
+    seq: str = "5",
+    seq_kv: str = "5",
+    block: str = "5,512",
+    query_rope: str = "5,16,1,64",
+    key_rope: str = "1171,1,128,64",
+) -> str:
+    slots = [""] * 31
     slots[0] = query
     slots[1] = key
     slots[2] = value
-    slots[6] = seq_kv_len
+    slots[5] = seq
+    slots[6] = seq_kv
     slots[14] = block
+    slots[24] = query_rope
+    slots[25] = key_rope
     return ";".join(slots)
 
 
-class TestFiaOperatorDetailsEnrichment:
+class TestFiaCommonHelpers:
+    def test_parse_runtime_metadata_fields(self):
+        assert fia_common.split_metadata_field('"1,2; ;3,4"') == ["1,2", "", "3,4"]
+        assert fia_common.parse_shape_or_none("1, 2,3") == (1, 2, 3)
+        assert fia_common.parse_shape_or_none(" ") is None
+        assert fia_common.parse_runtime_int(" 16 ") == 16
+        assert fia_common.parse_runtime_int("") is None
+        assert fia_common.parse_runtime_int_list("1; 2,3") == [1, 2, 3]
+        assert fia_common.parse_runtime_int_list("") is None
+        assert fia_common.shape_numel((2, 3, 4)) == 24
+        assert fia_common.shape_numel(None) == 0
+        assert fia_common.shape_to_text((1, 2, 3)) == "1,2,3"
+        assert fia_common.shape_to_text(None) == ""
+
+
+class TestFiaReplayInference:
     def test_fia_replay_prefers_operator_raw_shapes_for_mla(self):
         row = {
             "Input Shapes": (
@@ -66,6 +112,36 @@ class TestFiaOperatorDetailsEnrichment:
         assert inferred["input_layout"] == "BNSD_NBSD"
         assert inferred["num_heads"] == 16
         assert inferred["num_key_value_heads"] == 1
+
+    def test_fia_replay_infers_lengths_and_modes(self):
+        assert distribute_total(10, 3, min_value=1) == [4, 3, 3]
+        assert cumulative_lengths([4, 3, 3]) == [4, 7, 10]
+        assert build_scalar_length_list((2, 3)) == 6
+        assert build_scalar_length_list(None) is None
+        assert infer_sparse_mode(None, {}) == 0
+        assert infer_sparse_mode((2048, 2048), {}) == 3
+        assert infer_sparse_mode(None, {"Runtime sparse_mode": "4"}) == 4
+        assert infer_block_size((100, 16, 128), (2, 8), {}) == 16
+        assert infer_block_size((100, 1, 128, 512), (2, 8), {}) == 128
+        assert infer_block_size((100, 1, 128, 512), (2, 8), {"Runtime block_size": "64"}) == 64
+        assert infer_query_lens((9, 16, 128), 3) == [3, 6, 9]
+        assert infer_query_lens((3, 16, 4, 128), 3) == [4, 4, 4]
+        assert infer_kv_block_shape((100, 16, 128), (2, 8)) == (100, 16)
+        assert infer_kv_block_shape((100, 1, 128, 512), (2, 8)) == (100, 128)
+
+    def test_fia_replay_uses_runtime_seq_lens_when_available(self):
+        assert infer_seq_lens_kv(
+            (100, 16, 128),
+            batch_size=2,
+            block_table_shape=(2, 8),
+            runtime_row={"Runtime actual_seq_lengths_kv_values": "40,998"},
+        ) == [40, 998]
+        assert infer_seq_lens_kv(
+            (100, 16, 128),
+            batch_size=2,
+            block_table_shape=(2, 8),
+            runtime_row={"Runtime block_table_valid_blocks": "2,3"},
+        ) == [32, 48]
 
     def test_fia_replay_rejects_mla_row_without_raw_shapes(self):
         class FakeTensor:
@@ -105,21 +181,77 @@ class TestFiaOperatorDetailsEnrichment:
             "num_key_value_heads": 16,
         }
 
-        error = validate_case_for_replay(case, row)
-        assert error is None
+        assert validate_case_for_replay(case, row) is None
 
-    def test_parse_kernel_details_prefers_operator_raw_shapes_for_mla(self, tmp_path):
+
+class TestKernelDetailsParserFiaHelpers:
+    def test_parser_static_helpers(self):
+        assert profiling_column_name("Duration(us)") == "Profiling Duration(us)"
+        assert infer_avg_seq_len("40, 998") == "519.000000"
+        assert infer_avg_seq_len("bad") == ""
+        assert KernelDetailsParser._parse_duration("1.25") == 1.25
+        assert KernelDetailsParser._parse_duration("bad") == 0.0
+        assert KernelDetailsParser._sanitize_filename('A/B:*?"') == "A_B____"
+        assert KernelDetailsParser._safe_cell({"a": " x "}, "a") == "x"
+        assert KernelDetailsParser._is_na_shape('"N/A"')
+        assert KernelDetailsParser._normalize_kernel_type("muls_add_kernel_1") == "muls_add_kernel"
+        assert KernelDetailsParser._shape_key({"Input Shapes": "1,2", "Output Shapes": "3"}) == ("1,2", "3")
+        assert KernelDetailsParser._normalize_text("Fused Infer_Attention-Score") == "fusedinferattentionscore"
+        assert KernelDetailsParser._is_fia_operator_row({"Name": "aclnnFusedInferAttentionScoreV2"})
+
+    def test_extract_fia_profile_metadata_from_slots(self):
+        metadata = extract_fia_profile_metadata(
+            input_shapes_text=_build_input_shapes(seq="5", seq_kv="5", block="5,512"),
+            source_profile="PROF_001",
+        )
+
+        assert metadata.source_profile == "PROF_001"
+        assert metadata.actual_seq_lengths_shape == "5"
+        assert metadata.actual_seq_lengths_kv_shape == "5"
+        assert metadata.block_table_shape == "5,512"
+        assert metadata.metadata_completeness == "profile_shapes_only"
+
+    def test_compute_fia_metadata_completeness(self):
+        metadata = FiaRuntimeMetadata(
+            source_profile="p",
+            actual_seq_lengths_shape="",
+            actual_seq_lengths_values="",
+            actual_seq_lengths_kv_shape="",
+            actual_seq_lengths_kv_values="",
+            avg_seq_len="",
+            block_table_shape="",
+            block_table_valid_blocks="",
+            num_heads="",
+            num_key_value_heads="",
+            sparse_mode="",
+            input_layout="",
+            block_size="",
+            attn_state="",
+            kv_cache_mode="",
+            metadata_completeness="profile_shapes_only",
+        )
+        assert KernelDetailsParser._compute_fia_metadata_completeness(metadata) == "profile_shapes_only"
+        metadata.actual_seq_lengths_kv_values = "40,998"
+        assert KernelDetailsParser._compute_fia_metadata_completeness(metadata) == "runtime_values"
+
+    def test_parse_kernel_details_adds_profile_shapes_metadata(self, tmp_path):
         profile_dir = tmp_path / "profile_a"
         profile_dir.mkdir()
 
-        kernel_csv = profile_dir / "kernel_details.csv"
-        operator_csv = profile_dir / "operator_details.csv"
-
         kernel_row = _base_kernel_row(
-            ("8192,16,128;8192,16,128;8192,16,128;;2048,2048;2;2;;;;;;;;;;;;;;;;;;8192,16,64;8192,16,64;;;;;"),
+            _build_input_shapes(
+                query="8192,16,128",
+                key="8192,16,128",
+                value="8192,16,128",
+                seq="2",
+                seq_kv="2",
+                block="",
+                query_rope="8192,16,64",
+                key_rope="8192,16,64",
+            ),
             "8192,16,128;8192,16,1",
         )
-
+        kernel_csv = profile_dir / "kernel_details.csv"
         with kernel_csv.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=list(kernel_row.keys()))
             writer.writeheader()
@@ -128,11 +260,19 @@ class TestFiaOperatorDetailsEnrichment:
         operator_row = {
             "Type": "aclnnFusedInferAttentionScoreV2",
             "Name": "npu_fused_infer_attention_score_v2",
-            "Input Shapes": (
-                "5,16,1,512;1171,1,128,512;1171,1,128,512;;;;;;;;;;;;;5,512;;;;;;;;;;5,16,1,64;1171,1,128,64"
+            "Input Shapes": _build_input_shapes(
+                query="5,16,1,512",
+                key="1171,1,128,512",
+                value="1171,1,128,512",
+                seq="5",
+                seq_kv="5",
+                block="5,512",
+                query_rope="5,16,1,64",
+                key_rope="1171,1,128,64",
             ),
             "Output Shapes": "5,16,1,512;5,16,1,1",
         }
+        operator_csv = profile_dir / "operator_details.csv"
         with operator_csv.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=list(operator_row.keys()))
             writer.writeheader()
@@ -143,126 +283,14 @@ class TestFiaOperatorDetailsEnrichment:
             kernel_details_path=str(tmp_path),
             database_path=tmp_path / "db_out",
         )
-        parser.output_dir = tmp_path / "out"
         output_files = parser.parse_and_export()
 
-        output_name = "FusedInferAttentionScore.csv"
-        output_csv = next(path for path in output_files if path.name == output_name)
+        output_csv = next(path for path in output_files if path.name == "FusedInferAttentionScore.csv")
         with output_csv.open("r", encoding="utf-8", newline="") as handle:
             row = next(csv.DictReader(handle))
 
-        assert "Runtime operator_input_shapes_raw" not in row
-        assert row["Runtime block_table_shape"] == ""
-        assert row["Runtime actual_seq_lengths_shape"] == ""
-        assert row["Runtime actual_seq_lengths_kv_shape"] == ""
-        assert row["Runtime input_layout"] == ""
-        assert row["Runtime num_key_value_heads"] == ""
-        assert row["Runtime attn_state"] == ""
+        assert row["Runtime source_profile"] == "profile_a"
+        assert row["Runtime actual_seq_lengths_shape"] == "5"
+        assert row["Runtime actual_seq_lengths_kv_shape"] == "5"
+        assert row["Runtime block_table_shape"] == "5,512"
         assert row["Runtime metadata_completeness"] == "profile_shapes_only"
-
-
-class TestFiaBackfillSignature:
-    def test_build_keys_match_for_same_runtime_case(self):
-        csv_row = {
-            "Input Shapes": _build_input_shapes(
-                query="5,16,1,512",
-                key="1171,1,128,512",
-                value="1171,1,128,512",
-                seq_kv_len="1",
-                block="5,512",
-            ),
-        }
-        json_record = {
-            "query_shape": [5, 16, 1, 512],
-            "key_shape": [1171, 1, 128, 512],
-            "value_shape": [1171, 1, 128, 512],
-            "actual_seq_lengths_kv": [1024],
-            "atten_mask_shape": None,
-            "block_table_shape": [5, 512],
-        }
-
-        assert build_csv_key(csv_row) == build_jsonl_key(json_record)
-
-    def test_backfill_expands_all_runtime_variants_for_same_key(self):
-        rows = [
-            {
-                "Input Shapes": _build_input_shapes(
-                    query="8192,16,128",
-                    key="8192,16,128",
-                    value="8192,16,128",
-                    seq_kv_len="2",
-                    block="",
-                ),
-                "Runtime actual_seq_lengths_shape": "",
-                "Runtime actual_seq_lengths_values": "",
-                "Runtime actual_seq_lengths_kv_shape": "",
-                "Runtime actual_seq_lengths_kv_values": "",
-                "Runtime avg_seq_len": "",
-                "Runtime block_table_valid_blocks": "",
-            }
-        ]
-        jsonl_index = {
-            build_jsonl_key(
-                {
-                    "query_shape": [8192, 16, 128],
-                    "key_shape": [8192, 16, 128],
-                    "value_shape": [8192, 16, 128],
-                    "actual_seq_lengths_kv": [40, 998],
-                    "atten_mask_shape": None,
-                    "block_table_shape": None,
-                }
-            ): [
-                {
-                    "Runtime actual_seq_lengths_shape": "",
-                    "Runtime actual_seq_lengths_values": "",
-                    "Runtime actual_seq_lengths_kv_shape": "2",
-                    "Runtime actual_seq_lengths_kv_values": "40,998",
-                    "Runtime avg_seq_len": "519.000000",
-                    "Runtime block_table_valid_blocks": "",
-                },
-                {
-                    "Runtime actual_seq_lengths_shape": "",
-                    "Runtime actual_seq_lengths_values": "",
-                    "Runtime actual_seq_lengths_kv_shape": "2",
-                    "Runtime actual_seq_lengths_kv_values": "41,999",
-                    "Runtime avg_seq_len": "520.000000",
-                    "Runtime block_table_valid_blocks": "",
-                },
-            ]
-        }
-
-        output_rows, matched, total = backfill(rows, jsonl_index, "runtime_values_dumped")
-
-        assert matched == 1
-        assert total == 2
-        assert output_rows[0]["Runtime actual_seq_lengths_kv_values"] == "40,998"
-        assert output_rows[0]["Runtime avg_seq_len"] == "519.000000"
-        expected_tag = "runtime_values_dumped"
-        assert output_rows[0]["Runtime metadata_completeness"] == expected_tag
-        assert output_rows[1]["Runtime actual_seq_lengths_kv_values"] == "41,999"
-        assert output_rows[1]["Runtime avg_seq_len"] == "520.000000"
-
-    def test_backfill_keeps_unmatched_rows_unchanged(self):
-        rows = [
-            {
-                "Input Shapes": _build_input_shapes(
-                    query="8192,16,128",
-                    key="8192,16,128",
-                    value="8192,16,128",
-                    seq_kv_len="2",
-                    block="",
-                ),
-                "Runtime actual_seq_lengths_shape": "",
-                "Runtime actual_seq_lengths_values": "",
-                "Runtime actual_seq_lengths_kv_shape": "",
-                "Runtime actual_seq_lengths_kv_values": "",
-                "Runtime avg_seq_len": "",
-                "Runtime block_table_valid_blocks": "",
-            }
-        ]
-
-        output_rows, matched, total = backfill(rows, jsonl_index={}, metadata_tag="runtime_values_dumped")
-
-        assert matched == 0
-        assert total == 1
-        assert output_rows == rows

@@ -26,6 +26,13 @@ from tools.perf_data_collection.grid_generator.utils import (
     dedupe_generated_rows,
     process_csv_with_generated_rows,
 )
+from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
+    build_argparser as build_comm_microbench_argparser,
+)
+from tools.perf_data_collection.op_replay.common import (
+    DEFAULT_REPLAY_REPEAT_COUNT,
+    get_replay_repeat_count,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -39,6 +46,22 @@ for path in (PERF_DATA_COLLECTION_DIR, OP_REPLAY_DIR):
 dispatch_ffn = importlib.import_module("DispatchFFNCombine_run")
 run_all_op = importlib.import_module("run_all_op")
 start_microbench = importlib.import_module("start_microbench")
+
+
+def test_modified_perf_cli_policy_symbols_are_covered():
+    parser = build_comm_microbench_argparser()
+    args = parser.parse_args(["--database-path", "db", "--bench-mode", "event"])
+
+    assert args.database_path == "db"
+    assert args.bench_mode == "event"
+    assert not hasattr(args, "run")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--do-run"])
+
+    assert get_replay_repeat_count(3) == 3
+    assert get_replay_repeat_count(None) == DEFAULT_REPLAY_REPEAT_COUNT
+    with pytest.raises(ValueError, match="--repeat-count must be positive"):
+        get_replay_repeat_count(0)
 
 
 def test_signature_utils_canonicalizes_tooling_profile_signatures():

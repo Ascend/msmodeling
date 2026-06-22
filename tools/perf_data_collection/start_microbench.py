@@ -173,8 +173,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--vllm-version", dest="vllm_version", type=check_version)
     parser.add_argument("--torch-version", type=check_version)
     parser.add_argument("--cann-version", type=check_version)
-    parser.add_argument("--prof-path", help="Existing PROF_* directory")
-    parser.add_argument("--op", nargs="+", help=f"Operators. Available: {ops}")
+    parser.add_argument("--ops", nargs="+", help=f"Operators. Available: {ops}")
     parser.add_argument(
         "--dispatch-ffn-combine-ep-size",
         type=int,
@@ -248,7 +247,7 @@ def validate_ops(selected: list[str] | None) -> list[str] | None:
     invalid = sorted(op for op in normalized if op not in available)
 
     if invalid:
-        raise ValueError(f"Unsupported --op: {', '.join(invalid)}. "
+        raise ValueError(f"Unsupported --ops: {', '.join(invalid)}. "
                          f"Available: {', '.join(sorted(available))}")
 
     return normalized
@@ -316,7 +315,7 @@ def build_msprof_cmd(
     cmd += ["--update-mode", args.update_mode]
 
     if selected_ops:
-        cmd += ["--op"] + selected_ops
+        cmd += ["--ops"] + selected_ops
 
     if args.dispatch_ffn_combine_ep_size:
         cmd += ["--dispatch-ffn-combine-ep-size",
@@ -421,7 +420,7 @@ def run_msprof(target_dir: Path, args: argparse.Namespace,
             if selected_ops is None or not allow_per_op_fallback:
                 raise RuntimeError(
                     "combined msprof failed without op_summary data; rerun "
-                    "with --op to enable per-op fallback. Profiling data kept "
+                    "with --ops to enable per-op fallback. Profiling data kept "
                     f"at {profiler_root}: {subprocess.list2cmdline(cmd)}")
             fallback_ops = selected_ops or list_ops()
             if len(fallback_ops) <= 1 or args.fail_fast:
@@ -994,13 +993,13 @@ def main() -> None:
     """
     args = build_argparser().parse_args()
     print_logo()
-    selected_ops = validate_ops(args.op)
+    selected_ops = validate_ops(args.ops)
     target_dir = get_target_data_dir(
         args.device, args.vllm_version, database_path=args.database_path,
         torch_version=args.torch_version, cann_version=args.cann_version)
 
     # Early exit if all CSVs already have usable durations
-    if not args.prof_path and args.update_mode == "missing-only":
+    if args.update_mode == "missing-only":
         csv_paths = (
             [p for op in selected_ops for p in sorted(target_dir.rglob(f"{op}.csv"))]
             if selected_ops else
@@ -1023,7 +1022,7 @@ def main() -> None:
         nproc_per_node=args.dispatch_ffn_combine_nproc_per_node,
         visible_devices=visible_devices,
         update_mode=args.update_mode,
-        has_prof_path=bool(args.prof_path),
+        has_prof_path=False,
     ):
         skip_ops = selected_ops or [DISPATCH_FFN_OP]
         csv_paths = [
@@ -1062,26 +1061,20 @@ def main() -> None:
                 print(f"\n[REPORT] {report_result[0]}\n[REPORT] {report_result[1]}")
             return
     # Ensure environment and NPU availability
-    if not args.prof_path:
-        ensure_custom_opp_env(profiling_ops)
-        ensure_npu_available()
+    ensure_custom_opp_env(profiling_ops)
+    ensure_npu_available()
 
     # Run profiling and update database
     succeeded = False
     profiler_root = None
 
     try:
-        prof_dirs = {Path(args.prof_path)} if args.prof_path else set()
-
-        if args.prof_path and not Path(args.prof_path).exists():
-            raise FileNotFoundError(f"PROF path does not exist: {args.prof_path}")
-        elif not args.prof_path:
-            profiler_root, prof_dirs = run_msprof(
-                target_dir,
-                args,
-                profiling_ops,
-                allow_per_op_fallback=selected_ops is not None,
-            )
+        profiler_root, prof_dirs = run_msprof(
+            target_dir,
+            args,
+            profiling_ops,
+            allow_per_op_fallback=selected_ops is not None,
+        )
 
         aggregated = aggregate_summary(
             find_summary_files(prof_dirs), args.dispatch_ffn_combine_ep_size)
@@ -1113,10 +1106,10 @@ def main() -> None:
             except OSError:
                 pass
 
-        if not args.prof_path and succeeded and profiler_root is not None:
+        if succeeded and profiler_root is not None:
             shutil.rmtree(profiler_root)
             print(f"[CLEAN] removed {profiler_root}")
-        elif not args.prof_path and profiler_root is not None:
+        elif profiler_root is not None:
             print(f"[PRESERVE] profiling data kept for debugging: {profiler_root}")
 
 

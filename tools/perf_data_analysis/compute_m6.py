@@ -1,29 +1,4 @@
-"""Compute M6: Empirical E2E Prediction Ratio (offline metric).
-
-M6 = TC_empirical_hit_total / Real_per_forward_pass
-
-Where:
-  - TC_empirical_hit_total = sum of durations from TC chrome trace events
-    where source ∈ {MEASURED, INTERPOLATED} (empirical data, not analytic)
-  - Real_per_forward_pass = kernel duration sum from a clean forward pass
-    trace CSV (pre-extracted from kernel_details.csv).
-
-M6 = 1.0 is perfect. >1 = overestimate, <1 = underestimate.
-
-This tool computes the E2E ratio only. For per-kernel analysis, use
-tools/perf_data_analysis/generate_op_comparison.py.
-
-Usage:
-    python3.10 tools/perf_data_analysis/compute_m6.py \\
-        --tc-trace results/qwen3_dc_trace.json \\
-        --prof-trace docs/perf_database/forward_pass_traces/qwen3-32b_dc_16tok.csv
-
-    # Only count exact CSV matches (exclude interpolated):
-    python3.10 tools/perf_data_analysis/compute_m6.py \\
-        --tc-trace results/qwen3_dc_trace.json \\
-        --prof-trace docs/perf_database/forward_pass_traces/qwen3-32b_dc_16tok.csv \\
-        --source-filter MEASURED
-"""
+"""Compute M6: empirical E2E prediction ratio."""
 
 import argparse
 import csv

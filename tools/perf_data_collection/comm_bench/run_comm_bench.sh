@@ -12,7 +12,7 @@
 #   - Large msgs (>=512KB): per msg_bytes separate session, active=1,
 #     repeated 10 sessions taking median, eliminates ring buffer pressure
 #
-# Hardware: ATLAS_800_A3, grid_shape=[48,8,2]
+# Hardware: ATLAS_800_A3 series, grid_shape=[48,8,2]
 # Device groups: nd=16 (tier=1), nd=8 (tier=1), nd=4 (tier=1), nd=2 (tier=2)
 #
 # Organization: per-operator collection, each op iterates all nd
@@ -24,8 +24,7 @@
 #   Powers of 2 from 128B to 512MB (23 points).
 #   ProfilingDataSource uses alpha-beta least-squares interpolation on message_bytes,
 #   so power-of-2 spacing is sufficient for accurate interpolation at any query size.
-#   To validate interpolation accuracy at specific production msg_bytes, run
-#   validate_comm_alignment.py after collection.
+#   This wrapper is the documented A3 collection script.
 #
 # Fault tolerant: single session failure does not abort collection.
 #
@@ -79,7 +78,7 @@ echo ""
 # Power-of-2 spacing: sufficient for alpha-beta least-squares interpolation
 #   (latency = alpha + bytes/bandwidth) at any query message_bytes within range.
 #   To validate interpolation accuracy at specific production msg_bytes, run
-#   validate_comm_alignment.py after collection.
+#   This wrapper is the documented A3 collection script.
 MSG_BYTES="128 256 512 1024 2048 4096 8192 16384 32768 65536 131072 262144 524288 1048576 2097152 4194304 8388608 16777216 33554432 67108864 134217728 268435456 536870912"
 
 # Helper: run a torchrun session
@@ -92,13 +91,12 @@ run_session() {
     echo "    bytes_count=$(echo $bytes | wc -w | tr -d ' ')"
 
     MASTER_PORT=$port torchrun --nproc_per_node=$ndev "$SCRIPT" \
-        --do-run \
         --bench-mode kernel \
         --ops $ops \
         --grid-shape 48 8 2 \
         --num-devices $ndev \
         --bytes-grid $bytes \
-        --output-dir "$outdir"
+        --database-path "$outdir"
     local rc=$?
 
     if [ $rc -eq 0 ]; then
@@ -283,13 +281,13 @@ if [ "${NNODES:-1}" -ge 2 ]; then
             --master_addr=$MASTER_ADDR --master_port=$port \
             --nproc_per_node=$NPROC \
             "$SCRIPT" \
-            --do-run --bench-mode kernel \
+            --bench-mode kernel \
             --ops $ops \
             --grid-shape 48 8 2 \
             --num-devices $ND_LIST \
             --topology-tier 0 \
             --bytes-grid $MSG_BYTES_INTERPOD \
-            --output-dir "$OUTPUT_DIR"
+            --database-path "$OUTPUT_DIR"
         local rc=$?
         set -e
 

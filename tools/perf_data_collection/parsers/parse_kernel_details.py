@@ -114,8 +114,7 @@ class ProfilingBundle:
 class FiaRuntimeMetadata:
     """Profile-derived FIA metadata.
 
-    Fields without shape data are intentionally left empty here and are filled
-    later by `fill_fia_runtime_metadata.py` when runtime JSONL is available.
+    Fields without shape data are intentionally left empty here.
     """
 
     source_profile: str

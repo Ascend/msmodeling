@@ -33,14 +33,14 @@ DEFAULT_ROWS = 1000
 
 
 def resolve_data_dir(
-    data_dir: Path | None,
+    database_path: Path | None,
     device: str | None,
     vllm_ascend_version: str | None,
     torch_version: str | None,
     cann_version: str | None,
 ) -> Path:
-    if data_dir is not None:
-        return data_dir
+    if database_path is not None:
+        return database_path
     if device and vllm_ascend_version:
         return get_target_data_dir(
             device=device,
@@ -65,11 +65,11 @@ def parse_args() -> argparse.Namespace:
         "Only used in theory mode. If omitted, uses full NK_GRID cartesian product.",
     )
     parser.add_argument(
-        "--data-dir",
+        "--database-path",
         type=Path,
         default=None,
         help=(
-            "CSV root directory. If omitted, the script uses either "
+            "CSV database root directory. If omitted, the script uses either "
             "{repo}/tensor_cast/performance_model/profiling_database/data or "
             "{repo}/.../data/{device}/vllm_ascend/{version}/ when --device and "
             "--vllm-version are provided."
@@ -124,7 +124,7 @@ def main() -> None:
     args = parse_args()
     print_logo()
     data_dir = resolve_data_dir(
-        args.data_dir,
+        args.database_path,
         args.device,
         args.vllm_version,
         args.torch_version,

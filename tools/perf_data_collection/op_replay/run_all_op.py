@@ -136,7 +136,7 @@ def build_argparser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--op",
+        "--ops",
         nargs="+",
         default=None,
         help=(
@@ -407,8 +407,8 @@ def main() -> None:
         # Global invalid-row tracking only works when every operator runs in this process.
         reset_invalid_replay_rows()
     selected_ops = None
-    if args.op:
-        selected_ops = {normalize_op_name(item) for item in args.op}
+    if args.ops:
+        selected_ops = {normalize_op_name(item) for item in args.ops}
     scripts = discover_run_scripts()
     scripts = filter_run_scripts(scripts, selected_ops)
     if not scripts:

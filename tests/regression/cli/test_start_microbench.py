@@ -395,7 +395,7 @@ class TestRunMsprof:
 
         monkeypatch.setattr(start_microbench.subprocess, "run", fake_run)
 
-        with pytest.raises(RuntimeError, match="rerun with --op"):
+        with pytest.raises(RuntimeError, match="rerun with --ops"):
             run_msprof(tmp_path, self._args(tmp_path), None)
 
         assert len(calls) == 1
@@ -1144,10 +1144,11 @@ class TestPrintReport:
 # =============================================================================
 # End-to-End Tests
 # =============================================================================
-class TestEndToEndWithProfPath:
-    """End-to-end tests using --prof-path (no NPU required for profiling).
+class TestEndToEndWithMockedProfiling:
+    """End-to-end tests with mocked profiling collection (no NPU required).
 
-    These tests simulate the full pipeline with pre-generated profiling data.
+    These tests simulate the full pipeline with pre-generated profiling data
+    returned from run_msprof.
     """
 
     @pytest.fixture
@@ -1286,8 +1287,25 @@ class TestEndToEndWithProfPath:
 
         return db_path
 
-    def test_e2e_prof_path_updates_database(self, tmp_path: Path, mock_prof_data: Path, temp_database: Path, capsys):
-        """Test full pipeline with --prof-path updates database correctly."""
+    @pytest.fixture(autouse=True)
+    def mock_profile_collection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        mock_prof_data: Path,
+    ) -> None:
+        profiler_root = tmp_path / "profiler_root"
+        profiler_root.mkdir()
+        monkeypatch.setattr(start_microbench, "ensure_custom_opp_env", lambda _ops: None)
+        monkeypatch.setattr(start_microbench, "ensure_npu_available", lambda: None)
+        monkeypatch.setattr(
+            start_microbench,
+            "run_msprof",
+            lambda *_args, **_kwargs: (profiler_root, {mock_prof_data}),
+        )
+
+    def test_e2e_updates_database(self, temp_database: Path, capsys):
+        """Test full pipeline updates database correctly."""
         # Simulate CLI args
         import sys
 
@@ -1300,8 +1318,6 @@ class TestEndToEndWithProfPath:
                 "start_microbench.py",
                 "--database-path",
                 str(temp_database),
-                "--prof-path",
-                str(mock_prof_data),
                 "--update-mode",
                 "all",
             ]
@@ -1330,7 +1346,7 @@ class TestEndToEndWithProfPath:
         finally:
             sys.argv = old_argv
 
-    def test_e2e_missing_only_mode(self, tmp_path: Path, mock_prof_data: Path, temp_database: Path, capsys):
+    def test_e2e_missing_only_mode(self, temp_database: Path, capsys):
         """Test missing-only mode only updates rows without valid duration."""
         import sys
 
@@ -1342,8 +1358,6 @@ class TestEndToEndWithProfPath:
                 "start_microbench.py",
                 "--database-path",
                 str(temp_database),
-                "--prof-path",
-                str(mock_prof_data),
                 "--update-mode",
                 "missing-only",
             ]
@@ -1368,7 +1382,7 @@ class TestEndToEndWithProfPath:
         finally:
             sys.argv = old_argv
 
-    def test_e2e_creates_report_files(self, tmp_path: Path, mock_prof_data: Path, temp_database: Path):
+    def test_e2e_creates_report_files(self, temp_database: Path):
         """Test that report markdown and CSV files are created."""
         import sys
 
@@ -1380,8 +1394,6 @@ class TestEndToEndWithProfPath:
                 "start_microbench.py",
                 "--database-path",
                 str(temp_database),
-                "--prof-path",
-                str(mock_prof_data),
                 "--update-mode",
                 "all",
             ]
@@ -1404,7 +1416,7 @@ class TestEndToEndWithProfPath:
         finally:
             sys.argv = old_argv
 
-    def test_e2e_prune_empty_duration_rows(self, tmp_path: Path, mock_prof_data: Path):
+    def test_e2e_prune_empty_duration_rows(self, tmp_path: Path):
         """Test --prune-empty-duration-rows removes invalid rows."""
         # Create database with rows that have only N/A durations
         db_path = tmp_path / "database"
@@ -1464,8 +1476,6 @@ class TestEndToEndWithProfPath:
                 "start_microbench.py",
                 "--database-path",
                 str(db_path),
-                "--prof-path",
-                str(mock_prof_data),
                 "--update-mode",
                 "all",
                 "--prune-empty-duration-rows",
@@ -1589,7 +1599,7 @@ class TestEndToEndWithNPU:
                 self.TORCH_VERSION,
                 "--cann-version",
                 self.CANN_VERSION,
-                "--op",
+                "--ops",
                 "MatMulV2",
                 "--prune-empty-duration-rows",
             ]

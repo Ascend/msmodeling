@@ -273,7 +273,7 @@ Shape grid 行为：
 - `replay_framework.py` 提供适用于标准 API 型 kernel 的 `OpReplay` helper。
 - `run_all_op.py` 发现 `*_run.py`，支持 `--execution-mode inprocess` 以便由单个外层 `msprof` session 采集，并写出 `run_all_op_status.json`。
 - 每个算子脚本读取匹配的 `{KernelType}.csv`，在 NPU 上 replay 每一行，打印简洁 `[OK]` 信息，并在构造 replay case 失败时删除无效行。
-- 当未传 `--repeat-count` 时，`MSMODELING_OP_REPLAY_REPEAT_COUNT` 可以提供默认 repeat count。
+- 当未传 `--repeat-count` 时，使用 `common.py` 中的代码默认值（`30`）；repeat count 仅通过 CLI 配置，不再支持 `MSMODELING_OP_REPLAY_REPEAT_COUNT` 环境变量。
 - 新增或修改 `<KernelType>_run.py` 时，应遵循 Microbench Run Script Generator skill 的核心步骤：读取目标 CSV，定位 `torch_npu_reference.<KernelType>.microbench_api`，从上游 repo 文档/测试确认真实 API，推断缺失的非 tensor 参数，复用 `common.py` / `replay_framework.py` 约定，并至少通过 `py_compile` 与 `--help` 校验。
 
 覆盖限制：replay 覆盖可以逐步扩展。CSV 可能存在但没有对应 replay 脚本；部分脚本只支持其面向的已记录 shape/API 模式。自定义算子还要求正确设置 `ASCEND_CUSTOM_OPP_PATH` 和 `LD_LIBRARY_PATH`。常规 CI 中依赖 NPU 的 replay 测试必然有限；大部分测试覆盖 import、CLI help、纯解析逻辑和回写单元逻辑。

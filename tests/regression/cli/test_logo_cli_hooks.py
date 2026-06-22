@@ -79,7 +79,7 @@ def test_generate_shape_grid_main_cli(
 
     result = run_module_main(
         "tools.perf_data_collection.generate_shape_grid",
-        ["--data-dir", str(tmp_path), "--rows", "0"],
+        ["--database-path", str(tmp_path), "--rows", "0"],
     )
 
     assert result.returncode == 0

@@ -22,13 +22,13 @@ topology_tier semantics (mirrors CommAnalyticModel._get_topology_idx_for_group):
 Usage examples:
     # Run all ops + all tiers in ONE torchrun session (recommended)
     torchrun --nproc_per_node=16 generate_comm_microbench.py \\
-        --do-run --output-dir ./hccl_data \\
+        --database-path ./hccl_data \\
         --ops all_reduce all_gather reduce_scatter all_to_all \\
         --grid-shape 48 8 2 --num-devices 16 2
 
     # Run with event mode (fast, hcom_kernel only)
     torchrun --nproc_per_node=16 generate_comm_microbench.py \\
-        --do-run --bench-mode event --output-dir ./hccl_data \\
+        --bench-mode event --database-path ./hccl_data \\
         --ops all_reduce all_gather --grid-shape 48 8 2
 """
 
@@ -251,7 +251,7 @@ def build_group_for_tier(
     return group
 
 
-# Direct run mode (--do-run)
+# Direct run mode
 # ============================================================================
 
 def _build_run_op(
@@ -779,20 +779,20 @@ def build_argparser() -> argparse.ArgumentParser:
             Examples:
               # Run all ops + all tiers in ONE torchrun session (recommended)
               # tier=1 (intra_pod): 16 devices; tier=2 (die_level): 2 devices
-              # Writes hcom_allReduce_.csv / hcom_allGather_.csv / etc. to --output-dir
+              # Writes hcom_allReduce_.csv / hcom_allGather_.csv / etc. to --database-path
               torchrun --nproc_per_node=16 generate_comm_microbench.py \\
-                  --do-run --output-dir ./hccl_data \\
+                  --database-path ./hccl_data \\
                   --ops all_reduce all_gather reduce_scatter all_to_all \\
                   --grid-shape 48 8 2 --num-devices 16 2
 
               # Single op, single CSV (legacy)
               torchrun --nproc_per_node=16 generate_comm_microbench.py \\
-                  --do-run --output-csv ./hccl_v8.5/hcom_allReduce_.csv \\
+                  --output-csv ./hccl_v8.5/hcom_allReduce_.csv \\
                   --ops all_reduce --grid-shape 48 8 2
         """),
     )
     parser.add_argument(
-        "--output-dir",
+        "--database-path",
         default=None,
         help=(
             "Directory to write per-op CSV files "
@@ -849,15 +849,9 @@ def build_argparser() -> argparse.ArgumentParser:
         help="Custom message_bytes grid (default: 1KB~512MB powers-of-4)",
     )
     parser.add_argument(
-        "--do-run",
-        action="store_true",
-        dest="run",
-        help="Run benchmarks directly (requires torchrun)",
-    )
-    parser.add_argument(
         "--output-csv",
         default=None,
-        help="CSV file to append results to (used with --do-run, format per S4.7)",
+        help="CSV file to append results to (format per S4.7)",
     )
     parser.add_argument(
         "--bench-mode",
@@ -921,7 +915,7 @@ def main() -> None:
     if args.output_csv and len(args.ops) > 1:
         print(
             "ERROR: --output-csv only supports a single --ops value. "
-            "Use --output-dir for multiple ops.",
+            "Use --database-path for multiple ops.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -931,199 +925,145 @@ def main() -> None:
         grid_shape, bytes_grid,
     )
 
-    if args.run:
-        try:
-            import torch.distributed as dist
-            if not dist.is_initialized():
-                dist.init_process_group(backend="hccl" if _has_torch_npu() else "gloo")
-        except Exception as e:
-            print(f"ERROR: Failed to initialize distributed: {e}", file=sys.stderr)
-            print("Hint: run with `torchrun --nproc_per_node=N generate_comm_microbench.py --do-run ...`",
-                  file=sys.stderr)
-            sys.exit(1)
+    try:
+        import torch.distributed as dist
+        if not dist.is_initialized():
+            dist.init_process_group(backend="hccl" if _has_torch_npu() else "gloo")
+    except Exception as e:
+        print(f"ERROR: Failed to initialize distributed: {e}", file=sys.stderr)
+        print(
+            "Hint: this script requires torchrun. Run with: "
+            "torchrun --nproc_per_node=N generate_comm_microbench.py ...",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-        import torch
-        rank = dist.get_rank()
-        local_rank = int(os.environ.get("LOCAL_RANK", rank))
-        if _has_torch_npu():
-            import torch_npu  # noqa: F401
-            torch.npu.set_device(local_rank)
+    import torch
+    rank = dist.get_rank()
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    if _has_torch_npu():
+        import torch_npu  # noqa: F401
+        torch.npu.set_device(local_rank)
 
-        # Resolve per-op output CSV paths.
-        # Priority: --output-csv (single file, legacy) > --output-dir (per-op files) > None
-        if args.output_csv:
-            def _csv_for_op(op_type: str) -> Optional[str]:
-                return args.output_csv
-        elif args.output_dir:
-            run_out_dir = Path(args.output_dir)
-            run_out_dir.mkdir(parents=True, exist_ok=True)
-            def _csv_for_op(op_type: str) -> Optional[str]:
-                return str(run_out_dir / _OP_TO_CSV_FILENAME[op_type])
-        else:
-            def _csv_for_op(op_type: str) -> Optional[str]:
-                return None
+    # Priority: --output-csv (single file, legacy) > --database-path (per-op files) > None
+    if args.output_csv:
+        def _csv_for_op(op_type: str) -> Optional[str]:
+            return args.output_csv
+    elif args.database_path:
+        run_out_dir = Path(args.database_path)
+        run_out_dir.mkdir(parents=True, exist_ok=True)
+        def _csv_for_op(op_type: str) -> Optional[str]:
+            return str(run_out_dir / _OP_TO_CSV_FILENAME[op_type])
+    else:
+        def _csv_for_op(op_type: str) -> Optional[str]:
+            return None
 
-        # Pre-create one process group per unique group_ranks to avoid
-        # repeated hcclCommInitRootInfoConfig calls (HCCL error code 1).
-        # dist.new_group() must be called by ALL ranks in the world even if
-        # they are not in the group -- so we call it unconditionally here.
-        group_cache: dict = {}
-        unique_groups = []
-        seen = set()
-        for _, _, _, _, group_ranks in configs:
-            key = tuple(group_ranks)
-            if key not in seen:
-                seen.add(key)
-                unique_groups.append(group_ranks)
-        for group_ranks in unique_groups:
-            key = tuple(group_ranks)
-            group_cache[key] = dist.new_group(ranks=list(group_ranks))
+    # Pre-create one process group per unique group_ranks to avoid
+    # repeated hcclCommInitRootInfoConfig calls (HCCL error code 1).
+    # dist.new_group() must be called by ALL ranks in the world even if
+    # they are not in the group -- so we call it unconditionally here.
+    group_cache: dict = {}
+    unique_groups = []
+    seen = set()
+    for _, _, _, _, group_ranks in configs:
+        key = tuple(group_ranks)
+        if key not in seen:
+            seen.add(key)
+            unique_groups.append(group_ranks)
+    for group_ranks in unique_groups:
+        key = tuple(group_ranks)
+        group_cache[key] = dist.new_group(ranks=list(group_ranks))
 
-        # Global warmup: run each (op, group, msg_bytes) combination once to
-        # trigger HCCL JIT compilation for ALL message sizes before benchmarking.
-        # HCCL compiles different internal kernels per message size; warming up
-        # only the smallest size leaves mid-range sizes (1~5MB) un-compiled,
-        # causing the first real measurement to include JIT overhead.
-        # Always use event mode for warmup (fast, no profiler overhead).
-        if rank == 0:
-            print("Running global warmup to trigger HCCL JIT compilation "
-                  f"({len(configs)} configs)...")
-        warmed = set()
-        for op_type, msg_bytes, _, _, group_ranks in configs:
-            wkey = (op_type, msg_bytes, tuple(group_ranks))
-            if wkey not in warmed:
-                warmed.add(wkey)
-                run_benchmark(
-                    op_type, msg_bytes, group_ranks,
-                    resolve_topology_tier(list(group_ranks), grid_shape),
-                    args.dtype, output_csv=None,
-                    group=group_cache[tuple(group_ranks)],
-                    bench_mode="event",
-                )
+    # Global warmup: run each (op, group, msg_bytes) combination once to
+    # trigger HCCL JIT compilation for ALL message sizes before benchmarking.
+    # HCCL compiles different internal kernels per message size; warming up
+    # only the smallest size leaves mid-range sizes (1~5MB) un-compiled,
+    # causing the first real measurement to include JIT overhead.
+    # Always use event mode for warmup (fast, no profiler overhead).
+    if rank == 0:
+        print("Running global warmup to trigger HCCL JIT compilation "
+              f"({len(configs)} configs)...")
+    warmed = set()
+    for op_type, msg_bytes, _, _, group_ranks in configs:
+        wkey = (op_type, msg_bytes, tuple(group_ranks))
+        if wkey not in warmed:
+            warmed.add(wkey)
+            run_benchmark(
+                op_type, msg_bytes, group_ranks,
+                resolve_topology_tier(list(group_ranks), grid_shape),
+                args.dtype, output_csv=None,
+                group=group_cache[tuple(group_ranks)],
+                bench_mode="event",
+            )
 
-        if rank == 0:
-            print(f"Global warmup done. Starting benchmarks (mode={args.bench_mode})...\n")
+    if rank == 0:
+        print(f"Global warmup done. Starting benchmarks (mode={args.bench_mode})...\n")
 
 
-        if args.bench_mode == "kernel" and _has_torch_npu():
-            # Kernel mode: profiler -> kernel_details.csv, no inter-iteration sync.
-            # To avoid profiler ring-buffer pressure on large messages, split:
-            #   - Small messages (<512KB): batched into ONE profiler session
-            #   - Large messages (>=512KB): each msg_bytes gets its OWN profiler
-            #     session with active=1, repeated N times, then take median.
-            batched: OrderedDict = OrderedDict()
-            for op_type, msg_bytes, num_devices, tier, group_ranks in configs:
-                key = (op_type, tuple(group_ranks))
-                if key not in batched:
-                    batched[key] = []
-                batched[key].append((msg_bytes, num_devices, tier))
+    if args.bench_mode == "kernel" and _has_torch_npu():
+        # Kernel mode: profiler -> kernel_details.csv, no inter-iteration sync.
+        # To avoid profiler ring-buffer pressure on large messages, split:
+        #   - Small messages (<512KB): batched into ONE profiler session
+        #   - Large messages (>=512KB): each msg_bytes gets its OWN profiler
+        #     session with active=1, repeated N times, then take median.
+        batched: OrderedDict = OrderedDict()
+        for op_type, msg_bytes, num_devices, tier, group_ranks in configs:
+            key = (op_type, tuple(group_ranks))
+            if key not in batched:
+                batched[key] = []
+            batched[key].append((msg_bytes, num_devices, tier))
 
-            is_npu = True
-            device = f"npu:{local_rank}"
+        is_npu = True
+        device = f"npu:{local_rank}"
 
-            total_batches = len(batched)
-            for batch_idx, ((op_type, gr_tuple), items) in enumerate(batched.items()):
-                group_ranks = list(gr_tuple)
-                group = group_cache[gr_tuple]
-                is_member = rank in group_ranks
+        total_batches = len(batched)
+        for batch_idx, ((op_type, gr_tuple), items) in enumerate(batched.items()):
+            group_ranks = list(gr_tuple)
+            group = group_cache[gr_tuple]
+            is_member = rank in group_ranks
 
-                if is_member:
-                    is_leader = rank == group_ranks[0]
+            if is_member:
+                is_leader = rank == group_ranks[0]
 
-                    # Split into small and large msg_bytes
-                    small_items = [(mb, nd, t) for mb, nd, t in items
-                                   if mb < PROFILER_LARGE_MSG_THRESHOLD]
-                    large_items = [(mb, nd, t) for mb, nd, t in items
-                                   if mb >= PROFILER_LARGE_MSG_THRESHOLD]
+                # Split into small and large msg_bytes
+                small_items = [(mb, nd, t) for mb, nd, t in items
+                               if mb < PROFILER_LARGE_MSG_THRESHOLD]
+                large_items = [(mb, nd, t) for mb, nd, t in items
+                               if mb >= PROFILER_LARGE_MSG_THRESHOLD]
 
-                    if is_leader:
-                        print(f"\n[kernel] batch {batch_idx+1}/{total_batches}  "
-                              f"op={op_type}  group={group_ranks}  "
-                              f"small(<{PROFILER_LARGE_MSG_THRESHOLD//1024}KB)="
-                              f"{len(small_items)}(batch, active={PROFILER_ACTIVE_ITERS})  "
-                              f"large(>={PROFILER_LARGE_MSG_THRESHOLD//1024}KB)="
-                              f"{len(large_items)}(per-msg session"
-                              f"\u00d7{PROFILER_LARGE_MSG_SESSIONS}, "
-                              f"active={PROFILER_ACTIVE_ITERS_LARGE})")
+                if is_leader:
+                    print(f"\n[kernel] batch {batch_idx+1}/{total_batches}  "
+                          f"op={op_type}  group={group_ranks}  "
+                          f"small(<{PROFILER_LARGE_MSG_THRESHOLD//1024}KB)="
+                          f"{len(small_items)}(batch, active={PROFILER_ACTIVE_ITERS})  "
+                          f"large(>={PROFILER_LARGE_MSG_THRESHOLD//1024}KB)="
+                          f"{len(large_items)}(per-msg session"
+                          f"\u00d7{PROFILER_LARGE_MSG_SESSIONS}, "
+                          f"active={PROFILER_ACTIVE_ITERS_LARGE})")
 
-                    # 1) Small messages: one batch session
-                    if small_items:
-                        small_msg_list = [mb for mb, _, _ in small_items]
-                        try:
-                            results = _run_bench_profiler_batch(
-                                op_type, small_msg_list, args.dtype, device,
-                                group, group_ranks, is_npu, is_leader,
-                                parse_fn=_parse_kernel_comm_duration,
-                                no_sync=True,
-                            )
-                        except Exception as e:
-                            if is_leader:
-                                print(f"  ERROR [small-batch] op={op_type}: {e}",
-                                      file=sys.stderr)
-                            results = None
-
-                        if results and is_leader:
-                            for msg_bytes, nd, tier in small_items:
-                                if msg_bytes not in results:
-                                    print(f"  SKIP op={op_type} bytes={msg_bytes} "
-                                          f"(no data in batch result)", file=sys.stderr)
-                                    continue
-                                duration_us = results[msg_bytes]
-                                bandwidth_gbps = msg_bytes / (duration_us * 1e-6) / 1e9
-                                row = {
-                                    "message_bytes": msg_bytes,
-                                    "num_devices": nd,
-                                    "dtype": _DTYPE_TO_CSV.get(args.dtype, "DT_BF16"),
-                                    "topology_tier": tier,
-                                    "Duration(us)": round(duration_us, 2),
-                                    "bandwidth_gbps": round(bandwidth_gbps, 2),
-                                }
-                                print(
-                                    f"  op={op_type}  bytes={msg_bytes}  devices={nd}"
-                                    f"  tier={tier}  duration={duration_us:.2f}us"
-                                    f"  bw={bandwidth_gbps:.2f}GB/s  [small-batch]"
-                                )
-                                csv_path = _csv_for_op(op_type)
-                                if csv_path:
-                                    _append_csv(csv_path, row, op_type=op_type)
-
-                    # 2) Large messages: per-msg separate profiler sessions
-                    for large_idx, (msg_bytes, nd, tier) in enumerate(large_items):
+                # 1) Small messages: one batch session
+                if small_items:
+                    small_msg_list = [mb for mb, _, _ in small_items]
+                    try:
+                        results = _run_bench_profiler_batch(
+                            op_type, small_msg_list, args.dtype, device,
+                            group, group_ranks, is_npu, is_leader,
+                            parse_fn=_parse_kernel_comm_duration,
+                            no_sync=True,
+                        )
+                    except Exception as e:
                         if is_leader:
-                            print(f"  [large {large_idx+1}/{len(large_items)}] "
-                                  f"op={op_type}  bytes={msg_bytes}  "
-                                  f"sessions=0/{PROFILER_LARGE_MSG_SESSIONS}...",
-                                  end="", flush=True)
+                            print(f"  ERROR [small-batch] op={op_type}: {e}",
+                                  file=sys.stderr)
+                        results = None
 
-                        durations_across_sessions: List[float] = []
-                        session_errors = 0
-                        for repeat_idx in range(PROFILER_LARGE_MSG_SESSIONS):
-                            try:
-                                result = _run_bench_profiler_batch(
-                                    op_type, [msg_bytes], args.dtype, device,
-                                    group, group_ranks, is_npu, is_leader,
-                                    parse_fn=_parse_kernel_comm_duration,
-                                    no_sync=True,
-                                )
-                                if result and is_leader and msg_bytes in result:
-                                    durations_across_sessions.append(result[msg_bytes])
-                            except Exception as e:
-                                session_errors += 1
-                                if is_leader:
-                                    print(f"\n    WARN session {repeat_idx+1} failed: {e}",
-                                          file=sys.stderr, end="", flush=True)
-
-                        if is_leader:
-                            ok = len(durations_across_sessions)
-                            fail = session_errors
-                            print(f"\r  [large {large_idx+1}/{len(large_items)}] "
-                                  f"op={op_type}  bytes={msg_bytes}  "
-                                  f"sessions={ok}/{ok+fail}"
-                                  f"{f' ({fail} failed)' if fail else ''}",
-                                  end="")
-
-                        if durations_across_sessions and is_leader:
-                            duration_us = statistics.median(durations_across_sessions)
+                    if results and is_leader:
+                        for msg_bytes, nd, tier in small_items:
+                            if msg_bytes not in results:
+                                print(f"  SKIP op={op_type} bytes={msg_bytes} "
+                                      f"(no data in batch result)", file=sys.stderr)
+                                continue
+                            duration_us = results[msg_bytes]
                             bandwidth_gbps = msg_bytes / (duration_us * 1e-6) / 1e9
                             row = {
                                 "message_bytes": msg_bytes,
@@ -1134,37 +1074,88 @@ def main() -> None:
                                 "bandwidth_gbps": round(bandwidth_gbps, 2),
                             }
                             print(
-                                f"  duration={duration_us:.2f}us"
-                                f"  bw={bandwidth_gbps:.2f}GB/s"
+                                f"  op={op_type}  bytes={msg_bytes}  devices={nd}"
+                                f"  tier={tier}  duration={duration_us:.2f}us"
+                                f"  bw={bandwidth_gbps:.2f}GB/s  [small-batch]"
                             )
                             csv_path = _csv_for_op(op_type)
                             if csv_path:
                                 _append_csv(csv_path, row, op_type=op_type)
-                        elif is_leader:
-                            print(f"  FAILED (0 valid sessions)", file=sys.stderr)
 
-                # World barrier: ALL ranks must participate (including non-members)
-                # to prevent non-member ranks from racing ahead to the next batch.
-                dist.barrier()
-        else:
-            # Event mode: per-point measurement (no profiler session needed)
-            for op_type, msg_bytes, num_devices, tier, group_ranks in configs:
-                run_benchmark(
-                    op_type, msg_bytes, group_ranks, tier, args.dtype,
-                    _csv_for_op(op_type),
-                    group=group_cache[tuple(group_ranks)],
-                    bench_mode="event",
-                )
+                # 2) Large messages: per-msg separate profiler sessions
+                for large_idx, (msg_bytes, nd, tier) in enumerate(large_items):
+                    if is_leader:
+                        print(f"  [large {large_idx+1}/{len(large_items)}] "
+                              f"op={op_type}  bytes={msg_bytes}  "
+                              f"sessions=0/{PROFILER_LARGE_MSG_SESSIONS}...",
+                              end="", flush=True)
 
-        dist.destroy_process_group()
-        if rank == 0:
-            n = len(configs)
-            out_info = args.output_csv or args.output_dir or "(no output)"
-            print(f"\nCompleted {n} benchmarks. Results saved to {out_info}")
+                    durations_across_sessions: List[float] = []
+                    session_errors = 0
+                    for repeat_idx in range(PROFILER_LARGE_MSG_SESSIONS):
+                        try:
+                            result = _run_bench_profiler_batch(
+                                op_type, [msg_bytes], args.dtype, device,
+                                group, group_ranks, is_npu, is_leader,
+                                parse_fn=_parse_kernel_comm_duration,
+                                no_sync=True,
+                            )
+                            if result and is_leader and msg_bytes in result:
+                                durations_across_sessions.append(result[msg_bytes])
+                        except Exception as e:
+                            session_errors += 1
+                            if is_leader:
+                                print(f"\n    WARN session {repeat_idx+1} failed: {e}",
+                                      file=sys.stderr, end="", flush=True)
+
+                    if is_leader:
+                        ok = len(durations_across_sessions)
+                        fail = session_errors
+                        print(f"\r  [large {large_idx+1}/{len(large_items)}] "
+                              f"op={op_type}  bytes={msg_bytes}  "
+                              f"sessions={ok}/{ok+fail}"
+                              f"{f' ({fail} failed)' if fail else ''}",
+                              end="")
+
+                    if durations_across_sessions and is_leader:
+                        duration_us = statistics.median(durations_across_sessions)
+                        bandwidth_gbps = msg_bytes / (duration_us * 1e-6) / 1e9
+                        row = {
+                            "message_bytes": msg_bytes,
+                            "num_devices": nd,
+                            "dtype": _DTYPE_TO_CSV.get(args.dtype, "DT_BF16"),
+                            "topology_tier": tier,
+                            "Duration(us)": round(duration_us, 2),
+                            "bandwidth_gbps": round(bandwidth_gbps, 2),
+                        }
+                        print(
+                            f"  duration={duration_us:.2f}us"
+                            f"  bw={bandwidth_gbps:.2f}GB/s"
+                        )
+                        csv_path = _csv_for_op(op_type)
+                        if csv_path:
+                            _append_csv(csv_path, row, op_type=op_type)
+                    elif is_leader:
+                        print(f"  FAILED (0 valid sessions)", file=sys.stderr)
+
+            # World barrier: ALL ranks must participate (including non-members)
+            # to prevent non-member ranks from racing ahead to the next batch.
+            dist.barrier()
     else:
-        print("ERROR: --do-run is required. Script generation mode has been removed.", file=sys.stderr)
-        print("Use: torchrun --nproc_per_node=N generate_comm_microbench.py --do-run ...", file=sys.stderr)
-        sys.exit(1)
+        # Event mode: per-point measurement (no profiler session needed)
+        for op_type, msg_bytes, num_devices, tier, group_ranks in configs:
+            run_benchmark(
+                op_type, msg_bytes, group_ranks, tier, args.dtype,
+                _csv_for_op(op_type),
+                group=group_cache[tuple(group_ranks)],
+                bench_mode="event",
+            )
+
+    dist.destroy_process_group()
+    if rank == 0:
+        n = len(configs)
+        out_info = args.output_csv or args.database_path or "(no output)"
+        print(f"\nCompleted {n} benchmarks. Results saved to {out_info}")
 
 
 def _has_torch_npu() -> bool:

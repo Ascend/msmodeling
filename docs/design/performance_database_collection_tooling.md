@@ -212,7 +212,7 @@ comm_bench/generate_comm_microbench.py  ← 生成通信基准脚本
 * `run_all_op.py` 自动发现算子脚本，支持 `--execution-mode inprocess` 以便由单个外层 `msprof` session 采集
 * 每个算子脚本读取匹配的 `{KernelType}.csv`，在 NPU 上 replay 每一行，打印 `[OK]` 信息
 * 构造 replay case 失败时自动删除 CSV 中的无效行
-* 通过 `MSMODELING_OP_REPLAY_REPEAT_COUNT` 环境变量可覆盖默认 repeat count
+* 当未传 `--repeat-count` 时，使用 `common.py` 中的代码默认值（`30`）；repeat count 仅通过 CLI 配置，不再支持 `MSMODELING_OP_REPLAY_REPEAT_COUNT` 环境变量
 
 ### 2.9 `start_microbench.py` msprof 编排与回写
 
@@ -267,7 +267,8 @@ comm_bench/generate_comm_microbench.py  ← 生成通信基准脚本
 ```python
 tools/perf_data_collection/
 ├── __init__.py
-├── README.md                                          # 工具链使用说明
+├── readme.md                                          # 工具链使用说明（中文）
+├── readme_en.md                                       # 工具链使用说明（英文）
 │
 ├── parsers/
 │   ├── parse_kernel_details.py                        # 原始 Profiling 解析器

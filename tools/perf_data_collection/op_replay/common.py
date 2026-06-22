@@ -34,7 +34,6 @@ SUPPORTED_DEVICES = [
 ]
 DEFAULT_DEVICE = "ATLAS_800_A3_752T_128G_DIE"
 DEFAULT_REPLAY_REPEAT_COUNT = 30
-REPLAY_REPEAT_COUNT_ENV = "MSMODELING_OP_REPLAY_REPEAT_COUNT"
 VERSION_DIR_PATTERN = re.compile(r"^vllm.+_torch.+_cann.+$")
 DEFAULT_UPDATE_MODE = "all"
 SUPPORTED_UPDATE_MODES = ("all", "missing-only")
@@ -712,20 +711,7 @@ def get_replay_repeat_count(args_repeat_count: int | None) -> int:
         if args_repeat_count <= 0:
             raise ValueError(f"--repeat-count must be positive, got {args_repeat_count}")
         return args_repeat_count
-
-    raw_env = (os.environ.get(REPLAY_REPEAT_COUNT_ENV, "") or "").strip()
-    if not raw_env:
-        return DEFAULT_REPLAY_REPEAT_COUNT
-
-    try:
-        repeat_count = int(raw_env)
-    except ValueError as exc:
-        raise ValueError(
-            f"{REPLAY_REPEAT_COUNT_ENV} must be an integer, got {raw_env!r}"
-        ) from exc
-    if repeat_count <= 0:
-        raise ValueError(f"{REPLAY_REPEAT_COUNT_ENV} must be positive, got {raw_env!r}")
-    return repeat_count
+    return DEFAULT_REPLAY_REPEAT_COUNT
 
 
 def build_standard_argparser(
@@ -747,7 +733,6 @@ def build_standard_argparser(
             + "  --torch-version         Optional PyTorch version used to build the version dir name.\n"
             + "  --cann-version          Optional CANN version used to build the version dir name.\n"
             + f"  --repeat-count          Repeat each replay row this many times. Defaults to {DEFAULT_REPLAY_REPEAT_COUNT}\n"
-            + f"                          or ${REPLAY_REPEAT_COUNT_ENV} when set.\n"
             + "  --update-mode          `all` replays every row; `missing-only` replays only rows whose\n"
             + "                         Average/Profiling durations are both invalid.\n"
             + "  -h, --help              Show this help message and exit."
@@ -792,7 +777,7 @@ def build_standard_argparser(
         type=int,
         help=(
             "Repeat each replay row this many times. Defaults to "
-            f"{DEFAULT_REPLAY_REPEAT_COUNT} or ${REPLAY_REPEAT_COUNT_ENV} when set."
+            f"{DEFAULT_REPLAY_REPEAT_COUNT}."
         ),
     )
     parser.add_argument(

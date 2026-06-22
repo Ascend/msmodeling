@@ -7,7 +7,7 @@ Tests are split into two categories:
 1. Pure-logic tests (no NPU required) — run in any environment:
    resolve_topology_tier, build_group_for_tier, _apply_dispatch_overhead,
    _active_iters_for_msg, _build_run_op (CPU path), _parse_kernel_comm_duration,
-   TestMainKernelPath, TestMainNoDoRun.
+   TestMainKernelPath, TestCommMicrobenchCli.
 
 2. NPU integration tests — marked @pytest.mark.npu, skipped by default
    (run with: pytest -m npu).
@@ -22,7 +22,6 @@ import csv
 import inspect
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -578,38 +577,60 @@ class TestMainKernelPath:
 
 
 # ---------------------------------------------------------------------------
-# main() no --do-run error handling
+# CLI arguments
 # ---------------------------------------------------------------------------
-class TestMainNoDoRun:
-    def test_exits_with_error_when_no_do_run(self, capsys):
-        """main() must exit with code 1 and print error when --do-run is not provided."""
-        import argparse
+def test_build_argparser_exposes_database_path_and_removes_legacy_flags():
+    from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
+        build_argparser,
+    )
 
+    parser = build_argparser()
+    args = parser.parse_args(["--database-path", "db", "--bench-mode", "event"])
+
+    assert args.database_path == "db"
+    assert args.bench_mode == "event"
+    assert not hasattr(args, "run")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--output-dir", "db"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--do-run"])
+
+
+class TestCommMicrobenchCli:
+    def test_database_path_replaces_output_dir_and_do_run(self):
         from tools.perf_data_collection.comm_bench import (
             generate_comm_microbench as mod,
         )
 
-        with patch.object(mod, "build_argparser") as mock_parser:
-            args = argparse.Namespace(
-                run=False,
-                ops=["all_reduce"],
-                num_devices=[16],
-                topology_tier=None,
-                grid_shape=[48, 8, 2],
-                bytes_grid=None,
-                dtype="torch.bfloat16",
-                bench_mode="kernel",
-                output_csv=None,
-                output_dir=None,
-            )
-            mock_parser.return_value.parse_args.return_value = args
+        parser = mod.build_argparser()
+        args = parser.parse_args(
+            [
+                "--database-path",
+                "db",
+                "--ops",
+                "all_reduce",
+                "--num-devices",
+                "16",
+                "2",
+                "--grid-shape",
+                "48",
+                "8",
+                "2",
+                "--bench-mode",
+                "event",
+            ]
+        )
 
-            with pytest.raises(SystemExit) as exc_info:
-                mod.main()
-
-        assert exc_info.value.code == 1
-        captured = capsys.readouterr()
-        assert "--do-run is required" in captured.err
+        assert args.database_path == "db"
+        assert args.ops == ["all_reduce"]
+        assert args.num_devices == [16, 2]
+        assert args.grid_shape == [48, 8, 2]
+        assert args.bench_mode == "event"
+        assert not hasattr(args, "run")
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--output-dir", "db"])
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--do-run"])
 
 
 # ---------------------------------------------------------------------------

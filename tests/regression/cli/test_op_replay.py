@@ -24,6 +24,18 @@ op_common = importlib.import_module("common")
 run_all_op = importlib.import_module("run_all_op")
 
 
+def test_get_replay_repeat_count_direct_coverage():
+    from tools.perf_data_collection.op_replay.common import (
+        DEFAULT_REPLAY_REPEAT_COUNT,
+        get_replay_repeat_count,
+    )
+
+    assert get_replay_repeat_count(5) == 5
+    assert get_replay_repeat_count(None) == DEFAULT_REPLAY_REPEAT_COUNT
+    with pytest.raises(ValueError, match="--repeat-count must be positive"):
+        get_replay_repeat_count(0)
+
+
 @contextmanager
 def op_replay_import_path():
     path = str(OP_REPLAY_DIR)
@@ -440,7 +452,7 @@ class TestRunAllOpHelpers:
 
         args = SimpleNamespace(
             execution_mode="inprocess",
-            op=None,
+            ops=None,
             device="ATLAS_800_A3_752T_128G_DIE",
             vllm_version=None,
             database_path=tmp_path,
@@ -480,6 +492,15 @@ class TestCommonModule:
     def test_data_dir_points_to_profiling_database(self):
         """DATA_DIR resolves to the profiling_database/data/ tree."""
         assert common.DATA_DIR.parts[-2:] == ("profiling_database", "data")
+
+    def test_get_replay_repeat_count_uses_cli_value_or_default(self):
+        assert op_common.get_replay_repeat_count(7) == 7
+        assert op_common.get_replay_repeat_count(None) == op_common.DEFAULT_REPLAY_REPEAT_COUNT
+
+    @pytest.mark.parametrize("repeat_count", [0, -1])
+    def test_get_replay_repeat_count_rejects_non_positive_values(self, repeat_count):
+        with pytest.raises(ValueError, match="--repeat-count must be positive"):
+            op_common.get_replay_repeat_count(repeat_count)
 
     def test_build_host_tensor_uses_empty_for_float_dtypes(self, monkeypatch):
         class FakeTorch:
@@ -664,7 +685,7 @@ class TestRunAllOp:
                 "missing-only",
                 "--execution-mode",
                 "subprocess",
-                "--op",
+                "--ops",
                 "MatMulV2",
                 "PadV3",
                 "--continue-on-error",
@@ -675,7 +696,7 @@ class TestRunAllOp:
         assert args.device == "TEST_DEVICE"
         assert args.update_mode == "missing-only"
         assert args.execution_mode == "subprocess"
-        assert args.op == ["MatMulV2", "PadV3"]
+        assert args.ops == ["MatMulV2", "PadV3"]
         assert args.continue_on_error is True
 
     def test_discover_run_scripts(self):
