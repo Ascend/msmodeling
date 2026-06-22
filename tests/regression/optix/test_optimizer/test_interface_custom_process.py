@@ -68,6 +68,7 @@ def test_before_run_with_run_params():
     )
     process.before_run(run_params)
     assert process.command == ["benchmark", "10", "0.3"]
+    process.stop(del_log=True)
 
 
 def test_before_run_env_var_already_set(monkeypatch):
@@ -84,6 +85,7 @@ def test_before_run_env_var_already_set(monkeypatch):
     # Verify tempfile.mkstemp was called
     assert os.environ[CUSTOM_OUTPUT] == "/result"
     assert os.environ[MODEL_EVAL_STATE_CONFIG_PATH] == "config.toml"
+    process.stop(del_log=True)
 
 
 def test_check_success_process_still_running(tmpdir):
@@ -247,6 +249,244 @@ class TestCustomProcessSupplement:
 
         assert result is None
 
+    def test_get_log_reads_content(self, tmp_path):
+        """Test get_log reads file from offset"""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("line1\nline2\nline3\n")
+        process = CustomProcess()
+        process.run_log = str(log_file)
+        process.run_log_offset = 0
+        result = process.get_log()
+        assert "line1" in result
+        assert process.run_log_offset > 0
+
+    def test_get_last_log_returns_last_lines(self, tmp_path):
+        """Test get_last_log returns the last N lines"""
+        log_file = tmp_path / "test.log"
+        lines = [f"line{i}\n" for i in range(20)]
+        log_file.write_text("".join(lines))
+        process = CustomProcess()
+        process.run_log = str(log_file)
+        result = process.get_last_log(number=3)
+        assert "line17" in result
+        assert "line18" in result
+        assert "line19" in result
+
+    def test_get_last_log_none_when_no_log(self):
+        """Test get_last_log returns None when no run_log"""
+        process = CustomProcess()
+        process.run_log = None
+        assert process.get_last_log() is None
+
+    def test_get_last_log_nonexistent_file(self):
+        """Test get_last_log returns None for nonexistent file"""
+        process = CustomProcess()
+        process.run_log = "/nonexistent/path.log"
+        assert process.get_last_log() is None
+
+    def test_health_process_running(self):
+        """Test health returns running when process.poll() is None"""
+        process = CustomProcess()
+        process.process = Mock()
+        process.process.poll.return_value = None
+        process.print_log = False
+        result = process.health()
+        assert result.stage.value == "running"
+
+    def test_health_process_stopped(self):
+        """Test health returns stop when process.poll() == 0"""
+        process = CustomProcess()
+        process.process = Mock()
+        process.process.poll.return_value = 0
+        process.print_log = False
+        result = process.health()
+        assert result.stage.value == "stop"
+
+    def test_health_process_error(self):
+        """Test health returns error when process has non-zero return code"""
+        process = CustomProcess()
+        process.process = Mock()
+        process.process.poll.return_value = 1
+        process.process.returncode = 1
+        process.print_log = False
+        process.command = ["test"]
+        process.run_log = "/tmp/test.log"
+        result = process.health()
+        assert result.stage.value == "error"
+
+    @patch("psutil.Process")
+    def test_stop_running_process(self, mock_psutil_process):
+        """Test stop kills running process"""
+        process = CustomProcess()
+        process.process = Mock()
+        process.process.poll.return_value = None
+        process.process.pid = 12345
+        process.process.kill = Mock()
+        process.process.wait = Mock()
+        process.run_log_fp = None
+        process.run_log = None
+        mock_parent = Mock()
+        mock_parent.children.return_value = []
+        mock_psutil_process.return_value = mock_parent
+        process.stop(del_log=False)
+        process.process.kill.assert_called()
+
+    def test_stop_already_exited_process(self):
+        """Test stop when process already exited"""
+        process = CustomProcess()
+        process.process = Mock()
+        process.process.poll.return_value = 0
+        process.run_log_fp = None
+        process.run_log = None
+        process.stop(del_log=False)
+
+    def test_stop_no_process(self):
+        """Test stop when process is None"""
+        process = CustomProcess()
+        process.process = None
+        process.run_log_fp = None
+        process.run_log = None
+        process.stop(del_log=False)
+
+    def test_process_stage_property(self):
+        """Test process_stage getter and setter"""
+        from optix.config.constant import ProcessState, Stage
+
+        process = CustomProcess()
+        assert process.process_stage.stage == Stage.stop
+        new_state = ProcessState(stage=Stage.running)
+        process.process_stage = new_state
+        assert process.process_stage.stage == Stage.running
+        # Setting same stage should not change
+        process.process_stage = ProcessState(stage=Stage.running)
+        assert process.process_stage.stage == Stage.running
+
+    def test_split_merged_args_json(self):
+        """Test _split_merged_args splits JSON params correctly"""
+        process = CustomProcess()
+        process.command = [
+            "vllm",
+            "serve",
+            '--compilation-config \'{"cudagraph_mode": "FULL_DECODE_ONLY"}\'',
+        ]
+        process._split_merged_args()
+        assert "--compilation-config" in process.command
+        assert '{"cudagraph_mode": "FULL_DECODE_ONLY"}' in process.command
+
+    def test_split_merged_args_no_json(self):
+        """Test _split_merged_args leaves non-JSON args unchanged"""
+        process = CustomProcess()
+        process.command = ["vllm", "serve", "--port", "8000"]
+        original = list(process.command)
+        process._split_merged_args()
+        assert process.command == original
+
+    def test_split_merged_args_fullwidth_chars(self):
+        """Test _split_merged_args handles fullwidth unicode characters"""
+        process = CustomProcess()
+        process.command = [
+            "vllm",
+            "serve",
+            '--config \'{"key"\uff1a "value"}\'',
+        ]
+        process._split_merged_args()
+        assert "--config" in process.command
+
+    def test_split_merged_args_no_quotes_json(self):
+        """Test _split_merged_args with no-quote JSON"""
+        process = CustomProcess()
+        process.command = [
+            "vllm",
+            '--config {"mode": "full"}',
+        ]
+        process._split_merged_args()
+        assert "--config" in process.command
+
+    def test_split_merged_args_non_string_element(self):
+        """Test _split_merged_args with non-string elements"""
+        process = CustomProcess()
+        process.command = ["vllm", 123, "--port", "8000"]
+        process._split_merged_args()
+        assert 123 in process.command
+
+    def test_split_merged_args_escaped_json(self):
+        """Test _split_merged_args with escaped JSON string"""
+        process = CustomProcess()
+        process.command = [
+            "vllm",
+            '--compilation-config "{\\"mode\\": \\"FULL_DECODE_ONLY\\"}"',
+        ]
+        process._split_merged_args()
+        assert "--compilation-config" in process.command
+
+    def test_get_log_read_error(self, tmp_path):
+        """Test get_log handles OSError during read"""
+        log_file = tmp_path / "test.log"
+        log_file.write_text("content")
+        process = CustomProcess()
+        process.run_log = str(log_file)
+        process.run_log_offset = 0
+        with patch(
+            "optix.optimizer.interfaces.custom_process.open_file",
+            side_effect=OSError("fail"),
+        ):
+            result = process.get_log()
+        assert result is None
+
+    def test_stop_timeout_sends_signal_9(self):
+        """Test stop sends signal 9 on TimeoutExpired"""
+        import subprocess as sp
+
+        process = CustomProcess()
+        process.process = MagicMock()
+        process.process.poll.side_effect = [None, None, 0]
+        process.process.pid = 12345
+        process.process.kill = MagicMock()
+        process.process.wait = MagicMock(side_effect=sp.TimeoutExpired("cmd", 10))
+        process.process.send_signal = MagicMock()
+        process.run_log_fp = None
+        process.run_log = None
+        mock_parent = MagicMock()
+        mock_parent.children.return_value = []
+        with patch("psutil.Process", return_value=mock_parent):
+            process.stop(del_log=False)
+        process.process.send_signal.assert_called_once_with(9)
+
+    def test_stop_exception_sets_error_stage(self):
+        """Test stop handles exception and sets error stage"""
+        process = CustomProcess()
+        process.process = MagicMock()
+        process.process.poll.return_value = None
+        process.process.pid = 12345
+        process.run_log_fp = None
+        process.run_log = None
+        with patch("psutil.Process", side_effect=Exception("process not found")):
+            process.stop(del_log=False)
+        from optix.config.constant import Stage
+
+        assert process.process_stage.stage == Stage.error
+
+    def test_before_run_removes_empty_env_var(self):
+        """Test before_run removes env var when value is NaN (invalid)"""
+        process = CustomProcess()
+        process.command = ["benchmark", "--request-rate", "$REQUESTRATE"]
+        process.env = {"REQUESTRATE": "old_value"}
+        run_params = (
+            OptimizerConfigField(
+                name="REQUESTRATE",
+                config_position="env",
+                min=0,
+                max=100,
+                dtype="float",
+                value=float("nan"),
+            ),
+        )
+        process.before_run(run_params)
+        assert "REQUESTRATE" not in process.env
+        assert "--request-rate" not in process.command
+        assert "$REQUESTRATE" not in process.command
+        process.stop(del_log=True)
+
 
 class TestBaseDataField:
     @pytest.mark.parametrize(
@@ -369,3 +609,178 @@ class TestBaseDataField:
 
         # Verify config was not modified
         assert not hasattr(mock_config, "target_field") or mock_config.target_field == []
+
+
+class TestBeforeRunEnvHandling:
+    """Test before_run env variable handling edge cases"""
+
+    def test_non_positive_requestrate_removed_from_command(self):
+        """Test NON_POSITIVE_INVALID_FIELDS with non-positive value removes CLI flag"""
+        process = CustomProcess()
+        process.command = ["benchmark", "--request-rate", "$REQUESTRATE"]
+        run_params = (
+            OptimizerConfigField(
+                name="REQUESTRATE",
+                config_position="env",
+                min=0,
+                max=100,
+                dtype="float",
+                value=-1.0,  # Non-positive value
+            ),
+        )
+        process.before_run(run_params)
+        # Non-positive REQUESTRATE should be removed along with --request-rate flag
+        assert "--request-rate" not in process.command
+        assert "$REQUESTRATE" not in process.command
+        process.stop(del_log=True)
+
+    def test_positive_requestrate_set_in_command(self):
+        """Test positive REQUESTRATE value is set in command"""
+        process = CustomProcess()
+        process.command = ["benchmark", "--request-rate", "$REQUESTRATE"]
+        run_params = (
+            OptimizerConfigField(
+                name="REQUESTRATE",
+                config_position="env",
+                min=0.1,
+                max=100,
+                dtype="float",
+                value=5.0,
+            ),
+        )
+        process.before_run(run_params)
+        assert "5.0" in process.command
+        assert "$REQUESTRATE" not in process.command
+        process.stop(del_log=True)
+
+    def test_env_nan_value_removed(self):
+        """Test env with NaN value is considered invalid and removed"""
+        process = CustomProcess()
+        process.command = ["benchmark", "$MYVAR"]
+        process.env = {"MYVAR": "old_value"}
+        run_params = (
+            OptimizerConfigField(
+                name="MYVAR",
+                config_position="env",
+                min=0,
+                max=100,
+                dtype="float",
+                value=float("nan"),
+            ),
+        )
+        process.before_run(run_params)
+        assert "MYVAR" not in process.env
+        assert "$MYVAR" not in process.command
+        process.stop(del_log=True)
+
+    def test_env_inf_value_removed(self):
+        """Test env with Inf value is considered invalid and removed"""
+        process = CustomProcess()
+        process.command = ["benchmark", "$MYVAR"]
+        process.env = {"MYVAR": "old_value"}
+        run_params = (
+            OptimizerConfigField(
+                name="MYVAR",
+                config_position="env",
+                min=0,
+                max=1000,
+                dtype="float",
+                value=float("inf"),
+            ),
+        )
+        process.before_run(run_params)
+        assert "MYVAR" not in process.env
+        process.stop(del_log=True)
+
+    def test_env_string_empty_removed(self):
+        """Test env with empty string value is considered invalid"""
+        process = CustomProcess()
+        process.command = ["benchmark", "$MYVAR"]
+        process.env = {"MYVAR": "old_value"}
+        run_params = (
+            OptimizerConfigField(
+                name="MYVAR",
+                config_position="env",
+                min=0,
+                max=100,
+                dtype="str",
+                value="   ",  # whitespace-only string
+            ),
+        )
+        process.before_run(run_params)
+        assert "MYVAR" not in process.env
+        process.stop(del_log=True)
+
+    def test_variable_substitution_in_json_string(self):
+        """Test variable substitution inside JSON string parameters"""
+        process = CustomProcess()
+        process.command = [
+            "vllm",
+            "--config",
+            '{"num_tokens": $NUM_TOKENS, "mode": "full"}',
+        ]
+        run_params = (
+            OptimizerConfigField(
+                name="NUM_TOKENS",
+                config_position="env",
+                min=1,
+                max=1000,
+                dtype="int",
+                value=128,
+            ),
+        )
+        process.before_run(run_params)
+        assert '{"num_tokens": 128, "mode": "full"}' in process.command
+        process.stop(del_log=True)
+
+
+class TestRunCommandChecks:
+    """Test run() method command validation and edge cases"""
+
+    @patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+    @patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
+    def test_run_duplicate_flag_logs_warning(self, mock_popen, mock_before_run):
+        """Test run() logs warning when command has duplicate flags"""
+        process = CustomProcess()
+        process.process_name = None
+        process.command = ["vllm", "--port", "8000", "--port", "9000"]
+        process.work_path = "/test"
+        process.run_log_fp = MagicMock()
+        process.run_log = "/tmp/log"
+        # Should not raise, just log warning
+        process.run()
+        mock_popen.assert_called_once()
+
+    @patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+    @patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
+    def test_run_non_string_env_logs_error(self, mock_popen, mock_before_run):
+        """Test run() logs error for non-string env values"""
+        process = CustomProcess()
+        process.process_name = None
+        process.command = ["test_cmd"]
+        process.work_path = "/test"
+        process.run_log_fp = MagicMock()
+        process.run_log = "/tmp/log"
+        process.env = {"KEY": 123}  # Non-string value
+        process.run()
+        mock_popen.assert_called_once()
+
+    def test_backup_calls_utility(self, tmp_path):
+        """Test backup method delegates to backup utility"""
+        process = CustomProcess()
+        process.run_log = str(tmp_path / "test.log")
+        process.bak_path = str(tmp_path / "backup")
+        with patch("optix.optimizer.interfaces.custom_process.backup") as mock_backup:
+            process.backup()
+            mock_backup.assert_called_once_with(process.run_log, process.bak_path, "CustomProcess")
+
+    def test_get_last_log_encoding_fallback(self, tmp_path):
+        """Test get_last_log tries multiple encodings"""
+        log_file = tmp_path / "test.log"
+        # Write content with utf-8
+        log_file.write_text("line1\nline2\nline3\n", encoding="utf-8")
+        process = CustomProcess()
+        process.run_log = str(log_file)
+        result = process.get_last_log(number=2)
+        assert "line2" in result
+        assert "line3" in result
