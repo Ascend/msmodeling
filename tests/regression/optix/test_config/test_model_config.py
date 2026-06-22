@@ -241,3 +241,123 @@ def test_mindie_config_calculates_available_kv_cache_memory(mindie_config_path, 
     expected = 65535 * (100 - 3) / 100 / 1024 * 0.8 - 14356.015625 / 1024 - 4798283776 / 1024 / 1024 / 1024
 
     assert result == expected
+
+
+def test_model_config_repr(llama_config_path):
+    config = ModelConfig(llama_config_path)
+    repr_str = repr(config)
+    assert "ModelConfig" in repr_str
+    assert "hidden_size=4096" in repr_str
+
+
+def test_model_config_get_peak_activations_size(llama_config_path):
+    config = ModelConfig(llama_config_path)
+    result = config.get_peak_activations_size(max_prefill_token=2048, sequence_length=4096)
+    assert result > 0
+    assert isinstance(result, (int, float))
+
+
+def test_model_config_calculate_model_weights_size(llama_config_path):
+    config = ModelConfig(llama_config_path)
+    assert config.memory_mb > 0
+
+
+@pytest.mark.parametrize(
+    "dtype_str,expected",
+    [
+        ("float16", 2),
+        ("bfloat16", 2),
+        ("fp16", 2),
+        ("int8", 1),
+        ("float32", 4),
+        ("fp32", 4),
+        ("unknown_type", 2),
+    ],
+)
+def test_kvcache_dtype_byte_mapping(tmp_path, dtype_str, expected):
+    data = {**MODEL_SHAPE, "torch_dtype": dtype_str}
+    config_path = write_json(tmp_path / "config.json", data)
+    config = ModelConfig(config_path)
+    assert config.kvcache_dtype_byte == expected
+
+
+def test_kvcache_dtype_byte_no_dtype_field(tmp_path):
+    data = {k: v for k, v in MODEL_SHAPE.items() if k != "torch_dtype"}
+    config_path = write_json(tmp_path / "config.json", data)
+    config = ModelConfig(config_path)
+    assert config.kvcache_dtype_byte == 2
+
+
+def test_one_token_cache_zero_attention_heads(tmp_path):
+    data = {**MODEL_SHAPE, "num_attention_heads": 0}
+    config_path = write_json(tmp_path / "config.json", data)
+    config = ModelConfig(config_path)
+    assert config.get_one_token_cache() == 0
+
+
+def test_mindie_model_config_get_max_batch_size_bound(mindie_config_path, monkeypatch):
+    monkeypatch.setattr(model_config, "get_settings", fake_settings)
+    config = MindieModelConfig(mindie_config_path, npu_total_mem=65535, memory_usage_rate=3)
+    lb, ub = config.get_max_batch_size_bound()
+    assert lb >= 0
+    assert ub >= lb
+
+
+def test_mindie_model_config_npumemsize_positive(tmp_path, monkeypatch):
+    """Test when npuMemSize is a positive number (not -1)"""
+    monkeypatch.setattr(model_config, "get_settings", fake_settings)
+    model_path = tmp_path / "model"
+    model_path.mkdir()
+    write_json(model_path / "config.json", MODEL_SHAPE)
+    mindie_cfg = {
+        "BackendConfig": {
+            "npuDeviceIds": [[0]],
+            "ScheduleConfig": {
+                "cacheBlockSize": 128,
+                "maxPrefillTokens": 8192,
+                "maxIterTimes": 512,
+            },
+            "ModelDeployConfig": {"ModelConfig": [{"modelWeightPath": str(model_path), "npuMemSize": 10, "tp": 1}]},
+        }
+    }
+    cfg_path = write_json(tmp_path / "mindie_cfg.json", mindie_cfg)
+    config = MindieModelConfig(cfg_path, npu_total_mem=65535, memory_usage_rate=3)
+    assert config.mem_for_kv_cache_gb == 10
+
+
+def test_model_config_generic_exception_raises_ioerror(tmp_path, monkeypatch):
+    """Test ModelConfig raises IOError when open_file raises a generic exception"""
+    from unittest.mock import patch
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"valid": "json"}', encoding="utf-8")
+    with patch(
+        "optix.config.model_config.open_file",
+        side_effect=PermissionError("no access"),
+    ):
+        with pytest.raises(IOError):
+            ModelConfig(config_path)
+
+
+def test_mindie_model_config_generic_exception_raises_ioerror(tmp_path, monkeypatch):
+    """Test MindieModelConfig raises IOError when open_file raises a generic exception"""
+    from unittest.mock import patch
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"valid": "json"}', encoding="utf-8")
+    with patch(
+        "optix.config.model_config.open_file",
+        side_effect=PermissionError("no access"),
+    ):
+        with pytest.raises(IOError):
+            MindieModelConfig(config_path)
+
+
+def test_mindie_model_get_max_batch_size_zero_kv_block(mindie_config_path, monkeypatch):
+    """Test get_max_batch_size_bound raises when one_kv_block_size is 0"""
+    monkeypatch.setattr(model_config, "get_settings", fake_settings)
+    config = MindieModelConfig(mindie_config_path, npu_total_mem=65535, memory_usage_rate=3)
+    # Force one_token_cache to return 0
+    config.model_config.num_attention_heads = 0
+    with pytest.raises(ValueError, match="one_kv_block_size is 0"):
+        config.get_max_batch_size_bound()

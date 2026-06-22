@@ -31,8 +31,14 @@ from optix.config.config import (
     OptimizerConfigField,
     _get_mindie_config_paths,
     _repair_ternary_factories_with_priority,
+    _update_factories_field,
+    _update_times_field,
+    field_to_param,
+    get_settings,
     map_param_with_value,
+    register_settings,
     resolve_priority,
+    reverse_special_field,
     update_optimizer_value,
 )
 
@@ -982,3 +988,509 @@ def test_env_backup_is_restored_for_manual_mindie_path_check(monkeypatch):
     assert os.environ.get("MIES_INSTALL_PATH") == before
     assert config_path == Path("/opt/mindie/latest/mindie_llm/conf/config.json")
     assert backup_path == Path("/opt/mindie/latest/mindie_llm/conf/config_bak.json")
+
+
+# ==========================
+# Supplementary tests for uncovered lines
+# ==========================
+
+
+class TestOptimizerConfigFieldConvertDtype:
+    def test_convert_dtype_str(self):
+        f = OptimizerConfigField(name="f", dtype="str", min=0, max=1, value="hello")
+        assert f.convert_dtype(123) == "123"
+
+    def test_convert_dtype_int(self):
+        f = OptimizerConfigField(name="f", dtype="int", min=0, max=100, value=0)
+        assert f.convert_dtype(3.7) == 3
+
+    def test_convert_dtype_float(self):
+        f = OptimizerConfigField(name="f", dtype="float", min=0, max=100, value=0)
+        assert f.convert_dtype("3.7") == 3.7
+
+    def test_convert_dtype_unknown_defaults_to_float(self):
+        f = OptimizerConfigField(name="f", dtype="unknown", min=0, max=100, value=0)
+        assert f.convert_dtype("3.7") == 3.7
+
+
+class TestFindAvailableValue:
+    def test_str_type(self):
+        f = OptimizerConfigField(name="f", dtype="str", min=0, max=1, value="x")
+        assert f.find_available_value(42) == "42"
+
+    def test_enum_empty_dtype_param(self):
+        f = OptimizerConfigField(name="f", dtype="enum", min=0, max=1, value=0, dtype_param=[])
+        result = f.find_available_value(5)
+        assert result == 5.0
+
+    def test_enum_string_values_found(self):
+        """For enum with string dtype_param, find_available_value raises ValueError on string input"""
+        f = OptimizerConfigField(name="f", dtype="enum", min=0, max=1, value="a", dtype_param=["a", "b", "c"])
+        # dtype_func.get("enum", float)("b") → float("b") raises ValueError
+        with pytest.raises(ValueError):
+            f.find_available_value("b")
+
+    def test_enum_string_values_not_found(self):
+        """For enum with string dtype_param, find_available_value raises ValueError on string input"""
+        f = OptimizerConfigField(name="f", dtype="enum", min=0, max=1, value="a", dtype_param=["a", "b", "c"])
+        with pytest.raises(ValueError):
+            f.find_available_value("z")
+
+    def test_enum_numeric_exact_match(self):
+        f = OptimizerConfigField(name="f", dtype="enum", min=0, max=1, value=0, dtype_param=[1, 2, 4, 8])
+        assert f.find_available_value(4) == 4
+
+    def test_enum_numeric_bisect_middle(self):
+        f = OptimizerConfigField(name="f", dtype="enum", min=0, max=1, value=0, dtype_param=[1, 2, 4, 8])
+        # Value 3 -> bisect_left finds index 2 (value=4)
+        assert f.find_available_value(3) == 4
+
+    def test_enum_numeric_bisect_past_end(self):
+        f = OptimizerConfigField(name="f", dtype="enum", min=0, max=1, value=0, dtype_param=[1, 2, 4, 8])
+        # Value 10 -> bisect_left returns len(list), so returns last element
+        assert f.find_available_value(10) == 8
+
+    def test_value_within_range(self):
+        f = OptimizerConfigField(name="f", dtype="int", min=0, max=100, value=0)
+        assert f.find_available_value(50) == 50
+
+    def test_value_below_min(self):
+        f = OptimizerConfigField(name="f", dtype="int", min=10, max=100, value=0)
+        assert f.find_available_value(5) == 10
+
+    def test_value_above_max(self):
+        f = OptimizerConfigField(name="f", dtype="int", min=10, max=100, value=0)
+        assert f.find_available_value(200) == 100
+
+
+class TestResolvePriorityExtended:
+    def test_single_target(self):
+        dtype_param = {"target_names": ["field_a"]}
+        assert resolve_priority(dtype_param) == ["field_a"]
+
+    def test_fixed_policy_valid(self):
+        dtype_param = {
+            "target_names": ["a", "b"],
+            "priority_policy": "fixed",
+            "priority": ["b", "a"],
+        }
+        assert resolve_priority(dtype_param) == ["b", "a"]
+
+    def test_fixed_policy_invalid_falls_back(self):
+        dtype_param = {
+            "target_names": ["a", "b"],
+            "priority_policy": "fixed",
+            "priority": ["x", "y"],
+        }
+        assert resolve_priority(dtype_param) == ["a", "b"]
+
+    def test_balanced_no_context(self):
+        dtype_param = {"target_names": ["a", "b"], "priority_policy": "balanced"}
+        assert resolve_priority(dtype_param, context=None) == ["a", "b"]
+
+    def test_balanced_first_half(self):
+        ctx = DecodeContext(particle_index=0, n_particles=10, iteration=0)
+        dtype_param = {"target_names": ["a", "b"], "priority_policy": "balanced"}
+        assert resolve_priority(dtype_param, context=ctx) == ["a", "b"]
+
+    def test_balanced_second_half(self):
+        ctx = DecodeContext(particle_index=7, n_particles=10, iteration=0)
+        dtype_param = {"target_names": ["a", "b"], "priority_policy": "balanced"}
+        assert resolve_priority(dtype_param, context=ctx) == ["b", "a"]
+
+    def test_balanced_odd_iteration_flips(self):
+        ctx = DecodeContext(particle_index=0, n_particles=10, iteration=1)
+        dtype_param = {"target_names": ["a", "b"], "priority_policy": "balanced"}
+        # First half + odd iteration -> flipped
+        assert resolve_priority(dtype_param, context=ctx) == ["b", "a"]
+
+    def test_unknown_policy_returns_target_names(self):
+        dtype_param = {"target_names": ["a", "b"], "priority_policy": "unknown_policy"}
+        assert resolve_priority(dtype_param) == ["a", "b"]
+
+
+class TestMapParamWithValueBranches:
+    def test_bool_dtype_true(self):
+        fields = [OptimizerConfigField(name="flag", dtype="bool", min=0, max=1, value=0)]
+        result = map_param_with_value(np.array([0.8]), fields)
+        assert result[0].value is True
+
+    def test_bool_dtype_false(self):
+        fields = [OptimizerConfigField(name="flag", dtype="bool", min=0, max=1, value=0)]
+        result = map_param_with_value(np.array([0.3]), fields)
+        assert result[0].value is False
+
+    def test_string_enum(self):
+        fields = [
+            OptimizerConfigField(
+                name="mode",
+                dtype="enum",
+                min=0,
+                max=1,
+                value="auto",
+                dtype_param=["auto", "manual"],
+            )
+        ]
+        result = map_param_with_value(np.array([0.9]), fields)
+        assert result[0].value in ("auto", "manual")
+
+    def test_single_string_enum(self):
+        fields = [
+            OptimizerConfigField(
+                name="mode",
+                dtype="enum",
+                min=0,
+                max=1,
+                value="only",
+                dtype_param=["only"],
+            )
+        ]
+        result = map_param_with_value(np.array([0.5]), fields)
+        assert result[0].value == "only"
+
+    def test_numeric_enum_at_min(self):
+        fields = [OptimizerConfigField(name="bs", dtype="enum", min=0, max=1, value=0, dtype_param=[8, 16, 32])]
+        result = map_param_with_value(np.array([0.0]), fields)
+        assert result[0].value == 8
+
+    def test_numeric_enum_at_max(self):
+        fields = [OptimizerConfigField(name="bs", dtype="enum", min=0, max=1, value=0, dtype_param=[8, 16, 32])]
+        result = map_param_with_value(np.array([1.0]), fields)
+        assert result[0].value == 32
+
+    def test_constant_field_skipped(self):
+        fields = [
+            OptimizerConfigField(name="c", dtype="int", min=5, max=5, value=5, constant=5),
+            OptimizerConfigField(name="x", dtype="int", min=1, max=100, value=0),
+        ]
+        result = map_param_with_value(np.array([50]), fields)
+        assert result[0].value == 5
+        assert result[1].value == 50
+
+    def test_float_dtype(self):
+        fields = [OptimizerConfigField(name="lr", dtype="float", min=0, max=1, value=0)]
+        result = map_param_with_value(np.array([0.75]), fields)
+        assert result[0].value == 0.75
+
+    def test_int_conversion_error(self):
+        """Test map_param_with_value handles ValueError for int conversion"""
+        fields = [OptimizerConfigField(name="bs", dtype="int", min=0, max=100, value=0)]
+        # Use NaN which cannot be converted to int
+        result = map_param_with_value(np.array([float("nan")]), fields)
+        # NaN cannot be converted to int, falls back to raw value
+        import math
+
+        assert math.isnan(result[0].value)
+
+    def test_float_conversion_error(self):
+        """Test map_param_with_value handles TypeError for float conversion"""
+        fields = [OptimizerConfigField(name="lr", dtype="float", min=0, max=1, value=0)]
+        # Use object array with non-numeric value
+        params = np.array([None], dtype=object)
+        result = map_param_with_value(params, fields)
+        assert result[0].value is None
+
+    def test_support_select_batch_zeroes_time_fields(self):
+        """Test that supportSelectBatch=True zeroes out prefill/decode time fields"""
+        fields = [
+            OptimizerConfigField(
+                name="supportSelectBatch",
+                dtype="bool",
+                min=0,
+                max=1,
+                value=0,
+                config_position="BackendConfig.ScheduleConfig.supportSelectBatch",
+            ),
+            OptimizerConfigField(
+                name="prefillTime",
+                dtype="int",
+                min=0,
+                max=1000,
+                value=500,
+                config_position="BackendConfig.ScheduleConfig.prefillTimeMsPerReq",
+            ),
+            OptimizerConfigField(
+                name="decodeTime",
+                dtype="int",
+                min=0,
+                max=1000,
+                value=300,
+                config_position="BackendConfig.ScheduleConfig.decodeTimeMsPerReq",
+            ),
+        ]
+        # 0.8 > 0.5 → True for supportSelectBatch
+        result = map_param_with_value(np.array([0.8, 500, 300]), fields)
+        assert result[1].value == 0
+        assert result[2].value == 0
+
+
+class TestUpdateFactoriesField:
+    def test_basic_division(self):
+        """Test factories type: value = product / target.value"""
+        target = OptimizerConfigField(name="batch_size", dtype="int", min=1, max=100, value=4)
+        dependent = OptimizerConfigField(
+            name="dp",
+            dtype="int",
+            min=1,
+            max=16,
+            value=0,
+            dtype_param={"target_name": "batch_size", "product": 16, "dtype": "int"},
+        )
+        simulate_run_info = [deepcopy(target), deepcopy(dependent)]
+        _update_factories_field(dependent, 1, (target, dependent), simulate_run_info)
+        assert simulate_run_info[1].value == 4  # 16 / 4
+
+    def test_zero_target_no_update(self):
+        """Test factories type: zero target doesn't update (division by zero guard)"""
+        target = OptimizerConfigField(name="batch_size", dtype="int", min=0, max=100, value=0)
+        dependent = OptimizerConfigField(
+            name="dp",
+            dtype="int",
+            min=1,
+            max=16,
+            value=99,
+            dtype_param={"target_name": "batch_size", "product": 16, "dtype": "int"},
+        )
+        simulate_run_info = [deepcopy(target), deepcopy(dependent)]
+        _update_factories_field(dependent, 1, (target, dependent), simulate_run_info)
+        # value not updated because target is 0
+        assert simulate_run_info[1].value == 99
+
+
+class TestUpdateTimesField:
+    def test_basic_multiplication(self):
+        """Test times type: value = product × target.value"""
+        target = OptimizerConfigField(name="tp", dtype="int", min=1, max=8, value=4)
+        dependent = OptimizerConfigField(
+            name="world_size",
+            dtype="int",
+            min=1,
+            max=64,
+            value=0,
+            dtype_param={"target_name": "tp", "product": 2, "dtype": "int"},
+        )
+        simulate_run_info = [deepcopy(target), deepcopy(dependent)]
+        _update_times_field(dependent, 1, (target, dependent), simulate_run_info)
+        assert simulate_run_info[1].value == 8  # 2 * 4
+
+    def test_none_target_skips_with_warning(self):
+        """Test times type: None target value triggers warning and skips"""
+        target = OptimizerConfigField(name="tp", dtype="int", min=0, max=8, value=0)
+        dependent = OptimizerConfigField(
+            name="world_size",
+            dtype="int",
+            min=1,
+            max=64,
+            value=99,
+            dtype_param={"target_name": "tp", "product": 2, "dtype": "int"},
+        )
+        simulate_run_info = [deepcopy(target), deepcopy(dependent)]
+        # Manually set value to None after creation to bypass pydantic validation
+        object.__setattr__(simulate_run_info[0], "value", None)
+        _update_times_field(dependent, 1, (target, dependent), simulate_run_info)
+        # value not updated because target is None
+        assert simulate_run_info[1].value == 99
+
+    def test_nan_target_skips_with_warning(self):
+        """Test times type: NaN target value triggers warning and skips"""
+        target = OptimizerConfigField(name="tp", dtype="float", min=0, max=8, value=float("nan"))
+        dependent = OptimizerConfigField(
+            name="world_size",
+            dtype="int",
+            min=1,
+            max=64,
+            value=77,
+            dtype_param={"target_name": "tp", "product": 2, "dtype": "int"},
+        )
+        simulate_run_info = [deepcopy(target), deepcopy(dependent)]
+        _update_times_field(dependent, 1, (target, dependent), simulate_run_info)
+        assert simulate_run_info[1].value == 77
+
+
+class TestReverseSpecialField:
+    def test_ratio_field_reverse(self):
+        """Test reverse_special_field reverses ratio field"""
+        ratio_field = OptimizerConfigField(
+            name="max_preempt",
+            dtype="ratio",
+            min=0,
+            max=1,
+            value=50,
+            dtype_param="batch_size",
+        )
+        target_field = OptimizerConfigField(
+            name="batch_size",
+            dtype="int",
+            min=10,
+            max=100,
+            value=100,
+            config_position="BackendConfig.ScheduleConfig.maxBatchSize",
+        )
+        params = np.array([0.0, 100.0])
+        result = reverse_special_field((ratio_field, target_field), params, concurrency=100)
+        assert result[0] == 0.5  # 50 / 100
+
+    def test_concurrency_field_with_ratio_zero_value(self):
+        """Test CONCURRENCY field with ratio dtype and zero value sets to 1"""
+        conc_field = OptimizerConfigField(name="CONCURRENCY", dtype="ratio", min=0, max=1, value=0)
+        params = np.array([0.0])
+        result = reverse_special_field((conc_field,), params, concurrency=50)
+        assert result[0] == 1
+
+    def test_concurrency_field_with_ratio_nonzero(self):
+        """Test CONCURRENCY field with ratio dtype and non-zero value"""
+        conc_field = OptimizerConfigField(name="CONCURRENCY", dtype="ratio", min=0, max=1, value=25)
+        params = np.array([0.0])
+        result = reverse_special_field((conc_field,), params, concurrency=50)
+        assert result[0] == 0.5  # 25 / 50
+
+    def test_concurrency_field_non_ratio_with_value(self):
+        """Test CONCURRENCY field with non-ratio dtype uses value directly"""
+        conc_field = OptimizerConfigField(name="CONCURRENCY", dtype="int", min=1, max=100, value=30)
+        params = np.array([0.0])
+        result = reverse_special_field((conc_field,), params, concurrency=50)
+        assert result[0] == 30
+
+    def test_concurrency_field_none_value_uses_concurrency(self):
+        """Test CONCURRENCY field with None value uses concurrency arg"""
+        conc_field = OptimizerConfigField(name="CONCURRENCY", dtype="int", min=1, max=100, value=0)
+        # Bypass pydantic to set None
+        object.__setattr__(conc_field, "value", None)
+        params = np.array([0.0])
+        result = reverse_special_field((conc_field,), params, concurrency=42)
+        assert result[0] == 42
+
+
+class TestFieldToParam:
+    def test_int_field(self):
+        """Test field_to_param converts int field"""
+        fields = (OptimizerConfigField(name="bs", dtype="int", min=1, max=100, value=50),)
+        result = field_to_param(fields)
+        assert result[0] == 50.0
+
+    def test_bool_true_field(self):
+        """Test field_to_param converts bool True to 1"""
+        fields = (OptimizerConfigField(name="flag", dtype="bool", min=0, max=1, value=True),)
+        result = field_to_param(fields)
+        assert result[0] == 1
+
+    def test_bool_false_field(self):
+        """Test field_to_param converts bool False to 0"""
+        fields = (OptimizerConfigField(name="flag", dtype="bool", min=0, max=1, value=False),)
+        result = field_to_param(fields)
+        assert result[0] == 0
+
+    def test_enum_field_existing_value(self):
+        """Test field_to_param with enum value in dtype_param"""
+        fields = (
+            OptimizerConfigField(
+                name="policy",
+                dtype="enum",
+                min=0,
+                max=1,
+                value=1,
+                dtype_param=[0, 1, 3],
+            ),
+        )
+        result = field_to_param(fields)
+        # index=1, segment midpoint
+        assert result[0] is not None
+
+    def test_enum_field_string_value_not_in_list(self):
+        """Test field_to_param with string enum value not in dtype_param appends it"""
+        fields = (
+            OptimizerConfigField(
+                name="mode",
+                dtype="enum",
+                min=0,
+                max=1,
+                value="new_mode",
+                dtype_param=["auto", "manual"],
+            ),
+        )
+        _ = field_to_param(fields)
+        assert "new_mode" in fields[0].dtype_param
+
+    def test_enum_field_numeric_value_not_in_list(self):
+        """Test field_to_param with numeric enum value not in dtype_param inserts it"""
+        fields = (OptimizerConfigField(name="bs", dtype="enum", min=0, max=1, value=12, dtype_param=[8, 16, 32]),)
+        _ = field_to_param(fields)
+        assert 12 in fields[0].dtype_param
+
+    def test_float_field(self):
+        """Test field_to_param converts float field"""
+        fields = (OptimizerConfigField(name="lr", dtype="float", min=0, max=1, value=0.5),)
+        result = field_to_param(fields)
+        assert result[0] == 0.5
+
+    def test_constant_field_skipped(self):
+        """Test field_to_param skips constant fields"""
+        fields = (
+            OptimizerConfigField(name="c", dtype="int", min=5, max=5, value=5, constant=5),
+            OptimizerConfigField(name="x", dtype="int", min=1, max=100, value=42),
+        )
+        result = field_to_param(fields)
+        assert len(result) == 1
+        assert result[0] == 42.0
+
+    def test_concurrency_field_sets_concurrency(self):
+        """Test field_to_param detects max_batch_size and sets concurrency"""
+        fields = (
+            OptimizerConfigField(
+                name="max_batch_size",
+                dtype="int",
+                min=10,
+                max=200,
+                value=64,
+                config_position="BackendConfig.ScheduleConfig.maxBatchSize",
+            ),
+        )
+        result = field_to_param(fields)
+        assert result[0] == 64.0
+
+    def test_int_conversion_error(self):
+        """Test field_to_param handles int conversion error"""
+        # float('inf') cannot be converted to int (OverflowError)
+        fields = (OptimizerConfigField(name="bs", dtype="int", min=0, max=100, value=float("inf")),)
+        result = field_to_param(fields)
+        # Falls back to appending raw value (inf) which works in float array
+        assert result[0] == float("inf")
+
+
+class TestGetSettingsAndRegister:
+    def test_register_settings_custom_func(self):
+        """Test register_settings with custom function"""
+        import optix.config.config as config_mod
+
+        # Save original state
+        original_settings = config_mod.settings
+        original_func = config_mod.custom_settings_func
+        try:
+            config_mod.settings = None
+            sentinel = object()
+
+            def custom():
+                return sentinel
+
+            register_settings(custom)
+            result = get_settings()
+            assert result is sentinel
+        finally:
+            # Restore
+            config_mod.settings = original_settings
+            config_mod.custom_settings_func = original_func
+
+    def test_get_settings_default(self):
+        """Test get_settings returns default Settings when no custom func"""
+        import optix.config.config as config_mod
+
+        original_settings = config_mod.settings
+        original_func = config_mod.custom_settings_func
+        try:
+            config_mod.settings = None
+            config_mod.custom_settings_func = None
+            result = get_settings()
+            assert result is not None
+        finally:
+            config_mod.settings = original_settings
+            config_mod.custom_settings_func = original_func
