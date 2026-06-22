@@ -24,7 +24,7 @@ from loguru import logger
 from .io_utils import ensure_existing_file
 
 
-_KEY_WORD = "H" + "B" + "M"
+_KEY_WORD = "HBM"
 
 
 def get_train_sub_path(base_path: Path):
