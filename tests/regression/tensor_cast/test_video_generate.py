@@ -13,9 +13,11 @@ import pytest
 import torch
 from cli.inference.video_generate import main, process_input, run_inference
 from parameterized import parameterized
-from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
+from tensor_cast.core.quantization.config import create_attention_quant_config
+from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from tensor_cast.diffusers.cache_agent.cache import CacheState
 from tensor_cast.diffusers.cache_agent.dit_block_cache import DiTBlockCache
+from tensor_cast.diffusers.diffusers_attention import _attention, use_custom_sdpa
 from tensor_cast.diffusers.dit_cache_registry import (
     DiTBlockCacheSpec,
     _get_hunyuanvideo15_blocks_with_setters,
@@ -162,6 +164,149 @@ class TestVideoGeneration(unittest.TestCase):
             ulysses_size=1,
         )
         self._validate_inference_result("test_basic_video_inference")
+
+    def test_main_given_fp8_attention_quantization_when_invoked_then_passes_action_to_inference(self):
+        original_argv = sys.argv
+        try:
+            sys.argv = [
+                "video_generate.py",
+                self.model_id,
+                "--batch-size",
+                str(self.batch_size),
+                "--seq-len",
+                str(self.seq_len),
+                "--quantize-attention-action",
+                "FP8",
+            ]
+            with patch("cli.inference.video_generate.run_inference") as mock_run_inference:
+                main()
+
+            self.assertEqual(
+                mock_run_inference.call_args.kwargs["quantize_attention_action"], QuantizeAttentionAction.FP8
+            )
+        finally:
+            sys.argv = original_argv
+
+    def test_script_run_inference_is_covered_in_process(self):
+        from types import SimpleNamespace
+        from tensor_cast.scripts import video_generate as script_mod
+
+        fake_device = SimpleNamespace(name="TEST_DEVICE")
+        fake_model_config = SimpleNamespace(
+            transformer_config=SimpleNamespace(
+                parallel_config=SimpleNamespace(ulysses_size=1, world_size=1),
+                dtype=torch.float16,
+                model_config={
+                    "_class_name": "HunyuanVideoTransformer3DModel",
+                    "in_channels": 16,
+                    "text_embed_dim": 4096,
+                    "guidance_embeds": "true",
+                    "pooled_projection_dim": 768,
+                },
+            )
+        )
+        fake_model = MagicMock()
+        fake_model.forward.return_value = torch.zeros(1, device="meta")
+        fake_runtime = MagicMock()
+        fake_runtime.__enter__.return_value = fake_runtime
+        fake_runtime.__exit__.return_value = False
+        fake_runtime.table_averages.return_value = {"ok": True}
+        fake_sdpa = MagicMock()
+        fake_sdpa.__enter__.return_value = fake_sdpa
+        fake_sdpa.__exit__.return_value = False
+
+        with (
+            patch.object(script_mod.DeviceProfile, "all_device_profiles", {"TEST_DEVICE": fake_device}),
+            patch.object(script_mod, "AnalyticPerformanceModel") as mock_perf_model,
+            patch.object(script_mod, "ParallelConfig") as mock_parallel_config,
+            patch.object(script_mod, "create_quant_config") as mock_create_quant_config,
+            patch.object(script_mod, "str_to_dtype", return_value=torch.float16),
+            patch(
+                "tensor_cast.diffusers.diffusers_model.build_diffusers_transformer_model",
+                return_value=(fake_model, fake_model_config),
+            ),
+            patch("tensor_cast.diffusers.diffusers_attention.use_custom_sdpa", return_value=fake_sdpa),
+            patch("tensor_cast.diffusers.diffusers_attention.set_sp_group"),
+            patch.object(script_mod, "Runtime", return_value=fake_runtime),
+            patch.object(script_mod, "MemoryTracker", return_value=MagicMock()),
+            patch.object(script_mod, "time") as mock_time,
+            patch.object(script_mod, "print"),
+        ):
+            mock_parallel_config.return_value = SimpleNamespace(ulysses_size=1, world_size=1)
+            mock_create_quant_config.return_value = SimpleNamespace(attention_configs={-1: None})
+            mock_perf_model.return_value = MagicMock()
+            mock_time.perf_counter.side_effect = [1.0, 2.0]
+
+            script_mod.run_inference(
+                device="TEST_DEVICE",
+                model_id=self.model_id,
+                batch_size=self.batch_size,
+                seq_len=self.seq_len,
+                height=self.height,
+                width=self.width,
+                frame_num=self.frame_num,
+                sample_step=1,
+                dtype="float16",
+            )
+
+        mock_perf_model.assert_called_once()
+        mock_create_quant_config.assert_called_once()
+
+    def test_script_main_is_covered_in_process(self):
+        from tensor_cast.scripts import video_generate as script_mod
+
+        with patch.object(script_mod, "run_inference") as mock_run_inference:
+            result = run_module_main(
+                "tensor_cast.scripts.video_generate",
+                [
+                    "--device",
+                    "TEST_DEVICE",
+                    self.model_id,
+                    "--batch-size",
+                    str(self.batch_size),
+                    "--seq-len",
+                    str(self.seq_len),
+                    "--quantize-attention-action",
+                    "DISABLED",
+                ],
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        mock_run_inference.assert_called_once()
+
+    def test_custom_sdpa_given_fp8_attention_quantization_when_called_then_uses_quantized_attention_op(self):
+        quant_config = create_attention_quant_config(QuantizeAttentionAction.FP8)
+        query = torch.zeros((1, 2, 1, 4), device="meta", dtype=torch.float16)
+        key = torch.zeros((1, 2, 1, 4), device="meta", dtype=torch.float16)
+        value = torch.zeros((1, 2, 1, 4), device="meta", dtype=torch.float16)
+
+        with (
+            patch.object(torch.ops.tensor_cast, "attention_quant", return_value=query) as mock_attention_quant,
+            patch.object(torch.ops.tensor_cast, "attention") as mock_attention,
+            use_custom_sdpa(quant_config),
+        ):
+            torch.nn.functional.scaled_dot_product_attention(query, key, value)
+
+        mock_attention_quant.assert_called_once()
+        mock_attention.assert_not_called()
+
+    def test_diffusers_attention_backend_given_fp8_attention_quantization_when_called_then_uses_quantized_attention_op(
+        self,
+    ):
+        quant_config = create_attention_quant_config(QuantizeAttentionAction.FP8)
+        query = torch.zeros((1, 2, 1, 4), device="meta", dtype=torch.float16)
+        key = torch.zeros((1, 2, 1, 4), device="meta", dtype=torch.float16)
+        value = torch.zeros((1, 2, 1, 4), device="meta", dtype=torch.float16)
+
+        with (
+            patch.object(torch.ops.tensor_cast, "attention_quant", return_value=query) as mock_attention_quant,
+            patch.object(torch.ops.tensor_cast, "attention") as mock_attention,
+            use_custom_sdpa(quant_config),
+        ):
+            _attention(query, key, value)
+
+        mock_attention_quant.assert_called_once()
+        mock_attention.assert_not_called()
 
     def test_dit_cache_requires_step_range(self):
         """Test dit_cache requires cache_step_range."""

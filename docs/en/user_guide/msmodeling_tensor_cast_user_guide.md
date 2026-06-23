@@ -199,13 +199,16 @@ usage: video_generate.py [-h]
                          [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
                          --batch-size BATCH_SIZE --seq-len SEQ_LEN [--chrome-trace CHROME_TRACE] [--height HEIGHT] [--width WIDTH] [--frame-num FRAME_NUM] [--sample-step SAMPLE_STEP]
                          [--log-level {debug,info,warning,error,critical}] [--dtype {float16,float32,bfloat16}]
-                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}] [--use-cfg] [--world-size WORLD_SIZE]
+                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
+                         [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg] [--world-size WORLD_SIZE]
                          [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--dit-cache] [--cache-step-range CACHE_STEP_RANGE] [--cache-step-interval CACHE_STEP_INTERVAL]
                          [--cache-block-range CACHE_BLOCK_RANGE]
                          model_id
 
 Run a simulated diffusion transformer forward and dump perf stats.
 ```
+
+Use `--quantize-attention-action FP8` or `--quantize-attention-action INT8` to model quantized attention computation independently from linear layer quantization.
 
 Run `python -m cli.inference.video_generate --help` for details.
 

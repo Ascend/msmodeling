@@ -29,11 +29,44 @@ def get_sp_group() -> Optional[ParallelGroup]:
     return getattr(_thread_local, "sp_group", None)
 
 
+def get_attention_quant_config():
+    return getattr(_thread_local, "attention_quant_config", None)
+
+
+def _run_attention(query, key, value, attention_mask=None):
+    quant_config = get_attention_quant_config()
+    if quant_config is None:
+        return torch.ops.tensor_cast.attention(query, key, value, attention_mask, None, None, None, None)
+
+    out_dtype = query.dtype
+    quant_dtype = quant_config.get_quant_dtype()
+    query = torch.ops.tensor_cast.quantize(query, quant_config.query_scale, quant_config.query_offset, quant_dtype)
+    key = torch.ops.tensor_cast.quantize(key, quant_config.kv_scale, quant_config.kv_offset, quant_dtype)
+    value = torch.ops.tensor_cast.quantize(value, quant_config.kv_scale, quant_config.kv_offset, quant_dtype)
+    return torch.ops.tensor_cast.attention_quant(
+        query,
+        key,
+        value,
+        attention_mask,
+        None,
+        None,
+        None,
+        None,
+        quant_config.query_scale,
+        quant_config.query_offset,
+        quant_config.kv_scale,
+        quant_config.kv_offset,
+        quant_config.attention_prob_scale,
+        quant_config.attention_prob_offset,
+        out_dtype,
+    )
+
+
 @_AttentionBackendRegistry.register("tensor_cast")
 def _attention(query, key, value, **kwargs):
     sp_group = get_sp_group()
     if sp_group is None:
-        return torch.ops.tensor_cast.attention(query, key, value, None, None, None, None, None)
+        return _run_attention(query, key, value)
 
     ulysses_size = sp_group.world_size
 
@@ -82,7 +115,7 @@ def _attention(query, key, value, **kwargs):
         num_heads_kv // ulysses_size,
         head_dim_kv,
     )
-    out = torch.ops.tensor_cast.attention(query, key, value, None, None, None, None, None)
+    out = _run_attention(query, key, value)
 
     _ = sp_group.all_to_all(
         input_tensor_q,
@@ -94,16 +127,19 @@ def _attention(query, key, value, **kwargs):
 
 
 # scaled_dot_product_attention is not capturable by torch_dispatch;
-# override it with our custom tensor_cast.attention op instead.
+# override it with our custom tensor_cast attention op instead.
 @contextmanager
-def use_custom_sdpa():
+def use_custom_sdpa(quant_config=None):
     original_sdpa = F.scaled_dot_product_attention
+    original_quant_config = get_attention_quant_config()
 
     def _custom_sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
-        return torch.ops.tensor_cast.attention(q, k, v, attn_mask, None, None, None, None)
+        return _run_attention(q, k, v, attn_mask)
 
+    _thread_local.attention_quant_config = quant_config
     F.scaled_dot_product_attention = _custom_sdpa
     try:
         yield
     finally:
         F.scaled_dot_product_attention = original_sdpa
+        _thread_local.attention_quant_config = original_quant_config

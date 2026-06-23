@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-import inspect
+import inspect  # pylint: disable=no-member
 import logging
 import os
 from collections.abc import Callable, Iterator, Sequence
@@ -122,16 +122,16 @@ def _select_supported_keyword(
     candidate_keywords: Sequence[str],
 ) -> tuple[bool, str | None]:
     try:
-        signature = inspect.signature(func)
+        func_signature = inspect.signature(func)  # pylint: disable=no-member
     except (TypeError, ValueError):
         return False, None
 
-    parameters = signature.parameters
+    parameters = func_signature.parameters
     for keyword in candidate_keywords:
         if keyword in parameters:
             return True, keyword
 
-    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):  # pylint: disable=no-member
         return True, None
 
     return True, None

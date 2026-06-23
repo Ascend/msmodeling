@@ -7,7 +7,7 @@ import torch
 
 from .. import device_profiles  # noqa: F401
 from ..core.quantization.config import create_quant_config
-from ..core.quantization.datatypes import QuantizeLinearAction
+from ..core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from ..device import DeviceProfile
 from ..diffusers.cache_agent import CacheConfig
 from ..diffusers.diffusers_utils import (
@@ -15,7 +15,7 @@ from ..diffusers.diffusers_utils import (
     model_class_to_input,
     model_class_to_vae_stride,
 )
-from tensor_cast.model_config import ParallelConfig, QuantConfig, RemoteSource
+from tensor_cast.model_config import ParallelConfig, RemoteSource
 from ..parallel_group import ParallelGroup
 from ..performance_model.analytic import AnalyticPerformanceModel
 from ..performance_model.memory_tracker import MemoryTracker
@@ -138,6 +138,7 @@ def run_inference(
     dtype: str = "float16",
     remote_source: str = RemoteSource.huggingface,
     quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.W8A8_DYNAMIC,
+    quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED,
     mxfp4_group_size: int = 32,
     use_cfg: bool = False,
     world_size: int = 1,
@@ -161,18 +162,17 @@ def run_inference(
         world_size=world_size,
         ulysses_size=ulysses_size,
     )
-    quant_config = QuantConfig()
-    if quantize_linear_action != QuantizeLinearAction.DISABLED:
-        extra_kwargs = {}
-        if quantize_linear_action == QuantizeLinearAction.MXFP4:
-            extra_kwargs.update(
-                weight_group_size=mxfp4_group_size,
-                weight_quant_granularity=QuantGranularity.PER_GROUP,
-            )
-        quant_config = create_quant_config(
-            quantize_linear_action,
-            **extra_kwargs,
+    extra_kwargs = {}
+    if quantize_linear_action == QuantizeLinearAction.MXFP4:
+        extra_kwargs.update(
+            weight_group_size=mxfp4_group_size,
+            weight_quant_granularity=QuantGranularity.PER_GROUP,
         )
+    quant_config = create_quant_config(
+        quantize_linear_action,
+        quantize_attention_action=quantize_attention_action,
+        **extra_kwargs,
+    )
     dtype = str_to_dtype(dtype)
     resolved_model_path = resolve_diffusers_model_path(model_id, remote_source)
 
@@ -249,7 +249,7 @@ def run_inference(
     with (
         Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
         torch.no_grad(),
-        use_custom_sdpa(),
+        use_custom_sdpa(quant_config.attention_configs.get(-1)),
     ):
         for step_idx in range(sample_step):
             in_cache_window = cache_state is not None and cache_step_start <= step_idx <= cache_step_end
@@ -362,6 +362,13 @@ def main():
         help="Quantize linear layers.",
     )
     parser.add_argument(
+        "--quantize-attention-action",
+        type=QuantizeAttentionAction,
+        choices=list(QuantizeAttentionAction),
+        default=QuantizeAttentionAction.DISABLED,
+        help="Quantize attention computation.",
+    )
+    parser.add_argument(
         "--use-cfg",
         action="store_true",
         default=False,
@@ -438,6 +445,7 @@ def main():
         world_size=args.world_size,
         ulysses_size=args.ulysses_size,
         quantize_linear_action=args.quantize_linear_action,
+        quantize_attention_action=args.quantize_attention_action,
         cfg_parallel=args.cfg_parallel,
         dit_cache=args.dit_cache,
         cache_step_range=args.cache_step_range,
