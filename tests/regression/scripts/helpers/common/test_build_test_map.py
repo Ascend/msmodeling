@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from pathlib import Path
+from scripts.helpers.common.ast_utils import MODULE_SYMBOL
 from scripts.helpers.common.build_test_map import (
+    TEST_MAP_SCHEMA_VERSION,
     _collect_allowed_node_ids,
     _normalize_pytest_context,
     _prune_missing_source_keys,
@@ -15,11 +19,21 @@ from scripts.helpers.common.build_test_map import (
     collect_from_coverage,
     collect_test_map,
     detect_redundant_cases,
+    normalize_test_node_id,
     write_test_map,
 )
 from scripts.helpers.common.coverage_config import product_roots
 from scripts.helpers.common.pytest_runner import PYTEST_IGNORE_ADDOPTS
 from tests.helpers.fake_subprocess import FakeCompleted
+
+# ---------------------------------------------------------------------------
+# normalize_test_node_id
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_test_node_id_strips_param_and_phase() -> None:
+    assert normalize_test_node_id("tests/test_x.py::test_a[0]|run") == "tests/test_x.py::test_a"
+
 
 # ---------------------------------------------------------------------------
 # _relative_repo_key
@@ -69,6 +83,10 @@ def test_normalize_strips_setup_suffix() -> None:
     assert _normalize_pytest_context("tests/test_x.py::test_a|setup") == "tests/test_x.py::test_a"
 
 
+def test_normalize_strips_param_suffix() -> None:
+    assert _normalize_pytest_context("tests/test_x.py::test_a[0]|run") == "tests/test_x.py::test_a"
+
+
 def test_normalize_no_suffix_unchanged() -> None:
     assert _normalize_pytest_context("tests/test_x.py::test_a") == "tests/test_x.py::test_a"
 
@@ -103,7 +121,9 @@ def test_collect_allowed_node_ids_pytest_fails_raises_system_exit(
         _collect_allowed_node_ids("not npu")
 
 
-def test_collect_allowed_node_ids_includes_ignore_addopts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_collect_allowed_node_ids_includes_ignore_addopts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: list[list[str]] = []
 
     def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
@@ -124,7 +144,7 @@ def test_collect_test_map_skips_collect_when_allowed_node_ids_provided(
     allowed = frozenset({"tests/smoke/test_a.py::test_foo"})
     collect_calls: list[str] = []
     (tmp_path / "cli").mkdir()
-    (tmp_path / "cli" / "main.py").write_text("", encoding="utf-8")
+    (tmp_path / "cli" / "main.py").write_text("def run():\n    return 1\n", encoding="utf-8")
     monkeypatch.setattr(build_test_map, "REPO_ROOT", tmp_path)
 
     def _fail_collect(_marker_expr: str, _pytest_args: list[str] | None = None) -> frozenset[str]:
@@ -135,11 +155,17 @@ def test_collect_test_map_skips_collect_when_allowed_node_ids_provided(
     monkeypatch.setattr(
         build_test_map,
         "collect_from_coverage",
-        lambda node_ids, **_kwargs: {"cli/main.py": {"run": sorted(node_ids)}} if node_ids else {},
+        lambda node_ids, **_kwargs: (
+            {
+                "tests/smoke/test_a.py::test_foo": {"cli/main.py": ["run"]},
+            }
+            if node_ids
+            else {}
+        ),
     )
     result = collect_test_map(marker_expr="not npu", allowed_node_ids=allowed)
     assert collect_calls == []
-    assert result == {"cli/main.py": {"run": ["tests/smoke/test_a.py::test_foo"]}}
+    assert result == {"tests/smoke/test_a.py::test_foo": {"cli/main.py": ["run"]}}
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +212,39 @@ def test_collect_skips_coverage_omitted_source_paths(tmp_path: Path, monkeypatch
     assert result == {}
 
 
+def test_collect_builds_node_oriented_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.helpers.common import build_test_map
+
+    repo = tmp_path / "repo"
+    source = repo / "cli" / "main.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def run():\n    return 1\n", encoding="utf-8")
+    coverage_path = repo / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(build_test_map, "REPO_ROOT", repo)
+
+    class _FakeCoverageData:
+        def __init__(self, _path: str) -> None:
+            self._source = str(source.resolve())
+
+        def read(self) -> None:
+            return None
+
+        def measured_files(self) -> list[str]:
+            return [self._source]
+
+        def contexts_by_lineno(self, _path: str) -> dict[int, list[str]]:
+            return {2: ["tests/regression/cli/test_a.py::test_x|run"]}
+
+    monkeypatch.setattr("coverage.data.CoverageData", _FakeCoverageData)
+    result = collect_from_coverage(
+        frozenset({"tests/regression/cli/test_a.py::test_x"}),
+        coverage_path=coverage_path,
+        roots=("cli/",),
+    )
+    assert result == {"tests/regression/cli/test_a.py::test_x": {"cli/main.py": ["run"]}}
+
+
 def test_collect_returns_empty_when_no_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts.helpers.common import build_test_map
 
@@ -219,10 +278,14 @@ def test_prune_keeps_existing_files_drops_missing(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(build_test_map, "REPO_ROOT", tmp_path)
     (tmp_path / "cli").mkdir()
     (tmp_path / "cli" / "main.py").write_text("", encoding="utf-8")
-    mapping = {"cli/main.py": {"fn": ["test_a"]}, "cli/gone.py": {"fn": ["test_b"]}}
+    mapping = {
+        "tests/a.py::test_a": {"cli/main.py": ["run"]},
+        "tests/a.py::test_b": {"cli/gone.py": ["fn"]},
+    }
     result = _prune_missing_source_keys(mapping)
-    assert "cli/main.py" in result
-    assert "cli/gone.py" not in result
+    assert "tests/a.py::test_a" in result
+    assert "cli/gone.py" not in result.get("tests/a.py::test_b", {})
+    assert "tests/a.py::test_b" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -236,11 +299,36 @@ def test_write_test_map_creates_valid_json(tmp_path: Path, monkeypatch: pytest.M
         lambda _root: "deadbeef" * 5,
     )
     output = tmp_path / "out" / "map.json"
-    write_test_map(output, {"a.py": {"fn": ["test_x"]}})
+    write_test_map(output, {"tests/a.py::test_x": {"cli/main.py": ["run"]}})
     data = json.loads(output.read_text(encoding="utf-8"))
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == TEST_MAP_SCHEMA_VERSION
     assert data["built_from_commit"] == "deadbeef" * 5
-    assert data["map"]["a.py"]["fn"] == ["test_x"]
+    assert data["map"]["tests/a.py::test_x"]["cli/main.py"] == ["run"]
+
+
+def test_build_test_map_writes_pruned_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.helpers.common import build_test_map as build_test_map_mod
+
+    repo = tmp_path / "repo"
+    (repo / "cli").mkdir(parents=True)
+    (repo / "cli" / "main.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    output = repo / "test_map.json"
+    allowed = frozenset({"tests/smoke/test_a.py::test_foo"})
+    monkeypatch.setattr(build_test_map_mod, "REPO_ROOT", repo)
+    monkeypatch.setattr(build_test_map_mod, "_collect_allowed_node_ids", lambda _marker: allowed)
+    monkeypatch.setattr(
+        build_test_map_mod,
+        "collect_from_coverage",
+        lambda node_ids, **_kwargs: {"tests/smoke/test_a.py::test_foo": {"cli/main.py": ["run"]}} if node_ids else {},
+    )
+    monkeypatch.setattr(
+        build_test_map_mod,
+        "resolve_head_commit",
+        lambda _root: "deadbeef" * 5,
+    )
+    build_test_map_mod.build_test_map(output, marker_expr="not npu", roots=("cli/",))
+    data = json.loads(output.read_text(encoding="utf-8"))
+    assert data["map"]["tests/smoke/test_a.py::test_foo"]["cli/main.py"] == ["run"]
 
 
 # ---------------------------------------------------------------------------
@@ -250,51 +338,45 @@ def test_write_test_map_creates_valid_json(tmp_path: Path, monkeypatch: pytest.M
 
 def test_detect_redundant_cases_over_covered_symbol() -> None:
     mapping = {
-        "cli/main.py": {
-            "run": [
-                "tests/regression/cli/test_a.py::test_1",
-                "tests/regression/cli/test_a.py::test_2",
-                "tests/regression/cli/test_a.py::test_3",
-                "tests/regression/cli/test_a.py::test_4",
-                "tests/regression/cli/test_a.py::test_5",
-                "tests/regression/cli/test_a.py::test_6",
-            ],
-        },
+        "tests/regression/cli/test_a.py::test_1": {"cli/main.py": ["run"]},
+        "tests/regression/cli/test_a.py::test_2": {"cli/main.py": ["run"]},
+        "tests/regression/cli/test_a.py::test_3": {"cli/main.py": ["run"]},
+        "tests/regression/cli/test_a.py::test_4": {"cli/main.py": ["run"]},
+        "tests/regression/cli/test_a.py::test_5": {"cli/main.py": ["run"]},
+        "tests/regression/cli/test_a.py::test_6": {"cli/main.py": ["run"]},
     }
     warnings = detect_redundant_cases(mapping, max_per_symbol=5)
-    over_covered = [w for w in warnings if w["type"] == "over_covered_symbol"]
+    over_covered = [warning for warning in warnings if warning["type"] == "over_covered_symbol"]
     assert len(over_covered) == 1
     assert over_covered[0]["symbol"] == "cli/main.py::run"
     assert over_covered[0]["test_count"] == 6
 
 
 def test_detect_redundant_cases_no_over_covered_when_within_limit() -> None:
-    mapping = {"cli/main.py": {"run": ["tests/regression/cli/test_a.py::test_1"]}}
+    mapping = {"tests/regression/cli/test_a.py::test_1": {"cli/main.py": ["run"]}}
     warnings = detect_redundant_cases(mapping, max_per_symbol=5)
-    over_covered = [w for w in warnings if w["type"] == "over_covered_symbol"]
+    over_covered = [warning for warning in warnings if warning["type"] == "over_covered_symbol"]
     assert len(over_covered) == 0
 
 
 def test_detect_redundant_cases_redundant_pair_high_jaccard() -> None:
     mapping = {
-        "cli/main.py": {
-            "run": ["tests/a.py::test_1", "tests/a.py::test_2"],
-            "init": ["tests/a.py::test_1", "tests/a.py::test_2"],
-        },
+        "tests/a.py::test_1": {"cli/main.py": ["run", "init"]},
+        "tests/a.py::test_2": {"cli/main.py": ["run", "init"]},
     }
     warnings = detect_redundant_cases(mapping, jaccard_threshold=0.85)
-    pairs = [w for w in warnings if w["type"] == "redundant_pair"]
+    pairs = [warning for warning in warnings if warning["type"] == "redundant_pair"]
     assert len(pairs) == 1
     assert pairs[0]["jaccard"] == 1.0
 
 
 def test_detect_redundant_cases_no_redundant_pair_low_jaccard() -> None:
     mapping = {
-        "cli/main.py": {"run": ["tests/a.py::test_1"]},
-        "tensor_cast/ops.py": {"add": ["tests/a.py::test_2"]},
+        "tests/a.py::test_1": {"cli/main.py": ["run"]},
+        "tests/a.py::test_2": {"tensor_cast/ops.py": ["add"]},
     }
     warnings = detect_redundant_cases(mapping, jaccard_threshold=0.85)
-    pairs = [w for w in warnings if w["type"] == "redundant_pair"]
+    pairs = [warning for warning in warnings if warning["type"] == "redundant_pair"]
     assert len(pairs) == 0
 
 
@@ -303,12 +385,11 @@ def test_detect_redundant_cases_empty_mapping_returns_empty() -> None:
     assert warnings == []
 
 
-def test_detect_redundant_cases_ignores_unclassified_symbol_for_pairs() -> None:
+def test_detect_redundant_cases_ignores_module_symbol_for_pairs() -> None:
     mapping = {
-        "cli/main.py": {
-            "*": ["tests/a.py::test_1", "tests/a.py::test_2"],
-        },
+        "tests/a.py::test_1": {"cli/main.py": [MODULE_SYMBOL]},
+        "tests/a.py::test_2": {"cli/main.py": [MODULE_SYMBOL]},
     }
     warnings = detect_redundant_cases(mapping, jaccard_threshold=0.85)
-    pairs = [w for w in warnings if w["type"] == "redundant_pair"]
+    pairs = [warning for warning in warnings if warning["type"] == "redundant_pair"]
     assert pairs == []

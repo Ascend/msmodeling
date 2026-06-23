@@ -20,20 +20,19 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from scripts.helpers._config import Config, ConfigError
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.ci_gate.gate_policy import (
     find_expired_test_exemptions,
-    find_expired_unmapped,
     format_expired_exemptions_section,
     format_expired_test_exemptions_section,
     load_gate_policy,
 )
 from scripts.helpers.common._logging import log_env_audit, setup_logger
 from scripts.helpers.common.build_test_map import (
-    _collect_allowed_node_ids,
+    collect_allowed_node_ids,
     collect_test_map,
     detect_redundant_cases,
     write_test_map,
@@ -44,13 +43,18 @@ from scripts.helpers.common.coverage_gate import (
     check_thresholds,
     load_totals,
 )
-from scripts.helpers.common.test_map_config import resolve_test_map_path
+from scripts.helpers.common.test_map_config import (
+    TEST_MAP_COLLECTION_MARKER,
+    TEST_MAP_EXECUTION_MARKER,
+    resolve_test_map_path,
+)
+from scripts.helpers.common.test_map_report import find_expired_unmapped_in_map
 from scripts.helpers.nightly.feishu_notifier import build_feishu_payload, push_feishu
 from scripts.helpers.nightly.pytest_parser import (
     NightlyRunStats,
-    parse_junit_file,
-    parse_junit_xml,
-    slowest_testcases,
+    aggregate_phase_stats,
+    parse_junit_phases,
+    slowest_testcase_durations,
 )
 from scripts.helpers.nightly.report_builder import (
     build_phase_breakdown,
@@ -61,9 +65,6 @@ from scripts.helpers.nightly.report_builder import (
 )
 from scripts.helpers.nightly.report_models import CoverageSummary, FeishuReportInput
 
-_TEST_MAP_EXECUTION_MARKER = "not npu and not nightly and not network"
-# Keep NPU-marked coverage contexts mappable when coverage data comes from an NPU-capable run.
-_TEST_MAP_MARKER = "not nightly and not network"
 _NIGHTLY_MARKER = "not npu and nightly and not network"
 _NETWORK_MARKER = "not npu and network"
 _PROCESS_TERMINATE_TIMEOUT_SECONDS: Final[float] = 5.0
@@ -103,7 +104,7 @@ def _build_test_map_pytest_cmd(python_exe: str, *, junit_xml: Path) -> list[str]
         "tests/smoke/",
         "tests/regression/",
         "-m",
-        _TEST_MAP_EXECUTION_MARKER,
+        TEST_MAP_EXECUTION_MARKER,
         *pytest_xdist_args(),
         *cov_pytest_args(cov_context=True),
         "-q",
@@ -252,8 +253,20 @@ def _run_config_drift_check() -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+class _TerminableProcess(Protocol):
+    pid: int
+
+    def poll(self) -> int | None: ...
+
+    def terminate(self) -> None: ...
+
+    def kill(self) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> int: ...
+
+
 def _terminate_process_tree(
-    proc: subprocess.Popen[str],
+    proc: _TerminableProcess,
     *,
     sigterm_timeout_seconds: float = _PROCESS_TERMINATE_TIMEOUT_SECONDS,
 ) -> None:
@@ -300,26 +313,25 @@ def _stream_pytest(cmd: list[str], cwd: Path, *, log_file: Path | None = None) -
         bufsize=1,
         start_new_session=True,
     )
-    sink = log_file.open("w", encoding="utf-8") if log_file is not None else None
     try:
-        if proc.stdout is None:
-            raise RuntimeError("Failed to capture pytest stdout")
-        try:
-            for line in proc.stdout:
-                if sink is not None:
-                    sink.write(line)
-                else:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-        except KeyboardInterrupt:
-            _terminate_process_tree(proc)
-            raise
-        return proc.wait()
+        with contextlib.ExitStack() as stack:
+            sink = stack.enter_context(log_file.open("w", encoding="utf-8")) if log_file is not None else None
+            if proc.stdout is None:
+                raise RuntimeError("Failed to capture pytest stdout")
+            stdout = proc.stdout
+            stack.enter_context(contextlib.closing(stdout))
+            try:
+                for line in stdout:
+                    if sink is not None:
+                        sink.write(line)
+                    else:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+            except KeyboardInterrupt:
+                _terminate_process_tree(proc)
+                raise
+            return proc.wait()
     finally:
-        if sink is not None:
-            sink.close()
-        if proc.stdout is not None:
-            proc.stdout.close()
         if proc.poll() is None:
             _terminate_process_tree(proc)
             proc.wait()
@@ -377,26 +389,33 @@ def emit_report(
     redundancy_warnings: tuple[dict[str, object], ...] = (),
     expired_exemption_section: str = "",
     drift_warnings: tuple[str, ...] = (),
-) -> NightlyRunStats:
+) -> tuple[NightlyRunStats, tuple[NightlyRunStats | None, ...]]:
     """Parse pytest JUnit XML, push report to Feishu when webhook is set.
 
-    Returns the parsed run stats so the caller can build a final summary
-    without re-parsing the XML.
+    Returns aggregate stats and per-phase stats so callers avoid re-parsing XML.
     """
     logger = logging.getLogger("nightly")
-    stats = parse_junit_xml(junit_xml_paths)
+    phase_parsed = parse_junit_phases(junit_xml_paths)
+    phase_stats = tuple(phase.stats if phase is not None else None for phase in phase_parsed)
+    stats = aggregate_phase_stats(phase_parsed)
+    all_durations = [duration for phase in phase_parsed if phase is not None for duration in phase.durations]
     env = fetch_env_info()
     test_map = load_test_map_summary(test_map_path if test_map_written else None)
 
     if not webhook_url:
         logger.warning("FEISHU_WEBHOOK_URL not set — skipping Feishu push")
-        return stats
+        return stats, phase_stats
 
     phase_exit_list = phase_exits or tuple(0 for _ in junit_xml_paths)
     phase_log_list = phase_log_paths or tuple(None for _ in junit_xml_paths)
     phase_labels = _PHASE_LABELS[: len(junit_xml_paths)]
-    phase_breakdown = build_phase_breakdown(phase_labels, junit_xml_paths, phase_exit_list)
-    slowest_tests = slowest_testcases(junit_xml_paths, top_n=_SLOWEST_TESTS_TOP_N)
+    phase_breakdown = build_phase_breakdown(
+        phase_labels,
+        junit_xml_paths,
+        phase_exit_list,
+        phase_stats=phase_stats,
+    )
+    slowest_tests = slowest_testcase_durations(all_durations, top_n=_SLOWEST_TESTS_TOP_N)
     first_error = resolve_first_error(stats, phase_exit_list, phase_log_list)
 
     report = FeishuReportInput(
@@ -413,8 +432,8 @@ def emit_report(
         coverage_line_threshold=coverage.line_threshold if coverage else None,
         coverage_branch_threshold=coverage.branch_threshold if coverage else None,
         coverage_gate_passed=coverage.gate_passed if coverage else None,
-        test_map_source_files=test_map.source_files,
-        test_map_symbols=test_map.symbols,
+        test_map_test_nodes=test_map.test_nodes,
+        test_map_symbol_refs=test_map.symbol_refs,
         test_map_written=test_map_written,
         failed_cases=stats.failed_cases,
         first_error=first_error,
@@ -427,7 +446,7 @@ def emit_report(
     )
     payload = build_feishu_payload(report)
     push_feishu(webhook_url, payload)
-    return stats
+    return stats, phase_stats
 
 
 # ---------------------------------------------------------------------------
@@ -446,19 +465,22 @@ def _build_terminal_summary(
     drift_warnings: tuple[str, ...],
     phase_log_paths: tuple[Path | None, ...],
     include_phase_logs: bool,
+    phase_stats: tuple[NightlyRunStats | None, ...] | None = None,
 ) -> list[str]:
     """Build human-readable nightly stdout summary lines."""
+    if phase_stats is None:
+        phase_stats = tuple(parse_junit_phases(junit_paths))
+        phase_stats = tuple(phase.stats if phase is not None else None for phase in phase_stats)
     lines: list[str] = []
-    for label, junit_path, exit_code in zip(phase_labels, junit_paths, phase_exits, strict=True):
-        phase_stats = parse_junit_file(junit_path)
-        if phase_stats is None:
+    for label, parsed_stats, exit_code in zip(phase_labels, phase_stats, phase_exits, strict=True):
+        if parsed_stats is None:
             passed = 0
             failed = 0
             duration = "n/a"
         else:
-            passed = phase_stats.passed
-            failed = phase_stats.failed + phase_stats.errors
-            duration = f"{phase_stats.duration_sec:.0f}s" if phase_stats.duration_sec >= 0 else "n/a"
+            passed = parsed_stats.passed
+            failed = parsed_stats.failed + parsed_stats.errors
+            duration = f"{parsed_stats.duration_sec:.0f}s" if parsed_stats.duration_sec >= 0 else "n/a"
         lines.append(f"{label}: exit={exit_code} passed={passed} failed={failed} duration={duration}")
 
     lines.append(
@@ -497,7 +519,7 @@ def _write_test_map_artifacts(
     logger.info("Building coverage mapping from collected coverage data ...")
     gate_policy = load_gate_policy(REPO_ROOT)
     fresh_map = collect_test_map(
-        marker_expr=_TEST_MAP_MARKER,
+        marker_expr=TEST_MAP_COLLECTION_MARKER,
         roots=gate_policy.roots,
         allowed_node_ids=allowed_node_ids,
     )
@@ -508,7 +530,7 @@ def _write_test_map_artifacts(
         REPO_ROOT / ".coverage",
         mapping=fresh_map,
     )
-    expired = find_expired_unmapped(gate_policy, fresh_map)
+    expired = find_expired_unmapped_in_map(gate_policy, fresh_map)
     expired_tests = find_expired_test_exemptions(gate_policy)
     expired_section = format_expired_exemptions_section(expired) + format_expired_test_exemptions_section(expired_tests)
     if expired:
@@ -545,7 +567,8 @@ def _run_nightly_pipeline(
     )
 
     logger.info(
-        "Starting smoke UT (coverage mapping): tests/smoke + tests/regression, marker=%s", _TEST_MAP_EXECUTION_MARKER
+        "Starting smoke UT (coverage mapping): tests/smoke + tests/regression, marker=%s",
+        TEST_MAP_EXECUTION_MARKER,
     )
     map_cmd = _build_test_map_pytest_cmd(sys.executable, junit_xml=map_junit)
     logger.info("Running pytest: %s", shlex.join(map_cmd))
@@ -554,7 +577,7 @@ def _run_nightly_pipeline(
 
     allowed_node_ids: frozenset[str] | None = None
     if map_exit == 0:
-        allowed_node_ids = _collect_allowed_node_ids(_TEST_MAP_MARKER)
+        allowed_node_ids = collect_allowed_node_ids(TEST_MAP_COLLECTION_MARKER)
 
     coverage = _coverage_summary(cfg)
     if coverage:
@@ -574,7 +597,10 @@ def _run_nightly_pipeline(
         allowed_node_ids=allowed_node_ids,
     )
 
-    logger.info("Starting long-running tests: tests/smoke + tests/regression, marker=%s", _NIGHTLY_MARKER)
+    logger.info(
+        "Starting long-running tests: tests/smoke + tests/regression, marker=%s",
+        _NIGHTLY_MARKER,
+    )
     nightly_cmd = _build_nightly_pytest_cmd(sys.executable, junit_xml=nightly_junit)
     logger.info("Running pytest: %s", shlex.join(nightly_cmd))
     nightly_exit = _stream_pytest(nightly_cmd, cwd=REPO_ROOT, log_file=_phase_log("phase2a_nightly"))
@@ -602,10 +628,10 @@ def _run_nightly_pipeline(
         for warning in drift_warnings:
             logger.warning("  - %s", warning)
 
-    overall_exit = map_exit or nightly_exit or bench_exit
+    overall_exit = map_exit or nightly_exit or bench_exit or network_exit
 
     logger.info("Building report ...")
-    stats = emit_report(
+    stats, phase_stats = emit_report(
         (map_junit, nightly_junit, bench_junit, network_junit),
         coverage=coverage,
         test_map_written=map_written,
@@ -630,6 +656,7 @@ def _run_nightly_pipeline(
         drift_warnings=drift_warnings,
         phase_log_paths=phase_log_paths,
         include_phase_logs=feishu_url is not None,
+        phase_stats=phase_stats,
     )
     print("\n".join(summary_lines))
     return overall_exit

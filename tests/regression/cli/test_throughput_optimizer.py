@@ -5,6 +5,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 import pytest
+
 from serving_cast.service.optimizer_summary import SHOW_COLUMNS
 from tests.helpers.cli_runner import run_module_main
 
@@ -271,6 +272,7 @@ class TestThroughputOptimizer(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.nightly
     def test_deepseek_model_pd_ratio_with_output_validation(self):
         """Test deepseek model PD ratio with comprehensive output validation"""
         args = [

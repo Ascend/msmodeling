@@ -8,7 +8,10 @@ import urllib.request
 from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
-    from scripts.helpers.nightly.report_models import FeishuReportInput, PhaseBreakdownEntry
+    from scripts.helpers.nightly.report_models import (
+        FeishuReportInput,
+        PhaseBreakdownEntry,
+    )
 
 FEISHU_TIMEOUT_SEC: Final = 10
 _TRUNCATED_LIST_LIMIT: Final = 10
@@ -85,7 +88,9 @@ def _render_coverage_section(report: FeishuReportInput) -> list[str]:
 
 def _render_test_map_line(report: FeishuReportInput) -> list[str]:
     if report.test_map_written:
-        return [f"Test map: {report.test_map_source_files} files / {report.test_map_symbols} symbols (updated)"]
+        return [
+            f"Test map: {report.test_map_test_nodes} test nodes / {report.test_map_symbol_refs} symbol refs (updated)"
+        ]
     return ["Test map: not updated (UT phase failed)"]
 
 

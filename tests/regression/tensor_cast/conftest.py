@@ -9,15 +9,37 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
-import tensor_cast.ops  # noqa: F401 — register custom ops for regression tests
 import torch
+
+import tensor_cast.ops  # noqa: F401 — register custom ops for regression tests
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.transformers.model import TransformerModel
+from tests.helpers.model_assets import vendored_preprocessor_config_path
 from tests.helpers.model_cache import _BUILT_MODEL_CACHE, get_built_model, get_hf_config
 from tests.helpers.op_registry import build_op_registry
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _wire_vendored_preprocessor_configs():
+    """Resolve VL preprocessor limits from tests/assets/model_config/ before Hub cache."""
+    from tensor_cast.core import input_generator as input_generator_module
+
+    original_resolve = input_generator_module._resolve_local_preprocessor_config
+
+    def resolve_with_vendored_assets(model_id: str):
+        vendored = vendored_preprocessor_config_path(model_id)
+        if vendored is not None:
+            return vendored
+        return original_resolve(model_id)
+
+    input_generator_module._resolve_local_preprocessor_config = resolve_with_vendored_assets
+    input_generator_module._load_preprocessor_pixel_limits.cache_clear()
+    yield
+    input_generator_module._resolve_local_preprocessor_config = original_resolve
+    input_generator_module._load_preprocessor_pixel_limits.cache_clear()
 
 
 def get_session_model(user_config: UserInputConfig) -> TransformerModel:

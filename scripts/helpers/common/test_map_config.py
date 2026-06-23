@@ -1,33 +1,19 @@
-"""Test map path resolution and config-file detection.
+"""Test map path resolution.
 
 Extracted from scripts.helpers.ci_gate.py — single authority for MSMODELING_TEST_MAP_PATH
-resolution and CONFIG_FILE_NAMES used by diff classification.
+resolution.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 from scripts.helpers._config import Config, ConfigError
 
-CONFIG_FILE_NAMES: frozenset[str] = frozenset(
-    {
-        "pyproject.toml",
-        "pytest.ini",
-        "tox.ini",
-        "setup.cfg",
-        ".coveragerc",
-        "requirements.txt",
-        "uv.lock",
-    }
-)
-
-GATE_IGNORED_PATH_PREFIXES: tuple[str, ...] = (".agents/",)
-
-
-def is_gate_ignored_path(path: str) -> bool:
-    """Return True for paths outside product/test gate scope (agent skills, etc.)."""
-    return path.startswith(GATE_IGNORED_PATH_PREFIXES)
+# Hardcoded collection scope for test_map build/sync (not env-configurable).
+TEST_MAP_EXECUTION_MARKER: Final = "not npu and not nightly and not network"
+TEST_MAP_COLLECTION_MARKER: Final = "not nightly and not network"
 
 
 def resolve_test_map_path(cfg: Config, *, must_exist: bool) -> Path:
@@ -49,15 +35,3 @@ def resolve_test_map_path(cfg: Config, *, must_exist: bool) -> Path:
     if must_exist and not path.is_file():
         raise ConfigError(f"test_map not found: {path}")
     return path
-
-
-def is_config_path(path: str) -> bool:
-    """Return True if *path* is a CI config file that triggers full-suite."""
-    if path.startswith("tests/") and path.endswith("/conftest.py"):
-        return True
-    return path.rsplit("/", 1)[-1] in CONFIG_FILE_NAMES
-
-
-def is_full_suite_trigger_path(path: str) -> bool:
-    """Return True when a change should run the full PR gate test suite."""
-    return is_config_path(path) or path.startswith("scripts/helpers/")

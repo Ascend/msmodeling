@@ -1,4 +1,4 @@
-"""Tests for common.test_map_config — resolve_test_map_path, is_config_path."""
+"""Tests for common.test_map_config — resolve_test_map_path."""
 
 from __future__ import annotations
 
@@ -8,9 +8,8 @@ import pytest
 
 from scripts.helpers._config import Config, ConfigError
 from scripts.helpers.common.test_map_config import (
-    CONFIG_FILE_NAMES,
-    is_config_path,
-    is_gate_ignored_path,
+    TEST_MAP_COLLECTION_MARKER,
+    TEST_MAP_EXECUTION_MARKER,
     resolve_test_map_path,
 )
 
@@ -113,54 +112,6 @@ def test_resolve_must_exist_missing_file_raises_config_error(tmp_path: Path) -> 
         resolve_test_map_path(cfg, must_exist=True)
 
 
-# ---------------------------------------------------------------------------
-# is_config_path
-# ---------------------------------------------------------------------------
-
-
-def test_is_config_path_dot_ci_directory_returns_false() -> None:
-    assert is_config_path("tests/.ci/some_config.yaml") is False
-    assert is_config_path("tests/.ci/gate_policy.yaml") is False
-
-
-def test_is_config_path_conftest_returns_true() -> None:
-    assert is_config_path("tests/conftest.py") is True
-
-
-def test_is_config_path_subdirectory_conftest_returns_true() -> None:
-    assert is_config_path("tests/regression/web_ui/conftest.py") is True
-
-
-@pytest.mark.parametrize("fname", sorted(CONFIG_FILE_NAMES))
-def test_is_config_path_config_filenames_return_true(fname: str) -> None:
-    assert is_config_path(fname) is True
-
-
-def test_is_config_path_source_file_returns_false() -> None:
-    assert is_config_path("cli/main.py") is False
-
-
-def test_is_config_path_test_file_returns_false() -> None:
-    assert is_config_path("tests/smoke/test_x.py") is False
-
-
-def test_is_config_path_tests_prefix_without_conftest_returns_false() -> None:
-    assert is_config_path("tests/helpers/foo.py") is False
-
-
-def test_is_gate_ignored_path_agents_prefix() -> None:
-    assert is_gate_ignored_path(".agents/skills/optix-config/scripts/auto_config.py") is True
-    assert is_gate_ignored_path("cli/main.py") is False
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "requirements.txt",
-        "uv.lock",
-        "subdir/requirements.txt",
-        "deep/nested/path/uv.lock",
-    ],
-)
-def test_is_config_path_dependency_lock_files_return_true(path: str) -> None:
-    assert is_config_path(path) is True
+def test_test_map_markers_match_ci_gate_scope() -> None:
+    assert TEST_MAP_EXECUTION_MARKER == "not npu and not nightly and not network"
+    assert TEST_MAP_COLLECTION_MARKER == "not nightly and not network"

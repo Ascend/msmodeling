@@ -45,12 +45,16 @@ def test_fetch_env_info_returns_commit_and_branch(
     assert len(info.timestamp) > 0
 
 
-def test_fetch_env_info_git_not_found_raises_runtime_error(
+def test_fetch_env_info_returns_unknown_when_git_stdout_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("shutil.which", lambda _: None)
-    with pytest.raises(RuntimeError, match="git not found"):
-        fetch_env_info()
+    monkeypatch.setattr(
+        "scripts.helpers.nightly.report_builder.git_stdout",
+        lambda *_args, **_kwargs: "",
+    )
+    info = fetch_env_info()
+    assert info.commit == "unknown"
+    assert info.branch == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +62,7 @@ def test_fetch_env_info_git_not_found_raises_runtime_error(
 # ---------------------------------------------------------------------------
 
 
-def test_load_test_map_summary_valid_file_counts_files_and_symbols(
+def test_load_test_map_summary_valid_file_counts_nodes_and_symbol_refs(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "map.json"
@@ -67,42 +71,64 @@ def test_load_test_map_summary_valid_file_counts_files_and_symbols(
             {
                 "schema_version": 1,
                 "map": {
-                    "a.py": {"fn1": ["t1"], "fn2": ["t2", "t3"]},
-                    "b.py": {"fn3": ["t4"]},
+                    "tests/smoke/test_a.py::test_one": {
+                        "cli/a.py": ["fn1"],
+                        "cli/b.py": ["fn2", "fn3"],
+                    },
+                    "tests/smoke/test_b.py::test_two": {"cli/b.py": ["fn3"]},
                 },
             }
         ),
         encoding="utf-8",
     )
     summary = load_test_map_summary(path)
-    assert summary.source_files == 2
-    assert summary.symbols == 3
+    assert summary.test_nodes == 2
+    assert summary.symbol_refs == 3
+
+
+def test_load_test_map_summary_rejects_source_oriented_map(tmp_path: Path) -> None:
+    path = tmp_path / "map.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "map": {
+                    "a.py": {"fn1": ["tests/smoke/test_a.py::test_one"]},
+                    "b.py": {"fn3": ["tests/smoke/test_b.py::test_two"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    summary = load_test_map_summary(path)
+    assert summary.test_nodes == 0
+    assert summary.symbol_refs == 0
 
 
 def test_load_test_map_summary_none_path_returns_zeroes() -> None:
     summary = load_test_map_summary(None)
-    assert summary.source_files == 0
-    assert summary.symbols == 0
+    assert summary.test_nodes == 0
+    assert summary.symbol_refs == 0
 
 
 def test_load_test_map_summary_missing_file_returns_zeroes(tmp_path: Path) -> None:
     summary = load_test_map_summary(tmp_path / "nonexistent.json")
-    assert summary.source_files == 0
-    assert summary.symbols == 0
+    assert summary.test_nodes == 0
+    assert summary.symbol_refs == 0
 
 
 def test_load_test_map_summary_invalid_json_returns_zeroes(tmp_path: Path) -> None:
     path = tmp_path / "map.json"
     path.write_text("{bad", encoding="utf-8")
     summary = load_test_map_summary(path)
-    assert summary.source_files == 0
+    assert summary.test_nodes == 0
 
 
 def test_load_test_map_summary_map_not_dict_returns_zeroes(tmp_path: Path) -> None:
     path = tmp_path / "map.json"
     path.write_text(json.dumps({"schema_version": 1, "map": []}), encoding="utf-8")
     summary = load_test_map_summary(path)
-    assert summary.source_files == 0
+    assert summary.test_nodes == 0
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +150,13 @@ def test_weak_symbols_for_file_flags_symbols_below_threshold(tmp_path: Path) -> 
     src.parent.mkdir(parents=True)
     src.write_text("def run():\n    x = 1\n    y = 2\n", encoding="utf-8")
     coverage_data = _FakeCoverageData({2: ["tests/foo.py::test_bar"]})
-    weak = _weak_symbols_for_file("cli/main.py", src.resolve(), coverage_data, threshold=0.5)
+    weak = _weak_symbols_for_file(
+        "cli/main.py",
+        src.resolve(),
+        coverage_data,
+        symbols={"run"},
+        threshold=0.5,
+    )
     assert weak == ["cli/main.py::run"]
 
 
@@ -133,7 +165,13 @@ def test_weak_symbols_for_file_skips_symbols_above_threshold(tmp_path: Path) -> 
     src.parent.mkdir(parents=True)
     src.write_text("def run():\n    x = 1\n", encoding="utf-8")
     coverage_data = _FakeCoverageData({1: ["t"], 2: ["t"]})
-    weak = _weak_symbols_for_file("cli/main.py", src.resolve(), coverage_data, threshold=0.5)
+    weak = _weak_symbols_for_file(
+        "cli/main.py",
+        src.resolve(),
+        coverage_data,
+        symbols={"run"},
+        threshold=0.5,
+    )
     assert weak == []
 
 
@@ -142,7 +180,9 @@ def test_weak_symbols_for_file_skips_symbols_above_threshold(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_compute_weak_coverage_symbols_returns_empty_when_no_test_map(tmp_path: Path) -> None:
+def test_compute_weak_coverage_symbols_returns_empty_when_no_test_map(
+    tmp_path: Path,
+) -> None:
     result = compute_weak_coverage_symbols(None, tmp_path / ".coverage")
     assert result == ()
 
@@ -159,7 +199,7 @@ def test_compute_weak_coverage_symbols_uses_in_memory_mapping_without_file_read(
 ) -> None:
     from scripts.helpers.nightly import report_builder
 
-    in_memory = {"cli/main.py": {"run": ["test_a"]}}
+    in_memory = {"tests/regression/cli/test_run.py::test_run": {"cli/main.py": ["run"]}}
     monkeypatch_local = pytest.MonkeyPatch()
     monkeypatch_local.setattr(report_builder, "REPO_ROOT", tmp_path)
     (tmp_path / "cli").mkdir()
@@ -182,7 +222,12 @@ def test_compute_weak_coverage_symbols_returns_empty_when_no_coverage_data(
 
     map_path = tmp_path / "map.json"
     map_path.write_text(
-        json.dumps({"schema_version": 1, "map": {"cli/main.py": {"run": ["test_a"]}}}),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "map": {"tests/foo.py::test_a": {"cli/main.py": ["run"]}},
+            }
+        ),
         encoding="utf-8",
     )
     (tmp_path / "cli").mkdir()

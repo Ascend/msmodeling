@@ -18,7 +18,10 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
-from tensor_cast.model_hub import MODELSCOPE_WEIGHT_IGNORE_PATTERNS as _MODELSCOPE_WEIGHT_IGNORE_PATTERNS
+from tensor_cast.model_hub import (
+    snapshot_huggingface_config_only,
+    snapshot_modelscope_config_only,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -104,12 +107,13 @@ class HuggingFacePrefetcher:
         self._AutoConfig = AutoConfig
 
     def fetch(self, model_id: str) -> PrefetchResult:
+        snapshot_path = snapshot_huggingface_config_only(model_id)
         try:
-            self._AutoConfig.from_pretrained(model_id)
+            self._AutoConfig.from_pretrained(snapshot_path)
         except Exception as exc:
             if "trust_remote_code" not in str(exc):
                 raise
-            self._AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+            self._AutoConfig.from_pretrained(snapshot_path, trust_remote_code=True)
         return PrefetchResult(model_id=model_id, source="huggingface", success=True)
 
 
@@ -118,27 +122,16 @@ class ModelScopePrefetcher:
         import modelscope
 
         self._AutoConfig = modelscope.AutoConfig
-        self._snapshot_download = modelscope.snapshot_download
 
     def fetch(self, model_id: str) -> PrefetchResult:
-        kwargs = self._build_snapshot_kwargs(model_id)
-        local_dir = self._snapshot_download(model_id, **kwargs)
+        snapshot_path = snapshot_modelscope_config_only(model_id)
         try:
-            self._AutoConfig.from_pretrained(local_dir)
+            self._AutoConfig.from_pretrained(snapshot_path)
         except Exception as exc:
             if "trust_remote_code" not in str(exc):
                 raise
-            self._AutoConfig.from_pretrained(local_dir, trust_remote_code=True)
+            self._AutoConfig.from_pretrained(snapshot_path, trust_remote_code=True)
         return PrefetchResult(model_id=model_id, source="modelscope", success=True)
-
-    def _build_snapshot_kwargs(self, model_id: str) -> dict[str, Any]:
-        """Detect which ignore-pattern kwarg the installed modelscope accepts."""
-        import inspect
-
-        sig = inspect.signature(self._snapshot_download)  # pylint: disable=no-member
-        if "ignore_file_pattern" in sig.parameters:
-            return {"ignore_file_pattern": _MODELSCOPE_WEIGHT_IGNORE_PATTERNS}
-        return {"ignore_patterns": _MODELSCOPE_WEIGHT_IGNORE_PATTERNS}
 
 
 def _looks_like_model_id(value: str) -> bool:
@@ -240,22 +233,23 @@ def collect_model_ids(scan_dir: Path) -> list[str]:
     if not allowlist:
         return []
     model_ids: set[str] = set()
-    for path in scan_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            rel = path.relative_to(REPO_ROOT).as_posix()
-        except ValueError:
-            try:
-                rel = path.relative_to(scan_dir).as_posix()
-            except ValueError:
+    for pattern in ("*.py", "*.json"):
+        for path in scan_dir.rglob(pattern):
+            if not path.is_file():
                 continue
-        if rel.startswith(("tests/.ci/", "tests/assets/cache/", "scripts/helpers/")):
-            continue
-        if path.suffix == ".py":
-            model_ids.update(_collect_from_python(path, allowlist))
-        elif path.suffix == ".json":
-            model_ids.update(_collect_from_json(path, allowlist))
+            try:
+                rel = path.relative_to(REPO_ROOT).as_posix()
+            except ValueError:
+                try:
+                    rel = path.relative_to(scan_dir).as_posix()
+                except ValueError:
+                    continue
+            if rel.startswith(("tests/.ci/", "tests/assets/cache/", "scripts/helpers/")):
+                continue
+            if path.suffix == ".py":
+                model_ids.update(_collect_from_python(path, allowlist))
+            elif path.suffix == ".json":
+                model_ids.update(_collect_from_json(path, allowlist))
     return sorted(model_ids)
 
 

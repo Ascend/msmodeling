@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 import pytest
+from pydantic import ValidationError
+
 from scripts.helpers._config import Config, ConfigError
 
 # ---------------------------------------------------------------------------
@@ -42,9 +44,28 @@ def test_from_env_test_map_path_none_when_not_set() -> None:
     assert cfg.test_map_path is None
 
 
+def test_from_env_whitespace_only_test_map_path_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MSMODELING_TEST_MAP_PATH", "   ")
+    cfg = Config.from_env()
+    assert cfg.test_map_path is None
+
+
 # ---------------------------------------------------------------------------
 # from_env — set values
 # ---------------------------------------------------------------------------
+
+
+def test_from_env_strips_whitespace_from_base_branch_and_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MSMODELING_TEST_BASE_BRANCH", " develop ")
+    monkeypatch.setenv("MSMODELING_CACHE", " /tmp/cache ")
+
+    cfg = Config.from_env()
+    assert cfg.base_branch == "develop"
+    assert cfg.msmodeling_cache == "/tmp/cache"
 
 
 def test_from_env_all_values_set(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,7 +98,13 @@ def test_from_env_line_threshold_invalid_raises_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MSMODELING_TEST_LINE_THRESHOLD", "abc")
-    with pytest.raises(ConfigError, match="MSMODELING_TEST_LINE_THRESHOLD must be a number, got 'abc'"):
+    with pytest.raises(
+        ConfigError,
+        match=(
+            r"MSMODELING_TEST_LINE_THRESHOLD: Expected 'MSMODELING_TEST_LINE_THRESHOLD' "
+            r"to be a number\. Got 'abc' instead\."
+        ),
+    ):
         Config.from_env()
 
 
@@ -90,7 +117,7 @@ def test_from_env_line_threshold_negative_raises_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MSMODELING_TEST_LINE_THRESHOLD", "-1")
-    with pytest.raises(ConfigError, match="MSMODELING_TEST_LINE_THRESHOLD must be in"):
+    with pytest.raises(ConfigError, match="MSMODELING_TEST_LINE_THRESHOLD: must be in"):
         Config.from_env()
 
 
@@ -98,7 +125,7 @@ def test_from_env_line_threshold_over_100_raises_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MSMODELING_TEST_LINE_THRESHOLD", "101")
-    with pytest.raises(ConfigError, match="MSMODELING_TEST_LINE_THRESHOLD must be in"):
+    with pytest.raises(ConfigError, match="MSMODELING_TEST_LINE_THRESHOLD: must be in"):
         Config.from_env()
 
 
@@ -106,7 +133,7 @@ def test_from_env_branch_threshold_negative_raises_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MSMODELING_TEST_BRANCH_THRESHOLD", "-5")
-    with pytest.raises(ConfigError, match="MSMODELING_TEST_BRANCH_THRESHOLD must be in"):
+    with pytest.raises(ConfigError, match="MSMODELING_TEST_BRANCH_THRESHOLD: must be in"):
         Config.from_env()
 
 
@@ -114,7 +141,7 @@ def test_from_env_branch_threshold_over_100_raises_config_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("MSMODELING_TEST_BRANCH_THRESHOLD", "150")
-    with pytest.raises(ConfigError, match="MSMODELING_TEST_BRANCH_THRESHOLD must be in"):
+    with pytest.raises(ConfigError, match="MSMODELING_TEST_BRANCH_THRESHOLD: must be in"):
         Config.from_env()
 
 
@@ -153,6 +180,41 @@ def test_from_env_weights_prune_invalid_raises_config_error(
     monkeypatch.setenv("MSMODELING_TEST_WEIGHTS_PRUNE", "maybe")
     with pytest.raises(
         ConfigError,
-        match="MSMODELING_TEST_WEIGHTS_PRUNE must be a boolean.*got 'maybe'",
+        match=(
+            r"MSMODELING_TEST_WEIGHTS_PRUNE: Expected 'MSMODELING_TEST_WEIGHTS_PRUNE' "
+            r"to be a boolean\. Got 'maybe' instead\."
+        ),
     ):
         Config.from_env()
+
+
+@pytest.mark.parametrize("env_key", ["MSMODELING_BENCHMARK_PARALLEL", "MSMODELING_TEST_WEIGHTS_PRUNE"])
+def test_from_env_bool_empty_string_raises_config_error(
+    env_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(env_key, "")
+    with pytest.raises(
+        ConfigError,
+        match=rf"{env_key}: Expected '{env_key}' to be a boolean\. Got '' instead\.",
+    ):
+        Config.from_env()
+
+
+@pytest.mark.parametrize("env_key", ["MSMODELING_TEST_LINE_THRESHOLD", "MSMODELING_TEST_BRANCH_THRESHOLD"])
+def test_from_env_float_empty_string_raises_config_error(
+    env_key: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(env_key, "")
+    with pytest.raises(
+        ConfigError,
+        match=rf"{env_key}: Expected '{env_key}' to be a number\. Got '' instead\.",
+    ):
+        Config.from_env()
+
+
+def test_config_is_frozen() -> None:
+    cfg = Config.from_env()
+    with pytest.raises(ValidationError):
+        cfg.base_branch = "other"

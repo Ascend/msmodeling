@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
-from scripts.helpers._config import ConfigError
+from scripts.helpers._config import ConfigError, format_expected_got
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.common.test_map_loader import is_product_source
 
@@ -54,13 +54,16 @@ def load_coverage_omit_patterns() -> tuple[str, ...]:
     if omit is None:
         return ()
     if not isinstance(omit, list):
-        raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: [tool.coverage.run].omit must be a list")
+        raise ConfigError(
+            f"{_PYPROJECT_REL.as_posix()}: {format_expected_got('[tool.coverage.run].omit', 'a list', omit)}"
+        )
 
     patterns: list[str] = []
     for index, pattern in enumerate(omit):
         if not isinstance(pattern, str) or not pattern.strip():
             raise ConfigError(
-                f"{_PYPROJECT_REL.as_posix()}: [tool.coverage.run].omit[{index}] must be a non-empty string"
+                f"{_PYPROJECT_REL.as_posix()}: "
+                f"{format_expected_got(f'[tool.coverage.run].omit[{index}]', 'a non-empty string', pattern)}"
             )
         patterns.append(pattern)
     return tuple(patterns)

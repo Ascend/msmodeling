@@ -32,8 +32,17 @@ def _parse_collect_only_node_ids(stdout: str) -> tuple[str, ...]:
     return tuple(node_ids)
 
 
-def collect_test_node_ids(targets: Sequence[str], *, marker: str) -> tuple[str, ...]:
+def collect_test_node_ids(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
     """Collect pytest node ids matching *marker* from collect-only stdout."""
+    return _collect_with_marker(targets, marker=marker)
+
+
+def collect_all_test_node_ids(targets: Sequence[str]) -> tuple[str, ...]:
+    """Collect pytest node ids from *targets* without applying a marker filter."""
+    return _collect_with_marker(targets, marker=None)
+
+
+def _collect_with_marker(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
     if not targets:
         return ()
 
@@ -43,12 +52,12 @@ def collect_test_node_ids(targets: Sequence[str], *, marker: str) -> tuple[str, 
         "pytest",
         *targets,
         *PYTEST_IGNORE_ADDOPTS,
-        "-m",
-        marker,
         "--collect-only",
         "-q",
         "--no-header",
     ]
+    if marker is not None:
+        cmd.extend(["-m", marker])
     proc = subprocess.run(
         cmd,
         cwd=REPO_ROOT,
@@ -63,19 +72,19 @@ def collect_test_node_ids(targets: Sequence[str], *, marker: str) -> tuple[str, 
     return _parse_collect_only_node_ids(proc.stdout)
 
 
-def _run_collect_only(targets: Sequence[str], *, marker: str) -> subprocess.CompletedProcess[str]:
+def _run_collect_only(targets: Sequence[str], *, marker: str | None) -> subprocess.CompletedProcess[str]:
     cmd = [
         sys.executable,
         "-m",
         "pytest",
         *targets,
         *PYTEST_IGNORE_ADDOPTS,
-        "-m",
-        marker,
         "--collect-only",
         "-q",
         "--no-header",
     ]
+    if marker is not None:
+        cmd.extend(["-m", marker])
     return subprocess.run(
         cmd,
         cwd=REPO_ROOT,
@@ -85,7 +94,7 @@ def _run_collect_only(targets: Sequence[str], *, marker: str) -> subprocess.Comp
     )
 
 
-def _collect_test_node_ids_lenient(targets: Sequence[str], *, marker: str) -> tuple[str, ...]:
+def _collect_test_node_ids_lenient(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
     """Like collect_test_node_ids but returns () on exit 4 (missing node ids)."""
     if not targets:
         return ()
@@ -108,11 +117,13 @@ def _stderr_reports_all_targets_missing(proc: subprocess.CompletedProcess[str], 
     return all(target in combined for target in targets)
 
 
-def filter_collectable_node_ids(targets: Sequence[str], *, marker: str) -> tuple[str, ...]:
+def filter_collectable_node_ids(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
     """Return collectable node ids; drop stale ids instead of failing the batch."""
     if not targets:
         return ()
     if not all("::" in target for target in targets):
+        if marker is None:
+            return collect_all_test_node_ids(targets)
         return collect_test_node_ids(targets, marker=marker)
 
     proc = _run_collect_only(targets, marker=marker)
@@ -148,21 +159,19 @@ def build_pytest_cmd(
     python: str,
     targets: Sequence[str],
     *,
-    marker: str,
+    marker: str | None,
     collected_count: int,
     extra_args: Sequence[str] = (),
 ) -> list[str]:
-    """Assemble a pytest command with explicit marker and collect-first xdist sizing."""
+    """Assemble a pytest command with optional marker and collect-first xdist sizing."""
     cmd = [
         python,
         "-m",
         "pytest",
         *targets,
         *PYTEST_IGNORE_ADDOPTS,
-        "-m",
-        marker,
-        *xdist_worker_args(collected_count),
-        *_DEFAULT_RUN_ARGS,
-        *extra_args,
     ]
+    if marker is not None:
+        cmd.extend(["-m", marker])
+    cmd.extend([*xdist_worker_args(collected_count), *_DEFAULT_RUN_ARGS, *extra_args])
     return cmd
