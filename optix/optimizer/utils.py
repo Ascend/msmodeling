@@ -40,7 +40,7 @@ def remove_file(output_path: Path):
             try:
                 shutil.rmtree(file)
             except OSError:
-                logger.error(f"remove file failed, file_path :{output_path!r}")
+                logger.error(f"remove file failed, file_path: {file!r}")
                 return
 
 
