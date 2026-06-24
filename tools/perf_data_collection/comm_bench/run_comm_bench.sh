@@ -58,7 +58,7 @@ mkdir -p "$OUTPUT_DIR" || { echo "ERROR: cannot create output dir '$OUTPUT_DIR'"
 echo "=== HCCL Communication Microbenchmark ==="
 echo "Script: $SCRIPT"
 echo "Output: $OUTPUT_DIR"
-echo "Mode: kernel (profiler -> kernel_details.csv hcom_* Duration, no inter-iter sync)"
+echo "Mode: profiler -> kernel_details.csv hcom_* Duration, no inter-iter sync"
 echo ""
 echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
@@ -91,7 +91,6 @@ run_session() {
     echo "    bytes_count=$(echo $bytes | wc -w | tr -d ' ')"
 
     MASTER_PORT=$port torchrun --nproc_per_node=$ndev "$SCRIPT" \
-        --bench-mode kernel \
         --ops $ops \
         --grid-shape 48 8 2 \
         --num-devices $ndev \
@@ -188,7 +187,7 @@ echo ""
 echo "CSV files:"
 wc -l "$OUTPUT_DIR"/*.csv 2>/dev/null || echo "(no CSV files found)"
 echo ""
-echo "Mode: kernel (profiler -> kernel_details hcom_* Duration, excl. AivKernel, no inter-iter sync)"
+echo "Mode: profiler -> kernel_details hcom_* Duration, excl. AivKernel, no inter-iter sync"
 echo "Grid: 128B~512MB powers-of-2 (23 points), >=512KB per-msg session (active=1, 10 sessions), <512KB batch (active=10)"
 
     exit 0
@@ -281,7 +280,6 @@ if [ "${NNODES:-1}" -ge 2 ]; then
             --master_addr=$MASTER_ADDR --master_port=$port \
             --nproc_per_node=$NPROC \
             "$SCRIPT" \
-            --bench-mode kernel \
             --ops $ops \
             --grid-shape 48 8 2 \
             --num-devices $ND_LIST \

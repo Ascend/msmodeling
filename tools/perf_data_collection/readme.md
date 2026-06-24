@@ -194,6 +194,11 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 | `--cann-version` | 否 | 无 | 自动推导路径时使用的 CANN 版本。 |
 | `--ops` | 否 | 全部支持算子 | 只 replay 指定算子，支持多个算子名。 |
 | `--dispatch-ffn-combine-ep-size` | 否 | `16` | `DispatchFFNCombine` replay 和行匹配使用的 EP size。 |
+| `--dispatch-ffn-combine-nproc-per-node` | 否 | 无 | `torchrun`每节点进程数，msprof回放`DispatchFFNCombine`算子的配置参数。 |
+| `--dispatch-ffn-combine-nnodes` | 否 | `1` | `torchrun`节点数，msprof回放`DispatchFFNCombine`算子的配置参数。 |
+| `--dispatch-ffn-combine-node-rank` | 否 | `0` | `torchrun`当前节点的rank，msprof回放`DispatchFFNCombine`算子的配置参数。 |
+| `--dispatch-ffn-combine-master-addr` | 否 | `127.0.0.1` | `torchrun` master 地址，msprof回放`DispatchFFNCombine`算子的配置参数。 |
+| `--dispatch-ffn-combine-master-port` | 否 | 无 | `torchrun` master 端口，msprof回放`DispatchFFNCombine`算子的配置参数。 |
 | `--repeat-count` | 否 | `1` | 传给 `run_all_op.py` 的 replay 重复次数。 |
 | `--update-mode` | 否 | `all` | `all` 表示更新全部匹配行；`missing-only` 只填充无有效耗时的行。 |
 | `--fail-fast` | 否 | `false` | 任一 replay 失败时立即停止。 |
@@ -304,7 +309,6 @@ python tools/perf_data_collection/op_replay/MatMulV2_run.py \
 | `--dtype` | 否 | `torch.bfloat16` | 通信 tensor dtype。 |
 | `--bytes-grid` | 否 | 内置消息大小网格 | 自定义 `message_bytes` 列表。 |
 | `--output-csv` | 否 | 无 | 单 CSV 输出路径，只能配合单个 `--ops` 使用。 |
-| `--bench-mode` | 否 | `kernel` | `kernel` 使用 profiler 统计；`event` 使用 NPU event 计时。 |
 
 直接采集示例（`ATLAS_800_A3_752T_128G_DIE`，`grid-shape 48 8 2`）：
 
@@ -352,7 +356,7 @@ NNODES=2 NODE_RANK=1 MASTER_ADDR=<master_ip> \
 | `ASCEND_HOME_PATH` / `ASCEND_TOOLKIT_HOME` / `ASCEND_TOOLKIT_HOME_PATH` / `ASCEND_INSTALL_PATH` | 自动探测 | CANN 安装目录和版本探测。 |
 | `MASTER_ADDR` / `MASTER_PORT` / `RANK` / `WORLD_SIZE` / `LOCAL_RANK` | `torchrun` 注入 | 通信 benchmark 和 DFC 分布式 replay。 |
 
-跨模块完整列表见 [环境变量](../../scripts/README.md#environment-variables)。
+跨模块完整列表见 [Environment Variables](../../tests/README.md)。
 
 自定义 OPP 环境示例：
 

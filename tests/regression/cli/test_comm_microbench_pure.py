@@ -3,7 +3,6 @@
 import unittest
 
 from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
-    _BENCH_MODES,
     _COMM_OPS,
     _CSV_COLUMNS,
     _DEFAULT_BYTES_GRID,
@@ -19,10 +18,6 @@ from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
 
 
 class TestConstants(unittest.TestCase):
-    def test_bench_modes(self):
-        self.assertIn("event", _BENCH_MODES)
-        self.assertIn("kernel", _BENCH_MODES)
-
     def test_comm_ops(self):
         self.assertIn("all_reduce", _COMM_OPS)
         self.assertIn("all_gather", _COMM_OPS)
