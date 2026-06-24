@@ -1,6 +1,7 @@
 import logging
 import os
 
+from ..core.model_source_security import warn_remote_code_risk
 from ..model_config import RemoteSource
 from ..model_hub import snapshot_huggingface_config_only, snapshot_modelscope_config_only
 
@@ -16,6 +17,7 @@ def resolve_diffusers_model_path(model_id: str, remote_source: str = RemoteSourc
 
     source = _normalize_remote_source(remote_source)
     repo_id, subfolder = _split_remote_model_id(model_id)
+    warn_remote_code_risk(model_id, source)
     try:
         if source == RemoteSource.modelscope:
             snapshot_path = snapshot_modelscope_config_only(repo_id)

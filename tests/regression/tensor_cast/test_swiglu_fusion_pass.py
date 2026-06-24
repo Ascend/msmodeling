@@ -70,7 +70,7 @@ def test_grouped_matmul_swiglu_pass_rejects_unsafe_shapes_and_users():
 class SwiGLUFusionPassTestMixin:
     """Unified, parameterized test verifying SwiGLU fusion presence.
 
-    Simulates tensor_cast.scripts.text_generate via ModelRunner, compiles models,
+    Simulates cli.inference.text_generate via ModelRunner, compiles models,
     and asserts the fused op `tensor_cast.swiglu` appears in
     runtime table results.
     """

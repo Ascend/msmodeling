@@ -187,7 +187,7 @@ No public Python API changes. Integration surface is **project metadata**:
 
 1. **Install**: `uv sync` (add `--group lint` / `--group ci` as needed).
 2. **Add deps**: `uv add <package>` — updates `pyproject.toml` and `uv.lock`; use `uv add --editable ./path` for local packages; use `uv run --with <package> …` for one-off trials without lockfile changes.
-3. **Run**: `uv run python -m tensor_cast.scripts.text_generate ...` or rely on `scripts/*.sh` auto-detection.
+3. **Run**: `uv run python -m cli.inference.text_generate ...` or rely on `scripts/*.sh` auto-detection.
 4. **Upgrade deps**: `uv add` with new bounds or edit `pyproject.toml`, then `uv lock`, test, commit both files.
 5. **Constraints**: Prefer `uv sync` for development; pip + `requirements.txt` remains supported but without lockfile guarantees.
 

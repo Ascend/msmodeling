@@ -23,7 +23,7 @@ You will be given:
 Run TC simulation and extract ops:
 
 ```bash
-$python_path -m tensor_cast.scripts.text_generate $model \
+$python_path -m cli.inference.text_generate $model \
   --num-queries 2 --query-length 3500 \
   --device $device --world-size $ws --tp-size $tp \
   [--dp-size $dp] [--ep] [--quantize-linear-action $quant] \

@@ -1,6 +1,7 @@
 # RFC: Profiling-Driven Empirical Performance Model
 
 ## Metadata
+
 | Item | Content |
 | :--- | :--- |
 | **Status** | Completed |
@@ -362,7 +363,7 @@ Minimum validation gates:
 - Profiling smoke command shape:
 
 ```bash
-python -m tensor_cast.scripts.text_generate $MODEL \
+python -m cli.inference.text_generate $MODEL \
   --num-queries $NQ --query-length $QL [--context-length $CL] \
   --device $DEVICE --world-size $WS --tp-size $TP [--dp-size $DP] [--ep-size $EP] \
   --quantize-linear-action $QUANT --compile \

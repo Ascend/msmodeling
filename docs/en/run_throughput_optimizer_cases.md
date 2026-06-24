@@ -58,7 +58,7 @@ The input CSV must include a header row with column names matching the template.
 | `case_name` | Identifier for this case (auto-generated as `row_N` if empty) | `8card_agg_w8a8` |
 | `device` | Device profile name (same values as `--device` in Throughput Optimizer) | `ATLAS_800_A3_752T_128G_DIE` |
 | `num_devices` | Number of devices | `8` |
-| `model_id` | HuggingFace model ID or local path | `Qwen/Qwen3-32B` |
+| `model_id` | Recommended: reviewed absolute local model path. Hugging Face or ModelScope ids are accepted but may execute remote code through `trust_remote_code=True` and are not security-guaranteed. | `/data/models/Qwen3-32B` |
 | `input_length` | Input token length | `3500` |
 | `output_length` | Output token length | `1500` |
 | `ttft_limits` | TTFT SLO limit in ms (empty = no constraint) | `2000` |
@@ -86,9 +86,10 @@ The input CSV must include a header row with column names matching the template.
 | `compile_allow_graph_break` | Allow graph breaks in compile (`true`/`false`) | `false` |
 
 > [!Warning]
-> `ttft_limits` and `tpot_limits` accept **at most one value** per case. If multiple values are provided (e.g., `50;100`), the tool raises an error. Split them into separate CSV rows instead.
->
-> All limit values use **milliseconds (ms)** as the unit, consistent with Throughput Optimizer.
+> `ttft_limits` and `tpot_limits` accept **at most one value** per case. If multiple values are provided (e.g., `50;100`), the tool raises an error. Split them into separate CSV rows instead. All limit values use **milliseconds (ms)** as the unit, consistent with Throughput Optimizer.
+
+<!-- -->
+
 > [!Note]
 > If any required column (`device`, `num_devices`, `model_id`, `input_length`, `output_length`) is missing from the CSV header, the tool raises an error immediately rather than silently using wrong defaults.
 

@@ -118,7 +118,7 @@ ModelProfile(
 
 ### 3.1 仿真命令
 
-注：cli.inference.text_generate 中“设备数”参数名为 num-devices ，tensor_cast.scripts.text_generate 中“设备数”参数名为 world-size
+注：文本推理仿真统一使用 cli.inference.text_generate，设备数参数名为 num-devices
 
 **纯文本推理仿真**（W4A8 动态量化 + TP8/EP16/DP2）：
 

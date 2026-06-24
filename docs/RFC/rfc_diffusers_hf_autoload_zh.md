@@ -143,7 +143,7 @@ subfolder = transformer/720p_i2v_distilled_sparse
 建议数据流：
 
 ```text
-video_generate CLI / tensor_cast.scripts.video_generate / Web UI
+video_generate CLI / Web UI
   -> build_diffusers_transformer_model(model_id, ..., remote_source)
       -> resolve_diffusers_model_path(model_id, remote_source)
            -> local directory: return as-is

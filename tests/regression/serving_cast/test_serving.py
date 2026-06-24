@@ -19,6 +19,7 @@ class ServingTestCase(unittest.TestCase):
         self.mock_cfg.common_config.serving_config.max_concurrency = 100
         self.mock_cfg.common_config.serving_config.block_size = 128
         self.mock_cfg.common_config.serving_config.max_tokens_budget = 8192
+        self.mock_cfg.common_config.model_config.name = "dummy-serving-model"
         self.mock_cfg.common_config.model_config.enable_multi_process = False
         self.mock_cfg.enable_profiling = False
         self.mock_cfg.common_config.model_config.enable_multi_process = False

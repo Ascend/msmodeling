@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from transformers.initialization import no_init_weights
 
+from ..core.model_source_security import normalize_model_source
 from ..layers.attention import AttentionTensorCast
 from ..layers.quant_linear import TensorCastQuantLinear
 from ..model_config import (
@@ -59,12 +60,13 @@ def load_config_from_file(
     dtype: torch.dtype,
 ):
     # TODO add seperate parallel_config and quant_config(atten_cls is needed?) for vae and text
-    if not os.path.isdir(model_path):
-        raise ValueError(f"Input args.model_id should be dir, but got {model_path}")
+    source_info = normalize_model_source(model_path, RemoteSource.huggingface)
+    resolved_model_path = source_info.model_id
+    if not source_info.is_local_path or not os.path.isdir(resolved_model_path):
+        raise ValueError(f"Input args.model_id should be dir, but got {resolved_model_path}")
 
     config_path_dict: Dict[str, str] = {}
-    model_path = os.path.abspath(model_path)
-    for root, _, files in os.walk(model_path):
+    for root, _, files in os.walk(resolved_model_path):
         if "config.json" in files:
             folder_name = os.path.basename(root)
             config_path = os.path.join(root, "config.json")
@@ -102,7 +104,7 @@ def load_config_from_file(
     vae_config_json_path = config_path_dict.get("vae")
 
     model_config = DiffusersConfig()
-    model_config.model_path = model_path
+    model_config.model_path = resolved_model_path
     model_config.transformer_config = DiffusersTransformerConfig(
         parallel_config=parallel_config,
         quant_config=quant_config,

@@ -4,7 +4,9 @@ This reference summarizes high-value parameters for `python -m cli.inference.tex
 
 ## Required Or Core Parameters
 
-- `model_id`: Hugging Face model id or local model directory.
+- `model_id`: prefer a reviewed absolute local model path for safe local mode. Hugging Face or ModelScope
+  model ids are still accepted, but they may execute remote Python code through `trust_remote_code=True` and
+  are not security-guaranteed by msmodeling.
 - `--device`: target device profile; default is `TEST_DEVICE`, but real planning should specify a concrete profile.
 - `--num-devices`: total device/process count; default is `1`.
 - `--num-queries`: number of parallel inference queries in one batch; required.

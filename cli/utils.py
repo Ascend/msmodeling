@@ -141,9 +141,11 @@ def get_common_argparser(reserved_memory_gb_default: float = 0.0):
     general_group.add_argument(
         "model_id",
         type=check_string_valid,
-        help="The model identifier, which can be: "
-        "1) A Hugging Face model ID (e.g., 'meta-llama/Llama-2-7b-hf') to load from the Hub; "
-        "2) A local directory path containing a diffusers model (must include 'transformer/config.json').",
+        help=(
+            "Model source. Recommended safe mode: a reviewed absolute local model path. "
+            "Model id mode also accepts Hugging Face or ModelScope ids, but may execute remote Python code through "
+            "trust_remote_code=True and is not security-guaranteed."
+        ),
     )
 
     general_group.add_argument(

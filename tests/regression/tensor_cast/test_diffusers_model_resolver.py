@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -59,6 +60,21 @@ def test_resolve_diffusers_model_path_downloads_huggingface_repo(monkeypatch: py
 
     assert result == "/cache/hf/Wan-AI/Wan2.2-T2V-A14B-Diffusers"
     assert calls == ["Wan-AI/Wan2.2-T2V-A14B-Diffusers"]
+
+
+def test_resolve_diffusers_model_path_warns_for_remote_model_id(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    model_id = f"SecurityTest/DiffusersRemoteWarning-{uuid4()}"
+    monkeypatch.setattr(model_resolver, "snapshot_huggingface_config_only", lambda _model_id: "/cache/hf/model")
+
+    result = model_resolver.resolve_diffusers_model_path(model_id, "huggingface")
+
+    warning = capsys.readouterr().err
+    assert result == "/cache/hf/model"
+    assert model_id in warning
+    assert "trust_remote_code=True" in warning
 
 
 def test_resolve_diffusers_model_path_does_not_emit_info_log(

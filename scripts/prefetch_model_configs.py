@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
+from tensor_cast.core.model_source_security import warn_remote_code_risk
+
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
@@ -107,6 +109,7 @@ class HuggingFacePrefetcher:
         self._AutoConfig = AutoConfig
 
     def fetch(self, model_id: str) -> PrefetchResult:
+        warn_remote_code_risk(model_id, "huggingface")
         snapshot_path = snapshot_huggingface_config_only(model_id)
         try:
             self._AutoConfig.from_pretrained(snapshot_path)
@@ -124,6 +127,7 @@ class ModelScopePrefetcher:
         self._AutoConfig = modelscope.AutoConfig
 
     def fetch(self, model_id: str) -> PrefetchResult:
+        warn_remote_code_risk(model_id, "modelscope")
         snapshot_path = snapshot_modelscope_config_only(model_id)
         try:
             self._AutoConfig.from_pretrained(snapshot_path)

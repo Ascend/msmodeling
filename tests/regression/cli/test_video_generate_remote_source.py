@@ -12,10 +12,7 @@ from tensor_cast.diffusers import model_resolver
 
 @pytest.mark.parametrize(
     "module_name",
-    [
-        "cli.inference.video_generate",
-        "tensor_cast.scripts.video_generate",
-    ],
+    ["cli.inference.video_generate"],
 )
 def test_video_generate_help_includes_remote_source(
     module_name: str,
@@ -70,10 +67,10 @@ def test_cli_video_generate_main_passes_remote_source_to_run_inference(
     assert captured["remote_source"] == "modelscope"
 
 
-def test_scripts_video_generate_main_passes_remote_source_to_run_inference(
+def test_cli_video_generate_main_passes_remote_source_to_run_inference_for_modelscope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tensor_cast.scripts import video_generate
+    from cli.inference import video_generate
 
     captured: dict[str, object] = {}
 
@@ -102,10 +99,10 @@ def test_scripts_video_generate_main_passes_remote_source_to_run_inference(
     assert captured["remote_source"] == "modelscope"
 
 
-def test_scripts_video_generate_run_inference_passes_remote_source_to_builder(
+def test_cli_video_generate_run_inference_passes_remote_source_to_builder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tensor_cast.scripts import video_generate
+    from cli.inference import video_generate
 
     captured_builds: list[dict[str, object]] = []
     resolver_calls: list[tuple[str, str]] = []
@@ -217,7 +214,7 @@ def test_scripts_video_generate_run_inference_passes_remote_source_to_builder(
     assert resolver_calls == [("Wan-AI/Wan2.2-T2V-A14B-Diffusers", "modelscope")]
 
 
-def test_scripts_video_generate_remote_resolution_failure_includes_cause(
+def test_cli_video_generate_remote_resolution_failure_includes_cause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_snapshot_huggingface_config_only(repo_id: str) -> str:
@@ -233,10 +230,10 @@ def test_scripts_video_generate_remote_resolution_failure_includes_cause(
         model_resolver.resolve_diffusers_model_path("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 
 
-def test_scripts_video_generate_run_inference_cfg_batch_concat_path(
+def test_cli_video_generate_run_inference_cfg_batch_concat_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tensor_cast.scripts import video_generate
+    from cli.inference import video_generate
 
     class DummyRuntime:
         def __init__(self, *args: object, **kwargs: object) -> None:

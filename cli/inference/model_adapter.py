@@ -32,7 +32,7 @@ def _add_adapter_common_args(parser: argparse.ArgumentParser) -> None:
         "model_id_positional",
         nargs="?",
         type=check_string_valid,
-        help="Model identifier or local model path. Equivalent to --model-id.",
+        help="Model source. Prefer a reviewed absolute local model path. Equivalent to --model-id.",
     )
     general_group.add_argument(
         "--model-id",
@@ -40,7 +40,7 @@ def _add_adapter_common_args(parser: argparse.ArgumentParser) -> None:
         dest="model_id",
         type=check_string_valid,
         default=None,
-        help="Model identifier or local model path.",
+        help="Model source. Prefer a reviewed absolute local model path.",
     )
     general_group.add_argument(
         "--device",

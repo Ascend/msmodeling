@@ -91,7 +91,7 @@ must cite the file layout from the checked-out target version.
 ### 1b: Run TC Simulation
 
 ```bash
-$PYTHON -m tensor_cast.scripts.text_generate $MODEL \
+$PYTHON -m cli.inference.text_generate $MODEL \
   --num-queries 2 --query-length 3500 \
   --device $DEVICE --world-size $WS --tp-size $TP \
   [--dp-size $DP] [--ep] [--quantize-linear-action $QUANT] \
@@ -301,7 +301,7 @@ done
 ### 5b: Run TensorCast Simulation
 
 ```bash
-$PYTHON -m tensor_cast.scripts.text_generate $MODEL \
+$PYTHON -m cli.inference.text_generate $MODEL \
   --num-queries $NQ --query-length $QL [--context-length $CL] \
   --device $DEVICE --world-size $WS --tp-size $TP [--dp-size $DP] [--ep-size $EP] \
   --quantize-linear-action $QUANT \
