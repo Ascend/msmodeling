@@ -10,7 +10,6 @@ from tensor_cast.core.quantization.datatypes import (
 )
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
-import tensor_cast.utils as tensor_cast_utils
 
 from ..utils import (
     LOG_LEVELS,
@@ -399,7 +398,9 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
 
 
 def main() -> None:
-    getattr(tensor_cast_utils, "check_dependencies")()
+    # See docs/RFC/rfc_uv_dependency_management_en.md: dependency versions are
+    # governed by pyproject.toml/uv.lock, so the old runtime check_dependencies
+    # hook is intentionally not called here.
     parser, command_parsers = _build_parser()
     args = parser.parse_args()
     print_logo()

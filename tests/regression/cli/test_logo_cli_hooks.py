@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-import tensor_cast.utils as tensor_cast_utils
 from tests.helpers.cli_runner import CliResult, run_module_main
 
 _LOGO_BRAND = "MindStudio"
@@ -35,17 +34,7 @@ def _assert_logo_on_stderr(stderr: str) -> None:
     assert stderr.count("=") >= 2
 
 
-def _patch_model_adapter_check_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        tensor_cast_utils,
-        "check_dependencies",
-        lambda: None,
-        raising=False,
-    )
-
-
-def test_help_suppresses_logo_on_cli_modules(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_model_adapter_check_dependencies(monkeypatch)
+def test_help_suppresses_logo_on_cli_modules() -> None:
     for module_name in _HELP_MODULES:
         result = run_module_main(module_name, ["--help"])
         assert result.returncode == 0, module_name
@@ -101,7 +90,6 @@ def test_model_adapter_main_cli(
     tmp_path: Path,
 ) -> None:
     """Exercise model_adapter.main in-process for CI test_map coverage."""
-    _patch_model_adapter_check_dependencies(monkeypatch)
     doctor_report = tmp_path / "doctor.json"
     doctor_report.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
@@ -121,3 +109,10 @@ def test_model_adapter_main_cli(
     assert result.returncode == 0
     assert "version: 1" in result.stdout
     _assert_logo_on_stderr(result.stderr)
+
+
+def test_model_adapter_help_entrypoints_do_not_require_check_dependencies() -> None:
+    for argv in (["--help"], ["doctor", "--help"], ["verify", "--help"], ["export-evidence", "--help"]):
+        result = run_module_main("cli.inference.model_adapter", argv)
+        assert result.returncode == 0, argv
+        assert "usage:" in (result.stdout + result.stderr).lower()
