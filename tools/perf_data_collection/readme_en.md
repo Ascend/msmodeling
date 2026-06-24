@@ -94,7 +94,7 @@ This creates or updates per-operator CSV files such as `MatMulV2.csv` and `Fused
 ```bash
 python tools/perf_data_collection/generate_shape_grid.py \
   --database-path tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5_shape_generated \
-  --target-models dsv3,qwen3-32b \
+  --target-models deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B \
   --rows 2000 \
   --seed 20260409
 ```
@@ -154,7 +154,7 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 | Argument | Required | Default | Description |
 | --- | --- | --- | --- |
 | `--database-path` | No | auto-derived | Explicit CSV root directory. |
-| `--target-models` | No | full grid | Comma-separated model names to prune GEMM `(N, K)` candidates. |
+| `--target-models` | No | full grid | Comma-separated model IDs (for example, `deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B`), matching `text_generate`, used to prune GEMM `(N, K)` candidates. |
 | `--device` | No | `ATLAS_800_A3_752T_128G_DIE` | Device directory name when deriving the path. |
 | `--vllm-version` | No | — | vLLM version when deriving the path. |
 | `--torch-version` | No | — | PyTorch version when deriving the path. |
@@ -323,7 +323,7 @@ Variables commonly used under `tools/perf_data_collection/`. Replay repeat count
 | `ASCEND_HOME_PATH` / `ASCEND_TOOLKIT_HOME` / `ASCEND_TOOLKIT_HOME_PATH` / `ASCEND_INSTALL_PATH` | auto-detected | CANN install root and version detection. |
 | `MASTER_ADDR` / `MASTER_PORT` / `RANK` / `WORLD_SIZE` / `LOCAL_RANK` | injected by `torchrun` | Distributed launch for comm bench / DFC replay. |
 
-Full cross-module list: [Environment Variables](../../tests/README.md#environment-variables).
+Full cross-module list: [Environment Variables](../../scripts/README.md#environment-variables).
 
 Custom OPP example:
 

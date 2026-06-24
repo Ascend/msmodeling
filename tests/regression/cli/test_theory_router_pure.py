@@ -247,11 +247,11 @@ class TestResolveComplexGenerator(unittest.TestCase):
             called_with.append(model_names)
             return iter([])
 
-        result = resolve_complex_generator("test_func", ["dsv3"], {"test_func": fake_gen}, {})
+        result = resolve_complex_generator("test_func", ["deepseek-ai/DeepSeek-V3"], {"test_func": fake_gen}, {})
         self.assertIsNotNone(result)
         rows = list(result)
         self.assertEqual(len(rows), 0)
-        self.assertEqual(called_with, [["dsv3"]])
+        self.assertEqual(called_with, [["deepseek-ai/DeepSeek-V3"]])
 
 
 class TestDefaultComplexGenerators(unittest.TestCase):

@@ -110,7 +110,7 @@ op = OpReplay(
     usage_examples=[
         "py -3 tools/perf_data_collection/op_replay/BatchMatMulV2_run.py "
         "--database-path tensor_cast/performance_model/profiling_database/data/"
-        "ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5_shape_generated",
+        "ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5",
     ],
     version_help="vLLM-Ascend version, e.g. 0.18.0.",
     build_case=build_case,

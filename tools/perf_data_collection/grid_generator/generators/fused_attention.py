@@ -4,8 +4,12 @@ import math
 from typing import Generator
 
 try:
+    from ..model_configs import ModelConfig
+    from ..model_configs import _normalize_name as _normalize_model_name
     from ..model_configs import resolve_configs
 except ImportError:
+    from model_configs import ModelConfig
+    from model_configs import _normalize_name as _normalize_model_name
     from model_configs import resolve_configs
 
 from .base import TheoryShapeRow
@@ -195,13 +199,12 @@ def _iter_pairs(left: list[int], right: list[int]):
             yield first, second
 
 
-def _normalize_model_name(model_name: str) -> str:
-    return model_name.lower().replace("-", "").replace("_", "")
+def _model_scene_key(cfg: ModelConfig) -> str:
+    return cfg.model_key or _normalize_model_name(cfg.name)
 
 
-def _dense_scene_grids(model_name: str) -> tuple[list[int], list[int], list[int], list[int]]:
-    normalized = _normalize_model_name(model_name)
-    if normalized == "qwen332b":
+def _dense_scene_grids(model_key: str) -> tuple[list[int], list[int], list[int], list[int]]:
+    if model_key == "qwen332b":
         return (
             _QWEN3_DENSE_PREFILL_BATCHES,
             _QWEN3_DENSE_PREFILL_SEQS,
@@ -216,9 +219,8 @@ def _dense_scene_grids(model_name: str) -> tuple[list[int], list[int], list[int]
     )
 
 
-def _mla_scene_grids(model_name: str) -> tuple[list[int], list[int], list[int], list[int]]:
-    normalized = _normalize_model_name(model_name)
-    if normalized == "deepseekv3":
+def _mla_scene_grids(model_key: str) -> tuple[list[int], list[int], list[int], list[int]]:
+    if model_key == "deepseekv3":
         return (
             _DSV3_MLA_PREFILL_BATCHES,
             _DSV3_MLA_PREFILL_SEQS,
@@ -474,12 +476,13 @@ def generate_fused_attention_rows(
     for cfg in resolve_configs(model_names):
         num_heads = cfg.num_attention_heads
         num_kv_heads = cfg.num_kv_heads
+        model_key = _model_scene_key(cfg)
 
         if cfg.is_mla():
-            prefill_batches, prefill_seqs, decode_batches, decode_avg_seqs = _mla_scene_grids(cfg.name)
+            prefill_batches, prefill_seqs, decode_batches, decode_avg_seqs = _mla_scene_grids(model_key)
             for batch, seq in _iter_pairs(prefill_batches, prefill_seqs):
                 row = _build_mla_prefill_row(
-                    scene_name=f"{_normalize_model_name(cfg.name)}_mla_prefill",
+                    scene_name=f"{model_key}_mla_prefill",
                     batch=batch,
                     seq=seq,
                     num_heads=num_heads,
@@ -491,7 +494,7 @@ def generate_fused_attention_rows(
                     yield row
             for batch, avg_seq_len in _iter_pairs(decode_batches, decode_avg_seqs):
                 row = _build_mla_decode_row(
-                    scene_name=f"{_normalize_model_name(cfg.name)}_mla_decode",
+                    scene_name=f"{model_key}_mla_decode",
                     batch=batch,
                     avg_seq_len=avg_seq_len,
                     num_heads=num_heads,
@@ -502,10 +505,10 @@ def generate_fused_attention_rows(
                     yield row
             continue
 
-        prefill_batches, prefill_seqs, decode_batches, decode_avg_seqs = _dense_scene_grids(cfg.name)
+        prefill_batches, prefill_seqs, decode_batches, decode_avg_seqs = _dense_scene_grids(model_key)
         for batch, seq in _iter_pairs(prefill_batches, prefill_seqs):
             row = _build_dense_prefill_row(
-                scene_name=f"{_normalize_model_name(cfg.name)}_dense_prefill",
+                scene_name=f"{model_key}_dense_prefill",
                 batch=batch,
                 seq=seq,
                 num_heads=num_heads,
@@ -516,7 +519,7 @@ def generate_fused_attention_rows(
                 yield row
         for batch, avg_seq_len in _iter_pairs(decode_batches, decode_avg_seqs):
             row = _build_dense_decode_row(
-                scene_name=f"{_normalize_model_name(cfg.name)}_dense_decode",
+                scene_name=f"{model_key}_dense_decode",
                 batch=batch,
                 avg_seq_len=avg_seq_len,
                 num_heads=num_heads,

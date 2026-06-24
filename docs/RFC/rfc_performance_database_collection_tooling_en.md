@@ -94,7 +94,6 @@ Recommended directory examples include:
 - `vllm0.13.0_torch2.8.0_cann8.3`
 - `vllm0.15.0_torch2.9.0_cann8.5`
 - `vllm0.18.0_torch2.9.0_cann8.5`
-- `vllm0.18.0_torch2.9.0_cann8.5_shape_generated`, a generated/staging example that should not be mistaken for a complete measured directory.
 
 Each compute directory owns one `op_mapping.yaml` for that stack. Communication CSVs are not copied into every compute directory; `op_mapping.yaml` points to the communication directory through `communication_data_ref`, for example:
 

@@ -254,8 +254,8 @@ def collect_theory_generated_rows(
     template_row = source_rows[0]
     if max_rows is not None:
         all_rows = list(generated)
-        if len(all_rows) > max_rows and rng is not None:
-            all_rows = rng.sample(all_rows, max_rows)
+        if len(all_rows) > max_rows:
+            all_rows = rng.sample(all_rows, max_rows) if rng is not None else all_rows[:max_rows]
         grid_iter = iter(all_rows)
     else:
         grid_iter = generated

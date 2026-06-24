@@ -67,6 +67,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_LATENCY_COLS = (
+    "Average Duration(us)",
+    "Profiling Average Duration(us)",
+    "Duration(us)",
+)
+
 # torch dtype -> Profiling dtype string
 DTYPE_MAP = {
     torch.bfloat16: "DT_BF16",
@@ -873,13 +879,44 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         Duration (enriched CSV).  Falls back to the latter when the former
         is absent.
         """
-        for col in (
-            "Average Duration(us)",
-            "Profiling Average Duration(us)",
-        ):
+        for col in _LATENCY_COLS:
             if col in df.columns:
                 return col
-        return "Duration(us)"
+        return _LATENCY_COLS[-1]
+
+    @staticmethod
+    def _candidate_latency_cols(preferred_col: str) -> tuple[str, ...]:
+        candidate_cols = [preferred_col]
+        for col in _LATENCY_COLS:
+            if col not in candidate_cols:
+                candidate_cols.append(col)
+        return tuple(candidate_cols)
+
+    @staticmethod
+    def _row_latency_pair(row: pd.Series, preferred_col: str) -> Optional[tuple[str, float]]:
+        """Return the latency column and finite positive value for this row."""
+        for col in ProfilingDataSource._candidate_latency_cols(preferred_col):
+            if col not in row.index:
+                continue
+            try:
+                latency = float(row[col])
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(latency) and latency > 0:
+                return col, latency
+        return None
+
+    @staticmethod
+    def _row_latency_value(row: pd.Series, preferred_col: str) -> Optional[float]:
+        """Return a finite positive latency value for this row."""
+        pair = ProfilingDataSource._row_latency_pair(row, preferred_col)
+        return None if pair is None else pair[1]
+
+    @staticmethod
+    def _row_latency_col(row: pd.Series, preferred_col: str) -> Optional[str]:
+        """Return a latency column with a finite positive value for this row."""
+        pair = ProfilingDataSource._row_latency_pair(row, preferred_col)
+        return None if pair is None else pair[0]
 
     # ---- Unified CSV iteration (PR#123 §3.1: checker pattern) ----
 
@@ -917,7 +954,11 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             lat_col = self._latency_col(df)
 
             for _, row in df.iterrows():
-                candidate = checker_fn(row, kernel_type, lat_col)
+                row_lat_col = self._row_latency_col(row, lat_col)
+                if row_lat_col is None:
+                    logger.debug("Skipping %s row with no finite positive latency", kernel_type)
+                    continue
+                candidate = checker_fn(row, kernel_type, row_lat_col)
                 if candidate is None:
                     continue
                 if select == "first":
@@ -974,13 +1015,22 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
         matched = df[mask]
         if not matched.empty:
-            return (float(matched.iloc[0][lat_col]), False)
+            for _, row in matched.iterrows():
+                latency = self._row_latency_value(row, lat_col)
+                if latency is not None:
+                    return (latency, False)
 
         # --- Interpolation fallback: bracket message_bytes ---
         device_mask = df["num_devices"] == num_devices
         if topology_tier is not None and "topology_tier" in df.columns:
             device_mask = device_mask & (df["topology_tier"] == topology_tier)
         candidates = df[device_mask]
+        if not candidates.empty:
+            candidates = candidates.copy()
+            candidates["_effective_latency_us"] = [
+                self._row_latency_value(row, lat_col) for _, row in candidates.iterrows()
+            ]
+            candidates = candidates.dropna(subset=["_effective_latency_us"])
 
         if candidates.empty:
             logger.debug(
@@ -1008,11 +1058,11 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             return None
 
         mb_lo, mb_hi = int(below.max()), int(above.min())
-        lat_lo = float(candidates.loc[candidates["message_bytes"] == mb_lo, lat_col].iloc[0])
+        lat_lo = float(candidates.loc[candidates["message_bytes"] == mb_lo, "_effective_latency_us"].iloc[0])
         if mb_lo == mb_hi:
             return (lat_lo, False)  # degenerate bracket = exact
 
-        lat_hi = float(candidates.loc[candidates["message_bytes"] == mb_hi, lat_col].iloc[0])
+        lat_hi = float(candidates.loc[candidates["message_bytes"] == mb_hi, "_effective_latency_us"].iloc[0])
 
         # Alpha-beta interpolation: comm latency = alpha + message_bytes / bandwidth
         # Fit from ALL candidate data points (least-squares) rather than just the
@@ -1020,7 +1070,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         # (num_devices, topology_tier) group, which handles the latency-dominated →
         # bandwidth-dominated transition more accurately than piecewise linear.
         all_mb = candidates["message_bytes"].values.astype(np.float64)
-        all_lat = candidates[lat_col].values.astype(np.float64)
+        all_lat = candidates["_effective_latency_us"].values.astype(np.float64)
 
         if len(all_mb) >= 2:
             A = np.column_stack([np.ones_like(all_mb), all_mb])

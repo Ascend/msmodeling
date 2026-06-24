@@ -101,7 +101,7 @@ class TestRunTheoryMode:
                 ),
             ):
                 args = argparse.Namespace(
-                    target_models="dsv3,qwen332b",
+                    target_models="deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B",
                     rows=0,
                     seed=0,
                     max_hbm_gb=32.0,

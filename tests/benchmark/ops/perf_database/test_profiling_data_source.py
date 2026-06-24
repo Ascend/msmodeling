@@ -143,6 +143,83 @@ def test_exact_match_with_fractal_nz(sample_data_dir):
     assert result.shape_match_info.shape_match_rule == "identity"
 
 
+def test_compute_prefers_valid_row_latency_when_average_duration_blank(tmp_path):
+    data_dir = tmp_path / "dual_latency_cols"
+    data_dir.mkdir()
+    (data_dir / "op_mapping.yaml").write_text(SPIKE_OP_MAPPING_YAML)
+    (data_dir / "MatMulV2.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us),Profiling Average Duration(us)\n"
+        '"136,5120;320,48,16,16","DT_BF16;DT_BF16","ND;FRACTAL_NZ",'
+        '"136,768","DT_BF16","ND",,45.3\n'
+    )
+    ds = ProfilingDataSource(data_dir)
+    op = _make_op_info(
+        torch.ops.aten.mm.default,
+        [
+            torch.empty(136, 5120, device="meta", dtype=torch.bfloat16),
+            torch.empty(5120, 768, device="meta", dtype=torch.bfloat16),
+        ],
+    )
+
+    result = ds.lookup(op)
+
+    assert result is not None
+    assert result.latency_us == pytest.approx(45.3)
+
+
+def test_compute_misses_when_matching_row_has_no_valid_latency(tmp_path):
+    data_dir = tmp_path / "blank_latency"
+    data_dir.mkdir()
+    (data_dir / "op_mapping.yaml").write_text(SPIKE_OP_MAPPING_YAML)
+    (data_dir / "MatMulV2.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us),Profiling Average Duration(us)\n"
+        '"136,5120;320,48,16,16","DT_BF16;DT_BF16","ND;FRACTAL_NZ",'
+        '"136,768","DT_BF16","ND",,\n'
+    )
+    ds = ProfilingDataSource(data_dir)
+    op = _make_op_info(
+        torch.ops.aten.mm.default,
+        [
+            torch.empty(136, 5120, device="meta", dtype=torch.bfloat16),
+            torch.empty(5120, 768, device="meta", dtype=torch.bfloat16),
+        ],
+    )
+
+    result = ds.lookup(op)
+
+    assert result is None
+    assert ds.last_miss_reason == "shape_mismatch"
+
+
+def test_compute_skips_blank_latency_row_and_uses_later_valid_row(tmp_path):
+    data_dir = tmp_path / "blank_then_valid_latency"
+    data_dir.mkdir()
+    (data_dir / "op_mapping.yaml").write_text(SPIKE_OP_MAPPING_YAML)
+    (data_dir / "MatMulV2.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us),Profiling Average Duration(us)\n"
+        '"136,5120;320,48,16,16","DT_BF16;DT_BF16","ND;FRACTAL_NZ",'
+        '"136,768","DT_BF16","ND",,\n'
+        '"136,5120;320,48,16,16","DT_BF16;DT_BF16","ND;FRACTAL_NZ",'
+        '"136,768","DT_BF16","ND",46.2,\n'
+    )
+    ds = ProfilingDataSource(data_dir)
+    op = _make_op_info(
+        torch.ops.aten.mm.default,
+        [
+            torch.empty(136, 5120, device="meta", dtype=torch.bfloat16),
+            torch.empty(5120, 768, device="meta", dtype=torch.bfloat16),
+        ],
+    )
+
+    result = ds.lookup(op)
+
+    assert result is not None
+    assert result.latency_us == pytest.approx(46.2)
+
+
 def test_miss_wrong_shape(sample_data_dir):
     ds = ProfilingDataSource(sample_data_dir)
     op = _make_op_info(

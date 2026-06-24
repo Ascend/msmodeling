@@ -129,7 +129,7 @@ class TestGetMatmulNkPairs(unittest.TestCase):
         self.assertTrue(len(pairs) > 0)
 
     def test_qwen3_32b(self):
-        pairs = get_matmul_nk_pairs(["Qwen3-32B"])
+        pairs = get_matmul_nk_pairs(["Qwen/Qwen3-32B"])
         self.assertTrue(len(pairs) > 0)
         for n, k in pairs:
             self.assertIsInstance(n, int)
@@ -138,20 +138,20 @@ class TestGetMatmulNkPairs(unittest.TestCase):
 
 class TestGetExpertNkPairs(unittest.TestCase):
     def test_dense_model_returns_empty(self):
-        pairs = get_expert_nk_pairs(["Qwen3-32B"])
+        pairs = get_expert_nk_pairs(["Qwen/Qwen3-32B"])
         self.assertEqual(pairs, set())
 
     def test_moe_model_returns_pairs(self):
-        pairs = get_expert_nk_pairs(["DSv3"])
+        pairs = get_expert_nk_pairs(["deepseek-ai/DeepSeek-V3"])
         self.assertTrue(len(pairs) > 0)
 
 
 class TestGetMoeConfigs(unittest.TestCase):
     def test_dense_model_filtered_out(self):
-        configs = get_moe_configs(["Qwen3-32B"])
+        configs = get_moe_configs(["Qwen/Qwen3-32B"])
         self.assertEqual(len(configs), 0)
 
     def test_moe_model_returned(self):
-        configs = get_moe_configs(["DSv3"])
+        configs = get_moe_configs(["deepseek-ai/DeepSeek-V3"])
         self.assertEqual(len(configs), 1)
         self.assertGreater(configs[0].num_experts, 0)

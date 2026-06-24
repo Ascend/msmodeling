@@ -147,6 +147,96 @@ def test_main_returns_one_on_load_baseline_error(
     assert main() == 1
 
 
+def test_main_falls_back_to_full_suite_when_test_map_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    gate_cfg: Config,
+    baseline: Baseline,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pytest_calls: list[tuple[list[str], str]] = []
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.Config.from_env", lambda: gate_cfg)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.setup_logger",
+        lambda: logging.getLogger("ci_gate"),
+    )
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.log_env_audit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda *_args: "abc" * 10)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.validate_gate_policy_if_changed",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.assess_test_map_freshness",
+        lambda *_args: TestMapFreshness(
+            warn_message="test_map: built_from_commit 3b6dbc8b7fb2 is behind merge-base 5cf36c7ad92d"
+        ),
+    )
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.classify_changes", lambda *_args: ChangeSet.build())
+
+    def _fake_run_pytest(
+        targets: list[str],
+        *,
+        marker: str | None,
+        use_cov: bool = False,
+        cov_append: bool = False,
+    ) -> int:
+        pytest_calls.append((targets, marker))
+        return 0
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main._run_pytest", _fake_run_pytest)
+
+    with caplog.at_level(logging.WARNING, logger="ci_gate"):
+        assert main() == 0
+
+    assert "falling back to the full test suite" in caplog.text
+    assert pytest_calls == [(["tests"], "not npu and not nightly and not network")]
+
+
+def test_main_returns_one_on_non_stale_test_map_error(
+    monkeypatch: pytest.MonkeyPatch,
+    gate_cfg: Config,
+    baseline: Baseline,
+) -> None:
+    pytest_calls: list[list[str]] = []
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.Config.from_env", lambda: gate_cfg)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.setup_logger",
+        lambda: logging.getLogger("ci_gate"),
+    )
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.log_env_audit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda *_args: "abc" * 10)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.validate_gate_policy_if_changed",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, None))
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.assess_test_map_freshness",
+        lambda *_args: TestMapFreshness(
+            block_message="test_map: built_from_commit is required; rebuild test_map via nightly or build_test_map"
+        ),
+    )
+
+    def _fake_run_pytest(
+        targets: list[str],
+        *,
+        marker: str | None,
+        use_cov: bool = False,
+        cov_append: bool = False,
+    ) -> int:
+        pytest_calls.append(targets)
+        return 0
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.main._run_pytest", _fake_run_pytest)
+
+    assert main() == 1
+    assert pytest_calls == []
+
+
 def test_main_passes_baseline_unchanged_to_plan(
     monkeypatch: pytest.MonkeyPatch,
     gate_cfg: Config,
