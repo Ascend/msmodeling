@@ -8,7 +8,7 @@ import pytest
 
 from scripts.helpers.common.pytest_runner import (
     PYTEST_IGNORE_ADDOPTS,
-    _collect_test_node_ids_lenient,
+    _parse_not_found_node_ids,
     _run_collect_only,
     build_pytest_cmd,
     collect_all_test_node_ids,
@@ -99,14 +99,92 @@ def test_run_collect_only_returns_completed_process(
     assert "tests/smoke/test_a.py::test_foo" in proc.stdout
 
 
-def test_collect_test_node_ids_lenient_treats_exit_four_as_empty(
+def test_parse_not_found_node_ids_multiline_stderr() -> None:
+    stderr = "ERROR: not found: tests/a.py::test_one\nsome other line\nERROR: not found: tests/b.py::test_two\n"
+    assert _parse_not_found_node_ids(stderr) == frozenset({"tests/a.py::test_one", "tests/b.py::test_two"})
+
+
+def test_parse_not_found_node_ids_normalizes_absolute_paths() -> None:
+    stderr = "ERROR: not found: /build/msmodeling/tests/a.py::test_one\nERROR: not found: tests/b.py::test_two \n"
+    assert _parse_not_found_node_ids(stderr) == frozenset({"tests/a.py::test_one", "tests/b.py::test_two"})
+
+
+def test_filter_collectable_node_ids_exit_four_partial_stale_returns_valid_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "scripts.helpers.common.pytest_runner.subprocess.run",
-        lambda *a, **kw: FakeCompleted(4, "", "ERROR: not found"),
-    )
-    assert _collect_test_node_ids_lenient(["tests/missing.py::test_x"], marker="not npu") == ()
+    stale = "tests/regression/cli/test_b.py::test_stale"
+    valid = "tests/regression/cli/test_a.py::test_a"
+
+    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+        del cmd
+        return FakeCompleted(
+            4,
+            "",
+            f"ERROR: not found: /abs/repo/{stale}\n(no match in any of [<Module test_b.py>])",
+        )
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
+    result = filter_collectable_node_ids((valid, stale), marker="not npu")
+    assert result == (valid,)
+
+
+def test_filter_collectable_node_ids_all_stale_skips_per_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collect_calls: list[tuple[str, ...]] = []
+    stale = "tests/regression/cli/test_old.py::test_renamed"
+
+    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+        collect_calls.append(tuple(arg for arg in cmd if "::" in arg))
+        return FakeCompleted(
+            4,
+            "",
+            f"ERROR: not found: {stale}\n(no match in any of [<Module test_old.py>])",
+        )
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
+    assert filter_collectable_node_ids((stale,), marker="not npu") == ()
+    assert collect_calls == [(stale,)]
+
+
+def test_filter_collectable_node_ids_exit_zero_summary_stdout_returns_all_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    valid_a = "tests/regression/cli/test_a.py::test_a"
+    valid_b = "tests/regression/cli/test_b.py::test_b"
+
+    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+        del cmd
+        return FakeCompleted(0, "========================= 2 tests collected in 0.01s =========================\n", "")
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
+    result = filter_collectable_node_ids((valid_a, valid_b), marker="not npu")
+    assert result == (valid_a, valid_b)
+
+
+def test_filter_collectable_node_ids_exit_four_unparseable_stderr_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.helpers._config import ConfigError
+
+    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+        del cmd
+        return FakeCompleted(4, "", "internal pytest error without not-found lines")
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
+    with pytest.raises(ConfigError, match="unparseable stderr"):
+        filter_collectable_node_ids(("tests/regression/cli/test_a.py::test_a",), marker="not npu")
+
+
+def test_filter_collectable_node_ids_exit_five_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
+        del cmd
+        return FakeCompleted(5, "", "")
+
+    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
+    assert filter_collectable_node_ids(("tests/regression/cli/test_a.py::test_a",), marker="not npu") == ()
 
 
 def test_collect_test_node_ids_parses_node_ids(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,69 +230,6 @@ def test_collect_test_node_ids_nonzero_exit_raises_config_error(
     )
     with pytest.raises(ConfigError, match="collect-only failed"):
         collect_test_node_ids(["tests/smoke"], marker="not npu")
-
-
-def test_filter_collectable_node_ids_exit_four_batch_falls_back_per_node(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    lenient_calls: list[tuple[str, ...]] = []
-    stale = "tests/regression/cli/test_b.py::test_stale"
-    valid = "tests/regression/cli/test_a.py::test_a"
-
-    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
-        return FakeCompleted(
-            4,
-            "",
-            f"ERROR: not found: {stale}\n(no match in any of [<Module test_b.py>])",
-        )
-
-    def _fake_lenient(targets: tuple[str, ...], *, marker: str) -> tuple[str, ...]:
-        del marker
-        lenient_calls.append(targets)
-        if targets[0].endswith("::test_stale"):
-            return ()
-        return (targets[0],)
-
-    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
-    monkeypatch.setattr(
-        "scripts.helpers.common.pytest_runner._collect_test_node_ids_lenient",
-        _fake_lenient,
-    )
-    result = filter_collectable_node_ids((valid, stale), marker="not npu")
-    assert result == (valid,)
-    assert (valid,) in lenient_calls
-    assert (stale,) in lenient_calls
-
-
-def test_filter_collectable_node_ids_all_stale_skips_per_node(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    collect_calls: list[tuple[str, ...]] = []
-    stale = "tests/regression/cli/test_old.py::test_renamed"
-
-    def _fake_run(cmd: list[str], **_kw: object) -> FakeCompleted:
-        collect_calls.append(tuple(arg for arg in cmd if "::" in arg))
-        return FakeCompleted(
-            4,
-            "",
-            f"ERROR: not found: {stale}\n(no match in any of [<Module test_old.py>])",
-        )
-
-    per_node_calls: list[tuple[str, ...]] = []
-
-    def _unexpected_lenient(targets: tuple[str, ...], *, marker: str) -> tuple[str, ...]:
-        del marker
-        per_node_calls.append(targets)
-        return ()
-
-    monkeypatch.setattr("scripts.helpers.common.pytest_runner._run_collect_only", _fake_run)
-    monkeypatch.setattr(
-        "scripts.helpers.common.pytest_runner._collect_test_node_ids_lenient",
-        _unexpected_lenient,
-    )
-    assert filter_collectable_node_ids((stale,), marker="not npu") == ()
-    assert collect_calls == [(stale,)]
-    assert per_node_calls == []
 
 
 def test_collect_test_node_ids_includes_ignore_addopts(

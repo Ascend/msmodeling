@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import subprocess
 import sys
 from typing import TYPE_CHECKING, Final
@@ -12,6 +14,10 @@ if TYPE_CHECKING:
 
 from scripts.helpers._config import ConfigError
 from scripts.helpers._paths import REPO_ROOT
+
+logger = logging.getLogger(__name__)
+
+_NOT_FOUND_RE = re.compile(r"^ERROR: not found: ([^\n\r]+)", re.MULTILINE)
 
 PYTEST_IGNORE_ADDOPTS: Final[list[str]] = ["-o", "addopts="]
 
@@ -30,6 +36,19 @@ def _parse_collect_only_node_ids(stdout: str) -> tuple[str, ...]:
         if "::" in stripped and stripped.startswith("tests/"):
             node_ids.append(stripped)
     return tuple(node_ids)
+
+
+def _normalize_node_id(node_id: str) -> str:
+    """Map pytest node ids to repo-relative ``tests/...`` form for comparison."""
+    normalized = node_id.strip()
+    tests_idx = normalized.find("tests/")
+    if tests_idx >= 0:
+        return normalized[tests_idx:]
+    return normalized
+
+
+def _parse_not_found_node_ids(stderr: str) -> frozenset[str]:
+    return frozenset(_normalize_node_id(node_id) for node_id in _NOT_FOUND_RE.findall(stderr))
 
 
 def collect_test_node_ids(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
@@ -94,29 +113,6 @@ def _run_collect_only(targets: Sequence[str], *, marker: str | None) -> subproce
     )
 
 
-def _collect_test_node_ids_lenient(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
-    """Like collect_test_node_ids but returns () on exit 4 (missing node ids)."""
-    if not targets:
-        return ()
-
-    proc = _run_collect_only(targets, marker=marker)
-    if proc.returncode in (0, 4, 5):
-        return _parse_collect_only_node_ids(proc.stdout)
-
-    detail = (proc.stderr or proc.stdout or "").strip()
-    raise ConfigError(f"pytest collect-only failed (exit {proc.returncode})" + (f": {detail}" if detail else ""))
-
-
-def _stderr_reports_all_targets_missing(proc: subprocess.CompletedProcess[str], targets: Sequence[str]) -> bool:
-    """True when pytest exit 4 only because every target node id was not found."""
-    if proc.returncode != 4:
-        return False
-    combined = f"{proc.stderr or ''}\n{proc.stdout or ''}"
-    if "not found:" not in combined:
-        return False
-    return all(target in combined for target in targets)
-
-
 def filter_collectable_node_ids(targets: Sequence[str], *, marker: str | None) -> tuple[str, ...]:
     """Return collectable node ids; drop stale ids instead of failing the batch."""
     if not targets:
@@ -136,10 +132,23 @@ def filter_collectable_node_ids(targets: Sequence[str], *, marker: str | None) -
         target_set = frozenset(targets)
         return tuple(node_id for node_id in batch_ids if node_id in target_set)
 
-    if _stderr_reports_all_targets_missing(proc, targets):
+    not_found = _parse_not_found_node_ids(proc.stderr or "")
+    if not_found:
+        remaining = tuple(target for target in targets if _normalize_node_id(target) not in not_found)
+        dropped = len(targets) - len(remaining)
+        if dropped:
+            sample = ", ".join(sorted(not_found)[:3])
+            logger.info("Dropped %d stale pytest node id(s); sample: %s", dropped, sample)
+            return remaining
+
+    if proc.returncode == 0:
+        return tuple(targets)
+
+    if proc.returncode == 5:
         return ()
 
-    return tuple(target for target in targets if target in _collect_test_node_ids_lenient((target,), marker=marker))
+    detail = (proc.stderr or proc.stdout or "").strip()
+    raise ConfigError("pytest collect-only exit 4 with unparseable stderr" + (f": {detail[:500]}" if detail else ""))
 
 
 def count_collected_tests(targets: Sequence[str], *, marker: str) -> int:

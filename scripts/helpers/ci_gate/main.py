@@ -327,6 +327,11 @@ def _run_pytest(
 
     logger = logging.getLogger("ci_gate")
     if all("::" in target for target in targets):
+        logger.info(
+            "Filtering %d pytest node id(s) for collectability (marker=%r)",
+            len(targets),
+            marker,
+        )
         collectable_set = frozenset(filter_collectable_node_ids(targets, marker=marker))
         collectable = [target for target in targets if target in collectable_set]
         skipped = [target for target in targets if target not in collectable_set]
