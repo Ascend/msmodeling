@@ -1560,8 +1560,8 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.7.2" },
     { name = "scipy", specifier = ">=1.15.3" },
     { name = "strenum", specifier = ">=0.4.15" },
-    { name = "torch", specifier = ">=2.7,<=2.10", index = "https://download.pytorch.org/whl/cpu" },
-    { name = "torchvision", specifier = ">=0.25.0", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", specifier = ">=2.8,<=2.10", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torchvision", specifier = ">=0.23.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "transformers", specifier = ">=5.3.0,<5.8.0" },
 ]
 
