@@ -40,14 +40,30 @@ msmodeling（MindStudio Modeling）是一个全系统性能仿真与分析框架
 | Skill | 触发词 | 用途 |
 |-------|--------|------|
 | `device_config` | `/device_config` 或"我要导入新的设备拓扑" | 通过自然语言将硬件规格转换为 TensorCast `DeviceProfile` |
-| `op_mapping` | `/op_mapping` 或"生成 op_mapping.yaml" | 将 TensorCast 仿真算子映射到 NPU profiling 内核类型 |
+| `op-mapping` | `/op_mapping` 或"生成 op_mapping.yaml" | 将 TensorCast 仿真算子映射到 NPU profiling 内核类型 |
 | `microbench` | `/microbench` 或"生成 xxx_run.py" | 从 profiling CSV 生成可在 NPU 上重放的 run script |
+| `msmodeling-env-installer` | "安装 msmodeling 环境"、"创建 myenv" | 安装并验证当前仓库开发环境、依赖和必要环境变量 |
+| `model-adaptation` | "接入新模型"、"生成 ModelProfile"、"处理 doctor report" | 从仿真命令和 raw profiling 出发，完成 TensorCast 新模型适配流程 |
+| `text-generate-executor` | "跑 text_generate"、"验证 best row"、"导出 trace" | 生成并执行 `python -m cli.inference.text_generate` 单点验证命令 |
+| `throughput-optimizer-executor` | "搜索最佳 TP/EP"、"硬件对比"、"PD 配比优化" | 生成并执行 `python -m cli.inference.throughput_optimizer` 吞吐规划命令 |
+| `throughput-optimizer-explainer` | "结果是否合理"、"为什么硬件不同"、"Cube/Vec/Comm/Mem 瓶颈" | 解释 optimizer 结果，并将 best row 映射到 `text_generate` 验证命令 |
+| `optix-deploy` | "部署 optix"、"安装服务化自动寻优工具" | 安装并验证 msmodeling optix 服务化自动寻优工具 |
+| `optix-config` | "配置 config.toml"、"设置 MindIE/vLLM 寻优字段" | 自动修改 optix `config.toml` 的寻优参数、target 和 benchmark 配置 |
+| `optix-param-recommend` | "推荐 optix 参数"、"生成寻优范围" | 根据硬件、模型、负载和目标推荐 MindIE/vLLM 寻优参数与配置片段 |
 
 ### 何时使用哪个 Skill
 
 - 用户想添加新硬件 → `device_config`
-- 用户想做 TC op → NPU kernel 的映射 → `op_mapping`
+- 用户想做 TC op → NPU kernel 的映射 → `op-mapping`
 - 用户已有 profiling CSV，想生成可重放的 microbench → `microbench`
+- 用户想安装或验证当前仓库开发环境 → `msmodeling-env-installer`
+- 用户想接入新的 HuggingFace-style 模型 → `model-adaptation`
+- 用户想跑固定 `text_generate` 场景或复验 optimizer best row → `text-generate-executor`
+- 用户想搜索部署策略、对比硬件或规划 PD 聚合/分离/配比 → `throughput-optimizer-executor`
+- 用户想解释 optimizer 结果合理性、硬件差异、Cube/Vec/Comm/Mem 或 op-bound 归因 → `throughput-optimizer-explainer`
+- 用户想部署 optix 服务化自动寻优工具 → `optix-deploy`
+- 用户想修改 optix `config.toml` → `optix-config`
+- 用户首次使用 optix 且需要推荐寻优参数和搜索范围 → `optix-param-recommend`
 
 ---
 
@@ -83,8 +99,9 @@ msmodeling（MindStudio Modeling）是一个全系统性能仿真与分析框架
 ---
 name: <skill-name-in-kebab-case>
 description: <一句话描述触发场景>
-version: <semver>
-source: local-session-analysis
+metadata:
+  version: <semver>
+  source: local-session-analysis
 ---
 
 # <Skill 中文名>
@@ -171,8 +188,16 @@ msmodeling/
 ├── .agents/skills/          # Claude Code skills（随代码版本管理）
 │   ├── README.md             # Skills 概览索引
 │   ├── device_config/
-│   ├── op_mapping/
-│   └── microbench/
+│   ├── op-mapping/
+│   ├── microbench/
+│   ├── msmodeling-env-installer/
+│   ├── model-adaptation/
+│   ├── text-generate-executor/
+│   ├── throughput-optimizer-executor/
+│   ├── throughput-optimizer-explainer/
+│   ├── optix-deploy/
+│   ├── optix-config/
+│   └── optix-param-recommend/
 ├── tensor_cast/             # 核心仿真框架
 │   ├── device.py             # DeviceProfile 定义
 │   ├── device_profiles/     # 用户自定义 profiles
@@ -218,7 +243,7 @@ msmodeling/
 
 ### Skill 相关（若涉及）
 
-- [ ] SKILL.md frontmatter 完整（name、description、version、source）
+- [ ] SKILL.md frontmatter 完整（name、description、metadata.version、metadata.source）
 - [ ] Skill 文件名合法（snake_case，无连字符）
 - [ ] 验证 skill 可正确加载和执行
 

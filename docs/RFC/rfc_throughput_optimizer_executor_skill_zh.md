@@ -8,7 +8,7 @@
 | **作者** | lutean |
 | **创建日期** | 2026-05-30 |
 | **更新日期** | 2026-05-30 |
-| **相关链接** | 无 |
+| **相关链接** | [Executor Skill](../../.agents/skills/throughput-optimizer-executor/SKILL.md)、[Explainer Skill](../../.agents/skills/throughput-optimizer-explainer/SKILL.md)、[Explainer RFC](rfc_throughput_optimizer_explainer_skill_zh.md) |
 
 ---
 
@@ -34,7 +34,8 @@
 - 不修改 throughput optimizer 的搜索算法或性能模型。
 - 不自动决定量化策略；只提供推荐默认值并要求用户确认。
 - 不保证建模结果等同真实线上性能；结果必须作为部署规划参考，并要求真实负载验证。
-- 不负责通过 `text_generate` 自动复验最优行；复验应交由 `text-generate-executor`。
+- 不负责深入解释结果合理性、硬件差异或 Cube/Vec/Comm/Mem 瓶颈；这些问题交由 `throughput-optimizer-explainer`。
+- 不负责直接执行 `text_generate` 单点复验；复验命令由 `throughput-optimizer-explainer` 映射后，实际执行交由 `text-generate-executor`。
 
 ## 3. 用例分析
 
@@ -167,6 +168,12 @@ throughput-optimizer-executor/
 - 错误分类：参数、环境、模型/设备假设、搜索空间冲突。
 - 最小修正建议。
 
+### 4.7 Handoff 边界
+
+- `throughput-optimizer-executor` 负责问参、生成命令、执行 optimizer 和总结最优候选。
+- 用户追问“结果是否合理”“为什么硬件表现不同”“Cube/Vec/Comm/Mem 如何解释”“best row 如何映射到 text_generate”时，交由 `throughput-optimizer-explainer`。
+- `throughput-optimizer-explainer` 可以生成 Prefill/Decode 验证命令；如果用户要实际运行这些命令，再交由 `text-generate-executor`。
+
 ## 5. 实施计划
 
 | 阶段 | 内容 | 状态 |
@@ -204,4 +211,4 @@ throughput-optimizer-executor/
 
 - 增强 optimizer 输出解析，统一 Overall Best、Top candidates、PD ratio 的 JSON schema。
 - 增加更多典型硬件/模型场景的验收 prompt。
-- 与 `text-generate-executor` 建立显式 handoff：从 optimizer best row 生成单点验证命令。
+- 通过 `throughput-optimizer-explainer` 建立显式解释链路：从 optimizer best row 生成 Prefill/Decode 验证命令，并按需 handoff 到 `text-generate-executor` 执行。
