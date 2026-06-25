@@ -77,7 +77,7 @@ set HF_ENDPOINT=https://hf-mirror.com
 |------|--------|------|
 | `GRADIO_SERVER_PORT` | `2345` | 监听端口，可被 `--port` 覆盖 |
 
-完整环境变量列表见 [环境变量](../../../tests/README.md#environment-variables)。
+完整环境变量列表见 [Environment Variables](../../../tests/README.md)。
 
 ---
 
@@ -269,7 +269,6 @@ python -m cli.inference.text_generate deepseek-ai/DeepSeek-R1 \
   --context-length 3500 \
   --decode \
   --num-mtp-tokens 2 \
-  --mtp-acceptance-rate 0.9 0.6 0.4 0.2 \
   --tp-size 8 \
   --ep-size 8 \
   --quantize-linear-action W8A8_DYNAMIC \
@@ -352,7 +351,7 @@ python -m cli.inference.video_generate <model_id> [options]
 ### 5.2 最小视频仿真示例
 
 ```bash
-python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers \
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --device ATLAS_800_A2_280T_32G_PCIE \
   --batch-size 1 \
   --seq-len 128 \
@@ -367,7 +366,7 @@ python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers \
 ### 5.3 Ulysses 并行示例
 
 ```bash
-python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers \
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --device ATLAS_800_A2_280T_32G_PCIE \
   --batch-size 1 \
   --seq-len 128 \
@@ -391,7 +390,7 @@ world-size % ulysses-size == 0
 ### 5.4 CFG 与 CFG Parallel 示例
 
 ```bash
-python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers \
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --device ATLAS_800_A2_280T_32G_PCIE \
   --batch-size 1 \
   --seq-len 128 \
@@ -410,7 +409,7 @@ python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers \
 ### 5.5 DiT Cache 示例
 
 ```bash
-python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers \
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --device ATLAS_800_A2_280T_32G_PCIE \
   --batch-size 1 \
   --seq-len 128 \
@@ -433,7 +432,7 @@ python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers \
 ### 5.6 Chrome Trace 导出
 
 ```bash
-python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers \
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --device ATLAS_800_A2_280T_32G_PCIE \
   --batch-size 1 \
   --seq-len 128 \
@@ -964,7 +963,7 @@ python -m cli.inference.text_generate Qwen/Qwen3-VL-235B-A22B-Instruct --device 
 Video：
 
 ```bash
-python -m cli.inference.video_generate Wan2.2-T2V-A14B-Diffusers --device ATLAS_800_A2_280T_32G_PCIE --batch-size 1 --seq-len 128 --height 720 --width 1280 --frame-num 81 --sample-step 50
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers --device ATLAS_800_A2_280T_32G_PCIE --batch-size 1 --seq-len 128 --height 720 --width 1280 --frame-num 81 --sample-step 50
 ```
 
 Optimizer：
