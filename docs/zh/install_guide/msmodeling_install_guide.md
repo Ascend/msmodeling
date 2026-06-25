@@ -17,7 +17,7 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone https://gitcode.com/Ascend/msmodeling.git -b develop
+git clone https://gitcode.com/Ascend/msmodeling.git
 cd msmodeling
 ```
 

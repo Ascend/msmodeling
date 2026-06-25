@@ -1,20 +1,24 @@
 # Model and Feature Support Matrix
 
-This document summarizes the model types and simulation features currently supported by TensorCast. For usage details, see [TensorCast User Guide](../msmodeling_tensor_cast_user_guide.md).
+This document summarizes the currently supported model types and simulation features, making it easier to quickly understand the tool capability boundaries.
 
-> [!NOTE]
-> TensorCast is designed for performance modeling and resource estimation. Accuracy-related simulation or quantization results are for reference only. Final accuracy should be verified with real model evaluation.
+## Reading Notes
 
-## TensorCast Model Support
+- If you only want to check the currently supported models, see "Currently Supported Models".
+- If you need to check whether a CLI capability is available, see "Feature Support".
+- If you need service-level throughput optimization or serving simulation capabilities, read this together with the [ServingCast User Guide](../msmodeling_serving_cast_user_guide.md).
+
+## Currently Supported Models
 
 | Model Type | Model Family | Supported Models |
 | --- | --- | --- |
-| Text Models | DeepSeek | DeepSeek V3, DeepSeek V3.2, Kimi-K2 (supported through the DeepSeek V3 compatibility path) |
+| Text Models | DeepSeek | DeepSeek V4, DeepSeek V3.2, DeepSeek V3 |
+| Text Models | Kimi | Kimi-K2.6, Kimi-K2.5, Kimi-K2 (supported through the DeepSeek V3 compatibility path) |
+| Text Models | Qwen | Qwen3.5, Qwen3.5 MoE, Qwen3-Next, Qwen3 Dense, Qwen3 MoE |
+| Text Models | GLM | GLM5.1, GLM5, GLM-4 MoE |
 | Text Models | ERNIE | ERNIE 4.5 MoE |
-| Text Models | GLM | GLM-4 MoE, GLM5 |
-| Text Models | Qwen | Qwen3 MoE, Qwen3-Next, Qwen3.5, Qwen3.5 MoE |
 | Text Models | Bailing / MiMo / MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2 |
-| Vision-Language Models | VL Models | GLM-4V MoE, InternVL, Qwen3-VL, Qwen3-VL MoE |
+| Vision-Language Models | VL Models | Qwen3-VL, Qwen3-VL MoE, GLM-4V, GLM-4V MoE, InternVL |
 | Video Generation Models | Diffusers DiT Video Generation Models | Wan, HunyuanVideo, HunyuanVideo1.5 |
 
 ## Feature Support
@@ -36,3 +40,4 @@ This document summarizes the model types and simulation features currently suppo
 | ServingCast | System Metrics | Supported | Outputs throughput, TTFT, TPOT, E2E latency, and other serving-level metrics |
 | Web UI | Visual Configuration | Supported | Configure model, device, parallelism, quantization, and workload parameters through the page |
 | Web UI | Result Display and Export | Supported | Supports charts, tables, detail analysis, history cache, and result export |
+| OptiX | Serving Parameter Optimization | Supported | Uses the PSO particle swarm optimization algorithm to tune and validate parameters for serving frameworks such as vLLM and MindIE |

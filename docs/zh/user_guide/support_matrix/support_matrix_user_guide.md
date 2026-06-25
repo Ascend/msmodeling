@@ -1,26 +1,24 @@
 # 模型支持与特性支持矩阵
 
-本文档汇总 TensorCast 当前已支持的模型类型与仿真特性，便于快速确认工具能力边界。具体使用方法请参考《[TensorCast 使用指南](../msmodeling_tensor_cast_user_guide.md)》。
-
-> [!NOTE]
-> TensorCast 主要用于性能建模与资源估算，涉及精度相关的仿真或量化结果仅供参考，最终精度表现请以真实模型评测为准。
+本文档汇总当前已支持的模型类型与仿真特性，便于快速确认工具能力边界。
 
 ## 阅读说明
 
-- 如果只关心模型是否可被 TensorCast 识别，请查看“TensorCast 模型支持”。
+- 如果只关心目前已经支持的模型，请查看“目前已经支持的模型”。
 - 如果需要确认某项 CLI 能力是否可用，请查看“特性支持”。
 - 如果需要服务级吞吐优化或服务仿真能力，请结合《[ServingCast 使用指南](../msmodeling_serving_cast_user_guide.md)》阅读。
 
-## TensorCast 模型支持
+## 目前已经支持的模型
 
 | 模型类型 | 模型系列 | 支持模型 |
 | --- | --- | --- |
-| 文本模型 | DeepSeek 系列 | DeepSeek V3、DeepSeek V3.2、Kimi-K2（通过 DeepSeek V3 兼容路径支持） |
+| 文本模型 | DeepSeek 系列 | DeepSeek V4、DeepSeek V3.2、DeepSeek V3 |
+| 文本模型 | Kimi 系列 | Kimi-K2.6、Kimi-K2.5、Kimi-K2（通过 DeepSeek V3 兼容路径支持） |
+| 文本模型 | Qwen 系列 | Qwen3.5、Qwen3.5 MoE、Qwen3-Next、Qwen3 Dense、Qwen3 MoE |
+| 文本模型 | GLM 系列 | GLM5.1、GLM5、GLM-4 MoE |
 | 文本模型 | ERNIE 系列 | ERNIE 4.5 MoE |
-| 文本模型 | GLM 系列 | GLM-4 MoE、GLM5 |
-| 文本模型 | Qwen 系列 | Qwen3 MoE、Qwen3-Next、Qwen3.5、Qwen3.5 MoE |
 | 文本模型 | Bailing / MiMo / MiniMax | Bailing MoE、MiMo v2 Flash、MiniMax M2 |
-| 视觉-语言模型 | VL 模型 | GLM-4V MoE、InternVL、Qwen3-VL、Qwen3-VL MoE |
+| 视觉-语言模型 | VL 模型 | Qwen3-VL、Qwen3-VL MoE、GLM-4V、GLM-4V MoE、InternVL |
 | 视频生成模型 | Diffusers DiT 视频生成模型 | Wan、HunyuanVideo、HunyuanVideo1.5 |
 
 ## 特性支持
