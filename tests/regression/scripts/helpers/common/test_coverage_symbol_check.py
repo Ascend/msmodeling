@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 from scripts.helpers.common.coverage_symbol_check import symbol_lines_covered_in_data
 
@@ -52,6 +55,37 @@ def test_symbol_lines_covered_false_for_empty_context(tmp_path: Path, monkeypatc
         ),
     )
 
+    assert symbol_lines_covered_in_data(repo, "cli/main.py", "run", {2}, coverage_path) is False
+
+
+def test_symbol_lines_covered_relaxed_accepts_empty_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / "repo"
+    source = repo / "cli" / "main.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def run():\n    return 1\n", encoding="utf-8")
+    coverage_path = repo / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "coverage.data.CoverageData",
+        lambda _path: _FakeCoverageData(
+            _path,
+            measured=str(source.resolve()),
+            ctxmap={2: [""]},
+        ),
+    )
+
+    assert (
+        symbol_lines_covered_in_data(
+            repo,
+            "cli/main.py",
+            "run",
+            {2},
+            coverage_path,
+            require_test_context=False,
+        )
+        is True
+    )
     assert symbol_lines_covered_in_data(repo, "cli/main.py", "run", {2}, coverage_path) is False
 
 

@@ -29,6 +29,12 @@ class NightlyRunStats:
     first_error: str
 
 
+@dataclass(frozen=True, slots=True)
+class JunitPhaseParse:
+    stats: NightlyRunStats
+    durations: tuple[tuple[str, float], ...]
+
+
 def _format_testcase_id(classname: str, name: str, file: str = "") -> str:
     """Build a pytest node id from a JUnit ``testcase`` element.
 
@@ -131,15 +137,14 @@ def _accumulate_testcase(
     )
 
 
-def _parse_junit_file(path: pathlib.Path) -> NightlyRunStats:
-    root = ET.parse(path).getroot()
-
+def _parse_junit_root(root: ET.Element) -> JunitPhaseParse:
     passed = 0
     failed = 0
     errors = 0
     duration_sec = 0.0
     failed_cases: list[str] = []
     first_error = ""
+    durations: list[tuple[str, float]] = []
 
     for suite in root.iter("testsuite"):
         failed, errors, first_error = _accumulate_testsuite_direct_errors(
@@ -150,6 +155,18 @@ def _parse_junit_file(path: pathlib.Path) -> NightlyRunStats:
         )
 
     for testcase in root.iter("testcase"):
+        time_raw = testcase.get("time")
+        if time_raw is not None:
+            durations.append(
+                (
+                    _format_testcase_id(
+                        testcase.get("classname", ""),
+                        testcase.get("name", ""),
+                        testcase.get("file", ""),
+                    ),
+                    float(time_raw),
+                )
+            )
         passed, failed, errors, duration_sec, failed_cases, first_error = _accumulate_testcase(
             testcase,
             passed=passed,
@@ -160,14 +177,21 @@ def _parse_junit_file(path: pathlib.Path) -> NightlyRunStats:
             first_error=first_error,
         )
 
-    return NightlyRunStats(
-        passed=passed,
-        failed=failed,
-        errors=errors,
-        duration_sec=duration_sec,
-        failed_cases=tuple(failed_cases),
-        first_error=first_error,
+    return JunitPhaseParse(
+        stats=NightlyRunStats(
+            passed=passed,
+            failed=failed,
+            errors=errors,
+            duration_sec=duration_sec,
+            failed_cases=tuple(failed_cases),
+            first_error=first_error,
+        ),
+        durations=tuple(durations),
     )
+
+
+def _parse_junit_file(path: pathlib.Path) -> NightlyRunStats:
+    return _parse_junit_root(ET.parse(path).getroot()).stats
 
 
 def _merge_stats(stats_list: Sequence[NightlyRunStats]) -> NightlyRunStats:
@@ -200,13 +224,38 @@ def _merge_stats(stats_list: Sequence[NightlyRunStats]) -> NightlyRunStats:
     )
 
 
+def parse_junit_phase(path: pathlib.Path) -> JunitPhaseParse | None:
+    """Parse a single JUnit XML file, or None when it is missing."""
+    if not path.is_file():
+        return None
+    return _parse_junit_root(ET.parse(path).getroot())
+
+
+def aggregate_phase_stats(phases: Sequence[JunitPhaseParse | None]) -> NightlyRunStats:
+    """Merge per-phase stats from :func:`parse_junit_phases`."""
+    parsed = [phase.stats for phase in phases if phase is not None]
+    if not parsed:
+        return NightlyRunStats(
+            passed=0,
+            failed=0,
+            errors=0,
+            duration_sec=-1.0,
+            failed_cases=(),
+            first_error="",
+        )
+    return _merge_stats(parsed)
+
+
+def parse_junit_phases(
+    paths: Sequence[pathlib.Path],
+) -> tuple[JunitPhaseParse | None, ...]:
+    """Parse each JUnit path once; missing files yield None."""
+    return tuple(parse_junit_phase(path) for path in paths)
+
+
 def parse_junit_xml(paths: Sequence[pathlib.Path]) -> NightlyRunStats:
     """Aggregate test statistics from one or more pytest JUnit XML files."""
-    parsed: list[NightlyRunStats] = []
-    for path in paths:
-        if not path.is_file():
-            continue
-        parsed.append(_parse_junit_file(path))
+    parsed = [phase.stats for phase in parse_junit_phases(paths) if phase is not None]
 
     if not parsed:
         return NightlyRunStats(
@@ -263,22 +312,20 @@ def extract_pytest_log_snippet(
     return ""
 
 
+def slowest_testcase_durations(
+    durations: Sequence[tuple[str, float]],
+    *,
+    top_n: int = 10,
+) -> tuple[tuple[str, float], ...]:
+    """Return the top-N slowest ``(node_id, seconds)`` from pre-parsed durations."""
+    ranked = sorted(durations, key=lambda item: item[1], reverse=True)
+    return tuple(ranked[:top_n])
+
+
 def slowest_testcases(paths: Sequence[pathlib.Path], *, top_n: int = 10) -> tuple[tuple[str, float], ...]:
     """Return the top-N slowest ``(node_id, seconds)`` across the given files."""
     durations: list[tuple[str, float]] = []
-    for path in paths:
-        if not path.is_file():
-            continue
-        root = ET.parse(path).getroot()
-        for testcase in root.iter("testcase"):
-            time_raw = testcase.get("time")
-            if time_raw is None:
-                continue
-            node_id = _format_testcase_id(
-                testcase.get("classname", ""),
-                testcase.get("name", ""),
-                testcase.get("file", ""),
-            )
-            durations.append((node_id, float(time_raw)))
-    durations.sort(key=lambda item: item[1], reverse=True)
-    return tuple(durations[:top_n])
+    for phase in parse_junit_phases(paths):
+        if phase is not None:
+            durations.extend(phase.durations)
+    return slowest_testcase_durations(durations, top_n=top_n)

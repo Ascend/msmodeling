@@ -16,6 +16,8 @@ test_deepseek_pd_ratio_mode                       -> TestThroughputOptimizerNigh
 
 from unittest import TestCase
 
+import pytest
+
 from tests.helpers.cli_runner import run_module_main
 
 THROUGHPUT_OPTIMIZER_MODULE = "cli.inference.throughput_optimizer"
@@ -123,6 +125,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.nightly
     def test_vl_disagg_decode_smoke(self):
         """VL disagg decode; guards test_vl_model_disaggregation_decode_with_output_validation."""
         args = [

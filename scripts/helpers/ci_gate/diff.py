@@ -1,24 +1,19 @@
-"""Git diff analysis: base ref resolution, line mapping, change classification."""
+"""Git diff analysis: base ref resolution and unified diff parsing."""
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
 import re
 import shutil
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from scripts.helpers._config import ConfigError
-from scripts.helpers.ci_gate.gate_policy import TestDiscovery, default_test_discovery, is_gate_test_path
-from scripts.helpers.ci_gate.models import ChangeSet
-from scripts.helpers.common.coverage_config import product_roots
-from scripts.helpers.common.test_map_config import is_config_path, is_full_suite_trigger_path, is_gate_ignored_path
-from scripts.helpers.common.test_map_loader import is_product_source
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
 
 _git_path = shutil.which("git")
 if _git_path is None:
@@ -40,6 +35,11 @@ def _run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def git_stdout(repo_root: Path, *args: str) -> str:
+    """Run git in *repo_root* and return stripped stdout (empty on failure)."""
+    return _run_git(repo_root, *args).stdout.strip()
+
+
 def _parse_fetch_remote_branch(ref: str) -> tuple[str, str]:
     """Split *ref* into ``(remote, branch)`` for ``git fetch remote branch``.
 
@@ -57,7 +57,13 @@ def _fetch_deepen(repo_root: Path, ref: str) -> None:
     logger.info("Deepening shallow clone with git fetch --depth=50 %s %s", remote, branch)
     proc = _run_git(repo_root, "fetch", "--depth=50", remote, branch)
     if proc.returncode != 0:
-        logger.warning("git fetch failed for %s (%s %s): %s", ref, remote, branch, proc.stderr.strip())
+        logger.warning(
+            "git fetch failed for %s (%s %s): %s",
+            ref,
+            remote,
+            branch,
+            proc.stderr.strip(),
+        )
 
 
 def resolve_head_commit(repo_root: Path) -> str:
@@ -99,11 +105,6 @@ def resolve_base_ref(repo_root: Path, branch: str) -> str:
         + (f" Also tried {refs[1]!r}: not found either" if len(refs) > 1 else "")
         + (f" Last error: {last_stderr}" if last_stderr else "")
     )
-
-
-# ---------------------------------------------------------------------------
-# Unified diff parse
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,12 +258,21 @@ def _parse_unified_diff(stdout: str) -> GitDiffResult:
 def fetch_diff(repo_root: Path, base_ref: str) -> GitDiffResult:
     """Return added-line map and file-level status entries from one git diff subprocess."""
     diff_result = subprocess.run(
-        [_GIT, "diff", f"{base_ref}...HEAD", "--unified=0", "-M", "--diff-filter=ACDMR"],
+        [
+            _GIT,
+            "diff",
+            f"{base_ref}...HEAD",
+            "--unified=0",
+            "-M",
+            "--diff-filter=ACDMR",
+        ],
         capture_output=True,
         text=True,
         cwd=repo_root,
         check=False,
     )
+    if diff_result.returncode != 0:
+        raise ConfigError(f"git diff failed: {diff_result.stderr.strip()}")
     return _parse_unified_diff(diff_result.stdout)
 
 
@@ -271,186 +281,121 @@ def fetch_diff_line_map(repo_root: Path, base_ref: str) -> dict[str, set[int]]:
     return fetch_diff(repo_root, base_ref).line_map
 
 
-# ---------------------------------------------------------------------------
-# Change classification
-# ---------------------------------------------------------------------------
+def resolve_ref_commit(repo_root: Path, ref: str) -> str:
+    """Return full SHA for an arbitrary git ref."""
+    proc = _run_git(repo_root, "rev-parse", ref)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise ConfigError(f"Cannot resolve ref {ref!r}: {proc.stderr.strip()}")
+    return proc.stdout.strip()
 
 
-def _classify_rename(
-    old_path: str,
-    new_path: str,
-    score: int,
-    diff: dict[str, set[int]],
-    discovery: TestDiscovery,
-    roots: tuple[str, ...],
-) -> tuple[list[str], list[str], list[str], list[tuple[str, str, int]], dict[str, frozenset[int]]]:
-    """Classify one git rename (R status) into gate buckets."""
-    del_test: list[str] = []
-    new_test: list[str] = []
-    del_source: list[str] = []
-    renames: list[tuple[str, str, int]] = []
-    modified: dict[str, frozenset[int]] = {}
-
-    old_is_test = is_gate_test_path(old_path, discovery)
-    new_is_test = is_gate_test_path(new_path, discovery)
-
-    if old_is_test or new_is_test:
-        if old_is_test:
-            del_test.append(old_path)
-        if new_is_test:
-            new_test.append(new_path)
-        if not old_is_test and is_product_source(old_path, roots):
-            del_source.append(old_path)
-        return del_test, new_test, del_source, renames, modified
-
-    if is_config_path(old_path) or is_config_path(new_path):
-        return del_test, new_test, del_source, renames, modified
-
-    if is_gate_ignored_path(old_path) or is_gate_ignored_path(new_path):
-        return del_test, new_test, del_source, renames, modified
-
-    renames.append((old_path, new_path, score))
-    if score < 100:
-        modified[new_path] = frozenset(diff.get(new_path, set()))
-    return del_test, new_test, del_source, renames, modified
+def is_git_ancestor(repo_root: Path, ancestor: str, descendant: str) -> bool:
+    """Return True when *ancestor* is an ancestor of *descendant*."""
+    proc = _run_git(repo_root, "merge-base", "--is-ancestor", ancestor, descendant)
+    return proc.returncode == 0
 
 
-def _entry_paths(entry: DiffEntry) -> tuple[str, ...]:
-    if entry.status.startswith("R"):
-        assert entry.old_path is not None
-        assert entry.new_path is not None
-        return (entry.old_path, entry.new_path)
-    if entry.status == "D":
-        assert entry.old_path is not None
-        return (entry.old_path,)
-    assert entry.new_path is not None
-    return (entry.new_path,)
+def fetch_ref(repo_root: Path, ref: str) -> None:
+    """Fetch *ref* from its remote so local rev-parse / merge-base can resolve it."""
+    _fetch_deepen(repo_root, ref)
 
 
-def _classify_py_entry(
-    status: str,
-    filepath: str,
-    *,
-    line_map: dict[str, set[int]],
-    test_discovery: TestDiscovery,
-    resolved_roots: tuple[str, ...],
-    new_test: list[str],
-    del_test: list[str],
-    modified_test: list[str],
-    new_source: list[str],
-    del_source: list[str],
-    modified_source: dict[str, frozenset[int]],
-    track_unscoped: Callable[[str], None],
-) -> None:
-    is_test = is_gate_test_path(filepath, test_discovery)
-    is_config = is_config_path(filepath)
+def resolve_remote_ref(ref: str) -> str:
+    """Return the git ref that points at the fetched remote tip for *ref*."""
+    remote, branch = _parse_fetch_remote_branch(ref)
+    return ref if "/" in ref else f"{remote}/{branch}"
 
-    if status == "A" and is_test:
-        new_test.append(filepath)
-    elif status == "D" and is_test:
-        del_test.append(filepath)
-    elif status in ("M", "C") and is_test:
-        modified_test.append(filepath)
-    elif is_config or is_gate_ignored_path(filepath):
+
+def resolve_target_head(repo_root: Path, ref: str) -> str:
+    """Fetch *ref* and return the full SHA of the remote tip."""
+    fetch_ref(repo_root, ref)
+    return resolve_ref_commit(repo_root, resolve_remote_ref(ref))
+
+
+_SYNC_BRANCH_PREFIX = "msmodeling-sync/"
+
+
+@dataclass(frozen=True, slots=True)
+class _EphemeralCheckoutState:
+    work_branch: str
+    restore_ref: str
+
+
+_ephemeral_checkouts: dict[str, _EphemeralCheckoutState] = {}
+
+
+def _sync_work_branch_name() -> str:
+    return f"{_SYNC_BRANCH_PREFIX}{os.getpid()}"
+
+
+def _capture_restore_ref(repo_root: Path) -> str:
+    branch = git_stdout(repo_root, "symbolic-ref", "--short", "-q", "HEAD")
+    if branch:
+        return branch
+    return resolve_head_commit(repo_root)
+
+
+def _cleanup_ephemeral_checkout(repo_root: Path) -> None:
+    key = str(repo_root.resolve())
+    state = _ephemeral_checkouts.pop(key, None)
+    if state is None:
         return
-    elif status == "A" and not is_test:
-        if is_product_source(filepath, resolved_roots):
-            new_source.append(filepath)
-        else:
-            track_unscoped(filepath)
-    elif status == "D" and not is_test:
-        del_source.append(filepath)
-    elif status in ("M", "C") and not is_test:
-        if is_product_source(filepath, resolved_roots):
-            modified_source[filepath] = frozenset(line_map.get(filepath, set()))
-        else:
-            track_unscoped(filepath)
-
-
-def classify_changes(
-    repo_root: Path,
-    base_ref: str,
-    diff: GitDiffResult,
-    discovery: TestDiscovery | None = None,
-    roots: tuple[str, ...] | None = None,
-) -> ChangeSet:
-    """Return a ChangeSet from parsed git diff entries."""
-    del base_ref
-    line_map = diff.line_map
-    diff_result = diff
-    resolved_roots = roots if roots is not None else product_roots(repo_root)
-
-    config: list[str] = []
-    new_test: list[str] = []
-    del_test: list[str] = []
-    modified_test: list[str] = []
-    new_source: list[str] = []
-    del_source: list[str] = []
-    modified_source: dict[str, frozenset[int]] = {}
-    unscoped_source: list[str] = []
-    renames: list[tuple[str, str, int]] = []
-    test_discovery = discovery or default_test_discovery()
-
-    def _track_unscoped(filepath: str) -> None:
-        if (
-            filepath.endswith(".py")
-            and not is_gate_ignored_path(filepath)
-            and not is_gate_test_path(filepath, test_discovery)
-            and not is_config_path(filepath)
-            and not is_product_source(filepath, resolved_roots)
-        ):
-            unscoped_source.append(filepath)
-
-    for entry in diff_result.entries:
-        config.extend(filepath for filepath in _entry_paths(entry) if is_full_suite_trigger_path(filepath))
-
-        status = entry.status
-        if status.startswith("R"):
-            old_path = entry.old_path
-            new_path = entry.new_path
-            if old_path is None or new_path is None:
-                continue
-            score = int(status[1:]) if status[1:].isdigit() else 0
-            (
-                rename_del_test,
-                rename_new_test,
-                rename_del_source,
-                rename_entries,
-                rename_modified,
-            ) = _classify_rename(old_path, new_path, score, line_map, test_discovery, resolved_roots)
-            del_test.extend(rename_del_test)
-            new_test.extend(rename_new_test)
-            del_source.extend(rename_del_source)
-            renames.extend(rename_entries)
-            modified_source.update(rename_modified)
-            continue
-
-        candidate_path = entry.new_path if entry.new_path is not None else entry.old_path
-        if candidate_path is None or not candidate_path.endswith(".py"):
-            continue
-        _classify_py_entry(
-            entry.status,
-            candidate_path,
-            line_map=line_map,
-            test_discovery=test_discovery,
-            resolved_roots=resolved_roots,
-            new_test=new_test,
-            del_test=del_test,
-            modified_test=modified_test,
-            new_source=new_source,
-            del_source=del_source,
-            modified_source=modified_source,
-            track_unscoped=_track_unscoped,
+    checkout = _run_git(repo_root, "checkout", state.restore_ref)
+    if checkout.returncode != 0:
+        logger.error(
+            "git checkout %s failed during ephemeral cleanup (exit %d): %s",
+            state.restore_ref,
+            checkout.returncode,
+            checkout.stderr.strip(),
+        )
+        force = _run_git(repo_root, "checkout", "-f", state.restore_ref)
+        if force.returncode != 0:
+            logger.error(
+                "git checkout -f %s failed during ephemeral cleanup (exit %d): %s",
+                state.restore_ref,
+                force.returncode,
+                force.stderr.strip(),
+            )
+            return
+    delete = _run_git(repo_root, "branch", "-D", state.work_branch)
+    if delete.returncode != 0:
+        logger.warning(
+            "git branch -D %s failed during ephemeral cleanup (exit %d): %s",
+            state.work_branch,
+            delete.returncode,
+            delete.stderr.strip(),
         )
 
-    return ChangeSet.build(
-        config=tuple(config),
-        new_test=tuple(new_test),
-        del_test=tuple(del_test),
-        modified_test=tuple(modified_test),
-        new_source=tuple(new_source),
-        del_source=tuple(del_source),
-        modified_source=modified_source,
-        renames=tuple(renames),
-        unscoped_source=tuple(sorted(set(unscoped_source))),
-    )
+
+def cleanup_all_ephemeral_checkouts() -> None:
+    """Restore git state for any in-flight sync checkout sessions."""
+    for key in list(_ephemeral_checkouts):
+        _cleanup_ephemeral_checkout(Path(key))
+
+
+atexit.register(cleanup_all_ephemeral_checkouts)
+
+
+@contextmanager
+def ephemeral_target_checkout(repo_root: Path, ref: str) -> Iterator[str]:
+    """Check out target tip on a pid-scoped branch; restore and delete on exit."""
+    target_head = resolve_target_head(repo_root, ref)
+    work_branch = _sync_work_branch_name()
+    restore_ref = _capture_restore_ref(repo_root)
+    proc = _run_git(repo_root, "checkout", "-B", work_branch, target_head)
+    if proc.returncode != 0:
+        raise ConfigError(f"git checkout -B {work_branch!r} {target_head[:12]} failed: {proc.stderr.strip()}")
+    key = str(repo_root.resolve())
+    _ephemeral_checkouts[key] = _EphemeralCheckoutState(work_branch, restore_ref)
+    try:
+        yield target_head
+    finally:
+        _cleanup_ephemeral_checkout(repo_root)
+
+
+def fetch_changed_paths(repo_root: Path, base_commit: str, head_commit: str) -> frozenset[str]:
+    """Return repository-relative paths changed between two commits."""
+    proc = _run_git(repo_root, "diff", f"{base_commit}...{head_commit}", "--name-only")
+    if proc.returncode != 0:
+        raise ConfigError(f"git diff failed: {proc.stderr.strip()}")
+    return frozenset(line.strip() for line in proc.stdout.splitlines() if line.strip())

@@ -28,9 +28,9 @@ def test_env_info_fields() -> None:
 
 
 def test_map_coverage_summary() -> None:
-    m = MapCoverageSummary(source_files=10, symbols=42)
-    assert m.source_files == 10
-    assert m.symbols == 42
+    m = MapCoverageSummary(test_nodes=10, symbol_refs=42)
+    assert m.test_nodes == 10
+    assert m.symbol_refs == 42
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +72,8 @@ def test_feishu_report_input_accepts_phase_breakdown() -> None:
         coverage_line_threshold=None,
         coverage_branch_threshold=None,
         coverage_gate_passed=None,
-        test_map_source_files=0,
-        test_map_symbols=0,
+        test_map_test_nodes=0,
+        test_map_symbol_refs=0,
         test_map_written=False,
         failed_cases=(),
         first_error="",

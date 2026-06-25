@@ -76,7 +76,9 @@ def test_collect_from_json_returns_empty_for_invalid_json(tmp_path: Path) -> Non
     assert prefetch._collect_from_json(path, frozenset()) == set()
 
 
-def test_collect_model_ids_discovers_from_python_and_json_and_skips_ignored_paths(tmp_path: Path) -> None:
+def test_collect_model_ids_discovers_from_python_and_json_and_skips_ignored_paths(
+    tmp_path: Path,
+) -> None:
     scan_dir = tmp_path / "scan"
     (scan_dir / "suite").mkdir(parents=True)
     (scan_dir / "tests" / ".ci").mkdir(parents=True)
@@ -120,7 +122,9 @@ def test_collect_model_ids_discovers_from_python_and_json_and_skips_ignored_path
     ]
 
 
-def test_env_overrides_activate_sets_and_restores_values(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_overrides_activate_sets_and_restores_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("HF_HOME", "old-hf")
     monkeypatch.setenv("MSMODELING_OFFLINE", "1")
 
@@ -159,13 +163,21 @@ def test_prefetch_result_to_dict_serializes_all_fields() -> None:
     }
 
 
-def test_huggingface_prefetcher_fetch_success_first_try(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, dict[str, object]]] = []
+def test_huggingface_prefetcher_fetch_success_first_try(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_calls: list[str] = []
+    config_calls: list[tuple[str, dict[str, object]]] = []
+
+    def _snapshot(model_id: str) -> str:
+        snapshot_calls.append(model_id)
+        return f"/cache/hf/{model_id}"
 
     def _from_pretrained(model_id: str, **kwargs: object) -> object:
-        calls.append((model_id, kwargs))
+        config_calls.append((model_id, kwargs))
         return object()
 
+    monkeypatch.setattr(prefetch, "snapshot_huggingface_config_only", _snapshot)
     monkeypatch.setitem(
         sys.modules,
         "transformers",
@@ -180,15 +192,24 @@ def test_huggingface_prefetcher_fetch_success_first_try(monkeypatch: pytest.Monk
         source="huggingface",
         success=True,
     )
-    assert calls == [("Qwen/Qwen3-32B", {})]
+    assert snapshot_calls == ["Qwen/Qwen3-32B"]
+    assert config_calls == [("/cache/hf/Qwen/Qwen3-32B", {})]
 
 
-def test_huggingface_prefetcher_fetch_retries_with_trust_remote_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, dict[str, object]]] = []
+def test_huggingface_prefetcher_fetch_retries_with_trust_remote_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_calls: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        prefetch,
+        "snapshot_huggingface_config_only",
+        lambda model_id: f"/cache/hf/{model_id}",
+    )
 
     def _from_pretrained(model_id: str, **kwargs: object) -> object:
-        calls.append((model_id, kwargs))
-        if len(calls) == 1:
+        config_calls.append((model_id, kwargs))
+        if len(config_calls) == 1:
             raise RuntimeError("set trust_remote_code=True")
         return object()
 
@@ -202,58 +223,20 @@ def test_huggingface_prefetcher_fetch_retries_with_trust_remote_code(monkeypatch
     result = fetcher.fetch("deepseek-ai/DeepSeek-R1")
 
     assert result.success is True
-    assert calls == [
-        ("deepseek-ai/DeepSeek-R1", {}),
-        ("deepseek-ai/DeepSeek-R1", {"trust_remote_code": True}),
+    assert config_calls == [
+        ("/cache/hf/deepseek-ai/DeepSeek-R1", {}),
+        ("/cache/hf/deepseek-ai/DeepSeek-R1", {"trust_remote_code": True}),
     ]
 
 
-@pytest.mark.parametrize(
-    ("parameter_name", "expected_key"),
-    [
-        ("ignore_file_pattern", "ignore_file_pattern"),
-        ("ignore_patterns", "ignore_patterns"),
-    ],
-)
-def test_modelscope_build_snapshot_kwargs_supports_both_parameter_names(
-    parameter_name: str,
-    expected_key: str,
+def test_modelscope_prefetcher_fetch_retries_with_trust_remote_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _snapshot_download(model_id: str, **kwargs: object) -> str:
-        return f"/tmp/{model_id}"
-
-    if parameter_name == "ignore_file_pattern":
-
-        def _snapshot_download(model_id: str, ignore_file_pattern: object = None) -> str:
-            return f"/tmp/{model_id}"
-    else:
-
-        def _snapshot_download(model_id: str, ignore_patterns: object = None) -> str:
-            return f"/tmp/{model_id}"
-
-    monkeypatch.setitem(
-        sys.modules,
-        "modelscope",
-        SimpleNamespace(
-            AutoConfig=SimpleNamespace(from_pretrained=lambda *_a, **_kw: object()),
-            snapshot_download=_snapshot_download,
-        ),
-    )
-
-    fetcher = prefetch.ModelScopePrefetcher()
-
-    assert fetcher._build_snapshot_kwargs("Qwen/Qwen3-32B") == {
-        expected_key: prefetch._MODELSCOPE_WEIGHT_IGNORE_PATTERNS,
-    }
-
-
-def test_modelscope_prefetcher_fetch_retries_with_trust_remote_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    snapshot_calls: list[tuple[str, dict[str, object]]] = []
+    snapshot_calls: list[str] = []
     config_calls: list[tuple[str, dict[str, object]]] = []
 
-    def _snapshot_download(model_id: str, ignore_patterns: object = None) -> str:
-        snapshot_calls.append((model_id, {"ignore_patterns": ignore_patterns}))
+    def _snapshot(model_id: str) -> str:
+        snapshot_calls.append(model_id)
         return f"/cache/{model_id}"
 
     def _from_pretrained(local_dir: str, **kwargs: object) -> object:
@@ -262,13 +245,11 @@ def test_modelscope_prefetcher_fetch_retries_with_trust_remote_code(monkeypatch:
             raise RuntimeError("please enable trust_remote_code")
         return object()
 
+    monkeypatch.setattr(prefetch, "snapshot_modelscope_config_only", _snapshot)
     monkeypatch.setitem(
         sys.modules,
         "modelscope",
-        SimpleNamespace(
-            AutoConfig=SimpleNamespace(from_pretrained=_from_pretrained),
-            snapshot_download=_snapshot_download,
-        ),
+        SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=_from_pretrained)),
     )
 
     fetcher = prefetch.ModelScopePrefetcher()
@@ -279,12 +260,7 @@ def test_modelscope_prefetcher_fetch_retries_with_trust_remote_code(monkeypatch:
         source="modelscope",
         success=True,
     )
-    assert snapshot_calls == [
-        (
-            "THUDM/GLM-4-9B",
-            {"ignore_patterns": prefetch._MODELSCOPE_WEIGHT_IGNORE_PATTERNS},
-        )
-    ]
+    assert snapshot_calls == ["THUDM/GLM-4-9B"]
     assert config_calls == [
         ("/cache/THUDM/GLM-4-9B", {}),
         ("/cache/THUDM/GLM-4-9B", {"trust_remote_code": True}),
@@ -347,7 +323,10 @@ def test_prefetch_all_preserves_input_order() -> None:
         [ok],
     )
 
-    assert [item.model_id for item in results] == ["Qwen/Qwen3-32B", "deepseek-ai/DeepSeek-R1"]
+    assert [item.model_id for item in results] == [
+        "Qwen/Qwen3-32B",
+        "deepseek-ai/DeepSeek-R1",
+    ]
     assert ok.calls == ["Qwen/Qwen3-32B", "deepseek-ai/DeepSeek-R1"]
 
 

@@ -4,11 +4,12 @@ input_generation
 """
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import import_module
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 
@@ -17,6 +18,10 @@ from ..layers.sampler import SamplingMetadata
 from ..performance_model import bytes_of_tensor
 from ..transformers.utils import get_attention_quant_config, logger
 from ..utils import exact_division
+
+# Qwen2-VL / Qwen3-VL preprocessor_config.json defaults when no local config is available.
+_QWEN_VL_DEFAULT_MIN_PIXELS = 65536
+_QWEN_VL_DEFAULT_MAX_PIXELS = 16777216
 
 
 @dataclass
@@ -33,7 +38,7 @@ class RequestInfo:
     image_width: int = None
 
 
-def generate_inputs(model, requests: List[RequestInfo], block_size: int = 128):
+def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     # TODO merge generate_inputs and generate_inputs_varlen
     # for now, unify the function signatures, Firstly.
     request = requests[0]
@@ -169,16 +174,14 @@ def resize_image(
     factor = patch_size * merge_size
 
     def build_qwen_resize_params():
-        params = {
+        min_pixels, max_pixels = _load_qwen_vl_pixel_limits(model_id)
+        return {
             "height": image_height,
             "width": image_width,
             "factor": factor,
+            "min_pixels": min_pixels,
+            "max_pixels": max_pixels,
         }
-        min_pixels, max_pixels = _load_preprocessor_pixel_limits(model_id)
-        if min_pixels is not None and max_pixels is not None:
-            params["min_pixels"] = min_pixels
-            params["max_pixels"] = max_pixels
-        return params
 
     def build_glm_resize_params():
         return {
@@ -232,7 +235,11 @@ def _resolve_local_preprocessor_config(model_id: str) -> Path | None:
         if cached_path:
             return Path(cached_path)
     except Exception:
-        logger.debug("No local cached preprocessor_config.json for model_id=%s.", model_id, exc_info=True)
+        logger.debug(
+            "No local cached preprocessor_config.json for model_id=%s.",
+            model_id,
+            exc_info=True,
+        )
     return None
 
 
@@ -240,7 +247,7 @@ def _extract_pixel_limits(config: dict | None):
     if not config:
         return None, None
     size = config.get("size")
-    if hasattr(size, "get"):
+    if isinstance(size, Mapping):
         min_pixels = size.get("shortest_edge") or size.get("min_pixels")
         max_pixels = size.get("longest_edge") or size.get("max_pixels")
         if min_pixels is not None and max_pixels is not None:
@@ -250,13 +257,24 @@ def _extract_pixel_limits(config: dict | None):
     return min_pixels, max_pixels
 
 
+def _load_qwen_vl_pixel_limits(model_id: str) -> tuple[int, int]:
+    min_pixels, max_pixels = _load_preprocessor_pixel_limits(model_id)
+    if min_pixels is not None and max_pixels is not None:
+        return min_pixels, max_pixels
+    logger.info(
+        "Using Qwen VL default pixel limits for model_id=%s (no local preprocessor_config.json).",
+        model_id,
+    )
+    return _QWEN_VL_DEFAULT_MIN_PIXELS, _QWEN_VL_DEFAULT_MAX_PIXELS
+
+
 @lru_cache(maxsize=128)
 def _load_preprocessor_pixel_limits(model_id: str):
     """
     Load image pixel limits from a local HF processor config.
     """
     if not model_id:
-        logger.warning("model_id is empty; falling back to smart_resize defaults.")
+        logger.warning("model_id is empty; Qwen VL resize will use built-in default pixel limits.")
         return None, None
 
     local_config = _resolve_local_preprocessor_config(model_id)
@@ -270,14 +288,14 @@ def _load_preprocessor_pixel_limits(model_id: str):
 
         image_processor = AutoImageProcessor.from_pretrained(model_id, local_files_only=True)
         size = getattr(image_processor, "size", None)
-        if size is None or not hasattr(size, "get"):
+        if size is None or not isinstance(size, Mapping):
             return None, None
         min_pixels = size.get("shortest_edge")
         max_pixels = size.get("longest_edge")
         return min_pixels, max_pixels
     except Exception:
-        logger.warning(
-            "Failed to load local processor/image size for model_id=%s; falling back to smart_resize defaults.",
+        logger.debug(
+            "No local image processor for model_id=%s; Qwen VL resize may use built-in defaults.",
             model_id,
             exc_info=True,
         )
@@ -459,7 +477,7 @@ def _get_kv_cache_info(
     block_size: int,
     batch_size: Optional[int] = None,
     total_kv_tokens: Optional[int] = None,
-) -> Tuple[dict[Any, Any], int]:
+) -> tuple[dict[Any, Any], int]:
     model_config = model.model_config
     parallel_config = model.model_config.parallel_config
     decoder_layers = None
@@ -484,7 +502,12 @@ def _get_kv_cache_info(
                 attention_layer = _resolve_decoder_attention_layer(decoder_layers[i])
             if is_v4_model:
                 kv_cache_shape = _resolve_v4_kv_cache_size(
-                    model, attention_layer, num_blocks, block_size, batch_size, total_kv_tokens
+                    model,
+                    attention_layer,
+                    num_blocks,
+                    block_size,
+                    batch_size,
+                    total_kv_tokens,
                 )
                 kv_cache_by_layers[i] = torch.empty(
                     kv_cache_shape,
@@ -538,7 +561,7 @@ def _resolve_v4_kv_cache_size(
     block_size: int = 1,
     batch_size: Optional[int] = None,
     total_kv_tokens: Optional[int] = None,
-) -> List[int]:
+) -> list[int]:
     """
     Resolve V4 KV cache shape based on compress_ratio.
 
@@ -730,7 +753,7 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     }
 
 
-def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
+def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     """
     requests: List[RequestInfo], each dict represents a request, containing keys: query_len, seq_len, is_decode
     """
@@ -838,7 +861,7 @@ def generate_inputs_varlen(model, requests: List[RequestInfo], block_size):
     return kwargs
 
 
-def get_inputs_num_bytes(model, requests: List[RequestInfo], block_size: int) -> int:
+def get_inputs_num_bytes(model, requests: list[RequestInfo], block_size: int) -> int:
     """
     Get the number of bytes of the input tensors.
     """

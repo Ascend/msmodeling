@@ -11,10 +11,11 @@ import pytest
 import scripts.helpers.ci_gate.main as ci_gate_main
 from scripts.helpers._config import Config
 from scripts.helpers.ci_gate.diff import GitDiffResult
-from scripts.helpers.ci_gate.gate_policy import TestExemption, default_test_discovery
 from scripts.helpers.ci_gate.main import _run_pytest, main
-from scripts.helpers.ci_gate.models import Baseline, ChangeSet
+from scripts.helpers.ci_gate.models import Baseline, ChangeSet, TestExemption
+from scripts.helpers.common.test_map_loader import TestMapFreshness
 from tests.helpers.fake_subprocess import FakeCompleted
+from tests.regression.scripts.helpers.conftest import default_ci_gate_policy
 
 
 def _empty_diff() -> GitDiffResult:
@@ -37,27 +38,16 @@ def gate_cfg() -> Config:
 
 @pytest.fixture(scope="module")
 def empty_baseline() -> Baseline:
-    return Baseline(
-        test_map={},
-        exemptions=(),
-        test_exemptions=(),
-        discovery=default_test_discovery(),
-        roots=(
-            "cli/",
-            "tensor_cast/",
-            "serving_cast/",
-            "web_ui/",
-            "scripts/",
-            "tools/",
-        ),
-    )
+    return Baseline(test_map={}, policy=default_ci_gate_policy())
 
 
 def test_run_pytest_empty_targets_returns_zero_without_subprocess() -> None:
     assert _run_pytest([], marker="not npu") == 0
 
 
-def test_run_pytest_invokes_subprocess_for_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_pytest_invokes_subprocess_for_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: list[list[str]] = []
 
     def _fake_run(cmd: list[str], **kwargs: object) -> FakeCompleted:
@@ -65,7 +55,10 @@ def test_run_pytest_invokes_subprocess_for_targets(monkeypatch: pytest.MonkeyPat
         return FakeCompleted(0, "", "")
 
     monkeypatch.setattr("scripts.helpers.ci_gate.main.subprocess.run", _fake_run)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.count_collected_tests", lambda *_args, **_kwargs: 2)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.count_collected_tests",
+        lambda *_args, **_kwargs: 2,
+    )
     code = _run_pytest(
         ["tests/regression/scripts/helpers/ci_gate/test_errors.py"],
         marker="not npu and not nightly and not network",
@@ -81,7 +74,9 @@ def test_run_pytest_invokes_subprocess_for_targets(monkeypatch: pytest.MonkeyPat
     assert "pytest" in run_cmd
 
 
-def test_run_pytest_node_targets_filter_via_collect_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_pytest_node_targets_filter_via_collect_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: dict[str, object] = {}
 
     def _fake_collect(targets: list[str], *, marker: str) -> tuple[str, ...]:
@@ -105,7 +100,8 @@ def test_run_pytest_node_targets_filter_via_collect_only(monkeypatch: pytest.Mon
     monkeypatch.setattr("scripts.helpers.ci_gate.main.filter_collectable_node_ids", _fake_collect)
     monkeypatch.setattr("scripts.helpers.ci_gate.main.build_pytest_cmd", _fake_build)
     monkeypatch.setattr(
-        "scripts.helpers.ci_gate.main.subprocess.run", lambda *_args, **_kwargs: FakeCompleted(0, "", "")
+        "scripts.helpers.ci_gate.main.subprocess.run",
+        lambda *_args, **_kwargs: FakeCompleted(0, "", ""),
     )
 
     code = _run_pytest(
@@ -126,16 +122,23 @@ def test_run_pytest_node_targets_filter_via_collect_only(monkeypatch: pytest.Mon
     assert captured["build_marker"] == "not npu"
 
 
-def test_run_pytest_stale_node_targets_skip_wave(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_pytest_stale_node_targets_skip_wave(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     subprocess_calls: list[list[str]] = []
 
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.filter_collectable_node_ids",
         lambda *_args, **_kwargs: (),
     )
+
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        subprocess_calls.append(cmd)
+        return FakeCompleted(0, "", "")
+
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.subprocess.run",
-        lambda cmd, **_kwargs: subprocess_calls.append(cmd) or FakeCompleted(0, "", ""),
+        _fake_run,
     )
 
     code = _run_pytest(
@@ -155,7 +158,8 @@ def test_run_pytest_stale_node_targets_log_skipped(
         lambda *_args, **_kwargs: ("tests/regression/cli/test_a.py::test_a",),
     )
     monkeypatch.setattr(
-        "scripts.helpers.ci_gate.main.subprocess.run", lambda *_args, **_kwargs: FakeCompleted(0, "", "")
+        "scripts.helpers.ci_gate.main.subprocess.run",
+        lambda *_args, **_kwargs: FakeCompleted(0, "", ""),
     )
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.build_pytest_cmd",
@@ -174,18 +178,28 @@ def test_run_pytest_stale_node_targets_log_skipped(
     assert "Skipping non-collectable pytest node(s): tests/regression/cli/test_b.py::test_stale" in caplog.text
 
 
-def test_run_pytest_adds_cov_args_when_requested(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
+def test_run_pytest_adds_cov_args_when_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, tuple[str, ...]] = {}
 
-    def _fake_build(*_args, extra_args: tuple[str, ...] = (), **_kwargs: object) -> list[str]:
+    def _fake_build(
+        *_args: object,
+        extra_args: tuple[str, ...] = (),
+        **_kwargs: object,
+    ) -> list[str]:
         captured["extra_args"] = extra_args
         return ["pytest"]
 
     monkeypatch.setattr("scripts.helpers.ci_gate.main.build_pytest_cmd", _fake_build)
     monkeypatch.setattr(
-        "scripts.helpers.ci_gate.main.subprocess.run", lambda *_args, **_kwargs: FakeCompleted(0, "", "")
+        "scripts.helpers.ci_gate.main.subprocess.run",
+        lambda *_args, **_kwargs: FakeCompleted(0, "", ""),
     )
-    monkeypatch.setattr("scripts.helpers.ci_gate.main._collected_count_for_targets", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main._collected_count_for_targets",
+        lambda *_args, **_kwargs: 1,
+    )
 
     _run_pytest(["tests"], marker="not npu", use_cov=True)
     extra_args = captured["extra_args"]
@@ -197,21 +211,31 @@ def test_run_pytest_adds_cov_args_when_requested(monkeypatch: pytest.MonkeyPatch
 def test_run_pytest_cov_append_passes_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[tuple[str, ...]] = []
 
-    def _fake_build(*_args, extra_args: tuple[str, ...] = (), **_kwargs: object) -> list[str]:
+    def _fake_build(
+        *_args: object,
+        extra_args: tuple[str, ...] = (),
+        **_kwargs: object,
+    ) -> list[str]:
         captured.append(extra_args)
         return ["pytest"]
 
     monkeypatch.setattr("scripts.helpers.ci_gate.main.build_pytest_cmd", _fake_build)
     monkeypatch.setattr(
-        "scripts.helpers.ci_gate.main.subprocess.run", lambda *_args, **_kwargs: FakeCompleted(0, "", "")
+        "scripts.helpers.ci_gate.main.subprocess.run",
+        lambda *_args, **_kwargs: FakeCompleted(0, "", ""),
     )
-    monkeypatch.setattr("scripts.helpers.ci_gate.main._collected_count_for_targets", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main._collected_count_for_targets",
+        lambda *_args, **_kwargs: 1,
+    )
 
     _run_pytest(["tests"], marker="not npu", use_cov=True, cov_append=True)
     assert "--cov-append" in captured[-1]
 
 
-def test_run_pytest_full_suite_marker_uses_not_npu_only(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_pytest_full_suite_marker_uses_not_npu_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured: list[list[str]] = []
 
     def _fake_run(cmd: list[str], **kwargs: object) -> FakeCompleted:
@@ -219,7 +243,10 @@ def test_run_pytest_full_suite_marker_uses_not_npu_only(monkeypatch: pytest.Monk
         return FakeCompleted(0, "", "")
 
     monkeypatch.setattr("scripts.helpers.ci_gate.main.subprocess.run", _fake_run)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.count_collected_tests", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.count_collected_tests",
+        lambda *_args, **_kwargs: 1,
+    )
     code = _run_pytest(["tests"], marker="not npu")
     assert code == 0
     run_cmd = captured[-1]
@@ -234,10 +261,22 @@ def test_main_passes_when_no_gate_work(
     empty_baseline: Baseline,
 ) -> None:
     monkeypatch.setattr("scripts.helpers.ci_gate.main.Config.from_env", lambda: gate_cfg)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda _root, _branch: "abc" * 10)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (empty_baseline, "a" * 40))
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.resolve_base_ref",
+        lambda _root, _branch: "abc" * 10,
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.validate_gate_policy_if_changed",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.assess_test_map_freshness",
+        lambda *_args: TestMapFreshness(),
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.load_baseline",
+        lambda *_args: (empty_baseline, "a" * 40),
+    )
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",
@@ -253,10 +292,22 @@ def test_main_returns_one_on_unmapped_modified_source(
     empty_baseline: Baseline,
 ) -> None:
     monkeypatch.setattr("scripts.helpers.ci_gate.main.Config.from_env", lambda: gate_cfg)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda _root, _branch: "abc" * 10)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (empty_baseline, "a" * 40))
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.resolve_base_ref",
+        lambda _root, _branch: "abc" * 10,
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.validate_gate_policy_if_changed",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.assess_test_map_freshness",
+        lambda *_args: TestMapFreshness(),
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.load_baseline",
+        lambda *_args: (empty_baseline, "a" * 40),
+    )
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     main_line = inspect.getsourcelines(ci_gate_main.main)[1] + 1
     monkeypatch.setattr(
@@ -274,31 +325,48 @@ def test_main_skips_all_exempt_changed_test_file(
     gate_cfg: Config,
 ) -> None:
     monkeypatch.setattr(
-        "scripts.helpers.ci_gate.rules.collect_test_node_ids",
+        "scripts.helpers.ci_gate.rules.collect_all_test_node_ids",
         lambda targets, **_kwargs: tuple(f"{path}::test_case" for path in targets),
     )
     pytest_calls: list[list[str]] = []
+    policy = default_ci_gate_policy()
     baseline = Baseline(
         test_map={},
-        exemptions=(),
-        test_exemptions=(
-            TestExemption(
-                test_id="tests/regression/cli/test_omitted.py::test_case",
-                reason="x",
-                applicant="a",
-                approver="fangkai",
-                deadline=date(2099, 12, 31),
+        policy=policy.__class__(
+            sources=policy.sources,
+            tests=policy.tests,
+            configs=policy.configs,
+            source_exemptions=(),
+            test_exemptions=(
+                TestExemption(
+                    test_id="tests/regression/cli/test_omitted.py::test_case",
+                    reason="x",
+                    applicant="a",
+                    approver="fangkai",
+                    deadline=date(2099, 12, 31),
+                ),
             ),
+            approvers=policy.approvers,
         ),
-        discovery=default_test_discovery(),
-        roots=("cli/", "scripts/"),
     )
 
     monkeypatch.setattr("scripts.helpers.ci_gate.main.Config.from_env", lambda: gate_cfg)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.resolve_base_ref", lambda _root, _branch: "abc" * 10)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_gate_policy_if_changed", lambda *_args: None)
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.load_baseline", lambda *_args: (baseline, "a" * 40))
-    monkeypatch.setattr("scripts.helpers.ci_gate.main.validate_test_map_freshness", lambda *_args: None)
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.resolve_base_ref",
+        lambda _root, _branch: "abc" * 10,
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.validate_gate_policy_if_changed",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.load_baseline",
+        lambda *_args: (baseline, "a" * 40),
+    )
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.main.assess_test_map_freshness",
+        lambda *_args: TestMapFreshness(),
+    )
     monkeypatch.setattr("scripts.helpers.ci_gate.main.fetch_diff", lambda *_args: _empty_diff())
     monkeypatch.setattr(
         "scripts.helpers.ci_gate.main.classify_changes",

@@ -9,7 +9,11 @@ import os
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
-CONFIG_JSON_ALLOW_PATTERNS = ["config.json", "**/config.json"]
+CONFIG_JSON_ALLOW_PATTERNS = [
+    "config.json",
+    "**/config.json",
+    "preprocessor_config.json",
+]
 
 # Weight-like artifacts to skip when a Hub client does not support a stricter
 # config-only allowlist. Keep this in sync with transformer ModelScope loading.
@@ -85,9 +89,12 @@ def _suppress_snapshot_download_output() -> Iterator[None]:
     old_disable_level = logging.root.manager.disable
     logging.disable(logging.WARNING)
     try:
-        with open(os.devnull, "w", encoding="utf-8") as devnull:
-            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-                yield
+        with (
+            open(os.devnull, "w", encoding="utf-8") as devnull,
+            contextlib.redirect_stdout(devnull),
+            contextlib.redirect_stderr(devnull),
+        ):
+            yield
     finally:
         logging.disable(old_disable_level)
 

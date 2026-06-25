@@ -6,8 +6,11 @@ import pytest
 
 from tensor_cast import model_hub
 
-
-EXPECTED_CONFIG_JSON_ALLOW_PATTERNS = ["config.json", "**/config.json"]
+EXPECTED_CONFIG_JSON_ALLOW_PATTERNS = [
+    "config.json",
+    "**/config.json",
+    "preprocessor_config.json",
+]
 
 
 def _install_module(monkeypatch: pytest.MonkeyPatch, name: str, **attrs: object) -> None:
@@ -26,13 +29,20 @@ def test_huggingface_filter_patterns_match_root_and_nested_configs() -> None:
 
     assert list(
         filter_repo_objects(
-            ["config.json", "sub/config.json", "weights.safetensors"],
+            [
+                "config.json",
+                "sub/config.json",
+                "preprocessor_config.json",
+                "weights.safetensors",
+            ],
             allow_patterns=model_hub.CONFIG_JSON_ALLOW_PATTERNS,
         )
-    ) == ["config.json", "sub/config.json"]
+    ) == ["config.json", "sub/config.json", "preprocessor_config.json"]
 
 
-def test_huggingface_config_only_snapshot_uses_allow_patterns(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_huggingface_config_only_snapshot_uses_allow_patterns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def fake_snapshot_download(repo_id: str, **kwargs: object) -> str:
@@ -75,7 +85,9 @@ def test_huggingface_config_only_snapshot_suppresses_snapshot_output(
     assert "snapshot warning" not in caplog.text
 
 
-def test_modelscope_config_only_snapshot_prefers_allow_patterns(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_modelscope_config_only_snapshot_prefers_allow_patterns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def fake_snapshot_download(model_id: str, allow_patterns: object = None) -> str:
@@ -95,7 +107,9 @@ def test_modelscope_config_only_snapshot_prefers_allow_patterns(monkeypatch: pyt
     ]
 
 
-def test_modelscope_config_only_snapshot_supports_allow_file_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_modelscope_config_only_snapshot_supports_allow_file_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def fake_snapshot_download(model_id: str, allow_file_pattern: object = None) -> str:
@@ -185,7 +199,9 @@ def test_modelscope_config_only_snapshot_rejects_versions_without_allowlist(
         model_hub.snapshot_modelscope_config_only("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 
 
-def test_modelscope_without_weights_reuses_ignore_pattern_compatibility(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_modelscope_without_weights_reuses_ignore_pattern_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[str, dict[str, object]]] = []
 
     def fake_snapshot_download(model_id: str, ignore_file_pattern: object = None) -> str:

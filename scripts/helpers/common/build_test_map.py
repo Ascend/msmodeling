@@ -3,24 +3,48 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.ci_gate.diff import resolve_head_commit
-from scripts.helpers.common.ast_utils import iter_qualified_definition_spans, symbol_for_line
+from scripts.helpers.common.ast_utils import (
+    MODULE_SYMBOL,
+    canonical_symbol_for_line,
+    collect_file_symbols,
+)
 from scripts.helpers.common.coverage_config import product_roots
 from scripts.helpers.common.coverage_omit import is_coverage_omitted_source
 from scripts.helpers.common.pytest_runner import PYTEST_IGNORE_ADDOPTS
 
 logger = logging.getLogger(__name__)
 
-UNCLASSIFIED_SYMBOL: Final = "*"
+TEST_MAP_SCHEMA_VERSION: Final = 1
+# test_node -> source_rel_path -> list[canonical_symbol]
+TestMap = dict[str, dict[str, list[str]]]
+
+# Deprecated alias kept for callers that still import the old unclassified token.
+UNCLASSIFIED_SYMBOL: Final = MODULE_SYMBOL
+
+
+class _CoverageDataReader(Protocol):
+    def measured_files(self) -> list[str]: ...
+
+    def contexts_by_lineno(self, filename: str) -> dict[int, list[str]]: ...
+
+    def read(self) -> None: ...
+
+
+def normalize_test_node_id(node_id: str) -> str:
+    """Strip parametrized suffix ``[param]`` and pytest-cov phase suffix ``|run``."""
+    base = node_id.split("|", 1)[0].strip() if node_id else ""
+    return base.split("[", 1)[0] if base else ""
 
 
 def _relative_repo_key(abs_path: str, roots: tuple[str, ...]) -> str | None:
@@ -35,20 +59,15 @@ def _relative_repo_key(abs_path: str, roots: tuple[str, ...]) -> str | None:
 
 
 def _normalize_pytest_context(ctx: str) -> str:
-    """Strip pytest-cov phase suffix ``|run``, ``|setup``, ``|teardown``."""
-    return ctx.split("|", 1)[0].strip() if ctx else ""
+    """Strip pytest-cov phase suffix and parametrized suffix from a coverage context."""
+    return normalize_test_node_id(ctx.split("|", 1)[0].strip() if ctx else "")
 
 
 def _collect_allowed_node_ids(
     marker_expr: str,
     pytest_args: list[str] | None = None,
 ) -> frozenset[str]:
-    """Return node ids from smoke/regression directories matching marker_expr.
-
-    Uses ``pytest --collect-only -q --no-header`` for stable machine-readable
-    output. Strips parameterised suffixes ``[param]`` to match coverage context
-    base node ids.
-    """
+    """Return node ids from smoke/regression directories matching marker_expr."""
     if pytest_args is None:
         pytest_args = [
             sys.executable,
@@ -78,18 +97,17 @@ def _collect_allowed_node_ids(
     for line in proc.stdout.splitlines():
         stripped = line.strip()
         if "::" in stripped and stripped.startswith("tests/"):
-            base_id = stripped.split("[", 1)[0]
-            node_ids.add(base_id)
+            node_ids.add(normalize_test_node_id(stripped))
     return frozenset(node_ids)
 
 
 def _accumulate_measured_file(
     measured: str,
     *,
-    data: object,
+    data: _CoverageDataReader,
     allowed_node_ids: frozenset[str],
     resolved_roots: tuple[str, ...],
-    by_file: dict[str, dict[str, dict[str, int]]],
+    by_test: dict[str, dict[str, set[str]]],
 ) -> None:
     key = _relative_repo_key(measured, resolved_roots)
     if key is None or is_coverage_omitted_source(key, resolved_roots):
@@ -98,28 +116,25 @@ def _accumulate_measured_file(
     if not ctxmap:
         return
 
-    spans = iter_qualified_definition_spans(Path(measured).resolve())
+    file_symbols = collect_file_symbols(Path(measured).resolve())
     for line_no, ctxs in ctxmap.items():
-        sym = symbol_for_line(spans, line_no)
-        bucket = sym if sym is not None else UNCLASSIFIED_SYMBOL
+        sym = canonical_symbol_for_line(file_symbols, line_no)
         for ctx in ctxs:
             nid = _normalize_pytest_context(ctx)
             if nid and nid in allowed_node_ids:
-                by_file[key][bucket][nid] += 1
+                by_test[nid][key].add(sym)
 
 
-def _finalize_coverage_by_file(
-    by_file: dict[str, dict[str, dict[str, int]]],
-) -> dict[str, dict[str, list[str]]]:
-    result: dict[str, dict[str, list[str]]] = {}
-    for fp, syms in sorted(by_file.items()):
+def _finalize_test_map(by_test: dict[str, dict[str, set[str]]]) -> TestMap:
+    result: TestMap = {}
+    for test_node, sources in sorted(by_test.items()):
         filtered: dict[str, list[str]] = {}
-        for sym, test_lines in sorted(syms.items()):
-            kept = sorted(nid for nid, count in test_lines.items() if count)
+        for src_file, symbols in sorted(sources.items()):
+            kept = sorted(symbols)
             if kept:
-                filtered[sym] = kept
+                filtered[src_file] = kept
         if filtered:
-            result[fp] = filtered
+            result[test_node] = filtered
     return result
 
 
@@ -128,14 +143,17 @@ def collect_from_coverage(
     *,
     coverage_path: Path | None = None,
     roots: tuple[str, ...] | None = None,
-) -> dict[str, dict[str, list[str]]]:
-    """Read .coverage data, resolve symbols, return {rel_path: {symbol: [test_ids]}}.
+) -> TestMap:
+    """Read .coverage data and return ``test_node -> source_file -> [symbols]``."""
+    try:
+        coverage_data_mod = importlib.import_module("coverage.data")
+        coverage_misc_mod = importlib.import_module("coverage.misc")
+    except ImportError:
+        logger.warning("coverage package not installed")
+        return {}
 
-    Returns empty dict if coverage data is missing or unreadable — logs warning
-    to stderr so caller can distinguish "no data" from "empty map".
-    """
-    from coverage.data import CoverageData
-    from coverage.misc import CoverageException
+    coverage_data_cls = coverage_data_mod.CoverageData
+    coverage_exception_cls = coverage_misc_mod.CoverageException
 
     if coverage_path is None:
         coverage_path = REPO_ROOT / ".coverage"
@@ -145,52 +163,63 @@ def collect_from_coverage(
         logger.warning("Coverage data not found: %s", coverage_path)
         return {}
 
-    data = CoverageData(str(coverage_path))
+    data: _CoverageDataReader = coverage_data_cls(str(coverage_path))
     try:
         data.read()
-    except CoverageException as exc:
+    except coverage_exception_cls as exc:
         logger.warning("Failed to read coverage data: %s", exc)
         return {}
     except OSError as exc:
         logger.warning("Coverage data file error: %s", exc)
         return {}
 
-    by_file: dict[str, dict[str, dict[str, int]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    by_test: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
     for measured in data.measured_files():
         _accumulate_measured_file(
             measured,
             data=data,
             allowed_node_ids=allowed_node_ids,
             resolved_roots=resolved_roots,
-            by_file=by_file,
+            by_test=by_test,
         )
 
-    return _finalize_coverage_by_file(by_file)
+    return _finalize_test_map(by_test)
 
 
-def _prune_missing_source_keys(
-    mapping: dict[str, dict[str, list[str]]],
-) -> dict[str, dict[str, list[str]]]:
-    """Drop product paths that no longer exist on disk."""
-    return {source_path: symbols for source_path, symbols in mapping.items() if (REPO_ROOT / source_path).is_file()}
+def _prune_missing_source_keys(mapping: TestMap) -> TestMap:
+    """Drop source paths that no longer exist on disk."""
+    pruned: TestMap = {}
+    for test_node, sources in mapping.items():
+        kept = {src: syms for src, syms in sources.items() if (REPO_ROOT / src).is_file()}
+        if kept:
+            pruned[test_node] = kept
+    return pruned
 
 
-def write_test_map(output_path: Path, mapping: dict[str, dict[str, list[str]]]) -> None:
+def write_test_map(
+    output_path: Path,
+    mapping: TestMap,
+    *,
+    built_from_commit: str | None = None,
+) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    commit = built_from_commit if built_from_commit is not None else resolve_head_commit(REPO_ROOT)
     payload = {
-        "schema_version": 1,
-        "built_from_commit": resolve_head_commit(REPO_ROOT),
+        "schema_version": TEST_MAP_SCHEMA_VERSION,
+        "built_from_commit": commit,
         "map": mapping,
     }
     output_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    symbol_count = sum(len(syms) for syms in mapping.values())
+    source_files = {src for sources in mapping.values() for src in sources}
+    symbol_count = sum(len(syms) for sources in mapping.values() for syms in sources.values())
     logger.info(
-        "test_map written: %s (%d source files, %d symbols)",
+        "test_map written: %s (%d test nodes, %d source files, %d symbol entries)",
         output_path,
         len(mapping),
+        len(source_files),
         symbol_count,
     )
 
@@ -205,8 +234,7 @@ def build_test_map(
 ) -> None:
     allowed = allowed_node_ids if allowed_node_ids is not None else _collect_allowed_node_ids(marker_expr)
     mapping = collect_from_coverage(allowed, coverage_path=coverage_path, roots=roots)
-    mapping = _prune_missing_source_keys(mapping)
-    write_test_map(output_path, mapping)
+    write_test_map(output_path, _prune_missing_source_keys(mapping))
 
 
 def collect_test_map(
@@ -215,51 +243,51 @@ def collect_test_map(
     coverage_path: Path | None = None,
     roots: tuple[str, ...] | None = None,
     allowed_node_ids: frozenset[str] | None = None,
-) -> dict[str, dict[str, list[str]]]:
-    """Return test_map dict in memory — no file I/O.
-
-    Same logic as build_test_map but returns the mapping directly.
-    """
+) -> TestMap:
+    """Return test_map dict in memory — no file I/O."""
     allowed = allowed_node_ids if allowed_node_ids is not None else _collect_allowed_node_ids(marker_expr)
     mapping = collect_from_coverage(allowed, coverage_path=coverage_path, roots=roots)
     return _prune_missing_source_keys(mapping)
 
 
+def _qualified_symbol(src_file: str, symbol: str) -> str:
+    return f"{src_file}::{symbol}"
+
+
 def _index_redundancy_mapping(
-    mapping: dict[str, dict[str, list[str]]],
+    mapping: TestMap,
 ) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     test_to_symbols: dict[str, set[str]] = defaultdict(set)
     symbol_to_tests: dict[str, set[str]] = defaultdict(set)
-    for src_file, symbols in mapping.items():
-        for sym, test_ids in symbols.items():
-            if sym == UNCLASSIFIED_SYMBOL:
-                continue
-            qualified = f"{src_file}::{sym}"
-            for tid in test_ids:
-                test_to_symbols[tid].add(qualified)
-                symbol_to_tests[qualified].add(tid)
+    for test_node, sources in mapping.items():
+        for src_file, symbols in sources.items():
+            for sym in symbols:
+                if sym == MODULE_SYMBOL:
+                    continue
+                qualified = _qualified_symbol(src_file, sym)
+                test_to_symbols[test_node].add(qualified)
+                symbol_to_tests[qualified].add(test_node)
     return test_to_symbols, symbol_to_tests
 
 
 def _over_covered_symbol_warnings(
-    mapping: dict[str, dict[str, list[str]]],
+    symbol_to_tests: dict[str, set[str]],
     *,
     max_per_symbol: int,
 ) -> list[dict[str, object]]:
     warnings: list[dict[str, object]] = []
-    for src_file, symbols in mapping.items():
-        for sym, test_ids in symbols.items():
-            if sym == UNCLASSIFIED_SYMBOL or len(test_ids) <= max_per_symbol:
-                continue
-            warnings.append(
-                {
-                    "type": "over_covered_symbol",
-                    "symbol": f"{src_file}::{sym}",
-                    "test_count": len(test_ids),
-                    "threshold": max_per_symbol,
-                    "tests": sorted(test_ids),
-                }
-            )
+    for qualified, test_nodes in sorted(symbol_to_tests.items()):
+        if len(test_nodes) <= max_per_symbol:
+            continue
+        warnings.append(
+            {
+                "type": "over_covered_symbol",
+                "symbol": qualified,
+                "test_count": len(test_nodes),
+                "threshold": max_per_symbol,
+                "tests": sorted(test_nodes),
+            }
+        )
     return warnings
 
 
@@ -300,22 +328,14 @@ def _redundant_pair_warnings(
 
 
 def detect_redundant_cases(
-    mapping: dict[str, dict[str, list[str]]],
+    mapping: TestMap,
     *,
     jaccard_threshold: float = 0.85,
     max_per_symbol: int = 5,
 ) -> list[dict[str, object]]:
-    """Return redundancy warnings from a test_map.
-
-    Two checks:
-    1. Symbols covered by more than *max_per_symbol* test cases.
-    2. Pairs of test cases whose covered-symbol sets have Jaccard similarity
-       >= *jaccard_threshold*.
-
-    Returns a list of warning dicts suitable for nightly report inclusion.
-    """
+    """Return redundancy warnings from a test-node keyed test_map."""
     test_to_symbols, symbol_to_tests = _index_redundancy_mapping(mapping)
-    warnings = _over_covered_symbol_warnings(mapping, max_per_symbol=max_per_symbol)
+    warnings = _over_covered_symbol_warnings(symbol_to_tests, max_per_symbol=max_per_symbol)
     warnings.extend(
         _redundant_pair_warnings(
             test_to_symbols,
@@ -324,3 +344,7 @@ def detect_redundant_cases(
         )
     )
     return warnings
+
+
+collect_allowed_node_ids = _collect_allowed_node_ids
+prune_missing_source_keys = _prune_missing_source_keys
