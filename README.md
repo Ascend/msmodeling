@@ -4,7 +4,7 @@
 <p><b><span style="font-size:24px;">昇腾 AI 模型性能建模与仿真工具</span></b></p>
 
  [![快速入门](https://badgen.net/badge/快速入门/QuickStart/blue)](./docs/zh/quick_start/tensorcast_serving_cast_quick_start.md)
- [![AI问答(DeepWiki)](https://badgen.net/badge/AI问答/DeepWiki/blue)](https://deepwiki.com/mindstudio-docs/master)
+ [![AI问答(DeepWiki)](https://badgen.net/badge/AI问答/DeepWiki/blue)](https://deepwiki.com/Ascend/msmodeling)
  [![AI问答(ZRead)](https://badgen.net/badge/AI问答/ZRead/blue)](https://zread.ai/mindstudio-docs/master)
  [![精确搜索](https://badgen.net/badge/精确搜索/ReadTheDocs/blue)](https://mindstudio-docs-master.readthedocs.io)
  [![昇腾社区](https://badgen.net/badge/昇腾社区/Community/blue)](https://www.hiascend.com/cn/developer/software/mindstudio)
@@ -16,7 +16,7 @@
 
 <span style="font-size:14px;">
 
-🔹 **[2026.06.10]**：msModeling 新增 **DeepSeek-V4** 模型支持
+🔹 **[2026.06.10]**：msModeling 新增 **DeepSeek-V4** 模型支持  
 🔹 **[2026.04.02]**：msModeling 新增 **GLM5** 模型支持
 
 </span>
@@ -59,9 +59,9 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 ## 🌌 智能检索
 
-为提升文档查阅效率，我们提供多种高效检索方式：
-🔹 [AI 问答（DeepWiki）](https://deepwiki.com/mindstudio-docs/master)：自然语言问答，快速把握项目架构与模块关系。
-🔹 [AI 问答（ZRead）](https://zread.ai/mindstudio-docs/master)：中文问答体验更优，精准定位功能用法与细节。
+为提升文档查阅效率，我们提供多种高效检索方式：  
+🔹 [AI 问答（DeepWiki）](https://deepwiki.com/Ascend/msmodeling)：自然语言问答，快速把握项目架构与模块关系。  
+🔹 [AI 问答（ZRead）](https://zread.ai/mindstudio-docs/master)：中文问答体验更优，精准定位功能用法与细节。  
 🔹 [精确搜索（ReadTheDocs）](https://mindstudio-docs-master.readthedocs.io)：关键词全文检索，直达接口、参数与报错等信息。
 
 ## 🛠️ 贡献指南
@@ -70,9 +70,9 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 ## ⚖️ 相关说明
 
-🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》
-🔹 《[许可证声明](./LICENSE)》
-🔹 《[安全声明](https://www.hiascend.com/)》
+🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》  
+🔹 《[许可证声明](./LICENSE)》  
+🔹 《[安全声明](https://www.hiascend.com/)》  
 🔹 免责声明：本工具仿真与优化结果仅供性能评估参考，最终性能表现请以真实环境实测为准
 
 ## 🤝 建议与交流
@@ -87,7 +87,11 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 ## 🙏 致谢
 
-本工具由华为公司的下列部门联合贡献：
-🔹 昇腾计算 MindStudio 开发部
-🔹 昇腾计算生态使能部
+本工具由以下公司/部门联合贡献：  
+🔹 华为昇腾计算产品线 MindStudio 开发部  
+🔹 华为昇腾计算生态使能部  
+🔹 蚂蚁科技集团股份有限公司  
+🔹 腾讯科技（深圳）有限公司  
+🔹 AI Workload 项目组（马尔科夫团队）
+
 感谢来自社区的每一个 PR，欢迎贡献！

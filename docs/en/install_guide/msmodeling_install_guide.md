@@ -9,7 +9,7 @@ After reading this guide, you will be able to set up the development environment
 ### 1. Clone the Repository
 
 ```bash
-git clone https://gitcode.com/Ascend/msmodeling.git -b develop
+git clone https://gitcode.com/Ascend/msmodeling.git
 cd msmodeling
 ```
 
