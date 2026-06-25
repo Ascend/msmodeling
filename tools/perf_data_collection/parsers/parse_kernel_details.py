@@ -626,17 +626,7 @@ class KernelDetailsParser:
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=(
-            "Parse profiling data and split it into operator CSV files.\n\n"
-            "Required parameters:\n"
-            "  --profiling-path    Path to a kernel_details*.csv file or a profiling directory.\n\n"
-            "Optional parameters:\n"
-            "  --database-path     Explicit output database directory.\n"
-            "  --device            Device folder name when inferring the database path.\n"
-            "  --vllm-version      vLLM version or full version-dir name when inferring the database path.\n"
-            "  --torch-version     PyTorch version used to build the version-dir name.\n"
-            "  --cann-version      CANN version used to build the version-dir name."
-        ),
+        description="Parse profiling data and split it into operator CSV files.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(

@@ -75,4 +75,17 @@ exemptions:
       approver: liujiawang
       deadline: 2026-12-31
       ticket: deepseek-v4-ci-gate
-  tests: []
+
+  tests:
+    - symbols:
+        - tests/regression/cli/test_generate_comm_microbench.py::test_run_bench_kernel_no_sync_returns_positive_duration
+        - tests/regression/cli/test_generate_comm_microbench.py::test_run_bench_kernel_leader_returns_positive_duration
+        - tests/regression/cli/test_generate_comm_microbench.py::test_run_bench_event_returns_positive_duration
+        - tests/regression/cli/test_generate_comm_microbench.py::test_run_bench_profiler_batch_large_msg
+        - tests/regression/cli/test_generate_comm_microbench.py::test_run_bench_profiler_batch_small_msg
+        - tests/regression/cli/test_generate_comm_microbench.py::test_run_benchmark_kernel_mode_writes_csv
+      reason: "The CI environment does not support the execution of torch_npu test cases"
+      applicant: zhenghaojie
+      approver: liujiawang
+      deadline: 2026-12-31
+      ticket: "PR-412"

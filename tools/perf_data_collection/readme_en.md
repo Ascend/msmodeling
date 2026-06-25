@@ -174,6 +174,11 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 | `--cann-version` | No | — | CANN version when deriving the path. |
 | `--ops` | No | all supported ops | Restrict replay to specific operator names. |
 | `--dispatch-ffn-combine-ep-size` | No | `16` | EP size for `DispatchFFNCombine` replay and row matching. |
+| `--dispatch-ffn-combine-nproc-per-node` | No | — | Number of processes per node for `torchrun`, a configuration parameter for replaying the `DispatchFFNCombine` operator with msprof. |
+| `--dispatch-ffn-combine-nnodes` | No | `1` | Number of nodes for `torchrun`, a configuration parameter for replaying the `DispatchFFNCombine` operator with msprof. |
+| `--dispatch-ffn-combine-node-rank` | No | `0` | Rank of the current node for `torchrun`, a configuration parameter for replaying the `DispatchFFNCombine` operator with msprof. |
+| `--dispatch-ffn-combine-master-addr` | No | `127.0.0.1` | Master address for `torchrun`, a configuration parameter for replaying the `DispatchFFNCombine` operator with msprof. |
+| `--dispatch-ffn-combine-master-port` | No | — | Master port for `torchrun`, a configuration parameter for replaying the `DispatchFFNCombine` operator with msprof.|
 | `--repeat-count` | No | `1` | Replay repeat count forwarded to `run_all_op.py`. |
 | `--update-mode` | No | `all` | `all` updates all matched rows; `missing-only` fills rows without valid durations. |
 | `--fail-fast` | No | `false` | Stop immediately when one replay script fails. |
@@ -276,7 +281,6 @@ python tools/perf_data_collection/op_replay/MatMulV2_run.py \
 | `--dtype` | No | `torch.bfloat16` | Communication tensor dtype. |
 | `--bytes-grid` | No | built-in grid | Custom `message_bytes` list. |
 | `--output-csv` | No | — | Single CSV output path; only valid with one `--ops` value. |
-| `--bench-mode` | No | `kernel` | `kernel` uses profiler stats; `event` uses NPU event timing. |
 
 Direct collection example (`ATLAS_800_A3_752T_128G_DIE`, `grid-shape 48 8 2`):
 
@@ -323,7 +327,7 @@ Variables commonly used under `tools/perf_data_collection/`. Replay repeat count
 | `ASCEND_HOME_PATH` / `ASCEND_TOOLKIT_HOME` / `ASCEND_TOOLKIT_HOME_PATH` / `ASCEND_INSTALL_PATH` | auto-detected | CANN install root and version detection. |
 | `MASTER_ADDR` / `MASTER_PORT` / `RANK` / `WORLD_SIZE` / `LOCAL_RANK` | injected by `torchrun` | Distributed launch for comm bench / DFC replay. |
 
-Full cross-module list: [Environment Variables](../../tests/README.md#environment-variables).
+Full cross-module list: [Environment Variables](../../tests/README.md).
 
 Custom OPP example:
 

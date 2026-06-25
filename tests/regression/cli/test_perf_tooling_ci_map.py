@@ -50,13 +50,10 @@ start_microbench = importlib.import_module("start_microbench")
 
 def test_modified_perf_cli_policy_symbols_are_covered():
     parser = build_comm_microbench_argparser()
-    args = parser.parse_args(["--database-path", "db", "--bench-mode", "event"])
+    args = parser.parse_args(["--database-path", "db"])
 
     assert args.database_path == "db"
-    assert args.bench_mode == "event"
     assert not hasattr(args, "run")
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--do-run"])
 
     assert get_replay_repeat_count(3) == 3
     assert get_replay_repeat_count(None) == DEFAULT_REPLAY_REPEAT_COUNT

@@ -22,6 +22,7 @@ import csv
 import inspect
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -553,9 +554,9 @@ class TestMainKernelPath:
         return inspect.getsource(mod.main)  # pylint: disable=no-member
 
     def test_kernel_branch_exists(self):
-        """main() must have an explicit 'bench_mode == kernel' branch."""
-        assert 'bench_mode == "kernel"' in self._main_source(), (
-            "main() must have an explicit kernel branch to avoid per-point profiler restart (CANN constraint)"
+        """main() must have an explicit NPU branch via _has_torch_npu()."""
+        assert "_has_torch_npu()" in self._main_source(), (
+            "main() must use _has_torch_npu() to gate the NPU profiler path (CANN constraint)"
         )
 
     def test_kernel_branch_uses_parse_kernel_fn(self):
@@ -577,6 +578,130 @@ class TestMainKernelPath:
 
 
 # ---------------------------------------------------------------------------
+# _has_torch_npu
+# ---------------------------------------------------------------------------
+def test_has_torch_npu_returns_false_without_torch_npu():
+    """_has_torch_npu must return False when torch_npu is not importable."""
+    from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
+        _has_torch_npu,
+    )
+
+    def _mock_import(name, *args, **kwargs):
+        if name == "torch_npu":
+            raise ImportError
+        return mock.DEFAULT
+
+    with mock.patch("builtins.__import__", side_effect=_mock_import):
+        assert _has_torch_npu() is False
+
+
+# ---------------------------------------------------------------------------
+# _iter_configs
+# ---------------------------------------------------------------------------
+class TestIterConfigs:
+    """Verify config generation produces the expected (op, msg, nd, tier, ranks) tuples."""
+
+    GRID = [48, 8, 2]
+    OPS = ["all_reduce", "all_gather"]
+    BYTES_GRID = [1024, 65536, 1048576]
+
+    def test_generates_all_combinations(self):
+        from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
+            _iter_configs,
+        )
+
+        configs = _iter_configs(
+            self.OPS,
+            [16],
+            topology_tiers=[1],
+            grid_shape=self.GRID,
+            bytes_grid=self.BYTES_GRID,
+        )
+        # 2 ops x 1 nd x 1 tier x 3 msg sizes = 6 configs
+        assert len(configs) == 6
+
+        types = {c[0] for c in configs}
+        assert types == {"all_reduce", "all_gather"}
+
+        tiers = {c[3] for c in configs}
+        assert tiers == {1}
+
+    def test_auto_resolve_tier(self):
+        from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
+            _iter_configs,
+        )
+
+        configs = _iter_configs(
+            self.OPS,
+            [16],
+            topology_tiers=None,
+            grid_shape=self.GRID,
+            bytes_grid=self.BYTES_GRID,
+        )
+        assert len(configs) > 0
+        # nd=16 in grid [48,8,2] -> ranks 0..15 -> tier 1 (intra_pod)
+        for _, _, _, tier, _ in configs:
+            assert tier == 1
+
+    def test_auto_resolve_with_small_group_tier2(self):
+        from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
+            _iter_configs,
+        )
+
+        configs = _iter_configs(
+            self.OPS,
+            [2],
+            topology_tiers=None,
+            grid_shape=self.GRID,
+            bytes_grid=self.BYTES_GRID,
+        )
+        assert len(configs) > 0
+        # nd=2 in grid [48,8,2] -> ranks 0..1 -> tier 2 (die_level)
+        for _, _, _, tier, _ in configs:
+            assert tier == 2
+
+    def test_multiple_num_devices_and_tiers(self):
+        from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
+            _iter_configs,
+        )
+
+        configs = _iter_configs(
+            ["all_reduce"],
+            [16, 2],
+            topology_tiers=[1, 2],
+            grid_shape=self.GRID,
+            bytes_grid=[1024, 65536],
+        )
+        # nd=16 at tier=2 exceeds span (2 dies) -> skipped
+        # 1 op x ((2 msg x 1 valid tier for nd=16) + (2 msg x 2 tiers for nd=2))
+        # = 2 + 4 = 6 configs
+        assert len(configs) == 6
+
+        nd_tier_pairs = {(c[2], c[3]) for c in configs}
+        assert (16, 1) in nd_tier_pairs
+        assert (2, 2) in nd_tier_pairs
+
+    def test_skips_unreachable_group(self, capsys):
+        from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
+            _iter_configs,
+        )
+
+        # nd=4 at tier=2 exceeds span (2 dies), should skip with warning
+        configs = _iter_configs(
+            ["all_reduce"],
+            [4],
+            topology_tiers=[2],
+            grid_shape=self.GRID,
+            bytes_grid=[1024],
+        )
+        assert len(configs) == 0  # nd=4 > 2 dies -> skipped
+
+        stderr = capsys.readouterr().err
+        assert "WARNING" in stderr
+        assert "exceeds span size" in stderr
+
+
+# ---------------------------------------------------------------------------
 # CLI arguments
 # ---------------------------------------------------------------------------
 def test_build_argparser_exposes_database_path_and_removes_legacy_flags():
@@ -585,10 +710,10 @@ def test_build_argparser_exposes_database_path_and_removes_legacy_flags():
     )
 
     parser = build_argparser()
-    args = parser.parse_args(["--database-path", "db", "--bench-mode", "event"])
+    args = parser.parse_args(["--database-path", "db"])
 
     assert args.database_path == "db"
-    assert args.bench_mode == "event"
+    assert not hasattr(args, "bench_mode")
     assert not hasattr(args, "run")
     with pytest.raises(SystemExit):
         parser.parse_args(["--output-dir", "db"])
@@ -616,8 +741,6 @@ class TestCommMicrobenchCli:
                 "48",
                 "8",
                 "2",
-                "--bench-mode",
-                "event",
             ]
         )
 
@@ -625,7 +748,7 @@ class TestCommMicrobenchCli:
         assert args.ops == ["all_reduce"]
         assert args.num_devices == [16, 2]
         assert args.grid_shape == [48, 8, 2]
-        assert args.bench_mode == "event"
+        assert not hasattr(args, "bench_mode")
         assert not hasattr(args, "run")
         with pytest.raises(SystemExit):
             parser.parse_args(["--output-dir", "db"])
@@ -899,3 +1022,316 @@ class TestRunCommBenchShellMultiNode:
         ports = [a.split("=", 1)[1] for c in calls for a in c if a.startswith("--master_port=")]
         # Round i (i=1..3) -> base + i, distinct and ordered.
         assert ports == ["30001", "30002", "30003"], ports
+
+
+class TestMainControlFlow:
+    """Verify main() dispatches to the correct branch and calls expected helpers.
+
+    The NPU path (``if _has_torch_npu():``) uses
+    ``_run_bench_profiler_batch`` and splits messages by size.
+    The CPU path (``else:``) uses ``run_benchmark(bench_mode="event")``.
+
+    All tests mock ``torch.distributed`` functions directly to avoid
+    requiring a torchrun environment, and use synthetic ``_iter_configs``
+    output to control what configs are processed.
+    """
+
+    SMALL_BYTES = 65536
+    LARGE_BYTES = 1048576
+
+    @staticmethod
+    def _patch_dist():
+        """Patch torch.distributed functions for single-process testing.
+
+        Returns (context_manager, mock_dist) where mock_dist is the
+        torch.distributed module with patched functions.
+        """
+        import torch.distributed as dist_module
+
+        initialized = [False]
+
+        def _init_pg(*args, **kwargs):
+            initialized[0] = True
+
+        def _is_init():
+            return initialized[0]
+
+        return mock.patch.multiple(
+            dist_module,
+            is_initialized=mock.MagicMock(side_effect=_is_init),
+            init_process_group=mock.MagicMock(side_effect=_init_pg),
+            get_rank=mock.MagicMock(return_value=0),
+            get_world_size=mock.MagicMock(return_value=1),
+            new_group=mock.MagicMock(return_value=mock.MagicMock()),
+            barrier=mock.MagicMock(return_value=None),
+            destroy_process_group=mock.MagicMock(return_value=None),
+        )
+
+    @staticmethod
+    def _make_configs(ops=None, num_devices=16, bytes_list=None):
+        """Build synthetic _iter_configs output.
+
+        Returns list of (op_type, msg_bytes, nd, tier, group_ranks) tuples.
+        """
+        ops = ops or ["all_reduce"]
+        bytes_list = bytes_list or [65536]
+        configs = []
+        for op in ops:
+            group_ranks = list(range(num_devices))
+            for mb in bytes_list:
+                configs.append((op, mb, num_devices, 1, group_ranks))
+        return configs
+
+    def test_cpu_fallback_calls_run_benchmark(self):
+        """When _has_torch_npu()=False, CPU path calls run_benchmark(bench_mode="event")."""
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        configs = self._make_configs(bytes_list=[self.SMALL_BYTES])
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=False),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser"),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark") as mock_run,
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+        ):
+            mod.main()
+
+            assert mock_run.call_count == 2 * len(configs), (
+                f"Expected {2 * len(configs)} calls, got {mock_run.call_count}"
+            )
+            for call_args in mock_run.call_args_list:
+                assert call_args.kwargs["bench_mode"] == "event"
+
+    def test_cpu_fallback_passes_correct_csv(self):
+        """CPU fallback passes _csv_for_op result as output_csv to run_benchmark."""
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        configs = self._make_configs(bytes_list=[self.SMALL_BYTES])
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=False),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser"),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark") as mock_run,
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+        ):
+            mod.main()
+
+            for i, call_args in enumerate(mock_run.call_args_list):
+                assert call_args.kwargs["bench_mode"] == "event"
+                if i < len(configs):
+                    assert call_args.kwargs["output_csv"] is None
+
+    # ------------------------------------------------------------------
+    # NPU path (if _has_torch_npu() branch)
+    # ------------------------------------------------------------------
+
+    def test_npu_path_calls_profiler_batch_for_small_msgs(self):
+        """NPU path with small messages uses _run_bench_profiler_batch."""
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        parser = mod.build_argparser()
+        args = parser.parse_args(["--ops", "all_reduce", "--num-devices", "16"])
+        configs = self._make_configs(bytes_list=[self.SMALL_BYTES])
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=True),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser", return_value=parser),
+            mock.patch.object(parser, "parse_args", return_value=args),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark"),
+            mock.patch.object(mod, "_run_bench_profiler_batch", return_value={self.SMALL_BYTES: 100.0}),
+            mock.patch.object(mod, "_append_csv"),
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+            mock.patch("torch.npu", create=True),
+            mock.patch.dict("sys.modules", {"torch_npu": mock.MagicMock()}),
+        ):
+            mod.main()
+
+            mod._run_bench_profiler_batch.assert_called_once()  # pylint: disable=no-member
+            pos_args, kw_args = mod._run_bench_profiler_batch.call_args  # pylint: disable=no-member
+            assert pos_args[0] == "all_reduce"
+            assert self.SMALL_BYTES in pos_args[1]
+            assert kw_args["parse_fn"] is not None
+            assert kw_args["no_sync"] is True
+
+    def test_npu_path_calls_profiler_batch_for_large_msgs(self):
+        """NPU path with large messages uses per-msg _run_bench_profiler_batch sessions."""
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        configs = self._make_configs(bytes_list=[self.LARGE_BYTES])
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=True),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser"),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark"),
+            mock.patch.object(mod, "_run_bench_profiler_batch", return_value={self.LARGE_BYTES: 500.0}),
+            mock.patch.object(mod, "_append_csv"),
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+            mock.patch("torch.npu", create=True),
+            mock.patch.dict("sys.modules", {"torch_npu": mock.MagicMock()}),
+        ):
+            mod.main()
+
+            expected_calls = mod.PROFILER_LARGE_MSG_SESSIONS
+            assert mod._run_bench_profiler_batch.call_count >= expected_calls  # pylint: disable=no-member
+
+    def test_npu_path_mixed_small_and_large(self):
+        """NPU path processes small msgs in batch and large msgs per-session."""
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        configs = self._make_configs(
+            bytes_list=[self.SMALL_BYTES, self.LARGE_BYTES],
+        )
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=True),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser"),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark"),
+            mock.patch.object(
+                mod, "_run_bench_profiler_batch", return_value={self.SMALL_BYTES: 100.0, self.LARGE_BYTES: 500.0}
+            ),
+            mock.patch.object(mod, "_append_csv"),
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+            mock.patch("torch.npu", create=True),
+            mock.patch.dict("sys.modules", {"torch_npu": mock.MagicMock()}),
+        ):
+            mod.main()
+
+            expected_batch_calls = 1 + mod.PROFILER_LARGE_MSG_SESSIONS
+            assert mod._run_bench_profiler_batch.call_count >= expected_batch_calls  # pylint: disable=no-member
+
+    def test_npu_path_writes_csv_for_small_msgs(self):
+        """NPU path writes CSV via _append_csv for small msg results."""
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        configs = self._make_configs(bytes_list=[self.SMALL_BYTES])
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=True),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser"),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark"),
+            mock.patch.object(mod, "_run_bench_profiler_batch", return_value={self.SMALL_BYTES: 100.0}),
+            mock.patch.object(mod, "_append_csv") as mock_append,
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+            mock.patch("torch.npu", create=True),
+            mock.patch.dict("sys.modules", {"torch_npu": mock.MagicMock()}),
+        ):
+            mod.main()
+
+            mock_append.assert_called()
+            args_call, _ = mock_append.call_args
+            row = args_call[1]
+            assert row["Duration(us)"] == 100.0
+            assert row["message_bytes"] == self.SMALL_BYTES
+
+    def test_npu_path_writes_csv_for_large_msgs(self):
+        """NPU path writes CSV via _append_csv for large msg results."""
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        configs = self._make_configs(bytes_list=[self.LARGE_BYTES])
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=True),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser"),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark"),
+            mock.patch.object(mod, "_run_bench_profiler_batch", return_value={self.LARGE_BYTES: 500.0}),
+            mock.patch.object(mod, "_append_csv") as mock_append,
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+            mock.patch("torch.npu", create=True),
+            mock.patch.dict("sys.modules", {"torch_npu": mock.MagicMock()}),
+        ):
+            mod.main()
+
+            mock_append.assert_called()
+            args_call, _ = mock_append.call_args
+            row = args_call[1]
+            assert row["Duration(us)"] == 500.0
+            assert row["message_bytes"] == self.LARGE_BYTES
+
+    def test_npu_path_calls_dist_barrier(self):
+        """NPU path calls dist.barrier() at the end of each batch."""
+        import torch.distributed as dist_module
+
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        configs = self._make_configs(bytes_list=[self.SMALL_BYTES])
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=True),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser"),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark"),
+            mock.patch.object(mod, "_run_bench_profiler_batch", return_value={self.SMALL_BYTES: 100.0}),
+            mock.patch.object(mod, "_append_csv"),
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+            mock.patch("torch.npu", create=True),
+            mock.patch.dict("sys.modules", {"torch_npu": mock.MagicMock()}),
+        ):
+            mod.main()
+
+            dist_module.barrier.assert_called()
+
+    def test_npu_path_calls_destroy_process_group(self):
+        """NPU path calls dist.destroy_process_group() at the end."""
+        import torch.distributed as dist_module
+
+        from tools.perf_data_collection.comm_bench import (
+            generate_comm_microbench as mod,
+        )
+
+        configs = self._make_configs(bytes_list=[self.SMALL_BYTES])
+
+        with (
+            self._patch_dist(),
+            mock.patch.object(mod, "_has_torch_npu", return_value=True),
+            mock.patch.object(mod, "_iter_configs", return_value=configs),
+            mock.patch.object(mod, "build_argparser"),
+            mock.patch.object(mod, "print_logo"),
+            mock.patch.object(mod, "run_benchmark"),
+            mock.patch.object(mod, "_run_bench_profiler_batch", return_value={self.SMALL_BYTES: 100.0}),
+            mock.patch.object(mod, "_append_csv"),
+            mock.patch("sys.exit", side_effect=SystemExit(1)),
+            mock.patch("torch.npu", create=True),
+            mock.patch.dict("sys.modules", {"torch_npu": mock.MagicMock()}),
+        ):
+            mod.main()
+
+            dist_module.destroy_process_group.assert_called_once()

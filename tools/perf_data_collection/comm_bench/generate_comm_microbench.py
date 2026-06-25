@@ -25,11 +25,6 @@ Usage examples:
         --database-path ./hccl_data \\
         --ops all_reduce all_gather reduce_scatter all_to_all \\
         --grid-shape 48 8 2 --num-devices 16 2
-
-    # Run with event mode (fast, hcom_kernel only)
-    torchrun --nproc_per_node=16 generate_comm_microbench.py \\
-        --bench-mode event --database-path ./hccl_data \\
-        --ops all_reduce all_gather --grid-shape 48 8 2
 """
 
 import argparse
@@ -56,15 +51,13 @@ from cli.logo import print_logo
 WARMUP_ITERS = 20
 BENCH_ITERS = 100
 
-# Profiler bench mode constants
+# Profiler session configuration
 PROFILER_WARMUP_ITERS = 5   # profiler-internal warmup steps (separate from op warmup)
 PROFILER_ACTIVE_ITERS = 10  # active profiling steps -> 10 Duration samples, take median
 PROFILER_WAIT_ITERS = 0
 PROFILER_ACTIVE_ITERS_LARGE = 1  # single active iter per session to minimise profiler ring-buffer pressure
 PROFILER_LARGE_MSG_SESSIONS = 10  # repeat separate sessions and take median (compensates active=1)
 PROFILER_LARGE_MSG_THRESHOLD = 524288  # 512KB: above this, use per-msg separate sessions
-
-_BENCH_MODES = ["event", "kernel"]
 
 _COMM_OPS = ["all_reduce", "all_gather", "reduce_scatter", "all_to_all"]
 
@@ -304,8 +297,8 @@ def run_benchmark(
     Args:
         group: pre-created dist.ProcessGroup. If None, creates one internally
                (only safe when called once per group_ranks combination).
-        bench_mode: "kernel" (profiler -> kernel_details hcom_* Duration, aligns Communication),
-                    "event" (per-iteration NPU Event timing, hcom_kernel only).
+        bench_mode: "kernel" (default): profiler -> kernel_details hcom_* Duration, aligns Communication.
+                    "event": NPU Event timing, used internally for fast warmup.
 
     Note:
         In kernel mode, only the first rank in group_ranks runs the profiler.
@@ -374,7 +367,7 @@ def run_benchmark(
         if duration_us is None:
             return None  # follower ranks don't report results
     else:
-        # event mode (or non-NPU fallback)
+        # Non-NPU fallback or NPU event mode (used internally for warmup)
         duration_us = _run_bench_event(run_op, is_npu)
 
     bandwidth_gbps = message_bytes / (duration_us * 1e-6) / 1e9
@@ -617,7 +610,7 @@ def _run_bench_profiler_batch(
 
 
 # ============================================================================
-# Bench mode: kernel (hcom_* kernel Duration, excluding AivKernel)
+# Kernel mode: hcom_* kernel Duration (excluding AivKernel)
 # ============================================================================
 
 def _parse_kernel_comm_duration(prof_dir: str, op_type: str) -> List[float]:
@@ -732,15 +725,18 @@ def _run_bench_kernel(run_op, op_type: str, is_npu: bool, *, is_leader: bool = T
 
 
 # ============================================================================
-# Bench mode: event (event mode -- measures hcom_kernel only, no AicpuKernel)
+# NPU Event timing helper (used internally by kernel mode for warmup and
+# non-NPU fallback)
 # ============================================================================
 
 def _run_bench_event(run_op, is_npu: bool) -> float:
     """Run bench via per-iteration NPU Event timing, return median Duration (us).
 
-    NPU Events measure Device-side hcom_kernel execution time. This does NOT
-    include AicpuKernel overhead, so it underestimates Comm_NO on models like
-    Qwen3 where AicpuKernel > 0. Use as a fast sanity check alongside profiler mode.
+    Used internally for:
+    - Kernel mode warmup (fast, avoids profiler overhead during JIT compilation)
+    - Non-NPU fallback (CPU timing via time.perf_counter)
+
+    NPU Events measure Device-side hcom_kernel execution time.
     """
     import torch
 
@@ -852,17 +848,6 @@ def build_argparser() -> argparse.ArgumentParser:
         "--output-csv",
         default=None,
         help="CSV file to append results to (format per S4.7)",
-    )
-    parser.add_argument(
-        "--bench-mode",
-        default="kernel",
-        choices=_BENCH_MODES,
-        help=(
-            "Measurement mode (default: kernel). "
-            "'kernel': torch_npu.profiler -> kernel_details hcom_* Duration "
-            "(excludes AivKernel, aligns Communication in step_trace). "
-            "'event': per-iteration NPU Event timing (hcom_kernel only, fast)."
-        ),
     )
     return parser
 
@@ -997,10 +982,9 @@ def main() -> None:
             )
 
     if rank == 0:
-        print(f"Global warmup done. Starting benchmarks (mode={args.bench_mode})...\n")
+        print(f"Global warmup done. Starting benchmarks...\n")
 
-
-    if args.bench_mode == "kernel" and _has_torch_npu():
+    if _has_torch_npu():
         # Kernel mode: profiler -> kernel_details.csv, no inter-iteration sync.
         # To avoid profiler ring-buffer pressure on large messages, split:
         #   - Small messages (<512KB): batched into ONE profiler session
@@ -1142,7 +1126,7 @@ def main() -> None:
             # to prevent non-member ranks from racing ahead to the next batch.
             dist.barrier()
     else:
-        # Event mode: per-point measurement (no profiler session needed)
+        # Non-NPU fallback: CPU timing
         for op_type, msg_bytes, num_devices, tier, group_ranks in configs:
             run_benchmark(
                 op_type, msg_bytes, group_ranks, tier, args.dtype,
