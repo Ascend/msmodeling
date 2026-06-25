@@ -296,8 +296,9 @@ def main():
         "model_id",
         type=str,
         help=(
-            "Diffusers model dir, remote repo id, or remote repo id plus subfolder "
-            "(needs transformer/config.json or a compatible transformer config)."
+            "Diffusers model source. Recommended safe mode: a reviewed absolute local directory containing "
+            "transformer/config.json or a compatible transformer config. Remote repo ids and repo subfolders "
+            "are accepted but are not security-guaranteed."
         ),
     )
     parser.add_argument(

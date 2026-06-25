@@ -1,6 +1,7 @@
 # RFC: 基于 Profiling 的经验性能模型
 
 ## 元数据
+
 | 项目 | 内容 |
 | :--- | :--- |
 | **状态** | 已完成 |
@@ -362,9 +363,9 @@ M1-M5 属于运行时/模型侧输出。与真实 profiler trace 的端到端对
 - profiling smoke 命令形态：
 
 ```bash
-python -m tensor_cast.scripts.text_generate $MODEL \
+python -m cli.inference.text_generate $MODEL \
   --num-queries $NQ --query-length $QL [--context-length $CL] \
-  --device $DEVICE --world-size $WS --tp-size $TP [--dp-size $DP] [--ep-size $EP] \
+  --device $DEVICE --num-devices $WS --tp-size $TP [--dp-size $DP] [--ep-size $EP] \
   --quantize-linear-action $QUANT --compile \
   --performance-model analytic profiling \
   --profiling-database $DATA_DIR \

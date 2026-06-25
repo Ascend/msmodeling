@@ -4,7 +4,9 @@ Use this file when building or validating a command for `python -m cli.inference
 
 ## Core Inputs
 
-- `model_id`: required positional model identifier.
+- `model_id`: required positional model source. Prefer a reviewed absolute local model path for safe local mode.
+  Hugging Face or ModelScope model ids are still accepted, but they may execute remote Python code through
+  `trust_remote_code=True` and are not security-guaranteed by msmodeling.
 - `--device`: target hardware profile or profiles. The CLI accepts one or more values with `nargs="+"`; pass multiple profiles as `--device A B C` to enable cross-hardware summaries.
 - `--num-devices`: total device count. Required for most planning cases even though the CLI has a default. In multi-hardware runs, this same count applies to every profile.
 - `--input-length`: required prompt length.
@@ -37,6 +39,7 @@ Use this file when building or validating a command for `python -m cli.inference
 Default mode. Do not pass `--disagg` or `--enable-optimize-prefill-decode-ratio`.
 
 Typical use:
+
 - one combined serving instance runs Prefill and Decode
 - optimize under TTFT, TPOT, or both
 
@@ -45,6 +48,7 @@ Typical use:
 Pass `--disagg`.
 
 Interpretation:
+
 - only `--ttft-limits`: run Prefill optimization
 - only `--tpot-limits`: run Decode optimization
 - both limits: run both phases separately
@@ -52,6 +56,7 @@ Interpretation:
 ### PD Ratio Optimization
 
 Pass:
+
 - `--enable-optimize-prefill-decode-ratio`
 - `--prefill-devices-per-instance`
 - `--decode-devices-per-instance`
@@ -61,10 +66,12 @@ Do not combine with `--disagg`.
 ## Quantization
 
 Recommended defaults to offer, not silently apply:
+
 - `--quantize-linear-action W8A8_DYNAMIC`
 - `--quantize-attention-action DISABLED`
 
 Custom linear choices:
+
 - `DISABLED`
 - `W8A16_STATIC`
 - `W8A8_STATIC`
@@ -76,6 +83,7 @@ Custom linear choices:
 - `MXFP4`
 
 Custom attention choices:
+
 - `DISABLED`
 - `INT8`
 - `FP8`
@@ -89,6 +97,7 @@ If linear is `MXFP4`, optionally add `--mxfp4-group-size <n>`.
 - `--moe-dp-sizes`
 
 Rules:
+
 - if all three are omitted, the CLI falls back to TP-only search
 - if a search argument is present with no values, the CLI searches powers of two up to world size
 - explicit values must be positive, unique enough after normalization, and must not exceed the relevant shared device count
@@ -116,12 +125,14 @@ Rules:
 ## Multimodal Inputs
 
 For VL models, ask for:
+
 - `--image-height`
 - `--image-width`
 
 ## Practical Prompting Rules
 
 When the user is unsure:
+
 - ask whether they want one hardware target or a cross-hardware comparison
 - ask for the deployment mode first: PD混部/PD聚合, PD分离 phase capability evaluation, or PD ratio planning
 - prefer a narrow first run over an exhaustive run

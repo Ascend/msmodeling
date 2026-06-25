@@ -100,17 +100,24 @@ class TestVideoGeneration(unittest.TestCase):
         temp_dir = tempfile.mkdtemp()
         model_dir = os.path.join(temp_dir, "mock_model")
         os.makedirs(model_dir, exist_ok=True)
+        os.chmod(model_dir, 0o700)
 
         transformer_dir = os.path.join(model_dir, "transformer")
         os.makedirs(transformer_dir, exist_ok=True)
-        with open(os.path.join(transformer_dir, "config.json"), "w", encoding="utf-8") as f:
+        os.chmod(transformer_dir, 0o700)
+        transformer_config_path = os.path.join(transformer_dir, "config.json")
+        with open(transformer_config_path, "w", encoding="utf-8") as f:
             json.dump(transformer_config, f)
+        os.chmod(transformer_config_path, 0o600)
 
         # Write VAE config
         vae_dir = os.path.join(model_dir, "vae")
         os.makedirs(vae_dir, exist_ok=True)
-        with open(os.path.join(vae_dir, "config.json"), "w", encoding="utf-8") as f:
+        os.chmod(vae_dir, 0o700)
+        vae_config_path = os.path.join(vae_dir, "config.json")
+        with open(vae_config_path, "w", encoding="utf-8") as f:
             json.dump(vae_config, f)
+        os.chmod(vae_config_path, 0o600)
         return temp_dir, model_dir
 
     def _validate_inference_result(self, test_name: str = ""):
@@ -674,8 +681,8 @@ def test_dit_cache_registry_helpers_replace_and_select_blocks():
     assert _get_hunyuanvideo15_blocks_with_setters(types.SimpleNamespace()) == []
 
 
-class TestTensorCastScriptsVideoGenerateMain(unittest.TestCase):
-    """Coverage anchor for tensor_cast.scripts.video_generate.main."""
+class TestCliVideoGenerateMain(unittest.TestCase):
+    """Coverage anchor for cli.inference.video_generate.main."""
 
     def test_main_forwards_arguments_into_run_inference(self):
         captured: dict[str, object] = {}
@@ -683,9 +690,9 @@ class TestTensorCastScriptsVideoGenerateMain(unittest.TestCase):
         def fake_run_inference(**kwargs: object) -> None:
             captured.update(kwargs)
 
-        with patch("tensor_cast.scripts.video_generate.run_inference", fake_run_inference):
+        with patch("cli.inference.video_generate.run_inference", fake_run_inference):
             result = run_module_main(
-                "tensor_cast.scripts.video_generate",
+                "cli.inference.video_generate",
                 [
                     "--device",
                     "TEST_DEVICE",
@@ -710,11 +717,11 @@ class TestTensorCastScriptsVideoGenerateMain(unittest.TestCase):
         assert captured["remote_source"] == "huggingface"
 
 
-class TestTensorCastScriptsVideoGenerateRunInference(unittest.TestCase):
-    """Coverage anchor for tensor_cast.scripts.video_generate.run_inference."""
+class TestCliVideoGenerateRunInference(unittest.TestCase):
+    """Coverage anchor for cli.inference.video_generate.run_inference."""
 
     def test_cfg_batch_concat_path_doubles_batch_dimension(self):
-        from tensor_cast.scripts import video_generate as script_mod
+        from cli.inference import video_generate as video_generate_mod
 
         captured: dict[str, object] = {}
 
@@ -750,16 +757,16 @@ class TestTensorCastScriptsVideoGenerateRunInference(unittest.TestCase):
             return DummyModel(), model_config
 
         with (
-            patch.object(script_mod, "AnalyticPerformanceModel", lambda device_profile: object()),
-            patch.object(script_mod, "MemoryTracker", lambda device_profile: object()),
-            patch.object(script_mod, "Runtime", DummyRuntime),
+            patch.object(video_generate_mod, "AnalyticPerformanceModel", lambda device_profile: object()),
+            patch.object(video_generate_mod, "MemoryTracker", lambda device_profile: object()),
+            patch.object(video_generate_mod, "Runtime", DummyRuntime),
             patch.object(
-                script_mod,
+                video_generate_mod,
                 "generate_diffusers_inputs",
                 lambda *args, **kwargs: {"hidden_states": torch.zeros([1, 3], device="meta")},
             ),
             patch.object(
-                script_mod,
+                video_generate_mod,
                 "process_input",
                 lambda input_kwargs, model_config: (input_kwargs, None),
             ),
@@ -779,7 +786,7 @@ class TestTensorCastScriptsVideoGenerateRunInference(unittest.TestCase):
                 },
             ),
         ):
-            script_mod.run_inference(
+            video_generate_mod.run_inference(
                 device="TEST_DEVICE",
                 model_id="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
                 batch_size=1,

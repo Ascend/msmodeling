@@ -64,6 +64,7 @@ from scripts.helpers.nightly.report_builder import (
     resolve_first_error,
 )
 from scripts.helpers.nightly.report_models import CoverageSummary, FeishuReportInput
+from tensor_cast.core.model_source_security import warn_remote_code_risk
 
 _NIGHTLY_MARKER = "not npu and nightly and not network"
 _NETWORK_MARKER = "not npu and network"
@@ -202,6 +203,7 @@ def _load_vendored_config(fixture_dir: str) -> dict[str, object] | None:
 def _fetch_hub_config(model_id: str) -> dict[str, object]:
     from transformers import AutoConfig
 
+    warn_remote_code_risk(model_id, "huggingface")
     try:
         hf_config = AutoConfig.from_pretrained(model_id)
     except Exception:

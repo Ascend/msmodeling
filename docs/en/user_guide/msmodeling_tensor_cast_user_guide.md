@@ -157,6 +157,20 @@ For other hardware, define a custom device profile as a Python file under `tenso
 
 ## Detailed Usage
 
+### Model Source Security Recommendation
+
+We recommend local safe mode: download and review the model repository first,
+then pass `model_id` as a complete absolute local path, for example
+`/data/models/Qwen3-32B`. Local path loading validates ownership, symlinks, and
+permissions before use. Avoid symlinked directories, shared writable
+directories, or unreviewed model files.
+
+The tools still support Hugging Face or ModelScope model ids such as
+`Qwen/Qwen3-32B`, with `--remote-source` selecting the source. This model id
+mode may execute remote Python code when falling back to
+`trust_remote_code=True`; msmodeling does not provide security guarantees for
+remote model code, and the runtime prints a `trust_remote_code` risk warning.
+
 ### Run text generation with given query length
 
 We provide a `text_generate.py` command line interface to simulate the text generation. The script supports text generation with a batch of queries with the same input length and optionally same context length. The table summary of op performance breakdown is provided by default. An option is also provided to dump the chrome trace.

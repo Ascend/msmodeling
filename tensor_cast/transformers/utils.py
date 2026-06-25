@@ -29,6 +29,7 @@ from transformers.utils.quantization_config import (
 )
 
 from .custom_model_registry import get_model_profile
+from ..core.model_source_security import normalize_model_source
 from ..layers.mla import MultiheadLatentAttentionBase
 from ..model_config import AttentionQuantConfig, ModelConfig, RemoteSource
 from ..model_hub import (
@@ -89,63 +90,66 @@ def get_attention_quant_config(model, layer_idx) -> Optional[AttentionQuantConfi
     return None
 
 
-# Copied from `accelerate`
+_INIT_ON_DEVICE_FACTORY_NAMES = (
+    "empty",
+    "zeros",
+    "ones",
+    "arange",
+    "randn",
+    "rand",
+    "randint",
+)
+
+
+def _make_factory_use_device(factory, device: torch.device):
+    def factory_with_device(*args, **kwargs):
+        kwargs["device"] = device
+        return factory(*args, **kwargs)
+
+    return factory_with_device
+
+
+def _move_registered_parameter(module: torch.nn.Module, name: str, device: torch.device) -> None:
+    parameter = module._parameters.get(name)
+    if parameter is None:
+        return
+
+    parameter_type = type(parameter)
+    parameter_data = parameter.to(device)
+    attributes = dict(getattr(parameter, "__dict__", {}))
+    try:
+        moved_parameter = parameter_type(parameter_data, requires_grad=parameter.requires_grad)
+    except TypeError:
+        attributes["requires_grad"] = parameter.requires_grad
+        moved_parameter = parameter_type(parameter_data, **attributes)
+    else:
+        moved_parameter.__dict__.update(attributes)
+    module._parameters[name] = moved_parameter
+
+
 @contextlib.contextmanager
 def init_on_device_without_buffers(device: torch.device):
-    """
-    A context manager under which models are initialized with all
-    parameters on the specified device. However, buffers are not
-    initialized on specified device.
+    """Initialize newly registered parameters on ``device`` while leaving buffers unhooked."""
 
-    Args:
-        device (`torch.device`):
-            Device to initialize all parameters on.
-    """
+    target_device = torch.device(device)
+    original_register_parameter = torch.nn.Module.register_parameter
+    original_factories = {}
 
-    old_register_parameter = torch.nn.Module.register_parameter
-
-    def register_empty_parameter(module, name, param):
-        old_register_parameter(module, name, param)
-        if param is not None:
-            param_cls = type(module._parameters[name])
-            kwargs = module._parameters[name].__dict__
-            kwargs["requires_grad"] = param.requires_grad
-            module._parameters[name] = param_cls(module._parameters[name].to(device), **kwargs)
-
-    tensor_constructors_to_patch = [
-        # Not a full list of tensor factory functions
-        # TODO: align the list with torch._lazy.tensor_factory_functions
-        "empty",
-        "zeros",
-        "ones",
-        "arange",
-        "randn",
-        "rand",
-        "randint",
-    ]
-    old_tensor_constructors = {}
-
-    def patch_tensor_constructor(fn):
-        def wrapper(*args, **kwargs):
-            kwargs["device"] = device
-            return fn(*args, **kwargs)
-
-        return wrapper
+    def register_parameter_on_device(module, name, parameter):
+        original_register_parameter(module, name, parameter)
+        _move_registered_parameter(module, name, target_device)
 
     try:
-        torch.nn.Module.register_parameter = register_empty_parameter
-        for torch_function_name in tensor_constructors_to_patch:
-            old_tensor_constructors[torch_function_name] = getattr(torch, torch_function_name)
-            setattr(
-                torch,
-                torch_function_name,
-                patch_tensor_constructor(getattr(torch, torch_function_name)),
-            )
+        torch.nn.Module.register_parameter = register_parameter_on_device
+        for factory_name in _INIT_ON_DEVICE_FACTORY_NAMES:
+            original_factory = getattr(torch, factory_name)
+            original_factories[factory_name] = original_factory
+            setattr(torch, factory_name, _make_factory_use_device(original_factory, target_device))
         yield
     finally:
-        torch.nn.Module.register_parameter = old_register_parameter
-        for torch_function_name, old_torch_function in old_tensor_constructors.items():
-            setattr(torch, torch_function_name, old_torch_function)
+        torch.nn.Module.register_parameter = original_register_parameter
+        for factory_name, original_factory in original_factories.items():
+            setattr(torch, factory_name, original_factory)
 
 
 @contextlib.contextmanager
@@ -187,6 +191,7 @@ class AutoModelConfigLoader:
 
     def __init__(self):
         self.is_transformers_natively_supported: bool = False
+        self.resolved_model_id: Optional[str] = None
 
     @staticmethod
     def is_model_type_different(config: PretrainedConfig) -> Tuple[bool, str]:
@@ -245,12 +250,16 @@ class AutoModelConfigLoader:
         """
         load config
         """
+        source_info = normalize_model_source(model_id, remote_source)
+        model_id = source_info.model_id
+        self.resolved_model_id = model_id
+
         if remote_source == RemoteSource.modelscope:
             from modelscope import AutoConfig
         else:
             from transformers import AutoConfig
 
-        if remote_source == RemoteSource.modelscope and not os.path.isdir(model_id):
+        if remote_source == RemoteSource.modelscope and not source_info.is_local_path:
             resolved = _modelscope_snapshot_config_only(model_id)
             logger.info(
                 "ModelScope Hub id %s resolved to config-only snapshot at %s",
@@ -258,6 +267,7 @@ class AutoModelConfigLoader:
                 resolved,
             )
             model_id = resolved
+            self.resolved_model_id = resolved
 
         check_model_path_res = self.check_model_path(model_id)
         if check_model_path_res["has_config_json"] and not check_model_path_res["has_configuration_py"]:
@@ -343,6 +353,7 @@ class AutoModelConfigLoader:
         Load the model and config using model_id and model_config.
         """
         hf_config = self.load_config(model_id, remote_source=model_config.remote_source)
+        model_id = self.resolved_model_id or model_id
         if model_config.num_hidden_layers_override:
             hf_config.num_hidden_layers = model_config.num_hidden_layers_override
 

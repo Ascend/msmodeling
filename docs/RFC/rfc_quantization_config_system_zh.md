@@ -180,7 +180,7 @@ flowchart TD
 | 量化工具 | `tensor_cast/quantize_utils.py` | 定义量化类型枚举、量化粒度、量化方案 |
 | 量化线性层 | `tensor_cast/layers/quant_linear.py` | 实现`QuantLinearBase`和`TensorCastQuantLinear` |
 | 配置工具 | `tensor_cast/utils.py` | 实现模式匹配函数`pattern_match` |
-| 脚本工具 | `tensor_cast/scripts/utils.py` | 提供`create_quant_config`等配置创建函数 |
+| 量化配置工具 | `tensor_cast/core/quantization/config.py` | 提供`create_quant_config`等配置创建函数 |
 | Transformers工具 | `tensor_cast/transformers/utils.py` | 加载开源量化配置，提取`modules_to_not_convert` |
 
 ### 4.2 QuantConfig类设计（优化版）

@@ -215,8 +215,8 @@ Options:
                         If set, dump the original results for analysis. (default: False)
 
 General Options:
-  model_id              The model identifier, which can be: 1) A Hugging Face model ID (e.g., 'meta-llama/Llama-2-7b-hf') to load from the Hub;
-                        2) A local directory path containing a diffusers model (must include 'transformer/config.json').
+  model_id              Model source. Recommended safe mode: a reviewed absolute local model path. Model id mode also accepts Hugging Face or
+                        ModelScope ids, but may execute remote Python code through trust_remote_code=True and is not security-guaranteed.
   --device DEVICE [DEVICE ...]
                         Device profile(s) to evaluate. One or more registered DeviceProfile names.
                         Supported values: TEST_DEVICE, ATLAS_800_A2_376T_64G, ATLAS_800_A2_313T_64G,

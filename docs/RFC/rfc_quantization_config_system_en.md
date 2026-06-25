@@ -180,7 +180,7 @@ Based on the analysis of the project code, the current quantization-related impl
 | Quantization Utilities | `tensor_cast/quantize_utils.py` | Defines quantization type enums, quantization granularity, quantization schemes |
 | Quantization Linear Layer | `tensor_cast/layers/quant_linear.py` | Implements `QuantLinearBase` and `TensorCastQuantLinear` |
 | Configuration Utilities | `tensor_cast/utils.py` | Implements pattern matching function `pattern_match` |
-| Script Utilities | `tensor_cast/scripts/utils.py` | Provides `create_quant_config` and other configuration creation functions |
+| Quantization Config Utilities | `tensor_cast/core/quantization/config.py` | Provides `create_quant_config` and other configuration creation functions |
 | Transformers Utilities | `tensor_cast/transformers/utils.py` | Loads open-source quantization configurations, extracts `modules_to_not_convert` |
 
 ### 4.2 QuantConfig Class Design (Optimized Version)

@@ -14,7 +14,6 @@ from tensor_cast.diffusers import model_resolver
     "module_name",
     [
         "cli.inference.video_generate",
-        "tensor_cast.scripts.video_generate",
     ],
 )
 def test_video_generate_help_includes_remote_source(
@@ -30,11 +29,12 @@ def test_video_generate_help_includes_remote_source(
 
     assert exc_info.value.code == 0
     output = capsys.readouterr().out
+    normalized_output = output.lower()
     assert "--remote-source" in output
-    assert "huggingface" in output
-    assert "modelscope" in output
-    assert "remote repo id" in output
-    assert "subfolder" in output
+    assert "huggingface" in normalized_output
+    assert "modelscope" in normalized_output
+    assert "remote repo id" in normalized_output
+    assert "subfolder" in normalized_output
 
 
 def test_cli_video_generate_main_passes_remote_source_to_run_inference(
@@ -70,42 +70,10 @@ def test_cli_video_generate_main_passes_remote_source_to_run_inference(
     assert captured["remote_source"] == "modelscope"
 
 
-def test_scripts_video_generate_main_passes_remote_source_to_run_inference(
+def test_cli_video_generate_run_inference_passes_remote_source_to_builder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tensor_cast.scripts import video_generate
-
-    captured: dict[str, object] = {}
-
-    def fake_run_inference(**kwargs: object) -> None:
-        captured.update(kwargs)
-
-    monkeypatch.setattr(video_generate, "run_inference", fake_run_inference)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "video_generate",
-            "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-            "--batch-size",
-            "1",
-            "--seq-len",
-            "128",
-            "--remote-source",
-            "modelscope",
-        ],
-    )
-
-    video_generate.main()
-
-    assert captured["model_id"] == "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
-    assert captured["remote_source"] == "modelscope"
-
-
-def test_scripts_video_generate_run_inference_passes_remote_source_to_builder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tensor_cast.scripts import video_generate
+    from cli.inference import video_generate
 
     captured_builds: list[dict[str, object]] = []
     resolver_calls: list[tuple[str, str]] = []
@@ -217,7 +185,7 @@ def test_scripts_video_generate_run_inference_passes_remote_source_to_builder(
     assert resolver_calls == [("Wan-AI/Wan2.2-T2V-A14B-Diffusers", "modelscope")]
 
 
-def test_scripts_video_generate_remote_resolution_failure_includes_cause(
+def test_cli_video_generate_remote_resolution_failure_includes_cause(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_snapshot_huggingface_config_only(repo_id: str) -> str:
@@ -233,10 +201,10 @@ def test_scripts_video_generate_remote_resolution_failure_includes_cause(
         model_resolver.resolve_diffusers_model_path("Wan-AI/Wan2.2-T2V-A14B-Diffusers")
 
 
-def test_scripts_video_generate_run_inference_cfg_batch_concat_path(
+def test_cli_video_generate_run_inference_cfg_batch_concat_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tensor_cast.scripts import video_generate
+    from cli.inference import video_generate
 
     class DummyRuntime:
         def __init__(self, *args: object, **kwargs: object) -> None:

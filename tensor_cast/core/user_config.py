@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, fields
 from typing import List, Optional, Union
 
 from ..core.input_generator import RequestInfo
+from ..core.model_source_security import normalize_model_source
 from ..core.quantization.config import create_quant_config
 from ..core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from ..device import DeviceProfile
@@ -93,10 +94,15 @@ class UserInputConfig:
     """Path to the performance database directory (required for 'profiling' mode)."""
 
     def __post_init__(self):
+        self._normalize_model_source()
         self._validate_device()
         self._validate_vision_parallelism()
         self._normalize_performance_model()
         self._normalize_word_embedding_tp()
+
+    def _normalize_model_source(self):
+        source_info = normalize_model_source(self.model_id, self.remote_source)
+        self.model_id = source_info.model_id
 
     def _normalize_performance_model(self):
         """Normalize performance_model to a list of model type strings."""

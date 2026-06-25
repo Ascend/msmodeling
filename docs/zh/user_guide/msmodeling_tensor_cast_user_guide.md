@@ -171,6 +171,16 @@ Total time for analytic: 29.350s
 
 ## 详细用法
 
+### 模型来源安全建议
+
+推荐使用本地安全模式：先下载并审核模型仓库，然后将 `model_id` 填为完整本地绝对路径，例如
+`/data/models/Qwen3-32B`。本地路径加载会在运行前校验路径属主、软链接和权限；不建议使用软链接目录、
+共享可写目录或未审核来源中的模型文件。
+
+工具仍支持直接传入 Hugging Face 或 ModelScope 的 model id，例如 `Qwen/Qwen3-32B`，并可通过
+`--remote-source` 选择来源。该 model id 模式可能在 `trust_remote_code=True` fallback 时执行远端
+Python 代码，msmodeling 不对远端代码安全性做保证；运行时会打印 `trust_remote_code` 风险提示。
+
 ### 按指定 query 长度运行文本生成
 
 我们提供 `text_generate.py` 命令行接口来仿真文本生成。该脚本支持对一批具有相同输入长度、可选相同 context 长度的 query 进行文本生成仿真。默认提供算子性能分解的表格汇总。也可选择导出 Chrome trace。
