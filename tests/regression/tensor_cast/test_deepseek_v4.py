@@ -1066,6 +1066,53 @@ class TestDeepseekV4RouteFunctions(unittest.TestCase):
         assert topk_indices.shape == (2, 16, 8)
         assert topk_weights.shape == (2, 16, 8)
 
+    def test_route_deepseek_v4_gate_non_hash_with_tp_slice(self):
+        """Test non-hash routing slices post-score logits for shared expert TP."""
+        gate = nn.Linear(4096, 128)
+        gate.score_func = "sqrtsoftplus"
+        gate.route_scale = 1.0
+        gate.weight = nn.Parameter(torch.randn(128, 4096))
+        gate.bias = None
+
+        hidden_states = torch.randn(16, 4096)
+
+        topk_indices, topk_weights = route_deepseek_v4_gate(
+            gate,
+            hidden_states,
+            top_k=8,
+            moe_layer_idx=5,
+            tp_size=4,
+            tp_rank=1,
+        )
+
+        assert topk_indices.shape == (4, 8)
+        assert topk_weights.shape == (4, 8)
+
+    def test_route_deepseek_v4_gate_hash_with_tp_slice(self):
+        """Test hash routing slices scores and input ids for shared expert TP."""
+        gate = nn.Linear(4096, 128)
+        gate.score_func = "sqrtsoftplus"
+        gate.route_scale = 1.0
+        gate.weight = nn.Parameter(torch.randn(128, 4096))
+        gate.hash = True
+        gate.tid2eid = torch.randint(0, 128, (128000, 8), dtype=torch.int32)
+
+        hidden_states = torch.randn(16, 4096)
+        input_ids = torch.randint(0, 128000, (1, 16), dtype=torch.long)
+
+        topk_indices, topk_weights = route_deepseek_v4_gate(
+            gate,
+            hidden_states,
+            top_k=8,
+            input_ids=input_ids,
+            moe_layer_idx=1,
+            tp_size=4,
+            tp_rank=1,
+        )
+
+        assert topk_indices.shape == (4, 8)
+        assert topk_weights.shape == (4, 8)
+
     def test_compute_v4_gate_scores_softmax(self):
         """Test gate scores computation with softmax."""
         from tensor_cast.layers.deepseek_v4 import compute_v4_gate_scores

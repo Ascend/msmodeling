@@ -60,12 +60,44 @@ def compute_v4_gate_scores(
     return scores, route_scale, score_func != "softmax"
 
 
+def _slice_token_tensor_by_tp(tensor: torch.Tensor, tp_size: int, tp_rank: int) -> torch.Tensor:
+    if tp_size <= 1:
+        return tensor
+    if tp_rank < 0 or tp_rank >= tp_size:
+        raise ValueError(f"tp_rank must be in [0, {tp_size}), got {tp_rank}")
+
+    if tensor.ndim > 2:
+        tensor = tensor.reshape(-1, tensor.shape[-1])
+
+    num_tokens = tensor.shape[0]
+    pad = (-num_tokens) % tp_size
+    if pad > 0:
+        tensor = F.pad(tensor, (0, 0, 0, pad))
+    return torch.tensor_split(tensor, tp_size, dim=0)[tp_rank]
+
+
+def _slice_input_ids_by_tp(input_ids: torch.Tensor, tp_size: int, tp_rank: int) -> torch.Tensor:
+    if tp_size <= 1:
+        return input_ids
+    if tp_rank < 0 or tp_rank >= tp_size:
+        raise ValueError(f"tp_rank must be in [0, {tp_size}), got {tp_rank}")
+
+    input_ids = input_ids.reshape(-1)
+    pad = (-input_ids.shape[0]) % tp_size
+    if pad > 0:
+        input_ids = F.pad(input_ids, (0, pad), value=0)
+    return torch.tensor_split(input_ids, tp_size, dim=0)[tp_rank]
+
+
 def route_deepseek_v4_gate(
     gate: torch.nn.Module,
     hidden_states: torch.Tensor,
     top_k: int,
     input_ids: Optional[torch.Tensor] = None,
     moe_layer_idx: Optional[int] = None,
+    *,
+    tp_size: int = 1,
+    tp_rank: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     scores, route_scale, normalize_weights = compute_v4_gate_scores(gate, hidden_states)
     use_hash_routing = has_deepseek_v4_hash_routing(gate, moe_layer_idx)
@@ -77,6 +109,8 @@ def route_deepseek_v4_gate(
         normalize_weights,
         route_scale,
         input_ids,
+        tp_size=tp_size,
+        tp_rank=tp_rank,
     )
     return topk_indices, topk_weights.to(hidden_states.dtype)
 
@@ -89,7 +123,15 @@ def route_v4_gate_tail(
     normalize_weights: bool,
     route_scale: float,
     input_ids: Optional[torch.Tensor],
+    *,
+    tp_size: int = 1,
+    tp_rank: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if tp_size > 1:
+        scores = _slice_token_tensor_by_tp(scores, tp_size, tp_rank)
+        if hash_routing and input_ids is not None:
+            input_ids = _slice_input_ids_by_tp(input_ids, tp_size, tp_rank)
+
     if hash_routing:
         if input_ids is None:
             raise ValueError("DeepSeek V4 hash routing requires input_ids")

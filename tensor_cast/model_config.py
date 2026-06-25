@@ -361,9 +361,7 @@ class MoEConfig:
     field_names: MoEFieldNames = MoEFieldNames()
     gate_returns_raw_logits: bool = False
     """whether the gate module returns raw logits or (topk_indices, topk_weights) tuple"""
-    gate_router: Optional[
-        Callable[[torch.nn.Module, torch.Tensor, int, Optional[torch.Tensor]], tuple[torch.Tensor, torch.Tensor]]
-    ] = None
+    gate_router: Optional[Callable[..., tuple[torch.Tensor, torch.Tensor]]] = None
     """optional model-specific router callback returning (topk_indices, topk_weights)"""
     # TODO: add expert-parallel configuration
     enable_redundant_experts: bool = False
