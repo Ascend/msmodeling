@@ -1,19 +1,19 @@
 {
   "type": "text",
-  "name": "qwen3-vl-32b-decode",
-  "description": "Qwen3-VL-32B decode, 1 query, ctx=75, img=1080x1920, compile",
-  "initial_time_s": 0.063927,
-  "baseline_time_s": 0.069339,
+  "name": "qwen3.5-27b-3515-decode",
+  "description": "Qwen3.5-27B 3515 decode, 1 query, qlen=4, ctx=4250, TP=2, W8A8, MTP=3, compile",
+  "initial_time_s": 0.02482,
+  "baseline_time_s": 0.02733,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.2,
   "operator_top_n": 10,
   "operator_tolerance": 0.1,
   "user_input": {
-    "device": "ATLAS_800_A2_376T_64G",
-    "model_id": "Qwen/Qwen3-VL-32B-Instruct",
+    "device": "ATLAS_800_A3_560T_128G_DIE",
+    "model_id": "Qwen/Qwen3.5-27B",
     "num_queries": 1,
-    "query_len": 1,
-    "context_length": 75,
+    "query_len": 4,
+    "context_length": 4250,
     "prefix_cache_hit_rate": 0.0,
     "do_compile": true,
     "allow_graph_break": false,
@@ -22,13 +22,13 @@
     "chrome_trace": null,
     "graph_log_url": null,
     "log_level": null,
-    "quantize_linear_action": "DISABLED",
+    "quantize_linear_action": "W8A8_STATIC",
     "quantize_lmhead": false,
     "mxfp4_group_size": 32,
     "quantize_attention_action": "DISABLED",
     "enable_sequence_parallel": false,
     "decode": true,
-    "num_mtp_tokens": 0,
+    "num_mtp_tokens": 3,
     "mtp_acceptance_rate": [
       0.9,
       0.6,
@@ -38,8 +38,8 @@
     "num_hidden_layers_override": 0,
     "disable_repetition": false,
     "reserved_memory_gb": 0,
-    "world_size": 1,
-    "tp_size": 1,
+    "world_size": 2,
+    "tp_size": 2,
     "pp_size": 1,
     "dp_size": null,
     "o_proj_tp_size": null,
@@ -59,9 +59,9 @@
     "host_external_shared_experts": false,
     "block_size": 128,
     "remote_source": "huggingface",
-    "image_batch_size": 1,
-    "image_height": 1080,
-    "image_width": 1920,
+    "image_batch_size": null,
+    "image_height": null,
+    "image_width": null,
     "performance_model": [
       "analytic"
     ],
@@ -69,54 +69,54 @@
   },
   "operators": [
     {
+      "name": "tensor_cast.static_quant_linear.default",
+      "total_time_s": 0.009191000000000001,
+      "num_calls": 137
+    },
+    {
       "name": "aten.mm.default",
-      "total_time_s": 0.061901000000000005,
-      "num_calls": 257
+      "total_time_s": 0.004842,
+      "num_calls": 4
     },
     {
-      "name": "tensor_cast.attention.default",
-      "total_time_s": 0.000848008,
-      "num_calls": 64
+      "name": "tensor_cast.static_quant_linear_all_reduce.default",
+      "total_time_s": 0.004505,
+      "num_calls": 134
     },
     {
-      "name": "tensor_cast.rms_norm.default",
-      "total_time_s": 0.000390158,
-      "num_calls": 193
+      "name": "aten.mul.Tensor",
+      "total_time_s": 0.0009634489999999999,
+      "num_calls": 455
     },
     {
-      "name": "tensor_cast.swiglu.default",
-      "total_time_s": 0.000137313,
-      "num_calls": 64
+      "name": "tensor_cast.linear_attn_recurrent_gated_delta_rule.default",
+      "total_time_s": 0.000816701,
+      "num_calls": 48
     },
     {
-      "name": "tensor_cast.add_rms_norm2.default",
-      "total_time_s": 0.000131104,
-      "num_calls": 64
-    },
-    {
-      "name": "tensor_cast.apply_rope.default",
-      "total_time_s": 0.00013026599999999998,
-      "num_calls": 64
+      "name": "prims.convert_element_type.default",
+      "total_time_s": 0.000758418,
+      "num_calls": 361
     },
     {
       "name": "aten.add.Tensor",
-      "total_time_s": 0.000129863,
-      "num_calls": 64
+      "total_time_s": 0.000706061,
+      "num_calls": 345
     },
     {
-      "name": "aten.index.Tensor",
-      "total_time_s": 0.000129157,
-      "num_calls": 2
+      "name": "tensor_cast.quantize.default",
+      "total_time_s": 0.000559225,
+      "num_calls": 271
     },
     {
-      "name": "tensor_cast.reshape_and_cache.default",
-      "total_time_s": 0.000128497,
-      "num_calls": 64
+      "name": "aten.pow.Tensor_Scalar",
+      "total_time_s": 0.00038227599999999997,
+      "num_calls": 179
     },
     {
-      "name": "aten.embedding.default",
-      "total_time_s": 2.019e-06,
-      "num_calls": 1
+      "name": "aten.mean.dim",
+      "total_time_s": 0.00037014499999999995,
+      "num_calls": 179
     }
   ]
 }

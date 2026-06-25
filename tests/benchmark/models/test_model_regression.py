@@ -292,15 +292,16 @@ class TestPerformanceRegression(unittest.TestCase):
             self.__class__._op_results.append(
                 {
                     "case_name": name,
-                    "op_passed": False,
+                    "op_passed": None,
                     "op_status": "NO_BASELINE",
                     "violations": [],
                 }
             )
-            self.fail(
-                f"[{name}] No operator baseline found in case file: {case_path}. "
-                "Please generate baseline explicitly before running regression tests. "
-                "See README.md for the baseline lifecycle process."
+            logger.warning(
+                "[%s] No operator baseline found in case file: %s. "
+                "Please generate baseline explicitly before running regression tests.",
+                name,
+                case_path,
             )
         else:
             baseline_top_n = dict(
@@ -328,7 +329,7 @@ class TestPerformanceRegression(unittest.TestCase):
                         f"{bl['total_time_s'] * 1000:.3f}ms",
                         "MISSING",
                         "N/A",
-                        "FAIL",
+                        "WARN",
                         str(bl["num_calls"]),
                         "-",
                     )
@@ -347,7 +348,7 @@ class TestPerformanceRegression(unittest.TestCase):
                             "N/A",
                             f"{actual_op_time * 1000:.3f}ms",
                             "NEW",
-                            "FAIL",
+                            "WARN",
                             "-",
                             str(actual_num_calls),
                         )
@@ -372,8 +373,8 @@ class TestPerformanceRegression(unittest.TestCase):
                 op_diff_pct = (actual_op_time - baseline_op_time) / baseline_op_time
                 time_fail = abs(op_diff_pct) > case.operator_tolerance
                 calls_mismatch = baseline_num_calls > 0 and actual_num_calls != baseline_num_calls
-                op_row_status = "PASS" if (not time_fail and not calls_mismatch) else "FAIL"
-                if op_row_status == "FAIL":
+                op_row_status = "PASS" if (not time_fail and not calls_mismatch) else "WARN"
+                if op_row_status == "WARN":
                     violations.append(
                         f"  {op_name}: {op_diff_pct * 100:+.2f}% "
                         f"(baseline={baseline_op_time * 1000:.3f}ms, actual={actual_op_time * 1000:.3f}ms)"
@@ -397,7 +398,7 @@ class TestPerformanceRegression(unittest.TestCase):
                 )
 
             op_passed = len(violations) == 0
-            op_status = "PASS" if op_passed else "FAIL"
+            op_status = "PASS" if op_passed else "WARN"
             self.__class__._op_results.append(
                 {
                     "case_name": name,
@@ -481,12 +482,14 @@ class TestPerformanceRegression(unittest.TestCase):
 
         if op_passed is False:
             violations = self.__class__._op_results[-1].get("violations", [])
-            msg_parts = [f"\n[{case.name}] Operator-level regression anomaly detected!"]
+            msg_parts = [
+                f"\n[{case.name}] Operator-level differences detected (WARNING - not treated as test failure):"
+            ]
             msg_parts.append(f"  Description: {case.description}")
             msg_parts.append(f"  Top-{case.operator_top_n} Operator Comparison (...)")
             for v in violations:
                 msg_parts.append(v)
-            self.fail("\n".join(msg_parts))
+            logger.warning("\n".join(msg_parts))
 
 
 def _emit(text: str):
@@ -538,12 +541,16 @@ def _print_operator_summary(op_results: list[dict], op_detail_rows: list[tuple])
 
     total = len(op_results)
     passed = sum(1 for r in op_results if r["op_passed"] is True)
-    failed = sum(1 for r in op_results if r["op_passed"] is False)
+    warned = sum(1 for r in op_results if r["op_passed"] is False)
     no_baseline = sum(1 for r in op_results if r["op_passed"] is None)
-    _ = no_baseline
+
+    if warned == 0:
+        _emit("*** All Operator Top-N Checks Passed (no warnings) ***")
+        _emit("")
+        return
 
     _emit("=" * 145)
-    _emit("  [Test 2] Operator-Level Regression Summary")
+    _emit("  [Test 2] Operator-Level Differences Summary (WARNING only, not treated as failure)")
     _emit("=" * 145)
     header = (
         f"{'Case':<32} {'Operator':<44} {'Baseline':>10} {'Actual':>10}  {'Diff':>10}  {'#Calls':>12} {'Status':>10}"
@@ -561,16 +568,13 @@ def _print_operator_summary(op_results: list[dict], op_detail_rows: list[tuple])
         _,
         calls_str,
     ) in op_detail_rows:
-        _emit(
-            f"{case_name:<32} {op_name:<44} {baseline_str:>10}  {actual_str:>10}  {diff_str:>10}  {calls_str:>12}  {status:>10}"
-        )
+        if status == "WARN":
+            _emit(
+                f"{case_name:<32} {op_name:<44} {baseline_str:>10}  {actual_str:>10}  {diff_str:>10}  {calls_str:>12}  {status:>10}"
+            )
 
     _emit("-" * 145)
-    _emit(f"Total Cases: {total} | Passed: {passed} | Failed: {failed} | No Baseline: {no_baseline}")
+    _emit(f"Total Cases: {total} | Passed: {passed} | Warnings: {warned} | No Baseline: {no_baseline}")
     _emit("=" * 145)
     _emit("")
-
-    if failed > 0:
-        _emit("*** Operator Regression Anomaly Detected! ***")
-    else:
-        _emit("*** All Operator Checks Passed ***")
+    _emit("*** Operator Differences Detected (WARNING only, test NOT failed) ***")

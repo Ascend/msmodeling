@@ -1,0 +1,122 @@
+{
+  "type": "text",
+  "name": "kimi-k2.5-1080p-prefill",
+  "description": "Kimi-K2.5 1080P+30 prefill, 4 queries, qlen=30, img=1080x1920, DP=4, TP=4, EP=16, W4A8, compile",
+  "initial_time_s": 0.505217,
+  "baseline_time_s": 0.707843,
+  "initial_tolerance": 0.1,
+  "baseline_tolerance": 0.3,
+  "operator_top_n": 10,
+  "operator_tolerance": 0.1,
+  "user_input": {
+    "device": "ATLAS_800_A3_560T_128G_DIE",
+    "model_id": "moonshotai/Kimi-K2.5",
+    "num_queries": 4,
+    "query_len": 30,
+    "context_length": 0,
+    "prefix_cache_hit_rate": 0.0,
+    "do_compile": true,
+    "allow_graph_break": false,
+    "enable_multistream": true,
+    "dump_input_shapes": false,
+    "chrome_trace": null,
+    "graph_log_url": null,
+    "log_level": null,
+    "quantize_linear_action": "W4A8_DYNAMIC",
+    "quantize_lmhead": false,
+    "mxfp4_group_size": 32,
+    "quantize_attention_action": "DISABLED",
+    "enable_sequence_parallel": false,
+    "decode": false,
+    "num_mtp_tokens": 0,
+    "mtp_acceptance_rate": [
+      0.9,
+      0.6,
+      0.4,
+      0.2
+    ],
+    "num_hidden_layers_override": 0,
+    "disable_repetition": false,
+    "reserved_memory_gb": 0,
+    "world_size": 16,
+    "tp_size": 4,
+    "pp_size": 1,
+    "dp_size": 4,
+    "o_proj_tp_size": null,
+    "o_proj_dp_size": null,
+    "mlp_tp_size": null,
+    "mlp_dp_size": null,
+    "lmhead_tp_size": null,
+    "lmhead_dp_size": null,
+    "ep_size": 16,
+    "moe_dp_size": 1,
+    "moe_tp_size": null,
+    "word_embedding_tp": null,
+    "enable_redundant_experts": false,
+    "enable_shared_expert_tp": false,
+    "enable_dispatch_ffn_combine": false,
+    "enable_external_shared_experts": false,
+    "host_external_shared_experts": false,
+    "block_size": 128,
+    "remote_source": "huggingface",
+    "image_batch_size": 1,
+    "image_height": 1080,
+    "image_width": 1920,
+    "performance_model": [
+      "analytic"
+    ],
+    "profiling_database": null
+  },
+  "operators": [
+    {
+      "name": "tensor_cast.attention.default",
+      "total_time_s": 0.091559,
+      "num_calls": 27
+    },
+    {
+      "name": "tensor_cast.all_to_all.default",
+      "total_time_s": 0.069149,
+      "num_calls": 120
+    },
+    {
+      "name": "tensor_cast.grouped_matmul_quant_int4_swiglu.default",
+      "total_time_s": 0.059619,
+      "num_calls": 60
+    },
+    {
+      "name": "aten.addmm.default",
+      "total_time_s": 0.045770000000000005,
+      "num_calls": 109
+    },
+    {
+      "name": "tensor_cast.multihead_latent_attention.default",
+      "total_time_s": 0.030074000000000004,
+      "num_calls": 61
+    },
+    {
+      "name": "tensor_cast.grouped_matmul_quant_int4.default",
+      "total_time_s": 0.02996,
+      "num_calls": 60
+    },
+    {
+      "name": "tensor_cast.static_quant_linear_int4_all_reduce.default",
+      "total_time_s": 0.027297000000000002,
+      "num_calls": 62
+    },
+    {
+      "name": "tensor_cast.all_gather.default",
+      "total_time_s": 0.018357,
+      "num_calls": 61
+    },
+    {
+      "name": "aten.mul.Tensor",
+      "total_time_s": 0.014388999999999999,
+      "num_calls": 119
+    },
+    {
+      "name": "tensor_cast.dynamic_quantize_symmetric.default",
+      "total_time_s": 0.013798,
+      "num_calls": 303
+    }
+  ]
+}
