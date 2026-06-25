@@ -29,6 +29,7 @@ from tools.perf_data_collection.grid_generator.generators.fused_attention import
     RUNTIME_ACTUAL_SEQ_LENGTHS_VALUES,
     RUNTIME_AVG_SEQ_LEN,
     RUNTIME_BLOCK_TABLE_VALID_BLOCKS,
+    RUNTIME_NUM_HEADS,
     RUNTIME_NUM_KEY_VALUE_HEADS,
     RUNTIME_SOURCE_PROFILE,
     _build_dense_prefill_row,
@@ -683,7 +684,7 @@ class ZTestMemoryEstimation(unittest.TestCase):
         with mock.patch.object(fused_attention_module, "resolve_configs", return_value=[qwen_hf_cfg]):
             qwen_rows = list(generate_fused_attention_rows(["Qwen/Qwen3-32B"]))
         qwen_sources = {row.extra_values[RUNTIME_SOURCE_PROFILE] for row in qwen_rows}
-        self.assertIn("qwen332b_dense_prefill", qwen_sources)
+        self.assertIn("qwen332b_dense_prefill_tp1", qwen_sources)
         self.assertTrue(any(row.extra_values[RUNTIME_AVG_SEQ_LEN] == "4112.000000" for row in qwen_rows))
 
         with mock.patch.object(fused_attention_module, "resolve_configs", return_value=[dsv3_hf_cfg]):
@@ -838,6 +839,42 @@ class ZTestMemoryEstimation(unittest.TestCase):
         }
 
         self.assertEqual(len(rows), len(signatures))
+
+    def test_fia_qwen3_decode_covers_tp4_3p5k_context(self):
+        rows = list(generate_fused_attention_rows(["Qwen/Qwen3-32B"]))
+        target = next(
+            (
+                row
+                for row in rows
+                if row.input_shapes[0] == (1, 16, 128)
+                and row.input_shapes[1] == (29, 2, 128, 128)
+                and row.input_shapes[14] == (1, 29)
+                and row.output_shapes[0] == (1, 16, 128)
+                and row.extra_values[RUNTIME_AVG_SEQ_LEN] == "3593.000000"
+            ),
+            None,
+        )
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.extra_values[RUNTIME_NUM_HEADS], "16")
+        self.assertEqual(target.extra_values[RUNTIME_NUM_KEY_VALUE_HEADS], "2")
+        self.assertEqual(target.extra_values[RUNTIME_BLOCK_TABLE_VALID_BLOCKS], "29")
+
+    def test_fia_qwen3_dense_rows_cover_tp_head_variants(self):
+        rows = list(generate_fused_attention_rows(["Qwen/Qwen3-32B"]))
+        decode_head_pairs = {
+            (
+                row.input_shapes[0][1],
+                int(row.extra_values[RUNTIME_NUM_KEY_VALUE_HEADS]),
+            )
+            for row in rows
+            if row.input_shapes[0][0] == 1
+            and row.output_shapes[0][0] == 1
+            and "dense_decode" in row.extra_values[RUNTIME_SOURCE_PROFILE]
+        }
+
+        expected_head_pairs = {(64, 8), (32, 4), (16, 2), (8, 1), (4, 1)}
+        self.assertTrue(expected_head_pairs <= decode_head_pairs)
 
     def test_split_qkv_uses_model_qkv_hidden_sizes(self):
         rows = list(generate_split_qkv_rmsnorm_rope_rows(["Qwen/Qwen3-32B"]))

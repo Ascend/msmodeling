@@ -54,9 +54,9 @@ _DEFAULT_SPARSE_MODE_3_MASK = (2048, 2048)
 _FIA_INPUT_SLOT_COUNT = 31
 
 _QWEN3_DENSE_PREFILL_BATCHES = [1, 2, 4, 8]
-_QWEN3_DENSE_PREFILL_SEQS = [512, 1024, 2048, 3072, 4096, 4112, 4608, 5120, 6144]
+_QWEN3_DENSE_PREFILL_SEQS = [512, 1024, 2048, 3072, 3592, 4096, 4112, 4608, 5120, 6144]
 _QWEN3_DENSE_DECODE_BATCHES = [1, 2, 4, 8, 12, 16, 24, 32]
-_QWEN3_DENSE_DECODE_AVG_SEQS = [1024, 2048, 3072, 4096, 4224, 4352, 4608, 4864, 5120, 5376, 5632]
+_QWEN3_DENSE_DECODE_AVG_SEQS = [1024, 2048, 3072, 3593, 4096, 4224, 4352, 4608, 4864, 5120, 5376, 5632]
 
 _DSV3_MLA_PREFILL_BATCHES = [1, 2, 4, 8]
 _DSV3_MLA_PREFILL_SEQS = [512, 1024, 2048, 3072, 4096, 4099, 4608, 5120, 6144]
@@ -233,6 +233,29 @@ def _mla_scene_grids(model_key: str) -> tuple[list[int], list[int], list[int], l
         _GENERIC_DECODE_BATCHES,
         _GENERIC_DECODE_AVG_SEQS,
     )
+
+
+def _iter_dense_parallel_head_variants(cfg: ModelConfig) -> Generator[tuple[int, int, int], None, None]:
+    seen: set[tuple[int, int]] = set()
+    for tp in cfg.tp_sizes:
+        if tp <= 0 or cfg.num_attention_heads % tp != 0:
+            continue
+
+        local_num_heads = cfg.num_attention_heads // tp
+        if cfg.num_kv_heads >= tp:
+            if cfg.num_kv_heads % tp != 0:
+                continue
+            local_num_kv_heads = cfg.num_kv_heads // tp
+        elif tp % cfg.num_kv_heads == 0:
+            local_num_kv_heads = 1
+        else:
+            continue
+
+        signature = (local_num_heads, local_num_kv_heads)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        yield tp, local_num_heads, local_num_kv_heads
 
 
 def _build_dense_prefill_row(
@@ -475,7 +498,6 @@ def generate_fused_attention_rows(
     seen: set[tuple] = set()
     for cfg in resolve_configs(model_names):
         num_heads = cfg.num_attention_heads
-        num_kv_heads = cfg.num_kv_heads
         model_key = _model_scene_key(cfg)
 
         if cfg.is_mla():
@@ -506,25 +528,26 @@ def generate_fused_attention_rows(
             continue
 
         prefill_batches, prefill_seqs, decode_batches, decode_avg_seqs = _dense_scene_grids(model_key)
-        for batch, seq in _iter_pairs(prefill_batches, prefill_seqs):
-            row = _build_dense_prefill_row(
-                scene_name=f"{model_key}_dense_prefill",
-                batch=batch,
-                seq=seq,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=cfg.head_dim,
-            )
-            if _should_emit(row, seen):
-                yield row
-        for batch, avg_seq_len in _iter_pairs(decode_batches, decode_avg_seqs):
-            row = _build_dense_decode_row(
-                scene_name=f"{model_key}_dense_decode",
-                batch=batch,
-                avg_seq_len=avg_seq_len,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=cfg.head_dim,
-            )
-            if _should_emit(row, seen):
-                yield row
+        for tp, local_num_heads, local_num_kv_heads in _iter_dense_parallel_head_variants(cfg):
+            for batch, seq in _iter_pairs(prefill_batches, prefill_seqs):
+                row = _build_dense_prefill_row(
+                    scene_name=f"{model_key}_dense_prefill_tp{tp}",
+                    batch=batch,
+                    seq=seq,
+                    num_heads=local_num_heads,
+                    num_kv_heads=local_num_kv_heads,
+                    head_dim=cfg.head_dim,
+                )
+                if _should_emit(row, seen):
+                    yield row
+            for batch, avg_seq_len in _iter_pairs(decode_batches, decode_avg_seqs):
+                row = _build_dense_decode_row(
+                    scene_name=f"{model_key}_dense_decode_tp{tp}",
+                    batch=batch,
+                    avg_seq_len=avg_seq_len,
+                    num_heads=local_num_heads,
+                    num_kv_heads=local_num_kv_heads,
+                    head_dim=cfg.head_dim,
+                )
+                if _should_emit(row, seen):
+                    yield row
