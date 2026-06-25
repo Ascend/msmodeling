@@ -679,15 +679,15 @@ def shard_model_by_tp(
                         }
                         tp_plan.update(
                             {
-                                f"{prefix}.*.mlp.fused_moe.shared_experts.gate_proj": (
+                                f"{prefix}.*.shared_expert*.gate_proj": (
                                     COLWISE_LINEAR,
                                     shared_expert_params,
                                 ),
-                                f"{prefix}.*.mlp.fused_moe.shared_experts.up_proj": (
+                                f"{prefix}.*.shared_expert*.up_proj": (
                                     COLWISE_LINEAR,
                                     shared_expert_params,
                                 ),
-                                f"{prefix}.*.mlp.fused_moe.shared_experts.down_proj": (
+                                f"{prefix}.*.shared_expert*.down_proj": (
                                     ROWWISE_LINEAR,
                                     shared_expert_down_proj_params,
                                 ),

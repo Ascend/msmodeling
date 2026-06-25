@@ -180,6 +180,8 @@ class MoELayer(torch.nn.Module):
                 self.top_k,
                 input_ids,
                 self.moe_layer_idx,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
             )
         elif self.moe_config.gate_returns_raw_logits:
             # Branch 1: Custom fused top-k + softmax gating (from raw logits)
@@ -629,12 +631,13 @@ class FusedMoETensorCast(FusedMoEBase):
         actual_num_elements = final_hidden_states.numel()
         if actual_num_elements != expected_num_elements:
             # Truncate to expected size if there are extra tokens
-            logger.warning(
-                "MoE output shape mismatch: expected %d elements, got %d. "
-                "Truncating extra tokens from TP sharding padding.",
-                expected_num_elements,
-                actual_num_elements,
-            )
+            if not torch.compiler.is_compiling():
+                logger.warning(
+                    "MoE output shape mismatch: expected %d elements, got %d. "
+                    "Truncating extra tokens from TP sharding padding.",
+                    expected_num_elements,
+                    actual_num_elements,
+                )
             final_hidden_states = final_hidden_states.view(-1)[:expected_num_elements].view(original_shape)
         else:
             final_hidden_states = final_hidden_states.view(original_shape)
