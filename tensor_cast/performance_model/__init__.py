@@ -908,7 +908,7 @@ def _(
     return properties
 
 
-_PREDICTIVE_DECODING_THRESHOLD = 5
+_PREDICTIVE_DECODING_THRESHOLD = 6
 
 
 def _mlapo_properties_helper(
@@ -1049,9 +1049,180 @@ def _(
     return properties
 
 
+# Sparse MLA reads a small, index-selected KV working set from paged cache.  The
+# roofline model keeps this hardware-agnostic by converting physical KV bytes into
+# effective memory bytes with a data-movement efficiency, rather than modeling a
+# concrete cache level or DMA pipeline.  Formula: effective_bytes = physical_bytes / eta,
+# where eta is a sparse/paged data-movement efficiency in (0, 1].
+_SPARSE_MLA_S1_BASE_SIZE = 64
+# Reference sparse page count for decode efficiency interpolation.  More selected
+# pages slightly improve effective bandwidth because the fixed random-access overhead
+# is amortized over more useful KV bytes.
+_SPARSE_MLA_REFERENCE_SPARSE_PAGE_COUNT = 16
+# Decode sparse-KV reads are highly scattered: the calibrated efficiency is low and
+# changes logarithmically with selected page count, with floor/ceil clamps to avoid
+# overfitting very small or very large top-k shapes.  Formula:
+# eta_decode = clamp(base + scale * log2(page_count / reference_page_count), floor, ceil).
+_SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_DECODE_BASE = 0.025
+_SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_DECODE_LOG2_PAGE_SCALE = 0.006
+_SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_DECODE_FLOOR = 0.015
+_SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_DECODE_CEIL = 0.080
+# Prefill sparse-KV access is much more sequential across query tokens, so use a
+# fixed calibrated efficiency for the current fixed-block-size paged-cache layout.
+# Formula: eta_prefill = prefill_eta.
+_SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_PREFILL = 0.92
+_SPARSE_MLA_SPARSE_INDEX_DTYPE_BYTES = 4
+
+
+def _sparse_mla_decode_mask(query_lens: torch.Tensor) -> torch.Tensor:
+    """Return which requests use decode-like sparse MLA accounting. The predictive decode threshold is set one token above the largest observed decode/MTP target bundle, so query_len < threshold covers both single-token decode and small MTP decode without checking active context length or block span."""
+    return query_lens < _PREDICTIVE_DECODING_THRESHOLD
+
+
+def _sparse_mla_query_tile_count(query_lens: torch.Tensor) -> torch.Tensor:
+    """Compute ceil(query_len / S1_BASE_SIZE) for decode KV staging. SparseFlashAttention stages one selected sparse-KV working set per S1 tile, so using tile count rather than token count models reuse across adjacent decode/MTP query tokens."""
+    return torch.div(query_lens + _SPARSE_MLA_S1_BASE_SIZE - 1, _SPARSE_MLA_S1_BASE_SIZE, rounding_mode="floor")
+
+
+def _estimate_sparse_mla_decode_page_efficiency(sparse_page_count: int) -> float:
+    """Estimate decode sparse-KV efficiency as clamp(base + scale * log2(page_count / reference), floor, ceil).
+    The logarithmic term models random-access overhead being amortized as more useful sparse pages are selected,
+    while clamps keep extrapolated very-small and very-large top-k shapes bounded.
+    """
+    page_count = max(sparse_page_count, 1)
+    log2_page_scale = math.log2(page_count / _SPARSE_MLA_REFERENCE_SPARSE_PAGE_COUNT)
+    eta = (
+        _SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_DECODE_BASE
+        + _SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_DECODE_LOG2_PAGE_SCALE * log2_page_scale
+    )
+    return max(
+        _SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_DECODE_FLOOR,
+        min(eta, _SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_DECODE_CEIL),
+    )
+
+
+def _estimate_sparse_mla_prefill_page_efficiency() -> float:
+    """Return the calibrated sparse-MLA prefill KV-read efficiency. Prefill has many adjacent query tokens and the current paged-cache block size is fixed, so block-size scaling would reduce to a constant and is intentionally omitted."""
+    return _SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_PREFILL
+
+
+def _estimate_sparse_mla_paged_kv_read_breakdown(
+    kv_cache: torch.Tensor,
+    block_table: Optional[torch.Tensor],
+    request_total_seq_lens: torch.Tensor,
+    query_lens: torch.Tensor,
+    sparse_topk: Optional[int],
+    topk_indices: Optional[torch.Tensor] = None,
+):
+    """Break down sparse MLA cache traffic for roofline memory bytes. The helper first caps each request's attention length with sparse_topk, then converts selected KV entries into physical bytes, applies decode/prefill efficiencies separately, and returns effective bytes = physical_bytes / eta so random sparse gathers reduce usable bandwidth without hard-coding a cache level."""
+    block_size = kv_cache.size(1)
+    cache_entry_size = bytes_of_elements(kv_cache.size(-1), kv_cache.dtype)
+    # Dense MLA has no sparse index indirection, so physical and effective KV read
+    # bytes are identical.  Return the same compact schema as sparse mode: effective
+    # bytes for the calibrated path, physical bytes for the quant/raw path, and the
+    # optional index/table streams consumed by the caller.
+    if sparse_topk is None:
+        selected_cache_entries = int(torch.sum(request_total_seq_lens).item())
+        kv_read_bytes = selected_cache_entries * cache_entry_size
+        block_table_read_bytes = 0
+        if block_table is not None:
+            dense_block_table_entries = (request_total_seq_lens + block_size - 1) // block_size
+            block_table_read_bytes = bytes_of_elements(
+                int(torch.sum(dense_block_table_entries).item()), block_table.dtype
+            )
+        return {
+            "kv_effective_read_bytes": kv_read_bytes,
+            "block_table_read_bytes": block_table_read_bytes,
+            "sparse_index_read_bytes": 0,
+            "kv_physical_read_bytes": kv_read_bytes,
+            "physical_block_table_read_bytes": block_table_read_bytes,
+            "physical_sparse_index_read_bytes": 0,
+        }
+
+    # Sparse top-k caps the logical attention length.  This is the useful KV work
+    # before accounting for paged-cache indirection and sparse gather inefficiency.
+    # Formula: attn_len_i = min(request_total_seq_len_i, sparse_topk).
+    attn_lens = torch.minimum(
+        request_total_seq_lens,
+        torch.tensor(sparse_topk, device=request_total_seq_lens.device),
+    )
+    sparse_page_counts = torch.div(attn_lens + block_size - 1, block_size, rounding_mode="floor")
+
+    # raw_* is the unoptimized selected-KV traffic: every query token reads its own
+    # sparse KV set.  It is kept for the quant MLA path, whose calibration still uses
+    # the older selected-KV accounting.  Formula: raw_entries = sum_i(query_len_i * attn_len_i).
+    raw_sparse_cache_entries = query_lens.to(attn_lens.dtype) * attn_lens
+    raw_selected_cache_entries = int(torch.sum(raw_sparse_cache_entries).item())
+    raw_selected_kv_physical_read_bytes = raw_selected_cache_entries * cache_entry_size
+
+    is_decode = _sparse_mla_decode_mask(query_lens)
+    # Decode kernels stage sparse KV per S1 tile, so multiple adjacent query tokens can
+    # reuse the same selected pages.  Prefill keeps per-token accounting because its
+    # query dimension is already large enough to expose mostly sequential access.
+    # Formula: selected_entries = sum_i(query_units_i * attn_len_i), where decode
+    # query_units_i = ceil(query_len_i / S1_BASE_SIZE), prefill query_units_i = query_len_i.
+    cache_read_query_units = query_lens.clone()
+    if torch.any(is_decode).item():
+        cache_read_query_units[is_decode] = _sparse_mla_query_tile_count(query_lens[is_decode])
+    sparse_cache_entries = cache_read_query_units.to(attn_lens.dtype) * attn_lens
+    selected_cache_entries = int(torch.sum(sparse_cache_entries).item())
+
+    is_prefill = ~is_decode
+    decode_entries = int(torch.sum(sparse_cache_entries[is_decode]).item()) if torch.any(is_decode).item() else 0
+    prefill_entries = int(torch.sum(sparse_cache_entries[is_prefill]).item()) if torch.any(is_prefill).item() else 0
+    decode_physical_read_bytes = decode_entries * cache_entry_size
+    prefill_physical_read_bytes = prefill_entries * cache_entry_size
+
+    # Apply efficiency separately for decode and prefill so mixed batches do not get
+    # a single blended coefficient before the physical byte split is known.
+    # Formula: physical_bytes = selected_entries * cache_entry_size.
+    decode_efficiency = 1.0
+    if decode_entries > 0:
+        decode_sparse_page_count = int(torch.max(sparse_page_counts[is_decode]).item())
+        decode_efficiency = _estimate_sparse_mla_decode_page_efficiency(decode_sparse_page_count)
+    prefill_efficiency = 1.0
+    if prefill_entries > 0:
+        prefill_efficiency = _estimate_sparse_mla_prefill_page_efficiency()
+
+    # Effective bytes are the physical bytes divided by data-movement efficiency; the
+    # analytic roofline then treats them as ordinary memory traffic.  Formula:
+    # effective_bytes = decode_physical_bytes / eta_decode + prefill_physical_bytes / eta_prefill.
+    selected_kv_effective_read_bytes = (
+        decode_physical_read_bytes / decode_efficiency + prefill_physical_read_bytes / prefill_efficiency
+    )
+    # If topk_indices is not passed as an input tensor, account for the implicit sparse
+    # index stream consumed by the kernel.  Explicit topk_indices are already covered by
+    # get_memory_access_properties().
+    sparse_index_read_bytes = 0
+    physical_sparse_index_read_bytes = 0
+    if topk_indices is None:
+        sparse_index_read_bytes = selected_cache_entries * _SPARSE_MLA_SPARSE_INDEX_DTYPE_BYTES
+        physical_sparse_index_read_bytes = raw_selected_cache_entries * _SPARSE_MLA_SPARSE_INDEX_DTYPE_BYTES
+
+    block_table_read_bytes = 0
+    raw_block_table_read_bytes = 0
+    if block_table is not None:
+        block_table_entries = int(
+            torch.sum(cache_read_query_units.to(sparse_page_counts.dtype) * sparse_page_counts).item()
+        )
+        raw_block_table_entries = int(torch.sum(query_lens.to(sparse_page_counts.dtype) * sparse_page_counts).item())
+        block_table_read_bytes = bytes_of_elements(block_table_entries, block_table.dtype)
+        raw_block_table_read_bytes = bytes_of_elements(raw_block_table_entries, block_table.dtype)
+
+    return {
+        "kv_effective_read_bytes": selected_kv_effective_read_bytes,
+        "block_table_read_bytes": block_table_read_bytes,
+        "sparse_index_read_bytes": sparse_index_read_bytes,
+        "kv_physical_read_bytes": raw_selected_kv_physical_read_bytes,
+        "physical_block_table_read_bytes": raw_block_table_read_bytes,
+        "physical_sparse_index_read_bytes": physical_sparse_index_read_bytes,
+    }
+
+
 def _multihead_latent_attention_properties_helper(
     op_invoke_info: OpInvokeInfo,
     softmax_dtype: torch.dtype,
+    enable_sparse_mla_paged_kv_efficiency: bool = True,
 ) -> OpInvokeInfo.PerformanceProperties:
     # 1. Argument and Dimension Extraction
     assert len(op_invoke_info.args) >= 10
@@ -1080,16 +1251,15 @@ def _multihead_latent_attention_properties_helper(
     qk_nope_head_dim = q_head_dim - qk_rope_head_dim
     sparse_topk = topk_indices.shape[-1] if topk_indices is not None else topk_limit
 
-    # 2. Separate Prefill and Decode Sequences
-    # A sequence is in "decode" if it's processing only one query token.
-    # Otherwise, it's in "prefill".
+    # 2. Separate Prefill and Decode Sequences.
+    # q_len == 5 with a long active context is the MTP target decode shape in SFA traces.
     num_tokens_per_seq = query_lens
-    is_decode = num_tokens_per_seq < _PREDICTIVE_DECODING_THRESHOLD
+    is_decode = _sparse_mla_decode_mask(num_tokens_per_seq)
     is_prefill = ~is_decode
 
     total_fma_ops = 0
     total_gp_ops = 0
-    exclude_input_ids = {1, 6, 7, 8}  # kv_cache, W_UK_T, W_UV, kv_b_proj
+    exclude_input_ids = {1, 2, 6, 7, 8}  # kv_cache, block_table, W_UK_T, W_UV, kv_b_proj
 
     # 3. Calculate FLOPs for the Prefill Phase
     num_prefill_tokens = torch.sum(num_tokens_per_seq[is_prefill]).item()
@@ -1163,18 +1333,28 @@ def _multihead_latent_attention_properties_helper(
 
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids=exclude_input_ids)  # exclude kv_cache
 
-    # Estimate memory read from the KV Cache.
-    # The size of a cached entry is (kv_lora_rank + qk_rope_head_dim).
-    cache_entry_size = bytes_of_elements(kv_cache.size(-1), kv_cache.dtype)
-    if sparse_topk is not None:
-        decode_request_total_seq_lens = torch.minimum(
-            request_total_seq_lens,
-            torch.tensor(sparse_topk, device=request_total_seq_lens.device),
+    # Estimate paged sparse-KV reads with a local page efficiency. Decode shapes reuse
+    # the staged sparse KV set across an S1 tile, while prefill reads scale with query tokens.
+    sparse_mla_paged_kv = _estimate_sparse_mla_paged_kv_read_breakdown(
+        kv_cache,
+        _block_table,
+        request_total_seq_lens,
+        query_lens,
+        sparse_topk,
+        topk_indices,
+    )
+    if enable_sparse_mla_paged_kv_efficiency:
+        properties.memory_read_bytes += (
+            sparse_mla_paged_kv["kv_effective_read_bytes"]
+            + sparse_mla_paged_kv["block_table_read_bytes"]
+            + sparse_mla_paged_kv["sparse_index_read_bytes"]
         )
-        actual_request_total_seq_lens = torch.where(is_decode, decode_request_total_seq_lens, request_total_seq_lens)
-        properties.memory_read_bytes += torch.sum(actual_request_total_seq_lens).item() * cache_entry_size
     else:
-        properties.memory_read_bytes += torch.sum(request_total_seq_lens * cache_entry_size).item()
+        properties.memory_read_bytes += (
+            sparse_mla_paged_kv["kv_physical_read_bytes"]
+            + sparse_mla_paged_kv["physical_block_table_read_bytes"]
+            + sparse_mla_paged_kv["physical_sparse_index_read_bytes"]
+        )
 
     compute_ops = properties.compute_ops.setdefault(q.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = total_fma_ops
@@ -1209,9 +1389,9 @@ def _calculate_mla_quant_ops(
     Calculate quantization/dequantization ops for MLA quantization.
     Check `torch.ops.tensor_cast.multihead_latent_attention_quant` docstring for details.
     """
-    # Separate prefill and decode sequences
+    # Separate prefill and decode sequences.
     num_tokens_per_seq = query_lens
-    is_decode = num_tokens_per_seq < _PREDICTIVE_DECODING_THRESHOLD
+    is_decode = _sparse_mla_decode_mask(num_tokens_per_seq)
     is_prefill = ~is_decode
 
     total_quant_dequant_ops = 0
@@ -1292,8 +1472,14 @@ def _(
     else:
         softmax_dtype = out_dtype
 
-    # Get base properties from helper
-    properties = _multihead_latent_attention_properties_helper(op_invoke_info, softmax_dtype)
+    # Get base properties from helper. Quant MLA keeps selected KV traffic as
+    # physical bytes without sparse-page efficiency expansion until quant SFA
+    # profiles are available for calibrating an effective-byte model.
+    properties = _multihead_latent_attention_properties_helper(
+        op_invoke_info,
+        softmax_dtype,
+        enable_sparse_mla_paged_kv_efficiency=False,
+    )
 
     # Extract dimensions (reuse logic instead of duplicating)
     num_heads = q.size(1)
@@ -2376,6 +2562,103 @@ def _estimate_dfc_mxfp4(op_invoke_info: OpInvokeInfo, device_profile: DeviceProf
     )
 
 
+# dsa_indexer scores query tokens against a paged historical indexer cache.  Model
+# sparse/random cache access as physical historical-cache bytes expanded by an
+# efficiency factor; do not model hardware-specific L1/L2/MTE behavior here.
+# Formula: historical_effective_read_bytes = historical_physical_read_bytes / eta.
+_DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_BASE = 0.30
+_DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_LOG2_BLOCK_SCALE = 0.23
+_DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_REFERENCE_BLOCK_COUNT = 128
+_DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_FLOOR = 0.15
+# Prefill walks many adjacent queries over the same historical cache span, so use
+# a fixed calibrated efficiency for the current fixed-block-size paged-cache layout.
+# Formula: eta_prefill = prefill_eta.
+_DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_PREFILL = 0.90
+# Fraction of prefill query tokens that effectively cause independent historical
+# cache reads after adjacent-query reuse is amortized.  This is a generic data reuse
+# factor, not a cache-level-specific optimization.  Formula:
+# prefill_query_units = ceil(query_len * prefill_query_scale).
+_DSA_INDEXER_PREFILL_CACHE_READ_QUERY_SCALE = 0.25
+
+
+def _sum_request_cache_blocks(request_total_seq_lens: torch.Tensor, block_size: int) -> int:
+    """Estimate total active cache blocks as sum(ceil(seq_len_i / block_size)). dsa_indexer receives active request lengths from the op invocation, so the roofline model can use those lengths directly instead of falling back to shape-only block-table estimates."""
+    cache_blocks = torch.div(request_total_seq_lens + block_size - 1, block_size, rounding_mode="floor")
+    return int(cache_blocks.sum().item())
+
+
+def _is_dsa_indexer_decode_mode(query_len: int) -> bool:
+    """Classify dsa_indexer decode mode with the same threshold rule as sparse MLA. Reusing _sparse_mla_decode_mask keeps single-token decode and small MTP decode classification consistent across the two sparse-attention-related operators."""
+    return bool(_sparse_mla_decode_mask(torch.tensor(query_len)).item())
+
+
+def _estimate_dsa_indexer_decode_page_efficiency(logical_cache_block_count: int) -> float:
+    """Estimate decode historical-cache read efficiency from active cache blocks.
+    eta = max(floor, min(base + scale * log2(block_count / reference_block_count), 1));
+    more blocks amortize random page traversal, but efficiency is bounded to
+    avoid hardware-specific cache assumptions.
+    """
+    block_count = max(logical_cache_block_count, 1)
+    log2_block_scale = math.log2(block_count / _DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_REFERENCE_BLOCK_COUNT)
+    eta = (
+        _DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_BASE
+        + _DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_LOG2_BLOCK_SCALE * log2_block_scale
+    )
+    return max(_DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_FLOOR, min(eta, 1.0))
+
+
+def _estimate_dsa_indexer_paged_cache_read_breakdown(
+    hidden_states: torch.Tensor,
+    indexer_cache: torch.Tensor,
+    head_dim: int,
+    request_total_seq_lens: torch.Tensor,
+    fp8_mode: bool = False,
+):
+    """Break down dsa_indexer cache bytes into penalized historical reads and physical append writes. It computes context_work = query_units * sum(seq_lens), historical_physical_bytes from cache element width plus fp8 scale bytes, then historical_effective_bytes = historical_physical_bytes / eta because only historical random reads lose bandwidth; appends remain linear writes."""
+    batch, query_len, _ = hidden_states.shape
+    index_head_dim = indexer_cache.size(-1)
+    block_size = indexer_cache.size(1)
+    dtype_size = indexer_cache.element_size()
+    is_decode = _is_dsa_indexer_decode_mode(query_len)
+    logical_cache_block_count = _sum_request_cache_blocks(request_total_seq_lens, block_size)
+    # Decode touches a small number of query tokens, so efficiency is dominated by
+    # random page traversal and improves slowly as more cache blocks amortize overhead.
+    # Formula: eta_decode = max(floor, min(base + scale * log2(block_count / reference_block_count), 1)).
+    if is_decode:
+        eta = _estimate_dsa_indexer_decode_page_efficiency(logical_cache_block_count)
+    else:
+        # Prefill sees adjacent-query reuse and longer contiguous cache walks.  The
+        # current paged-cache block size is fixed, so use the calibrated constant directly.
+        eta = _DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_PREFILL
+    summed_seq_lens = int(request_total_seq_lens.sum().item())
+    # Decode has little query-side reuse, so every query token probes the historical
+    # cache.  Prefill amortizes repeated historical-cache reads across neighboring
+    # query tokens with the generic query scale above.  Formula:
+    # context_work = query_units * sum(request_total_seq_lens).
+    if is_decode:
+        query_units = query_len
+    else:
+        query_units = math.ceil(query_len * _DSA_INDEXER_PREFILL_CACHE_READ_QUERY_SCALE)
+    context_work = query_units * summed_seq_lens
+    # Historical reads are the only traffic penalized by sparse/random access.  The
+    # append path writes the current query tokens into cache linearly and remains
+    # physical byte traffic.  Formula:
+    # historical_physical_read_bytes = context_work * (index_head_dim * dtype_size + fp8_scale_bytes_per_token).
+    historical_cache_read_bytes = context_work * index_head_dim * dtype_size
+    scale_bytes_per_token = ((head_dim + 127) // 128) * 4 if fp8_mode else 0
+    historical_scale_read_bytes = context_work * scale_bytes_per_token
+    historical_physical_read_bytes = historical_cache_read_bytes + historical_scale_read_bytes
+    historical_effective_read_bytes = historical_physical_read_bytes / eta if historical_physical_read_bytes != 0 else 0
+    append_cache_write_bytes = batch * query_len * index_head_dim * dtype_size
+    append_scale_write_bytes = batch * query_len * scale_bytes_per_token
+
+    return {
+        "historical_effective_read_bytes": historical_effective_read_bytes,
+        "append_cache_write_bytes": append_cache_write_bytes,
+        "append_scale_write_bytes": append_scale_write_bytes,
+    }
+
+
 def _estimate_dsa_indexer_breakdown(
     hidden_states: torch.Tensor,
     qa_normed: torch.Tensor,
@@ -2384,9 +2667,10 @@ def _estimate_dsa_indexer_breakdown(
     head_dim: int,
     qk_rope_head_dim: int,
     topk_limit: int,
-    request_total_seq_lens: Optional[torch.Tensor] = None,
+    request_total_seq_lens: torch.Tensor,
     fp8_mode: bool = False,
 ):
+    """Estimate dsa_indexer MMA/GP work and cache traffic for analytic roofline. Projection and score math use active sequence lengths for compute, while cache traffic is delegated to the paged-cache breakdown so sparse historical reads are expanded by efficiency and append writes stay physical."""
     batch, seq_len, hidden_size = hidden_states.shape
     q_lora_rank = qa_normed.shape[-1]
 
@@ -2432,21 +2716,16 @@ def _estimate_dsa_indexer_breakdown(
     # 6) score work.  The reference implementation computes a per-head score tensor
     #    against the active cache, then combines those head scores with the learned
     #    routing weights into one index score.
-    max_request_total_seq_len = int(request_total_seq_lens.max().item()) if request_total_seq_lens is not None else None
-    active_cache_len = max_request_total_seq_len or seq_len
+    active_cache_len = int(request_total_seq_lens.max().item())
     qk_index_mma = 2 * batch * seq_len * num_heads * active_cache_len * head_dim
 
-    # Cache traffic uses the logical cache extent when runtime lengths are available;
-    # otherwise it falls back to the preallocated cache buffer length.
-    cache_len = max_request_total_seq_len or indexer_cache.size(1)
-    cache_rw_bytes = batch * cache_len * indexer_cache.size(-1) * indexer_cache.element_size()
-    scale_cache_rw_bytes = 0
-    if fp8_mode:
-        # The fp8 path writes both the fp8 key cache and the accompanying scale cache.
-        # The scale cache is a small fp32 side buffer, approximated as one 32-bit scale
-        # per 128-wide block, sized by the same logical cache length.
-        scale_cache_rw_bytes = batch * cache_len * ((head_dim + 127) // 128) * 4
-
+    paged_cache_read_breakdown = _estimate_dsa_indexer_paged_cache_read_breakdown(
+        hidden_states,
+        indexer_cache,
+        head_dim,
+        request_total_seq_lens=request_total_seq_lens,
+        fp8_mode=fp8_mode,
+    )
     # BF16/GLM5-style head mixing keeps the learned weight multiply in the base path.
     # The fp8-only terms are layered on top when fp8_mode is enabled.
     head_weight_mul_gp = batch * seq_len * num_heads * active_cache_len
@@ -2477,8 +2756,7 @@ def _estimate_dsa_indexer_breakdown(
         "head_reduce_gp": head_reduce_gp,
         "head_k_scale_mul_gp": head_k_scale_mul_gp,
         "topk_gp": topk_gp,
-        "cache_rw_bytes": cache_rw_bytes,
-        "scale_cache_rw_bytes": scale_cache_rw_bytes,
+        **paged_cache_read_breakdown,
     }
 
 
@@ -2537,11 +2815,8 @@ def _(
         gp_ops=(breakdown["head_relu_gp"] + breakdown["head_q_scale_mul_gp"] + breakdown["head_k_scale_mul_gp"]),
     )
 
-    # The cache itself is dense, and the reference kernel also maintains a separate
-    # scale cache in fp8 mode.  The local wrapper only exposes one cache tensor, so we
-    # count the scale-cache bytes as read/write traffic as well to keep the roofline
-    # bound conservative.
-    properties.memory_readwrite_bytes += breakdown["cache_rw_bytes"] + breakdown["scale_cache_rw_bytes"]
+    properties.memory_read_bytes += breakdown["historical_effective_read_bytes"]
+    properties.memory_write_bytes += breakdown["append_cache_write_bytes"] + breakdown["append_scale_write_bytes"]
     return properties
 
 
