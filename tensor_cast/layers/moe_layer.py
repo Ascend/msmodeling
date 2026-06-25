@@ -356,11 +356,12 @@ class ParallelMoELayer(ModelWrapperBase):
             origin_shape = hidden_states.shape
             if len(origin_shape) == 3:
                 hidden_states = hidden_states.view(-1, *origin_shape[2:])
+            # post-run shared expert to decrease memory peak
+            residuals = hidden_states
 
-            shared_expert_output = None
-            if self._inner.fused_moe.shared_experts is not None and self.num_external_shared_experts == 0:
-                shared_expert_output = self._run_shared_experts(hidden_states)
-
+            skip_shared_experts = (
+                self._inner.fused_moe.shared_experts is not None and self.num_external_shared_experts == 0
+            )
             if self.transform_dp_group:
                 tp_size = self.global_tp_group.world_size
                 tp_rank = self.global_tp_group.rank_in_group
@@ -379,7 +380,7 @@ class ParallelMoELayer(ModelWrapperBase):
                     hidden_states,
                     topk_indices,
                     topk_weights,
-                    skip_shared_experts=shared_expert_output is not None,
+                    skip_shared_experts=skip_shared_experts,
                 )
                 hidden_states = self._dp_transform_exit(hidden_states, num_tokens)
             else:
@@ -388,11 +389,11 @@ class ParallelMoELayer(ModelWrapperBase):
                     hidden_states,
                     topk_indices,
                     topk_weights,
-                    skip_shared_experts=shared_expert_output is not None,
+                    skip_shared_experts=skip_shared_experts,
                 )
 
-            if shared_expert_output is not None:
-                hidden_states = hidden_states + shared_expert_output
+            if skip_shared_experts:
+                hidden_states = hidden_states + self._run_shared_experts(residuals)
 
             if len(origin_shape) == 3:
                 hidden_states = hidden_states.view(*origin_shape[:2], *hidden_states.shape[1:])

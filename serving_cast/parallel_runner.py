@@ -4,11 +4,13 @@ import logging
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from functools import partial
+import os
 from typing import Callable, Iterator, Optional, Type
 
 import pandas as pd
 import torch
 
+from tensor_cast import config
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
@@ -189,6 +191,7 @@ class ParallelRunner:
         base_args = copy.copy(self.args)
         base_args.num_devices = target_devices
         base_user_input = UserInputConfig.from_args(base_args)
+        base_chrome_trace = getattr(base_args, "chrome_trace", None)
 
         def _build_user_input(tp: int, ep: int, moe_dp: int) -> UserInputConfig:
             tmp_user_input = copy.copy(base_user_input)
@@ -199,6 +202,9 @@ class ParallelRunner:
             tmp_user_input.ep_size = ep
             tmp_user_input.moe_dp_size = moe_dp
             tmp_user_input.moe_tp_size = target_devices // (ep * moe_dp)
+            if base_chrome_trace:
+                name, ext = os.path.splitext(base_chrome_trace)
+                tmp_user_input.chrome_trace = f"{name}_tp{tmp_user_input.tp_size}dp{tmp_user_input.dp_size}{ext}"
             return tmp_user_input
 
         tp_list = resolve_search_sizes(self.args.tp_sizes, target_devices, target_devices)
@@ -280,6 +286,15 @@ class ParallelRunner:
 
         logging.basicConfig(level=log_level, format="[%(levelname)s] [%(name)s] %(message)s")
 
+    def _apply_compilation_config(self, user_input: UserInputConfig) -> None:
+        """Apply compile-time graph rewrite flags in the current process.
+
+        Args:
+            user_input: User input configuration.
+        """
+        config.compilation.passes.enable_sequence_parallel = user_input.enable_sequence_parallel
+        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = user_input.enable_dispatch_ffn_combine
+
     def _submit_task(
         self,
         user_input: UserInputConfig,
@@ -301,6 +316,7 @@ class ParallelRunner:
             torch._dynamo.config.recompile_limit = LIMIT_COUNT
             torch._dynamo.config.accumulated_recompile_limit = LIMIT_COUNT
         torch.compiler.reset()
+        self._apply_compilation_config(user_input)
 
         logger.info("Start processing TP size: %d", user_input.tp_size)
 

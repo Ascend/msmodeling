@@ -16,6 +16,7 @@ from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.model_config import WordEmbeddingTPMode
+from tests.helpers.cli_runner import run_module_main
 
 
 @pytest.mark.nightly
@@ -57,7 +58,7 @@ class SequenceParallelPassTestCase(unittest.TestCase):
             num_hidden_layers_override=1,
             world_size=tp_size,
             tp_size=tp_size,
-            word_embedding_tp=WordEmbeddingTPMode.row.value,
+            word_embedding_tp=WordEmbeddingTPMode.row,
             quantize_linear_action=QuantizeLinearAction.DISABLED,
         )
 
@@ -102,6 +103,66 @@ class SequenceParallelPassTestCase(unittest.TestCase):
                 table,
                 "Non-sequence-parallel mode should have all_reduce",
             )
+
+
+class SequenceParallelPassRegressionTestCase(unittest.TestCase):
+    """Regression tests for sequence parallel pass that must run in CI gate."""
+
+    @parameterized.expand(
+        [
+            # Regression case from run_sc.sh: Qwen3-32B + sequence parallel +
+            # row word-embedding TP with large input length and batch size.
+            # Batch size must be divisible by TP size to avoid
+            # ``AssertionError: X is not divisible by Y`` in reduce_scatter.
+            (8, 16),
+            (16, 16),
+        ]
+    )
+    def test_sp_throughput_optimizer_row_embedding_tp(self, tp_size: int, batch_size: int):
+        """throughput_optimizer entry point works for SP + row embedding TP.
+
+        Mirrors the ``run_sc.sh`` aggregation case via
+        ``cli.inference.throughput_optimizer``:
+        - model: Qwen/Qwen3-32B
+        - input length: 4096
+        - output length: 1
+        - batch size: 16 (aligned to TP size)
+        - TP size: 8 or 16
+        - row word-embedding TP
+        - quantize linear: DISABLED
+        - compile enabled
+        """
+        args = [
+            "Qwen/Qwen3-32B",
+            "--device=ATLAS_800_A3_752T_128G_DIE",
+            "--num-devices=16",
+            "--input-length=4096",
+            "--output-length=1",
+            "--compile",
+            "--tp-sizes",
+            str(tp_size),
+            "--batch-range",
+            str(batch_size),
+            str(batch_size),
+            "--enable-sequence-parallel",
+            "--word-embedding-tp=row",
+            "--quantize-linear-action=DISABLED",
+            "--ttft-limits=2000",
+        ]
+
+        result = run_module_main("cli.inference.throughput_optimizer", args)
+        full_output = result.stdout + result.stderr
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"throughput_optimizer failed for TP={tp_size}, batch={batch_size}: {result.stderr}",
+        )
+        self.assertIn(
+            "Overall Best Configuration:",
+            full_output,
+            "Optimizer should produce an overall best configuration",
+        )
 
 
 if __name__ == "__main__":

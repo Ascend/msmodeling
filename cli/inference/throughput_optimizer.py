@@ -35,6 +35,7 @@ from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
     QuantizeLinearAction,
 )
+from tensor_cast.model_config import WordEmbeddingTPMode
 
 from ..utils import (
     LOG_FORMAT,
@@ -162,6 +163,37 @@ def arg_parse():
         default=None,
         help="Enable MOE-DP search. Optional explicit MOE-DP sizes. "
         "If no value is provided, defaults to powers of 2 up to world_size.",
+    )
+    model_group.add_argument(
+        "--enable-shared-expert-tp",
+        action="store_true",
+        help="Enable vLLM-style tensor parallel for shared experts. "
+        "This uses dense-MLP TP for shared_experts with delayed down_proj reduction.",
+    )
+    model_group.add_argument(
+        "--enable-sequence-parallel",
+        action="store_true",
+        help="Enable the sequence parallel graph rewrite pass during compilation.",
+    )
+    model_group.add_argument(
+        "--enable-dispatch-ffn-combine",
+        action="store_true",
+        help="Enable dispatch_ffn_combine fusion pattern during compilation.",
+    )
+    model_group.add_argument(
+        "--word-embedding-tp",
+        type=str,
+        choices=[mode.value for mode in WordEmbeddingTPMode],
+        default=None,
+        help="Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled.",
+    )
+    debug_group = parser.add_argument_group("Debug Options")
+    debug_group.add_argument(
+        "--chrome-trace",
+        type=str,
+        default=None,
+        help="Generate chrome trace file for visualization (e.g., trace.json). "
+        "Useful for analyzing operator-level performance in detail.",
     )
     service_group = parser.add_argument_group("Service Options")
     service_group.add_argument(
