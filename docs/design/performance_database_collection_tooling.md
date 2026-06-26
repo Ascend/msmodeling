@@ -88,7 +88,6 @@ comm_bench/generate_comm_microbench.py  ← 生成通信基准脚本
 * `vllm0.13.0_torch2.8.0_cann8.3`
 * `vllm0.15.0_torch2.9.0_cann8.5`
 * `vllm0.18.0_torch2.9.0_cann8.5`
-* `vllm0.18.0_torch2.9.0_cann8.5_shape_generated`（generated/staging 示例）
 
 ### 2.4 计算 CSV Schema 契约
 
@@ -169,7 +168,7 @@ comm_bench/generate_comm_microbench.py  ← 生成通信基准脚本
 
 **行为**：
 
-* `--target-models` 使用已知模型配置裁剪 GEMM `(N, K)` 候选
+* `--target-models` 使用与 `text_generate` 相同的模型 ID 裁剪 GEMM `(N, K)` 候选
 * `--rows` 限制每个 CSV 的行数；`--seed` 保证抽样可复现
 * `--max-hbm-gb` 通过 `memory_estimator.py` 过滤超出内存预算的行
 
@@ -383,7 +382,7 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 # 2. 生成 shape 变异矩阵扩大覆盖
 python tools/perf_data_collection/generate_shape_grid.py \
     --data-dir <data_dir> \
-    --target-models dsv3,qwen3-32b \
+    --target-models deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B \
     --max-hbm-gb 128
 
 # 3. 运行微基准测试（需要 NPU 设备 + CANN + vLLM-Ascend 自定义 OPP）
@@ -444,7 +443,7 @@ tools/perf_data_collection/comm_bench/generate_comm_microbench.py \
 
 | 参数                | 是否必选 | 默认值                              | 说明                                                                  |
 | ----------------- | ---- | -------------------------------- | ------------------------------------------------------------------- |
-| `--target-models` | 否    |                                  | 逗号分隔的模型名（如 "qwen3-32b" ），指定时通过对 tp_sizes 枚举，只生成模型实际需要的 GEMM (N,K) 对 |
+| `--target-models` | 否    |                                  | 逗号分隔的模型 ID（如 "Qwen/Qwen3-32B" ），命名与 `text_generate` 一致；指定时通过对 tp_sizes 枚举，只生成模型实际需要的 GEMM (N,K) 对 |
 | `--data-dir`      | 否    |                                  | 数据库目录路径                                                             |
 | `--device`        | 否    | ATLAS_800_A3_752T_128G_DIE       | 目标设备名称，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用                 |
 | `--vllm-version`  | 否    | vLLM 版本                          | vLLM-Ascend 版本号，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用        |

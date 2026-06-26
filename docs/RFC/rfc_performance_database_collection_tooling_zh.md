@@ -94,7 +94,6 @@ vllm{vllm_version}_torch{torch_version}_cann{cann_version}
 - `vllm0.13.0_torch2.8.0_cann8.3`
 - `vllm0.15.0_torch2.9.0_cann8.5`
 - `vllm0.18.0_torch2.9.0_cann8.5`
-- `vllm0.18.0_torch2.9.0_cann8.5_shape_generated`（generated/staging 示例，不应被误认为完整测量目录）
 
 计算目录为该栈维护唯一的 `op_mapping.yaml`。通信 CSV 不复制到每个计算目录，而是由 `op_mapping.yaml` 通过 `communication_data_ref` 指向通信目录，例如：
 

@@ -7,15 +7,18 @@ import sys
 import tempfile
 import types
 import unittest
+from dataclasses import replace
 from unittest import mock
 import warnings
 from pathlib import Path
 
+from tools.perf_data_collection.grid_generator import model_configs
 from tools.perf_data_collection.grid_generator.config import (
     load_op_mapping_metadata,
     load_shape_grid_config,
 )
 from tools.perf_data_collection.grid_generator.generators import TheoryShapeRow
+from tools.perf_data_collection.grid_generator.generators import fused_attention as fused_attention_module
 from tools.perf_data_collection.grid_generator.evaluator import (
     SafeExprEval,
     _parse_shape_expr,
@@ -24,8 +27,11 @@ from tools.perf_data_collection.grid_generator.evaluator import (
 from tools.perf_data_collection.grid_generator.generators.fused_attention import (
     RUNTIME_ACTUAL_SEQ_LENGTHS_KV_VALUES,
     RUNTIME_ACTUAL_SEQ_LENGTHS_VALUES,
+    RUNTIME_AVG_SEQ_LEN,
     RUNTIME_BLOCK_TABLE_VALID_BLOCKS,
+    RUNTIME_NUM_HEADS,
     RUNTIME_NUM_KEY_VALUE_HEADS,
+    RUNTIME_SOURCE_PROFILE,
     _build_dense_prefill_row,
     _build_mla_decode_row,
     _build_mla_prefill_row,
@@ -388,6 +394,49 @@ class TestShapeGridLogic(unittest.TestCase):
 
         self.assertEqual(rows[0]["Input Shapes"], '"128,512;128,512;512;512"')
 
+    def test_theory_rows_cap_applies_without_rng(self):
+        headers = [
+            "Input Shapes",
+            "Input Data Types",
+            "Input Formats",
+            "Output Shapes",
+            "Output Data Types",
+            "Output Formats",
+            "Average Duration(us)",
+        ]
+        source_rows = [
+            {
+                "Input Shapes": '"1,512"',
+                "Input Data Types": "DT_BF16",
+                "Input Formats": "ND",
+                "Output Shapes": '"1,512"',
+                "Output Data Types": "DT_BF16",
+                "Output Formats": "ND",
+                "Average Duration(us)": "1.0",
+            }
+        ]
+        generated = iter(
+            [
+                TheoryShapeRow([(1, 512)], [(1, 512)]),
+                TheoryShapeRow([(2, 512)], [(2, 512)]),
+                TheoryShapeRow([(3, 512)], [(3, 512)]),
+            ]
+        )
+
+        rows = collect_theory_generated_rows(
+            headers,
+            source_rows,
+            generated,
+            csv_path=Path("Add.csv"),
+            file_index=1,
+            total_files=1,
+            max_rows=2,
+            rng=None,
+        )
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1]["Input Shapes"], '"2,512"')
+
     def test_tensor_move_theory_rows_skip_small_unprofiled_copies(self):
         config = load_shape_grid_config(Path("tools/perf_data_collection/grid_generator/config.yaml"))
         generator = get_default_theory_generator("TensorMove", ["Qwen3-32B"], config, {})
@@ -545,7 +594,7 @@ class ZTestMemoryEstimation(unittest.TestCase):
         self.assertTrue(exceeded)
 
     def test_theory_generation_dry_run(self):
-        """Dry-run: verify theory generation with memory filtering for all defined kernels using dsv3/qwen332b."""
+        """Dry-run: verify theory generation with memory filtering for all defined kernels using canonical model IDs."""
         # Suppress noise for a clean table output
         warnings.filterwarnings("ignore")
         logging.getLogger("transformers").setLevel(logging.ERROR)
@@ -561,7 +610,7 @@ class ZTestMemoryEstimation(unittest.TestCase):
 
         # Test all kernels defined in the config assignments
         test_kernels = sorted(config.get("assignments", {}).keys())
-        model_names = ["dsv3", "qwen332b"]
+        model_names = ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen3-32B"]
         failed_kernels = []
         all_total_rows = 0
 
@@ -627,6 +676,23 @@ class ZTestMemoryEstimation(unittest.TestCase):
             f"The following kernels failed to generate any rows: {failed_kernels}",
         )
 
+    def test_fused_attention_uses_stable_model_key_for_hf_id_config_names(self):
+        """HF fetch success may keep cfg.name as the HF id; scene grids must still be model-specific."""
+        qwen_hf_cfg = replace(model_configs.QWEN3_32B_CONFIG, name="Qwen/Qwen3-32B")
+        dsv3_hf_cfg = replace(model_configs.DEEPSEEK_V3_CONFIG, name="deepseek-ai/DeepSeek-V3")
+
+        with mock.patch.object(fused_attention_module, "resolve_configs", return_value=[qwen_hf_cfg]):
+            qwen_rows = list(generate_fused_attention_rows(["Qwen/Qwen3-32B"]))
+        qwen_sources = {row.extra_values[RUNTIME_SOURCE_PROFILE] for row in qwen_rows}
+        self.assertIn("qwen332b_dense_prefill_tp1", qwen_sources)
+        self.assertTrue(any(row.extra_values[RUNTIME_AVG_SEQ_LEN] == "4112.000000" for row in qwen_rows))
+
+        with mock.patch.object(fused_attention_module, "resolve_configs", return_value=[dsv3_hf_cfg]):
+            dsv3_rows = list(generate_fused_attention_rows(["deepseek-ai/DeepSeek-V3"]))
+        dsv3_sources = {row.extra_values[RUNTIME_SOURCE_PROFILE] for row in dsv3_rows}
+        self.assertIn("deepseekv3_mla_prefill", dsv3_sources)
+        self.assertTrue(any(row.extra_values[RUNTIME_AVG_SEQ_LEN] == "4099.000000" for row in dsv3_rows))
+
     def test_m_grid_is_superset_of_baseline(self):
         """Ensure the new M_GRID is a strict superset of the baseline."""
         BASELINE_M_GRID = [
@@ -670,7 +736,7 @@ class ZTestMemoryEstimation(unittest.TestCase):
 
     def test_dfc_rows_set_ep_size_from_expert_per_rank(self):
         """DFC generated rows must not inherit template EP Size blindly."""
-        rows = list(generate_dispatch_ffn_combine_rows(["glm51"]))
+        rows = list(generate_dispatch_ffn_combine_rows(["zai-org/GLM-5.1"]))
         self.assertGreater(len(rows), 0)
         for row in rows:
             expert_per_rank = row.output_shapes[1][0]
@@ -774,8 +840,44 @@ class ZTestMemoryEstimation(unittest.TestCase):
 
         self.assertEqual(len(rows), len(signatures))
 
+    def test_fia_qwen3_decode_covers_tp4_3p5k_context(self):
+        rows = list(generate_fused_attention_rows(["Qwen/Qwen3-32B"]))
+        target = next(
+            (
+                row
+                for row in rows
+                if row.input_shapes[0] == (1, 16, 128)
+                and row.input_shapes[1] == (29, 2, 128, 128)
+                and row.input_shapes[14] == (1, 29)
+                and row.output_shapes[0] == (1, 16, 128)
+                and row.extra_values[RUNTIME_AVG_SEQ_LEN] == "3593.000000"
+            ),
+            None,
+        )
+
+        self.assertIsNotNone(target)
+        self.assertEqual(target.extra_values[RUNTIME_NUM_HEADS], "16")
+        self.assertEqual(target.extra_values[RUNTIME_NUM_KEY_VALUE_HEADS], "2")
+        self.assertEqual(target.extra_values[RUNTIME_BLOCK_TABLE_VALID_BLOCKS], "29")
+
+    def test_fia_qwen3_dense_rows_cover_tp_head_variants(self):
+        rows = list(generate_fused_attention_rows(["Qwen/Qwen3-32B"]))
+        decode_head_pairs = {
+            (
+                row.input_shapes[0][1],
+                int(row.extra_values[RUNTIME_NUM_KEY_VALUE_HEADS]),
+            )
+            for row in rows
+            if row.input_shapes[0][0] == 1
+            and row.output_shapes[0][0] == 1
+            and "dense_decode" in row.extra_values[RUNTIME_SOURCE_PROFILE]
+        }
+
+        expected_head_pairs = {(64, 8), (32, 4), (16, 2), (8, 1), (4, 1)}
+        self.assertTrue(expected_head_pairs <= decode_head_pairs)
+
     def test_split_qkv_uses_model_qkv_hidden_sizes(self):
-        rows = list(generate_split_qkv_rmsnorm_rope_rows(["Qwen3-32B"]))
+        rows = list(generate_split_qkv_rmsnorm_rope_rows(["Qwen/Qwen3-32B"]))
         self.assertIn(
             TheoryShapeRow(
                 [(1, 768), (128,)],
@@ -798,7 +900,7 @@ class ZTestMemoryEstimation(unittest.TestCase):
 
     def test_split_qkv_skips_mla_models(self):
         self.assertEqual(
-            list(generate_split_qkv_rmsnorm_rope_rows(["dsv3", "GLM5.1"])),
+            list(generate_split_qkv_rmsnorm_rope_rows(["deepseek-ai/DeepSeek-V3", "zai-org/GLM-5.1"])),
             [],
         )
 

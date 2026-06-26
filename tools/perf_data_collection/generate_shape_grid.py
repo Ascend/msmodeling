@@ -61,7 +61,8 @@ def parse_args() -> argparse.Namespace:
         "--target-models",
         type=str,
         default=None,
-        help="Comma-separated model names (e.g. 'dsv3,qwen3-32b') to prune GEMM (N,K) pairs. "
+        help="Comma-separated model IDs (e.g. 'deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B') "
+        "to prune GEMM (N,K) pairs. Use the same names passed to text_generate. "
         "Only used in theory mode. If omitted, uses full NK_GRID cartesian product.",
     )
     parser.add_argument(

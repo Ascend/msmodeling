@@ -1,15 +1,18 @@
 """Target model architecture configs for theory-guided shape grid generation.
 
 Each entry describes the key architectural parameters needed to derive
-all operator shapes. Used by `generate_shape_grid.py --mode theory --target-models ...`
+all operator shapes. Used by `generate_shape_grid.py --target-models ...`
 to prune the GEMM (N,K) cartesian product to only model-relevant pairs.
 
-Reference: OPERATOR_PERF_DATABASE_DESIGN_zh_v1.5.md, Appendix I.
+Reference: docs/RFC/rfc_performance_database_collection_tooling_zh.md.
 """
 
 from __future__ import annotations
 
+import logging
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,7 @@ class ModelConfig:
     # Parallel configs to enumerate
     tp_sizes: tuple[int, ...] = (1, 4, 8)
     ep_sizes: tuple[int, ...] = (1,)
+    model_key: str = ""
 
     def is_mla(self) -> bool:
         """Check if this model uses MLA (Multi-head Latent Attention)."""
@@ -123,67 +127,92 @@ GLM51_CONFIG = ModelConfig(
     topk=8,
     tp_sizes=(1, 2, 4, 8, 16),
     ep_sizes=(1, 2, 4, 8),
+    model_key="glm51",
 )
 
 
+def _normalize_name(name: str) -> str:
+    return (
+        name.lower()
+        .replace("-", "")
+        .replace("_", "")
+        .replace(".", "")
+        .replace("/", "")
+        .replace(" ", "")
+    )
+
+
+DEEPSEEK_V3_CONFIG = ModelConfig(
+    name="DeepSeek-V3",
+    hidden_size=7168,
+    intermediate_size=18432,
+    num_attention_heads=128,
+    num_kv_heads=1,  # MLA latent
+    head_dim=128,
+    q_lora_rank=1536,
+    kv_lora_rank=512,
+    qk_nope_head_dim=128,
+    qk_rope_head_dim=64,
+    num_experts=256,
+    num_experts_per_card=32,
+    expert_intermediate_size=2048,
+    topk=8,
+    tp_sizes=(1, 2, 4, 8, 16),
+    ep_sizes=(1, 2, 4, 8),
+    model_key="deepseekv3",
+)
+
+QWEN3_32B_CONFIG = ModelConfig(
+    name="Qwen3-32B",
+    hidden_size=5120,
+    intermediate_size=25600,
+    num_attention_heads=64,
+    num_kv_heads=8,
+    head_dim=128,
+    tp_sizes=(1, 2, 4, 8, 16),
+    model_key="qwen332b",
+)
+
+LLAMA_70B_CONFIG = ModelConfig(
+    name="LLaMA-70B",
+    hidden_size=8192,
+    intermediate_size=28672,
+    num_attention_heads=64,
+    num_kv_heads=8,
+    head_dim=128,
+    tp_sizes=(1, 4, 8, 16),
+    model_key="llama70b",
+)
+
+MODEL_IDS: dict[str, ModelConfig] = {
+    "deepseek-ai/DeepSeek-V3": DEEPSEEK_V3_CONFIG,
+    "Qwen/Qwen3-32B": QWEN3_32B_CONFIG,
+    "meta-llama/Meta-Llama-3-70B": LLAMA_70B_CONFIG,
+    "zai-org/GLM-5.1": GLM51_CONFIG,
+}
+
 # Keys must be lowercase and without punctuation for normalize_name()
 MODELS: dict[str, ModelConfig] = {
-    "dsv3": ModelConfig(
-        name="DeepSeek-V3",
-        hidden_size=7168,
-        intermediate_size=18432,
-        num_attention_heads=128,
-        num_kv_heads=1,  # MLA latent
-        head_dim=128,
-        q_lora_rank=1536,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        num_experts=256,
-        num_experts_per_card=32,
-        expert_intermediate_size=2048,
-        topk=8,
-        tp_sizes=(1, 2, 4, 8, 16),
-        ep_sizes=(1, 2, 4, 8),
-    ),
-    "qwen332b": ModelConfig(
-        name="Qwen3-32B",
-        hidden_size=5120,
-        intermediate_size=25600,
-        num_attention_heads=64,
-        num_kv_heads=8,
-        head_dim=128,
-        tp_sizes=(1, 2, 4, 8, 16),
-    ),
-    "llama70b": ModelConfig(
-        name="LLaMA-70B",
-        hidden_size=8192,
-        intermediate_size=28672,
-        num_attention_heads=64,
-        num_kv_heads=8,
-        head_dim=128,
-        tp_sizes=(1, 4, 8, 16),
-    ),
-    "glm51": GLM51_CONFIG,
-    "zaiorgglm51": GLM51_CONFIG,
+    _normalize_name(model_id): config for model_id, config in MODEL_IDS.items()
 }
 
 MODELS_HF_PATHS: dict[str, str] = {
+    _normalize_name(model_id): model_id for model_id in MODEL_IDS
+}
+
+LEGACY_MODEL_NAME_HINTS: dict[str, str] = {
+    "deepseekv3": "deepseek-ai/DeepSeek-V3",
     "dsv3": "deepseek-ai/DeepSeek-V3",
+    "metallama370b": "meta-llama/Meta-Llama-3-70B",
     "qwen332b": "Qwen/Qwen3-32B",
     "llama70b": "meta-llama/Meta-Llama-3-70B",
     "glm51": "zai-org/GLM-5.1",
-    "zaiorgglm51": "zai-org/GLM-5.1",
 }
 
 _RESOLVED_CONFIGS: dict[str, ModelConfig] = {}
 
 
 def _fetch_from_huggingface(model_name: str, model_id: str) -> ModelConfig:
-    import logging
-    import sys
-    from pathlib import Path
-
     # Define repo root from tools/perf_data_collection/model_configs.py
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
@@ -236,6 +265,9 @@ def _fetch_from_huggingface(model_name: str, model_id: str) -> ModelConfig:
         num_experts_per_card = 0
         ep_sizes = (1,)
 
+    static_config = MODELS.get(_normalize_name(model_id))
+    model_key = static_config.model_key if static_config is not None else _normalize_name(model_id)
+
     return ModelConfig(
         name=model_name,
         hidden_size=hidden_size,
@@ -253,30 +285,23 @@ def _fetch_from_huggingface(model_name: str, model_id: str) -> ModelConfig:
         topk=topk,
         tp_sizes=(1, 2, 4, 8, 16),
         ep_sizes=ep_sizes,
-    )
-
-
-def _normalize_name(name: str) -> str:
-    return (
-        name.lower()
-        .replace("-", "")
-        .replace("_", "")
-        .replace(".", "")
-        .replace("/", "")
-        .replace(" ", "")
+        model_key=model_key,
     )
 
 
 def resolve_configs(model_names: list[str] | None) -> list[ModelConfig]:
     """Resolve model names to ModelConfig objects."""
-    import logging
-
     if model_names is None:
         return list(dict.fromkeys(MODELS.values()))
     
     configs = []
     for name in model_names:
         norm_name = _normalize_name(name)
+        if norm_name in LEGACY_MODEL_NAME_HINTS:
+            raise ValueError(
+                f"Unsupported legacy model name '{name}'. "
+                f"Use '{LEGACY_MODEL_NAME_HINTS[norm_name]}' to match text_generate model_id naming."
+            )
         model_id = MODELS_HF_PATHS.get(norm_name, name)
         
         if model_id not in _RESOLVED_CONFIGS:

@@ -16,7 +16,12 @@ class TestLoadShapeGridConfig(unittest.TestCase):
     def test_loads_yaml(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "config.yaml"
-            p.write_text("assignments:\n  MatMulV2:\n    pattern: MatMulFamily\n    models: [dsv3, qwen332b]\n")
+            p.write_text(
+                "assignments:\n"
+                "  MatMulV2:\n"
+                "    pattern: MatMulFamily\n"
+                "    models: [deepseek-ai/DeepSeek-V3, Qwen/Qwen3-32B]\n"
+            )
             result = load_shape_grid_config(p)
             self.assertIn("assignments", result)
             self.assertEqual(result["assignments"]["MatMulV2"]["pattern"], "MatMulFamily")

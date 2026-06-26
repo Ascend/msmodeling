@@ -94,7 +94,7 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 ```bash
 python tools/perf_data_collection/generate_shape_grid.py \
   --database-path tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5_shape_generated \
-  --target-models dsv3,qwen3-32b \
+  --target-models deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B \
   --rows 2000 \
   --seed 20260409
 ```
@@ -168,7 +168,7 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 | 参数 | 是否必选 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `--database-path` | 否 | 自动推导 | 显式 CSV 根目录。 |
-| `--target-models` | 否 | 全量网格 | 逗号分隔模型名，用于裁剪 GEMM `(N, K)` 候选。 |
+| `--target-models` | 否 | 全量网格 | 逗号分隔模型 ID（如 `deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B`），命名与 `text_generate` 一致，用于裁剪 GEMM `(N, K)` 候选。 |
 | `--device` | 否 | `ATLAS_800_A3_752T_128G_DIE` | 自动推导路径时使用的设备目录名。 |
 | `--vllm-version` | 否 | 无 | 自动推导路径时使用的 vLLM 版本。 |
 | `--torch-version` | 否 | 无 | 自动推导路径时使用的 PyTorch 版本。 |
@@ -356,7 +356,7 @@ NNODES=2 NODE_RANK=1 MASTER_ADDR=<master_ip> \
 | `ASCEND_HOME_PATH` / `ASCEND_TOOLKIT_HOME` / `ASCEND_TOOLKIT_HOME_PATH` / `ASCEND_INSTALL_PATH` | 自动探测 | CANN 安装目录和版本探测。 |
 | `MASTER_ADDR` / `MASTER_PORT` / `RANK` / `WORLD_SIZE` / `LOCAL_RANK` | `torchrun` 注入 | 通信 benchmark 和 DFC 分布式 replay。 |
 
-跨模块完整列表见 [Environment Variables](../../tests/README.md)。
+跨模块完整列表见 [环境变量](../../scripts/README.md#environment-variables)。
 
 自定义 OPP 环境示例：
 
