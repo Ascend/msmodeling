@@ -16,6 +16,8 @@ dependencies = [
     "colorama>=0.4.6",
     "compressed-tensors>=0.16.0",
     "diffusers>=0.38.0",
+    # Keep fastapi version range aligned with vllm dependency constraint
+    "fastapi>=0.133.0,<0.137",
     "filelock",
     "gradio>=6.7.0,<7",
     "greenlet>=3.5.1",
