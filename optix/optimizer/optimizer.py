@@ -621,8 +621,10 @@ def main() -> None:
     )
     from ..optimizer.scheduler import Scheduler
     from ..optimizer.store import DataStorage
+    from ..plugins import load_general_plugins
 
     register_ori_functions()
+    load_general_plugins()
 
     sims = ["vllm", "mindie"]
     benches = ["ais_bench", "vllm_benchmark"]
