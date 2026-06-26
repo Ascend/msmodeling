@@ -739,8 +739,8 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #        ``selected_token_indices`` *before* the lm_head like
         #        ``CausalLmWrapper`` can.  Instead we apply it *after* the
         #        HF model's forward to select only the desired logit rows.
-        #        (c) For the MTP branch we also prune the intermediate
-        #        hidden_states so MTP layers only process the selected tokens.
+        #        (c) For the MTP branch we prune logits only; intermediate
+        #        hidden_states stay full-width for rotary_emb and proposal row selection.
         #
         #        The patch is additive and backwards-compatible: the default
         #        path (no MTP, no selected_indices) is identical to the
@@ -751,6 +751,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #          12×7168×163840 during prefill, inflating compute cost
         #          ~3500×.
         from tensor_cast.transformers.model import ModelWrapper
+        from tensor_cast.layers.sampler import _has_explicit_selected_token_indices, select_lm_head_hidden_states
 
         if not hasattr(ModelWrapper, "_patched_for_mtp"):
             _original_mw_forward = ModelWrapper.forward
@@ -763,18 +764,41 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                 output_intermediate_hidden_states: bool = False,
                 **kwargs: object,
             ):
-                # Extract selected_token_indices from sampling_metadata
-                # (injected by generate_inputs() for prefill token pruning).
+                # Extract sampling_metadata from generate_inputs(); spec decode uses it for target row selection.
                 sampling_metadata = kwargs.get("sampling_metadata")
-                selected_indices = sampling_metadata.selected_token_indices if sampling_metadata is not None else None
 
                 if output_intermediate_hidden_states:
-                    # MTP path: delegate to HF model, prune logits only.
-                    # intermediate_hidden_states must NOT be pruned here
-                    # because MtpWrapper needs the full seq_len for
-                    # rotary_emb and the MTP layers will apply
-                    # selected_token_indices themselves (see
-                    # MultiTokenPredictor.forward in mtp.py).
+                    has_image_input = kwargs.get("pixel_values") is not None or kwargs.get("image_grid_thw") is not None
+                    if not has_image_input and inputs_embeds is None and hasattr(self._inner, "language_model"):
+                        # MTP text path: keep full intermediate hidden states for rotary/proposal
+                        # selection, but prune target rows before the internal lm_head.
+                        from tensor_cast.transformers.model import _EXTRA_TC_KWARGS_KEYS
+
+                        lm = self._inner.language_model
+                        _tc_extra = {
+                            k: kwargs[k] for k in _EXTRA_TC_KWARGS_KEYS if k in kwargs and kwargs[k] is not None
+                        }
+                        if _tc_extra:
+                            for layer in lm.model.layers:
+                                if hasattr(layer, "self_attn"):
+                                    layer.self_attn._extra_forward_kwargs = _tc_extra
+
+                        body_outputs = lm.model(
+                            input_ids=input_ids,
+                            position_ids=position_ids,
+                            use_cache=False,
+                            return_dict=True,
+                        )
+                        intermediate_hidden_states = body_outputs.last_hidden_state
+                        hidden_states = select_lm_head_hidden_states(
+                            intermediate_hidden_states,
+                            sampling_metadata,
+                            mode="target",
+                        )
+                        logits = lm.lm_head(hidden_states)
+                        return logits, intermediate_hidden_states
+
+                    # Fallback for image / embedding paths that require the full VL forward.
                     kwargs_with_hidden = {**kwargs, "output_hidden_states": True}
                     outputs = self._inner(
                         input_ids=input_ids,
@@ -786,12 +810,17 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                     )
                     logits = outputs[0]
                     intermediate_hidden_states = outputs[1][-1]
-                    if selected_indices is not None:
-                        logits = logits.index_select(1, selected_indices)
+                    logits = select_lm_head_hidden_states(logits, sampling_metadata, mode="target")
                     return logits, intermediate_hidden_states
 
+                selected_indices = sampling_metadata.selected_token_indices if sampling_metadata is not None else None
+
                 # Non-MTP path
-                if selected_indices is not None and inputs_embeds is None:
+                if (
+                    _has_explicit_selected_token_indices(selected_indices)
+                    and sampling_metadata.spec_decode_metadata is None
+                    and inputs_embeds is None
+                ):
                     # ------------------------------------------------------------
                     # Fix: Check whether image inputs are present.  If the user
                     # supplied pixel_values / image_grid_thw, we must route
@@ -839,9 +868,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
 
                 # Default / fallback path
                 logits = _original_mw_forward(self, input_ids, position_ids, inputs_embeds, **kwargs)
-                if selected_indices is not None:
-                    logits = logits.index_select(1, selected_indices)
-                return logits
+                return select_lm_head_hidden_states(logits, sampling_metadata, mode="target")
 
             ModelWrapper.forward = patched_mw_forward
             ModelWrapper._patched_for_mtp = True
@@ -895,48 +922,6 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
 
             rotary_cls.forward = patched_rotary_forward
             rotary_cls._patched_for_kimi_k25 = True
-            patched = True
-
-        # ----------------------------------------------------------------
-        # Patch 15: MultiTokenPredictorLayer — unpack tuple from decoder
-        # ----------------------------------------------------------------
-        # WHY:   Both the original and patched
-        #        ``DeepseekV3DecoderLayer.forward`` return a tuple
-        #        ``(hidden_states, ...)``.  ``MultiTokenPredictorLayer``
-        #        passes this tuple through to ``MultiTokenPredictor``,
-        #        which tries to call ``.index_select()`` on it — tuples
-        #        don't have that method.  Unpack the first tensor element.
-        # WITHOUT: ``AttributeError: 'tuple' object has no attribute
-        #          'index_select'`` at ``MultiTokenPredictor.forward()``.
-        from tensor_cast.layers.mtp import MultiTokenPredictorLayer
-
-        if not hasattr(MultiTokenPredictorLayer, "_patched_for_kimi_k25"):
-            _original_mtp_layer_forward = MultiTokenPredictorLayer.forward
-
-            def patched_mtp_layer_forward(
-                self,
-                inputs_embeds: torch.Tensor,
-                position_ids: torch.Tensor,
-                previous_hidden_states: torch.Tensor,
-                position_embeddings: Optional[torch.Tensor] = None,
-                **kwargs,
-            ):
-                hidden_states = _original_mtp_layer_forward(
-                    self,
-                    inputs_embeds,
-                    position_ids,
-                    previous_hidden_states,
-                    position_embeddings=position_embeddings,
-                    **kwargs,
-                )
-                # The decoder layer (e.g. DeepseekV3DecoderLayer) returns
-                # a tuple (hidden_states, ...).  Unpack the first tensor.
-                if isinstance(hidden_states, tuple):
-                    hidden_states = hidden_states[0]
-                return hidden_states
-
-            MultiTokenPredictorLayer.forward = patched_mtp_layer_forward
-            MultiTokenPredictorLayer._patched_for_kimi_k25 = True
             patched = True
 
     except Exception as e:

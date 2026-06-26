@@ -651,6 +651,169 @@ class TestKimiK25Patches(unittest.TestCase):
             _ig.resize_image = _orig
             _km._resize_image_patched = False
 
+    def _install_kimi_model_wrapper_patch(self):
+        from unittest.mock import patch
+        from tensor_cast.transformers.builtin_model.kimi_k25 import _patch_model_classes_for_kimi_k25
+        from tensor_cast.transformers.model import ModelWrapper
+
+        class _KimiConfig:
+            model_type = "kimi_k25"
+
+        class _FakeVLRemote:
+            def forward(self, *args, **kwargs):
+                return None
+
+            def _merge_input_ids_with_image_features(self, *args, **kwargs):
+                return None
+
+        class _FakeRemote:
+            def forward(self, *args, **kwargs):
+                return None
+
+            def moe_infer(self, *args, **kwargs):
+                return None
+
+        fake_classes = {
+            "modeling_kimi_k25.KimiK25ForConditionalGeneration": _FakeVLRemote,
+            "modeling_kimi_k25.MoonViT3dEncoder": _FakeRemote,
+            "modeling_deepseek.DeepseekV3MoE": _FakeRemote,
+            "modeling_deepseek.MoEGate": _FakeRemote,
+            "modeling_deepseek.DeepseekV3DecoderLayer": _FakeRemote,
+            "modeling_kimi_k25.MoonVision3dPatchEmbed": _FakeRemote,
+            "modeling_deepseek.DeepseekV3RotaryEmbedding": _FakeRemote,
+        }
+
+        def _fake_get_class(class_ref, *args, **kwargs):
+            return fake_classes[class_ref]
+
+        original_model_wrapper_forward = ModelWrapper.forward
+        had_model_wrapper_flag = hasattr(ModelWrapper, "_patched_for_mtp")
+        original_model_wrapper_flag = getattr(ModelWrapper, "_patched_for_mtp", None)
+
+        def _restore_model_wrapper():
+            ModelWrapper.forward = original_model_wrapper_forward
+            if had_model_wrapper_flag:
+                ModelWrapper._patched_for_mtp = original_model_wrapper_flag
+            elif hasattr(ModelWrapper, "_patched_for_mtp"):
+                delattr(ModelWrapper, "_patched_for_mtp")
+
+        try:
+            with patch("transformers.dynamic_module_utils.get_class_from_dynamic_module", side_effect=_fake_get_class):
+                self.assertTrue(_patch_model_classes_for_kimi_k25(_KimiConfig(), "moonshotai/Kimi-K2.5"))
+        except Exception:
+            _restore_model_wrapper()
+            raise
+        return ModelWrapper, _restore_model_wrapper
+
+    def test_model_wrapper_mtp_patch_prunes_hidden_states_before_kimi_lm_head(self):
+        """Kimi MTP wrapper must select target rows before running the internal lm_head."""
+        from types import SimpleNamespace
+        from tensor_cast.layers.sampler import SamplingMetadata, SpecDecodeMetadata
+
+        class _RecordingLmHead(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.input_rows = []
+
+            def forward(self, hidden_states):
+                self.input_rows.append(hidden_states.reshape(-1, hidden_states.size(-1)).size(0))
+                return hidden_states
+
+        class _FakeLanguageBody(torch.nn.Module):
+            def __init__(self, hidden_states):
+                super().__init__()
+                self.hidden_states = hidden_states
+                self.layers = []
+
+            def forward(self, **kwargs):
+                return SimpleNamespace(last_hidden_state=self.hidden_states)
+
+        class _FakeLanguageModel(torch.nn.Module):
+            def __init__(self, hidden_states):
+                super().__init__()
+                self.model = _FakeLanguageBody(hidden_states)
+                self.lm_head = _RecordingLmHead()
+
+        class _FakeInner(torch.nn.Module):
+            def __init__(self, hidden_states):
+                super().__init__()
+                self.language_model = _FakeLanguageModel(hidden_states)
+
+            def forward(self, **kwargs):
+                hidden_states = self.language_model.model(**kwargs).last_hidden_state
+                logits = self.language_model.lm_head(hidden_states)
+                return logits, (hidden_states,)
+
+        ModelWrapper, restore_model_wrapper = self._install_kimi_model_wrapper_patch()
+        try:
+            hidden_states = torch.arange(8 * 3, dtype=torch.float32).view(1, 8, 3)
+            wrapper = ModelWrapper(_FakeInner(hidden_states))
+            spec_metadata = SpecDecodeMetadata(
+                logits_indices=torch.tensor([2, 3, 4, 5, 6, 7], dtype=torch.long),
+                num_active_requests=2,
+                num_speculative_tokens=2,
+            )
+            sampling_metadata = SamplingMetadata(spec_decode_metadata=spec_metadata)
+
+            logits, intermediate_hidden_states = wrapper(
+                input_ids=None,
+                position_ids=torch.arange(8, dtype=torch.long).view(1, 8),
+                output_intermediate_hidden_states=True,
+                sampling_metadata=sampling_metadata,
+            )
+
+            expected_logits = hidden_states.reshape(-1, 3).index_select(0, spec_metadata.logits_indices)
+            self.assertEqual(logits.tolist(), expected_logits.tolist())
+            self.assertIs(intermediate_hidden_states, hidden_states)
+            self.assertEqual(wrapper._inner.language_model.lm_head.input_rows, [spec_metadata.logits_indices.numel()])
+        finally:
+            restore_model_wrapper()
+
+    def test_model_wrapper_default_sampling_metadata_skips_kimi_fast_path(self):
+        """Kimi text path must ignore SamplingMetadata's scalar default sentinel."""
+        from types import SimpleNamespace
+        from tensor_cast.layers.sampler import SamplingMetadata
+
+        class _FakeLanguageBody(torch.nn.Module):
+            def __init__(self, hidden_states):
+                super().__init__()
+                self.hidden_states = hidden_states
+                self.layers = []
+
+            def forward(self, **kwargs):
+                return SimpleNamespace(last_hidden_state=self.hidden_states)
+
+        class _FakeLanguageModel(torch.nn.Module):
+            def __init__(self, hidden_states):
+                super().__init__()
+                self.model = _FakeLanguageBody(hidden_states)
+                self.lm_head = torch.nn.Identity()
+
+        class _FakeInner(torch.nn.Module):
+            def __init__(self, fallback_logits, body_hidden_states):
+                super().__init__()
+                self.fallback_logits = fallback_logits
+                self.language_model = _FakeLanguageModel(body_hidden_states)
+
+            def forward(self, **kwargs):
+                return (self.fallback_logits,)
+
+        ModelWrapper, restore_model_wrapper = self._install_kimi_model_wrapper_patch()
+        try:
+            fallback_logits = torch.arange(3 * 2, dtype=torch.float32).view(1, 3, 2)
+            body_hidden_states = fallback_logits + 100
+            wrapper = ModelWrapper(_FakeInner(fallback_logits, body_hidden_states))
+
+            logits = wrapper(
+                input_ids=None,
+                position_ids=torch.arange(3, dtype=torch.long).view(1, 3),
+                sampling_metadata=SamplingMetadata(),
+            )
+
+            self.assertEqual(logits.tolist(), fallback_logits.tolist())
+        finally:
+            restore_model_wrapper()
+
     # ------------------------------------------------------------------
     # _shard_lm_head_for_kimi_vl — functional test with TP>1
     # ------------------------------------------------------------------

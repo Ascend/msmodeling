@@ -20,6 +20,7 @@ from tensor_cast.transformers.transformations import (
     wrap_model,
 )
 from ..layers.attention import flash_attention_forward
+from ..layers.sampler import select_lm_head_hidden_states
 from ..layers.utils import ModelWrapperBase
 from ..model_config import ModelConfig
 from ..parallel_group import ParallelGroupManager
@@ -85,8 +86,7 @@ class CausalLmWrapper(ModelWrapperBase):
         )[0]
         intermediate_hidden_states = hidden_states
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
-        if sampling_metadata and sampling_metadata.selected_token_indices is not None:
-            hidden_states = hidden_states.index_select(1, sampling_metadata.selected_token_indices)
+        hidden_states = select_lm_head_hidden_states(hidden_states, sampling_metadata, mode="target")
         hidden_states = self.lm_head(hidden_states)
         if output_intermediate_hidden_states:
             return hidden_states, intermediate_hidden_states
@@ -124,8 +124,7 @@ class VLModelWrapper(ModelWrapperBase):
 
         hidden_states = outputs.last_hidden_state
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
-        if sampling_metadata and sampling_metadata.selected_token_indices is not None:
-            hidden_states = hidden_states.index_select(1, sampling_metadata.selected_token_indices)
+        hidden_states = select_lm_head_hidden_states(hidden_states, sampling_metadata, mode="target")
         logits = self.lm_head(hidden_states)
 
         if output_intermediate_hidden_states:

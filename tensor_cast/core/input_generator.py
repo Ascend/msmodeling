@@ -14,7 +14,7 @@ from typing import Any, Optional
 import torch
 
 from ..layers.attention import AttentionMetadataTensorCast
-from ..layers.sampler import SamplingMetadata
+from ..layers.sampler import SamplingMetadata, SpecDecodeMetadata
 from ..performance_model import bytes_of_tensor
 from ..transformers.utils import get_attention_quant_config, logger
 from ..utils import exact_division
@@ -36,6 +36,47 @@ class RequestInfo:
     image_batch_size: int = None
     image_height: int = None
     image_width: int = None
+
+
+def _build_spec_decode_metadata(
+    query_start_loc: torch.Tensor,
+    query_lens: torch.Tensor | list[int],
+    num_mtp_tokens: int,
+) -> SpecDecodeMetadata:
+    if num_mtp_tokens <= 0:
+        raise ValueError("num_mtp_tokens must be positive for spec decode metadata")
+
+    if isinstance(query_lens, torch.Tensor):
+        if query_lens.device.type == "meta":
+            raise ValueError("query_lens must be a Python list or a materialized tensor for spec decode metadata")
+        query_lens_list = query_lens.tolist()
+    else:
+        query_lens_list = query_lens
+    spec_window = num_mtp_tokens + 1
+    # Spec decode metadata covers the per-request tail target+bonus verification window.
+    # Longer decode query windows may carry earlier rows, but only the tail window participates
+    # in lm-head verification/proposal selection.
+    logits_indices = []
+    query_start = 0
+
+    for query_len in query_lens_list:
+        query_len = int(query_len)
+        if query_len < spec_window:
+            raise ValueError(
+                f"MTP decode query length must be at least num_mtp_tokens + 1 ({spec_window}), got {query_len}"
+            )
+        tail_start = query_start + query_len - spec_window
+        tail_rows = list(range(tail_start, tail_start + spec_window))
+
+        logits_indices.extend(tail_rows)
+        query_start += query_len
+
+    metadata_device = query_start_loc.device
+    return SpecDecodeMetadata(
+        logits_indices=torch.tensor(logits_indices, dtype=torch.long, device=metadata_device),
+        num_active_requests=len(query_lens_list),
+        num_speculative_tokens=num_mtp_tokens,
+    )
 
 
 def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
@@ -123,6 +164,15 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     sampling_metadata = SamplingMetadata(
         query_start_loc=attn_meta.query_start_loc,
     )
+    # Short decode windows cannot form the target+bonus verification window; omit spec metadata
+    # so downstream lm-head and sampler logic uses ordinary decode selection for that step.
+    # Fixed-shape generation uses one request template expanded by concurrency, so query_len is uniform.
+    if is_decode and num_mtp_tokens > 0 and query_len >= num_mtp_tokens + 1:
+        sampling_metadata.spec_decode_metadata = _build_spec_decode_metadata(
+            attn_meta.query_start_loc,
+            [query_len] * batch_size,
+            num_mtp_tokens,
+        )
     if is_decode:
         # do not prune logits
         sampling_metadata.selected_token_indices = None
@@ -800,16 +850,32 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     )
 
     sampling_meta = SamplingMetadata(query_start_loc=query_start_loc)
-    selected_token_indices = []
+    # Spec metadata is only valid when every active decode request has a full target+bonus window;
+    # mixed or short-window batches intentionally fall back to ordinary per-request selection.
+    # When enabled, pass the per-request query_lens list so packed offsets honor varlen batches.
+    use_spec_decode_metadata = (
+        num_mtp_tokens > 0 and all(is_decode_list) and all(query_len >= num_mtp_tokens + 1 for query_len in query_lens)
+    )
+    if use_spec_decode_metadata:
+        sampling_meta.spec_decode_metadata = _build_spec_decode_metadata(
+            query_start_loc,
+            query_lens,
+            num_mtp_tokens,
+        )
+        sampling_meta.selected_token_indices = None
+    elif num_mtp_tokens > 0 and all(is_decode_list):
+        sampling_meta.selected_token_indices = None
+    else:
+        selected_token_indices = []
 
-    pos = 0
-    for ql, decode in zip(query_lens, is_decode_list):
-        if decode:
-            selected_token_indices.extend(range(pos, pos + ql))
-        else:
-            selected_token_indices.append(pos + ql - 1)
-        pos += ql
-    sampling_meta.selected_token_indices = torch.tensor(selected_token_indices, dtype=torch.long, device="meta")
+        pos = 0
+        for ql, decode in zip(query_lens, is_decode_list):
+            if decode:
+                selected_token_indices.extend(range(pos, pos + ql))
+            else:
+                selected_token_indices.append(pos + ql - 1)
+            pos += ql
+        sampling_meta.selected_token_indices = torch.tensor(selected_token_indices, dtype=torch.long, device="meta")
 
     kwargs = {
         "input_ids": input_ids,

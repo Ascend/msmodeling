@@ -22,10 +22,33 @@ from tensor_cast.core.input_generator import (
     resize_image,
 )
 from tensor_cast.layers.deepseek_v4 import DeepseekV4SparseAttention
+from tensor_cast.layers.sampler import Sampler
+from tensor_cast.model_config import MtpConfig
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.model import TransformerModel
+
+
+def _fake_mtp_input_model(num_mtp_tokens=2):
+    return SimpleNamespace(
+        is_vl_model=False,
+        num_hidden_layers=0,
+        model_config=SimpleNamespace(
+            mtp_config=MtpConfig(
+                num_mtp_layers=num_mtp_tokens,
+                mtp_block_module_name="DeepseekV3DecoderLayer",
+            ),
+            parallel_config=SimpleNamespace(data_parallel_size=1, tensor_parallel_size=1),
+            mla_config=None,
+            hf_config=SimpleNamespace(model_type="deepseek_v3"),
+        ),
+    )
+
+
+def _proposal_indices(spec_metadata):
+    spec_window = spec_metadata.num_speculative_tokens + 1
+    return spec_metadata.logits_indices.view(spec_metadata.num_active_requests, spec_window)[:, -1]
 
 
 @pytest.mark.parametrize("is_decode", [True, False])
@@ -56,6 +79,60 @@ def test_selected_token_indices_for_lmhead(qwen3_32b_lmhead_attention_transforme
     assert outputs.shape == output_shape
 
 
+def test_generate_inputs_mtp_decode_does_not_select_all_packed_rows_for_target_lm_head():
+    inputs = generate_inputs(
+        _fake_mtp_input_model(),
+        [RequestInfo(query_len=5, seq_len=16, concurrency=2, is_decode=True)],
+    )
+
+    spec_metadata = inputs["sampling_metadata"].spec_decode_metadata
+
+    assert spec_metadata.logits_indices.tolist() != list(range(10))
+    assert spec_metadata.logits_indices.tolist() == [2, 3, 4, 7, 8, 9]
+    assert _proposal_indices(spec_metadata).tolist() == [4, 9]
+    assert spec_metadata.num_active_requests == 2
+    assert spec_metadata.num_speculative_tokens == 2
+    assert inputs["sampling_metadata"].selected_token_indices is None
+
+
+def test_generate_inputs_varlen_mtp_decode_does_not_reuse_padded_prefix_rows():
+    inputs = generate_inputs_varlen(
+        _fake_mtp_input_model(),
+        [
+            RequestInfo(query_len=5, seq_len=16, is_decode=True),
+            RequestInfo(query_len=3, seq_len=12, is_decode=True),
+        ],
+        block_size=128,
+    )
+
+    spec_metadata = inputs["sampling_metadata"].spec_decode_metadata
+
+    assert spec_metadata.logits_indices.tolist() != list(range(8))
+    assert spec_metadata.logits_indices.tolist() == [2, 3, 4, 5, 6, 7]
+    assert _proposal_indices(spec_metadata).tolist() == [4, 7]
+    assert spec_metadata.num_active_requests == 2
+    assert spec_metadata.num_speculative_tokens == 2
+    assert inputs["sampling_metadata"].selected_token_indices is None
+
+
+def test_generate_inputs_varlen_mtp_decode_uses_ordinary_selection_for_short_query_window():
+    inputs = generate_inputs_varlen(
+        _fake_mtp_input_model(),
+        [
+            RequestInfo(query_len=3, seq_len=16, is_decode=True),
+            RequestInfo(query_len=2, seq_len=12, is_decode=True),
+        ],
+        block_size=128,
+    )
+
+    sampling_metadata = inputs["sampling_metadata"]
+    next_tokens = Sampler()(torch.empty(1, 5, 8, device="meta"), sampling_metadata)
+
+    assert sampling_metadata.spec_decode_metadata is None
+    assert sampling_metadata.selected_token_indices is None
+    assert next_tokens.shape == (2, 1)
+
+
 @pytest.mark.parametrize("is_decode", [True, False])
 def test_varlen_selected_token_indices_for_lmhead(qwen3_32b_lmhead_attention_transformer: TransformerModel, is_decode):
     model = qwen3_32b_lmhead_attention_transformer
@@ -83,7 +160,10 @@ def test_varlen_selected_token_indices_for_lmhead(qwen3_32b_lmhead_attention_tra
     assert outputs.shape == output_shape
 
 
-@patch("tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info", return_value={})
+@patch(
+    "tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info",
+    return_value={},
+)
 @patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
 def test_varlen_qwen3_5_cache_position_starts_at_context(_mock_kv_cache, _mock_sparse_cache):
     model = SimpleNamespace(
@@ -105,7 +185,10 @@ def test_varlen_qwen3_5_cache_position_starts_at_context(_mock_kv_cache, _mock_s
     assert inputs["cache_position"].tensor_cast_has_previous_state
 
 
-@patch("tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info", return_value={})
+@patch(
+    "tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info",
+    return_value={},
+)
 @patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
 def test_qwen3_5_decode_mtp_cache_position_metadata(_mock_kv_cache, _mock_sparse_cache):
     model = SimpleNamespace(
@@ -235,10 +318,28 @@ def test_dsa_indexer_cache_dtype_uses_fp8_when_attention_quant_is_fp8(
     assert cache_info["indexer_cache_by_layers"][0].dtype == torch.float8_e4m3fn
 
 
-def test_qwen3_vl_1080p_resize_to_1088x1920(
-    qwen3_vl_8b_instruct_transformer: TransformerModel,
-):
-    model = qwen3_vl_8b_instruct_transformer
+def test_qwen3_vl_1080p_resize_to_1088x1920(tmp_path):
+    _load_preprocessor_pixel_limits.cache_clear()
+    (tmp_path / "preprocessor_config.json").write_text(
+        '{"size": {"shortest_edge": 65536, "longest_edge": 16777216}}',
+        encoding="utf-8",
+    )
+    model = SimpleNamespace(
+        model_id=str(tmp_path),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            parallel_config=SimpleNamespace(data_parallel_size=1),
+            hf_config=SimpleNamespace(
+                model_type="qwen3_vl",
+                vision_config=SimpleNamespace(
+                    patch_size=16,
+                    spatial_merge_size=2,
+                    temporal_patch_size=2,
+                    in_channels=3,
+                ),
+            ),
+        ),
+    )
 
     image_kwargs = generate_image_inputs(
         model=model,
@@ -374,7 +475,10 @@ class TestDeepseekV4KvCacheHelpers:
 
         assert _resolve_indexer_cache_dtype(model, 0) == torch.int8
 
-    @patch("tensor_cast.core.input_generator._resolve_sparse_attention_kv_cache_width", return_value=576)
+    @patch(
+        "tensor_cast.core.input_generator._resolve_sparse_attention_kv_cache_width",
+        return_value=576,
+    )
     def test_resolve_v4_kv_cache_size_compressed_sparse_layer(self, _mock_head_dim):
         model = MagicMock()
         model.text_config.sliding_window = 128
@@ -394,7 +498,10 @@ class TestDeepseekV4KvCacheHelpers:
         # window_slots=256, compressed_slots=2048 -> total_slots=2304 -> 18 blocks
         assert shape == [18, 128, 576]
 
-    @patch("tensor_cast.core.input_generator._resolve_sparse_attention_kv_cache_width", return_value=480)
+    @patch(
+        "tensor_cast.core.input_generator._resolve_sparse_attention_kv_cache_width",
+        return_value=480,
+    )
     def test_resolve_v4_kv_cache_size_fallback_without_batch_info(self, _mock_head_dim):
         model = MagicMock()
         model.text_config.sliding_window = 128

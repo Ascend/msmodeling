@@ -5,7 +5,7 @@ import torch
 
 from .. import ops  # noqa: F401
 from ..model_config import MtpConfig
-from .sampler import Sampler, SamplingMetadata
+from .sampler import Sampler, SamplingMetadata, select_lm_head_hidden_states
 from .utils import ModelWrapperBase
 
 
@@ -114,8 +114,7 @@ class MultiTokenPredictor(torch.nn.Module):
         intermediate_hidden_states = hidden_states
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
         assert sampling_metadata is not None, "No sampling metadata given for MTP"
-        if sampling_metadata.selected_token_indices is not None:
-            hidden_states = hidden_states.index_select(1, sampling_metadata.selected_token_indices)
+        hidden_states = select_lm_head_hidden_states(hidden_states, sampling_metadata, mode="proposal")
         hidden_states = self.lm_head(hidden_states)
         return hidden_states, intermediate_hidden_states
 
@@ -169,8 +168,9 @@ class MtpWrapper(ModelWrapperBase):
             output_intermediate_hidden_states=True,
             **kwargs,
         )
-        next_tokens = self.sampler(logits, sampling_metadata)  # shape: (batch_size, selected_token_indices.nelements())
-        # skip token verification... assuming all predications are taken and we use the last token of each batch
+        next_tokens = self.sampler(logits, sampling_metadata)
+        # The first target-model pass returns target tokens plus one bonus token per request.
+        # This model assumes every speculative token is accepted and feeds the last returned token forward.
         output = torch.empty(
             [next_tokens.size(0), self.mtp_config.num_mtp_layers + 1],
             dtype=torch.long,
