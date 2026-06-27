@@ -626,9 +626,6 @@ def main() -> None:
     register_ori_functions()
     load_general_plugins()
 
-    sims = ["vllm", "mindie"]
-    benches = ["ais_bench", "vllm_benchmark"]
-
     parser = argparse.ArgumentParser(
         description="optix - Service Parameter Optimizer for LLM inference performance tuning.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -650,14 +647,14 @@ def main() -> None:
         "-b",
         "--benchmark_policy",
         default="ais_bench",
-        choices=list(_benchmarks.keys()) + benches,
+        choices=list(_benchmarks.keys()),
         help="Whether to use custom performance indicators.",
     )
     parser.add_argument(
         "-e",
         "--engine",
-        default="mindie",
-        choices=list(_simulates.keys()) + sims,
+        default="vllm",
+        choices=list(_simulates.keys()),
         help="The engine used for model evaluation.",
     )
     parser.add_argument(
