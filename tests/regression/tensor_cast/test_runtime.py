@@ -120,6 +120,79 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         actual_execution_time = analytic_result.execution_time_s
         return actual_execution_time
 
+    def test_mlapo_quant_uint8_weights_use_int8_mma_modeling(self):
+        hidden_states = torch.empty((4, 6144), device="meta", dtype=torch.float16)
+        cos = torch.empty((1, 4, 64), device="meta", dtype=torch.float16)
+        sin = torch.empty((1, 4, 64), device="meta", dtype=torch.float16)
+        q_a_proj_weight = torch.empty((2048, 3072), device="meta", dtype=torch.uint8)
+        q_a_layernorm_weight = torch.empty((2048,), device="meta", dtype=torch.float16)
+        q_b_proj_weight = torch.empty((1024, 1024), device="meta", dtype=torch.uint8)
+        kv_a_proj_weight = torch.empty((576, 3072), device="meta", dtype=torch.uint8)
+        kv_a_layernorm_weight = torch.empty((512,), device="meta", dtype=torch.float16)
+        scale = torch.tensor(1.0, device="meta")
+        args = (
+            hidden_states,
+            cos,
+            sin,
+            q_a_proj_weight,
+            q_a_layernorm_weight,
+            q_b_proj_weight,
+            kv_a_proj_weight,
+            kv_a_layernorm_weight,
+            4,
+            256,
+            192,
+            64,
+            512,
+            2048,
+            scale,
+            None,
+            scale,
+            None,
+            scale,
+            None,
+        )
+        out = torch.ops.tensor_cast.mlapo_quant(*args)
+        op_invoke_info = OpInvokeInfo(torch.ops.tensor_cast.mlapo_quant.default, args, None, out)
+
+        properties = op_invoke_info.get_perf_properties()
+        self.assertNotIn(torch.uint8, properties.compute_ops)
+        self.assertGreater(properties.compute_ops[torch.int8].mma_ops, 0)
+        self.assertEqual(properties.extra_static_cost_count, 15)
+
+        result = AnalyticPerformanceModel(TEST_DEVICE).process_op(op_invoke_info)
+        self.assertGreater(result.statistics[StatsKey.MMA_OPS], 0)
+
+    def test_mlapo_uses_extra_static_cost_modeling(self):
+        hidden_states = torch.empty((4, 16), device="meta", dtype=torch.float16)
+        cos = torch.empty((1, 4, 4), device="meta", dtype=torch.float16)
+        sin = torch.empty((1, 4, 4), device="meta", dtype=torch.float16)
+        q_a_proj_weight = torch.empty((8, 16), device="meta", dtype=torch.float16)
+        q_a_layernorm_weight = torch.empty((8,), device="meta", dtype=torch.float16)
+        q_b_proj_weight = torch.empty((16, 8), device="meta", dtype=torch.float16)
+        kv_a_proj_weight = torch.empty((12, 16), device="meta", dtype=torch.float16)
+        kv_a_layernorm_weight = torch.empty((8,), device="meta", dtype=torch.float16)
+        args = (
+            hidden_states,
+            cos,
+            sin,
+            q_a_proj_weight,
+            q_a_layernorm_weight,
+            q_b_proj_weight,
+            kv_a_proj_weight,
+            kv_a_layernorm_weight,
+            2,
+            8,
+            4,
+            4,
+            8,
+            8,
+        )
+        out = torch.ops.tensor_cast.mlapo(*args)
+        properties = OpInvokeInfo(torch.ops.tensor_cast.mlapo.default, args, None, out).get_perf_properties()
+
+        self.assertEqual(properties.extra_static_cost_count, 15)
+
     def test_simple_model_eager(self):
         def func(x):
             return x + x
@@ -746,7 +819,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             )
         )
 
-        assert_close(self, actual_execution_time, 2.28e-3)
+        assert_close(self, actual_execution_time, 2.3537e-3)
 
     def test_mlapo_quant(self):
         num_tokens = 8192
@@ -803,7 +876,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             )
         )
 
-        assert_close(self, actual_execution_time, 1.18e-3)
+        assert_close(self, actual_execution_time, 1.2502e-3)
 
     def test_moe_gating_top_k_softmax(
         self,

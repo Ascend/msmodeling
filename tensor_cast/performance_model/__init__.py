@@ -26,6 +26,10 @@ def _get_device_ops_for_dtype(
     return perf_ops.get(performance_dtype(dtype))
 
 
+def _quantized_weight_compute_dtype(dtype: torch.dtype) -> torch.dtype:
+    return torch.int8 if dtype == torch.uint8 else dtype
+
+
 def _load_custom_op():
     try:
         custom_op_dir = Path(__file__).resolve().parent / "custom_op"
@@ -950,7 +954,7 @@ def _mlapo_properties_helper(
     op5_ops = num_tokens * hidden_size * (kv_lora_rank + qk_rope_head_dim) * 2
 
     # Op6: kv_a_layernorm
-    op6_ops = num_tokens * q_lora_rank * 5
+    op6_ops = num_tokens * kv_lora_rank * 5
 
     # Op7: k_RoPE
     op7_ops = num_tokens * qk_rope_head_dim * 3
@@ -959,7 +963,16 @@ def _mlapo_properties_helper(
     total_gp_ops += op2_ops + op4_ops + op6_ops + op7_ops
 
     properties = op_invoke_info.get_memory_access_properties()
-    compute_ops = properties.compute_ops.setdefault(kv_a_proj_weight.dtype, OpInvokeInfo.ComputeOps())
+    activation_bytes = hidden_states.element_size()
+    q_a_bytes = num_tokens * q_lora_rank * activation_bytes
+    qa_normed_read_bytes = q_a_bytes
+    compressed_kv_bytes = num_tokens * (kv_lora_rank + qk_rope_head_dim) * activation_bytes
+    properties.memory_readwrite_bytes += 2 * (q_a_bytes + compressed_kv_bytes)
+    properties.memory_read_bytes += qa_normed_read_bytes
+    properties.extra_static_cost_count += 15
+
+    mma_dtype = _quantized_weight_compute_dtype(kv_a_proj_weight.dtype)
+    compute_ops = properties.compute_ops.setdefault(mma_dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops += total_mma_ops
     compute_ops = properties.compute_ops.setdefault(hidden_states.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.gp_ops += total_gp_ops
@@ -2270,9 +2283,7 @@ def _estimate_dfc_common(
     if isinstance(first_w, (list, tuple)):
         first_w = first_w[0] if first_w else None
     raw_weight_dtype = first_w.dtype if first_w is not None else x.dtype
-    # INT4 packed weights use uint8 storage (2 values per byte), but MMA
-    # runs on INT8.  Map uint8 → int8 so DeviceProfile throughput lookup works.
-    weight_dtype = torch.int8 if raw_weight_dtype == torch.uint8 else raw_weight_dtype
+    weight_dtype = _quantized_weight_compute_dtype(raw_weight_dtype)
 
     # Determine number of experts from the weight list length.
     # gmm1_w_args[0] is the weight list (List[Tensor]), one per expert.
