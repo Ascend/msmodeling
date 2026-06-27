@@ -137,7 +137,6 @@ vLLM 的 presence flag 参数分两类处理：`ENABLE_PREFIX_CACHING` 和 `ENAB
 - `config_skill_handoff.apply_commands` 用于当前已有 config skill 的命令式衔接。
 - vLLM 的 `MAX_NUM_BATCHED_TOKENS` 和 `MAX_NUM_SEQS` 已在工具的 `VllmCommand` 中内置占位符，不需要再追加到 `others`。
 - `ENABLE_PREFIX_CACHING`、`ENABLE_CHUNKED_PREFILL` 这类 vLLM 可自行决定默认值的 flag 不写入 target_field，也不写入 command；`ENABLE_EXPERT_PARALLEL` 这类由 discovery 明确识别的 MoE flag 才写入 command 字面量。
-- `ais_bench` 的 `CONCURRENCY`、`REQUESTRATE` 暂只保留在 JSON handoff 中，不生成 `ais_bench` target-field TOML 块；当前 Settings loader 对该 section 的 `range_to_enum` 调用存在兼容风险。
 
 ## 快速命令
 
