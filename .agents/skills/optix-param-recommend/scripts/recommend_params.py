@@ -947,8 +947,6 @@ def build_toml(engine: str, benchmark: str, recs: List[Dict[str, Any]], world_si
     if benchmark == "ais_bench":
         sections.append("[ais_bench.command]\nnum_prompts = 3000\n")
         sections.append("# CONCURRENCY and REQUESTRATE recommendations are kept in JSON handoff.")
-        sections.append("# They are not emitted as ais_bench target-field blocks because the current Settings loader")
-        sections.append("# calls range_to_enum(self.ais_bench) instead of range_to_enum(self.ais_bench.target_field).")
     return "\n".join(sections)
 
 

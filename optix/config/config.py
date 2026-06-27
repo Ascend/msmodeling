@@ -1069,7 +1069,7 @@ class Settings(BaseSettings):
         if not self.ais_bench.command.work_dir:
             self.ais_bench.command.work_dir = str(self.ais_bench.output_path)
         if self.ais_bench.target_field:
-            range_to_enum(self.ais_bench)
+            range_to_enum(self.ais_bench.target_field)
         return self
 
     @model_validator(mode="after")
