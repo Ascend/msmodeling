@@ -73,7 +73,7 @@ pip uninstall msmodeling
     msmodeling optix
     ```
 
-    By default, the tool optimizes `MindIE` serving parameters with `Ais_Bench` as the benchmark tool.
+    By default, the tool optimizes `vLLM` serving parameters with `Ais_Bench` as the benchmark tool.
 
 4. View the results. The optimization time depends on the model size and dataset size, typically taking 4 to 8 hours. Upon completion, the `data_storage_*.csv` file is generated and saved in the `result/store` subdirectory under the current directory. The file records the performance of each parameter set. For details, see [Output File Description](#output-file-description).
 
@@ -101,7 +101,7 @@ msmodeling optix [options]
 |-d or --deploy_policy|No|Specifies a deployment policy. The options are as follows:<br>&#8226;`single`: single-node deployment<br>&#8226;`multiple`: multi-node deployment<br>The default value is `single`.|
 |--backup|No|Specifies whether to back up data during optimization. The options are as follows:<br>&#8226; `True`: enables backup.<br>&#8226; `False`: disables backup.<br>The default value is `False`.|
 |-b or --benchmark_policy|No|Specifies a benchmark tool. The options are as follows:<br>&#8226;`vllm_benchmark`: vllm_benchmark is used as the benchmark tool.<br>&#8226;`ais_bench`: ais_bench is used as as the benchmark tool.<br>The default value is `ais_bench`.<br>You need to select a benchmark tool compatible with your inference framework.|
-|-e or --engine|No|Specifies an inference framework. The options are as follows:<br>&#8226;`vllm`: vLLM is used as the inference framework.<br>&#8226;`mindie`: MindIE is used as the inference framework.<br>The default value is `mindie`.|
+|-e or --engine|No|Specifies an inference framework. The options are as follows:<br>&#8226;`vllm`: vLLM is used as the inference framework.<br>&#8226;`mindie`: MindIE is used as the inference framework.<br>The default value is `vllm`.|
 |-c or --config|No|Specifies a custom configuration file path (TOML format). Supports the following three forms:<br>&#8226;Absolute path: directly uses the specified path;<br>&#8226;Relative path (with directory separators): resolves relative to the current working directory;<br>&#8226;Filename only: searches in the current working directory.<br>If not specified, the tool searches for configuration files in preset path order.<br>The specified file must be in valid TOML format and has the highest configuration priority.|
 
 **Example (vLLM Service Parameter Optimization)**
@@ -142,7 +142,7 @@ msmodeling optix [options]
 3. Once the prerequisites are ready, run the following command to start automatic optimization:
 
     ```bash
-    msmodeling optix
+    msmodeling optix -e mindie
     ```
 
 **Example (Specifying a Custom Configuration File)**

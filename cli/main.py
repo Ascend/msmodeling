@@ -58,7 +58,7 @@ def main() -> int:
             "  msmodeling inference throughput-optimizer MODEL --device DEV --num-devices 8 ...\n"
             "  msmodeling inference model-adapter doctor --model-id MODEL\n"
             "  msmodeling inference video-generate MODEL --batch-size 1 ...\n"
-            "  msmodeling optix -e mindie -b ais_bench\n"
+            "  msmodeling optix -e vllm -b ais_bench\n"
         ),
     )
     subparsers = parser.add_subparsers(dest="command")
