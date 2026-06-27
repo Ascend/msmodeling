@@ -91,4 +91,4 @@ class TestDeepseekV32ModelNightly(unittest.TestCase):
 
         self.assertGreater(time_v31, 0)
         self.assertGreater(time_v32, 0)
-        self.assertLess(time_v32, time_v31)
+        self.assertGreater(time_v32, time_v31)

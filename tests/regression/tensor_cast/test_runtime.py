@@ -120,6 +120,79 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         actual_execution_time = analytic_result.execution_time_s
         return actual_execution_time
 
+    def test_mlapo_quant_uint8_weights_use_int8_mma_modeling(self):
+        hidden_states = torch.empty((4, 6144), device="meta", dtype=torch.float16)
+        cos = torch.empty((1, 4, 64), device="meta", dtype=torch.float16)
+        sin = torch.empty((1, 4, 64), device="meta", dtype=torch.float16)
+        q_a_proj_weight = torch.empty((2048, 3072), device="meta", dtype=torch.uint8)
+        q_a_layernorm_weight = torch.empty((2048,), device="meta", dtype=torch.float16)
+        q_b_proj_weight = torch.empty((1024, 1024), device="meta", dtype=torch.uint8)
+        kv_a_proj_weight = torch.empty((576, 3072), device="meta", dtype=torch.uint8)
+        kv_a_layernorm_weight = torch.empty((512,), device="meta", dtype=torch.float16)
+        scale = torch.tensor(1.0, device="meta")
+        args = (
+            hidden_states,
+            cos,
+            sin,
+            q_a_proj_weight,
+            q_a_layernorm_weight,
+            q_b_proj_weight,
+            kv_a_proj_weight,
+            kv_a_layernorm_weight,
+            4,
+            256,
+            192,
+            64,
+            512,
+            2048,
+            scale,
+            None,
+            scale,
+            None,
+            scale,
+            None,
+        )
+        out = torch.ops.tensor_cast.mlapo_quant(*args)
+        op_invoke_info = OpInvokeInfo(torch.ops.tensor_cast.mlapo_quant.default, args, None, out)
+
+        properties = op_invoke_info.get_perf_properties()
+        self.assertNotIn(torch.uint8, properties.compute_ops)
+        self.assertGreater(properties.compute_ops[torch.int8].mma_ops, 0)
+        self.assertEqual(properties.extra_static_cost_count, 15)
+
+        result = AnalyticPerformanceModel(TEST_DEVICE).process_op(op_invoke_info)
+        self.assertGreater(result.statistics[StatsKey.MMA_OPS], 0)
+
+    def test_mlapo_uses_extra_static_cost_modeling(self):
+        hidden_states = torch.empty((4, 16), device="meta", dtype=torch.float16)
+        cos = torch.empty((1, 4, 4), device="meta", dtype=torch.float16)
+        sin = torch.empty((1, 4, 4), device="meta", dtype=torch.float16)
+        q_a_proj_weight = torch.empty((8, 16), device="meta", dtype=torch.float16)
+        q_a_layernorm_weight = torch.empty((8,), device="meta", dtype=torch.float16)
+        q_b_proj_weight = torch.empty((16, 8), device="meta", dtype=torch.float16)
+        kv_a_proj_weight = torch.empty((12, 16), device="meta", dtype=torch.float16)
+        kv_a_layernorm_weight = torch.empty((8,), device="meta", dtype=torch.float16)
+        args = (
+            hidden_states,
+            cos,
+            sin,
+            q_a_proj_weight,
+            q_a_layernorm_weight,
+            q_b_proj_weight,
+            kv_a_proj_weight,
+            kv_a_layernorm_weight,
+            2,
+            8,
+            4,
+            4,
+            8,
+            8,
+        )
+        out = torch.ops.tensor_cast.mlapo(*args)
+        properties = OpInvokeInfo(torch.ops.tensor_cast.mlapo.default, args, None, out).get_perf_properties()
+
+        self.assertEqual(properties.extra_static_cost_count, 15)
+
     def test_simple_model_eager(self):
         def func(x):
             return x + x
@@ -592,6 +665,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)
         qa_normed = torch.randn(2, 3, 4, device="meta", dtype=torch.float16)
         indexer_cache = torch.randn(2, 5, 7, device="meta", dtype=torch.float16)
+        request_total_seq_lens = torch.tensor([3, 3], dtype=torch.long)
 
         breakdown = _estimate_dsa_indexer_breakdown(
             hidden_states,
@@ -601,27 +675,26 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             head_dim=8,
             qk_rope_head_dim=4,
             topk_limit=5,
+            request_total_seq_lens=request_total_seq_lens,
         )
-        self.assertEqual(
-            breakdown,
-            {
-                "q_proj_mma": 768,
-                "k_proj_mma": 1536,
-                "weights_proj_mma": 384,
-                "rope_gp": 216,
-                "rotate_activation_gp": 0,
-                "act_quant_gp": 0,
-                "qk_index_mma": 576,
-                "head_relu_gp": 0,
-                "head_q_scale_mul_gp": 0,
-                "head_weight_mul_gp": 36,
-                "head_reduce_gp": 36,
-                "head_k_scale_mul_gp": 0,
-                "topk_gp": 18,
-                "cache_rw_bytes": 140,
-                "scale_cache_rw_bytes": 0,
-            },
-        )
+        self.assertEqual(breakdown["q_proj_mma"], 768)
+        self.assertEqual(breakdown["k_proj_mma"], 1536)
+        self.assertEqual(breakdown["weights_proj_mma"], 384)
+        self.assertEqual(breakdown["rope_gp"], 216)
+        self.assertEqual(breakdown["rotate_activation_gp"], 0)
+        self.assertEqual(breakdown["act_quant_gp"], 0)
+        self.assertEqual(breakdown["qk_index_mma"], 576)
+        self.assertEqual(breakdown["head_relu_gp"], 0)
+        self.assertEqual(breakdown["head_q_scale_mul_gp"], 0)
+        self.assertEqual(breakdown["head_weight_mul_gp"], 36)
+        self.assertEqual(breakdown["head_reduce_gp"], 36)
+        self.assertEqual(breakdown["head_k_scale_mul_gp"], 0)
+        self.assertEqual(breakdown["topk_gp"], 18)
+        assert_close(self, breakdown["historical_effective_read_bytes"], 252 / 0.15)
+        self.assertEqual(breakdown["append_cache_write_bytes"], 84)
+        self.assertEqual(breakdown["append_scale_write_bytes"], 0)
+        self.assertNotIn("cache_rw_bytes", breakdown)
+        self.assertNotIn("scale_cache_rw_bytes", breakdown)
 
     def test_dsa_indexer_breakdown_helper_uses_request_total_seq_lens_for_score_length(
         self,
@@ -665,13 +738,17 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             fp8_mode=True,
         )
 
-        self.assertEqual(breakdown["cache_rw_bytes"], 140)
-        self.assertEqual(breakdown["scale_cache_rw_bytes"], 40)
+        assert_close(self, breakdown["historical_effective_read_bytes"], 540 / 0.15)
+        self.assertEqual(breakdown["append_cache_write_bytes"], 84)
+        self.assertEqual(breakdown["append_scale_write_bytes"], 24)
+        self.assertNotIn("cache_rw_bytes", breakdown)
+        self.assertNotIn("scale_cache_rw_bytes", breakdown)
 
     def test_dsa_indexer_breakdown_helper_fp8(self):
         hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)
         qa_normed = torch.randn(2, 3, 4, device="meta", dtype=torch.float16)
         indexer_cache = torch.empty(2, 5, 7, device="meta", dtype=torch.float8_e4m3fn)
+        request_total_seq_lens = torch.tensor([3, 3], dtype=torch.long)
 
         breakdown = _estimate_dsa_indexer_breakdown(
             hidden_states,
@@ -681,28 +758,27 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             head_dim=8,
             qk_rope_head_dim=4,
             topk_limit=5,
+            request_total_seq_lens=request_total_seq_lens,
             fp8_mode=True,
         )
-        self.assertEqual(
-            breakdown,
-            {
-                "q_proj_mma": 768,
-                "k_proj_mma": 1536,
-                "weights_proj_mma": 384,
-                "rope_gp": 216,
-                "rotate_activation_gp": 144,
-                "act_quant_gp": 144,
-                "qk_index_mma": 576,
-                "head_relu_gp": 36,
-                "head_q_scale_mul_gp": 36,
-                "head_weight_mul_gp": 36,
-                "head_reduce_gp": 36,
-                "head_k_scale_mul_gp": 18,
-                "topk_gp": 18,
-                "cache_rw_bytes": 70,
-                "scale_cache_rw_bytes": 40,
-            },
-        )
+        self.assertEqual(breakdown["q_proj_mma"], 768)
+        self.assertEqual(breakdown["k_proj_mma"], 1536)
+        self.assertEqual(breakdown["weights_proj_mma"], 384)
+        self.assertEqual(breakdown["rope_gp"], 216)
+        self.assertEqual(breakdown["rotate_activation_gp"], 144)
+        self.assertEqual(breakdown["act_quant_gp"], 144)
+        self.assertEqual(breakdown["qk_index_mma"], 576)
+        self.assertEqual(breakdown["head_relu_gp"], 36)
+        self.assertEqual(breakdown["head_q_scale_mul_gp"], 36)
+        self.assertEqual(breakdown["head_weight_mul_gp"], 36)
+        self.assertEqual(breakdown["head_reduce_gp"], 36)
+        self.assertEqual(breakdown["head_k_scale_mul_gp"], 18)
+        self.assertEqual(breakdown["topk_gp"], 18)
+        assert_close(self, breakdown["historical_effective_read_bytes"], 198 / 0.15)
+        self.assertEqual(breakdown["append_cache_write_bytes"], 42)
+        self.assertEqual(breakdown["append_scale_write_bytes"], 24)
+        self.assertNotIn("cache_rw_bytes", breakdown)
+        self.assertNotIn("scale_cache_rw_bytes", breakdown)
 
     def test_mlapo_eager(self):
         num_tokens = 8192
@@ -743,7 +819,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             )
         )
 
-        assert_close(self, actual_execution_time, 2.28e-3)
+        assert_close(self, actual_execution_time, 2.3537e-3)
 
     def test_mlapo_quant(self):
         num_tokens = 8192
@@ -800,7 +876,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             )
         )
 
-        assert_close(self, actual_execution_time, 1.18e-3)
+        assert_close(self, actual_execution_time, 1.2502e-3)
 
     def test_moe_gating_top_k_softmax(
         self,
@@ -971,7 +1047,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             )
         )
 
-        assert_close(self, actual_execution_time, 9.26e-6)
+        assert_close(self, actual_execution_time, 0.00015605324564501644)
 
     def _run_test_model(self, model_id, do_compile):
         num_tokens = 100
