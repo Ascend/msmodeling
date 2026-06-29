@@ -227,9 +227,13 @@ class SwiGLUFusionPassNightlyTestCase(SwiGLUFusionPassTestMixin, unittest.TestCa
                 position_ids,
                 attention_meta=attn_meta,
                 kv_cache_by_layers=kv_cache_by_layers,
-                sampling_metadata=SamplingMetadata(query_start_loc=attn_meta.query_start_loc),
+                sampling_metadata=SamplingMetadata(
+                    query_start_loc=attn_meta.query_start_loc,
+                    selected_token_indices=attn_meta.query_start_loc[1:] - 1,
+                ),
             )
-            self.assertEqual(outputs.shape, (1, 1, model.model_config.hf_config.vocab_size))
+            num_sequences = attn_meta.query_start_loc.shape[0] - 1
+            self.assertEqual(outputs.shape, (1, num_sequences, model.model_config.hf_config.vocab_size))
 
         self.assertGreaterEqual(
             count_events(runtime, torch.ops.tensor_cast.swiglu.default),
