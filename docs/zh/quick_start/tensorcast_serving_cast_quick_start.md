@@ -141,17 +141,36 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### 2.3.2 查看优化结果
 
-命令执行成功后，终端会输出候选配置及吞吐指标。重点关注：
+命令执行成功后，终端会先打印输入配置和最优配置摘要，随后展示候选并行配置表。例如：
+
+```text
+Input Configuration:
+  Model: Qwen/Qwen3-32B
+  Devices: 8 TEST_DEVICE
+  TPOT Limits: 50.0 ms
+
+Overall Best Configuration:
+  Best Throughput: 2161.56 tokens/s
+  TTFT: 13848.08 ms
+  TPOT: 49.98 ms
+
+Top 4 PD Aggregated Configurations:
+| Top | Throughput (token/s) | TTFT (ms) | TPOT (ms) | concurrency | num_devices | parallel           | batch_size |
+|  1  | 2161.56              | 13848.08  | 49.98     | 128         | 8           | TP=4 | PP=1 | DP=2 | 64         |
+```
+
+重点关注以下字段：
 
 - `TP` / `DP`：推荐的并行策略。
+- `concurrency`：当前候选配置支持的并发请求数。
 - `batch size`：满足 SLO 约束下的批大小。
 - `TTFT` / `TPOT`：首 token 时间与每输出 token 时间。
-- `token throughput`：系统级 token 吞吐。
+- `Throughput (token/s)`：系统级输出 token 吞吐，数值越大表示吞吐越高。
 
 成功标准：
 
-- 终端输出候选配置或最优配置。
-- 输出吞吐量、TTFT、TPOT 等指标。
+- 终端输出 `Overall Best Configuration` 或候选配置表。
+- 输出 `Throughput`、`TTFT`、`TPOT` 等指标。
 - 没有出现模型配置加载失败或参数冲突报错。
 
 ### 2.4【服务仿真】运行 ServingCast 端到端仿真
@@ -203,6 +222,7 @@ output_token_throughput(tok/s) 285.598
 - `E2E_TIME`：单请求端到端延迟。
 - `TTFT`：首 token 时间。
 - `TPOT`：首 token 之后每个输出 token 的时间。
+- `benchmark_duration`：本次仿真的总耗时。
 - `request_throughput`：系统级请求吞吐。
 - `input_token_throughput` / `output_token_throughput`：聚合 token 吞吐。
 

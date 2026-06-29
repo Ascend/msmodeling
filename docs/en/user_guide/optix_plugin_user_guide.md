@@ -2,7 +2,7 @@
 
 ## Overview
 
-Serviceparam Optimizer supports custom plugins. You can develop your own plugins to customize search parameters, service frameworks, and performance benchmark tools.
+Service Parameter Optimizer supports custom plugins. You can develop your own plugins to customize search parameters, service frameworks, and performance benchmark tools.
 
 The process of developing a custom plugin is as follows:
 
@@ -70,7 +70,7 @@ The process of developing a custom plugin is as follows:
             Returns: None
     ```
 
-2. Register the service framework in the `_init_.py` file. Example:
+2. Register the service framework in the `__init__.py` file. Example:
 
     ```python
     from optix.optimizer.register import register_simulator
@@ -114,7 +114,7 @@ Example:
             Returns: None
     ```
 
-2. Register the benchmark tool in the `_init_.py` file. Example:
+2. Register the benchmark tool in the `__init__.py` file. Example:
 
     ```python
     from optix.optimizer.register import register_benchmarks
@@ -126,7 +126,7 @@ Example:
     Add your custom registration function to the entry point group 'optix.plugins'.
     For example, to register the `register` function from the `vllm_inference_optimization` module:
 
-    ```python
+    ```toml
     [project.entry-points.'optix.plugins']
     vllm_inference_optimization = "vllm_inference_optimization:register"
     ```
@@ -134,7 +134,7 @@ Example:
 4. Installing the Plugin
     Set the entry point to `optix.plugins`. Example:
 
-    ```python
+    ```toml
     [project.entry-points.'optix.plugins']
     vllm_inference_optimization="vllm_inference_optimization:register"
     ```
@@ -147,7 +147,7 @@ Example:
 
 5. Use the plugin.
 
-    You can specify which plugin modules to use via the Serviceparam Optimizer's command-line arguments.
+    You can specify which plugin modules to use via the Service Parameter Optimizer's command-line arguments.
     For example, after registering the service framework `service framework vllm_infer` and the benchmark tool `vllm_infer_benchmark`, check whether they appear in the supported services and benchmark tools: Example:
 
     ```bash

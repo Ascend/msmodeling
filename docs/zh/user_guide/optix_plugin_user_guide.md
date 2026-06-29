@@ -91,7 +91,7 @@
             Returns: None
     ```
 
-2. 并在init文件中注册服务框架，例如：
+2. 并在 `__init__.py` 文件中注册服务框架，例如：
 
     ```python
     from optix.optimizer.register import register_simulator
@@ -135,7 +135,7 @@
             Returns: None
     ```
 
-2. 并在init文件中注册benchmark，例如：
+2. 并在 `__init__.py` 文件中注册 benchmark，例如：
 
     ```python
     from optix.optimizer.register import register_benchmarks
@@ -147,20 +147,20 @@
     将自定义的内容的注册函数添加到入口组'optix.plugins'即可。
     例如通过调用vllm_inference_optimization模块的register来注册，例如：
 
-    ```python
+    ```toml
     [project.entry-points.'optix.plugins']
     vllm_inference_optimization = "vllm_inference_optimization:register"
     ```
 
 4. 安装插件
-    入口设置为optix.plugins，例如：
+    入口设置为 `optix.plugins`，例如：
 
-    ```python
+    ```toml
     [project.entry-points.'optix.plugins']
     vllm_inference_optimization="vllm_inference_optimization:register"
     ```
 
-    使用插件模式前需要先在插件目录中（确保当前路径下包含pyproject.toml）对插件进行安装，例如：
+    使用插件模式前，需要先在插件目录中（确保当前路径下包含 `pyproject.toml`）对插件进行安装，例如：
 
     ```bash
     pip install -e .

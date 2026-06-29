@@ -54,7 +54,7 @@ msModeling 采用 [木兰宽松许可证 第2版（Mulan PSL v2）](http://licen
 - **贡献者许可协议 (CLA)**：参与项目贡献前，个人贡献应签署个人 CLA，公司贡献应签署企业 CLA。
 - 禁止引入与项目 License 不兼容的第三方依赖。
 - 引入第三方库时需确认其 License 兼容性，并在 PR 中说明。
-- 新增源文件应在文件头部包含版权声明（参见 [LICENSE](LICENSE) 中的模板）。
+- 新增源文件应在文件头部包含版权声明（参见 [LICENSE](docs/zh/legal/LICENSE) 中的模板）。
 
 ---
 
