@@ -31,6 +31,11 @@
 
 默认设备为 `ATLAS_800_A3_752T_128G_DIE`。通信批量采集脚本 `comm_bench/run_comm_bench.sh` 面向 **`ATLAS_800_A3_752T_128G_DIE`**，固定按 `48 8 2` 硬件网格采集。A3 系列中其他型号（如 ROCE 款）的网格形状可能不同（例如 `2 8 2`），需按实际硬件调整 `--grid-shape` 或改用 `generate_comm_microbench.py` 手动配置。
 
+## 环境准备
+
+1. 在昇腾环境安装配套版本的CANN Toolkit开发套件包和ops算子包并配置CANN环境变量，具体请参见[CANN快速安装](https://www.hiascend.com/cann/download)。
+2. 完成 vLLM 和 vLLM-Ascend 的安装和配置并确认 vLLM-Ascend 可以正常运行，具体请参见《 [vLLM-Ascend安装指南](https://docs.vllm.ai/projects/ascend/zh-cn/latest/installation.html)》。
+
 ## 前置条件
 
 在仓库根目录执行命令。项目要求 Python 版本不低于 `3.10`。
@@ -343,6 +348,8 @@ NNODES=2 NODE_RANK=0 MASTER_ADDR=<master_ip> \
 NNODES=2 NODE_RANK=1 MASTER_ADDR=<master_ip> \
   bash tools/perf_data_collection/comm_bench/run_comm_bench.sh ./hccl_inter_pod
 ```
+
+注意：多节点采集是为了模拟真实的多节点训练大模型，应在真实的多机组网环境下进行采集。
 
 ## 环境变量
 

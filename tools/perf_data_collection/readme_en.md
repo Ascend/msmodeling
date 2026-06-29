@@ -31,6 +31,11 @@ Supported device directory names:
 
 The default device is `ATLAS_800_A3_752T_128G_DIE`. The batch collection script `comm_bench/run_comm_bench.sh` targets **`ATLAS_800_A3_752T_128G_DIE`** with hardware grid `48 8 2`. Other A3 variants (for example ROCE models) may use a different grid shape (such as `2 8 2`); adjust `--grid-shape` or use `generate_comm_microbench.py` manually.
 
+## Environment Setup
+
+1. In the Ascend environment, install the matching CANN Toolkit and ops operator packages, and configure CANN environment variables. For details, see [CANN Installation Guide](https://www.hiascend.com/cann/download).
+2. Install vLLM and vLLM-Ascend. Verify that vLLM-ascend can run properly. For details, see [vLLM-Ascend installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html).
+
 ## Prerequisites
 
 Run commands from the repository root. Python **>= 3.10** is required.
@@ -314,6 +319,8 @@ NNODES=2 NODE_RANK=0 MASTER_ADDR=<master_ip> \
 NNODES=2 NODE_RANK=1 MASTER_ADDR=<master_ip> \
   bash tools/perf_data_collection/comm_bench/run_comm_bench.sh ./hccl_inter_pod
 ```
+
+Note: Multi-node collection is intended to simulate real multi-node training of large models and should be carried out in an actual multi-machine networking environment.
 
 ## Environment Variables
 
