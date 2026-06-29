@@ -71,8 +71,8 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 ## ⚖️ 相关说明
 
 🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》  
-🔹 《[许可证声明](./LICENSE)》  
-🔹 《[安全声明](https://www.hiascend.com/)》  
+🔹 《[许可证声明](./docs/zh/legal/LICENSE)》  
+🔹 《[安全声明](./docs/zh/legal/SECURITY.md)》  
 🔹 免责声明：本工具仿真与优化结果仅供性能评估参考，最终性能表现请以真实环境实测为准
 
 ## 🤝 建议与交流
@@ -89,9 +89,11 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 本工具由以下公司/部门联合贡献：  
 🔹 华为昇腾计算产品线 MindStudio 开发部  
-🔹 华为昇腾计算生态使能部  
-🔹 蚂蚁科技集团股份有限公司  
-🔹 腾讯科技（深圳）有限公司  
-🔹 AI Workload 项目组（马尔科夫团队）
+🔹 华为2012网络技术实验室  
+🔹 华为小巧灵突击队  
+🔹 华为OTT5系统部  
+🔹 湛卢  
+🔹 AI Workload  
+🔹 2012马尔科夫实验室
 
 感谢来自社区的每一个 PR，欢迎贡献！

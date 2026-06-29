@@ -1,8 +1,8 @@
-# Serviceparam Optimizer
+# Service Parameter Optimizer
 
 ## Overview
 
-**Serviceparam Optimizer** (optix) is an automatic optimization tool for serving parameters based on Particle Swarm Optimization (PSO). It supports `vLLM` and `MindIE`, automatically tuning parameters to find the optimal throughput configuration that meets latency requirements.
+**Service Parameter Optimizer** (optix) is an automatic optimization tool for serving parameters based on Particle Swarm Optimization (PSO). It supports `vLLM` and `MindIE`, automatically tuning parameters to find the optimal throughput configuration that meets latency requirements.
 
 The tool consists of two core functional modules:
 
@@ -12,9 +12,9 @@ The tool consists of two core functional modules:
 
 > [!NOTE]
 >
-> The benchmark tool is about to be replaced by AISBench and is no longer supported by Serviceparam Optimizer.
+> The benchmark tool is about to be replaced by AISBench and is no longer supported by Service Parameter Optimizer.
 
-Based on the modules above, Serviceparam Optimizer can automatically recommend serving parameter combinations that deliver high throughput.
+Based on the modules above, Service Parameter Optimizer can automatically recommend serving parameter combinations that deliver high throughput.
 
 The tool has been validated on LLaMA3-8B and Qwen3-8B. In principle, it does not limit the supported model types, and broader validation coverage is planned for future releases.
 
@@ -100,7 +100,7 @@ msmodeling optix [options]
 |-lb or --load_breakpoint|No|Specifies whether to resume optimization from a breakpoint. Including this parameter enables breakpoint resumption; omitting it disables this feature.|
 |-d or --deploy_policy|No|Specifies a deployment policy. The options are as follows:<br>&#8226;`single`: single-node deployment<br>&#8226;`multiple`: multi-node deployment<br>The default value is `single`.|
 |--backup|No|Specifies whether to back up data during optimization. The options are as follows:<br>&#8226; `True`: enables backup.<br>&#8226; `False`: disables backup.<br>The default value is `False`.|
-|-b or --benchmark_policy|No|Specifies a benchmark tool. The options are as follows:<br>&#8226;`vllm_benchmark`: vllm_benchmark is used as the benchmark tool.<br>&#8226;`ais_bench`: ais_bench is used as as the benchmark tool.<br>The default value is `ais_bench`.<br>You need to select a benchmark tool compatible with your inference framework.|
+|-b or --benchmark_policy|No|Specifies a benchmark tool. The options are as follows:<br>&#8226;`vllm_benchmark`: vllm_benchmark is used as the benchmark tool.<br>&#8226;`ais_bench`: ais_bench is used as the benchmark tool.<br>The default value is `ais_bench`.<br>You need to select a benchmark tool compatible with your inference framework.|
 |-e or --engine|No|Specifies an inference framework. The options are as follows:<br>&#8226;`vllm`: vLLM is used as the inference framework.<br>&#8226;`mindie`: MindIE is used as the inference framework.<br>The default value is `vllm`.|
 |-c or --config|No|Specifies a custom configuration file path (TOML format). Supports the following three forms:<br>&#8226;Absolute path: directly uses the specified path;<br>&#8226;Relative path (with directory separators): resolves relative to the current working directory;<br>&#8226;Filename only: searches in the current working directory.<br>If not specified, the tool searches for configuration files in preset path order.<br>The specified file must be in valid TOML format and has the highest configuration priority.|
 
@@ -308,28 +308,28 @@ You can define search ranges directly using these parameters. For example, to se
 
 ```toml
 [[mindie.target_field]]
-"name": "max_batch_size," # Serving parameter name
-"config_position": "BackendConfig.ScheduleConfig.maxBatchSize",    # Path to the serving parameters in MindIE Server config
-"min": 10, # Minimum value
-"max": 400, # Maximum value
-"dtype": "int" # Data type
+name = "max_batch_size" # Serving parameter name
+config_position = "BackendConfig.ScheduleConfig.maxBatchSize" # Path to the serving parameters in MindIE Server config
+min = 10 # Minimum value
+max = 400 # Maximum value
+dtype = "int" # Data type
 ```
 
 You can also define parameters relative to others. For example, to set `max_prefill_batch_size` as a ratio of `max_batch_size`, that is, `max_prefill_batch_size = ratio * max_batch_size (0 < ratio < 1)`:
 
 ```toml
 [[mindie.target_field]]
-"name": "max_prefill_batch_size",
-"config_position": "BackendConfig.ScheduleConfig.maxPrefillBatchSize",
-"min": 0,
-"max": 1,
-"dtype": "ratio",
-"dtype_param": "max_batch_size" # Indicates that max_prefill_batch_size is proportional to max_batch_size.
+name = "max_prefill_batch_size"
+config_position = "BackendConfig.ScheduleConfig.maxPrefillBatchSize"
+min = 0
+max = 1
+dtype = "ratio"
+dtype_param = "max_batch_size" # Indicates that max_prefill_batch_size is proportional to max_batch_size.
 ```
 
 ### Plugin Mode
 
-Serviceparam Optimizer supports user-defined search parameter configuration and benchmark tools. You can configure them as needed by adapting to the plugin interface and registering the corresponding plugin. For details, see [Plugin Development Guide](./optix_plugin_user_guide.md).
+Service Parameter Optimizer supports user-defined search parameter configuration and benchmark tools. You can configure them as needed by adapting to the plugin interface and registering the corresponding plugin. For details, see [Plugin Development Guide](./optix_plugin_user_guide.md).
 
 ### Log Description
 
