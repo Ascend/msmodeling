@@ -67,7 +67,7 @@
         {"name": "tensor_cast.all_to_all.default", "total_time_s": 0.007736, "num_calls": 122},
         {"name": "tensor_cast.grouped_matmul_quant.default", "total_time_s": 0.007365, "num_calls": 61},
         {"name": "tensor_cast.multihead_latent_attention_quant.default", "total_time_s": 0.005518, "num_calls": 64},
-        {"name": "tensor_cast.mlapo_quant.default", "total_time_s": 0.003626, "num_calls": 64},
+        {"name": "tensor_cast.mlapo_quant.default", "total_time_s": 0.008443, "num_calls": 64},
         {"name": "tensor_cast.dynamic_quantize_symmetric.default", "total_time_s": 0.001245, "num_calls": 314},
         {"name": "aten.cat.default", "total_time_s": 0.000556, "num_calls": 64},
         {"name": "tensor_cast.quantize.default", "total_time_s": 0.000494, "num_calls": 192}
