@@ -50,7 +50,7 @@ https://mirrors.aliyun.com/pypi/simple/
 
 ### 1. 检查仓库是否存在
 
-寻优工具已集成在 msmodeling 项目的 `experimental/` 子目录中。检查安装入口与默认配置：
+寻优工具已集成在 msmodeling 项目根目录中。检查安装入口与默认配置：
 
 ```bash
 ls optix/config.toml
@@ -69,22 +69,21 @@ msmodeling 仓库结构：
 
 ```
 msmodeling/                  ← 仓库根目录
-└── experimental/
-    ├── pyproject.toml       ← optix 安装入口
-    └── optix/               ← 寻优工具源码（含 config.toml、optimizer 代码）
+├── pyproject.toml           ← msmodeling 安装入口（含 optix CLI）
+└── optix/                   ← 寻优工具源码（含 config.toml、optimizer 代码）
 ```
 
-安装时不要依赖上一次 shell 的 `cd` 状态。应优先使用**单条命令**，把切目录和安装写在一起，避免误在仓库根目录或其他目录执行 `pip install -e .`。
+安装时不要依赖上一次 shell 的 `cd` 状态。应优先使用**单条命令**，把切目录和安装写在一起，避免误在其他目录执行 `pip install -e .`。
 
 推荐安装命令如下：
 
 ```bash
-cd experimental && python -m pip install -i https://mirrors.aliyun.com/pypi/simple/ -e .
+python -m pip install -i https://mirrors.aliyun.com/pypi/simple/ -e .
 ```
 
 若用户明确要求使用其他镜像，把上面的 URL 替换成用户指定源即可。
 
-> 注意：当前仓库中 `msmodeling` CLI 由 `experimental/pyproject.toml` 提供，安装时应进入 `experimental/` 目录，而不是在仓库根目录直接 `pip install -e .`。
+> 注意：`msmodeling` CLI 由仓库根目录的 `pyproject.toml` 提供，安装时应在仓库根目录执行 `pip install -e .`。
 
 ### 3. 验证
 

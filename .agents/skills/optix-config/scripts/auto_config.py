@@ -272,7 +272,7 @@ def update_vllm_config(content: str, args) -> str:
     if args.host:
         content = update_config_section(content, "vllm.command", "host", args.host)
     if args.port:
-        content = update_config_section(content, "vllm.command", "port", args.port)
+        content = update_config_section(content, "vllm.command", "port", str(args.port))
 
     # Update corresponding parameters for vllm_benchmark
     if args.model:
