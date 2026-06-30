@@ -88,7 +88,7 @@ http://127.0.0.1:2345
 3. 点击“预览配置”或“预览命令”，确认将要执行的 CLI 命令。
 4. 点击“开始运行”。
 5. 查看汇总结论、曲线图、显存分析、带宽瓶颈、算子详情和导出结果。
-6. 如果设置了并发列表或 TP 列表，在明细分析区选择具体 case，例如 `并发=32 | TP=2`，再查看该 case 的显存和算子数据。
+6. 如果设置了并发列表或 TP 列表，在明细分析区选择具体 case，例如 `Concurrency=32 | TP=2`，再查看该 case 的显存和算子数据。
 
 ---
 
@@ -756,7 +756,7 @@ jobs: 8
 常见原因：
 
 - TTFT 或 TPOT 约束过严。
-- `max-prefill-tokens` 小于有效输入长度。
+- `max-batched-tokens` 小于有效输入长度。
 - batch 搜索范围太小。
 - 卡数不足或 TP 搜索空间不合适。
 - 显存预留过大导致可用显存不足。
@@ -920,7 +920,6 @@ web_ui/web_ui_start.py      Web UI服务器启动入口
 
 ```bash
 python -m py_compile web_ui/__init__.py web_ui/app.py web_ui/callbacks.py web_ui/command_builder.py web_ui/components.py web_ui/charts.py web_ui/parsers.py web_ui/result_store.py web_ui/runner.py web_ui/schemas.py web_ui/styles.py web_ui/time_tracker.py web_ui/utils.py web_ui/web_ui_start.py
-python web_ui/tests/test_frontend_workflows.py
 ```
 
 ---
