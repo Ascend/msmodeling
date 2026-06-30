@@ -17,7 +17,13 @@ from tensor_cast.device import DeviceProfile
 from .service.optimizer_factory import OptimizerFactory
 from .service.optimizer_summary import OptimizerSummary
 from .service.pd_ratio_throughput_optimizer import PDRatioThroughputOptimizer
-from .service.utils import LIMIT_COUNT, OptimizerData, resolve_search_sizes
+from .service.utils import (
+    DEFAULT_MAX_SEARCH_COMBINATIONS,
+    LIMIT_COUNT,
+    OptimizerData,
+    count_search_combinations,
+    resolve_parallel_search_candidates,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -61,6 +67,8 @@ class ParallelRunner:
 
         self.summary_result = []
         max_batched_tokens = getattr(self.args, "max_batched_tokens", 8192)
+        mtp_candidates = getattr(self.args, "num_mtp_token_sizes", None) or [self.args.num_mtp_tokens]
+        fixed_num_mtp_tokens = self.args.num_mtp_tokens if len(mtp_candidates) == 1 else 0
         self.optimizer_data = OptimizerData(
             input_length=self.args.input_length,
             output_length=self.args.output_length,
@@ -71,7 +79,7 @@ class ParallelRunner:
             max_batched_tokens=max_batched_tokens,
             num_devices=self.args.num_devices,
             serving_cost=self.args.serving_cost,
-            num_mtp_tokens=self.args.num_mtp_tokens,
+            num_mtp_tokens=fixed_num_mtp_tokens,
             mtp_acceptance_rate=self.args.mtp_acceptance_rate,
             prefill_devices_per_instance=self.args.prefill_devices_per_instance,
             decode_devices_per_instance=self.args.decode_devices_per_instance,
@@ -193,7 +201,7 @@ class ParallelRunner:
         base_user_input = UserInputConfig.from_args(base_args)
         base_chrome_trace = getattr(base_args, "chrome_trace", None)
 
-        def _build_user_input(tp: int, ep: int, moe_dp: int) -> UserInputConfig:
+        def _build_user_input(tp: int, ep: int, moe_dp: int, num_mtp_tokens: int) -> UserInputConfig:
             tmp_user_input = copy.copy(base_user_input)
             tmp_user_input.tp_size = tp
             tmp_user_input.dp_size = target_devices // tp
@@ -202,14 +210,43 @@ class ParallelRunner:
             tmp_user_input.ep_size = ep
             tmp_user_input.moe_dp_size = moe_dp
             tmp_user_input.moe_tp_size = target_devices // (ep * moe_dp)
+            tmp_user_input.num_mtp_tokens = num_mtp_tokens
             if base_chrome_trace:
                 name, ext = os.path.splitext(base_chrome_trace)
-                tmp_user_input.chrome_trace = f"{name}_tp{tmp_user_input.tp_size}dp{tmp_user_input.dp_size}{ext}"
+                tmp_user_input.chrome_trace = (
+                    f"{name}_tp{tmp_user_input.tp_size}dp{tmp_user_input.dp_size}mtp{num_mtp_tokens}{ext}"
+                )
             return tmp_user_input
 
-        tp_list = resolve_search_sizes(self.args.tp_sizes, target_devices, target_devices)
-        ep_list = resolve_search_sizes(self.args.ep_sizes, target_devices, target_devices)
-        moe_dp_list = resolve_search_sizes(self.args.moe_dp_sizes, target_devices, 1)
+        tp_list, ep_list, moe_dp_list, mtp_list = resolve_parallel_search_candidates(
+            self.args.tp_sizes,
+            self.args.ep_sizes,
+            self.args.moe_dp_sizes,
+            getattr(self.args, "num_mtp_token_sizes", None),
+            self.args.num_mtp_tokens,
+            target_devices,
+        )
+        total_combinations = count_search_combinations(tp_list, ep_list, moe_dp_list, mtp_list)
+        max_search_combinations = getattr(
+            self.args,
+            "max_search_combinations",
+            DEFAULT_MAX_SEARCH_COMBINATIONS,
+        )
+        if (
+            max_search_combinations
+            and total_combinations > max_search_combinations
+            and not getattr(self.args, "search_combination_warning_emitted", False)
+        ):
+            logger.warning(
+                "Large number of parallel search combinations (%d = TP:%d x EP:%d x MOE-DP:%d x MTP:%d), "
+                "optimization may take a long time. Consider narrowing --tp-sizes, --ep-sizes, "
+                "--moe-dp-sizes, or --num-mtp-tokens; or increase --max-search-combinations.",
+                total_combinations,
+                len(tp_list),
+                len(ep_list),
+                len(moe_dp_list),
+                len(mtp_list),
+            )
 
         for tp in tp_list:
             if target_devices % tp != 0:
@@ -220,7 +257,8 @@ class ParallelRunner:
                 for moe_dp in moe_dp_list:
                     if target_devices % (ep * moe_dp) != 0:
                         continue
-                    yield _build_user_input(tp=tp, ep=ep, moe_dp=moe_dp)
+                    for num_mtp_tokens in mtp_list:
+                        yield _build_user_input(tp=tp, ep=ep, moe_dp=moe_dp, num_mtp_tokens=num_mtp_tokens)
 
     def _get_df_list(
         self,
@@ -324,19 +362,23 @@ class ParallelRunner:
         if model_runner is None:
             return None
 
+        task_optimizer_data = copy.deepcopy(overwrite_optimizer_data)
+        task_optimizer_data.num_mtp_tokens = user_input.num_mtp_tokens
+
         # 2. get strategy result
         strategy = OptimizerFactory.create_strategy(
             model_runner,
             self.args.disagg if disagg_mode is None else disagg_mode,
         )
-        result = strategy.run(overwrite_optimizer_data, self.args.batch_range)
+        result = strategy.run(task_optimizer_data, self.args.batch_range)
 
         if not isinstance(result, OptimizerSummary) or len(result.get_summary_df()) == 0:
             logger.warning(
-                "No result found with TP %d for ttft %s ms, tpot %s ms",
+                "No result found with TP %d and num_mtp_tokens %d for ttft %s ms, tpot %s ms",
                 model_runner.model.model_config.parallel_config.tensor_parallel_size,
-                overwrite_optimizer_data.ttft_limits,
-                overwrite_optimizer_data.tpot_limits,
+                user_input.num_mtp_tokens,
+                task_optimizer_data.ttft_limits,
+                task_optimizer_data.tpot_limits,
             )
             return None
 

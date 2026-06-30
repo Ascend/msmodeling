@@ -19,6 +19,7 @@ LOG_LEVELS = {
     "critical": logging.CRITICAL,
 }
 LIMIT_COUNT = 1e6
+DEFAULT_MAX_SEARCH_COMBINATIONS = 100
 BYTES_TO_GB = 1024**3
 MAX_ITER_NUMS = 10
 
@@ -207,7 +208,37 @@ def resolve_search_sizes(values: list[int] | None, target_devices: int, default_
     return normalized
 
 
-def format_parallel_label(parallel_config: ParallelConfig, is_moe_model: bool) -> str:
+def resolve_parallel_search_candidates(
+    tp_sizes: list[int] | None,
+    ep_sizes: list[int] | None,
+    moe_dp_sizes: list[int] | None,
+    num_mtp_token_sizes: list[int] | None,
+    num_mtp_tokens: int,
+    target_devices: int,
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    """Resolve throughput optimizer TP/EP/MOE-DP/MTP candidate lists."""
+    tp_candidates = resolve_search_sizes(tp_sizes, target_devices, target_devices)
+    ep_candidates = resolve_search_sizes(ep_sizes, target_devices, target_devices)
+    moe_dp_candidates = resolve_search_sizes(moe_dp_sizes, target_devices, 1)
+    mtp_candidates = num_mtp_token_sizes or [num_mtp_tokens]
+    return tp_candidates, ep_candidates, moe_dp_candidates, mtp_candidates
+
+
+def count_search_combinations(
+    tp_candidates: list[int],
+    ep_candidates: list[int],
+    moe_dp_candidates: list[int],
+    mtp_candidates: list[int],
+) -> int:
+    """Return Cartesian product size for parallel and MTP search dimensions."""
+    return len(tp_candidates) * len(ep_candidates) * len(moe_dp_candidates) * len(mtp_candidates)
+
+
+def format_parallel_label(
+    parallel_config: ParallelConfig,
+    is_moe_model: bool,
+    num_mtp_tokens: Optional[int] = None,
+) -> str:
     parts = [
         f"TP={parallel_config.tensor_parallel_size}",
         f"PP={parallel_config.pipeline_parallel_size}",
@@ -221,4 +252,6 @@ def format_parallel_label(parallel_config: ParallelConfig, is_moe_model: bool) -
                 f"MOE-DP={parallel_config.moe_data_parallel_size}",
             ]
         )
+    if num_mtp_tokens is not None and num_mtp_tokens > 0:
+        parts.append(f"MTP={num_mtp_tokens}")
     return " | ".join(parts)

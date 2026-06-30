@@ -39,6 +39,40 @@ class TestThroughputOptimizer(TestCase):
 
         self.assertEqual(args.reserved_memory_gb, 10.0)
 
+    def test_arg_parse_num_mtp_token_sizes_defaults_to_empty_list(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            "Qwen/Qwen3-32B",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            args = throughput_optimizer_module.arg_parse()
+
+        self.assertEqual(args.num_mtp_tokens, 0)
+        self.assertEqual(args.num_mtp_token_sizes, [])
+
+    def test_num_mtp_token_candidates_validate_acceptance_rate_length(self):
+        args = [
+            "--input-length=1",
+            "--output-length=1",
+            "Qwen/Qwen3-32B",
+            "--device=TEST_DEVICE",
+            "--num-devices=1",
+            "--num-mtp-tokens",
+            "0",
+            "6",
+        ]
+
+        with self.assertLogs("cli.inference.throughput_optimizer", "ERROR") as logs:
+            result = self._run_throughput_optimizer(args, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("num_mtp_tokens candidates [6] exceed", "\n".join(logs.output))
+
     def _run_throughput_optimizer(self, args, check=True):
         """Run throughput_optimizer's main() in-process so coverage sees the core path."""
         result = run_module_main(THROUGHPUT_OPTIMIZER_MODULE, args)

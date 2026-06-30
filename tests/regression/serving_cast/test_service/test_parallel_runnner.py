@@ -135,6 +135,62 @@ class TestTaskRunner(unittest.TestCase):
         self.assertIn((4, 4, 1), keys)
         self.assertIn((2, 2, 2), keys)
 
+    def test_get_user_config_num_mtp_tokens_combinations(self):
+        """Test searching num_mtp_tokens together with parallel candidates."""
+        self.args.tp_sizes = [1, 2]
+        self.args.num_devices = 2
+        self.args.num_mtp_token_sizes = [0, 2]
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+
+        self.assertEqual(len(configs), 4)
+        keys = {(config.tp_size, config.num_mtp_tokens) for config in configs}
+        self.assertEqual(keys, {(1, 0), (1, 2), (2, 0), (2, 2)})
+
+    def test_get_user_config_chrome_trace_names_include_num_mtp_tokens(self):
+        """Test MTP search candidates do not overwrite the same chrome trace file."""
+        self.args.tp_sizes = [1]
+        self.args.num_devices = 1
+        self.args.num_mtp_token_sizes = [0, 2]
+        self.args.chrome_trace = "trace.json"
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+
+        trace_names = {config.num_mtp_tokens: config.chrome_trace for config in configs}
+        self.assertEqual(trace_names[0], "trace_tp1dp1mtp0.json")
+        self.assertEqual(trace_names[2], "trace_tp1dp1mtp2.json")
+        self.assertEqual(len(set(trace_names.values())), 2)
+
+    def test_get_user_config_tp_ep_num_mtp_tokens_combinations(self):
+        """Test TP/EP/MTP search combinations for the throughput optimizer CLI pattern."""
+        self.args.tp_sizes = [1, 2]
+        self.args.ep_sizes = [1, 2]
+        self.args.num_mtp_token_sizes = [1, 2, 3]
+        self.args.num_devices = 8
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+
+        self.assertEqual(len(configs), 12)
+        keys = {(config.tp_size, config.ep_size, config.num_mtp_tokens) for config in configs}
+        self.assertIn((1, 1, 1), keys)
+        self.assertIn((1, 2, 3), keys)
+        self.assertIn((2, 1, 2), keys)
+        self.assertIn((2, 2, 3), keys)
+
+    def test_optimizer_data_uses_safe_num_mtp_tokens_for_multi_candidate_search(self):
+        """Test base OptimizerData does not pin the first MTP candidate before task dispatch."""
+        self.args.num_mtp_tokens = 1
+        self.args.num_mtp_token_sizes = [1, 2, 3]
+
+        task_runner = ParallelRunner(self.args)
+
+        self.assertEqual(task_runner.optimizer_data.num_mtp_tokens, 0)
+        configs = list(task_runner._get_user_config())
+        self.assertEqual({config.num_mtp_tokens for config in configs}, {1, 2, 3})
+
     def test_run_with_tpot_limit(self):
         """Test run method with TPOT limit"""
         self.args.tpot_limits = 50

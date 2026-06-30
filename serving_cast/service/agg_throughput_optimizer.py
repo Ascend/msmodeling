@@ -104,6 +104,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         parallel = format_parallel_label(
             self.model_runner.model.model_config.parallel_config,
             self.is_moe_model,
+            optimizer_data.num_mtp_tokens,
         )
 
         logger.info(

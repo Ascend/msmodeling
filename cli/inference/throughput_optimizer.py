@@ -26,9 +26,11 @@ from serving_cast.service.optimizer_curve_plots import (
 )
 from serving_cast.service.utils import (
     BatchRangeAction,
+    DEFAULT_MAX_SEARCH_COMBINATIONS,
     check_positive_float,
     check_positive_integer,
-    resolve_search_sizes,
+    count_search_combinations,
+    resolve_parallel_search_candidates,
 )
 from tensor_cast import device_profiles  # noqa: F401
 from tensor_cast.core.quantization.datatypes import (
@@ -41,6 +43,7 @@ from ..utils import (
     LOG_FORMAT,
     LOG_LEVELS,
     check_device_targets,
+    check_non_negative_integer,
     check_prefix_cache_hit_rate,
     get_common_argparser,
 )
@@ -89,8 +92,12 @@ def arg_parse():
         "--num-mtp-tokens",
         type=int,
         choices=range(0, 10),
-        default=0,
-        help="Number of MTP tokens, 0 means disabled - only support models having MTP like DeepSeek",
+        nargs="+",
+        default=None,
+        help="MTP token count candidate(s). Pass one value for a fixed configuration, "
+        "or multiple values to sweep during throughput optimization. "
+        "0 means disabled and only models with MTP support will benefit from non-zero values. "
+        "When combined with TP/EP/MOE-DP search, total combinations grow as TP x EP x MOE-DP x MTP.",
     )
     parser.add_argument(
         "--mtp-acceptance-rate",
@@ -146,7 +153,8 @@ def arg_parse():
         nargs="*",
         default=None,
         help="Enable TP search. Optional explicit TP sizes. "
-        "If no value is provided, defaults to powers of 2 up to world_size.",
+        "If no value is provided, defaults to powers of 2 up to world_size. "
+        "Combined TP/EP/MOE-DP/MTP candidates are evaluated as a Cartesian product.",
     )
     model_group.add_argument(
         "--ep-sizes",
@@ -154,7 +162,8 @@ def arg_parse():
         nargs="*",
         default=None,
         help="Enable EP search. Optional explicit EP sizes. "
-        "If no value is provided, defaults to powers of 2 up to world_size.",
+        "If no value is provided, defaults to powers of 2 up to world_size. "
+        "Combined TP/EP/MOE-DP/MTP candidates are evaluated as a Cartesian product.",
     )
     model_group.add_argument(
         "--moe-dp-sizes",
@@ -162,7 +171,8 @@ def arg_parse():
         nargs="*",
         default=None,
         help="Enable MOE-DP search. Optional explicit MOE-DP sizes. "
-        "If no value is provided, defaults to powers of 2 up to world_size.",
+        "If no value is provided, defaults to powers of 2 up to world_size. "
+        "Combined TP/EP/MOE-DP/MTP candidates are evaluated as a Cartesian product.",
     )
     model_group.add_argument(
         "--enable-shared-expert-tp",
@@ -240,6 +250,12 @@ def arg_parse():
         help="Number of parallel jobs.",
     )
     service_group.add_argument(
+        "--max-search-combinations",
+        type=check_non_negative_integer,
+        default=DEFAULT_MAX_SEARCH_COMBINATIONS,
+        help="Warn when TP/EP/MOE-DP/MTP search combinations exceed this value. Set 0 to disable the warning.",
+    )
+    service_group.add_argument(
         "--concurrency-search-strategy",
         choices=["exponential", "linear_exponential"],
         default="exponential",
@@ -292,6 +308,20 @@ def arg_parse():
         # Backward-compatible default: search TP only with default range.
         args.tp_sizes = []
 
+    def _normalize_mtp_token_values(values: list[int] | None) -> tuple[int, list[int]]:
+        if values is None:
+            return 0, []
+
+        normalized = []
+        for val in values:
+            if val not in normalized:
+                normalized.append(val)
+
+        if not normalized:
+            parser.error("--num-mtp-tokens expects at least one candidate when provided.")
+
+        return normalized[0], normalized
+
     def _normalize_and_validate(values: list[int] | None, arg_name: str, num_devices: int) -> list[int] | None:
         if values is None:
             return None
@@ -305,13 +335,25 @@ def arg_parse():
                 normalized.append(val)
         return normalized
 
+    args.num_mtp_tokens, args.num_mtp_token_sizes = _normalize_mtp_token_values(args.num_mtp_tokens)
     args.tp_sizes = _normalize_and_validate(args.tp_sizes, "tp-sizes", args.num_devices)
     args.ep_sizes = _normalize_and_validate(args.ep_sizes, "ep-sizes", args.num_devices)
     args.moe_dp_sizes = _normalize_and_validate(args.moe_dp_sizes, "moe-dp-sizes", args.num_devices)
 
-    tp_candidates = resolve_search_sizes(args.tp_sizes, args.num_devices, args.num_devices)
-    ep_candidates = resolve_search_sizes(args.ep_sizes, args.num_devices, args.num_devices)
-    moe_dp_candidates = resolve_search_sizes(args.moe_dp_sizes, args.num_devices, 1)
+    tp_candidates, ep_candidates, moe_dp_candidates, mtp_candidates = resolve_parallel_search_candidates(
+        args.tp_sizes,
+        args.ep_sizes,
+        args.moe_dp_sizes,
+        args.num_mtp_token_sizes,
+        args.num_mtp_tokens,
+        args.num_devices,
+    )
+    total_combinations = count_search_combinations(
+        tp_candidates,
+        ep_candidates,
+        moe_dp_candidates,
+        mtp_candidates,
+    )
 
     has_valid_combination = any(
         args.num_devices % tp == 0 and args.num_devices % ep == 0 and args.num_devices % (ep * moe_dp) == 0
@@ -322,6 +364,19 @@ def arg_parse():
     if not has_valid_combination:
         parser.error(
             "No valid parallel combination is produced by the provided search arguments under current --num-devices."
+        )
+
+    args.search_combination_warning_emitted = False
+    if args.max_search_combinations and total_combinations > args.max_search_combinations:
+        args.search_combination_warning_emitted = True
+        print(
+            "[WARNING] Large number of parallel search combinations "
+            f"({total_combinations} = TP:{len(tp_candidates)} x EP:{len(ep_candidates)} "
+            f"x MOE-DP:{len(moe_dp_candidates)} x MTP:{len(mtp_candidates)}). "
+            "Optimization may take a long time. Consider narrowing --tp-sizes, --ep-sizes, "
+            "--moe-dp-sizes, or --num-mtp-tokens; or increase --max-search-combinations.",
+            file=sys.stderr,
+            flush=True,
         )
 
     return args
@@ -341,10 +396,12 @@ def main():
     if device_targets is None:
         return 1
 
-    if args.num_mtp_tokens > 0 and args.num_mtp_tokens > len(args.mtp_acceptance_rate) + 1:
+    mtp_candidates = args.num_mtp_token_sizes or [args.num_mtp_tokens]
+    invalid_num_mtp_tokens = [value for value in mtp_candidates if value > len(args.mtp_acceptance_rate) + 1]
+    if invalid_num_mtp_tokens:
         logger.error(
-            "num_mtp_tokens (%r) is greater than the length of mtp_acceptance_rate (%r). Please check.",
-            args.num_mtp_tokens,
+            "num_mtp_tokens candidates %r exceed the supported mtp_acceptance_rate length (%r). Please check.",
+            invalid_num_mtp_tokens,
             len(args.mtp_acceptance_rate),
         )
         return 1
