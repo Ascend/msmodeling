@@ -64,6 +64,21 @@ pip install -r requirements.txt
 > [!NOTE]
 > `requirements.txt` 顶部也保留了 pip 安装路径和 CPU PyTorch 安装顺序说明。
 
+如果依赖下载失败或速度较慢，可临时切换 PyPI 镜像源后重试：
+
+```bash
+# 临时使用清华源
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 或临时使用阿里云源
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+
+# 或临时使用华为云源
+pip install -r requirements.txt -i https://repo.huaweicloud.com/repository/pypi/simple
+```
+
+如某个镜像源同步不及时导致版本找不到，请更换其他镜像源或临时回退到官方源 `https://pypi.org/simple` 后重试。
+
 <!---->
 
 > [!WARNING]
@@ -86,29 +101,36 @@ $env:PYTHONPATH = "C:\path\to\msmodeling;$env:PYTHONPATH"
 工具运行时需要从 Hugging Face 读取模型配置文件。如果无法直接访问，可以设置镜像：
 
 ```bash
+# Linux / macOS
 export HF_ENDPOINT="https://hf-mirror.com"
+
+# Windows PowerShell
+$env:HF_ENDPOINT = "https://hf-mirror.com"
 ```
 
-## 第一次仿真
+在受限网络中，即使设置 `HF_ENDPOINT`，仍可能因代理策略、DNS、TLS 证书、镜像站不可达、模型仓库需要鉴权，或依赖库未使用该环境变量而下载失败。此时建议使用以下方案：
 
-环境准备完成后，可以运行一次最小 LLM 推理仿真：
+优先在可访问外网的环境中提前下载并审核模型仓库中的配置文件（仅需 `.json`、`.yaml`、`.yml`、`.txt` 后缀），再将 `model_id` 指向本地绝对路径：
+
+   ```bash
+   python -m cli.inference.text_generate /data/models/Qwen3-32B --num-queries 2 --query-length 3500 --device TEST_DEVICE
+   ```
+
+## 验证安装
+
+依赖安装完成后，请在 **msModeling 仓库根目录** 下激活虚拟环境，执行以下命令确认 CLI 入口可用：
 
 ```bash
-python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --device TEST_DEVICE
+python -m cli.inference.text_generate --help
+python -m cli.inference.throughput_optimizer --help
+python -m serving_cast.main --help
 ```
 
-运行完成后，终端会输出算子级性能汇总、总执行时间、TPS/Device 以及显存占用等信息。更详细的使用方法请参考《[TensorCast 使用指南](../user_guide/msmodeling_tensor_cast_user_guide.md)》。
-
-## 结果校验与下一步
-
-如果命令执行成功，通常可以看到以下信息：
-
-- 算子级性能表，包括 `analytic total`、`analytic avg` 与 `# of Calls`。
-- `Total time for analytic`、`TPS/Device` 等总体性能指标。
-- 权重、KV cache、activation 与可用显存等内存估算结果。
+若安装正常，上述命令应分别输出 `text_generate`、`throughput_optimizer`、`serving_cast` 的用法说明与参数列表，且不报 `ModuleNotFoundError`。
 
 常见问题：
 
+- 若 `--help` 无法显示帮助信息，请参考上文「验证安装」章节排查虚拟环境、`PYTHONPATH` 与依赖安装。
 - 如果提示无法找到 `cli` 或 `tensor_cast` 模块，请确认当前目录为仓库根目录，或已正确设置 `PYTHONPATH`。
-- 如果模型配置下载失败，请确认网络可访问 Hugging Face，或设置 `HF_ENDPOINT` 镜像。
-- 如果依赖安装失败，请先确认虚拟环境已激活，并重新执行 `uv sync`；若使用 pip 方式，请升级 `pip` 后重新执行 `pip install -r requirements.txt`。
+- 如果模型配置下载失败，请确认网络可访问 Hugging Face；若 `HF_ENDPOINT` 镜像仍不可用，请改用本地模型路径。
+- 如果依赖安装失败，请先确认虚拟环境已激活，并重新执行 `uv sync`；若使用 pip 方式，请升级 `pip` 后重新执行 `pip install -r requirements.txt`，必要时切换 PyPI 镜像源。
