@@ -313,6 +313,31 @@ class ParallelMoELayer(ModelWrapperBase):
         else:
             self.transform_dp_group = self.global_dp_group.world_size != 1
 
+    def _forward_ep_raw_logits(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, int]:
+        """EP path with gate_returns_raw_logits=True.
+
+        Gate runs on full packed-local tokens first, router_logits are
+        pad+sliced inside route() to match vllm-ascend
+        All2AllPrepareFinalize.prepare() order, then hidden_states is
+        sliced by _dp_transform_enter().  skip_shared_experts=False is
+        correct: models without shared_experts (GLM4-MoE/GLM4V/GLM5) are
+        unaffected, and models with shared_experts (e.g. DeepSeek-V3) have
+        them run per-rank on the disjoint TP slice, reassembled by
+        _dp_transform_exit's all_gather.
+        """
+        tp_size = self.global_tp_group.world_size
+        tp_rank = self.global_tp_group.rank_in_group
+        topk_indices, topk_weights = self._inner.route(
+            hidden_states, tp_size=tp_size, tp_rank=tp_rank, input_ids=input_ids
+        )
+        hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
+        hidden_states = self._inner.fused_moe(hidden_states, topk_indices, topk_weights, skip_shared_experts=False)
+        return hidden_states, num_tokens
+
     def _run_shared_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Current EP path gathers routed outputs by token dimension, so we cannot
         # reuse vLLM's "add partial shared + partial routed, then one all-reduce"
@@ -397,6 +422,19 @@ class ParallelMoELayer(ModelWrapperBase):
             if skip_shared_experts:
                 hidden_states = hidden_states + self._run_shared_experts(residuals)
 
+            if len(origin_shape) == 3:
+                hidden_states = hidden_states.view(*origin_shape[:2], *hidden_states.shape[1:])
+            return hidden_states
+
+        if self.has_ep and self._inner.moe_config.gate_returns_raw_logits:
+            origin_shape = hidden_states.shape
+            if len(origin_shape) == 3:
+                hidden_states = hidden_states.view(-1, *origin_shape[2:])
+            if self.transform_dp_group:
+                hidden_states, num_tokens = self._forward_ep_raw_logits(hidden_states, input_ids)
+                hidden_states = self._dp_transform_exit(hidden_states, num_tokens)
+            else:
+                hidden_states = self._inner(hidden_states, input_ids=input_ids)
             if len(origin_shape) == 3:
                 hidden_states = hidden_states.view(*origin_shape[:2], *hidden_states.shape[1:])
             return hidden_states

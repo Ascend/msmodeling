@@ -7,7 +7,12 @@ from parameterized import parameterized
 from tensor_cast.compilation import get_backend
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
-from tensor_cast.layers.moe_layer import ExpertWrapper, FusedMoETensorCast, MoELayer, ParallelMoELayer
+from tensor_cast.layers.moe_layer import (
+    ExpertWrapper,
+    FusedMoETensorCast,
+    MoELayer,
+    ParallelMoELayer,
+)
 from tensor_cast.model_config import ModelConfig, MoEConfig, ParallelConfig, QuantConfig
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.runtime import Runtime
@@ -581,3 +586,176 @@ def test_parallel_moe_shared_expert_tp_without_dp_transform():
     fused_moe = _make_fake_fused_moe.last_instance
     assert fused_moe is not None
     assert fused_moe.forward_inputs == [((6, 16), (6, 2), (6, 2), True)]
+
+
+# ---------------------------------------------------------------------------
+# Tests for non-shared-expert-tp EP path with gate_returns_raw_logits=True
+# (GLM5-style: gate on full packed-local tokens, router_logits pad+sliced
+#  inside route(), hidden_states sliced by _dp_transform_enter afterwards)
+# ---------------------------------------------------------------------------
+
+
+def test_raw_logits_non_shared_ep_gate_sees_full_tokens():
+    """Gate must receive pre-TP-slice token count (27), not post-slice (7)."""
+    top_k = 2
+    tp_size = 4
+    seq_len = 27  # packed local tokens; pad to 28 then slice to 7 per TP rank
+    gate = _make_fake_gate(top_k=top_k, tp_size=tp_size, shard_by_tp=False)
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=top_k,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(8)]),
+        shared_experts=None,
+        shared_experts_gate=None,
+    )
+    moe_config = MoEConfig(module_name="FakeMoE", gate_returns_raw_logits=True)
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=1),
+            global_tp_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            mlp_tp_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            ep_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(seq_len, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert output.shape == (seq_len, 16)
+    # Gate must see the full packed-local token count, not the TP-sliced count.
+    assert gate.seen_shape == (seq_len, 16), f"gate saw {gate.seen_shape}, want ({seq_len}, 16)"
+
+    # fused_moe receives hidden_states after _dp_transform_enter:
+    # 27 -> pad to 28 -> slice by tp_size=4 -> 7 tokens per rank.
+    expected_local_tokens = (seq_len + tp_size - 1) // tp_size
+    fused_moe = _make_fake_fused_moe.last_instance
+    assert fused_moe is not None
+    assert fused_moe.forward_inputs[0][0] == (expected_local_tokens, 16), (
+        f"fused_moe saw {fused_moe.forward_inputs[0][0]}, want ({expected_local_tokens}, 16)"
+    )
+
+
+def test_raw_logits_non_shared_ep_small_seq_len_pad_boundary():
+    """seq_len=1 with tp_size=4: pad to 4, slice to 1; gate still sees 1 token."""
+    top_k = 2
+    tp_size = 4
+    seq_len = 1
+    gate = _make_fake_gate(top_k=top_k, tp_size=tp_size, shard_by_tp=False)
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=top_k,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(8)]),
+        shared_experts=None,
+        shared_experts_gate=None,
+    )
+    moe_config = MoEConfig(module_name="FakeMoE", gate_returns_raw_logits=True)
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=1),
+            global_tp_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            mlp_tp_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            ep_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(seq_len, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert output.shape == (seq_len, 16)
+    assert gate.seen_shape == (seq_len, 16)
+
+    # 1 -> pad to 4 -> slice to 1 per rank (rank 0 gets index [0:1])
+    fused_moe = _make_fake_fused_moe.last_instance
+    assert fused_moe is not None
+    assert fused_moe.forward_inputs[0][0] == (seq_len, 16)
+
+
+def test_raw_logits_non_shared_ep_no_dp_transform():
+    """transform_dp_group=False with gate_returns_raw_logits=True: _inner runs directly."""
+    top_k = 2
+    tp_size = 4
+    seq_len = 6
+    gate = _make_fake_gate(top_k=top_k, tp_size=tp_size, shard_by_tp=False)
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=top_k,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(8)]),
+        shared_experts=None,
+        shared_experts_gate=None,
+    )
+    moe_config = MoEConfig(module_name="FakeMoE", gate_returns_raw_logits=True)
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        # dp_group.world_size == ep_group.world_size → transform_dp_group=False
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=tp_size),
+            global_tp_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            mlp_tp_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            ep_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(seq_len, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert parallel_moe.transform_dp_group is False
+    assert output.shape == (seq_len, 16)
+    # No TP slice: gate and fused_moe both see the full token count.
+    assert gate.seen_shape == (seq_len, 16)
+    fused_moe = _make_fake_fused_moe.last_instance
+    assert fused_moe is not None
+    assert fused_moe.forward_inputs[0][0] == (seq_len, 16)
+
+
+def test_raw_logits_false_non_shared_ep_regression():
+    """gate_returns_raw_logits=False path must be unaffected: gate sees post-slice tokens.
+
+    Uses 3D input (1, seq_len, 16) to also exercise the flatten/unflatten
+    reshape path in forward(), covering origin_shape[:2] view restore.
+    """
+    top_k = 2
+    tp_size = 2
+    seq_len = 6
+    gate = _make_fake_gate(top_k=top_k, tp_size=tp_size, shard_by_tp=False)
+    module = SimpleNamespace(
+        gate=gate,
+        top_k=top_k,
+        norm_topk_prob=False,
+        experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(4)]),
+        shared_experts=None,
+        shared_experts_gate=None,
+    )
+    moe_config = MoEConfig(module_name="FakeMoE")
+
+    with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+        moe_layer = MoELayer(moe_config, module)
+        parallel_moe = ParallelMoELayer(
+            module=moe_layer,
+            global_dp_group=_FakeParallelGroup(world_size=1),
+            global_tp_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            mlp_tp_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            ep_group=_FakeParallelGroup(world_size=tp_size, rank_in_group=0),
+            num_external_shared_experts=0,
+            num_redundant_experts=0,
+        )
+
+        hidden_states = torch.empty(1, seq_len, 16, device="meta", dtype=torch.float16)
+        output = parallel_moe(hidden_states)
+
+    assert output.shape == (1, seq_len, 16)
+    # False path: _dp_transform_enter runs first, gate sees sliced token count.
+    assert gate.seen_shape == ((seq_len + tp_size - 1) // tp_size, 16)
