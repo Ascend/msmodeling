@@ -3,6 +3,7 @@ import unittest
 import pytest
 import torch
 from parameterized import parameterized
+import tensor_cast.config as tc_config
 from tensor_cast.compilation import get_backend
 from tensor_cast.core.config_resolver import ConfigResolver
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
@@ -26,6 +27,12 @@ from .test_common import count_events, get_quant_config
 class GmmPassTestCase(unittest.TestCase):
     def setUp(self):
         torch.compiler.reset()
+        self._orig_dfc = tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine
+        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = False
+        self.addCleanup(self._restore_dfc)
+
+    def _restore_dfc(self):
+        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = self._orig_dfc
 
     @parameterized.expand(
         [

@@ -376,7 +376,6 @@ def _build_text_form(*vals):
         "host_external_shared_experts",
         "enable_sequence_parallel",
         "enable_shared_expert_tp",
-        "enable_dispatch_ffn_combine",
         "remote_source",
         "performance_model",
         "profiling_database",

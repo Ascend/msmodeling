@@ -117,6 +117,7 @@ class TestKimiK25(unittest.TestCase):
             moe_tp_size=1,
             moe_dp_size=1,
             enable_shared_expert_tp=True,
+            enable_dispatch_ffn_combine=False,
         )
 
         model_runner = ModelRunner(user_input)
@@ -164,6 +165,7 @@ class TestKimiK25(unittest.TestCase):
             moe_tp_size=1,
             moe_dp_size=1,
             enable_shared_expert_tp=True,
+            enable_dispatch_ffn_combine=False,
             # Vision-language specific parameters
             image_batch_size=1,
             image_height=1080,
@@ -244,6 +246,7 @@ class TestKimiK25(unittest.TestCase):
             moe_tp_size=1,
             moe_dp_size=1,
             enable_shared_expert_tp=True,
+            enable_dispatch_ffn_combine=False,
         )
 
         model_runner = ModelRunner(user_input)
@@ -297,6 +300,7 @@ class TestKimiK25(unittest.TestCase):
             moe_tp_size=1,
             moe_dp_size=1,
             enable_shared_expert_tp=True,
+            enable_dispatch_ffn_combine=False,
             # Vision-language specific parameters
             image_batch_size=1,
             image_height=1080,
@@ -372,6 +376,7 @@ class TestKimiK25(unittest.TestCase):
             moe_tp_size=1,
             moe_dp_size=1,
             enable_shared_expert_tp=True,
+            enable_dispatch_ffn_combine=False,
             num_mtp_tokens=3,
         )
 
@@ -421,6 +426,7 @@ class TestKimiK25(unittest.TestCase):
             moe_tp_size=1,
             moe_dp_size=1,
             enable_shared_expert_tp=True,
+            enable_dispatch_ffn_combine=False,
             # Vision-language specific parameters
             image_batch_size=1,
             image_height=1080,

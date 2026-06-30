@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.fx as fx
 from parameterized import parameterized
+import tensor_cast.config as tc_config
 from tensor_cast.compilation import get_backend
 from tensor_cast.compilation.freezing_passes.grouped_matmul_swiglu_pass import (
     GroupedMatmulSwigluPass,
@@ -148,6 +149,12 @@ class SwiGLUFusionPassTestCase(SwiGLUFusionPassTestMixin, unittest.TestCase):
 class SwiGLUFusionPassNightlyTestCase(SwiGLUFusionPassTestMixin, unittest.TestCase):
     def setUp(self):
         torch.compiler.reset()
+        self._orig_dfc = tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine
+        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = False
+        self.addCleanup(self._restore_dfc)
+
+    def _restore_dfc(self):
+        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = self._orig_dfc
 
     @parameterized.expand(
         [

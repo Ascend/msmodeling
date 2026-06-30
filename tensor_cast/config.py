@@ -42,7 +42,7 @@ class compilation:
         enable_swiglu = True
         enable_matmul_allreduce = True
         enable_grouped_matmul_swiglu = True
-        enable_dispatch_ffn_combine = False
+        enable_dispatch_ffn_combine = True
 
     class debug:
         graph_log_url = None

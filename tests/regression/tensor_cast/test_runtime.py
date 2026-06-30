@@ -1072,7 +1072,11 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         self.assertIn("tensor_cast.", runtime.table_averages())
 
     def _run_test_deepseek(self, model_id, do_compile):
-        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile)
+        user_config = UserInputConfig(
+            model_id=model_id,
+            do_compile=do_compile,
+            enable_dispatch_ffn_combine=False,
+        )
         model = self._get_model(user_config)
         attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         # make sure all original attention modules have been replaced

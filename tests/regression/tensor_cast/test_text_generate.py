@@ -1606,6 +1606,7 @@ class TestTextGenerateNightly(TextGenerateTestMixin, unittest.TestCase):
             moe_dp_size=1 if enable_ep else 8,
             moe_tp_size=1,
             tp_size=8 if enable_tp else 1,
+            enable_dispatch_ffn_combine=False,
         )
         model_runner = ModelRunner(user_input)
         result = model_runner.run_inference(generate_inputs_func=generate_inputs)

@@ -32,6 +32,7 @@ def test_gmm_pass_grouped_matmul_smoke():
         do_compile=True,
         num_hidden_layers_override=1,
         quantize_linear_action=QuantizeLinearAction.DISABLED,
+        enable_dispatch_ffn_combine=False,
     )
     result = ModelRunner(user_input).run_inference(generate_inputs_func=generate_inputs)
     assert result is not None
@@ -53,6 +54,7 @@ def test_gmm_pass_vl_moe_smoke():
         image_height=224,
         image_width=224,
         quantize_linear_action=QuantizeLinearAction.DISABLED,
+        enable_dispatch_ffn_combine=False,
     )
     runner = ModelRunner(user_input)
     assert runner.model.is_vl_model
@@ -78,6 +80,7 @@ def test_gmm_fusion_ep_smoke():
         moe_dp_size=1,
         moe_tp_size=1,
         tp_size=1,
+        enable_dispatch_ffn_combine=False,
     )
     result = ModelRunner(user_input).run_inference(generate_inputs_func=generate_inputs)
     assert result is not None

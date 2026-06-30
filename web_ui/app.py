@@ -521,10 +521,6 @@ def build_app() -> gr.Blocks:
                                 label="enable-shared-expert-tp",
                                 value=False,
                             )
-                            tg_enable_dispatch_ffn_combine = gr.Checkbox(
-                                label="enable-dispatch-ffn-combine",
-                                value=False,
-                            )
                     with gr.Row():
                         tg_remote_source = gr.Dropdown(
                             REMOTE_SOURCE_OPTIONS,
@@ -708,7 +704,6 @@ def build_app() -> gr.Blocks:
                 tg_host_external_shared_experts,
                 tg_enable_sequence_parallel,
                 tg_enable_shared_expert_tp,
-                tg_enable_dispatch_ffn_combine,
                 tg_remote_source,
                 tg_performance_model,
                 tg_profiling_database,

@@ -250,11 +250,6 @@ def main():
         "This uses dense-MLP TP for shared_experts with delayed down_proj reduction.",
     )
     par_group.add_argument(
-        "--enable-dispatch-ffn-combine",
-        action="store_true",
-        help="Enable dispatch_ffn_combine fusion pattern during compilation.",
-    )
-    par_group.add_argument(
         "--enable-external-shared-experts",
         action="store_true",
         help="Whether or not to implement external shared experts",
@@ -335,7 +330,6 @@ def main():
     if args.graph_log_url:
         config.compilation.debug.graph_log_url = args.graph_log_url
     config.compilation.passes.enable_sequence_parallel = args.enable_sequence_parallel
-    config.compilation.fusion_patterns.enable_dispatch_ffn_combine = args.enable_dispatch_ffn_combine
 
     # Set default performance_model if not specified
     if args.performance_model is None:

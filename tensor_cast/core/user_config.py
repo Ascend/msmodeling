@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass, field, fields
 from typing import List, Optional, Union
 
+from .. import config
 from ..core.input_generator import RequestInfo
 from ..core.model_source_security import normalize_model_source
 from ..core.quantization.config import create_quant_config
@@ -69,7 +70,9 @@ class UserInputConfig:
     enable_redundant_experts: bool = False
     """Pad routing-expert count to a multiple of EP size for load balancing."""
     enable_shared_expert_tp: bool = False
-    enable_dispatch_ffn_combine: bool = False
+    enable_dispatch_ffn_combine: bool = field(
+        default_factory=lambda: config.compilation.fusion_patterns.enable_dispatch_ffn_combine
+    )
     """Apply tensor-parallelism to shared experts across the EP group.
     Requires expert_parallel_size > 1.
     Mutually exclusive with ``host_external_shared_experts``.

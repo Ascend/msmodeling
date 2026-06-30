@@ -143,7 +143,6 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "host_external_shared_experts": _as_bool(form.get("host_external_shared_experts", False)),
             "enable_sequence_parallel": _as_bool(form.get("enable_sequence_parallel", False)),
             "enable_shared_expert_tp": _as_bool(form.get("enable_shared_expert_tp", False)),
-            "enable_dispatch_ffn_combine": _as_bool(form.get("enable_dispatch_ffn_combine", False)),
             "remote_source": str(form.get("remote_source") or DEFAULT_REMOTE_SOURCE),
             "performance_model": _performance_models(form.get("performance_model")),
             "profiling_database": _optional_str(form.get("profiling_database")),
@@ -221,8 +220,6 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd.append("--enable-sequence-parallel")
         if params["enable_shared_expert_tp"]:
             cmd.append("--enable-shared-expert-tp")
-        if params["enable_dispatch_ffn_combine"]:
-            cmd.append("--enable-dispatch-ffn-combine")
         if params["image_batch_size"] is not None:
             cmd += ["--image-batch-size", str(params["image_batch_size"])]
         if params["image_height"] is not None:
