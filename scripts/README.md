@@ -2,6 +2,8 @@
 
 Shell entry points for local runs, PR incremental gate, nightly, and `test_map` maintenance. Python logic lives in `scripts/helpers/`; `scripts/lib/common.sh` bootstraps env, optional `uv sync --frozen --group ci`, and invokes helpers.
 
+**Department unified entry:** repo-root [`build.py`](../build.py) wraps `scripts/build.sh` (default) and `scripts/run_ci_gate.sh` (`test`). Use `python build.py` locally or in CI instead of calling the shell scripts directly.
+
 Test case layout, markers, and authoring rules: see [tests/README.md](../tests/README.md).
 
 ## Layout
@@ -20,6 +22,23 @@ scripts/
 ```
 
 Test rules/markers: [tests/README.md](../tests/README.md)
+
+## Unified entry (`build.py`)
+
+Department-standard root entry. Thin wrapper over existing shell scripts:
+
+| Command | Delegates to |
+|---------|--------------|
+| `python build.py` | `bash scripts/build.sh` → wheel under `artifacts/wheels/` |
+| `python build.py test` | `bash scripts/run_ci_gate.sh` → log under `artifacts/test-reports/` |
+
+`local` is accepted for spec compatibility but is a no-op in this pure-Python repo (same behavior as omitting it).
+
+`-e` / `--extra` is **test-only** (`python build.py test ...`). Allowed keys: `test_map_path`, `base_branch`, `offline`, `weights_prune`. Build mode rejects any `-e`. Other options use environment variables (e.g. `MSMODELING_TEST_MAP_PATH`).
+
+`-v` / `--version` temporarily writes `project.version` in `pyproject.toml` via `uv version --frozen` for the wheel build, then restores the original version. Prefer `uv run python build.py -v <ver>` (or `uv run -- build.py --version <ver>`); bare `uv run build.py -v` may be consumed by uv itself.
+
+Test mode resolves `test_map_path` from `-e test_map_path=...` first, then `MSMODELING_TEST_MAP_PATH`; the file must exist before `run_ci_gate.sh` runs.
 
 ## Entry scripts
 
@@ -112,6 +131,8 @@ Boolean: `0`/`1`/`true`/`false`/`yes`/`no`/`on`/`off` (case-insensitive).
 
 ```bash
 # local
+python build.py
+python build.py test -e test_map_path=/data/test_map.json
 bash scripts/run_smoke.sh
 bash scripts/run_regression.sh
 bash scripts/run_benchmark.sh

@@ -5,3 +5,5 @@
 # DT coverage report
 **/coverage
 .coverage*
+
+artifacts/

@@ -55,6 +55,16 @@ def test_classify_changes_modified_source_includes_lines() -> None:
     assert result.modified_source[0][1] == frozenset({10, 11})
 
 
+def test_classify_changes_build_py_is_unscoped_not_config() -> None:
+    result = _classify(
+        _diff_result(
+            entries=(DiffEntry(status="M", old_path="build.py", new_path="build.py"),),
+        ),
+    )
+    assert result.config == ()
+    assert result.unscoped_python == ("build.py",)
+
+
 def test_classify_changes_gate_policy_validate_only() -> None:
     result = _classify(
         _diff_result(
