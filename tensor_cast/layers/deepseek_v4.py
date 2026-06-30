@@ -208,11 +208,35 @@ def get_compress_topk_idxs(
     batch_size: int,
     seq_length: int,
     device: torch.device,
+    total_seq_length: Optional[int] = None,
 ) -> torch.Tensor:
     R = int(ratio)
-    sl = int(seq_length)
-    width = max(sl // R, 1)
-    return torch.arange(width, device=device, dtype=torch.long).view(1, 1, -1).expand(int(batch_size), sl, -1)
+    query_len = int(seq_length)
+    effective_seq_length = int(total_seq_length) if total_seq_length is not None else query_len
+    width = max(effective_seq_length // R, 1)
+    return torch.arange(width, device=device, dtype=torch.long).view(1, 1, -1).expand(int(batch_size), query_len, -1)
+
+
+def _resolve_max_total_seq_len(attention_meta: Optional[AttentionMetadataBase]) -> Optional[int]:
+    """Resolve batch max total sequence length without requiring tensor scalar extraction."""
+    if attention_meta is None:
+        return None
+    max_total_seq_len = getattr(attention_meta, "max_total_seq_len", None)
+    if max_total_seq_len is None:
+        # Compatibility for hand-built metadata that still uses the old field name.
+        max_total_seq_len = getattr(attention_meta, "max_seq_len", None)
+    if max_total_seq_len is not None:
+        return int(max_total_seq_len)
+
+    # Last-resort eager fallback for hand-built metadata. Generated metadata
+    # should always carry max_total_seq_len so compile paths avoid .item().
+    seq_lens = getattr(attention_meta, "seq_lens", None)
+    if seq_lens is None or getattr(seq_lens, "device", None) is None or seq_lens.device.type == "meta":
+        return None
+    try:
+        return int(seq_lens.max().item())
+    except (RuntimeError, TypeError, ValueError):
+        return None
 
 
 def _is_decode_attention_batch(
@@ -649,7 +673,18 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                     attention_meta=attention_meta,
                 )
             else:
-                compress_topk_indices = get_compress_topk_idxs(R, batch_size, sl, device)
+                compress_topk_indices = get_compress_topk_idxs(
+                    R,
+                    batch_size,
+                    sl,
+                    device,
+                    # TensorCast's semantic sparse-attention op consumes a
+                    # rectangular topk tensor. For packed varlen batches, use
+                    # the batch max total length as a conservative width; the
+                    # compressor/perf paths still receive per-request seq_lens
+                    # and query_lens for row-count modeling.
+                    total_seq_length=_resolve_max_total_seq_len(attention_meta),
+                )
             topk_indices = torch.cat([topk_indices, compress_topk_indices], dim=-1)
 
         # 3. int-cast the merged topk indices (model.py:515).

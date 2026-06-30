@@ -615,6 +615,64 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
         assert result.shape == hidden_states.shape
         assert cache is None
 
+    def test_v4_ratio128_topk_uses_total_seq_len(self):
+        """Deterministic compressed topk should include previous context chunks."""
+        inner = self._create_tiny_forward_inner_module()
+        inner.compress_ratio = 128
+        inner.use_compressor = True
+        inner.window_size = 4
+        mla_config = MlaConfig(module_name="DeepseekV4SparseAttention")
+
+        with patch(
+            "tensor_cast.layers.mla.MultiheadLatentAttentionTensorCast.__init__",
+            _stub_mla_tensor_cast_init,
+        ):
+            wrapper = DeepseekV4SparseAttention(mla_config, inner, self._mock_tp_group())
+        wrapper.layer_idx = 0
+
+        hidden_states = torch.randn(1, 8, 8)
+        cos = torch.ones(1, 8, 2)
+        sin = torch.zeros(1, 8, 2)
+        attention_meta = AttentionMetadataTensorCast(
+            query_start_loc=torch.tensor([0, 8], dtype=torch.long),
+            seq_lens=torch.tensor([1024], dtype=torch.long),
+            query_lens=torch.tensor([8], dtype=torch.long),
+            slot_mapping=torch.arange(8, dtype=torch.long),
+            max_total_seq_len=1024,
+        )
+        kv_cache = torch.randn(8, 128, 4)
+        expected_topk_width = 4 + 1024 // 128
+
+        def _dynamic_quantize_symmetric(x, *_args, **_kwargs):
+            return x, torch.ones(1, dtype=torch.float32, device=x.device)
+
+        def _compressor(_hidden_states, cache, *_args, **_kwargs):
+            return torch.randn(1, 8, 4), cache
+
+        def _sparse_attn_sharedkv(q, _kv, _sink, topk_indices, *_args, kv_dependency=None, **_kwargs):
+            assert topk_indices.shape == (1, 8, expected_topk_width)
+            assert kv_dependency is kv_cache
+            return q
+
+        with (
+            patch("torch.ops.tensor_cast.rms_norm", side_effect=lambda x, *_args, **_kwargs: x),
+            patch("torch.ops.tensor_cast.apply_rope_inplace", side_effect=lambda *_args, **_kwargs: None),
+            patch("torch.ops.tensor_cast.dynamic_quantize_symmetric", side_effect=_dynamic_quantize_symmetric),
+            patch("torch.ops.tensor_cast.scatter_nd_update_mla", side_effect=lambda _kv, cache, *_args: cache),
+            patch("torch.ops.tensor_cast.compressor", side_effect=_compressor),
+            patch("torch.ops.tensor_cast.sparse_attn_sharedkv", side_effect=_sparse_attn_sharedkv),
+        ):
+            result, cache = wrapper(
+                hidden_states,
+                (cos, sin),
+                attention_mask=None,
+                attention_meta=attention_meta,
+                kv_cache_by_layers={0: kv_cache},
+            )
+
+        assert result.shape == hidden_states.shape
+        assert cache is None
+
     def test_w4a8_wo_a_weight_is_unpacked_before_grouped_einsum(self):
         inner = self._create_tiny_forward_inner_module()
         inner.wo_a = TensorCastQuantLinear(
@@ -675,6 +733,17 @@ class TestDeepseekV4Helpers(unittest.TestCase):
         """Test compress topk indices."""
         indices = get_compress_topk_idxs(ratio=4, batch_size=2, seq_length=32, device="cpu")
         # width = max(32 // 4, 1) = 8
+        assert indices.shape == (2, 32, 8)
+
+    def test_get_compress_topk_idxs_uses_total_seq_length(self):
+        """Context-prefill compressed topk width follows total seq length."""
+        indices = get_compress_topk_idxs(
+            ratio=128,
+            batch_size=2,
+            seq_length=32,
+            total_seq_length=1024,
+            device="cpu",
+        )
         assert indices.shape == (2, 32, 8)
 
 

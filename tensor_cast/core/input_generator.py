@@ -144,6 +144,7 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
         query_lens=query_lens,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        max_total_seq_len=int(seq_len),
     )
 
     # The total number of new tokens to be processed in this batch, concatenated.
@@ -828,9 +829,10 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     seq_lens_t = torch.tensor(seq_lens, dtype=torch.long)
     query_len_t = torch.tensor(query_lens, dtype=torch.long)
 
+    max_total_seq_len = int(max(seq_lens))
     total_kv_tokens = sum(seq_lens) + batch_size * (num_mtp_tokens + 1)
     num_blocks = (total_kv_tokens + block_size - 1) // block_size
-    max_num_blocks_per_seq = (max(seq_lens) + block_size - 1) // block_size
+    max_num_blocks_per_seq = (max_total_seq_len + block_size - 1) // block_size
     block_table_tensor = torch.empty((batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta")
     slot_mapping = torch.empty((num_tokens,), dtype=torch.long, device="meta")
 
@@ -840,6 +842,7 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
         seq_lens=seq_lens_t,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        max_total_seq_len=max_total_seq_len,
     )
 
     input_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")

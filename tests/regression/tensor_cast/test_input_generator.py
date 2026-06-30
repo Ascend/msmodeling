@@ -223,6 +223,57 @@ def test_qwen3_5_decode_mtp_cache_position_metadata(_mock_kv_cache, _mock_sparse
     assert cache_position.tensor_cast_effective_decode_steps == 4
 
 
+@patch("tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info", return_value={})
+@patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
+def test_generate_inputs_sets_max_total_seq_len(_mock_kv_cache, _mock_sparse_cache):
+    model = SimpleNamespace(
+        is_vl_model=False,
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
+            mtp_config=None,
+            parallel_config=SimpleNamespace(data_parallel_size=1),
+        ),
+    )
+
+    inputs = generate_inputs(
+        model,
+        [
+            RequestInfo(
+                query_len=102400,
+                context_length=921600,
+                seq_len=1024000,
+                concurrency=1,
+                is_decode=False,
+            )
+        ],
+    )
+
+    attention_meta = inputs["attention_meta"]
+    assert attention_meta.max_total_seq_len == 1024000
+    assert int(attention_meta.seq_lens.max().item()) == attention_meta.max_total_seq_len
+
+
+@patch("tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info", return_value={})
+@patch("tensor_cast.core.input_generator._get_kv_cache_info", return_value=({}, 0))
+def test_generate_inputs_varlen_sets_max_total_seq_len(_mock_kv_cache, _mock_sparse_cache):
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v4"),
+            mtp_config=None,
+        ),
+    )
+    requests = [
+        RequestInfo(query_len=102400, context_length=921600, seq_len=1024000, is_decode=False),
+        RequestInfo(query_len=8192, context_length=253952, seq_len=262144, is_decode=False),
+    ]
+
+    inputs = generate_inputs_varlen(model, requests, 128)
+
+    attention_meta = inputs["attention_meta"]
+    assert attention_meta.max_total_seq_len == 1024000
+    assert int(attention_meta.seq_lens.max().item()) == attention_meta.max_total_seq_len
+
+
 def test_resize_image_uses_local_preprocessor_config(tmp_path):
     _load_preprocessor_pixel_limits.cache_clear()
     (tmp_path / "preprocessor_config.json").write_text(

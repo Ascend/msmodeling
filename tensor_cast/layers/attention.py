@@ -30,6 +30,14 @@ class AttentionMetadataBase:
     """(num_tokens,) The indices of the token slots that input tokens will be
     stored into."""
 
+    max_total_seq_len: Optional[int] = None
+    """Python scalar equal to ``max(seq_lens)`` for this metadata batch.
+
+    This duplicates ``seq_lens.max()`` intentionally so compile-time callers can
+    size rectangular helper tensors without materializing a tensor scalar via
+    ``.item()``.
+    """
+
 
 class AttentionBase(torch.nn.Module):
     attn_implmentation = None
