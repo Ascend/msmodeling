@@ -1,20 +1,30 @@
-# Serving Simulation
+# ServingCast Simulation Guide
 
-## Supported python versions
+## 1 Introduction
 
-3.10+
+ServingCast simulation evaluates end-to-end model serving performance based on instance configuration and global configuration. It uses YAML files to describe instance groups, model structure, request workloads, and serving limits, and outputs performance metrics such as TTFT, TPOT, throughput, and request count. This helps users analyze serving capacity and configuration bottlenecks before actual deployment.
 
-> [!Warning]
-> If you are using Windows, note that PyTorch 2.10 may not run properly on your system. For a solution, please refer to [this issue](https://github.com/pytorch/pytorch/issues/166628). If you have not yet installed PyTorch, for optimal compatibility, we strongly recommend using version 2.8 or earlier to ensure the program functions correctly.
+## 2 Environment Requirements
 
-## Run simulation
+Before running ServingCast simulation, complete environment setup first. Python 3.10+ is recommended. For details, see [Quick Start: Environment Setup and First Simulation](../install_guide/msmodeling_install_guide.md).
+
+## 3 Input Configuration
+
+Service simulation depends on two YAML configuration files:
+
+| Configuration File | Purpose |
+| --- | --- |
+| `instance_config_path` | Describes one or more instance groups, such as role, instance count, and TP/DP parallelism. |
+| `common_config_path` | Describes global settings, such as model structure, request workload, serving limits, and simulation parameters. |
+
+## 4 Run Simulation
 
 Its general usage is shown below:
 
 ```text
 usage: python -m serving_cast.main [-h] --instance_config_path INSTANCE_CONFIG_PATH [INSTANCE_CONFIG_PATH ...] --common_config_path COMMON_CONFIG_PATH
 
-Run a service inference simulation driven by JSON configuration files.
+Run a service inference simulation driven by YAML configuration files.
 
 required arguments:
   --instance_config_path INSTANCE_CONFIG_PATH [INSTANCE_CONFIG_PATH ...]
@@ -32,29 +42,26 @@ optional arguments:
                         Path to directory where profiling results will be saved (default: ./profiling_results)
 ```
 
-example:
+Parameter descriptions:
 
-- basic usage
+| Parameter | Required/Optional | Description |
+| --- | --- | --- |
+| `--instance_config_path` | Required | Path to one or more instance configuration files. Format: YAML file path list. Each file declares one or more instance groups, such as role, instance count, and TP/DP parallelism. Default: none. |
+| `--common_config_path` | Required | Path to the global configuration file. Format: YAML file path. It describes model structure, request workload, serving limits, and simulation parameters. Default: none. |
+| `--enable_profiling` | Optional | Enables profiling and outputs more fine-grained system performance information. Valid range: flag option. Default: `False`. |
+| `--profiling_output_path` | Optional | Specifies profiling result directory. Format: directory path. Default: `./profiling_results`. |
+
+Example:
+
+- Basic usage
 
 ```bash
 python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml
 ```
 
-- enable profiling
+### 4.1 Result
 
-```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling
-```
-
-- enable profiling with custom output path
-
-```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling --profiling_output_path=/path/to/custom/profiling_dir
-```
-
-### Result
-
-After the simulation finishes, a performance summary is printed to the console like following:
+After the simulation finishes, the console prints a performance summary similar to:
 
 ```text
          E2E_TIME(s)  TTFT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
@@ -77,32 +84,9 @@ output_token_throughput(tok/s) 285.598
 
 Metric descriptions:
 
-- E2E_TIME: End-to-end latency per request (issue → last token)
+- E2E_TIME: End-to-end latency for a single request (request issued → last token)
 - TTFT: Time-to-first-token
 - TPOT: Time-per-output-token after the first token
 - OUTPUT_TOKEN_THROUGHPUT: Per-request output-token rate
-- request_throughput: System-wide request rate
-- input_token_throughput / output_token_throughput: Aggregate token throughput
-
-### Profiling
-
-Profiling is supported in the simulation. You can get more specific information about the performance of the system by viewing the profiling result.
-
-Use the following command to enable profiling:
-
-- enable profiling
-
-```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling
-```
-
-- enable profiling with custom output path
-
-```bash
-python -m serving_cast.main --instance_config_path=./serving_cast/example/instances.yaml --common_config_path=./serving_cast/example/common.yaml --enable_profiling --profiling_output_path=/path/to/custom/profiling_dir
-```
-
-The original collected profiling result is stored in the directory `profiling_output_path/{$time_stamp}`.
-The parsed profiling result is stored in the directory `profiling_output_path/{$time_stamp}_parsed_result`.
-
-A `chrome_tracing.json` and a `profiler.db` will be generated in parsed_result directory, you can view it by `chrome://tracing` or MindStudio Insight
+- request_throughput: System-level request rate
+- `input_token_throughput` / `output_token_throughput`: Aggregate token throughput

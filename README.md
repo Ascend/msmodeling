@@ -33,7 +33,7 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 |---------|--------|
 | [**TensorCast**](./docs/zh/user_guide/msmodeling_tensor_cast_user_guide.md) | 算子仿真模块，拦截 PyTorch 计算图，在指定 DeviceProfile 上模拟推理过程，输出算子级性能分解、内存占用、算子 shape 及 Chrome Trace。 |
 | [**Throughput Optimizer**](./docs/zh/user_guide/msmodeling_throughput_optimizer_user_guide.md) | 吞吐优化模块，在 SLO 约束下自动搜索最优并行策略与 batch 配置，支持 PD 混部、PD 分离、PD 配比三种模式。 |
-| [**ServingCast**](./docs/zh/user_guide/msmodeling_serving_cast_user_guide.md) | 服务级推理仿真模块，基于 YAML 配置模拟多实例、多请求的端到端 serving 场景，输出吞吐、TTFT、TPOT 等系统级指标。 |
+| [**ServingCast**](./docs/zh/user_guide/msmodeling_serving_cast_simulation_user_guide.md) | 服务级推理仿真模块，基于 YAML 配置模拟多实例、多请求的端到端 serving 场景，输出吞吐、TTFT、TPOT 等系统级指标。 |
 | [**Web UI**](./docs/zh/user_guide/msmodeling_web_ui_user_guide.md) | 可视化交互界面，支持通过页面配置模型、芯片、并行、量化和 workload 参数，并查看曲线、表格和导出结果。 |
 | [**OptiX**](./docs/zh/user_guide/optix_user_guide.md) | 服务化参数自动寻优工具，基于 PSO 粒子寻优算法对 vLLM、MindIE 等服务框架进行参数寻优与验证。 |
 

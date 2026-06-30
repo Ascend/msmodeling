@@ -232,20 +232,6 @@ output_token_throughput(tok/s) 285.598
 - 输出 `Overall Summary`。
 - 输出 `request_throughput`、`input_token_throughput` 或 `output_token_throughput`。
 
-#### 2.4.4 启用 Profiling（可选）
-
-如需查看更细粒度的系统性能信息，可增加 profiling 参数：
-
-```bash
-python -m serving_cast.main \
-    --instance_config_path=./serving_cast/example/instances.yaml \
-    --common_config_path=./serving_cast/example/common.yaml \
-    --enable_profiling \
-    --profiling_output_path=./profiling_results
-```
-
-原始 profiling 结果保存在 `profiling_output_path/{$time_stamp}` 目录，解析后的结果保存在 `profiling_output_path/{$time_stamp}_parsed_result` 目录。解析结果中包含 `chrome_tracing.json` 与 `profiler.db`，可通过 `chrome://tracing` 或 MindStudio Insight 查看。
-
 ## 3. 结果校验与下一步
 
 如果上述命令执行成功，说明已完成 TensorCast 与 ServingCast 的核心流程体验：
