@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Iterable
 
 if TYPE_CHECKING:
     from .base_throughput_optimizer import BaseThroughputOptimizer
+    from .utils import MemoryInfo
     from .utils import OptimizerData
 
 
@@ -26,6 +27,7 @@ class ForwardLatencyRecord:
     latency_ms: float
     memory_left_gb: float
     breakdowns: str
+    memory_info: MemoryInfo | None = None
     raw_breakdowns: dict[str, dict[str, float]] = field(default_factory=dict)
 
 

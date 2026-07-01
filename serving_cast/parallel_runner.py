@@ -23,6 +23,7 @@ from .service.utils import (
     OptimizerData,
     count_search_combinations,
     resolve_parallel_search_candidates,
+    select_tightest_memory_info,
 )
 
 
@@ -95,9 +96,9 @@ class ParallelRunner:
         )
         overwrite_optimizer_data = copy.deepcopy(self.optimizer_data)
         overwrite_optimizer_data.tpot_limits = self.args.tpot_limits
-        df_list = self._get_df_list(overwrite_optimizer_data)
+        summary_list = self._get_df_list(overwrite_optimizer_data)
 
-        self._add_summary_result(df_list, overwrite_optimizer_data)
+        self._add_summary_result(summary_list, overwrite_optimizer_data)
 
         return self.summary_result
 
@@ -112,16 +113,16 @@ class ParallelRunner:
             overwrite_optimizer_data = copy.deepcopy(self.optimizer_data)
             overwrite_optimizer_data.ttft_limits = self.args.ttft_limits or float("inf")
             overwrite_optimizer_data.tpot_limits = None
-            df_list = self._get_df_list(overwrite_optimizer_data)
-            self._add_summary_result(df_list, overwrite_optimizer_data)
+            summary_list = self._get_df_list(overwrite_optimizer_data)
+            self._add_summary_result(summary_list, overwrite_optimizer_data)
 
         if self.args.tpot_limits is not None:
             logger.info("Run Decode with tpot %r ms.", self.args.tpot_limits)
             overwrite_optimizer_data = copy.deepcopy(self.optimizer_data)
             overwrite_optimizer_data.tpot_limits = self.args.tpot_limits or float("inf")
             overwrite_optimizer_data.ttft_limits = None
-            df_list = self._get_df_list(overwrite_optimizer_data)
-            self._add_summary_result(df_list, overwrite_optimizer_data)
+            summary_list = self._get_df_list(overwrite_optimizer_data)
+            self._add_summary_result(summary_list, overwrite_optimizer_data)
 
         return self.summary_result
 
@@ -168,20 +169,32 @@ class ParallelRunner:
         if result_df.empty:
             logger.info("No PD ratio results found.")
         else:
-            self._add_summary_result([result_df], self.optimizer_data)
+            summary = OptimizerSummary(self.optimizer_data)
+            summary.set_summary_df(result_df)
+            mem = select_tightest_memory_info((p_df.attrs.get("memory_info"), d_df.attrs.get("memory_info")))
+            if mem:
+                summary.set_memory_info(mem)
+            self._add_summary_result([summary], self.optimizer_data)
 
         return self.summary_result
 
-    def _add_summary_result(self, df_list: list[pd.DataFrame], overwrite_data_config: OptimizerData):
-        if len(df_list) == 0:
+    def _add_summary_result(self, summary_list: list[OptimizerSummary], overwrite_data_config: OptimizerData):
+        if len(summary_list) == 0:
             logger.info(
                 "No results found with ttft %r ms, tpot %r ms",
                 overwrite_data_config.ttft_limits,
                 overwrite_data_config.tpot_limits,
             )
             return
+        merged_df = pd.concat([s.get_summary_df() for s in summary_list], axis=0, ignore_index=True)
         summary = OptimizerSummary(overwrite_data_config)
-        summary.set_summary_df(pd.concat(df_list, axis=0, ignore_index=True))
+        summary.set_summary_df(merged_df)
+        # Propagate constant memory fields (total_device_memory_gb,
+        # reserved_memory_gb) for text output. Per-row memory fields (weight, kv,
+        # activation, avail) are already in each row of the DataFrame.
+        mem = select_tightest_memory_info(source_summary.get_memory_info() for source_summary in summary_list)
+        if mem:
+            summary.set_memory_info(mem)
         self.summary_result.append(summary)
 
     def _get_model_runnner(self, user_input: UserInputConfig) -> ModelRunner:
@@ -265,8 +278,11 @@ class ParallelRunner:
         overwrite_optimizer_data: OptimizerData,
         user_configs: Optional[list] = None,
         disagg_mode: Optional[bool] = None,
-    ) -> list[pd.DataFrame]:
-        """Execute optimization tasks in parallel and return list of DataFrames.
+    ) -> list[OptimizerSummary]:
+        """Execute optimization tasks in parallel and return list of OptimizerSummary.
+
+        Keep the historical method name for existing CI test_map entries while
+        returning OptimizerSummary objects after memory-info propagation.
 
         Args:
             overwrite_optimizer_data: Optimizer data for tasks.
@@ -274,7 +290,7 @@ class ParallelRunner:
             disagg_mode: Optional override for strategy selection.
 
         Returns:
-            List of result DataFrames (non-None results only).
+            List of OptimizerSummary (non-None results only).
         """
         configs = list(user_configs) if user_configs is not None else list(self._get_user_config())
 
@@ -338,7 +354,7 @@ class ParallelRunner:
         user_input: UserInputConfig,
         overwrite_optimizer_data: OptimizerData,
         disagg_mode: Optional[bool] = None,
-    ):
+    ) -> Optional[OptimizerSummary]:
         """Submit a single optimization task.
 
         Args:
@@ -347,7 +363,7 @@ class ParallelRunner:
             disagg_mode: Optional override for strategy selection.
 
         Returns:
-            DataFrame with optimization results or None.
+            OptimizerSummary with optimization results or None.
         """
         # 1. get model config
         if self.args.compile:
@@ -382,13 +398,12 @@ class ParallelRunner:
             )
             return None
 
-        result_df = result.get_summary_df()
         logger.info(
             "Finish processing TP size: %d",
             model_runner.model.model_config.parallel_config.tensor_parallel_size,
         )
 
-        return result_df
+        return result
 
     def _run_pd_phase(
         self,
@@ -427,14 +442,19 @@ class ParallelRunner:
             return pd.DataFrame()
 
         # Run optimization in parallel using _get_df_list
-        df_list = self._get_df_list(
+        summary_list = self._get_df_list(
             overwrite_optimizer_data=overwrite_optimizer_data,
             user_configs=user_configs,
             disagg_mode=True,
         )
 
-        # Concatenate all DataFrames
-        if not df_list:
+        # Concatenate all DataFrames from OptimizerSummary results
+        if not summary_list:
             return pd.DataFrame()
 
-        return pd.concat(df_list, axis=0, ignore_index=True)
+        result_df = pd.concat([s.get_summary_df() for s in summary_list], axis=0, ignore_index=True)
+        mem = select_tightest_memory_info(summary.get_memory_info() for summary in summary_list)
+        if mem:
+            result_df.attrs["memory_info"] = mem
+
+        return result_df

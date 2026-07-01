@@ -18,6 +18,7 @@ from typing import Optional
 import pandas as pd
 from prettytable import PrettyTable
 
+from serving_cast.service.utils import MEMORY_COLUMNS, MemoryInfo
 from serving_cast.utils import best_pd_row_per_group, rank_pd_ratio_rows, sort_pd_ratio_dict_rows
 
 logger = logging.getLogger(__name__)
@@ -64,11 +65,18 @@ SHOW_COLUMNS = [
     "num_devices",
     "parallel",
     "batch_size",
-]
+] + MEMORY_COLUMNS
 
 
 def _fmt_optional(value, fmt: str = "{:.2f}") -> str:
     return fmt.format(value) if value is not None else "-"
+
+
+def _fmt_memory_info(memory_info: Optional[MemoryInfo], key: str) -> str:
+    val = pd.to_numeric(memory_info.get(key), errors="coerce") if memory_info else None
+    if val is None or pd.isna(val):
+        return "-"
+    return f"{float(val):.3f} GB"
 
 
 def _sorted_rows(rows: list[dict], metric: str) -> list[dict]:
@@ -79,6 +87,7 @@ class OptimizerSummary:
     def __init__(self, data_config):
         self._early_stop_flag = None
         self._summary_df = None
+        self._memory_info: MemoryInfo | None = None
         self.data_config = data_config
         self._search_info = None
 
@@ -93,6 +102,19 @@ class OptimizerSummary:
 
     def get_search_info(self) -> dict:
         return self._search_info
+
+    def set_memory_info(self, memory_info: MemoryInfo):
+        """Set memory breakdown info for reporting.
+
+        Args:
+            memory_info: dict with keys like total_device_memory_gb,
+                model_weight_size_gb, kv_cache_size_gb, model_activation_size_gb,
+                reserved_memory_gb, device_memory_available_gb.
+        """
+        self._memory_info = memory_info
+
+    def get_memory_info(self) -> MemoryInfo | None:
+        return self._memory_info
 
     def set_early_stop_flag(self, memory_left, tpot, ttft):
         def check(value, limit):
@@ -177,6 +199,14 @@ class OptimizerSummary:
         final_out.append(f"    TTFT Limits: {self.data_config.ttft_limits} ms")
         final_out.append(f"    TPOT Limits: {self.data_config.tpot_limits} ms")
         final_out.append("  " + "-" * 76)
+
+        # Memory Info (constant fields; per-row fields are in the table)
+        mem = self._memory_info
+        if mem:
+            final_out.append("  Memory Info: ")
+            final_out.append(f"    Total device memory:  {_fmt_memory_info(mem, 'total_device_memory_gb')}")
+            final_out.append(f"    Reserved memory:      {_fmt_memory_info(mem, 'reserved_memory_gb')}")
+            final_out.append("  " + "-" * 76)
 
         final_out.append("  Overall Best Configuration: ")
         final_out.append(f"    Best Throughput: {best_result['token/s']:.2f} tokens/s")
@@ -329,6 +359,13 @@ class OptimizerSummary:
         final_out.append(f"    TPOT Limits: {self.data_config.tpot_limits} ms")
         final_out.append("  " + "-" * 116)
 
+        mem = self._memory_info
+        if mem:
+            final_out.append("  Memory Info:")
+            final_out.append(f"    Total device memory:  {_fmt_memory_info(mem, 'total_device_memory_gb')}")
+            final_out.append(f"    Reserved memory:      {_fmt_memory_info(mem, 'reserved_memory_gb')}")
+            final_out.append("  " + "-" * 116)
+
         # Overall Best Configuration section
         final_out.append("  Overall Best Configuration:")
         final_out.append(f"      PD Ratio: {best_result['pd_ratio']:.2f} (P Instance:D Instance)")
@@ -410,6 +447,23 @@ class OptimizerSummary:
         return best_p_inst, best_d_inst
 
 
+def _fmt_memory(row, col: str) -> str:
+    """Format a memory column value for table display. Returns '-' if missing/NaN."""
+    val = row.get(col)
+    if val is None or pd.isna(val):
+        return "-"
+    return f"{val:.2f}"
+
+
+def _add_table_row(table: PrettyTable, row_data: list, columns: list[str]):
+    if len(row_data) != len(columns):
+        raise RuntimeError(
+            f"Optimizer summary table row length {len(row_data)} does not match column count {len(columns)}. "
+            "Ensure memory columns in add_row match the selected table columns."
+        )
+    table.add_row(row_data)
+
+
 def _get_agg_table_buf(df: pd.DataFrame):
     show_len = len(df)
     table_buf = []
@@ -418,18 +472,21 @@ def _get_agg_table_buf(df: pd.DataFrame):
     table.field_names = SHOW_COLUMNS
     for i in range(show_len):
         row = df.loc[i]
-        table.add_row(
-            [
-                i + 1,
-                f"\033[1m{row['token/s']:.2f}\033[0m",
-                f"{row['ttft']:.2f}",
-                f"{row['tpot']:.2f}",
-                row["concurrency"],
-                row["num_devices"],
-                row["parallel"],
-                row["batch_size"],
-            ]
-        )
+        row_data = [
+            i + 1,
+            f"\033[1m{row['token/s']:.2f}\033[0m",
+            f"{row['ttft']:.2f}",
+            f"{row['tpot']:.2f}",
+            row["concurrency"],
+            row["num_devices"],
+            row["parallel"],
+            row["batch_size"],
+            _fmt_memory(row, "weight_GB"),
+            _fmt_memory(row, "kv_cache_GB"),
+            _fmt_memory(row, "activation_GB"),
+            _fmt_memory(row, "avail_GB"),
+        ]
+        _add_table_row(table, row_data, SHOW_COLUMNS)
     table_buf.append(table.get_string())
     return "\n".join(table_buf)
 
@@ -455,18 +512,21 @@ def _get_disagg_table_buf(df: pd.DataFrame, output_length: Optional[int] = None)
         row = df.loc[i]
         qps = _compute_disagg_request_qps(row, output_length)
         qps_cell = f"{qps:.2f}" if qps is not None else "-"
-        table.add_row(
-            [
-                i + 1,
-                f"\033[1m{row['token/s']:.2f}\033[0m",
-                qps_cell,
-                f"{row['tpot']:.2f}" if is_decode else f"{row['ttft']:.2f}",
-                row["concurrency"],
-                row["num_devices"],
-                row["parallel"],
-                row["batch_size"],
-            ]
-        )
+        row_data = [
+            i + 1,
+            f"\033[1m{row['token/s']:.2f}\033[0m",
+            qps_cell,
+            f"{row['tpot']:.2f}" if is_decode else f"{row['ttft']:.2f}",
+            row["concurrency"],
+            row["num_devices"],
+            row["parallel"],
+            row["batch_size"],
+            _fmt_memory(row, "weight_GB"),
+            _fmt_memory(row, "kv_cache_GB"),
+            _fmt_memory(row, "activation_GB"),
+            _fmt_memory(row, "avail_GB"),
+        ]
+        _add_table_row(table, row_data, local_column)
     table_buf.append(table.get_string())
     return "\n".join(table_buf)
 
@@ -486,7 +546,7 @@ def _get_pd_ratio_table_buf(df: pd.DataFrame):
 
     table = PrettyTable()
 
-    table.field_names = [
+    columns = [
         "Top",
         "PD Ratio",
         "Balanced QPS (req/s)",
@@ -503,6 +563,7 @@ def _get_pd_ratio_table_buf(df: pd.DataFrame):
         "P Concurrency",
         "D Concurrency",
     ]
+    table.field_names = columns
 
     for i in range(show_len):
         row = df.loc[i]
@@ -523,7 +584,7 @@ def _get_pd_ratio_table_buf(df: pd.DataFrame):
             row["concurrency_p"],
             row["concurrency_d"],
         ]
-        table.add_row(row_data)
+        _add_table_row(table, row_data, columns)
 
     table_buf.append(table.get_string())
     return "\n".join(table_buf)

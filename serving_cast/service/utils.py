@@ -5,7 +5,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional, TypedDict
 
 from tensor_cast.model_config import ParallelConfig
 
@@ -43,8 +43,29 @@ COMMON_COLUMNS = [
     "batch_size",
 ]
 
-AGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns(p)", "percentage_breakdowns(d)"]
-DISAGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns"]
+
+class MemoryInfo(TypedDict, total=False):
+    total_device_memory_gb: float
+    model_weight_size_gb: float
+    kv_cache_size_gb: float
+    model_activation_size_gb: float
+    reserved_memory_gb: float
+    device_memory_available_gb: float
+
+
+MEMORY_KEY_TO_COLUMN = {
+    "model_weight_size_gb": "weight_GB",
+    "kv_cache_size_gb": "kv_cache_GB",
+    "model_activation_size_gb": "activation_GB",
+    "device_memory_available_gb": "avail_GB",
+}
+MEMORY_COLUMNS = list(MEMORY_KEY_TO_COLUMN.values())
+# Note: total_device_memory_gb and reserved_memory_gb are constant across
+# configurations within the same device, so they are displayed only in the
+# text header (OptimizerSummary._memory_info) rather than as table columns.
+
+AGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns(p)", "percentage_breakdowns(d)"] + MEMORY_COLUMNS
+DISAGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns"] + MEMORY_COLUMNS
 
 
 @dataclass
@@ -177,6 +198,38 @@ def format_breakdowns(breakdowns: Dict[str, Dict[str, float]]):
             formatted_parts.append(f"{key} 0.00")
 
     return " | ".join(formatted_parts)
+
+
+def select_tightest_memory_info(memory_infos: Iterable[MemoryInfo | None]) -> MemoryInfo | None:
+    """Select the memory info with the smallest available device memory."""
+    candidates = [memory_info for memory_info in memory_infos if memory_info]
+    if not candidates:
+        return None
+
+    def memory_available(memory_info: MemoryInfo) -> float:
+        try:
+            return float(memory_info.get("device_memory_available_gb", float("inf")))
+        except (TypeError, ValueError):
+            return float("inf")
+
+    return min(candidates, key=memory_available)
+
+
+def build_memory_info(batch_result) -> MemoryInfo:
+    """Build memory info dict from ModelRunnerMetrics.
+
+    Only per-row (per-configuration) fields are included in the DataFrame columns
+    (see MEMORY_COLUMNS). Constant fields (total_device_memory_gb, reserved_memory_gb)
+    are stored only in OptimizerSummary._memory_info for text display.
+    """
+    return {
+        "total_device_memory_gb": getattr(batch_result, "total_device_memory_gb", float("nan")),
+        "model_weight_size_gb": getattr(batch_result, "model_weight_size_gb", float("nan")),
+        "kv_cache_size_gb": getattr(batch_result, "kv_cache_size_gb", float("nan")),
+        "model_activation_size_gb": getattr(batch_result, "model_activation_size_gb", float("nan")),
+        "reserved_memory_gb": getattr(batch_result, "reserved_memory_gb", float("nan")),
+        "device_memory_available_gb": getattr(batch_result, "device_memory_available_gb", float("nan")),
+    }
 
 
 def resolve_search_sizes(values: list[int] | None, target_devices: int, default_size: int) -> list[int]:

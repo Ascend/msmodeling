@@ -10,9 +10,11 @@ from .latency_table import ForwardLatencyTable
 from .optimizer_summary import OptimizerSummary
 from .utils import (
     DISAGG_COLUMNS,
+    build_memory_info,
     format_breakdowns,
     format_parallel_label,
     OptimizerData,
+    select_tightest_memory_info,
 )
 
 
@@ -58,10 +60,12 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             latency_ms = batch_result.execution_time_s.get("analytic") * 1000 + optimizer_data.serving_cost
             device_memory_available_gb = batch_result.device_memory_available_gb
             breakdowns = format_breakdowns(batch_result.breakdowns)
+            memory_info = build_memory_info(batch_result)
         else:
             latency_ms = optimizer_data.serving_cost
             device_memory_available_gb = float("inf")
             breakdowns = ""
+            memory_info = None
             breakdown_sums = {}
             breakdown_counts = {}
             wave_keys = []
@@ -100,6 +104,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                     device_memory_available_gb,
                     record.memory_left_gb,
                 )
+                memory_info = select_tightest_memory_info((memory_info, record.memory_info))
                 if record.memory_left_gb < 0:
                     break
                 # Preserve the historical per-wave weighting: each wave contributes one normalized
@@ -159,6 +164,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         )
 
         summary = OptimizerSummary(optimizer_data)
+        if memory_info:
+            summary.set_memory_info(memory_info)
         result_df = pd.DataFrame(
             columns=DISAGG_COLUMNS,
             data=[
@@ -181,6 +188,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                     parallel,
                     batch_size,
                     breakdowns,
+                    memory_info["model_weight_size_gb"] if memory_info else float("nan"),
+                    memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
+                    memory_info["model_activation_size_gb"] if memory_info else float("nan"),
+                    memory_info["device_memory_available_gb"] if memory_info else float("nan"),
                 ]
             ],
         ).round(3)

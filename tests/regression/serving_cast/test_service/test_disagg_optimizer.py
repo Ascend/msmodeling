@@ -116,6 +116,11 @@ class TestDisaggStrategy(unittest.TestCase):
 
             class DummyMetrics:
                 execution_time_s = {"analytic": 0.001}
+                total_device_memory_gb = 64.0
+                model_weight_size_gb = 20.0
+                kv_cache_size_gb = 4.0
+                model_activation_size_gb = 1.0
+                reserved_memory_gb = 10.0
                 device_memory_available_gb = 1.0
                 breakdowns = {
                     "stage": {
@@ -198,6 +203,11 @@ class TestDisaggStrategy(unittest.TestCase):
             captured.append((is_decode, optimizer_data.get_effective_input_length(is_decode)))
 
             class DummyMetrics:
+                total_device_memory_gb = 64.0
+                model_weight_size_gb = 20.0
+                kv_cache_size_gb = 4.0
+                model_activation_size_gb = 1.0
+                reserved_memory_gb = 10.0
                 execution_time_s = {"analytic": 0.001}
                 device_memory_available_gb = 1.0
                 breakdowns = {}
@@ -228,6 +238,11 @@ class TestDisaggStrategy(unittest.TestCase):
         )
 
         class DummyMetrics:
+            total_device_memory_gb = 64.0
+            model_weight_size_gb = 20.0
+            kv_cache_size_gb = 4.0
+            model_activation_size_gb = 1.0
+            reserved_memory_gb = 10.0
             execution_time_s = {"analytic": 0.005}
             device_memory_available_gb = 2.0
             breakdowns = {}
@@ -266,6 +281,11 @@ class TestDisaggStrategy(unittest.TestCase):
         )
 
         class DummyMetrics:
+            total_device_memory_gb = 64.0
+            model_weight_size_gb = 20.0
+            kv_cache_size_gb = 4.0
+            model_activation_size_gb = 1.0
+            reserved_memory_gb = 10.0
             execution_time_s = {"analytic": 0.009}
             device_memory_available_gb = 2.0
             breakdowns = {}

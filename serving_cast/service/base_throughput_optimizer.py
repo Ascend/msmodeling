@@ -21,7 +21,7 @@ from tensor_cast.core.input_generator import generate_inputs, RequestInfo
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from .latency_table import ForwardLatencyRecord, ForwardShapeKey
 from .optimizer_summary import OptimizerSummary
-from .utils import AGG_COLUMNS, format_breakdowns, MAX_ITER_NUMS, OptimizerData
+from .utils import AGG_COLUMNS, build_memory_info, format_breakdowns, MAX_ITER_NUMS, OptimizerData
 
 
 class BaseThroughputOptimizer(ABC):
@@ -78,6 +78,7 @@ class BaseThroughputOptimizer(ABC):
         left, right = 1, 512
         result = []
         result_df = pd.DataFrame(columns=AGG_COLUMNS)
+        last_valid_summary = None
 
         if batch_range:
             if len(batch_range) == 2:
@@ -106,6 +107,7 @@ class BaseThroughputOptimizer(ABC):
             else:
                 left = mid + 1
                 result.append(summary.get_summary_df())
+                last_valid_summary = summary
 
         if result:
             result_df = pd.concat(result, axis=0, ignore_index=True)
@@ -114,6 +116,10 @@ class BaseThroughputOptimizer(ABC):
 
         ret_summary = OptimizerSummary(optimizer_data)
         ret_summary.set_summary_df(sorted_df)
+        if last_valid_summary is not None:
+            memory_info = last_valid_summary.get_memory_info()
+            if memory_info:
+                ret_summary.set_memory_info(memory_info)
 
         return ret_summary
 
@@ -301,6 +307,7 @@ class BaseThroughputOptimizer(ABC):
             latency_ms=batch_result.execution_time_s.get("analytic") * 1000,
             memory_left_gb=batch_result.device_memory_available_gb,
             breakdowns=format_breakdowns(batch_result.breakdowns),
+            memory_info=build_memory_info(batch_result),
             raw_breakdowns=batch_result.breakdowns,
         )
         self._cache_forward_latency_record(key, record)
@@ -344,7 +351,7 @@ class BaseThroughputOptimizer(ABC):
             is_decode: Whether this is a decode operation.
 
         Returns:
-            Tuple of (latency_ms, memory_left_gb, breakdowns).
+            Tuple of (latency_ms, memory_left_gb, breakdowns, memory_info).
 
         Optional query_len/seq_len override the default request shape for chunked prefill.
         When concurrency_is_model is true, batch_size is already model-level concurrency
@@ -372,7 +379,7 @@ class BaseThroughputOptimizer(ABC):
         memory_left_gb = record.memory_left_gb
         breakdowns = record.breakdowns
 
-        return latency, memory_left_gb, breakdowns
+        return latency, memory_left_gb, breakdowns, record.memory_info
 
     def _get_forward_info(
         self,

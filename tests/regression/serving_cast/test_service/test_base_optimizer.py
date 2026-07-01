@@ -75,6 +75,7 @@ class TestBaseBackend(unittest.TestCase):
         # Mock the run_inference method to return different stop flags
         def side_effect(data_config):
             summary = Mock(spec=OptimizerSummary)
+            summary.get_memory_info.return_value = None
             # Simulate the behavior: lower batch sizes don't stop, higher ones do
             if data_config.batch_size < 10:
                 summary.check_early_stop_flag.return_value = False
@@ -112,6 +113,10 @@ class TestBaseBackend(unittest.TestCase):
                             data_config.batch_size,
                             "prefill_breakdonws",
                             "decode_breakdowns",
+                            20.0,
+                            4.0,
+                            1.0,
+                            39.0,
                         ]
                     ],
                 )
@@ -128,6 +133,59 @@ class TestBaseBackend(unittest.TestCase):
         # Verify that run_inference was called
         self.assertGreater(mock_get_inference_info.call_count, 0)
         self.assertIsNotNone(result)
+
+    @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
+    def test_run_propagates_memory_info_to_return_summary(self, mock_get_inference_info):
+        memory_info = {
+            "total_device_memory_gb": 64.0,
+            "reserved_memory_gb": 4.0,
+            "model_weight_size_gb": 20.0,
+            "kv_cache_size_gb": 8.0,
+            "model_activation_size_gb": 2.0,
+            "device_memory_available_gb": 30.0,
+        }
+
+        def side_effect(data_config):
+            summary = Mock(spec=OptimizerSummary)
+            summary.check_early_stop_flag.return_value = False
+            summary.get_memory_info.return_value = memory_info
+            summary.get_summary_df.return_value = pd.DataFrame(
+                columns=AGG_COLUMNS,
+                data=[
+                    [
+                        "TEST_DEVICE",
+                        1,
+                        "model",
+                        "DISABLED",
+                        "DISABLED",
+                        128,
+                        64,
+                        128,
+                        8192,
+                        1,
+                        data_config.batch_size,
+                        100.0,
+                        50.0,
+                        float(data_config.batch_size),
+                        500.0,
+                        "tp1pp1dp1",
+                        data_config.batch_size,
+                        "prefill_breakdowns",
+                        "decode_breakdowns",
+                        memory_info["model_weight_size_gb"],
+                        memory_info["kv_cache_size_gb"],
+                        memory_info["model_activation_size_gb"],
+                        memory_info["device_memory_available_gb"],
+                    ]
+                ],
+            )
+            return summary
+
+        mock_get_inference_info.side_effect = side_effect
+
+        result = self.backend.run(self.mock_data_config, [1, 2])
+
+        self.assertEqual(result.get_memory_info(), memory_info)
 
     @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
     def test_optimizer_early_stop(self, mock_get_inference_info):

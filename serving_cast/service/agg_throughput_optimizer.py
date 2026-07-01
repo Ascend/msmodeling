@@ -23,7 +23,7 @@ from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable, ForwardShapeKey
 from .optimizer_summary import OptimizerSummary
 from .scheduler import DecodeFirstWithSlack, Scheduler, SchedulerState
-from .utils import AGG_COLUMNS, format_parallel_label, OptimizerData
+from .utils import AGG_COLUMNS, MemoryInfo, format_parallel_label, OptimizerData, select_tightest_memory_info
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ class _ChunkedAggMetrics:
     decode_latency: float
     prefill_breakdowns: str
     decode_breakdowns: str
+    memory_info: MemoryInfo | None = None
 
 
 class AggThroughputOptimizer(BaseThroughputOptimizer):
@@ -129,6 +130,9 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             metrics.prefill_memory_left_gb,
         )
         summary = OptimizerSummary(optimizer_data)
+        memory_info = getattr(metrics, "memory_info", None)
+        if memory_info:
+            summary.set_memory_info(memory_info)
         result_df = pd.DataFrame(
             columns=AGG_COLUMNS,
             data=[
@@ -152,6 +156,10 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                     batch_size,
                     metrics.prefill_breakdowns,
                     metrics.decode_breakdowns,
+                    memory_info["model_weight_size_gb"] if memory_info else float("nan"),
+                    memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
+                    memory_info["model_activation_size_gb"] if memory_info else float("nan"),
+                    memory_info["device_memory_available_gb"] if memory_info else float("nan"),
                 ]
             ],
         ).round(3)
@@ -182,10 +190,14 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         prefill_last_latency = 0
         prefill_min_memory_left_gb = float("inf")
         prefill_breakdowns = ""
+        prefill_memory_info = None
         if calc_nums_for_ttft > 0:
-            prefill_latency, prefill_memory_left_gb, prefill_breakdowns = self._get_or_compute_latency(
-                prefill_batch_size, optimizer_data, is_decode=False
-            )
+            (
+                prefill_latency,
+                prefill_memory_left_gb,
+                prefill_breakdowns,
+                prefill_memory_info,
+            ) = self._get_or_compute_latency(prefill_batch_size, optimizer_data, is_decode=False)
             prefill_last_latency = prefill_latency
             prefill_min_memory_left_gb = prefill_memory_left_gb
             if prefill_memory_left_gb < 0:
@@ -200,11 +212,13 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                     decode_latency=0,
                     prefill_breakdowns=prefill_breakdowns,
                     decode_breakdowns="",
+                    memory_info=prefill_memory_info,
                 )
 
         left_latency = 0
+        left_memory_info = None
         if left_calc_num != 0:
-            left_latency, left_memory_left_gb, left_breakdowns = self._get_or_compute_latency(
+            left_latency, left_memory_left_gb, left_breakdowns, left_memory_info = self._get_or_compute_latency(
                 left_calc_num,
                 optimizer_data,
                 is_decode=False,
@@ -236,13 +250,15 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 decode_latency=0,
                 prefill_breakdowns=prefill_breakdowns,
                 decode_breakdowns="",
+                memory_info=select_tightest_memory_info((prefill_memory_info, left_memory_info)),
             )
 
-        decode_latency, decode_memory_left_gb, decode_breakdowns = self._get_or_compute_latency(
+        decode_latency, decode_memory_left_gb, decode_breakdowns, decode_memory_info = self._get_or_compute_latency(
             batch_size, optimizer_data, is_decode=True
         )
         tpot = (ttft + decode_latency * output_length) / output_length
         output_throughput = 1000 * (output_length * concurrency) / (ttft + tpot * output_length)
+        effective_prefill_memory_info = prefill_memory_info if calc_nums_for_ttft > 0 else None
 
         return _ChunkedAggMetrics(
             ttft=ttft,
@@ -255,6 +271,9 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             decode_latency=decode_latency,
             prefill_breakdowns=prefill_breakdowns,
             decode_breakdowns=decode_breakdowns,
+            memory_info=select_tightest_memory_info(
+                (effective_prefill_memory_info, left_memory_info, decode_memory_info)
+            ),
         )
 
     def _simulate_chunked_prefill(
@@ -408,6 +427,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         decode_breakdowns = ""
         last_prefill_latency = 0.0
         last_decode_latency = 0.0
+        memory_info = None
 
         for step in schedule:
             prefill_step_latency = 0.0
@@ -417,6 +437,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 memory_left_gb = min(memory_left_gb, prefill_record.memory_left_gb)
                 prefill_memory_left_gb = min(prefill_memory_left_gb, prefill_record.memory_left_gb)
                 prefill_breakdowns = prefill_breakdowns or prefill_record.breakdowns
+                memory_info = select_tightest_memory_info((memory_info, prefill_record.memory_info))
                 last_prefill_latency = prefill_step_latency
                 if prefill_record.memory_left_gb < 0:
                     return _ChunkedAggMetrics(
@@ -430,6 +451,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                         decode_latency=last_decode_latency,
                         prefill_breakdowns=prefill_breakdowns,
                         decode_breakdowns=decode_breakdowns,
+                        memory_info=memory_info,
                     )
 
             decode_step_latency = 0.0
@@ -438,6 +460,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 decode_step_latency = self._get_forward_latency_ms(step.decode_key, decode_record, optimizer_data)
                 memory_left_gb = min(memory_left_gb, decode_record.memory_left_gb)
                 decode_breakdowns = decode_breakdowns or decode_record.breakdowns
+                memory_info = select_tightest_memory_info((memory_info, decode_record.memory_info))
                 last_decode_latency = decode_step_latency
                 if decode_record.memory_left_gb < 0:
                     return _ChunkedAggMetrics(
@@ -451,6 +474,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                         decode_latency=last_decode_latency,
                         prefill_breakdowns=prefill_breakdowns,
                         decode_breakdowns=decode_breakdowns,
+                        memory_info=memory_info,
                     )
 
             # The default mixed scheduler models prefill and decode as overlapping in the same step.
@@ -501,6 +525,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             decode_latency=last_decode_latency,
             prefill_breakdowns=prefill_breakdowns,
             decode_breakdowns=decode_breakdowns,
+            memory_info=memory_info,
         )
 
     @staticmethod

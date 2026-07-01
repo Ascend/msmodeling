@@ -2,7 +2,7 @@
 import unittest
 
 import pandas as pd
-from serving_cast.service.optimizer_summary import OptimizerSummary, _get_agg_table_buf
+from serving_cast.service.optimizer_summary import OptimizerSummary, _fmt_memory, _fmt_memory_info, _get_agg_table_buf
 from serving_cast.service.utils import OptimizerData
 
 
@@ -84,6 +84,34 @@ class TestSummary(unittest.TestCase):
         # Should not raise exception
         self.summary.report_final_result(args)
 
+    def test_get_agg_disagg_final_out_missing_memory_keys(self):
+        test_df = pd.DataFrame(
+            {
+                "token/s": [100.0],
+                "ttft": [100.0],
+                "tpot": [20.0],
+                "concurrency": [1],
+                "num_devices": [1],
+                "parallel": [1],
+                "batch_size": [1],
+            }
+        )
+        self.summary.set_summary_df(test_df)
+        self.summary.set_memory_info({"total_device_memory_gb": 64.0})
+
+        class Args:
+            model_id = "Qwen/Qwen3-8B"
+            num_devices = 1
+            device = "test_device"
+            quantize_linear_action = "DISABLED"
+            quantize_attention_action = "DISABLED"
+            disagg = False
+
+        result = self.summary._get_agg_disagg_final_out(Args())
+        result_str = "\n".join(result)
+        self.assertIn("Total device memory:  64.000 GB", result_str)
+        self.assertIn("Reserved memory:      -", result_str)
+
 
 class TestGetAggTableBuf(unittest.TestCase):
     def test_get_agg_table_buf_with_different_parallel_values(self):
@@ -124,6 +152,30 @@ class TestGetAggTableBuf(unittest.TestCase):
         self.assertRegex(result, r"Top 1 (?:PD Aggregated|Aggregation) Configurations:")
         self.assertIn("1", result)  # Top rank
         self.assertIn("100.00", result)  # Throughput value
+
+
+class TestFormatMemory(unittest.TestCase):
+    def test_fmt_memory_formats_values_and_missing_entries(self):
+        row = pd.Series(
+            {
+                "weight_GB": 12.345,
+                "kv_cache_GB": None,
+                "activation_GB": float("nan"),
+            }
+        )
+
+        self.assertEqual(_fmt_memory(row, "weight_GB"), "12.35")
+        self.assertEqual(_fmt_memory(row, "kv_cache_GB"), "-")
+        self.assertEqual(_fmt_memory(row, "activation_GB"), "-")
+        self.assertEqual(_fmt_memory(row, "missing_GB"), "-")
+
+    def test_fmt_memory_info_formats_values_and_missing_entries(self):
+        memory_info = {"total_device_memory_gb": "64", "reserved_memory_gb": None, "bad": "not-a-number"}
+
+        self.assertEqual(_fmt_memory_info(memory_info, "total_device_memory_gb"), "64.000 GB")
+        self.assertEqual(_fmt_memory_info(memory_info, "reserved_memory_gb"), "-")
+        self.assertEqual(_fmt_memory_info(memory_info, "bad"), "-")
+        self.assertEqual(_fmt_memory_info(memory_info, "missing"), "-")
 
 
 class SimpleArgs:
@@ -263,6 +315,33 @@ class TestSummaryPDMode(unittest.TestCase):
         self.assertIn("PD Ratio:", result_str)
         self.assertIn("Prefill QPS:", result_str)
         self.assertIn("Decode QPS:", result_str)
+
+    def test_get_pd_ratio_final_out_missing_memory_keys(self):
+        df = pd.DataFrame(
+            {
+                "ttft_p": [100.0],
+                "tpot_d": [10.0],
+                "concurrency_p": [10],
+                "concurrency_d": [8],
+                "parallel_p": ["tp4pp1dp1"],
+                "parallel_d": ["tp2pp1dp1"],
+                "batch_size_p": [4],
+                "batch_size_d": [8],
+                "num_devices_p": [4],
+                "num_devices_d": [2],
+                "p_qps": [100.0],
+                "d_qps": [0.78125],
+                "pd_ratio": [0.0078125],
+                "balanced_qps": [0.78125],
+            }
+        )
+        self.summary.set_memory_info({"total_device_memory_gb": 64.0})
+
+        args = SimpleArgs()
+        result = self.summary._get_pd_ratio_final_out(args, df)
+        result_str = "\n".join(result)
+        self.assertIn("Total device memory:  64.000 GB", result_str)
+        self.assertIn("Reserved memory:      -", result_str)
 
     def test_report_final_result_pd_mode_empty(self):
         """Test report_final_result in PD mode with empty DataFrame does not raise."""

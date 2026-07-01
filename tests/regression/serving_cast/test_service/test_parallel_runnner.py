@@ -1,7 +1,7 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import unittest
 from concurrent.futures.process import BrokenProcessPool
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 from serving_cast.parallel_runner import ParallelRunner
 from serving_cast.service.optimizer_summary import OptimizerSummary
@@ -290,9 +290,10 @@ class TestTaskRunner(unittest.TestCase):
         )
 
         task_runner = ParallelRunner(self.args)
-        result_df = task_runner._submit_task(user_config, optimizer_data)
-        self.assertIsNotNone(result_df)
-        row = result_df.iloc[0]
+        result = task_runner._submit_task(user_config, optimizer_data)
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, OptimizerSummary)
+        row = result.get_summary_df().iloc[0]
         self.assertEqual(row["model_id"], self.args.model_id)
         self.assertEqual(row["parallel"], "TP=1 | PP=1 | DP=1")
 
@@ -350,8 +351,141 @@ class TestParallelRunnerPDMode(unittest.TestCase):
             }
         )
 
-        task_runner._add_summary_result([df], optimizer_data)
+        summary = OptimizerSummary(optimizer_data)
+        summary.set_summary_df(df)
+
+        task_runner._add_summary_result([summary], optimizer_data)
         self.assertEqual(len(task_runner.summary_result), 1)
+
+    def test_add_summary_result_selects_tightest_memory_info(self):
+        """Merged multi-TP summaries should keep the most constrained memory info."""
+        import pandas as pd
+
+        task_runner = ParallelRunner(self.args)
+        optimizer_data = OptimizerData(
+            input_length=1024,
+            output_length=1024,
+            ttft_limits=100,
+            tpot_limits=10,
+        )
+        df = pd.DataFrame({"ttft": [100.0], "tpot": [10.0], "token/s": [1.0]})
+        loose_memory_info = {
+            "total_device_memory_gb": 64.0,
+            "reserved_memory_gb": 4.0,
+            "device_memory_available_gb": 8.0,
+        }
+        tight_memory_info = {
+            "total_device_memory_gb": 48.0,
+            "reserved_memory_gb": 3.0,
+            "device_memory_available_gb": 4.0,
+        }
+
+        first = OptimizerSummary(optimizer_data)
+        first.set_summary_df(df)
+        second = OptimizerSummary(optimizer_data)
+        second.set_summary_df(df)
+        second.set_memory_info(loose_memory_info)
+        third = OptimizerSummary(optimizer_data)
+        third.set_summary_df(df)
+        third.set_memory_info(tight_memory_info)
+
+        task_runner._add_summary_result([first, second, third], optimizer_data)
+
+        self.assertEqual(task_runner.summary_result[0].get_memory_info(), tight_memory_info)
+
+    def test_run_pd_ratio_combines_prefill_and_decode_results(self):
+        """_run_pd_ratio should submit both phases and wrap the optimized result."""
+        import pandas as pd
+
+        class ImmediateFuture:
+            def __init__(self, result):
+                self._result = result
+
+            def result(self):
+                return self._result
+
+        class ImmediateThreadPool:
+            def __init__(self, max_workers=None):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def submit(self, fn, *args, **kwargs):
+                return ImmediateFuture(fn(*args, **kwargs))
+
+        class RecordingPDRatioOptimizer:
+            instances = []
+
+            def __init__(self, output_length):
+                self.output_length = output_length
+                self.p_df = None
+                self.d_df = None
+                self.instances.append(self)
+
+            def set_p_results(self, p_df):
+                self.p_df = p_df
+
+            def set_d_results(self, d_df):
+                self.d_df = d_df
+
+            def optimize(self):
+                return pd.DataFrame(
+                    {
+                        "balanced_qps": [12.0],
+                        "pd_ratio": [0.5],
+                        "p_qps": [24.0],
+                        "d_qps": [12.0],
+                    }
+                )
+
+        task_runner = ParallelRunner(self.args)
+        phase_calls = []
+
+        def fake_run_pd_phase(devices_per_instance, is_prefill):
+            phase_calls.append((devices_per_instance, is_prefill))
+            if is_prefill:
+                df = pd.DataFrame({"p_qps": [24.0]})
+                df.attrs["memory_info"] = {
+                    "total_device_memory_gb": 64.0,
+                    "reserved_memory_gb": 4.0,
+                    "device_memory_available_gb": 8.0,
+                }
+                return df
+            df = pd.DataFrame({"d_qps": [12.0]})
+            df.attrs["memory_info"] = {
+                "total_device_memory_gb": 48.0,
+                "reserved_memory_gb": 3.0,
+                "device_memory_available_gb": 3.0,
+            }
+            return df
+
+        task_runner._run_pd_phase = fake_run_pd_phase
+
+        with (
+            patch("serving_cast.parallel_runner.ThreadPoolExecutor", ImmediateThreadPool),
+            patch("serving_cast.parallel_runner.PDRatioThroughputOptimizer", RecordingPDRatioOptimizer),
+        ):
+            result = task_runner._run_pd_ratio()
+
+        self.assertEqual(
+            phase_calls,
+            [
+                (self.args.prefill_devices_per_instance, True),
+                (self.args.decode_devices_per_instance, False),
+            ],
+        )
+        optimizer = RecordingPDRatioOptimizer.instances[0]
+        self.assertEqual(optimizer.output_length, self.args.output_length)
+        self.assertEqual(optimizer.p_df.iloc[0]["p_qps"], 24.0)
+        self.assertEqual(optimizer.d_df.iloc[0]["d_qps"], 12.0)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].get_summary_df().iloc[0]["balanced_qps"], 12.0)
+        self.assertEqual(result[0].get_memory_info()["total_device_memory_gb"], 48.0)
+        self.assertEqual(result[0].get_memory_info()["device_memory_available_gb"], 3.0)
 
     def test_pd_phase_forces_disaggregation_strategy(self):
         """PD ratio sub-phases should use disaggregated optimizer semantics."""
@@ -384,9 +518,20 @@ class TestParallelRunnerPDMode(unittest.TestCase):
                 disagg_mode=None,
             ):
                 self.disagg_modes.append(disagg_mode)
-                return pd.DataFrame({"ttft": [100.0], "concurrency": [1]})
+                summary = OptimizerSummary(overwrite_optimizer_data)
+                summary.set_summary_df(pd.DataFrame({"ttft": [100.0], "concurrency": [user_input.tp_size]}))
+                summary.set_memory_info(
+                    {
+                        "total_device_memory_gb": 64.0,
+                        "reserved_memory_gb": 4.0,
+                        "device_memory_available_gb": 8.0 / user_input.tp_size,
+                    }
+                )
+                return summary
 
         self.args.disagg = False
+        self.args.tp_sizes = [1, 2]
+        self.args.num_devices = 2
         task_runner = RecordingParallelRunner(self.args)
         result_df = task_runner._run_pd_phase(
             devices_per_instance=self.args.prefill_devices_per_instance,
@@ -395,6 +540,8 @@ class TestParallelRunnerPDMode(unittest.TestCase):
 
         self.assertFalse(self.args.disagg)
         self.assertEqual(result_df.iloc[0]["ttft"], 100.0)
+        self.assertEqual(result_df.attrs["memory_info"]["total_device_memory_gb"], 64.0)
+        self.assertEqual(result_df.attrs["memory_info"]["device_memory_available_gb"], 4.0)
         self.assertTrue(task_runner.disagg_modes)
         self.assertTrue(all(task_runner.disagg_modes))
 

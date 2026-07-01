@@ -11,8 +11,10 @@ from unittest.mock import patch
 
 import pandas as pd
 import serving_cast.service.optimizer_summary as optimizer_summary_module
+from prettytable import PrettyTable
 from serving_cast.service.optimizer_summary import (
     OptimizerSummary,
+    _add_table_row,
     _compute_disagg_request_qps,
     _fmt_optional,
     _get_agg_table_buf,
@@ -71,6 +73,12 @@ class TestComputeDisaggRequestQps(TestCase):
 
 
 class TestDisaggPdRatioTableBuf(TestCase):
+    def test_table_row_guard_raises_on_column_mismatch(self):
+        table = PrettyTable()
+        table.field_names = ["A", "B"]
+        with self.assertRaisesRegex(RuntimeError, "row length 1"):
+            _add_table_row(table, ["only-one"], ["A", "B"])
+
     def test_disagg_prefill_table_title_and_qps_cell(self):
         df = pd.DataFrame(
             {
@@ -635,6 +643,25 @@ class TestOptimizerSummaryReportAndCollect(TestCase):
         body = "\n".join(fout)
         self.assertIn("model-x", body)
         self.assertIn("P Instances:", body)
+
+    def test_pd_ratio_final_out_includes_memory_info(self):
+        cfg = SimpleNamespace(
+            ttft_limits=450.0,
+            tpot_limits=45.0,
+            output_length=8,
+            prefill_devices_per_instance=2,
+            decode_devices_per_instance=2,
+            num_devices=32,
+        )
+        s = OptimizerSummary(cfg)
+        s.set_memory_info({"total_device_memory_gb": 64.0, "reserved_memory_gb": 4.0})
+        fout = s._get_pd_ratio_final_out(
+            SimpleNamespace(model_id="model-x", device="mydev"),
+            pd.DataFrame([dict(_baseline_pd_ratio_row(pd_ratio=0.5))]),
+        )
+        body = "\n".join(fout)
+        self.assertIn("Memory Info:", body)
+        self.assertIn("Total device memory:", body)
 
     def test_report_pd_ratio_pretty_not_dump_calls_print(self):
         cfg = SimpleNamespace(
