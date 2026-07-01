@@ -397,7 +397,7 @@ value = 64
 
 字段约束：
 
-1. `config_position="env"` 表示写入环境变量，同时可替换命令中的 `$NAME`。
+1. `config_position="env"` 表示写入环境变量，同时可替换命令中的 `$NAME`。VLLM 环境变量类参数只需配置在 `[[vllm.target_field]]` 中，不需要写入 `[vllm.command]` 的 `others`；只有需要拼接为启动命令参数时才在 `others` 中引用。
 2. `config_position` 以 `BackendConfig` 开头时表示写入 MindIE JSON 配置。
 3. `min == max` 或 `constant` 不为空的字段会作为固定值，不进入 PSO 搜索维度。
 4. `range` 类型需要配置 `dtype_param` 作为步长，加载后会转换为枚举。

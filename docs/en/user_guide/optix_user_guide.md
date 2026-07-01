@@ -253,11 +253,29 @@ others = ""
 
 ### vLLM Custom Parameter Optimization
 
-The optimizer supports adding any vLLM startup parameter for optimization through `[[vllm.target_field]]`. The configuration involves two steps: **declaring the optimization field** and **referencing the variable in `others`**.
+The optimizer supports adding vLLM parameters for optimization through `[[vllm.target_field]]`. Configure the parameter according to how it takes effect:
+
+- vLLM environment variables: declare the field in `[[vllm.target_field]]` and set `config_position = "env"`. The tool writes the uppercase environment variable before starting the service in each optimization round. Do not add it to `[vllm.command].others`.
+- vLLM command-line parameters: declare the field in `[[vllm.target_field]]`, then reference it from `[vllm.command].others` so it is appended to the launch command.
 
 > **Variable reference rule**: Use the format `$UPPERCASE_FIELD_NAME` in `others` to reference an optimization field. The tool automatically replaces it with the actual value of the current iteration.
 
-#### Example 1: Enumerated Numeric Parameter (Taking `gpu_memory_utilization` as an Example)
+#### Example 1: vLLM Environment Variable Optimization
+
+If the target parameter is a vLLM environment variable, add it only to `[[vllm.target_field]]`. For example:
+
+```toml
+[[vllm.target_field]]
+name = "VLLM_WORKER_MULTIPROC_METHOD"
+config_position = "env"
+dtype = "enum"
+dtype_param = ["fork", "spawn"]
+value = "fork"
+```
+
+Do not reference this type of parameter in `[vllm.command].others`. Keep `others = ""` or use it only for other command-line parameters.
+
+#### Example 2: Command-Line Enumerated Numeric Parameter (Taking `gpu_memory_utilization` as an Example)
 
 **Step 1**: Declare the optimization field.
 
@@ -278,7 +296,7 @@ value = 0.9
 others = "--gpu-memory-utilization $GPU_MEMORY_UTILIZATION"
 ```
 
-#### Example 2: Switch/Composite String Parameter (Taking Compilation Config `--compilation-config` as an Example)
+#### Example 3: Command-Line Switch/Composite String Parameter (Taking Compilation Config `--compilation-config` as an Example)
 
 When the parameter itself is a complete CLI string, you can use an empty string `""` (not enabled) and the enabled form as enum candidates. The tool automatically skips empty strings and does not append anything to the launch command.
 
