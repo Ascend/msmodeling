@@ -10,7 +10,6 @@ For the complete model list and feature details, see [Model Support and Feature 
 | 2. Understand timing, call count, and memory metrics in the output | [2.2 Result (Text Generation)](#22-result-text-generation) |
 | 3. Run video generation model simulation | [2.3 Quick Start: Video Generation](#23-quick-start-video-generation) |
 | 4. View or customize hardware device profiles | [3 Supported Devices and Custom Devices](#3-supported-devices-and-custom-devices) |
-| 5. Configure prefill / decode scenarios | [5 Advanced Notes](#5-advanced-notes) |
 
 ## 1 Introduction
 
@@ -42,7 +41,7 @@ Before first use, see [Quick Start: Environment Setup and First Simulation](../i
 To run prefill for Qwen3-32B on A2 with two requests, each with 3500 input tokens, run:
 
 ```bash
-python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 3500 --device TEST_DEVICE
+python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 3500 --device TEST_DEVICE --compile
 ```
 
 In prefill mode, omit `--decode`; `--query-length` is the new input length and `--context-length` is the context length for each query.
@@ -50,15 +49,15 @@ In prefill mode, omit `--decode`; `--query-length` is the new input length and `
 You can also use different quantization schemes for linear layers. For example, use W8A8 dynamic quantization with a 4500-token context prefix:
 
 ```bash
-python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 4500 --device TEST_DEVICE --quantize-linear-action W8A8_DYNAMIC
+python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 4500 --device TEST_DEVICE --quantize-linear-action W8A8_DYNAMIC --compile
 ```
 
 #### Decode Scenario
 
-Running decode is similar; adjust `--query-length` and the context length. When MTP is not enabled, `--query-length` is usually `1`; after enabling `--num-mtp-tokens`, set `--query-length` to `1 + mtp_tokens`.
+The decode scenario is similar; only adjust the input length `--query-length` and the requested context length `--context-length`. When MTP is not enabled, `--query-length` is usually `1`; when `--num-mtp-tokens` is enabled, set `--query-length` to `1 + --num-mtp-tokens`.
 
 ```bash
-python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 10 --query-length 1 --context-length 4500 --device TEST_DEVICE --quantize-linear-action W8A8_STATIC
+python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 10 --query-length 1 --context-length 4500 --decode --device TEST_DEVICE --quantize-linear-action W8A8_STATIC --compile
 ```
 
 **Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace` is set.
@@ -256,10 +255,10 @@ Main parameters:
 | `--moe-tp-size` | Parallelism Options | Optional | Specifies TP size for experts and can override `--tp-size`.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`. |
 | `--moe-dp-size` | Parallelism Options | Optional | Specifies DP size for experts and can override `--dp-size`.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
 | `--word-embedding-tp` | Parallelism Options | Optional | Enables word embedding tensor parallel and specifies the parallel mode.<br>1. Type: Str.<br>2. Reference values: `col`, `row`.<br>3. Default: `None`, meaning embedding TP is disabled. |
-| `--enable-redundant-experts` | Parallelism Options | Optional | Enables redundant expert configuration.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. When external shared experts are not enabled, each device adds one redundant expert. When external shared experts are enabled and routing experts are evenly distributed, devices hosting routing experts also add one redundant expert. |
+| `--enable-redundant-experts` | Parallelism Options | Optional | Enables redundant expert configuration.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. When enabled alone, each device hosts 1 additional redundant expert.<br>5. When enabled together with `--enable-external-shared-experts`, the allocation logic is the same as external shared experts. If routing experts are already evenly distributed across devices and no redundant experts are needed for padding, each device hosting routing experts hosts 1 additional redundant expert. |
 | `--enable-shared-expert-tp` | Parallelism Options | Optional | Enables vLLM-style tensor parallel for shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Shared experts use dense MLP TP with delayed `down_proj` reduction. |
 | `--enable-dispatch-ffn-combine` | Parallelism Options | Optional | Enables the dispatch_ffn_combine fusion pattern during compilation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
-| `--enable-external-shared-experts` | Parallelism Options | Optional | Enables external shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
+| `--enable-external-shared-experts` | Parallelism Options | Optional | Enables external shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. When enabled, devices are allocated between external shared experts and routing experts at a `1:top_k` ratio. Redundant experts are used to pad routing experts if needed.<br>5. For example, if `world_size=64`, `top_k=8`, and the number of routing experts is 256, 8 devices host external shared experts and the remaining 56 devices distribute the 256 routing experts: 32 devices host 5 routing experts each, and 24 devices host 4 routing experts plus 1 redundant expert each. |
 | `--host-external-shared-experts` | Parallelism Options | Optional | Specifies that the current device hosts external shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--vision-tp-size` | Parallelism Options | Optional | Specifies tensor parallel size for vision modules.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`, meaning vision modules are not sharded. |
 | `--image-batch-size` | MultiModal Options | Optional | Specifies image processing batch size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`. |
@@ -327,20 +326,3 @@ Main parameters:
 | `--cache-block-range` | Cache Options | Optional | Specifies block range for cache.<br>1. Type: Str.<br>2. Format: `start,end`, start inclusive and end exclusive.<br>3. Default: `None`. |
 
 Run `python -m cli.inference.video_generate --help` for details.
-
-## 5 Advanced Notes
-
-### 5.1 External Shared Experts & Redundant Experts Implementation
-
-The following outlines the implementation logic for External Shared Experts and Redundant Experts.
-
-1. Redundant Experts Only:
-Each device will host an additional redundant expert.
-
-2. External Shared Experts Only:
-Devices are allocated between external shared experts and routing experts at a ratio of 1:`top_k`. Redundant experts are used to pad routing experts if needed.
-For example, if `world_size` is 64, `top_k` is 8, and number of routing experts is 256, 8 devices are assigned to host external shared experts.
-The remaining 56 devices are used to distribute 256 routing experts. 32 devices host 5 routing experts each. 24 devices host 4 routing experts and 1 redundant expert.
-
-3. Both External Shared Experts & Redundant Experts Enabled:
-The allocation logic is identical to the "External Shared Experts Only" mode, with one addition: If no redundant experts are needed to pad routing experts (i.e., routing experts are evenly distributed across devices), each device hosting routing experts will host an additional redundant expert.
