@@ -269,11 +269,29 @@ others = ""
 
 ### VLLM自定义参数寻优
 
-寻优工具支持通过 `[[vllm.target_field]]` 添加任意 VLLM 启动参数参与寻优。配置方式分为两步：**声明寻优字段** + **在 `others` 中引用变量**。
+寻优工具支持通过 `[[vllm.target_field]]` 添加 VLLM 参数参与寻优。根据参数生效方式不同，配置方式分为两类：
+
+- VLLM 环境变量：只需在 `[[vllm.target_field]]` 中声明，且 `config_position = "env"`。工具会在每轮寻优启动服务前自动写入同名大写环境变量，不需要写入 `[vllm.command]` 的 `others`。
+- VLLM 命令行参数：先在 `[[vllm.target_field]]` 中声明，再在 `[vllm.command]` 的 `others` 中通过变量引用拼接到启动命令。
 
 > **变量引用规则**：在 `others` 中使用 `$字段名大写` 的格式引用寻优字段，工具运行时会自动将其替换为当前迭代的实际值。
 
-#### 示例一：枚举数值参数（以 `gpu_memory_utilization` 为例）
+#### 示例一：VLLM 环境变量寻优
+
+如果待寻优参数本身是 VLLM 环境变量，只需添加到 `[[vllm.target_field]]`。例如：
+
+```toml
+[[vllm.target_field]]
+name = "VLLM_WORKER_MULTIPROC_METHOD"
+config_position = "env"
+dtype = "enum"
+dtype_param = ["fork", "spawn"]
+value = "fork"
+```
+
+此类参数无需在 `[vllm.command]` 的 `others` 中引用，保持 `others = ""` 或仅填写其他命令行参数即可。
+
+#### 示例二：命令行枚举数值参数（以 `gpu_memory_utilization` 为例）
 
 **第一步**：声明寻优字段。
 
@@ -294,7 +312,7 @@ value = 0.9
 others = "--gpu-memory-utilization $GPU_MEMORY_UTILIZATION"
 ```
 
-#### 示例二：开关型/复合字符串参数（以编译配置 `--compilation-config` 为例）
+#### 示例三：命令行开关型/复合字符串参数（以编译配置 `--compilation-config` 为例）
 
 当参数本身是一段完整的 CLI 字符串时，可将"不启用"（空字符串 `""`）和"启用"两种形态作为枚举候选值。工具遇到空字符串时会自动跳过，不向启动命令追加任何内容。
 
