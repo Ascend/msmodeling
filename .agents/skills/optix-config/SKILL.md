@@ -164,16 +164,20 @@ python ./.agents/skills/optix-config/scripts/auto_config.py --add-fixed-param \
 
 ### Parameter Type Description
 
-| dtype | Meaning | Required Fields | Example Config |
-|-------|---------|----------------|---------------|
-| `int` | Integer parameter | min, max | `min=10, max=400` |
-| `float` | Float parameter | min, max | `min=0.8, max=0.95` |
-| `bool` | Boolean parameter | value | `value=true/false` |
-| `str` | String parameter | value | `value="string"` |
-| `enum` | Enum parameter | enum_values | `enum-values="[1,2,4,8]"` |
-| `ratio` | Ratio parameter | dtype_param | `dtype-param=target_param` |
-| `factories` | Factories parameter | factories_config | `product/target_name` |
-| `times` | Times parameter | dtype_param | `product/target_name` |
+| dtype | Meaning | Required CLI Args | Example CLI |
+|-------|---------|-------------------|-------------|
+| `int` | Integer parameter | --min, --max | `min=10, max=400` |
+| `float` | Float parameter | --min, --max | `min=0.8, max=0.95` |
+| `bool` | Boolean parameter | --value | `value=true/false` |
+| `str` | String parameter | --value | `value="string"` |
+| `enum` | Enum parameter | --enum-values | `enum-values="[1,2,4,8]"` |
+| `ratio` | Ratio parameter | --dtype-param | `dtype-param=target_param` |
+| `factories` | Factories parameter | --factories-config | `factories-config='{"target_name":"TP","product":16}'` |
+| `times` | Times parameter | --dtype-param | `dtype-param='{"target_name":"TP","product":16}'` |
+
+> **注意**: CLI 参数名与 config.toml 中的键名不完全一致。`--enum-values` 和 `--factories-config` 在生成的 config.toml 中对应的键名均为 **`dtype_param`**。例如:
+> - `--dtype enum --enum-values "[1,2,4]"` → `dtype = "enum"` + `dtype_param = [1, 2, 4]`
+> - `--dtype factories --factories-config '{...}'` → `dtype = "factories"` + `dtype_param = {...}`
 
 ## 服务配置
 
