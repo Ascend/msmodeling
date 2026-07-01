@@ -1,151 +1,128 @@
-# Web_UI
+# Web UI User Guide
 
-本文档面向 Modeling的日常使用者和即将接入项目的开发者，目标是帮助你快速理解工具能做什么、如何从 Web UI 或 CLI 发起仿真、如何解读结果，以及在不同业务场景下应该如何配置参数。
+This document is intended for daily users of Modeling and developers who are about to integrate the project. Its goal is to help you quickly understand what the tool can do, how to launch simulations from the Web UI or CLI, how to interpret results, and how to configure parameters for different business scenarios.
 
-如果只想启动前端页面，直接执行：
+If you only want to start the frontend page, simply run:
 
 ```bash
 python -m web_ui.web_ui_start --port 2345
 ```
 
-启动后在浏览器打开 `http://127.0.0.1:2345`。
+After starting, open `http://127.0.0.1:2345` in your browser.
 
 ---
 
-## 1. 工具定位
+## Reading Guide
 
-Modeling 是一个面向模型推理性能分析的仿真工具，核心能力包括：
+| Goal | Recommended Section |
+| --- | --- |
+| First time launching Web UI | [3. Web UI Quick Start](#web-ui-quick-start) |
+| Configuring LLM / VL simulations | [4. LLM / VL Simulation Guide](#llm-vl-simulation) |
+| Configuring video generation simulations | [5. Video Generation Simulation Guide](#video-generation-simulation) |
+| Using the throughput optimizer | [6. Optimizer Throughput Tuning Guide](#optimizer-guide) |
+| Interpreting results and exporting data | [7. How to Read Result Charts and Detail Tables](#results-guide) |
+| Troubleshooting common issues | [9. FAQ](#faq) |
 
-- 在没有真实硬件或真实大模型完整运行环境的情况下，基于设备画像预测算子耗时、显存占用、通信开销和整体推理时间。
-- 支持 LLM 文本推理、VL 多模态推理、视频生成 Diffusion Transformer 推理，以及服务化吞吐寻优。
-- 支持多芯片横向对比，帮助判断同一个模型在不同设备上的性能差异。
-- 支持并发、TP、量化、MTP、Prefix Cache、Ulysses、DiT Cache、PD 混部、PD 分离、PD Ratio 等参数组合分析。
-- Web UI 提供可视化图表、明细表格、case 选择、Excel 导出和历史缓存；CLI 适合脚本化批量实验。
+---
 
-仓库中与用户最相关的入口如下：
+## 1. Tool Positioning
 
-| 入口 | 作用 | 推荐使用场景 |
+Modeling is a simulation tool for model inference performance analysis. Its core capabilities include:
+
+- Predicting operator latency, memory usage, communication overhead, and overall inference time based on device profiles, without requiring real hardware or a full runtime environment for large models.
+- Supporting LLM text inference, VL multimodal inference, video generation Diffusion Transformer inference, and service throughput tuning.
+- Supporting cross-chip comparisons to help evaluate performance differences of the same model on different devices.
+- Supporting parameter combination analysis for concurrency, TP, quantization, MTP, Prefix Cache, Ulysses, DiT Cache, PD Aggregated, PD Disaggregated, PD Ratio, and more.
+- The Web UI provides visual charts, detail tables, case selection, Excel export, and historical caching; the CLI is suitable for scripted batch experiments.
+
+The most relevant entry points in the repository are as follows:
+
+| Entry Point | Purpose | Recommended Scenario |
 |---|---|---|
-| `python -m web_ui.web_ui_start` | 启动 Gradio 前端 | 交互式配置、结果可视化、非开发用户使用 |
-| `python -m cli.inference.text_generate` | LLM / VL 前向推理仿真 | 单次或脚本化 LLM/VL 性能分析 |
-| `python -m cli.inference.video_generate` | 视频生成模型仿真 | Diffusion Transformer / Wan / HunyuanVideo 等场景 |
-| `python -m cli.inference.throughput_optimizer` | 服务吞吐寻优 | 在 TTFT/TPOT/SLO 约束下寻找最优并行和 batch |
+| `python -m web_ui.web_ui_start` | Launch the Gradio frontend | Interactive configuration, result visualization, non-developer users |
+| `python -m cli.inference.text_generate` | LLM / VL forward inference simulation | One-off or scripted LLM/VL performance analysis |
+| `python -m cli.inference.video_generate` | Video generation model simulation | Diffusion Transformer / Wan / HunyuanVideo scenarios |
+| `python -m cli.inference.throughput_optimizer` | Service throughput tuning | Finding optimal parallel and batch under TTFT/TPOT/SLO constraints |
 
 ---
 
-## 2. 环境准备
+## 2. Environment Setup
 
-### 2.1 安装依赖
+For complete environment setup steps (cloning the repository, creating a virtual environment, installing dependencies, setting `PYTHONPATH` and Hugging Face access), please refer to the [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md).
 
-推荐 [安装指南](../install_guide/msmodeling_install_guide.md)（uv）；亦可：
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2.2 设置 PYTHONPATH
-
-从仓库根目录运行一般不需要额外设置。如果从其他目录调用模块，建议设置：
-
-```bash
-set PYTHONPATH=D:\path\to\Modeling;%PYTHONPATH%
-```
-
-Linux/macOS：
-
-```bash
-export PYTHONPATH=/path/to/Modeling:$PYTHONPATH
-```
-
-### 2.3 模型来源
-
-工具会读取模型配置，常见来源包括 Hugging Face、ModelScope 或本地模型目录。
-
-如果网络无法访问 Hugging Face，可以考虑：
-
-```bash
-set HF_ENDPOINT=https://hf-mirror.com
-```
-
-或在 Web UI 的 `remote-source` 中选择 `modelscope`。
-
-### 2.4 Gradio 服务环境变量
-
-`web_ui/web_ui_start.py` 支持以下变量（CLI 参数优先）：
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `GRADIO_SERVER_PORT` | `2345` | 监听端口，可被 `--port` 覆盖 |
-
-完整环境变量列表见 [Environment Variables](../../../tests/README.md)。
+If the environment is already set up, launching the Web UI from the repository root generally requires no additional configuration. The tool reads model configurations, with common sources including Hugging Face, ModelScope, or local model directories. If the network cannot access Hugging Face, you can select `modelscope` in the Web UI's `remote-source`, or set the `HF_ENDPOINT` mirror as described in the installation guide.
 
 ---
 
-## 3. Web UI 快速上手
+<a id="web-ui-quick-start"></a>
 
-### 3.1 启动本地页面
+## 3. Web UI Quick Start
+
+### 3.1 Launch the Local Page
 
 ```bash
 python -m web_ui.web_ui_start --port 2345
 ```
 
-适合本机使用。浏览器打开：
+Suitable for local use. Open in your browser:
 
 ```text
 http://127.0.0.1:2345
 ```
 
-### 3.2 Web UI 页面说明
+### 3.2 Web UI Page Overview
 
-当前 Web UI 主要包含三类工作区：
+The current Web UI mainly includes three types of workspaces:
 
-| 页面 | 能力 |
+| Page | Capabilities |
 |---|---|
-| Simulator - LLM Forward | LLM 文本推理仿真，支持并发列表、TP 列表、量化、MTP、Prefix Cache、并行细分、算子和显存分析 |
-| Simulator - VL Forward | 多模态 VL 推理仿真，在 LLM 参数基础上增加 image batch、height、width 等图像参数 |
-| Video Generation | 视频生成模型推理仿真，支持 Ulysses、CFG、DiT Cache、Chrome Trace 等参数 |
-| Optimizer | 服务吞吐寻优，支持 `PD 混部`、`PD 分离`、`PD Ratio` 三种部署模式 |
+| Simulator - LLM Forward | LLM text inference simulation, supporting concurrency list, TP list, quantization, MTP, Prefix Cache, parallel breakdown, operator and memory analysis |
+| Simulator - VL Forward | Multimodal VL inference simulation, adding image batch, height, width and other image parameters on top of LLM parameters |
+| Video Generation | Video generation model inference simulation, supporting Ulysses, CFG, DiT Cache, Chrome Trace and other parameters |
+| Optimizer | Service throughput tuning, supporting three deployment modes: `PD Aggregated`, `PD Disaggregated`, `PD Ratio` |
 
-### 3.3 Web UI 的基本操作流程
+### 3.3 Basic Web UI Workflow
 
-1. 选择模型、主芯片和可选竞品芯片。
-2. 填写卡数、并发、长度、量化、并行等参数。
-3. 点击“预览配置”或“预览命令”，确认将要执行的 CLI 命令。
-4. 点击“开始运行”。
-5. 查看汇总结论、曲线图、显存分析、带宽瓶颈、算子详情和导出结果。
-6. 如果设置了并发列表或 TP 列表，在明细分析区选择具体 case，例如 `并发=32 | TP=2`，再查看该 case 的显存和算子数据。
+1. Select the model, primary chip, and optional competitor chip.
+2. Fill in parameters such as number of devices, concurrency, length, quantization, and parallelism.
+3. Click "Preview Configuration" or "Preview Command" to confirm the CLI command that will be executed.
+4. Click "Start Run".
+5. View the summary conclusion, charts, memory analysis, bandwidth bottleneck, operator details, and export results.
+6. If a concurrency list or TP list is configured, select a specific case in the detail analysis area, for example `Concurrency=32 | TP=2`, then view the memory and operator data for that case.
 
 ---
 
-## 4. LLM / VL 仿真使用指南
+<a id="llm-vl-simulation"></a>
 
-LLM 和 VL 仿真最终都调用：
+## 4. LLM / VL Simulation Guide
+
+Both LLM and VL simulations ultimately invoke:
 
 ```bash
 python -m cli.inference.text_generate <model_id> [options]
 ```
 
-其中 VL 是在 LLM 仿真基础上增加图像输入参数。
+where VL adds image input parameters on top of the LLM simulation.
 
-### 4.1 关键概念
+### 4.1 Key Concepts
 
-| 概念 | 说明 |
+| Concept | Description |
 |---|---|
-| `num-queries` | 并发请求数，影响 batch、KV Cache、显存和吞吐 |
-| `query-length` | 本次新增 token 数。prefill 通常较大，decode 通常为 1 或较小值 |
-| `context-length` | 已有上下文长度，影响 KV Cache 和 attention 成本 |
-| `decode` | 开启自回归 decode 模式 |
-| `tp-size` | Tensor Parallel 数量 |
-| `dp-size` | Data Parallel 数量，可在 Web UI 中填 `auto` |
-| `ep-size` | Expert Parallel 数量，MoE 模型常用 |
-| `num-mtp-tokens` | MTP token 数，DeepSeek 等支持 MTP 的模型可用 |
-| `prefix-cache-hit-rate` | Prefix Cache 命中率，取值 `[0,1)`，用于估计 prefill token 复用收益 |
-| `quantize-linear-action` | Linear 层量化方式，如 `W8A8_DYNAMIC`、`FP8`、`MXFP4` |
-| `quantize-non-expert-linear-action` | Non-expert Linear 层量化覆盖项，主要用于 DeepSeek V4；作用于 attention projections、dense MLP 和 shared experts；routed MoE experts 仍使用 `quantize-linear-action` |
-| `quantize-attention-action` | KV Cache / Attention 量化方式，如 `DISABLED`、`INT8`、`FP8` |
-| `image-height/image-width` | VL 图像尺寸 |
+| `num-queries` | Number of concurrent requests, affecting batch, KV Cache, memory, and throughput |
+| `query-length` | Number of newly added tokens. Prefill is usually large; decode is usually 1 or a small value |
+| `context-length` | Existing context length, affecting KV Cache and attention cost |
+| `decode` | Enable autoregressive decode mode |
+| `tp-size` | Tensor Parallel size |
+| `dp-size` | Data Parallel size; can be set to `auto` in the Web UI |
+| `ep-size` | Expert Parallel size, commonly used for MoE models |
+| `num-mtp-tokens` | Number of MTP tokens, available for models that support MTP such as DeepSeek |
+| `prefix-cache-hit-rate` | Prefix Cache hit rate, value range `[0,1)`, used to estimate the benefit of prefill token reuse |
+| `quantize-linear-action` | Linear layer quantization method, such as `W8A8_DYNAMIC`, `FP8`, `MXFP4` |
+| `quantize-non-expert-linear-action` | Non-expert Linear layer quantization override, mainly used for DeepSeek V4; applies to attention projections, dense MLP, and shared experts; routed MoE experts still use `quantize-linear-action` |
+| `quantize-attention-action` | KV Cache / Attention quantization method, such as `DISABLED`, `INT8`, `FP8` |
+| `image-height/image-width` | VL image dimensions |
 
-### 4.2 最小 LLM 示例：单芯片 decode
+### 4.2 Minimal LLM Example: Single-Chip Decode
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B \
@@ -159,9 +136,9 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
   --quantize-attention-action DISABLED
 ```
 
-适合快速观察某芯片在典型 decode 场景下的单设备推理时间、TPS/Device、显存和算子占比。
+Suitable for quickly observing single-device inference time, TPS/Device, memory usage, and operator breakdown for a given chip under a typical decode scenario.
 
-### 4.3 Prefill 示例：长输入吞吐和瓶颈分析
+### 4.3 Prefill Example: Long-Input Throughput and Bottleneck Analysis
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B \
@@ -176,24 +153,24 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
   --quantize-attention-action INT8
 ```
 
-此场景关注首段输入处理成本，适合比较：
+This scenario focuses on the cost of processing the first input segment, suitable for comparing:
 
-- 不同 TP 下 prefill 是否受通信瓶颈影响。
-- Attention 量化是否降低显存和带宽压力。
-- `compile` 对图编译和执行耗时的影响。
+- Whether prefill is affected by communication bottlenecks under different TP configurations.
+- Whether attention quantization reduces memory and bandwidth pressure.
+- The impact of `compile` on graph compilation and execution time.
 
-### 4.4 并发列表示例：绘制并发曲线
+### 4.4 Concurrency List Example: Plotting Concurrency Curves
 
-Web UI 中可填写：
+In the Web UI, you can fill in:
 
 ```text
-并发列表: [16,32,64]
-TP 并行数: 1
+Concurrency list: [16,32,64]
+TP parallel size: 1
 ```
 
-等价于多次执行不同 `--num-queries` 的实验。结果区会绘制并发数与推理时间、吞吐等变化关系，适合寻找最佳并发区间。
+This is equivalent to running multiple experiments with different `--num-queries` values. The results area will plot the relationship between concurrency count and inference time, throughput, and so on, suitable for finding the optimal concurrency range.
 
-如果使用 CLI 批量实验，可用脚本循环：
+If using the CLI for batch experiments, you can use a script loop:
 
 ```bash
 for nq in 16 32 64; do
@@ -210,55 +187,55 @@ for nq in 16 32 64; do
 done
 ```
 
-### 4.5 TP 列表示例：同一模型遍历多个 TP
+### 4.5 TP List Example: Sweeping Multiple TP Values for the Same Model
 
-Web UI 中可填写：
-
-```text
-部署卡数: 8
-请求并发数: 32
-TP 列表: [1,2,4,8]
-```
-
-工具会在同一并发下遍历多个 TP，并输出 TP 数量与推理时间的变化图。横轴为 TP 数量，纵轴为推理时间。
-
-适合回答：
-
-- 增大 TP 后计算是否加速。
-- 通信开销是否抵消了计算收益。
-- 当前芯片和模型最适合的 TP 区间。
-
-### 4.6 并发列表 + TP 列表示例
-
-Web UI 中可填写：
+In the Web UI, you can fill in:
 
 ```text
-部署卡数: 8
-并发列表: [16,32,64]
-TP 列表: [1,2]
+Number of devices: 8
+Request concurrency: 32
+TP list: [1,2,4,8]
 ```
 
-工具会按照每个 TP 遍历并发，并输出每个 TP 下的并发曲线。结果可理解为：
+The tool will sweep through multiple TP values at the same concurrency and output a chart of TP count versus inference time. The x-axis is the TP count, and the y-axis is the inference time.
 
-| TP | 会运行的 case |
+Suitable for answering:
+
+- Whether increasing TP accelerates computation.
+- Whether communication overhead cancels out computation gains.
+- The optimal TP range for the current chip and model.
+
+### 4.6 Concurrency List + TP List Example
+
+In the Web UI, you can fill in:
+
+```text
+Number of devices: 8
+Concurrency list: [16,32,64]
+TP list: [1,2]
+```
+
+The tool will sweep concurrency for each TP and output a concurrency curve for each TP. The results can be understood as:
+
+| TP | Cases that will run |
 |---|---|
-| 1 | 并发 16、32、64 |
-| 2 | 并发 16、32、64 |
+| 1 | Concurrency 16, 32, 64 |
+| 2 | Concurrency 16, 32, 64 |
 
-后续显存、带宽、算子详情区域会出现 case 选择项，例如：
+Subsequently, the memory, bandwidth, and operator detail areas will show case selectors, for example:
 
 ```text
-并发=16 | TP=1
-并发=32 | TP=1
-并发=64 | TP=1
-并发=16 | TP=2
-并发=32 | TP=2
-并发=64 | TP=2
+Concurrency=16 | TP=1
+Concurrency=32 | TP=1
+Concurrency=64 | TP=1
+Concurrency=16 | TP=2
+Concurrency=32 | TP=2
+Concurrency=64 | TP=2
 ```
 
-查看明细时请先选芯片，再选具体 case，否则容易混淆不同并发和 TP 的显存与算子数据。
+When viewing details, please select a chip first and then a specific case; otherwise, it is easy to confuse memory and operator data across different concurrency and TP configurations.
 
-### 4.7 DeepSeek / MTP 示例
+### 4.7 DeepSeek / MTP Example
 
 ```bash
 python -m cli.inference.text_generate deepseek-ai/DeepSeek-R1 \
@@ -275,9 +252,9 @@ python -m cli.inference.text_generate deepseek-ai/DeepSeek-R1 \
   --compile
 ```
 
-注意：`query-length` 必须大于 MTP token 数，否则没有足够的生成 token 承载 MTP 分析。
+Note: `query-length` must be greater than the number of MTP tokens; otherwise there will not be enough generated tokens to carry out MTP analysis.
 
-### 4.8 Prefix Cache 示例
+### 4.8 Prefix Cache Example
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B \
@@ -291,9 +268,9 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
   --quantize-linear-action W8A8_DYNAMIC
 ```
 
-`prefix-cache-hit-rate=0.5` 表示按 token 级近似估算 50% prefix 命中。命中率越高，有效 prefill 长度越短，TTFT 和 prefill 侧显存压力通常会降低。
+`prefix-cache-hit-rate=0.5` means estimating a 50% prefix hit at the token level. The higher the hit rate, the shorter the effective prefill length, and typically the lower the TTFT and prefill-side memory pressure.
 
-### 4.9 VL 示例：图像输入推理
+### 4.9 VL Example: Image Input Inference
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-VL-235B-A22B-Instruct \
@@ -311,44 +288,46 @@ python -m cli.inference.text_generate Qwen/Qwen3-VL-235B-A22B-Instruct \
   --quantize-attention-action INT8
 ```
 
-VL 场景建议重点关注：
+For VL scenarios, it is recommended to focus on:
 
-- 图像尺寸变化对显存的影响。
-- 图像 batch 与文本并发叠加后的显存峰值。
-- Vision tower 或多模态投影相关算子的耗时占比。
+- The impact of image dimension changes on memory usage.
+- The peak memory when image batch is combined with text concurrency.
+- The latency proportion of operators related to the vision tower or multimodal projection.
 
 ---
 
-## 5. Video Generation 仿真使用指南
+<a id="video-generation-simulation"></a>
 
-视频生成入口：
+## 5. Video Generation Simulation Guide
+
+Video generation entry point:
 
 ```bash
 python -m cli.inference.video_generate <model_id> [options]
 ```
 
-该工具模拟 Diffusion Transformer 前向过程，常用于 Wan、HunyuanVideo 等视频生成模型的性能估算。
+This tool simulates the Diffusion Transformer forward process, commonly used for performance estimation of video generation models such as Wan and HunyuanVideo.
 
-### 5.1 关键参数
+### 5.1 Key Parameters
 
-| 参数 | 说明 |
+| Parameter | Description |
 |---|---|
-| `--batch-size` | 视频生成 batch |
-| `--seq-len` | 文本 prompt token 长度 |
-| `--height / --width` | 视频分辨率 |
-| `--frame-num` | 帧数 |
-| `--sample-step` | denoise step 数 |
-| `--dtype` | `float16`、`float32`、`bfloat16` |
-| `--world-size` | 总卡数 |
-| `--ulysses-size` | Ulysses sequence parallel 大小，必须整除 `world-size` |
-| `--use-cfg` | 启用 CFG |
-| `--cfg-parallel` | 使用 CFG 并行 |
-| `--dit-cache` | 启用 DiT block cache |
-| `--cache-step-range` | DiT Cache 生效 step 范围，格式 `start,end` |
-| `--cache-step-interval` | 每 N step 刷新一次 cache，`1` 等价于不复用 |
-| `--cache-block-range` | block cache 范围，格式 `start,end` |
+| `--batch-size` | Video generation batch |
+| `--seq-len` | Text prompt token length |
+| `--height / --width` | Video resolution |
+| `--frame-num` | Number of frames |
+| `--sample-step` | Number of denoise steps |
+| `--dtype` | `float16`, `float32`, `bfloat16` |
+| `--world-size` | Total number of devices |
+| `--ulysses-size` | Ulysses sequence parallel size, must evenly divide `world-size` |
+| `--use-cfg` | Enable CFG |
+| `--cfg-parallel` | Use CFG parallel |
+| `--dit-cache` | Enable DiT block cache |
+| `--cache-step-range` | Step range for DiT Cache to take effect, format `start,end` |
+| `--cache-step-interval` | Refresh cache every N steps; `1` is equivalent to no reuse |
+| `--cache-block-range` | Block cache range, format `start,end` |
 
-### 5.2 最小视频仿真示例
+### 5.2 Minimal Video Simulation Example
 
 ```bash
 python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
@@ -363,7 +342,7 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --quantize-linear-action W8A8_DYNAMIC
 ```
 
-### 5.3 Ulysses 并行示例
+### 5.3 Ulysses Parallel Example
 
 ```bash
 python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
@@ -379,15 +358,15 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --dtype float16
 ```
 
-配置要求：
+Configuration requirement:
 
 ```text
 world-size % ulysses-size == 0
 ```
 
-如果不满足，程序会报错。Web UI 中也会提前校验。
+If this is not satisfied, the program will report an error. The Web UI will also validate this in advance.
 
-### 5.4 CFG 与 CFG Parallel 示例
+### 5.4 CFG and CFG Parallel Example
 
 ```bash
 python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
@@ -404,9 +383,9 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --cfg-parallel
 ```
 
-`--use-cfg` 会模拟 classifier-free guidance。`--cfg-parallel` 适合比较 CFG 对通信和并行效率的影响。
+`--use-cfg` simulates classifier-free guidance. `--cfg-parallel` is suitable for comparing the impact of CFG on communication and parallel efficiency.
 
-### 5.5 DiT Cache 示例
+### 5.5 DiT Cache Example
 
 ```bash
 python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
@@ -423,13 +402,13 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --cache-block-range 0,20
 ```
 
-说明：
+Explanation:
 
-- `--cache-step-range 10,40` 表示第 10 到第 40 个 denoise step 尝试复用 cache。
-- `--cache-step-interval 5` 表示每 5 个 step 刷新一次，其余 step 复用。
-- `--cache-step-interval 1` 会使 cache 复用基本失效。
+- `--cache-step-range 10,40` means attempting to reuse cache from denoise step 10 through step 40.
+- `--cache-step-interval 5` means refreshing the cache every 5 steps, with the remaining steps reusing it.
+- `--cache-step-interval 1` effectively disables cache reuse.
 
-### 5.6 Chrome Trace 导出
+### 5.6 Chrome Trace Export
 
 ```bash
 python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
@@ -439,7 +418,7 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --chrome-trace trace/video.json
 ```
 
-生成后可在 Chrome 浏览器打开：
+After generation, you can open it in the Chrome browser:
 
 ```text
 chrome://tracing
@@ -447,29 +426,31 @@ chrome://tracing
 
 ---
 
-## 6. Optimizer 吞吐寻优使用指南
+<a id="optimizer-guide"></a>
 
-吞吐寻优入口：
+## 6. Optimizer Throughput Tuning Guide
+
+Throughput tuning entry point:
 
 ```bash
 python -m cli.inference.throughput_optimizer <model_id> [options]
 ```
 
-Optimizer 不是只跑一个固定并行配置，而是在给定模型、设备、卡数、输入输出长度、SLO 约束和搜索空间后，自动搜索更优的并行方式、batch size、concurrency 和吞吐。
+The Optimizer does not just run a single fixed parallel configuration; instead, given a model, device, number of devices, input/output lengths, SLO constraints, and a search space, it automatically searches for better parallel configurations, batch size, concurrency, and throughput.
 
-### 6.1 三种部署模式
+### 6.1 Three Deployment Modes
 
-Web UI 中部署模式名称为：
+The deployment mode names in the Web UI are:
 
-| Web UI 名称 | CLI 参数 | 适用场景 |
+| Web UI Name | CLI Parameter | Applicable Scenario |
 |---|---|---|
-| `PD 混部` | 默认，不加 `--disagg`，不加 `--enable-optimize-prefill-decode-ratio` | Prefill 和 Decode 在同一类实例中混合部署，先做基线和多芯片横向对比 |
-| `PD 分离` | 加 `--disagg` | Prefill 和 Decode 分离分析，分别评估 TTFT 或 TPOT 约束下的能力 |
-| `PD Ratio` | 加 `--enable-optimize-prefill-decode-ratio`，并指定 P/D 单实例卡数 | 在分离式服务架构下，寻找 Prefill 与 Decode 实例比例 |
+| `PD Aggregated` | Default, without `--disagg`, without `--enable-optimize-prefill-decode-ratio` | Prefill and Decode are co-deployed in the same instance type; suitable for baselines and cross-chip comparisons |
+| `PD Disaggregated` | Add `--disagg` | Prefill and Decode disaggregated analysis; separately evaluating capacity under TTFT or TPOT constraints |
+| `PD Ratio` | Add `--enable-optimize-prefill-decode-ratio`, and specify the number of devices per P/D instance | Under a PD disaggregated architecture, finding the optimal Prefill-to-Decode instance ratio |
 
-### 6.2 PD 混部：离线吞吐寻优
+### 6.2 PD Aggregated: Offline Throughput Tuning
 
-不设置 TTFT/TPOT 约束时，工具会更关注最高吞吐：
+When TTFT/TPOT constraints are not set, the tool focuses more on maximum throughput:
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -482,15 +463,15 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --quantize-attention-action INT8
 ```
 
-适合回答：
+Suitable for answering:
 
-- 给定 8 卡，这个模型理论最大吞吐是多少。
-- 最优 TP/DP 和 batch 大概是什么。
-- 多芯片横向对比时，哪张芯片的最优吞吐更高。
+- Given 8 devices, what is the theoretical maximum throughput of this model.
+- What the optimal TP/DP and batch approximately look like.
+- In cross-chip comparisons, which chip achieves higher optimal throughput.
 
-### 6.3 PD 混部：在线服务 SLO 约束
+### 6.3 PD Aggregated: Online Service SLO Constraints
 
-同时设置 TTFT 和 TPOT：
+Setting both TTFT and TPOT:
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -505,15 +486,15 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --tpot-limits 50
 ```
 
-适合在线服务容量评估：
+Suitable for online service capacity evaluation:
 
-- TTFT 是否能满足首 token 响应目标。
-- TPOT 是否能满足持续生成速度目标。
-- 在约束下最优 batch 和并发是多少。
+- Whether TTFT can meet the first-token response target.
+- Whether TPOT can meet the sustained generation speed target.
+- The optimal batch and concurrency under the given constraints.
 
-### 6.4 限制 TP 搜索空间
+### 6.4 Restricting the TP Search Space
 
-默认情况下，Optimizer 会搜索可用 TP。你也可以手动限制：
+By default, the Optimizer will search available TP values. You can also manually restrict them:
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -526,20 +507,20 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --jobs 8
 ```
 
-Web UI 中 `TP并行大小列表` 可填写：
+In the Web UI, the `TP Parallel Size List` can be filled in as:
 
 ```text
 [1,2,4,8]
 ```
 
-`batch-range` 支持两种含义：
+`batch-range` supports two meanings:
 
-| 写法 | 含义 |
+| Syntax | Meaning |
 |---|---|
-| `--batch-range 256` | min 默认为 1，max 为 256 |
-| `--batch-range 1 256` | min 为 1，max 为 256 |
+| `--batch-range 256` | min defaults to 1, max is 256 |
+| `--batch-range 1 256` | min is 1, max is 256 |
 
-### 6.5 PD 分离：Prefill 侧 TTFT 分析
+### 6.5 PD Disaggregated: Prefill-Side TTFT Analysis
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -554,9 +535,9 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --ttft-limits 2000
 ```
 
-该模式关注 Prefill 阶段在 TTFT 约束下能承载多少请求。
+This mode focuses on how many requests the Prefill stage can handle under TTFT constraints.
 
-### 6.6 PD 分离：Decode 侧 TPOT 分析
+### 6.6 PD Disaggregated: Decode-Side TPOT Analysis
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -571,9 +552,9 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --tpot-limits 50
 ```
 
-该模式关注 Decode 阶段在 TPOT 约束下的持续输出能力。
+This mode focuses on the sustained output capability of the Decode stage under TPOT constraints.
 
-### 6.7 PD Ratio：Prefill / Decode 实例比例寻优
+### 6.7 PD Ratio: Prefill / Decode Instance Ratio Tuning
 
 ```bash
 python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
@@ -592,9 +573,9 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
   --log-level info
 ```
 
-PD Ratio 的核心思想是分别计算 Prefill QPS 和 Decode QPS，再寻找更平衡的 P/D 实例比例。
+The core idea of PD Ratio is to compute the Prefill QPS and Decode QPS separately, then find a more balanced Prefill / Decode instance ratio.
 
-近似理解：
+Approximate understanding:
 
 ```text
 Prefill QPS = prefill_concurrency / ttft_ms * 1000
@@ -603,74 +584,76 @@ PD Ratio    = Decode QPS / Prefill QPS
 Balanced QPS = min(Prefill QPS, Decode QPS)
 ```
 
-当 `PD Ratio > 1` 时，Decode 侧相对更强，可能需要更多 Prefill 实例；当 `PD Ratio < 1` 时，Decode 侧可能成为瓶颈。
+When `PD Ratio > 1`, the Decode side is relatively stronger, and more Prefill instances may be needed; when `PD Ratio < 1`, the Decode side may become the bottleneck.
 
-### 6.8 Optimizer 输出解读
+### 6.8 Optimizer Output Interpretation
 
-典型输出包含：
+Typical output includes:
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `Best Throughput` | 当前约束下最优 token/s |
-| `TTFT` | Time To First Token，首 token 延迟 |
-| `TPOT` | Time Per Output Token，单输出 token 延迟 |
-| `concurrency` | 最优配置对应的并发数 |
-| `parallel` | 并行配置，如 `tp4pp1dp2` |
-| `batch_size` | 最优 batch |
-| `pd_ratio` | PD Ratio 模式下的 P/D 能力比例 |
-| `balanced_qps` | PD Ratio 模式下 P/D 平衡后的系统 QPS |
+| `Best Throughput` | Optimal token/s under the current constraints |
+| `TTFT` | Time To First Token, first-token latency |
+| `TPOT` | Time Per Output Token, per-output-token latency |
+| `concurrency` | Concurrency corresponding to the optimal configuration |
+| `parallel` | Parallel configuration, such as `tp4pp1dp2` |
+| `batch_size` | Optimal batch |
+| `pd_ratio` | Instance ratio in PD Ratio mode |
+| `balanced_qps` | System QPS after P/D balancing in PD Ratio mode |
 
-Web UI 还会展示：
+The Web UI also displays:
 
-- 各芯片最优吞吐对比。
-- 各芯片最优 TTFT / TPOT 对比。
-- 固定配置横向对比。
-- PD Ratio 关键指标表。
-- 单芯片 Pareto 明细。
-
----
-
-## 7. 结果图和明细表怎么看
-
-### 7.1 LLM / VL 结果
-
-建议按以下顺序阅读：
-
-1. 汇总结论：先看总时间、TPS/Device、是否有失败或告警。
-2. 推理时间曲线：看并发或 TP 增大后是否仍能降低耗时。
-3. 显存分析：看模型权重、KV Cache、激活和预留显存占比。
-4. 带宽瓶颈：看 memory bound、communication bound、compute bound。
-5. 算子详情：按总耗时排序，定位最主要算子。
-6. 算子分类统计：从 GEMM、Attention、Communication 等类别判断优化方向。
-
-如果配置了并发列表或 TP 列表，查看明细前一定要选择 case。
-
-### 7.2 Video 结果
-
-重点关注：
-
-- 总 analytic time 与 sample step 的关系。
-- Ulysses 后通信算子的占比。
-- CFG / CFG Parallel 是否引入额外 all-gather 或 batch 扩张。
-- DiT Cache 是否显著减少重复 block 的计算耗时。
-
-### 7.3 Optimizer 结果
-
-推荐阅读顺序：
-
-1. 推荐结论：看最优芯片、吞吐、并行方式、batch、并发。
-2. 各芯片最优对比：用于竞品和主芯片横向比较。
-3. 固定配置横向对比：确保比较是在同一配置下进行，而不是只比较各自最优点。
-4. PD Ratio：如果是分离式架构，查看 Balanced QPS 和 P/D 实例比例。
-5. 单芯片 Pareto：判断是否存在“吞吐更高但延迟略差”的备选点。
+- Optimal throughput comparison across chips.
+- Optimal TTFT / TPOT comparison across chips.
+- Fixed-configuration cross-chip comparison.
+- PD Ratio key metrics table.
+- Single-chip Pareto details.
 
 ---
 
-## 8. 参数选择建议
+<a id="results-guide"></a>
 
-### 8.1 不知道从哪里开始时
+## 7. How to Read Result Charts and Detail Tables
 
-LLM decode 初始值：
+### 7.1 LLM / VL Results
+
+It is recommended to read in the following order:
+
+1. Summary conclusion: first check the total time, TPS/Device, and whether there are any failures or warnings.
+2. Inference time chart: check whether increasing concurrency or TP still reduces latency.
+3. Memory analysis: check the proportion of model weights, KV Cache, activations, and reserved memory.
+4. Bandwidth bottleneck: check for memory bound, communication bound, and compute bound.
+5. Operator details: sorted by total latency to identify the main operators.
+6. Operator category statistics: determine optimization direction from categories such as GEMM, Attention, and Communication.
+
+If a concurrency list or TP list is configured, be sure to select a case before viewing details.
+
+### 7.2 Video Results
+
+Key areas of focus:
+
+- The relationship between total analytic time and sample steps.
+- The proportion of communication operators after Ulysses.
+- Whether CFG / CFG Parallel introduces additional all-gather or batch expansion.
+- Whether DiT Cache significantly reduces the computation time of repeated blocks.
+
+### 7.3 Optimizer Results
+
+Recommended reading order:
+
+1. Recommended conclusion: check the optimal chip, throughput, parallel configuration, batch, and concurrency.
+2. Optimal comparison across chips: used for cross-chip comparison between the primary chip and competitors.
+3. Fixed-configuration cross-chip comparison: ensure the comparison is done under the same configuration, not just comparing each chip's individual optimum.
+4. PD Ratio: if using a PD disaggregated architecture, check the Balanced QPS and Prefill / Decode instance ratio.
+5. Single-chip Pareto: determine whether there are alternative points with higher throughput but slightly worse latency.
+
+---
+
+## 8. Parameter Selection Recommendations
+
+### 8.1 When You Don't Know Where to Start
+
+LLM decode initial values:
 
 ```text
 num-devices: 8
@@ -683,7 +666,7 @@ quantize-linear-action: W8A8_DYNAMIC
 quantize-attention-action: DISABLED
 ```
 
-LLM prefill 初始值：
+LLM prefill initial values:
 
 ```text
 num-devices: 8
@@ -696,7 +679,7 @@ quantize-linear-action: W8A8_DYNAMIC
 quantize-attention-action: INT8
 ```
 
-Optimizer 在线服务初始值：
+Optimizer online service initial values:
 
 ```text
 input-length: 3500
@@ -708,142 +691,144 @@ batch-range: [1,256]
 jobs: 8
 ```
 
-### 8.2 TP 怎么选
+### 8.2 How to Choose TP
 
-经验规则：
+Rules of thumb:
 
-- 模型权重太大放不下：优先增大 TP。
-- 单卡算力瓶颈明显：增大 TP 可能收益明显。
-- 通信占比高：继续增大 TP 可能收益下降。
-- 小模型或小 batch：过大的 TP 可能因为通信和同步开销导致变慢。
+- If the model weights are too large to fit in memory: prioritize increasing TP.
+- If a single device has a clear compute bottleneck: increasing TP may yield significant gains.
+- If communication proportion is high: continuing to increase TP may have diminishing returns.
+- For small models or small batches: excessively large TP may slow things down due to communication and synchronization overhead.
 
-建议先用 Web UI 的 TP 列表跑 `[1,2,4,8]`，再根据曲线缩小搜索范围。
+It is recommended to first run a TP list of `[1,2,4,8]` in the Web UI, then narrow down the search range based on the curves.
 
-### 8.3 并发怎么选
+### 8.3 How to Choose Concurrency
 
-经验规则：
+Rules of thumb:
 
-- 并发太低：设备利用率可能不足。
-- 并发逐步增大：吞吐通常提升，但延迟和显存也会上升。
-- 并发过高：可能触发显存瓶颈、KV Cache 过大或延迟不可接受。
+- Too low concurrency: device utilization may be insufficient.
+- Gradually increasing concurrency: throughput usually improves, but latency and memory also increase.
+- Excessively high concurrency: may trigger memory bottlenecks, excessive KV Cache, or unacceptable latency.
 
-建议用 `[16,32,64,128]` 做第一轮，然后在最优区间附近细扫。
+It is recommended to use `[16,32,64,128]` for the first round, then perform a finer sweep around the optimal range.
 
-### 8.4 量化怎么选
+### 8.4 How to Choose Quantization
 
-| 场景 | 建议 |
+| Scenario | Recommendation |
 |---|---|
-| 快速基线 | `W8A8_DYNAMIC` |
-| 不希望引入量化影响 | `DISABLED` |
-| 显存压力明显 | 尝试 `INT8` attention 或 `FP8` |
-| MXFP4 方案评估 | 使用 `MXFP4`，必要时调整 `mxfp4-group-size` |
+| Quick baseline | `W8A8_DYNAMIC` |
+| Do not want to introduce quantization effects | `DISABLED` |
+| Significant memory pressure | Try `INT8` attention or `FP8` |
+| MXFP4 solution evaluation | Use `MXFP4`, adjust `mxfp4-group-size` if necessary |
 
-注意：仿真工具关注性能和资源估计，不替代真实精度评估。量化后的模型质量仍需通过精度测试验证。
-
----
-
-## 9. 常见问题
-
-### 9.1 Web UI 启动后浏览器打不开
-
-检查：
-
-- 是否使用了正确地址：`http://127.0.0.1:2345`。
-- 端口是否被占用，可换成 `--port 2346`。
-
-### 9.2 提示设备名不合法
-
-`--device` 必须来自 `DeviceProfile.all_device_profiles`。Web UI 会从设备画像自动加载品牌和芯片列表。CLI 下可以查看报错中的 choices，或在 Web UI 中先选择可用芯片。
-
-### 9.3 TP / DP / EP 配置不合法
-
-常见原因：
-
-- `num-devices` 不能被 `tp-size` 整除。
-- `world-size` 不能被 `ulysses-size` 整除。
-- `TP * DP * EP` 超过部署卡数。
-- 某些细分 TP/DP 参数与总卡数不匹配。
-
-处理建议：先用简单配置跑通，例如 `tp-size=1, dp-size=auto, ep-size=1`，再逐步增加并行复杂度。
-
-### 9.4 Optimizer 没有可行方案
-
-常见原因：
-
-- TTFT 或 TPOT 约束过严。
-- `max-batched-tokens` 过小导致 chunked prefill 开销过高。
-- batch 搜索范围太小。
-- 卡数不足或 TP 搜索空间不合适。
-- 显存预留过大导致可用显存不足。
-
-处理建议：
-
-1. 先去掉 TTFT/TPOT 约束，看是否能找到离线最优。
-2. 放宽 `tpot-limits` 或 `ttft-limits`。
-3. 增大 `batch-range` 上限。
-4. 检查 `tp-sizes` 是否包含可行值。
-5. 降低 `reserved-memory-gb` 或使用更强设备画像。
-
-### 9.5 结果来自缓存，想重新运行
-
-Web UI 会根据 task hash 读取 `.msmodeling_ui/results.sqlite3` 和 `.msmodeling_ui/logs/` 中的缓存。若需要完全重跑，可以清理对应缓存目录，或调整一个会影响仿真的参数生成新 task hash。
-
-### 9.6 图表标题遮挡内容
-
-新版 Web UI 已将图标题放在图像区域外的独立标题位置，不再使用 Gradio 左上角覆盖式标题。如果仍看到旧样式，确认浏览器没有加载旧页面，并重启 Web UI。
+Note: The simulation tool focuses on performance and resource estimation, and does not replace real accuracy evaluation. Model quality after quantization must still be verified through accuracy testing.
 
 ---
 
-## 10. 推荐工作流案例
+<a id="faq"></a>
 
-### 10.1 案例 A：比较两张芯片的 LLM decode 能力
+## 9. FAQ
 
-Web UI：
+### 9.1 Browser Cannot Open After Web UI Launch
+
+Check:
+
+- Whether the correct address is used: `http://127.0.0.1:2345`.
+- Whether the port is occupied; you can switch to `--port 2346`.
+
+### 9.2 Invalid Device Name
+
+`--device` must come from `DeviceProfile.all_device_profiles`. The Web UI automatically loads the brand and chip list from device profiles. In the CLI, you can check the choices in the error message, or select an available chip in the Web UI first.
+
+### 9.3 Invalid TP / DP / EP Configuration
+
+Common causes:
+
+- `num-devices` is not evenly divisible by `tp-size`.
+- `world-size` is not evenly divisible by `ulysses-size`.
+- `TP * DP * EP` exceeds the number of deployed devices.
+- Certain fine-grained TP/DP parameters do not match the total number of devices.
+
+Recommended approach: first run with a simple configuration, such as `tp-size=1, dp-size=auto, ep-size=1`, then gradually increase parallel complexity.
+
+### 9.4 Optimizer Has No Feasible Solution
+
+Common causes:
+
+- TTFT or TPOT constraints are too strict.
+- `max-batched-tokens` is smaller than the effective input length.
+- The batch search range is too small.
+- Insufficient number of devices or an unsuitable TP search space.
+- Excessive reserved memory leading to insufficient available memory.
+
+Recommended approach:
+
+1. First remove TTFT/TPOT constraints to see if an offline optimum can be found.
+2. Relax `tpot-limits` or `ttft-limits`.
+3. Increase the upper limit of `batch-range`.
+4. Check whether `tp-sizes` includes feasible values.
+5. Reduce `reserved-memory-gb` or use a stronger device profile.
+
+### 9.5 Results Come from Cache and You Want to Re-run
+
+The Web UI reads cache from `.msmodeling_ui/results.sqlite3` and `.msmodeling_ui/logs/` based on the task hash. If you need to completely re-run, you can clear the corresponding cache directories, or adjust a parameter that affects the simulation to generate a new task hash.
+
+### 9.6 Chart Title Overlapping Content
+
+The current version of the Web UI places chart titles in a separate title area outside the image region, no longer using the Gradio overlay title in the upper-left corner. If you still see the old style, confirm that the browser is not loading the old page, and restart the Web UI.
+
+---
+
+## 10. Recommended Workflow Examples
+
+### 10.1 Example A: Comparing LLM Decode Capabilities of Two Chips
+
+Web UI:
 
 ```text
-模型: Qwen/Qwen3-32B
-主芯片: ATLAS_800_A2_280T_32G_PCIE
-竞品芯片: 选择另一张芯片
-部署卡数: 8
-并发列表: [16,32,64]
-TP列表: [1,2,4,8]
-生成token数量: 8
-上下文长度: 4500
-Decode模式: 开启
-量化: MLP=W8A8_DYNAMIC, Attention=DISABLED
+Model: Qwen/Qwen3-32B
+Primary chip: ATLAS_800_A2_280T_32G_PCIE
+Competitor chip: select another chip
+Number of devices: 8
+Concurrency list: [16,32,64]
+TP list: [1,2,4,8]
+Generated token count: 8
+Context length: 4500
+Decode mode: enabled
+Quantization: MLP=W8A8_DYNAMIC, Attention=DISABLED
 ```
 
-观察：
+Observe:
 
-- 哪张芯片在同 TP 和同并发下推理时间更低。
-- 是否存在某张芯片在高 TP 下通信瓶颈更明显。
-- 显存和算子详情中瓶颈是否一致。
+- Which chip has lower inference time under the same TP and same concurrency.
+- Whether one chip has more obvious communication bottlenecks at high TP.
+- Whether the bottlenecks in memory and operator details are consistent.
 
-### 10.2 案例 B：评估 VL 图像尺寸影响
+### 10.2 Example B: Evaluating the Impact of VL Image Dimensions
 
-第一轮：
+First round:
 
 ```text
 image-height: 720
 image-width: 1080
 ```
 
-第二轮：
+Second round:
 
 ```text
 image-height: 1024
 image-width: 1024
 ```
 
-保持其他参数不变，对比：
+Keep other parameters unchanged and compare:
 
-- 总推理时间变化。
-- 显存占用变化。
-- Vision 相关算子的耗时变化。
+- Changes in total inference time.
+- Changes in memory usage.
+- Changes in latency of vision-related operators.
 
-### 10.3 案例 C：视频生成 Ulysses 扩展性
+### 10.3 Example C: Video Generation Ulysses Scalability
 
-依次测试：
+Test sequentially:
 
 ```text
 world-size=8, ulysses-size=1
@@ -852,121 +837,120 @@ world-size=8, ulysses-size=4
 world-size=8, ulysses-size=8
 ```
 
-观察：
+Observe:
 
-- 总耗时是否随 Ulysses 增大下降。
-- 通信算子占比是否上升。
-- 是否存在最优 Ulysses，而不是越大越好。
+- Whether total latency decreases as Ulysses increases.
+- Whether the proportion of communication operators increases.
+- Whether there is an optimal Ulysses rather than bigger being better.
 
-### 10.4 案例 D：在线服务容量评估
+### 10.4 Example D: Online Service Capacity Evaluation
 
-Web UI Optimizer：
-
-```text
-部署模式: PD 混部
-模型: Qwen/Qwen3-32B
-部署卡数: 8
-输入长度: 3500
-输出长度: 1500
-TP并行大小列表: [1,2,4,8]
-Batch范围: [1,256]
-TTFT: 2000
-TPOT: 50
-量化: MLP=W8A8_DYNAMIC, Attention=INT8
-```
-
-输出中重点查看：
-
-- 是否有可行解。
-- 最优吞吐、TTFT、TPOT 是否同时满足目标。
-- 最优 parallel 和 batch 是否符合部署预期。
-
-### 10.5 案例 E：PD Ratio 分离式部署规划
-
-Web UI Optimizer：
+Web UI Optimizer:
 
 ```text
-部署模式: PD Ratio
-部署卡数: 16
-Prefill 单实例卡数: 4
-Decode 单实例卡数: 2
-输入长度: 3500
-输出长度: 1500
+Deployment mode:PD Aggregated
+Model: Qwen/Qwen3-32B
+Number of devices: 8
+Input length: 3500
+Output length: 1500
+TP parallel size list: [1,2,4,8]
+Batch range: [1,256]
+TTFT: 2000
+TPOT: 50
+Quantization: MLP=W8A8_DYNAMIC, Attention=INT8
+```
+
+Key areas to check in the output:
+
+- Whether a feasible solution exists.
+- Whether the optimal throughput, TTFT, and TPOT all meet the targets simultaneously.
+- Whether the optimal parallel and batch match deployment expectations.
+
+### 10.5 Example E: PD Ratio Deployment Planning
+
+Web UI Optimizer:
+
+```text
+Deployment mode: PD Ratio
+Number of devices: 16
+Devices per Prefill instance: 4
+Devices per Decode instance: 2
+Input length: 3500
+Output length: 1500
 TTFT: 2000
 TPOT: 50
 ```
 
-观察：
+Observe:
 
-- Balanced QPS。
-- Prefill QPS 与 Decode QPS 谁更低。
-- 推荐 P/D 实例数量和总卡数是否匹配实际集群规划。
+- Balanced QPS.
+- Whether Prefill QPS or Decode QPS is lower.
+- Whether the recommended number of P/D instances and total devices match actual cluster planning.
 
 ---
 
-## 11. 开发者补充说明
+## 11. Developer Notes
 
-如果你要修改 Web UI，建议先阅读：
+If you want to modify the Web UI, it is recommended to first read:
 
 ```text
 web_ui/README.md
 ```
 
-核心文件关系：
+Core file relationships:
 
 ```text
-web_ui/__init__.py          包入口点，延迟暴露 launch_app
-web_ui/app.py               页面布局和事件绑定
-web_ui/components.py        复用组件和结果区域
-web_ui/callbacks.py         表单构建、校验、运行、结果整理
-web_ui/command_builder.py   CLI 命令和任务矩阵生成
-web_ui/runner.py            缓存、子进程运行、进度流
-web_ui/parsers.py           日志解析
-web_ui/result_store.py      SQLite 和日志缓存
-web_ui/charts.py            图表绘制
-web_ui/styles.py            共享CSS、主题助手和头部样式
-web_ui/schemas.py           构建器、运行器、解析器和存储之间共享的数据类
-web_ui/utils.py             共享解析、哈希和标准化助手
-web_ui/time_tracker.py      跟踪和显示仿真时间信息
-web_ui/web_ui_start.py      Web UI服务器启动入口
+web_ui/__init__.py          Package entry point, lazily exposes launch_app
+web_ui/app.py               Page layout and event bindings
+web_ui/components.py        Reusable components and result areas
+web_ui/callbacks.py         Form building, validation, execution, result organization
+web_ui/command_builder.py   CLI command and task matrix generation
+web_ui/runner.py            Cache, subprocess execution, progress streaming
+web_ui/parsers.py           Log parsing
+web_ui/result_store.py      SQLite and log caching
+web_ui/charts.py            Chart rendering
+web_ui/styles.py            Shared CSS, theme helpers, and header styles
+web_ui/schemas.py           Data classes shared between builder, runner, parser, and store
+web_ui/utils.py             Shared parsing, hashing, and normalization helpers
+web_ui/time_tracker.py      Tracking and displaying simulation time information
+web_ui/web_ui_start.py      Web UI server launch entry point
 ```
 
-修改前端功能后建议执行：
+After modifying frontend functionality, it is recommended to run:
 
 ```bash
 python -m py_compile web_ui/__init__.py web_ui/app.py web_ui/callbacks.py web_ui/command_builder.py web_ui/components.py web_ui/charts.py web_ui/parsers.py web_ui/result_store.py web_ui/runner.py web_ui/schemas.py web_ui/styles.py web_ui/time_tracker.py web_ui/utils.py web_ui/web_ui_start.py
-python web_ui/tests/test_frontend_workflows.py
 ```
 
 ---
 
-## 12. 快速命令索引
+## 12. Quick Command Index
 
-启动 Web UI：
+Launch Web UI:
 
 ```bash
 python -m web_ui.web_ui_start --port 2345
 ```
 
-LLM decode：
+LLM decode:
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B --device ATLAS_800_A2_280T_32G_PCIE --num-devices 8 --num-queries 32 --query-length 1 --context-length 4500 --decode --tp-size 8
 ```
 
-VL：
+VL:
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-VL-235B-A22B-Instruct --device ATLAS_800_A2_280T_32G_PCIE --num-devices 8 --num-queries 4 --query-length 16 --context-length 200 --decode --tp-size 8 --image-batch-size 1 --image-height 720 --image-width 1080
 ```
 
-Video：
+Video:
 
 ```bash
 python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers --device ATLAS_800_A2_280T_32G_PCIE --batch-size 1 --seq-len 128 --height 720 --width 1280 --frame-num 81 --sample-step 50
 ```
 
-Optimizer：
+Optimizer:
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B --device ATLAS_800_A2_280T_32G_PCIE --num-devices 8 --input-length 3500 --output-length 1500 --tp-sizes 1 2 4 8 --batch-range 1 256 --ttft-limits 2000 --tpot-limits 50
