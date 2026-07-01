@@ -713,6 +713,16 @@ def main() -> None:
         register_settings(create_custom_settings)
         logger.info(f"Using custom config file: {custom_config_path}")
     settings = get_settings()
+    from ..deploy_env import emit_runtime_hints, resolve_deploy_context, validate_deploy_stack
+
+    runtime_ctx, deploy_env = resolve_deploy_context()
+    emit_runtime_hints(runtime_ctx, engine=args.engine)
+    validate_deploy_stack(
+        engine=args.engine,
+        benchmark=args.benchmark_policy,
+        env=deploy_env,
+        ctx=runtime_ctx,
+    )
     if is_root():
         logger.warning(
             "Security Warning: Do not run this tool as root. "

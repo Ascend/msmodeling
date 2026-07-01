@@ -13,6 +13,8 @@
 - 已明确需要扩展的对象：搜索参数配置、服务框架或性能测试工具。
 
 > [!NOTE]
+> 插件若自建 `subprocess` 拉起部署栈，应使用 `optix.deploy_env.build_deploy_env` 构建子进程环境，而非直接传入 `os.environ`；命令首元素为可执行名时，在启动子进程前调用 `materialize_command(self.command, self.env, ctx)` 解析为绝对路径。API 说明见 [`optix/deploy_env.py`](../../../optix/deploy_env.py)。
+> [!NOTE]
 > 以下示例中的 `optix.*` 模块路径以已安装的 OptiX 版本为准；如果当前仓库分支未包含 OptiX 源码，请先切换到包含 OptiX 代码的发布分支或安装对应发布包。
 
 自定义插件开发流程如下：

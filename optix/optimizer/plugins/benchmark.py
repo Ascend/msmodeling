@@ -13,29 +13,30 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
+import glob
 import json
 import os
 import re
-from pathlib import Path
 import subprocess
-from typing import Optional, Tuple
-import glob
-from loguru import logger
+from pathlib import Path
+from typing import Optional
+
 import pandas as pd
+from loguru import logger
+
 from ...config.base_config import MINDIE_BENCHMARK_PERF_COLUMNS
 from ...config.config import (
     AisBenchConfig,
+    OptimizerConfigField,
+    PerformanceIndex,
     VllmBenchmarkConfig,
     get_settings,
-    PerformanceIndex,
-    OptimizerConfigField,
 )
 from ...config.custom_command import AisBenchCommand, VllmBenchmarkCommand
+from ...deploy_env import materialize_command
 from ...io_utils import open_file, walk_files
 from ...optimizer.interfaces.benchmark import BenchmarkInterface
-
 from ...optimizer.utils import backup, remove_file
-
 
 MS_TO_S = 10**3
 US_TO_S = 10**6
@@ -90,10 +91,11 @@ class AisBench(BenchmarkInterface):
 
     def update_command(self):
         self.command = AisBenchCommand(self.config.command).command
+        self.command = materialize_command(self.command, self.env, self._runtime_ctx)
 
     def get_models_config_path(self):
         cmd = [self.command[0], "--models", self.config.command.models, "--search"]
-        res = subprocess.run(cmd, text=True, capture_output=True)
+        res = subprocess.run(cmd, text=True, capture_output=True, env=self.env)
         if res.returncode != 0:
             raise ValueError(f"The command {cmd} execution failed, with an exit code of {res.returncode}")
         _output = res.stdout
@@ -216,7 +218,7 @@ class AisBench(BenchmarkInterface):
             performance_index.generate_speed = float(output_average.split()[0])
         return performance_index
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField]] = None):
+    def before_run(self, run_params: Optional[tuple[OptimizerConfigField]] = None):
         remove_file(Path(self.config.output_path))
         super().before_run(run_params)
         # Start the test
@@ -263,7 +265,7 @@ class VllmBenchMark(BenchmarkInterface):
             settings = get_settings()
             self.config = settings.vllm_benchmark
         super().__init__(*args, **kwargs)
-        self.command = VllmBenchmarkCommand(self.config.command).command
+        self.update_command()
 
     @property
     def num_prompts(self) -> int:
@@ -285,6 +287,7 @@ class VllmBenchMark(BenchmarkInterface):
 
     def update_command(self):
         self.command = VllmBenchmarkCommand(self.config.command).command
+        self.command = materialize_command(self.command, self.env, self._runtime_ctx)
 
     def stop(self, del_log: bool = True):
         # Delete output files
@@ -292,7 +295,7 @@ class VllmBenchMark(BenchmarkInterface):
         remove_file(output_path)
         super().stop(del_log)
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None):  # Delete output files
+    def before_run(self, run_params: Optional[tuple[OptimizerConfigField, ...]] = None):  # Delete output files
         # Clean output directory before start because get_performance_index only retrieves one record,
         # to avoid getting wrong data
         output_path = Path(self.config.command.result_dir)

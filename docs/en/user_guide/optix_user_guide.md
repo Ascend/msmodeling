@@ -2,7 +2,16 @@
 
 ## Overview
 
-**Service Parameter Optimizer** (optix) is an automatic optimization tool for serving parameters based on Particle Swarm Optimization (PSO). It supports `vLLM` and `MindIE`, automatically tuning parameters to find the optimal throughput configuration that meets latency requirements.
+**Service Parameter Optimizer** (`msmodeling optix`) is an automatic optimization tool for serving parameters based on Particle Swarm Optimization (PSO). It supports `vLLM` and `MindIE`, automatically tuning parameters to find the optimal throughput configuration that meets latency requirements.
+
+## Audience and Reading Path
+
+This guide is for performance and deployment engineers who need automatic tuning of vLLM or MindIE serving parameters. Recommended reading order:
+
+1. Read [Recommended Practice: Environment and Deploy Stack](#recommended-practice-environment-and-deploy-stack) and [Tool Installation](#tool-installation): install msmodeling in a uv venv; assume vLLM/MindIE are on the **system** environment.
+2. Read [Preparations](#preparations) and [Quick Start](#quick-start) to confirm the serving framework and benchmark tools run independently.
+3. Read [Command Parameters](#command-parameters) and [Configuration File Description](#configuration-file-description) (including `[deploy]`) to run a default optimization.
+4. For issues, see [Environment Variables and Troubleshooting](#environment-variables-and-troubleshooting); for SLO tuning, see [Output File Description](#output-file-description).
 
 The tool consists of two core functional modules:
 
@@ -44,18 +53,102 @@ The tool has been validated on LLaMA3-8B and Qwen3-8B. In principle, it does not
 
 ## Preparations
 
-**Environment Setup**
-Set up an environment where serving tools (such as [vLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)) and benchmark tools (such as `vllm_benchmark`/`ais_bench`, see [Benchmark Tool Deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md)) can run properly.
+**Environment and deploy stack**
+
+| Layer | Recommended | Notes |
+|-------|-------------|-------|
+| **msmodeling / OptiX** | **Must** use a **uv virtual environment** | Install brings in `torch`, `transformers`, and similar packages for TensorCast simulation, not for OptiX on-device runs. Installing into system Python overwrites packages the deploy stack relies on |
+| **vLLM / MindIE / benchmarks** | **System environment by default** | Assume serving and benchmarks are already on the machine. You usually do not need a separate deploy venv |
+
+When OptiX starts child processes, it removes msmodeling venv entries from `PATH` and `PYTHONPATH`, then resolves `vllm`, `mindieservice_daemon`, `ais_bench`, and similar commands from system PATH. You do not need to edit subprocess env vars or build a second venv for deploy.
+
+If binaries are not on the default PATH, set `OPTIX_DEPLOY_PATH` or `config.toml` `[deploy] path_prefix`.
+
+See [Recommended Practice: Environment and Deploy Stack](#recommended-practice-environment-and-deploy-stack) and the [Environment Setup Guide](../install_guide/msmodeling_install_guide.md#optix-and-simulation-environment-isolation).
+
+**Deploy stack setup**
+
+Confirm serving and benchmarks work in the system environment, or under the path set by `[deploy]`. See [vLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html), [MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md), and [AISBench deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md).
 
 ## Tool Installation
 
-optix is integrated into the msmodeling package. Installation command:
+> [!IMPORTANT]
+> **Install OptiX inside a virtual environment.** Run `uv sync` at the repository root; it creates `.venv` automatically.
+>
+> Installing msmodeling also installs `torch`, `transformers`, and related packages. Those dependencies are for TensorCast simulation in this repo, not for OptiX on-device optimization. Installing msmodeling into system Python often changes the `torch` and `transformers` versions already used on the machine, which leads to:
+>
+> - vLLM or MindIE failing to start or throwing inference errors
+> - a mismatch with validated Ascend inference stack versions
+> - other deployment tools on the same Python breaking
+>
+> Install msmodeling only inside a uv venv. Keep vLLM, MindIE, and benchmarks on the system install you already have.
+
+OptiX is integrated at the msmodeling repository root. Install as follows:
 
 ```bash
-pip install msmodeling
+git clone https://gitcode.com/Ascend/msmodeling.git   # skip if already cloned
+cd msmodeling
+uv sync
 ```
 
+> [!NOTE]
+> `uv sync` creates `.venv`, installs msmodeling in editable mode (including the `msmodeling optix` CLI), and does not require `uv venv` or `pip install -e .`. If the current branch does not include the OptiX source tree, switch to a release branch that includes OptiX or use the corresponding release package. Copying documentation alone does not provide the `msmodeling optix` command.
+> [!WARNING]
+> **Do not** `pip install vllm` / `mindie_llm` in the msmodeling venv. **Do not** install msmodeling in system Python without a venv. See [Recommended Practice: Environment and Deploy Stack](#recommended-practice-environment-and-deploy-stack).
+
+## Recommended Practice: Environment and Deploy Stack<a name="recommended-practice-environment-and-deploy-stack"></a>
+
+Typical setup: **vLLM/MindIE already on the system**; msmodeling only in a uv venv.
+
+**① Install msmodeling (uv)**
+
+```bash
+cd /path/to/msmodeling
+uv sync
+```
+
+Verify: `uv run msmodeling optix --help`
+
+**② Confirm system deploy stack (no separate deploy venv)**
+
+```bash
+deactivate 2>/dev/null || true
+which vllm    # e.g. /usr/local/bin/vllm
+vllm --help
+```
+
+**③ (Optional) explicit deploy root**
+
+Only if system PATH cannot resolve the right binaries:
+
+```bash
+export OPTIX_DEPLOY_PATH=/path/to/custom-deploy-root
+```
+
+Or in `optix/config.toml`:
+
+```toml
+[deploy]
+path_prefix = "/path/to/custom-deploy-root"
+```
+
+**④ Run OptiX from the msmodeling venv**
+
+```bash
+source /path/to/msmodeling/.venv/bin/activate
+msmodeling optix -e vllm -b ais_bench
+```
+
+**⑤ Confirm logs**
+
+`[optix/env] ... 部署命令 vllm → /usr/local/bin/vllm` (or your system/custom path) means child processes use the deploy stack, not the msmodeling venv.
+
+> [!NOTE]
+> By default you **do not** need a deploy-only venv. `OPTIX_DEPLOY_PATH` / `[deploy]` are optional overrides.
+
 ## Tool Uninstallation
+
+Uninstall from the msmodeling virtual environment:
 
 ```bash
 pip uninstall msmodeling
@@ -63,7 +156,16 @@ pip uninstall msmodeling
 
 ## Quick Start
 
-1. Complete the operations described in [Preparations](#preparations).
+0. **Confirm deploy commands are outside the msmodeling venv** (vLLM example):
+
+    ```bash
+    source /path/to/msmodeling/.venv/bin/activate
+    which vllm
+    # expected: /usr/local/bin/vllm (system path)
+    # wrong: /path/to/msmodeling/.venv/bin/vllm → see troubleshooting scenario C
+    ```
+
+1. Complete [Preparations](#preparations) and [Recommended Practice: Environment and Deploy Stack](#recommended-practice-environment-and-deploy-stack).
 
 2. Modify the configuration file. Before starting optimization, configure [`config.toml`](../../../optix/config.toml) according to your environment, including optimization parameters, benchmark tool parameters, and serving parameters. See [Configuration File Description](#configuration-file-description) for details.
 
@@ -85,7 +187,10 @@ By combining real-device testing with the parameter verification and optimizatio
 
 **Precautions**
 
-None
+- Before starting optimization, ensure the selected serving framework and benchmark tool run in the **system deploy environment** (or `[deploy]` path), not in the msmodeling venv.
+- Model paths, ports, dataset paths, and service startup parameters in `config.toml` must match your deployment environment.
+- Optimization repeatedly starts services and runs benchmarks; expect long runtimes and use a stable, dedicated environment when possible.
+- On environment isolation failures, log lines prefixed with `[optix/env]` explain cause and fix; see [Environment Variables and Troubleshooting](#environment-variables-and-troubleshooting).
 
 **Syntax**
 
@@ -190,6 +295,20 @@ Other columns are the `config.toml` parameters from vLLM or MindIE.
 ## Appendixes
 
 ### Configuration File Description
+
+**Deploy environment `[deploy]`**
+
+When OptiX spawns vLLM/MindIE and benchmark child processes, it strips msmodeling venv variables and resolves the deploy stack root (with `bin/vllm`, `bin/ais_bench`, etc.) from:
+
+| Parameter | Mandatory | Description |
+|-----------|-----------|-------------|
+| `path_prefix` | Optional | **Optional override** for deploy root. If unset, child processes use **system PATH** after stripping the msmodeling venv. Equivalent to directory-level `OPTIX_DEPLOY_PATH`. |
+
+```toml
+# Optional: only when system PATH cannot resolve vllm/ais_bench
+[deploy]
+# path_prefix = "/path/to/custom-deploy-root"
+```
 
 **Optimization parameters**: `n_particles` (number of optimization particles), `iters` (number of iterations), and `tpot_slo` (latency constraint for `time_per_output_token`).
 You can configure the number of particles and iterations based on the estimated time. Each particle requires time for service startup and testing. For example, if service startup and testing takes 9 to 10 minutes per run, and you allocate 8 hours for optimization, you can run approximately 50 particles in total. The recommended configuration is 5 × 10. That is, 10 particles and 5 iterations. As a rule of thumb, set the number of particles to about twice the number of iterations.
@@ -348,6 +467,41 @@ dtype_param = "max_batch_size" # Indicates that max_prefill_batch_size is propor
 ### Plugin Mode
 
 Service Parameter Optimizer supports user-defined search parameter configuration and benchmark tools. You can configure them as needed by adapting to the plugin interface and registering the corresponding plugin. For details, see [Plugin Development Guide](./optix_plugin_user_guide.md).
+
+### Environment Variables and Troubleshooting<a name="environment-variables-and-troubleshooting"></a>
+
+**Environment variables**
+
+| Variable | Description |
+|----------|-------------|
+| `OPTIX_DEPLOY_PATH` | **Optional**. Deploy root; **priority over** `config.toml` `[deploy] path_prefix`. If unset, **system PATH** is used after venv strip. |
+| `MIES_INSTALL_PATH` | MindIE install root; **preserved** in child-process env. |
+
+Priority: `OPTIX_DEPLOY_PATH` > `config.toml [deploy] path_prefix` > strip msmodeling venv only (rely on system PATH).
+
+**Recommended launch (default: system vLLM, no OPTIX_DEPLOY_PATH)**
+
+```bash
+source /path/to/msmodeling/.venv/bin/activate
+msmodeling optix -e vllm -b ais_bench
+```
+
+If PATH is non-standard:
+
+```bash
+export OPTIX_DEPLOY_PATH=/path/to/custom-deploy-root
+source /path/to/msmodeling/.venv/bin/activate
+msmodeling optix -e vllm -b ais_bench
+```
+
+**`[optix/env]` log reference**
+
+| Log / symptom | Cause | Action |
+|---------------|-------|--------|
+| `[optix/env] 当前未检测到虚拟环境` | optix without venv / msmodeling installed in system Python | Run `uv sync` at the repository root (creates `.venv` automatically); do not install in system Python—`torch`/`transformers` may overwrite deploy stack and break vLLM/MindIE |
+| `[optix/env] 找不到部署命令：vllm` (or `mindieservice_daemon`) | No deploy stack on system PATH after venv strip | Verify system vLLM/MindIE install; optionally set `OPTIX_DEPLOY_PATH` or `[deploy] path_prefix` |
+| `[optix/env] 命令 vllm 解析到 msmodeling 虚拟环境` | vllm installed in msmodeling venv | `pip uninstall vllm` in msmodeling venv; use system-deployed vLLM |
+| `[optix/env] msmodeling 运行于虚拟环境 ...；部署命令 vllm → ...` | Normal | No action |
 
 ### Log Description
 

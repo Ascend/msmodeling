@@ -13,11 +13,9 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-import os
-import shutil
 import shlex
-from pydantic import BaseModel, Field
 
+from pydantic import BaseModel, Field
 
 MAX_REQUEST_NUM = 1e6
 
@@ -32,15 +30,12 @@ class AisBenchCommandConfig(BaseModel):
 
 class AisBenchCommand:
     def __init__(self, aisbench_command_config: AisBenchCommandConfig):
-        self.process = shutil.which("ais_bench")
-        if self.process is None:
-            raise ValueError("Error: The 'ais_bench' executable was not found in the system PATH.")
         self.aisbench_command_config = aisbench_command_config
 
     @property
     def command(self):
         _cmd = [
-            self.process,
+            "ais_bench",
             "--models",
             self.aisbench_command_config.models,
             "--datasets",
@@ -72,15 +67,12 @@ class VllmBenchmarkCommandConfig(BaseModel):
 
 class VllmBenchmarkCommand:
     def __init__(self, benchmark_command_config: VllmBenchmarkCommandConfig):
-        self.process = shutil.which("vllm")
-        if self.process is None:
-            raise ValueError("Error: The 'vllm' executable was not found in the system PATH.")
         self.benchmark_command_config = benchmark_command_config
 
     @property
     def command(self):
         cmd = [
-            self.process,
+            "vllm",
             "bench",
             "serve",
             "--host",
@@ -116,18 +108,6 @@ class MindieCommand:
     def __init__(self, command_config: MindieCommandConfig):
         self.command_config = command_config
 
-    @property
-    def command(self):
-        mindie_service_default_path: str = "/usr/local/Ascend/mindie/latest/mindie-service"
-        mindie_service_path: str = os.getenv("MIES_INSTALL_PATH", mindie_service_default_path)
-        mindie_command_path: str = os.path.join(mindie_service_path, "bin", "mindieservice_daemon")
-        new_mindie_command: str = "mindie_llm_server"
-        if not os.path.isfile(mindie_command_path):
-            if shutil.which(new_mindie_command) is None:
-                raise FileNotFoundError(f"Command {new_mindie_command} is not available")
-            return [new_mindie_command]
-        return [mindie_command_path]
-
 
 class VllmCommandConfig(BaseModel):
     host: str = ""
@@ -139,15 +119,12 @@ class VllmCommandConfig(BaseModel):
 
 class VllmCommand:
     def __init__(self, command_config: VllmCommandConfig):
-        self.process = shutil.which("vllm")
-        if self.process is None:
-            raise ValueError("Error: The 'vllm' executable was not found in the system PATH.")
         self.command_config = command_config
 
     @property
     def command(self):
         cmd = [
-            self.process,
+            "vllm",
             "serve",
             self.command_config.model,
             "--served-model-name",

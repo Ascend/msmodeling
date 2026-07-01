@@ -73,7 +73,7 @@ class TestVllmSimulator(unittest.TestCase):
         self.mock_config.command.served_model_name = "gpt2"
         self.mock_config.command.others = ""
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_init(self, mock_which):
         """Test VllmSimulator initialization."""
         mock_which.return_value = "/usr/local/bin/vllm"
@@ -82,7 +82,7 @@ class TestVllmSimulator(unittest.TestCase):
         simulator = VllmSimulator(self.mock_config)
         self.assertEqual(simulator.config, self.mock_config)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_base_url_property(self, mock_which):
         """Test the base_url property."""
         mock_which.return_value = "/usr/local/bin/vllm"
@@ -92,7 +92,7 @@ class TestVllmSimulator(unittest.TestCase):
         expected_url = "http://localhost:8000/health"
         self.assertEqual(simulator.base_url, expected_url)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     @patch("optix.optimizer.interfaces.custom_process.CustomProcess.stop")
     def test_stop(self, mock_super_stop, mock_run, mock_which):
@@ -106,7 +106,7 @@ class TestVllmSimulator(unittest.TestCase):
             simulator.stop()
         mock_super_stop.assert_called_once()
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_stop_vllm_process_success(self, mock_run, mock_which):
         """Test _stop_vllm_process successfully stopping a process."""
@@ -121,7 +121,7 @@ class TestVllmSimulator(unittest.TestCase):
             result = simulator._stop_vllm_process(max_attempts=1, timeout=1)
             self.assertTrue(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_stop_vllm_process_with_psutil_targeting(self, mock_which):
         """Test _stop_vllm_process with active process via psutil PID-based targeting."""
         mock_which.return_value = "/usr/local/bin/vllm"
@@ -150,7 +150,7 @@ class TestVllmSimulator(unittest.TestCase):
                     mock_child.terminate.assert_called_once()
                     mock_parent.terminate.assert_called_once()
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_stop_vllm_process_psutil_fails_fallback_pkill(self, mock_which):
         """Test _stop_vllm_process fallback to pkill when psutil targeting fails."""
         mock_which.return_value = "/usr/local/bin/vllm"
@@ -171,7 +171,7 @@ class TestVllmSimulator(unittest.TestCase):
                         result = simulator._stop_vllm_process(max_attempts=1, timeout=0)
                         self.assertTrue(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_stop_vllm_process_already_stopped(self, mock_run, mock_which):
         """Test _stop_vllm_process when the process is already stopped."""
@@ -185,7 +185,7 @@ class TestVllmSimulator(unittest.TestCase):
             result = simulator._stop_vllm_process(max_attempts=1, timeout=1)
             self.assertTrue(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_stop_vllm_process_no_pkill(self, mock_which):
         """Test _stop_vllm_process when pkill is unavailable."""
         mock_which.return_value = "/usr/local/bin/vllm"
@@ -202,7 +202,7 @@ class TestVllmSimulator(unittest.TestCase):
                 result = simulator._stop_vllm_process()
                 self.assertFalse(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.shutil.which")
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_is_vllm_running_true(self, mock_run, mock_simulate_which, mock_config_which):
@@ -216,7 +216,7 @@ class TestVllmSimulator(unittest.TestCase):
         result = simulator._is_vllm_running()
         self.assertTrue(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.shutil.which")
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_is_vllm_running_false(self, mock_run, mock_simulate_which, mock_config_which):
@@ -230,7 +230,7 @@ class TestVllmSimulator(unittest.TestCase):
         result = simulator._is_vllm_running()
         self.assertFalse(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.shutil.which")
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_is_vllm_running_exception(self, mock_run, mock_simulate_which, mock_config_which):
@@ -244,7 +244,7 @@ class TestVllmSimulator(unittest.TestCase):
         result = simulator._is_vllm_running()
         self.assertFalse(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.time.time")
     def test_wait_for_process_exit_success(self, mock_time, mock_which):
         """Test _wait_for_process_exit on successful exit."""
@@ -258,7 +258,7 @@ class TestVllmSimulator(unittest.TestCase):
             result = simulator._wait_for_process_exit(timeout=1)
             self.assertTrue(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.time.time")
     def test_wait_for_process_exit_timeout(self, mock_time, mock_which):
         """Test _wait_for_process_exit timeout."""
@@ -272,7 +272,7 @@ class TestVllmSimulator(unittest.TestCase):
             result = simulator._wait_for_process_exit(timeout=1)
             self.assertFalse(result)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_log_residual_processes(self, mock_run, mock_which):
         """Test the _log_residual_processes method."""
@@ -284,7 +284,7 @@ class TestVllmSimulator(unittest.TestCase):
         simulator._log_residual_processes()
         mock_run.assert_called_once()
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     def test_log_residual_processes_exception(self, mock_run, mock_which):
         """Test _log_residual_processes exception handling."""
@@ -295,7 +295,7 @@ class TestVllmSimulator(unittest.TestCase):
         simulator = VllmSimulator(self.mock_config)
         simulator._log_residual_processes()  # Should not raise an exception.
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_update_command(self, mock_which):
         """Test the update_command method."""
         mock_which.return_value = "/usr/local/bin/vllm"
@@ -368,9 +368,9 @@ class TestSimulatorSetConfigEdgeCases(unittest.TestCase):
         mock_config.command = MagicMock()
         mock_config.process_name = "mindie"
 
-        with patch("optix.config.custom_command.os.path.isfile", return_value=True):
+        with patch("optix.deploy_env.os.path.isfile", return_value=True):
             with patch(
-                "optix.config.custom_command.shutil.which",
+                "optix.deploy_env.shutil.which",
                 return_value="/usr/bin/mindie_llm_server",
             ):
                 simulator = Simulator(config=mock_config)
@@ -394,7 +394,7 @@ class TestSimulatorSetConfigEdgeCases(unittest.TestCase):
 class TestSimulatorInterfaceHealth(unittest.TestCase):
     """Test SimulatorInterface.health method (lines 72-96)"""
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_health_returns_running_on_200(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
         from optix.optimizer.plugins.simulate import VllmSimulator
@@ -420,7 +420,7 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
             result = simulator.health()
         assert result.stage == Stage.running
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_health_returns_error_on_non_200(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
         from optix.optimizer.plugins.simulate import VllmSimulator
@@ -447,7 +447,7 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
             result = simulator.health()
         assert result.stage == Stage.error
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_health_request_exception_during_start(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
         from optix.optimizer.plugins.simulate import VllmSimulator
@@ -473,7 +473,7 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
             result = simulator.health()
         assert result.stage == Stage.start
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_health_request_exception_during_running(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
         from optix.optimizer.plugins.simulate import VllmSimulator
@@ -499,7 +499,7 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
             result = simulator.health()
         assert result.stage == Stage.error
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_enable_simulation_model(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
         from optix.optimizer.plugins.simulate import VllmSimulator
@@ -531,9 +531,9 @@ class TestMindieSimulatorInit(unittest.TestCase):
         config_path.write_text(json.dumps(config_data), encoding="utf-8")
         return config_path
 
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_init_success(self, mock_which, mock_isfile):
@@ -558,9 +558,9 @@ class TestMindieSimulatorInit(unittest.TestCase):
         assert simulator.default_config == config_data
         assert bak_path.exists()
 
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_init_config_not_found(self, mock_which, mock_isfile):
@@ -579,9 +579,9 @@ class TestMindieSimulatorBeforeRun(unittest.TestCase):
 
     @patch("optix.optimizer.plugins.simulate.subprocess.run")
     @patch("optix.optimizer.plugins.simulate.shutil.which")
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_before_run_calls_pkill_and_npu_smi(self, mock_cmd_which, mock_isfile, mock_sim_which, mock_run):
@@ -603,7 +603,7 @@ class TestMindieSimulatorBeforeRun(unittest.TestCase):
         mock_config.process_name = "mindie"
         mock_config.command = MagicMock()
 
-        mock_sim_which.side_effect = lambda cmd: f"/usr/bin/{cmd}" if cmd in ("pkill", "npu-smi") else None
+        mock_sim_which.side_effect = lambda cmd, path=None: f"/usr/bin/{cmd}" if cmd in ("pkill", "npu-smi") else None
 
         simulator = Simulator(config=mock_config)
         simulator.env = {}
@@ -622,9 +622,9 @@ class TestMindieSimulatorBeforeRun(unittest.TestCase):
         assert mock_run.call_count == 2
 
     @patch("optix.optimizer.plugins.simulate.shutil.which", return_value=None)
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_before_run_no_pkill(self, mock_cmd_which, mock_isfile, mock_sim_which):
@@ -665,9 +665,9 @@ class TestMindieSimulatorBeforeRun(unittest.TestCase):
 class TestMindieSimulatorHealth(unittest.TestCase):
     """Test Simulator.health (Mindie variant with daemon check)"""
 
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_health_running_via_daemon(self, mock_cmd_which, mock_isfile):
@@ -705,9 +705,9 @@ class TestMindieSimulatorHealth(unittest.TestCase):
                     result = simulator.health()
         assert result.stage == Stage.running
 
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_health_returns_process_result_when_running(self, mock_cmd_which, mock_isfile):
@@ -742,9 +742,9 @@ class TestMindieSimulatorHealth(unittest.TestCase):
 class TestMindieSimulatorStop(unittest.TestCase):
     """Test Simulator.stop restores config"""
 
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_stop_restores_default_config(self, mock_cmd_which, mock_isfile):
@@ -782,9 +782,9 @@ class TestMindieSimulatorStop(unittest.TestCase):
 class TestMindieSimulatorUpdateConfig(unittest.TestCase):
     """Test Simulator.update_config"""
 
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_update_config_no_params(self, mock_cmd_which, mock_isfile):
@@ -811,9 +811,9 @@ class TestMindieSimulatorUpdateConfig(unittest.TestCase):
         current = json.loads(config_path.read_text())
         assert current == config_data
 
-    @patch("optix.config.custom_command.os.path.isfile", return_value=True)
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_update_config_skips_non_backend_params(self, mock_cmd_which, mock_isfile):

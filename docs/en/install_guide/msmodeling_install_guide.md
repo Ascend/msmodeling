@@ -23,26 +23,30 @@ cd msmodeling
 
 ### 2. Recommended: uv
 
-The project recommends using `uv` to manage the virtual environment and dependencies. When the repository contains `pyproject.toml`, scripts under `scripts/` can also detect and use `uv` automatically.
+The project recommends `uv` for the virtual environment and dependencies. From the repository root, `uv sync` **creates** `.venv` if needed, installs this project in editable mode (including the `msmodeling` CLI), and syncs dependencies from `uv.lock`. You do **not** need a separate `uv venv` or `pip install -e .`. Scripts under `scripts/` also detect and use `uv` automatically.
 
 ```bash
 pip install uv
-uv venv --python 3.13 .venv
+cd msmodeling
+uv sync
 
+# Optional: pin Python version (defaults to an available interpreter on the machine)
+# UV_PYTHON=3.13 uv sync
+
+# Optional: install lint or CI dependency groups
+uv sync --group lint
+uv sync --group ci
+```
+
+After setup, use `uv run ...` (recommended), or activate the auto-created virtual environment:
+
+```bash
 # Linux / macOS
 source .venv/bin/activate
 
 # Windows
 .venv\Scripts\activate
-
-uv sync
-
-# Optional: install lint or CI dependencies
-uv sync --group lint
-uv sync --group ci
 ```
-
-After setup, you can run commands directly in the activated virtual environment, or use `uv run ...`.
 
 ### 3. Alternative: pip + requirements.txt
 
@@ -110,6 +114,18 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 
 In restricted networks, downloads can still fail even with `HF_ENDPOINT` set because of proxy policies, DNS, TLS certificates, mirror availability, model repository authentication, or dependency libraries not using this environment variable. In this case, use the following approach:
 
+## OptiX and Simulation Environment Isolation<a name="optix-and-simulation-environment-isolation"></a>
+
+If you use [OptiX service parameter optimizer](../user_guide/optix_user_guide.md):
+
+- Install msmodeling and OptiX in a uv venv from this guide, for example `.venv`: run `uv sync`. The install brings in `torch`, `transformers`, and similar packages for simulation, not for OptiX on-device runs. Installing into system Python can break vLLM and MindIE on the same machine.
+- vLLM, MindIE, and benchmarks default to the system deploy environment. You usually do not need a separate deploy venv.
+- Do not `pip install vllm` in the msmodeling venv.
+
+OptiX strips the msmodeling venv for child processes and uses system PATH; set `OPTIX_DEPLOY_PATH` only when PATH is non-standard. See [OptiX User Guide · Environment and Deploy Stack](../user_guide/optix_user_guide.md#recommended-practice-environment-and-deploy-stack).
+
+## First Simulation
+
 Prefer downloading and reviewing the model repository configuration files in an environment with internet access first. Only files ending with `.json`, `.yaml`, `.yml`, or `.txt` are required. Then point `model_id` to the local absolute path:
 
    ```bash
@@ -118,12 +134,13 @@ Prefer downloading and reviewing the model repository configuration files in an 
 
 ## Verify the Installation
 
-After installing dependencies, activate the virtual environment under the **msModeling repository root** and run the following commands to verify that CLI entry points are available:
+After installing dependencies, run the following commands from the **msModeling repository root** to verify CLI entry points (`uv run` does not require manual activation):
 
 ```bash
-python -m cli.inference.text_generate --help
-python -m cli.inference.throughput_optimizer --help
-python -m serving_cast.main --help
+uv run python -m cli.inference.text_generate --help
+uv run python -m cli.inference.throughput_optimizer --help
+uv run python -m serving_cast.main --help
+uv run msmodeling optix --help
 ```
 
 If the installation is correct, the commands above should print usage and argument lists for `text_generate`, `throughput_optimizer`, and `serving_cast` respectively, without `ModuleNotFoundError`.

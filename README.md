@@ -16,7 +16,7 @@
 
 <span style="font-size:14px;">
 
-🔹 **[2026.06.10]**：msModeling 新增 **DeepSeek-V4** 模型支持  
+🔹 **[2026.06.10]**：msModeling 新增 **DeepSeek-V4** 模型支持
 🔹 **[2026.04.02]**：msModeling 新增 **GLM5** 模型支持
 
 </span>
@@ -35,7 +35,7 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 | [**Throughput Optimizer**](./docs/zh/user_guide/msmodeling_throughput_optimizer_user_guide.md) | 吞吐优化仿真模块，在 SLO 约束下自动搜索最优并行策略与 batch 配置，支持 PD 混部、PD 分离、PD 配比三种模式。 |
 | [**ServingCast**](./docs/zh/user_guide/msmodeling_serving_cast_simulation_user_guide.md) | 服务级推理仿真模块，基于 YAML 配置模拟多实例、多请求的端到端 serving 场景，输出吞吐、TTFT、TPOT 等系统级指标。 |
 | [**Web UI**](./docs/zh/user_guide/msmodeling_web_ui_user_guide.md) | 可视化交互界面，支持通过页面配置模型、芯片、并行、量化和 workload 参数，并查看曲线、表格和导出结果。 |
-| [**OptiX**](./docs/zh/user_guide/optix_user_guide.md) | 服务化参数自动寻优工具，基于 PSO 粒子寻优算法对 vLLM、MindIE 等服务框架进行参数寻优与验证。 |
+| [**OptiX**](./docs/zh/user_guide/optix_user_guide.md) | 服务化参数自动寻优；**必须**在 uv 虚拟环境里安装 msmodeling（仓库根目录 `uv sync` 即可，会自动创建 `.venv`），避免 `torch`、`transformers` 冲掉系统部署栈；vLLM、MindIE 默认用系统环境。见[工具安装](./docs/zh/user_guide/optix_user_guide.md#工具安装)。 |
 
 ## 🚀 快速入门
 
@@ -59,9 +59,9 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 ## 🌌 智能检索
 
-为提升文档查阅效率，我们提供多种高效检索方式：  
-🔹 [AI 问答（DeepWiki）](https://deepwiki.com/Ascend/msmodeling)：自然语言问答，快速把握项目架构与模块关系。  
-🔹 [AI 问答（ZRead）](https://zread.ai/mindstudio-docs/master)：中文问答体验更优，精准定位功能用法与细节。  
+为提升文档查阅效率，我们提供多种高效检索方式：
+🔹 [AI 问答（DeepWiki）](https://deepwiki.com/Ascend/msmodeling)：自然语言问答，快速把握项目架构与模块关系。
+🔹 [AI 问答（ZRead）](https://zread.ai/mindstudio-docs/master)：中文问答体验更优，精准定位功能用法与细节。
 🔹 [精确搜索（ReadTheDocs）](https://mindstudio-docs-master.readthedocs.io)：关键词全文检索，直达接口、参数与报错等信息。
 
 ## 🛠️ 贡献指南
@@ -70,9 +70,9 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 ## ⚖️ 相关说明
 
-🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》  
-🔹 《[许可证声明](./docs/zh/legal/LICENSE)》  
-🔹 《[安全声明](./docs/zh/legal/SECURITY.md)》  
+🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》
+🔹 《[许可证声明](./docs/zh/legal/LICENSE)》
+🔹 《[安全声明](./docs/zh/legal/SECURITY.md)》
 🔹 免责声明：本工具仿真与优化结果仅供性能评估参考，最终性能表现请以真实环境实测为准
 
 ## 🤝 建议与交流
@@ -89,13 +89,13 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 本工具由以下公司/部门联合贡献，以下排名不分先后：
 
-🔹 **华为**  
-&emsp;&emsp;昇腾计算产品部  
-&emsp;&emsp;湛卢、AI Workload  
-&emsp;&emsp;2012 网络技术实验室、2012 马尔科夫实验室  
-&emsp;&emsp;小巧灵突击队、OTT 系统部  
+🔹 **华为**
+&emsp;&emsp;昇腾计算产品部
+&emsp;&emsp;湛卢、AI Workload
+&emsp;&emsp;2012 网络技术实验室、2012 马尔科夫实验室
+&emsp;&emsp;小巧灵突击队、OTT 系统部
 
-🔹 **蚂蚁集团**  
+🔹 **蚂蚁集团**
 
 🔹 **电信研究院**
 

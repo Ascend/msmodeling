@@ -729,7 +729,8 @@ class TestBeforeRunEnvHandling:
                 value=128,
             ),
         )
-        process.before_run(run_params)
+        with patch("optix.deploy_env.shutil.which", return_value="/usr/bin/vllm"):
+            process.before_run(run_params)
         assert '{"num_tokens": 128, "mode": "full"}' in process.command
         process.stop(del_log=True)
 

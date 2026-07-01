@@ -1,5 +1,5 @@
 param(
-    [string]$EnvName = "myenv",
+    [string]$EnvName = ".venv",
     [string]$PythonVersion = "",
     [switch]$UseExistingEnv,
     [switch]$SetProjectEnv,
@@ -139,8 +139,8 @@ function Assert-ExistingEnvironmentClean {
     Write-Host "Existing environment check passed: torch_npu and cudatoolkit are absent."
 }
 
-if ((-not (Test-Path "README.md")) -or (-not (Test-Path "requirements.txt"))) {
-    throw "README.md or requirements.txt not found. Run this script from msmodeling repository root."
+if ((-not (Test-Path "README.md")) -or (-not (Test-Path "pyproject.toml"))) {
+    throw "README.md or pyproject.toml not found. Run this script from msmodeling repository root."
 }
 
 $launcher = @(Resolve-PythonLauncher)
@@ -167,21 +167,22 @@ if ([string]::IsNullOrWhiteSpace($PythonVersion)) {
 $venvPython = Join-Path (Get-Location) "$EnvName\Scripts\python.exe"
 
 if (-not $UseExistingEnv) {
-    if (Test-Path $EnvName) {
-        throw "Environment path already exists: $EnvName. Rerun with -UseExistingEnv to reuse it, or remove the directory after confirming it can be rebuilt."
-    }
-
-    Write-Host "Creating virtual environment: $EnvName (Python $PythonVersion)"
-    & $uv venv --python $PythonVersion $EnvName
+    Write-Host "Installing msmodeling with uv sync (env: $EnvName, Python: $PythonVersion)..."
+    $env:UV_PROJECT_ENVIRONMENT = $EnvName
+    $env:UV_PYTHON = $PythonVersion
+    & $uv sync
 
     if (-not (Test-Path $venvPython)) {
-        throw "Virtual environment python not found: $venvPython"
+        throw "Virtual environment python not found after uv sync: $venvPython"
     }
 
-    Write-Host "Installing dependencies with uv pip..."
-    & $uv pip install --python $venvPython -r requirements.txt -i $PypiMirror
+    Write-Host "Verifying msmodeling CLI..."
+    & $uv run msmodeling --help | Out-Null
 } else {
-    Write-Host "Using existing environment fallback: pip install -r requirements.txt"
+    Write-Host "Using legacy fallback: pip install -r requirements.txt (does not install msmodeling CLI; prefer uv sync)"
+    if (-not (Test-Path "requirements.txt")) {
+        throw "requirements.txt not found for legacy fallback."
+    }
     if (Test-Path $venvPython) {
         Assert-ExistingEnvironmentClean -Launcher @($venvPython)
         & $venvPython -m pip install -r requirements.txt
@@ -212,4 +213,4 @@ if ($UseHFMirror) {
     Write-Host "HF_ENDPOINT set for current session: $env:HF_ENDPOINT"
 }
 
-Write-Host "Done. Activation command (Windows): $EnvName\Scripts\activate"
+Write-Host "Done. Activation: $EnvName\Scripts\activate  |  Or: uv run <command>"

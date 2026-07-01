@@ -19,9 +19,9 @@ import re
 import subprocess
 import tempfile
 import time
-from math import isnan, isinf
+from math import isinf, isnan
 from pathlib import Path
-from typing import Any, Tuple, Optional, List
+from typing import Any, Optional
 
 import psutil
 from loguru import logger
@@ -31,8 +31,9 @@ from ...config.base_config import (
     MODEL_EVAL_STATE_CONFIG_PATH,
     ms_serviceparam_optimizer_config_path,
 )
+from ...deploy_env import materialize_command, resolve_deploy_context
 from ...io_utils import open_file
-from ..utils import close_file_fp, remove_file, kill_children, backup, kill_process
+from ..utils import backup, close_file_fp, kill_children, kill_process, remove_file
 
 # Mapping from field name to CLI flag name, used to remove CLI flags when removing invalid values
 FIELD_TO_CLI_FLAG = {
@@ -50,21 +51,21 @@ class CustomProcess:
     def __init__(
         self,
         bak_path: Optional[Path] = None,
-        command: Optional[List[str]] = None,
+        command: Optional[list[str]] = None,
         work_path: Optional[Path] = None,
         print_log: bool = False,
         process_name: str = "",
     ):
         self.command = command
         self.bak_path = bak_path
-        self.work_path = work_path if work_path else os.getcwd()
+        self.work_path = work_path or os.getcwd()
         self.run_log = None
         self.run_log_offset = None
         self.run_log_fp = None
         self.process = None
         self.print_log = print_log
         self.process_name = process_name
-        self.env = os.environ.copy()
+        self._runtime_ctx, self.env = resolve_deploy_context()
         from ...config.constant import ProcessState, Stage
 
         self._process_stage = ProcessState(stage=Stage.stop)
@@ -118,8 +119,8 @@ class CustomProcess:
         Compatible with all JSON-like parameter input forms: bare JSON/quoted JSON/escaped JSON/fullwidth symbol JSON.
         Does not rely on hardcoded JSON parameter lists; auto-detects whether to split based on value format.
         """
-        import re
         import json
+        import re
 
         def clean_json_string(json_str):
             """
@@ -223,7 +224,7 @@ class CustomProcess:
         # Backup operation, default to backing up log
         backup(self.run_log, self.bak_path, self.__class__.__name__)
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None):
+    def before_run(self, run_params: Optional[tuple[OptimizerConfigField, ...]] = None):
         from ...config.config import get_settings
 
         """
@@ -234,6 +235,12 @@ class CustomProcess:
         self.run_log_fp, self.run_log = tempfile.mkstemp(prefix="ms_serviceparam_optimizer_")
         self.run_log_offset = 0
         if not run_params:
+            if CUSTOM_OUTPUT not in self.env:
+                self.env[CUSTOM_OUTPUT] = str(get_settings().output)
+            if MODEL_EVAL_STATE_CONFIG_PATH not in self.env:
+                self.env[MODEL_EVAL_STATE_CONFIG_PATH] = str(ms_serviceparam_optimizer_config_path)
+            if self.command:
+                self.command = materialize_command(self.command, self.env, self._runtime_ctx)
             return
         for k in run_params:
             if k.config_position == "env":
@@ -305,7 +312,10 @@ class CustomProcess:
         if MODEL_EVAL_STATE_CONFIG_PATH not in self.env:
             self.env[MODEL_EVAL_STATE_CONFIG_PATH] = str(ms_serviceparam_optimizer_config_path)
 
-    def run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None, **kwargs):
+        if self.command:
+            self.command = materialize_command(self.command, self.env, self._runtime_ctx)
+
+    def run(self, run_params: Optional[tuple[OptimizerConfigField, ...]] = None, **kwargs):
         # Start the test
         if self.process_name:
             try:
@@ -448,7 +458,7 @@ class BaseDataField:
             self.config = settings.ais_bench
 
     @property
-    def data_field(self) -> Tuple[OptimizerConfigField, ...]:
+    def data_field(self) -> tuple[OptimizerConfigField, ...]:
         """
         Get data field property
         """
@@ -457,7 +467,7 @@ class BaseDataField:
         return ()
 
     @data_field.setter
-    def data_field(self, value: Tuple[OptimizerConfigField] = ()) -> None:
+    def data_field(self, value: tuple[OptimizerConfigField] = ()) -> None:
         """
         Provide new data, update and replace data field properties.
         """

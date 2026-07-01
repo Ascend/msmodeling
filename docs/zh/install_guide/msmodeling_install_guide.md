@@ -23,26 +23,30 @@ cd msmodeling
 
 ### 2. 推荐方式：uv
 
-项目推荐使用 `uv` 管理虚拟环境和依赖。仓库包含 `pyproject.toml` 时，`scripts/` 下的脚本也会自动识别并使用 `uv`。
+项目推荐使用 `uv` 管理虚拟环境和依赖。在仓库根目录执行 `uv sync` 会**自动创建** `.venv`、以可编辑模式安装本项目（含 `msmodeling` CLI），并同步 `uv.lock` 中的依赖；**无需**先执行 `uv venv` 或 `pip install -e .`。`scripts/` 下的脚本也会自动识别并使用 `uv`。
 
 ```bash
 pip install uv
-uv venv --python 3.13 .venv
-
-# Linux / macOS
-source .venv/bin/activate
-
-# Windows
-.venv\Scripts\activate
-
+cd msmodeling
 uv sync
+
+# 可选：指定 Python 版本（默认使用本机可用版本）
+# UV_PYTHON=3.13 uv sync
 
 # 可选：安装 lint 或 CI 相关依赖
 uv sync --group lint
 uv sync --group ci
 ```
 
-完成后，可在已激活的虚拟环境中直接运行命令，也可以使用 `uv run ...` 执行命令。
+完成后可直接使用 `uv run ...`（推荐），或激活自动创建的虚拟环境：
+
+```bash
+# Linux / macOS
+source .venv/bin/activate
+
+# Windows
+.venv\Scripts\activate
+```
 
 ### 3. 备选方式：pip + requirements.txt
 
@@ -110,6 +114,18 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 
 在受限网络中，即使设置 `HF_ENDPOINT`，仍可能因代理策略、DNS、TLS 证书、镜像站不可达、模型仓库需要鉴权，或依赖库未使用该环境变量而下载失败。此时建议使用以下方案：
 
+## OptiX 与仿真环境分离<a name="optix-与仿真环境分离"></a>
+
+若使用 [OptiX 服务化自动寻优](../user_guide/optix_user_guide.md)：
+
+- msmodeling、OptiX **必须**装在 uv 虚拟环境里，例如 `.venv`：执行 `uv sync` 即可。安装会带上 `torch`、`transformers` 等，它们给仿真用，不是 OptiX 寻优用的。写进系统 Python 会冲掉部署栈里的版本，vLLM、MindIE 可能起不来或推理报错。
+- vLLM、MindIE、测评工具默认走 **系统里已部署好的环境**，一般不必再建部署 venv。
+- 不要在 msmodeling venv 里 `pip install vllm`。
+
+OptiX 子进程会自动剥离 msmodeling venv，走系统 PATH；仅当 PATH 特殊时可配置 `OPTIX_DEPLOY_PATH`。详见《[OptiX 使用指南 · 推荐实践：环境与部署栈](../user_guide/optix_user_guide.md#推荐实践环境与部署栈)》。
+
+## 第一次仿真
+
 优先在可访问外网的环境中提前下载并审核模型仓库中的配置文件（仅需 `.json`、`.yaml`、`.yml`、`.txt` 后缀），再将 `model_id` 指向本地绝对路径：
 
    ```bash
@@ -118,12 +134,13 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 
 ## 验证安装
 
-依赖安装完成后，请在 **msModeling 仓库根目录** 下激活虚拟环境，执行以下命令确认 CLI 入口可用：
+依赖安装完成后，在 **msModeling 仓库根目录** 执行以下命令确认 CLI 入口可用（`uv run` 无需手动激活虚拟环境）：
 
 ```bash
-python -m cli.inference.text_generate --help
-python -m cli.inference.throughput_optimizer --help
-python -m serving_cast.main --help
+uv run python -m cli.inference.text_generate --help
+uv run python -m cli.inference.throughput_optimizer --help
+uv run python -m serving_cast.main --help
+uv run msmodeling optix --help
 ```
 
 若安装正常，上述命令应分别输出 `text_generate`、`throughput_optimizer`、`serving_cast` 的用法说明与参数列表，且不报 `ModuleNotFoundError`。

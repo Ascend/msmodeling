@@ -9,9 +9,10 @@ description: Automates the configuration of msmodeling optix config.toml for par
 
 使用本 skill 前，请确保：
 
-1. **已完成 optix 安装**（推荐按 `docs/zh/user_guide/optix_user_guide.md` 在 OptiX 源码目录执行 `pip install -e .`）
-2. **config.toml 文件已存在**（位于 `optix/config.toml`，也可通过 `-c` 参数指定其他路径）
-3. **了解寻优参数类型**（见下文参数类型说明）
+1. **已完成 optix 安装**：在 msmodeling 仓库根目录执行 `uv sync`（自动创建 `.venv` 并安装 msmodeling，无需 `pip install -e .`）。不要在该 venv 里装 vllm。
+2. **部署栈默认在系统环境**：机器上应已部署 vLLM、MindIE 和测评工具。只有 PATH 特殊时才配 `OPTIX_DEPLOY_PATH` 或 `config.toml` 的 `[deploy] path_prefix`，`OPTIX_DEPLOY_PATH` 优先。
+3. **config.toml 文件已存在**（位于 `optix/config.toml`，也可通过 `-c` 参数指定其他路径）
+4. **了解寻优参数类型**（见下文参数类型说明）
 
 ## 快速开始
 

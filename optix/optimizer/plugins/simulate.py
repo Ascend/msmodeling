@@ -14,26 +14,27 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 import json
+import shutil
 import subprocess
 import time
 from copy import deepcopy
-from typing import Any, Optional, Tuple
-import shutil
 from dataclasses import dataclass
+from typing import Any, Optional
 
 from loguru import logger
 
-from ..interfaces.simulator import SimulatorInterface
-from ..utils import remove_file, backup
-from ...config.custom_command import VllmCommand, MindieCommand
 from ...config.config import (
-    get_settings,
+    MindieConfig,
     OptimizerConfigField,
     VllmConfig,
-    MindieConfig,
+    get_settings,
 )
 from ...config.constant import Stage
+from ...config.custom_command import VllmCommand
+from ...deploy_env import materialize_command, resolve_mindie_argv
 from ...io_utils import open_file
+from ..interfaces.simulator import SimulatorInterface
+from ..utils import backup, remove_file
 
 """
 Mindie simulation engine - provides interfaces for starting/stopping mindie simulation services.
@@ -86,7 +87,7 @@ class Simulator(SimulatorInterface):
             self.config.config_bak_path.unlink()
         with open_file(self.config.config_bak_path, "w") as fout:
             json.dump(self.default_config, fout, indent=4)
-        self.command = MindieCommand(self.config.command).command
+        self.update_command()
 
     @property
     def base_url(self) -> str:
@@ -95,7 +96,6 @@ class Simulator(SimulatorInterface):
         Returns:
 
         """
-        pass
 
     @staticmethod
     def is_int(x):
@@ -221,13 +221,13 @@ class Simulator(SimulatorInterface):
             raise ValueError(f"Not Support type {type(origin_config)}")
 
     def update_command(self):
-        self.command = MindieCommand(self.config.command).command
+        self.command = resolve_mindie_argv(self.env)
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField]] = None):
+    def before_run(self, run_params: Optional[tuple[OptimizerConfigField]] = None):
         self.update_config(run_params)
         super().before_run(run_params)
 
-        pkill_path = shutil.which("pkill")
+        pkill_path = shutil.which("pkill", path=self.env.get("PATH") or None)
         if not pkill_path:
             logger.warning("pkill command not found in PATH")
             return
@@ -240,7 +240,7 @@ class Simulator(SimulatorInterface):
             cwd=self.work_path,
         )
 
-        npu_smi_path = shutil.which("npu-smi")
+        npu_smi_path = shutil.which("npu-smi", path=self.env.get("PATH") or None)
         if not npu_smi_path:
             logger.warning("npu-smi command not found in PATH")
             return
@@ -273,7 +273,7 @@ class Simulator(SimulatorInterface):
                 return proxy_status
         return process_res
 
-    def update_config(self, params: Optional[Tuple[OptimizerConfigField]] = None):
+    def update_config(self, params: Optional[tuple[OptimizerConfigField]] = None):
         if not params:
             return
         new_config = deepcopy(self.default_config)
@@ -304,7 +304,7 @@ class VllmSimulator(SimulatorInterface):
             self.config = settings.vllm
         super().__init__(*args, process_name=self.config.process_name, **kwargs)
 
-        self.command = VllmCommand(self.config.command).command
+        self.update_command()
 
     @property
     def base_url(self) -> str:
@@ -370,7 +370,7 @@ class VllmSimulator(SimulatorInterface):
             except Exception as e:
                 logger.warning(f"Unexpected error in targeted stop, fallback to pkill: {e}")
 
-        pkill_path = shutil.which("pkill")
+        pkill_path = shutil.which("pkill", path=self.env.get("PATH") or None)
         if not pkill_path:
             logger.error("pkill command not found in PATH")
             return False
@@ -391,6 +391,7 @@ class VllmSimulator(SimulatorInterface):
                         stdout=subprocess.PIPE,
                         text=True,
                         timeout=10,
+                        env=self.env,
                     )
                     if result.returncode == 0 or result.returncode == 1:
                         logger.debug(f"Signal {signal} sent successfully (rc={result.returncode})")
@@ -410,7 +411,7 @@ class VllmSimulator(SimulatorInterface):
 
     def _is_vllm_running(self) -> bool:
         """Check if vllm process is running"""
-        pgrep_path = shutil.which("pgrep")
+        pgrep_path = shutil.which("pgrep", path=self.env.get("PATH") or None)
         if not pgrep_path:
             logger.warning("pgrep command not found in PATH")
             return False
@@ -421,6 +422,7 @@ class VllmSimulator(SimulatorInterface):
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=5,
+                env=self.env,
             )
             count = int((result.stdout or "0").strip() or "0")
             return count > 0
@@ -429,7 +431,6 @@ class VllmSimulator(SimulatorInterface):
 
     def _wait_for_process_exit(self, timeout: int) -> bool:
         """Wait for process to exit, returns whether exit was successful"""
-
         start = time.time()
         while time.time() - start < timeout:
             if not self._is_vllm_running():
@@ -439,7 +440,7 @@ class VllmSimulator(SimulatorInterface):
 
     def _log_residual_processes(self):
         """Log residual process info for diagnostics"""
-        pgrep_path = shutil.which("pgrep")
+        pgrep_path = shutil.which("pgrep", path=self.env.get("PATH") or None)
         if not pgrep_path:
             logger.warning("pgrep command not found in PATH")
             return
@@ -451,6 +452,7 @@ class VllmSimulator(SimulatorInterface):
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=5,
+                env=self.env,
             )
             if result.stdout:
                 logger.warning(f"Residual vllm processes:\n{result.stdout}")
@@ -459,3 +461,4 @@ class VllmSimulator(SimulatorInterface):
 
     def update_command(self):
         self.command = VllmCommand(self.config.command).command
+        self.command = materialize_command(self.command, self.env, self._runtime_ctx)
