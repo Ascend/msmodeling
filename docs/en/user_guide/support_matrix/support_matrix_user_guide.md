@@ -10,6 +10,8 @@ This document summarizes the currently supported model types and simulation feat
 
 ## Currently Supported Models
 
+> Note: OptiX supports all models that can be deployed in the target serving framework, and is not limited by the model scope listed below.
+
 | Model Type | Model Family | Supported Models |
 | --- | --- | --- |
 | Text Models | DeepSeek | DeepSeek V4, DeepSeek V3.2, DeepSeek V3 |
