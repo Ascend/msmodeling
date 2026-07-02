@@ -28,8 +28,10 @@ def test_run_test_without_test_map_path_returns_1(
     repo_root: Path,
     with_uv: None,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del repo_root
+    monkeypatch.delenv("MSMODELING_TEST_MAP_PATH", raising=False)
     with caplog.at_level("ERROR"):
         assert run_test(build_options(is_test=True)) == 1
     assert "test_map_path" in caplog.text

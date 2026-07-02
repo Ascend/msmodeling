@@ -135,6 +135,15 @@ def test_collect_allowed_node_ids_includes_ignore_addopts(
     assert PYTEST_IGNORE_ADDOPTS[0] in captured[0]
 
 
+def test_collect_allowed_node_ids_includes_build_helper_regression_tests() -> None:
+    """tests/.../helpers/build must not be skipped by pytest norecursedirs=build."""
+    from scripts.helpers.common.test_map_config import TEST_MAP_COLLECTION_MARKER
+
+    allowed = _collect_allowed_node_ids(TEST_MAP_COLLECTION_MARKER)
+    build_nodes = [node_id for node_id in allowed if "scripts/helpers/build/" in node_id]
+    assert build_nodes, "build helper regression tests must be collectable for test_map sync"
+
+
 def test_collect_test_map_skips_collect_when_allowed_node_ids_provided(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

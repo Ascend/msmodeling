@@ -59,6 +59,8 @@ packages = ["tensor_cast", "serving_cast", "cli", "optix", "web_ui"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# Default norecursedirs includes "build", which skips tests/regression/scripts/helpers/build/.
+norecursedirs = ["__pycache__"]
 markers = [
     "nightly: do_compile=True large model cases, only run in nightly",
     "npu: requires NPU hardware",
