@@ -7,14 +7,15 @@ import os
 import shutil
 import subprocess
 import time
-import tomllib
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from scripts.helpers._config import ConfigError
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.build.argv import BuildOptions, parse_argv
 from scripts.helpers.common._logging import setup_logger
+from scripts.helpers.common.pyproject_toml import read_project_version
 from scripts.helpers.common.subprocess_stream import run_merged_output
 
 if TYPE_CHECKING:
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 _BUILD_SCRIPT: Final = REPO_ROOT / "scripts" / "build.sh"
 _CI_GATE_SCRIPT: Final = REPO_ROOT / "scripts" / "run_ci_gate.sh"
 _ARTIFACTS_DIR: Final = REPO_ROOT / "artifacts"
-_WHEELS_DIR: Final = _ARTIFACTS_DIR / "wheels"
+_WHEEL_OUTPUT_DIR: Final = _ARTIFACTS_DIR
 _TEST_REPORTS_DIR: Final = _ARTIFACTS_DIR / "test-reports"
 _SHELL_TIMEOUT_SECONDS: Final = 36000
 _VERSION_CMD_TIMEOUT_SECONDS: Final = 120
@@ -44,16 +45,6 @@ def _require_uv() -> bool:
         return True
     logger.error("uv not found in PATH")
     return False
-
-
-def _read_pyproject_version() -> str:
-    with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
-        data = tomllib.load(handle)
-    version = data.get("project", {}).get("version")
-    if not isinstance(version, str):
-        msg = "pyproject.toml project.version must be a string"
-        raise TypeError(msg)
-    return version
 
 
 def _clear_wheel_output_dir(wheel_dir: Path) -> None:
@@ -180,8 +171,8 @@ def run_build(options: BuildOptions) -> int:
         return 1
 
     try:
-        pyproject_version = _read_pyproject_version()
-    except (OSError, TypeError):
+        pyproject_version = read_project_version(repo_root=REPO_ROOT)
+    except ConfigError:
         logger.exception("failed to read version from pyproject.toml")
         return 1
 
@@ -195,9 +186,9 @@ def run_build(options: BuildOptions) -> int:
 
     # ``local`` is parsed for department spec compatibility; no behavioral branch.
     should_stage_version = options.version_explicit and target_version != pyproject_version
-    _clear_wheel_output_dir(_WHEELS_DIR)
+    _clear_wheel_output_dir(_WHEEL_OUTPUT_DIR)
     env = os.environ.copy()
-    env["MSMODELING_WHEEL_OUTPUT_DIR"] = str(_WHEELS_DIR)
+    env["MSMODELING_WHEEL_OUTPUT_DIR"] = str(_WHEEL_OUTPUT_DIR)
 
     exit_code, restore_failed = _run_with_version_staging(
         pyproject_version=pyproject_version,
@@ -211,13 +202,13 @@ def run_build(options: BuildOptions) -> int:
     if exit_code != 0:
         return exit_code
 
-    wheel_path = _newest_wheel(_WHEELS_DIR)
+    wheel_path = _newest_wheel(_WHEEL_OUTPUT_DIR)
     manifest = {
         "wheel_path": str(wheel_path) if wheel_path is not None else "",
         "version": target_version,
         "pyproject_version": pyproject_version,
         "version_explicit": options.version_explicit,
-        "timestamp": datetime.now(tz=UTC).isoformat(),
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
     _ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     (_ARTIFACTS_DIR / "build-manifest.json").write_text(

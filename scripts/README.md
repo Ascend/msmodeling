@@ -2,7 +2,7 @@
 
 Shell entry points for local runs, PR incremental gate, nightly, and `test_map` maintenance. Python logic lives in `scripts/helpers/`; `scripts/lib/common.sh` bootstraps env, optional `uv sync --frozen --group ci`, and invokes helpers.
 
-**Department unified entry:** repo-root [`build.py`](../build.py) wraps `scripts/build.sh` (default) and `scripts/run_ci_gate.sh` (`test`). Use `python build.py` locally or in CI instead of calling the shell scripts directly.
+**Department unified entry:** repo-root [`build.py`](../build.py) wraps `scripts/build.sh` (default) and `scripts/run_ci_gate.sh` (`test`). Prefer `uv run python build.py` locally or in CI instead of calling the shell scripts directly. On Python 3.10, `build.py` parses `pyproject.toml` via `tomli` from the `ci` dependency group — run `uv sync --frozen --group ci` first.
 
 Test case layout, markers, and authoring rules: see [tests/README.md](../tests/README.md).
 
@@ -25,12 +25,12 @@ Test rules/markers: [tests/README.md](../tests/README.md)
 
 ## Unified entry (`build.py`)
 
-Department-standard root entry. Thin wrapper over existing shell scripts:
+Department-standard root entry. Thin wrapper over existing shell scripts. Requires Python ≥ 3.10; on 3.10 install `tomli` via `uv sync --frozen --group ci` before running.
 
 | Command | Delegates to |
 |---------|--------------|
-| `python build.py` | `bash scripts/build.sh` → wheel under `artifacts/wheels/` |
-| `python build.py test` | `bash scripts/run_ci_gate.sh` → log under `artifacts/test-reports/` |
+| `uv run python build.py` | `bash scripts/build.sh` → wheel under `artifacts/` |
+| `uv run python build.py test` | `bash scripts/run_ci_gate.sh` → log under `artifacts/test-reports/` |
 
 `local` is accepted for spec compatibility but is a no-op in this pure-Python repo (same behavior as omitting it).
 
@@ -131,8 +131,8 @@ Boolean: `0`/`1`/`true`/`false`/`yes`/`no`/`on`/`off` (case-insensitive).
 
 ```bash
 # local
-python build.py
-python build.py test -e test_map_path=/data/test_map.json
+uv run python build.py
+uv run python build.py test -e test_map_path=/data/test_map.json
 bash scripts/run_smoke.sh
 bash scripts/run_regression.sh
 bash scripts/run_benchmark.sh

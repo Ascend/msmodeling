@@ -147,7 +147,7 @@ def fake_build_bash(
     stdout: str = "",
 ) -> Callable[[list[str], dict[str, Any]], subprocess.CompletedProcess[str]]:
     def handler(cmd: list[str], _kwargs: dict[str, Any]) -> subprocess.CompletedProcess[str]:
-        wheel_dir = repo_root / "artifacts" / "wheels"
+        wheel_dir = repo_root / "artifacts"
         wheel_dir.mkdir(parents=True, exist_ok=True)
         wheel_path = wheel_dir / wheel_name
         wheel_path.write_bytes(b"wheel-bytes")
@@ -171,7 +171,7 @@ def repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(build_main, "_BUILD_SCRIPT", scripts_dir / "build.sh")
     monkeypatch.setattr(build_main, "_CI_GATE_SCRIPT", scripts_dir / "run_ci_gate.sh")
     monkeypatch.setattr(build_main, "_ARTIFACTS_DIR", tmp_path / "artifacts")
-    monkeypatch.setattr(build_main, "_WHEELS_DIR", tmp_path / "artifacts" / "wheels")
+    monkeypatch.setattr(build_main, "_WHEEL_OUTPUT_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(build_main, "_TEST_REPORTS_DIR", tmp_path / "artifacts" / "test-reports")
     return tmp_path
 

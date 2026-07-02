@@ -114,7 +114,7 @@ def test_run_build_delegates_to_build_sh(
     assert run_build(build_options(version="3.2.1", version_explicit=True)) == 0
     call = subprocess_capture.shell_calls[0]
     assert call["cmd"] == ["bash", str(repo_root / "scripts" / "build.sh")]
-    assert call["kwargs"]["env"]["MSMODELING_WHEEL_OUTPUT_DIR"] == str(repo_root / "artifacts" / "wheels")
+    assert call["kwargs"]["env"]["MSMODELING_WHEEL_OUTPUT_DIR"] == str(repo_root / "artifacts")
     manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
     assert manifest["version"] == "3.2.1"
     assert manifest["pyproject_version"] == "0.2.0"
@@ -134,7 +134,7 @@ def test_run_build_stages_and_restores_pyproject_version(
 
     assert run_build(build_options(version="9.9.9", version_explicit=True)) == 0
     assert subprocess_capture.version_calls == ["9.9.9", "0.2.0"]
-    wheel_dir = repo_root / "artifacts" / "wheels"
+    wheel_dir = repo_root / "artifacts"
     assert (wheel_dir / "msmodeling-9.9.9-py3-none-any.whl").is_file()
     manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
     assert manifest["version"] == "9.9.9"
@@ -353,7 +353,7 @@ def test_e2e_explicit_version_stages_pyproject(
         repo_root,
         wheel_name="msmodeling-26.1.1-py3-none-any.whl",
     )
-    wheel_dir = repo_root / "artifacts" / "wheels"
+    wheel_dir = repo_root / "artifacts"
     wheel_dir.mkdir(parents=True, exist_ok=True)
     (wheel_dir / "msmodeling-1.0.0-py3-none-any.whl").write_bytes(b"stale")
 
@@ -375,7 +375,7 @@ def test_e2e_default_version_keeps_pyproject_wheel_name(
         repo_root,
         wheel_name="msmodeling-0.2.0-py3-none-any.whl",
     )
-    wheel_dir = repo_root / "artifacts" / "wheels"
+    wheel_dir = repo_root / "artifacts"
     wheel_dir.mkdir(parents=True, exist_ok=True)
     (wheel_dir / "msmodeling-9.9.9-py3-none-any.whl").write_bytes(b"stale")
 
@@ -456,3 +456,115 @@ def test_main_build_via_cli_runner(
     result = run_cli_main(main, [], prog="build.py")
     assert result.returncode == 0
     assert capture.shell_calls[0]["cmd"] == ["bash", str(repo_root / "scripts" / "build.sh")]
+
+
+def test_run_build_malformed_pyproject_returns_1(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    (repo_root / "pyproject.toml").write_text("[project\nversion = bad\n", encoding="utf-8")
+    with caplog.at_level("ERROR"):
+        assert run_build(build_options()) == 1
+    assert subprocess_capture.shell_calls == []
+
+
+def test_run_build_missing_version_returns_1_without_build_sh(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    (repo_root / "pyproject.toml").write_text('[project]\nname = "msmodeling"\n', encoding="utf-8")
+    with caplog.at_level("ERROR"):
+        assert run_build(build_options()) == 1
+    assert subprocess_capture.shell_calls == []
+
+
+def test_run_build_version_explicit_without_value_returns_1(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    del repo_root
+    with caplog.at_level("ERROR"):
+        assert run_build(build_options(version=None, version_explicit=True)) == 1
+    assert "internal error" in caplog.text
+    assert subprocess_capture.shell_calls == []
+
+
+def test_run_build_read_project_version_from_repo_root(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    seen_roots: list[Path | None] = []
+
+    def fake_read_project_version(*, repo_root: Path | None = None) -> str:
+        seen_roots.append(repo_root)
+        return "4.5.6"
+
+    monkeypatch.setattr("scripts.helpers.build.main.read_project_version", fake_read_project_version)
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-4.5.6-py3-none-any.whl",
+    )
+
+    assert run_build(build_options()) == 0
+    assert seen_roots == [repo_root]
+    manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pyproject_version"] == "4.5.6"
+    assert manifest["version"] == "4.5.6"
+
+
+def test_run_build_read_project_version_config_error_returns_1(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_capture: SubprocessRunCapture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from scripts.helpers._config import ConfigError
+
+    def raise_config(*, repo_root: Path | None = None) -> str:
+        del repo_root
+        raise ConfigError("pyproject.toml: invalid project table")
+
+    monkeypatch.setattr("scripts.helpers.build.main.read_project_version", raise_config)
+    with caplog.at_level("ERROR"):
+        assert run_build(build_options()) == 1
+    assert "failed to read version from pyproject.toml" in caplog.text
+    assert subprocess_capture.shell_calls == []
+
+
+def test_run_build_reads_version_when_tomllib_missing(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    class FakeTomli:
+        @staticmethod
+        def loads(text: str) -> dict[str, object]:
+            del text
+            return {"project": {"version": "0.2.0"}}
+
+        class TOMLDecodeError(ValueError):
+            pass
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "tomllib":
+            msg = "No module named 'tomllib'"
+            raise ModuleNotFoundError(msg)
+        if name == "tomli":
+            return FakeTomli()
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-0.2.0-py3-none-any.whl",
+    )
+    assert run_build(build_options()) == 0
+    assert subprocess_capture.shell_calls
