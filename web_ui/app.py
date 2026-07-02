@@ -450,10 +450,6 @@ def build_app() -> gr.Blocks:
                             label="log-level",
                         )
                     with gr.Row():
-                        tg_enable_multistream = gr.Checkbox(
-                            label="enable-multistream",
-                            value=True,
-                        )
                         tg_compile_allow_graph_break = gr.Checkbox(
                             label="compile-allow-graph-break",
                             value=False,
@@ -681,7 +677,6 @@ def build_app() -> gr.Blocks:
                 tg_prefix_cache_hit_rate,
                 tg_reserved_memory_gb,
                 tg_log_level,
-                tg_enable_multistream,
                 tg_compile_allow_graph_break,
                 tg_disable_repetition,
                 tg_quantize_lmhead,
@@ -1246,7 +1241,6 @@ def build_app() -> gr.Blocks:
                                 placeholder="Required in PD Ratio mode",
                             )
                         with gr.Row():
-                            op_enable_multistream = gr.Checkbox(label="enable-multistream", value=True)
                             op_compile_break = gr.Checkbox(label="Allow Graph Breaks", value=False)
                             op_max_batched_tokens = gr.Textbox(
                                 label="Max Batched Tokens (max-batched-tokens)",
@@ -1542,7 +1536,6 @@ def build_app() -> gr.Blocks:
                     op_prefix_cache_hit_rate,
                     op_prefill_devices_per_instance,
                     op_decode_devices_per_instance,
-                    op_enable_multistream,
                     op_compile_break,
                     op_mxfp4_group_size,
                     op_reserved_memory_gb,

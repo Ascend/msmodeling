@@ -297,7 +297,6 @@ Model & Quantization Options:
   --compile             If set, invoke torch.compile() on the model before inference. (default: False)
   --compile-allow-graph-break
                         If set, allows graph breaks during torch.compile() to improve compilation speed or handle unsupported ops. (default: False)
-  --enable-multistream  Enable compiler-driven multi-stream simulation for torch.compile path. Enabled by default. (default: True)
   --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9}
                         Number of MTP tokens, 0 means disabled - only support models having MTP like DeepSeek (default: 0)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -378,7 +377,6 @@ PD Ratio Optimization Options:
 | `--dump-original-results` | Options | 可选 | 输出原始搜索结果，便于进一步分析。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `model_id` | General Options | 必选 | 模型 ID 或已审核的本地模型绝对路径。<br>1. 类型：Str。<br>2. 参考值：Hugging Face ID、ModelScope ID 或本地绝对路径。<br>3. 默认值：无。<br>4. 使用远端模型 ID 时，可能通过 `trust_remote_code=True` 执行远端代码。 |
 | `--num-devices` | General Options | 可选 | 指定参与仿真的设备总数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
-| `--enable-multistream` | General Options | 可选 | 在 compile 路径启用编译期多流仿真。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`True`。 |
 | `--reserved-memory-gb` | General Options | 可选 | 指定每张设备预留给系统使用的显存，单位为 GB。<br>1. 类型：Float。<br>2. 取值范围：非负数；设置为 `0` 表示不预留系统显存。<br>3. 默认值：`10.0`。 |
 | `--log-level` | General Options | 可选 | 指定日志级别。<br>1. 类型：Str。<br>2. 参考值：`debug`、`info`、`warning`、`error`、`critical`。<br>3. 默认值：`error`。 |
 | `--compile` | Model & Quantization Options | 可选 | 在推理前对模型调用 `torch.compile()`。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |

@@ -236,7 +236,6 @@ Model & Quantization Options:
   --compile             If set, invoke torch.compile() on the model before inference. (default: False)
   --compile-allow-graph-break
                         If set, allows graph breaks during torch.compile() to improve compilation speed or handle unsupported ops. (default: False)
-  --enable-multistream  Enable compiler-driven multi-stream simulation for torch.compile path. Enabled by default. (default: True)
   --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9}
                         Number of MTP tokens, 0 means disabled - only support models having MTP like DeepSeek (default: 0)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -305,7 +304,6 @@ Main parameters:
 | `--dump-original-results` | Options | Optional | Dumps original search results for further analysis.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `model_id` | General Options | Required | Model ID or reviewed local model absolute path.<br>1. Type: Str.<br>2. Reference values: Hugging Face ID, ModelScope ID, or local absolute path.<br>3. Default: none.<br>4. Remote model IDs may execute remote code through `trust_remote_code=True`. |
 | `--num-devices` | General Options | Optional | Total number of devices for simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
-| `--enable-multistream` | General Options | Optional | Enables compiler-driven multi-stream simulation on the compile path.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `True`. |
 | `--reserved-memory-gb` | General Options | Optional | Device memory reserved for system use, in GB.<br>1. Type: Float.<br>2. Valid range: non-negative number; set to `0` to disable reservation.<br>3. Default: `10.0`. |
 | `--log-level` | General Options | Optional | Log level.<br>1. Type: Str.<br>2. Reference values: `debug`, `info`, `warning`, `error`, `critical`.<br>3. Default: `error`. |
 | `--compile` | Model & Quantization Options | Optional | Invokes `torch.compile()` before inference.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |

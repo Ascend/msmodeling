@@ -211,7 +211,6 @@ The following Throughput Optimizer arguments are set to defaults since they are 
 | `image_height` | `None` | Multimodal not supported in CSV |
 | `image_width` | `None` | Multimodal not supported in CSV |
 | `prefix_cache_hit_rate` | `0.0` | Not commonly varied per case |
-| `enable_multistream` | `True` | Default from Throughput Optimizer |
 | `enable_optimize_prefill_decode_ratio` | `False` | PD ratio optimization not exposed |
 | `prefill_devices_per_instance` | `None` | PD ratio optimization not exposed |
 | `decode_devices_per_instance` | `None` | PD ratio optimization not exposed |

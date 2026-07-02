@@ -46,7 +46,6 @@ def user_config_build_cache_key(user_config: UserInputConfig) -> tuple:
         user_config.quantize_attention_action,
         user_config.remote_source,
         user_config.allow_graph_break,
-        user_config.enable_multistream,
         user_config.world_size,
         user_config.tp_size,
         user_config.mlp_tp_size,

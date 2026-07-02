@@ -1,4 +1,4 @@
-﻿# TensorCast User Guide
+# TensorCast User Guide
 
 For the complete model list and feature details, see [Model Support and Feature Support Matrix](./support_matrix/support_matrix_user_guide.md).
 
@@ -185,7 +185,7 @@ Its general usage is shown below:
 ```text
 usage: text_generate.py [-h]
                         [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
-                        [--num-devices NUM_DEVICES] [--enable-multistream] [--reserved-memory-gb RESERVED_MEMORY_GB]
+                        [--num-devices NUM_DEVICES] [--reserved-memory-gb RESERVED_MEMORY_GB]
                         [--log-level {debug,info,warning,error,critical}] --num-queries NUM_QUERIES
                         --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--decode]
                         [--prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE] [--num-mtp-tokens NUM_MTP_TOKENS]
@@ -220,7 +220,6 @@ Main parameters:
 | `model_id` | General Options | Required | Model ID or local model path.<br>1. Type: Str.<br>2. Reference values: Hugging Face ID, ModelScope ID, or local absolute path, such as `Qwen/Qwen3-32B` or `/data/models/Qwen3-32B`.<br>3. Default: none.<br>4. When a remote model ID is used, remote code may be executed through `trust_remote_code=True`. |
 | `--device` | General Options | Optional | Specifies the device profile for simulation.<br>1. Type: Str.<br>2. Reference values: registered `DeviceProfile` names, including `TEST_DEVICE`, `ATLAS_800_A2_376T_64G`, `ATLAS_800_A2_313T_64G`, `ATLAS_800_A2_280T_64G`, `ATLAS_800_A2_280T_64G_PCIE`, `ATLAS_800_A2_280T_32G_PCIE`, `ATLAS_800_A3_752T_128G_DIE`, `ATLAS_800_A3_560T_128G_DIE`, `ATLAS_800_A3_560T_128G_DIE_ROCE`, `ATLAS_350_425T_112G`, `ATLAS_350_425T_84G`.<br>3. Default: `TEST_DEVICE`. |
 | `--num-devices` | General Options | Optional | Specifies the number of devices participating in simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
-| `--enable-multistream` | General Options | Optional | Enables compiler-driven multi-stream simulation on the `--compile` path.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `True`. |
 | `--reserved-memory-gb` | General Options | Optional | Specifies device memory reserved for system use, in GB.<br>1. Type: Float.<br>2. Valid range: non-negative number; set to `0` to disable memory reservation.<br>3. Default: `0.0`. |
 | `--log-level` | General Options | Optional | Specifies the log level.<br>1. Type: Str.<br>2. Reference values: `debug`, `info`, `warning`, `error`, `critical`.<br>3. Default: `error`. |
 | `--num-queries` | LLM Options | Required | Number of queries in this simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: none. |
@@ -268,8 +267,6 @@ Main parameters:
 | `--performance-model` | Options | Optional | Specifies one or more performance models. This parameter can be repeated.<br>1. Type: List[Str].<br>2. Reference values: `analytic`, `profiling`.<br>3. Default: `analytic` when omitted.<br>4. `analytic` is a roofline model and does not require profiling data; `profiling` is an empirical performance model backed by profiling CSV data and requires `--profiling-database`. |
 | `--profiling-database` | Options | Optional | Specifies the profiling database path for the `profiling` performance model.<br>1. Type: Str.<br>2. Valid range: directory path containing `op_mapping.yaml` and CSV files for each kernel type.<br>3. Default: `None`. |
 | `--export-empirical-metrics` | Options | Optional | Exports M1-M5 metrics as JSON for offline M6 computation.<br>1. Type: Str.<br>2. Valid range: JSON file path.<br>3. Default: `None`.<br>4. Developer-only option; requires `--performance-model profiling`. |
-
-`--enable-multistream` enables compiler-driven multi-stream simulation on the `--compile` path. It is enabled by default, so existing compile commands keep the same behavior.
 
 For VL models, use `--image-batch-size`, `--image-height`, and `--image-width` together to describe the number and resolution of input images. Omit them for text-only models.
 

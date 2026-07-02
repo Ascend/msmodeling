@@ -3,7 +3,7 @@ import json
 import logging
 
 from cli.logo import print_logo
-from tensor_cast import config, device_profiles  # noqa: F401
+from tensor_cast import device_profiles  # noqa: F401
 from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
     QuantizeLinearAction,
@@ -171,7 +171,6 @@ def _run_doctor(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
         apply_context_to_namespace(args, adaptation_context)
     _normalize_adapter_common_args(args, parser)
     _configure_logging(args)
-    config.compilation.multistream.enable = False
 
     from tensor_cast.adapter.doctor import run_model_doctor
 
@@ -262,7 +261,6 @@ def _run_verify(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
             args.model_id = str(model_id)
     _normalize_adapter_common_args(args, parser)
     _configure_logging(args)
-    config.compilation.multistream.enable = False
 
     from tensor_cast.adapter.doctor import run_evidence_verification
 

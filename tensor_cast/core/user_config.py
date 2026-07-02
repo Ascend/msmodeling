@@ -35,7 +35,6 @@ class UserInputConfig:
     prefix_cache_hit_rate: float = 0.0
     do_compile: bool = False
     allow_graph_break: bool = False
-    enable_multistream: bool = True
     dump_input_shapes: bool = False
     dump_op_bound_results: bool = False
     chrome_trace: Optional[str] = None
@@ -170,7 +169,6 @@ class UserInputConfig:
         print(f"Use torch.compile: {self.do_compile}")
         if self.do_compile:
             print(f"  allow graph break: {self.allow_graph_break}")
-            print(f"  enable multistream: {self.enable_multistream}")
         print(f"Group table averages by input shapes: {self.dump_input_shapes}")
         print(f"Dump operator bound ratios: {self.dump_op_bound_results}")
         if self.chrome_trace:

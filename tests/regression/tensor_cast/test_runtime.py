@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from unittest.mock import Mock
@@ -717,6 +718,32 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
 
         self.assertEqual(breakdown["qk_index_mma"], 960)
         self.assertEqual(breakdown["topk_gp"], 30)
+
+    def test_dsa_indexer_breakdown_helper_uses_block_table_for_metadata_cache_bound(
+        self,
+    ):
+        hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)
+        qa_normed = torch.randn(2, 3, 4, device="meta", dtype=torch.float16)
+        indexer_cache = torch.randn(8, 2, 7, device="meta", dtype=torch.float16)
+        block_tables = torch.empty((2, 4), device="meta", dtype=torch.int64)
+        request_total_seq_lens = torch.empty((2,), device="meta", dtype=torch.int64)
+
+        breakdown = _estimate_dsa_indexer_breakdown(
+            hidden_states,
+            qa_normed,
+            indexer_cache,
+            num_heads=2,
+            head_dim=8,
+            qk_rope_head_dim=4,
+            topk_limit=5,
+            request_total_seq_lens=request_total_seq_lens,
+            block_tables=block_tables,
+        )
+
+        active_cache_len = block_tables.size(1) * indexer_cache.size(1)
+        expected_qk_index_mma = 2 * 2 * 3 * 2 * active_cache_len * 8
+        self.assertEqual(breakdown["qk_index_mma"], expected_qk_index_mma)
+        self.assertEqual(breakdown["topk_gp"], 2 * 3 * active_cache_len)
 
     def test_dsa_indexer_breakdown_helper_uses_request_total_seq_lens_for_cache_traffic(
         self,
@@ -1531,6 +1558,57 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         tracked_events = [event for event in runtime.event_list if event.op_invoke_info.func in durations_s]
         self.assertEqual(len(tracked_events), 3)
         self.assertEqual([event.stream_id for event in tracked_events], [0, 1, 0])
+
+    def test_multistream_chrome_trace_exports_stream_ids(self):
+        def func(x):
+            c0 = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 0, [])
+            a = torch.ops.aten.relu.default(c0)
+            _ = torch.ops.tensor_cast._internal_record.default(a, 0)
+
+            c1 = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 1, [])
+            b = torch.ops.aten.sigmoid.default(c1)
+            token_b = torch.ops.tensor_cast._internal_record.default(b, 1)
+
+            c2 = torch.ops.tensor_cast._internal_wait_and_bind.default(a, 0, [token_b])
+            return torch.ops.aten.tanh.default(c2)
+
+        durations_s = {
+            torch.ops.aten.relu.default: 3.0,
+            torch.ops.aten.sigmoid.default: 5.0,
+            torch.ops.aten.tanh.default: 2.0,
+        }
+        perf_model = Mock(spec=PerformanceModel)
+        perf_model.name = "fixed"
+        perf_model.device_profile = TEST_DEVICE
+        perf_model.get_classifiers.return_value = []
+
+        def _fixed_duration_process_op(op_invoke_info):
+            return PerformanceModel.Result(execution_time_s=durations_s.get(op_invoke_info.func, 0.0))
+
+        perf_model.process_op.side_effect = _fixed_duration_process_op
+        x = torch.randn([8, 8], device="meta")
+        with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+            _ = func(x)
+
+        with tempfile.TemporaryFile(mode="w+") as temp_file:
+            runtime.export_chrome_trace(temp_file)
+            temp_file.seek(0)
+            trace = json.load(temp_file)
+
+        events = [event for event in trace["traceEvents"] if event.get("ph") == "X"]
+        op_streams = {
+            event["name"]: event["tid"]
+            for event in events
+            if event["name"] in {"aten.relu.default", "aten.sigmoid.default", "aten.tanh.default"}
+        }
+        self.assertEqual(
+            op_streams,
+            {
+                "aten.relu.default": 0,
+                "aten.sigmoid.default": 1,
+                "aten.tanh.default": 0,
+            },
+        )
 
     def test_multistream_anchors_do_not_inflate_memory_tracking(self):
         x = torch.randn([8, 8], device="meta")

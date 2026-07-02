@@ -560,7 +560,6 @@ def _build_optimizer_args(case: BenchmarkCase) -> Namespace:
         prefill_devices_per_instance=None,
         decode_devices_per_instance=None,
         prefix_cache_hit_rate=0.0,
-        enable_multistream=True,
         enable_optimize_prefill_decode_ratio=False,
         ep_sizes=case.ep_sizes,
         moe_dp_sizes=None,

@@ -17,7 +17,6 @@
         "prefix_cache_hit_rate": 0.0,
         "do_compile": true,
         "allow_graph_break": false,
-        "enable_multistream": true,
         "dump_input_shapes": false,
         "chrome_trace": null,
         "graph_log_url": null,

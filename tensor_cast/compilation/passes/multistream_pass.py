@@ -63,12 +63,11 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast._internal_wait_and_bind.default,
         torch.ops.tensor_cast._internal_record.default,
     }
-    META_ANALYTIC_UNSUPPORTED_TARGETS = {
-        torch.ops.tensor_cast.attention.default,
-        torch.ops.tensor_cast.attention_quant.default,
-        torch.ops.tensor_cast.multihead_latent_attention.default,
-        torch.ops.tensor_cast.multihead_latent_attention_quant.default,
-        torch.ops.tensor_cast.sparse_attn_sharedkv.default,
+    INTERNAL_CONTROL_TARGETS = {
+        *ANCHOR_TARGETS,
+        torch.ops.tensor_cast._internal_mark_region_begin.default,
+        torch.ops.tensor_cast._internal_mark_region_end.default,
+        torch.ops.tensor_cast._internal_copy_region.default,
     }
     RESOURCE_COMPUTE = "compute"
     RESOURCE_COMM = "comm"
@@ -204,6 +203,17 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         return isinstance(target, torch._ops.OpOverload)
 
     @staticmethod
+    def _target_has_unsafe_schema(target: Any) -> bool:
+        schema = getattr(target, "_schema", None)
+        if schema is None:
+            return True
+        for argument in schema.arguments:
+            alias_info = argument.alias_info
+            if alias_info is not None and getattr(alias_info, "is_write", False):
+                return True
+        return False
+
+    @staticmethod
     def _node_value(node: fx.Node) -> Any:
         return node.meta.get("val") if hasattr(node, "meta") else None
 
@@ -230,16 +240,6 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         return False
 
     @staticmethod
-    def _value_contains_none(value: Any) -> bool:
-        if value is None:
-            return True
-        if isinstance(value, (list, tuple)):
-            return any(MultiStreamSchedulePass._value_contains_none(v) for v in value)
-        if isinstance(value, dict):
-            return any(MultiStreamSchedulePass._value_contains_none(v) for v in value.values())
-        return False
-
-    @staticmethod
     def _to_meta_value_for_cost_model(value: Any) -> Any:
         if isinstance(value, torch.Tensor):
             if value.layout != torch.strided:
@@ -260,6 +260,28 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             return {key: MultiStreamSchedulePass._to_meta_value_for_cost_model(item) for key, item in value.items()}
         return value
 
+    @staticmethod
+    def _none_args_match_schema(target: Any, args: Any, kwargs: Any) -> bool:
+        schema = getattr(target, "_schema", None)
+        if schema is None:
+            return False
+
+        def _allows_none(argument) -> bool:
+            return getattr(argument.type, "kind", lambda: None)() == "OptionalType"
+
+        schema_args = schema.arguments
+        for index, value in enumerate(args):
+            if value is None and (index >= len(schema_args) or not _allows_none(schema_args[index])):
+                return False
+
+        schema_args_by_name = {argument.name: argument for argument in schema_args}
+        for name, value in kwargs.items():
+            argument = schema_args_by_name.get(name)
+            if value is None and (argument is None or not _allows_none(argument)):
+                return False
+
+        return True
+
     def _materialize_fx_arg_values(self, arg: Any) -> Any:
         def _map_fx_arg_value(item: Any) -> Any:
             if isinstance(item, fx.Node):
@@ -272,7 +294,8 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         return (
             node.op == "call_function"
             and self._is_analytic_compatible_target(node.target)
-            and node.target not in self.ANCHOR_TARGETS
+            and node.target not in self.INTERNAL_CONTROL_TARGETS
+            and not self._target_has_unsafe_schema(node.target)
             and self._is_single_tensor_value(self._node_value(node))
         )
 
@@ -291,9 +314,8 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             self._analytic_model is None
             or node.op != "call_function"
             or not self._is_analytic_compatible_target(node.target)
+            or node.target in self.ANCHOR_TARGETS
         ):
-            return None
-        if node.target in self.META_ANALYTIC_UNSUPPORTED_TARGETS:
             return None
         if any(self._node_value(parent) is None for parent in node.all_input_nodes):
             return None
@@ -304,7 +326,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
             return None
         args = self._materialize_fx_arg_values(node.args)
         kwargs = self._materialize_fx_arg_values(node.kwargs)
-        if self._value_contains_none((args, kwargs)):
+        if not self._none_args_match_schema(node.target, args, kwargs):
             return None
         if self._value_has_symbolic_shape(args) or self._value_has_symbolic_shape(kwargs):
             return None
@@ -550,20 +572,6 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
 
     def __call__(self, gm: fx.GraphModule) -> fx.GraphModule:
         nodes_in_order = list(gm.graph.nodes)
-        helper_nodes = [
-            node
-            for node in nodes_in_order
-            if node.op == "call_function"
-            and node.target not in self.ANCHOR_TARGETS
-            and self._is_single_tensor_value(self._node_value(node))
-            and not self._is_analytic_compatible_target(node.target)
-        ]
-        if helper_nodes:
-            logger.debug(
-                "Skip multistream cost-model for %d helper call_function nodes (for example: %s)",
-                len(helper_nodes),
-                helper_nodes[0].target,
-            )
         schedulable_nodes = [n for n in nodes_in_order if self._is_schedulable_node(n)]
         if not schedulable_nodes:
             return gm

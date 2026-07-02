@@ -120,7 +120,6 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "prefix_cache_hit_rate": float(form.get("prefix_cache_hit_rate") or 0.0),
             "reserved_memory_gb": float(form.get("reserved_memory_gb") or 0.0),
             "log_level": str(form.get("log_level") or "error"),
-            "enable_multistream": _as_bool(form.get("enable_multistream", True)),
             "compile_allow_graph_break": _as_bool(form.get("compile_allow_graph_break", False)),
             "disable_repetition": _as_bool(form.get("disable_repetition", False)),
             "quantize_lmhead": _as_bool(form.get("quantize_lmhead", False)),
@@ -178,8 +177,6 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd.append("--disable-repetition")
         if params["compile"]:
             cmd.append("--compile")
-        if params["enable_multistream"]:
-            cmd.append("--enable-multistream")
         if params["compile_allow_graph_break"]:
             cmd.append("--compile-allow-graph-break")
         cmd += ["--quantize-linear-action", qlin, "--quantize-attention-action", qattn]
@@ -373,7 +370,6 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
         form.get("enable_optimize_prefill_decode_ratio", False)
     )
     compile_allow_graph_break = bool(form.get("compile_allow_graph_break", False))
-    enable_multistream = bool(form.get("enable_multistream", True))
     mxfp4_group_size = int(form.get("mxfp4_group_size") or 32)
     prefix_cache_hit_rate = float(form.get("prefix_cache_hit_rate") or 0.0)
 
@@ -426,7 +422,6 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "decode_devices_per_instance": decode_devices_per_instance,
             "enable_optimize_prefill_decode_ratio": enable_pd_ratio,
             "compile_allow_graph_break": compile_allow_graph_break,
-            "enable_multistream": enable_multistream,
             "mxfp4_group_size": mxfp4_group_size,
             "reserved_memory_gb": float(form.get("reserved_memory_gb") or 0.0),
             "log_level": str(form.get("log_level") or "error"),
@@ -449,8 +444,6 @@ def build_optimizer_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
         ]
         if params["compile"]:
             cmd.append("--compile")
-        if enable_multistream:
-            cmd.append("--enable-multistream")
         if compile_allow_graph_break:
             cmd.append("--compile-allow-graph-break")
         cmd += ["--quantize-linear-action", qlin, "--quantize-attention-action", qattn]

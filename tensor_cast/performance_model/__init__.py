@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 import torch
+from torch._subclasses.fake_tensor import FakeTensor
 
 from .. import ops  # noqa: F401
 from ..device import DeviceProfile
@@ -290,7 +291,10 @@ def _attention_properties_helper(
         assert hidden_size % head_size == 0
         num_q_heads = hidden_size // head_size
 
-        context_len_product_sum = torch.sum(query_lens.to(seq_lens.dtype) * seq_lens).item()
+        if _tensor_value_unavailable(seq_lens) or _tensor_value_unavailable(query_lens):
+            context_len_product_sum = _attention_context_sum_from_metadata(query, key, block_table)
+        else:
+            context_len_product_sum = torch.sum(query_lens.to(seq_lens.dtype) * seq_lens).item()
 
     # 1. First Batched Matrix Multiplication (BMM): Q @ K^T
     # For each query head, this is a sum of (num_tokens_per_seq * seq_len) dot products,
@@ -314,9 +318,12 @@ def _attention_properties_helper(
         properties = op_invoke_info.get_memory_access_properties()
     else:
         properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={1, 2})
-        properties.memory_read_bytes += torch.sum(
-            seq_lens * 2 * bytes_of_elements(key.size(-1) * key.size(-2), key.dtype)
-        ).item()
+        if _tensor_value_unavailable(seq_lens):
+            properties.memory_read_bytes += _attention_cache_read_bytes_from_metadata(key, block_table, seq_lens)
+        else:
+            properties.memory_read_bytes += torch.sum(
+                seq_lens * 2 * bytes_of_elements(key.size(-1) * key.size(-2), key.dtype)
+            ).item()
 
     compute_ops = properties.compute_ops.setdefault(query.dtype, OpInvokeInfo.ComputeOps())
     compute_ops.mma_ops = bmm1_ops + bmm2_ops
@@ -324,6 +331,51 @@ def _attention_properties_helper(
     compute_ops.gp_ops = softmax_ops
 
     return properties
+
+
+def _tensor_value_unavailable(value) -> bool:
+    # Fake/meta tensors only carry metadata. Reading their contents via item/max
+    # can either fail or create unbacked symbols during torch.compile.
+    return isinstance(value, torch.Tensor) and (value.device.type == "meta" or isinstance(value, FakeTensor))
+
+
+def _query_token_count(query: torch.Tensor) -> int:
+    if query.ndim == 4:
+        return int(query.size(0) * query.size(1))
+    return int(query.size(0))
+
+
+def _attention_context_sum_from_metadata(query: torch.Tensor, key: torch.Tensor, block_table) -> int:
+    query_tokens = _query_token_count(query)
+    if block_table is not None:
+        # KV cache layout is (total_blocks, block_size, kv_heads, head_size).
+        # Without concrete seq_lens/query_lens values, use each request's maximum
+        # addressable cache length from block_table as a conservative upper bound.
+        return query_tokens * int(block_table.size(1) * key.size(1))
+    return query_tokens * int(key.size(0))
+
+
+def _attention_cache_read_bytes_from_metadata(key: torch.Tensor, block_table, seq_lens) -> float:
+    # Mirrors the concrete seq_lens path below, but replaces the unknown runtime
+    # sequence length with the cache extent addressable from metadata.
+    if block_table is not None:
+        batch_size = int(block_table.size(0))
+        max_seq_len = int(block_table.size(1) * key.size(1))
+    else:
+        batch_size = int(seq_lens.size(0))
+        max_seq_len = int(key.size(0))
+    cache_row_bytes = 2 * bytes_of_elements(key.size(-1) * key.size(-2), key.dtype)
+    return batch_size * max_seq_len * cache_row_bytes
+
+
+def _max_seq_len_or_metadata_bound(seq_lens: Optional[torch.Tensor], fallback_len: int) -> Optional[int]:
+    if seq_lens is None:
+        return None
+    if _tensor_value_unavailable(seq_lens):
+        # The estimator needs a cache length, not the exact token values. When
+        # values are unavailable, use the known cache capacity as an upper bound.
+        return int(fallback_len)
+    return int(seq_lens.max().item())
 
 
 def _default_query_lens_and_request_total_seq_lens(
@@ -829,8 +881,9 @@ def _(
     key = op_invoke_info.args[1]
     request_total_seq_lens = op_invoke_info.args[6]
     query_lens = op_invoke_info.args[7]
-    is_query_scaled = op_invoke_info.args[8] is not None and not torch.isclose(
-        op_invoke_info.args[8], torch.tensor(1.0)
+    query_scale = op_invoke_info.args[8]
+    is_query_scaled = query_scale is not None and (
+        _tensor_value_unavailable(query_scale) or not torch.isclose(query_scale, torch.tensor(1.0))
     )
     out_dtype = op_invoke_info.args[14]
     query_lens, request_total_seq_lens = _normalize_query_lens_and_request_total_seq_lens(
@@ -854,9 +907,12 @@ def _(
     head_size = key.size(-1)
     num_q_heads = hidden_size // head_size
     num_tokens_per_seq = query_lens
-    context_len_product_sum = torch.sum(
-        num_tokens_per_seq.to(request_total_seq_lens.dtype) * request_total_seq_lens
-    ).item()
+    if _tensor_value_unavailable(num_tokens_per_seq) or _tensor_value_unavailable(request_total_seq_lens):
+        context_len_product_sum = _attention_context_sum_from_metadata(query, key, op_invoke_info.args[4])
+    else:
+        context_len_product_sum = torch.sum(
+            num_tokens_per_seq.to(request_total_seq_lens.dtype) * request_total_seq_lens
+        ).item()
 
     # FP8: only 1 op per element (scale multiplication, no offset applied).
     # Assume FP8 is not natively supported
@@ -879,7 +935,10 @@ def _(
     if out_dtype is None or out_dtype == query.dtype:
         dequant_output_ops = 0
     else:
-        total_tokens = torch.sum(num_tokens_per_seq).item()
+        if _tensor_value_unavailable(num_tokens_per_seq):
+            total_tokens = _query_token_count(query)
+        else:
+            total_tokens = torch.sum(num_tokens_per_seq).item()
         dequant_output_ops = total_tokens * num_q_heads * head_size * qdq_op_factor
 
     if is_query_scaled:
@@ -913,6 +972,102 @@ def _(
 
 
 _PREDICTIVE_DECODING_THRESHOLD = 6
+
+
+def _mla_sparse_topk(topk_limit, topk_indices) -> Optional[int]:
+    if topk_indices is not None:
+        return int(topk_indices.shape[-1])
+    if topk_limit is not None:
+        return int(topk_limit)
+    return None
+
+
+def _mla_metadata_attn_len(kv_cache: torch.Tensor, block_table) -> int:
+    # Metadata-only MLA path: infer the largest addressable attention length from
+    # cache shape. This avoids reading query_lens/request_total_seq_lens values.
+    if block_table is not None:
+        return int(block_table.size(1) * kv_cache.size(1))
+    return int(kv_cache.size(0))
+
+
+def _mla_metadata_sparse_attn_len(kv_cache: torch.Tensor, block_table, sparse_topk: Optional[int]) -> int:
+    attn_len = _mla_metadata_attn_len(kv_cache, block_table)
+    if sparse_topk is not None:
+        return min(attn_len, sparse_topk)
+    return attn_len
+
+
+def _mla_metadata_properties(
+    op_invoke_info: OpInvokeInfo,
+    softmax_dtype: torch.dtype,
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table,
+    request_total_seq_lens,
+    W_UK_T,
+    W_UV,
+    kv_b_proj,
+    v_head_dim: int,
+    sparse_topk: Optional[int],
+) -> OpInvokeInfo.PerformanceProperties:
+    # This path is used only when the runtime length tensors are fake/meta. In
+    # that case we cannot know whether the node is prefill or decode from values,
+    # so estimate both valid MLA shapes and keep the larger compute cost.
+    num_heads = int(q.size(1))
+    q_head_dim = int(q.size(2))
+    total_tokens = int(q.size(0))
+    kv_lora_rank = int(W_UK_T.size(-1) if W_UK_T is not None else kv_b_proj.size(0))
+    qk_rope_head_dim = int(kv_cache.size(-1) - kv_lora_rank)
+    qk_nope_head_dim = int(q_head_dim - qk_rope_head_dim)
+    prefill_attn_len = _mla_metadata_sparse_attn_len(kv_cache, block_table, sparse_topk)
+    decode_attn_len = _mla_metadata_sparse_attn_len(kv_cache, block_table, sparse_topk)
+    prefill_context_sum = total_tokens * prefill_attn_len
+    decode_context_sum = total_tokens * decode_attn_len
+
+    prefill_fma_ops = 0
+    prefill_gp_ops = 0
+    if kv_b_proj is not None:
+        kv_proj_out_dim = num_heads * (qk_nope_head_dim + v_head_dim)
+        prefill_fma_ops = (
+            total_tokens * kv_proj_out_dim * kv_lora_rank * 2
+            + prefill_context_sum * num_heads * q_head_dim * 2
+            + prefill_context_sum * num_heads * v_head_dim * 2
+        )
+        prefill_gp_ops = prefill_context_sum * num_heads * 4
+
+    decode_fma_ops = 0
+    decode_gp_ops = 0
+    if W_UK_T is not None and W_UV is not None:
+        decode_fma_ops = (
+            total_tokens * num_heads * qk_nope_head_dim * kv_lora_rank * 2
+            + decode_context_sum * num_heads * (kv_lora_rank + qk_rope_head_dim) * 2
+            + decode_context_sum * num_heads * kv_lora_rank * 2
+            + total_tokens * num_heads * kv_lora_rank * v_head_dim * 2
+        )
+        decode_gp_ops = decode_context_sum * num_heads * 4
+
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={1, 6, 7, 8})
+    prefill_weight_read_bytes = bytes_of_tensor(kv_b_proj) if kv_b_proj is not None else 0
+    decode_weight_read_bytes = 0
+    if W_UK_T is not None:
+        decode_weight_read_bytes += bytes_of_tensor(W_UK_T)
+    if W_UV is not None:
+        decode_weight_read_bytes += bytes_of_tensor(W_UV)
+    properties.memory_read_bytes += max(prefill_weight_read_bytes, decode_weight_read_bytes)
+    cache_entry_size = bytes_of_elements(kv_cache.size(-1), kv_cache.dtype)
+    if block_table is not None:
+        batch_size = int(block_table.size(0))
+    elif request_total_seq_lens is not None:
+        batch_size = int(request_total_seq_lens.size(0))
+    else:
+        batch_size = 1
+    # Memory traffic should cover the full cache read upper bound. Using the
+    # sparse decode top-k bound here would undercount prefill cache reads.
+    properties.memory_read_bytes += batch_size * _mla_metadata_attn_len(kv_cache, block_table) * cache_entry_size
+
+    _accumulate_compute_ops(properties, q.dtype, mma_ops=max(prefill_fma_ops, decode_fma_ops))
+    _accumulate_compute_ops(properties, softmax_dtype, gp_ops=max(prefill_gp_ops, decode_gp_ops))
+    return properties
 
 
 def _mlapo_properties_helper(
@@ -1242,7 +1397,7 @@ def _multihead_latent_attention_properties_helper(
     (
         q,
         kv_cache,
-        _block_table,
+        block_table,
         query_start_loc,
         request_total_seq_lens,
         query_lens,
@@ -1263,6 +1418,21 @@ def _multihead_latent_attention_properties_helper(
     qk_rope_head_dim = kv_cache.size(-1) - kv_lora_rank
     qk_nope_head_dim = q_head_dim - qk_rope_head_dim
     sparse_topk = topk_indices.shape[-1] if topk_indices is not None else topk_limit
+
+    if _tensor_value_unavailable(request_total_seq_lens) or _tensor_value_unavailable(query_lens):
+        return _mla_metadata_properties(
+            op_invoke_info,
+            softmax_dtype,
+            q,
+            kv_cache,
+            block_table,
+            request_total_seq_lens,
+            W_UK_T,
+            W_UV,
+            kv_b_proj,
+            v_head_dim,
+            _mla_sparse_topk(topk_limit, topk_indices),
+        )
 
     # 2. Separate Prefill and Decode Sequences.
     # q_len == 5 with a long active context is the MTP target decode shape in SFA traces.
@@ -1350,7 +1520,7 @@ def _multihead_latent_attention_properties_helper(
     # the staged sparse KV set across an S1 tile, while prefill reads scale with query tokens.
     sparse_mla_paged_kv = _estimate_sparse_mla_paged_kv_read_breakdown(
         kv_cache,
-        _block_table,
+        block_table,
         request_total_seq_lens,
         query_lens,
         sparse_topk,
@@ -1453,14 +1623,54 @@ def _calculate_mla_quant_ops(
 
         total_quant_dequant_ops += quant_qk_ops + quant_attention_prob_ops + quant_v_ops
 
-    # Optional final output quantization (both prefill and decode)
-    # This is only applied if out_dtype is same as q_dtype
-    if out_dtype is None or out_dtype == q_dtype:
+    # Optional final output dtype conversion (both prefill and decode).
+    if out_dtype is not None and out_dtype != q_dtype:
         total_tokens = torch.sum(num_tokens_per_seq).item()
         # Number of elements: total_tokens * num_heads * v_head_dim
         quant_output_ops = total_tokens * num_heads * v_head_dim * 2
         total_quant_dequant_ops += quant_output_ops
 
+    return total_quant_dequant_ops
+
+
+def _calculate_mla_metadata_quant_ops(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table,
+    W_UK_T,
+    kv_b_proj,
+    num_heads: int,
+    q_head_dim: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    v_head_dim: int,
+    sparse_topk: Optional[int],
+    out_dtype: torch.dtype,
+    q_dtype: torch.dtype,
+) -> int:
+    total_tokens = int(q.size(0))
+    qk_nope_head_dim = q_head_dim - qk_rope_head_dim
+    prefill_attn_len = _mla_metadata_sparse_attn_len(kv_cache, block_table, sparse_topk)
+    decode_attn_len = _mla_metadata_sparse_attn_len(kv_cache, block_table, sparse_topk)
+    prefill_context_sum = total_tokens * prefill_attn_len
+    decode_context_sum = total_tokens * decode_attn_len
+
+    prefill_ops = 0
+    if kv_b_proj is not None:
+        kv_proj_out_dim = num_heads * (qk_nope_head_dim + v_head_dim)
+        prefill_ops = total_tokens * kv_proj_out_dim * 2 + prefill_context_sum * num_heads * 2
+
+    decode_ops = 0
+    if W_UK_T is not None:
+        decode_ops = (
+            total_tokens * num_heads * kv_lora_rank * 2
+            + decode_context_sum * num_heads * 2
+            + total_tokens * num_heads * kv_lora_rank * 2
+        )
+
+    total_quant_dequant_ops = max(prefill_ops, decode_ops)
+    if out_dtype is not None and out_dtype != q_dtype:
+        total_quant_dequant_ops += total_tokens * num_heads * v_head_dim * 2
     return total_quant_dequant_ops
 
 
@@ -1502,19 +1712,38 @@ def _(
     qk_nope_head_dim = q_head_dim - qk_rope_head_dim
 
     # Calculate additional quant/dequant ops
-    total_quant_dequant_ops = _calculate_mla_quant_ops(
-        op_invoke_info,
-        num_heads,
-        q_head_dim,
-        kv_lora_rank,
-        qk_nope_head_dim,
-        v_head_dim,
-        query_start_loc,
-        request_total_seq_lens,
-        query_lens,
-        out_dtype,
-        q.dtype,
-    )
+    if _tensor_value_unavailable(request_total_seq_lens) or _tensor_value_unavailable(query_lens):
+        topk_limit = op_invoke_info.args[10] if len(op_invoke_info.args) > 10 else None
+        topk_indices = op_invoke_info.args[11] if len(op_invoke_info.args) > 11 else None
+        total_quant_dequant_ops = _calculate_mla_metadata_quant_ops(
+            q,
+            kv_cache,
+            op_invoke_info.args[2],
+            W_UK_T,
+            op_invoke_info.args[8],
+            num_heads,
+            q_head_dim,
+            kv_lora_rank,
+            qk_rope_head_dim,
+            v_head_dim,
+            _mla_sparse_topk(topk_limit, topk_indices),
+            out_dtype,
+            q.dtype,
+        )
+    else:
+        total_quant_dequant_ops = _calculate_mla_quant_ops(
+            op_invoke_info,
+            num_heads,
+            q_head_dim,
+            kv_lora_rank,
+            qk_nope_head_dim,
+            v_head_dim,
+            query_start_loc,
+            request_total_seq_lens,
+            query_lens,
+            out_dtype,
+            q.dtype,
+        )
 
     # Add all quantization/dequantization ops to gp_ops
     _accumulate_compute_ops(
@@ -2603,6 +2832,13 @@ def _is_dsa_indexer_decode_mode(query_len: int) -> bool:
     return bool(_sparse_mla_decode_mask(torch.tensor(query_len)).item())
 
 
+def _dsa_indexer_metadata_cache_len(indexer_cache: torch.Tensor, block_tables: Optional[torch.Tensor]) -> int:
+    block_size = int(indexer_cache.size(1))
+    if block_tables is not None:
+        return int(block_tables.size(1) * block_size)
+    return int(indexer_cache.size(0) * block_size)
+
+
 def _estimate_dsa_indexer_decode_page_efficiency(logical_cache_block_count: int) -> float:
     """Estimate decode historical-cache read efficiency from active cache blocks.
     eta = max(floor, min(base + scale * log2(block_count / reference_block_count), 1));
@@ -2622,7 +2858,8 @@ def _estimate_dsa_indexer_paged_cache_read_breakdown(
     hidden_states: torch.Tensor,
     indexer_cache: torch.Tensor,
     head_dim: int,
-    request_total_seq_lens: torch.Tensor,
+    request_total_seq_lens: Optional[torch.Tensor],
+    block_tables: Optional[torch.Tensor] = None,
     fp8_mode: bool = False,
 ):
     """Break down dsa_indexer cache bytes into penalized historical reads and physical append writes. It computes context_work = query_units * sum(seq_lens), historical_physical_bytes from cache element width plus fp8 scale bytes, then historical_effective_bytes = historical_physical_bytes / eta because only historical random reads lose bandwidth; appends remain linear writes."""
@@ -2631,7 +2868,16 @@ def _estimate_dsa_indexer_paged_cache_read_breakdown(
     block_size = indexer_cache.size(1)
     dtype_size = indexer_cache.element_size()
     is_decode = _is_dsa_indexer_decode_mode(query_len)
-    logical_cache_block_count = _sum_request_cache_blocks(request_total_seq_lens, block_size)
+    if request_total_seq_lens is None or _tensor_value_unavailable(request_total_seq_lens):
+        active_cache_len = _dsa_indexer_metadata_cache_len(indexer_cache, block_tables)
+        if block_tables is not None:
+            logical_cache_block_count = batch * int(block_tables.size(1))
+        else:
+            logical_cache_block_count = max(int(indexer_cache.size(0)), 1)
+        summed_seq_lens = batch * active_cache_len
+    else:
+        logical_cache_block_count = _sum_request_cache_blocks(request_total_seq_lens, block_size)
+        summed_seq_lens = int(request_total_seq_lens.sum().item())
     # Decode touches a small number of query tokens, so efficiency is dominated by
     # random page traversal and improves slowly as more cache blocks amortize overhead.
     # Formula: eta_decode = max(floor, min(base + scale * log2(block_count / reference_block_count), 1)).
@@ -2641,7 +2887,6 @@ def _estimate_dsa_indexer_paged_cache_read_breakdown(
         # Prefill sees adjacent-query reuse and longer contiguous cache walks.  The
         # current paged-cache block size is fixed, so use the calibrated constant directly.
         eta = _DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_PREFILL
-    summed_seq_lens = int(request_total_seq_lens.sum().item())
     # Decode has little query-side reuse, so every query token probes the historical
     # cache.  Prefill amortizes repeated historical-cache reads across neighboring
     # query tokens with the generic query scale above.  Formula:
@@ -2679,6 +2924,7 @@ def _estimate_dsa_indexer_breakdown(
     qk_rope_head_dim: int,
     topk_limit: int,
     request_total_seq_lens: torch.Tensor,
+    block_tables: Optional[torch.Tensor] = None,
     fp8_mode: bool = False,
 ):
     """Estimate dsa_indexer MMA/GP work and cache traffic for analytic roofline. Projection and score math use active sequence lengths for compute, while cache traffic is delegated to the paged-cache breakdown so sparse historical reads are expanded by efficiency and append writes stay physical."""
@@ -2727,7 +2973,11 @@ def _estimate_dsa_indexer_breakdown(
     # 6) score work.  The reference implementation computes a per-head score tensor
     #    against the active cache, then combines those head scores with the learned
     #    routing weights into one index score.
-    active_cache_len = int(request_total_seq_lens.max().item())
+    max_request_total_seq_len = _max_seq_len_or_metadata_bound(
+        request_total_seq_lens,
+        _dsa_indexer_metadata_cache_len(indexer_cache, block_tables),
+    )
+    active_cache_len = max_request_total_seq_len or seq_len
     qk_index_mma = 2 * batch * seq_len * num_heads * active_cache_len * head_dim
 
     paged_cache_read_breakdown = _estimate_dsa_indexer_paged_cache_read_breakdown(
@@ -2735,6 +2985,7 @@ def _estimate_dsa_indexer_breakdown(
         indexer_cache,
         head_dim,
         request_total_seq_lens=request_total_seq_lens,
+        block_tables=block_tables,
         fp8_mode=fp8_mode,
     )
     # BF16/GLM5-style head mixing keeps the learned weight multiply in the base path.
@@ -2778,6 +3029,7 @@ def _(
     hidden_states = op_invoke_info.args[0]
     qa_normed = op_invoke_info.args[1]
     indexer_cache = op_invoke_info.args[4]
+    block_tables = op_invoke_info.args[6]
     seq_lens = op_invoke_info.args[7]
     num_heads = op_invoke_info.args[12]
     head_dim = op_invoke_info.args[13]
@@ -2797,6 +3049,7 @@ def _(
         qk_rope_head_dim,
         topk_limit,
         request_total_seq_lens=seq_lens,
+        block_tables=block_tables,
         fp8_mode=fp8_mode,
     )
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={4})

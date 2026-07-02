@@ -70,7 +70,6 @@ def build_model(user_input: UserInputConfig = None) -> TransformerModel:
 
         use_glm5_overrides = _requires_glm5_compile_overrides(user_input)
         config.compilation.fusion_patterns.enable_matmul_allreduce = not use_glm5_overrides
-        config.compilation.multistream.enable = bool(user_input.enable_multistream)
         config.compilation.fusion_patterns.enable_dispatch_ffn_combine = bool(user_input.enable_dispatch_ffn_combine)
         model = torch.compile(
             model,
