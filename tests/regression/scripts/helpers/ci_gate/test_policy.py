@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 from scripts.helpers._config import ConfigError
+from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.ci_gate.policy import (
     is_gate_test_path,
     is_policy_config_path,
@@ -115,6 +119,11 @@ def test_is_policy_config_path_uses_policy_configs(tmp_path: Path) -> None:
     assert is_policy_config_path("tests/regression/conftest.py", policy.configs) is True
     assert is_policy_config_path("tests/.ci/gate_policy.yaml", policy.configs) is False
     assert is_policy_config_path("cli/main.py", policy.configs) is False
+
+
+def test_is_policy_config_path_build_py_not_config() -> None:
+    policy = load_gate_policy(REPO_ROOT)
+    assert is_policy_config_path("build.py", policy.configs) is False
 
 
 def test_matches_path_patterns_respects_exclude(tmp_path: Path) -> None:

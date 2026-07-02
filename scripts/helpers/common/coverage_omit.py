@@ -8,44 +8,16 @@ from typing import Final
 
 from scripts.helpers._config import ConfigError, format_expected_got
 from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.common.pyproject_toml import read_pyproject_data
 from scripts.helpers.common.test_map_loader import is_product_source
 
 _PYPROJECT_REL: Final = Path("pyproject.toml")
 
 
-def _decode_pyproject(raw: bytes) -> dict[str, object]:
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        try:
-            import tomli as tomllib
-        except ImportError as exc:
-            raise ConfigError(
-                "tomli required to parse pyproject.toml on Python < 3.11. Run: uv sync --frozen --group ci"
-            ) from exc
-
-    try:
-        return tomllib.loads(raw.decode("utf-8"))
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: invalid TOML: {exc}") from exc
-
-
-def _read_pyproject_data() -> dict[str, object]:
-    pyproject_path = REPO_ROOT / _PYPROJECT_REL
-    if not pyproject_path.is_file():
-        raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: file not found")
-
-    try:
-        raw = pyproject_path.read_bytes()
-    except OSError as exc:
-        raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: cannot read file: {exc}") from exc
-    return _decode_pyproject(raw)
-
-
 @lru_cache(maxsize=1)
 def load_coverage_omit_patterns() -> tuple[str, ...]:
     """Return ``[tool.coverage.run].omit`` patterns from repo pyproject.toml."""
-    data = _read_pyproject_data()
+    data = read_pyproject_data(repo_root=REPO_ROOT)
     coverage_run = data.get("tool", {}).get("coverage", {}).get("run")
     if not isinstance(coverage_run, dict):
         raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: [tool.coverage.run] section missing")
