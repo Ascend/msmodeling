@@ -5,7 +5,10 @@ import logging
 import math
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, Optional, TypedDict
+
+import yaml
 
 from tensor_cast.model_config import ParallelConfig
 
@@ -78,6 +81,7 @@ class PrefillChunk:
 @dataclass
 class OptimizerData:
     input_length: Optional[int] = None
+    length_distribution: Optional["LengthDistribution"] = None
     output_length: Optional[int] = None
     batch_size: Optional[int] = None
     image_batch_size: Optional[int] = None
@@ -95,7 +99,49 @@ class OptimizerData:
     prefix_cache_hit_rate: float = 0.0
     concurrency_search_strategy: str = 'exponential'
 
+    def get_representative_rows(self, strategy: str = "mid") -> list[dict]:
+        """
+        Get representative rows for the length distribution based on the specified strategy.
+
+        Args:
+            strategy (str): The strategy to use for determining the representative point.
+                Options are "mid", "min", or "max". Default is "mid".
+
+        Returns:
+            list[dict]: A list of dictionaries representing the representative rows. Each dictionary contains:
+                - "num_input_tokens": The representative input token count for the bin.
+                - "query_len": The effective input token count after applying prefix cache hit rate.
+                - "request_ratio": The weight of the bin in the total weight of the distribution.
+        """
+        representative_rows = []
+        total_weight = sum(bin_.weight for bin_ in self.length_distribution.bins)
+        for bin_ in self.length_distribution.bins:
+            if strategy == "mid":
+                representative_point = math.floor((bin_.min_tokens + bin_.max_tokens) / 2)
+            elif strategy == "min":
+                representative_point = bin_.min_tokens
+            elif strategy == "max":
+                representative_point = bin_.max_tokens
+            else:
+                raise ValueError(f"Unknown strategy: {strategy}")
+            # prefix_cache_hit_rate is a fixed float number for now
+            cached_prefix_tokens = math.floor(representative_point * self.prefix_cache_hit_rate)
+            representative_rows.append(
+                {
+                    "num_input_tokens": representative_point,
+                    "query_len": max(1, representative_point - cached_prefix_tokens),
+                    "request_ratio": bin_.weight / total_weight,
+                }
+            )
+        return representative_rows
+
     def get_effective_input_length(self, is_decode: bool = False):
+        if self.length_distribution is not None:
+            if is_decode:
+                return None
+            weighted_average = sum(row["query_len"] * row["request_ratio"] for row in self.get_representative_rows())
+            return max(1, math.floor(weighted_average))
+
         if self.input_length is None:
             return None
         effective_hit_rate = 0.0 if is_decode else self.prefix_cache_hit_rate
@@ -132,6 +178,97 @@ class OptimizerData:
         """Return the number of prefill chunks produced by the current token budget."""
         return len(self.get_prefill_chunk_plan())
 
+    def build_concurrency_samples(self, concurrency: int):
+        rows = self.get_representative_rows()
+        ideal_samples = [concurrency * row["request_ratio"] for row in rows]
+        base_samples = [math.floor(sample) for sample in ideal_samples]
+        remaining = concurrency - sum(base_samples)
+
+        ranked_indices = sorted(
+            range(len(rows)),
+            key=lambda idx: (
+                ideal_samples[idx] - base_samples[idx],
+                rows[idx]["query_len"],
+            ),
+            reverse=True,
+        )
+
+        for idx in ranked_indices[:remaining]:
+            base_samples[idx] += 1
+
+        composition_rows = []
+        for row, sample in zip(rows, base_samples):
+            if sample <= 0:
+                continue
+            composition_rows.append({**row, "samples": sample})
+
+        return composition_rows
+
+
+@dataclass(frozen=True)
+class LengthBin:
+    min_tokens: int
+    max_tokens: int
+    weight: float
+
+
+@dataclass(frozen=True)
+class LengthDistribution:
+    bins: list[LengthBin]
+
+
+def validate_length_distribution(bins: list[LengthBin]) -> None:
+    if not bins:
+        raise ValueError("length distribution must contain at least one bin")
+
+    previous_max_tokens = None
+    for index, bin_ in enumerate(sorted(bins, key=lambda item: item.min_tokens)):
+        if bin_.min_tokens < 0:
+            raise ValueError(f"bin {index} min_tokens must be >= 0")
+        if bin_.max_tokens <= bin_.min_tokens:
+            raise ValueError(f"bin {index} max_tokens must be > min_tokens")
+        if bin_.weight <= 0:
+            raise ValueError(f"bin {index} weight must be > 0")
+        if previous_max_tokens is not None and bin_.min_tokens < previous_max_tokens:
+            raise ValueError(f"bin {index} ranges overlap")
+        previous_max_tokens = bin_.max_tokens
+
+
+def load_length_distribution(
+    path: str | Path = None,
+) -> LengthDistribution:
+    if path is None:
+        path = Path(__file__).resolve().parent.parent / "example" / "length_distribution.yaml"
+    distribution_path = Path(path)
+    try:
+        with distribution_path.open(encoding="utf-8") as file:
+            raw_distribution = yaml.safe_load(file) or {}
+    except Exception as e:
+        raise ValueError(f"failed to load length distribution from {path}") from e
+
+    if not isinstance(raw_distribution, dict):
+        raise ValueError("length distribution must be a mapping with a 'bins' list")
+    raw_bins = raw_distribution.get("bins", [])
+    if not isinstance(raw_bins, list):
+        raise ValueError("length distribution 'bins' must be a list")
+
+    bins = []
+    for index, item in enumerate(raw_bins):
+        if not isinstance(item, dict):
+            raise ValueError(f"bin {index} must be a mapping")
+        missing_keys = [key for key in ("min_tokens", "max_tokens", "weight") if key not in item]
+        if missing_keys:
+            raise ValueError(f"bin {index} missing required key(s): {', '.join(missing_keys)}")
+        bins.append(
+            LengthBin(
+                min_tokens=int(item["min_tokens"]),
+                max_tokens=int(item["max_tokens"]),
+                weight=float(item["weight"]),
+            )
+        )
+    validate_length_distribution(bins)
+    return LengthDistribution(bins=bins)
+
 
 def check_string_valid(string: str, max_len=256):
     if len(string) > max_len:
@@ -151,6 +288,18 @@ def check_positive_integer(value):
     if value > 1e6:
         raise argparse.ArgumentTypeError(f"{value!r} is too large")
     return value
+
+
+def check_positive_integer_and_string(value):
+    try:
+        return check_positive_integer(value)
+    except argparse.ArgumentTypeError:
+        input_length_path = Path(value)
+        if input_length_path.is_file():
+            return str(input_length_path)
+        raise argparse.ArgumentTypeError(
+            f"{value!r} must be a positive integer or an existing length distribution YAML file"
+        ) from None
 
 
 def check_positive_float(value):

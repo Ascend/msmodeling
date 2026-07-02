@@ -2,15 +2,31 @@
 
 import argparse
 import unittest
+from pathlib import Path
+
+import pytest
 
 from serving_cast.service.utils import (
     BatchRangeAction,
+    LengthBin,
+    LengthDistribution,
     OptimizerData,
     PrefillChunk,
     check_positive_float,
     check_positive_integer,
+    check_positive_integer_and_string,
     check_string_valid,
+    load_length_distribution,
 )
+
+
+def _simple_length_distribution():
+    return LengthDistribution(
+        bins=[
+            LengthBin(min_tokens=0, max_tokens=500, weight=0.6),
+            LengthBin(min_tokens=500, max_tokens=1500, weight=0.4),
+        ]
+    )
 
 
 class TestServiceUtils(unittest.TestCase):
@@ -43,6 +59,18 @@ class TestServiceUtils(unittest.TestCase):
         """Test check_positive_integer with very large value"""
         with self.assertRaises(argparse.ArgumentTypeError):
             check_positive_integer("2000000")  # Greater than 1e6
+
+    def test_check_positive_integer_and_string_accepts_positive_integer(self):
+        self.assertEqual(check_positive_integer_and_string("128"), 128)
+
+    def test_check_positive_integer_and_string_accepts_file_path(self):
+        path = "serving_cast/example/length_distribution.yaml"
+
+        self.assertEqual(check_positive_integer_and_string(path), path)
+
+    def test_check_positive_integer_and_string_rejects_invalid_value(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            check_positive_integer_and_string("not-a-length-or-file")
 
     def test_check_positive_float_valid(self):
         """Test check_positive_float with valid floats"""
@@ -123,6 +151,216 @@ class TestServiceUtils(unittest.TestCase):
         config = OptimizerData(input_length=9, max_batched_tokens=4)
 
         self.assertEqual(config.get_prefill_num_chunks(), 3)
+
+    def test_optimizer_data_effective_input_length_uses_distribution_midpoint_average(
+        self,
+    ):
+        config = OptimizerData(length_distribution=_simple_length_distribution())
+
+        self.assertEqual(config.get_effective_input_length(), 550)
+
+    def test_optimizer_data_effective_input_length_uses_distribution_after_prefix_cache(
+        self,
+    ):
+        config = OptimizerData(
+            length_distribution=_simple_length_distribution(),
+            prefix_cache_hit_rate=0.5,
+        )
+
+        self.assertEqual(config.get_effective_input_length(), 275)
+
+    def test_optimizer_data_effective_input_length_distribution_decode_stays_none(self):
+        config = OptimizerData(length_distribution=_simple_length_distribution())
+
+        self.assertIsNone(config.get_effective_input_length(is_decode=True))
+
+    def test_optimizer_data_effective_input_length_distribution_has_minimum_one(self):
+        config = OptimizerData(
+            length_distribution=LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=2, weight=1.0)]),
+            prefix_cache_hit_rate=0.999,
+        )
+
+        self.assertEqual(config.get_effective_input_length(), 1)
+
+    def test_build_concurrency_samples_uses_largest_remainder(self):
+        config = OptimizerData(
+            output_length=1,
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=100, weight=0.5),
+                    LengthBin(min_tokens=100, max_tokens=200, weight=0.3),
+                    LengthBin(min_tokens=200, max_tokens=300, weight=0.2),
+                ]
+            ),
+        )
+
+        rows = config.build_concurrency_samples(7)
+
+        self.assertEqual([row["samples"] for row in rows], [4, 2, 1])
+        self.assertEqual(sum(row["samples"] for row in rows), 7)
+
+    def test_distribution_rows_include_midpoint_effective_length_and_ratio(self):
+        config = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=100, weight=0.6),
+                    LengthBin(min_tokens=100, max_tokens=300, weight=0.4),
+                ]
+            ),
+            prefix_cache_hit_rate=0.5,
+        )
+
+        rows = config.get_representative_rows()
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "num_input_tokens": 50,
+                    "query_len": 25,
+                    "request_ratio": 0.6,
+                },
+                {
+                    "num_input_tokens": 200,
+                    "query_len": 100,
+                    "request_ratio": 0.4,
+                },
+            ],
+        )
+
+    def test_distribution_rows_normalize_weights_when_sum_is_not_one(self):
+        config = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=100, weight=3.0),
+                    LengthBin(min_tokens=100, max_tokens=300, weight=1.0),
+                ]
+            )
+        )
+
+        rows = config.get_representative_rows()
+
+        self.assertEqual(rows[0]["request_ratio"], 0.75)
+        self.assertEqual(rows[1]["request_ratio"], 0.25)
+
+    def test_effective_input_length_uses_normalized_distribution_weights(self):
+        config = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=100, weight=3.0),
+                    LengthBin(min_tokens=100, max_tokens=300, weight=1.0),
+                ]
+            )
+        )
+
+        self.assertEqual(config.get_effective_input_length(), 87)
+
+    def test_build_concurrency_samples_normalizes_weights(self):
+        config = OptimizerData(
+            output_length=1,
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=100, weight=3.0),
+                    LengthBin(min_tokens=100, max_tokens=300, weight=1.0),
+                ]
+            ),
+        )
+
+        rows = config.build_concurrency_samples(8)
+
+        self.assertEqual([row["samples"] for row in rows], [6, 2])
+        self.assertEqual(sum(row["samples"] for row in rows), 8)
+
+    def test_build_concurrency_samples_returns_query_len_and_num_input_tokens(self):
+        config = OptimizerData(
+            output_length=5,
+            length_distribution=LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=100, weight=1.0)]),
+        )
+
+        rows = config.build_concurrency_samples(3)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["num_input_tokens"], 50)
+        self.assertEqual(rows[0]["query_len"], 50)
+        self.assertEqual(rows[0]["samples"], 3)
+
+
+def test_load_length_distribution_success():
+    path = Path("serving_cast/example/length_distribution.yaml")
+
+    distribution = load_length_distribution(path)
+
+    assert len(distribution.bins) > 1
+    assert distribution.bins[0] == LengthBin(
+        min_tokens=0,
+        max_tokens=500,
+        weight=0.24718176439266218,
+    )
+
+
+def test_load_length_distribution_rejects_overlapping_bins(tmp_path):
+    path = tmp_path / "bad.yaml"
+    path.write_text(
+        "bins:\n"
+        "  - min_tokens: 0\n"
+        "    max_tokens: 500\n"
+        "    weight: 0.5\n"
+        "  - min_tokens: 400\n"
+        "    max_tokens: 900\n"
+        "    weight: 0.5\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="overlap"):
+        load_length_distribution(path)
+
+
+def test_load_length_distribution_rejects_malformed_top_level(tmp_path):
+    path = tmp_path / "bad_top_level.yaml"
+    path.write_text("- bins\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mapping"):
+        load_length_distribution(path)
+
+
+def test_load_length_distribution_rejects_missing_required_key(tmp_path):
+    path = tmp_path / "missing_key.yaml"
+    path.write_text(
+        "bins:\n  - min_tokens: 0\n    weight: 1.0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing required key"):
+        load_length_distribution(path)
+
+
+def test_load_length_distribution_rejects_empty_bins(tmp_path):
+    path = tmp_path / "empty_bins.yaml"
+    path.write_text("bins: []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="at least one bin"):
+        load_length_distribution(path)
+
+
+def test_load_length_distribution_accepts_invalid_weights_sum(tmp_path):
+    path = tmp_path / "bad_weights.yaml"
+    path.write_text(
+        "bins:\n"
+        "  - min_tokens: 0\n"
+        "    max_tokens: 500\n"
+        "    weight: 0.2\n"
+        "  - min_tokens: 500\n"
+        "    max_tokens: 1000\n"
+        "    weight: 0.2\n",
+        encoding="utf-8",
+    )
+
+    distribution = load_length_distribution(path)
+
+    assert distribution.bins == [
+        LengthBin(min_tokens=0, max_tokens=500, weight=0.2),
+        LengthBin(min_tokens=500, max_tokens=1000, weight=0.2),
+    ]
 
 
 class TestBatchRangeAction(unittest.TestCase):

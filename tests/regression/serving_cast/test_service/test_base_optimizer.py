@@ -7,7 +7,13 @@ import pandas as pd
 from serving_cast.service.base_throughput_optimizer import BaseThroughputOptimizer
 from serving_cast.service.latency_table import ForwardLatencyRecord, ForwardShapeKey
 from serving_cast.service.optimizer_summary import OptimizerSummary
-from serving_cast.service.utils import AGG_COLUMNS, OptimizerData
+from serving_cast.service.utils import (
+    AGG_COLUMNS,
+    LengthBin,
+    LengthDistribution,
+    OptimizerData,
+)
+from tensor_cast.core.input_generator import RequestInfo
 
 
 class ConcreteThroughputOptimizer(BaseThroughputOptimizer):
@@ -507,6 +513,95 @@ class TestBaseBackend(unittest.TestCase):
         )
 
         self.assertEqual(estimated, 7)
+
+    def test_get_batched_forward_info_builds_single_mixed_batch(self):
+        self.backend.model_runner = Mock()
+        self.backend.model_runner.model = Mock()
+        self.backend.model_runner.model.model_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_size=1)
+        )
+        optimizer_data = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=200, weight=0.6),
+                    LengthBin(min_tokens=200, max_tokens=600, weight=0.2),
+                    LengthBin(min_tokens=600, max_tokens=1000, weight=0.2),
+                ]
+            ),
+            batch_size=1,
+            output_length=16,
+        )
+        self.backend.model_runner.run_inference.return_value = Mock(
+            execution_time_s={"analytic": 0.010},
+            device_memory_available_gb=8.0,
+            breakdowns={"prefill_a": {"Mem": 0.0, "Comm": 0.0, "Cube": 6.0, "Vec": 4.0}},
+        )
+
+        metrics, composition_rows = self.backend._get_batched_forward_info(4, optimizer_data)
+
+        self.backend.model_runner.run_inference.assert_called_once()
+        requests = self.backend.model_runner.run_inference.call_args.args[0]
+        self.assertEqual(len(requests), 4)
+        self.assertTrue(all(isinstance(req, RequestInfo) for req in requests))
+        self.assertEqual([row["samples"] for row in composition_rows], [2, 1, 1])
+        self.assertEqual(metrics.execution_time_s["analytic"], 0.010)
+
+    def test_get_batched_forward_info_uses_query_len_and_num_input_tokens(self):
+        self.backend.model_runner = Mock()
+        self.backend.model_runner.model = Mock()
+        self.backend.model_runner.model.model_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_size=1)
+        )
+        optimizer_data = Mock()
+        optimizer_data.output_length = 32
+        optimizer_data.build_concurrency_samples.return_value = [
+            {
+                "num_input_tokens": 400,
+                "query_len": 300,
+                "request_ratio": 0.25,
+                "samples": 1,
+            },
+            {
+                "num_input_tokens": 100,
+                "query_len": 80,
+                "request_ratio": 0.75,
+                "samples": 3,
+            },
+        ]
+
+        self.backend._get_batched_forward_info(4, optimizer_data)
+
+        requests = self.backend.model_runner.run_inference.call_args.args[0]
+        self.assertEqual(requests[0].query_len, 300)
+        self.assertEqual(requests[0].seq_len, 300)
+        self.assertEqual(requests[0].num_input_tokens, 400)
+        self.assertEqual(requests[0].num_output_tokens, 32)
+        self.assertEqual(requests[1].query_len, 80)
+        self.assertEqual(requests[1].num_input_tokens, 100)
+        self.assertEqual(len(requests), 4)
+
+    def test_get_batched_forward_info_uses_per_rank_concurrency_for_varlen(self):
+        self.backend.model_runner = Mock()
+        self.backend.model_runner.model = Mock()
+        self.backend.model_runner.model.model_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_size=4)
+        )
+        optimizer_data = Mock()
+        optimizer_data.output_length = 32
+        optimizer_data.build_concurrency_samples.return_value = [
+            {
+                "num_input_tokens": 400,
+                "query_len": 300,
+                "request_ratio": 1.0,
+                "samples": 1,
+            }
+        ]
+
+        self.backend._get_batched_forward_info(4, optimizer_data)
+
+        optimizer_data.build_concurrency_samples.assert_called_once_with(1)
+        requests = self.backend.model_runner.run_inference.call_args.args[0]
+        self.assertEqual(len(requests), 1)
 
 
 if __name__ == "__main__":

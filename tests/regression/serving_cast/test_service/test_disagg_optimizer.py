@@ -1,16 +1,26 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pandas as pd
 from serving_cast.service.disagg_throughput_optimizer import DisaggThroughputOptimizer
 from serving_cast.service.optimizer_summary import OptimizerSummary
-from serving_cast.service.utils import OptimizerData
+from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
 
 from .test_common import SimpleArgs
+
+
+def _simple_length_distribution():
+    return LengthDistribution(
+        bins=[
+            LengthBin(min_tokens=0, max_tokens=500, weight=0.6),
+            LengthBin(min_tokens=500, max_tokens=1500, weight=0.4),
+        ]
+    )
 
 
 class TestDisaggStrategy(unittest.TestCase):
@@ -309,6 +319,216 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(search_info["device_memory_available_gb"], 2.0)
         self.assertIsNone(search_info["ttft"])
         self.assertAlmostEqual(search_info["tpot"], 5.0)
+
+
+class TestDisaggStrategyHermetic(unittest.TestCase):
+    def test_decode_only_summary_hides_prefill_distribution_metadata(self):
+        strategy = DisaggThroughputOptimizer()
+        strategy.dp = 4
+        strategy.tp = 1
+        strategy.pp = 1
+        strategy.is_moe_model = False
+        strategy.num_mtp_tokens = 0
+        strategy.model_runner = Mock()
+        strategy.model_runner.user_input.device = "TEST_DEVICE"
+        strategy.model_runner.user_input.model_id = "test-model"
+        strategy.model_runner.user_input.quantize_linear_action = "DISABLED"
+        strategy.model_runner.user_input.quantize_attention_action = "DISABLED"
+        strategy.model_runner.model.model_config.parallel_config = Mock(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=4,
+        )
+
+        optimizer_data = OptimizerData(
+            ttft_limits=None,
+            tpot_limits=50.0,
+            batch_size=2,
+            input_length=512,
+            output_length=128,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+
+        class DummyMetrics:
+            execution_time_s = {"analytic": 0.004}
+            device_memory_available_gb = 1.0
+            breakdowns = {}
+
+        with patch.object(strategy, "_get_forward_info", return_value=DummyMetrics()):
+            result = strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        self.assertIsNone(row["ttft"])
+        self.assertIsNone(row.get("input_length_mode"))
+        self.assertIsNotNone(row["tpot"])
+
+    def test_distribution_prefill_path_keeps_input_length_empty_in_base_row(self):
+        strategy = DisaggThroughputOptimizer()
+        strategy.dp = 4
+        strategy.tp = 1
+        strategy.pp = 1
+        strategy.is_moe_model = False
+        strategy.num_mtp_tokens = 0
+        strategy.model_runner = Mock()
+        strategy.model_runner.user_input.device = "TEST_DEVICE"
+        strategy.model_runner.user_input.model_id = "test-model"
+        strategy.model_runner.user_input.quantize_linear_action = "DISABLED"
+        strategy.model_runner.user_input.quantize_attention_action = "DISABLED"
+        strategy.model_runner.model.model_config.parallel_config = Mock(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=4,
+        )
+
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=5,
+            length_distribution=_simple_length_distribution(),
+            output_length=50,
+            serving_cost=0,
+            max_batched_tokens=8192,
+        )
+
+        batch_result = Mock(
+            execution_time_s={"analytic": 0.001},
+            device_memory_available_gb=1.0,
+            breakdowns={},
+        )
+        composition_rows = [
+            {
+                "num_input_tokens": 250,
+                "query_len": 250,
+                "request_ratio": 0.6,
+                "samples": 3,
+            },
+            {
+                "num_input_tokens": 1000,
+                "query_len": 1000,
+                "request_ratio": 0.4,
+                "samples": 2,
+            },
+        ]
+
+        with patch.object(
+            strategy,
+            "_get_batched_forward_info",
+            return_value=(batch_result, composition_rows),
+        ):
+            result = strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        self.assertTrue(pd.isna(row["input_length"]))
+        self.assertIsNone(row["tpot"])
+
+    def test_distribution_early_stop_uses_aggregated_ttft_not_p95(self):
+        strategy = DisaggThroughputOptimizer()
+        strategy.dp = 4
+        strategy.tp = 1
+        strategy.pp = 1
+        strategy.is_moe_model = False
+        strategy.num_mtp_tokens = 0
+        strategy.model_runner = Mock()
+        strategy.model_runner.user_input.device = "TEST_DEVICE"
+        strategy.model_runner.user_input.model_id = "test-model"
+        strategy.model_runner.user_input.quantize_linear_action = "DISABLED"
+        strategy.model_runner.user_input.quantize_attention_action = "DISABLED"
+        strategy.model_runner.model.model_config.parallel_config = Mock(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=4,
+        )
+
+        optimizer_data = OptimizerData(
+            ttft_limits=130.0,
+            tpot_limits=None,
+            batch_size=5,
+            length_distribution=_simple_length_distribution(),
+            output_length=50,
+            serving_cost=7,
+            max_batched_tokens=8192,
+        )
+
+        with (
+            patch.object(
+                strategy,
+                "_get_batched_forward_info",
+                return_value=(
+                    Mock(
+                        execution_time_s={"analytic": 0.123},
+                        device_memory_available_gb=2.0,
+                        breakdowns={"prefill": {"Mem": 1.0}},
+                    ),
+                    [],
+                ),
+            ),
+            patch.object(strategy, "_get_forward_info") as mock_forward,
+        ):
+            result = strategy.get_inference_info(optimizer_data)
+
+        mock_forward.assert_not_called()
+        self.assertFalse(result.check_early_stop_flag())
+
+    def test_distribution_prefill_throughput_uses_global_tokens_instead_of_per_rank_tokens(self):
+        strategy = DisaggThroughputOptimizer()
+        strategy.dp = 4
+        strategy.tp = 1
+        strategy.pp = 1
+        strategy.is_moe_model = False
+        strategy.num_mtp_tokens = 0
+        strategy.model_runner = Mock()
+        strategy.model_runner.user_input.device = "TEST_DEVICE"
+        strategy.model_runner.user_input.model_id = "test-model"
+        strategy.model_runner.user_input.quantize_linear_action = "DISABLED"
+        strategy.model_runner.user_input.quantize_attention_action = "DISABLED"
+        strategy.model_runner.model.model_config.parallel_config = Mock(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=4,
+        )
+
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=5,
+            length_distribution=_simple_length_distribution(),
+            output_length=50,
+            serving_cost=0,
+            max_batched_tokens=8192,
+        )
+
+        batch_result = Mock(
+            execution_time_s={"analytic": 0.001},
+            device_memory_available_gb=1.0,
+            breakdowns={},
+        )
+        composition_rows = [
+            {
+                "num_input_tokens": 250,
+                "query_len": 250,
+                "request_ratio": 0.6,
+                "samples": 3,
+            },
+            {
+                "num_input_tokens": 1000,
+                "query_len": 1000,
+                "request_ratio": 0.4,
+                "samples": 2,
+            },
+        ]
+
+        with patch.object(
+            strategy,
+            "_get_batched_forward_info",
+            return_value=(batch_result, composition_rows),
+        ):
+            result = strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        self.assertEqual(row["concurrency"], 20)
+        self.assertEqual(row["token/s"], 11000000.0)
 
 
 if __name__ == "__main__":

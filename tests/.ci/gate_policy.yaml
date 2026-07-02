@@ -26,6 +26,15 @@ configs:
 exemptions:
   sources:
     - symbols:
+        - cli/inference/throughput_optimizer.py::%
+        - serving_cast/parallel_runner.py::%
+      reason: "Import-scope changes are covered through function-level throughput optimizer tests; coverage.py does not reliably attribute multiline import continuation lines."
+      applicant: stormchasingg
+      approver: liujiawang
+      deadline: 2026-12-31
+      ticket: "PR-438"
+
+    - symbols:
         - tools/perf_data_collection/grid_generator/model_configs.py::_fetch_from_huggingface
       reason: "External HuggingFace config loading is covered by static fallback tests; no network dependency in PR UT."
       applicant: Secluded_Ocean

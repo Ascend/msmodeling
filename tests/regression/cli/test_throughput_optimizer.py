@@ -2,7 +2,8 @@
 import re
 import sys
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
 
 import pytest
 
@@ -10,6 +11,7 @@ from serving_cast.service.optimizer_summary import SHOW_COLUMNS
 from tests.helpers.cli_runner import run_module_main
 
 THROUGHPUT_OPTIMIZER_MODULE = "cli.inference.throughput_optimizer"
+LENGTH_DISTRIBUTION_PATH = "serving_cast/example/length_distribution.yaml"
 
 # Match current PD titles and legacy Aggregation / Disaggregation (Prefill|Decode) titles across branches.
 AGG_TABLE_TITLE_RE = r"Top\s+\d+\s+(?:PD\s+Aggregated|Aggregation)\s+Configurations\s*:?"
@@ -349,6 +351,254 @@ class TestThroughputOptimizer(TestCase):
         ]
         table_start_pattern = r"\s*Top\s+\d+\s+PD Ratio Configurations:"
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
+
+    def test_arg_parse_accepts_input_length_distribution_file(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            f"--input-length={LENGTH_DISTRIBUTION_PATH}",
+            "--output-length=1",
+            "test-model",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            args = throughput_optimizer_module.arg_parse()
+
+        self.assertEqual(args.input_length, LENGTH_DISTRIBUTION_PATH)
+        self.assertFalse(hasattr(args, "length_distribution"))
+
+    def test_arg_parse_rejects_invalid_input_length(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=not-a-length-or-file",
+            "--output-length=1",
+            "test-model",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit):
+                throughput_optimizer_module.arg_parse()
+
+    def test_arg_parse_rejects_missing_input_length(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "--output-length=1",
+            "test-model",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit):
+                throughput_optimizer_module.arg_parse()
+
+    def test_main_length_distribution_mode_rejects_aggregation_mode(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        class DummyArgs:
+            log_level = "error"
+            model_id = "test-model"
+            device = ["TEST_DEVICE"]
+            num_devices = 1
+            input_length = LENGTH_DISTRIBUTION_PATH
+            word_embedding_tp = None
+            output_length = 16
+            prefix_cache_hit_rate = 0.0
+            max_batched_tokens = 8192
+            num_mtp_tokens = 0
+            num_mtp_token_sizes = []
+            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
+            disagg = False
+            enable_optimize_prefill_decode_ratio = False
+
+        mock_tasks = Mock()
+        mock_tasks.run_agg.return_value = []
+
+        with (
+            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
+            patch.object(
+                throughput_optimizer_module,
+                "check_device_targets",
+                return_value=DummyArgs.device,
+            ),
+            patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks),
+        ):
+            self.assertEqual(throughput_optimizer_module.main(), 1)
+            mock_tasks.run_agg.assert_not_called()
+
+    def test_main_length_distribution_mode_rejects_decode_only_disagg(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        class DummyArgs:
+            log_level = "error"
+            model_id = "test-model"
+            device = ["TEST_DEVICE"]
+            num_devices = 1
+            input_length = LENGTH_DISTRIBUTION_PATH
+            word_embedding_tp = None
+            output_length = 16
+            prefix_cache_hit_rate = 0.5
+            max_batched_tokens = 8192
+            num_mtp_tokens = 0
+            num_mtp_token_sizes = []
+            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
+            ttft_limits = None
+            tpot_limits = 50
+            disagg = True
+            enable_optimize_prefill_decode_ratio = False
+
+        mock_tasks = Mock()
+        mock_tasks.run_disagg.return_value = []
+
+        with (
+            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
+            patch.object(
+                throughput_optimizer_module,
+                "check_device_targets",
+                return_value=DummyArgs.device,
+            ),
+            patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks),
+        ):
+            self.assertEqual(throughput_optimizer_module.main(), 1)
+            mock_tasks.run_disagg.assert_not_called()
+
+    def test_main_loads_length_distribution_into_runtime_args(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+        from serving_cast.service.utils import LengthBin, LengthDistribution
+
+        class DummyArgs:
+            log_level = "error"
+            model_id = "test-model"
+            device = ["TEST_DEVICE"]
+            num_devices = 1
+            input_length = LENGTH_DISTRIBUTION_PATH
+            word_embedding_tp = None
+            output_length = 16
+            prefix_cache_hit_rate = 0.0
+            max_batched_tokens = 8192
+            num_mtp_tokens = 0
+            num_mtp_token_sizes = []
+            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
+            ttft_limits = 1000
+            tpot_limits = None
+            disagg = True
+            enable_optimize_prefill_decode_ratio = False
+
+        loaded_distribution = LengthDistribution(
+            bins=[
+                LengthBin(min_tokens=0, max_tokens=500, weight=0.6),
+                LengthBin(min_tokens=500, max_tokens=1500, weight=0.4),
+            ]
+        )
+        mock_tasks = Mock()
+        mock_tasks.run_disagg.return_value = []
+
+        with (
+            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
+            patch.object(
+                throughput_optimizer_module,
+                "check_device_targets",
+                return_value=DummyArgs.device,
+            ),
+            patch.object(
+                throughput_optimizer_module,
+                "load_length_distribution",
+                return_value=loaded_distribution,
+            ) as mock_load_distribution,
+            patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks) as mock_parallel_runner,
+        ):
+            self.assertEqual(throughput_optimizer_module.main(), None)
+            mock_load_distribution.assert_called_once_with(LENGTH_DISTRIBUTION_PATH)
+            self.assertEqual(mock_parallel_runner.call_args.args[0].input_length, LENGTH_DISTRIBUTION_PATH)
+            self.assertFalse(hasattr(mock_parallel_runner.call_args.args[0], "length_distribution"))
+            mock_tasks.run_disagg.assert_called_once_with()
+
+    def test_main_rejects_invalid_length_distribution_input(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        class DummyArgs:
+            log_level = "error"
+            model_id = "test-model"
+            device = ["TEST_DEVICE"]
+            num_devices = 1
+            input_length = LENGTH_DISTRIBUTION_PATH
+            word_embedding_tp = None
+            output_length = 16
+            prefix_cache_hit_rate = 0.0
+            max_batched_tokens = 8192
+            num_mtp_tokens = 0
+            num_mtp_token_sizes = []
+            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
+            ttft_limits = 1000
+            tpot_limits = None
+            disagg = True
+            enable_optimize_prefill_decode_ratio = False
+
+        mock_tasks = Mock()
+        mock_tasks.run_disagg.return_value = []
+
+        with (
+            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
+            patch.object(
+                throughput_optimizer_module,
+                "check_device_targets",
+                return_value=DummyArgs.device,
+            ),
+            patch.object(
+                throughput_optimizer_module,
+                "load_length_distribution",
+                side_effect=ValueError("bad distribution"),
+            ),
+            patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks),
+        ):
+            self.assertEqual(throughput_optimizer_module.main(), 1)
+            mock_tasks.run_disagg.assert_not_called()
+
+    def test_main_rejects_length_distribution_with_chunked_prefill(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+        from serving_cast.service.utils import LengthBin, LengthDistribution
+
+        class DummyArgs:
+            log_level = "error"
+            model_id = "test-model"
+            device = ["TEST_DEVICE"]
+            num_devices = 1
+            input_length = LENGTH_DISTRIBUTION_PATH
+            word_embedding_tp = None
+            output_length = 16
+            prefix_cache_hit_rate = 0.0
+            num_mtp_tokens = 0
+            num_mtp_token_sizes = []
+            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
+            ttft_limits = 1000
+            tpot_limits = None
+            disagg = True
+            enable_optimize_prefill_decode_ratio = False
+            max_batched_tokens = 64
+
+        loaded_distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=500, weight=1.0)])
+        mock_tasks = Mock()
+        mock_tasks.run_disagg.return_value = []
+
+        with (
+            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
+            patch.object(
+                throughput_optimizer_module,
+                "check_device_targets",
+                return_value=DummyArgs.device,
+            ),
+            patch.object(
+                throughput_optimizer_module,
+                "load_length_distribution",
+                return_value=loaded_distribution,
+            ),
+            patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks),
+        ):
+            self.assertEqual(throughput_optimizer_module.main(), 1)
+            mock_tasks.run_disagg.assert_not_called()
 
 
 @pytest.mark.nightly

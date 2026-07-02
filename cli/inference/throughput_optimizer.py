@@ -27,9 +27,12 @@ from serving_cast.service.optimizer_curve_plots import (
 from serving_cast.service.utils import (
     BatchRangeAction,
     DEFAULT_MAX_SEARCH_COMBINATIONS,
+    OptimizerData,
     check_positive_float,
     check_positive_integer,
+    check_positive_integer_and_string,
     count_search_combinations,
+    load_length_distribution,
     resolve_parallel_search_candidates,
 )
 from tensor_cast import device_profiles  # noqa: F401
@@ -67,9 +70,9 @@ def arg_parse():
     )
     parser.add_argument(
         "--input-length",
-        type=check_positive_integer,
+        type=check_positive_integer_and_string,
         required=True,
-        help="The input length of the prompt.",
+        help="The input length of the prompt, or a YAML file describing a variable-length input distribution.",
     )
     parser.add_argument(
         "--output-length",
@@ -205,6 +208,7 @@ def arg_parse():
         help="Generate chrome trace file for visualization (e.g., trace.json). "
         "Useful for analyzing operator-level performance in detail.",
     )
+
     service_group = parser.add_argument_group("Service Options")
     service_group.add_argument(
         "--ttft-limits",
@@ -304,6 +308,7 @@ def arg_parse():
         help="Enable PD ratio optimization mode",
     )
     args = parser.parse_args()
+
     if all(x is None for x in (args.tp_sizes, args.ep_sizes, args.moe_dp_sizes)):
         # Backward-compatible default: search TP only with default range.
         args.tp_sizes = []
@@ -395,6 +400,35 @@ def main():
     device_targets = check_device_targets(args, logger)
     if device_targets is None:
         return 1
+
+    if isinstance(args.input_length, str) and (
+        not args.disagg
+        or args.enable_optimize_prefill_decode_ratio
+        or args.ttft_limits is None
+        or args.tpot_limits is not None
+    ):
+        logger.warning(
+            "--input-length FILE currently only supports disaggregation "
+            "prefill-only runs with --ttft-limits and without --tpot-limits."
+        )
+        return 1
+
+    if isinstance(args.input_length, str):
+        try:
+            length_distribution = load_length_distribution(args.input_length)
+        except ValueError as err:
+            logger.error("Failed to load length distribution from %s: %s", args.input_length, err)
+            return 1
+        optimizer_data = OptimizerData(
+            length_distribution=length_distribution,
+            prefix_cache_hit_rate=args.prefix_cache_hit_rate,
+            max_batched_tokens=args.max_batched_tokens,
+        )
+        if optimizer_data.get_prefill_num_chunks() > 1:
+            logger.warning(
+                "--input-length FILE currently does not support chunked prefill. Please increase --max-batched-tokens."
+            )
+            return 1
 
     mtp_candidates = args.num_mtp_token_sizes or [args.num_mtp_tokens]
     invalid_num_mtp_tokens = [value for value in mtp_candidates if value > len(args.mtp_acceptance_rate) + 1]

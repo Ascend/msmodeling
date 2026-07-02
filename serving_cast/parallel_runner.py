@@ -22,6 +22,7 @@ from .service.utils import (
     LIMIT_COUNT,
     OptimizerData,
     count_search_combinations,
+    load_length_distribution,
     resolve_parallel_search_candidates,
     select_tightest_memory_info,
 )
@@ -70,8 +71,16 @@ class ParallelRunner:
         max_batched_tokens = getattr(self.args, "max_batched_tokens", 8192)
         mtp_candidates = getattr(self.args, "num_mtp_token_sizes", None) or [self.args.num_mtp_tokens]
         fixed_num_mtp_tokens = self.args.num_mtp_tokens if len(mtp_candidates) == 1 else 0
+        # set input_length to None if length_distribution is provided
+        input_length = self.args.input_length
+        length_distribution = None
+        if isinstance(input_length, str):
+            length_distribution = load_length_distribution(input_length)
+            input_length = None
+
         self.optimizer_data = OptimizerData(
-            input_length=self.args.input_length,
+            input_length=input_length,
+            length_distribution=length_distribution,
             output_length=self.args.output_length,
             image_batch_size=self.args.image_batch_size,
             image_height=self.args.image_height,

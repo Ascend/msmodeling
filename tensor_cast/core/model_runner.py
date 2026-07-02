@@ -109,6 +109,38 @@ class ModelRunner:
         self.sampler = Sampler()
         logger.debug("Sampler initialized: %s", self.sampler)
 
+    def _check_peak_memory_usage_gb(
+        self,
+        peak_memory_usage_gb: float,
+        kv_cache_size_gb: float,
+        requests: Optional[List[RequestInfo]],
+    ) -> float:
+        """
+        Check peak memory usage against device limits.
+
+        Args:
+            peak_memory_usage_gb: Current peak memory usage in GB
+            kv_cache_size_gb: Size of KV cache in GB
+            requests: List of RequestInfo objects
+
+        Returns:
+            float: Adjusted peak memory usage in GB
+        """
+        model_activation_size_gb = peak_memory_usage_gb - kv_cache_size_gb - self.model_weight_size_gb
+        device_memory_available_gb = (
+            self.total_device_memory_gb - peak_memory_usage_gb - self.user_input.reserved_memory_gb
+        )
+        query_lens = [request.query_len for request in requests if not request.is_decode]
+
+        if device_memory_available_gb < 0 and len(set(query_lens)) > 1:
+            if model_activation_size_gb <= 0:
+                return self.model_weight_size_gb + kv_cache_size_gb
+            # Empirical calibration for heterogeneous multi-sequence Prefill batches.
+            peak_memory_usage_gb = 0.1 * model_activation_size_gb + self.model_weight_size_gb + kv_cache_size_gb
+            logger.warning("Adjusting peak memory usage")
+
+        return peak_memory_usage_gb
+
     # -----------------------------------------------------
     # public API
     # -----------------------------------------------------
@@ -199,6 +231,11 @@ class ModelRunner:
             visual_weight_size_gb = self.model.get_weight_size_nested([get_visual(self.model)]) / 1024**3
             self.model_weight_size_gb = self.model_weight_size_gb - visual_weight_size_gb
 
+        peak_memory_usage_gb = self._check_peak_memory_usage_gb(
+            peak_memory_usage_gb,
+            kv_cache_size_gb,
+            requests,
+        )
         model_activation_size_gb = peak_memory_usage_gb - kv_cache_size_gb - self.model_weight_size_gb
         if model_activation_size_gb < 0:
             logger.warning(

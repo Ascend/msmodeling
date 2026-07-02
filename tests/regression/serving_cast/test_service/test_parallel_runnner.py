@@ -61,6 +61,14 @@ class TestTaskRunner(unittest.TestCase):
             self.assertEqual(config.ep_size, 4)
             self.assertEqual(config.moe_dp_size, 1)
 
+    def test_optimizer_data_loads_length_distribution_from_input_length_file(self):
+        self.args.input_length = "serving_cast/example/length_distribution.yaml"
+
+        task_runner = ParallelRunner(self.args)
+
+        self.assertIsNone(task_runner.optimizer_data.input_length)
+        self.assertIsNotNone(task_runner.optimizer_data.length_distribution)
+
     def test_get_user_config_default_tps(self):
         """Test _get_user_config with default TP values"""
         self.args.tp_sizes = []

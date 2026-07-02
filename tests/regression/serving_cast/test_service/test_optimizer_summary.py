@@ -2,7 +2,13 @@
 import unittest
 
 import pandas as pd
-from serving_cast.service.optimizer_summary import OptimizerSummary, _fmt_memory, _fmt_memory_info, _get_agg_table_buf
+from serving_cast.service.optimizer_summary import (
+    OptimizerSummary,
+    _fmt_memory,
+    _fmt_memory_info,
+    _get_agg_table_buf,
+    _get_disagg_table_buf_batched,
+)
 from serving_cast.service.utils import OptimizerData
 
 
@@ -78,6 +84,7 @@ class TestSummary(unittest.TestCase):
             quantize_linear_action = "DISABLED"
             quantize_attention_action = "DISABLED"
             disagg = False
+            input_length = 1024
 
         args = Args()
 
@@ -106,6 +113,7 @@ class TestSummary(unittest.TestCase):
             quantize_linear_action = "DISABLED"
             quantize_attention_action = "DISABLED"
             disagg = False
+            input_length = 1024
 
         result = self.summary._get_agg_disagg_final_out(Args())
         result_str = "\n".join(result)
@@ -349,6 +357,246 @@ class TestSummaryPDMode(unittest.TestCase):
         args = SimpleArgs()
         # Should not raise exception
         self.summary.report_final_result(args)
+
+
+class TestMixedBatchOptimizerSummary(unittest.TestCase):
+    def setUp(self):
+        self.data_config = OptimizerData(
+            ttft_limits=1000.0,
+            tpot_limits=None,
+        )
+        self.summary = OptimizerSummary(self.data_config)
+
+    def test_report_final_result_expands_composition_rows(self):
+        test_df = pd.DataFrame(
+            [
+                {
+                    "device_name": "TEST_DEVICE",
+                    "num_devices": 4,
+                    "model_id": "test-model",
+                    "quantize_linear_action": "DISABLED",
+                    "quantize_attention_action": "DISABLED",
+                    "input_length": None,
+                    "num_input_tokens": "all",
+                    "output_length": 50,
+                    "request_ratio": 1.0,
+                    "samples": 4,
+                    "concurrency": 4,
+                    "ttft": 100.0,
+                    "tpot": None,
+                    "token/s": 2000.0,
+                    "token/s/device": 500.0,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "percentage_breakdowns": "prefill:100%",
+                },
+                {
+                    "device_name": "TEST_DEVICE",
+                    "num_devices": 4,
+                    "model_id": "test-model",
+                    "quantize_linear_action": "DISABLED",
+                    "quantize_attention_action": "DISABLED",
+                    "input_length": None,
+                    "num_input_tokens": 250,
+                    "output_length": 50,
+                    "request_ratio": 0.25,
+                    "samples": 1,
+                    "concurrency": 4,
+                    "ttft": None,
+                    "tpot": None,
+                    "token/s": None,
+                    "token/s/device": None,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "percentage_breakdowns": None,
+                },
+                {
+                    "device_name": "TEST_DEVICE",
+                    "num_devices": 4,
+                    "model_id": "test-model",
+                    "quantize_linear_action": "DISABLED",
+                    "quantize_attention_action": "DISABLED",
+                    "input_length": None,
+                    "num_input_tokens": 1000,
+                    "output_length": 50,
+                    "request_ratio": 0.75,
+                    "samples": 3,
+                    "concurrency": 4,
+                    "ttft": None,
+                    "tpot": None,
+                    "token/s": None,
+                    "token/s/device": None,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "percentage_breakdowns": None,
+                },
+            ]
+        )
+        self.summary.set_summary_df(test_df)
+
+        class Args:
+            model_id = "test-model"
+            num_devices = 4
+            device = "TEST_DEVICE"
+            dump_original_results = False
+            quantize_linear_action = "DISABLED"
+            quantize_attention_action = "DISABLED"
+            disagg = True
+            input_length = "serving_cast/example/length_distribution.yaml"
+
+        result = self.summary._get_agg_disagg_final_out(Args())
+        result_str = "\n".join(result)
+        self.assertIn("Top 1 Disaggregation (Prefill) Configurations:", result_str)
+        self.assertIn("num_input_tokens", result_str)
+        self.assertIn("request_ratio", result_str)
+        self.assertIn("samples", result_str)
+        self.assertIn("all", result_str)
+        self.assertIn("250", result_str)
+        self.assertIn("1000", result_str)
+        self.assertIn("-", result_str)
+
+    def test_get_agg_disagg_final_out_batched_returns_message_when_all_rows_filtered(self):
+        test_df = pd.DataFrame(
+            [
+                {
+                    "device_name": "TEST_DEVICE",
+                    "num_devices": 4,
+                    "model_id": "test-model",
+                    "quantize_linear_action": "DISABLED",
+                    "quantize_attention_action": "DISABLED",
+                    "input_length": None,
+                    "num_input_tokens": "all",
+                    "output_length": 50,
+                    "request_ratio": 1.0,
+                    "samples": 4,
+                    "concurrency": 4,
+                    "ttft": 2000.0,
+                    "tpot": None,
+                    "token/s": 2000.0,
+                    "token/s/device": 500.0,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "percentage_breakdowns": "prefill:100%",
+                }
+            ]
+        )
+        self.summary.set_summary_df(test_df)
+
+        class Args:
+            model_id = "test-model"
+            num_devices = 4
+            device = "TEST_DEVICE"
+            dump_original_results = False
+            quantize_linear_action = "DISABLED"
+            quantize_attention_action = "DISABLED"
+            disagg = True
+            input_length = "serving_cast/example/length_distribution.yaml"
+
+        result = self.summary._get_agg_disagg_final_out(Args())
+        self.assertEqual(
+            result,
+            ["*" * 80, "No configurations satisfy the current TTFT/TPOT filters.", "*" * 80],
+        )
+
+    def test_expand_composition_rows_keeps_aggregate_first_then_detail_sorted_by_tokens(self):
+        test_df = pd.DataFrame(
+            [
+                {
+                    "num_input_tokens": 1000,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "concurrency": 4,
+                    "num_devices": 4,
+                },
+                {
+                    "num_input_tokens": "all",
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "concurrency": 4,
+                    "num_devices": 4,
+                },
+                {
+                    "num_input_tokens": 250,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "concurrency": 4,
+                    "num_devices": 4,
+                },
+            ]
+        )
+        best_df = pd.DataFrame(
+            [
+                {
+                    "num_input_tokens": "all",
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "concurrency": 4,
+                    "num_devices": 4,
+                }
+            ]
+        )
+        self.summary.set_summary_df(test_df)
+
+        expanded_df = self.summary._expand_composition_rows(best_df)
+
+        self.assertEqual(list(expanded_df["num_input_tokens"]), ["all", 250, 1000])
+
+    def test_get_disagg_table_buf_batched_numbers_only_aggregate_rows(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "num_devices": 4,
+                    "num_input_tokens": "all",
+                    "request_ratio": 1.0,
+                    "samples": 4,
+                    "concurrency": 4,
+                    "ttft": 100.0,
+                    "token/s": 2000.0,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                },
+                {
+                    "num_devices": 4,
+                    "num_input_tokens": 250,
+                    "request_ratio": 0.25,
+                    "samples": 1,
+                    "concurrency": 4,
+                    "ttft": None,
+                    "token/s": None,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                },
+                {
+                    "num_devices": 4,
+                    "num_input_tokens": "all",
+                    "request_ratio": 1.0,
+                    "samples": 8,
+                    "concurrency": 8,
+                    "ttft": 200.0,
+                    "token/s": 1500.0,
+                    "parallel": "TP=2 | PP=1 | DP=2",
+                    "batch_size": 4,
+                },
+                {
+                    "num_devices": 4,
+                    "num_input_tokens": 500,
+                    "request_ratio": 0.5,
+                    "samples": 4,
+                    "concurrency": 8,
+                    "ttft": None,
+                    "token/s": None,
+                    "parallel": "TP=2 | PP=1 | DP=2",
+                    "batch_size": 4,
+                },
+            ]
+        )
+
+        result = _get_disagg_table_buf_batched(df)
+
+        self.assertIn("Top 2 Disaggregation (Prefill) Configurations:", result)
+        self.assertIn("|  1  |", result)
+        self.assertIn("|  2  |", result)
+        self.assertIn("|  -  |", result)
 
 
 if __name__ == "__main__":

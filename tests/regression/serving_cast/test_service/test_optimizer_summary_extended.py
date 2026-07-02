@@ -265,6 +265,7 @@ class TestOptimizerSummaryBranches(TestCase):
             quantize_linear_action="DISABLED",
             quantize_attention_action="DISABLED",
             disagg=False,
+            input_length=1024,
         )
         with self.assertLogs("serving_cast.service.optimizer_summary", level="WARNING") as log_ctx:
             out = s._get_agg_disagg_final_out(args)
@@ -515,6 +516,7 @@ class TestOptimizerSummaryReportAndCollect(TestCase):
             quantize_linear_action="OFF",
             quantize_attention_action="OFF",
             disagg=True,
+            input_length=1024,
         )
         out = s._get_agg_disagg_final_out(args)
         joined = "\n".join(out)
@@ -543,6 +545,7 @@ class TestOptimizerSummaryReportAndCollect(TestCase):
             device="-",
             quantize_linear_action="",
             quantize_attention_action="",
+            input_length=1024,
         )
         with patch("builtins.print") as pr:
             s.report_final_result(dump_args, silent=False)
@@ -556,6 +559,7 @@ class TestOptimizerSummaryReportAndCollect(TestCase):
             device="dev",
             quantize_linear_action="QL",
             quantize_attention_action="QA",
+            input_length=1024,
         )
         with patch("builtins.print") as pr2:
             s.report_final_result(norm_args, silent=False)

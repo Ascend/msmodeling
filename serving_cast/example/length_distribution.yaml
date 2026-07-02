@@ -1,0 +1,106 @@
+bins:
+  - min_tokens: 0
+    max_tokens: 500
+    weight: 0.24718176439266218
+  - min_tokens: 500
+    max_tokens: 1000
+    weight: 0.04613716744368331
+  - min_tokens: 1000
+    max_tokens: 1500
+    weight: 0.027367884630481103
+  - min_tokens: 1500
+    max_tokens: 2000
+    weight: 0.061251711182288476
+  - min_tokens: 2000
+    max_tokens: 2500
+    weight: 0.0846889719207866
+  - min_tokens: 2500
+    max_tokens: 3000
+    weight: 0.0791423112877781
+  - min_tokens: 3000
+    max_tokens: 3500
+    weight: 0.0883193895146476
+  - min_tokens: 3500
+    max_tokens: 4000
+    weight: 0.03050152213708379
+  - min_tokens: 4000
+    max_tokens: 4500
+    weight: 0.02667657529187161
+  - min_tokens: 4500
+    max_tokens: 5000
+    weight: 0.02602458071108939
+  - min_tokens: 5000
+    max_tokens: 5500
+    weight: 0.019294004916857805
+  - min_tokens: 5500
+    max_tokens: 6000
+    weight: 0.019767017252363562
+  - min_tokens: 6000
+    max_tokens: 6500
+    weight: 0.02647161037890865
+  - min_tokens: 6500
+    max_tokens: 7000
+    weight: 0.024277182417366917
+  - min_tokens: 7000
+    max_tokens: 7500
+    weight: 0.01744616870443902
+  - min_tokens: 7500
+    max_tokens: 8000
+    weight: 0.014522863022485358
+  - min_tokens: 8000
+    max_tokens: 8500
+    weight: 0.011721803662269789
+  - min_tokens: 8500
+    max_tokens: 9000
+    weight: 0.010302638872140954
+  - min_tokens: 9000
+    max_tokens: 9500
+    weight: 0.010119141605922243
+  - min_tokens: 9500
+    max_tokens: 10000
+    weight: 0.009690172021871954
+  - min_tokens: 10000
+    max_tokens: 12000
+    weight: 0.033530462271271065
+  - min_tokens: 12000
+    max_tokens: 14000
+    weight: 0.03247501223421594
+  - min_tokens: 14000
+    max_tokens: 16000
+    weight: 0.02299581095505088
+  - min_tokens: 16000
+    max_tokens: 18000
+    weight: 0.012550821139617694
+  - min_tokens: 18000
+    max_tokens: 20000
+    weight: 0.0055375028075124325
+  - min_tokens: 20000
+    max_tokens: 30000
+    weight: 0.01069868287894262
+  - min_tokens: 30000
+    max_tokens: 40000
+    weight: 0.0007418690542551751
+  - min_tokens: 40000
+    max_tokens: 50000
+    weight: 0.00016420194087120055
+  - min_tokens: 50000
+    max_tokens: 60000
+    weight: 0.00008906517726632434
+  - min_tokens: 60000
+    max_tokens: 70000
+    weight: 0.00008165372779509506
+  - min_tokens: 70000
+    max_tokens: 80000
+    weight: 0.000018443434603691268
+  - min_tokens: 80000
+    max_tokens: 90000
+    weight: 0.00004493723673647642
+  - min_tokens: 90000
+    max_tokens: 100000
+    weight: 0.0000702809863651053
+  - min_tokens: 100000
+    max_tokens: 120000
+    weight: 0.00009179122764654661
+  - min_tokens: 120000
+    max_tokens: 140000
+    weight: 0.00000498356085134383

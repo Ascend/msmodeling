@@ -43,6 +43,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
     def get_inference_info(self, optimizer_data: OptimizerData) -> OptimizerSummary:
         # check prefill or decode
         decode_flag = optimizer_data.ttft_limits is None
+        variable_input_mode = optimizer_data.length_distribution is not None
+        composition_rows = []
 
         batch_size = optimizer_data.batch_size
         input_length = optimizer_data.input_length
@@ -56,7 +58,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         concurrency = batch_size * self.dp * self.pp
 
         if decode_flag or len(chunk_plan) == 1:
-            batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
+            if variable_input_mode:
+                batch_result, composition_rows = self._get_batched_forward_info(concurrency, optimizer_data)
+            else:
+                batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
             latency_ms = batch_result.execution_time_s.get("analytic") * 1000 + optimizer_data.serving_cost
             device_memory_available_gb = batch_result.device_memory_available_gb
             breakdowns = format_breakdowns(batch_result.breakdowns)
@@ -139,8 +144,15 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             tpot = latency_ms
             output_throughput = concurrency / tpot * 1000 if tpot > 0 else 0
         else:
+            total_input_tokens = 0
+            if variable_input_mode:
+                for composition_row in composition_rows:
+                    total_input_tokens += composition_row["num_input_tokens"] * composition_row["samples"]
+                total_input_tokens *= self.dp
+            else:
+                total_input_tokens = concurrency * input_length
             ttft = latency_ms
-            output_throughput = concurrency / latency_ms * 1000 * input_length if latency_ms > 0 else 0
+            output_throughput = total_input_tokens / latency_ms * 1000 if latency_ms > 0 else 0
 
         token_s_device = output_throughput / self.dp / self.pp / self.tp
         parallel = format_parallel_label(
@@ -166,35 +178,53 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         summary = OptimizerSummary(optimizer_data)
         if memory_info:
             summary.set_memory_info(memory_info)
-        result_df = pd.DataFrame(
-            columns=DISAGG_COLUMNS,
-            data=[
-                [
-                    self.model_runner.user_input.device,
-                    optimizer_data.num_devices,
-                    self.model_runner.user_input.model_id,
-                    self.model_runner.user_input.quantize_linear_action,
-                    self.model_runner.user_input.quantize_attention_action,
-                    input_length,
-                    output_length,
-                    effective_input_length,
-                    max_batched_tokens,
-                    len(chunk_plan),
-                    concurrency,
-                    ttft,
-                    tpot,
-                    output_throughput,
-                    token_s_device,
-                    parallel,
-                    batch_size,
-                    breakdowns,
-                    memory_info["model_weight_size_gb"] if memory_info else float("nan"),
-                    memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
-                    memory_info["model_activation_size_gb"] if memory_info else float("nan"),
-                    memory_info["device_memory_available_gb"] if memory_info else float("nan"),
-                ]
-            ],
-        ).round(3)
+        columns = DISAGG_COLUMNS.copy()
+        data = [
+            self.model_runner.user_input.device,
+            optimizer_data.num_devices,
+            self.model_runner.user_input.model_id,
+            self.model_runner.user_input.quantize_linear_action,
+            self.model_runner.user_input.quantize_attention_action,
+            input_length,
+            output_length,
+            effective_input_length,
+            max_batched_tokens,
+            len(chunk_plan),
+            concurrency,
+            ttft,
+            tpot,
+            output_throughput,
+            token_s_device,
+            parallel,
+            batch_size,
+            breakdowns,
+            memory_info["model_weight_size_gb"] if memory_info else float("nan"),
+            memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
+            memory_info["model_activation_size_gb"] if memory_info else float("nan"),
+            memory_info["device_memory_available_gb"] if memory_info else float("nan"),
+        ]
+        rows = [data]
+        if variable_input_mode and not decode_flag:
+            columns.insert(columns.index("output_length"), "num_input_tokens")
+            data.insert(columns.index("output_length") - 1, "all")
+            columns.insert(columns.index("concurrency"), "request_ratio")
+            data.insert(columns.index("concurrency") - 1, 1.0)
+            columns.insert(columns.index("concurrency"), "samples")
+            data.insert(columns.index("concurrency") - 1, concurrency)
+            #
+            for composition_row in composition_rows:
+                detail_row = data.copy()
+                detail_row[columns.index("num_input_tokens")] = composition_row["num_input_tokens"]
+                detail_row[columns.index("request_ratio")] = composition_row["request_ratio"]
+                detail_row[columns.index("samples")] = composition_row["samples"]
+                detail_row[columns.index("ttft")] = None
+                detail_row[columns.index("tpot")] = None
+                detail_row[columns.index("token/s")] = None
+                detail_row[columns.index("token/s/device")] = None
+                detail_row[columns.index("percentage_breakdowns")] = None
+                rows.append(detail_row)
+
+        result_df = pd.DataFrame(columns=columns, data=rows).round(3)
         summary.set_summary_df(result_df)
         summary.set_early_stop_flag(device_memory_available_gb, tpot, ttft)
 

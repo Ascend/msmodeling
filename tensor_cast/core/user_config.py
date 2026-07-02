@@ -52,6 +52,12 @@ class UserInputConfig:
     num_hidden_layers_override: int = 0
     disable_repetition: bool = False
     reserved_memory_gb: float = 0
+    """For models with weight > 50GB, the MemoryTracker significantly
+    underestimates peak memory. Recommended values:
+    - weight < 20GB: 2-5 GB (or leave as 0)
+    - weight 20-50GB: 5-10 GB
+    - weight > 50GB: 15-20 GB or 20-30% of weight size
+    """
     world_size: int = 1
     tp_size: int = 1
     pp_size: int = 1

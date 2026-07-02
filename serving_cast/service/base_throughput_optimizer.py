@@ -17,7 +17,11 @@ from typing import Optional
 
 import pandas as pd
 
-from tensor_cast.core.input_generator import generate_inputs, RequestInfo
+from tensor_cast.core.input_generator import (
+    generate_inputs,
+    generate_inputs_varlen,
+    RequestInfo,
+)
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from .latency_table import ForwardLatencyRecord, ForwardShapeKey
 from .optimizer_summary import OptimizerSummary
@@ -455,3 +459,28 @@ class BaseThroughputOptimizer(ABC):
             resolved_seq_len = seq_len or resolved_query_len
 
         return resolved_query_len, resolved_seq_len
+
+    def _get_batched_forward_info(
+        self, concurrency: int, optimizer_data: OptimizerData
+    ) -> tuple[ModelRunnerMetrics, list[dict]]:
+        dp_size = self.model_runner.model.model_config.parallel_config.data_parallel_size
+        concurrency = (concurrency + dp_size - 1) // dp_size
+        composition_rows = optimizer_data.build_concurrency_samples(concurrency)
+
+        requests = []
+        for row in composition_rows:
+            # repeat samples for same input length
+            for _ in range(row["samples"]):
+                requests.append(
+                    RequestInfo(
+                        query_len=row["query_len"],
+                        seq_len=row["query_len"],
+                        is_decode=False,
+                        num_input_tokens=row["num_input_tokens"],
+                        num_output_tokens=optimizer_data.output_length,
+                    )
+                )
+
+        metrics = self.model_runner.run_inference(requests, generate_inputs_func=generate_inputs_varlen)
+
+        return metrics, composition_rows

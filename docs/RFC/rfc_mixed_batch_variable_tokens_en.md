@@ -6,7 +6,7 @@
 |:---|:---|
 | **Status** | Approved |
 | **Author** | stormchasingg |
-| **Updated Date** | 2026-05-15 |
+| **Updated Date** | 2026-06-26 |
 | **Related Links** | |
 
 ---
@@ -17,8 +17,9 @@ This document records the current implementation of variable-token throughput op
 
 Compared with the original RFC version, the current implementation still supports mixed-batch modeling for variable-length prefill workloads, but the code structure has been significantly simplified and renamed:
 
-- the CLI uses a boolean `--length-distribution` switch instead of a user-provided path
-- distribution parsing and workload construction live in `OptimizerData`
+- the CLI uses the required `--input-length` argument for both fixed-length and distribution modes
+- `--input-length` accepts either a positive integer or an existing length-distribution YAML file path
+- distribution loading is handled by `load_length_distribution()`, while workload construction lives in `OptimizerData`
 - mixed-batch execution is implemented through `_get_batched_forward_info()`
 - final reporting no longer relies on a dedicated summary subclass
 - batched detail-row expansion is handled directly inside `OptimizerSummary`
@@ -40,24 +41,24 @@ It does not apply to:
 
 ### 2.1 CLI behavior
 
-The CLI now exposes:
+The CLI now exposes a single required input-length argument:
 
 - `--input-length`
-- `--length-distribution`
 
-with the rule:
+Its accepted values are:
 
-- exactly one of them must be provided
+- a positive integer, which selects fixed-length mode
+- an existing YAML file path, which selects variable-length distribution mode
 
-This validation is enforced in `cli/inference/throughput_optimizer.py`.
+This validation is enforced by `check_positive_integer_and_string()` in `serving_cast/service/utils.py` and used by `cli/inference/throughput_optimizer.py`.
 
-### 2.2 Built-in distribution mode
+### 2.2 Distribution-file mode
 
-`--length-distribution` is a boolean switch, not a file-path argument.
+There is no separate `--length-distribution` CLI switch.
 
-When enabled, the CLI loads the built-in distribution file:
+When `--input-length` is a file path, the CLI treats it as a length-distribution YAML file. For example:
 
-- `serving_cast/example/length_distribution.yaml`
+- `--input-length serving_cast/example/length_distribution.yaml`
 
 This mode is currently restricted to:
 
@@ -67,6 +68,13 @@ This mode is currently restricted to:
 - no PD ratio optimization
 
 If these conditions are not satisfied, the CLI rejects the run.
+
+At runtime, `args.input_length` remains:
+
+- `int` in fixed-length mode
+- `str` in distribution-file mode
+
+`ParallelRunner` loads the `LengthDistribution` object from the file path and passes it into `OptimizerData.length_distribution`. In this mode, `OptimizerData.input_length` is set to `None`.
 
 ## 3. Data Model
 
@@ -137,11 +145,9 @@ Semantics:
 - distribution mode:
   - returns the weighted average of representative `query_len`
 
-`OptimizerData.get_max_effective_input_length()` is distribution-specific and is used by the CLI for:
+Chunk planning is handled by `OptimizerData.get_prefill_chunk_plan()`, which uses the effective input length and `max_batched_tokens`.
 
-- `max_prefill_tokens` validation
-
-It computes the maximum effective prefill length from the configured bins.
+For distribution mode, the CLI performs a preflight chunked-prefill check by building an `OptimizerData(length_distribution=...)` object and calling `get_prefill_num_chunks()`. Distribution mode does not currently support chunked prefill, so users should increase `--max-batched-tokens` when the distribution's effective prefill length would require multiple chunks.
 
 ### 4.3 Integer sample allocation
 
@@ -262,7 +268,7 @@ This selection happens on the aggregate rows.
 
 ### 7.3 Composition-row expansion
 
-If `args.length_distribution is not None`, `OptimizerSummary._get_agg_disagg_final_out()` dispatches to:
+If `args.input_length` is a string path, `OptimizerSummary._get_agg_disagg_final_out()` dispatches to:
 
 - `_get_agg_disagg_final_out_batched()`
 
@@ -317,22 +323,33 @@ Performance columns on detail rows are rendered as `-`.
 ```bash
 CLI Argument Parsing (throughput_optimizer.py)
     │
-    ├─ Exactly one of --input-length / --length-distribution
+    ├─ Required --input-length
+    │   ├─ positive integer → fixed-length mode
+    │   └─ existing YAML path → distribution-file mode
     │
-    ├─ --length-distribution enabled?
+    ├─ Is input_length a YAML path?
     │   ├─ No
     │   │   └─ Use scalar input_length path
     │   │
     │   └─ Yes
-    │       ├─ load_length_distribution()
-    │       ├─ Build OptimizerData(length_distribution=...)
     │       ├─ Validate:
     │       │   ├─ disagg only
     │       │   ├─ prefill only (--ttft-limits set)
     │       │   └─ no --tpot-limits / no PD ratio optimization
+    │       ├─ load_length_distribution(input_length)
+    │       ├─ Build OptimizerData(length_distribution=...)
+    │       ├─ Check that chunked prefill is not required
     │       └─ Use distribution-aware prefill path
     │
     └─ ParallelRunner(args)
+        │
+        ├─ Is input_length a YAML path?
+        │   ├─ No
+        │   │   └─ OptimizerData(input_length=<int>)
+        │   │
+        │   └─ Yes
+        │       └─ OptimizerData(input_length=None,
+        │                         length_distribution=load_length_distribution(input_length))
         │
         └─ run_disagg()
             │
@@ -359,11 +376,11 @@ CLI Argument Parsing (throughput_optimizer.py)
             │
             └─ OptimizerSummary.report_final_result(args)
                 │
-                ├─ length_distribution is None?
-                │   ├─ Yes → _get_agg_disagg_final_out()
+                ├─ args.input_length is YAML path?
+                │   ├─ No  → _get_agg_disagg_final_out()
                 │   │         └─ _get_disagg_table_buf()
                 │   │
-                │   └─ No  → _get_agg_disagg_final_out_batched()
+                │   └─ Yes → _get_agg_disagg_final_out_batched()
                 │             │
                 │             ├─ _prepare_agg_disagg_results()
                 │             ├─ _expand_composition_rows()
@@ -381,8 +398,8 @@ The following directions are already identified and are still in progress:
 
 Beyond that, current limitations include:
 
-1. only the built-in YAML file is supported from the CLI
-2. distribution mode only works for disaggregation prefill with `TTFT` limits
+1. distribution mode only works for disaggregation prefill with `TTFT` limits
+2. distribution mode does not currently support chunked prefill
 3. PD ratio optimization does not support variable-token mixed-batch modeling
 4. best-row selection still happens on aggregate rows before detail-row expansion
 
@@ -390,7 +407,7 @@ Beyond that, current limitations include:
 
 If the implementation evolves again, the following areas are most sensitive and should be updated together:
 
-- CLI contract for `--length-distribution`
+- CLI contract for `--input-length` integer/path parsing
 - `OptimizerData` naming and workload-construction helpers
 - `BaseThroughputOptimizer` mixed-batch execution entry
 - `DisaggThroughputOptimizer` summary row schema
@@ -398,7 +415,7 @@ If the implementation evolves again, the following areas are most sensitive and 
 
 In particular, any future reintroduction of:
 
-- custom distribution file paths
+- a separate distribution CLI argument
 - summary subclasses
 - decode-mode batched reporting
 - aggregation-mode variable-token support

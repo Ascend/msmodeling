@@ -180,6 +180,9 @@ class OptimizerSummary:
         )
 
     def _get_agg_disagg_final_out(self, args):
+        if isinstance(args.input_length, str):
+            return self._get_agg_disagg_final_out_batched(args)
+
         sorted_summary_df = self._prepare_agg_disagg_results()
         if sorted_summary_df.empty:
             logger.warning("No optimizer rows passed TTFT/TPOT filters; cannot pick best configuration.")
@@ -306,6 +309,70 @@ class OptimizerSummary:
             "batch_size": r["batch_size"],
             "qps_req_s": _compute_disagg_request_qps(r, getattr(self.data_config, "output_length", None)),
         }
+
+    def _expand_composition_rows(self, best_df: pd.DataFrame) -> pd.DataFrame:
+        expanded_rows = []
+        match_columns = ["parallel", "batch_size", "concurrency", "num_devices"]
+
+        for _, best_row in best_df.iterrows():
+            matched_rows = self._summary_df.copy()
+            for column in match_columns:
+                matched_rows = matched_rows[matched_rows[column] == best_row[column]]
+
+            if matched_rows.empty:
+                continue
+
+            matched_rows = matched_rows.copy()
+            matched_rows["_is_aggregate"] = matched_rows["num_input_tokens"].astype(str) == "all"
+            matched_rows["_sort_num_input_tokens"] = pd.to_numeric(
+                matched_rows["num_input_tokens"],
+                errors="coerce",
+            )
+            matched_rows = matched_rows.sort_values(
+                by=["_is_aggregate", "_sort_num_input_tokens"],
+                ascending=[False, True],
+            ).drop(columns=["_is_aggregate", "_sort_num_input_tokens"])
+            expanded_rows.append(matched_rows)
+
+        if not expanded_rows:
+            return best_df
+
+        return pd.concat(expanded_rows, ignore_index=True)
+
+    def _get_agg_disagg_final_out_batched(self, args):
+        sorted_summary_df = self._prepare_agg_disagg_results()
+        if sorted_summary_df.empty:
+            logger.warning("No optimizer rows passed TTFT/TPOT filters; cannot pick best configuration.")
+            return ["*" * 80, "No configurations satisfy the current TTFT/TPOT filters.", "*" * 80]
+        best_result = sorted_summary_df.loc[0]
+        final_df = self._expand_composition_rows(sorted_summary_df)
+
+        final_out = []
+        final_out.append("*" * 80)
+
+        final_out.append("  " + "-" * 76)
+        final_out.append("  Input Configuration: ")
+        final_out.append(f"    Model: {args.model_id}")
+        final_out.append(f"    Quantize Linear action: {args.quantize_linear_action}")
+        final_out.append(f"    Quantize Attention action: {args.quantize_attention_action}")
+        final_out.append(f"    Devices: {args.num_devices} {args.device}")
+        final_out.append(f"    TTFT Limits: {self.data_config.ttft_limits} ms")
+        final_out.append(f"    TPOT Limits: {self.data_config.tpot_limits} ms")
+        final_out.append("  " + "-" * 76)
+
+        final_out.append("  Overall Best Configuration: ")
+        final_out.append(f"    Best Throughput: {best_result['token/s']:.2f} tokens/s")
+        if best_result["ttft"] is not None:
+            final_out.append(f"    TTFT: {best_result['ttft']:.2f} ms")
+        if best_result["tpot"] is not None:
+            final_out.append(f"    TPOT: {best_result['tpot']:.2f} ms")
+        final_out.append("  " + "-" * 76)
+
+        table_buf = _get_disagg_table_buf_batched(final_df)
+        final_out.append(table_buf)
+        final_out.append("*" * 80)
+
+        return final_out
 
     def _prepare_pd_ratio_results(self):
         """Prepare and filter results for PD ratio mode.
@@ -527,6 +594,62 @@ def _get_disagg_table_buf(df: pd.DataFrame, output_length: Optional[int] = None)
             _fmt_memory(row, "avail_GB"),
         ]
         _add_table_row(table, row_data, local_column)
+    table_buf.append(table.get_string())
+    return "\n".join(table_buf)
+
+
+def _get_disagg_table_buf_batched(df: pd.DataFrame):
+    aggregate_mask = df["num_input_tokens"].astype(str) == "all"
+    show_len = int(aggregate_mask.sum())
+    table_buf = []
+    table = PrettyTable()
+
+    table_buf.append(f"Top {show_len} Disaggregation (Prefill) Configurations: ")
+    table.field_names = [
+        "Top",
+        "num_devices",
+        "num_input_tokens",
+        "request_ratio",
+        "samples",
+        "concurrency",
+        TTFT_COLUMN,
+        "\033[1mThroughput\033[0m (token/s)",
+        "parallel",
+        "batch_size",
+    ]
+
+    def _format_value(value, fmt: str = None):
+        if pd.isna(value):
+            return "-"
+        if fmt is None:
+            return value
+        return fmt.format(value)
+
+    top_idx = 0
+    for _, row in df.iterrows():
+        is_aggregate = str(row.get("num_input_tokens", "-")) == "all"
+        if is_aggregate:
+            top_idx += 1
+        throughput = _format_value(row["token/s"], "\033[1m{:.2f}\033[0m")
+        latency = _format_value(row["ttft"], "{:.2f}")
+        request_ratio = _format_value(row.get("request_ratio"), "{:.3f}")
+        samples = _format_value(row.get("samples"))
+
+        table.add_row(
+            [
+                top_idx if is_aggregate else "-",
+                row["num_devices"],
+                row.get("num_input_tokens", "-"),
+                request_ratio,
+                samples,
+                row["concurrency"],
+                latency,
+                throughput,
+                row["parallel"],
+                row["batch_size"],
+            ]
+        )
+
     table_buf.append(table.get_string())
     return "\n".join(table_buf)
 
