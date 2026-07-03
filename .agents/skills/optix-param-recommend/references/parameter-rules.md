@@ -18,7 +18,7 @@
 - `max_batch_size`：根据 KV cache 容量估算。
 - `max_prefill_batch_size`：`max_batch_size` 的比例；TTFT 优先时更低，吞吐优先时更高。
 - `max_prefill_token`：覆盖首次寻优业务负载的 prefill token 压力。
-- `max_queue_deloy_mircroseconds`：TTFT 优先时更低，吞吐优先时更高。
+- `max_queue_delay_microseconds`：TTFT 优先时更低，吞吐优先时更高。
 - `support_select_batch`：TTFT 优先时关闭，吞吐或均衡场景开启。
 - `prefill_time_ms_per_req`、`decode_time_ms_per_req`：作为可搜索调度参数。
 - `max_preempt_count`：按 `max_batch_size` 的比例生成，首次寻优保持较低范围。

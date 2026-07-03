@@ -1,4 +1,4 @@
-# TensorCast User Guide
+﻿# TensorCast User Guide
 
 For the complete model list and feature details, see [Model Support and Feature Support Matrix](./support_matrix/support_matrix_user_guide.md).
 
@@ -201,10 +201,10 @@ usage: text_generate.py [-h]
                         [--o-proj-dp-size O_PROJ_DP_SIZE] [--mlp-tp-size MLP_TP_SIZE] [--mlp-dp-size MLP_DP_SIZE]
                         [--lmhead-tp-size LMHEAD_TP_SIZE] [--lmhead-dp-size LMHEAD_DP_SIZE]
                         [--moe-tp-size MOE_TP_SIZE] [--moe-dp-size MOE_DP_SIZE] [--word-embedding-tp {col,row}]
-                        [--enable-redundant-experts] [--enable-shared-expert-tp] [--enable-dispatch-ffn-combine]
-                        [--enable-external-shared-experts] [--host-external-shared-experts]
-                        [--vision-tp-size VISION_TP_SIZE] [--image-batch-size IMAGE_BATCH_SIZE]
-                        [--image-height IMAGE_HEIGHT] [--image-width IMAGE_WIDTH]
+                        [--enable-redundant-experts] [--enable-shared-expert-tp] [--enable-external-shared-experts]
+                        [--host-external-shared-experts] [--vision-tp-size VISION_TP_SIZE]
+                        [--image-batch-size IMAGE_BATCH_SIZE] [--image-height IMAGE_HEIGHT]
+                        [--image-width IMAGE_WIDTH]
                         [--remote-source {huggingface,modelscope}] [--performance-model {analytic,profiling}]
                         [--profiling-database PROFILING_DATABASE]
                         [--export-empirical-metrics EXPORT_EMPIRICAL_METRICS]
@@ -256,7 +256,6 @@ Main parameters:
 | `--word-embedding-tp` | Parallelism Options | Optional | Enables word embedding tensor parallel and specifies the parallel mode.<br>1. Type: Str.<br>2. Reference values: `col`, `row`.<br>3. Default: `None`, meaning embedding TP is disabled. |
 | `--enable-redundant-experts` | Parallelism Options | Optional | Enables redundant expert configuration.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. When enabled alone, each device hosts 1 additional redundant expert.<br>5. When enabled together with `--enable-external-shared-experts`, the allocation logic is the same as external shared experts. If routing experts are already evenly distributed across devices and no redundant experts are needed for padding, each device hosting routing experts hosts 1 additional redundant expert. |
 | `--enable-shared-expert-tp` | Parallelism Options | Optional | Enables vLLM-style tensor parallel for shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Shared experts use dense MLP TP with delayed `down_proj` reduction. |
-| `--enable-dispatch-ffn-combine` | Parallelism Options | Optional | Enables the dispatch_ffn_combine fusion pattern during compilation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--enable-external-shared-experts` | Parallelism Options | Optional | Enables external shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. When enabled, devices are allocated between external shared experts and routing experts at a `1:top_k` ratio. Redundant experts are used to pad routing experts if needed.<br>5. For example, if `world_size=64`, `top_k=8`, and the number of routing experts is 256, 8 devices host external shared experts and the remaining 56 devices distribute the 256 routing experts: 32 devices host 5 routing experts each, and 24 devices host 4 routing experts plus 1 redundant expert each. |
 | `--host-external-shared-experts` | Parallelism Options | Optional | Specifies that the current device hosts external shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--vision-tp-size` | Parallelism Options | Optional | Specifies tensor parallel size for vision modules.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`, meaning vision modules are not sharded. |

@@ -1,4 +1,4 @@
-# TensorCast 新模型适配使用指南
+# TensorCast 新模型适配开发指导
 
 本文介绍将 Hugging Face 风格的新模型适配到 TensorCast 的实际操作流程。当模型在可靠仿真前需要补充 TensorCast 专用元数据、兼容性补丁或 profiling 证据时，可参考本文执行适配。
 

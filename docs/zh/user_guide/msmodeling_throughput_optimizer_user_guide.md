@@ -1,4 +1,4 @@
-# 吞吐优化指南
+# 吞吐优化仿真 使用指南
 
 ## 1 简介
 
@@ -341,6 +341,8 @@ Service Options:
                         Serving cost represents the cost of service delivery (default: 0)
   --disagg              If set, run disaggregation mode. disagg means disaggregation mode. (default: False)
   --jobs JOBS           Number of parallel jobs. (default: 8)
+  --max-search-combinations MAX_SEARCH_COMBINATIONS
+                        Warn when TP/EP/MOE-DP/MTP search combinations exceed this value. Set 0 to disable the warning. (default: 100)
   --concurrency-search-strategy {exponential,linear_exponential}
                         Concurrency search strategy. The default is exponential. (default: exponential)
 
@@ -401,6 +403,7 @@ PD Ratio Optimization Options:
 | `--serving-cost` | Service Options | 可选 | 指定服务成本，用于成本相关指标计算。<br>1. 类型：Float。<br>2. 取值范围：非负数。<br>3. 默认值：`0`。 |
 | `--disagg` | Service Options | 可选 | 启用 PD 分离模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--jobs` | Service Options | 可选 | 指定并行搜索任务数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`8`。 |
+| `--max-search-combinations` | Service Options | 可选 | 当 TP / EP / MOE-DP / MTP 搜索组合数超过该值时输出警告。<br>1. 类型：Int。<br>2. 取值范围：非负整数；设置为 `0` 表示关闭该警告。<br>3. 默认值：`100`。 |
 | `--concurrency-search-strategy` | Service Options | 可选 | 指定并发度搜索策略。<br>1. 类型：Str。<br>2. 参考值：`exponential`、`linear_exponential`。<br>3. 默认值：`exponential`。 |
 | `--image-batch-size` | MultiModal Options | 可选 | 指定每个请求的图像数量。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；未设置时复用 batch size。 |
 | `--image-height` | MultiModal Options | 可选 | 指定输入图像高度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |

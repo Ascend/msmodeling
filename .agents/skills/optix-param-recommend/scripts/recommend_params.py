@@ -395,7 +395,7 @@ def recommend_mindie(
             "BackendConfig.ScheduleConfig.maxPrefillTokens",
         ),
         recommendation(
-            "max_queue_deloy_mircroseconds",
+            "max_queue_delay_microseconds",
             "mindie",
             "range",
             10000 if target == "ttft" else 100000,

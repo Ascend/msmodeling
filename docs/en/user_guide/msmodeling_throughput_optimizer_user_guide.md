@@ -268,6 +268,8 @@ Service Options:
                         Serving cost represents the cost of service delivery (default: 0)
   --disagg              If set, run disaggregation mode. disagg means disaggregation mode. (default: False)
   --jobs JOBS           Number of parallel jobs. (default: 8)
+  --max-search-combinations MAX_SEARCH_COMBINATIONS
+                        Warn when TP/EP/MOE-DP/MTP search combinations exceed this value. Set 0 to disable the warning. (default: 100)
   --concurrency-search-strategy {exponential,linear_exponential}
                         Concurrency search strategy. The default is exponential. (default: exponential)
 
@@ -328,6 +330,7 @@ Main parameters:
 | `--serving-cost` | Service Options | Optional | Serving cost used for cost-related metrics.<br>1. Type: Float.<br>2. Valid range: non-negative number.<br>3. Default: `0`. |
 | `--disagg` | Service Options | Optional | Enables PD disaggregation mode.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--jobs` | Service Options | Optional | Number of parallel search jobs.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `8`. |
+| `--max-search-combinations` | Service Options | Optional | Warns when TP / EP / MOE-DP / MTP search combinations exceed this value.<br>1. Type: Int.<br>2. Valid range: non-negative integer; set to `0` to disable this warning.<br>3. Default: `100`. |
 | `--concurrency-search-strategy` | Service Options | Optional | Concurrency search strategy.<br>1. Type: Str.<br>2. Reference values: `exponential`, `linear_exponential`.<br>3. Default: `exponential`. |
 | `--image-batch-size` | MultiModal Options | Optional | Number of images per request.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`; if omitted, batch size is reused. |
 | `--image-height` | MultiModal Options | Optional | Input image height.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`. |
@@ -346,10 +349,10 @@ Main parameters:
   So `prefill_batch_size = max_batched_tokens // effective_input_length`. And request was
   processed in prefill_batch_size steps one by one. We can get the total ttft time as follows:
 
-  `sum_for_ttft = (prefill_latency * prefill_batch_size) * (1 + calc_nums_for_ttft)) * (calc_nums_for_ttft) / 2`
+  `sum_for_ttft = (prefill_latency * prefill_batch_size) * (1 + calc_nums_for_ttft) * (calc_nums_for_ttft) / 2`
 
   For example, if we have 12 requests, and max_batched_tokens is 8192, input_length is 2048,
-  then prefill_batch_size is 4. And 12 requests was processed in 3 steps.
+  then prefill_batch_size is 4. And 12 requests were processed in 3 steps.
   so
 
   `sum_for_ttft = (prefill_latency * 4 ) * (1 + 3) * 3 / 2`

@@ -43,7 +43,7 @@ Run commands from the repository root. Python **>= 3.10** is required.
 Activate the Python environment first:
 
 ```bash
-source try/bin/activate
+source venv/bin/activate
 ```
 
 Then use `python` to launch scripts below. On Windows you may use `py -3` instead (PowerShell line continuation with `` ` ``).
@@ -403,5 +403,5 @@ When editing either guide, keep both `readme.md` and `readme_en.md` in sync:
 
 - Argument names match argparse definitions in code.
 - Defaults match code defaults.
-- Example commands are copy-paste ready from the repository root (after `source try/bin/activate`).
+- Example commands are copy-paste ready from the repository root (after `source venv/bin/activate`).
 - Document NPU, CANN, `torchrun`, or custom OPP requirements for new tools.

@@ -1,4 +1,4 @@
-# 服务化自动寻优工具
+# OptiX 使用指南
 
 ## 简介
 
@@ -341,11 +341,11 @@ others = "$COMPILATION_CONFIG"
 
 ```toml
 [[mindie.target_field]]
-name = "max_batch_size"    # 服务化参数名称
-config_position = "BackendConfig.ScheduleConfig.maxBatchSize"    # 服务化参数在MindIE Server中的位置
-min = 10    # 最小值
-max = 400    # 最大值
-dtype = "int"    # 数据类型
+name = "max_batch_size" # 服务化参数名称
+config_position = "BackendConfig.ScheduleConfig.maxBatchSize" # 服务化参数在MindIE Server中的位置
+min = 10 # 最小值
+max = 400 # 最大值
+dtype = "int" # 数据类型
 ```
 
 此外，也可设置参数与另一参数相关，如 `max_prefill_batch_size` 与 `max_batch_size` 相关，`max_prefill_batch_size = ratio * max_batch_size (0 < ratio < 1)`则可设置：
@@ -357,7 +357,7 @@ config_position = "BackendConfig.ScheduleConfig.maxPrefillBatchSize"
 min = 0
 max = 1
 dtype = "ratio"
-dtype_param = "max_batch_size"    # 表明该参数与max_batch_size相关
+dtype_param = "max_batch_size" # 表明该参数与max_batch_size相关
 ```
 
 此外，`target_field` 支持的所有 `dtype` 类型如下：

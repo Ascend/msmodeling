@@ -113,7 +113,7 @@ def schedule_fields():
             config_position="BackendConfig.ScheduleConfig.maxPrefillTokens",
         ),
         field(
-            "max_queue_deloy_microseconds",
+            "max_queue_delay_microseconds",
             "int",
             500,
             1000000,

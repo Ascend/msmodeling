@@ -187,7 +187,7 @@ default_support_field = [
         dtype="int",
     ),
     OptimizerConfigField(
-        name="max_queue_deloy_mircroseconds",
+        name="max_queue_delay_microseconds",
         config_position="BackendConfig.ScheduleConfig.maxQueueDelayMicroseconds",
         min=500,
         max=1000000,
