@@ -82,7 +82,7 @@ min = 0
 max = 1
 dtype = "bool"
 [[mindie.target_field]]
-name = "max_queue_deloy_mircroseconds"
+name = "max_queue_delay_microseconds"
 config_position = "BackendConfig.ScheduleConfig.maxQueueDelayMicroseconds"
 min = 500
 max = 1000000

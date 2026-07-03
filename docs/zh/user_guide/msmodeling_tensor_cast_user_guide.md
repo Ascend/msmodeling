@@ -1,4 +1,4 @@
-# TensorCast 使用指南
+# TensorCast仿真 使用指南
 
 完整模型列表与特性明细请参见《[模型支持与特性支持矩阵](./support_matrix/support_matrix_user_guide.md)》。
 
@@ -283,7 +283,7 @@ usage: video_generate.py [-h]
                          [--log-level {debug,info,warning,error,critical}] [--dtype {float16,float32,bfloat16}]
                          [--remote-source {huggingface,modelscope}]
                          [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
-                         [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg] [--world-size WORLD_SIZE]
+                         [--use-cfg] [--world-size WORLD_SIZE]
                          [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--dit-cache]
                          [--cache-step-range CACHE_STEP_RANGE] [--cache-step-interval CACHE_STEP_INTERVAL]
                          [--cache-block-range CACHE_BLOCK_RANGE]
@@ -309,7 +309,6 @@ Run a simulated diffusion transformer forward and dump perf stats.
 | `--dtype` | options | 可选 | 指定模型计算数据类型。<br>1. 类型：Str。<br>2. 参考值：`float16`、`float32`、`bfloat16`。<br>3. 默认值：`float16`。 |
 | `--remote-source` | options | 可选 | 指定非本地 Diffusers repo ID 的远端模型来源。<br>1. 类型：Str。<br>2. 参考值：`huggingface`、`modelscope`。<br>3. 默认值：`huggingface`。 |
 | `--quantize-linear-action` | options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`W8A8_DYNAMIC`。 |
-| `--quantize-attention-action` | options | 可选 | 指定 attention 计算量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`。<br>3. 默认值：`DISABLED`。 |
 | `--use-cfg` | options | 可选 | 启用 classifier-free guidance 相关仿真路径。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--world-size` | Parallel Options | 可选 | 指定参与分布式仿真的总设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
 | `--ulysses-size` | Parallel Options | 可选 | 指定 Ulysses 并行规模。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |

@@ -348,10 +348,10 @@ Main parameters:
   So `prefill_batch_size = max_batched_tokens // effective_input_length`. And request was
   processed in prefill_batch_size steps one by one. We can get the total ttft time as follows:
 
-  `sum_for_ttft = (prefill_latency * prefill_batch_size) * (1 + calc_nums_for_ttft)) * (calc_nums_for_ttft) / 2`
+  `sum_for_ttft = (prefill_latency * prefill_batch_size) * (1 + calc_nums_for_ttft) * (calc_nums_for_ttft) / 2`
 
   For example, if we have 12 requests, and max_batched_tokens is 8192, input_length is 2048,
-  then prefill_batch_size is 4. And 12 requests was processed in 3 steps.
+  then prefill_batch_size is 4. And 12 requests were processed in 3 steps.
   so
 
   `sum_for_ttft = (prefill_latency * 4 ) * (1 + 3) * 3 / 2`

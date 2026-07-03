@@ -212,20 +212,6 @@ Success criteria:
 - The output includes `Overall Summary`.
 - The output includes `request_throughput`, `input_token_throughput`, or `output_token_throughput`.
 
-#### 2.4.4 Enable Profiling (Optional)
-
-To obtain more fine-grained system performance information, add profiling parameters:
-
-```bash
-python -m serving_cast.main \
-    --instance_config_path=./serving_cast/example/instances.yaml \
-    --common_config_path=./serving_cast/example/common.yaml \
-    --enable_profiling \
-    --profiling_output_path=./profiling_results
-```
-
-Raw profiling results are saved under `profiling_output_path/{$time_stamp}`. Parsed results are saved under `profiling_output_path/{$time_stamp}_parsed_result`. The parsed output contains `chrome_tracing.json` and `profiler.db`, which can be opened with `chrome://tracing` or MindStudio Insight.
-
 ## 3. Validate Results and Next Steps
 
 If the commands above succeed, you have completed the core TensorCast and ServingCast workflow:

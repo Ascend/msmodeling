@@ -43,7 +43,7 @@
 先激活 Python 环境，再运行下文命令：
 
 ```bash
-source try/bin/activate
+source venv/bin/activate
 ```
 
 激活后使用 `python` 启动脚本（与英文 `readme_en.md` 命令一致；Windows 可选 `py -3`）。
@@ -432,5 +432,5 @@ export LD_LIBRARY_PATH=/path/to/vllm_ascend/_cann_ops_custom/vendors/vllm-ascend
 
 - 参数名与代码中的 argparse 定义一致。
 - 默认值与代码默认值一致。
-- 示例命令可以从仓库根目录直接复制执行（先 `source try/bin/activate`）。
+- 示例命令可以从仓库根目录直接复制执行（先 `source venv/bin/activate`）。
 - 新增工具如果依赖 NPU、CANN、`torchrun` 或自定义 OPP，需要在前置条件中说明。

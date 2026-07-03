@@ -61,7 +61,7 @@ source .venv/bin/activate
 # Windows
 .venv\Scripts\activate
 
-pip install "torch>=2.7,<=2.10" "torchvision>=0.25.0" --index-url https://download.pytorch.org/whl/cpu
+pip install "torch>=2.8,<=2.10" "torchvision>=0.23.0" --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```
 

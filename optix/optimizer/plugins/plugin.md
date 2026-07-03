@@ -116,14 +116,14 @@ The steps are as follows:
 
 ## III. Setting Plugin Entry Points
 
-Add the registration function of the custom content to the entry group '..plugins'.
+Add the registration function of the custom content to the entry group `optix.plugins`.
 
 For example, register by calling the register function of the vllm_inference_optimization module as follows
 
 pyproject.toml
 
-```python
-[project.entry - points.'..plugins']
+```toml
+[project.entry-points.'optix.plugins']
 vllm_inference_optimization = "vllm_inference_optimization:register"
 ```
 
@@ -137,15 +137,15 @@ First check whether the supported services and benchmark tools include the newly
 msserviceprofiler optimizer -h
 ```
 
-```ColdFusion
+```text
 options:
 -h, --help show this help message and exit
 -lb, --load_breakpoint
 Continue from where the last optimization was aborted.
 --backup Whether to back up data.
--e {vllm，vllm_infer}, --engine {vllm， vllm_infer}
+-e {vllm, vllm_infer}, --engine {vllm, vllm_infer}
 Specifies the engine to be used.
--b {vllm_benchmark，vllm_infer_benchmark}, --benchmark {vllm_benchmark， vllm_infer_benchmark}
+-b {vllm_benchmark, vllm_infer_benchmark}, --benchmark {vllm_benchmark, vllm_infer_benchmark}
 Specified benchmark to be used.
 ```
 
@@ -268,26 +268,24 @@ class ..optimizer.interfaces.simulator.SimulatorInterface()
 
 Set plugin entry points
 
-Add the registration function of the custom content to the entry group 'ms_service_profiler...plugins'.
+Add the registration function of the custom content to the entry group `optix.plugins`.
 
 For example, register by calling the register function of the vllm_inference_optimization module as follows
 
 pyproject.toml
 
-```python
-[project.entry - points.'ms_service_profiler...plugins']
+```toml
+[project.entry-points.'optix.plugins']
 vllm_inference_optimization = "vllm_inference_optimization:register"
 ```
 
 Install Plugin
 
-Set entry to ..plugins
+Set the entry point group to `optix.plugins`. For example:
 
-For example:
-
-```python
-[project.entry-points.'..plugins']
-vllm_inference_optimization="vllm_inference_optimization:register"
+```toml
+[project.entry-points.'optix.plugins']
+vllm_inference_optimization = "vllm_inference_optimization:register"
 ```
 
 Before using plugin mode, install the plugin in the plugin directory (ensure the current path contains pyproject.toml):
@@ -308,15 +306,15 @@ First check whether the supported services and benchmark tools include the newly
 msserviceprofiler optimizer -h
 ```
 
-```ColdFusion
+```text
 options:
 -h, --help show this help message and exit
 -lb, --load_breakpoint
 Continue from where the last optimization was aborted.
 --backup Whether to back up data.
--e {vllm，vllm_infer}, --engine {vllm， vllm_infer}
+-e {vllm, vllm_infer}, --engine {vllm, vllm_infer}
 Specifies the engine to be used.
--b {vllm_benchmark，vllm_infer_benchmark}, --benchmark {vllm_benchmark， vllm_infer_benchmark}
+-b {vllm_benchmark, vllm_infer_benchmark}, --benchmark {vllm_benchmark, vllm_infer_benchmark}
 Specified benchmark to be used.
 ```
 

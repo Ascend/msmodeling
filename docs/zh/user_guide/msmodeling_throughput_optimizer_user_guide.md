@@ -1,4 +1,4 @@
-# 吞吐优化指南
+# 吞吐优化仿真 使用指南
 
 ## 1 简介
 
@@ -286,6 +286,7 @@ General Options:
   --num-devices NUM_DEVICES
                         Specifies the total number of devices/processes to use. Must be a positive integer. A value of 1 indicates single-device
                         execution. (default: 1)
+  --enable-multistream  Enable compiler-driven multi-stream simulation for torch.compile path. Enabled by default. (default: True)
   --reserved-memory-gb RESERVED_MEMORY_GB
                         Amount of device memory (in gigabytes) reserved for system usage and unavailable for application. Set to 0 to disable
                         memory reservation. (default: 10.0)
@@ -297,7 +298,6 @@ Model & Quantization Options:
   --compile             If set, invoke torch.compile() on the model before inference. (default: False)
   --compile-allow-graph-break
                         If set, allows graph breaks during torch.compile() to improve compilation speed or handle unsupported ops. (default: False)
-  --enable-multistream  Enable compiler-driven multi-stream simulation for torch.compile path. Enabled by default. (default: True)
   --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9}
                         Number of MTP tokens, 0 means disabled - only support models having MTP like DeepSeek (default: 0)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -314,18 +314,6 @@ Model & Quantization Options:
                         Enable EP search. Optional explicit EP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
   --moe-dp-sizes [MOE_DP_SIZES ...]
                         Enable MOE-DP search. Optional explicit MOE-DP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
-  --enable-shared-expert-tp
-                        Enable vLLM-style tensor parallel for shared experts. (default: False)
-  --enable-sequence-parallel
-                        Enable the sequence parallel graph rewrite pass during compilation. (default: False)
-  --enable-dispatch-ffn-combine
-                        Enable dispatch_ffn_combine fusion pattern during compilation. (default: False)
-  --word-embedding-tp {col,row}
-                        Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled. (default: None)
-
-Debug Options:
-  --chrome-trace CHROME_TRACE
-                        Generate chrome trace file for visualization, for example trace.json. (default: None)
 
 Service Options:
   --ttft-limits TTFT_LIMITS
@@ -391,11 +379,6 @@ PD Ratio Optimization Options:
 | `--tp-sizes` | Model & Quantization Options | 可选 | 启用 TP 搜索，并可显式指定 TP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
 | `--ep-sizes` | Model & Quantization Options | 可选 | 启用 EP 搜索，并可显式指定 EP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
 | `--moe-dp-sizes` | Model & Quantization Options | 可选 | 启用 MOE-DP 搜索，并可显式指定 MOE-DP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
-| `--enable-shared-expert-tp` | Model & Quantization Options | 可选 | 启用 vLLM 风格的 shared experts 张量并行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. shared experts 使用 dense MLP TP，并延迟执行 `down_proj` 规约。 |
-| `--enable-sequence-parallel` | Model & Quantization Options | 可选 | 编译期间启用 sequence parallel 图改写 pass。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--enable-dispatch-ffn-combine` | Model & Quantization Options | 可选 | 编译期间启用 dispatch_ffn_combine 融合模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--word-embedding-tp` | Model & Quantization Options | 可选 | 启用 word embedding 张量并行并指定并行模式。<br>1. 类型：Str。<br>2. 参考值：`col`、`row`。<br>3. 默认值：`None`，表示不启用 embedding TP。 |
-| `--chrome-trace` | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |
 | `--ttft-limits` | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。 |
 | `--tpot-limits` | Service Options | 可选 | 指定 TPOT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TPOT。 |
 | `--max-batched-tokens` | Service Options | 可选 | 指定单个 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`8192`。 |
