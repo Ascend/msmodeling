@@ -35,6 +35,7 @@ class UserInputConfig:
     prefix_cache_hit_rate: float = 0.0
     do_compile: bool = False
     allow_graph_break: bool = False
+    dynamic_shapes: bool = False
     dump_input_shapes: bool = False
     dump_op_bound_results: bool = False
     chrome_trace: Optional[str] = None

@@ -233,6 +233,7 @@ class ParallelRunner:
             tmp_user_input.moe_dp_size = moe_dp
             tmp_user_input.moe_tp_size = target_devices // (ep * moe_dp)
             tmp_user_input.num_mtp_tokens = num_mtp_tokens
+            tmp_user_input.dynamic_shapes = not tmp_user_input.enable_sequence_parallel
             if base_chrome_trace:
                 name, ext = os.path.splitext(base_chrome_trace)
                 tmp_user_input.chrome_trace = (
