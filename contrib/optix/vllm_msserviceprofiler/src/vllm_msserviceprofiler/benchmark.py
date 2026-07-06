@@ -2,10 +2,10 @@ import json
 from pathlib import Path
 from typing import Optional, Tuple
 
-from ms_serviceparam_optimizer.config.config import VllmBenchmarkConfig, get_settings, PerformanceIndex, OptimizerConfigField
-from ms_serviceparam_optimizer.config.custom_command import VllmBenchmarkCommand
-from ms_serviceparam_optimizer.optimizer.interfaces.benchmark import BenchmarkInterface
-from ms_serviceparam_optimizer.optimizer.utils import remove_file
+from optix.config.config import VllmBenchmarkConfig, get_settings, PerformanceIndex, OptimizerConfigField
+from optix.config.custom_command import VllmBenchmarkCommand
+from optix.optimizer.interfaces.benchmark import BenchmarkInterface
+from optix.optimizer.utils import remove_file
 
 
 class VllmBenchMark(BenchmarkInterface):

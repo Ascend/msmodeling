@@ -17,6 +17,6 @@ packages = [{include = "vllm_msserviceprofiler", from = "src"}]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[project.entry-points.'modelevalstate.plugins']
+[project.entry-points.'optix.plugins']
 vllm_msserviceprofiler="vllm_msserviceprofiler:register"
 

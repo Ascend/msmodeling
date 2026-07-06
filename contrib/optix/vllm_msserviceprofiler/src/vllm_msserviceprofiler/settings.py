@@ -1,4 +1,4 @@
-from ms_serviceparam_optimizer.config.config import Settings
+from optix.config.config import Settings
 
 
 class CusSettings(Settings):

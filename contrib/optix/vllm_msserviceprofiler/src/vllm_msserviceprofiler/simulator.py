@@ -2,9 +2,9 @@
 import subprocess
 from typing import Optional, Tuple
 from loguru import logger
-from ms_serviceparam_optimizer.config.config import get_settings, OptimizerConfigField, VllmConfig
-from ms_serviceparam_optimizer.config.custom_command import VllmCommand
-from ms_serviceparam_optimizer.optimizer.interfaces.simulator import SimulatorInterface
+from optix.config.config import get_settings, OptimizerConfigField, VllmConfig
+from optix.config.custom_command import VllmCommand
+from optix.optimizer.interfaces.simulator import SimulatorInterface
 from jinja2 import Template
 
 class CustomVllmDockerSimulator(SimulatorInterface):
