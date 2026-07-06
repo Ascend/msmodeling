@@ -74,7 +74,7 @@ def build_model(user_input: UserInputConfig = None) -> TransformerModel:
         model = torch.compile(
             model,
             backend=get_backend(device_name=user_input.device),
-            dynamic=False,
+            dynamic=True,
             fullgraph=use_full_graph,
         )
     return model
