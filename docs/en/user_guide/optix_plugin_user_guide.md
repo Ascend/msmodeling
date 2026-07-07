@@ -77,6 +77,8 @@ The process of developing a custom plugin is as follows:
     register_simulator("vllm_infer", VllmSimulator)
     ```
 
+    If your engine depends on a CLI on `PATH` (e.g. `vllm`), set `required_executable = "vllm"` on the class; OptiX validates before constructing the plugin for `-e`. Omit for fixed install paths (e.g. MindIE daemon).
+
 ### Customizing a Performance Benchmark Tool
 
 1. Inherit from `optix.optimizer.benchmark.BenchmarkInterface` and implement the `data_field property` and `get_performance_index` methods.
@@ -120,6 +122,8 @@ Example:
     from optix.optimizer.register import register_benchmarks
     register_benchmarks("vllm_infer_benchmark", VllmBenchMark)
     ```
+
+    If the benchmark depends on a CLI on `PATH`, set `required_executable = "your_tool"` on the class; OptiX validates before constructing the plugin for `-b`.
 
 3. Set the plugin entry point.
 

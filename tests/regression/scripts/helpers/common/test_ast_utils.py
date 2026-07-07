@@ -627,6 +627,28 @@ def test_coverage_checks_def_header_only_uses_proxy(tmp_path: Path) -> None:
     assert checks == CoverageChecks(frozenset(), frozenset(), frozenset({body_line}))
 
 
+def test_coverage_checks_multiline_signature_uses_proxy(tmp_path: Path) -> None:
+    path = tmp_path / "multiline_sig.py"
+    path.write_text(
+        "\n".join(
+            [
+                "def run(",
+                "    x: int,",
+                "    y: str,",
+                ") -> int:",
+                "    return x",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run")
+    body_line = fn.body[0].lineno
+    continuation_line = fn.lineno + 1
+    checks = coverage_checks_for_definition(path, "run", {continuation_line})
+    assert checks == CoverageChecks(frozenset(), frozenset(), frozenset({body_line}))
+
+
 def test_coverage_checks_body_only_uses_strict(tmp_path: Path) -> None:
     path = tmp_path / "body_checks.py"
     path.write_text("def run():\n    return 1\n", encoding="utf-8")

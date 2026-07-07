@@ -15,16 +15,18 @@
 # -------------------------------------------------------------------------
 import json
 import shutil
-from pathlib import Path
 import unittest
-from unittest.mock import patch, MagicMock
-import pytest
-from optix.config.config import PerformanceIndex, get_settings
-from optix.optimizer.plugins.benchmark import (
-    parse_result,
-    VllmBenchMark,
-)
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+from optix.config.config import PerformanceIndex, get_settings
+from optix.io_utils import open_file as _patch_open_file
+from optix.optimizer.plugins.benchmark import (
+    VllmBenchMark,
+    parse_result,
+)
 
 settings = get_settings()
 
@@ -136,7 +138,6 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
 
     def test_get_performance_index_normal(self):
         """Test the get_performance_index method in normal case"""
-
         # Call the method
         result = self.benchmark.get_performance_index()
 
@@ -181,8 +182,9 @@ class TestVllmBenchMarkExtended(unittest.TestCase):
         self.benchmark.stop(del_log=False)
 
     def test_before_run(self):
-        from optix.config.config import OptimizerConfigField
         import tempfile
+
+        from optix.config.config import OptimizerConfigField
 
         tmp_dir = tempfile.mkdtemp()
         self.benchmark.config.command.result_dir = tmp_dir
@@ -306,8 +308,8 @@ class TestAisBenchGetBestConcurrency(unittest.TestCase):
     """Test AisBench.get_best_concurrency"""
 
     def test_get_best_concurrency_normal(self, tmp_path=None):
-        import tempfile
         import os
+        import tempfile
 
         from optix.optimizer.plugins.benchmark import AisBench
 
@@ -336,21 +338,24 @@ class TestAisBenchGetBestConcurrency(unittest.TestCase):
         bench.config.best_concurrency_coefficient = 1.5
         bench.config.best_concurrency_threshold = 10
 
-        with patch(
-            "optix.optimizer.plugins.benchmark.glob.glob",
-            return_value=[csv_path],
-        ):
-            with patch(
+        with (
+            patch(
+                "optix.optimizer.plugins.benchmark.glob.glob",
+                return_value=[csv_path],
+            ),
+            patch(
                 "optix.optimizer.plugins.benchmark.open_file",
-                side_effect=lambda *a, **kw: open(*a, **kw),  # pylint: disable=unspecified-encoding
-            ):
-                result = AisBench.get_best_concurrency(bench)
+                side_effect=_patch_open_file,
+            ),
+        ):
+            result = AisBench.get_best_concurrency(bench)
         assert result == 30  # 20 * 1.5 = 30
 
     def test_get_best_concurrency_below_threshold(self):
-        from optix.optimizer.plugins.benchmark import AisBench
-        import tempfile
         import os
+        import tempfile
+
+        from optix.optimizer.plugins.benchmark import AisBench
 
         tmp_dir = tempfile.mkdtemp()
         perf_dir = os.path.join(tmp_dir, "run1", "performances", "task1")
@@ -373,25 +378,40 @@ class TestAisBenchGetBestConcurrency(unittest.TestCase):
         bench.config.best_concurrency_coefficient = 1.0
         bench.config.best_concurrency_threshold = 10
 
-        with patch(
-            "optix.optimizer.plugins.benchmark.glob.glob",
-            return_value=[csv_path],
-        ):
-            with patch(
+        with (
+            patch(
+                "optix.optimizer.plugins.benchmark.glob.glob",
+                return_value=[csv_path],
+            ),
+            patch(
                 "optix.optimizer.plugins.benchmark.open_file",
-                side_effect=lambda *a, **kw: open(*a, **kw),  # pylint: disable=unspecified-encoding
-            ):
-                result = AisBench.get_best_concurrency(bench)
+                side_effect=_patch_open_file,
+            ),
+        ):
+            result = AisBench.get_best_concurrency(bench)
         assert result == 10  # Below threshold, use threshold
+
+    def test_get_best_concurrency_non_unique_csv_raises(self):
+        from optix.optimizer.errors import BenchmarkResultError, OptimizerError
+        from optix.optimizer.plugins.benchmark import AisBench
+
+        assert issubclass(BenchmarkResultError, OptimizerError)
+
+        bench = MagicMock()
+        bench.config.output_path = "/output"
+        with patch("optix.optimizer.plugins.benchmark.glob.glob", return_value=["/a.csv", "/b.csv"]):
+            with pytest.raises(BenchmarkResultError, match="not unique"):
+                AisBench.get_best_concurrency(bench)
 
 
 class TestAisBenchGetPerformanceIndex(unittest.TestCase):
     """Test AisBench.get_performance_index"""
 
     def test_get_performance_index_success(self):
-        from optix.optimizer.plugins.benchmark import AisBench
-        import tempfile
         import os
+        import tempfile
+
+        from optix.optimizer.plugins.benchmark import AisBench
 
         tmp_dir = tempfile.mkdtemp()
         perf_dir = os.path.join(tmp_dir, "run1", "performances", "task1")
@@ -419,15 +439,17 @@ class TestAisBenchGetPerformanceIndex(unittest.TestCase):
         bench.config.performance_config.time_per_output_token.algorithm = "average"
         bench.get_performance_metric = MagicMock(side_effect=[0.1, 0.05])
 
-        with patch(
-            "optix.optimizer.plugins.benchmark.glob.glob",
-            return_value=[csv_path],
-        ):
-            with patch(
+        with (
+            patch(
+                "optix.optimizer.plugins.benchmark.glob.glob",
+                return_value=[csv_path],
+            ),
+            patch(
                 "optix.optimizer.plugins.benchmark.open_file",
-                side_effect=lambda *a, **kw: open(*a, **kw),  # pylint: disable=unspecified-encoding
-            ):
-                result = AisBench.get_performance_index(bench)
+                side_effect=_patch_open_file,
+            ),
+        ):
+            result = AisBench.get_performance_index(bench)
         assert result.throughput == 4.5
         assert result.success_rate == 0.95
         assert result.generate_speed == 2000.0
@@ -437,10 +459,11 @@ class TestAisBenchBeforeRun(unittest.TestCase):
     """Test AisBench.before_run"""
 
     def test_before_run_modifies_config(self):
-        from optix.optimizer.plugins.benchmark import AisBench
-        from optix.config.config import OptimizerConfigField
-        import tempfile
         import os
+        import tempfile
+
+        from optix.config.config import OptimizerConfigField
+        from optix.optimizer.plugins.benchmark import AisBench
 
         tmp_dir = tempfile.mkdtemp()
         config_file = os.path.join(tmp_dir, "config.py")
@@ -478,12 +501,14 @@ class TestAisBenchBeforeRun(unittest.TestCase):
                 ),
             )
 
-            with patch("optix.optimizer.plugins.benchmark.remove_file"):
-                with patch(
+            with (
+                patch("optix.optimizer.plugins.benchmark.remove_file"),
+                patch(
                     "optix.optimizer.plugins.benchmark.open_file",
-                    side_effect=lambda *a, **kw: open(*a, **kw),  # pylint: disable=unspecified-encoding
-                ):
-                    bench.before_run(params)
+                    side_effect=_patch_open_file,
+                ),
+            ):
+                bench.before_run(params)
 
         with open(config_file, encoding="utf-8") as f:
             content = f.read()
@@ -495,8 +520,9 @@ class TestAisBenchBackup(unittest.TestCase):
     """Test AisBench.backup"""
 
     def test_backup_calls_utility(self):
-        from optix.optimizer.plugins.benchmark import AisBench
         import types
+
+        from optix.optimizer.plugins.benchmark import AisBench
 
         bench = MagicMock()
         bench.config.output_path = "/output"
@@ -509,8 +535,9 @@ class TestAisBenchBackup(unittest.TestCase):
             mock_backup.assert_called_once()
 
     def test_backup_with_log(self):
-        from optix.optimizer.plugins.benchmark import AisBench
         import types
+
+        from optix.optimizer.plugins.benchmark import AisBench
 
         bench = MagicMock()
         bench.config.output_path = "/output"
@@ -562,8 +589,8 @@ class TestVllmBenchMarkGetPerformanceIndexNoJson(unittest.TestCase):
 
     @patch("optix.config.custom_command.shutil.which")
     def test_get_performance_index_json_decode_error(self, mock_which):
-        import tempfile
         import os
+        import tempfile
 
         mock_which.return_value = "/usr/bin/vllm"
         mock_config = MagicMock()
@@ -588,8 +615,8 @@ class TestVllmBenchMarkGetPerformanceIndexNoJson(unittest.TestCase):
 
     @patch("optix.config.custom_command.shutil.which")
     def test_get_performance_index_zero_prompts(self, mock_which):
-        import tempfile
         import os
+        import tempfile
 
         mock_which.return_value = "/usr/bin/vllm"
         mock_config = MagicMock()

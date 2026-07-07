@@ -18,8 +18,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from optix.config.config import (
-    PerformanceIndex,
     OptimizerConfigField,
+    PerformanceIndex,
     get_settings,
 )
 from optix.optimizer.store import DataStorage
@@ -29,31 +29,64 @@ class TestDataStorage(unittest.TestCase):
     def setUp(self):
         self.data_storage = DataStorage(get_settings().data_storage, MagicMock(), MagicMock())
 
-    @patch("optix.optimizer.store.Path")
+    @patch("optix.optimizer.store.open_file")
     @patch("optix.optimizer.store.csv")
-    @patch("optix.optimizer.store.sanitize_csv_value")
-    def test_save_existing_file(self, mock_sanitize_csv_value, mock_csv, mock_path):
-        # Configure mock behavior.
-        mock_path.exists.return_value = True
+    @patch("optix.optimizer.store.sanitize_csv_value", side_effect=lambda value: value)
+    def test_save_existing_file(self, mock_sanitize_csv_value, mock_csv, mock_open_file):
         mock_file = MagicMock()
-        mock_file.__enter__.return_value = mock_file
-        mock_path.open.return_value = mock_file
+        mock_open_file.return_value.__enter__.return_value = mock_file
+        mock_writer = MagicMock()
+        mock_csv.writer.return_value = mock_writer
 
-        # Create a DataStorage instance.
         config = MagicMock()
         config.store_dir = Path("/tmp/fake/dir")
-        storage = DataStorage(config)
+        storage = DataStorage(config, MagicMock(), MagicMock())
+        storage.save_file = MagicMock()
+        storage.save_file.exists.return_value = True
 
-        # Create test data.
         performance_index = PerformanceIndex()
-        params = [
+        params = (
             OptimizerConfigField(name="param1", value=1),
             OptimizerConfigField(name="param2", value=2),
-        ]
+        )
         kwargs = {"key1": "value1", "key2": "value2"}
 
-        # Call the save method.
         storage.save(performance_index, params, **kwargs)
+
+        mock_open_file.assert_called_once_with(storage.save_file, "a+")
+        mock_csv.writer.assert_called_once_with(mock_file)
+        mock_writer.writerow.assert_called_once()
+        written_row = mock_writer.writerow.call_args[0][0]
+        assert len(written_row) > 0
+        assert mock_sanitize_csv_value.call_count == len(written_row)
+
+    def test_save_strips_leading_double_dash_before_sanitize(self):
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock()
+        config.store_dir = tmp_dir
+        storage = DataStorage(config)
+        performance_index = PerformanceIndex()
+        params = (OptimizerConfigField(name="cmd", value="--max-batch-size=32"),)
+        storage.save(performance_index, params)
+        content = storage.save_file.read_text(encoding="utf-8")
+        assert "--max-batch-size" not in content
+        assert "max-batch-size=32" in content
+
+    def test_save_strips_embedded_double_dash(self):
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock()
+        config.store_dir = tmp_dir
+        storage = DataStorage(config)
+        performance_index = PerformanceIndex()
+        params = (OptimizerConfigField(name="cmd", value="foo--bar"),)
+        storage.save(performance_index, params)
+        content = storage.save_file.read_text(encoding="utf-8")
+        assert "foo--bar" not in content
+        assert "foobar" in content
 
     @patch("optix.optimizer.store.Path")
     def test_load_history_position_dir_not_exist(self, mock_path):
@@ -184,8 +217,8 @@ class TestDataStorage(unittest.TestCase):
 
     def test_get_best_result_with_both_penalties(self):
         """Test get_best_result filters by both ttft and tpot SLOs"""
-        import tempfile
         import csv
+        import tempfile
 
         tmp_dir = Path(tempfile.mkdtemp())
         config = MagicMock()
@@ -226,8 +259,8 @@ class TestDataStorage(unittest.TestCase):
 
     def test_get_best_result_tpot_only(self):
         """Test get_best_result filters by tpot penalty only"""
-        import tempfile
         import csv
+        import tempfile
 
         tmp_dir = Path(tempfile.mkdtemp())
         config = MagicMock()
@@ -262,8 +295,8 @@ class TestDataStorage(unittest.TestCase):
 
     def test_get_best_result_no_penalty(self):
         """Test get_best_result with no penalty"""
-        import tempfile
         import csv
+        import tempfile
 
         tmp_dir = Path(tempfile.mkdtemp())
         config = MagicMock()

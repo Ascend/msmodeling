@@ -13,16 +13,26 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-"""OptiX service parameter optimizer for LLM inference tuning."""
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
 
-from optix.logging import LogStage, configure_logger
-
-__all__ = ["LogStage", "configure_logger"]
+from ..config.config import PerformanceIndex
 
 
-def main() -> None:
-    """CLI entry for ``python -m optix`` and coverage tests."""
-    configure_logger()
-    from optix.optimizer.optimizer import main as optimizer_main
+class RunStatus(str, Enum):
+    SUCCESS = "success"
+    FAILED = "failed"
 
-    optimizer_main()
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """Structured result of a single Scheduler evaluation run."""
+
+    status: RunStatus
+    performance_index: PerformanceIndex
+    error_context: Any | None = None
+
+    @property
+    def has_error(self) -> bool:
+        return self.status == RunStatus.FAILED

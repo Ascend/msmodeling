@@ -1,4 +1,8 @@
 # -------------------------------------------------------------------------
+# Process cleanup (remove_file, kill_*) and path backup (backup, get_folder_size)
+# intentionally share this module; split deferred until a second consumer needs
+# isolated imports without widening the public optimizer API surface.
+# -------------------------------------------------------------------------
 # This file is part of the MindStudio project.
 # Copyright (c) 2025 Huawei Technologies Co.,Ltd.
 #
@@ -28,8 +32,22 @@ def remove_file(output_path: Path):
         return
     if not isinstance(output_path, Path):
         output_path = Path(output_path)
+    if not str(output_path).strip():
+        logger.error("Refusing to clean empty output path")
+        return
     if not output_path.exists():
         return
+    resolved = output_path.expanduser().resolve()
+    cwd = Path.cwd().resolve()
+    protected_paths = (
+        ("current working directory", cwd),
+        ("home directory", Path.home().resolve()),
+        ("filesystem root", Path("/").resolve()),
+    )
+    for description, sentinel in protected_paths:
+        if resolved == sentinel:
+            logger.error("Refusing to clean {}: {}", description, sentinel)
+            return
     if output_path.is_file():
         output_path.unlink()
         return
@@ -114,8 +132,7 @@ def get_folder_size(folder_path: Path) -> int:
         return 0
     total_size = 0
     for file_path in walk_files(folder):
-        if os.path.isfile(file_path):
-            total_size += os.path.getsize(file_path)
+        total_size += Path(file_path).stat().st_size
 
     return total_size
 
@@ -140,9 +157,14 @@ def get_required_field_from_json(data, key, max_depth=20, current_depth=0):
         _next_key = key[_index + 1 :]
     _value = None
     if isinstance(data, dict):
+        if _cur_key not in data:
+            return None
         _value = data[_cur_key]
     elif isinstance(data, list):
-        _value = data[int(_cur_key)]
+        try:
+            _value = data[int(_cur_key)]
+        except (IndexError, ValueError):
+            return None
     else:
         raise ValueError(f"Unsupported data type: {data}, please confirm. ")
     if _next_key:

@@ -15,9 +15,11 @@
 # -------------------------------------------------------------------------
 # pylint: disable=too-many-lines,duplicate-code,protected-access
 import os
+import tempfile
+import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -39,6 +41,7 @@ from optix.config.config import (
     register_settings,
     resolve_priority,
     reverse_special_field,
+    Settings,
     update_optimizer_value,
 )
 
@@ -1455,6 +1458,44 @@ class TestFieldToParam:
         result = field_to_param(fields)
         # Falls back to appending raw value (inf) which works in float array
         assert result[0] == float("inf")
+
+
+class TestSettingsValidators(unittest.TestCase):
+    def test_settings_customise_sources_includes_toml(self):
+        init_settings = MagicMock()
+        env_settings = MagicMock()
+        dotenv_settings = MagicMock()
+        file_secret_settings = MagicMock()
+
+        sources = Settings.settings_customise_sources(
+            Settings,
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
+
+        assert sources[0] is init_settings
+        assert sources[1] is env_settings
+        assert sources[2].__class__.__name__ == "TomlConfigSettingsSource"
+        assert sources[3] is file_secret_settings
+
+    @patch("optix.config.config.is_vllm", return_value=True)
+    def test_partial_update_vllm_syncs_benchmark_command(self, _mock_is_vllm):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            settings = Settings(output=base / "out", simulator_output=base / "sim")
+            settings.vllm.command.host = "10.0.0.1"
+            settings.vllm.command.port = "8123"
+            settings.vllm.command.model = "test-model"
+            settings.vllm.command.served_model_name = "served-name"
+
+            updated = Settings.partial_update_vllm(settings)
+
+            assert updated.vllm_benchmark.command.host == "10.0.0.1"
+            assert updated.vllm_benchmark.command.port == "8123"
+            assert updated.vllm_benchmark.command.model == "test-model"
+            assert updated.vllm_benchmark.command.served_model_name == "served-name"
 
 
 class TestGetSettingsAndRegister:

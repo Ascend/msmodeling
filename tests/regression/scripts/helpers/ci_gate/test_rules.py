@@ -754,6 +754,65 @@ def test_gate_modified_source_signature_proxy_accepts_body_coverage(
     assert 1 not in captured[0]
 
 
+def test_gate_modified_source_multiline_signature_proxy_accepts_body_coverage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "\n".join(
+            [
+                "def run(",
+                "    x: int,",
+                "    y: str,",
+                ") -> int:",
+                "    return x + 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    import ast
+
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run")
+    cs = ChangeSet.build(modified_source={"cli/main.py": frozenset({fn.lineno + 1})})
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+
+    captured: list[set[int]] = []
+
+    def _fake_symbol_lines_covered(
+        _repo: Path,
+        _path: str,
+        _symbol: str,
+        lines: set[int],
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        captured.append(set(lines))
+        return True
+
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.rules.symbol_lines_covered_in_data",
+        _fake_symbol_lines_covered,
+    )
+
+    result = gate_modified_source(
+        tmp_path,
+        cs,
+        {},
+        (),
+        ("cli/",),
+        coverage_path=coverage_path,
+    )
+
+    assert result.errors == ()
+    assert captured
+    assert fn.body[0].lineno in captured[0]
+    assert fn.lineno + 1 not in captured[0]
+
+
 def test_gate_modified_source_decorator_only_requires_import_and_proxy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -21,14 +21,13 @@ import pandas as pd
 import pytest
 
 from optix.config.config import (
+    DecodeContext,
     OptimizerConfigField,
     PerformanceIndex,
-    DecodeContext,
 )
 from optix.optimizer.optimizer import (
     PSOOptimizer,
     adapter_target_field,
-    enable_simulate,
 )
 
 
@@ -314,14 +313,6 @@ class TestAdapterTargetField:
             conc_field = next(f for f in opt.target_field if f.name == "CONCURRENCY")
             assert conc_field.constant == 64
             assert conc_field.value == 64
-
-
-class TestEnableSimulate:
-    @patch("optix.optimizer.optimizer.simulate_flag", False)
-    def test_no_simulate_flag(self):
-        scheduler = MagicMock()
-        with enable_simulate(scheduler) as flag:
-            assert flag is False
 
 
 class TestOpFunc:
@@ -701,6 +692,7 @@ class TestOptimizerMain:
             stack.enter_context(patch("optix.optimizer.scheduler.Scheduler"))
             stack.enter_context(patch("optix.optimizer.store.DataStorage"))
             mock_fine_tune = stack.enter_context(patch("optix.optimizer.experience_fine_tunning.FineTune"))
+            stack.enter_context(patch("optix.optimizer.register.shutil.which", return_value="/usr/bin/ais_bench"))
             stack.enter_context(patch.dict("optix.optimizer.register.simulates", {"mindie": lambda **kw: mock_simu}))
             stack.enter_context(
                 patch.dict("optix.optimizer.register.benchmarks", {"ais_bench": lambda **kw: mock_bench})
@@ -779,7 +771,9 @@ class TestOptimizerMain:
         # -- mock downstream data access --------------------------------
         opt.scheduler.data_storage.get_best_result.return_value = pd.DataFrame()
         opt.refine_optimization_candidates = MagicMock(return_value=([], [], []))
-        opt.best_params = MagicMock(return_value=(None, None, None))
+        opt.best_params = MagicMock(
+            return_value=(0.5, np.array([50.0, 25000.0]), PerformanceIndex(generate_speed=100.0)),
+        )
 
         # -- exercise ---------------------------------------------------
         opt.run_plugin()
@@ -803,7 +797,9 @@ class TestOptimizerMain:
 
         opt.scheduler.data_storage.get_best_result.return_value = pd.DataFrame()
         opt.refine_optimization_candidates = MagicMock(return_value=([], [], []))
-        opt.best_params = MagicMock(return_value=(None, None, None))
+        opt.best_params = MagicMock(
+            return_value=(0.5, np.array([50.0, 25000.0]), PerformanceIndex(generate_speed=100.0)),
+        )
 
         opt.run_plugin()
 

@@ -98,6 +98,8 @@
     register_simulator("vllm_infer", VllmSimulator)
     ```
 
+    若插件依赖 `PATH` 中的可执行文件（如 `vllm`），在实现类上声明 `required_executable = "vllm"`，框架会在 `-e` 构造插件前自动校验；无需在插件内手写 `shutil.which`。MindIE 等使用固定安装路径的引擎可省略该属性。
+
 ### 自定义性能测试工具
 
 1. 继承optix.optimizer.benchmark.BenchmarkInterface，实现data_field property，get_performance_index方法等。
@@ -141,6 +143,8 @@
     from optix.optimizer.register import register_benchmarks
     register_benchmarks("vllm_infer_benchmark", VllmBenchMark)
     ```
+
+    若测评工具依赖 `PATH` 中的 CLI，在实现类上声明 `required_executable = "your_tool"`，框架会在 `-b` 构造插件前自动校验。
 
 3. 设置插件入口点
 

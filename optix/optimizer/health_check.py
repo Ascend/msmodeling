@@ -1,9 +1,10 @@
-from enum import Enum
-from dataclasses import dataclass, field
-from typing import Callable, Optional, Dict, Any, Tuple, List
 import subprocess
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Optional
 
-from ..config.config import get_settings, ErrorSeverity, ErrorType
+from ..config.config import ErrorSeverity, ErrorType, get_settings
 
 LOG_ERROR_MESSAGE = "Detected {error_type} in logs"
 BENCHMARK_LOG_ERROR_MESSAGE = "Detected {error_type} in benchmark logs"
@@ -12,13 +13,9 @@ BENCHMARK_LOG_ERROR_MESSAGE = "Detected {error_type} in benchmark logs"
 class FatalError(subprocess.SubprocessError):
     """Fatal error, no retry (OOM, device failure, etc.)"""
 
-    pass
-
 
 class RetryableError(subprocess.SubprocessError):
     """Retryable error (network jitter, IO error, etc.)"""
-
-    pass
 
 
 class ServiceHookPoint(Enum):
@@ -41,7 +38,7 @@ class ErrorContext:
     error_type: Any
     severity: Any
     message: str
-    details: Dict[str, Any] = field(default_factory=dict)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -66,7 +63,7 @@ class HealthCheckResult:
 
 def _check_log_patterns(
     log_content: str,
-    patterns_dict: Dict[ErrorType, List[str]],
+    patterns_dict: dict[ErrorType, list[str]],
     severity: ErrorSeverity,
     error_message_format: str,
     log_snippet_length: int,
@@ -83,6 +80,8 @@ def _check_log_patterns(
     Returns:
         Returns HealthCheckResult(is_healthy=False) if an error is detected, otherwise returns None
     """
+    if not log_content or not str(log_content).strip():
+        return None
     log_lower = log_content.lower()
     for error_type, patterns in patterns_dict.items():
         for pattern in patterns:
@@ -103,7 +102,7 @@ class HealthCheckHook:
     """Health check hook base class"""
 
     def __init__(self):
-        self._hooks: Dict[Enum, List[Tuple[int, Callable, str]]] = {}
+        self._hooks: dict[Enum, list[tuple[int, Callable, str]]] = {}
 
     def register(
         self,
@@ -141,7 +140,7 @@ class HealthCheckHook:
                     error_context=ErrorContext(
                         error_type=ErrorType.UNKNOWN,
                         severity=ErrorSeverity.FATAL,
-                        message=f"Hook {hook_name} raised unexpected exception: {type(e).__name__}: {str(e)}",
+                        message=f"Hook {hook_name} raised unexpected exception: {type(e).__name__}: {e!s}",
                     ),
                 )
 
@@ -151,13 +150,9 @@ class HealthCheckHook:
 class ServiceHealthCheckHook(HealthCheckHook):
     """Service framework health check hook (only inherits, no need to re-implement register)"""
 
-    pass
-
 
 class BenchmarkHealthCheckHook(HealthCheckHook):
     """Benchmark framework health check hook (only inherits, no need to re-implement register)"""
-
-    pass
 
 
 class ServiceHealthChecks:
@@ -170,7 +165,12 @@ class ServiceHealthChecks:
             return HealthCheckResult(is_healthy=True)
         settings = get_settings()
         config = settings.health_check.service_errors
-        log_content = context.simulator.get_last_log(number=settings.health_check.log_snippet_length)
+        log_content = context.simulator.get_last_log(
+            number=settings.health_check.log_snippet_length,
+            retry=False,
+        )
+        if not log_content or not str(log_content).strip():
+            return HealthCheckResult(is_healthy=True)
         # Check fatal errors
         result = _check_log_patterns(
             log_content=log_content,
@@ -204,7 +204,12 @@ class BenchmarkHealthChecks:
             return HealthCheckResult(is_healthy=True)
         settings = get_settings()
         config = settings.health_check.benchmark_errors
-        log_content = context.benchmark.get_last_log(number=settings.health_check.log_snippet_length)
+        log_content = context.benchmark.get_last_log(
+            number=settings.health_check.log_snippet_length,
+            retry=False,
+        )
+        if not log_content or not str(log_content).strip():
+            return HealthCheckResult(is_healthy=True)
         # Check fatal errors
         result = _check_log_patterns(
             log_content=log_content,

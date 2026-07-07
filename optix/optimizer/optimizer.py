@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from math import inf, isclose, isinf, isnan
 from pathlib import Path
-from typing import Optional
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -33,6 +33,15 @@ from ..config.base_config import (
     simulate_flag,
 )
 from ..config.config import DecodeContext, field_to_param, map_param_with_value
+from ..logging import LogStage, format_evaluation_failure
+from ..optimizer.errors import (
+    BaselineRunError,
+    ConfigFileNotFoundError,
+    InvalidConfigError,
+    NoFeasibleSolutionError,
+    OptimizerError,
+)
+from ..optimizer.outcome import RunStatus
 from ..optimizer.performance_tunner import PerformanceTuner
 from ..optimizer.register import benchmarks, simulates
 from ..optimizer.utils import get_required_field_from_json, is_root
@@ -47,10 +56,10 @@ class PSOOptimizer(PerformanceTuner):
         n_particles: int = 10,
         iters=100,
         pso_options=None,
-        target_field: Optional[tuple] = None,
-        load_history_data: Optional[list] = None,
+        target_field: tuple | None = None,
+        load_history_data: list | None = None,
         load_breakpoint: bool = False,
-        pso_init_kwargs: Optional[dict] = None,
+        pso_init_kwargs: dict | None = None,
         fine_tune=None,
         max_fine_tune: int = 10,
         use_request_rate_calibration: bool = True,
@@ -69,7 +78,7 @@ class PSOOptimizer(PerformanceTuner):
             self.pso_options = pso_options
         self.load_history_data = load_history_data
         self.load_breakpoint = load_breakpoint
-        self.pso_init_kwargs = pso_init_kwargs
+        self.pso_init_kwargs = pso_init_kwargs or {}
         self.init_pos = None
         self.history_cost, self.history_pos = None, None
         self.default_fitness = None
@@ -123,7 +132,6 @@ class PSOOptimizer(PerformanceTuner):
                 _fitness = self.minimum_algorithm(performance_index)
             if isnan(_fitness) or isinf(_fitness):
                 continue
-            logger.debug(f"fitness {_fitness}")
             try:
                 _target_field = self.get_target_field_from_case_data(case_data)
             except ValueError:
@@ -184,9 +192,10 @@ class PSOOptimizer(PerformanceTuner):
             self._seen_params[param_key] = (iteration, particle_index)
             return False
         prev_iter, prev_particle = self._seen_params[param_key]
-        logger.info(
-            f"Particle {particle_index}: params already evaluated "
-            f"(iter={prev_iter}, particle={prev_particle}), skipping."
+        logger.bind(particle=particle_index, prev_iter=prev_iter, prev_particle=prev_particle).info(
+            "Params already evaluated (iter={}, particle={}), skipping.",
+            prev_iter,
+            prev_particle,
         )
         self.scheduler.simulate_run_info = map_param_with_value(
             position, self.target_field, decode_context=decode_context
@@ -198,29 +207,37 @@ class PSOOptimizer(PerformanceTuner):
 
     def op_func(self, x) -> np.ndarray:
         n_particles = x.shape[0]
-        logger.debug(f"Acquired n_particles: {n_particles}, value: {x}")
         current_iteration = self._iteration
         self._iteration += 1
         generate_speed = []
-        # Select scheduler method once; flag is invariant across particles/iterations.
         scheduler_run = (
             self.scheduler.run_with_request_rate if self.use_request_rate_calibration else self.scheduler.run
         )
-        for i in range(n_particles):
-            x[i], decode_context = self._normalize_particle_position(x[i], i, n_particles, current_iteration)
-            param_key = tuple(np.round(x[i], decimals=6))
-            if self._skip_if_duplicate(param_key, i, current_iteration, x[i], decode_context):
-                generate_speed.append(inf)
-                continue
-            try:
-                _res = scheduler_run(x[i], self.target_field, decode_context=decode_context)
-                _fitness = self.minimum_algorithm(_res)
-            except Exception as e:
-                logger.error(f"Failed. error: {e}, please check.")
-                _fitness = inf
-            logger.debug(f"fitness {_fitness}")
-            self.scheduler.save_result(fitness=_fitness)
-            generate_speed.append(_fitness)
+        with logger.contextualize(iter=current_iteration, stage=LogStage.SEARCH.value):
+            for i in range(n_particles):
+                x[i], decode_context = self._normalize_particle_position(x[i], i, n_particles, current_iteration)
+                param_key = tuple(np.round(x[i], decimals=6))
+                if self._skip_if_duplicate(param_key, i, current_iteration, x[i], decode_context):
+                    generate_speed.append(inf)
+                    continue
+                try:
+                    _res = scheduler_run(x[i], self.target_field, decode_context=decode_context)
+                    if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
+                        logger.bind(particle=i).warning(
+                            "Evaluation failed, fitness=inf: {}",
+                            format_evaluation_failure(self.scheduler, self.scheduler.error_info),
+                        )
+                        _fitness = inf
+                    else:
+                        _fitness = self.minimum_algorithm(_res)
+                except OptimizerError:
+                    raise
+                except Exception as e:
+                    logger.bind(particle=i).warning("Evaluation failed, fitness=inf: {}", e)
+                    _fitness = inf
+                self.scheduler.save_result(fitness=_fitness)
+                generate_speed.append(_fitness)
+                logger.trace("Particle {} fitness {}", i, _fitness)
         return np.array(generate_speed)
 
     def constructing_bounds(self) -> tuple[tuple, tuple]:
@@ -258,9 +275,20 @@ class PSOOptimizer(PerformanceTuner):
             params = field_to_param(_target_field)
             try:
                 _res = self.scheduler.run(params, self.target_field)
+                if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
+                    logger.error(
+                        "Runtime exception. error: {}, please check.",
+                        format_evaluation_failure(self.scheduler, self.scheduler.error_info),
+                    )
+                    _fitness = inf
+                    self.scheduler.save_result(fitness=_fitness)
+                    continue
                 _fitness = self.minimum_algorithm(_res)
             except Exception as e:
-                logger.error(f"Runtime exception. error: {e}, please check.")
+                logger.error(
+                    "Runtime exception. error: {}, please check.",
+                    format_evaluation_failure(self.scheduler, e),
+                )
                 _fitness = inf
                 self.scheduler.save_result(fitness=_fitness)
                 continue
@@ -272,8 +300,8 @@ class PSOOptimizer(PerformanceTuner):
             for _ in range(self.max_fine_tune):
                 try:
                     simulate_run_info = self.fine_tune.fine_tune_with_concurrency_and_request_rate(params, _res)
-                except ValueError:
-                    logger.error("Failed in fine-tuning parameter. error: {e}")
+                except ValueError as e:
+                    logger.error("Failed in fine-tuning parameter. error: {}", e)
                     break
                 except StopFineTune:
                     break
@@ -282,9 +310,20 @@ class PSOOptimizer(PerformanceTuner):
                     break
                 try:
                     _res = self.scheduler.run(params, self.target_field)
+                    if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
+                        logger.error(
+                            "Runtime exception. error: {}, please check.",
+                            format_evaluation_failure(self.scheduler, self.scheduler.error_info),
+                        )
+                        _fitness = inf
+                        self.scheduler.save_result(fitness=_fitness)
+                        break
                     _fitness = self.minimum_algorithm(_res)
                 except Exception as e:
-                    logger.error(f"Runtime exception. error: {e}, please check.")
+                    logger.error(
+                        "Runtime exception. error: {}, please check.",
+                        format_evaluation_failure(self.scheduler, e),
+                    )
                     _fitness = inf
                     self.scheduler.save_result(fitness=_fitness)
                     break
@@ -406,12 +445,6 @@ class PSOOptimizer(PerformanceTuner):
             scale_max_batch_size_ub = int(max_batch_size_ub * settings.scaling_coefficient)
         else:
             scale_max_batch_size_ub = inf
-        logger.debug(
-            f"avg_input_length: {mc.avg_input_length}, max_input_length: {mc.max_input_length},"
-            f"max_output_length: {mc.max_output_length}"
-        )
-        max_batch_size_lb, max_batch_size_ub = mc.get_max_batch_size_bound()
-        scale_max_batch_size_ub = int(max_batch_size_ub * settings.scaling_coefficient)
         if max_batch_size_lb >= max_batch_size_ub or max_batch_size_lb <= 0 or max_batch_size_ub <= 0:
             logger.warning(
                 f"Theoretical derivation scope failure.max_batch_size_lb {max_batch_size_lb}, "
@@ -435,68 +468,75 @@ class PSOOptimizer(PerformanceTuner):
                 break
         logger.debug(f"target_field: {self.target_field}")
 
+    def _raise_if_baseline_failed(self) -> None:
+        if not self.scheduler.error_info:
+            return
+        err = BaselineRunError.from_scheduler(self.scheduler)
+        del_log = self.scheduler.del_log if self.scheduler.del_log is not None else False
+        self.scheduler.stop_target_server(del_log)
+        raise err
+
     def prepare_plugin(self):
         from ..config.config import get_settings
         from ..config.model_config import MindieModelConfig
         from ..optimizer.plugins.benchmark import AisBench
         from ..optimizer.plugins.simulate import Simulator
 
-        if isinstance(self.scheduler.simulator, Simulator):
-            settings = get_settings()
-            mc = None
-            if is_mindie() and settings.theory_guided_enable:
-                mc = MindieModelConfig(self.scheduler.simulator.config.config_path)
-            for _, _field in enumerate(self.target_field):
-                if _field.config_position.startswith("BackendConfig"):
-                    _field.value = get_required_field_from_json(
-                        self.scheduler.simulator.default_config, _field.config_position
-                    )
-                elif _field.config_position == "env":
-                    _field.value = os.getenv(_field.name, _field.value)
-            self.default_run_param = field_to_param(self.target_field)
-            self.default_res = self.scheduler.run(self.default_run_param, self.target_field)
-            if self.default_res.generate_speed:
-                self.gen_speed_target = 10 * self.default_res.generate_speed
-            self.default_fitness = self.minimum_algorithm(self.default_res)
-            self.scheduler.save_result(fitness=self.default_fitness)
-            if is_mindie():
-                self.mindie_prepare(mc)
-            if isinstance(self.scheduler.benchmark, AisBench):
-                _concurrency = self.scheduler.benchmark.get_best_concurrency()
-                for _field in self.target_field:
-                    if _field.name in CONCURRENCYS and _field.min != _field.max:
-                        if _field.min < _concurrency < _field.max:
-                            _field.value = _field.max = _concurrency
-                        elif _concurrency < _field.min:
-                            _field.value = _field.max = _field.min
-                        else:
-                            _field.value = _field.max
-        else:
-            self.default_run_param = field_to_param(self.target_field)
-            self.default_res = self.scheduler.run(self.default_run_param, self.target_field)
-            self.default_fitness = self.minimum_algorithm(self.default_res)
-            self.scheduler.save_result(fitness=self.default_fitness)
+        with logger.contextualize(stage=LogStage.BASELINE.value):
+            if isinstance(self.scheduler.simulator, Simulator):
+                settings = get_settings()
+                mc = None
+                if is_mindie() and settings.theory_guided_enable:
+                    mc = MindieModelConfig(self.scheduler.simulator.config.config_path)
+                for _, _field in enumerate(self.target_field):
+                    if _field.config_position.startswith("BackendConfig"):
+                        _field.value = get_required_field_from_json(
+                            self.scheduler.simulator.default_config, _field.config_position
+                        )
+                    elif _field.config_position == "env":
+                        _field.value = os.getenv(_field.name, _field.value)
+                self.default_run_param = field_to_param(self.target_field)
+                self.default_res = self.scheduler.run(self.default_run_param, self.target_field)
+                self._raise_if_baseline_failed()
+                if self.default_res.generate_speed:
+                    self.gen_speed_target = 10 * self.default_res.generate_speed
+                self.default_fitness = self.minimum_algorithm(self.default_res)
+                self.scheduler.save_result(fitness=self.default_fitness)
+                if is_mindie():
+                    self.mindie_prepare(mc)
+                if isinstance(self.scheduler.benchmark, AisBench):
+                    _concurrency = self.scheduler.benchmark.get_best_concurrency()
+                    for _field in self.target_field:
+                        if _field.name in CONCURRENCYS and _field.min != _field.max:
+                            if _field.min < _concurrency < _field.max:
+                                _field.value = _field.max = _concurrency
+                            elif _concurrency < _field.min:
+                                _field.value = _field.max = _field.min
+                            else:
+                                _field.value = _field.max
+            else:
+                self.default_run_param = field_to_param(self.target_field)
+                self.default_res = self.scheduler.run(self.default_run_param, self.target_field)
+                self._raise_if_baseline_failed()
+                self.default_fitness = self.minimum_algorithm(self.default_res)
+                self.scheduler.save_result(fitness=self.default_fitness)
 
-        if self.scheduler.error_info:
-            raise ValueError(
-                "Failed to start the default service. "
-                "Please check if the service and the request to start it are correct. error:{e}"
-            )
+            if (
+                self.default_res.generate_speed is None
+                or self.default_res.time_to_first_token is None
+                or self.default_res.time_per_output_token is None
+            ):
+                logger.warning(
+                    "Failed to obtain benchmark metric data. metric {}. "
+                    "Please check if the benchmark is running successfully.",
+                    self.default_res,
+                )
 
-        if (
-            self.default_res.generate_speed is None
-            or self.default_res.time_to_first_token is None
-            or self.default_res.time_per_output_token is None
-        ):
-            logger.warning(
-                f"Failed to obtain benchmark metric data. metric {self.default_res}"
-                "Please check if the benchmark is running successfully. "
-            )
-
-        self.target_field = [
-            *self.scheduler.simulator.data_field,
-            *self.scheduler.benchmark.data_field,
-        ]
+            self.target_field = [
+                *self.scheduler.simulator.data_field,
+                *self.scheduler.benchmark.data_field,
+            ]
+            logger.success("Baseline established")
 
     def run_plugin(self):
         from ..optimizer.global_best_custom import CustomGlobalBestPSO
@@ -535,13 +575,15 @@ class PSOOptimizer(PerformanceTuner):
             _record_fitness, _record_params, _record_res
         )
         if best_param is None or best_fitness is None or best_performance_index is None:
-            return
+            raise NoFeasibleSolutionError()
         _position = {_field.name: _field.value for _field in map_param_with_value(best_param, self.target_field)}
-        logger.debug(
-            f"vars: {_position}, performance index: "
-            f"ttft: {best_performance_index.time_to_first_token} \n"
-            f"tpot: {best_performance_index.time_per_output_token} \n"
-            f"generate_speed: {best_performance_index.generate_speed} \n"
+        logger.success(
+            "Optimization complete: fitness={} ttft={} tpot={} throughput={} params={}",
+            best_fitness,
+            best_performance_index.time_to_first_token,
+            best_performance_index.time_per_output_token,
+            best_performance_index.generate_speed,
+            _position,
         )
 
 
@@ -575,23 +617,23 @@ def enable_simulate(scheduler):
     Returns
     """
     if simulate_flag:
-        with scheduler.simulator.enable_simulation_model as flag:
+        with scheduler.simulator.enable_simulation_model() as flag:
             yield flag
     else:
         yield False
 
 
-def main() -> None:
-    from optix import configure_logger
-
-    configure_logger()
+def _run_optimizer() -> None:
     from ..config.config import Settings, get_settings, register_settings
     from ..optimizer.experience_fine_tunning import FineTune
     from ..optimizer.register import (
-        benchmarks as _benchmarks,
+        DEFAULT_BENCHMARK_POLICY,
+        register_ori_functions,
+        validate_benchmark_policy,
+        validate_simulator_policy,
     )
     from ..optimizer.register import (
-        register_ori_functions,
+        benchmarks as _benchmarks,
     )
     from ..optimizer.register import (
         simulates as _simulates,
@@ -623,7 +665,7 @@ def main() -> None:
     parser.add_argument(
         "-b",
         "--benchmark_policy",
-        default="ais_bench",
+        default=DEFAULT_BENCHMARK_POLICY,
         choices=list(_benchmarks.keys()),
         help="Whether to use custom performance indicators.",
     )
@@ -644,90 +686,91 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-
     from cli.logo import print_logo
 
     print_logo()
-
-    if args.config:
-        custom_config_path = Path(args.config).expanduser().resolve()
-        if not custom_config_path.is_file():
-            logger.error("Custom config file not found: {}", custom_config_path)
-            return
-
-        tomllib = None
-        try:
-            import tomllib
-        except ImportError:
-            try:
-                import tomli as tomllib
-            except ImportError:
-                logger.warning("toml library not available, skipping TOML validation")
-        if tomllib is not None:
-            try:
-                with open(custom_config_path, "rb") as f:
-                    tomllib.load(f)
-            except Exception as e:
-                raise ValueError(f"Invalid TOML config file '{custom_config_path}': {e}") from e
-
-        def create_custom_settings():
-            from pydantic_settings import SettingsConfigDict
-
-            default_toml_files = list(Settings.model_config.get("toml_file", ()))
-            toml_files = default_toml_files + [custom_config_path]
-
-            original_model_config = Settings.model_config
-
-            custom_config_dict = dict(original_model_config)
-            custom_config_dict["toml_file"] = toml_files
-            custom_config_dict["extra"] = "allow"
-
-            class CustomSettings(Settings):
-                model_config = SettingsConfigDict(**custom_config_dict)
-
-            return CustomSettings()
-
-        register_settings(create_custom_settings)
-        logger.info(f"Using custom config file: {custom_config_path}")
-    settings = get_settings()
     if is_root():
         logger.warning(
             "Security Warning: Do not run this tool as root. "
             "Running with elevated privileges may compromise system security. "
             "Use a regular user account."
         )
-    bak_path = None
-    if args.backup:
-        bak_path = settings.output.joinpath("bak")
-        if not bak_path.exists():
-            bak_path.mkdir(parents=True, mode=0o750)
-    _simu = _bench = None
-    _target_field = []
-    if args.engine:
-        _simu = simulates[args.engine](bak_path=bak_path)
-        _target_field.extend(_simu.data_field)
-    if args.benchmark_policy:
-        _bench = benchmarks[args.benchmark_policy](bak_path=bak_path)
-        _target_field.extend(_bench.data_field)
-    _target_field = tuple(_target_field)
-    if not _simu:
-        raise ValueError("No available simulator object found.")
-    if not _bench:
-        raise ValueError("No available benchmark object found.")
-    if len(_target_field) < 1:
-        raise ValueError("No optimization fields were found. ")
-    data_storage = DataStorage(settings.data_storage, _simu, _bench)
-    scheduler = Scheduler(_simu, _bench, data_storage, bak_path=bak_path)
-    fine_tune = FineTune(
-        ttft_penalty=settings.ttft_penalty,
-        tpot_penalty=settings.tpot_penalty,
-        target_field=_target_field,
-        ttft_slo=settings.ttft_slo,
-        tpot_slo=settings.tpot_slo,
-        slo_coefficient=settings.slo_coefficient,
-        step_size=settings.step_size,
-    )
-    try:
+
+    logger.info("Starting optix optimizer")
+    with logger.contextualize(engine=args.engine):
+        if args.config:
+            custom_config_path = Path(args.config).expanduser().resolve()
+            if not custom_config_path.is_file():
+                raise ConfigFileNotFoundError(custom_config_path)
+
+            tomllib = None
+            try:
+                import tomllib
+            except ImportError:
+                try:
+                    import tomli as tomllib
+                except ImportError:
+                    logger.warning("toml library not available, skipping TOML validation")
+            if tomllib is not None:
+                try:
+                    with open(custom_config_path, "rb") as f:
+                        tomllib.load(f)
+                except Exception as e:
+                    raise InvalidConfigError(custom_config_path, e) from e
+
+            def create_custom_settings():
+                from pydantic_settings import SettingsConfigDict
+
+                default_toml_files = list(Settings.model_config.get("toml_file", ()))
+                toml_files = default_toml_files + [custom_config_path]
+
+                original_model_config = Settings.model_config
+
+                custom_config_dict = dict(original_model_config)
+                custom_config_dict["toml_file"] = toml_files
+                custom_config_dict["extra"] = "allow"
+
+                class CustomSettings(Settings):
+                    model_config = SettingsConfigDict(**custom_config_dict)
+
+                return CustomSettings()
+
+            register_settings(create_custom_settings)
+            logger.info("Using custom config file: {}", custom_config_path)
+        settings = get_settings()
+        bak_path = None
+        if args.backup:
+            bak_path = settings.output.joinpath("bak")
+            if not bak_path.exists():
+                bak_path.mkdir(parents=True, mode=0o750)
+        _simu = _bench = None
+        _target_field = []
+        if args.engine:
+            validate_simulator_policy(args.engine)
+            _simu = simulates[args.engine](bak_path=bak_path)
+            _target_field.extend(_simu.data_field)
+        if args.benchmark_policy:
+            validate_benchmark_policy(args.benchmark_policy)
+            _bench = benchmarks[args.benchmark_policy](bak_path=bak_path)
+            _target_field.extend(_bench.data_field)
+        _target_field = tuple(_target_field)
+        if not _simu:
+            raise ValueError("No available simulator object found.")
+        if not _bench:
+            raise ValueError("No available benchmark object found.")
+        if len(_target_field) < 1:
+            raise ValueError("No optimization fields were found. ")
+        data_storage = DataStorage(settings.data_storage, _simu, _bench)
+        scheduler = Scheduler(_simu, _bench, data_storage, bak_path=bak_path)
+        fine_tune = FineTune(
+            ttft_penalty=settings.ttft_penalty,
+            tpot_penalty=settings.tpot_penalty,
+            target_field=_target_field,
+            ttft_slo=settings.ttft_slo,
+            tpot_slo=settings.tpot_slo,
+            slo_coefficient=settings.slo_coefficient,
+            step_size=settings.step_size,
+        )
         pso = PSOOptimizer(
             scheduler,
             n_particles=settings.n_particles,
@@ -746,6 +789,27 @@ def main() -> None:
             use_request_rate_calibration=settings.use_request_rate_calibration,
             pso_init_kwargs={"ftol": settings.ftol, "ftol_iter": settings.ftol_iter},
         )
-        pso.run_plugin()
-    except Exception as e:
-        logger.error(f"Failed to run optimizer. Please check. error: {e}")
+        with logger.contextualize(stage=LogStage.SEARCH.value):
+            pso.run_plugin()
+        with logger.contextualize(stage=LogStage.DONE.value):
+            logger.success("Optimizer finished")
+
+
+def _main() -> None:
+    run_id = uuid4().hex[:8]
+    with logger.contextualize(run_id=run_id, stage=LogStage.INIT.value, engine="-"):
+        try:
+            _run_optimizer()
+        except OptimizerError as exc:
+            logger.error("{}", exc)
+            raise SystemExit(1) from None
+        except Exception:
+            logger.exception("Optimizer aborted")
+            raise SystemExit(1) from None
+
+
+def main() -> None:
+    from optix import configure_logger
+
+    configure_logger()
+    _main()

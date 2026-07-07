@@ -153,6 +153,10 @@ class TestServiceHealthChecks(unittest.TestCase):
         )
         result = ServiceHealthChecks.check_log_errors(context)
         self.assertTrue(result.is_healthy)
+        simulator.get_last_log.assert_called_once_with(
+            number=mock_health_check.log_snippet_length,
+            retry=False,
+        )
 
     @patch("optix.optimizer.health_check.get_settings")
     def test_detect_fatal_error(self, mock_get_settings):
@@ -232,6 +236,27 @@ class TestServiceHealthChecks(unittest.TestCase):
         result = ServiceHealthChecks.check_log_errors(context)
         self.assertTrue(result.is_healthy)
 
+    @patch("optix.optimizer.health_check.get_settings")
+    def test_empty_log_is_healthy(self, mock_get_settings):
+        mock_health_check = MagicMock()
+        mock_health_check.service_errors.fatal_patterns = {ErrorType.OUT_OF_MEMORY: ["oom"]}
+        mock_health_check.service_errors.retryable_patterns = {}
+        mock_health_check.log_snippet_length = 200
+        mock_get_settings.return_value = MagicMock(health_check=mock_health_check)
+
+        simulator = MagicMock()
+        simulator.get_last_log.return_value = None
+
+        context = HealthCheckContext(
+            simulator=simulator,
+            benchmark=MagicMock(),
+            scheduler=MagicMock(),
+            current_time=100.0,
+            elapsed_time=1.0,
+        )
+        result = ServiceHealthChecks.check_log_errors(context)
+        self.assertTrue(result.is_healthy)
+
 
 class TestBenchmarkHealthChecks(unittest.TestCase):
     @patch("optix.optimizer.health_check.get_settings")
@@ -261,6 +286,10 @@ class TestBenchmarkHealthChecks(unittest.TestCase):
 
         result = BenchmarkHealthChecks.check_log_errors(context)
         self.assertTrue(result.is_healthy)
+        benchmark.get_last_log.assert_called_once_with(
+            number=mock_health_check.log_snippet_length,
+            retry=False,
+        )
 
     @patch("optix.optimizer.health_check.get_settings")
     def test_detect_network_error(self, mock_get_settings):

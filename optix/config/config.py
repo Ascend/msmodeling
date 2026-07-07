@@ -21,28 +21,28 @@ from collections.abc import Callable
 from copy import deepcopy
 from enum import Enum
 from inspect import isfunction  # pylint: disable=no-name-in-module
-from math import isinf, isclose, isnan
+from math import isclose, isinf, isnan
 from pathlib import Path
-from typing import Any, List, Tuple, Type, Optional, Union, Dict
+from typing import Any, Optional, Union
 
 import numpy as np
 from loguru import logger
-from pydantic import BaseModel, field_validator, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
-    SettingsConfigDict,
     PydanticBaseSettingsSource,
+    SettingsConfigDict,
     TomlConfigSettingsSource,
 )
-from ..common import is_vllm, is_mindie, ais_bench_exists
-from ..io_utils import open_file
-from ..config.custom_command import (
-    VllmBenchmarkCommandConfig,
-    MindieCommandConfig,
-    VllmCommandConfig,
-    AisBenchCommandConfig,
-)
 
+from ..common import is_mindie, is_vllm
+from ..config.custom_command import (
+    AisBenchCommandConfig,
+    MindieCommandConfig,
+    VllmBenchmarkCommandConfig,
+    VllmCommandConfig,
+)
+from ..io_utils import open_file
 from . import base_config
 from .base_config import (
     INSTALL_PATH,
@@ -252,7 +252,7 @@ default_support_field = [
 ]
 
 
-def range_to_enum(params_field: Tuple[OptimizerConfigField, ...]):
+def range_to_enum(params_field: tuple[OptimizerConfigField, ...]):
     for v in params_field:
         if v.dtype != "range":
             continue
@@ -305,6 +305,7 @@ def resolve_priority(dtype_param: dict, context=None) -> list:
     Args:
         dtype_param: The dtype_param dict from ternary_factories
         context:     DecodeContext instance, or None (non-PSO path)
+
     Returns:
         [High priority field name, Low priority field name]
     """
@@ -356,6 +357,7 @@ def _repair_ternary_factories_with_priority(
         max_val:          Result upper bound (None means unbounded)
         conv:             Type conversion function (int / float)
         context:          DecodeContext instance, determines balanced strategy direction (degenerates when None)
+
     Returns:
         True  Repair succeeded, simulate_run_info has been updated in-place
         False Unable to repair, caller should fall back to clamping
@@ -467,14 +469,14 @@ def _get_field_candidates(field_def):
 
 
 def _update_ratio_field(field, i, params_field, simulate_run_info, decode_context=None):
-    """ratio type handler: value = int(self_ratio × target.value)"""
+    """Ratio type handler: value = int(self_ratio × target.value)"""
     _field = simulate_run_info[i]
     _t_op = [_op for _op in simulate_run_info if _op.name == field.dtype_param][0]
     _field.value = int(_field.value * _t_op.value)
 
 
 def _update_factories_field(field, i, params_field, simulate_run_info, decode_context=None):
-    """factories type handler: value = product / target.value"""
+    """Factories type handler: value = product / target.value"""
     _field = simulate_run_info[i]
     _t_op = [_op for _op in simulate_run_info if _op.name == field.dtype_param["target_name"]][0]
     if _t_op.value != 0:
@@ -482,7 +484,7 @@ def _update_factories_field(field, i, params_field, simulate_run_info, decode_co
 
 
 def _update_times_field(field, i, params_field, simulate_run_info, decode_context=None):
-    """times type handler: value = product × target.value"""
+    """Times type handler: value = product × target.value"""
     _field = simulate_run_info[i]
     _t_op = [_op for _op in simulate_run_info if _op.name == field.dtype_param["target_name"]][0]
     if _t_op.value is not None and not (isnan(_t_op.value) if isinstance(_t_op.value, float) else False):
@@ -600,7 +602,7 @@ def _update_ternary_times_field(field, i, params_field, simulate_run_info, decod
 
 
 def _update_share_field(field, i, params_field, simulate_run_info, decode_context=None):
-    """share type handler: value = int(target.min + target.max - target.value)"""
+    """Share type handler: value = int(target.min + target.max - target.value)"""
     _field = simulate_run_info[i]
     for _op in simulate_run_info:
         if _op.name == field.dtype_param:
@@ -619,8 +621,8 @@ DERIVED_FIELD_HANDLERS = {
 
 
 def update_optimizer_value(
-    params_field: Tuple[OptimizerConfigField, ...],
-    simulate_run_info: Tuple[OptimizerConfigField, ...],
+    params_field: tuple[OptimizerConfigField, ...],
+    simulate_run_info: tuple[OptimizerConfigField, ...],
     support_select_is_false,
     decode_context: Optional["DecodeContext"] = None,
 ):
@@ -675,7 +677,7 @@ def update_optimizer_value(
 
 def map_param_with_value(
     params: np.ndarray,
-    params_field: Tuple[OptimizerConfigField, ...],
+    params_field: tuple[OptimizerConfigField, ...],
     decode_context: Optional["DecodeContext"] = None,
 ):
     _simulate_run_info = []
@@ -745,7 +747,7 @@ def map_param_with_value(
     return _simulate_run_info
 
 
-def reverse_special_field(params_field: Tuple[OptimizerConfigField, ...], params: np.ndarray, concurrency: int):
+def reverse_special_field(params_field: tuple[OptimizerConfigField, ...], params: np.ndarray, concurrency: int):
     _params = params
     i = 0
     for v in params_field:
@@ -769,7 +771,7 @@ def reverse_special_field(params_field: Tuple[OptimizerConfigField, ...], params
     return _params
 
 
-def field_to_param(params_field: Tuple[OptimizerConfigField, ...]):
+def field_to_param(params_field: tuple[OptimizerConfigField, ...]):
     concurrency = None
     _params = []
     for _, v in enumerate(params_field):
@@ -828,14 +830,14 @@ class DataStorageConfig(BaseModel):
 class LatencyModel(BaseModel):
     base_path: Path = Path("latency_model")
     model_path: Optional[Path] = Field(
-        default_factory=lambda data: (data["base_path"].joinpath("bak/base/xgb_model.ubj").resolve())
+        default_factory=lambda data: data["base_path"].joinpath("bak/base/xgb_model.ubj").resolve()
     )
     static_file_dir: Optional[Path] = Field(
-        default_factory=lambda data: (data["base_path"].joinpath("model_static_file").resolve()),
+        default_factory=lambda data: data["base_path"].joinpath("model_static_file").resolve(),
         validate_default=True,
     )
     req_and_decode_file: Optional[Path] = Field(
-        default_factory=lambda data: (data["base_path"].joinpath("req_id_and_decode_num.json").resolve())
+        default_factory=lambda data: data["base_path"].joinpath("req_id_and_decode_num.json").resolve()
     )
     cache_data: Optional[Path] = Field(default_factory=lambda data: data["base_path"].joinpath("cache").resolve())
 
@@ -869,7 +871,7 @@ class MindieConfig(BaseModel):
     config_path: Path = Field(default_factory=lambda: _get_mindie_config_paths()[0])
     config_bak_path: Path = Field(default_factory=lambda: _get_mindie_config_paths()[1])
     command: MindieCommandConfig = MindieCommandConfig()
-    target_field: List[OptimizerConfigField] = default_support_field
+    target_field: list[OptimizerConfigField] = default_support_field
 
 
 class AisBenchConfig(BaseModel):
@@ -878,7 +880,7 @@ class AisBenchConfig(BaseModel):
     work_path: Path = Field(default_factory=lambda: Path(os.getcwd()).resolve())
     command: AisBenchCommandConfig = AisBenchCommandConfig()
     performance_config: PerformanceConfig = PerformanceConfig()
-    target_field: List[OptimizerConfigField] = Field(default_factory=list)
+    target_field: list[OptimizerConfigField] = Field(default_factory=list)
     model: str = ""
     path: str = ""
     host_ip: str = ""
@@ -893,7 +895,7 @@ class VllmBenchmarkConfig(BaseModel):
     process_name: str = ""
     command: VllmBenchmarkCommandConfig = VllmBenchmarkCommandConfig()
     performance_config: PerformanceConfig = PerformanceConfig()
-    target_field: List[OptimizerConfigField] = Field(default_factory=list)
+    target_field: list[OptimizerConfigField] = Field(default_factory=list)
 
 
 class VllmConfig(BaseModel):
@@ -901,7 +903,7 @@ class VllmConfig(BaseModel):
     process_name: str = "vllm"
     work_path: Path = Field(default_factory=lambda: Path(os.getcwd()).resolve())
     command: VllmCommandConfig = VllmCommandConfig()
-    target_field: List[OptimizerConfigField] = Field(default_factory=list)
+    target_field: list[OptimizerConfigField] = Field(default_factory=list)
 
 
 class PsoOptions(BaseModel):
@@ -919,13 +921,13 @@ class PsoStrategy(BaseModel):
 class ErrorPatternConfig(BaseModel):
     """Error pattern configuration - 3-tier design: ErrorType -> patterns -> severity"""
 
-    fatal_patterns: Dict[ErrorType, List[str]] = Field(
+    fatal_patterns: dict[ErrorType, list[str]] = Field(
         default_factory=lambda: {
             ErrorType.OUT_OF_MEMORY: [],
             ErrorType.DEVICE_ERROR: [],
         }
     )
-    retryable_patterns: Dict[ErrorType, List[str]] = Field(
+    retryable_patterns: dict[ErrorType, list[str]] = Field(
         default_factory=lambda: {ErrorType.NETWORK_ERROR: [], ErrorType.IO_ERROR: []}
     )
 
@@ -1016,12 +1018,12 @@ class Settings(BaseSettings):
     @classmethod
     def settings_customise_sources(
         cls,
-        settings_cls: Type[BaseSettings],
+        settings_cls: type[BaseSettings],
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
-    ) -> Tuple[PydanticBaseSettingsSource, ...]:
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (
             init_settings,
             env_settings,
@@ -1036,19 +1038,29 @@ class Settings(BaseSettings):
         return path
 
     @model_validator(mode="after")
+    def normalize_benchmark_paths(self):
+        ais_output = AisBenchConfig.model_fields["output_path"].default
+        if self.ais_bench.output_path == ais_output:
+            self.ais_bench.output_path = self.output.joinpath(ais_output)
+        if not self.ais_bench.command.work_dir:
+            self.ais_bench.command.work_dir = str(self.ais_bench.output_path)
+
+        vllm_bench_output = VllmBenchmarkConfig.model_fields["output_path"].default
+        if self.vllm_benchmark.output_path == vllm_bench_output:
+            self.vllm_benchmark.output_path = self.output.joinpath(vllm_bench_output)
+        result_dir = self.vllm_benchmark.command.result_dir.strip()
+        if not result_dir or Path(result_dir).resolve() == Path.cwd().resolve():
+            self.vllm_benchmark.command.result_dir = str(self.vllm_benchmark.output_path.joinpath("result"))
+        Path(self.vllm_benchmark.command.result_dir).mkdir(parents=True, exist_ok=True, mode=0o750)
+        return self
+
+    @model_validator(mode="after")
     def partial_update_vllm(self):
         if not is_vllm():
             return self
         output = VllmConfig.model_fields["output"].default
         if self.vllm.output == output:
             self.vllm.output = self.output.joinpath(output)
-        output = VllmBenchmarkConfig.model_fields["output_path"].default
-        if self.vllm_benchmark.output_path == output:
-            self.vllm_benchmark.output_path = self.output.joinpath(output)
-        if self.vllm_benchmark.command.result_dir == VllmBenchmarkCommandConfig.model_fields["result_dir"].default:
-            self.vllm_benchmark.command.result_dir = str(self.vllm_benchmark.output_path.joinpath("result"))
-        Path(self.vllm_benchmark.command.result_dir).mkdir(parents=True, exist_ok=True, mode=0o750)
-
         self.vllm_benchmark.command.host = self.vllm.command.host
         self.vllm_benchmark.command.port = self.vllm.command.port
         self.vllm_benchmark.command.model = self.vllm.command.model
@@ -1061,13 +1073,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def partial_update_aisbench(self):
-        if not ais_bench_exists():
-            return self
-        output = AisBenchConfig.model_fields["output_path"].default
-        if self.ais_bench.output_path == output:
-            self.ais_bench.output_path = self.output.joinpath(output)
-        if not self.ais_bench.command.work_dir:
-            self.ais_bench.command.work_dir = str(self.ais_bench.output_path)
         if self.ais_bench.target_field:
             range_to_enum(self.ais_bench.target_field)
         return self

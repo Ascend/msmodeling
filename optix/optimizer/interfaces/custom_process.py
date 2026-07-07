@@ -19,9 +19,12 @@ import re
 import subprocess
 import tempfile
 import time
-from math import isnan, isinf
+from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
+from math import isinf, isnan
 from pathlib import Path
-from typing import Any, Tuple, Optional, List
+from typing import Any, Optional
 
 import psutil
 from loguru import logger
@@ -32,7 +35,8 @@ from ...config.base_config import (
     ms_serviceparam_optimizer_config_path,
 )
 from ...io_utils import open_file
-from ..utils import close_file_fp, remove_file, kill_children, backup, kill_process
+from ...logging import format_subprocess_start
+from ..utils import backup, close_file_fp, kill_children, kill_process, remove_file
 
 # Mapping from field name to CLI flag name, used to remove CLI flags when removing invalid values
 FIELD_TO_CLI_FLAG = {
@@ -44,20 +48,31 @@ FIELD_TO_CLI_FLAG = {
 NON_POSITIVE_INVALID_FIELDS = frozenset(FIELD_TO_CLI_FLAG.keys())
 
 
+@contextmanager
+def _run_log_fd_lifecycle(prefix: str = "ms_serviceparam_optimizer_") -> Iterator[tuple[int, str]]:
+    """Allocate a tempfile FD; close it only when setup raises before Popen takes ownership."""
+    fd, path = tempfile.mkstemp(prefix=prefix)
+    try:
+        yield fd, path
+    except Exception:
+        close_file_fp(fd)
+        raise
+
+
 class CustomProcess:
     from ...config.config import OptimizerConfigField
 
     def __init__(
         self,
         bak_path: Optional[Path] = None,
-        command: Optional[List[str]] = None,
+        command: Optional[list[str]] = None,
         work_path: Optional[Path] = None,
         print_log: bool = False,
         process_name: str = "",
     ):
         self.command = command
         self.bak_path = bak_path
-        self.work_path = work_path if work_path else os.getcwd()
+        self.work_path = work_path or os.getcwd()
         self.run_log = None
         self.run_log_offset = None
         self.run_log_fp = None
@@ -84,7 +99,6 @@ class CustomProcess:
         """
         Check environment, see if there are residual tasks and clean them up
         """
-        logger.debug("check env")
         _residual_process = []
         _all_process_name = process_name.split(",")
         for proc in psutil.process_iter(["pid", "name"]):
@@ -100,7 +114,6 @@ class CustomProcess:
                 continue
             _residual_process.append(proc)
         if _residual_process:
-            logger.debug("kill residual_process")
             for _p_name in _all_process_name:
                 try:
                     kill_process(_p_name)
@@ -118,8 +131,8 @@ class CustomProcess:
         Compatible with all JSON-like parameter input forms: bare JSON/quoted JSON/escaped JSON/fullwidth symbol JSON.
         Does not rely on hardcoded JSON parameter lists; auto-detects whether to split based on value format.
         """
-        import re
         import json
+        import re
 
         def clean_json_string(json_str):
             """
@@ -190,7 +203,6 @@ class CustomProcess:
                 if is_json_like(rest):
                     new_command.append(param_name)
                     new_command.append(cleaned_value)
-                    logger.debug(f"[FIX] Split merged arg (no quotes, valid JSON): {param_name} + {cleaned_value}")
                 else:
                     new_command.append(cmd_element)
                 i += 1
@@ -211,9 +223,7 @@ class CustomProcess:
             # Try to split, let vllm handle it even if it's not standard JSON
             new_command.append(param_name)
             new_command.append(cleaned_value)
-            if is_json_like(json_value):
-                logger.debug(f"[FIX] Split merged arg (valid JSON): {param_name} + {cleaned_value}")
-            else:
+            if not is_json_like(json_value):
                 logger.warning(f"[FIX] Non-standard JSON param (vllm may parse it): {param_name} = {cleaned_value}")
             i += 1
 
@@ -223,16 +233,21 @@ class CustomProcess:
         # Backup operation, default to backing up log
         backup(self.run_log, self.bak_path, self.__class__.__name__)
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None):
-        from ...config.config import get_settings
-
+    def before_run(self, run_params: Optional[tuple[OptimizerConfigField, ...]] = None):
         """
         Preparation work before running command
         Args:
             run_params: tuning parameter list, a tuple, each element defined by value and config_position
         """
-        self.run_log_fp, self.run_log = tempfile.mkstemp(prefix="ms_serviceparam_optimizer_")
-        self.run_log_offset = 0
+        with _run_log_fd_lifecycle() as (fd, path):
+            self.run_log_fp = fd
+            self.run_log = path
+            self.run_log_offset = 0
+            self._prepare_run_params(run_params)
+
+    def _prepare_run_params(self, run_params: Optional[tuple[OptimizerConfigField, ...]] = None):
+        from ...config.config import get_settings
+
         if not run_params:
             return
         for k in run_params:
@@ -305,7 +320,29 @@ class CustomProcess:
         if MODEL_EVAL_STATE_CONFIG_PATH not in self.env:
             self.env[MODEL_EVAL_STATE_CONFIG_PATH] = str(ms_serviceparam_optimizer_config_path)
 
-    def run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None, **kwargs):
+    def _flush_run_log(self) -> None:
+        if self.run_log_fp is None:
+            return
+        try:
+            os.fsync(self.run_log_fp)
+        except OSError:
+            pass
+
+    def _read_log_tail_from_fd(self, number: int) -> str | None:
+        if self.run_log_fp is None:
+            return None
+        try:
+            with os.fdopen(os.dup(self.run_log_fp), "rb") as handle:
+                handle.seek(0)
+                raw_lines = deque(handle, maxlen=number)
+        except OSError:
+            return None
+        if not raw_lines:
+            return None
+        text = b"".join(raw_lines).decode("utf-8", errors="replace").rstrip("\n")
+        return text or None
+
+    def run(self, run_params: Optional[tuple[OptimizerConfigField, ...]] = None, **kwargs):
         # Start the test
         if self.process_name:
             try:
@@ -331,6 +368,8 @@ class CustomProcess:
                 )
         from ...config.constant import ProcessState, Stage
 
+        logger.debug("subprocess Popen cwd={} env_keys={}", self.work_path, len(self.env))
+        self.env.setdefault("PYTHONUNBUFFERED", "1")
         try:
             self.process = subprocess.Popen(
                 self.command,
@@ -341,23 +380,28 @@ class CustomProcess:
             )
             self.process_stage = ProcessState(stage=Stage.start)
         except OSError as e:
-            logger.error(f"Failed to run {self.command}. error {e}")
+            close_file_fp(self.run_log_fp)
+            self.run_log_fp = None
+            logger.debug("subprocess Popen failed command={} error={}", self.command, e)
             raise e
-        logger.info(f"Start running the command: {' '.join(self.command)}, log file: {self.run_log}")
+        logger.info(format_subprocess_start(self.command, self.run_log, pid=self.process.pid))
+        logger.debug("subprocess started pid={}", self.process.pid)
 
     def get_log(self):
         output = None
         if not self.run_log:
             return output
         run_log_path = Path(self.run_log)
+        logger.debug("reading subprocess log path={} offset={}", run_log_path, self.run_log_offset)
         if run_log_path.exists():
             try:
                 with open_file(run_log_path, "r", encoding="utf-8", errors="ignore") as f:
                     f.seek(self.run_log_offset)
                     output = f.read()
                     self.run_log_offset = f.tell()
+                logger.debug("read subprocess log bytes={} new_offset={}", len(output or ""), self.run_log_offset)
             except (UnicodeError, OSError) as e:
-                logger.error(f"Failed read {self.command} log. error {e}")
+                logger.debug("failed reading subprocess log path={} error={}", run_log_path, e)
         return output
 
     def health(self):
@@ -368,8 +412,7 @@ class CustomProcess:
         Returns: returns bool value, check if the program started successfully
         """
         if self.print_log:
-            output = self.get_log()
-            logger.debug(output)
+            self.get_log()
         if self.process.poll() is None:
             return ProcessState(stage=Stage.running)
         elif self.process.poll() == 0:
@@ -377,14 +420,20 @@ class CustomProcess:
         else:
             return ProcessState(
                 stage=Stage.error,
-                info=f"Failed in run {self.command!r}. \
-                                        return code: {self.process.returncode}. log: {self.run_log}",
+                info=f"exit_code={self.process.returncode} log={self.run_log}",
             )
 
     def stop(self, del_log: bool = True):
         from ...config.constant import ProcessState, Stage
 
+        logger.debug("stopping subprocess pid={} del_log={}", getattr(self.process, "pid", None), del_log)
         self.run_log_offset = 0
+        if self.process and self.process.poll() is None:
+            try:
+                self.process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        self._flush_run_log()
         close_file_fp(self.run_log_fp)
         if del_log and self.run_log:
             remove_file(Path(self.run_log))
@@ -394,6 +443,7 @@ class CustomProcess:
         if _process_state is not None:
             self.process_stage = ProcessState(stage=Stage.stop)
             logger.info(f"The program has exited. exit_code: {_process_state}")
+            logger.debug("subprocess already exited exit_code={}", _process_state)
             return
         try:
             children = psutil.Process(self.process.pid).children(recursive=True)
@@ -412,27 +462,33 @@ class CustomProcess:
             logger.error(f"Failed to stop simulator process. {e}")
             self.process_stage = ProcessState(stage=Stage.error, info=f"Failed to stop simulator process. {e}")
 
-    def get_last_log(self, number: int = 5):
-        output = None
+    def get_last_log(self, number: int = 5, *, retry: bool = True):
         if not self.run_log:
-            return output
-        run_log_path = Path(self.run_log)
-        if run_log_path.exists():
-            file_lines = []
-            encodings_to_try = ["utf-8", "latin-1", "gbk", "cp1252"]
+            return None
+        from ...logging import read_log_tail
 
-            for encoding in encodings_to_try:
-                try:
-                    with open_file(run_log_path, "r", encoding=encoding, errors="replace") as f:
-                        file_lines = f.readlines()
-                    break
-                except (UnicodeError, OSError) as e:
-                    if encoding == encodings_to_try[-1]:
-                        logger.error(f"Failed read {self.command} log after trying all encodings. error {e}")
-                    continue
-            number = min(number, len(file_lines))
-            output = "\n".join(file_lines[-number:])
-        return output
+        run_log_path = Path(self.run_log)
+        max_attempts = 5 if retry else 1
+        for attempt in range(max_attempts):
+            self._flush_run_log()
+            logger.debug("reading subprocess tail log path={} lines={}", run_log_path, number)
+            tail = self._read_log_tail_from_fd(number)
+            if not tail:
+                tail = read_log_tail(run_log_path, lines=number)
+            if tail:
+                return tail
+            if not retry:
+                return None
+            process = self.process
+            if process is None:
+                break
+            if process.poll() is not None:
+                if attempt + 1 < max_attempts:
+                    time.sleep(0.5)
+                continue
+            if attempt + 1 < max_attempts:
+                time.sleep(0.25)
+        return None
 
 
 class BaseDataField:
@@ -448,7 +504,7 @@ class BaseDataField:
             self.config = settings.ais_bench
 
     @property
-    def data_field(self) -> Tuple[OptimizerConfigField, ...]:
+    def data_field(self) -> tuple[OptimizerConfigField, ...]:
         """
         Get data field property
         """
@@ -457,7 +513,7 @@ class BaseDataField:
         return ()
 
     @data_field.setter
-    def data_field(self, value: Tuple[OptimizerConfigField] = ()) -> None:
+    def data_field(self, value: tuple[OptimizerConfigField] = ()) -> None:
         """
         Provide new data, update and replace data field properties.
         """

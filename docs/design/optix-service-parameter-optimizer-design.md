@@ -492,6 +492,11 @@ io_error = ["IO error"]
 | UT-retryable 错误处理 | 单元测试 | 构造 retryable `ErrorContext` | 调用 `run_target_server()` | 触发重试，成功后退出 |
 | UT-DataStorage 保存 | 单元测试 | 临时 store 目录 | 调用 `save()` | CSV 表头和值写入正确 |
 | UT-插件注册 | 单元测试 | 自定义接口子类 | 调用注册函数 | 注册表写入成功，非法类型抛错 |
+| UT-loguru 结构化日志 | 单元测试 | mock sink / caplog | 调用 `configure_logger`、`bind`、`_handle_error` | extra 字段出现在格式；`_handle_error` 仅 raise |
+| UT-prepare/run_plugin | 单元测试 | mock Scheduler 与插件 | 调用 `prepare_plugin`、`run_plugin` | baseline 失败、无可行解 exit、断点加载行为符合预期 |
+| UT-enable_simulate | 单元测试 | `simulate_flag=True` | 进入 `enable_simulation_model()` | 上下文管理器正确调用 |
+| UT-main CLI | 单元测试 | mock argv / settings | 执行 `main()` | config、backup、breakpoint、顶层异常路径 |
+| Smoke-optix optimizer | 冒烟测试 | mock 全栈 | `main()` 最小路径 | <10s 完成且无未处理异常 |
 
 ### 集成测试
 
@@ -544,3 +549,9 @@ io_error = ["IO error"]
 2. `bash scripts/run_regression.sh` 能收集并运行 optix regression 用例。
 3. 在具备外部依赖的环境中完成至少一组 MindIE + AISBench 或 vLLM + vLLM benchmark 端到端验证。
 4. 失败场景下 CSV、日志和备份信息足够定位问题。
+
+### 变更记录
+
+| 日期 | 变更摘要 | 参考 |
+|------|----------|------|
+| 2026-07-03 | optix optimizer 可靠性、结构化日志、RunOutcome、测试与 CLI 退出语义增强 | [RFC: optix optimizer 重构](../RFC/rfc_optix_optimizer_refactor_zh.md) |

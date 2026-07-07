@@ -14,26 +14,26 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 import json
+import shutil
 import subprocess
 import time
 from copy import deepcopy
-from typing import Any, Optional, Tuple
-import shutil
 from dataclasses import dataclass
+from typing import Any, Optional
 
 from loguru import logger
 
-from ..interfaces.simulator import SimulatorInterface
-from ..utils import remove_file, backup
-from ...config.custom_command import VllmCommand, MindieCommand
 from ...config.config import (
-    get_settings,
+    MindieConfig,
     OptimizerConfigField,
     VllmConfig,
-    MindieConfig,
+    get_settings,
 )
 from ...config.constant import Stage
+from ...config.custom_command import MindieCommand, VllmCommand
 from ...io_utils import open_file
+from ..interfaces.simulator import SimulatorInterface
+from ..utils import backup, remove_file
 
 """
 Mindie simulation engine - provides interfaces for starting/stopping mindie simulation services.
@@ -95,7 +95,6 @@ class Simulator(SimulatorInterface):
         Returns:
 
         """
-        pass
 
     @staticmethod
     def is_int(x):
@@ -223,7 +222,7 @@ class Simulator(SimulatorInterface):
     def update_command(self):
         self.command = MindieCommand(self.config.command).command
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField]] = None):
+    def before_run(self, run_params: Optional[tuple[OptimizerConfigField]] = None):
         self.update_config(run_params)
         super().before_run(run_params)
 
@@ -273,7 +272,7 @@ class Simulator(SimulatorInterface):
                 return proxy_status
         return process_res
 
-    def update_config(self, params: Optional[Tuple[OptimizerConfigField]] = None):
+    def update_config(self, params: Optional[tuple[OptimizerConfigField]] = None):
         if not params:
             return
         new_config = deepcopy(self.default_config)
@@ -296,6 +295,8 @@ class Simulator(SimulatorInterface):
 
 
 class VllmSimulator(SimulatorInterface):
+    required_executable = "vllm"
+
     def __init__(self, config: Optional[VllmConfig] = None, *args, **kwargs):
         if config:
             self.config = config
@@ -377,23 +378,21 @@ class VllmSimulator(SimulatorInterface):
 
         signals = ["-15", "-9"]  # SIGTERM, SIGKILL
 
-        for attempt in range(1, max_attempts + 1):
+        for _attempt in range(1, max_attempts + 1):
             for signal in signals:
                 if not self._is_vllm_running():
                     logger.info("vllm process has been terminated")
                     return True
 
-                logger.debug(f"Attempt {attempt}/{max_attempts}: sending signal {signal} to vllm")
                 try:
-                    result = subprocess.run(
+                    subprocess.run(
                         [pkill_path, signal, "-f", "vllm serve"],
                         stderr=subprocess.STDOUT,
                         stdout=subprocess.PIPE,
                         text=True,
                         timeout=10,
+                        check=False,
                     )
-                    if result.returncode == 0 or result.returncode == 1:
-                        logger.debug(f"Signal {signal} sent successfully (rc={result.returncode})")
                 except subprocess.SubprocessError as e:
                     logger.warning(f"Failed to send signal {signal} to vllm: {e}")
 
@@ -429,7 +428,6 @@ class VllmSimulator(SimulatorInterface):
 
     def _wait_for_process_exit(self, timeout: int) -> bool:
         """Wait for process to exit, returns whether exit was successful"""
-
         start = time.time()
         while time.time() - start < timeout:
             if not self._is_vllm_running():

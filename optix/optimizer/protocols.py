@@ -13,16 +13,31 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-"""OptiX service parameter optimizer for LLM inference tuning."""
-
-from optix.logging import LogStage, configure_logger
-
-__all__ = ["LogStage", "configure_logger"]
+from typing import Any, Protocol, runtime_checkable
 
 
-def main() -> None:
-    """CLI entry for ``python -m optix`` and coverage tests."""
-    configure_logger()
-    from optix.optimizer.optimizer import main as optimizer_main
+@runtime_checkable
+class SupportsHealth(Protocol):
+    def health(self) -> Any: ...
 
-    optimizer_main()
+
+@runtime_checkable
+class SupportsCheckSuccess(Protocol):
+    def check_success(self) -> bool: ...
+
+
+@runtime_checkable
+class SupportsPrepare(Protocol):
+    def prepare(self) -> None: ...
+
+
+@runtime_checkable
+class SupportsDataField(Protocol):
+    data_field: Any
+
+    def update_command(self) -> None: ...
+
+
+@runtime_checkable
+class SupportsBackup(Protocol):
+    def backup(self) -> None: ...

@@ -421,12 +421,28 @@ def _find_definition_node(
     return None
 
 
+def _function_header_line_numbers(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[int]:
+    """Signature + leading docstring lines before the first executable body statement."""
+    if not node.body:
+        end = node.end_lineno if node.end_lineno is not None else node.lineno
+        return set(range(node.lineno, end + 1))
+
+    first_body_lineno = node.body[0].lineno
+    if (
+        isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    ):
+        first_body_lineno = node.body[1].lineno if len(node.body) > 1 else _end_line(node.body[0]) + 1
+    return set(range(node.lineno, first_body_lineno))
+
+
 def _body_executable_lines(path: Path, symbol: str) -> set[int]:
     all_lines = executable_lines_for_canonical_symbol(path, symbol)
     node = _find_definition_node(path, symbol)
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return all_lines
-    header = {node.lineno}
+    header = _function_header_line_numbers(node)
     return all_lines - header - _decorator_line_numbers(node)
 
 
@@ -486,14 +502,17 @@ def coverage_checks_for_definition(
         return CoverageChecks(frozenset(), frozenset(), frozenset())
 
     decorator_lines = _decorator_line_numbers(node)
-    def_line = {node.lineno}
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        header_lines = _function_header_line_numbers(node)
+    else:
+        header_lines = {node.lineno}
     if isinstance(node, ast.ClassDef):
         body_executable = _proxy_body_lines(path, symbol) - _decorator_line_numbers(node)
     else:
         body_executable = _body_executable_lines(path, symbol)
 
     decorator_hit = changed & decorator_lines
-    def_hit = changed & def_line
+    def_hit = changed & header_lines
     body_hit = changed & body_executable
 
     import_lines = frozenset(decorator_hit)

@@ -14,19 +14,20 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 import os
-from unittest.mock import patch, MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from optix.optimizer.utils import (
-    remove_file,
-    kill_children,
-    kill_process,
     backup,
     close_file_fp,
     get_folder_size,
     get_required_field_from_json,
     is_root,
+    kill_children,
+    kill_process,
+    remove_file,
 )
 
 
@@ -72,6 +73,39 @@ class TestRemoveFile:
         # The log should reference the specific sub-path that failed, not
         # the top-level output_path.
         assert str(sub) in mock_log.call_args[0][0]
+
+    def test_remove_file_refuses_current_working_directory(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        sentinel = tmp_path / "keep.txt"
+        sentinel.write_text("stay", encoding="utf-8")
+
+        with patch("optix.optimizer.utils.logger.error") as mock_log:
+            remove_file(Path(""))
+
+        mock_log.assert_called_once()
+        assert sentinel.exists()
+        assert list(tmp_path.iterdir()) == [sentinel]
+
+    def test_remove_file_refuses_home_directory(self, tmp_path):
+        home_file = tmp_path / "home_secret.txt"
+        home_file.write_text("keep", encoding="utf-8")
+
+        with (
+            patch("optix.optimizer.utils.Path.home", return_value=tmp_path),
+            patch("optix.optimizer.utils.logger.error") as mock_log,
+        ):
+            remove_file(tmp_path)
+
+        mock_log.assert_called_once()
+        assert home_file.exists()
+
+    def test_remove_file_refuses_filesystem_root(self, tmp_path):
+        with patch("optix.optimizer.utils.logger.error") as mock_log:
+            remove_file(Path("/"))
+
+        mock_log.assert_called_once()
+        assert mock_log.call_args[0][0] == "Refusing to clean {}: {}"
+        assert mock_log.call_args[0][1] == "filesystem root"
 
 
 class TestKillChildren:
@@ -239,6 +273,15 @@ class TestGetRequiredFieldFromJson:
     def test_unsupported_type(self):
         with pytest.raises(ValueError, match="Unsupported data type"):
             get_required_field_from_json("string", "key")
+
+    def test_missing_key_returns_none(self):
+        data = {"a": {"b": 1}}
+        assert get_required_field_from_json(data, "a.missing") is None
+        assert get_required_field_from_json(data, "missing") is None
+
+    def test_missing_list_index_returns_none(self):
+        data = {"items": [10]}
+        assert get_required_field_from_json(data, "items.5") is None
 
 
 class TestIsRoot:

@@ -16,19 +16,21 @@
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import Tuple, Optional
+from typing import ClassVar, Optional
 
 import requests
 
-from .custom_process import BaseDataField, CustomProcess
 from ...config.config import OptimizerConfigField
 from ...config.constant import ProcessState, Stage
+from .custom_process import BaseDataField, CustomProcess
 
 
 class SimulatorInterface(CustomProcess, BaseDataField, ABC):
     """
     Operate service framework. Used to operate service-related functions.
     """
+
+    required_executable: ClassVar[str | None] = None
 
     @property
     @abstractmethod
@@ -38,7 +40,6 @@ class SimulatorInterface(CustomProcess, BaseDataField, ABC):
         Returns:
 
         """
-        pass
 
     @abstractmethod
     def update_command(self) -> None:
@@ -47,12 +48,12 @@ class SimulatorInterface(CustomProcess, BaseDataField, ABC):
         Returns: None
 
         """
-        pass
 
-    def update_config(self, params: Optional[Tuple[OptimizerConfigField]] = None) -> bool:
+    def update_config(self, params: Optional[tuple[OptimizerConfigField]] = None) -> bool:
         """
         Update service config file or other config based on params. Modify config file before service
         startup based on passed parameter values so new config takes effect.
+
         Args:
             params: tuning parameter list, a tuple, each element defined by value and config_position.
 
@@ -64,6 +65,7 @@ class SimulatorInterface(CustomProcess, BaseDataField, ABC):
     def stop(self, del_log: bool = True):
         """
         Runtime, other preparation work.
+
         Returns:
 
         """

@@ -13,28 +13,40 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-import json
-import os
-import re
-from pathlib import Path
-import subprocess
-from typing import Optional, Tuple
 import glob
-from loguru import logger
+import json
+import re
+import subprocess
+from pathlib import Path
+from typing import Optional
+
 import pandas as pd
+from loguru import logger
+
 from ...config.base_config import MINDIE_BENCHMARK_PERF_COLUMNS
 from ...config.config import (
     AisBenchConfig,
+    OptimizerConfigField,
+    PerformanceIndex,
     VllmBenchmarkConfig,
     get_settings,
-    PerformanceIndex,
-    OptimizerConfigField,
 )
 from ...config.custom_command import AisBenchCommand, VllmBenchmarkCommand
 from ...io_utils import open_file, walk_files
+from ...optimizer.errors import BenchmarkResultError
 from ...optimizer.interfaces.benchmark import BenchmarkInterface
-
 from ...optimizer.utils import backup, remove_file
+
+
+def _require_unique_csv(output_path: Path) -> list[str]:
+    csv_files = glob.glob(f"{output_path}/*/performances/*/*.csv")
+    logger.debug("benchmark csv glob output_path={} matches={}", output_path, len(csv_files))
+    if len(csv_files) != 1:
+        raise BenchmarkResultError(
+            f"The ais bench result for csv files are not unique, result files {csv_files}; "
+            f"output path: {output_path}. please check"
+        )
+    return csv_files
 
 
 MS_TO_S = 10**3
@@ -56,6 +68,8 @@ def parse_result(res):
 
 
 class AisBench(BenchmarkInterface):
+    required_executable = "ais_bench"
+
     def __init__(self, *args, config: Optional[AisBenchConfig] = None, **kwargs):
         if config:
             self.config = config
@@ -130,16 +144,9 @@ class AisBench(BenchmarkInterface):
 
     def get_best_concurrency(self):
         output_path = Path(self.config.output_path)
-        csv_files = glob.glob(f"{output_path}/*/performances/*/*.csv")
-        if len(csv_files) != 1:
-            logger.error(
-                f"The ais bench result for csv files are not unique, result files {csv_files}; "
-                f"output path: {output_path}. please check"
-            )
-        dir_path = os.path.dirname(csv_files[0])
-        file_name = os.path.splitext(os.path.basename(csv_files[0]))[0]
-        # Generate the JSON file path
-        json_file = os.path.join(dir_path, f"{file_name}.json")
+        csv_files = _require_unique_csv(output_path)
+        csv_path = Path(csv_files[0])
+        json_file = csv_path.with_suffix(".json")
 
         with open_file(json_file, "r") as f:
             try:
@@ -170,17 +177,9 @@ class AisBench(BenchmarkInterface):
             self.config.performance_config.time_per_output_token.metric,
             self.config.performance_config.time_per_output_token.algorithm,
         )
-        csv_files = glob.glob(f"{output_path}/*/performances/*/*.csv")
-        if len(csv_files) != 1:
-            logger.error(
-                f"The ais bench result for csv files are not unique, result files {csv_files}; "
-                f"output path: {output_path}. please check"
-            )
-        dir_path = os.path.dirname(csv_files[0])
-        file_name = os.path.splitext(os.path.basename(csv_files[0]))[0]
-
-        # Generate JSON file path
-        json_file = os.path.join(dir_path, f"{file_name}.json")
+        csv_files = _require_unique_csv(output_path)
+        csv_path = Path(csv_files[0])
+        json_file = csv_path.with_suffix(".json")
 
         with open_file(json_file, "r") as f:
             try:
@@ -198,11 +197,10 @@ class AisBench(BenchmarkInterface):
             performance_index.generate_speed = float(output_average.split()[0])
         return performance_index
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField]] = None):
+    def before_run(self, run_params: Optional[tuple[OptimizerConfigField]] = None):
         remove_file(Path(self.config.output_path))
         super().before_run(run_params)
         # Start the test
-        logger.debug("Start the aisbench test.")
         concurrency = rate = None
         for k in run_params:
             try:
@@ -238,6 +236,8 @@ class AisBench(BenchmarkInterface):
 
 
 class VllmBenchMark(BenchmarkInterface):
+    required_executable = "vllm"
+
     def __init__(self, config: Optional[VllmBenchmarkConfig] = None, *args, **kwargs):
         if config:
             self.config = config
@@ -256,7 +256,7 @@ class VllmBenchMark(BenchmarkInterface):
         remove_file(output_path)
         super().stop(del_log)
 
-    def before_run(self, run_params: Optional[Tuple[OptimizerConfigField, ...]] = None):  # Delete output files
+    def before_run(self, run_params: Optional[tuple[OptimizerConfigField, ...]] = None):  # Delete output files
         # Clean output directory before start because get_performance_index only retrieves one record,
         # to avoid getting wrong data
         output_path = Path(self.config.command.result_dir)

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
+
 from optix.optimizer.plugins.simulate import Simulator
 
 
@@ -138,17 +139,16 @@ class TestVllmSimulator(unittest.TestCase):
         mock_child = MagicMock()
         mock_parent.children.return_value = [mock_child]
 
-        with patch("psutil.Process", return_value=mock_parent):
-            with patch("psutil.wait_procs") as mock_wait:
-                mock_wait.return_value = (
-                    [mock_parent, mock_child],
-                    [],
-                )  # all gone, none alive
-                with patch.object(simulator, "_is_vllm_running", return_value=False):
-                    result = simulator._stop_vllm_process(max_attempts=1, timeout=1)
-                    self.assertTrue(result)
-                    mock_child.terminate.assert_called_once()
-                    mock_parent.terminate.assert_called_once()
+        with patch("psutil.Process", return_value=mock_parent), patch("psutil.wait_procs") as mock_wait:
+            mock_wait.return_value = (
+                [mock_parent, mock_child],
+                [],
+            )  # all gone, none alive
+            with patch.object(simulator, "_is_vllm_running", return_value=False):
+                result = simulator._stop_vllm_process(max_attempts=1, timeout=1)
+                self.assertTrue(result)
+                mock_child.terminate.assert_called_once()
+                mock_parent.terminate.assert_called_once()
 
     @patch("optix.config.custom_command.shutil.which")
     def test_stop_vllm_process_psutil_fails_fallback_pkill(self, mock_which):
@@ -368,12 +368,14 @@ class TestSimulatorSetConfigEdgeCases(unittest.TestCase):
         mock_config.command = MagicMock()
         mock_config.process_name = "mindie"
 
-        with patch("optix.config.custom_command.os.path.isfile", return_value=True):
-            with patch(
+        with (
+            patch("optix.config.custom_command.os.path.isfile", return_value=True),
+            patch(
                 "optix.config.custom_command.shutil.which",
                 return_value="/usr/bin/mindie_llm_server",
-            ):
-                simulator = Simulator(config=mock_config)
+            ),
+        ):
+            simulator = Simulator(config=mock_config)
 
         from optix.config.config import OptimizerConfigField
 
@@ -386,9 +388,28 @@ class TestSimulatorSetConfigEdgeCases(unittest.TestCase):
         )
         simulator.update_config(params)
 
-        with open(mock_config.config_path, "r", encoding="utf-8") as f:
+        with open(mock_config.config_path, encoding="utf-8") as f:
             updated = json.load(f)
         assert updated["BackendConfig"]["ScheduleConfig"]["maxBatchSize"] == 200
+
+
+class TestSimulatorInterfaceUpdateConfig(unittest.TestCase):
+    """Test SimulatorInterface.update_config default (base-class) implementation."""
+
+    def test_update_config_default_returns_true(self):
+        from optix.optimizer.interfaces.simulator import SimulatorInterface
+
+        class StubSimulator(SimulatorInterface):
+            @property
+            def base_url(self) -> str:
+                return "http://localhost:8000"
+
+            def update_command(self) -> None:
+                return None
+
+        stub = StubSimulator.__new__(StubSimulator)
+        assert SimulatorInterface.update_config(stub, None) is True
+        assert SimulatorInterface.update_config(stub, ()) is True
 
 
 class TestSimulatorInterfaceHealth(unittest.TestCase):
@@ -397,8 +418,8 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
     @patch("optix.config.custom_command.shutil.which")
     def test_health_returns_running_on_200(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
-        from optix.optimizer.plugins.simulate import VllmSimulator
         from optix.config.constant import Stage
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         mock_config = MagicMock()
         mock_config.process_name = "vllm"
@@ -423,8 +444,8 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
     @patch("optix.config.custom_command.shutil.which")
     def test_health_returns_error_on_non_200(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
-        from optix.optimizer.plugins.simulate import VllmSimulator
         from optix.config.constant import Stage
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         mock_config = MagicMock()
         mock_config.process_name = "vllm"
@@ -450,9 +471,10 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
     @patch("optix.config.custom_command.shutil.which")
     def test_health_request_exception_during_start(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
-        from optix.optimizer.plugins.simulate import VllmSimulator
-        from optix.config.constant import Stage, ProcessState
         import requests
+
+        from optix.config.constant import ProcessState, Stage
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         mock_config = MagicMock()
         mock_config.process_name = "vllm"
@@ -476,9 +498,10 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
     @patch("optix.config.custom_command.shutil.which")
     def test_health_request_exception_during_running(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
-        from optix.optimizer.plugins.simulate import VllmSimulator
-        from optix.config.constant import Stage, ProcessState
         import requests
+
+        from optix.config.constant import ProcessState, Stage
+        from optix.optimizer.plugins.simulate import VllmSimulator
 
         mock_config = MagicMock()
         mock_config.process_name = "vllm"
@@ -588,6 +611,7 @@ class TestMindieSimulatorBeforeRun(unittest.TestCase):
         import json
         import tempfile
         from pathlib import Path
+
         from optix.config.config import OptimizerConfigField
 
         tmp_dir = tempfile.mkdtemp()
@@ -631,6 +655,7 @@ class TestMindieSimulatorBeforeRun(unittest.TestCase):
         import json
         import tempfile
         from pathlib import Path
+
         from optix.config.config import OptimizerConfigField
 
         tmp_dir = tempfile.mkdtemp()
@@ -674,7 +699,8 @@ class TestMindieSimulatorHealth(unittest.TestCase):
         import json
         import tempfile
         from pathlib import Path
-        from optix.config.constant import Stage, ProcessState
+
+        from optix.config.constant import ProcessState, Stage
 
         tmp_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
@@ -714,7 +740,8 @@ class TestMindieSimulatorHealth(unittest.TestCase):
         import json
         import tempfile
         from pathlib import Path
-        from optix.config.constant import Stage, ProcessState
+
+        from optix.config.constant import ProcessState, Stage
 
         tmp_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
@@ -779,6 +806,83 @@ class TestMindieSimulatorStop(unittest.TestCase):
         assert restored == config_data
 
 
+class TestMindieSimulatorUpdateCommand(unittest.TestCase):
+    """Test Simulator.update_command."""
+
+    @patch(
+        "optix.config.custom_command.shutil.which",
+        return_value="/usr/bin/mindie_llm_server",
+    )
+    def test_update_command_rebuilds_command(self, mock_which):
+        import tempfile
+
+        from optix.config.custom_command import MindieCommand
+        from tests.regression.optix.test_optimizer.plugin_run_support import make_mindie_simulator_config
+
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        mock_config = make_mindie_simulator_config(tmp_dir)
+
+        simulator = Simulator(config=mock_config)
+        simulator.update_command()
+
+        assert simulator.command is not None
+        assert len(simulator.command) > 0
+        expected = MindieCommand(mock_config.command).command
+        assert simulator.command == expected
+
+    @patch(
+        "optix.config.custom_command.shutil.which",
+        return_value="/usr/bin/mindie_llm_server",
+    )
+    def test_update_command_reflects_config_change(self, mock_which):
+        import tempfile
+
+        from tests.regression.optix.test_optimizer.plugin_run_support import make_mindie_simulator_config
+
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        mock_config = make_mindie_simulator_config(tmp_dir)
+        simulator = Simulator(config=mock_config)
+
+        with patch("optix.config.custom_command.os.path.isfile", return_value=False):
+            simulator.update_command()
+            assert simulator.command is not None
+            first_command = list(simulator.command)
+
+        daemon_path = "/usr/local/Ascend/mindie/latest/mindie-service/bin/mindieservice_daemon"
+        with patch("optix.config.custom_command.os.path.isfile", return_value=True):
+            simulator.update_command()
+            assert simulator.command is not None
+            second_command = list(simulator.command)
+
+        assert first_command != second_command
+        assert second_command == [daemon_path]
+
+    @patch(
+        "optix.config.custom_command.shutil.which",
+        return_value="/usr/bin/mindie_llm_server",
+    )
+    def test_update_command_after_init_differs_from_stale_command(self, mock_which):
+        import tempfile
+
+        from optix.config.custom_command import MindieCommand
+        from tests.regression.optix.test_optimizer.plugin_run_support import make_mindie_simulator_config
+
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        mock_config = make_mindie_simulator_config(tmp_dir)
+
+        simulator = Simulator(config=mock_config)
+        stale_command = ["stale", "command", "list"]
+        simulator.command = stale_command
+        simulator.update_command()
+
+        expected = MindieCommand(mock_config.command).command
+        assert simulator.command == expected
+        assert simulator.command != stale_command
+
+
 class TestMindieSimulatorUpdateConfig(unittest.TestCase):
     """Test Simulator.update_config"""
 
@@ -820,6 +924,7 @@ class TestMindieSimulatorUpdateConfig(unittest.TestCase):
         import json
         import tempfile
         from pathlib import Path
+
         from optix.config.config import OptimizerConfigField
 
         tmp_dir = tempfile.mkdtemp()

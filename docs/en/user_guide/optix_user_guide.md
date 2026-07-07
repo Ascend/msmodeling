@@ -45,7 +45,7 @@ The tool has been validated on LLaMA3-8B and Qwen3-8B. In principle, it does not
 ## Preparations
 
 **Environment Setup**
-Set up an environment where serving tools (such as [vLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)) and benchmark tools (such as `vllm_benchmark`/`ais_bench`, see [Benchmark Tool Deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md)) can run properly.
+Set up an environment where serving tools (such as [vLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start/)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)) and benchmark tools (such as `vllm_benchmark`/`ais_bench`, see [Benchmark Tool Deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md)) can run properly.
 
 ## Tool Installation
 
@@ -350,10 +350,69 @@ Service Parameter Optimizer supports user-defined search parameter configuration
 
 ### Log Description
 
-The default log level during optimization is `INFO`. To view detailed per-iteration logs, set the following environment variable before running the tool:
+The optimizer uses [loguru](https://github.com/Delgan/loguru) with structured context (`run_id`, `stage`, `engine`) on each console line. Configure the level **before** starting the tool:
 
 ```bash
+# Preferred
+export OPTIX_LOG_LEVEL=INFO
+
+# Legacy alias (used only when OPTIX_LOG_LEVEL is unset)
 export MODELEVALSTATE_LEVEL=DEBUG
 ```
 
-The status of each iteration is printed to the console. Detailed `vLLM/MindIE` logs are redirected to `/tmp`. The exact file path is shown in the console output for debugging service status.
+| Level | What you see |
+| --- | --- |
+| `INFO` (default) | Milestones: baseline pass, service ready, iteration summaries, best result; subprocess start shows multiline `command:` / `log:` |
+| `DEBUG` | Parameter dumps, subprocess I/O (`Popen`, log reads, benchmark CSV glob); each line includes `file:line`; uncaught errors include full traceback (`diagnose` / `backtrace`) |
+| `TRACE` | Per-particle PSO detail (fitness, swarm positions, evaluation parameters); same `file:line` column as DEBUG |
+
+Example — iteration summary only:
+
+```bash
+export OPTIX_LOG_LEVEL=INFO
+msmodeling optix -e vllm
+```
+
+Example — debug a failing candidate configuration:
+
+```bash
+export OPTIX_LOG_LEVEL=DEBUG
+msmodeling optix -e mindie --backup
+```
+
+Service and benchmark subprocess logs are written to files under the result tree (and `/tmp` in some setups). Startup logs use a readable multiline format:
+
+```text
+Starting service subprocess
+  command: vllm serve model_path --host 127.0.0.1 --port 8080
+  log: /tmp/ms_serviceparam_optimizer__abc123
+```
+
+Baseline failures at the CLI boundary show `exit=`, `command:`, `log:`, and the last lines of the subprocess log once (no nested wrappers). Before constructing plugins, OptiX checks `PATH` using each class's `required_executable` for `-b` (`BenchmarkUnavailableError`) and `-e` (`SimulatorUnavailableError`, e.g. missing `vllm`). These fail before optimization starts — no subprocess or output cleanup runs.
+
+### Troubleshooting
+
+| Symptom | Likely cause | What to do |
+| --- | --- | --- |
+| Process exits with code `1`, message `No feasible solution found` | Every candidate failed baseline or PSO (all fitness `inf`) | Check CSV `error` column; run with `OPTIX_LOG_LEVEL=DEBUG`; verify service and benchmark commands |
+| `Optimizer aborted` with traceback | Unhandled fatal error in `main()` | Read the single boundary traceback; fix config, paths, or health-check patterns |
+| `BenchmarkResultError` (`OptimizerError` subclass) / ambiguous AISBench CSV | Zero or multiple `performances/*/*.csv` under benchmark output | Clean output dir; ensure one AISBench run per evaluation; **terminates the whole CLI run** (not a single PSO particle) |
+| Console shows `run_id` and `stage` but little detail | Default `INFO` hides particle-level logs | Set `OPTIX_LOG_LEVEL=TRACE` for PSO internals |
+| `BenchmarkUnavailableError` on startup | CLI declared by the selected `-b` plugin is not on `PATH` | Install the benchmark CLI or choose another `-b` option; fix happens before optimization starts |
+| `SimulatorUnavailableError` on startup | CLI declared by the selected `-e` plugin is not on `PATH` (e.g. `vllm`) | Install the inference CLI or choose another `-e` option; fix happens before optimization starts |
+| `BaselineRunError` with `exit=` / `log:` / `log tail:` | Service subprocess failed during baseline | Read the printed tail first; open the log path only if you need more context |
+| Console `run_id` or `stage` shows `-` on a boundary error | Fixed in recent releases — boundary logging runs inside `contextualize` | Upgrade; boundary errors should show real `run_id` and `stage` |
+| `--config` points to a missing file | Wrong path or file not deployed | Verify path; raises `ConfigFileNotFoundError` (exit code `1`) |
+
+**CLI exit codes**
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Feasible best configuration found and written |
+| `1` | `OptimizerError` subclasses (`ConfigFileNotFoundError`, `BenchmarkResultError`, `NoFeasibleSolutionError`, `BaselineRunError`, etc.) or unhandled fatal error |
+
+All failure paths currently exit with code `1`. Distinguish failure types by log message or `OptimizerError` subclass, not by exit code.
+
+Domain failures use `optix.optimizer.errors.OptimizerError` and subclasses so callers can distinguish missing config, invalid TOML, baseline failure, and no feasible solution without parsing log text. `InvalidConfigError` is raised for malformed TOML.
+
+When the process exits non-zero, use console logs together with the CSV `error` column for diagnosis.

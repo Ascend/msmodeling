@@ -15,39 +15,48 @@
 # -------------------------------------------------------------------------
 import subprocess  # nosec B404
 import time
-from pathlib import Path
-from typing import Tuple, Optional
 from math import isclose
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 from loguru import logger
 
 from ..common import get_train_sub_path, is_mindie, is_vllm
-from ..config.base_config import REAL_EVALUATION
+from ..config.base_config import FOLDER_LIMIT_SIZE, REAL_EVALUATION, REQUESTRATES
 from ..config.config import (
-    get_settings,
     DecodeContext,
-    PerformanceIndex,
-    OptimizerConfigField,
-    map_param_with_value,
     ErrorSeverity,
+    OptimizerConfigField,
+    PerformanceIndex,
+    get_settings,
+    map_param_with_value,
 )
-from ..config.base_config import FOLDER_LIMIT_SIZE, REQUESTRATES
 from ..config.constant import Stage
-from ..optimizer.plugins.simulate import Simulator
-from ..optimizer.store import DataStorage
-from ..optimizer.utils import get_folder_size
+from ..logging import LogStage, format_subprocess_failure
+from ..optimizer.errors import OptimizerError
 from ..optimizer.health_check import (
-    ErrorContext,
     BenchmarkHealthCheckHook,
+    BenchmarkHookPoint,
+    ErrorContext,
+    FatalError,
+    HealthCheckContext,
+    RetryableError,
     ServiceHealthCheckHook,
     ServiceHookPoint,
-    BenchmarkHookPoint,
-    HealthCheckContext,
-    service_health_checks_hooks,
     benchmark_health_checks_hooks,
-    FatalError,
-    RetryableError,
+    service_health_checks_hooks,
 )
+from ..optimizer.outcome import RunOutcome, RunStatus
+from ..optimizer.plugins.simulate import Simulator
+from ..optimizer.protocols import (
+    SupportsCheckSuccess,
+    SupportsDataField,
+    SupportsHealth,
+    SupportsPrepare,
+)
+from ..optimizer.store import DataStorage
+from ..optimizer.utils import get_folder_size
 
 
 class Scheduler:
@@ -69,13 +78,24 @@ class Scheduler:
         self.current_back_path = None
         self.simulate_run_info = None
         self.performance_index = None
-        self.error_info = None
+        self._error_info = None
+        self.last_outcome: Optional[RunOutcome] = None
         self.run_start_timestamp = None
         self.first_duration = None
         self.del_log = None
         self.service_checks = ServiceHealthCheckHook()
         self.benchmark_checks = BenchmarkHealthCheckHook()
         self._register_default_checks()
+
+    @property
+    def error_info(self):
+        if self.last_outcome is not None and self.last_outcome.error_context is not None:
+            return self.last_outcome.error_context
+        return self._error_info
+
+    @error_info.setter
+    def error_info(self, value):
+        self._error_info = value
 
     def _register_default_checks(self):
         """Register default health checks (can be overridden by subclasses)"""
@@ -97,11 +117,19 @@ class Scheduler:
     def _handle_error(self, error_context: ErrorContext) -> None:
         """Raise different exceptions based on error type"""
         if error_context.severity == ErrorSeverity.FATAL:
-            logger.error(f"Fatal error: {error_context.message}")
             raise FatalError(error_context.message)
-        else:  # RETRYABLE
-            logger.warning(f"Retryable error: {error_context.message}")
-            raise RetryableError(error_context.message)
+        raise RetryableError(error_context.message)
+
+    def _simulator_failure_message(self, return_code: int | None = None) -> str:
+        command = list(getattr(self.simulator, "command", None) or [])
+        log_path = getattr(self.simulator, "run_log", None)
+        if return_code is None and hasattr(self.simulator, "process") and self.simulator.process is not None:
+            return_code = self.simulator.process.returncode
+        log_tail = None
+        get_last_log = getattr(self.simulator, "get_last_log", None)
+        if callable(get_last_log):
+            log_tail = get_last_log(10)
+        return format_subprocess_failure(command, return_code, log_path, log_tail=log_tail)
 
     def set_back_up_path(self):
         if self.bak_path:
@@ -114,7 +142,6 @@ class Scheduler:
                 self.benchmark.bak_path = self.current_back_path
 
     def wait_simulate(self):
-        logger.debug("wait run simulator")
         start_time = time.time()
         for _ in range(self.wait_time):
             time.sleep(1)
@@ -122,14 +149,13 @@ class Scheduler:
             context = self._create_check_context(elapsed)
             result = self.service_checks.run(ServiceHookPoint.STARTUP_POLLING, context)
             if result.is_healthy:
-                if hasattr(self.simulator, "check_success") and self.simulator.check_success():
-                    logger.info(f"Successfully started the {self.simulator.process} process.")
-                    return
-                elif hasattr(self.simulator, "health"):
+                started = False
+                if isinstance(self.simulator, SupportsCheckSuccess) and self.simulator.check_success():
+                    started = True
+                elif isinstance(self.simulator, SupportsHealth):
                     res = self.simulator.health()
                     if res.stage == Stage.running:
-                        logger.info(f"Successfully started the {self.simulator.process} process.")
-                        return
+                        started = True
                     elif res.stage == Stage.start:
                         if int(elapsed) % 60 == 0:
                             logger.warning(
@@ -137,10 +163,15 @@ class Scheduler:
                             )
                         continue
                     elif res.stage in (Stage.stop, Stage.error):
-                        logger.error(f"Failed to start the {self.simulator.process} process.")
-                        raise subprocess.SubprocessError(
-                            f"Failed in run simulator. status: {res.stage}. info: {res.info}"
+                        return_code = None
+                        if hasattr(self.simulator, "process") and self.simulator.process is not None:
+                            return_code = self.simulator.process.returncode
+                        logger.debug(
+                            "Simulator subprocess exited during startup stage={} return_code={}",
+                            res.stage,
+                            return_code,
                         )
+                        raise subprocess.SubprocessError(self._simulator_failure_message(return_code))
                     else:
                         logger.warning(f" Unknown Status. status: {res.stage}. info: {res.info}")
                 else:
@@ -148,22 +179,27 @@ class Scheduler:
                         f"No actionable method found. the expected is check_success or health. "
                         f"simulator: {type(self.simulator)}"
                     )
+                if started:
+                    logger.success(f"Successfully started the {self.simulator.process} process.")
+                    return
             else:
                 self._handle_error(result.error_context)
         raise TimeoutError(self.wait_time)
 
-    def run_simulate(self, params: np.ndarray, params_field: Tuple[OptimizerConfigField]):
-        if hasattr(self.benchmark, "prepare"):
+    def run_simulate(self, params: np.ndarray, params_field: tuple[OptimizerConfigField]):
+        if isinstance(self.benchmark, SupportsPrepare):
             self.benchmark.prepare()
+        logger.debug("starting simulator subprocess")
         self.simulator.run(tuple(self.simulate_run_info))
+        logger.debug("waiting for simulator startup")
         self.wait_simulate()
+        logger.debug("simulator startup complete")
 
     def backup(self):
         self.simulator.backup()
         self.benchmark.backup()
 
     def monitoring_status(self):
-        logger.debug("monitor status")
         start_time = time.time()
         for _ in range(get_settings().particles_time_out):
             elapsed = time.time() - start_time
@@ -174,21 +210,25 @@ class Scheduler:
             benchmark_result = self.benchmark_checks.run(BenchmarkHookPoint.RUNTIME_MONITOR, context)
             if not benchmark_result.is_healthy:
                 self._handle_error(benchmark_result.error_context)
-            if hasattr(self.simulator, "check_success"):
+            if isinstance(self.simulator, SupportsCheckSuccess):
                 if is_mindie() or is_vllm():
                     if self.simulator.process.poll() is not None:
-                        raise subprocess.SubprocessError(
-                            f"Failed in run simulator. return code: {self.simulator.process.returncode}."
+                        logger.debug(
+                            "Simulator subprocess exited during runtime monitor return_code={}",
+                            self.simulator.process.returncode,
                         )
+                        raise subprocess.SubprocessError(self._simulator_failure_message())
                 if self.benchmark.check_success():
                     return
-            if hasattr(self.simulator, "health"):
+            if isinstance(self.simulator, SupportsHealth):
                 if not isinstance(self.simulator, Simulator):
                     res = self.simulator.health()
                     if res.stage != Stage.running:
-                        raise subprocess.SubprocessError(
-                            f"Failed in run simulator. error: {res.stage} info: {res.info}."
+                        logger.debug(
+                            "Simulator health non-running during runtime monitor stage={}",
+                            res.stage,
                         )
+                        raise subprocess.SubprocessError(self._simulator_failure_message())
                 res = self.benchmark.health()
                 if res.stage != Stage.running:
                     return
@@ -200,7 +240,7 @@ class Scheduler:
 
         raise TimeoutError(f"{get_settings().particles_time_out}")
 
-    def run_target_server(self, params: np.ndarray, params_field: Tuple[OptimizerConfigField]):
+    def run_target_server(self, params: np.ndarray, params_field: tuple[OptimizerConfigField]):
         """
         1. Start mindie simulation
         2. Start benchmark test
@@ -210,23 +250,31 @@ class Scheduler:
             try:
                 self.run_simulate(params, params_field)
                 time.sleep(1)
+                logger.debug("starting benchmark subprocess")
                 self.benchmark.run(tuple(self.simulate_run_info))
+                logger.debug("benchmark subprocess started")
                 time.sleep(1)
                 self.monitoring_status()
                 return
             except FatalError as e:
-                logger.error(
-                    f"Fatal error in run_target_server (attempt {attempt + 1}/{self.retry_number}): {e}, \n"
-                    f"simulator log: {self.simulator.run_log}, \n"
-                    f"log last info: {self.simulator.get_last_log()}"
+                logger.debug(
+                    "Fatal error in run_target_server (attempt {}/{}): {}, simulator log: {}, tail: {}",
+                    attempt + 1,
+                    self.retry_number,
+                    e,
+                    self.simulator.run_log,
+                    self.simulator.get_last_log(),
                 )
                 self.stop_target_server(False)
                 raise
             except RetryableError as e:
-                logger.warning(
-                    f"Retryable error in run_target_server (attempt {attempt + 1}/{self.retry_number}): {e}, \n"
-                    f"simulator log: {self.simulator.run_log}, \n"
-                    f"log last info: {self.simulator.get_last_log()}"
+                logger.debug(
+                    "Retryable error in run_target_server (attempt {}/{}): {}, simulator log: {}, tail: {}",
+                    attempt + 1,
+                    self.retry_number,
+                    e,
+                    self.simulator.run_log,
+                    self.simulator.get_last_log(),
                 )
                 self.stop_target_server(False)
                 continue
@@ -256,22 +304,92 @@ class Scheduler:
         )
         if self.bak_path:
             self.backup()
-        self.stop_target_server()
+        del_log = self.del_log if self.del_log is not None else False
+        self.stop_target_server(del_log)
 
-    def update_data_field(self, params_field: Tuple[OptimizerConfigField]):
-        if hasattr(self.simulator, "data_field"):
+    def update_data_field(self, params_field: tuple[OptimizerConfigField]):
+        if isinstance(self.simulator, SupportsDataField):
             self.simulator.data_field = params_field
-        if hasattr(self.simulator, "update_command"):
             self.simulator.update_command()
-        if hasattr(self.benchmark, "data_field"):
+        if isinstance(self.benchmark, SupportsDataField):
             self.benchmark.data_field = params_field
-        if hasattr(self.benchmark, "update_command"):
             self.benchmark.update_command()
+
+    def _apply_request_rate_second_run(self, params_field: tuple[OptimizerConfigField]) -> None:
+        self.benchmark.stop()
+        need_second_run = False
+        for _field in self.simulate_run_info:
+            if _field.name in REQUESTRATES:
+                if not isclose(_field.min, _field.max):
+                    _field.value = _field.find_available_value(self.performance_index.throughput * 1.05)
+                    need_second_run = True
+        if not need_second_run:
+            logger.info("REQUESTRATE is fixed (min == max), skipping second run.")
+            return
+        logger.info(
+            "second run param info {}",
+            {v.name: v.value for v in self.simulate_run_info},
+        )
+        if isinstance(self.benchmark, SupportsDataField):
+            self.benchmark.data_field = params_field
+        self.benchmark.update_command()
+        if isinstance(self.benchmark, SupportsPrepare):
+            self.benchmark.prepare()
+        self.benchmark.run(tuple(self.simulate_run_info))
+        self.monitoring_status()
+        time.sleep(1)
+        self.performance_index = self.benchmark.get_performance_index()
+
+    def _run_evaluation(
+        self,
+        params: np.ndarray,
+        params_field: tuple[OptimizerConfigField],
+        decode_context: Optional[DecodeContext],
+        *,
+        with_request_rate: bool = False,
+    ) -> PerformanceIndex:
+        with logger.contextualize(stage=LogStage.EVALUATE.value):
+            self.run_start_timestamp = time.time()
+            logger.debug("evaluation start param_count={} values={}", len(params), params.tolist())
+            self.set_back_up_path()
+            self.simulate_run_info = map_param_with_value(params, params_field, decode_context)
+            logger.opt(lazy=True).trace("run param info {}", lambda: {v.name: v.value for v in self.simulate_run_info})
+            self._error_info = None
+            self.last_outcome = None
+            self.del_log = True
+            self.performance_index = PerformanceIndex()
+            try:
+                self.update_data_field(self.simulate_run_info)
+                self.run_target_server(params, params_field)
+                time.sleep(1)
+                self.performance_index = self.benchmark.get_performance_index()
+                if with_request_rate:
+                    self._apply_request_rate_second_run(params_field)
+            except OptimizerError:
+                raise
+            except Exception as e:
+                self._error_info = e
+                self.del_log = False
+            status = RunStatus.FAILED if self._error_info else RunStatus.SUCCESS
+            duration = time.time() - self.run_start_timestamp if self.run_start_timestamp else None
+            error_type = type(self._error_info).__name__ if self._error_info else "-"
+            logger.debug(
+                "evaluation finished status={} duration={:.2f}s error_type={}",
+                status.value,
+                duration or 0.0,
+                error_type,
+            )
+            self.last_outcome = RunOutcome(
+                status=status,
+                performance_index=self.performance_index,
+                error_context=self._error_info,
+            )
+            return self.performance_index
 
     def run(
         self,
         params: np.ndarray,
-        params_field: Tuple[OptimizerConfigField],
+        params_field: tuple[OptimizerConfigField],
         decode_context: Optional[DecodeContext] = None,
     ) -> PerformanceIndex:
         """
@@ -282,32 +400,12 @@ class Scheduler:
         5. Return benchmark test results
         params: 1D array whose values correspond to mindie related configurations.
         """
-        self.run_start_timestamp = time.time()
-        logger.debug("Start run in scheduler.")
-        self.set_back_up_path()
-        self.simulate_run_info = map_param_with_value(params, params_field, decode_context)
-        logger.info("run param info {}", {v.name: v.value for v in self.simulate_run_info})
-        self.error_info = None
-        self.del_log = True
-        self.performance_index = PerformanceIndex()
-        try:
-            self.update_data_field(self.simulate_run_info)
-            self.run_target_server(params, params_field)
-            time.sleep(1)
-            self.performance_index = self.benchmark.get_performance_index()
-        except Exception as e:
-            logger.error(
-                f"Failed running. bak path: {self.simulator.bak_path}. error {e}"
-                f"simulator log {self.simulator.run_log}, benchmark log {self.benchmark.run_log}"
-            )
-            self.error_info = e
-            self.del_log = False
-        return self.performance_index
+        return self._run_evaluation(params, params_field, decode_context, with_request_rate=False)
 
     def run_with_request_rate(
         self,
         params: np.ndarray,
-        params_field: Tuple[OptimizerConfigField],
+        params_field: tuple[OptimizerConfigField],
         decode_context: Optional[DecodeContext] = None,
     ) -> PerformanceIndex:
         """
@@ -315,57 +413,4 @@ class Scheduler:
         then run based on concurrency and request rate, using the last run as the evaluation result.
         params: 1D array whose values correspond to mindie related configurations.
         """
-        self.run_start_timestamp = time.time()
-        self.set_back_up_path()
-        self.simulate_run_info = map_param_with_value(params, params_field, decode_context)
-        logger.info("run param info {}", {v.name: v.value for v in self.simulate_run_info})
-        self.error_info = None
-        self.del_log = True
-        self.performance_index = PerformanceIndex()
-        try:
-            self.update_data_field(self.simulate_run_info)
-            self.run_target_server(params, params_field)
-            time.sleep(1)
-            self.performance_index = self.benchmark.get_performance_index()
-            self.benchmark.stop()
-            need_second_run = False
-            for _field in self.simulate_run_info:
-                if _field.name in REQUESTRATES:
-                    if not isclose(_field.min, _field.max):
-                        _field.value = _field.find_available_value(self.performance_index.throughput * 1.05)
-                        need_second_run = True
-            if not need_second_run:
-                logger.info("REQUESTRATE is fixed (min == max), skipping second run.")
-            else:
-                logger.info(
-                    "second run param info {}",
-                    {v.name: v.value for v in self.simulate_run_info},
-                )
-                if hasattr(self.benchmark, "data_field"):
-                    self.benchmark.data_field = params_field
-                self.benchmark.update_command()
-                try:
-                    if hasattr(self.benchmark, "prepare"):
-                        self.benchmark.prepare()
-                    self.benchmark.run(tuple(self.simulate_run_info))
-                except Exception as e:
-                    logger.error(f"Failed in Benchmark Running. error: {e}, benchmark log {self.benchmark.run_log}")
-                    raise e
-                try:
-                    self.monitoring_status()
-                except Exception as e:
-                    logger.error(
-                        f"Failed in monitoring status. error: {e}, simulator log {self.simulator.run_log}, "
-                        f"benchmark log {self.benchmark.run_log}"
-                    )
-                    raise e
-                time.sleep(1)
-                self.performance_index = self.benchmark.get_performance_index()
-        except Exception as e:
-            logger.error(
-                f"Failed running. bak path: {self.simulator.bak_path}. error {e}"
-                f"simulator log {self.simulator.run_log}, benchmark log {self.benchmark.run_log}"
-            )
-            self.error_info = e
-            self.del_log = False
-        return self.performance_index
+        return self._run_evaluation(params, params_field, decode_context, with_request_rate=True)

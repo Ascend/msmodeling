@@ -15,10 +15,12 @@
 # -------------------------------------------------------------------------
 import os
 import tempfile
+from io import StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from loguru import logger
 
 from optix.config.config import (
     CUSTOM_OUTPUT,
@@ -26,8 +28,8 @@ from optix.config.config import (
     OptimizerConfigField,
 )
 from optix.optimizer.interfaces.custom_process import (
-    CustomProcess,
     BaseDataField,
+    CustomProcess,
 )
 
 
@@ -193,6 +195,28 @@ def test_run_process_name_exists_and_check_env_fail(mock_popen, mock_before_run,
     mock_popen.assert_called_once()
 
 
+@patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+@patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
+def test_run_logs_multiline_command_and_log(mock_popen, mock_before_run):
+    mock_popen.return_value = MagicMock(pid=4242)
+    process = CustomProcess()
+    process.process_name = None
+    process.command = ["vllm", "serve", "model_path", "--port", "8080"]
+    process.work_path = "/test/work/path"
+    process.run_log_fp = MagicMock()
+    process.run_log = "/tmp/ms_serviceparam_optimizer__abc"
+
+    buffer = StringIO()
+    handler_id = logger.add(buffer, level="TRACE")
+    process.run()
+    logger.remove(handler_id)
+
+    output = buffer.getvalue()
+    assert "  command:" in output
+    assert "  log: /tmp/ms_serviceparam_optimizer__abc" in output
+    assert "vllm serve model_path --port 8080" in output
+
+
 # Test case 3: process_name does not exist
 @patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
 @patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
@@ -205,6 +229,19 @@ def test_run_process_name_not_exists(mock_popen, mock_before_run):
     process.run_log = "/test/run/log"
     process.run()
     mock_before_run.assert_called_once()
+
+
+@patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
+def test_run_popen_failure_closes_run_log_fd(mock_popen):
+    """FD from mkstemp must close when Popen fails after before_run."""
+    process = CustomProcess()
+    process.process_name = None
+    process.command = ["test_command"]
+    process.work_path = "/tmp"
+    mock_popen.side_effect = OSError("subprocess.Popen failed")
+    with pytest.raises(OSError, match="subprocess.Popen failed"):
+        process.run()
+    assert process.run_log_fp is None
 
 
 # Test case 4: subprocess.Popen raises OSError
@@ -284,6 +321,21 @@ class TestCustomProcessSupplement:
         process.run_log = "/nonexistent/path.log"
         assert process.get_last_log() is None
 
+    @patch("optix.optimizer.interfaces.custom_process.time.sleep")
+    def test_get_last_log_retry_false_no_sleep(self, mock_sleep, tmp_path):
+        """Health-check path must not block on empty logs."""
+        log_file = tmp_path / "empty.log"
+        log_file.write_text("", encoding="utf-8")
+        process = CustomProcess()
+        process.run_log = str(log_file)
+        process.process = Mock()
+        process.process.poll.return_value = None
+
+        result = process.get_last_log(number=3, retry=False)
+
+        assert result is None
+        mock_sleep.assert_not_called()
+
     def test_health_process_running(self):
         """Test health returns running when process.poll() is None"""
         process = CustomProcess()
@@ -309,10 +361,14 @@ class TestCustomProcessSupplement:
         process.process.poll.return_value = 1
         process.process.returncode = 1
         process.print_log = False
-        process.command = ["test"]
+        process.command = ["vllm", "serve", "model_path"]
         process.run_log = "/tmp/test.log"
         result = process.health()
         assert result.stage.value == "error"
+        assert "exit_code=1" in result.info
+        assert "log=/tmp/test.log" in result.info
+        assert "vllm" not in result.info
+        assert "!r" not in result.info
 
     @patch("psutil.Process")
     def test_stop_running_process(self, mock_psutil_process):
@@ -784,3 +840,24 @@ class TestRunCommandChecks:
         result = process.get_last_log(number=2)
         assert "line2" in result
         assert "line3" in result
+
+    def test_get_last_log_reads_after_subprocess_write(self, tmp_path):
+        import subprocess
+
+        log_file = tmp_path / "subprocess.log"
+        process = CustomProcess()
+        process.run_log = str(log_file)
+        fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        process.run_log_fp = fd
+        subprocess.run(
+            ["/usr/bin/env", "python3", "-c", "import sys; print('vllm error line', file=sys.stderr)"],
+            stdout=fd,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            check=False,
+        )
+        tail = process.get_last_log(number=5)
+        os.close(fd)
+        process.run_log_fp = None
+        assert tail is not None
+        assert "vllm error line" in tail

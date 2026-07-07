@@ -54,7 +54,7 @@
 ## 使用前准备
 
 **环境准备**
-准备好能正常运行服务化（如[VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)）和测评工具（如`vllm_benchmark/AISBench`，参见[测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)）的环境。
+准备好能正常运行服务化（如[VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start/)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)）和测评工具（如`vllm_benchmark/AISBench`，参见[测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)）的环境。
 
 ## 工具安装
 
@@ -546,10 +546,69 @@ io_error = ["file not found", "permission denied", "IO error"]
 
 ### 日志说明
 
-寻优过程中默认日志为INFO级别，如果用户想看每一轮具体的日志，可以在使用工具前设置
+寻优工具使用 [loguru](https://github.com/Delgan/loguru) 输出结构化日志。控制台每行包含 `run_id`、`stage` 等上下文字段。请在启动工具**之前**设置日志级别：
 
 ```bash
+# 推荐
+export OPTIX_LOG_LEVEL=INFO
+
+# 兼容旧变量（仅当未设置 OPTIX_LOG_LEVEL 时生效）
 export MODELEVALSTATE_LEVEL=DEBUG
 ```
 
-对于每一轮的运行状态会进行输出，我们将具体的VLLM/MindIE日志重定向在/tmp目录下，可以根据打印信息获取具体文件路径查看服务运行状态。
+| 级别 | 可见内容 |
+| --- | --- |
+| `INFO`（默认） | 里程碑：baseline 通过、服务就绪、迭代摘要、最优结果；子进程启动为多行 `command:` / `log:` |
+| `DEBUG` | 参数与配置细节、子进程 I/O（`Popen`、读日志、benchmark CSV glob）；每行含 `file:line`；未捕获异常含完整堆栈 |
+| `TRACE` | PSO 粒子级细节（fitness、粒子位置、单次评测参数）；与 DEBUG 相同含 `file:line` 列 |
+
+示例 — 仅看迭代摘要：
+
+```bash
+export OPTIX_LOG_LEVEL=INFO
+msmodeling optix -e vllm
+```
+
+示例 — 排查失败候选的参数：
+
+```bash
+export OPTIX_LOG_LEVEL=DEBUG
+msmodeling optix -e mindie --backup
+```
+
+VLLM/MindIE 及测评子进程日志写入结果目录或 `/tmp`。启动日志为多行可读格式：
+
+```text
+Starting service subprocess
+  command: vllm serve model_path --host 127.0.0.1 --port 8080
+  log: /tmp/ms_serviceparam_optimizer__abc123
+```
+
+baseline 失败时 CLI 边界仅输出一次含 `exit=`、`command:`、`log:` 及日志末尾数行的消息（不再嵌套包装）。框架在构造插件前按各类声明的 `required_executable` 检查 `PATH`：`-b` 缺失时抛出 `BenchmarkUnavailableError`，`-e` 缺失时抛出 `SimulatorUnavailableError`（如 `vllm`），均发生在寻优开始前，不会拉起子进程或清理输出目录。
+
+### 故障排查
+
+| 现象 | 可能原因 | 处理建议 |
+| --- | --- | --- |
+| 退出码 `1`，提示 `No feasible solution found` | baseline 或 PSO 全部候选 fitness 为 `inf` | 查看 CSV `error` 列；使用 `OPTIX_LOG_LEVEL=DEBUG`；检查服务与测评命令 |
+| `Optimizer aborted` 并带堆栈 | `main()` 未捕获的致命错误 | 根据边界单次 traceback 修复配置、路径或健康检查规则 |
+| `BenchmarkResultError`（`OptimizerError` 子类）/ AISBench CSV 不唯一 | 测评输出目录下 0 个或多个 `performances/*/*.csv` | 清理输出目录；确保每次评测只产生一份 CSV；**立即终止整次寻优**（非单粒子失败） |
+| 控制台仅有 `run_id`、`stage`，细节较少 | 默认 `INFO` 不打印粒子级日志 | 设置 `OPTIX_LOG_LEVEL=TRACE` 查看 PSO 内部 |
+| `BenchmarkUnavailableError` 启动即失败 | 所选 `-b` 插件声明的 CLI 不在 `PATH` | 安装 benchmark CLI 或更换 `-b`；发生在寻优开始前 |
+| `SimulatorUnavailableError` 启动即失败 | 所选 `-e` 插件声明的 CLI 不在 `PATH`（如 `vllm`） | 安装推理框架 CLI 或更换 `-e`；发生在寻优开始前 |
+| `BaselineRunError` 含 `exit=` / `log:` / `log tail:` | baseline 子进程失败 | 先看控制台末尾日志；需要时再打开完整 log 文件 |
+| 边界错误行 `run_id` 或 `stage` 为 `-` | 较新版本已修复：边界日志在 `contextualize` 内输出 | 升级；边界错误应显示真实 `run_id` 与 `stage` |
+| `--config` 指向不存在文件 | 路径错误或文件未部署 | 检查路径；抛出 `ConfigFileNotFoundError`（退出码 `1`） |
+
+**CLI 退出码**
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 找到可行最优解并完成输出 |
+| `1` | `OptimizerError` 子类（`ConfigFileNotFoundError`、`BenchmarkResultError`、`NoFeasibleSolutionError`、`BaselineRunError` 等）或未捕获致命错误 |
+
+当前所有失败路径均以退出码 `1` 退出；请通过日志消息或 `OptimizerError` 子类区分失败类型，而非依赖不同非零退出码。
+
+领域错误集中在 `optix.optimizer.errors.OptimizerError` 及其子类，便于区分 config 缺失、TOML 非法、baseline 失败与无可行解，无需解析日志文本。非法 TOML 抛出 `InvalidConfigError`。
+
+退出码非零时，请结合控制台日志与 CSV `error` 列排查。

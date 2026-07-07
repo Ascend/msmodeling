@@ -14,8 +14,10 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 from abc import ABC, abstractmethod
-from .custom_process import BaseDataField, CustomProcess
+from typing import ClassVar
+
 from ...config.config import PerformanceIndex
+from .custom_process import BaseDataField, CustomProcess
 
 MS_TO_S = 10**3
 US_TO_S = 10**6
@@ -25,6 +27,8 @@ class BenchmarkInterface(CustomProcess, BaseDataField, ABC):
     """
     Operate benchmark program, test performance.
     """
+
+    required_executable: ClassVar[str | None] = None
 
     @property
     def num_prompts(self) -> int:
@@ -42,7 +46,6 @@ class BenchmarkInterface(CustomProcess, BaseDataField, ABC):
         Returns:""
 
         """
-        pass
 
     @property
     def model_name(self) -> str:
@@ -77,7 +80,6 @@ class BenchmarkInterface(CustomProcess, BaseDataField, ABC):
         Returns: None
 
         """
-        pass
 
     @abstractmethod
     def get_performance_index(self) -> PerformanceIndex:
@@ -86,4 +88,3 @@ class BenchmarkInterface(CustomProcess, BaseDataField, ABC):
         Returns: index data class
 
         """
-        pass

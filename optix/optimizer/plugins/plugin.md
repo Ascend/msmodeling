@@ -4,6 +4,19 @@
 
 The optimization tool supports custom plugins, through which users can customize search parameter configurations, custom service frameworks, and custom performance testing tools.
 
+## Logging and error behavior
+
+OptiX configures loguru in `optix/logging.py` before `optimizer.main()` runs. Plugin code should follow these rules:
+
+1. **Structured context**: Prefer `logger.bind(stage=...)` or `with logger.contextualize(...)` instead of embedding run context in message strings. Do not log inside helpers that only raise (Scheduler `_handle_error` pattern).
+2. **Levels**: Use `info` / `success` for milestones, `warning` for recoverable plugin issues, `debug` for subprocess I/O detail, `trace` for hot-path detail. Do **not** call `logger.error` for fatal business failures inside plugins or Scheduler — raise `OptimizerError` / `SubprocessError` / `BenchmarkResultError` and let `_main()` log once at the boundary.
+3. **Fail-fast benchmark output**: Custom `BenchmarkInterface` implementations must raise `BenchmarkResultError` (from `optix.optimizer.errors`) when result CSV files are missing or ambiguous — do not log and continue with `files[0]`. This terminates the CLI run immediately (not per-particle PSO failure).
+4. **Executable PATH check**: Declare `required_executable: ClassVar[str | None] = "your_cli"` on `BenchmarkInterface` or `SimulatorInterface` subclasses. After `register_benchmarks` / `register_simulator`, OptiX validates `PATH` for `-b` / `-e` before constructing plugins. Omit or set `None` when the plugin uses a fixed install path (e.g. MindIE daemon) or has no CLI dependency.
+5. **Health checks**: Return fatal/retryable results through the health-check hooks; let Scheduler raise `FatalError` / `RetryableError` with `logger.debug` for diagnostics only.
+6. **Log level env**: Users set `OPTIX_LOG_LEVEL` (`INFO` / `DEBUG` / `TRACE`); `MODELEVALSTATE_LEVEL` remains a legacy alias. At `DEBUG`/`TRACE`, console lines include `file:line` for troubleshooting.
+
+If optimization ends with no feasible candidate, `_main()` raises `NoFeasibleSolutionError` and exits with code `1`. Other `OptimizerError` subclasses log a single error line inside the run `contextualize` block; unexpected exceptions log one traceback at that same boundary before `SystemExit(1)`.
+
 ## Custom Plugin Development Steps
 
 The steps are as follows:

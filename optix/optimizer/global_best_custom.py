@@ -13,10 +13,9 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
-from loguru import logger
 from pyswarms.backend.operators import compute_pbest
 from pyswarms.single.global_best import GlobalBestPSO
 
@@ -25,11 +24,11 @@ class CustomGlobalBestPSO(GlobalBestPSO):
     def __init__(
         self,
         *args,
-        breakpoint_cost: Optional[List] = None,
-        breakpoint_pos: Optional[List] = None,
+        breakpoint_cost: Optional[list] = None,
+        breakpoint_pos: Optional[list] = None,
         **kwargs,
     ):
-        super(CustomGlobalBestPSO, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.breakpoint_cost = breakpoint_cost
         self.breakpoint_pos = breakpoint_pos
         if self.breakpoint_pos and self.breakpoint_cost:
@@ -83,5 +82,3 @@ class CustomGlobalBestPSO(GlobalBestPSO):
         dtype = self.swarm.velocity.dtype
         self.swarm.position = self.swarm.position.astype(dtype)
         self.swarm.position = self.top.compute_position(self.swarm, self.bounds, self.bh)
-        logger.debug(f"Best Position {self.swarm.best_pos}, Best Cost {self.swarm.best_cost}")
-        logger.debug(f"Init Position {self.swarm.position}")

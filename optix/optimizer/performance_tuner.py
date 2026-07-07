@@ -13,16 +13,8 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
-"""OptiX service parameter optimizer for LLM inference tuning."""
+"""Correctly spelled re-export; prefer this import over performance_tunner."""
 
-from optix.logging import LogStage, configure_logger
+from .performance_tunner import PerformanceTuner
 
-__all__ = ["LogStage", "configure_logger"]
-
-
-def main() -> None:
-    """CLI entry for ``python -m optix`` and coverage tests."""
-    configure_logger()
-    from optix.optimizer.optimizer import main as optimizer_main
-
-    optimizer_main()
+__all__ = ["PerformanceTuner"]

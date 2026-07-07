@@ -18,22 +18,22 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
+from optix.config.base_config import FOLDER_LIMIT_SIZE
 from optix.config.config import (
-    OptimizerConfigField,
-    PerformanceIndex,
     ErrorSeverity,
     ErrorType,
+    OptimizerConfigField,
+    PerformanceIndex,
 )
-from optix.config.constant import Stage
-from optix.optimizer.scheduler import Scheduler
-from optix.config.base_config import FOLDER_LIMIT_SIZE
+from optix.config.constant import ProcessState, Stage
 from optix.optimizer.health_check import (
-    FatalError,
+    BenchmarkHookPoint,
     ErrorContext,
+    FatalError,
     RetryableError,
     ServiceHookPoint,
-    BenchmarkHookPoint,
 )
+from optix.optimizer.scheduler import Scheduler
 
 
 class TestScheduler(unittest.TestCase):
@@ -60,13 +60,14 @@ class TestScheduler(unittest.TestCase):
 
     @patch("time.sleep", return_value=None)
     def test_wait_simulate_success(self, mock_sleep):
-        self.simulator.health.return_value.stage = Stage.running
+        self.simulator.health = MagicMock(return_value=ProcessState(stage=Stage.running))
         self.scheduler.wait_simulate()
 
     @patch("time.sleep", return_value=None)
     def test_wait_simulate_timeout(self, mock_sleep):
-        self.simulator.health.return_value.stage = Stage.error
-        self.scheduler.wait_simulate()
+        self.simulator.health = MagicMock(return_value=ProcessState(stage=Stage.error))
+        with self.assertRaises(Exception):
+            self.scheduler.wait_simulate()
 
     @patch("time.sleep", return_value=None)
     def test_run_target_server_benchmark_error(self, _):
@@ -223,6 +224,17 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.data_storage.save.assert_called_once()
 
     @patch("time.time")
+    def test_save_result_passes_del_log_flag(self, mock_time):
+        mock_time.return_value = 1000.0
+        self.scheduler.run_start_timestamp = 999.0
+        self.scheduler.performance_index = PerformanceIndex()
+        self.scheduler.simulate_run_info = self.params_field
+        self.scheduler.del_log = True
+        self.scheduler.save_result()
+        self.simulator.stop.assert_called_with(True)
+        self.benchmark.stop.assert_called_with(True)
+
+    @patch("time.time")
     def test_save_result_with_first_duration(self, mock_time):
         """Test save_result sets first_duration on first call"""
         mock_time.return_value = 1010.0
@@ -244,7 +256,9 @@ class TestSchedulerRunMethods(unittest.TestCase):
     def test_update_data_field(self):
         """Test update_data_field updates simulator and benchmark"""
         self.simulator.data_field = None
+        self.simulator.update_command = MagicMock()
         self.benchmark.data_field = None
+        self.benchmark.update_command = MagicMock()
         self.scheduler.update_data_field(self.params_field)
         assert self.simulator.data_field == self.params_field
         assert self.benchmark.data_field == self.params_field
@@ -282,7 +296,7 @@ class TestSchedulerRunWithRequestRate(unittest.TestCase):
         perf = PerformanceIndex(throughput=4.0, generate_speed=100)
         self.benchmark.get_performance_index.return_value = perf
         self.benchmark.check_success.return_value = True
-        self.simulator.health.return_value = MagicMock(stage=Stage.running)
+        self.simulator.check_success = MagicMock(return_value=True)
 
         result = self.scheduler.run_with_request_rate(self.params, self.params_field)
         assert isinstance(result, PerformanceIndex)
@@ -308,7 +322,7 @@ class TestSchedulerRunWithRequestRate(unittest.TestCase):
         perf = PerformanceIndex(throughput=4.0, generate_speed=100)
         self.benchmark.get_performance_index.return_value = perf
         self.benchmark.check_success.return_value = True
-        self.simulator.health.return_value = MagicMock(stage=Stage.running)
+        self.simulator.check_success = MagicMock(return_value=True)
 
         result = self.scheduler.run_with_request_rate(self.params, params_field_fixed)
         assert isinstance(result, PerformanceIndex)
@@ -415,10 +429,12 @@ class TestWaitSimulateHealthBranches(unittest.TestCase):
         from optix.config.constant import ProcessState
 
         # First call: start (continue), second call: running (return)
-        self.simulator.health.side_effect = [
-            ProcessState(stage=Stage.start, info="loading"),
-            ProcessState(stage=Stage.running),
-        ]
+        self.simulator.health = MagicMock(
+            side_effect=[
+                ProcessState(stage=Stage.start, info="loading"),
+                ProcessState(stage=Stage.running),
+            ]
+        )
 
         self.scheduler.wait_simulate()
 
@@ -487,6 +503,7 @@ class TestMonitoringStatusBranches(unittest.TestCase):
         mock_mindie.return_value = True
         mock_vllm.return_value = False
         self.simulator.process.poll.return_value = None
+        self.simulator.check_success = MagicMock(return_value=True)
         self.benchmark.check_success.return_value = True
 
         self.scheduler.monitoring_status()
@@ -508,11 +525,18 @@ class TestMonitoringStatusBranches(unittest.TestCase):
         mock_time.side_effect = [0, 1, 1]
         mock_mindie.return_value = True
         mock_vllm.return_value = False
+        self.simulator.check_success = MagicMock(return_value=True)
         self.simulator.process.poll.return_value = 1
         self.simulator.process.returncode = 1
+        self.simulator.command = ["vllm", "serve", "model"]
+        self.simulator.run_log = "/tmp/sim.log"
 
-        with self.assertRaises(subprocess.SubprocessError):
+        with self.assertRaises(subprocess.SubprocessError) as ctx:
             self.scheduler.monitoring_status()
+        message = str(ctx.exception)
+        self.assertIn("exit=1", message)
+        self.assertIn("command:", message)
+        self.assertNotIn("Failed in run simulator", message)
 
     @patch("time.time")
     @patch("time.sleep")
@@ -520,6 +544,7 @@ class TestMonitoringStatusBranches(unittest.TestCase):
     def test_monitoring_simulator_health_error_raises(self, mock_settings, mock_sleep, mock_time):
         """Test monitoring_status raises when simulator.health() returns non-running"""
         import subprocess
+
         from optix.config.constant import ProcessState
 
         mock_settings.return_value.particles_time_out = 5
@@ -530,9 +555,16 @@ class TestMonitoringStatusBranches(unittest.TestCase):
         # Make simulator NOT an instance of Simulator
         self.simulator.__class__ = type("OtherSim", (), {})
         self.simulator.health = MagicMock(return_value=ProcessState(stage=Stage.error, info="crashed"))
+        self.simulator.command = ["vllm", "serve", "model"]
+        self.simulator.run_log = "/tmp/sim.log"
+        self.simulator.process.returncode = 1
 
-        with self.assertRaises(subprocess.SubprocessError):
+        with self.assertRaises(subprocess.SubprocessError) as ctx:
             self.scheduler.monitoring_status()
+        message = str(ctx.exception)
+        self.assertIn("exit=1", message)
+        self.assertIn("command:", message)
+        self.assertNotIn("Failed in run simulator", message)
 
     @patch("time.time")
     @patch("time.sleep")
@@ -591,3 +623,47 @@ class TestRunTargetServerRetry(unittest.TestCase):
         self.simulator.backup.assert_called_once()
         self.benchmark.backup.assert_called_once()
         # pylint: enable=no-member
+
+
+class TestSchedulerRunEvaluation(unittest.TestCase):
+    """Tests for _run_evaluation OptimizerError propagation."""
+
+    def setUp(self):
+        self.simulator = MagicMock()
+        self.benchmark = MagicMock()
+        self.data_storage = MagicMock()
+        self.scheduler = Scheduler(self.simulator, self.benchmark, self.data_storage)
+        self.params_field = (
+            OptimizerConfigField(
+                name="CONCURRENCY",
+                config_position="env",
+                value=10,
+                min=1,
+                max=100,
+                dtype="int",
+            ),
+        )
+
+    @patch("time.sleep")
+    def test_run_evaluation_reraises_benchmark_result_error(self, _mock_sleep):
+        from optix.optimizer.errors import BenchmarkResultError
+
+        self.scheduler.run_target_server = MagicMock()
+        self.benchmark.get_performance_index.side_effect = BenchmarkResultError("csv not unique")
+
+        with self.assertRaises(BenchmarkResultError):
+            self.scheduler.run(np.array([10.0]), self.params_field)
+
+        self.assertIsNone(self.scheduler.last_outcome)
+
+    @patch("time.sleep")
+    def test_run_evaluation_records_failure_for_runtime_error(self, _mock_sleep):
+        from optix.optimizer.outcome import RunStatus
+
+        self.scheduler.run_target_server = MagicMock(side_effect=RuntimeError("bench down"))
+
+        result = self.scheduler.run(np.array([10.0]), self.params_field)
+
+        self.assertIsNotNone(self.scheduler.last_outcome)
+        self.assertEqual(self.scheduler.last_outcome.status, RunStatus.FAILED)
+        self.assertIsInstance(result, PerformanceIndex)

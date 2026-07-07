@@ -15,21 +15,19 @@
 # -------------------------------------------------------------------------
 import csv
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple
+from typing import Optional
 
 import numpy as np
-from loguru import logger
-from ..config.config import (
-    DataStorageConfig,
-    PerformanceIndex,
-    OptimizerConfigField,
-    get_settings,
-)
-from ..config.base_config import RUN_TIME
-from ..io_utils import open_file, sanitize_csv_value
 
 from ..common import read_csv_s
-
+from ..config.base_config import RUN_TIME
+from ..config.config import (
+    DataStorageConfig,
+    OptimizerConfigField,
+    PerformanceIndex,
+    get_settings,
+)
+from ..io_utils import open_file, sanitize_csv_value
 
 LLM_MODEL = "llm_model"
 DATASET_PATH = "dataset_path"
@@ -53,7 +51,7 @@ class DataStorage:
         self.benchmark = benchmark
 
     @staticmethod
-    def load_history_position(load_dir: Path, filter_field: Optional[Dict] = None) -> Optional[List]:
+    def load_history_position(load_dir: Path, filter_field: Optional[dict] = None) -> Optional[list]:
         if not load_dir.exists():
             raise FileNotFoundError(f"file: {load_dir}")
         if not load_dir.is_dir():
@@ -71,7 +69,7 @@ class DataStorage:
         return DataStorage.filter_data(history_data, filter_field)
 
     @staticmethod
-    def filter_data(data: List[Dict], filter_field: Optional[Dict] = None):
+    def filter_data(data: list[dict], filter_field: Optional[dict] = None):
         if not filter_field:
             return data
         filtered_data = []
@@ -102,11 +100,9 @@ class DataStorage:
     def save(
         self,
         performance_index: PerformanceIndex,
-        params: Tuple[OptimizerConfigField],
+        params: tuple[OptimizerConfigField],
         **kwargs,
     ):
-        logger.info(f"Save result with DataStorage. File path: {self.save_file!r}")
-
         def safe_sanitize_csv_value(value):
             """
             Safely handle CSV values, particularly parameter values with -- prefix.
