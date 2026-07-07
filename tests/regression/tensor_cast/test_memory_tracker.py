@@ -299,3 +299,90 @@ class TestMemoryTracker(unittest.TestCase):
                 ),
                 expected,
             )
+
+    def test_registered_zero_storage_input_does_not_count_as_activation(self):
+        """Registered semantic metadata inputs keep def-use edges but allocate no storage."""
+        q = torch.empty(1, 1, 1, 8)  # 32 bytes
+        kv = torch.empty(1, 4, 8)  # 128 bytes
+        attn_sink = torch.empty(1)  # 4 bytes
+        topk_indices = torch.empty(32768, dtype=torch.int32)  # 131072 bytes
+        out = torch.empty_like(q)  # 32 bytes
+        MemoryTracker.register_zero_storage_input(torch.ops.tensor_cast.sparse_attn_sharedkv.default, "topk_indices")
+
+        topk_producer_info = OpInvokeInfo(
+            torch.ops.aten.empty.memory_format,
+            ([32768],),
+            {},
+            topk_indices,
+        )
+        sparse_attn_info = OpInvokeInfo(
+            torch.ops.tensor_cast.sparse_attn_sharedkv.default,
+            (q, kv, attn_sink),
+            {"topk_indices": topk_indices, "softmax_scale": 1.0, "head_dim": 8},
+            out,
+        )
+
+        mt = MemoryTracker(TEST_DEVICE)
+        mt.record_single_op_invocation(topk_producer_info)
+        mt.record_single_op_invocation(sparse_attn_info)
+        mt.analyze()
+        profile = mt.get_profile()
+
+        expected_profile = [(164, 164), (164, 196), (196, 196)]
+        self.assertEqual(len(profile), len(expected_profile))
+        for op_profile, expected in zip(profile, expected_profile):
+            self.assertEqual(
+                (
+                    op_profile.usage_before_call_bytes,
+                    op_profile.usage_after_call_bytes,
+                ),
+                expected,
+            )
+
+    def test_clear_zero_storage_inputs_resets_registered_specs(self):
+        """Allows tests and callers to isolate process-global zero-storage rules."""
+        MemoryTracker.register_zero_storage_input(torch.ops.aten.add.Tensor, "other")
+        self.assertIn(torch.ops.aten.add.Tensor, MemoryTracker._zero_storage_input_specs)
+
+        MemoryTracker.clear_zero_storage_inputs()
+
+        self.assertEqual(MemoryTracker._zero_storage_input_specs, {})
+
+    def test_restore_default_zero_storage_inputs_replays_default_specs(self):
+        original_specs = {op: set(input_specs) for op, input_specs in MemoryTracker._zero_storage_input_specs.items()}
+        original_defaults = {
+            op: set(input_specs) for op, input_specs in MemoryTracker._default_zero_storage_input_specs.items()
+        }
+        try:
+            MemoryTracker.clear_zero_storage_inputs()
+            MemoryTracker._default_zero_storage_input_specs.clear()
+            MemoryTracker.register_default_zero_storage_input(torch.ops.aten.add.Tensor, "other")
+
+            MemoryTracker.clear_zero_storage_inputs()
+            self.assertEqual(MemoryTracker._zero_storage_input_specs, {})
+
+            MemoryTracker.restore_default_zero_storage_inputs()
+
+            self.assertEqual(MemoryTracker._zero_storage_input_specs, {torch.ops.aten.add.Tensor: {"other"}})
+        finally:
+            MemoryTracker._zero_storage_input_specs = original_specs
+            MemoryTracker._default_zero_storage_input_specs = original_defaults
+
+    def test_register_zero_storage_input_rejects_negative_index(self):
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            MemoryTracker.register_zero_storage_input(torch.ops.aten.add.Tensor, -1)
+
+    def test_register_zero_storage_input_rejects_unknown_schema_name(self):
+        with self.assertRaisesRegex(ValueError, "not found in op schema"):
+            MemoryTracker.register_zero_storage_input(torch.ops.aten.add.Tensor, "topk_indicies")
+
+    def test_get_memory_access_properties_excludes_input_by_schema_name(self):
+        x = torch.empty(10)  # 40 bytes
+        y = torch.empty(10)  # 40 bytes
+        out = torch.empty(10)  # 40 bytes
+        op_info = OpInvokeInfo(torch.ops.aten.add.Tensor, (), {"self": x, "other": y}, out)
+
+        props = op_info.get_memory_access_properties(exclude_input_ids={"other"})
+
+        self.assertEqual(props.memory_read_bytes, 40)
+        self.assertEqual(props.memory_write_bytes, 40)

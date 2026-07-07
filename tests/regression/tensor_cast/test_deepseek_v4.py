@@ -913,13 +913,30 @@ class TestDeepseekV4PerformanceModel(unittest.TestCase):
         kv = torch.randn(2, 16, 8, 512)
         attn_sink = torch.randn(8, dtype=torch.float32)
         topk_indices = torch.randint(0, 16, (2, 8, 4))
-        mock_invoke.args = [q, kv, attn_sink, topk_indices, 0.01, 512]
+        mock_invoke.args = [q, kv, attn_sink]
+        mock_invoke.kwargs = {"topk_indices": topk_indices, "softmax_scale": 0.01, "head_dim": 512}
         mock_invoke.get_memory_access_properties.return_value = MagicMock(
             memory_read_bytes=0, memory_write_bytes=0, memory_readwrite_bytes=0
         )
 
         props = attn_props(mock_invoke)
         assert props is not None
+        mock_invoke.get_memory_access_properties.assert_called_once_with(exclude_input_ids={"kv", "topk_indices"})
+
+    def test_sparse_attn_sharedkv_performance_reports_missing_required_arg(self):
+        """Missing kwargs should report the schema name instead of leaking KeyError."""
+        attn_props = _v4_perf_props(torch.ops.tensor_cast.sparse_attn_sharedkv.default)
+
+        mock_invoke = MagicMock()
+        q = torch.randn(2, 8, 8, 512)
+        kv = torch.randn(2, 16, 8, 512)
+        attn_sink = torch.randn(8, dtype=torch.float32)
+        topk_indices = torch.randint(0, 16, (2, 8, 4))
+        mock_invoke.args = [q, kv, attn_sink]
+        mock_invoke.kwargs = {"topk_indices": topk_indices, "softmax_scale": 0.01}
+
+        with self.assertRaisesRegex(ValueError, "head_dim"):
+            attn_props(mock_invoke)
 
     def test_moe_gating_top_k_performance(self):
         """Test moe_gating_top_k performance properties."""

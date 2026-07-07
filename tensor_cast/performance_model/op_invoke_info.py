@@ -1,8 +1,7 @@
 import dataclasses
 import hashlib
-import itertools
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch.utils._cxx_pytree import tree_map
@@ -12,6 +11,7 @@ from ..utils import EquivalentKeyManager
 from .utils import bytes_of_tensor, is_noop_self_copy_op, is_view_op, run_once
 
 logger = logging.getLogger(__name__)
+InputExcludeSpec = int | str
 
 
 class OpInvokeInfo:
@@ -87,7 +87,7 @@ class OpInvokeInfo:
 
     def get_memory_access_properties(
         self,
-        exclude_input_ids: Optional[set] = None,
+        exclude_input_ids: Optional[set[InputExcludeSpec]] = None,
         exclude_output_ids: Optional[set] = None,
     ) -> "OpInvokeInfo.PerformanceProperties":
         """Get memory read/write properties"""
@@ -97,18 +97,30 @@ class OpInvokeInfo:
         memory_write_bytes = 0
         memory_readwrite_bytes = 0
         args_schema = self.func._schema.arguments
-        for i, arg in enumerate(itertools.chain(self.args, self.kwargs.values())):
-            if i not in exclude_input_ids:
-                inputs = arg if isinstance(arg, (list, tuple)) else [arg]
-                if inputs and isinstance(inputs[0], torch.Tensor):
-                    for tensor in inputs:
-                        access_bytes = bytes_of_tensor(tensor)
-                        if args_schema[i].is_out:
-                            memory_write_bytes += access_bytes
-                        elif args_schema[i].is_write:
-                            memory_readwrite_bytes += access_bytes
-                        else:
-                            memory_read_bytes += access_bytes
+
+        def get_schema_arg(index: int, arg_name: str) -> Any:
+            if index < len(self.args):
+                return self.args[index]
+            return self.kwargs.get(arg_name)
+
+        for i, arg_schema in enumerate(args_schema):
+            arg_name = arg_schema.name
+            if i in exclude_input_ids or arg_name in exclude_input_ids:
+                continue
+            arg = get_schema_arg(i, arg_name)
+            if arg is None:
+                continue
+            inputs = arg if isinstance(arg, (list, tuple)) else [arg]
+            for tensor in inputs:
+                if not isinstance(tensor, torch.Tensor):
+                    continue
+                access_bytes = bytes_of_tensor(tensor)
+                if arg_schema.is_out:
+                    memory_write_bytes += access_bytes
+                elif arg_schema.is_write:
+                    memory_readwrite_bytes += access_bytes
+                else:
+                    memory_read_bytes += access_bytes
         out = self.out if isinstance(self.out, (list, tuple)) else [self.out]
         for i, arg in enumerate(out):
             if isinstance(arg, torch.Tensor) and i not in exclude_output_ids:

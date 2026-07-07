@@ -18,6 +18,7 @@ import torch
 from torch._subclasses.fake_tensor import is_fake
 
 from .. import _accumulate_compute_ops, _rmsnorm_ops
+from ..memory_tracker import MemoryTracker
 from ..op_invoke_info import OpInvokeInfo
 from ..utils import bytes_of_elements
 
@@ -43,6 +44,9 @@ def _safe_max_int(tensor: Optional[torch.Tensor]) -> Optional[int]:
         return int(tensor.max().item())
     except Exception:
         return None
+
+
+MemoryTracker.register_default_zero_storage_input(torch.ops.tensor_cast.sparse_attn_sharedkv.default, "topk_indices")
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.scatter_nd_update_mla.default)
@@ -706,12 +710,21 @@ def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
     """sparse_attn cost aligned to kernel.py:277-368 (block=64 online softmax)."""
+
     # args: (q, kv, attn_sink, topk_indices, softmax_scale, head_dim, kv_dependency?)
-    q = op_invoke_info.args[0]
-    kv = op_invoke_info.args[1]
-    attn_sink = op_invoke_info.args[2]
-    topk_indices = op_invoke_info.args[3]
-    v_head_dim = int(op_invoke_info.args[5])
+    def get_arg(index: int, name: str):
+        if index < len(op_invoke_info.args):
+            return op_invoke_info.args[index]
+        value = op_invoke_info.kwargs.get(name)
+        if value is None:
+            raise ValueError(f"sparse_attn_sharedkv missing required argument {name!r}")
+        return value
+
+    q = get_arg(0, "q")
+    kv = get_arg(1, "kv")
+    attn_sink = get_arg(2, "attn_sink")
+    topk_indices = get_arg(3, "topk_indices")
+    v_head_dim = int(get_arg(5, "head_dim"))
 
     # `sparse_attn` pads h<16 to 16 (kernel.py:359-362).
     raw_num_heads = int(q.size(2))
@@ -727,11 +740,11 @@ def _(
     pipelined_ctx = padded_topk
     context_sum = query_tokens * pipelined_ctx
 
-    exclude_input_ids = {1}
-    if len(op_invoke_info.args) > 6:
-        exclude_input_ids.add(6)
-    elif "kv_dependency" in op_invoke_info.kwargs:
-        exclude_input_ids.add(len(op_invoke_info.args) + list(op_invoke_info.kwargs).index("kv_dependency"))
+    # KV payload and topk index traffic are modeled below with sparse-attention
+    # gather semantics; exclude them from generic full-tensor input reads.
+    exclude_input_ids = {"kv", "topk_indices"}
+    if len(op_invoke_info.args) > 6 or "kv_dependency" in op_invoke_info.kwargs:
+        exclude_input_ids.add("kv_dependency")
     properties = op_invoke_info.get_memory_access_properties(exclude_input_ids=exclude_input_ids)
     # Two GEMMs per iter (Q*K^T and S*V), both [h, block]x[block, d].
     mma_ops = context_sum * num_heads * q_head_dim * 2 + context_sum * num_heads * v_head_dim * 2

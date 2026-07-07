@@ -48,6 +48,7 @@ class OutputKind(Enum):
 
 
 AliasPlan = tuple[List[str], List[tuple[OutputKind, int, List[int]]]]
+ZeroStorageInputSpec = int | str
 
 
 _MISSING = object()
@@ -77,6 +78,66 @@ class MemoryTracker:
     After these two stages, the caller can get a memory profile of the program by calling `get_profile` which gives
     the memory consumption before and after each op invocation.
     """
+
+    _zero_storage_input_specs: Dict[Any, Set[ZeroStorageInputSpec]] = {}
+    _default_zero_storage_input_specs: Dict[Any, Set[ZeroStorageInputSpec]] = {}
+
+    @staticmethod
+    def _validate_zero_storage_input_specs(op: Any, input_specs: tuple[ZeroStorageInputSpec, ...]) -> None:
+        schema = getattr(op, "_schema", None)
+        valid_names = {arg.name for arg in schema.arguments} if schema is not None else set()
+
+        for input_spec in input_specs:
+            if isinstance(input_spec, int):
+                if input_spec < 0:
+                    raise ValueError(f"Zero-storage input spec index must be non-negative, got {input_spec}")
+            elif isinstance(input_spec, str) and schema is not None and input_spec not in valid_names:
+                raise ValueError(f"Zero-storage input spec name {input_spec!r} not found in op schema")
+
+    @classmethod
+    def register_zero_storage_input(cls, op: Any, *input_specs: ZeroStorageInputSpec) -> None:
+        """Register op inputs whose tensor shape is semantic metadata only.
+
+        ``input_specs`` entries may be schema argument indices or names. During
+        liveness analysis the matching tensors keep their def/use edges, but
+        their modeled storage size is forced to zero.
+
+        This is a process-global tensor storage override: once a registered
+        consumer marks a tensor as zero-storage, every reference to that tensor
+        across the liveness window is modeled as zero bytes. Only register
+        tensors that are metadata for their full lifetime.
+        """
+        if not input_specs:
+            raise ValueError("At least one zero-storage input spec is required.")
+        cls._validate_zero_storage_input_specs(op, input_specs)
+        cls._zero_storage_input_specs.setdefault(op, set()).update(input_specs)
+
+    @classmethod
+    def register_default_zero_storage_input(cls, op: Any, *input_specs: ZeroStorageInputSpec) -> None:
+        """Register process-default zero-storage inputs.
+
+        Test fixtures can call ``restore_default_zero_storage_inputs`` after
+        tests that mutate the active registry, so import-time model defaults do
+        not disappear after an unrelated ``clear_zero_storage_inputs`` call.
+        """
+        cls.register_zero_storage_input(op, *input_specs)
+        cls._default_zero_storage_input_specs.setdefault(op, set()).update(input_specs)
+
+    @classmethod
+    def clear_zero_storage_inputs(cls) -> None:
+        """Clear active zero-storage registrations.
+
+        Defaults registered with ``register_default_zero_storage_input`` are not
+        deleted from the default registry; call
+        ``restore_default_zero_storage_inputs`` to reapply them.
+        """
+        cls._zero_storage_input_specs.clear()
+
+    @classmethod
+    def restore_default_zero_storage_inputs(cls) -> None:
+        cls._zero_storage_input_specs.clear()
+        for op, input_specs in cls._default_zero_storage_input_specs.items():
+            cls._zero_storage_input_specs[op] = set(input_specs)
 
     def __init__(self, device_profile: DeviceProfile):
         self.device_profile = device_profile
@@ -123,6 +184,43 @@ class MemoryTracker:
     def _get_real_tensor_id(self, tensor, repeat_id) -> TensorKey:
         tensor_id, repeat_id = Region.get_tensor_id(tensor, repeat_id)
         return TensorKey(tensor_id=tensor_id, repeat_id=repeat_id)
+
+    def _schema_arg_names(self, op_invoke_info: OpInvokeInfo) -> List[str]:
+        schema = getattr(op_invoke_info.func, "_schema", None)
+        if schema is None:
+            return []
+        return [arg.name for arg in schema.arguments]
+
+    def _get_schema_input(self, op_invoke_info: OpInvokeInfo, input_spec: ZeroStorageInputSpec) -> Any:
+        arg_names = self._schema_arg_names(op_invoke_info)
+        if isinstance(input_spec, int):
+            if input_spec < 0:
+                raise ValueError(f"Zero-storage input spec index must be non-negative, got {input_spec}")
+            if input_spec < len(op_invoke_info.args):
+                return op_invoke_info.args[input_spec]
+            if input_spec < len(arg_names):
+                return op_invoke_info.kwargs.get(arg_names[input_spec])
+            return None
+
+        if input_spec in op_invoke_info.kwargs:
+            return op_invoke_info.kwargs[input_spec]
+        if input_spec in arg_names:
+            input_index = arg_names.index(input_spec)
+            if input_index < len(op_invoke_info.args):
+                return op_invoke_info.args[input_index]
+        return None
+
+    def _zero_storage_input_ids(self, op_invoke_info: OpInvokeInfo, repeat_id: int) -> Set[TensorKey]:
+        input_specs = self._zero_storage_input_specs.get(op_invoke_info.func)
+        if not input_specs:
+            return set()
+
+        tensor_ids: Set[TensorKey] = set()
+        for input_spec in input_specs:
+            input_value = self._get_schema_input(op_invoke_info, input_spec)
+            for tensor in self._extract_tensors(input_value):
+                tensor_ids.add(self._get_real_tensor_id(tensor, repeat_id))
+        return tensor_ids
 
     def record_tensor_alias(
         self,
@@ -261,6 +359,7 @@ class MemoryTracker:
         """
         op_idx = len(self.op_invoke_infos_with_repeat_id)
         self.op_invoke_infos_with_repeat_id.append((op_invoke_info, repeat_id))
+        zero_storage_tensor_ids = self._zero_storage_input_ids(op_invoke_info, repeat_id)
 
         # Identify all input tensors and record their usage.
         input_tensors = self._extract_tensors(op_invoke_info.args)
@@ -274,6 +373,8 @@ class MemoryTracker:
                 # If a tensor is used before it's defined, it's a model input.
                 # We initialize its info here.
                 self.tensor_infos[tensor_id] = _TensorInfo(size_bytes=int(bytes_of_tensor(tensor)))
+            if tensor_id in zero_storage_tensor_ids:
+                self.tensor_infos[tensor_id].size_bytes = 0
             self.tensor_infos[tensor_id].use_op_indices.append(op_idx)
             aliased_tensor_id = self.alias_info.get(tensor_id)
             if aliased_tensor_id is not None:

@@ -42,6 +42,18 @@ def _wire_vendored_preprocessor_configs():
     input_generator_module._load_preprocessor_pixel_limits.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _restore_memory_tracker_zero_storage_inputs():
+    """Keep process-global zero-storage registrations deterministic per test."""
+    from tensor_cast.performance_model.memory_tracker import MemoryTracker
+
+    MemoryTracker.restore_default_zero_storage_inputs()
+    try:
+        yield
+    finally:
+        MemoryTracker.restore_default_zero_storage_inputs()
+
+
 def get_session_model(user_config: UserInputConfig) -> TransformerModel:
     """Cross-file session-level build_model cache for unittest TestCase usage."""
     return get_built_model(user_config)
