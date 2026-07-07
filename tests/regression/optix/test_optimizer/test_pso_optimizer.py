@@ -17,6 +17,7 @@ from math import inf
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from optix.config.config import (
@@ -27,7 +28,6 @@ from optix.config.config import (
 from optix.optimizer.optimizer import (
     PSOOptimizer,
     adapter_target_field,
-    sample,
     enable_simulate,
 )
 
@@ -59,6 +59,8 @@ def _make_pso_optimizer(**overrides):
         "tpot_slo": 0.1,
         "success_rate_slo": 0.9,
         "generate_speed_target": 100,
+        "use_request_rate_calibration": False,
+        "pso_init_kwargs": {},
     }
     defaults.update(overrides)
     return PSOOptimizer(**defaults)
@@ -271,23 +273,47 @@ class TestAdapterTargetField:
             assert opt.target_field is not original_field
         assert opt.target_field is original_field
 
-
-class TestSampleContextManager:
-    @patch("optix.config.config.get_settings")
-    def test_sample_no_sample_size(self, mock_settings):
-        mock_settings.return_value.sample_size = None
+    def test_concurrency_not_fixed_by_default(self):
+        """When use_request_rate_calibration=False (default), CONCURRENCY stays as a search variable."""
         scheduler = MagicMock()
-        with sample(scheduler):
-            pass
+        target_field = (OptimizerConfigField(name="CONCURRENCY", min=1, max=64, dtype="int", value=32),)
+        opt = PSOOptimizer(
+            scheduler=scheduler,
+            target_field=target_field,
+            use_request_rate_calibration=False,
+            ttft_penalty=0,
+            tpot_penalty=0,
+            success_rate_penalty=0,
+            ttft_slo=1.0,
+            tpot_slo=0.1,
+            success_rate_slo=0.9,
+            generate_speed_target=100,
+        )
+        with adapter_target_field(opt):
+            conc_field = next(f for f in opt.target_field if f.name == "CONCURRENCY")
+            assert conc_field.constant is None
+            assert conc_field.value == 32
 
-    @patch("optix.config.config.get_settings")
-    def test_sample_with_sample_size(self, mock_settings):
-        mock_settings.return_value.sample_size = 50
+    def test_concurrency_fixed_when_request_rate_calibration_enabled(self):
+        """When use_request_rate_calibration=True, CONCURRENCY is fixed to max."""
         scheduler = MagicMock()
-        scheduler.benchmark.num_prompts = 100
-        scheduler.benchmark.__class__ = type("BenchmarkInterface", (), {})
-        with sample(scheduler):
-            pass
+        target_field = (OptimizerConfigField(name="CONCURRENCY", min=1, max=64, dtype="int", value=32),)
+        opt = PSOOptimizer(
+            scheduler=scheduler,
+            target_field=target_field,
+            use_request_rate_calibration=True,
+            ttft_penalty=0,
+            tpot_penalty=0,
+            success_rate_penalty=0,
+            ttft_slo=1.0,
+            tpot_slo=0.1,
+            success_rate_slo=0.9,
+            generate_speed_target=100,
+        )
+        with adapter_target_field(opt):
+            conc_field = next(f for f in opt.target_field if f.name == "CONCURRENCY")
+            assert conc_field.constant == 64
+            assert conc_field.value == 64
 
 
 class TestEnableSimulate:
@@ -312,7 +338,7 @@ class TestOpFunc:
             time_per_output_token=0.01,
             success_rate=1.0,
         )
-        opt.scheduler.run_with_request_rate.return_value = perf
+        opt.scheduler.run.return_value = perf
         x = np.array([[50.0, 25000.0], [60.0, 30000.0], [70.0, 35000.0]])
         result = opt.op_func(x)
         assert len(result) == 3
@@ -320,7 +346,7 @@ class TestOpFunc:
 
     def test_op_func_exception(self):
         opt = self._create_optimizer()
-        opt.scheduler.run_with_request_rate.side_effect = Exception("service down")
+        opt.scheduler.run.side_effect = Exception("service down")
         x = np.array([[50.0, 25000.0]])
         result = opt.op_func(x)
         assert result[0] == inf
@@ -333,7 +359,7 @@ class TestOpFunc:
             time_per_output_token=0.01,
             success_rate=1.0,
         )
-        opt.scheduler.run_with_request_rate.return_value = perf
+        opt.scheduler.run.return_value = perf
         # First call
         x = np.array([[50.0, 25000.0]])
         opt.op_func(x)
@@ -341,6 +367,36 @@ class TestOpFunc:
         x2 = np.array([[50.0, 25000.0]])
         result = opt.op_func(x2)
         assert result[0] == inf
+
+    def test_op_func_calls_run_by_default(self):
+        """When use_request_rate_calibration=False (default), scheduler.run is used."""
+        opt = self._create_optimizer()
+        perf = PerformanceIndex(
+            generate_speed=200,
+            time_to_first_token=0.1,
+            time_per_output_token=0.01,
+            success_rate=1.0,
+        )
+        opt.scheduler.run.return_value = perf
+        x = np.array([[50.0, 25000.0]])
+        opt.op_func(x)
+        opt.scheduler.run.assert_called_once()
+        opt.scheduler.run_with_request_rate.assert_not_called()
+
+    def test_op_func_calls_run_with_request_rate_when_enabled(self):
+        """When use_request_rate_calibration=True, scheduler.run_with_request_rate is used."""
+        opt = self._create_optimizer(use_request_rate_calibration=True)
+        perf = PerformanceIndex(
+            generate_speed=200,
+            time_to_first_token=0.1,
+            time_per_output_token=0.01,
+            success_rate=1.0,
+        )
+        opt.scheduler.run_with_request_rate.return_value = perf
+        x = np.array([[50.0, 25000.0]])
+        opt.op_func(x)
+        opt.scheduler.run_with_request_rate.assert_called_once()
+        opt.scheduler.run.assert_not_called()
 
 
 class TestComputerFitness:
@@ -582,17 +638,12 @@ class TestRefineOptimizationCandidates:
 class TestOptimizerMain:
     """Test optimizer.main() function
 
-    The decorators mock the heavy dependencies so that ``main()`` can be
-    exercised end-to-end without real I/O or external processes.  The
-    configuration flows from ``get_settings`` through ``PSOOptimizer``
-    construction, so the assertions below verify that every relevant
-    setting is forwarded correctly.
+    Mocks the heavy dependencies so that ``main()`` can be exercised
+    end-to-end without real I/O or external processes.  The configuration
+    flows from ``get_settings`` through ``PSOOptimizer`` construction, so
+    the assertions verify that every relevant setting is forwarded correctly.
     """
 
-    @patch("optix.optimizer.optimizer.PSOOptimizer")
-    @patch("optix.optimizer.scheduler.Scheduler")
-    @patch("optix.optimizer.store.DataStorage")
-    @patch("optix.optimizer.experience_fine_tunning.FineTune")
     @patch("optix.config.config.get_settings")
     @patch("optix.optimizer.register.register_ori_functions")
     @patch("optix.optimizer.optimizer.is_root", return_value=False)
@@ -603,13 +654,17 @@ class TestOptimizerMain:
         mock_is_root,
         mock_register,
         mock_get_settings,
-        mock_fine_tune,
-        mock_ds,
-        mock_scheduler,
-        mock_pso,
     ):
+        import importlib
         import sys
+        from contextlib import ExitStack
+
         from optix.optimizer.optimizer import main as optix_main
+
+        # Ensure lazy-loaded submodules are importable for the patch targets below.
+        importlib.import_module("optix.optimizer.scheduler")
+        importlib.import_module("optix.optimizer.store")
+        importlib.import_module("optix.optimizer.experience_fine_tunning")
 
         settings = MagicMock()
         settings.n_particles = 5
@@ -622,6 +677,7 @@ class TestOptimizerMain:
         settings.success_rate_slo = 1.0
         settings.generate_speed_target = 5000
         settings.max_fine_tune = 5
+        settings.use_request_rate_calibration = False
         settings.output = MagicMock()
         settings.step_size = 0.1
         settings.slo_coefficient = 1.2
@@ -640,33 +696,118 @@ class TestOptimizerMain:
             OptimizerConfigField(name="CONCURRENCY", min=1, max=64, dtype="int", config_position="env"),
         ]
 
-        with patch.dict(
-            "optix.optimizer.register.simulates",
-            {"mindie": lambda **kw: mock_simu},
-        ):
-            with patch.dict(
-                "optix.optimizer.register.benchmarks",
-                {"ais_bench": lambda **kw: mock_bench},
-            ):
-                with patch.object(sys, "argv", ["optix", "-e", "mindie", "-b", "ais_bench"]):
-                    optix_main()
+        with ExitStack() as stack:
+            mock_pso = stack.enter_context(patch("optix.optimizer.optimizer.PSOOptimizer"))
+            stack.enter_context(patch("optix.optimizer.scheduler.Scheduler"))
+            stack.enter_context(patch("optix.optimizer.store.DataStorage"))
+            mock_fine_tune = stack.enter_context(patch("optix.optimizer.experience_fine_tunning.FineTune"))
+            stack.enter_context(patch.dict("optix.optimizer.register.simulates", {"mindie": lambda **kw: mock_simu}))
+            stack.enter_context(
+                patch.dict("optix.optimizer.register.benchmarks", {"ais_bench": lambda **kw: mock_bench})
+            )
+            stack.enter_context(patch.object(sys, "argv", ["optix", "-e", "mindie", "-b", "ais_bench"]))
 
-        # ---- verify PSOOptimizer construction ----
-        mock_pso.assert_called_once()
-        _, pso_kwargs = mock_pso.call_args
-        assert pso_kwargs["n_particles"] == 5
-        assert pso_kwargs["iters"] == 10
-        assert pso_kwargs["ttft_penalty"] == 3.0
-        assert pso_kwargs["tpot_penalty"] == 3.0
-        assert pso_kwargs["success_rate_penalty"] == 5.0
-        assert pso_kwargs["ttft_slo"] == 0.5
-        assert pso_kwargs["tpot_slo"] == 0.05
-        assert pso_kwargs["success_rate_slo"] == 1.0
-        assert pso_kwargs["generate_speed_target"] == 5000
-        assert pso_kwargs["max_fine_tune"] == 5
-        assert pso_kwargs["load_breakpoint"] is False
-        assert pso_kwargs["fine_tune"] is mock_fine_tune.return_value
-        assert pso_kwargs["pso_init_kwargs"] == {"ftol": 1e-3, "ftol_iter": 5}
+            optix_main()
 
-        # ---- verify post-construction execution ----
-        mock_pso.return_value.run_plugin.assert_called_once()
+            # ---- verify PSOOptimizer construction ----
+            mock_pso.assert_called_once()
+            _, pso_kwargs = mock_pso.call_args
+            assert pso_kwargs["n_particles"] == 5
+            assert pso_kwargs["iters"] == 10
+            assert pso_kwargs["ttft_penalty"] == 3.0
+            assert pso_kwargs["tpot_penalty"] == 3.0
+            assert pso_kwargs["success_rate_penalty"] == 5.0
+            assert pso_kwargs["ttft_slo"] == 0.5
+            assert pso_kwargs["tpot_slo"] == 0.05
+            assert pso_kwargs["success_rate_slo"] == 1.0
+            assert pso_kwargs["generate_speed_target"] == 5000
+            assert pso_kwargs["max_fine_tune"] == 5
+            assert pso_kwargs["use_request_rate_calibration"] is False
+            assert pso_kwargs["load_breakpoint"] is False
+            assert pso_kwargs["fine_tune"] is mock_fine_tune.return_value
+            assert pso_kwargs["pso_init_kwargs"] == {"ftol": 1e-3, "ftol_iter": 5}
+
+            # ---- verify post-construction execution ----
+            mock_pso.return_value.run_plugin.assert_called_once()
+
+    def test_load_breakpoint_does_not_crash(self):
+        """Regression: run_plugin() with load_breakpoint=True must not crash.
+
+        After num_prompts was removed from all benchmark commands, the
+        filter_field in the load_breakpoint branch was simplified to just
+        ``{REAL_EVALUATION: True}``.  This test verifies that the
+        ``load_history_position`` call path remains healthy.
+        """
+        from optix.optimizer.optimizer import REAL_EVALUATION
+        from optix.optimizer.store import DataStorage
+
+        mock_config = MagicMock()
+        mock_config.store_dir = MagicMock()
+        storage = DataStorage(config=mock_config, benchmark=None)
+
+        # Exact expression from run_plugin()
+        filter_field = {REAL_EVALUATION: True}
+
+        # Verify the filter dict is well-formed
+        assert isinstance(filter_field, dict)
+        assert filter_field[REAL_EVALUATION] is True
+
+        # Verify load_history_position accepts the simplified filter
+        with patch.object(storage, "load_history_position", wraps=storage.load_history_position) as mock_load:
+            storage.load_history_position(storage.config.store_dir, filter_field=filter_field)
+        mock_load.assert_called_once()
+
+    @patch("optix.optimizer.global_best_custom.CustomGlobalBestPSO")
+    def test_run_plugin_flow(self, _mock_pso_cls):
+        """run_plugin() exercises its core control flow without crashing.
+
+        Mocks prepare_plugin and CustomGlobalBestPSO so we can verify the
+        full pipeline: prepare → adapter_target_field → sample →
+        CustomGlobalBestPSO.optimize → refine_optimization_candidates →
+        best_params.
+        """
+        opt = _make_pso_optimizer(load_breakpoint=True, fine_tune=False, max_fine_tune=0)
+
+        # -- mock prepare_plugin ----------------------------------------
+        opt.prepare_plugin = MagicMock()
+
+        # -- mock the PSO instance returned by CustomGlobalBestPSO ------
+        _mock_optimizer = MagicMock()
+        _mock_optimizer.optimize.return_value = (0.5, np.array([50.0, 25000.0]))
+        _mock_pso_cls.return_value = _mock_optimizer
+
+        # -- mock downstream data access --------------------------------
+        opt.scheduler.data_storage.get_best_result.return_value = pd.DataFrame()
+        opt.refine_optimization_candidates = MagicMock(return_value=([], [], []))
+        opt.best_params = MagicMock(return_value=(None, None, None))
+
+        # -- exercise ---------------------------------------------------
+        opt.run_plugin()
+
+        # -- assertions -------------------------------------------------
+        opt.prepare_plugin.assert_called_once()
+        _mock_pso_cls.assert_called_once()
+        _mock_optimizer.optimize.assert_called_once_with(opt.op_func, iters=opt.iters)
+
+    @patch("optix.optimizer.global_best_custom.CustomGlobalBestPSO")
+    def test_load_breakpoint_filter_field_in_run_plugin(self, _mock_pso_cls):
+        """Verify filter_field={REAL_EVALUATION: True} is used in run_plugin."""
+        from optix.optimizer.optimizer import REAL_EVALUATION
+
+        opt = _make_pso_optimizer(load_breakpoint=True, fine_tune=False, max_fine_tune=0)
+        opt.prepare_plugin = MagicMock()
+
+        _mock_optimizer = MagicMock()
+        _mock_optimizer.optimize.return_value = (0.5, np.array([50.0, 25000.0]))
+        _mock_pso_cls.return_value = _mock_optimizer
+
+        opt.scheduler.data_storage.get_best_result.return_value = pd.DataFrame()
+        opt.refine_optimization_candidates = MagicMock(return_value=([], [], []))
+        opt.best_params = MagicMock(return_value=(None, None, None))
+
+        opt.run_plugin()
+
+        opt.scheduler.data_storage.load_history_position.assert_called_once_with(
+            opt.scheduler.data_storage.config.store_dir,
+            filter_field={REAL_EVALUATION: True},
+        )

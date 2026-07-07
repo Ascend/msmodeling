@@ -27,7 +27,7 @@ from ..config.config import (
 )
 from ..config.base_config import RUN_TIME
 from ..io_utils import open_file, sanitize_csv_value
-from ..optimizer.plugins.benchmark import VllmBenchMark, AisBench
+
 from ..common import read_csv_s
 
 
@@ -99,16 +99,6 @@ class DataStorage:
             filtered_data.append(d)
         return filtered_data
 
-    def get_run_info(self):
-        _run_info = {}
-        if self.benchmark is None:
-            return _run_info
-        if isinstance(self.benchmark, (AisBench, VllmBenchMark)):
-            _run_info[NUM_PROMPTS] = self.benchmark.config.command.num_prompts
-        elif self.benchmark.num_prompts:
-            _run_info[NUM_PROMPTS] = self.benchmark.num_prompts
-        return _run_info
-
     def save(
         self,
         performance_index: PerformanceIndex,
@@ -138,9 +128,6 @@ class DataStorage:
             _column.append(_p.name)
             _value.append(_p.value)
         for k, v in kwargs.items():
-            _column.append(k)
-            _value.append(v)
-        for k, v in self.get_run_info().items():
             _column.append(k)
             _value.append(v)
         if self.save_file.exists():

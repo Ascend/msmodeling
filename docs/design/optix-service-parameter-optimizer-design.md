@@ -251,9 +251,8 @@ Scheduler 的职责是执行一次候选参数评测：
 性能影响：
 
 1. 搜索成本与 `n_particles * iters` 近似线性相关，每个候选会触发一次或两次 benchmark。
-2. `sample_size` 可降低 benchmark 请求规模，用于加速初筛。
-3. `MAX_ITER_NUM=200` 限制 `n_particles`、`iters` 和 `max_fine_tune` 的上限，避免配置错误导致无限搜索。
-4. 重复参数跳过可减少无效评测。
+2. `MAX_ITER_NUM=200` 限制 `n_particles`、`iters` 和 `max_fine_tune` 的上限，避免配置错误导致无限搜索。
+3. 重复参数跳过可减少无效评测。
 
 可靠性影响：
 
@@ -343,7 +342,7 @@ msmodeling optix \
 | `ttft_penalty` | float | `3.0` | TTFT 指数惩罚系数 |
 | `tpot_penalty` | float | `3.0` | TPOT 指数惩罚系数 |
 | `success_rate_penalty` | float | `5.0` | 成功率指数惩罚系数 |
-| `sample_size` | Optional[int] | `None` | benchmark 采样请求数；为空时使用 benchmark 原始请求数 |
+| `use_request_rate_calibration` | bool | `true` | false → scheduler.run 搜索 CONCURRENCY（REQUESTRATE 固定 max）；true → scheduler.run_with_request_rate 固定 CONCURRENCY=max |
 | `data_storage.pso_top_k` | int | `3` | PSO 后进入 fine tune 的 top 结果数量 |
 
 ### target_field 配置
@@ -534,7 +533,6 @@ io_error = ["IO error"]
 
 | 用例名 | 测试类型 | 前置条件 | 操作方式 | 预期结果 |
 | -- | -- | -- | -- | -- |
-| 性能-采样模式 | 性能测试 | benchmark 请求数大于 `sample_size` | 运行 PSO 搜索 | 搜索阶段请求数被临时降至 `sample_size` |
 | 性能-重复参数跳过 | 性能测试 | PSO 生成重复粒子 | 运行 `op_func()` | 重复参数不启动服务和 benchmark |
 | 兼容-默认配置路径 | 兼容测试 | 多路径配置存在 | 初始化 Settings | 按 pydantic-settings 顺序合并配置 |
 | 兼容-MIES_INSTALL_PATH | 兼容测试 | 设置 `MIES_INSTALL_PATH` | 获取 MindIE 配置路径 | 使用 MindIE 新安装路径 |

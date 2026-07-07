@@ -70,24 +70,6 @@ class AisBench(BenchmarkInterface):
             self.default_data = f.read()
         self.mindie_benchmark_perf_columns = [k.lower().strip() for k in MINDIE_BENCHMARK_PERF_COLUMNS]
 
-    @property
-    def num_prompts(self) -> int:
-        """
-        Get the process name property of the service
-        Returns:""
-
-        """
-        return self.config.command.num_prompts
-
-    @num_prompts.setter
-    def num_prompts(self, value):
-        """
-        Get the process name property of the service
-        Returns:""
-
-        """
-        self.config.command.num_prompts = value
-
     def update_command(self):
         self.command = AisBenchCommand(self.config.command).command
 
@@ -264,24 +246,6 @@ class VllmBenchMark(BenchmarkInterface):
             self.config = settings.vllm_benchmark
         super().__init__(*args, **kwargs)
         self.command = VllmBenchmarkCommand(self.config.command).command
-
-    @property
-    def num_prompts(self) -> int:
-        """
-        Get the process name property of the service
-        Returns:""
-
-        """
-        return self.config.command.num_prompts
-
-    @num_prompts.setter
-    def num_prompts(self, value):
-        """
-        Get the process name property of the service
-        Returns:""
-
-        """
-        self.config.command.num_prompts = value
 
     def update_command(self):
         self.command = VllmBenchmarkCommand(self.config.command).command

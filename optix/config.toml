@@ -7,7 +7,10 @@ success_rate_penalty = 5.0
 ttft_slo = 1
 tpot_slo = 0.05
 service = "master"
-sample_size = 1000
+# false: use scheduler.run, search CONCURRENCY during PSO, REQUESTRATE fixed to max.
+#   scheduler.run is called at max request rate for each candidate concurrency.
+# true: use scheduler.run_with_request_rate, CONCURRENCY fixed to max, REQUESTRATE fixed to max.
+use_request_rate_calibration = true
 
 # ------------------------- Select top_k for fine-tuning ------------------------------------------------
 [data_storage]
@@ -113,9 +116,8 @@ value = 100
 # ------------------------- Benchmark Tool Related Configuration ------------------------------------------------
 [ais_bench.command]
 models = "models"
-datasets = "datasets"
 mode = "perf"
-num_prompts = 3000
+others = ""
 
 [vllm_benchmark.command]
 host = "127.0.0.1"
@@ -123,7 +125,6 @@ port = "port"
 model = "model_path"
 served_model_name = "model_name"
 dataset_name = "dataset_name"
-num_prompts = 3000
 others = ""
 
 

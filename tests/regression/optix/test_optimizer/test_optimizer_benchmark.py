@@ -109,7 +109,6 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
         self.mock_benchmark_config.command.model = "test-model"
         self.mock_benchmark_config.command.served_model_name = "test-model"
         self.mock_benchmark_config.command.dataset_name = "test-dataset"
-        self.mock_benchmark_config.command.num_prompts = 10
         self.mock_benchmark_config.command.result_dir = "test_dir"
         self.mock_benchmark_config.command.others = ""
         mock_which.return_value = "/usr/local/bin/vllm"
@@ -159,18 +158,10 @@ class TestVllmBenchMarkExtended(unittest.TestCase):
         self.mock_benchmark_config.command.model = "test-model"
         self.mock_benchmark_config.command.served_model_name = "test-model"
         self.mock_benchmark_config.command.dataset_name = "test-dataset"
-        self.mock_benchmark_config.command.num_prompts = 10
         self.mock_benchmark_config.command.result_dir = "test_dir_ext"
         self.mock_benchmark_config.command.others = ""
         mock_which.return_value = "/usr/local/bin/vllm"
         self.benchmark = VllmBenchMark(self.mock_benchmark_config)
-
-    def test_num_prompts_property(self):
-        assert self.benchmark.num_prompts == 10
-
-    def test_num_prompts_setter(self):
-        self.benchmark.num_prompts = 200
-        assert self.benchmark.config.command.num_prompts == 200
 
     @patch("optix.config.custom_command.shutil.which")
     def test_update_command(self, mock_which):
@@ -236,10 +227,9 @@ class TestAisBenchInit(unittest.TestCase):
         mock_config = MagicMock()
         mock_config.work_path = "/work"
         mock_config.command.models = "model1"
-        mock_config.command.datasets = "ds1"
         mock_config.command.mode = "perf"
-        mock_config.command.num_prompts = 100
         mock_config.command.work_dir = "/work"
+        mock_config.command.others = ""
         mock_config.output_path = "/output"
 
         # Mock get_models_config_path subprocess.run
@@ -265,10 +255,9 @@ class TestAisBenchInit(unittest.TestCase):
         mock_config = MagicMock()
         mock_config.work_path = "/work"
         mock_config.command.models = "model1"
-        mock_config.command.datasets = "ds1"
         mock_config.command.mode = "perf"
-        mock_config.command.num_prompts = 100
         mock_config.command.work_dir = "/work"
+        mock_config.command.others = ""
 
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
         with pytest.raises(ValueError, match="execution failed"):
@@ -548,7 +537,6 @@ class TestVllmBenchMarkBeforeRun(unittest.TestCase):
         mock_config.command.model = "test"
         mock_config.command.served_model_name = "test"
         mock_config.command.dataset_name = "ds"
-        mock_config.command.num_prompts = 10
         mock_config.command.result_dir = "/tmp/vllm_results"
         mock_config.command.others = ""
         bench = VllmBenchMark(mock_config)
@@ -584,7 +572,6 @@ class TestVllmBenchMarkGetPerformanceIndexNoJson(unittest.TestCase):
         mock_config.command.model = "test"
         mock_config.command.served_model_name = "test"
         mock_config.command.dataset_name = "ds"
-        mock_config.command.num_prompts = 10
         mock_config.command.others = ""
 
         tmp_dir = tempfile.mkdtemp()
@@ -611,7 +598,6 @@ class TestVllmBenchMarkGetPerformanceIndexNoJson(unittest.TestCase):
         mock_config.command.model = "test"
         mock_config.command.served_model_name = "test"
         mock_config.command.dataset_name = "ds"
-        mock_config.command.num_prompts = 10
         mock_config.command.others = ""
 
         tmp_dir = tempfile.mkdtemp()

@@ -16,7 +16,7 @@
 import os
 import shutil
 import shlex
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 MAX_REQUEST_NUM = 1e6
@@ -24,10 +24,9 @@ MAX_REQUEST_NUM = 1e6
 
 class AisBenchCommandConfig(BaseModel):
     models: str = ""
-    datasets: str = ""
     mode: str = ""
-    num_prompts: int = Field(0, gt=0, le=MAX_REQUEST_NUM)
     work_dir: str = ""
+    others: str = ""
 
 
 class AisBenchCommand:
@@ -43,16 +42,14 @@ class AisBenchCommand:
             self.process,
             "--models",
             self.aisbench_command_config.models,
-            "--datasets",
-            self.aisbench_command_config.datasets,
             "--mode",
             self.aisbench_command_config.mode,
-            "--num-prompts",
-            str(self.aisbench_command_config.num_prompts),
             "--work-dir",
             self.aisbench_command_config.work_dir,
             "--debug",
         ]
+        if self.aisbench_command_config.others:
+            _cmd.extend(shlex.split(self.aisbench_command_config.others))
         return _cmd
 
 
@@ -65,7 +62,6 @@ class VllmBenchmarkCommandConfig(BaseModel):
     served_model_name: str = ""
     dataset_name: str = ""
     dataset_path: str = ""
-    num_prompts: int = Field(0, gt=0, le=MAX_REQUEST_NUM)
     result_dir: str = ""
     others: str = ""
 
@@ -93,8 +89,6 @@ class VllmBenchmarkCommand:
             self.benchmark_command_config.served_model_name,
             "--dataset-name",
             self.benchmark_command_config.dataset_name,
-            "--num-prompts",
-            str(self.benchmark_command_config.num_prompts),
             "--max-concurrency",
             "$CONCURRENCY",
             "--request-rate",

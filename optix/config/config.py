@@ -983,9 +983,9 @@ class Settings(BaseSettings):
     success_rate_slo: float = Field(default=1.0, gt=0)
     slo_coefficient: float = 0.1
     generate_speed_target: float = 5000.0
-    sample_size: Optional[int] = None
     mem_coefficient: float = 0.8
     max_fine_tune: int = 10
+    use_request_rate_calibration: bool = True
     scaling_coefficient: float = 1.3
     step_size: float = 0.6
     theory_guided_enable: bool = True

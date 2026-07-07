@@ -221,7 +221,6 @@ msmodeling optix -e vllm -b vllm_benchmark -c ../configs/vllm_config.toml
 |ttft_slo|必选|`time_to_first_token`的限制时延。如对`time_to_first_token`限制为2s内，则设为2，取值范围：(0, 100]，单位s。|
 |tpot_slo|必选|`time_per_output_token`的限制时延。如对`time_per_output_token`限制为50ms内，则设为0.05，取值范围：(0, 100]，单位s。 |
 |service|必选|标注多机启动时为主机或从机，多机场景下从机设为 `slave`，可取值：<br>&#8226;master：主机<br/>&#8226;slave：从机，<br/>默认值为`master`。|
-|sample_size|可选|对原始数据集采样大小，用采样后的数据进行调优，可增加寻优效率，取值范围为：1000-10000的整数，建议设为原数据集请求的1 / 3。|
 
 **测评工具参数**：
 若使用`AISBench`测评，需修改以下参数，可以参照[AISBench 使用说明](https://gitee.com/aisbench/benchmark/blob/master/README.md)进行修改。

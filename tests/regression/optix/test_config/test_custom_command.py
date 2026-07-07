@@ -127,8 +127,6 @@ class TestVllmBenchmarkCommand:
         cmd = cmd_obj.command
         assert "bench" in cmd
         assert "serve" in cmd
-        assert "--num-prompts" in cmd
-        assert "100" in cmd
         assert "--save-result" in cmd
         assert "--extra-arg" in cmd
         assert "value" in cmd
@@ -142,10 +140,9 @@ class TestAisBenchCommand:
         mock_which.return_value = "/usr/bin/ais_bench"
         config = AisBenchCommandConfig(
             models="model1",
-            datasets="ds1",
             mode="perf",
-            num_prompts=50,
             work_dir="/work",
+            others="",
         )
         cmd_obj = AisBenchCommand(config)
         assert cmd_obj.process == "/usr/bin/ais_bench"
@@ -153,7 +150,7 @@ class TestAisBenchCommand:
     @patch("shutil.which")
     def test_init_failure(self, mock_which):
         mock_which.return_value = None
-        config = AisBenchCommandConfig(num_prompts=50)
+        config = AisBenchCommandConfig()
         with pytest.raises(ValueError, match="ais_bench"):
             AisBenchCommand(config)
 
@@ -162,21 +159,36 @@ class TestAisBenchCommand:
         mock_which.return_value = "/usr/bin/ais_bench"
         config = AisBenchCommandConfig(
             models="model1",
-            datasets="ds1",
             mode="perf",
-            num_prompts=50,
             work_dir="/work",
+            others="--extra-arg value",
         )
         cmd_obj = AisBenchCommand(config)
         cmd = cmd_obj.command
         assert cmd[0] == "/usr/bin/ais_bench"
         assert "--models" in cmd
         assert "model1" in cmd
-        assert "--datasets" in cmd
         assert "--mode" in cmd
-        assert "--num-prompts" in cmd
-        assert "50" in cmd
+        assert "perf" in cmd
+        assert "--work-dir" in cmd
+        assert "/work" in cmd
         assert "--debug" in cmd
+        assert "--extra-arg" in cmd
+        assert "value" in cmd
+
+    @patch("shutil.which")
+    def test_command_no_others(self, mock_which):
+        """Test command when others is empty"""
+        mock_which.return_value = "/usr/bin/ais_bench"
+        config = AisBenchCommandConfig(
+            models="model1",
+            mode="perf",
+            work_dir="/work",
+            others="",
+        )
+        cmd_obj = AisBenchCommand(config)
+        cmd = cmd_obj.command
+        assert "--extra-arg" not in cmd
 
 
 class TestMindieCommand:

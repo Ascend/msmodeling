@@ -53,6 +53,7 @@ class PSOOptimizer(PerformanceTuner):
         pso_init_kwargs: Optional[dict] = None,
         fine_tune=None,
         max_fine_tune: int = 10,
+        use_request_rate_calibration: bool = True,
         **kwargs,
     ):
         from ..config.config import PsoOptions, default_support_field
@@ -77,6 +78,7 @@ class PSOOptimizer(PerformanceTuner):
         self.sample_data = None
         self.fine_tune = fine_tune
         self.max_fine_tune = min(max_fine_tune, MAX_ITER_NUM)
+        self.use_request_rate_calibration = use_request_rate_calibration
         self._iteration = 0  # op_func call count, used for balanced strategy inter-iteration direction alternation
         self._seen_params = {}
 
@@ -200,6 +202,10 @@ class PSOOptimizer(PerformanceTuner):
         current_iteration = self._iteration
         self._iteration += 1
         generate_speed = []
+        # Select scheduler method once; flag is invariant across particles/iterations.
+        scheduler_run = (
+            self.scheduler.run_with_request_rate if self.use_request_rate_calibration else self.scheduler.run
+        )
         for i in range(n_particles):
             x[i], decode_context = self._normalize_particle_position(x[i], i, n_particles, current_iteration)
             param_key = tuple(np.round(x[i], decimals=6))
@@ -207,7 +213,7 @@ class PSOOptimizer(PerformanceTuner):
                 generate_speed.append(inf)
                 continue
             try:
-                _res = self.scheduler.run_with_request_rate(x[i], self.target_field, decode_context=decode_context)
+                _res = scheduler_run(x[i], self.target_field, decode_context=decode_context)
                 _fitness = self.minimum_algorithm(_res)
             except Exception as e:
                 logger.error(f"Failed. error: {e}, please check.")
@@ -496,14 +502,11 @@ class PSOOptimizer(PerformanceTuner):
         from ..optimizer.global_best_custom import CustomGlobalBestPSO
 
         self.prepare_plugin()
-        with adapter_target_field(self), sample(self.scheduler):
+        with adapter_target_field(self):
             if self.load_breakpoint:
                 self.load_history_data = self.scheduler.data_storage.load_history_position(
                     self.scheduler.data_storage.config.store_dir,
-                    filter_field={
-                        **self.scheduler.data_storage.get_run_info(),
-                        REAL_EVALUATION: True,
-                    },
+                    filter_field={REAL_EVALUATION: True},
                 )
             if self.load_history_data and self.load_breakpoint:
                 self.history_pos, self.history_cost = self.computer_fitness()
@@ -546,10 +549,15 @@ class PSOOptimizer(PerformanceTuner):
 def adapter_target_field(pso_optimizer: PSOOptimizer):
     _bak_target_field = pso_optimizer.target_field
     target_field = deepcopy(pso_optimizer.target_field)
+    fix_concurrency = pso_optimizer.use_request_rate_calibration
     for _field in target_field:
-        if _field.name in CONCURRENCYS and _field.constant is None:
+        if _field.name in CONCURRENCYS and _field.constant is None and fix_concurrency:
+            # true 模式：CONCURRENCY 固定为 max，由 run_with_request_rate 内部校准请求速率
             _field.constant = _field.value = _field.convert_dtype(_field.max)
         elif _field.name in REQUESTRATES and _field.constant is None:
+            # 两种模式均将 REQUESTRATE 固定为 max：
+            #   true  → run_with_request_rate 需要最大速率上限
+            #   false → scheduler.run 在最大请求速率下对每个候选并发做单次压测
             _field.constant = _field.convert_dtype(_field.max)
             _field.value = None
         elif _field.constant and _field.constant != _field.value:
@@ -557,37 +565,6 @@ def adapter_target_field(pso_optimizer: PSOOptimizer):
     pso_optimizer.target_field = target_field
     yield
     pso_optimizer.target_field = _bak_target_field
-
-
-@contextmanager
-def sample(scheduler):
-    """
-    Sampling request control. Used when running only a subset of requests.
-
-    Args:
-        scheduler: The scheduler runner.
-
-    Returns:
-
-    """
-    from ..config.config import get_settings
-    from ..optimizer.interfaces.benchmark import BenchmarkInterface
-
-    settings = get_settings()
-    _bak_number = None
-    if settings.sample_size:
-        if (
-            isinstance(scheduler.benchmark, BenchmarkInterface)
-            and scheduler.benchmark.num_prompts
-            and scheduler.benchmark.num_prompts > settings.sample_size
-        ):
-            _bak_number = scheduler.benchmark.num_prompts
-            scheduler.benchmark.num_prompts = settings.sample_size
-        yield
-        if _bak_number:
-            scheduler.benchmark.num_prompts = _bak_number
-    else:
-        yield
 
 
 @contextmanager
@@ -766,6 +743,7 @@ def main() -> None:
             load_breakpoint=args.load_breakpoint,
             fine_tune=fine_tune,
             max_fine_tune=settings.max_fine_tune,
+            use_request_rate_calibration=settings.use_request_rate_calibration,
             pso_init_kwargs={"ftol": settings.ftol, "ftol_iter": settings.ftol_iter},
         )
         pso.run_plugin()

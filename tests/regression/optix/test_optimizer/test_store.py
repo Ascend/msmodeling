@@ -146,35 +146,6 @@ class TestDataStorage(unittest.TestCase):
         result = DataStorage.filter_data(data_rows, filter_field)
         self.assertEqual(result, [{"name": "b", "extra": "val"}])
 
-    def test_get_run_info_no_benchmark(self):
-        config = MagicMock()
-        config.store_dir = Path("/tmp/fake/dir")
-        storage = DataStorage(config, benchmark=None)
-        assert storage.get_run_info() == {}
-
-    def test_get_run_info_with_vllm_benchmark(self):
-        from optix.optimizer.plugins.benchmark import VllmBenchMark
-
-        config = MagicMock()
-        config.store_dir = Path("/tmp/fake/dir")
-        mock_benchmark = MagicMock()
-        mock_benchmark.__class__ = VllmBenchMark
-        mock_benchmark.config.command.num_prompts = 100
-        storage = DataStorage(config, benchmark=mock_benchmark)
-        info = storage.get_run_info()
-        assert info["num_prompts"] == 100
-
-    def test_get_run_info_with_generic_benchmark(self):
-        config = MagicMock()
-        config.store_dir = Path("/tmp/fake/dir")
-        mock_benchmark = MagicMock()
-        mock_benchmark.num_prompts = 50
-        # Make isinstance check fail for AisBench/VllmBenchMark
-        mock_benchmark.__class__ = type("GenericBench", (), {})
-        storage = DataStorage(config, benchmark=mock_benchmark)
-        info = storage.get_run_info()
-        assert info["num_prompts"] == 50
-
     def test_save_creates_new_file(self, tmp_path=None):
         import tempfile
 
@@ -198,7 +169,7 @@ class TestDataStorage(unittest.TestCase):
         params = (OptimizerConfigField(name="p1", value=1),)
         storage.save(performance_index, params)
         storage.save(performance_index, params)
-        lines = storage.save_file.read_text().strip().split("\n")
+        lines = [line for line in storage.save_file.read_text().splitlines() if line]
         # Header + 2 data rows
         assert len(lines) == 3
 
