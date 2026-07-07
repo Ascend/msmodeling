@@ -258,13 +258,12 @@ class Runtime(TorchDispatchMode):
     def _iter_flat_invocations(self) -> List[tuple[OpInvokeInfo, int]]:
         invocations: List[tuple[OpInvokeInfo, int]] = []
         for op_info_or_region in self.op_info_group:
-            if isinstance(op_info_or_region, Region):
-                invocations.extend(
-                    (op_invoke_info, op_info_or_region.reference_id)
-                    for op_invoke_info in op_info_or_region.op_invoke_infos
-                )
-            else:
+            if not isinstance(op_info_or_region, Region):
                 invocations.append((op_info_or_region, 0))
+                continue
+            reference_id = getattr(op_info_or_region, "reference_id")
+            op_invoke_infos = getattr(op_info_or_region, "op_invoke_infos")
+            invocations.extend((op_invoke_info, reference_id) for op_invoke_info in op_invoke_infos)
         return invocations
 
     @staticmethod

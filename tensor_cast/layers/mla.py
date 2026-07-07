@@ -367,7 +367,11 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         )
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        return attn_output, None
+        return self._format_forward_output(attn_output, None, pre_attn_out)
+
+    def _format_forward_output(self, attn_output, attn_weights, pre_attn_out) -> tuple:
+        """Hook for subclasses to attach sparse-attention intermediates to forward output."""
+        return attn_output, attn_weights
 
     def _get_backend_kwargs(self, pre_attn_out) -> dict:
         """

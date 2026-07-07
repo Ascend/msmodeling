@@ -22,6 +22,7 @@ from tensor_cast.core.input_generator import (
     resize_image,
 )
 from tensor_cast.layers.deepseek_v4 import DeepseekV4SparseAttention
+from tensor_cast.layers.glm5 import Glm5SparseAttention
 from tensor_cast.layers.sampler import Sampler
 from tensor_cast.model_config import MtpConfig
 from tensor_cast.device import TEST_DEVICE
@@ -598,3 +599,93 @@ class TestDeepseekV4KvCacheHelpers:
 
         # Non-V4 models must keep the full paged pool even when compress_ratio is set.
         assert info["indexer_cache_by_layers"][0].shape[0] == 100
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_glm5_indexshare_allocates_only_full_indexer_caches(self, _mock_attn_quant):
+        model = MagicMock()
+        model.num_hidden_layers = 6
+        model.model_config.mla_config = MagicMock(mla_cls=Glm5SparseAttention)
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = SimpleNamespace(
+            model_type="glm_moe_dsa",
+            indexer_types=["full", "shared", "shared", "shared", "full", "shared"],
+        )
+        model.text_config = None
+        model.unwrap.return_value = SimpleNamespace(
+            layers=[
+                SimpleNamespace(self_attn=MagicMock(use_indexer=True, _index_head_dim=128, indexer=None))
+                for _ in range(6)
+            ]
+        )
+
+        info = get_sparse_attention_indexer_cache_info(model, num_blocks=4, block_size=16)
+
+        assert set(info["indexer_cache_by_layers"]) == {0, 4}
+        assert info["indexer_cache_by_layers"][0].shape == (4, 16, 128)
+        assert info["indexer_cache_by_layers"][4].shape == (4, 16, 128)
+        assert info["indexer_cache_per_token"] == 2 * 128 * torch.bfloat16.itemsize
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_glm5_without_indexshare_preserves_per_layer_cache_allocation(self, _mock_attn_quant):
+        model = MagicMock()
+        model.num_hidden_layers = 3
+        model.model_config.mla_config = MagicMock(mla_cls=Glm5SparseAttention)
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = SimpleNamespace(
+            model_type="glm_moe_dsa",
+            indexer_types=["full", "full", "full"],
+        )
+        model.text_config = None
+        model.unwrap.return_value = SimpleNamespace(
+            layers=[
+                SimpleNamespace(self_attn=MagicMock(use_indexer=True, _index_head_dim=128, indexer=None))
+                for _ in range(3)
+            ]
+        )
+
+        info = get_sparse_attention_indexer_cache_info(model, num_blocks=4, block_size=16)
+
+        assert set(info["indexer_cache_by_layers"]) == {0, 1, 2}
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_glm5_shared_indexer_without_full_source_is_rejected(self, _mock_attn_quant):
+        model = MagicMock()
+        model.num_hidden_layers = 1
+        model.model_config.mla_config = MagicMock(mla_cls=Glm5SparseAttention)
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = SimpleNamespace(model_type="glm_moe_dsa", indexer_types=["shared"])
+        model.text_config = None
+        model.unwrap.return_value = SimpleNamespace(
+            layers=[SimpleNamespace(self_attn=MagicMock(use_indexer=True, _index_head_dim=128, indexer=None))]
+        )
+
+        with pytest.raises(ValueError, match="Invalid GLM5 indexer_types for layer 0/1"):
+            get_sparse_attention_indexer_cache_info(model, num_blocks=4, block_size=16)
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_glm5_indexshare_uses_mtp_extended_config(self, _mock_attn_quant):
+        model = MagicMock()
+        model.num_hidden_layers = 5
+        model.model_config.mla_config = MagicMock(mla_cls=Glm5SparseAttention)
+        model.model_config.dtype = torch.bfloat16
+        model.model_config.hf_config = SimpleNamespace(
+            model_type="glm_moe_dsa",
+            indexer_types=["full", "shared"],
+        )
+        model._inner = SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="glm_moe_dsa",
+                indexer_types=["full", "shared", "shared", "shared", "full"],
+            )
+        )
+        model.text_config = None
+        model.unwrap.return_value = SimpleNamespace(
+            layers=[
+                SimpleNamespace(self_attn=MagicMock(use_indexer=True, _index_head_dim=128, indexer=None))
+                for _ in range(5)
+            ]
+        )
+
+        info = get_sparse_attention_indexer_cache_info(model, num_blocks=4, block_size=16)
+
+        assert set(info["indexer_cache_by_layers"]) == {0, 4}

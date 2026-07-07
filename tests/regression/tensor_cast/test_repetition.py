@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ from tensor_cast.performance_model.memory_tracker import MemoryTracker
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.custom_model_registry import get_mtp_block_module_name
 from tensor_cast.transformers.model import TransformerModel
+from tensor_cast.transformers.transformations import maybe_reuse_layers
 
 from .conftest import get_session_hf_config
 from .test_common import (
@@ -25,6 +27,78 @@ from .test_common import (
 )
 
 # Core repetition layer-behavior assertions were moved to the unified entry in test_layers.py.
+
+
+def test_glm5_indexer_flow_layers_are_not_reused(monkeypatch):
+    class FakeAttention(torch.nn.Module):
+        def __init__(self, layer_idx, skip_topk=False, next_skip_topk=False):
+            super().__init__()
+            self.layer_idx = layer_idx
+            self.skip_topk = skip_topk
+            self.next_skip_topk = next_skip_topk
+
+    class FakeLayer(torch.nn.Module):
+        def __init__(self, layer_idx, skip_topk=False, next_skip_topk=False):
+            super().__init__()
+            self.self_attn = FakeAttention(layer_idx, skip_topk=skip_topk, next_skip_topk=next_skip_topk)
+
+    layers = torch.nn.ModuleList(
+        [
+            FakeLayer(0),
+            FakeLayer(1),
+            FakeLayer(2, next_skip_topk=True),
+            FakeLayer(3, skip_topk=True, next_skip_topk=True),
+            FakeLayer(4, skip_topk=True),
+        ]
+    )
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(enable_repetition=True),
+        is_vl_model=False,
+        _inner=None,
+        unwrap=lambda: SimpleNamespace(layers=layers),
+    )
+    monkeypatch.setattr("tensor_cast.transformers.transformations.get_visual_layers", lambda _model: None)
+
+    maybe_reuse_layers(model)
+
+    assert isinstance(layers[1], CopyLayerWrapper)
+    assert not isinstance(layers[2], CopyLayerWrapper)
+    assert not isinstance(layers[3], CopyLayerWrapper)
+    assert not isinstance(layers[4], CopyLayerWrapper)
+
+
+def test_glm5_indexer_flow_layers_are_not_reused_from_config(monkeypatch):
+    class FakeAttention(torch.nn.Module):
+        def __init__(self, layer_idx):
+            super().__init__()
+            self.layer_idx = layer_idx
+
+    class FakeLayer(torch.nn.Module):
+        def __init__(self, layer_idx):
+            super().__init__()
+            self.self_attn = FakeAttention(layer_idx)
+
+    layers = torch.nn.ModuleList([FakeLayer(i) for i in range(6)])
+    hf_config = SimpleNamespace(
+        model_type="glm_moe_dsa",
+        indexer_types=["full", "shared", "shared", "shared", "full", "full"],
+    )
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(enable_repetition=True),
+        is_vl_model=False,
+        _inner=SimpleNamespace(hf_config=hf_config),
+        hf_config=hf_config,
+        unwrap=lambda: SimpleNamespace(layers=layers),
+    )
+    monkeypatch.setattr("tensor_cast.transformers.transformations.get_visual_layers", lambda _model: None)
+
+    maybe_reuse_layers(model)
+
+    assert not isinstance(layers[0], CopyLayerWrapper)
+    assert not isinstance(layers[1], CopyLayerWrapper)
+    assert not isinstance(layers[2], CopyLayerWrapper)
+    assert not isinstance(layers[3], CopyLayerWrapper)
+    assert isinstance(layers[5], CopyLayerWrapper)
 
 
 class RepetitionTestMixin:

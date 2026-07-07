@@ -17,6 +17,14 @@ from ..layers import (
     PARALLEL_MODULE_CLS,
     ROWWISE_LINEAR,
 )
+from ..layers.glm5 import (
+    Glm5SparseAttention,
+    extend_glm5_indexer_types_for_mtp,
+    get_glm5_indexer_flow_flags,
+    get_glm5_indexer_types,
+    glm5_uses_indexshare,
+    resolve_glm5_indexer_source_layer,
+)
 from ..layers.internal import CopyLayerWrapper, RegionMarkerWrapper
 from ..layers.mla import MultiheadLatentAttentionBase, tp_plan_module_path, tp_plan_nested_module_path
 from ..layers.moe_layer import MoELayer, ParallelMoELayer
@@ -109,7 +117,10 @@ def maybe_enable_mtp(model: "ModelWrapperBase") -> "ModelWrapperBase":
     ):
         hf_config.mlp_layer_types.extend([hf_config.mlp_layer_types[-1]] * mtp_config.num_mtp_layers)
     if hasattr(hf_config, "indexer_types") and isinstance(hf_config.indexer_types, list) and hf_config.indexer_types:
-        hf_config.indexer_types.extend([hf_config.indexer_types[-1]] * mtp_config.num_mtp_layers)
+        if getattr(hf_config, "model_type", None) == "glm_moe_dsa" and glm5_uses_indexshare(hf_config):
+            extend_glm5_indexer_types_for_mtp(hf_config.indexer_types, mtp_config.num_mtp_layers)
+        else:
+            hf_config.indexer_types.extend([hf_config.indexer_types[-1]] * mtp_config.num_mtp_layers)
 
     orig_dtype = torch.get_default_dtype()
     torch.set_default_dtype(model.model_config.dtype)
@@ -124,8 +135,24 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
     if not model.model_config.enable_repetition:
         return model
 
+    effective_hf_config = getattr(getattr(model, "_inner", None), "hf_config", getattr(model, "hf_config", None))
+    glm5_indexer_types = (
+        get_glm5_indexer_types(effective_hf_config)
+        if effective_hf_config is not None and glm5_uses_indexshare(effective_hf_config)
+        else None
+    )
+
     def get_submodule_structure_key(module: torch.nn.Module) -> str:
         submodule_types = []
+        self_attn = getattr(module, "self_attn", None)
+        if self_attn is not None:
+            layer_idx = getattr(self_attn, "layer_idx", None)
+            skip_topk = getattr(self_attn, "skip_topk", False)
+            next_skip_topk = getattr(self_attn, "next_skip_topk", False)
+            if glm5_indexer_types is not None and isinstance(layer_idx, int):
+                skip_topk, next_skip_topk = get_glm5_indexer_flow_flags(glm5_indexer_types, layer_idx)
+            if skip_topk or next_skip_topk:
+                submodule_types.append(f"glm5_indexer_flow:{layer_idx if layer_idx is not None else id(module)}")
         for name, sub_module in module.named_modules():
             submodule_types.append(name)
             submodule_types.append(".".join([type(sub_module).__module__, type(sub_module).__name__]))
@@ -330,6 +357,13 @@ def patch_mla(
                 model.parallel_group_manager.tp_group,
                 **extra_kwargs,
             )
+            effective_hf_config = getattr(model._inner, "hf_config", model.hf_config)
+            if isinstance(mla, Glm5SparseAttention) and glm5_uses_indexshare(effective_hf_config):
+                indexer_types = get_glm5_indexer_types(effective_hf_config)
+                layer_idx = mla.layer_idx
+                mla.indexer_source_layer_idx = resolve_glm5_indexer_source_layer(indexer_types, layer_idx)
+                mla.indexer_type = indexer_types[layer_idx]
+                mla.skip_topk, mla.next_skip_topk = get_glm5_indexer_flow_flags(indexer_types, layer_idx)
             old_type = type(module).__name__
             model._replace_module(name, mla)
             report.add_replacement(name, old_type, type(mla).__name__)

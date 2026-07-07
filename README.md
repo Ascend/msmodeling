@@ -16,7 +16,7 @@
 
 <span style="font-size:14px;">
 
-🔹 **[2026.06.10]**：msModeling 新增 **DeepSeek-V4** 模型支持  
+🔹 **[2026.06.10]**：msModeling 新增 **DeepSeek-V4** 模型支持
 🔹 **[2026.04.02]**：msModeling 新增 **GLM5** 模型支持
 
 </span>
@@ -59,9 +59,9 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 ## 🌌 智能检索
 
-为提升文档查阅效率，我们提供多种高效检索方式：  
-🔹 [AI 问答（DeepWiki）](https://deepwiki.com/Ascend/msmodeling)：自然语言问答，快速把握项目架构与模块关系。  
-🔹 [AI 问答（ZRead）](https://zread.ai/mindstudio-docs/master)：中文问答体验更优，精准定位功能用法与细节。  
+为提升文档查阅效率，我们提供多种高效检索方式：
+🔹 [AI 问答（DeepWiki）](https://deepwiki.com/Ascend/msmodeling)：自然语言问答，快速把握项目架构与模块关系。
+🔹 [AI 问答（ZRead）](https://zread.ai/mindstudio-docs/master)：中文问答体验更优，精准定位功能用法与细节。
 🔹 [精确搜索（ReadTheDocs）](https://mindstudio-docs-master.readthedocs.io)：关键词全文检索，直达接口、参数与报错等信息。
 
 ## 🛠️ 贡献指南
@@ -70,9 +70,9 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 ## ⚖️ 相关说明
 
-🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》  
-🔹 《[许可证声明](./docs/zh/legal/LICENSE)》  
-🔹 《[安全声明](./docs/zh/legal/SECURITY.md)》  
+🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》
+🔹 《[许可证声明](./docs/zh/legal/LICENSE)》
+🔹 《[安全声明](./docs/zh/legal/SECURITY.md)》
 🔹 免责声明：本工具仿真与优化结果仅供性能评估参考，最终性能表现请以真实环境实测为准
 
 ## 🤝 建议与交流
@@ -89,13 +89,13 @@ msModeling 提供 TensorCast、Throughput Optimizer、ServingCast、Web UI 和 O
 
 本工具由以下公司/部门联合贡献，以下排名不分先后：
 
-🔹 **华为**  
-&emsp;&emsp;昇腾计算产品部  
-&emsp;&emsp;湛卢、AI Workload  
-&emsp;&emsp;2012 网络技术实验室、2012 马尔科夫实验室  
-&emsp;&emsp;小巧灵突击队、OTT 系统部  
+🔹 **华为**
+&emsp;&emsp;昇腾计算产品部
+&emsp;&emsp;湛卢、AI Workload
+&emsp;&emsp;2012 网络技术实验室、2012 马尔科夫实验室
+&emsp;&emsp;小巧灵突击队、OTT 系统部
 
-🔹 **蚂蚁集团**  
+🔹 **蚂蚁集团**
 
 🔹 **电信研究院**
 

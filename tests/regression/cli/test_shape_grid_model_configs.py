@@ -34,20 +34,36 @@ def test_glm51_model_id_resolves_to_static_fallback(monkeypatch):
     assert by_hf.expert_intermediate_size == 2048
 
 
+def test_glm52_model_id_resolves_to_static_fallback(monkeypatch):
+    monkeypatch.setattr(model_configs, "_fetch_from_huggingface", fail_fetch)
+    model_configs._RESOLVED_CONFIGS.clear()
+
+    by_hf = resolve_configs(["zai-org/GLM-5.2"])[0]
+
+    assert by_hf.name == "GLM-5.2"
+    assert by_hf.model_key == "glm52"
+    assert by_hf.hidden_size == 6144
+    assert by_hf.q_lora_rank == 2048
+    assert by_hf.kv_lora_rank == 512
+    assert by_hf.head_dim == 256
+    assert by_hf.expert_intermediate_size == 2048
+
+
 def test_all_model_configs_dedupe_aliases():
     configs = resolve_configs(None)
 
     assert len(configs) == len(set(configs))
     assert [cfg.name for cfg in configs].count("GLM-5.1") == 1
-    assert {cfg.model_key for cfg in configs} >= {"deepseekv3", "qwen332b", "llama70b", "glm51"}
+    assert [cfg.name for cfg in configs].count("GLM-5.2") == 1
+    assert {cfg.model_key for cfg in configs} >= {"deepseekv3", "qwen332b", "llama70b", "glm51", "glm52"}
 
 
-def test_glm51_mla_pairs_include_q_and_kv_projection_dims(monkeypatch):
-    """GLM-5.1 MLA matmul candidates should use 256-wide qk/v heads, not HF head_dim=64."""
+@pytest.mark.parametrize("model_id", ["zai-org/GLM-5.1", "zai-org/GLM-5.2"])
+def test_glm5_mla_pairs_include_q_and_kv_projection_dims(monkeypatch, model_id):
     monkeypatch.setattr(model_configs, "_fetch_from_huggingface", fail_fetch)
     model_configs._RESOLVED_CONFIGS.clear()
 
-    pairs = get_matmul_nk_pairs(["zai-org/GLM-5.1"])
+    pairs = get_matmul_nk_pairs([model_id])
 
     assert (2048, 6144) in pairs
     assert (576, 6144) in pairs

@@ -14,6 +14,7 @@ from typing import Any, Optional
 import torch
 
 from ..layers.attention import AttentionMetadataTensorCast
+from ..layers.glm5 import get_glm5_indexer_types, glm5_uses_indexshare, resolve_glm5_indexer_source_layer
 from ..layers.sampler import SamplingMetadata, SpecDecodeMetadata
 from ..performance_model import bytes_of_tensor
 from ..transformers.utils import get_attention_quant_config, logger
@@ -495,6 +496,53 @@ def _is_v4_model(model) -> bool:
     return False
 
 
+def _get_glm5_indexshare_config(model):
+    orig_mod = getattr(model, "_orig_mod", None)
+    for candidate in (model, orig_mod):
+        if candidate is None:
+            continue
+        inner = getattr(candidate, "_inner", None)
+        for config in (
+            getattr(inner, "hf_config", None),
+            getattr(getattr(candidate, "model_config", None), "hf_config", None),
+            getattr(candidate, "text_config", None),
+        ):
+            if config is not None and getattr(config, "model_type", None) == "glm_moe_dsa":
+                return config
+    return None
+
+
+def _get_glm5_indexshare_indexer_types(model) -> list[str] | None:
+    glm5_config = _get_glm5_indexshare_config(model)
+    if glm5_config is None or not glm5_uses_indexshare(glm5_config):
+        return None
+    return get_glm5_indexer_types(glm5_config)
+
+
+def _glm5_indexshare_layer_owns_indexer_cache(indexer_types: list[str] | None, layer_idx: int) -> bool:
+    # GLM-5.2 shared layers reuse prev_topk_indices and must not alias source caches here.
+    return indexer_types is None or resolve_glm5_indexer_source_layer(indexer_types, layer_idx) == layer_idx
+
+
+def _resolve_sparse_attention_indexer_num_blocks(
+    is_v4_model: bool,
+    attention_layer,
+    num_blocks: int,
+    block_size: int,
+    batch_size: Optional[int] = None,
+    total_kv_tokens: Optional[int] = None,
+) -> int:
+    # DeepSeek V4 compresses indexer-cache slots; other sparse-attention models keep the full paged pool.
+    compress_ratio = (
+        int(getattr(attention_layer, "compress_ratio", 0) or 0) if (is_v4_model and attention_layer is not None) else 0
+    )
+    if batch_size is None or total_kv_tokens is None or compress_ratio <= 0:
+        return num_blocks
+
+    compressed_slots = total_kv_tokens // compress_ratio
+    return max(1, (compressed_slots + block_size - 1) // block_size)
+
+
 def _resolve_main_kv_cache_dtype(model, layer_idx: int) -> torch.dtype:
     """Resolve storage dtype for the primary (attention) KV cache.
 
@@ -735,6 +783,9 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     also used by DeepSeek V4's custom sparse attention path, whose ratio=4
     layers carry a distinct learned indexer.
 
+    GLM-5.2 IndexShare decides whether a layer owns cache; V4 compression
+    decides how many blocks each allocated cache needs.
+
     For V4 the indexer cache is purely compressed (no sliding window): the
     reference allocates ``[max_batch_size, max_seq_len // compress_ratio,
     index_head_dim]`` (model.py:399). When ``batch_size`` and
@@ -746,11 +797,9 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     if mla_config is None or not mla_config.mla_cls.requires_indexer_cache():
         return {}
 
-    # Compressed indexer-cache sizing is a DeepSeek V4-only behavior. Other
-    # sparse-attention models (e.g. DeepSeek V3.2 / DSA) also reach this helper
-    # via requires_indexer_cache(), so we must not let the compression branch
-    # alter their cache size. Gate it explicitly on the V4 model type.
     is_v4_model = _is_v4_model(model)
+    # GLM-5.2 IndexShare is a layer-selection rule: shared layers reuse top-k and own no cache.
+    glm5_indexer_types = _get_glm5_indexshare_indexer_types(model)
     indexer_cache_by_layers = {}
     indexer_cache_per_token = 0
     try:
@@ -758,6 +807,15 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     except AttributeError:
         decoder_layers = None
     for i in range(model.num_hidden_layers):
+        try:
+            owns_indexer_cache = _glm5_indexshare_layer_owns_indexer_cache(glm5_indexer_types, i)
+        except ValueError as err:
+            raise ValueError(
+                f"Invalid GLM5 indexer_types for layer {i}/{model.num_hidden_layers}: {glm5_indexer_types}"
+            ) from err
+        if not owns_indexer_cache:
+            continue
+
         attention_layer = (
             _resolve_decoder_attention_layer(decoder_layers[i])
             if decoder_layers is not None and i < len(decoder_layers)
@@ -772,20 +830,14 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
 
         cache_dtype = _resolve_indexer_cache_dtype(model, i)
 
-        # Indexer cache is purely compressed (no window). Size it to
-        # total_kv_tokens // compress_ratio slots when batch info is available,
-        # otherwise fall back to the full paged pool for backward compatibility.
-        # Only DeepSeek V4 uses this compressed sizing; every other model keeps
-        # the full paged pool unchanged.
-        indexer_num_blocks = num_blocks
-        compress_ratio = (
-            int(getattr(attention_layer, "compress_ratio", 0) or 0)
-            if (is_v4_model and attention_layer is not None)
-            else 0
+        indexer_num_blocks = _resolve_sparse_attention_indexer_num_blocks(
+            is_v4_model,
+            attention_layer,
+            num_blocks,
+            block_size,
+            batch_size,
+            total_kv_tokens,
         )
-        if batch_size is not None and total_kv_tokens is not None and compress_ratio > 0:
-            compressed_slots = total_kv_tokens // compress_ratio
-            indexer_num_blocks = max(1, (compressed_slots + block_size - 1) // block_size)
 
         indexer_cache_by_layers[i] = torch.empty(
             [

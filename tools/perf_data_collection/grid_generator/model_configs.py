@@ -130,6 +130,26 @@ GLM51_CONFIG = ModelConfig(
     model_key="glm51",
 )
 
+GLM52_CONFIG = ModelConfig(
+    name="GLM-5.2",
+    hidden_size=6144,
+    intermediate_size=12288,
+    num_attention_heads=64,
+    num_kv_heads=64,  # MLA latent heads
+    head_dim=256,
+    q_lora_rank=2048,
+    kv_lora_rank=512,
+    qk_nope_head_dim=192,
+    qk_rope_head_dim=64,
+    num_experts=256,
+    num_experts_per_card=32,
+    expert_intermediate_size=2048,
+    topk=8,
+    tp_sizes=(1, 2, 4, 8, 16),
+    ep_sizes=(1, 2, 4, 8),
+    model_key="glm52",
+)
+
 
 def _normalize_name(name: str) -> str:
     return (
@@ -189,6 +209,7 @@ MODEL_IDS: dict[str, ModelConfig] = {
     "Qwen/Qwen3-32B": QWEN3_32B_CONFIG,
     "meta-llama/Meta-Llama-3-70B": LLAMA_70B_CONFIG,
     "zai-org/GLM-5.1": GLM51_CONFIG,
+    "zai-org/GLM-5.2": GLM52_CONFIG,
 }
 
 # Keys must be lowercase and without punctuation for normalize_name()
@@ -207,6 +228,7 @@ LEGACY_MODEL_NAME_HINTS: dict[str, str] = {
     "qwen332b": "Qwen/Qwen3-32B",
     "llama70b": "meta-llama/Meta-Llama-3-70B",
     "glm51": "zai-org/GLM-5.1",
+    "glm52": "zai-org/GLM-5.2",
 }
 
 _RESOLVED_CONFIGS: dict[str, ModelConfig] = {}
