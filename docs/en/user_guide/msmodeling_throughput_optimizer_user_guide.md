@@ -4,9 +4,11 @@
 
 Throughput optimizer is a tool to optimize the throughput under SLO (Service Level Objective) constraints. It automatically searches for the optimal model configuration (parallelism strategy, batch size) to maximize token throughput under specified SLO constraints (e.g., limits on TTFT, TPOT).
 
-This guide is intended for developers or performance engineers who need to evaluate model serving throughput, parallel strategies, and SLO constraints. Before you start, complete the environment setup in [Quick Start: Environment Setup and First Simulation](../install_guide/msmodeling_install_guide.md), and make sure that the target model configuration can be loaded.
+This guide is intended for developers, performance engineers, and capacity planners who need to evaluate LLM serving deployment options, model serving throughput, parallel strategies, and SLO constraints. Before you start, complete the environment setup in [Quick Start: Environment Setup and First Simulation](../install_guide/msmodeling_install_guide.md), and make sure that the target model configuration can be loaded.
 
 ## 2 Main Scenarios
+
+The throughput optimizer supports hardware planning, SLO-constrained throughput optimization, and PD-disaggregated deployment design. By deployment pattern, it mainly supports the following scenarios:
 
 | Mode | Use Case | Key Parameters |
 | --- | --- | --- |

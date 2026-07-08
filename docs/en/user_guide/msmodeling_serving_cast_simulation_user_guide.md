@@ -1,8 +1,23 @@
 # ServingCast Simulation Guide
 
+> **Experimental feature**: The service-level fine-grained simulation capability described in this guide is still evolving. Interfaces and behavior may change, and simulation results are for evaluation reference only.
+
 ## 1 Introduction
 
-ServingCast simulation evaluates end-to-end model serving performance based on instance configuration and global configuration. It uses YAML files to describe instance groups, model structure, request workloads, and serving limits, and outputs performance metrics such as TTFT, TPOT, throughput, and request count. This helps users analyze serving capacity and configuration bottlenecks before actual deployment.
+ServingCast simulation uses YAML configuration to simulate end-to-end serving scenarios with multiple instances and requests, and outputs system-level metrics such as throughput and latency (TTFT, TPOT). It describes instance groups, model structure, request workloads, and serving limits through YAML files, and outputs performance metrics such as TTFT, TPOT, throughput, and request count to help users analyze serving capacity and configuration bottlenecks before actual deployment.
+
+**Use Cases:**
+
+- **System Behavior Validation**: Validate the expected performance of a serving configuration before actual deployment
+- **Multi-Instance Benchmarking**: Simulate complex serving topologies, such as separate Prefill and Decode clusters
+- **Workload Analysis**: Evaluate system performance under specific request patterns and load characteristics
+- **Resource Planning**: Determine the required number of instances and their configurations to meet target throughput
+
+**Key Features:**
+
+- YAML-driven configuration for instances and workload
+- Support for heterogeneous instance groups
+- Comprehensive metrics: E2E latency, TTFT, TPOT, token throughput
 
 ## 2 Environment Requirements
 

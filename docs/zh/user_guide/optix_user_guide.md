@@ -1,8 +1,8 @@
-# OptiX 使用指南
+# 服务化实测寻优 使用指南
 
 ## 简介
 
-**服务化自动寻优工具**（msmodeling optix）是一个基于PSO粒子寻优算法的服务化参数自动寻优工具，支持对 `VLLM` 和 `MindIE` 进行自动寻优，获取符合时延要求的最佳吞吐参数组合。
+**服务化实测寻优**（msmodeling optix）是一项基于 PSO 粒子寻优算法的服务化参数实测寻优功能，支持在 `VLLM` 和 `MindIE` 等真实服务框架上自动搜索，获取符合时延要求的最佳吞吐参数组合。
 
 ## 适用对象与阅读路径
 
@@ -22,7 +22,7 @@
 >
 > 旧版 benchmark 工具将逐步由 AISBench 替代，推荐优先使用 AISBench。若当前环境仍保留 `vllm_benchmark` 适配能力，可按本文对应章节配置。
 
-服务化自动寻优工具能够基于以上功能模块，自动推荐吞吐较优的服务化参数组合。
+服务化实测寻优能够基于以上功能模块，自动推荐吞吐较优的服务化参数组合。
 
 目前工具已基于llama3-8b和qwen3-8b通过验证，理论上不限制支持模型范围，后续计划扩大支持范围的验证。
 
@@ -54,7 +54,7 @@
 ## 使用前准备
 
 **环境准备**
-准备好能正常运行服务化（如[VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start/)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)）和测评工具（如`vllm_benchmark/AISBench`，参见[测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)）的环境。
+准备好能正常运行服务化（如[VLLM Server](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)）和测评工具（如`vllm_benchmark/AISBench`，参见[测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)）的环境。
 
 ## 工具安装
 

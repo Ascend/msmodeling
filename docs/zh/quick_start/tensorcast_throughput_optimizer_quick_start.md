@@ -1,23 +1,22 @@
-# TensorCast 与 ServingCast 快速入门
+# 模型推理性能仿真与服务化性能仿真 快速入门
 
 <br>
 
 ## 1. 概述
 
-msModeling 提供单模型性能仿真与服务级推理仿真能力。本文档面向首次体验 TensorCast 和 ServingCast 的用户，带您从环境检查开始，依次跑通 LLM 文本生成仿真、吞吐优化和端到端服务仿真，快速理解工具的核心输入、输出与适用场景。
+msModeling 提供单模型性能仿真与服务级吞吐优化能力。本文档面向首次体验 TensorCast 和 Throughput Optimizer 的用户，带您从环境检查开始，依次跑通 LLM 文本生成仿真与吞吐优化，快速理解工具的核心输入、输出与适用场景。
 
 ### 1.1 前言
 
 **体验地图（核心操作约 10 分钟）**
 
-> **执行顺序建议**：步骤 1 为基础环境检查；步骤 2 用于体验 TensorCast 单模型仿真；步骤 3 和步骤 4 用于体验 ServingCast 的吞吐优化与服务仿真，可按需选择。
+> **执行顺序建议**：步骤 1 为基础环境检查；步骤 2 用于体验 TensorCast 单模型仿真；步骤 3 用于体验 Throughput Optimizer 吞吐优化。
 
 | 步骤 | 环节 | 核心模块 | 参考操作耗时 | 建议原理学习 |
 | :---: | :---: | :--- | :---: | :---: |
 | **1** | **环境准备** | `msModeling` | 2 分钟 | 5 分钟 |
 | **2** | **单模型仿真** | `TensorCast` | 1 分钟 | 10 分钟 |
-| **3** | **吞吐优化** | `ServingCast / Throughput Optimizer` | 2 分钟 | 15 分钟 |
-| **4** | **服务仿真** | `ServingCast` | 2 分钟 | 15 分钟 |
+| **3** | **吞吐优化** | `Throughput Optimizer` | 2 分钟 | 15 分钟 |
 
 ### 1.2 环境准备
 
@@ -51,7 +50,7 @@ export HF_ENDPOINT="https://hf-mirror.com"
 
 ```bash
 python -m cli.inference.text_generate --help
-python -m serving_cast.main --help
+python -m cli.inference.throughput_optimizer --help
 ```
 
 若上述命令无法正常输出帮助信息，请优先检查虚拟环境是否已激活、依赖是否安装完成，以及 `PYTHONPATH` 是否指向 msModeling 仓库根目录。
@@ -173,82 +172,34 @@ Top 4 PD Aggregated Configurations:
 - 输出 `Throughput`、`TTFT`、`TPOT` 等指标。
 - 没有出现模型配置加载失败或参数冲突报错。
 
-### 2.4【服务仿真】运行 ServingCast 端到端仿真
-
-ServingCast 服务仿真基于 YAML 配置描述实例组、请求负载和服务限制，可模拟多实例、多请求的端到端 serving 场景，并输出 E2E_TIME、TTFT、TPOT、请求吞吐和 token 吞吐等系统级指标。
-
-#### 2.4.1 查看示例配置
-
-仓库内置了可直接使用的示例配置：
-
-```bash
-ls serving_cast/example/instances.yaml serving_cast/example/common.yaml
-```
-
-两个配置文件的作用如下：
-
-| 配置文件 | 作用 |
-| --- | --- |
-| `instances.yaml` | 描述一个或多个实例组，例如角色、实例数量、TP/DP 并行方式等。 |
-| `common.yaml` | 描述全局配置，例如模型结构、请求负载、服务限制与仿真参数。 |
-
-示例配置默认使用 `TEST_DEVICE` 和 `Qwen/Qwen3-32B`。如果需要切换模型、请求长度或请求数量，可修改 `common.yaml`；如果需要调整实例数量、设备数或并行策略，可修改 `instances.yaml`。
-
-#### 2.4.2 执行服务仿真
-
-```bash
-python -m serving_cast.main \
-    --instance_config_path=./serving_cast/example/instances.yaml \
-    --common_config_path=./serving_cast/example/common.yaml
-```
-
-#### 2.4.3 查看服务仿真结果
-
-仿真结束后，控制台会打印类似以下的性能摘要：
-
-```text
-         E2E_TIME(s)  TTFT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
-AVERAGE     1052.591    0.378    0.301        1500.0         3500.0                           3.327
-MIN         1050.000    0.300    0.300        1500.0         3500.0                           2.978
-MAX         1175.500    0.600    0.336        1500.0         3500.0                           3.334
-======== Overall Summary ========
-request_throughput(req/s)      0.082
-input_token_throughput(tok/s)  122.399
-output_token_throughput(tok/s) 285.598
-```
-
-指标说明：
-
-- `E2E_TIME`：单请求端到端延迟。
-- `TTFT`：首 token 时间。
-- `TPOT`：首 token 之后每个输出 token 的时间。
-- `benchmark_duration`：本次仿真的总耗时。
-- `request_throughput`：系统级请求吞吐。
-- `input_token_throughput` / `output_token_throughput`：聚合 token 吞吐。
-
-成功标准：
-
-- 终端输出请求级统计表。
-- 输出 `Overall Summary`。
-- 输出 `request_throughput`、`input_token_throughput` 或 `output_token_throughput`。
-
 ## 3. 结果校验与下一步
 
-如果上述命令执行成功，说明已完成 TensorCast 与 ServingCast 的核心流程体验：
+如果上述命令执行成功，说明已完成 TensorCast 与 Throughput Optimizer 的核心流程体验：
 
 - TensorCast：已完成单模型文本生成性能仿真，并获得算子级耗时、TPS/Device 与显存估算。
 - Throughput Optimizer：已完成 SLO 约束下的吞吐优化，并获得推荐并行策略与吞吐指标。
-- ServingCast：已完成端到端服务仿真，并获得 TTFT、TPOT、请求吞吐和 token 吞吐。
 
 常见问题：
 
 - 如果提示无法下载模型配置，请确认网络可访问 Hugging Face，或设置 `HF_ENDPOINT` 镜像。
-- 如果提示无法找到 `cli`、`tensor_cast` 或 `serving_cast` 模块，请确认当前目录为仓库根目录，或已正确设置 `PYTHONPATH`。
+- 如果提示无法找到 `cli` 或 `tensor_cast` 模块，请确认当前目录为仓库根目录，或已正确设置 `PYTHONPATH`。
 - 如果吞吐优化运行耗时较长，可先减小搜索范围，例如减少 `--num-devices` 或显式指定 `--tp-sizes`。
 
 更多用法请继续阅读：
 
 - 《[TensorCast 使用指南](../user_guide/msmodeling_tensor_cast_user_guide.md)》
-- 《[ServingCast 使用指南](../user_guide/msmodeling_serving_cast_user_guide.md)》
 - 《[吞吐优化指南](../user_guide/msmodeling_throughput_optimizer_user_guide.md)》
-- 《[服务仿真指南](../user_guide/msmodeling_serving_cast_simulation_user_guide.md)》
+
+## 4. 【可选】Web UI 体验
+
+若更偏好可视化操作，可在完成上述 CLI 流程后，通过 Web UI 在页面完成单模型仿真、吞吐优化等配置，并以曲线和表格查看结果。
+
+在仓库根目录启动 Web UI：
+
+```bash
+python -m web_ui.web_ui_start --port 2345
+```
+
+浏览器访问 `http://127.0.0.1:2345`，即可通过页面配置模型、芯片、并行、量化和 workload 参数，并查看仿真曲线、明细表格与导出结果。
+
+更多页面说明、参数配置与结果解读，请参见《[Web UI 使用指南](../user_guide/msmodeling_web_ui_user_guide.md)》。

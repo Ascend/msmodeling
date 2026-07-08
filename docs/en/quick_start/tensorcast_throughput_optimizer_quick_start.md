@@ -1,23 +1,22 @@
-# TensorCast and ServingCast Quick Start
+# Model Inference Performance Simulation and Service-Level Performance Simulation Quick Start
 
 <br>
 
 ## 1. Overview
 
-msModeling provides single-model performance simulation and service-level inference simulation. This guide is for first-time TensorCast and ServingCast users. It walks through environment checks, LLM text-generation simulation, throughput optimization, and end-to-end service simulation, helping you understand the main inputs, outputs, and usage scenarios.
+msModeling provides single-model performance simulation and service-level throughput optimization. This guide is for first-time TensorCast and Throughput Optimizer users. It walks through environment checks, LLM text-generation simulation, and throughput optimization, helping you understand the main inputs, outputs, and usage scenarios.
 
 ### 1.1 Before You Start
 
 **Experience Map (core operations take about 10 minutes)**
 
-> **Recommended order**: Step 1 is the environment baseline. Step 2 runs TensorCast single-model simulation. Steps 3 and 4 cover ServingCast throughput optimization and service simulation, and can be selected as needed.
+> **Recommended order**: Step 1 is the environment baseline. Step 2 runs TensorCast single-model simulation. Step 3 runs Throughput Optimizer throughput optimization.
 
 | Step | Stage | Core Module | Reference Operation Time | Suggested Concept Study |
 | :---: | :---: | :--- | :---: | :---: |
 | **1** | **Environment setup** | `msModeling` | 2 minutes | 5 minutes |
 | **2** | **Single-model simulation** | `TensorCast` | 1 minute | 10 minutes |
-| **3** | **Throughput optimization** | `ServingCast / Throughput Optimizer` | 2 minutes | 15 minutes |
-| **4** | **Service simulation** | `ServingCast` | 2 minutes | 15 minutes |
+| **3** | **Throughput optimization** | `Throughput Optimizer` | 2 minutes | 15 minutes |
 
 ### 1.2 Environment Preparation
 
@@ -51,7 +50,7 @@ Use the following commands to confirm the command-line entry points are availabl
 
 ```bash
 python -m cli.inference.text_generate --help
-python -m serving_cast.main --help
+python -m cli.inference.throughput_optimizer --help
 ```
 
 If the commands do not print help information, check that the virtual environment is activated, dependencies are installed, and `PYTHONPATH` points to the msModeling repository root.
@@ -154,95 +153,34 @@ Success criteria:
 - The output includes throughput, TTFT, and TPOT metrics.
 - No model configuration loading failure or parameter conflict is reported.
 
-### 2.4 Service Simulation: Run End-to-End Serving Simulation
-
-ServingCast service simulation uses YAML files to describe instance groups, request workloads, and serving limits. It can simulate end-to-end serving scenarios with multiple instances and requests, and outputs system-level metrics such as E2E_TIME, TTFT, TPOT, request throughput, and token throughput.
-
-#### 2.4.1 Inspect Example Configurations
-
-The repository includes example configurations that can be used directly:
-
-```bash
-ls serving_cast/example/instances.yaml serving_cast/example/common.yaml
-```
-
-The two configuration files are used as follows:
-
-| Config File | Purpose |
-| --- | --- |
-| `instances.yaml` | Describes one or more instance groups, such as role, instance count, and TP/DP parallelism. |
-| `common.yaml` | Describes global settings, such as model structure, request workload, serving limits, and simulation parameters. |
-
-The example configurations use `TEST_DEVICE` and `Qwen/Qwen3-32B` by default. To change the model, request length, or request count, edit `common.yaml`. To change instance count, device count, or parallel strategy, edit `instances.yaml`.
-
-#### 2.4.2 Run Service Simulation
-
-```bash
-python -m serving_cast.main \
-    --instance_config_path=./serving_cast/example/instances.yaml \
-    --common_config_path=./serving_cast/example/common.yaml
-```
-
-#### 2.4.3 Check Service Simulation Results
-
-When simulation finishes, the console prints a performance summary similar to:
-
-```text
-         E2E_TIME(s)  TTFT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
-AVERAGE     1052.591    0.378    0.301        1500.0         3500.0                           3.327
-MIN         1050.000    0.300    0.300        1500.0         3500.0                           2.978
-MAX         1175.500    0.600    0.336        1500.0         3500.0                           3.334
-======== Overall Summary ========
-request_throughput(req/s)      0.082
-input_token_throughput(tok/s)  122.399
-output_token_throughput(tok/s) 285.598
-```
-
-Metric descriptions:
-
-- `E2E_TIME`: End-to-end latency for a single request.
-- `TTFT`: Time to first token.
-- `TPOT`: Time per output token after the first token.
-- `request_throughput`: System-level request throughput.
-- `input_token_throughput` / `output_token_throughput`: Aggregated token throughput.
-
-Success criteria:
-
-- The terminal prints a request-level statistics table.
-- The output includes `Overall Summary`.
-- The output includes `request_throughput`, `input_token_throughput`, or `output_token_throughput`.
-
-#### 2.4.4 Enable Profiling (Optional)
-
-To obtain more fine-grained system performance information, add profiling parameters:
-
-```bash
-python -m serving_cast.main \
-    --instance_config_path=./serving_cast/example/instances.yaml \
-    --common_config_path=./serving_cast/example/common.yaml \
-    --enable_profiling \
-    --profiling_output_path=./profiling_results
-```
-
-Raw profiling results are saved under `profiling_output_path/{$time_stamp}`. Parsed results are saved under `profiling_output_path/{$time_stamp}_parsed_result`. The parsed output contains `chrome_tracing.json` and `profiler.db`, which can be opened with `chrome://tracing` or MindStudio Insight.
-
 ## 3. Validate Results and Next Steps
 
-If the commands above succeed, you have completed the core TensorCast and ServingCast workflow:
+If the commands above succeed, you have completed the core TensorCast and Throughput Optimizer workflow:
 
 - TensorCast: single-model text-generation performance simulation with operator latency, TPS/Device, and memory estimates.
 - Throughput Optimizer: throughput optimization under SLO constraints with recommended parallel strategy and throughput metrics.
-- ServingCast: end-to-end service simulation with TTFT, TPOT, request throughput, and token throughput.
 
 Common issues:
 
 - If model configuration cannot be downloaded, check network access to Hugging Face or set the `HF_ENDPOINT` mirror.
-- If `cli`, `tensor_cast`, or `serving_cast` cannot be imported, confirm that you are in the repository root or that `PYTHONPATH` is set correctly.
+- If `cli` or `tensor_cast` cannot be imported, confirm that you are in the repository root or that `PYTHONPATH` is set correctly.
 - If throughput optimization takes too long, reduce the search range, such as lowering `--num-devices` or explicitly specifying `--tp-sizes`.
 
 Continue with:
 
 - [TensorCast User Guide](../user_guide/msmodeling_tensor_cast_user_guide.md)
-- [ServingCast User Guide](../user_guide/msmodeling_serving_cast_user_guide.md)
 - [Throughput Optimizer Guide](../user_guide/msmodeling_throughput_optimizer_user_guide.md)
-- [ServingCast Simulation Guide](../user_guide/msmodeling_serving_cast_simulation_user_guide.md)
+
+## 4. [Optional] Web UI Experience
+
+If you prefer a visual workflow, you can use Web UI after completing the CLI steps above to configure single-model simulation, throughput optimization, and other tasks in the browser, and view results as charts and tables.
+
+Start Web UI from the repository root:
+
+```bash
+python -m web_ui.web_ui_start --port 2345
+```
+
+Open `http://127.0.0.1:2345` in your browser to configure model, chip, parallelism, quantization, and workload parameters on the page, and view simulation charts, detail tables, and exported results.
+
+For page layout, parameter configuration, and result interpretation, see the [Web UI User Guide](../user_guide/msmodeling_web_ui_user_guide.md).
