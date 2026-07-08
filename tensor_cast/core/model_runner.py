@@ -70,12 +70,10 @@ class ModelRunner:
                 # Exact match against pre-collected Profiling CSV database
                 if not profiling_database:
                     raise ValueError("--profiling-database must be specified when using --performance-model profiling")
-                data_source = InterpolatingDataSource(
-                    ProfilingDataSource(
-                        profiling_database,
-                        self.device_profile,
-                        parallel_config=user_input.get_parallel_config(),
-                    )
+                data_source = ProfilingDataSource(
+                    profiling_database,
+                    self.device_profile,
+                    parallel_config=user_input.get_parallel_config(),
                 )
                 if not getattr(user_input, "disable_profiling_interpolation", False):
                     data_source = InterpolatingDataSource(data_source)
