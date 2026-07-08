@@ -2,12 +2,6 @@ version: "0.15.0"
 device: ATLAS_800_A3_752T_128G_DIE
 cann_version: "8.5"
 
-interpolation_policy:
-  default_method: linear
-  kernel_overrides:
-    FusedInferAttentionScore:
-      shape_transform: sqrt
-
 operator_mappings:
   "tensor_cast.attention.default":
     kernel_type: FusedInferAttentionScore

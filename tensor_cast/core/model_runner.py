@@ -77,6 +77,8 @@ class ModelRunner:
                         parallel_config=user_input.get_parallel_config(),
                     )
                 )
+                if not getattr(user_input, "disable_profiling_interpolation", False):
+                    data_source = InterpolatingDataSource(data_source)
                 self.perf_models.append(
                     EmpiricalPerformanceModel(
                         self.device_profile,

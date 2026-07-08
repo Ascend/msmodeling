@@ -101,6 +101,8 @@ class UserInputConfig:
     """
     profiling_database: Optional[str] = None
     """Path to the performance database directory (required for 'profiling' mode)."""
+    disable_profiling_interpolation: bool = False
+    """Disable InterpolatingDataSource wrapper in profiling mode."""
 
     def __post_init__(self):
         self._normalize_model_source()
@@ -180,6 +182,9 @@ class UserInputConfig:
         print(f"Dump operator bound ratios: {self.dump_op_bound_results}")
         if self.chrome_trace:
             print(f"Chrome trace output file: {self.chrome_trace}")
+        if "profiling" in self.performance_model:
+            status = "Disabled" if self.disable_profiling_interpolation else "Enabled"
+            print(f"Profiling interpolation: {status}")
         if self.image_batch_size:
             print(f"image_batch_size: {self.image_batch_size}")
             print(f"image_height: {self.image_height}")

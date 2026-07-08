@@ -319,7 +319,7 @@ exact -> 1D -> 2D -> 3D
 
 含义是优先寻找“只有一个连续轴需要插值”的候选点；如果低维候选因为固定轴太严格无法形成 boundary，再扩大到 2D / 3D。第一阶段不将该顺序暴露为 `fallback_order` 配置。实现上不要求逐个维度全量重查，索引层应一次性返回各轴的 boundary/grid 可用性，再选择最低可用维度；compute 轴优先级建议为 `M -> K -> N`。
 
-`PARTIAL` 只表示 base `ProfilingDataSource` 已经产生了部分结果。第一阶段 wrapper 不做“对子 kernel 缺口局部补齐”的混合结果，而是把 `PARTIAL` 当作一次完整 wrapper 插值重试的入口：如果 wrapper 能独立生成完整插值结果，则返回 `QuerySource.INTERPOLATED` 并在 details 记录 `fallback_from="partial"`；如果 wrapper 插值失败，则原样返回 base 的 `PARTIAL`。
+`PARTIAL` 只表示 base `ProfilingDataSource` 已经产生了部分结果。第一阶段 wrapper 不做“对子 kernel 缺口局部补齐”的混合结果，而是把 `PARTIAL` 当作一次完整 wrapper 插值重试的入口：如果 wrapper 能独立生成完整插值结果，则返回 `QuerySource.INTERPOLATED` 并在 details 记录 `fallback_from="partial"`；如果 wrapper 插值失败，则返回 `None`，让上层 empirical 路径使用 analytic fallback，避免把只覆盖部分子 kernel 的 latency 当作完整 op latency。
 
 ### 5.3 InterpolatingDataSource 与候选点索引
 
@@ -862,6 +862,14 @@ tests/regression/tensor_cast/test_profiling_interpolation_phase1.py
 - attention holdout：CSV 至少覆盖 `avg_seq_len` 1D，并构造包含 batch/head_dim 或 heads 的 2D/3D 测试网格，移除目标点作为查询目标，验证结果与 `scipy.interpolate.griddata(..., method="linear")` 直接调用结果一致。即使真实 profiling 数据暂时缺少 batch/head_dim 多取值，也要用测试 CSV 覆盖第一阶段 2D/3D 代码路径。
 
 holdout / 精度损失对比需要生成可见报告，至少包含每个 holdout 样本的目标 axes、被移除的真实 latency、插值 latency、绝对误差、相对误差、source、confidence、method 和候选点数量。报告可以是 markdown 或 JSON artifact，例如 `phase1_profiling_interpolation_holdout_report_zh.md`。
+
+本轮实现期验证摘要：
+
+- repo-tracked 回归覆盖 interpolation math、candidate index、wrapper datasource、CLI help、composite decomposition、op_mapping policy，以及 synthetic M1、M3、M5 指标聚合行为。
+- 真实 profiling DB 的 enabled / disabled on/off 验证作为本 PR 的本地验证证据记录在 PR 描述中；完整 nightly/CI 非劣化门禁留后续。
+- synthetic holdout 覆盖 compute 和 attention 的 1D/2D/3D 代码路径，验证结果与 `linear_interp` / `scipy.interpolate.griddata(..., method="linear")` 一致；生产默认仍受 kernel policy、regime key、候选点完整性和 no-extrapolation 约束。
+- 本地补充跑过 Qwen3-32B prefill/decode、DeepSeek-V3 prefill/decode 四个 profiling 场景，导出 empirical metrics 和 chrome trace 后计算 M6；这些结果只用于说明 profiling model 的命中和覆盖情况，不解释为真实硬件吞吐提升。
+- 已知边界包括 MatMul / batch-matmul 数据稀疏与路由问题、AddRmsNormBias / shared-token elementwise-like 覆盖不足，以及 full nightly on/off gate 尚未纳入本 PR；这些作为后续数据或阶段演进事项跟踪。
 
 从用户视角，第一阶段要证明：
 

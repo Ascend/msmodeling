@@ -18,10 +18,14 @@ device: <DEVICE>
 cann_version: "<cann_version>"
 
 interpolation_policy:
-  default_method: linear
   kernel_overrides:
+    MatMulV3:
+      max_interpolation_dim: 1
     FusedInferAttentionScore:
-      shape_transform: sqrt    # O(seq²) 算子在 sqrt 空间中插值
+      axis_transform: sqrt_seq # O(seq²) 算子对 seq 坐标轴做 sqrt 变换后插值，不是 latency value transform
+    GatherV2:
+      generic_compute:
+        axis: output_numel
 
 operator_mappings:
   "aten.mm.default":

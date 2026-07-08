@@ -136,7 +136,7 @@ ModelRunner / PerformanceModel Factory
          |                                                               |
          |-- base exact / _query_comm_csv                                |-- CandidateIndex / ComputeIndex
          |-- base alpha-beta(message_bytes) may return INTERPOLATED      |-- axes: M / K / N
-         |-- wrapper returns base result or None/PARTIAL unchanged       |-- regime keys:
+         |-- wrapper returns interpolated result or None fallback        |-- regime keys:
          |                                                               |     kernel_type, dtype, format,
          |                                                               |     layout, transpose, exact fields
          |                                                               |-- algorithms:
@@ -286,7 +286,7 @@ exact -> 1D -> 2D -> 3D
 
 This means the runtime first searches for candidates where only one continuous axis needs interpolation. If low-dimensional candidates cannot form a boundary because the fixed axes are too strict, the search expands to 2D and then 3D. This order is chosen to minimize error and behavior change. The index layer should avoid full table rescans per dimension and should return boundary/grid availability for the current regime.
 
-`PARTIAL` means the base `ProfilingDataSource` produced a partial result. Phase 1 does not merge wrapper interpolation into missing sub-kernels. Instead, `PARTIAL` is treated as an entry point for a whole-wrapper retry: if the wrapper can independently build a complete interpolation result, it returns `QuerySource.INTERPOLATED` with `details["fallback_from"] = "partial"`; otherwise the original base `PARTIAL` is returned unchanged.
+`PARTIAL` means the base `ProfilingDataSource` produced a partial result. Phase 1 does not merge wrapper interpolation into missing sub-kernels. Instead, `PARTIAL` is treated as an entry point for a whole-wrapper retry: if the wrapper can independently build a complete interpolation result, it returns `QuerySource.INTERPOLATED` with `details["fallback_from"] = "partial"`; otherwise the wrapper returns `None` so the upper empirical path uses analytic fallback. The base `PARTIAL` latency is not reused in that failure case because partial sub-kernel latency should not be treated as full op latency.
 
 ## 7. Candidate Index Layer
 
@@ -624,6 +624,14 @@ Holdout tests:
 - Attention holdout: cover `avg_seq_len` 1D and synthetic/enriched 2D/3D grids with batch/head/head_dim.
 
 The implementation should produce a visible holdout / accuracy-loss report, either markdown or JSON. At minimum it should list target axes, removed measured latency, interpolated latency, absolute error, relative error, source, confidence, method and candidate count for every holdout sample.
+
+Implementation validation summary:
+
+- Repo-tracked regressions cover interpolation math, candidate indexing, the wrapper datasource, CLI help, composite decomposition, op_mapping policy, and synthetic M1/M3/M5 metric aggregation behavior.
+- Real profiling DB enabled / disabled on/off validation is kept as local evidence in the PR description; full nightly/CI non-regression gating is follow-up work.
+- Synthetic holdout coverage exercises compute and attention 1D/2D/3D code paths and checks results against `linear_interp` / `scipy.interpolate.griddata(..., method="linear")`; production use is still constrained by kernel policy, regime keys, candidate completeness and no-extrapolation.
+- Local validation additionally ran four profiling scenarios: Qwen3-32B prefill/decode and DeepSeek-V3 prefill/decode. The runs exported empirical metrics and chrome traces and then computed M6. These results describe profiling-model hit and coverage behavior, not real hardware throughput gains.
+- Known boundaries remain tracked separately: MatMul / batch-matmul data sparsity and routing, AddRmsNormBias / shared-token elementwise-like coverage, and the absence of a full nightly on/off gate in this PR.
 
 ## 17. Implementation Steps
 

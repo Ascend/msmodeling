@@ -35,11 +35,12 @@
 # communication_data_ref (string): 通信 CSV 数据的相对路径.
 # communication_fallback (string): 通信查询未命中时的回退策略 (analytic).
 # interpolation_policy: 插值策略配置.
-#   default_method (string): 默认插值方法 (linear). 所有算子默认 dtype+format
-#     精确匹配, shape 维度线性插值.
 #   kernel_overrides (map): 特定 kernel 的插值覆盖配置.
-#     示例: FusedInferAttentionScore: { shape_transform: sqrt }
-#     shape_transform: sqrt 用于 O(seq²) 复杂度的算子, 在 sqrt(seq) 空间插值.
+#     示例: FusedInferAttentionScore: { axis_transform: sqrt_seq }
+#     axis_transform: sqrt_seq 用于 O(seq²) 复杂度的算子, 对 seq 坐标轴做 sqrt 变换后插值, 不是 latency value transform.
+#
+#     max_interpolation_dim: 限制某个 kernel 的最大插值维度, 如 MatMulV3: { max_interpolation_dim: 1 }.
+#     generic_compute.axis: output_numel 使用 output numel 作为 generic compute 1D 插值轴.
 #
 # --- operator_mappings 中每条映射的可用字段 ---
 #
@@ -164,10 +165,9 @@ communication_data_ref: "../../hccl/v8.1.RC1/"
 communication_fallback: analytic
 
 interpolation_policy:
-  default_method: linear    # 所有算子默认: dtype+format 精确匹配, shape 维度线性插值
   kernel_overrides:         # 仅列出需要特殊处理的 kernel_type
     FusedInferAttentionScore:
-      shape_transform: sqrt # O(seq²) → 在 sqrt(seq) 空间插值
+      axis_transform: sqrt_seq # O(seq²) → 对 seq 坐标轴做 sqrt 变换后插值
 
 
 # ============================================================================

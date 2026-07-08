@@ -300,7 +300,8 @@ def main():
         help="Performance model type(s). Can specify one or more models. "
         "'analytic': Roofline model (default, no data required). "
         "'profiling': EmpiricalPerformanceModel backed by Profiling CSV database "
-        "(exact match, requires --profiling-database). "
+        "with optional interpolation; use --disable-profiling-interpolation for exact and partial "
+        "profiling matches only (requires --profiling-database). "
         "Example: --performance-model analytic --performance-model profiling",
     )
     parser.add_argument(
@@ -310,6 +311,11 @@ def main():
         help="Path to the performance database directory for 'profiling' mode. "
         "The directory must contain op_mapping.yaml and per-kernel-type CSV files, "
         "e.g. tensor_cast/performance_model/profiling_database/data/atlas_a3_752t_128g/vllm_ascend/v0.13.0/",
+    )
+    parser.add_argument(
+        "--disable-profiling-interpolation",
+        action="store_true",
+        help="Use exact and partial profiling database matches only when using --performance-model profiling.",
     )
     parser.add_argument(
         "--export-empirical-metrics",

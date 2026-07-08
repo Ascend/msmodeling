@@ -56,13 +56,6 @@
 # collection_date (string): profiling data collection date (YYYY-MM-DD).
 # communication_data_ref (string): Relative path to communication CSV data.
 # communication_fallback (string): Fallback strategy when communication query misses (analytic).
-# interpolation_policy: Interpolation policy configuration.
-# default_method (string): Default interpolation method (linear). All operators default to dtype+format
-# Exact matching, linear interpolation of shape dimension.
-# kernel_overrides (map): Interpolation override configuration for a specific kernel.
-# Example: FusedInferAttentionScore: { shape_transform: sqrt }
-# shape_transform: sqrt operator for O(seq²) complexity, interpolating in sqrt(seq) space.
-#
 # --- Available fields for each mapping in operator_mappings ---
 #
 # kernel_type (string, required*):
@@ -204,11 +197,21 @@ communication_data_ref: "../../hccl/v8.5/"
 communication_fallback: analytic
 
 interpolation_policy:
-  default_method: linear
   kernel_overrides:
+    MatMulV2:
+      max_interpolation_dim: 1
+    MatMulV3:
+      max_interpolation_dim: 1
+    MatMulCommon:
+      max_interpolation_dim: 1
     FusedInferAttentionScore:
-      shape_transform: sqrt
-
+      axis_transform: sqrt_seq
+    GatherV2:
+      generic_compute:
+        axis: output_numel
+    Index:
+      generic_compute:
+        axis: output_numel
 
 # ============================================================================
 # Calculate operator mapping (operator_mappings)

@@ -200,10 +200,9 @@ communication_data_ref: "../../hccl/<cann_version>/"
 communication_fallback: analytic
 
 interpolation_policy:
-  default_method: linear
   kernel_overrides:
     FusedInferAttentionScore:
-      shape_transform: sqrt    # O(seq^2) → interpolate in sqrt(seq) space
+      axis_transform: sqrt_seq    # O(seq^2) -> interpolate in sqrt(seq) space
 ```
 
 ### 4c: Organize by Category

@@ -250,11 +250,6 @@ class TestDecomposeMLAQuant:
 MLA_OP_MAPPING = """\
 version: "test"
 device: TEST_DEVICE
-interpolation_policy:
-  default_method: linear
-  kernel_overrides:
-    FusedInferAttentionScore:
-      shape_transform: sqrt
 operator_mappings:
   "tensor_cast.multihead_latent_attention.default":
     composite: true
@@ -458,11 +453,6 @@ class TestCompositeInterpolation:
 EXTRAP_OP_MAPPING = """\
 version: "test"
 device: TEST_DEVICE
-interpolation_policy:
-  default_method: linear
-  kernel_overrides:
-    FusedInferAttentionScore:
-      shape_transform: sqrt
 operator_mappings:
   "aten.mm.default":
     kernel_type: MatMulV2
@@ -479,7 +469,8 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 
 _EXTRAP_FIA_HEADER = (
     "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
-    "Output Data Types,Output Formats,Duration(us),avg_seq_len"
+    "Output Data Types,Output Formats,Duration(us),avg_seq_len,"
+    "Runtime sparse_mode,Runtime input_layout,Runtime num_key_value_heads"
 )
 _EXTRAP_FIA_ROW_COMMON = (
     '"1,4,128;16,128,4,128;16,128,4,128;;;;1;;;;;;;;1,16;;;;;;;;;;;;;;"'
@@ -497,11 +488,11 @@ EXTRAP_FIA_CSV = (
     _EXTRAP_FIA_HEADER
     + "\n"
     + _EXTRAP_FIA_ROW_COMMON
-    + ",100.0,1000\n"
+    + ",100.0,1000,3,TND,4\n"
     + _EXTRAP_FIA_ROW_COMMON
-    + ",400.0,2000\n"
+    + ",400.0,2000,3,TND,4\n"
     + _EXTRAP_FIA_ROW_COMMON
-    + ",1600.0,4000"
+    + ",1600.0,4000,3,TND,4"
 )
 
 
@@ -665,7 +656,7 @@ class TestConfidenceLevels:
         assert result.confidence == 0.7
         assert result.source == QuerySource.INTERPOLATED
 
-    def test_sqrt_interpolation_confidence_06(self, extrap_data_dir):
+    def test_attention_interpolation_uses_1d_confidence(self, extrap_data_dir):
         base = ProfilingDataSource(extrap_data_dir)
         ds = InterpolatingDataSource(base)
         op = _make_op_info(
@@ -683,7 +674,7 @@ class TestConfidenceLevels:
         )
         result = ds.lookup(op)
         assert result is not None
-        assert result.confidence == 0.6
+        assert result.confidence == 0.7
 
     def test_composite_exact_confidence_08(self, mla_data_dir):
         """Composite exact match → confidence 0.8."""
@@ -702,8 +693,8 @@ class TestConfidenceLevels:
         result = ds.lookup(op)
         assert result.confidence == 0.8
 
-    def test_composite_interpolated_confidence_05(self, mla_data_dir):
-        """Composite with FIA raw shape miss → None (no interpolation for raw shapes yet)."""
+    def test_composite_partial_miss_returns_none_for_analytic_fallback(self, mla_data_dir):
+        """Composite PARTIAL miss falls through so analytic fallback can cover residual latency."""
         base = ProfilingDataSource(mla_data_dir)
         ds = InterpolatingDataSource(base)
         args = _make_mla_decode_args(
@@ -718,10 +709,10 @@ class TestConfidenceLevels:
         )
         op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
-        # FIA raw shape for batch=32 not in CSV → sub_kernel_miss → PARTIAL
-        assert result is not None
-        assert result.source == QuerySource.PARTIAL
-        assert result.details.get("partial") is True
+        # FIA raw shape for batch=32 is not in CSV. Interpolation misses, so the
+        # wrapper returns None and lets EmpiricalPerformanceModel use analytic fallback
+        # instead of exposing a partial sub-kernel latency as a complete result.
+        assert result is None
 
 
 # ---- 4. Monotonicity ----
@@ -768,8 +759,8 @@ class TestMonotonicity:
         assert result is not None
         assert 25.0 <= result.latency_us <= 50.0
 
-    def test_attention_sqrt_within_bounds(self, extrap_data_dir):
-        """Sqrt-interpolated attention value within bracket bounds."""
+    def test_attention_interpolation_within_bounds(self, extrap_data_dir):
+        """Interpolated attention value within bracket bounds."""
         base = ProfilingDataSource(extrap_data_dir)
         ds = InterpolatingDataSource(base)
         op = _make_op_info(
@@ -819,22 +810,18 @@ class TestDtypeMismatch:
         assert result is None
 
 
-# ---- 6. Sqrt vs linear accuracy comparison ----
+# ---- 6. Attention linear accuracy comparison ----
 
 
-class TestSqrtTransformAccuracy:
-    """Verify sqrt transform behavior for O(n²) ops."""
+class TestAttentionLinearInterpolationAccuracy:
+    """Verify default attention interpolation is linear unless an explicit policy is added later."""
 
-    def test_sqrt_transform_applied(self, extrap_data_dir):
-        """Sqrt interpolation produces different result than linear would.
+    def test_attention_linear_interpolation_applied(self, extrap_data_dir):
+        """Default attention interpolation uses linear seq interpolation.
 
         CSV: seq=1000→100, seq=2000→400, seq=4000→1600
         For seq=1500 (between 1000 and 2000):
           Linear: 100 + 0.5*300 = 250
-          Sqrt: in sqrt space, t=(sqrt(1500)-sqrt(1000))/(sqrt(2000)-sqrt(1000))
-                = (38.73-31.62)/(44.72-31.62) = 0.543
-                interp = 100 + 0.543*300 = 262.8
-        Sqrt gives a different (higher) value, reflecting the nonlinear scaling.
         """
         base = ProfilingDataSource(extrap_data_dir)
         ds = InterpolatingDataSource(base)
@@ -853,11 +840,7 @@ class TestSqrtTransformAccuracy:
         )
         result = ds.lookup(op)
         assert result is not None
-        # Sqrt result should differ from naive linear midpoint (250)
-        linear_midpoint = 250.0
-        assert abs(result.latency_us - linear_midpoint) > 5.0, (
-            "Sqrt transform should produce different result than linear"
-        )
+        assert result.latency_us == pytest.approx(250.0)
         # Should be within bracket bounds
         assert 100.0 <= result.latency_us <= 400.0
 
