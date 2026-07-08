@@ -308,7 +308,7 @@ class BaseThroughputOptimizer(ABC):
         )
 
         record = ForwardLatencyRecord(
-            latency_ms=batch_result.execution_time_s.get("analytic") * 1000,
+            latency_ms=self._select_latency_s(batch_result.execution_time_s) * 1000,
             memory_left_gb=batch_result.device_memory_available_gb,
             breakdowns=format_breakdowns(batch_result.breakdowns),
             memory_info=build_memory_info(batch_result),
@@ -316,6 +316,16 @@ class BaseThroughputOptimizer(ABC):
         )
         self._cache_forward_latency_record(key, record)
         return record
+
+    @staticmethod
+    def _select_latency_s(execution_time_s: dict) -> float:
+        """Prefer the empirical (profiling) latency when present, else analytic.
+
+        Uses an explicit ``is not None`` check so a measured ``0.0`` is not
+        treated as a missing value (which ``or`` would do).
+        """
+        empirical = execution_time_s.get("empirical")
+        return empirical if empirical is not None else execution_time_s.get("analytic")
 
     def _get_cached_forward_latency_record(self, key: ForwardShapeKey) -> ForwardLatencyRecord | None:
         return self._forward_record_cache.get(key)

@@ -349,6 +349,39 @@ class TestBaseBackend(unittest.TestCase):
         self.assertEqual((request.query_len, request.seq_len, request.concurrency), (6, 12, 5))
         self.assertEqual((request.image_batch_size, request.image_height, request.image_width), (2, 224, 336))
 
+    def test_select_latency_s_prefers_empirical_over_analytic(self):
+        self.assertEqual(
+            self.backend._select_latency_s({"empirical": 0.5, "analytic": 0.9}),
+            0.5,
+        )
+
+    def test_select_latency_s_treats_zero_empirical_as_present(self):
+        # 0.0 is a valid measured latency and must not fall back to analytic.
+        self.assertEqual(
+            self.backend._select_latency_s({"empirical": 0.0, "analytic": 0.9}),
+            0.0,
+        )
+
+    def test_select_latency_s_falls_back_to_analytic_when_empirical_absent(self):
+        self.assertEqual(self.backend._select_latency_s({"analytic": 0.9}), 0.9)
+
+    def test_compute_forward_latency_record_uses_empirical_when_present(self):
+        # Regression guard: profiling-only runs expose only the "empirical" key.
+        # Previously this path hardcoded .get("analytic") and crashed on None * 1000.
+        fake_runner = FakeModelRunner()
+        fake_runner.run_inference = lambda requests, generate_inputs_func: SimpleNamespace(
+            execution_time_s={"empirical": 0.02},
+            device_memory_available_gb=3.5,
+            breakdowns={},
+        )
+        self.backend.model_runner = fake_runner
+        optimizer_data = OptimizerData(input_length=12, output_length=8, batch_size=2)
+        key = self.backend._make_forward_shape_key(5, optimizer_data, is_decode=False, query_len=6, seq_len=12)
+
+        record = self.backend._compute_forward_latency_record(key, optimizer_data)
+
+        self.assertEqual(record.latency_ms, 20.0)
+
     def test_get_forward_latency_ms_applies_mtp_only_to_decode_records(self):
         optimizer_data = OptimizerData(num_mtp_tokens=2, mtp_acceptance_rate=[0.5, 0.25, 1.0])
         prefill_key = ForwardShapeKey(False, 4, 100, 100)

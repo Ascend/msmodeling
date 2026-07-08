@@ -167,6 +167,23 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device TEST_DE
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device TEST_DEVICE --num-devices 8 --input-length 3500 --output-length 1500 --tpot-limits 50 --ep-sizes
 ```
 
+## Performance model selection
+
+By default `throughput_optimizer` estimates operator latency with the analytic (Roofline) model. Use `--performance-model` to switch to a profiling model backed by measured operator CSV data:
+
+- `--performance-model analytic` (default): pure analytic Roofline model, no extra data required.
+- `--performance-model profiling`: model latency from measured operator data. You **must** also pass `--profiling-database <dir>`, otherwise the run errors out at startup. When an operator shape is missing from the CSV data, interpolation is attempted first, falling back to the analytic model on a miss.
+
+`--performance-model` may be specified multiple times (e.g. both `analytic` and `profiling`) to compare results across models.
+
+Example:
+
+```bash
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device ATLAS_800_A3_752T_128G_DIE --num-devices 8 --input-length 3500 --output-length 1500 --tpot-limits 50 \
+    --performance-model profiling \
+    --profiling-database tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/
+```
+
 ## 3 Result Information
 
 The script outputs performance metrics (throughput, TTFT, TPOT, concurrency, and mode-specific fields such as QPS or PD ratio). Example:
@@ -255,6 +272,12 @@ Model & Quantization Options:
   --moe-dp-sizes [MOE_DP_SIZES ...]
                         Enable MOE-DP search. Optional explicit MOE-DP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
 
+Performance Model Options:
+  --performance-model {analytic,profiling}
+                        Performance model type(s). 'analytic': Roofline model (default). 'profiling': empirical model backed by measured CSV data (requires --profiling-database). May be specified multiple times. (default: None)
+  --profiling-database PROFILING_DATABASE
+                        Path to the profiling CSV database directory for 'profiling' mode. e.g. tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/ (default: None)
+
 Service Options:
   --ttft-limits TTFT_LIMITS
                         TTFT constraints under which to search for the best throughput. None means no constraint. (default: None)
@@ -324,6 +347,8 @@ Main parameters:
 | `--enable-sequence-parallel` | Model & Quantization Options | Optional | Enables the sequence parallel graph rewrite pass during compilation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--enable-dispatch-ffn-combine` | Model & Quantization Options | Optional | Enables dispatch_ffn_combine fusion pattern during compilation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--word-embedding-tp` | Model & Quantization Options | Optional | Enables word embedding tensor parallel and specifies mode.<br>1. Type: Str.<br>2. Reference values: `col`, `row`.<br>3. Default: `None`, meaning embedding TP is disabled. |
+| `--performance-model` | Performance Model Options | Optional | Performance model type(s); may be specified multiple times to compare models.<br>1. Type: Str.<br>2. Reference values: `analytic`, `profiling`.<br>3. Default: `None`, resolved to `analytic` when omitted.<br>4. `profiling` mode requires `--profiling-database`. |
+| `--profiling-database` | Performance Model Options | Conditional | Directory of the measured operator CSV database used by profiling mode.<br>1. Type: Str.<br>2. Value: database directory path, such as `tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/`.<br>3. Default: `None`; required when `--performance-model profiling` is used. |
 | `--chrome-trace` | Debug Options | Optional | Generates a Chrome Trace file for operator-level performance visualization.<br>1. Type: Str.<br>2. Reference value: trace file path, such as `trace.json`.<br>3. Default: `None`. |
 | `--ttft-limits` | Service Options | Optional | TTFT constraint for throughput search.<br>1. Type: Float.<br>2. Valid range: positive number, in ms.<br>3. Default: `None`, meaning no TTFT constraint. |
 | `--tpot-limits` | Service Options | Optional | TPOT constraint for throughput search.<br>1. Type: Float.<br>2. Valid range: positive number, in ms.<br>3. Default: `None`, meaning no TPOT constraint. |

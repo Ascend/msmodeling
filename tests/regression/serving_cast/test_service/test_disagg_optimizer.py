@@ -84,6 +84,36 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["device_name"], "TEST_DEVICE")
         self.assertEqual(row["parallel"], "TP=1 | PP=1 | DP=4 | MTP=1")
 
+    def test_get_inference_info_decode_uses_empirical_latency_when_present(self):
+        # Regression guard for profiling mode: the decode/single-chunk path must
+        # read the "empirical" key and not crash when "analytic" is absent.
+        optimizer_data = OptimizerData(
+            ttft_limits=None,
+            tpot_limits=50,
+            batch_size=2,
+            input_length=512,
+            output_length=128,
+            max_batched_tokens=2048,
+            serving_cost=3,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            class DummyMetrics:
+                execution_time_s = {"empirical": 0.002}
+                device_memory_available_gb = 1.0
+                breakdowns = {}
+
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        # latency_ms = empirical (0.002 s -> 2 ms) + serving_cost (3) = 5 ms
+        self.assertEqual(row["tpot"], 5.0)
+
     def test_get_inference_info_prefill_mode(self):
         """Test get_inference_info method in prefill mode"""
         # Mock data config for prefill mode

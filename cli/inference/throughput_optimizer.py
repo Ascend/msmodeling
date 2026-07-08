@@ -200,6 +200,26 @@ def arg_parse():
         default=None,
         help="Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled.",
     )
+    perf_group = parser.add_argument_group("Performance Model Options")
+    perf_group.add_argument(
+        "--performance-model",
+        action="append",
+        default=None,
+        dest="performance_model",
+        choices=["analytic", "profiling"],
+        help="Performance model type(s). 'analytic': Roofline model (default). "
+        "'profiling': empirical model backed by measured CSV data "
+        "(requires --profiling-database). May be specified multiple times.",
+    )
+    perf_group.add_argument(
+        "--profiling-database",
+        type=str,
+        default=None,
+        dest="profiling_database",
+        help="Path to the profiling CSV database directory for 'profiling' mode. "
+        "e.g. tensor_cast/performance_model/profiling_database/data/"
+        "ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/",
+    )
     debug_group = parser.add_argument_group("Debug Options")
     debug_group.add_argument(
         "--chrome-trace",
@@ -326,6 +346,12 @@ def arg_parse():
             parser.error("--num-mtp-tokens expects at least one candidate when provided.")
 
         return normalized[0], normalized
+
+    # Default performance_model to analytic if not specified
+    if args.performance_model is None:
+        args.performance_model = ["analytic"]
+    if "profiling" in args.performance_model and not args.profiling_database:
+        parser.error("--profiling-database is required when using --performance-model profiling")
 
     def _normalize_and_validate(values: list[int] | None, arg_name: str, num_devices: int) -> list[int] | None:
         if values is None:

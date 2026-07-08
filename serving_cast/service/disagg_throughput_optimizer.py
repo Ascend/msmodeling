@@ -62,7 +62,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 batch_result, composition_rows = self._get_batched_forward_info(concurrency, optimizer_data)
             else:
                 batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
-            latency_ms = batch_result.execution_time_s.get("analytic") * 1000 + optimizer_data.serving_cost
+            latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000 + optimizer_data.serving_cost
             device_memory_available_gb = batch_result.device_memory_available_gb
             breakdowns = format_breakdowns(batch_result.breakdowns)
             memory_info = build_memory_info(batch_result)

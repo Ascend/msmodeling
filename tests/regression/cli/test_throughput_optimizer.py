@@ -75,6 +75,34 @@ class TestThroughputOptimizer(TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("num_mtp_tokens candidates [6] exceed", "\n".join(logs.output))
 
+    def test_arg_parse_performance_model_defaults_to_analytic(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            "Qwen/Qwen3-32B",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            args = throughput_optimizer_module.arg_parse()
+
+        self.assertEqual(args.performance_model, ["analytic"])
+
+    def test_arg_parse_profiling_without_database_errors(self):
+        argv = [
+            "--input-length=1",
+            "--output-length=1",
+            "Qwen/Qwen3-32B",
+            "--performance-model=profiling",
+        ]
+
+        result = self._run_throughput_optimizer(argv, check=False)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--profiling-database", result.stderr)
+
     def _run_throughput_optimizer(self, args, check=True):
         """Run throughput_optimizer's main() in-process so coverage sees the core path."""
         result = run_module_main(THROUGHPUT_OPTIMIZER_MODULE, args)

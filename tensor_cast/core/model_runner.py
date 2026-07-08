@@ -19,7 +19,7 @@ from ..layers.sampler import Sampler
 from ..performance_model.analytic import AnalyticPerformanceModel
 from ..performance_model.empirical import EmpiricalPerformanceModel
 from ..performance_model.memory_tracker import MemoryTracker
-from ..performance_model.profiling_database import ProfilingDataSource
+from ..performance_model.profiling_database import InterpolatingDataSource, ProfilingDataSource
 from ..performance_model.utils import bytes_of_tensor
 from ..runtime import Runtime
 from ..transformers.custom_model_registry import get_visual
@@ -70,10 +70,12 @@ class ModelRunner:
                 # Exact match against pre-collected Profiling CSV database
                 if not profiling_database:
                     raise ValueError("--profiling-database must be specified when using --performance-model profiling")
-                data_source = ProfilingDataSource(
-                    profiling_database,
-                    self.device_profile,
-                    parallel_config=user_input.get_parallel_config(),
+                data_source = InterpolatingDataSource(
+                    ProfilingDataSource(
+                        profiling_database,
+                        self.device_profile,
+                        parallel_config=user_input.get_parallel_config(),
+                    )
                 )
                 self.perf_models.append(
                     EmpiricalPerformanceModel(
