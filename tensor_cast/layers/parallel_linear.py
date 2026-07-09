@@ -71,6 +71,7 @@ class RowParallelLinear(ParallelLinearBase):
         head_num: Optional[int] = None,
         slice_input_by_last_dim: bool = False,
         reduce_output: bool = True,
+        gather_slice_data: Optional[bool] = None,
     ):
         super().__init__(linear_layer)
         self.tp_group = tp_group
@@ -87,9 +88,10 @@ class RowParallelLinear(ParallelLinearBase):
         self.create_weights()
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
-        self.gather_slice_data = (
+        auto_gather_slice_data = (
             self.tp_group.world_size > 1 and self.global_tp_group.world_size != self.tp_group.world_size
         )
+        self.gather_slice_data = auto_gather_slice_data if gather_slice_data is None else gather_slice_data
         self.slice_input_by_last_dim = slice_input_by_last_dim
         self.reduce_output = reduce_output
 
@@ -169,6 +171,7 @@ class ColumnParallelLinear(ParallelLinearBase):
         is_replicable: bool = False,
         gather_output: bool = False,
         dim: int = 0,
+        gather_slice_data: Optional[bool] = None,
     ):
         super().__init__(linear_layer)
         self.tp_group = tp_group
@@ -190,9 +193,10 @@ class ColumnParallelLinear(ParallelLinearBase):
         self.create_weights(dim=dim)
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
-        self.gather_slice_data = (
+        auto_gather_slice_data = (
             self.tp_group.world_size > 1 and self.global_tp_group.world_size != self.tp_group.world_size
         )
+        self.gather_slice_data = auto_gather_slice_data if gather_slice_data is None else gather_slice_data
         self.gather_output = gather_output
 
     def create_weights(self, dim: int = 0):

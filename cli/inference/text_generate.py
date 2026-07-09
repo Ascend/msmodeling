@@ -168,6 +168,12 @@ def main():
         help="The tp size for the whole model",
     )
     par_group.add_argument(
+        "--pp-size",
+        type=check_positive_integer,
+        default=1,
+        help="The pipeline parallel size for the whole model",
+    )
+    par_group.add_argument(
         "--dp-size",
         type=check_positive_integer,
         default=None,

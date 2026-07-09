@@ -6,7 +6,7 @@ from tensor_cast.core.input_generator import generate_inputs
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.performance_model.metrics_collector import MetricsCollector
 
-from .actual import ActualSummary, build_actual_summary_from_runtime
+from .actual import ActualSummary, build_actual_summary_from_events
 from .evidence import EvidenceCase
 
 
@@ -37,17 +37,32 @@ def run_actual_case(evidence_case: EvidenceCase, user_input: Any) -> ActualRunRe
         if hasattr(case_input, key):
             setattr(case_input, key, value)
     runner = ModelRunner(case_input)
-    summary = None
+    runtime_events = []
+    coverage: Dict[str, Any] = {}
+    observed_runtime = False
+    perf_model_name = None
+    total_forward_time_s = None
 
     def collect_summary(runtime):
-        nonlocal summary
-        summary = build_actual_summary_from_runtime(
-            runtime,
-            case_name=evidence_case.name,
-            coverage=_collect_empirical_coverage(runtime.perf_models),
-        )
+        nonlocal observed_runtime, perf_model_name, total_forward_time_s
+        observed_runtime = True
+        runtime_events.extend(runtime.event_list)
+        if perf_model_name is None and runtime.perf_models:
+            perf_model_name = runtime.perf_models[0].name
+        if perf_model_name is not None:
+            runtime_total = runtime.total_execution_time_s().get(perf_model_name)
+            if runtime_total is not None:
+                total_forward_time_s = (0.0 if total_forward_time_s is None else total_forward_time_s) + runtime_total
+        coverage.update(_collect_empirical_coverage(runtime.perf_models))
 
     metrics = runner.run_inference(generate_inputs_func=generate_inputs, runtime_observer=collect_summary)
-    if summary is None:
+    if not observed_runtime:
         raise RuntimeError("ModelRunner did not provide runtime events for actual summary collection.")
+    summary = build_actual_summary_from_events(
+        runtime_events,
+        case_name=evidence_case.name,
+        perf_model_name=perf_model_name,
+        total_forward_time_s=total_forward_time_s,
+        coverage=coverage,
+    )
     return ActualRunResult(metrics=metrics, summary=summary)

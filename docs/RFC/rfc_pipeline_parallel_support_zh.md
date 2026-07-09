@@ -1,4 +1,4 @@
-# RFC: Pipeline Parallel 并行仿真支持
+﻿# RFC: Pipeline Parallel 并行仿真支持
 
 ## 元数据
 
@@ -489,11 +489,10 @@ stage_time[i] = stage_compute_time[i] + stage_comm_time[i]
 整体 pipeline latency：
 
 ```text
-latency_s = sum(stage_times) + (num_microbatches - 1) * max(stage_times)
+latency_s = sum(stage_times) + sum(stage_transfer_times)
 ```
 
-其中 `num_microbatches` 可由 `len(input_kwargs["attention_meta"].query_lens)` 推导，并至少为 1。该公式等价于 fill-drain 近似：第一批需要经过所有 stage，后续 microbatch 按最慢 stage 的节拍推进。
-
+当前 TensorCast PP 保持单次 model forward 仿真语义；chunked prefill、microbatch 和 pipeline bubble 由 ServingCast 或真实运行时调度层建模。
 `PipelineRuntimeEstimate` 保存：
 
 | 字段 | 含义 |
@@ -596,7 +595,7 @@ Mem 25.00 | Comm 25.00 | Cube 50.00 | Vec 0.00 | PP Compute 50.00 | PP Comm 16.6
 - 对当前 analytic/profiling 两套性能模型都会产生较大影响。
 - 首版实现成本高，不适合作为 PP 搜索接入的第一阶段。
 
-本 RFC 采用 stage-first trace 加 fill-drain latency 近似，作为真实 pipeline runtime 模拟之前的中间架构。
+本 RFC 采用 stage-first trace 加单次 forward 的 stage compute / logical transfer 累加，作为 TensorCast PP 的当前仿真口径。
 
 ### 3.4 基于模型声明的 `_pp_plan`
 
@@ -628,7 +627,7 @@ Mem 25.00 | Comm 25.00 | Cube 50.00 | Vec 0.00 | PP Compute 50.00 | PP Comm 16.6
 | Stage-aware 显存估算 | 待实现 | `pipeline_max_stage_weight_size`、active-layer KV cache per token、PP 最大 stage KV cache。 | 覆盖权重和 KV cache active layer 测试。 |
 | Stage-first runtime trace | 待实现 | 每个 stage 单独 forward、compile、trace 和 performance model 建模。 | 覆盖无跨 stage fusion、stage trace fallback 和 runtime estimate 测试。 |
 | Logical send/recv 建模 | 待实现 | hidden states message bytes、stage 边界 send/recv pseudo event、comm latency。 | 覆盖通信边界、首中末通信方向和拓扑带宽选择。 |
-| PP latency 估算 | 待实现 | stage compute + comm、fill-drain latency、bubble 计算。 | 覆盖 latency 公式和 microbatch 边界。 |
+| PP latency 估算 | 已实现 | stage compute + logical transfer、bubble 计算。 | 覆盖单次 forward latency 公式和 transfer 聚合。 |
 | serving breakdown 展示 | 待实现 | `format_breakdowns()` 分离 op-bound 与 PP breakdown。 | 覆盖 `PP Compute`、`PP Comm`、`PP Bubble` 格式化测试。 |
 
 ### 4.2 测试计划
@@ -658,7 +657,7 @@ python -m pytest serving_cast/tests/ut/test_tensor_cast_model_runner.py -q
 | Compile/trace 边界 | `torch.compile` 和 runtime trace 在 stage-local graph 上执行，不跨 PP 边界融合。 |
 | Cache 估算 | KV cache 和 DSA indexer cache 只累计 active stage layers。 |
 | 通信建模 | message bytes、send/recv pseudo event、首中末通信方向、拓扑带宽和延迟。 |
-| 时延模型 | stage compute、stage comm、fill-drain latency、microbatch 数和 bubble。 |
+| 时延模型 | stage compute、stage comm、logical transfer 和 bubble；当前 TensorCast PP 为单次 forward 口径。 |
 | 输出格式 | PP breakdown 与原 op-bound breakdown 分开展示。 |
 
 ### 4.3 后续演进
@@ -669,7 +668,7 @@ python -m pytest serving_cast/tests/ut/test_tensor_cast_model_runner.py -q
 | VL/MTP/多模态 PP | 目标模型需要 PP 搜索时 | 明确视觉塔、MTP head、语言层和输出层的 stage 所属关系。 | 不再回退完整模型权重，stage trace 可稳定运行。 |
 | PP + MoE stage-local group | MoE 模型需要同时搜索 PP 和 EP 时 | 重新定义 stage 内 EP/MoE-TP/MoE-DP group 与全局 group 的关系。 | rank group、cache、dispatch/combine 通信都有测试覆盖。 |
 | 真实 send/recv kernel | 需要真实分布式通信或端到端 pipeline 执行时 | 从 logical send/recv pseudo event 演进为真实 Runtime op。 | trace 中可见真实通信 kernel，并与设备执行对齐。 |
-| 严格 microbatch 调度 | fill-drain 近似误差不可接受时 | 支持 1F1B、interleaved PP、bubble/overlap 事件级模拟。 | 与真实调度或参考 simulator 对齐，并提供误差报告。 |
+| 严格 microbatch 调度 | 需要 ServingCast chunked prefill 或真实运行时调度时 | 支持 1F1B、interleaved PP、bubble/overlap 事件级模拟。 | 与真实调度或参考 simulator 对齐，并提供误差报告。 |
 | Profiling/empirical PP | 需要 profiling database 支持 PP 时 | 定义 stage-local profiling 数据、通信 CSV 和 empirical stage 汇总契约。 | profiling 模式下 PP 输出可解释且有覆盖率指标。 |
 
 ### 4.4 运行约束
@@ -680,4 +679,4 @@ python -m pytest serving_cast/tests/ut/test_tensor_cast_model_runner.py -q
 - `torch.compile`、runtime trace 和 performance model 建模必须基于 stage-local graph，而不是完整模型 trace 后处理。
 - `send/recv` 在首版中是逻辑通信事件；真实通信 kernel 和 overlap 建模属于后续演进。
 - `pipeline_max_stage_weight_size` 和最大 stage KV cache 是面向单 rank 峰值的保守指标，不等价于全局总显存。
-- `PP Bubble` 来源于 fill-drain 公式，是估算项；当 microbatch 数为 1 时，bubble 为 0。
+- `PP Bubble` 当前由单次 forward 的 compute / communication 汇总口径推导；在未建模 overlap / 1F1B 前通常为 0。

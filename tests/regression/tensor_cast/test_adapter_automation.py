@@ -1009,6 +1009,53 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
 
         self.assertEqual(generated_ops, baseline_ops)
 
+    def test_run_actual_case_accumulates_events_from_multiple_runtime_observers(self):
+        user_input = UserInputConfig(
+            model_id="tests/assets/model_config/deepseek_v32",
+            num_queries=1,
+            query_len=1,
+            context_length=0,
+            decode=False,
+            performance_model=["analytic"],
+            word_embedding_tp=None,
+        )
+        case = EvidenceCase.from_dict({"name": "decode", "input": {"decode": True}})
+        stage_event = RuntimeEvent(
+            OpInvokeInfo(_FakeOp("tensor_cast.stage0.default"), (), {}, None),
+            {"analytic": PerformanceModel.Result(0.1)},
+        )
+        transfer_event = RuntimeEvent(
+            OpInvokeInfo(_FakeOp("tensor_cast.transfer.default"), (), {}, None),
+            {"analytic": PerformanceModel.Result(0.2)},
+        )
+        runtime_a = SimpleNamespace(
+            perf_models=[SimpleNamespace(name="analytic")],
+            event_list=[stage_event],
+            total_execution_time_s=lambda: {"analytic": 0.1},
+        )
+        runtime_b = SimpleNamespace(
+            perf_models=[SimpleNamespace(name="analytic")],
+            event_list=[transfer_event],
+            total_execution_time_s=lambda: {"analytic": 0.2},
+        )
+
+        with patch("tensor_cast.adapter.runner.ModelRunner") as runner_cls:
+
+            def run_inference(*, generate_inputs_func, runtime_observer):
+                del generate_inputs_func
+                runtime_observer(runtime_a)
+                runtime_observer(runtime_b)
+                return SimpleNamespace()
+
+            runner_cls.return_value.run_inference.side_effect = run_inference
+            result = run_actual_case(case, user_input)
+
+        self.assertEqual(set(result.summary.ops), {"tensor_cast.stage0.default", "tensor_cast.transfer.default"})
+        self.assertEqual(result.summary.ops["tensor_cast.stage0.default"].count, 1)
+        self.assertEqual(result.summary.ops["tensor_cast.transfer.default"].count, 1)
+        self.assertAlmostEqual(result.summary.total_forward_time_s, 0.3)
+        self.assertEqual(result.summary.perf_model_name, "analytic")
+
     def test_run_actual_case_does_not_mutate_shared_user_input(self):
         user_input = UserInputConfig(
             model_id="tests/assets/model_config/deepseek_v32",
@@ -1024,13 +1071,13 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
                 "input": {"decode": True, "context_length": 8},
             }
         )
-        fake_runtime = SimpleNamespace(perf_models=[])
+        fake_runtime = SimpleNamespace(perf_models=[], event_list=[], total_execution_time_s=lambda: {})
         fake_summary = MagicMock()
 
         with (
             patch("tensor_cast.adapter.runner.ModelRunner") as runner_cls,
             patch(
-                "tensor_cast.adapter.runner.build_actual_summary_from_runtime",
+                "tensor_cast.adapter.runner.build_actual_summary_from_events",
                 return_value=fake_summary,
             ),
         ):

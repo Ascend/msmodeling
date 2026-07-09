@@ -206,6 +206,7 @@ class ParallelConfig:
     tensor_parallel_size: int = 1
     data_parallel_size: Optional[int] = None
     pipeline_parallel_size: int = 1
+    source_pipeline_parallel_size: Optional[int] = None
     o_proj_tensor_parallel_size: Optional[int] = None
     o_proj_data_parallel_size: Optional[int] = None
     mlp_tensor_parallel_size: Optional[int] = None
@@ -246,6 +247,19 @@ class ParallelConfig:
                 f"vision_tensor_parallel_size ({self.vision_tensor_parallel_size}) "
                 f"must not exceed world_size ({self.world_size})"
             )
+        if self.pipeline_parallel_size < 1:
+            raise ValueError(f"pipeline_parallel_size must be at least 1, got {self.pipeline_parallel_size}")
+        if self.source_pipeline_parallel_size is None:
+            self.source_pipeline_parallel_size = self.pipeline_parallel_size
+        if self.source_pipeline_parallel_size < 1:
+            raise ValueError(
+                f"source_pipeline_parallel_size must be at least 1, got {self.source_pipeline_parallel_size}"
+            )
+        if self.world_size % self.pipeline_parallel_size != 0:
+            raise ValueError(
+                f"world_size ({self.world_size}) must be divisible by "
+                f"pipeline_parallel_size ({self.pipeline_parallel_size})"
+            )
         if self.data_parallel_size is None:
             self.data_parallel_size = self.world_size // self.tensor_parallel_size // self.pipeline_parallel_size
 
@@ -257,14 +271,16 @@ class ParallelConfig:
                 f"must equal world_size ({self.world_size})"
             )
 
+        moe_world_size = self.world_size // self.pipeline_parallel_size
         if self.moe_tensor_parallel_size is None:
-            self.moe_tensor_parallel_size = self.world_size // self.moe_data_parallel_size // self.expert_parallel_size
-        if self.moe_data_parallel_size * self.moe_tensor_parallel_size * self.expert_parallel_size != self.world_size:
+            self.moe_tensor_parallel_size = moe_world_size // self.moe_data_parallel_size // self.expert_parallel_size
+        if self.moe_data_parallel_size * self.moe_tensor_parallel_size * self.expert_parallel_size != moe_world_size:
             raise ValueError(
                 f"moe_tensor_parallel_size ({self.moe_tensor_parallel_size}) * "
                 f"moe_data_parallel_size ({self.moe_data_parallel_size}) * "
                 f"expert_parallel_size ({self.expert_parallel_size}) "
-                f"must equal to world_size ({self.world_size})"
+                f"must equal pipeline stage world_size ({moe_world_size}) "
+                f"derived from world_size ({self.world_size}) / pipeline_parallel_size ({self.pipeline_parallel_size})"
             )
         if self.o_proj_tensor_parallel_size is None:
             self.o_proj_tensor_parallel_size = self.tensor_parallel_size

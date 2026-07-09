@@ -38,6 +38,19 @@ def _(x: torch.Tensor, dim: int, rank: int, rank_group: List[int]) -> torch.Tens
     return torch.empty(new_shape, dtype=x.dtype, device=x.device)
 
 
+@register_tensor_cast_op("pipeline_send_recv")
+def _(
+    x: torch.Tensor,
+    source_rank: int,
+    target_rank: int,
+    source_stage_id: int,
+    target_stage_id: int,
+) -> torch.Tensor:
+    """Model one PP boundary transfer for residual-applied hidden states."""
+    del source_rank, target_rank, source_stage_id, target_stage_id
+    return torch.empty_like(x)
+
+
 @register_tensor_cast_op("matmul_all_reduce")
 def _(
     mat1: torch.Tensor,

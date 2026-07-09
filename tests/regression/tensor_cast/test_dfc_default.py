@@ -85,6 +85,8 @@ def test_build_model_applies_user_dfc_config_before_compile():
     captured = {}
     fake_model = MagicMock()
     fake_model.is_vl_model = False
+    fake_model_config = MagicMock()
+    fake_model_config.parallel_config.pipeline_parallel_size = 1
 
     def fake_compile(model, **kwargs):
         captured["dfc"] = tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine
@@ -101,7 +103,7 @@ def test_build_model_applies_user_dfc_config_before_compile():
     try:
         tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
         with (
-            patch.object(model_builder.ConfigResolver, "resolve", return_value=MagicMock()),
+            patch.object(model_builder.ConfigResolver, "resolve", return_value=fake_model_config),
             patch.object(model_builder, "TransformerModel", return_value=fake_model),
             patch.object(model_builder, "get_backend", return_value="fake_backend"),
             patch("torch.compile", side_effect=fake_compile),

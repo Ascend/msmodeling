@@ -21,6 +21,7 @@ from ..performance_model.empirical import EmpiricalPerformanceModel
 from ..performance_model.memory_tracker import MemoryTracker
 from ..performance_model.profiling_database import InterpolatingDataSource, ProfilingDataSource
 from ..performance_model.utils import bytes_of_tensor
+from ..pipeline_parallel import PipelineModel, PipelineRunResult, PipelineRunner
 from ..runtime import Runtime
 from ..transformers.custom_model_registry import get_visual
 from .input_generator import (
@@ -146,6 +147,13 @@ class ModelRunner:
     # -----------------------------------------------------
     # public API
     # -----------------------------------------------------
+    def _calculate_single_card_tps(self, execution_time_s: float) -> float:
+        if not execution_time_s or execution_time_s <= 0:
+            raise ValueError("execution_time_s must be positive")
+        return (self.user_input.num_queries * self.user_input.query_len) / (
+            execution_time_s * self.user_input.world_size
+        )
+
     def run_inference(
         self,
         requests: Optional[List[RequestInfo]] = None,
@@ -153,13 +161,6 @@ class ModelRunner:
         with_sampler: bool = False,
         runtime_observer: Optional[Callable[[Runtime], None]] = None,
     ) -> ModelRunnerMetrics:
-        def calculate_single_card_tps(execution_time_s: float) -> float:
-            if not execution_time_s or execution_time_s <= 0:
-                raise ValueError("execution_time_s must be positive")
-            return (self.user_input.num_queries * self.user_input.query_len) / (
-                execution_time_s * self.user_input.world_size
-            )
-
         data_parallel_size = self.model.model_config.parallel_config.data_parallel_size
         logger.debug("data_parallel_size: %s", data_parallel_size)
 
@@ -177,6 +178,28 @@ class ModelRunner:
         )
 
         run_start = time.perf_counter()
+        if isinstance(self.model, PipelineModel):
+            pipeline_runner = PipelineRunner(
+                model=self.model,
+                perf_models=self.perf_models,
+                device_profile=self.device_profile,
+                user_input=self.user_input,
+            )
+            pipeline_result = pipeline_runner.run(
+                input_kwargs,
+                with_sampler=with_sampler,
+                sampler=self.sampler,
+                runtime_observer=runtime_observer,
+            )
+            run_end = time.perf_counter()
+            self._log_empirical_model_stats()
+            if self.user_input.chrome_trace:
+                PipelineRunner.export_chrome_trace(self.user_input.chrome_trace, pipeline_result.trace_events)
+            return self._build_pipeline_metrics(
+                pipeline_result,
+                batch_size=batch_size,
+                run_time_s=run_end - run_start,
+            )
 
         with (
             Runtime(
@@ -192,13 +215,7 @@ class ModelRunner:
         run_end = time.perf_counter()
 
         # Log empirical model stats if using profiling mode
-        for pm in self.perf_models:
-            if isinstance(pm, EmpiricalPerformanceModel):
-                from ..performance_model.metrics_collector import MetricsCollector
-
-                collector = MetricsCollector()
-                collector.collect_from_records(pm.op_records)
-                collector.log_stats()
+        self._log_empirical_model_stats()
 
         all_execution_time_s = runtime.total_execution_time_s()
         run_time_s = run_end - run_start
@@ -215,7 +232,7 @@ class ModelRunner:
         tps_per_model: Dict[str, float] = {}
         for model_name, exec_time in all_execution_time_s.items():
             if exec_time and exec_time > 0:
-                tps_per_model[model_name] = calculate_single_card_tps(exec_time)
+                tps_per_model[model_name] = self._calculate_single_card_tps(exec_time)
 
         peak_memory_usage_gb = runtime.memory_tracker.peak_mem_usage() / 1024**3
 
@@ -242,7 +259,8 @@ class ModelRunner:
         if model_activation_size_gb < 0:
             logger.warning(
                 "Negative activation memory estimate (peak=%.6f GB, weight=%.6f GB, kv=%.6f GB); "
-                "clamping activation to 0 and adjusting peak for consistency.",
+                "this may indicate inconsistent peak memory, model weight, or cache accounting. "
+                "Clamping activation to 0 and adjusting peak for consistency.",
                 peak_memory_usage_gb,
                 self.model_weight_size_gb,
                 kv_cache_size_gb,
@@ -279,6 +297,90 @@ class ModelRunner:
             runtime_event_list=runtime_event_list,
             perf_model_name=perf_model_name,
         )
+
+    def _build_pipeline_metrics(
+        self,
+        pipeline_result: PipelineRunResult,
+        *,
+        batch_size: int,
+        run_time_s: float,
+    ) -> ModelRunnerMetrics:
+        all_execution_time_s = pipeline_result.execution_time_s
+        tps_per_model = {
+            model_name: self._calculate_single_card_tps(exec_time)
+            for model_name, exec_time in all_execution_time_s.items()
+            if exec_time and exec_time > 0
+        }
+
+        peak_memory_usage_gb = pipeline_result.peak_memory_usage_bytes / 1024**3
+        model_weight_size_gb = (
+            pipeline_result.model_weight_size_bytes / 1024**3
+            if pipeline_result.model_weight_size_bytes > 0
+            else self.model_weight_size_gb
+        )
+        kv_cache_bytes = pipeline_result.kv_cache_size_bytes
+        indexer_cache_bytes = pipeline_result.indexer_cache_size_bytes
+        kv_cache_size_gb = (kv_cache_bytes + indexer_cache_bytes) / 1024**3
+        kv_cache_per_token_gb = (
+            pipeline_result.kv_cache_per_token_bytes + pipeline_result.indexer_cache_per_token_bytes
+        ) / 1024**3
+        if pipeline_result.model_activation_size_bytes is not None:
+            # PP path: activation was computed in _build_run_result for the
+            # selected summary stage, using its stage-local runtime peak -
+            # weight - kv - indexer (all terms same rank, so it is non-negative
+            # and never needs clamping). Use it directly instead of the
+            # cross-stage `peak - kv - weight` subtraction below, which can mix
+            # different ranks and fabricate a non-existent rank.
+            model_activation_size_gb = pipeline_result.model_activation_size_bytes / 1024**3
+        else:
+            model_activation_size_gb = peak_memory_usage_gb - kv_cache_size_gb - model_weight_size_gb
+            if model_activation_size_gb < 0:
+                logger.warning(
+                    "Negative activation memory estimate (peak=%.6f GB, weight=%.6f GB, kv=%.6f GB); "
+                    "this may indicate inconsistent peak memory, model weight, or cache accounting. "
+                    "Clamping activation to 0 and adjusting peak for consistency.",
+                    peak_memory_usage_gb,
+                    model_weight_size_gb,
+                    kv_cache_size_gb,
+                )
+                model_activation_size_gb = 0.0
+                peak_memory_usage_gb = model_weight_size_gb + kv_cache_size_gb
+        device_memory_available_gb = (
+            self.total_device_memory_gb - peak_memory_usage_gb - self.user_input.reserved_memory_gb
+        )
+        perf_model_name = self.perf_models[0].name if self.perf_models else None
+
+        return ModelRunnerMetrics(
+            total_device_memory_gb=self.total_device_memory_gb,
+            model_weight_size_gb=model_weight_size_gb,
+            peak_memory_usage_gb=peak_memory_usage_gb,
+            kv_cache_size_gb=kv_cache_size_gb,
+            kv_cache_per_token_gb=kv_cache_per_token_gb,
+            indexer_cache_size_gb=indexer_cache_bytes / 1024**3,
+            indexer_cache_per_token_gb=pipeline_result.indexer_cache_per_token_bytes / 1024**3,
+            model_activation_size_gb=model_activation_size_gb,
+            reserved_memory_gb=self.user_input.reserved_memory_gb,
+            device_memory_available_gb=device_memory_available_gb,
+            execution_time_s=all_execution_time_s,
+            tps_per_model=tps_per_model,
+            run_time_s=run_time_s,
+            batch_size=batch_size,
+            table_result=pipeline_result.table_result,
+            breakdowns=pipeline_result.breakdowns,
+            runtime_event_list=pipeline_result.runtime_event_list,
+            perf_model_name=perf_model_name,
+            stage_latency_breakdown=pipeline_result.stage_latency_breakdown,
+            stage_memory_breakdown=pipeline_result.stage_memory_breakdown,
+        )
+
+    def _log_empirical_model_stats(self) -> None:
+        for pm in self.perf_models:
+            if isinstance(pm, EmpiricalPerformanceModel):
+                from ..performance_model.metrics_collector import MetricsCollector
+
+                collector = MetricsCollector()
+                collector.collect_from_records(pm.op_records)
+                collector.log_stats()
 
     def get_inputs_num_bytes(self, requests: List[RequestInfo]) -> int:
         return get_inputs_num_bytes(self.model, requests, self.user_input.block_size)
@@ -337,6 +439,8 @@ class ModelRunnerMetrics:
     breakdowns: Dict[str, Dict[str, float]] = field(default_factory=dict)
     runtime_event_list: List[Dict] = field(default_factory=list)
     perf_model_name: Optional[str] = None
+    stage_latency_breakdown: List[Dict] = field(default_factory=list)
+    stage_memory_breakdown: List[Dict] = field(default_factory=list)
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")
@@ -348,6 +452,23 @@ class ModelRunnerMetrics:
             if tps is not None:
                 print(f"[{model_name}] TPS/Device: {tps:.4g} token/s")
 
+        if self.stage_latency_breakdown:
+            print("Pipeline stage latency breakdown:")
+            for stage in self.stage_latency_breakdown:
+                for model_name, compute_time_s in stage["compute_time_s"].items():
+                    outgoing_comm_time_s = stage["outgoing_comm_time_s"].get(model_name, 0.0)
+                    total_time_s = stage["total_time_s"].get(
+                        model_name,
+                        compute_time_s + outgoing_comm_time_s,
+                    )
+                    print(
+                        f"  [{model_name}] stage {stage['stage_id']} "
+                        f"(layers {stage['layer_start']}:{stage['layer_end']}): "
+                        f"compute={compute_time_s:.6f} s  "
+                        f"outgoing_comm={outgoing_comm_time_s:.6f} s  "
+                        f"total={total_time_s:.6f} s"
+                    )
+
         print(f"Total device memory: {self.total_device_memory_gb:.3f} GB")
         print(f"  Model weight size: {self.model_weight_size_gb:.3f} GB")
         print(f"  KV cache: {self.kv_cache_size_gb:.3f} GB")
@@ -358,6 +479,18 @@ class ModelRunnerMetrics:
         print(f"  Model activation size: {self.model_activation_size_gb:.3f} GB")
         print(f"  Reserved memory: {self.reserved_memory_gb:.3f} GB")
         print(f"  Memory available: {self.device_memory_available_gb:.3f} GB")
+        if self.stage_memory_breakdown:
+            gib = 1024**3
+            print("Pipeline stage memory breakdown (per-rank):")
+            for stage in self.stage_memory_breakdown:
+                print(
+                    f"  stage {stage['stage_id']} (layers {stage['layer_start']}:{stage['layer_end']}): "
+                    f"weight={stage['weight_bytes'] / gib:.3f} GB  "
+                    f"kv={stage['kv_cache_bytes'] / gib:.6f} GB  "
+                    f"indexer={stage['indexer_cache_bytes'] / gib:.6f} GB  "
+                    f"peak={stage['peak_bytes'] / gib:.3f} GB  "
+                    f"activation={stage['activation_bytes'] / gib:.3f} GB"
+                )
 
         print("Stats breakdowns:")
         for breakdown_name, breakdown in self.breakdowns.items():
@@ -393,6 +526,8 @@ class ModelRunnerMetrics:
             "breakdowns_percent": breakdowns_percent,
             "perf_model_name": self.perf_model_name,
             "runtime_event_list": self.runtime_event_list,
+            "pipeline_stage_latency": self.stage_latency_breakdown,
+            "pipeline_stage_memory": self.stage_memory_breakdown,
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)

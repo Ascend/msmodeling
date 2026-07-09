@@ -2204,6 +2204,80 @@ def _estimate_collective_comm(op_invoke_info: OpInvokeInfo, device_profile: Devi
     return result
 
 
+def _get_p2p_topology_idx(device_profile: DeviceProfile, ranks: List[int]) -> int:
+    comm_grid = device_profile.comm_grid
+    grid_shape = comm_grid.grid.shape
+    total_ranks = math.prod(grid_shape)
+    if any(rank < 0 or rank >= total_ranks for rank in ranks):
+        raise ValueError(f"Pipeline communication ranks {ranks} exceed device grid size {total_ranks}.")
+
+    coords = []
+    for rank in ranks:
+        coord = []
+        temp_rank = rank
+        for dim_size in reversed(grid_shape):
+            coord.insert(0, temp_rank % dim_size)
+            temp_rank //= dim_size
+        coords.append(coord)
+
+    diff_dim = -1
+    for dim_idx in range(comm_grid.grid.dim()):
+        first_coord = coords[0][dim_idx]
+        if any(coord[dim_idx] != first_coord for coord in coords[1:]):
+            diff_dim = dim_idx
+            break
+
+    if diff_dim == -1:
+        return max(comm_grid.topologies.keys())
+
+    for start_dim in sorted(comm_grid.topologies.keys(), reverse=True):
+        if start_dim <= diff_dim:
+            return start_dim
+    raise ValueError(f"No interconnect topology can cover pipeline communication dimension {diff_dim}.")
+
+
+@register_op_estimator(torch.ops.tensor_cast.pipeline_send_recv.default, None)
+def _estimate_pipeline_send_recv(
+    op_invoke_info: OpInvokeInfo,
+    device_profile: DeviceProfile,
+) -> PerformanceModel.Result:
+    x = op_invoke_info.args[0]
+    source_rank = int(op_invoke_info.args[1])
+    target_rank = int(op_invoke_info.args[2])
+    source_stage_id = int(op_invoke_info.args[3])
+    target_stage_id = int(op_invoke_info.args[4])
+
+    topology_idx = _get_p2p_topology_idx(device_profile, [source_rank, target_rank])
+    topology = device_profile.comm_grid.topologies[topology_idx]
+    bandwidth_bytes_ps = topology.bandwidth_bytes_ps * topology.comm_efficiency
+    if bandwidth_bytes_ps <= 0:
+        raise ValueError(f"Invalid pipeline transfer bandwidth for topology {topology_idx}: {bandwidth_bytes_ps}.")
+
+    payload_bytes = int(bytes_of_tensor(x))
+    transfer_time_s = 0.0
+    latency_s = 0.0
+    if payload_bytes > 0:
+        latency_s = topology.latency_s
+        transfer_time_s = (
+            getattr(device_profile.static_cost, "comm_op_cost_s", 0.0) + latency_s + payload_bytes / bandwidth_bytes_ps
+        )
+
+    return PerformanceModel.Result(
+        execution_time_s=transfer_time_s,
+        statistics={
+            StatsKey.COMMUNICATION: transfer_time_s,
+            "message_size_bytes": payload_bytes,
+            "source_rank": source_rank,
+            "target_rank": target_rank,
+            "source_stage_id": source_stage_id,
+            "target_stage_id": target_stage_id,
+            "topology_idx": topology_idx,
+            "latency_s": latency_s,
+            "bandwidth_bytes_ps": bandwidth_bytes_ps if payload_bytes > 0 else 0.0,
+        },
+    )
+
+
 def _tag_statistics(stats: dict[str, object], prefix: str) -> dict[str, object]:
     tagged: dict[str, object] = {}
     for key, value in stats.items():

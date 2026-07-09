@@ -214,7 +214,7 @@ class ParallelGroupManager:
 
         self.all_rank_group = initialize_parallel(
             ParallelGroupType.TENSOR_PARALLEL,
-            world_size,
+            world_size // pipeline_parallel_size,
             1,
             pipeline_parallel_size=pipeline_parallel_size,
         )

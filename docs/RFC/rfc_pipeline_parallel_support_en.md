@@ -489,11 +489,10 @@ stage_time[i] = stage_compute_time[i] + stage_comm_time[i]
 Overall pipeline latency is:
 
 ```text
-latency_s = sum(stage_times) + (num_microbatches - 1) * max(stage_times)
+latency_s = sum(stage_times) + sum(stage_transfer_times)
 ```
 
-`num_microbatches` can be derived from `len(input_kwargs["attention_meta"].query_lens)` and is at least 1. The formula is a fill-drain approximation: the first microbatch passes through all stages, and later microbatches progress at the pace of the slowest stage.
-
+Current TensorCast PP keeps a single model-forward simulation semantics; chunked prefill / microbatch scheduling belongs to ServingCast or future strict runtime work.
 `PipelineRuntimeEstimate` stores:
 
 | Field | Meaning |
@@ -596,7 +595,7 @@ Disadvantages:
 - Has broad impact on both analytic and profiling performance models.
 - Implementation cost is too high for the first stage of PP search support.
 
-This RFC uses stage-first tracing plus a fill-drain latency approximation as an intermediate architecture before real pipeline runtime simulation.
+This RFC uses stage-first tracing plus single-forward stage compute / logical transfer accumulation as the current TensorCast PP simulation semantics.
 
 ### 3.4 Model-Declared `_pp_plan`
 
@@ -628,7 +627,7 @@ This RFC uses uniform decoder layer partitioning and leaves `_pp_plan` for later
 | Stage-aware memory estimation | To do | Add `pipeline_max_stage_weight_size`, active-layer KV cache per token, and maximum stage KV cache. | Tests cover weight and KV cache active-layer behavior. |
 | Stage-first runtime trace | To do | Run per-stage forward, compile, trace, and performance-model estimation. | Tests cover no cross-stage fusion, stage trace fallback, and runtime estimates. |
 | Logical send/recv modeling | To do | Add hidden-states message bytes, stage-boundary send/recv pseudo events, and communication latency. | Tests cover communication boundaries, first/middle/last communication direction, and topology bandwidth selection. |
-| PP latency estimation | To do | Add stage compute + comm, fill-drain latency, and bubble calculation. | Tests cover latency formula and microbatch boundaries. |
+| PP latency estimation | Done | Add stage compute + logical transfer and bubble calculation. | Tests cover the single-forward latency formula and transfer aggregation. |
 | serving breakdown display | To do | Separate op-bound breakdowns from PP breakdowns in `format_breakdowns()`. | Tests cover `PP Compute`, `PP Comm`, and `PP Bubble` formatting. |
 
 ### 4.2 Test Plan
@@ -658,7 +657,7 @@ Required coverage:
 | Compile/trace boundary | `torch.compile` and runtime trace execute on stage-local graphs and do not fuse across PP boundaries. |
 | Cache estimation | KV cache and DSA indexer cache only accumulate active stage layers. |
 | Communication modeling | Message bytes, send/recv pseudo events, first/middle/last communication direction, topology bandwidth, and latency. |
-| Latency model | Stage compute, stage comm, fill-drain latency, microbatch count, and bubble. |
+| Latency model | Stage compute, stage comm, logical transfer, and bubble under the current single-forward TensorCast PP semantics. |
 | Output format | PP breakdown is displayed separately from the original op-bound breakdown. |
 
 ### 4.3 Future Evolution
@@ -680,4 +679,4 @@ Required coverage:
 - `torch.compile`, runtime trace, and performance-model estimation must use stage-local graphs instead of post-processing a full-model trace.
 - In the first version, `send/recv` are logical communication events; real communication kernels and overlap modeling are future work.
 - `pipeline_max_stage_weight_size` and maximum stage KV cache are conservative per-rank peak metrics and are not equal to global total memory.
-- `PP Bubble` comes from the fill-drain formula. When the microbatch count is 1, bubble is 0.
+- `PP Bubble` is derived from the current single-forward compute / communication aggregation; before overlap / 1F1B modeling it is typically 0.

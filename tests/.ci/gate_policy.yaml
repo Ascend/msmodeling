@@ -85,6 +85,26 @@ exemptions:
       deadline: 2026-12-31
       ticket: deepseek-v4-ci-gate
 
+    - symbols:
+        - tensor_cast/pipeline_parallel.py::PPMissingLayer::%
+        - tensor_cast/pipeline_parallel.py::PipelineStageModel::%
+        - tensor_cast/pipeline_parallel.py::PipelineModel::%
+        - tensor_cast/pipeline_parallel.py::StageRunner::%
+        - tensor_cast/pipeline_parallel.py::PipelineCommunicator::%
+        - tensor_cast/pipeline_parallel.py::PipelineRunner::%
+        - tensor_cast/pipeline_parallel.py::PipelineStageSpec::%
+        - tensor_cast/pipeline_parallel.py::PipelinePlan::%
+        - tensor_cast/pipeline_parallel.py::PipelineStageCacheStats::%
+        - tensor_cast/pipeline_parallel.py::PipelineTransferStats::%
+        - tensor_cast/pipeline_parallel.py::PipelineRunResult::%
+        - tensor_cast/pipeline_parallel.py::_PipelineStageRunResult::%
+        - tensor_cast/pipeline_parallel.py::_PipelineTransferRunResult::%
+      reason: "PP class and result-container symbols are covered by dedicated pipeline-parallel regression tests; test_map does not reliably map class definitions."
+      applicant: pp_real_split
+      approver: hexiaowu
+      deadline: 2026-12-31
+      ticket: pp-real-split-ci-gate
+
   tests:
     - symbols:
         - tests/regression/cli/test_generate_comm_microbench.py::test_run_bench_kernel_no_sync_returns_positive_duration

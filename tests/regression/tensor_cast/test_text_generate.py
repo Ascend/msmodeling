@@ -15,7 +15,10 @@ from cli.inference.text_generate import main
 from parameterized import parameterized
 from tensor_cast.core.input_generator import generate_image_inputs, generate_inputs
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
-from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
+from tensor_cast.core.quantization.datatypes import (
+    QuantizeAttentionAction,
+    QuantizeLinearAction,
+)
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.layers.parallel_embedding import ParallelEmbedding
 from tensor_cast.model_config import WordEmbeddingTPMode
@@ -1776,6 +1779,83 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
         self.assertIn("non_empty", payload["breakdowns_percent"])
         self.assertAlmostEqual(payload["breakdowns_percent"]["non_empty"]["a"], 25.0)
         self.assertAlmostEqual(payload["breakdowns_percent"]["non_empty"]["b"], 75.0)
+
+    @patch("sys.stdout", new_callable=StringIO)
+    def test_print_info_shows_pipeline_stage_breakdown_when_present(self, mock_stdout):
+        """When PP breakdowns are present, print_info renders per-stage timing and memory."""
+        self.metrics.stage_latency_breakdown = [
+            {
+                "stage_id": 0,
+                "layer_start": 0,
+                "layer_end": 4,
+                "compute_time_s": {"analytic": 0.01},
+                "outgoing_comm_time_s": {"analytic": 0.002},
+                "total_time_s": {"analytic": 0.012},
+            }
+        ]
+        self.metrics.stage_memory_breakdown = [
+            {
+                "stage_id": 0,
+                "layer_start": 0,
+                "layer_end": 4,
+                "weight_bytes": 5 * 1024**3,
+                "kv_cache_bytes": 1024**3,
+                "indexer_cache_bytes": 0,
+                "peak_bytes": 6 * 1024**3,
+                "activation_bytes": 0,
+            }
+        ]
+        self.metrics.print_info()
+        output = mock_stdout.getvalue()
+        self.assertIn("Pipeline stage latency breakdown:", output)
+        self.assertIn("[analytic] stage 0 (layers 0:4):", output)
+        self.assertIn("compute=0.010000 s", output)
+        self.assertIn("outgoing_comm=0.002000 s", output)
+        self.assertIn("total=0.012000 s", output)
+        self.assertIn("Pipeline stage memory breakdown (per-rank):", output)
+        self.assertIn("stage 0 (layers 0:4):", output)
+        self.assertIn("weight=5.000 GB", output)
+        self.assertIn("peak=6.000 GB", output)
+
+    @patch("sys.stdout", new_callable=StringIO)
+    def test_print_info_omits_pipeline_stage_breakdowns_when_empty(self, mock_stdout):
+        """When PP breakdowns are empty, print_info omits per-stage blocks."""
+        self.metrics.print_info()
+        output = mock_stdout.getvalue()
+        self.assertNotIn("Pipeline stage latency breakdown:", output)
+        self.assertNotIn("Pipeline stage memory breakdown (per-rank):", output)
+
+    def test_dump_json_writes_pipeline_stage_memory(self):
+        """dump_json should include per-stage PP breakdown arrays."""
+        self.metrics.stage_latency_breakdown = [
+            {
+                "stage_id": 0,
+                "layer_start": 0,
+                "layer_end": 4,
+                "compute_time_s": {"analytic": 0.01},
+                "outgoing_comm_time_s": {"analytic": 0.002},
+                "total_time_s": {"analytic": 0.012},
+            }
+        ]
+        self.metrics.stage_memory_breakdown = [
+            {
+                "stage_id": 0,
+                "layer_start": 0,
+                "layer_end": 4,
+                "weight_bytes": 5 * 1024**3,
+                "kv_cache_bytes": 1024**3,
+                "indexer_cache_bytes": 0,
+                "peak_bytes": 6 * 1024**3,
+                "activation_bytes": 0,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "metrics.json"
+            self.metrics.dump_json(str(output_path))
+            with output_path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+        self.assertEqual(payload["pipeline_stage_latency"], self.metrics.stage_latency_breakdown)
+        self.assertEqual(payload["pipeline_stage_memory"], self.metrics.stage_memory_breakdown)
 
 
 class TestAggregateRuntimeEvents(unittest.TestCase):

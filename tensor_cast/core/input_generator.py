@@ -770,6 +770,19 @@ def _resolve_decoder_layers(model):
     nested = getattr(inner, "model", None)
     if nested is not None and hasattr(nested, "layers"):
         return nested.layers
+    if hasattr(inner, "stages") and hasattr(inner, "num_hidden_layers"):
+        layers = [None] * int(inner.num_hidden_layers)
+        for stage in inner.stages:
+            stage_layers = _resolve_decoder_layers(stage.model)
+            layer_start = int(stage.stage_spec.layer_start)
+            for offset, layer in enumerate(stage_layers):
+                layer_idx = layer_start + offset
+                if 0 <= layer_idx < len(layers):
+                    layers[layer_idx] = layer
+        missing_layers = [idx for idx, layer in enumerate(layers) if layer is None]
+        if missing_layers:
+            raise AttributeError(f"Unable to locate pipeline decoder layer(s): {missing_layers}")
+        return layers
     raise AttributeError(
         "Unable to locate decoder layers; neither `unwrap().layers` nor "
         "`unwrap().model.layers` is available on this model"

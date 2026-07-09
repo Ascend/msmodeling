@@ -9,6 +9,13 @@ from .. import config
 from ..compilation import get_backend
 from ..core.config_resolver import ConfigResolver
 from ..core.user_config import UserInputConfig
+from ..pipeline_parallel import (
+    apply_stage_boundaries,
+    build_pipeline_plan,
+    build_stage_model_config,
+    PipelineModel,
+    PipelineStageModel,
+)
 from ..transformers.custom_model_registry import get_visual
 from ..transformers.model import TransformerModel
 
@@ -52,15 +59,60 @@ def _prepare_vl_compile(model: TransformerModel) -> bool:
     return False
 
 
-def build_model(user_input: UserInputConfig = None) -> TransformerModel:
+def _build_pipeline_model(user_input: UserInputConfig, model_config) -> PipelineModel:
+    if getattr(model_config.hf_config, "vision_config", None) is not None:
+        raise ValueError("Pipeline parallel model construction only supports text-only decoder models for now.")
+    if model_config.mtp_config is not None:
+        raise ValueError("Pipeline parallel model construction does not support MTP models yet.")
+
+    pp_size = model_config.parallel_config.pipeline_parallel_size
+    plan = build_pipeline_plan(model_config, pp_size)
+    logger.info("Building pipeline model with %d stages", pp_size)
+    stages = []
+    for stage_index, stage_spec in enumerate(plan.stages, start=1):
+        logger.info(
+            "Building pipeline stage %d/%d with layers [%d, %d)",
+            stage_index,
+            pp_size,
+            stage_spec.layer_start,
+            stage_spec.layer_end,
+        )
+        stage_model_config = build_stage_model_config(model_config, stage_spec)
+        stage_model = TransformerModel(user_input.model_id, stage_model_config)
+        apply_stage_boundaries(stage_model, stage_spec)
+        if user_input.do_compile:
+            import torch
+
+            use_glm5_overrides = _requires_glm5_compile_overrides(user_input)
+            config.compilation.fusion_patterns.enable_matmul_allreduce = not use_glm5_overrides
+            config.compilation.fusion_patterns.enable_dispatch_ffn_combine = bool(
+                user_input.enable_dispatch_ffn_combine
+            )
+            stage_model = torch.compile(
+                stage_model,
+                backend=get_backend(device_name=user_input.device),
+                dynamic=user_input.dynamic_shapes,
+                fullgraph=not user_input.allow_graph_break,
+            )
+        stages.append(PipelineStageModel(stage_spec=stage_spec, model=stage_model))
+    logger.info("Pipeline model construction completed with %d stages", len(stages))
+    return PipelineModel(model_config=model_config, plan=plan, stages=stages)
+
+
+def build_model(
+    user_input: UserInputConfig | None = None,
+) -> TransformerModel | PipelineModel:
     """
     Build a transformer model based on the given args
 
     :param user_input: user_input
-    :return: The loaded (and possibly compiled) Transformer model.
+    :return: The loaded (and possibly compiled) Transformer or Pipeline model.
     """
     config_resolver = ConfigResolver(user_input=user_input)
     model_config = config_resolver.resolve()
+    if model_config.parallel_config.pipeline_parallel_size > 1:
+        return _build_pipeline_model(user_input, model_config)
+
     model = TransformerModel(user_input.model_id, model_config)
     use_full_graph = not user_input.allow_graph_break
     if user_input.do_compile and getattr(model, "is_vl_model", False):

@@ -502,6 +502,10 @@ def shard_model_by_tp(
         lmhead_tp_group = self.parallel_group_manager.lmhead_tp_group
         vision_tp_group = self.parallel_group_manager.vision_tp_group
         moe_tp_group = self.parallel_group_manager.moe_tp_group
+        is_pipeline_stage_local = (
+            self.model_config.parallel_config.pipeline_parallel_size == 1
+            and self.model_config.parallel_config.source_pipeline_parallel_size > 1
+        )
 
         def get_tp_plan():
             # TODO:
@@ -690,6 +694,8 @@ def shard_model_by_tp(
                     "tp_group": moe_tp_group,
                     "global_tp_group": tp_group,
                 }
+                if is_pipeline_stage_local:
+                    params["gather_slice_data"] = False
                 for prefix in layer_prefixes:
                     tp_plan.update(
                         {

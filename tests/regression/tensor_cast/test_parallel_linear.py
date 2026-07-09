@@ -7,9 +7,10 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
-from tensor_cast.layers.parallel_linear import get_qparam_shard_dim
+from tensor_cast.layers.parallel_linear import ColumnParallelLinear, get_qparam_shard_dim, RowParallelLinear
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
 from tensor_cast.model_config import MlaConfig, ModelConfig, ParallelConfig, QuantConfig, WordEmbeddingTPMode
+from tensor_cast.parallel_group import ParallelGroup
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.quantize_utils import LinearQuantType, QuantGranularity, QuantScheme
 from tensor_cast.runtime import Runtime
@@ -23,6 +24,14 @@ from .test_quant_linear import get_quant_config
 # Core parallel-topology assertions were moved to test_layers.py::test_parallel_config_topology_flags.
 
 
+def _make_parallel_group(world_size: int) -> ParallelGroup:
+    return ParallelGroup(
+        rank=0,
+        rank_groups=[list(range(world_size))],
+        global_world_size=world_size,
+    )
+
+
 class TestGetQparamShardDim(unittest.TestCase):
     def test_1d_tensor_shards_dim_zero(self):
         self.assertEqual(get_qparam_shard_dim(torch.randn(128), weight_dim=1), 0)
@@ -32,6 +41,54 @@ class TestGetQparamShardDim(unittest.TestCase):
 
     def test_higher_rank_tensor_uses_weight_dim(self):
         self.assertEqual(get_qparam_shard_dim(torch.randn(2, 128, 64), weight_dim=1), 1)
+
+
+class TestParallelLinearGatherSliceData(unittest.TestCase):
+    def test_column_parallel_linear_keeps_auto_gather_slice_default(self):
+        module = torch.nn.Linear(8, 8, bias=False, device="meta")
+
+        wrapper = ColumnParallelLinear(
+            module,
+            tp_group=_make_parallel_group(4),
+            global_tp_group=_make_parallel_group(8),
+        )
+
+        self.assertTrue(wrapper.gather_slice_data)
+
+    def test_column_parallel_linear_allows_gather_slice_override(self):
+        module = torch.nn.Linear(8, 8, bias=False, device="meta")
+
+        wrapper = ColumnParallelLinear(
+            module,
+            tp_group=_make_parallel_group(4),
+            global_tp_group=_make_parallel_group(8),
+            gather_slice_data=False,
+        )
+
+        self.assertFalse(wrapper.gather_slice_data)
+
+    def test_row_parallel_linear_keeps_auto_gather_slice_default(self):
+        module = torch.nn.Linear(8, 8, bias=False, device="meta")
+
+        wrapper = RowParallelLinear(
+            module,
+            tp_group=_make_parallel_group(4),
+            global_tp_group=_make_parallel_group(8),
+        )
+
+        self.assertTrue(wrapper.gather_slice_data)
+
+    def test_row_parallel_linear_allows_gather_slice_override(self):
+        module = torch.nn.Linear(8, 8, bias=False, device="meta")
+
+        wrapper = RowParallelLinear(
+            module,
+            tp_group=_make_parallel_group(4),
+            global_tp_group=_make_parallel_group(8),
+            gather_slice_data=False,
+        )
+
+        self.assertFalse(wrapper.gather_slice_data)
 
 
 def get_parallel_config(parallel_configuration: tuple):

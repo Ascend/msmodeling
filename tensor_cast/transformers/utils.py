@@ -75,9 +75,21 @@ def strip_module_name(name: str) -> str:
     return stripped
 
 
+def _get_attention_quant_config_from_model_config(model, layer_idx) -> Optional[AttentionQuantConfig]:
+    quant_config = getattr(getattr(model, "model_config", None), "quant_config", None)
+    attention_configs = getattr(quant_config, "attention_configs", None)
+    if not attention_configs:
+        return None
+    return attention_configs.get(layer_idx, attention_configs.get(-1))
+
+
 def get_attention_quant_config(model, layer_idx) -> Optional[AttentionQuantConfig]:
-    if model.model_config.mla_config is not None:
-        for _, module in model._inner.named_modules():
+    model_config = getattr(model, "model_config", None)
+    if (
+        getattr(model_config, "mla_config", None) is not None
+        and (inner_model := getattr(model, "_inner", None)) is not None
+    ):
+        for _, module in inner_model.named_modules():
             if (
                 isinstance(module, MultiheadLatentAttentionBase)
                 and hasattr(module, "layer_idx")
@@ -86,8 +98,11 @@ def get_attention_quant_config(model, layer_idx) -> Optional[AttentionQuantConfi
             ):
                 return attn_quant_config
     if hasattr(model, "attention_by_layers") and layer_idx in model.attention_by_layers:
-        return model.attention_by_layers[layer_idx].quant_config
-    return None
+        if (attention_config := model.attention_by_layers[layer_idx].quant_config) is not None:
+            return attention_config
+    # PipelineModel is a PP container: it keeps model_config but does not own the
+    # ordinary TransformerModel _inner / attention_by_layers module structure.
+    return _get_attention_quant_config_from_model_config(model, layer_idx)
 
 
 _INIT_ON_DEVICE_FACTORY_NAMES = (
