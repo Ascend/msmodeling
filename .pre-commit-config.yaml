@@ -87,3 +87,19 @@ repos:
       - id: typos
         exclude: ^(tools/|tests/assets/model_config/|pre-commit/)
         args: ["--force-exclude", "--config", "pre-commit/typos.toml"]
+
+# -------------------------- Gitleaks 本地离线二进制扫描 --------------------------
+  - repo: local
+    hooks:
+      - id: gitleaks-offline-scan
+        name: Gitleaks Secret Scan(Local Binary)
+        entry: ./gitleaks
+        language: system
+        pass_filenames: true
+        args:
+          - protect
+          - --verbose
+          - --redact
+          - --config=pre-commit/.gitleaks.toml
+
+        stages: [pre-commit]
