@@ -7,7 +7,7 @@ import pandas as pd
 from tensor_cast.core.model_runner import ModelRunner
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable
-from .optimizer_summary import OptimizerSummary
+from .optimizer_summary import EARLY_STOP_DECODE_OOM, EARLY_STOP_PREFILL_OOM, OptimizerSummary
 from .utils import (
     DISAGG_COLUMNS,
     build_memory_info,
@@ -56,8 +56,14 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             chunk_plan = optimizer_data.get_prefill_chunk_plan()
         output_length = optimizer_data.output_length
         concurrency = batch_size * self.dp * self.pp
+        single_prefill_fits_budget = (
+            not decode_flag
+            and not variable_input_mode
+            and len(chunk_plan) == 1
+            and concurrency * chunk_plan[0].query_len <= max_batched_tokens
+        )
 
-        if decode_flag or len(chunk_plan) == 1:
+        if decode_flag or variable_input_mode or single_prefill_fits_budget:
             if variable_input_mode:
                 batch_result, composition_rows = self._get_batched_forward_info(concurrency, optimizer_data)
             else:
@@ -226,7 +232,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
 
         result_df = pd.DataFrame(columns=columns, data=rows).round(3)
         summary.set_summary_df(result_df)
-        summary.set_early_stop_flag(device_memory_available_gb, tpot, ttft)
+        early_stop_reason = None
+        if device_memory_available_gb < 0:
+            early_stop_reason = EARLY_STOP_DECODE_OOM if decode_flag else EARLY_STOP_PREFILL_OOM
+        summary.set_early_stop_flag(device_memory_available_gb, tpot, ttft, reason=early_stop_reason)
 
         self._maybe_set_search_info(optimizer_data, device_memory_available_gb, batch_size, ttft, tpot, summary)
 

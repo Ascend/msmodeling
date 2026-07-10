@@ -110,6 +110,29 @@ def _infer_rs_shape(comm_node: Node, world_size: int):
     return tuple(shape)
 
 
+def _as_concrete_dim(dim):
+    if isinstance(dim, int):
+        return dim
+    try:
+        return int(dim)
+    except (TypeError, ValueError, RuntimeError):
+        return None
+
+
+def _repair_view_shape_for_codegen(target_shape, inferred_dim: int):
+    """Return a view shape that avoids unbound SymInt expressions in FX codegen."""
+    shape = []
+    for idx, dim in enumerate(target_shape):
+        concrete_dim = _as_concrete_dim(dim)
+        if concrete_dim is not None:
+            shape.append(concrete_dim)
+        elif idx == inferred_dim:
+            shape.append(-1)
+        else:
+            shape.append(dim)
+    return shape
+
+
 def _insert_reduce_scatter(graph, comm_node, rank, rank_group):
     """Insert reduce_scatter and repair 2-D/3-D shape mismatches with a view."""
     inp = comm_node.args[0]
@@ -132,8 +155,10 @@ def _insert_reduce_scatter(graph, comm_node, rank, rank_group):
     ):
         return rs
 
+    repair_dim = _shard_dim(comm_node)
+    repair_shape = _repair_view_shape_for_codegen(target_shape, repair_dim)
     with graph.inserting_after(rs):
-        return graph.call_function(torch.ops.aten.view.default, (rs, list(target_shape)))
+        return graph.call_function(torch.ops.aten.view.default, (rs, repair_shape))
 
 
 def _infer_comm_rs_shape(comm_node):

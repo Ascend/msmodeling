@@ -25,6 +25,8 @@ LIMIT_COUNT = 1e6
 DEFAULT_MAX_SEARCH_COMBINATIONS = 100
 BYTES_TO_GB = 1024**3
 MAX_ITER_NUMS = 10
+HISTORICAL_DEFAULT_MAX_BATCHED_TOKENS = 8192
+AUTO_MAX_BATCHED_TOKENS_FACTORS = (4, 2, 1)
 
 COMMON_COLUMNS = [
     "device_name",
@@ -173,6 +175,26 @@ class OptimizerData:
             index += 1
 
         return chunks
+
+    def get_auto_max_batched_tokens_candidates(self) -> list[int]:
+        """Return max_batched_tokens candidates for automatic Prefill OOM fallback.
+
+        Prefer raw input_length when available so prefix-cache hit rate does not
+        shrink the serving-engine token budget. Distribution mode has no single
+        raw input length, so it falls back to the representative effective length.
+        """
+        base_length = self.input_length
+        if base_length is None:
+            base_length = self.get_effective_input_length(is_decode=False)
+        if base_length is None:
+            return []
+
+        candidates = []
+        for factor in AUTO_MAX_BATCHED_TOKENS_FACTORS:
+            candidate = base_length * factor
+            if candidate > 0 and candidate not in candidates:
+                candidates.append(candidate)
+        return candidates
 
     def get_prefill_num_chunks(self) -> int:
         """Return the number of prefill chunks produced by the current token budget."""

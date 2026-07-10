@@ -736,10 +736,20 @@ def _validate_optimizer_form(form: dict[str, Any]) -> list[str]:
         ("input_length", "\u8f93\u5165\u957f\u5ea6"),
         ("output_length", "\u8f93\u51fa\u957f\u5ea6"),
         ("jobs", "\u5e76\u884c\u4efb\u52a1\u6570"),
-        ("max_batched_tokens", "max-batched-tokens"),
         ("mxfp4_group_size", "MXFP4 \u5206\u7ec4\u5927\u5c0f"),
     ]:
         require_positive_int(key, label)
+    raw_max_batched_tokens = form.get("max_batched_tokens")
+    if raw_max_batched_tokens is None and "max_prefill_tokens" in form:
+        raw_max_batched_tokens = form.get("max_prefill_tokens")
+    if raw_max_batched_tokens not in (None, "", "None", "none", "auto"):
+        try:
+            max_batched_tokens = int(raw_max_batched_tokens)
+        except (TypeError, ValueError):
+            errors.append("max-batched-tokens\u5fc5\u987b\u662f\u6b63\u6574\u6570\u3002")
+        else:
+            if max_batched_tokens <= 0:
+                errors.append("max-batched-tokens\u5fc5\u987b\u5927\u4e8e0\u3002")
 
     prefix_cache_hit_rate = non_negative_float("prefix_cache_hit_rate", "Prefix Cache Hit Rate")
     if prefix_cache_hit_rate is not None and prefix_cache_hit_rate >= 1:

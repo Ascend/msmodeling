@@ -6,9 +6,10 @@ from unittest.mock import Mock, patch
 import pandas as pd
 from serving_cast.service.base_throughput_optimizer import BaseThroughputOptimizer
 from serving_cast.service.latency_table import ForwardLatencyRecord, ForwardShapeKey
-from serving_cast.service.optimizer_summary import OptimizerSummary
+from serving_cast.service.optimizer_summary import EARLY_STOP_PREFILL_OOM, OptimizerSummary
 from serving_cast.service.utils import (
     AGG_COLUMNS,
+    HISTORICAL_DEFAULT_MAX_BATCHED_TOKENS,
     LengthBin,
     LengthDistribution,
     OptimizerData,
@@ -205,6 +206,131 @@ class TestBaseBackend(unittest.TestCase):
 
         # Should return None if early stop occurs
         self.assertIsNone(result)
+
+    @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
+    def test_optimizer_auto_max_batched_tokens_uses_four_times_input_length(self, mock_get_inference_info):
+        """Auto max_batched_tokens starts at 4x input length."""
+        seen_max_batched_tokens = []
+
+        def side_effect(data_config):
+            seen_max_batched_tokens.append(data_config.max_batched_tokens)
+            summary = Mock(spec=OptimizerSummary)
+            summary.check_early_stop_flag.return_value = False
+            summary.get_memory_info.return_value = None
+            summary.get_summary_df.return_value = pd.DataFrame(
+                [{"token/s": 1.0, "max_batched_tokens": data_config.max_batched_tokens}]
+            )
+            return summary
+
+        mock_get_inference_info.side_effect = side_effect
+        optimizer_data = OptimizerData(input_length=100, output_length=10, max_batched_tokens=None)
+
+        result = self.backend.run(optimizer_data, [1, 1])
+
+        self.assertEqual(seen_max_batched_tokens, [400, 400])
+        self.assertEqual(result.get_summary_df().iloc[0]["max_batched_tokens"], 400)
+        self.assertIsNone(optimizer_data.max_batched_tokens)
+
+    @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
+    def test_optimizer_auto_max_batched_tokens_retries_on_prefill_oom(self, mock_get_inference_info):
+        """Auto max_batched_tokens retries 4x -> 2x after Prefill OOM."""
+        seen_max_batched_tokens = []
+
+        def side_effect(data_config):
+            seen_max_batched_tokens.append(data_config.max_batched_tokens)
+            summary = Mock(spec=OptimizerSummary)
+            if data_config.max_batched_tokens == 400:
+                summary.check_early_stop_flag.return_value = True
+                summary.get_early_stop_reason.return_value = EARLY_STOP_PREFILL_OOM
+                return summary
+
+            summary.check_early_stop_flag.return_value = False
+            summary.get_memory_info.return_value = None
+            summary.get_summary_df.return_value = pd.DataFrame(
+                [{"token/s": 1.0, "max_batched_tokens": data_config.max_batched_tokens}]
+            )
+            return summary
+
+        mock_get_inference_info.side_effect = side_effect
+        optimizer_data = OptimizerData(input_length=100, output_length=10, max_batched_tokens=None)
+
+        result = self.backend.run(optimizer_data, [1, 1])
+
+        self.assertEqual(seen_max_batched_tokens, [400, 200, 200])
+        self.assertEqual(result.get_summary_df().iloc[0]["max_batched_tokens"], 200)
+        self.assertIsNone(optimizer_data.max_batched_tokens)
+
+    @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
+    def test_optimizer_auto_max_batched_tokens_returns_none_after_min_prefill_oom(self, mock_get_inference_info):
+        """Auto max_batched_tokens exits when 4x, 2x, and 1x all Prefill OOM."""
+        seen_max_batched_tokens = []
+
+        def side_effect(data_config):
+            seen_max_batched_tokens.append(data_config.max_batched_tokens)
+            summary = Mock(spec=OptimizerSummary)
+            summary.check_early_stop_flag.return_value = True
+            summary.get_early_stop_reason.return_value = EARLY_STOP_PREFILL_OOM
+            return summary
+
+        mock_get_inference_info.side_effect = side_effect
+        optimizer_data = OptimizerData(input_length=100, output_length=10, max_batched_tokens=None)
+
+        result = self.backend.run(optimizer_data, [1, 1])
+
+        self.assertIsNone(result)
+        self.assertEqual(seen_max_batched_tokens, [400, 200, 100])
+        self.assertIsNone(optimizer_data.max_batched_tokens)
+
+    @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
+    def test_optimizer_auto_max_batched_tokens_falls_back_when_candidates_are_empty(self, mock_get_inference_info):
+        """Auto max_batched_tokens uses the historical default when no input length is available."""
+        seen_max_batched_tokens = []
+
+        def side_effect(data_config):
+            seen_max_batched_tokens.append(data_config.max_batched_tokens)
+            summary = Mock(spec=OptimizerSummary)
+            summary.check_early_stop_flag.return_value = False
+            summary.get_memory_info.return_value = None
+            summary.get_summary_df.return_value = pd.DataFrame(
+                [{"token/s": 1.0, "max_batched_tokens": data_config.max_batched_tokens}]
+            )
+            return summary
+
+        mock_get_inference_info.side_effect = side_effect
+        optimizer_data = OptimizerData(output_length=10, max_batched_tokens=None)
+
+        result = self.backend.run(optimizer_data, [1, 1])
+
+        self.assertEqual(
+            seen_max_batched_tokens,
+            [HISTORICAL_DEFAULT_MAX_BATCHED_TOKENS, HISTORICAL_DEFAULT_MAX_BATCHED_TOKENS],
+        )
+        self.assertEqual(
+            result.get_summary_df().iloc[0]["max_batched_tokens"],
+            HISTORICAL_DEFAULT_MAX_BATCHED_TOKENS,
+        )
+        self.assertIsNone(optimizer_data.max_batched_tokens)
+
+    @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
+    def test_optimizer_explicit_max_batched_tokens_does_not_retry_on_prefill_oom(self, mock_get_inference_info):
+        """Explicit max_batched_tokens keeps existing fixed-budget behavior."""
+        seen_max_batched_tokens = []
+
+        def side_effect(data_config):
+            seen_max_batched_tokens.append(data_config.max_batched_tokens)
+            summary = Mock(spec=OptimizerSummary)
+            summary.check_early_stop_flag.return_value = True
+            summary.get_early_stop_reason.return_value = EARLY_STOP_PREFILL_OOM
+            return summary
+
+        mock_get_inference_info.side_effect = side_effect
+
+        optimizer_data = OptimizerData(input_length=100, output_length=10, max_batched_tokens=400)
+
+        result = self.backend.run(optimizer_data, [1, 1])
+
+        self.assertIsNone(result)
+        self.assertEqual(seen_max_batched_tokens, [400])
 
     @patch.object(ConcreteThroughputOptimizer, "get_inference_info")
     def test_optimizer_no_results(self, mock_get_inference_info):

@@ -245,8 +245,9 @@ def arg_parse():
     service_group.add_argument(
         "--max-batched-tokens",
         type=check_positive_integer,
-        default=8192,
-        help="Max batched tokens for one prefill or mixed prefill/decode step.",
+        default=None,
+        help="Max batched tokens for one prefill or mixed prefill/decode step. "
+        "If omitted, starts from a multiple of input_length and falls back on Prefill OOM.",
     )
     service_group.add_argument(
         "--batch-range",
@@ -450,7 +451,22 @@ def main():
             prefix_cache_hit_rate=args.prefix_cache_hit_rate,
             max_batched_tokens=args.max_batched_tokens,
         )
-        if optimizer_data.get_prefill_num_chunks() > 1:
+        if optimizer_data.max_batched_tokens is None:
+            candidates = optimizer_data.get_auto_max_batched_tokens_candidates()
+            if not candidates:
+                logger.error("No available max_batched_tokens candidates for auto fallback.")
+                return 1
+            precheck_max_batched_tokens = candidates[0]
+        else:
+            precheck_max_batched_tokens = optimizer_data.max_batched_tokens
+
+        original_max_batched_tokens = optimizer_data.max_batched_tokens
+        try:
+            optimizer_data.max_batched_tokens = precheck_max_batched_tokens
+            prefill_num_chunks = optimizer_data.get_prefill_num_chunks()
+        finally:
+            optimizer_data.max_batched_tokens = original_max_batched_tokens
+        if prefill_num_chunks > 1:
             logger.warning(
                 "--input-length FILE currently does not support chunked prefill. Please increase --max-batched-tokens."
             )

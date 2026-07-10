@@ -139,6 +139,18 @@ class TestServiceUtils(unittest.TestCase):
 
         self.assertEqual(config.get_prefill_chunk_plan(), [])
 
+    def test_optimizer_data_auto_max_batched_tokens_uses_input_length(self):
+        config = OptimizerData(input_length=100)
+
+        self.assertEqual(config.get_auto_max_batched_tokens_candidates(), [400, 200, 100])
+
+    def test_optimizer_data_auto_max_batched_tokens_uses_distribution_when_input_length_missing(
+        self,
+    ):
+        config = OptimizerData(length_distribution=_simple_length_distribution())
+
+        self.assertEqual(config.get_auto_max_batched_tokens_candidates(), [2200, 1100, 550])
+
     def test_optimizer_data_prefill_chunk_plan_rejects_invalid_token_budget(self):
         for max_batched_tokens in (None, 0, -1):
             with self.subTest(max_batched_tokens=max_batched_tokens):

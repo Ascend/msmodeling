@@ -3,6 +3,10 @@ import unittest
 
 import pandas as pd
 from serving_cast.service.optimizer_summary import (
+    EARLY_STOP_MEMORY_OOM,
+    EARLY_STOP_PREFILL_OOM,
+    EARLY_STOP_TPOT_LIMIT,
+    EARLY_STOP_TTFT_LIMIT,
     OptimizerSummary,
     _fmt_memory,
     _fmt_memory_info,
@@ -59,6 +63,25 @@ class TestSummary(unittest.TestCase):
         # Initially _stop_flag is None, which should evaluate to False
         flag = self.summary.check_early_stop_flag()
         self.assertIsNone(flag)
+
+    def test_get_early_stop_reason(self):
+        """Test get_early_stop_reason returns the current early-stop reason."""
+        self.assertIsNone(self.summary.get_early_stop_reason())
+
+        self.summary.set_early_stop_flag(memory_left=-1, tpot=10.0, ttft=100.0)
+        self.assertEqual(self.summary.get_early_stop_reason(), EARLY_STOP_MEMORY_OOM)
+
+        self.summary.set_early_stop_flag(memory_left=-1, tpot=10.0, ttft=100.0, reason=EARLY_STOP_PREFILL_OOM)
+        self.assertEqual(self.summary.get_early_stop_reason(), EARLY_STOP_PREFILL_OOM)
+
+        self.summary.set_early_stop_flag(memory_left=10, tpot=60.0, ttft=100.0)
+        self.assertEqual(self.summary.get_early_stop_reason(), EARLY_STOP_TPOT_LIMIT)
+
+        self.summary.set_early_stop_flag(memory_left=10, tpot=10.0, ttft=1500.0)
+        self.assertEqual(self.summary.get_early_stop_reason(), EARLY_STOP_TTFT_LIMIT)
+
+        self.summary.set_early_stop_flag(memory_left=10, tpot=10.0, ttft=100.0)
+        self.assertIsNone(self.summary.get_early_stop_reason())
 
     def test_report_final_result_successful(self):
         """Test report_final_result with valid DataFrame"""

@@ -53,7 +53,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### Constraints
 
-- `--max-batched-tokens` sets the token budget for one prefill or mixed prefill/decode step. If `effective_input_length` is greater than `max_batched_tokens`, the optimizer automatically splits Prefill into chunks. Set `--max-batched-tokens` to match the serving engine's scheduling budget.
+- `--max-batched-tokens` sets the token budget for one prefill or mixed prefill/decode step. If omitted, the optimizer starts from `4 * input_length`, then falls back to `2 * input_length` and `1 * input_length` when the Prefill phase OOMs. If `effective_input_length` is greater than the active `max_batched_tokens`, the optimizer automatically splits Prefill into chunks. Set `--max-batched-tokens` explicitly to match the serving engine's scheduling budget.
 
 ### 2.2 PD Disaggregation Scenario
 
@@ -284,7 +284,7 @@ Service Options:
   --tpot-limits TPOT_LIMITS
                         TPOT constraints under which to search for the best throughput. None means no constraint. (default: None)
   --max-batched-tokens MAX_BATCHED_TOKENS
-                        Max batched tokens for one prefill or mixed prefill/decode step. (default: 8192)
+                        Max batched tokens for one prefill or mixed prefill/decode step. If omitted, starts from 4 * input_length and falls back on Prefill OOM. (default: None)
   --prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE
                         Prefix cache hit rate for token-level prefill reuse approximation. Valid range: [0, 1). (default: 0.0)
   --batch-range BATCH_RANGE [BATCH_RANGE ...]
@@ -352,7 +352,7 @@ Main parameters:
 | `--chrome-trace` | Debug Options | Optional | Generates a Chrome Trace file for operator-level performance visualization.<br>1. Type: Str.<br>2. Reference value: trace file path, such as `trace.json`.<br>3. Default: `None`. |
 | `--ttft-limits` | Service Options | Optional | TTFT constraint for throughput search.<br>1. Type: Float.<br>2. Valid range: positive number, in ms.<br>3. Default: `None`, meaning no TTFT constraint. |
 | `--tpot-limits` | Service Options | Optional | TPOT constraint for throughput search.<br>1. Type: Float.<br>2. Valid range: positive number, in ms.<br>3. Default: `None`, meaning no TPOT constraint. |
-| `--max-batched-tokens` | Service Options | Optional | Maximum batched tokens for one prefill or mixed prefill/decode step.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `8192`. |
+| `--max-batched-tokens` | Service Options | Optional | Maximum batched tokens for one prefill or mixed prefill/decode step.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`; auto mode starts from `4 * input_length` and falls back to `2 * input_length` then `1 * input_length` on Prefill OOM. |
 | `--batch-range` | Service Options | Optional | Batch size search range.<br>1. Type: List[Int].<br>2. Format: `[min max]` or `[max]`.<br>3. Default: `None`; if `min` is omitted, search starts from `1`; if `max` is omitted, no upper limit is set. |
 | `--serving-cost` | Service Options | Optional | Serving cost used for cost-related metrics.<br>1. Type: Float.<br>2. Valid range: non-negative number.<br>3. Default: `0`. |
 | `--disagg` | Service Options | Optional | Enables PD disaggregation mode.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |

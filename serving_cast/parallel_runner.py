@@ -68,7 +68,7 @@ class ParallelRunner:
         self._worker_initializer = worker_initializer or self._init_worker
 
         self.summary_result = []
-        max_batched_tokens = getattr(self.args, "max_batched_tokens", 8192)
+        max_batched_tokens = getattr(self.args, "max_batched_tokens", None)
         mtp_candidates = getattr(self.args, "num_mtp_token_sizes", None) or [self.args.num_mtp_tokens]
         fixed_num_mtp_tokens = self.args.num_mtp_tokens if len(mtp_candidates) == 1 else 0
         # set input_length to None if length_distribution is provided

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -24,8 +25,18 @@ from tensor_cast.core.input_generator import (
 )
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from .latency_table import ForwardLatencyRecord, ForwardShapeKey
-from .optimizer_summary import OptimizerSummary
-from .utils import AGG_COLUMNS, build_memory_info, format_breakdowns, MAX_ITER_NUMS, OptimizerData
+from .optimizer_summary import EARLY_STOP_PREFILL_OOM, OptimizerSummary
+from .utils import (
+    AGG_COLUMNS,
+    HISTORICAL_DEFAULT_MAX_BATCHED_TOKENS,
+    build_memory_info,
+    format_breakdowns,
+    MAX_ITER_NUMS,
+    OptimizerData,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseThroughputOptimizer(ABC):
@@ -52,6 +63,7 @@ class BaseThroughputOptimizer(ABC):
         self.moe_dp: int = 1
         self.is_moe_model: bool = False
         self._forward_record_cache: dict[ForwardShapeKey, ForwardLatencyRecord] = {}
+        self._last_run_early_stop_reason: str | None = None
 
     @abstractmethod
     def initialize(self, model_runner: ModelRunner):
@@ -78,7 +90,47 @@ class BaseThroughputOptimizer(ABC):
             the specified batch size and return performance metrics.
         """
 
-    def run(self, optimizer_data: OptimizerData, batch_range: list[int]) -> OptimizerSummary:
+    def run(self, optimizer_data: OptimizerData, batch_range: list[int]) -> OptimizerSummary | None:
+        if optimizer_data.max_batched_tokens is None:
+            return self._run_with_auto_max_batched_tokens(optimizer_data, batch_range)
+        return self._run_once(optimizer_data, batch_range)
+
+    def _run_with_auto_max_batched_tokens(
+        self,
+        optimizer_data: OptimizerData,
+        batch_range: list[int],
+    ) -> OptimizerSummary | None:
+        original_max_batched_tokens = optimizer_data.max_batched_tokens
+        try:
+            candidates = optimizer_data.get_auto_max_batched_tokens_candidates()
+            if not candidates:
+                logger.warning(
+                    "Cannot determine auto max_batched_tokens because input_length and length_distribution are both "
+                    "unset; falling back to the historical default of %d.",
+                    HISTORICAL_DEFAULT_MAX_BATCHED_TOKENS,
+                )
+                optimizer_data.max_batched_tokens = HISTORICAL_DEFAULT_MAX_BATCHED_TOKENS
+                return self._run_once(optimizer_data, batch_range)
+
+            for candidate in candidates:
+                optimizer_data.max_batched_tokens = candidate
+                logger.info("Auto max_batched_tokens candidate: %d.", candidate)
+                summary = self._run_once(optimizer_data, batch_range)
+                if summary is not None or self._last_run_early_stop_reason != EARLY_STOP_PREFILL_OOM:
+                    return summary
+
+                logger.info(
+                    "Prefill OOM with auto max_batched_tokens=%d; retrying with a smaller token budget.",
+                    candidate,
+                )
+
+            logger.warning("Prefill still OOM with the minimum auto max_batched_tokens; no valid result found.")
+            return None
+        finally:
+            optimizer_data.max_batched_tokens = original_max_batched_tokens
+
+    def _run_once(self, optimizer_data: OptimizerData, batch_range: list[int]) -> OptimizerSummary | None:
+        self._last_run_early_stop_reason = None
         left, right = 1, 512
         result = []
         result_df = pd.DataFrame(columns=AGG_COLUMNS)
@@ -94,6 +146,7 @@ class BaseThroughputOptimizer(ABC):
         optimizer_data.batch_size = left
         summary = self.get_inference_info(optimizer_data)
         if summary.check_early_stop_flag():
+            self._last_run_early_stop_reason = summary.get_early_stop_reason()
             return None
 
         if not batch_range:

@@ -52,7 +52,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### 约束
 
-- `--max-batched-tokens` 设置单个 Prefill 或混合 Prefill/Decode 步骤的 token 预算。如果 `effective_input_length` 大于 `max_batched_tokens`，优化器会自动将 Prefill 拆分为多个分块（chunk）。请将 `--max-batched-tokens` 设置为与服务引擎调度预算一致。
+- `--max-batched-tokens` 设置单个 Prefill 或混合 Prefill/Decode 步骤的 token 预算。未传入时，优化器先使用 `4 * input_length`，如果 Prefill 阶段 OOM，则依次降级为 `2 * input_length` 和 `1 * input_length`。如果 `effective_input_length` 大于当前生效的 `max_batched_tokens`，优化器会自动将 Prefill 拆分为多个分块（chunk）。如需匹配服务引擎调度预算，请显式设置 `--max-batched-tokens`。
 
 ### 2.2 PD 分离场景
 
@@ -340,7 +340,7 @@ Service Options:
   --tpot-limits TPOT_LIMITS
                         TPOT constraints under which to search for the best throughput. None means no constraint. (default: None)
   --max-batched-tokens MAX_BATCHED_TOKENS
-                        Max batched tokens for one prefill or mixed prefill/decode step. (default: 8192)
+                        Max batched tokens for one prefill or mixed prefill/decode step. If omitted, starts from 4 * input_length and falls back on Prefill OOM. (default: None)
   --prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE
                         Prefix cache hit rate for token-level prefill reuse approximation. Valid range: [0, 1). (default: 0.0)
   --batch-range BATCH_RANGE [BATCH_RANGE ...]
@@ -408,7 +408,7 @@ PD Ratio Optimization Options:
 | `--chrome-trace` | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |
 | `--ttft-limits` | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。 |
 | `--tpot-limits` | Service Options | 可选 | 指定 TPOT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TPOT。 |
-| `--max-batched-tokens` | Service Options | 可选 | 指定单个 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`8192`。 |
+| `--max-batched-tokens` | Service Options | 可选 | 指定单个 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；自动模式先使用 `4 * input_length`，并在 Prefill OOM 时依次降级为 `2 * input_length`、`1 * input_length`。 |
 | `--batch-range` | Service Options | 可选 | 指定 batch size 搜索范围。<br>1. 类型：List[Int]。<br>2. 格式：`[min max]` 或 `[max]`。<br>3. 默认值：`None`；未指定 `min` 时默认从 `1` 开始搜索，未指定 `max` 时不设置上限。 |
 | `--serving-cost` | Service Options | 可选 | 指定服务成本，用于成本相关指标计算。<br>1. 类型：Float。<br>2. 取值范围：非负数。<br>3. 默认值：`0`。 |
 | `--disagg` | Service Options | 可选 | 启用 PD 分离模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |

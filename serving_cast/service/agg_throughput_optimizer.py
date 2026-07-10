@@ -21,7 +21,7 @@ import pandas as pd
 from tensor_cast.core.model_runner import ModelRunner
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable, ForwardShapeKey
-from .optimizer_summary import OptimizerSummary
+from .optimizer_summary import EARLY_STOP_DECODE_OOM, EARLY_STOP_PREFILL_OOM, OptimizerSummary
 from .scheduler import DecodeFirstWithSlack, Scheduler, SchedulerState
 from .utils import AGG_COLUMNS, MemoryInfo, format_parallel_label, OptimizerData, select_tightest_memory_info
 
@@ -164,7 +164,12 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             ],
         ).round(3)
         summary.set_summary_df(result_df)
-        summary.set_early_stop_flag(memory_left, metrics.tpot, metrics.ttft)
+        early_stop_reason = None
+        if metrics.prefill_memory_left_gb < 0:
+            early_stop_reason = EARLY_STOP_PREFILL_OOM
+        elif memory_left < 0:
+            early_stop_reason = EARLY_STOP_DECODE_OOM
+        summary.set_early_stop_flag(memory_left, metrics.tpot, metrics.ttft, reason=early_stop_reason)
 
         self._maybe_set_search_info(optimizer_data, memory_left, batch_size, metrics.ttft, metrics.tpot, summary)
 

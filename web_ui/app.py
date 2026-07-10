@@ -1244,8 +1244,8 @@ def build_app() -> gr.Blocks:
                             op_compile_break = gr.Checkbox(label="Allow Graph Breaks", value=False)
                             op_max_batched_tokens = gr.Textbox(
                                 label="Max Batched Tokens (max-batched-tokens)",
-                                value="8192",
-                                placeholder="Default: 8192",
+                                value="",
+                                placeholder="Auto: starts from input length multiple, then falls back on Prefill OOM",
                             )
                         with gr.Row():
                             op_mtp_tokens = gr.Textbox(

@@ -193,6 +193,41 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["ttft"], 12.0)
         self.assertEqual(row["percentage_breakdowns"], "Mem 18.00 | Comm 82.00 | Cube 0.00 | Vec 0.00")
 
+    def test_single_chunk_prefill_splits_when_concurrency_exceeds_token_budget(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=4,
+            output_length=16,
+            max_batched_tokens=8,
+            serving_cost=0,
+        )
+        captured_calls = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            captured_calls.append((concurrency, query_len, seq_len))
+
+            class DummyMetrics:
+                execution_time_s = {"analytic": 0.001}
+                total_device_memory_gb = 64.0
+                model_weight_size_gb = 20.0
+                kv_cache_size_gb = 4.0
+                model_activation_size_gb = 1.0
+                reserved_memory_gb = 10.0
+                device_memory_available_gb = 1.0
+                breakdowns = {}
+
+            return DummyMetrics()
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        row = result.get_summary_df().iloc[0]
+        self.assertEqual(captured_calls, [(2, 4, 4)])
+        self.assertEqual(row["prefill_num_chunks"], 1)
+        self.assertEqual(row["ttft"], 2.0)
+
     def test_chunked_prefill_stops_when_any_record_memory_is_negative(self):
         optimizer_data = OptimizerData(
             ttft_limits=1000,
@@ -272,7 +307,7 @@ class TestDisaggStrategy(unittest.TestCase):
             batch_size=16,
             input_length=100,
             output_length=10,
-            max_batched_tokens=2048,
+            max_batched_tokens=8192,
             serving_cost=0,
             concurrency_search_strategy="linear_exponential",
         )

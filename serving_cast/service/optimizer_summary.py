@@ -23,6 +23,12 @@ from serving_cast.utils import best_pd_row_per_group, rank_pd_ratio_rows, sort_p
 
 logger = logging.getLogger(__name__)
 
+EARLY_STOP_MEMORY_OOM = "memory_oom"
+EARLY_STOP_PREFILL_OOM = "prefill_oom"
+EARLY_STOP_DECODE_OOM = "decode_oom"
+EARLY_STOP_TPOT_LIMIT = "tpot_limit"
+EARLY_STOP_TTFT_LIMIT = "ttft_limit"
+
 
 def _positive_float(value) -> Optional[float]:
     num = pd.to_numeric(value, errors="coerce")
@@ -86,6 +92,7 @@ def _sorted_rows(rows: list[dict], metric: str) -> list[dict]:
 class OptimizerSummary:
     def __init__(self, data_config):
         self._early_stop_flag = None
+        self._early_stop_reason = None
         self._summary_df = None
         self._memory_info: MemoryInfo | None = None
         self.data_config = data_config
@@ -116,16 +123,26 @@ class OptimizerSummary:
     def get_memory_info(self) -> MemoryInfo | None:
         return self._memory_info
 
-    def set_early_stop_flag(self, memory_left, tpot, ttft):
+    def set_early_stop_flag(self, memory_left, tpot, ttft, reason: str | None = None):
         def check(value, limit):
             return value is not None and limit is not None and value > limit
 
-        self._early_stop_flag = (
-            (memory_left < 0) or check(tpot, self.data_config.tpot_limits) or check(ttft, self.data_config.ttft_limits)
-        )
+        if memory_left < 0:
+            self._early_stop_reason = reason or EARLY_STOP_MEMORY_OOM
+        elif check(tpot, self.data_config.tpot_limits):
+            self._early_stop_reason = EARLY_STOP_TPOT_LIMIT
+        elif check(ttft, self.data_config.ttft_limits):
+            self._early_stop_reason = EARLY_STOP_TTFT_LIMIT
+        else:
+            self._early_stop_reason = None
+
+        self._early_stop_flag = self._early_stop_reason is not None
 
     def check_early_stop_flag(self):
         return self._early_stop_flag
+
+    def get_early_stop_reason(self) -> str | None:
+        return self._early_stop_reason
 
     def _is_pd_ratio_mode(self):
         """Return whether this is PD ratio optimization mode."""
