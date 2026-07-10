@@ -86,6 +86,15 @@ exemptions:
       ticket: deepseek-v4-ci-gate
 
     - symbols:
+        - tensor_cast/performance_model/profiling_database/profiling_data_source.py::ProfilingDataSource::_lookup_composite_decomposed
+        - tensor_cast/ops/mla.py::_@register_tensor_cast_op("mla_sparse_attention_quant")
+      reason: "Methods are exercised by test_mla_decode_fia_miss_returns_none, TestMlaSparseProfilingFallback and test_mla_sparse_attention_quant_output_dtype_fallback but the static test_map cannot attribute coverage to these modified symbols."
+      applicant: Hudingyi
+      approver: liujiawang
+      deadline: 2026-09-30
+      ticket: "PR-363"
+
+    - symbols:
         - tensor_cast/pipeline_parallel.py::PPMissingLayer::%
         - tensor_cast/pipeline_parallel.py::PipelineStageModel::%
         - tensor_cast/pipeline_parallel.py::PipelineModel::%

@@ -42,7 +42,7 @@ class TestDeepseekV32Model(unittest.TestCase):
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
             model.forward(**inputs)
         result = runtime.table_averages()
-        self.assertIn("tensor_cast.multihead_latent_attention_quant.default", result)
+        self.assertIn("tensor_cast.mla_sparse_attention_quant.default", result)
         self.assertIn("tensor_cast.dsa_indexer.default", result)
         total_time_s = runtime.total_execution_time_s()[perf_model.name]
         self.assertGreater(total_time_s, 0)
@@ -81,8 +81,8 @@ class TestDeepseekV32ModelNightly(unittest.TestCase):
             total_time = 0.0
             for event in runtime.event_list:
                 func_name = str(event.op_invoke_info.func)
-                if "multihead_latent_attention_quant" in func_name:
-                    total_time = event.perf_results.get("analytic").execution_time_s
+                if "multihead_latent_attention_quant" in func_name or "mla_sparse_attention_quant" in func_name:
+                    total_time += event.perf_results.get("analytic").execution_time_s
             return total_time
 
         seq_len = 3500

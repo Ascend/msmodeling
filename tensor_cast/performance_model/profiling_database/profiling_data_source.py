@@ -468,6 +468,12 @@ class SubKernelSpec:
     attention_params: Optional[Dict[str, Any]] = field(default=None)
     tc_input_count: Optional[int] = None
     alternate_kernel_types: Optional[List[str]] = None
+    # Marks a sub-kernel as the dominant attention kernel (FIA/SFA). On a CSV
+    # miss the composite lookup returns None to force a complete analytic
+    # fallback instead of a PARTIAL result that silently drops attention
+    # latency. This is independent of query_mode: SFA matches in compute mode
+    # (its CSV has no avg_seq_len column) but is still an attention kernel.
+    is_attention: bool = False
 
 
 def _is_decode_mla(args: tuple) -> bool:
@@ -491,16 +497,20 @@ def _decompose_mla_common(
     mapping: dict,
     first_kernel_type: str,
     alternate_kernel_types: Optional[List[str]] = None,
+    attention_kernel_type: str = "FusedInferAttentionScore",
 ) -> Optional[List[SubKernelSpec]]:
     """Shared MLA decomposition for BF16 and quantized variants.
 
-    Decode: first_kernel_type(q@W_UK_T) + FIA + TransposeBatchMatMul(out@W_UV)
-    Prefill: MatMulV2(kv_c@kv_b_proj) + FusedInferAttentionScore (v0.18.0: unified FIA)
+    Decode: first_kernel_type(q@W_UK_T) + attention_kernel_type + TransposeBatchMatMul(out@W_UV)
+    Prefill: MatMulV2(kv_c@kv_b_proj) + attention_kernel_type
 
     Args:
         first_kernel_type: "BatchMatMulV2" for BF16, "QuantBatchMatmulV3" for quant.
         alternate_kernel_types: Optional fallback kernel types for the
             first decode matmul sub-kernel.
+        attention_kernel_type: Kernel type for the attention sub-kernel.
+            "FusedInferAttentionScore" for dense MLA (default);
+            "SparseFlashAttention" for sparse MLA (DeepSeek-V3.2 / GLM-5.1).
     """
     args = op_invoke_info.args
     if len(args) < 10:
@@ -540,18 +550,34 @@ def _decompose_mla_common(
         fia_q_raw = (batch_size, num_heads, 1, fia_head_dim)
         fia_q_normalized = _normalize_fia_q_shape(fia_q_raw, fia_head_dim)
 
-        fia_spec = SubKernelSpec(
-            kernel_type="FusedInferAttentionScore",
-            input_shapes=[],
-            dtype=dtype_str,
-            query_mode="attention",
-            attention_params={
-                "q_shape_3d": fia_q_normalized or (batch_size, num_heads, fia_head_dim),
-                "avg_seq_len": avg_seq_len,
-                "sparse_mode": 0,  # decode uses no_mask
-                "num_kv_heads": 1,  # MLA compressed attention: single KV head
-            },
-        )
+        if attention_kernel_type == "SparseFlashAttention":
+            # SFA CSV uses 9-input shape layout (q, k_cache, v_cache, block_table,
+            # topk_indices, query_start_loc, seq_lens, rope_q, rope_k).
+            # It has no avg_seq_len column, so FIA-style _query_by_attn_params
+            # would always miss.  Use compute-mode shape matching against the
+            # first input (q shape: num_tokens × num_heads × kv_lora_rank) with
+            # tc_input_count=1 so only slot-0 is compared.
+            attn_spec = SubKernelSpec(
+                kernel_type=attention_kernel_type,
+                input_shapes=[(num_tokens, num_heads, fia_head_dim)],
+                dtype=dtype_str,
+                tc_input_count=1,
+                is_attention=True,
+            )
+        else:
+            attn_spec = SubKernelSpec(
+                kernel_type=attention_kernel_type,
+                input_shapes=[],
+                dtype=dtype_str,
+                query_mode="attention",
+                attention_params={
+                    "q_shape_3d": fia_q_normalized or (batch_size, num_heads, fia_head_dim),
+                    "avg_seq_len": avg_seq_len,
+                    "sparse_mode": 0,  # decode uses no_mask
+                    "num_kv_heads": 1,  # MLA compressed attention: single KV head
+                },
+                is_attention=True,
+            )
 
         # QuantBatchMatmulV3 CSV has extra inputs (bias columns) beyond
         # the 2 TC shapes; tc_input_count=2 tells shape matching to only
@@ -573,7 +599,7 @@ def _decompose_mla_common(
                 tc_input_count=first_tc_input_count,
                 alternate_kernel_types=alternate_kernel_types,
             ),
-            fia_spec,
+            attn_spec,
             SubKernelSpec(
                 kernel_type="TransposeBatchMatMul",
                 input_shapes=[
@@ -605,18 +631,25 @@ def _decompose_mla_common(
         qk_nope_head_dim_pf = qk_head_dim - qk_rope_head_dim
         fia_q_shape_3d = (num_tokens, num_heads, qk_nope_head_dim_pf)
 
-        return [
-            SubKernelSpec(
-                kernel_type="MatMulV2",
-                input_shapes=[
-                    (num_tokens, kv_lora_rank),
-                    tuple(kv_b_proj.shape),
-                ],
+        if attention_kernel_type == "SparseFlashAttention":
+            # SFA prefill: compute-mode shape matching on the q shape.
+            # q layout for prefill: (num_tokens, num_heads, qk_nope_head_dim).
+            # SFA CSV uses the same 9-input layout as decode (q, k_cache,
+            # v_cache, block_table, topk_indices, query_start_loc, seq_lens,
+            # rope_q, rope_k); TC only models the q tensor, so tc_input_count=1
+            # compares slot-0 (q) only. This is independent of the sibling
+            # MatMulV2 sub-kernel below, which keeps tc_input_count=2 because TC
+            # supplies both of its operand shapes (kv_c and kv_b_proj).
+            prefill_attn_spec = SubKernelSpec(
+                kernel_type=attention_kernel_type,
+                input_shapes=[fia_q_shape_3d],
                 dtype=dtype_str,
-                tc_input_count=2,
-            ),
-            SubKernelSpec(
-                kernel_type="FusedInferAttentionScore",
+                tc_input_count=1,  # SFA 9-input layout, slot-0 = q
+                is_attention=True,
+            )
+        else:
+            prefill_attn_spec = SubKernelSpec(
+                kernel_type=attention_kernel_type,
                 input_shapes=[],
                 dtype=dtype_str,
                 query_mode="attention",
@@ -635,7 +668,20 @@ def _decompose_mla_common(
                     #   _forward_decode():  num_key_value_heads=self.num_kv_heads (=1)
                     "num_kv_heads": num_heads,
                 },
+                is_attention=True,
+            )
+
+        return [
+            SubKernelSpec(
+                kernel_type="MatMulV2",
+                input_shapes=[
+                    (num_tokens, kv_lora_rank),
+                    tuple(kv_b_proj.shape),
+                ],
+                dtype=dtype_str,
+                tc_input_count=2,
             ),
+            prefill_attn_spec,
         ]
 
 
@@ -652,6 +698,52 @@ def _decompose_mla(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[Li
 def _decompose_mla_quant(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
     """Decompose multihead_latent_attention_quant."""
     return _decompose_mla_common(op_invoke_info, mapping, "QuantBatchMatmulV3")
+
+
+def _decompose_mla_sparse(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
+    """Decompose mla_sparse_attention (BF16). Maps attention kernel to SparseFlashAttention.
+
+    The SFA sub-kernel is matched in compute mode (its CSV has no avg_seq_len
+    column) but flagged is_attention=True. When SparseFlashAttention.csv is not
+    yet in the database, that sub-kernel misses and _lookup_composite_decomposed
+    returns None, falling back to the analytic model for a complete (though less
+    accurate) latency estimate rather than a PARTIAL result that would drop the
+    dominant attention latency. This is the expected behavior until SFA profiling
+    data is collected for DSv3.2 / GLM-5.1.
+
+    tc_input_count rationale: the SFA attention sub-kernel sets tc_input_count=1
+    because TC only models the q tensor while the SFA CSV stores a 9-input layout
+    (q, k_cache, v_cache, block_table, topk_indices, query_start_loc, seq_lens,
+    rope_q, rope_k) — matching slot-0 (q) only. This is independent of the
+    sibling matmul sub-kernels: the decode q@W_UK_T / out@W_UV and the prefill
+    kv_c@kv_b_proj matmuls keep their own tc_input_count (2 for QuantBatchMatmulV3
+    / MatMulV2) because TC supplies both operand shapes for those.
+    """
+    return _decompose_mla_common(
+        op_invoke_info,
+        mapping,
+        "BatchMatMulV2",
+        alternate_kernel_types=["BatchMatMulNd"],
+        attention_kernel_type="SparseFlashAttention",
+    )
+
+
+def _decompose_mla_sparse_quant(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
+    """Decompose mla_sparse_attention_quant. Maps attention kernel to SparseFlashAttention.
+
+    Note: alternate_kernel_types is intentionally omitted — QuantBatchMatmulV3 has no
+    ND variant fallback (unlike BF16 BatchMatMulV2 which falls back to BatchMatMulNd).
+
+    When SparseFlashAttention.csv is absent, falls back to analytic model (same as BF16
+    sparse variant). See _decompose_mla_sparse for details, including the
+    tc_input_count=1 rationale for the SFA attention sub-kernel.
+    """
+    return _decompose_mla_common(
+        op_invoke_info,
+        mapping,
+        "QuantBatchMatmulV3",
+        attention_kernel_type="SparseFlashAttention",
+    )
 
 
 def _decompose_mlapo_common(
@@ -769,6 +861,8 @@ COMPOSITE_DECOMPOSERS: Dict[
     # See §14 in OP_PLUGIN_MAPPING_TUTORIAL.md for the full SOP.
     "tensor_cast.multihead_latent_attention.default": _decompose_mla,
     "tensor_cast.multihead_latent_attention_quant.default": _decompose_mla_quant,
+    "tensor_cast.mla_sparse_attention.default": _decompose_mla_sparse,
+    "tensor_cast.mla_sparse_attention_quant.default": _decompose_mla_sparse_quant,
     "tensor_cast.mlapo.default": _decompose_mlapo,
     "tensor_cast.mlapo_quant.default": _decompose_mlapo_quant,
 }
@@ -1295,7 +1389,15 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         Calls the decomposer to get SubKernelSpec list, then queries each
         sub-kernel via _find_compute_match or _query_by_attn_params.
 
-        Returns PARTIAL if some sub-kernels miss (with accumulated hit latency).
+        Returns:
+          - MEASURED if all sub-kernels hit.
+          - PARTIAL if non-attention sub-kernels miss but some hit (accumulated latency).
+          - None if an attention sub-kernel (is_attention=True) misses — forces
+            analytic fallback to avoid silently dropping the dominant attention
+            latency. This applies regardless of match mode: FIA matches via
+            query_mode='attention', SFA matches in compute mode (its CSV has no
+            avg_seq_len column), but both are flagged is_attention.
+          - None if all sub-kernels miss.
         """
         specs = decomposer(op_invoke_info, mapping)
         if not specs:
@@ -1329,6 +1431,17 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                     )
                 else:
                     missed_kernels.append(spec.kernel_type)
+                    # Attention sub-kernel miss: SFA/FIA CSV not available.
+                    # Return None so analytic fallback produces a complete estimate
+                    # rather than a PARTIAL result that silently drops attention latency.
+                    self.last_miss_reason = f"attention_sub_kernel_miss:{spec.kernel_type}"
+                    logger.warning(
+                        "attention sub-kernel miss for %s (%s): CSV not in database, "
+                        "falling back to analytic model. Latency estimate may be less accurate.",
+                        spec.kernel_type,
+                        _normalize_func_name(op_invoke_info.func),
+                    )
+                    return None
             else:
                 torch_dtype = None
                 for k, v in DTYPE_MAP.items():
@@ -1366,6 +1479,20 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                     )
                 else:
                     missed_kernels.append(spec.kernel_type)
+                    if spec.is_attention:
+                        # Attention sub-kernel matched in compute mode (e.g. SFA,
+                        # whose CSV has no avg_seq_len column). A miss here must
+                        # still force analytic fallback — returning PARTIAL would
+                        # silently drop the dominant attention latency, the exact
+                        # failure mode this composite path guards against.
+                        self.last_miss_reason = f"attention_sub_kernel_miss:{spec.kernel_type}"
+                        logger.warning(
+                            "attention sub-kernel miss for %s (%s): CSV not in database, "
+                            "falling back to analytic model. Latency estimate may be less accurate.",
+                            spec.kernel_type,
+                            _normalize_func_name(op_invoke_info.func),
+                        )
+                        return None
 
         if missed_kernels:
             self.last_miss_reason = f"sub_kernel_miss:{','.join(missed_kernels)}"

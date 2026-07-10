@@ -206,6 +206,14 @@ interpolation_policy:
       max_interpolation_dim: 1
     FusedInferAttentionScore:
       axis_transform: sqrt_seq
+    SparseFlashAttention:
+      # SFA is matched in compute mode on the q-shape (num_tokens, num_heads,
+      # fia_head_dim); this shape carries no seq/topk dimension, so the transform
+      # interpolates over num_tokens, not avg_seq_len. The single-q-shape key
+      # cannot yet distinguish context/topk length — revisit whether to encode
+      # avg_seq_len/topk in the key before importing real SFA profiling data
+      # (see issue #213). linear = no sqrt transform (compute-mode default).
+      axis_transform: linear
     GatherV2:
       generic_compute:
         axis: output_numel
@@ -514,6 +522,24 @@ operator_mappings:
       shape derivation. Same decomposition as mlapo but uses QuantBatchMatmulV3
       for projections instead of MatMulV2.
 
+
+  "tensor_cast.mla_sparse_attention.default":
+    composite: true
+    decomposer: true
+    notes: >
+      [HIGH] Sparse MLA composite (DeepSeek-V3.2 / GLM-5.1 DSA path).
+      Same decomposition structure as multihead_latent_attention but
+      attention kernel maps to SparseFlashAttention (SFA) instead of FIA.
+      vllm-ascend: AscendSFABackend → npu_sparse_flash_attention.
+      Dispatch condition: hf_config has index_topk attribute.
+
+  "tensor_cast.mla_sparse_attention_quant.default":
+    composite: true
+    decomposer: true
+    notes: >
+      [HIGH] Quantized sparse MLA composite. SFA variant of
+      multihead_latent_attention_quant.default.
+      Same NPU kernel path as mla_sparse_attention.default.
 
   # ========== 8. KV Cache ==========
 

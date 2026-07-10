@@ -323,7 +323,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         }
         if self.quant_config is not None:
             attention_backend = partial(
-                torch.ops.tensor_cast.multihead_latent_attention_quant,
+                self._get_attention_op(quant_enabled=True),
                 W_UK_T=self.W_UK_T,
                 W_UV=self.W_UV,
                 kv_b_proj=self.kv_b_proj_weight_t,
@@ -349,7 +349,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             )
         else:
             attention_backend = partial(
-                torch.ops.tensor_cast.multihead_latent_attention,
+                self._get_attention_op(quant_enabled=False),
                 W_UK_T=self.W_UK_T,
                 W_UV=self.W_UV,
                 kv_b_proj=self.kv_b_proj_weight_t,
@@ -380,6 +380,12 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         Subclasses can override this to pass specific parameters (e.g., top-k, window size).
         """
         return {}
+
+    def _get_attention_op(self, quant_enabled: bool):
+        """Return the TC op to use for attention. Subclasses override for non-dense paths."""
+        if quant_enabled:
+            return torch.ops.tensor_cast.multihead_latent_attention_quant
+        return torch.ops.tensor_cast.multihead_latent_attention
 
     def quantize_params(self):
         assert self.quant_config is not None, "quant_config must be set before quantization"
@@ -472,6 +478,17 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
             "topk_limit": self.indexer.topk_limit,
             "topk_indices": pre_attn_out,
         }
+
+    def _get_attention_op(self, quant_enabled: bool):
+        """Return the sparse-MLA (SFA) TC op for the DSA path.
+
+        Overrides the dense MLA base to dispatch to mla_sparse_attention[_quant],
+        which map the attention sub-kernel to NPU SparseFlashAttention instead of
+        FusedInferAttentionScore.
+        """
+        if quant_enabled:
+            return torch.ops.tensor_cast.mla_sparse_attention_quant
+        return torch.ops.tensor_cast.mla_sparse_attention
 
     def _pre_attention_forward(
         self,

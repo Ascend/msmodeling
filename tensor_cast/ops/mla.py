@@ -221,14 +221,16 @@ def _(
             used in the decode phase, None if only prefill sequences are provided.
         kv_b_proj: (kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim))
             used in the prefill phase, None if only decode sequences are provided.
-        topk_limit: Number of top-K tokens for sparse attention
+        topk_limit: Number of top-K tokens for sparse attention.
         topk_indices: Preselected token positions for sparse attention.
+            For dense MLA (DeepSeek-V3) these are typically None; the DSA sparse
+            path uses the dedicated mla_sparse_attention[_quant] ops. They are
+            retained here so both ops share one analytic helper — when provided,
+            the helper clamps the attended context length to topk (see
+            _multihead_latent_attention_properties_helper).
     Returns:
         (num_tokens, num_heads, v_head_dim)
     """
-    if topk_indices is not None:
-        # Keep the sparse top-k tensor live in the semantic graph via its shape.
-        _ = topk_indices.shape[-1]
     return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=q.dtype, device="meta")
 
 
@@ -296,9 +298,76 @@ def _(
     Returns:
         (num_tokens, num_heads, v_head_dim)
     """
-    if topk_indices is not None:
-        # Keep the sparse top-k tensor live in the semantic graph via its shape.
-        _ = topk_indices.shape[-1]
+    if out_dtype is None:
+        out_dtype = q.dtype
+    return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=out_dtype, device="meta")
+
+
+@register_tensor_cast_op("mla_sparse_attention")
+def _(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_lens: Optional[torch.Tensor],
+    W_UK_T: Optional[torch.Tensor],
+    W_UV: Optional[torch.Tensor],
+    kv_b_proj: Optional[torch.Tensor],
+    v_head_dim: int,
+    topk_limit: Optional[int] = None,
+    topk_indices: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Sparse MLA attention (DSA path) for DeepSeek-V3.2 and GLM-5.1.
+
+    Semantically identical to multihead_latent_attention; registered as a
+    separate TC op so the profiling database maps it to SparseFlashAttention
+    (SFA) instead of FusedInferAttentionScore (FIA).
+
+    vllm-ascend dispatch condition: hf_config has index_topk → AscendSFABackend
+    → npu_sparse_flash_attention.
+    """
+    return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=q.dtype, device="meta")
+
+
+@register_tensor_cast_op("mla_sparse_attention_quant")
+def _(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    query_lens: Optional[torch.Tensor],
+    W_UK_T: Optional[torch.Tensor],
+    W_UV: Optional[torch.Tensor],
+    kv_b_proj: Optional[torch.Tensor],
+    v_head_dim: int,
+    topk_limit: Optional[int],
+    topk_indices: Optional[torch.Tensor],
+    query_scale: torch.Tensor,
+    query_offset: Optional[torch.Tensor],
+    kv_scale: torch.Tensor,
+    kv_offset: Optional[torch.Tensor],
+    kv_projected_scale: torch.Tensor,
+    kv_projected_offset: Optional[torch.Tensor],
+    qk_scale: torch.Tensor,
+    qk_offset: Optional[torch.Tensor],
+    v_scale: torch.Tensor,
+    v_offset: Optional[torch.Tensor],
+    attention_prob_scale: torch.Tensor,
+    attention_prob_offset: Optional[torch.Tensor],
+    kv_b_proj_scale: torch.Tensor,
+    kv_b_proj_offset: Optional[torch.Tensor],
+    out_scale: Optional[torch.Tensor],
+    out_offset: Optional[torch.Tensor],
+    out_dtype: Optional[torch.dtype],
+) -> torch.Tensor:
+    """
+    Quantized sparse MLA attention (DSA path). SFA variant of
+    multihead_latent_attention_quant. Used by DeepSeek-V3.2 and GLM-5.1
+    when quant config is enabled.
+    """
     if out_dtype is None:
         out_dtype = q.dtype
     return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=out_dtype, device="meta")

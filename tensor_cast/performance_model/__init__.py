@@ -1411,10 +1411,18 @@ def _multihead_latent_attention_properties_helper(
     topk_limit = rest[0] if len(rest) > 0 else None
     topk_indices = rest[1] if len(rest) > 1 else None
 
-    # Extract dimensions from input tensors
+    # Extract dimensions from input tensors.
+    # A prefill-only batch has W_UK_T=None (decode weights absent); derive
+    # kv_lora_rank from kv_b_proj instead, mirroring _mla_metadata_properties.
     num_heads = q.size(1)
     q_head_dim = q.size(2)
-    kv_lora_rank = W_UK_T.size(-1)
+    if W_UK_T is not None:
+        kv_lora_rank = W_UK_T.size(-1)
+    elif kv_b_proj is not None:
+        kv_lora_rank = kv_b_proj.size(0)
+    else:
+        # Neither decode nor prefill weights available: return empty properties.
+        return op_invoke_info.get_memory_access_properties()
     qk_rope_head_dim = kv_cache.size(-1) - kv_lora_rank
     qk_nope_head_dim = q_head_dim - qk_rope_head_dim
     sparse_topk = topk_indices.shape[-1] if topk_indices is not None else topk_limit
@@ -1674,16 +1682,23 @@ def _calculate_mla_metadata_quant_ops(
     return total_quant_dequant_ops
 
 
-@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.multihead_latent_attention_quant.default)
-def _(
+def _mla_quant_analytic_properties(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
+    """Shared analytic properties for dense and sparse quant MLA handlers.
+
+    multihead_latent_attention_quant and mla_sparse_attention_quant decode to the
+    same compute graph (the sparse variant only changes which NPU attention kernel
+    the empirical path maps to, not the analytic FLOP/byte accounting), so they
+    share this body.
+    """
     q = op_invoke_info.args[0]
     kv_cache = op_invoke_info.args[1]
     query_start_loc = op_invoke_info.args[3]
     request_total_seq_lens = op_invoke_info.args[4]
     query_lens = op_invoke_info.args[5]
     W_UK_T = op_invoke_info.args[6]
+    kv_b_proj = op_invoke_info.args[8]
     v_head_dim = op_invoke_info.args[9]
     out_dtype = op_invoke_info.kwargs.get("out_dtype")
     if out_dtype is None and len(op_invoke_info.args) > 28:
@@ -1704,10 +1719,20 @@ def _(
         enable_sparse_mla_paged_kv_efficiency=False,
     )
 
-    # Extract dimensions (reuse logic instead of duplicating)
+    # Extract dimensions (reuse logic instead of duplicating).
+    # For a real-value prefill-only batch W_UK_T is None (decode weights absent);
+    # derive kv_lora_rank from kv_b_proj instead, mirroring the meta path in
+    # _mla_metadata_properties. The prefill quant ops do not depend on W_UK_T, so
+    # dropping them would understate quant prefill as BF16.
     num_heads = q.size(1)
     q_head_dim = q.size(2)
-    kv_lora_rank = W_UK_T.size(-1)
+    if W_UK_T is not None:
+        kv_lora_rank = W_UK_T.size(-1)
+    elif kv_b_proj is not None:
+        kv_lora_rank = kv_b_proj.size(0)
+    else:
+        # Neither decode nor prefill weights available: no quant ops to add.
+        return properties
     qk_rope_head_dim = kv_cache.size(-1) - kv_lora_rank
     qk_nope_head_dim = q_head_dim - qk_rope_head_dim
 
@@ -1753,6 +1778,31 @@ def _(
     )
 
     return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.multihead_latent_attention_quant.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    return _mla_quant_analytic_properties(op_invoke_info)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_sparse_attention.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    # Sparse MLA (DSA / SFA path) shares the dense bf16 analytic accounting; the
+    # sparse variant only changes which NPU attention kernel the empirical path
+    # maps to (SparseFlashAttention vs FusedInferAttentionScore).
+    q = op_invoke_info.args[0]
+    return _multihead_latent_attention_properties_helper(op_invoke_info, q.dtype)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_sparse_attention_quant.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    return _mla_quant_analytic_properties(op_invoke_info)
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul.default)

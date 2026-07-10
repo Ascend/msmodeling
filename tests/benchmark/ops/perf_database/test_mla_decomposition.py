@@ -12,6 +12,8 @@ from tensor_cast.performance_model.profiling_database.profiling_data_source impo
     ProfilingDataSource,
     _decompose_mla,
     _decompose_mla_quant,
+    _decompose_mla_sparse,
+    _decompose_mla_sparse_quant,
     _decompose_mlapo,
     _decompose_mlapo_quant,
     _is_decode_mla,
@@ -359,15 +361,33 @@ class TestCompositeLookupMLA:
         assert result.source == QuerySource.MEASURED
         assert result.details["kernel_type"].startswith("BatchMatMulV2,")
 
-    def test_mla_decode_fia_miss_returns_partial(self, mla_data_dir):
-        """MLA decode: FIA miss (wrong batch_size) → PARTIAL."""
+    def test_mla_decode_fia_miss_returns_none(self, mla_data_dir):
+        """MLA decode: FIA miss (wrong batch_size) → None (analytic fallback).
+
+        Attention sub-kernel miss returns None to avoid silently dropping
+        attention latency from the PARTIAL estimate.
+        """
         ds = ProfilingDataSource(mla_data_dir)
         args = _make_mla_decode_args(batch_size=99, avg_seq_len=4096)
         op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
         result = ds.lookup(op)
-        assert result is not None
-        assert result.source == QuerySource.PARTIAL
-        assert result.details.get("partial") is True
+        assert result is None
+
+    def test_attention_miss_emits_warning(self, mla_data_dir, caplog):
+        """_lookup_composite_decomposed: attention sub-kernel miss logs a warning.
+
+        Exercises the logger.warning branch added in PR-363 — the branch that
+        fires when query_mode='attention' misses and forces analytic fallback.
+        """
+        import logging
+
+        ds = ProfilingDataSource(mla_data_dir)
+        args = _make_mla_decode_args(batch_size=99, avg_seq_len=4096)
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        with caplog.at_level(logging.WARNING, logger="tensor_cast"):
+            result = ds.lookup(op)
+        assert result is None
+        assert any("attention sub-kernel miss" in r.message for r in caplog.records)
 
     def test_mla_decode_falls_back_to_batch_matmul_nd(self, mla_legacy_data_dir):
         """MLA decode falls back to BatchMatMulNd when BatchMatMulV2 CSV is absent."""
@@ -693,8 +713,12 @@ class TestConfidenceLevels:
         result = ds.lookup(op)
         assert result.confidence == 0.8
 
-    def test_composite_partial_miss_returns_none_for_analytic_fallback(self, mla_data_dir):
-        """Composite PARTIAL miss falls through so analytic fallback can cover residual latency."""
+    def test_composite_attention_miss_returns_none(self, mla_data_dir):
+        """Composite with FIA raw shape miss → None (analytic fallback, not PARTIAL).
+
+        Attention sub-kernel miss returns None to avoid silently dropping
+        attention latency. Upper layer falls back to analytic for a complete estimate.
+        """
         base = ProfilingDataSource(mla_data_dir)
         ds = InterpolatingDataSource(base)
         args = _make_mla_decode_args(
@@ -1669,3 +1693,536 @@ class TestCompositeLookupMLAPO:
         )
         result = ds.lookup(op)
         assert result is None, "Expected None for insufficient args but got result"
+
+
+# ============================================================
+# Issue #128: mla_sparse_attention op — TDD test suite
+# Covers acceptance criteria R1–R5, L1–L4, D1–D7, A1–A3, F1–F3
+# ============================================================
+
+
+# ---- R: Op registration ----
+
+
+class TestMlaSparseOpRegistered:
+    """R1–R5: new ops are registered and return correct shapes."""
+
+    def test_mla_sparse_attention_accessible(self):
+        """R1: op exists in torch.ops.tensor_cast namespace."""
+        assert hasattr(torch.ops.tensor_cast, "mla_sparse_attention")
+
+    def test_mla_sparse_attention_quant_accessible(self):
+        """R2: quant variant exists."""
+        assert hasattr(torch.ops.tensor_cast, "mla_sparse_attention_quant")
+
+    def test_mla_sparse_attention_output_shape(self):
+        """R3: output shape matches (num_tokens, num_heads, v_head_dim)."""
+        num_tokens, num_heads, v_head_dim = 16, 8, 128
+        qk_head_dim = 192
+        kv_lora_rank, qk_rope_head_dim = 512, 64
+        with torch.device("meta"):
+            q = torch.empty(num_tokens, num_heads, qk_head_dim, dtype=torch.bfloat16)
+            kv_cache = torch.empty(64, 16, kv_lora_rank + qk_rope_head_dim, dtype=torch.bfloat16)
+            block_table = torch.empty(num_tokens, 8, dtype=torch.int32)
+            query_start_loc = torch.arange(num_tokens + 1, dtype=torch.int32)
+            seq_lens = torch.full((num_tokens,), 128, dtype=torch.int64)
+        out = torch.ops.tensor_cast.mla_sparse_attention(
+            q,
+            kv_cache,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            None,
+            None,
+            None,
+            None,
+            v_head_dim,
+        )
+        assert out.shape == (num_tokens, num_heads, v_head_dim)
+
+    def test_mla_sparse_attention_quant_output_dtype_fallback(self):
+        """R4: out_dtype=None falls back to q.dtype."""
+        num_tokens, num_heads, v_head_dim = 4, 8, 128
+        qk_head_dim = 192
+        kv_lora_rank, qk_rope_head_dim = 512, 64
+        with torch.device("meta"):
+            q = torch.empty(num_tokens, num_heads, qk_head_dim, dtype=torch.bfloat16)
+            kv_cache = torch.empty(64, 16, kv_lora_rank + qk_rope_head_dim, dtype=torch.bfloat16)
+            block_table = torch.empty(num_tokens, 8, dtype=torch.int32)
+            query_start_loc = torch.arange(num_tokens + 1, dtype=torch.int32)
+            seq_lens = torch.full((num_tokens,), 128, dtype=torch.int64)
+            dummy_scale = torch.empty(1, dtype=torch.float32)
+        out = torch.ops.tensor_cast.mla_sparse_attention_quant(
+            q,
+            kv_cache,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            None,
+            None,
+            None,
+            None,
+            v_head_dim,
+            None,
+            None,
+            dummy_scale,
+            None,
+            dummy_scale,
+            None,
+            dummy_scale,
+            None,
+            dummy_scale,
+            None,
+            dummy_scale,
+            None,
+            dummy_scale,
+            None,
+            dummy_scale,
+            None,
+            None,
+            None,
+            None,
+        )
+        assert out.dtype == torch.bfloat16
+
+    def test_mla_sparse_attention_with_topk_indices(self):
+        """R5: passing topk_indices does not raise."""
+        num_tokens, num_heads, v_head_dim = 4, 8, 128
+        qk_head_dim = 192
+        kv_lora_rank, qk_rope_head_dim = 512, 64
+        with torch.device("meta"):
+            q = torch.empty(num_tokens, num_heads, qk_head_dim, dtype=torch.bfloat16)
+            kv_cache = torch.empty(64, 16, kv_lora_rank + qk_rope_head_dim, dtype=torch.bfloat16)
+            block_table = torch.empty(num_tokens, 8, dtype=torch.int32)
+            query_start_loc = torch.arange(num_tokens + 1, dtype=torch.int32)
+            seq_lens = torch.full((num_tokens,), 128, dtype=torch.int64)
+            topk_indices = torch.empty(num_tokens, 64, dtype=torch.long)
+        out = torch.ops.tensor_cast.mla_sparse_attention(
+            q,
+            kv_cache,
+            block_table,
+            query_start_loc,
+            seq_lens,
+            None,
+            None,
+            None,
+            None,
+            v_head_dim,
+            topk_limit=64,
+            topk_indices=topk_indices,
+        )
+        assert out.shape == (num_tokens, num_heads, v_head_dim)
+
+
+# ---- L: Layer routing (via _get_attention_op hook) ----
+
+
+class TestGetAttentionOpHook:
+    """L1–L4: _get_attention_op returns correct op per class and quant flag."""
+
+    def test_parent_dense_op(self):
+        """L1: parent returns multihead_latent_attention for quant=False."""
+        from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
+
+        obj = MultiheadLatentAttentionTensorCast.__new__(MultiheadLatentAttentionTensorCast)
+        assert obj._get_attention_op(quant_enabled=False) is (torch.ops.tensor_cast.multihead_latent_attention)
+
+    def test_parent_quant_op(self):
+        """L2: parent returns multihead_latent_attention_quant for quant=True."""
+        from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
+
+        obj = MultiheadLatentAttentionTensorCast.__new__(MultiheadLatentAttentionTensorCast)
+        assert obj._get_attention_op(quant_enabled=True) is (torch.ops.tensor_cast.multihead_latent_attention_quant)
+
+    def test_sparse_dense_op(self):
+        """L3: DeepseekSparseAttention returns mla_sparse_attention for quant=False."""
+        from tensor_cast.layers.mla import DeepseekSparseAttention
+
+        obj = DeepseekSparseAttention.__new__(DeepseekSparseAttention)
+        assert obj._get_attention_op(quant_enabled=False) is (torch.ops.tensor_cast.mla_sparse_attention)
+
+    def test_sparse_quant_op(self):
+        """L4: DeepseekSparseAttention returns mla_sparse_attention_quant for quant=True."""
+        from tensor_cast.layers.mla import DeepseekSparseAttention
+
+        obj = DeepseekSparseAttention.__new__(DeepseekSparseAttention)
+        assert obj._get_attention_op(quant_enabled=True) is (torch.ops.tensor_cast.mla_sparse_attention_quant)
+
+
+# ---- D: Decomposer correctness ----
+
+
+class TestDecomposeMlaSparse:
+    """D1–D7: _decompose_mla_sparse / _decompose_mla_sparse_quant correctness."""
+
+    def test_decode_produces_sfa(self):
+        """D1+D5: decode decomposes to 3 specs; spec[1].kernel_type == SparseFlashAttention."""
+        args = _make_mla_decode_args()
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        specs = _decompose_mla_sparse(op, {})
+        assert specs is not None
+        assert len(specs) == 3, f"Expected 3 specs for decode, got {len(specs)}"
+        assert specs[1].kernel_type == "SparseFlashAttention", (
+            f"Expected SparseFlashAttention, got {specs[1].kernel_type}"
+        )
+
+    def test_sfa_spec_uses_compute_mode(self):
+        """H2 regression: SFA spec must use compute mode (not attention mode).
+
+        SFA CSV has no avg_seq_len column, so query_mode='attention' would always
+        miss. compute mode matches on q shape (tc_input_count=1).
+        """
+        args = _make_mla_decode_args(num_tokens=16, num_heads=16, kv_lora_rank=512)
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        specs = _decompose_mla_sparse(op, {})
+        sfa_spec = specs[1]
+        assert sfa_spec.kernel_type == "SparseFlashAttention"
+        # Must use compute mode: input_shapes non-empty, query_mode != "attention"
+        assert sfa_spec.query_mode != "attention", (
+            "SFA must use compute mode, not attention mode (CSV has no avg_seq_len)"
+        )
+        assert len(sfa_spec.input_shapes) > 0, "SFA compute spec must have input_shapes"
+        assert sfa_spec.tc_input_count == 1, "SFA uses tc_input_count=1 (q shape only)"
+        # q shape: (num_tokens, num_heads, kv_lora_rank)
+        assert sfa_spec.input_shapes[0] == (16, 16, 512)
+
+    def test_prefill_produces_sfa(self):
+        """D2+D6: prefill decomposes to 2 specs; spec[1].kernel_type == SparseFlashAttention."""
+        args = _make_mla_prefill_args()
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        specs = _decompose_mla_sparse(op, {})
+        assert specs is not None
+        assert len(specs) == 2, f"Expected 2 specs for prefill, got {len(specs)}"
+        assert specs[1].kernel_type == "SparseFlashAttention", (
+            f"Expected SparseFlashAttention, got {specs[1].kernel_type}"
+        )
+
+    def test_non_attention_specs_match_dense(self):
+        """D3: non-attention specs (BMM, TBMM, MatMul) are structurally identical to dense."""
+        args = _make_mla_decode_args()
+        dense_op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        sparse_op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        dense_specs = _decompose_mla(dense_op, {})
+        sparse_specs = _decompose_mla_sparse(sparse_op, {})
+        assert dense_specs is not None and sparse_specs is not None
+        # spec[0]: first BMM — must match
+        assert sparse_specs[0].kernel_type == dense_specs[0].kernel_type
+        assert sparse_specs[0].input_shapes == dense_specs[0].input_shapes
+        # spec[2]: TBMM — must match
+        assert sparse_specs[2].kernel_type == dense_specs[2].kernel_type
+        assert sparse_specs[2].input_shapes == dense_specs[2].input_shapes
+
+    def test_dense_still_produces_fia(self):
+        """D4: existing dense decomposer regression — still returns FusedInferAttentionScore."""
+        args = _make_mla_decode_args()
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        specs = _decompose_mla(op, {})
+        assert specs is not None
+        assert specs[1].kernel_type == "FusedInferAttentionScore"
+
+    def test_decode_missing_w_uk_t_returns_none(self):
+        """D7: W_UK_T=None in decode path → returns None."""
+        args = _make_mla_decode_args()
+        args[6] = None  # W_UK_T
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        assert _decompose_mla_sparse(op, {}) is None
+
+    def test_quant_decode_produces_sfa(self):
+        """D1 quant variant: quant decode also maps to SparseFlashAttention."""
+        args = _make_mla_decode_args()
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention_quant.default, args)
+        specs = _decompose_mla_sparse_quant(op, {})
+        assert specs is not None
+        assert specs[1].kernel_type == "SparseFlashAttention"
+
+    def test_quant_prefill_produces_sfa(self):
+        """D2 quant variant: quant prefill also maps to SparseFlashAttention."""
+        args = _make_mla_prefill_args()
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention_quant.default, args)
+        specs = _decompose_mla_sparse_quant(op, {})
+        assert specs is not None
+        assert specs[1].kernel_type == "SparseFlashAttention"
+
+
+# ---- A: Analytic properties ----
+
+
+class TestMlaSparseAnalyticProperties:
+    """A1–A3: sparse ops are registered in analytic performance model."""
+
+    def test_sparse_op_in_properties_registry(self):
+        """A1: mla_sparse_attention.default has registered op_properties."""
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        assert torch.ops.tensor_cast.mla_sparse_attention.default in OpInvokeInfo._op_properties_functors, (
+            "mla_sparse_attention.default not found in _op_properties_functors"
+        )
+
+    def test_sparse_quant_op_in_properties_registry(self):
+        """A2: mla_sparse_attention_quant.default has registered op_properties."""
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        assert torch.ops.tensor_cast.mla_sparse_attention_quant.default in OpInvokeInfo._op_properties_functors, (
+            "mla_sparse_attention_quant.default not found in _op_properties_functors"
+        )
+
+    def test_sparse_bf16_prefill_only_no_crash(self):
+        """H1 regression: mla_sparse_attention.default with W_UK_T=None must not crash.
+
+        prefill-only batch has W_UK_T=None; _multihead_latent_attention_properties_helper
+        must handle this via kv_b_proj fallback instead of calling W_UK_T.size(-1).
+        """
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        args = _make_mla_prefill_args()  # W_UK_T=None, kv_b_proj set
+        sparse_op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        fn = OpInvokeInfo._op_properties_functors[torch.ops.tensor_cast.mla_sparse_attention.default]
+        # Must not raise AttributeError: 'NoneType' has no attribute 'size'
+        result = fn(sparse_op)
+        assert result is not None
+
+    def test_dense_bf16_prefill_only_no_crash(self):
+        """H1 regression: multihead_latent_attention.default with W_UK_T=None must not crash."""
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        args = _make_mla_prefill_args()
+        dense_op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        fn = OpInvokeInfo._op_properties_functors[torch.ops.tensor_cast.multihead_latent_attention.default]
+        result = fn(dense_op)
+        assert result is not None
+
+    def test_dense_quant_prefill_only_no_crash(self):
+        """H1 regression: multihead_latent_attention_quant.default with W_UK_T=None must not crash.
+
+        dense quant handler lacked the W_UK_T is None guard before this PR fix.
+        """
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        args = _make_mla_prefill_args()  # W_UK_T=None, kv_b_proj set
+        dense_quant_op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention_quant.default, args)
+        fn = OpInvokeInfo._op_properties_functors[torch.ops.tensor_cast.multihead_latent_attention_quant.default]
+        # Must not raise AttributeError: 'NoneType' has no attribute 'size'
+        result = fn(dense_quant_op)
+        assert result is not None
+
+    def test_prefill_only_quant_accounts_quant_ops(self):
+        """MEDIUM regression: prefill-only quant must NOT be approximated as BF16.
+
+        A prefill-only batch has W_UK_T=None. The prefill quant ops (kv-proj and
+        attention-prob quantization) depend only on scalars derivable from
+        kv_b_proj, so they must still be counted rather than dropped by the
+        W_UK_T-is-None guard. Assert the quant handler adds strictly more gp_ops
+        than the BF16 handler on the same prefill-only batch.
+        """
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        def _run(func):
+            op = _make_op_info(func, _make_mla_prefill_args())  # W_UK_T=None, kv_b_proj set
+            # Real (empty) properties so gp_ops totals are real, not MagicMock.
+            op.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
+            return OpInvokeInfo._op_properties_functors[func](op)
+
+        def _gp_total(props):
+            return sum(c.gp_ops for c in props.compute_ops.values())
+
+        bf16_props = _run(torch.ops.tensor_cast.multihead_latent_attention.default)
+        quant_props = _run(torch.ops.tensor_cast.multihead_latent_attention_quant.default)
+        # quant prefill adds quant_kv_proj_ops + quant_attention_prob_ops
+        # (+ final output quant), so its gp_ops must exceed the BF16 baseline.
+        assert _gp_total(quant_props) > _gp_total(bf16_props)
+
+    def test_sparse_analytic_matches_dense(self):
+        """A3: sparse functor delegates to the dense helper and scales by topk.
+
+        Both ops call _multihead_latent_attention_properties_helper, so with no
+        topk constraint the sparse functor must produce byte-for-byte the same
+        compute_ops as dense. With a small topk_limit the sparse attention FLOPs
+        must shrink (top-k clamps the attended context), proving the sparse
+        top-k scaling is actually wired through rather than a no-op delegation.
+        """
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        dense_fn = OpInvokeInfo._op_properties_functors[torch.ops.tensor_cast.multihead_latent_attention.default]
+        sparse_fn = OpInvokeInfo._op_properties_functors[torch.ops.tensor_cast.mla_sparse_attention.default]
+        assert callable(dense_fn)
+        assert callable(sparse_fn)
+
+        # Decode args with a long active context so topk clamping is observable.
+        num_tokens, num_heads, v_head_dim = 8, 16, 128
+        qk_nope_head_dim, qk_rope_head_dim, kv_lora_rank = 128, 64, 512
+        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        long_ctx = 4096
+
+        def _decode_op(func, extra):
+            with torch.device("meta"):
+                q = torch.empty(num_tokens, num_heads, qk_head_dim, dtype=torch.bfloat16)
+                kv_cache = torch.empty(256, 16, kv_lora_rank + qk_rope_head_dim, dtype=torch.bfloat16)
+                block_table = torch.empty(num_tokens, 16, dtype=torch.int32)
+                W_UK_T = torch.empty(num_heads, qk_nope_head_dim, kv_lora_rank, dtype=torch.bfloat16)
+                W_UV = torch.empty(num_heads, kv_lora_rank, v_head_dim, dtype=torch.bfloat16)
+            query_start_loc = torch.arange(num_tokens + 1, dtype=torch.int32)
+            request_total_seq_lens = torch.full((num_tokens,), long_ctx, dtype=torch.int64)
+            query_lens = torch.ones(num_tokens, dtype=torch.int64)  # decode
+            args = [
+                q,
+                kv_cache,
+                block_table,
+                query_start_loc,
+                request_total_seq_lens,
+                query_lens,
+                W_UK_T,
+                W_UV,
+                None,
+                v_head_dim,
+            ] + extra
+            op = _make_op_info(func, args)
+            # The helper accumulates compute_ops onto whatever get_memory_access_properties
+            # returns; give it a real (empty) PerformanceProperties so the mma_ops totals
+            # below are real numbers rather than MagicMock attributes.
+            op.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
+            return op
+
+        def _mma_total(props):
+            return sum(c.mma_ops for c in props.compute_ops.values())
+
+        # No topk constraint → sparse must equal dense exactly (same helper).
+        dense_props = dense_fn(_decode_op(torch.ops.tensor_cast.multihead_latent_attention.default, []))
+        sparse_props = sparse_fn(_decode_op(torch.ops.tensor_cast.mla_sparse_attention.default, []))
+        assert _mma_total(dense_props) > 0
+        assert _mma_total(sparse_props) == _mma_total(dense_props)
+
+        # Small topk_limit << context → sparse attention FLOPs must shrink.
+        topk = 128
+        sparse_topk_props = sparse_fn(
+            _decode_op(torch.ops.tensor_cast.mla_sparse_attention.default, [topk])  # topk_limit
+        )
+        assert _mma_total(sparse_topk_props) < _mma_total(sparse_props)
+
+
+# ---- F: SFA miss → analytic fallback (integration) ----
+
+MLA_SPARSE_OP_MAPPING_NO_SFA = """\
+version: "test"
+device: TEST_DEVICE
+interpolation_policy:
+  default_method: linear
+  kernel_overrides:
+    FusedInferAttentionScore:
+      shape_transform: sqrt
+operator_mappings:
+  "tensor_cast.mla_sparse_attention.default":
+    composite: true
+    decomposer: true
+  "tensor_cast.mla_sparse_attention_quant.default":
+    composite: true
+    decomposer: true
+"""
+
+# Same YAML as MLA_SPARSE_OP_MAPPING_NO_SFA: the two fixtures differ only in
+# whether SparseFlashAttention.csv is present, not in op_mapping content.
+MLA_SPARSE_OP_MAPPING_WITH_SFA = MLA_SPARSE_OP_MAPPING_NO_SFA
+
+# SparseFlashAttention CSV uses compute-mode shape matching on q shape slot-0.
+# SFA CSV has no avg_seq_len column, so it cannot use FIA-style attn-params query.
+# tc_input_count=1 means only the first input (q: num_tokens × num_heads × kv_lora_rank)
+# is compared. Row matches: q=(16,16,512), Duration=30us.
+SFA_CSV = """Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"16,16,512","DT_BF16","ND","16,16,512","DT_BF16","ND",30.0
+"32,16,512","DT_BF16","ND","32,16,512","DT_BF16","ND",60.0"""
+
+
+@pytest.fixture
+def mla_sparse_no_sfa_dir(tmp_path):
+    """No SparseFlashAttention.csv — sub-kernel miss on attention spec."""
+    d = tmp_path / "sparse_no_sfa"
+    d.mkdir()
+    (d / "op_mapping.yaml").write_text(MLA_SPARSE_OP_MAPPING_NO_SFA)
+    (d / "BatchMatMulV2.csv").write_text(BATCH_MATMUL_V2_CSV.strip())
+    (d / "BatchMatMulNd.csv").write_text(BATCH_MATMUL_ND_CSV.strip())
+    (d / "TransposeBatchMatMul.csv").write_text(TBMM_CSV.strip())
+    return d
+
+
+@pytest.fixture
+def mla_sparse_with_sfa_dir(tmp_path):
+    """With SparseFlashAttention.csv — all sub-kernels hit."""
+    d = tmp_path / "sparse_with_sfa"
+    d.mkdir()
+    (d / "op_mapping.yaml").write_text(MLA_SPARSE_OP_MAPPING_WITH_SFA)
+    (d / "BatchMatMulV2.csv").write_text(BATCH_MATMUL_V2_CSV.strip())
+    (d / "BatchMatMulNd.csv").write_text(BATCH_MATMUL_ND_CSV.strip())
+    (d / "TransposeBatchMatMul.csv").write_text(TBMM_CSV.strip())
+    (d / "SparseFlashAttention.csv").write_text(SFA_CSV.strip())
+    return d
+
+
+class TestMlaSparseProfilingFallback:
+    """F2–F3: SFA CSV missing → None (analytic fallback); SFA CSV present → correct latency."""
+
+    def test_all_csvs_missing_returns_none(self, tmp_path):
+        """F1: no BMM or SFA CSV at all → decompose returns specs but all miss → None."""
+        d = tmp_path / "sparse_empty"
+        d.mkdir()
+        (d / "op_mapping.yaml").write_text(MLA_SPARSE_OP_MAPPING_NO_SFA)
+        # No CSV files at all
+        ds = ProfilingDataSource(d)
+        args = _make_mla_decode_args(
+            num_tokens=16,
+            num_heads=16,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            kv_lora_rank=512,
+            v_head_dim=128,
+            batch_size=16,
+            avg_seq_len=4096,
+        )
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        result = ds.lookup(op)
+        assert result is None
+
+    def test_no_sfa_csv_returns_none(self, mla_sparse_no_sfa_dir):
+        """F2: without SFA CSV the SFA sub-kernel misses → None (analytic fallback).
+
+        SFA matches in compute mode (its CSV has no avg_seq_len column) but is
+        flagged is_attention=True. A miss therefore forces None → analytic
+        fallback rather than a PARTIAL result that would silently drop the
+        dominant attention latency. BMM + TBMM sub-kernels hit, but the SFA
+        attention miss short-circuits to None before any PARTIAL is returned.
+        """
+        ds = ProfilingDataSource(mla_sparse_no_sfa_dir)
+        args = _make_mla_decode_args(
+            num_tokens=16,
+            num_heads=16,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            kv_lora_rank=512,
+            v_head_dim=128,
+            batch_size=16,
+            avg_seq_len=4096,
+        )
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        result = ds.lookup(op)
+        # SFA (is_attention) miss → None so the analytic model produces a
+        # complete estimate instead of an attention-dropping PARTIAL.
+        assert result is None
+        assert "SparseFlashAttention" in ds.last_miss_reason
+
+    def test_with_sfa_csv_returns_correct_latency(self, mla_sparse_with_sfa_dir):
+        """F3: with SFA CSV all sub-kernels hit → correct total latency."""
+        ds = ProfilingDataSource(mla_sparse_with_sfa_dir)
+        args = _make_mla_decode_args(
+            num_tokens=16,
+            num_heads=16,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            kv_lora_rank=512,
+            v_head_dim=128,
+            batch_size=16,
+            avg_seq_len=4096,
+        )
+        op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
+        result = ds.lookup(op)
+        assert result is not None
+        # 5.0 (BatchMatMulV2) + 30.0 (SFA) + 4.0 (TBMM) = 39.0
+        assert abs(result.latency_us - 39.0) < 0.1, f"Expected 39.0, got {result.latency_us}"
+        assert result.source == QuerySource.MEASURED
