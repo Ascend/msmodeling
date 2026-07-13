@@ -115,3 +115,6 @@ ci = [
     "tomli>=2.0; python_version < '3.11'",
     "types-colorama>=0.4.15",
 ]
+build = [
+    "tomli>=2.0 ; python_full_version < '3.11'",
+]

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import builtins
+import importlib
 from pathlib import Path
 from typing import Any
 
 import pytest
+
 from scripts.helpers._config import ConfigError
 from scripts.helpers.common import pyproject_toml
 
@@ -80,7 +81,7 @@ def test_read_project_version_non_str_raises_config_error(tmp_path: Path) -> Non
 
 
 def test_decode_uses_tomli_when_tomllib_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_import = builtins.__import__
+    real_import_module = importlib.import_module
 
     class FakeTomli:
         @staticmethod
@@ -90,28 +91,28 @@ def test_decode_uses_tomli_when_tomllib_missing(monkeypatch: pytest.MonkeyPatch)
         class TOMLDecodeError(ValueError):
             pass
 
-    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+    def fake_import_module(name: str, package: str | None = None) -> Any:
         if name == "tomllib":
             msg = "No module named 'tomllib'"
             raise ModuleNotFoundError(msg)
         if name == "tomli":
             return FakeTomli()
-        return real_import(name, *args, **kwargs)
+        return real_import_module(name, package)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
     data = pyproject_toml.decode_pyproject_bytes(b'[project]\nversion = "1.0.0"\n')
     assert data["parsed_by"] == "tomli"
 
 
 def test_decode_raises_when_tomllib_and_tomli_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_import = builtins.__import__
+    real_import_module = importlib.import_module
 
-    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+    def fake_import_module(name: str, package: str | None = None) -> Any:
         if name in {"tomllib", "tomli"}:
             msg = f"No module named '{name}'"
             raise ModuleNotFoundError(msg)
-        return real_import(name, *args, **kwargs)
+        return real_import_module(name, package)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
     with pytest.raises(ConfigError, match=r"tomli required to parse pyproject\.toml on Python < 3\.11"):
         pyproject_toml.decode_pyproject_bytes(b'[project]\nversion = "1.0.0"\n')

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 _FAKE_UV = "/fake/uv"
 _BUILD_MAIN = "scripts.helpers.build.main"
+_BOOTSTRAP = "scripts.helpers.build.bootstrap"
 
 
 def _completed(cmd: list[str], returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
@@ -40,15 +41,28 @@ class SubprocessRunCapture:
     version_calls: list[str] = field(default_factory=list)
     shell_calls: list[dict[str, Any]] = field(default_factory=list)
     merged_output_calls: list[dict[str, Any]] = field(default_factory=list)
+    sync_calls: list[list[str]] = field(default_factory=list)
     on_uv_version: Callable[[str], subprocess.CompletedProcess[str] | None] | None = None
     on_bash: Callable[[list[str], dict[str, Any]], subprocess.CompletedProcess[str] | None] | None = None
     on_merged_output: Callable[..., int] | None = None
+    on_uv_sync: Callable[[list[str]], subprocess.CompletedProcess[str] | None] | None = None
 
     def _run_uv_version(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         version = cmd[2]
         self.version_calls.append(version)
         if self.on_uv_version is not None:
             custom = self.on_uv_version(version)
+            if custom is not None:
+                _raise_if_check(cmd, custom, **kwargs)
+                return custom
+        completed = _completed(cmd, 0)
+        _raise_if_check(cmd, completed, **kwargs)
+        return completed
+
+    def _run_uv_sync(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        self.sync_calls.append(list(cmd))
+        if self.on_uv_sync is not None:
+            custom = self.on_uv_sync(cmd)
             if custom is not None:
                 _raise_if_check(cmd, custom, **kwargs)
                 return custom
@@ -71,6 +85,8 @@ class SubprocessRunCapture:
     def run(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if len(cmd) >= 3 and Path(cmd[0]).name == "uv" and cmd[1] == "version":
             return self._run_uv_version(cmd, **kwargs)
+        if len(cmd) >= 2 and Path(cmd[0]).name == "uv" and cmd[1] == "sync":
+            return self._run_uv_sync(cmd, **kwargs)
         if cmd and cmd[0] == "bash":
             return self._run_bash(cmd, **kwargs)
         msg = f"unexpected subprocess.run command: {cmd!r}"
@@ -129,6 +145,21 @@ def patch_uv_in_path(monkeypatch: pytest.MonkeyPatch, *, uv_path: str | None = _
         return None
 
     monkeypatch.setattr(f"{_BUILD_MAIN}.shutil.which", which)
+    monkeypatch.setattr(f"{_BOOTSTRAP}.shutil.which", which)
+
+
+def patch_bootstrap_success(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    uv_path: str = _FAKE_UV,
+) -> None:
+    """Skip real ensure_uv/ensure_deps; return a fake uv path."""
+
+    def fake_bootstrap(_mode: str) -> str:
+        return uv_path
+
+    monkeypatch.setattr(f"{_BUILD_MAIN}.bootstrap", fake_bootstrap)
+    monkeypatch.setattr(f"{_BOOTSTRAP}.bootstrap", fake_bootstrap)
 
 
 def patch_subprocess_run(
@@ -137,6 +168,8 @@ def patch_subprocess_run(
 ) -> SubprocessRunCapture:
     monkeypatch.setattr(f"{_BUILD_MAIN}.subprocess.run", capture.run)
     monkeypatch.setattr(f"{_BUILD_MAIN}.run_merged_output", capture.run_merged_output)
+    # Bootstrap may call subprocess.run for sync when not fully mocked.
+    monkeypatch.setattr(f"{_BOOTSTRAP}.subprocess.run", capture.run)
     return capture
 
 
@@ -167,18 +200,26 @@ def repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         '[project]\nname = "msmodeling"\nversion = "0.2.0"\n',
         encoding="utf-8",
     )
+    (tmp_path / "uv.lock").write_text("# test lock\n", encoding="utf-8")
     monkeypatch.setattr(build_main, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(build_main, "_BUILD_SCRIPT", scripts_dir / "build.sh")
     monkeypatch.setattr(build_main, "_CI_GATE_SCRIPT", scripts_dir / "run_ci_gate.sh")
     monkeypatch.setattr(build_main, "_ARTIFACTS_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(build_main, "_WHEEL_OUTPUT_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(build_main, "_TEST_REPORTS_DIR", tmp_path / "artifacts" / "test-reports")
+    try:
+        from scripts.helpers.build import bootstrap as bootstrap_mod
+
+        monkeypatch.setattr(bootstrap_mod, "REPO_ROOT", tmp_path)
+    except ImportError:
+        pass
     return tmp_path
 
 
 @pytest.fixture
 def with_uv(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_uv_in_path(monkeypatch)
+    patch_bootstrap_success(monkeypatch)
 
 
 @pytest.fixture

@@ -11,14 +11,14 @@ from typing import Final
 from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from scripts.helpers._errors import ConfigError, format_expected_got
+
 _THRESHOLD_MAX: Final = 100.0
 _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
 _BOOL_FALSE = frozenset({"0", "false", "no", "off"})
 
-
-class ConfigError(Exception):
-    """Raised when a required config key is missing or invalid."""
-
+# Re-export for callers that historically imported from ``_config``.
+__all__ = ("Config", "ConfigError", "format_expected_got")
 
 _FIELD_ENV_KEYS: Final = {
     "test_map_path": "MSMODELING_TEST_MAP_PATH",
@@ -34,10 +34,6 @@ _FIELD_ENV_KEYS: Final = {
     "gitcode_pr_number": "GITCODE_PR_NUMBER",
     "gitcode_pat": "GITCODE_PAT",
 }
-
-
-def format_expected_got(field: str, expected: str, got: object) -> str:
-    return f"Expected {field!r} to be {expected}. Got {got!r} instead."
 
 
 def _format_validation_error(exc: ValidationError) -> str:

@@ -200,7 +200,10 @@ def test_main_test_branch_via_cli_runner(
         prog="build.py",
     )
     assert result.returncode == 0
-    assert capture.merged_output_calls[0]["cmd"] == ["bash", str(repo_root / "scripts" / "run_ci_gate.sh")]
+    assert capture.merged_output_calls[0]["cmd"] == [
+        "bash",
+        str(repo_root / "scripts" / "run_ci_gate.sh"),
+    ]
 
 
 def test_cli_test_without_test_map_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,20 +218,165 @@ def test_malformed_extra_via_cli_runner() -> None:
     assert "KEY=VALUE" in result.stderr
 
 
-def test_run_build_without_uv_returns_1(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_build_without_uv_install_failure_returns_1(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Abnormal: missing uv and non-interactive install fails → exit 1, no second fallback."""
     del repo_root
+    from scripts.helpers.build import bootstrap as bootstrap_mod
+
     patch_uv_in_path(monkeypatch, uv_path=None)
-    assert run_build(build_options()) == 1
+
+    def fail_install(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit(1)
+
+    monkeypatch.setattr(bootstrap_mod, "ensure_uv", fail_install)
+    monkeypatch.setattr(build_main, "bootstrap", bootstrap_mod.bootstrap)
+    with caplog.at_level("WARNING"):
+        # bootstrap may SystemExit; main/run_build should surface non-zero
+        try:
+            code = run_build(build_options())
+        except SystemExit as exc:
+            code = int(exc.code or 1)
+    assert code == 1
 
 
-def test_run_test_without_uv_returns_1(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    patch_uv_in_path(monkeypatch, uv_path=None)
-    assert (
-        run_test(
-            build_options(is_test=True, extras={"test_map_path": str(repo_root / "x.json")}),
-        )
-        == 1
+def test_run_build_missing_uv_warns_installs_then_continues(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Normal: missing uv → WARNING + install + sync build group, then build.sh."""
+    from scripts.helpers.build import bootstrap as bootstrap_mod
+
+    which_state: dict[str, str | None] = {"uv": None}
+
+    def fake_which(name: str) -> str | None:
+        return which_state.get(name)
+
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.shutil.which", fake_which)
+    monkeypatch.setattr("scripts.helpers.build.main.shutil.which", fake_which)
+
+    capture = SubprocessRunCapture()
+    install_calls: list[list[str]] = []
+
+    def fake_bootstrap_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pip":
+            install_calls.append(list(cmd))
+            which_state["uv"] = "/fake/uv"
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return capture.run(cmd, **kwargs)
+
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.subprocess.run", fake_bootstrap_run)
+    monkeypatch.setattr(build_main, "bootstrap", bootstrap_mod.bootstrap)
+    # Route build.main subprocess.run / merged output through capture after bootstrap.
+    patch_subprocess_run(monkeypatch, capture)
+    # Re-bind bootstrap run after patch_subprocess_run overwrote bootstrap.subprocess.run
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.subprocess.run", fake_bootstrap_run)
+    capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-0.2.0-py3-none-any.whl",
     )
+
+    with caplog.at_level("WARNING"):
+        assert run_build(build_options()) == 0
+    assert install_calls
+    assert "-i" not in install_calls[0]
+    assert "uv not found" in caplog.text.lower() or "installing" in caplog.text.lower()
+    assert capture.sync_calls
+    sync_cmd = capture.sync_calls[0]
+    assert "--group" in sync_cmd
+    assert sync_cmd[sync_cmd.index("--group") + 1] == "build"
+    assert "ci" not in sync_cmd
+    assert capture.shell_calls
+
+
+def test_run_build_reuses_bootstrap_uv_path_when_not_on_path(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Normal: Scripts-only uv (not on PATH) is returned by bootstrap and used for uv version."""
+    import sys
+
+    from scripts.helpers.build import bootstrap as bootstrap_mod
+
+    scripts_dir = tmp_path / "pybin"
+    scripts_dir.mkdir(parents=True)
+    uv_candidate = scripts_dir / "uv"
+    uv_candidate.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(scripts_dir / "python"))
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.shutil.which", lambda name: None)
+    monkeypatch.setattr("scripts.helpers.build.main.shutil.which", lambda name: None)
+
+    capture = SubprocessRunCapture()
+    version_cmds: list[list[str]] = []
+
+    def combined_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pip":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if len(cmd) >= 2 and Path(cmd[0]).name == "uv" and cmd[1] == "version":
+            version_cmds.append(list(cmd))
+        return capture.run(cmd, **kwargs)
+
+    monkeypatch.setattr(build_main, "bootstrap", bootstrap_mod.bootstrap)
+    patch_subprocess_run(monkeypatch, capture)
+    # main/bootstrap share the subprocess module; one combined stub covers both.
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.subprocess.run", combined_run)
+    capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-9.9.9-py3-none-any.whl",
+    )
+
+    assert run_build(build_options(version="9.9.9", version_explicit=True)) == 0
+    assert version_cmds
+    assert all(cmd[0] == str(uv_candidate) for cmd in version_cmds)
+    assert capture.version_calls == ["9.9.9", "0.2.0"]
+
+
+def test_run_test_without_uv_install_failure_returns_1(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.helpers.build import bootstrap as bootstrap_mod
+
+    map_file = repo_root / "x.json"
+    map_file.write_text("{}", encoding="utf-8")
+    patch_uv_in_path(monkeypatch, uv_path=None)
+
+    def fail_install(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit(1)
+
+    monkeypatch.setattr(bootstrap_mod, "ensure_uv", fail_install)
+    monkeypatch.setattr(build_main, "bootstrap", bootstrap_mod.bootstrap)
+    try:
+        code = run_test(build_options(is_test=True, extras={"test_map_path": str(map_file)}))
+    except SystemExit as exc:
+        code = int(exc.code or 1)
+    assert code == 1
+
+
+def test_run_test_syncs_ci_group_not_build(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edge: test mode ensure_deps uses --group ci only."""
+    from scripts.helpers.build import bootstrap as bootstrap_mod
+
+    map_file = repo_root / "map.json"
+    map_file.write_text("{}", encoding="utf-8")
+    patch_uv_in_path(monkeypatch, uv_path="/fake/uv")
+    capture = SubprocessRunCapture()
+    patch_subprocess_run(monkeypatch, capture)
+    monkeypatch.setattr(build_main, "bootstrap", bootstrap_mod.bootstrap)
+
+    assert run_test(build_options(is_test=True, extras={"test_map_path": str(map_file)})) == 0
+    assert capture.sync_calls
+    sync_cmd = capture.sync_calls[0]
+    assert sync_cmd[sync_cmd.index("--group") + 1] == "ci"
+    assert "build" not in sync_cmd[sync_cmd.index("--group") :]
 
 
 def test_run_test_missing_test_map_file_returns_1(
@@ -281,7 +429,9 @@ def test_run_build_restore_failure_returns_1_after_successful_build(
     assert not (repo_root / "artifacts" / "build-manifest.json").exists()
 
 
-def test_run_shell_without_tee_uses_run_not_popen(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_shell_without_tee_uses_run_not_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     popen_called = False
     merged_called = False
 
@@ -455,7 +605,10 @@ def test_main_build_via_cli_runner(
     capture.on_bash = fake_build_bash(repo_root, wheel_name="msmodeling-0.2.0-py3-none-any.whl")
     result = run_cli_main(main, [], prog="build.py")
     assert result.returncode == 0
-    assert capture.shell_calls[0]["cmd"] == ["bash", str(repo_root / "scripts" / "build.sh")]
+    assert capture.shell_calls[0]["cmd"] == [
+        "bash",
+        str(repo_root / "scripts" / "build.sh"),
+    ]
 
 
 def test_run_build_malformed_pyproject_returns_1(
@@ -540,9 +693,9 @@ def test_run_build_reads_version_when_tomllib_missing(
     monkeypatch: pytest.MonkeyPatch,
     subprocess_capture: SubprocessRunCapture,
 ) -> None:
-    import builtins
+    import importlib
 
-    real_import = builtins.__import__
+    real_import_module = importlib.import_module
 
     class FakeTomli:
         @staticmethod
@@ -553,15 +706,15 @@ def test_run_build_reads_version_when_tomllib_missing(
         class TOMLDecodeError(ValueError):
             pass
 
-    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+    def fake_import_module(name: str, package: str | None = None) -> Any:
         if name == "tomllib":
             msg = "No module named 'tomllib'"
             raise ModuleNotFoundError(msg)
         if name == "tomli":
             return FakeTomli()
-        return real_import(name, *args, **kwargs)
+        return real_import_module(name, package)
 
-    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
     subprocess_capture.on_bash = fake_build_bash(
         repo_root,
         wheel_name="msmodeling-0.2.0-py3-none-any.whl",

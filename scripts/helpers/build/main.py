@@ -11,9 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from scripts.helpers._config import ConfigError
+from scripts.helpers._errors import ConfigError
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.build.argv import BuildOptions, parse_argv
+from scripts.helpers.build.bootstrap import bootstrap
 from scripts.helpers.common._logging import setup_logger
 from scripts.helpers.common.pyproject_toml import read_project_version
 from scripts.helpers.common.subprocess_stream import run_merged_output
@@ -32,19 +33,14 @@ _VERSION_CMD_TIMEOUT_SECONDS: Final = 120
 logger: Final = setup_logger("build")
 
 
-def _uv_executable() -> str:
+def _uv_executable(uv_path: str | None = None) -> str:
+    if uv_path:
+        return uv_path
     uv = shutil.which("uv")
     if uv is None:
         msg = "uv not found in PATH"
         raise RuntimeError(msg)
     return uv
-
-
-def _require_uv() -> bool:
-    if shutil.which("uv") is not None:
-        return True
-    logger.error("uv not found in PATH")
-    return False
 
 
 def _clear_wheel_output_dir(wheel_dir: Path) -> None:
@@ -60,11 +56,11 @@ def _newest_wheel(wheel_dir: Path) -> Path | None:
     return max(wheels, key=lambda path: path.stat().st_mtime)
 
 
-def _set_pyproject_version(version: str) -> None:
+def _set_pyproject_version(version: str, *, uv_path: str) -> None:
     """Write ``project.version`` via uv without re-locking the lockfile."""
     logger.info("setting project version to %s", version)
     subprocess.run(
-        [_uv_executable(), "version", version, "--frozen"],
+        [_uv_executable(uv_path), "version", version, "--frozen"],
         cwd=REPO_ROOT,
         check=True,
         timeout=_VERSION_CMD_TIMEOUT_SECONDS,
@@ -94,6 +90,7 @@ def _run_with_version_staging(
     target_version: str,
     should_stage: bool,
     env: dict[str, str],
+    uv_path: str,
 ) -> tuple[int, bool]:
     exit_code = 0
     restore_failed = False
@@ -101,7 +98,7 @@ def _run_with_version_staging(
     try:
         if should_stage:
             try:
-                _set_pyproject_version(target_version)
+                _set_pyproject_version(target_version, uv_path=uv_path)
                 staging_applied = True
             except subprocess.CalledProcessError as exc:
                 logger.error(
@@ -115,7 +112,7 @@ def _run_with_version_staging(
         if staging_applied:
             try:
                 logger.info("restoring project version to %s", pyproject_version)
-                _set_pyproject_version(pyproject_version)
+                _set_pyproject_version(pyproject_version, uv_path=uv_path)
             except subprocess.CalledProcessError:
                 logger.exception(
                     "build finished but failed to restore pyproject version to %s",
@@ -167,8 +164,8 @@ def run_build(options: BuildOptions) -> int:
     if not _BUILD_SCRIPT.is_file():
         logger.error("missing script: %s", _BUILD_SCRIPT)
         return 1
-    if not _require_uv():
-        return 1
+
+    uv_path = bootstrap("build")
 
     try:
         pyproject_version = read_project_version(repo_root=REPO_ROOT)
@@ -195,6 +192,7 @@ def run_build(options: BuildOptions) -> int:
         target_version=target_version,
         should_stage=should_stage_version,
         env=env,
+        uv_path=uv_path,
     )
 
     if restore_failed:
@@ -223,8 +221,6 @@ def run_test(options: BuildOptions) -> int:
     if not _CI_GATE_SCRIPT.is_file():
         logger.error("missing script: %s", _CI_GATE_SCRIPT)
         return 1
-    if not _require_uv():
-        return 1
 
     test_map_path = options.extras.get("test_map_path") or os.environ.get("MSMODELING_TEST_MAP_PATH")
     if not test_map_path:
@@ -235,6 +231,8 @@ def run_test(options: BuildOptions) -> int:
     if not Path(test_map_path).is_file():
         logger.error("test_map_path is not a file: %s", test_map_path)
         return 1
+
+    _ = bootstrap("test")
 
     env = os.environ.copy()
     env["MSMODELING_TEST_MAP_PATH"] = test_map_path
