@@ -101,34 +101,49 @@ Metric descriptions:
 
 ### 2.3 Quick Start: Video Generation
 
-**What it does:** Simulate diffusion transformer forward pass for video generation models.
+**What it does:** Simulate the diffusion transformer forward pass for video generation models. The following example uses the Wan2.2 Diffusers remote model ID; on first run, the required model configuration files are downloaded according to the configured model source.
 
 **Command:**
 
 ```bash
-python -m cli.inference.video_generate docs/fixtures/hunyuanvideo_mock_model --batch-size 1 --seq-len 16 --height 576 --width 1024 --frame-num 14 --sample-step 25 --device TEST_DEVICE
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+  --device ATLAS_800_A2_280T_32G_PCIE \
+  --batch-size 1 \
+  --seq-len 128 \
+  --height 720 \
+  --width 1280 \
+  --frame-num 81 \
+  --sample-step 50 \
+  --dtype float16 \
+  --quantize-linear-action W8A8_DYNAMIC
 ```
 
-**Key flags:** `--height`, `--width`, `--frame-num`, `--sample-step`, `--chrome-trace`, `--device`
+**Key flags:** `model_id`, `--device`, `--batch-size`, `--seq-len`, `--height`, `--width`, `--frame-num`, `--sample-step`, `--dtype`, `--quantize-linear-action`, `--chrome-trace`
 
 **Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace` is set.
 
 ### 2.4 Result (Video Generation)
 
-Example output (truncated):
+Example output (truncated; actual values vary by device profile, model configuration, and input shape):
 
 ```text
-Model compilation and execution time: 25.44349410000723s
+Model compilation and execution time: 96.06264850008301s
 ----------------------------------------------  --------------  ------------  ----------
                      Name                       analytic total  analytic avg  # of Calls
 ----------------------------------------------  --------------  ------------  ----------
-aten.addmm.default                                      8.546s       1.280ms        6675
-tensor_cast.attention.default                           7.943s       5.125ms        1550
-aten.mul.Tensor                                         2.597s     126.510us       20525
-aten._to_copy.default                                   2.450s     142.242us       17225
-tensor_cast.static_quant_linear.default                 2.266s     323.720us        7000
+tensor_cast.attention.default                        1363.587s     340.897ms        4000
+tensor_cast.static_quant_linear.default               231.521s      11.576ms       20000
+aten._to_copy.default                                 150.176s       3.398ms       44200
+aten.mul.Tensor                                       138.593s       3.448ms       40200
+aten.add.Tensor                                        76.611s       3.802ms       20150
+tensor_cast.dynamic_quantize_symmetric.default         42.740s       2.137ms       20000
+aten.native_layer_norm.default                         35.517s       5.871ms        6050
+aten.pow.Tensor_Scalar                                 35.240s       4.405ms        8000
+aten.mean.dim                                          17.631s       2.204ms        8000
+aten.copy_.default                                     17.618s       2.202ms        8000
+aten.gelu.default                                      15.846s       7.730ms        2050
 ...
-Total time for analytic: 29.350s
+Total time for analytic: 2145.882s
 ```
 
 Note: `Model compilation and execution time` is the simulator's runtime on the host, not the real model compile or execution time on hardware.
