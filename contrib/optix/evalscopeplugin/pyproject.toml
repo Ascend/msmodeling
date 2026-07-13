@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evalscopeplugin"
+version = "0.1.0"
+description = "Evalscope performance benchmarking plugin for msserviceprofiler"
+requires-python = ">=3.8"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "optix"
+]   
+
+[project.scripts]
+evalscopeperf = "evalscopeperf:register"
+
+[project.entry-points."optix.plugins"]
+evalscopeperf = "evalscopeperf:register"
