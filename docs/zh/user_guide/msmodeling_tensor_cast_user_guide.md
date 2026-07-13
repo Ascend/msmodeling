@@ -101,34 +101,49 @@ Total device memory: 64.000 GB
 
 ### 2.3 快速入门：视频生成
 
-**功能说明：** 仿真视频生成模型的 diffusion transformer 前向传播。
+**功能说明：** 仿真视频生成模型的 diffusion transformer 前向传播。以下示例使用 Wan2.2 Diffusers 远程模型 ID；首次运行时会按配置拉取所需模型配置文件。
 
 **命令：**
 
 ```bash
-python -m cli.inference.video_generate docs/fixtures/hunyuanvideo_mock_model --batch-size 1 --seq-len 16 --height 576 --width 1024 --frame-num 14 --sample-step 25 --device TEST_DEVICE
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+  --device ATLAS_800_A2_280T_32G_PCIE \
+  --batch-size 1 \
+  --seq-len 128 \
+  --height 720 \
+  --width 1280 \
+  --frame-num 81 \
+  --sample-step 50 \
+  --dtype float16 \
+  --quantize-linear-action W8A8_DYNAMIC
 ```
 
-**关键参数：** `--height`、`--width`、`--frame-num`、`--sample-step`、`--chrome-trace`、`--device`
+**关键参数：** `model_id`、`--device`、`--batch-size`、`--seq-len`、`--height`、`--width`、`--frame-num`、`--sample-step`、`--dtype`、`--quantize-linear-action`、`--chrome-trace`
 
 **输出：** 性能汇总表；若设置了 `--chrome-trace`，还可选输出 Chrome trace 文件。
 
 ### 2.4 结果（视频生成）
 
-示例输出（已截断）：
+示例输出（已截断，实际数值会随设备配置、模型配置和输入尺寸变化）：
 
 ```text
-Model compilation and execution time: 25.44349410000723s
+Model compilation and execution time: 96.06264850008301s
 ----------------------------------------------  --------------  ------------  ----------
                      Name                       analytic total  analytic avg  # of Calls
 ----------------------------------------------  --------------  ------------  ----------
-aten.addmm.default                                      8.546s       1.280ms        6675
-tensor_cast.attention.default                           7.943s       5.125ms        1550
-aten.mul.Tensor                                         2.597s     126.510us       20525
-aten._to_copy.default                                   2.450s     142.242us       17225
-tensor_cast.static_quant_linear.default                 2.266s     323.720us        7000
+tensor_cast.attention.default                        1363.587s     340.897ms        4000
+tensor_cast.static_quant_linear.default               231.521s      11.576ms       20000
+aten._to_copy.default                                 150.176s       3.398ms       44200
+aten.mul.Tensor                                       138.593s       3.448ms       40200
+aten.add.Tensor                                        76.611s       3.802ms       20150
+tensor_cast.dynamic_quantize_symmetric.default         42.740s       2.137ms       20000
+aten.native_layer_norm.default                         35.517s       5.871ms        6050
+aten.pow.Tensor_Scalar                                 35.240s       4.405ms        8000
+aten.mean.dim                                          17.631s       2.204ms        8000
+aten.copy_.default                                     17.618s       2.202ms        8000
+aten.gelu.default                                      15.846s       7.730ms        2050
 ...
-Total time for analytic: 29.350s
+Total time for analytic: 2145.882s
 ```
 
 说明：`Model compilation and execution time` 是仿真器在宿主机上的运行时间，而非模型在硬件上的真实编译或执行时间。
