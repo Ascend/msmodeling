@@ -261,8 +261,9 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         decode_latency, decode_memory_left_gb, decode_breakdowns, decode_memory_info = self._get_or_compute_latency(
             batch_size, optimizer_data, is_decode=True
         )
-        tpot = (ttft + decode_latency * output_length) / output_length
-        output_throughput = 1000 * (output_length * concurrency) / (ttft + tpot * output_length)
+        e2el = ttft + decode_latency * output_length
+        tpot = e2el / output_length
+        output_throughput = 1000 * (output_length * concurrency) / e2el
         effective_prefill_memory_info = prefill_memory_info if calc_nums_for_ttft > 0 else None
 
         return _ChunkedAggMetrics(

@@ -166,7 +166,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(calls, [(2, False), (1, False), (3, True)])
         self.assertAlmostEqual(metrics.ttft, 16.8)
         self.assertAlmostEqual(metrics.tpot, 5.36)
-        self.assertAlmostEqual(metrics.output_throughput, 573.3944954)
+        self.assertAlmostEqual(metrics.output_throughput, 932.8358209)
         self.assertEqual(metrics.memory_left_gb, 6.0)
         self.assertEqual(metrics.prefill_latency, 10.0)
         self.assertEqual(metrics.prefill_last_latency, 4.0)
