@@ -49,7 +49,11 @@ for key in list(sys.modules):
         del sys.modules[key]
 
 import scripts.helpers.build.main as m
-assert hasattr(m, "main") and hasattr(m, "run_build")
+import scripts.helpers.build.run_build as rb
+import scripts.helpers.build.run_test as rt
+assert hasattr(m, "main") and callable(m.main)
+assert hasattr(rb, "run_build") and callable(rb.run_build)
+assert hasattr(rt, "run_test") and callable(rt.run_test)
 assert "pydantic" not in sys.modules
 assert "pydantic_settings" not in sys.modules
 print("ok")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from scripts.helpers.build.main import _clear_wheel_output_dir, _newest_wheel
+from scripts.helpers.build.run_build import _clear_wheel_output_dir, _newest_wheel
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -1,0 +1,213 @@
+"""Build msmodeling wheel for ``python build.py``."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Final
+
+from scripts.helpers._errors import ConfigError
+from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.build.bootstrap import bootstrap
+from scripts.helpers.common._logging import setup_logger
+from scripts.helpers.common.pyproject_toml import read_project_version
+from scripts.helpers.common.subprocess_stream import run_merged_output
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from scripts.helpers.build.argv import BuildOptions
+
+_BUILD_SCRIPT: Final = REPO_ROOT / "scripts" / "build.sh"
+_ARTIFACTS_DIR: Final = REPO_ROOT / "artifacts"
+_WHEEL_OUTPUT_DIR: Final = _ARTIFACTS_DIR
+_SHELL_TIMEOUT_SECONDS: Final = 36000
+_VERSION_CMD_TIMEOUT_SECONDS: Final = 120
+
+logger: Final = setup_logger("build")
+
+
+def _uv_executable(uv_path: str | None = None) -> str:
+    if uv_path:
+        return uv_path
+    uv = shutil.which("uv")
+    if uv is None:
+        msg = "uv not found in PATH"
+        raise RuntimeError(msg)
+    return uv
+
+
+def _clear_wheel_output_dir(wheel_dir: Path) -> None:
+    wheel_dir.mkdir(parents=True, exist_ok=True)
+    for wheel_path in wheel_dir.glob("msmodeling-*.whl"):
+        wheel_path.unlink()
+
+
+def _newest_wheel(wheel_dir: Path) -> Path | None:
+    wheels = list(wheel_dir.glob("msmodeling-*.whl"))
+    if not wheels:
+        return None
+    return max(wheels, key=lambda path: path.stat().st_mtime)
+
+
+def _set_pyproject_version(version: str, *, uv_path: str) -> None:
+    """Write ``project.version`` via uv without re-locking the lockfile."""
+    logger.info("setting project version to %s", version)
+    subprocess.run(
+        [_uv_executable(uv_path), "version", version, "--frozen"],
+        cwd=REPO_ROOT,
+        check=True,
+        timeout=_VERSION_CMD_TIMEOUT_SECONDS,
+    )
+
+
+def _run_shell(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
+    tee_path: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a shell command.
+
+    Without *tee_path*, stdout/stderr inherit the parent terminal.
+    With *tee_path*, merged output is streamed to the log file and mirrored live.
+    """
+    logger.info("running: %s", " ".join(cmd))
+    if tee_path is None:
+        return subprocess.run(
+            cmd,
+            cwd=cwd,
+            env=env,
+            timeout=timeout,
+            check=True,
+            text=True,
+        )
+    exit_code = run_merged_output(
+        cmd,
+        cwd=cwd,
+        env=env,
+        timeout=timeout,
+        tee_path=tee_path,
+        mirror_stdout=True,
+        start_new_session=True,
+    )
+    if exit_code != 0:
+        raise subprocess.CalledProcessError(exit_code, cmd)
+    return subprocess.CompletedProcess(cmd, exit_code, stdout="", stderr=None)
+
+
+def _run_build_script(env: dict[str, str]) -> int:
+    try:
+        _run_shell(
+            ["bash", str(_BUILD_SCRIPT)],
+            cwd=REPO_ROOT,
+            env=env,
+            timeout=_SHELL_TIMEOUT_SECONDS,
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.error("command failed (exit %d): %s", exc.returncode, exc.cmd)
+        return exc.returncode
+    except Exception:
+        logger.exception("unexpected error running build")
+        return 1
+    return 0
+
+
+def _run_with_version_staging(
+    *,
+    pyproject_version: str,
+    target_version: str,
+    should_stage: bool,
+    env: dict[str, str],
+    uv_path: str,
+) -> tuple[int, bool]:
+    exit_code = 0
+    restore_failed = False
+    staging_applied = False
+    try:
+        if should_stage:
+            try:
+                _set_pyproject_version(target_version, uv_path=uv_path)
+                staging_applied = True
+            except subprocess.CalledProcessError as exc:
+                logger.error(
+                    "failed to set project version to %s (exit %d)",
+                    target_version,
+                    exc.returncode,
+                )
+                return exc.returncode, False
+        exit_code = _run_build_script(env)
+    finally:
+        if staging_applied:
+            try:
+                logger.info("restoring project version to %s", pyproject_version)
+                _set_pyproject_version(pyproject_version, uv_path=uv_path)
+            except subprocess.CalledProcessError:
+                logger.exception(
+                    "build finished but failed to restore pyproject version to %s",
+                    pyproject_version,
+                )
+                restore_failed = True
+    return exit_code, restore_failed
+
+
+def run_build(options: BuildOptions) -> int:
+    """Build msmodeling wheel via scripts/build.sh."""
+    if not _BUILD_SCRIPT.is_file():
+        logger.error("missing script: %s", _BUILD_SCRIPT)
+        return 1
+
+    uv_path = bootstrap("build")
+
+    try:
+        pyproject_version = read_project_version(repo_root=REPO_ROOT)
+    except ConfigError:
+        logger.exception("failed to read version from pyproject.toml")
+        return 1
+
+    if options.version_explicit:
+        if options.version is None:
+            logger.error("internal error: version_explicit without version value")
+            return 1
+        target_version = options.version
+    else:
+        target_version = pyproject_version
+
+    # ``local`` is parsed for department spec compatibility; no behavioral branch.
+    should_stage_version = options.version_explicit and target_version != pyproject_version
+    _clear_wheel_output_dir(_WHEEL_OUTPUT_DIR)
+    env = os.environ.copy()
+    env["MSMODELING_WHEEL_OUTPUT_DIR"] = str(_WHEEL_OUTPUT_DIR)
+
+    exit_code, restore_failed = _run_with_version_staging(
+        pyproject_version=pyproject_version,
+        target_version=target_version,
+        should_stage=should_stage_version,
+        env=env,
+        uv_path=uv_path,
+    )
+
+    if restore_failed:
+        return 1
+    if exit_code != 0:
+        return exit_code
+
+    wheel_path = _newest_wheel(_WHEEL_OUTPUT_DIR)
+    manifest = {
+        "wheel_path": str(wheel_path) if wheel_path is not None else "",
+        "version": target_version,
+        "pyproject_version": pyproject_version,
+        "version_explicit": options.version_explicit,
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    _ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    (_ARTIFACTS_DIR / "build-manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return 0

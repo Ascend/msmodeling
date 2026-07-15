@@ -9,14 +9,16 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from scripts.helpers.build import main as build_main
+from scripts.helpers.build import run_build as run_build_mod
+from scripts.helpers.build import run_test as run_test_mod
 from scripts.helpers.build.argv import BuildOptions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 _FAKE_UV = "/fake/uv"
-_BUILD_MAIN = "scripts.helpers.build.main"
+_RUN_BUILD = "scripts.helpers.build.run_build"
+_RUN_TEST = "scripts.helpers.build.run_test"
 _BOOTSTRAP = "scripts.helpers.build.bootstrap"
 
 
@@ -36,7 +38,7 @@ def _raise_if_check(cmd: list[str], completed: subprocess.CompletedProcess[str],
 
 @dataclass
 class SubprocessRunCapture:
-    """Records boundary subprocess invocations from build.main."""
+    """Records boundary subprocess invocations from run_build / run_test."""
 
     version_calls: list[str] = field(default_factory=list)
     shell_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -144,7 +146,7 @@ def patch_uv_in_path(monkeypatch: pytest.MonkeyPatch, *, uv_path: str | None = _
             return uv_path
         return None
 
-    monkeypatch.setattr(f"{_BUILD_MAIN}.shutil.which", which)
+    monkeypatch.setattr(f"{_RUN_BUILD}.shutil.which", which)
     monkeypatch.setattr(f"{_BOOTSTRAP}.shutil.which", which)
 
 
@@ -158,7 +160,8 @@ def patch_bootstrap_success(
     def fake_bootstrap(_mode: str) -> str:
         return uv_path
 
-    monkeypatch.setattr(f"{_BUILD_MAIN}.bootstrap", fake_bootstrap)
+    monkeypatch.setattr(f"{_RUN_BUILD}.bootstrap", fake_bootstrap)
+    monkeypatch.setattr(f"{_RUN_TEST}.bootstrap", fake_bootstrap)
     monkeypatch.setattr(f"{_BOOTSTRAP}.bootstrap", fake_bootstrap)
 
 
@@ -166,9 +169,9 @@ def patch_subprocess_run(
     monkeypatch: pytest.MonkeyPatch,
     capture: SubprocessRunCapture,
 ) -> SubprocessRunCapture:
-    monkeypatch.setattr(f"{_BUILD_MAIN}.subprocess.run", capture.run)
-    monkeypatch.setattr(f"{_BUILD_MAIN}.run_merged_output", capture.run_merged_output)
-    # Bootstrap may call subprocess.run for sync when not fully mocked.
+    monkeypatch.setattr(f"{_RUN_BUILD}.subprocess.run", capture.run)
+    monkeypatch.setattr(f"{_RUN_BUILD}.run_merged_output", capture.run_merged_output)
+    monkeypatch.setattr(f"{_RUN_TEST}.run_merged_output", capture.run_merged_output)
     monkeypatch.setattr(f"{_BOOTSTRAP}.subprocess.run", capture.run)
     return capture
 
@@ -201,12 +204,13 @@ def repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         encoding="utf-8",
     )
     (tmp_path / "uv.lock").write_text("# test lock\n", encoding="utf-8")
-    monkeypatch.setattr(build_main, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(build_main, "_BUILD_SCRIPT", scripts_dir / "build.sh")
-    monkeypatch.setattr(build_main, "_CI_GATE_SCRIPT", scripts_dir / "run_ci_gate.sh")
-    monkeypatch.setattr(build_main, "_ARTIFACTS_DIR", tmp_path / "artifacts")
-    monkeypatch.setattr(build_main, "_WHEEL_OUTPUT_DIR", tmp_path / "artifacts")
-    monkeypatch.setattr(build_main, "_TEST_REPORTS_DIR", tmp_path / "artifacts" / "test-reports")
+    monkeypatch.setattr(run_build_mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(run_build_mod, "_BUILD_SCRIPT", scripts_dir / "build.sh")
+    monkeypatch.setattr(run_build_mod, "_ARTIFACTS_DIR", tmp_path / "artifacts")
+    monkeypatch.setattr(run_build_mod, "_WHEEL_OUTPUT_DIR", tmp_path / "artifacts")
+    monkeypatch.setattr(run_test_mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(run_test_mod, "_CI_GATE_SCRIPT", scripts_dir / "run_ci_gate.sh")
+    monkeypatch.setattr(run_test_mod, "_TEST_REPORTS_DIR", tmp_path / "artifacts" / "test-reports")
     try:
         from scripts.helpers.build import bootstrap as bootstrap_mod
 

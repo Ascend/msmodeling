@@ -2,11 +2,11 @@
 
 Shell entry points for local runs, PR incremental gate, nightly, and `test_map` maintenance. Python logic lives in `scripts/helpers/`; `scripts/lib/common.sh` bootstraps env, optional `uv sync --frozen --group ci`, and invokes helpers.
 
-**Department unified entry:** repo-root [`build.py`](../build.py) wraps `scripts/build.sh` (default) and `scripts/run_ci_gate.sh` (`test`). Prefer:
+**Department unified entry:** repo-root [`build.py`](../build.py) wraps `scripts/build.sh` (default) and test mode (full suite or CI gate). Prefer:
 
 ```bash
 python build.py          # build wheel (bootstraps tools)
-python build.py test     # run CI gate (bootstraps tools)
+python build.py test     # full pytest tests (pyproject.toml markers); set MSMODELING_TEST_MAP_PATH for CI gate
 ```
 
 `build.py` is fully non-interactive (CI-safe). It **strongly depends on `uv`**: if `uv` is missing it logs a WARNING and installs `uv` non-interactively via `pip` (default index; configure `PIP_INDEX_URL` yourself if download is slow), then runs `uv sync --frozen` for the mode's dependency group (`build` or `ci`). Network/permission failures exit with no venv/pip build fallback. On Python < 3.11, `tomli` comes from the `build` group (build mode) or `ci` group (test mode).
@@ -37,7 +37,8 @@ Department-standard root entry. Thin wrapper over existing shell scripts. Requir
 | Mode | Sync | Delegates to |
 |------|------|--------------|
 | `python build.py` | `uv sync --frozen --group build` | `bash scripts/build.sh` → wheel under `artifacts/` |
-| `python build.py test` | `uv sync --frozen --group ci` | `bash scripts/run_ci_gate.sh` → log under `artifacts/test-reports/` |
+| `python build.py test` (no `MSMODELING_TEST_MAP_PATH`) | `uv sync --frozen --group ci` | `python -m pytest tests` → markers from `pyproject.toml` `[tool.pytest.ini_options] addopts`; log under `artifacts/test-reports/full_suite.log` |
+| `python build.py test` (with `MSMODELING_TEST_MAP_PATH` or `-e test_map_path=...`) | `uv sync --frozen --group ci` | `bash scripts/run_ci_gate.sh` → log under `artifacts/test-reports/ci_gate.log` |
 
 - **`build` group**: build-time helpers only (e.g. `tomli` on Python < 3.11). Does not pull CI/test packages.
 - **`ci` group**: gate/test dependencies (pytest, pydantic, `tomli`, …).
@@ -48,7 +49,10 @@ Department-standard root entry. Thin wrapper over existing shell scripts. Requir
 
 `-v` / `--version` temporarily writes `project.version` in `pyproject.toml` via `uv version --frozen` for the wheel build, then restores the original version. Prefer `python build.py -v <ver>` (or `python build.py --version <ver>`). If you wrap with `uv run`, use `uv run -- python build.py -v <ver>` so uv does not consume `-v`.
 
-Test mode resolves `test_map_path` from `-e test_map_path=...` first, then `MSMODELING_TEST_MAP_PATH`; the file must exist before bootstrap sync / `run_ci_gate.sh` runs.
+**Test mode routing (fail-fast before bootstrap):**
+
+- No `test_map_path` / `MSMODELING_TEST_MAP_PATH` (or blank) → run full `pytest tests` **without** overriding markers (inherits `pyproject.toml` `addopts`, currently `-m 'not npu and not nightly and not network'`).
+- `test_map_path` from `-e test_map_path=...` first, then `MSMODELING_TEST_MAP_PATH` → require the map file and `scripts/run_ci_gate.sh` before bootstrap, then run CI gate.
 
 ## Entry scripts
 
@@ -140,8 +144,11 @@ Boolean: `0`/`1`/`true`/`false`/`yes`/`no`/`on`/`off` (case-insensitive).
 ### Examples
 
 ```bash
-# local
+# local — full suite (pyproject.toml markers)
 uv run python build.py
+uv run python build.py test
+
+# local / CI — CI gate when test_map is provided
 uv run python build.py test -e test_map_path=/data/test_map.json
 bash scripts/run_smoke.sh
 bash scripts/run_regression.sh
