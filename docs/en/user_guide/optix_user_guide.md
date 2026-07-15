@@ -45,7 +45,7 @@ The tool has been validated on LLaMA3-8B and Qwen3-8B. In principle, it does not
 ## Preparations
 
 **Environment Setup**
-Set up an environment where serving tools (such as [vLLM Server](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)) and benchmark tools (such as `vllm_benchmark`/`ais_bench`, see [Benchmark Tool Deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md)) can run properly.
+Set up an environment where serving tools (such as [vLLM Server](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)) and benchmark tools (such as `vllm_benchmark`/`ais_bench`, see [Benchmark Tool Deployment](https://github.com/AISBench/benchmark/blob/master/docs/source_en/get_started/quick_start.md)) can run properly.
 
 ## Tool Installation
 
@@ -208,13 +208,13 @@ You can configure the number of particles and iterations based on the estimated 
 |service|Yes|Node role in multi-node deployment. The options are as follows:<br>&#8226;`master`: primary node<br>&#8226;`slave`: secondary node<br>The default value is `master`.|
 
 **Benchmark tool parameters**:
-If `ais_bench` is used for the test, modify the following parameters. For details, see [ais_bench Usage Description] (<https://gitee.com/aisbench/benchmark/blob/master/README.md>).
+If `ais_bench` is used for the test, modify the following parameters. For details, see [AISBench Quick Start](https://github.com/AISBench/benchmark/blob/master/docs/source_en/get_started/quick_start.md).
 
 |Parameter|Description|
 |---|---|
-|models| Specifies a model task. You can configure it as described in [Model Configuration Description] (<https://gitee.com/aisbench/benchmark/blob/master/doc/users_guide/models.md>).|
-|datasets| Specifies a dataset task. For details, see [Dataset Preparation Guide] (<https://gitee.com/aisbench/benchmark/blob/master/doc/users_guide/datasets.md>).|
-|mode| Specifies the operation mode. For details, see [Operation Mode Description](https://gitee.com/aisbench/benchmark/blob/master/doc/users_guide/mode.md).|
+|models| Specifies a model task. You can configure it as described in [Model Configuration Description](https://github.com/AISBench/benchmark/blob/master/docs/source_en/base_tutorials/all_params/models.md).|
+|datasets| Specifies a dataset task. For details, see [Dataset Preparation Guide](https://github.com/AISBench/benchmark/blob/master/docs/source_en/get_started/datasets.md).|
+|mode| Specifies the operation mode. For details, see [Operation Mode Description](https://github.com/AISBench/benchmark/blob/master/docs/source_en/base_tutorials/all_params/mode.md).|
 |num_prompts| Specifies the number of prompts to run from the dataset. This parameter is valid only when `mode` is set to `perf`.|
 
 If `vllm_benchmark` is used for the test, modify the following parameters:

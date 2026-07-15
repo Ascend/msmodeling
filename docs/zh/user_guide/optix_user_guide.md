@@ -54,7 +54,7 @@
 ## 使用前准备
 
 **环境准备**
-准备好能正常运行服务化（如[VLLM Server](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)）和测评工具（如`vllm_benchmark/AISBench`，参见[测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)）的环境。
+准备好能正常运行服务化（如[VLLM Server](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)）和测评工具（如`vllm_benchmark/AISBench`，参见[测评工具部署](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/quick_start.md)）的环境。
 
 ## 工具安装
 
@@ -223,13 +223,13 @@ msmodeling optix -e vllm -b vllm_benchmark -c ../configs/vllm_config.toml
 |service|必选|标注多机启动时为主机或从机，多机场景下从机设为 `slave`，可取值：<br>&#8226;master：主机<br/>&#8226;slave：从机，<br/>默认值为`master`。|
 
 **测评工具参数**：
-若使用`AISBench`测评，需修改以下参数，可以参照[AISBench 使用说明](https://gitee.com/aisbench/benchmark/blob/master/README.md)进行修改。
+若使用`AISBench`测评，需修改以下参数，可以参照[AISBench 快速入门](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/quick_start.md)进行修改。
 
 |参数|说明|
 |---|---|
-|models| 指定模型任务，可根据[模型配置说明](https://gitee.com/aisbench/benchmark/blob/master/doc/users_guide/models.md)进行配置。|
-|datasets| 指定数据集任务，可根据[数据集准备指南](https://gitee.com/aisbench/benchmark/blob/master/doc/users_guide/datasets.md)进行配置 |
-|mode| 运行模式。可根据[运行模式说明](https://gitee.com/aisbench/benchmark/blob/master/doc/users_guide/mode.md)进行配置。|
+|models| 指定模型任务，可根据[模型配置说明](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/base_tutorials/all_params/models.md)进行配置。|
+|datasets| 指定数据集任务，可根据[数据集准备指南](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/datasets.md)进行配置。|
+|mode| 运行模式。可根据[运行模式说明](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/base_tutorials/all_params/mode.md)进行配置。|
 |num_prompts| 控制运行数据集的条数，`mode`为`perf`时有效。|
 
 若使用`vllm_benchmark`测评，需修改以下参数：
