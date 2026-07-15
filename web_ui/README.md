@@ -14,7 +14,7 @@ Environment variables (defaults used when CLI flags omitted):
 |----------|---------|-------------|
 | `GRADIO_SERVER_PORT` | `2345` | Listen port; overridden by `--port` |
 
-See also [Environment Variables](../tests/README.md#environment-variables) for `PYTHONPATH`, `HF_ENDPOINT`, and Hub cache variables.
+See also [Environment Variables](../scripts/README.md#environment-variables) for `PYTHONPATH`, `HF_ENDPOINT`, and Hub cache variables.
 
 ## Directory Structure
 

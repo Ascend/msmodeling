@@ -325,4 +325,3 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.2 `
 - DeepSeek-V3.2 text_generate compile/no-compile 的 analytic execution time、weight、KV cache 一致
 - DeepSeek-V3.2 compile op table 中 `tensor_cast.cat.default` 和 `aten.cat.default` call count 保持 58
 - throughput_optimizer best result 不变
-

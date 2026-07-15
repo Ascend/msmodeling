@@ -95,13 +95,13 @@
 
 参数推荐必须满足核心并行约束：
 
-```
+```text
 DP * TP * PP == world_size
 ```
 
 首次使用时，优先推荐在稳定可行的前提下用满卡：
 
-```
+```text
 DP * TP * PP == world_size
 ```
 
@@ -157,7 +157,7 @@ dtype 字节映射：
 
 #### 2.4.2 KV Cache 容量估算
 
-```
+```text
 KV_cache_per_token = 2 * num_layers * num_heads * head_dim * dtype_bytes
 ```
 
@@ -260,6 +260,7 @@ config = {
 **第二轮（助手）**：信息已足够，运行参数推荐脚本进行分析，准备推荐结果。
 
 **第三轮（助手）**：输出推荐结果，包含：
+
 - 输入摘要和假设
 - 推荐参数表
 - TOML 片段
@@ -278,4 +279,4 @@ config = {
 - [《Skill 文档》](../../.agents/skills/optix-param-recommend/SKILL.md)
 - [《输入格式说明》](../../.agents/skills/optix-param-recommend/references/input-schema.md)
 - [《参数推荐规则》](../../.agents/skills/optix-param-recommend/references/parameter-rules.md)
-- [《服务化自动寻优工具文档》](../../docs/zh/serviceparam_optimizer_instruct.md)
+- [《服务化自动寻优工具文档》](../../docs/zh/user_guide/optix_user_guide.md)
