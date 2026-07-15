@@ -48,6 +48,53 @@ def test_build_diffusers_transformer_model_passes_remote_source_to_resolver(
     assert calls["model"] == ("Wan-AI/Wan2.2-T2V-A14B-Diffusers", fake_transformer_config)
 
 
+def test_build_diffusers_transformer_model_accepts_huggingface_snapshot_symlinks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_cache = tmp_path / "models--Wan-AI--Wan2.2-T2V-A14B"
+    snapshot = repo_cache / "snapshots" / "revision"
+    high_noise_dir = snapshot / "high_noise_model"
+    high_noise_dir.mkdir(parents=True)
+    blob = repo_cache / "blobs" / "config-blob"
+    blob.parent.mkdir()
+    blob.write_text(
+        json.dumps({"_class_name": "WanTransformer3DModel"}),
+        encoding="utf-8",
+    )
+    (high_noise_dir / "config.json").symlink_to("../../../blobs/config-blob")
+
+    monkeypatch.setattr(
+        diffusers_model,
+        "resolve_diffusers_model_path",
+        lambda _model_id, _remote_source: str(snapshot),
+    )
+    monkeypatch.setattr(
+        diffusers_model,
+        "DiffusersTransformerModel",
+        lambda model_id, transformer_config: (model_id, transformer_config),
+    )
+
+    model, model_config = diffusers_model.build_diffusers_transformer_model(
+        "Wan-AI/Wan2.2-T2V-A14B",
+        parallel_config=None,
+        quant_config=None,
+        dtype=torch.bfloat16,
+    )
+
+    assert model[0] == "Wan-AI/Wan2.2-T2V-A14B"
+    assert model_config.model_path == str(snapshot.resolve())
+    assert model_config.transformer_config.model_config["_class_name"] == "WanTransformer3DModel"
+
+    with pytest.raises(ValueError, match="must not contain symlinks"):
+        diffusers_model.build_diffusers_transformer_model(
+            str(snapshot),
+            parallel_config=None,
+            quant_config=None,
+            dtype=torch.bfloat16,
+        )
+
+
 def test_load_config_from_file_accepts_single_variant_transformer_config(tmp_path: Path) -> None:
     variant_dir = tmp_path / "transformer" / "720p_i2v_distilled_sparse"
     variant_dir.mkdir(parents=True)

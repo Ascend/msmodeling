@@ -37,6 +37,7 @@ def build_diffusers_transformer_model(
     remote_source: str = RemoteSource.huggingface,
     resolved_model_path: str | None = None,
 ):
+    validate_local_path = os.path.isdir(model_id)
     if resolved_model_path is None:
         resolved_model_path = resolve_diffusers_model_path(model_id, remote_source)
     model_config = load_config_from_file(
@@ -46,6 +47,7 @@ def build_diffusers_transformer_model(
         quant_linear_cls=TensorCastQuantLinear,
         attention_cls=AttentionTensorCast,
         dtype=dtype,
+        validate_local_path=validate_local_path,
     )
     model = DiffusersTransformerModel(model_id, model_config.transformer_config)
     return model, model_config
@@ -58,9 +60,14 @@ def load_config_from_file(
     quant_linear_cls: None,
     attention_cls: None,
     dtype: torch.dtype,
+    validate_local_path: bool = True,
 ):
     # TODO add seperate parallel_config and quant_config(atten_cls is needed?) for vae and text
-    source_info = normalize_model_source(model_path, RemoteSource.huggingface)
+    source_info = normalize_model_source(
+        model_path,
+        RemoteSource.huggingface,
+        validate_local=validate_local_path,
+    )
     resolved_model_path = source_info.model_id
     if not source_info.is_local_path or not os.path.isdir(resolved_model_path):
         raise ValueError(f"Input args.model_id should be dir, but got {resolved_model_path}")
