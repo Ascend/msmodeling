@@ -1,0 +1,137 @@
+{
+  "sigs": [
+    {
+      "name": "模型适配",
+      "chair": "ChenHuiwen",
+      "reviewers": ["stormchasingg", "jhon-117", "weixin_43113933"],
+      "approver": "lutean",
+      "paths": [
+        "tensor_cast/transformers/builtin_model/",
+        "tensor_cast/layers/",
+        "tensor_cast/compilation/",
+        "tensor_cast/adapter/",
+        "tensor_cast/core/",
+        "tensor_cast/config.py",
+        "model_config.py",
+        "model_hub.py",
+        "cli/inference/text_generate.py",
+        "cli/inference/model_adapter.py",
+        "tensor_cast/ops/"
+      ]
+    },
+    {
+      "name": "视频生成",
+      "chair": "minghang_c",
+      "reviewers": ["jia_ya_nan"],
+      "approver": "yaohan404",
+      "paths": [
+        "tensor_cast/diffusers/",
+        "cli/inference/video_generate.py"
+      ]
+    },
+    {
+      "name": "ServingCast",
+      "chair": "yuyinkai1",
+      "reviewers": ["yaohan404"],
+      "approver": "lutean",
+      "paths": [
+        "serving_cast/",
+        "tensor_cast/device.py",
+        "tensor_cast/device_profiles/",
+        "tensor_cast/quantize_utils.py"
+      ]
+    },
+    {
+      "name": "Throughput寻优",
+      "chair": "jia_ya_nan",
+      "reviewers": ["yuyinkai1"],
+      "approver": "jhon-117",
+      "paths": [
+        "cli/inference/throughput_optimizer.py",
+        "optix/run_throughput_optimizer_cases.py"
+      ]
+    },
+    {
+      "name": "Optix",
+      "chair": "tt0cool",
+      "reviewers": ["h7star"],
+      "approver": "jhon-117",
+      "paths": [
+        "optix/",
+        "contrib/optix/"
+      ]
+    },
+    {
+      "name": "实测算子查询",
+      "chair": "Horacehxw",
+      "reviewers": ["zhenghaojie"],
+      "approver": "yaohan404",
+      "paths": [
+        "tensor_cast/performance_model/"
+      ]
+    },
+    {
+      "name": "实测算子工具链",
+      "chair": "Secluded_Ocean",
+      "reviewers": ["zhenghaojie"],
+      "approver": "Horacehxw",
+      "paths": [
+        "tools/perf_data_collection/",
+        "tools/perf_data_analysis/",
+        "tensor_cast/performance_model/profiling_database/"
+      ]
+    },
+    {
+      "name": "测试与基础设施",
+      "chair": "AvadaKedavrua",
+      "reviewers": ["jhon-117"],
+      "approver": "lutean",
+      "paths": [
+        "tests/",
+        "scripts/",
+        "pre-commit/",
+        "build.py",
+        ".pre-commit-config.yaml",
+        "pyproject.toml"
+      ]
+    },
+    {
+      "name": "文档与Skill",
+      "chair": "wendellX",
+      "reviewers": ["eveyin1"],
+      "approver": "yaohan404",
+      "paths": [
+        "docs/",
+        ".agents/skills/",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "README.md"
+      ]
+    },
+    {
+      "name": "UI",
+      "chair": "zwt__",
+      "reviewers": ["lutean"],
+      "approver": "jhon-117",
+      "paths": [
+        "web_ui/"
+      ]
+    }
+  ],
+  "fallback_sigs": {
+    "tensor_cast/": "模型适配",
+    "serving_cast/": "ServingCast",
+    "cli/": "模型适配",
+    "optix/": "Optix",
+    "contrib/": "Optix",
+    "tools/": "实测算子工具链",
+    "tests/": "测试与基础设施",
+    "scripts/": "测试与基础设施",
+    "pre-commit/": "测试与基础设施",
+    "docs/": "文档与Skill",
+    ".agents/": "文档与Skill",
+    "web_ui/": "UI"
+  },
+  "root_files_policy": "arch_co_review"
+}

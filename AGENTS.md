@@ -50,6 +50,7 @@ msmodeling（MindStudio Modeling）是一个全系统性能仿真与分析框架
 | `optix-deploy` | "部署 optix"、"安装服务化自动寻优工具" | 安装并验证 msmodeling optix 服务化自动寻优工具 |
 | `optix-config` | "配置 config.toml"、"设置 MindIE/vLLM 寻优字段" | 自动修改 optix `config.toml` 的寻优参数、target 和 benchmark 配置 |
 | `optix-param-recommend` | "推荐 optix 参数"、"生成寻优范围" | 根据硬件、模型、负载和目标推荐 MindIE/vLLM 寻优参数与配置片段 |
+| `sig-review` | "请求检视"、"检视PR {number}"、"review PR {number}"、"分析PR {number}的检视意见" | GitCode PR 分配检视（SIG 路由 + 指派 chair）、代码检视、检视意见分析，支持 cursor/claude code/opencode/codex 等各类 agent |
 
 ### 何时使用哪个 Skill
 
@@ -64,6 +65,9 @@ msmodeling（MindStudio Modeling）是一个全系统性能仿真与分析框架
 - 用户想部署 optix 服务化自动寻优工具 → `optix-deploy`
 - 用户想修改 optix `config.toml` → `optix-config`
 - 用户首次使用 optix 且需要推荐寻优参数和搜索范围 → `optix-param-recommend`
+- 用户推送 PR 后想请求检视（自动分配 SIG chair） → `sig-review`（assign）
+- 用户收到 PR 检视通知，要用 agent 检视 PR → `sig-review`（review）
+- 用户收到检视意见，想分析哪些该改、怎么改 → `sig-review`（analyze）
 
 ---
 

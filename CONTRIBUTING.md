@@ -184,6 +184,8 @@ git push origin feat/your-feature-name
 
 在 GitCode 页面创建 PR，PR 应遵循 [PR 规范](#pr-规范)。
 
+创建 PR 后，对 AI agent 说"请求检视"，自动分析变更文件归属哪个 SIG 并指派对应 chair（详见 `.agents/skills/sig-review/SKILL.md`）。
+
 ### 8. 门禁流水线与 CI
 
 PR 提交后，会自动触发 CI 门禁流水线。**如果门禁流水线有报错**，例如：
