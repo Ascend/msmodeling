@@ -23,10 +23,10 @@ This document summarizes the currently supported model types and simulation feat
 | --- | --- | --- |
 | Text Models | DeepSeek | DeepSeek V4, DeepSeek V3.2, DeepSeek V3 |
 | Text Models | Kimi | Kimi-K2.6, Kimi-K2.5, Kimi-K2 (supported through the DeepSeek V3 compatibility path) |
-| Text Models | Qwen | Qwen3.5, Qwen3.5 MoE, Qwen3-Next, Qwen3 Dense, Qwen3 MoE |
-| Text Models | GLM | GLM5.1, GLM5, GLM-4 MoE |
+| Text Models | Qwen | Qwen3.6, Qwen3.6 MoE, Qwen3.5, Qwen3.5 MoE, Qwen3-Next, Qwen3 Dense, Qwen3 MoE |
+| Text Models | GLM | GLM5.2, GLM5.1, GLM5, GLM-4 MoE |
 | Text Models | ERNIE | ERNIE 4.5 MoE |
-| Text Models | Bailing / MiMo / MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2 |
+| Text Models | Bailing / MiMo / MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2.7, MiniMax M2.5 |
 | Vision-Language Models | VL Models | Qwen3-VL, Qwen3-VL MoE, GLM-4V, GLM-4V MoE, InternVL |
 | Video Generation Models | Diffusers DiT Video Generation Models | Wan, HunyuanVideo, HunyuanVideo1.5 |
 

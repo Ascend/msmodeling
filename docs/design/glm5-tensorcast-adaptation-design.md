@@ -1,4 +1,7 @@
+# GLM5 TensorCast 适配设计
+
 ## 修订记录
+
 | 日期 | 修订版本 | 修改描述 | 作者 | RFC文档 |
 | -- | -- | -- | -- | -- |
 | 2026-04-30 | 1.0 | 初稿完成，归档 TensorCast 适配 GLM5 系列模型及 Sparse MLA/DSA Indexer 融合算子设计 | minghang_c | - |

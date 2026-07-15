@@ -199,9 +199,9 @@ python -m pip check
 环境变量配置按操作系统区分：
 
 | 操作系统 | `PYTHONPATH` | `HF_ENDPOINT` |
-|:---|:---|:---|
+| --- | --- | --- |
 | Linux/macOS/WSL/Git Bash | `export PYTHONPATH="$(pwd):${PYTHONPATH:-}"` | `export HF_ENDPOINT="https://hf-mirror.com"` |
-| Windows PowerShell | `$env:PYTHONPATH = "$(Get-Location);$env:PYTHONPATH"` | `$env:HF_ENDPOINT = "https://hf-mirror.com"` |
+| Windows PowerShell | ``$env:PYTHONPATH = "$(Get-Location);$env:PYTHONPATH"`` | ``$env:HF_ENDPOINT = "https://hf-mirror.com"`` |
 
 ### 4.5 默认值和确认规则
 

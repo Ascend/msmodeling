@@ -39,6 +39,8 @@
 <details>
 <summary><b>Qwen 系列</b></summary>
 
+🔹 [2026.07.14] msModeling 新增 **Qwen3.6** 图片输入支持  
+🔹 [2026.07.14] msModeling 新增 **Qwen3.6 Dense / MoE** 文本输入支持  
 🔹 [2026.04.20] msModeling 新增 **Qwen3.5** 图片输入支持  
 🔹 [2026.03.31] msModeling 新增 **Qwen3.5 Dense / MoE** 文本输入支持  
 🔹 [2025.12.25] msModeling 新增 **Qwen3 MoE** 模型支持  
@@ -50,6 +52,7 @@
 <details>
 <summary><b>GLM 系列</b></summary>
 
+🔹 [2026.07.07] msModeling 新增 **GLM5.2** 模型支持  
 🔹 [2026.06.04] msModeling 新增 **GLM5.1** 模型支持  
 🔹 [2026.04.30] msModeling 新增 **GLM5** 模型支持  
 🔹 [2026.03.31] msModeling 新增 **GLM-4 MoE** 模型支持
@@ -59,7 +62,8 @@
 <details>
 <summary><b>MiniMax 系列</b></summary>
 
-🔹 [2025.12.18] msModeling 新增 **MiniMax M2** 模型支持
+🔹 [2026.06.25] msModeling 新增 **MiniMax M2.7** 模型支持  
+🔹 [2026.05.29] msModeling 新增 **MiniMax M2.5** 模型支持
 
 </details>
 

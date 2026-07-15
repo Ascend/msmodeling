@@ -375,7 +375,7 @@ user_input = UserInputConfig(
 
 ### 目录结构
 
-```
+```text
 tensor_cast/
 ├── core/                      # 核心模块
 │   ├── config_resolver.py     # 配置解析器

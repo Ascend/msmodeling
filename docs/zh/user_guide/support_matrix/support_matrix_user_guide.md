@@ -23,10 +23,10 @@
 | --- | --- | --- |
 | 文本模型 | DeepSeek 系列 | DeepSeek V4、DeepSeek V3.2、DeepSeek V3 |
 | 文本模型 | Kimi 系列 | Kimi-K2.6、Kimi-K2.5、Kimi-K2（通过 DeepSeek V3 兼容路径支持） |
-| 文本模型 | Qwen 系列 | Qwen3.5、Qwen3.5 MoE、Qwen3-Next、Qwen3 Dense、Qwen3 MoE |
-| 文本模型 | GLM 系列 | GLM5.1、GLM5、GLM-4 MoE |
+| 文本模型 | Qwen 系列 | Qwen3.6、Qwen3.6 MoE、Qwen3.5、Qwen3.5 MoE、Qwen3-Next、Qwen3 Dense、Qwen3 MoE |
+| 文本模型 | GLM 系列 | GLM5.2、GLM5.1、GLM5、GLM-4 MoE |
 | 文本模型 | ERNIE 系列 | ERNIE 4.5 MoE |
-| 文本模型 | Bailing / MiMo / MiniMax | Bailing MoE、MiMo v2 Flash、MiniMax M2 |
+| 文本模型 | Bailing / MiMo / MiniMax | Bailing MoE、MiMo v2 Flash、MiniMax M2.7、MiniMax M2.5 |
 | 视觉-语言模型 | VL 模型 | Qwen3-VL、Qwen3-VL MoE、GLM-4V、GLM-4V MoE、InternVL |
 | 视频生成模型 | Diffusers DiT 视频生成模型 | Wan、HunyuanVideo、HunyuanVideo1.5 |
 

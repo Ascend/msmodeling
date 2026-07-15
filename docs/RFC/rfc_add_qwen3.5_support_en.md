@@ -71,7 +71,7 @@ The msmodeling framework already supports Qwen3 series models, but Qwen3.5 intro
 
 In Qwen3.5's DecoderLayer, **some layers use standard Self-Attention (FlashAttention), others use GatedDeltaNet (Linear Attention)**. Which layers use which attention type is determined by the `self_attn.layer_type` field.
 
-```
+```text
 Qwen3_5DecoderLayer:
   ├── input_layernorm         → RMSNorm (standard)
   ├── self_attn:
@@ -299,11 +299,11 @@ The following are real HW measurements on ATLAS_800_A3_560T_128G_DIE (dual-card)
 |---|---|---|---|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **Prefill long text** | 3500 | 1000 | 447.1 ms | `python -m cli.inference.text_generate Qwen/Qwen3.5-27B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 1 --query-length 3510 --context-length 0  --quantize-linear-action W8A8_STATIC --tp-size 2 --compile`                                                                             |
 | **Decode long context** | 3500 | 1000 | 27.33 ms | `python -m cli.inference.text_generate Qwen/Qwen3.5-27B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 1 --query-length 4 --context-length 4250  --quantize-linear-action W8A8_STATIC --tp-size 2 --compile --num-mtp-tokens 3 --decode`                                                 |
-| **Prefill very long text** | 16000 | 1000 | 2.099 s | `python -m cli.inference.text_generate Qwen/Qwen3.5-27B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 1 --query-length 16824 --context-length 0  --quantize-linear-action W8A8_STATIC --tp-size 2 --compile `                                                                           |
+| **Prefill very long text** | 16000 | 1000 | 2.099 s | `python -m cli.inference.text_generate Qwen/Qwen3.5-27B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 1 --query-length 16824 --context-length 0  --quantize-linear-action W8A8_STATIC --tp-size 2 --compile` |
 | **Decode very long context** | 16000 | 1000 | 28.161 ms | `python -m cli.inference.text_generate Qwen/Qwen3.5-27B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 3 --query-length 4 --context-length 16500  --quantize-linear-action W8A8_STATIC --tp-size 2 --compile --num-mtp-tokens 3 --decode`                                                |
 | **VL Prefill** (1080p + 30 token) | 1080p | 30 | 1.712 s | `python -m cli.inference.text_generate Qwen/Qwen3.5-27B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 4 --query-length 30 --context-length 0 --image-height 1080 --image-width 1920 --image-batch-size 1 --quantize-linear-action W8A8_STATIC --tp-size 2 --compile --num-mtp-tokens 3` |
 | **VL Decode** (1080p + 30 token) | 1080p | 30 | 39.84 ms | `python -m cli.inference.text_generate Qwen/Qwen3.5-27B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 8 --query-length 4 --context-length 16500  --quantize-linear-action W8A8_STATIC --tp-size 2 --compile --num-mtp-tokens 3 --decode`                                                |
-| **Prefill very long text** (35B-A3B) | 16000 | 1000 | 504 ms | `python -m cli.inference.text_generate Qwen/Qwen3.5-35B-A3B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 1 --query-length 8192 --context-length 0  --quantize-linear-action W4A8_STATIC --tp-size 2 --compile  --num-mtp-tokens 3 `                                                    |
+| **Prefill very long text** (35B-A3B) | 16000 | 1000 | 504 ms | `python -m cli.inference.text_generate Qwen/Qwen3.5-35B-A3B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 1 --query-length 8192 --context-length 0  --quantize-linear-action W4A8_STATIC --tp-size 2 --compile  --num-mtp-tokens 3` |
 | **Decode very long context** (W4A8) | 16000 | 1000 | 29.76 ms | `python -m cli.inference.text_generate Qwen/Qwen3.5-35B-A3B --device ATLAS_800_A3_560T_128G_DIE --num-devices 2 --num-queries 8 --query-length 4 --context-length 16500  --quantize-linear-action W4A8_STATIC --tp-size 2 --compile --num-mtp-tokens 3 --decode`                                            |
 
 ---
@@ -337,10 +337,10 @@ The following are real HW measurements on ATLAS_800_A3_560T_128G_DIE (dual-card)
 ### Appendix A: References
 
 - [Qwen3.5 Model Source Code](https://huggingface.co/Qwen/Qwen3.5-27B) — `modeling_qwen3_5.py`
-- [Qwen3.5-27B Simulation Operator Coverage Analysis Report](../Qwen3.5-27B仿真算子覆盖度分析报告.md)
-- [Measured LINEARATTENTION Kernel Records](../实测LINEARATTENTION实测算子记录.MD)
-- [Code Change Alignment Notes](../代码修改对齐说明.md)
-- [Visual Comparison](../视觉对比.MD)
+- Qwen3.5-27B Simulation Operator Coverage Analysis Report (internal document)
+- Measured LINEARATTENTION Kernel Records (internal document)
+- Code Change Alignment Notes (internal document)
+- Visual Comparison (internal document)
 
 ### Appendix B: Glossary
 

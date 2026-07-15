@@ -375,7 +375,7 @@ user_input = UserInputConfig(
 
 ### Directory Structure
 
-```
+```text
 tensor_cast/
 ├── core/                      # Core modules
 │   ├── config_resolver.py     # Configuration resolver
