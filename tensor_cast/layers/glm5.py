@@ -1,9 +1,7 @@
 from .mla import DeepseekSparseAttention
 
-
 _INDEXER_FULL = "full"
 _INDEXER_SHARED = "shared"
-_INDEXSHARE_PERIOD = 4
 
 
 def get_glm5_indexer_types(config) -> list[str] | None:
@@ -64,23 +62,13 @@ def extend_glm5_indexer_types_for_mtp(indexer_types: list[str], num_mtp_layers: 
         indexer_types.extend([indexer_types[-1]] * num_mtp_layers)
         return
 
-    last_full_idx = None
-    for idx in range(len(indexer_types) - 1, -1, -1):
-        if indexer_types[idx] == _INDEXER_FULL:
-            last_full_idx = idx
-            break
-        if indexer_types[idx] != _INDEXER_SHARED:
-            raise ValueError(f"Unsupported GLM5 indexer type '{indexer_types[idx]}' at layer {idx}")
-    if last_full_idx is None:
-        raise ValueError("GLM5 indexer_types with shared entries has no full indexer layer")
-
-    for _ in range(num_mtp_layers):
-        distance_from_full = len(indexer_types) - last_full_idx
-        if distance_from_full >= _INDEXSHARE_PERIOD:
-            indexer_types.append(_INDEXER_FULL)
-            last_full_idx = len(indexer_types) - 1
-        else:
-            indexer_types.append(_INDEXER_SHARED)
+    # MTP proposal blocks run independently from the main decoder stack and
+    # therefore cannot consume a main-stack prev_topk_indices output. Every
+    # appended MTP block must compute its own indexer.
+    for indexer_type in indexer_types:
+        if indexer_type not in (_INDEXER_FULL, _INDEXER_SHARED):
+            raise ValueError(f"Unsupported GLM5 indexer type '{indexer_type}'")
+    indexer_types.extend([_INDEXER_FULL] * num_mtp_layers)
 
 
 class Glm5SparseAttention(DeepseekSparseAttention):

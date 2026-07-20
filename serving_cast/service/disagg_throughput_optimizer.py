@@ -56,6 +56,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             chunk_plan = optimizer_data.get_prefill_chunk_plan()
         output_length = optimizer_data.output_length
         concurrency = batch_size * self.dp * self.pp
+        prefill_ttft_sum_ms = None
+        prefill_ttft_request_count = 0
         single_prefill_fits_budget = (
             not decode_flag
             and not variable_input_mode
@@ -80,24 +82,33 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             breakdown_sums = {}
             breakdown_counts = {}
             wave_keys = []
+            wave_specs = []
+            prefill_ttft_sum_ms = 0.0
             # Keep disaggregated prefill modeling simple and deterministic: each wave contains
             # only one chunk shape and is capped by max_batched_tokens. We do not aggregate
             # different chunk positions across queries into one wave, so this may be conservative
             # compared with engines that do cross-query chunk packing.
             # serving_cost is treated as one fixed phase overhead, while breakdowns are averaged
-            # across all modeled waves to include every chunk shape.
-            for chunk in chunk_plan:
+            # across all modeled waves to include every chunk shape. latency_ms is the phase
+            # makespan; final-chunk wave completion timestamps are used for request-level TTFT.
+            for chunk_index, chunk in enumerate(chunk_plan):
                 wave_size = max(max_batched_tokens // chunk.query_len, 1)
                 remaining = concurrency
                 while remaining > 0:
                     wave_concurrency = min(wave_size, remaining)
-                    wave_keys.append(
-                        self._make_forward_shape_key(
+                    wave_key = self._make_forward_shape_key(
+                        wave_concurrency,
+                        optimizer_data,
+                        decode_flag,
+                        query_len=chunk.query_len,
+                        seq_len=chunk.seq_len,
+                    )
+                    wave_keys.append(wave_key)
+                    wave_specs.append(
+                        (
+                            wave_key,
                             wave_concurrency,
-                            optimizer_data,
-                            decode_flag,
-                            query_len=chunk.query_len,
-                            seq_len=chunk.seq_len,
+                            chunk_index == len(chunk_plan) - 1,
                         )
                     )
                     remaining -= wave_concurrency
@@ -108,7 +119,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             )
             latency_table.prefetch(wave_keys)
 
-            for key in wave_keys:
+            for key, wave_concurrency, is_final_chunk in wave_specs:
                 record = latency_table.get(key)
                 latency_ms += record.latency_ms
                 device_memory_available_gb = min(
@@ -118,6 +129,9 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 memory_info = select_tightest_memory_info((memory_info, record.memory_info))
                 if record.memory_left_gb < 0:
                     break
+                if is_final_chunk:
+                    prefill_ttft_sum_ms += wave_concurrency * latency_ms
+                    prefill_ttft_request_count += wave_concurrency
                 # Preserve the historical per-wave weighting: each wave contributes one normalized
                 # breakdown distribution, even when multiple waves reuse the same latency table record.
                 for breakdown_name, breakdown in record.raw_breakdowns.items():
@@ -157,7 +171,12 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 total_input_tokens *= self.dp
             else:
                 total_input_tokens = concurrency * input_length
-            ttft = latency_ms
+            if prefill_ttft_sum_ms is not None and prefill_ttft_request_count == concurrency:
+                ttft = prefill_ttft_sum_ms / concurrency
+            else:
+                # OOM/partial replay has no complete request-level TTFT average. Keep the
+                # phase latency for diagnostics; memory-based early stop takes precedence.
+                ttft = latency_ms
             output_throughput = total_input_tokens / latency_ms * 1000 if latency_ms > 0 else 0
 
         token_s_device = output_throughput / self.dp / self.pp / self.tp

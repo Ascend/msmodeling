@@ -8,9 +8,17 @@ from tensor_cast.layers.glm5 import (
     extend_glm5_indexer_types_for_mtp,
     resolve_glm5_indexer_source_layer,
 )
+from tensor_cast.layers.internal import CopyLayerWrapper, RegionMarkerWrapper
 from tensor_cast.layers.mla import DeepseekSparseAttention
 from tensor_cast.layers.mtp import MultiTokenPredictorLayer
 from tensor_cast.model_config import MtpConfig
+from tensor_cast.transformers.builtin_model.glm5 import (
+    Glm5DecoderLayerCompat,
+    Glm5ModelCompat,
+    _decoder_supports_prev_topk,
+    _prepare_glm5_decoder_layer,
+    _resolve_glm5_mtp_block_owner,
+)
 from tensor_cast.transformers.transformations import maybe_enable_mtp, patch_mla
 
 
@@ -24,6 +32,138 @@ def test_glm5_sparse_attention_returns_topk_slot(monkeypatch):
     )
 
     assert Glm5SparseAttention.forward(sparse_attention, None, None, None) == ("hidden", None, None)
+
+
+def test_glm5_old_decoder_compat_propagates_prev_topk_indices():
+    captured = {}
+
+    class FakeAttention(torch.nn.Module):
+        def forward(self, **kwargs):
+            captured["prev_topk_indices"] = kwargs["prev_topk_indices"]
+            return kwargs["hidden_states"], None, "next-topk"
+
+    class FakeLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_layernorm = torch.nn.Identity()
+            self.post_attention_layernorm = torch.nn.Identity()
+            self.self_attn = FakeAttention()
+            self.mlp = torch.nn.Identity()
+
+    layer = Glm5DecoderLayerCompat(FakeLayer())
+    hidden_states, topk_indices = layer(
+        torch.ones(1, 1, 2),
+        prev_topk_indices="previous-topk",
+    )
+
+    assert captured["prev_topk_indices"] == "previous-topk"
+    assert torch.equal(hidden_states, torch.full((1, 1, 2), 4.0))
+    assert topk_indices == "next-topk"
+
+
+def test_glm5_decoder_compat_rejects_missing_topk_output():
+    class FakeAttention(torch.nn.Module):
+        def forward(self, **_kwargs):
+            return "hidden", None
+
+    class FakeLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_layernorm = torch.nn.Identity()
+            self.post_attention_layernorm = torch.nn.Identity()
+            self.self_attn = FakeAttention()
+            self.mlp = torch.nn.Identity()
+
+    with pytest.raises(ValueError, match="attention must return"):
+        Glm5DecoderLayerCompat(FakeLayer())(torch.ones(1, 1, 2))
+
+
+def test_glm5_decoder_contract_detection():
+    class NewDecoder(torch.nn.Module):
+        def forward(self, hidden_states, prev_topk_indices=None):
+            return hidden_states, prev_topk_indices
+
+    class OldDecoder(torch.nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states
+
+    assert _decoder_supports_prev_topk(NewDecoder())
+    assert not _decoder_supports_prev_topk(OldDecoder())
+
+
+def test_glm5_model_compat_preserves_repetition_wrappers():
+    class FakeLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.input_layernorm = torch.nn.Identity()
+
+    representative = RegionMarkerWrapper(region_id=1, layer=FakeLayer())
+    copy_layer = CopyLayerWrapper(region_id=1, layer=FakeLayer(), representative=representative)
+    inner = torch.nn.Module()
+    inner.layers = torch.nn.ModuleList([representative, copy_layer])
+    model = Glm5ModelCompat(inner)
+
+    assert model.layers[0] is representative
+    assert isinstance(representative._inner, Glm5DecoderLayerCompat)
+    assert model.layers[1] is copy_layer
+    assert _prepare_glm5_decoder_layer(copy_layer) is copy_layer
+
+
+def test_glm5_model_uses_configured_cache_default(monkeypatch):
+    created_caches = []
+
+    class FakeCache:
+        def __init__(self, config):
+            self.config = config
+            created_caches.append(self)
+
+        def get_seq_length(self):
+            return 0
+
+    class FakeRotaryEmbedding(torch.nn.Module):
+        def forward(self, hidden_states, position_ids=None):
+            return hidden_states
+
+    class FakeInner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(use_cache=True, num_hidden_layers=0)
+            self.layers = torch.nn.ModuleList()
+            self.embed_tokens = torch.nn.Identity()
+            self.norm = torch.nn.Identity()
+
+    monkeypatch.setattr("tensor_cast.transformers.builtin_model.glm5.DynamicCache", FakeCache)
+    monkeypatch.setattr(
+        "tensor_cast.transformers.builtin_model.glm5.create_causal_mask",
+        lambda **_kwargs: None,
+    )
+
+    model = Glm5ModelCompat(FakeInner())
+    model.rotary_emb = FakeRotaryEmbedding()
+    model(input_ids=torch.ones(1, 1, dtype=torch.long))
+
+    assert len(created_caches) == 1
+    assert created_caches[0].config.use_cache is True
+
+
+def test_glm5_mtp_patch_skips_copy_layers_and_unwraps_representatives():
+    class FakeMtpLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mtp_block = torch.nn.Identity()
+
+    representative = RegionMarkerWrapper(
+        region_id=1,
+        layer=FakeMtpLayer(),
+    )
+    copy_layer = CopyLayerWrapper(
+        region_id=1,
+        layer=FakeMtpLayer(),
+        representative=representative,
+    )
+
+    assert _resolve_glm5_mtp_block_owner(representative) is representative._inner
+    assert _resolve_glm5_mtp_block_owner(copy_layer) is None
 
 
 def test_glm5_returns_topk_when_next_layer_skips_topk():
@@ -140,7 +280,7 @@ def test_glm5_mtp_extension_ignores_empty_indexer_types():
     assert indexer_types == []
 
 
-def test_glm52_mtp_extension_continues_from_last_full_layer():
+def test_glm52_mtp_extension_uses_full_indexers_for_independent_blocks():
     indexer_types = ["full", "shared", "shared", "shared"] * 18 + [
         "full",
         "shared",
@@ -152,7 +292,7 @@ def test_glm52_mtp_extension_continues_from_last_full_layer():
 
     extend_glm5_indexer_types_for_mtp(indexer_types, 3)
 
-    assert indexer_types[-5:] == ["full", "shared", "shared", "shared", "full"]
+    assert indexer_types[-3:] == ["full", "full", "full"]
 
 
 def test_glm5_mtp_layer_uses_hidden_states_from_tuple_block_output():
@@ -217,6 +357,6 @@ def test_glm5_mtp_extends_indexer_types(monkeypatch):
         "shared",
         "shared",
         "full",
-        "shared",
-        "shared",
+        "full",
+        "full",
     ]

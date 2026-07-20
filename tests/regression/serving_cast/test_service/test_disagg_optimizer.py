@@ -190,7 +190,11 @@ class TestDisaggStrategy(unittest.TestCase):
             )
         )
         self.assertEqual(row["prefill_num_chunks"], 3)
-        self.assertEqual(row["ttft"], 12.0)
+        # The two final-chunk waves complete at 11 ms and 12 ms for two requests
+        # each, so TTFT is their request-weighted average. Throughput still uses
+        # the full 12 ms Prefill makespan.
+        self.assertEqual(row["ttft"], 11.5)
+        self.assertEqual(row["token/s"], 3333.333)
         self.assertEqual(row["percentage_breakdowns"], "Mem 18.00 | Comm 82.00 | Cube 0.00 | Vec 0.00")
 
     def test_single_chunk_prefill_splits_when_concurrency_exceeds_token_budget(self):
@@ -226,7 +230,8 @@ class TestDisaggStrategy(unittest.TestCase):
         row = result.get_summary_df().iloc[0]
         self.assertEqual(captured_calls, [(2, 4, 4)])
         self.assertEqual(row["prefill_num_chunks"], 1)
-        self.assertEqual(row["ttft"], 2.0)
+        # Two waves complete at 1 ms and 2 ms, respectively.
+        self.assertEqual(row["ttft"], 1.5)
 
     def test_chunked_prefill_stops_when_any_record_memory_is_negative(self):
         optimizer_data = OptimizerData(

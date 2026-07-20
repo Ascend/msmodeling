@@ -161,29 +161,58 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
             )
         return ",".join(submodule_types)
 
+    def reuse_modules(modules):
+        """Wrap structurally repeated modules with region replay wrappers."""
+        seen_keys: dict[str, RegionMarkerWrapper] = {}
+        for i, module in enumerate(modules):
+            key = get_submodule_structure_key(module)
+            if key not in seen_keys:
+                modules[i] = RegionMarkerWrapper(region_id=id(module), layer=module)
+                seen_keys[key] = modules[i]
+            else:
+                region_wrapper = seen_keys[key]
+                region_wrapper.repeat_count += 1
+                modules[i] = CopyLayerWrapper(
+                    region_id=region_wrapper.region_id,
+                    layer=module,
+                    representative=region_wrapper,
+                )
+
     def reuse_layers(layers):
         # We analyze the structure of sub-modules of each layer to detect repetition patterns.
         # For the first layer of the repetition, we wrap it with RegionMarkerWrapper and then
         # wrap the rest layers of the same pattern with CopyLayerWrapper. CopyLayerWrapper is a
         # synthetic module with no children, so later transformations only process representative layers.
-        seen_keys: dict[str, RegionMarkerWrapper] = {}
-        for i, layer in enumerate(layers):
-            key = get_submodule_structure_key(layer)
-            if key not in seen_keys:
-                layers[i] = RegionMarkerWrapper(region_id=id(layer), layer=layer)
-                seen_keys[key] = layers[i]
-            else:
-                region_wrapper = seen_keys[key]
-                region_wrapper.repeat_count += 1
-                layers[i] = CopyLayerWrapper(
-                    region_id=region_wrapper.region_id,
-                    layer=layer,
-                    representative=region_wrapper,
-                )
+        reuse_modules(layers)
+
+    def reuse_glm5_stateless_submodules(layers):
+        """Reuse GLM-5.2 MLPs while keeping IndexShare decoder data flow real.
+
+        A complete decoder-layer copy would also need to copy the auxiliary
+        ``topk_indices`` output used by shared Indexer layers. The current
+        region-copy primitive only replays the first tensor output, so limit
+        this pass to MLPs, which have no cross-layer state.
+        """
+        mlps = []
+        for layer in layers:
+            mlp = getattr(layer, "mlp", None)
+            if mlp is None:
+                # Keep the generic behavior for synthetic or unsupported layer
+                # containers that do not expose the standard decoder MLP.
+                reuse_layers(layers)
+                return
+            mlps.append(mlp)
+
+        reuse_modules(mlps)
+        for layer, mlp in zip(layers, mlps):
+            layer.mlp = mlp
 
     unwrapped = model.unwrap()
     if hasattr(unwrapped, "layers"):
-        reuse_layers(unwrapped.layers)
+        if glm5_indexer_types is not None:
+            reuse_glm5_stateless_submodules(unwrapped.layers)
+        else:
+            reuse_layers(unwrapped.layers)
 
     visual_layers = get_visual_layers(model)
     if visual_layers is not None:

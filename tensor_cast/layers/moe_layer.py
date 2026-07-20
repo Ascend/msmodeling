@@ -563,14 +563,15 @@ class FusedMoETensorCast(FusedMoEBase):
         if self.ep_group.rank_in_group < self.num_external_shared_experts:
             return x[0]
 
-        for i in range(self.num_local_experts):
-            split_sizes = [split_sizes_by_expert[rank][i] for rank in range(self.ep_group.world_size)]
-            x[i] = x[i].split(split_sizes)
+        split_x_by_expert = [
+            x[i].split([split_sizes_by_expert[rank][i] for rank in range(self.ep_group.world_size)])
+            for i in range(self.num_local_experts)
+        ]
 
         rearranged_x = []
         for rank in range(self.ep_group.world_size):
             for i in range(self.num_local_experts):
-                rearranged_x.append(x[i][rank])
+                rearranged_x.append(split_x_by_expert[i][rank])
         return torch.cat(rearranged_x, dim=0)
 
     def dispatch_tokens(
