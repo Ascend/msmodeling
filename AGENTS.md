@@ -201,7 +201,13 @@ msmodeling/
 │   ├── throughput-optimizer-explainer/
 │   ├── optix-deploy/
 │   ├── optix-config/
-│   └── optix-param-recommend/
+│   ├── optix-param-recommend/
+│   └── sig-review/           # GitCode PR 检视（SIG 责任田路由 + AI 自动检视）
+├── .loop/                   # AI 自主开发框架（经验池 + prompt 模板）
+│   └── memory/lessons.md     # 跨会话经验教训库（团队共享，随代码版本管理）
+├── spec/                    # 项目正式规范（最高权威）
+│   ├── governance/           #   治理规则（source-of-truth-matrix.md 等）
+│   └── foundations/          #   基础规范（后续补齐）
 ├── tensor_cast/             # 核心仿真框架
 │   ├── device.py             # DeviceProfile 定义
 │   ├── device_profiles/     # 用户自定义 profiles
@@ -210,13 +216,15 @@ msmodeling/
 │   ├── performance_model/   # 性能模型
 │   └── compilation/         # 编译相关
 ├── serving_cast/            # 服务仿真
-├── tests/                   # 测试（UT + ST + skill_eval）
-│   ├── perf_database/       # Profiling 数据库
-│   └── skill_eval/         # Skill 评测框架
+├── tests/                   # 测试（UT + ST + benchmark）
+│   └── perf_database/       # Profiling 数据库
 ├── docs/                    # 文档
 │   ├── RFC/                 # 设计提案
+│   ├── design/              # 实现设计
 │   └── perf_database/      # 专项文档
 ├── cli/                     # CLI 入口
+├── optix/                   # 服务化自动寻优工具
+├── web_ui/                  # Web UI
 ├── pre-commit/              # pre-commit 配置
 └── tools/                   # 辅助工具
 ```
