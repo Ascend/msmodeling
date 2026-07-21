@@ -134,5 +134,5 @@ class BaselineRunError(OptimizerError):
 class NoFeasibleSolutionError(OptimizerError):
     """Raised when PSO finishes without any feasible candidate."""
 
-    def __init__(self) -> None:
-        super().__init__("No feasible solution found")
+    def __init__(self, message: str = "No feasible solution found") -> None:
+        super().__init__(message)

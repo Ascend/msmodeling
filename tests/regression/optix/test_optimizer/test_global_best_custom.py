@@ -15,7 +15,9 @@
 # -------------------------------------------------------------------------
 import numpy as np
 import pytest
+from loguru import logger
 
+from optix.optimizer.errors import NoFeasibleSolutionError
 from optix.optimizer.global_best_custom import CustomGlobalBestPSO
 
 
@@ -90,6 +92,44 @@ class TestCustomGlobalBestPSO:
         )
         assert optimizer.swarm.position is not None
         assert optimizer.swarm.velocity is not None
+
+    def test_optimize_resamples_when_round_fails_before_global_best(self):
+        n_particles = 4
+        dimensions = 2
+        optimizer = self._create_optimizer(n_particles=n_particles, dimensions=dimensions)
+        records = []
+        call_count = 0
+
+        def succeeds_after_resample(x):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return np.full(x.shape[0], np.inf)
+            return np.arange(x.shape[0], dtype=float)
+
+        handler_id = logger.add(lambda message: records.append(message.record["message"]), level="WARNING")
+        try:
+            cost, pos = optimizer.optimize(succeeds_after_resample, iters=2, verbose=False)
+        finally:
+            logger.remove(handler_id)
+        assert call_count == 2
+        assert np.isfinite(cost)
+        assert pos.shape == (dimensions,)
+        assert any("Resampling candidate positions" in message for message in records)
+
+    def test_optimize_raises_clear_error_after_all_rounds_fail(self):
+        n_particles = 4
+        optimizer = self._create_optimizer(n_particles=n_particles, dimensions=2)
+        call_count = 0
+
+        def all_failed_objective(x):
+            nonlocal call_count
+            call_count += 1
+            return np.full(x.shape[0], np.inf)
+
+        with pytest.raises(NoFeasibleSolutionError, match="No feasible solution found after 2 optimization rounds"):
+            optimizer.optimize(all_failed_objective, iters=2, verbose=False)
+        assert call_count == 2
 
     def test_zero_particles_raises(self):
         with pytest.raises(ValueError, match="n_particles cannot be zero"):

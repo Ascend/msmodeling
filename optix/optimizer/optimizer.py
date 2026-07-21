@@ -476,6 +476,38 @@ class PSOOptimizer(PerformanceTuner):
         self.scheduler.stop_target_server(del_log)
         raise err
 
+    @staticmethod
+    def _field_names(data_field) -> set[str]:
+        return {field.name for field in data_field if hasattr(field, "name")}
+
+    @staticmethod
+    def _select_fields_by_name(target_field, names: set[str]):
+        return tuple(field for field in target_field if field.name in names)
+
+    def _restore_search_data_field(self, target_field, simulator_names: set[str], benchmark_names: set[str]) -> None:
+        if hasattr(self.scheduler.simulator, "data_field"):
+            self.scheduler.simulator.data_field = self._select_fields_by_name(target_field, simulator_names)
+        if hasattr(self.scheduler.benchmark, "data_field"):
+            self.scheduler.benchmark.data_field = self._select_fields_by_name(target_field, benchmark_names)
+
+    def _run_baseline_preserving_search_space(self):
+        """Run baseline evaluation while preserving search-space data fields.
+
+        scheduler.run may overwrite simulator.data_field and benchmark.data_field
+        as a side effect. Snapshot the original field names before the run and
+        restore them in finally so the PSO search space defined by
+        self.target_field remains intact for subsequent iterations.
+        """
+        simulator_names = self._field_names(getattr(self.scheduler.simulator, "data_field", ()))
+        benchmark_names = self._field_names(getattr(self.scheduler.benchmark, "data_field", ()))
+        search_target_field = tuple(self.target_field)
+        baseline_target_field = tuple(deepcopy(self.target_field))
+        self.default_run_param = field_to_param(baseline_target_field)
+        try:
+            return self.scheduler.run(self.default_run_param, baseline_target_field)
+        finally:
+            self._restore_search_data_field(search_target_field, simulator_names, benchmark_names)
+
     def prepare_plugin(self):
         from ..config.config import get_settings
         from ..config.model_config import MindieModelConfig
@@ -495,8 +527,7 @@ class PSOOptimizer(PerformanceTuner):
                         )
                     elif _field.config_position == "env":
                         _field.value = os.getenv(_field.name, _field.value)
-                self.default_run_param = field_to_param(self.target_field)
-                self.default_res = self.scheduler.run(self.default_run_param, self.target_field)
+                self.default_res = self._run_baseline_preserving_search_space()
                 self._raise_if_baseline_failed()
                 if self.default_res.generate_speed:
                     self.gen_speed_target = 10 * self.default_res.generate_speed
@@ -515,8 +546,7 @@ class PSOOptimizer(PerformanceTuner):
                             else:
                                 _field.value = _field.max
             else:
-                self.default_run_param = field_to_param(self.target_field)
-                self.default_res = self.scheduler.run(self.default_run_param, self.target_field)
+                self.default_res = self._run_baseline_preserving_search_space()
                 self._raise_if_baseline_failed()
                 self.default_fitness = self.minimum_algorithm(self.default_res)
                 self.scheduler.save_result(fitness=self.default_fitness)
@@ -561,14 +591,7 @@ class PSOOptimizer(PerformanceTuner):
                 **self.pso_init_kwargs,
             )
             with enable_simulate(self.scheduler):
-                try:
-                    cost, joint_vars = optimizer.optimize(self.op_func, iters=self.iters)
-                except ValueError as e:
-                    if "operands could not be broadcast together with shape" in str(e):
-                        logger.warning(f"The first round of operation may have failed; please try again. error: {e}")
-                        cost, joint_vars = optimizer.optimize(self.op_func, iters=self.iters)
-                    else:
-                        raise e
+                cost, joint_vars = optimizer.optimize(self.op_func, iters=self.iters)
                 best_results = self.scheduler.data_storage.get_best_result()
         _record_fitness, _record_params, _record_res = self.refine_optimization_candidates(best_results)
         best_fitness, best_param, best_performance_index = self.best_params(

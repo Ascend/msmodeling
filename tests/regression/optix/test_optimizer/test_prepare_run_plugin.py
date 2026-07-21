@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 
-from optix.config.config import OptimizerConfigField, PerformanceIndex
+from optix.config.config import OptimizerConfigField, PerformanceIndex, map_param_with_value
 from optix.optimizer.errors import BaselineRunError, NoFeasibleSolutionError
 from tests.regression.optix.test_optimizer.test_pso_optimizer import _make_pso_optimizer
 
@@ -92,6 +92,46 @@ class TestPreparePlugin(unittest.TestCase):
         scheduler.save_result.assert_not_called()
         scheduler.stop_target_server.assert_called_once()
 
+    @patch("optix.optimizer.optimizer.is_mindie", return_value=False)
+    @patch("optix.optimizer.plugins.simulate.Simulator", _FakeSimulator)
+    @patch("optix.optimizer.plugins.benchmark.AisBench", _FakeAisBench)
+    @patch("optix.optimizer.optimizer.get_required_field_from_json", return_value=50)
+    def test_prepare_plugin_keeps_baseline_only_enum_value_out_of_search_space(self, mock_get_field, mock_is_mindie):
+        opt = _simulator_branch_optimizer()
+        scheduler = opt.scheduler
+        enum_field = OptimizerConfigField(
+            name="ASCEND_RT_VISIBLE_DEVICES",
+            config_position="env",
+            dtype="enum",
+            dtype_param=[1],
+            value=2,
+        )
+        opt.target_field = (enum_field,)
+        scheduler.simulator.data_field = (enum_field,)
+        scheduler.benchmark.data_field = ()
+        captured = {}
+
+        def baseline_run(params, params_field):
+            captured["params"] = params
+            captured["params_field"] = params_field
+            scheduler.simulator.data_field = params_field
+            return PerformanceIndex(
+                generate_speed=100.0,
+                time_to_first_token=0.2,
+                time_per_output_token=0.02,
+                success_rate=1.0,
+            )
+
+        scheduler.run.side_effect = baseline_run
+
+        opt.prepare_plugin()
+
+        assert captured["params_field"][0].value == 2
+        assert captured["params_field"][0].dtype_param == [1, 2]
+        assert opt.target_field[0].dtype_param == [1]
+        assert scheduler.simulator.data_field[0].dtype_param == [1]
+        assert map_param_with_value(np.array([0.0]), tuple(opt.target_field))[0].value == 1
+
 
 class TestRunPlugin(unittest.TestCase):
     @patch("optix.optimizer.optimizer.enable_simulate")
@@ -133,7 +173,7 @@ class TestRunPlugin(unittest.TestCase):
     @patch("optix.optimizer.optimizer.enable_simulate")
     @patch("optix.optimizer.optimizer.adapter_target_field")
     @patch("optix.optimizer.global_best_custom.CustomGlobalBestPSO")
-    def test_run_plugin_retries_broadcast_value_error(
+    def test_run_plugin_stops_when_optimizer_has_no_feasible_solution(
         self,
         mock_pso_cls,
         mock_adapter,
@@ -141,24 +181,19 @@ class TestRunPlugin(unittest.TestCase):
     ):
         opt = _simulator_branch_optimizer()
         opt.prepare_plugin = MagicMock()
-        opt.refine_optimization_candidates = MagicMock(return_value=([1.0], [np.array([1.0])], [MagicMock()]))
-        best_perf = PerformanceIndex(
-            generate_speed=100.0,
-            time_to_first_token=0.2,
-            time_per_output_token=0.02,
-            success_rate=1.0,
-        )
-        opt.best_params = MagicMock(return_value=(1.0, np.array([50.0, 25000.0]), best_perf))
+        opt.refine_optimization_candidates = MagicMock()
 
         for cm in (mock_adapter, mock_enable_sim):
             cm.return_value.__enter__ = MagicMock(return_value=None)
             cm.return_value.__exit__ = MagicMock(return_value=False)
 
-        broadcast_error = ValueError("operands could not be broadcast together with shape (3,) (2,)")
-        mock_pso_cls.return_value.optimize.side_effect = [broadcast_error, (np.array([1.0]), np.array([[1.0]]))]
+        no_feasible = NoFeasibleSolutionError("No feasible solution found after 2 optimization rounds")
+        mock_pso_cls.return_value.optimize.side_effect = no_feasible
 
-        opt.run_plugin()
-        assert mock_pso_cls.return_value.optimize.call_count == 2
+        with self.assertRaisesRegex(NoFeasibleSolutionError, "No feasible solution found"):
+            opt.run_plugin()
+        mock_pso_cls.return_value.optimize.assert_called_once_with(opt.op_func, iters=opt.iters)
+        opt.refine_optimization_candidates.assert_not_called()
 
     @patch("optix.optimizer.optimizer.enable_simulate")
     @patch("optix.optimizer.optimizer.adapter_target_field")
