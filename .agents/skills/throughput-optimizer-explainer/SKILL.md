@@ -88,7 +88,7 @@ I = input_length
 O = output_length
 B = batch_size
 C = concurrency
-M = max_prefill_tokens
+M = max_batched_tokens
 H = prefix_cache_hit_rate
 N = num_mtp_tokens
 ```

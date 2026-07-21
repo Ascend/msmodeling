@@ -89,7 +89,7 @@ Before execution, check these conditions and call them out clearly:
 - `--prefix-cache-hit-rate` must be in `[0, 1)`.
 - `--num-mtp-tokens` must be a positive integer when MTP is enabled.
 - `--mtp-acceptance-rate` values must be in `[0, 1]` and should reflect user-provided or explicitly labeled assumptions.
-- In aggregation mode, `--max-prefill-tokens` must not be smaller than the effective input length after applying prefix cache.
+- In aggregation mode, `--max-batched-tokens` must not be smaller than the effective input length after applying prefix cache.
 - If the user provides both TTFT and TPOT in disaggregation mode, explain that the tool will run both Prefill and Decode optimization separately.
 
 ## Execution Pattern

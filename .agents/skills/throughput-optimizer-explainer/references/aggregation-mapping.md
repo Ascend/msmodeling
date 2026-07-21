@@ -8,7 +8,7 @@ For an aggregation row:
 
 ```text
 effective_input_length = max(1, input_length - floor(input_length * prefix_cache_hit_rate))
-prefill_batch_size = max_prefill_tokens // effective_input_length
+prefill_batch_size = max_batched_tokens // effective_input_length
 concurrency = batch_size * DP * PP
 ```
 

@@ -64,14 +64,14 @@ def shell_join(cmd: list[str]) -> str:
 def build_aggregation(data: dict, include_op_bound: bool = False) -> dict:
     input_length = int(data["input_length"])
     output_length = int(data["output_length"])
-    max_prefill_tokens = int(data.get("max_prefill_tokens", 8192))
+    max_batched_tokens = int(data.get("max_batched_tokens", 8192))
     hit_rate = float(data.get("prefix_cache_hit_rate", 0.0))
     num_mtp_tokens = int(data.get("num_mtp_tokens", 0))
     concurrency = int(data["concurrency"])
     effective_input_length = max(1, input_length - math.floor(input_length * hit_rate))
-    prefill_batch_size = max_prefill_tokens // effective_input_length
+    prefill_batch_size = max_batched_tokens // effective_input_length
     if prefill_batch_size < 1:
-        raise ValueError("max_prefill_tokens must be >= effective_input_length for aggregation validation")
+        raise ValueError("max_batched_tokens must be >= effective_input_length for aggregation validation")
     parallel = parse_parallel(data.get("parallel"))
 
     prefill = base_cmd(data, parallel, include_op_bound=include_op_bound)

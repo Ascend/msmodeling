@@ -109,7 +109,7 @@ Ask these two questions for every throughput planning run after quantization and
 Prefix cache:
 - If disabled, do not add `--prefix-cache-hit-rate`.
 - If enabled, collect `--prefix-cache-hit-rate` and validate that it is in `[0, 1)`.
-- In aggregation mode, explain that `--max-prefill-tokens` must not be smaller than the effective input length after applying prefix cache.
+- In aggregation mode, explain that `--max-batched-tokens` must not be smaller than the effective input length after applying prefix cache.
 
 MTP:
 - If disabled, do not add MTP parameters.
@@ -122,7 +122,7 @@ MTP:
 Ask only when relevant:
 - multimodal image size
 - batch range
-- max prefill tokens
+- max batched tokens
 - compile toggle
 - jobs
 

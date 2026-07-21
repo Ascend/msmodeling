@@ -107,7 +107,7 @@ Rules:
 - `--ttft-limits`: positive float in ms
 - `--tpot-limits`: positive float in ms
 - `--batch-range`: `[max]` or `[min max]`
-- `--max-prefill-tokens`: relevant to aggregation mode and effective input length
+- `--max-batched-tokens`: relevant to aggregation mode and effective input length
 - `--serving-cost`: optional cost term
 
 ## Advanced Options

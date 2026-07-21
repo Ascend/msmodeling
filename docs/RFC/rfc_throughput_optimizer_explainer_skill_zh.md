@@ -94,5 +94,5 @@
 | `.agents/skills/throughput-optimizer-explainer/SKILL.md` | Skill 主说明、证据规则、工作流、映射规则 |
 | `.agents/skills/throughput-optimizer-explainer/references/*.md` | 映射规则、证据等级、瓶颈解释和输出模板 |
 | `.agents/skills/throughput-optimizer-explainer/scripts/*.py` | 解析、命令生成和对比辅助脚本 |
-| `.agents/skills/README.md` | skills 索引与 quick start |
+| `.agents/README.md` | skills 索引与 quick start |
 | `AGENTS.md` | 项目级 Skills 体系索引 |

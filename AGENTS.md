@@ -251,7 +251,7 @@ msmodeling/
 ### 文档
 
 - [ ] 新增/修改的功能反映在相关文档中
-- [ ] 如果是 Skill 相关改动，更新 `.agents/skills/README.md` 对应章节
+- [ ] 如果是 Skill 相关改动，更新 `.agents/README.md` 对应章节
 
 ### Skill 相关（若涉及）
 
