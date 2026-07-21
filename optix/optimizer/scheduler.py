@@ -76,6 +76,10 @@ class Scheduler:
         self.retry_number = retry_number
         self.wait_time = wait_start_time or get_settings().wait_start_time
         self.current_back_path = None
+        # Backup phase marker: "pso" / "refine" / "default"; None means no optimization phase (falls back to the old plain-number dirs)
+        self.backup_phase = None
+        # Iteration index of the current phase; together with backup_phase forms a top-level dir under trial_logs, e.g. pso_001, refine_002
+        self.backup_iter = 0
         self.simulate_run_info = None
         self.performance_index = None
         self._error_info = None
@@ -131,13 +135,34 @@ class Scheduler:
             log_tail = get_last_log(10)
         return format_subprocess_failure(command, return_code, log_path, log_tail=log_tail)
 
+    def set_backup_phase(self, phase: Optional[str], iter_num: int):
+        """Set the current backup phase and iteration index, used to create pso_N / refine_N / default_N top-level dirs under trial_logs.
+
+        phase: "pso" / "refine" / "default"; None means no phase prefix (falls back to the old plain-number dirs).
+        iter_num: iteration index of the current phase (starting from 1).
+        """
+        self.backup_phase = phase
+        self.backup_iter = iter_num
+
+    def _get_phase_bak_path(self) -> Optional[Path]:
+        """Create/return the top-level phase dir under bak_path based on the current phase, e.g. trial_logs/pso_001.
+
+        Returns bak_path itself when no phase is set, preserving the original behavior.
+        """
+        if not self.backup_phase:
+            return self.bak_path
+        phase_dir = self.bak_path.joinpath(f"{self.backup_phase}_{self.backup_iter:03d}")
+        if not phase_dir.exists():
+            phase_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+        return phase_dir
+
     def set_back_up_path(self):
         if self.bak_path:
             if get_folder_size(self.bak_path) > FOLDER_LIMIT_SIZE:
                 self.simulator.bak_path = None
                 self.benchmark.bak_path = None
             else:
-                self.current_back_path = get_train_sub_path(self.bak_path)
+                self.current_back_path = get_train_sub_path(self._get_phase_bak_path())
                 self.simulator.bak_path = self.current_back_path
                 self.benchmark.bak_path = self.current_back_path
 

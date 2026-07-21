@@ -2,7 +2,6 @@ import json
 import logging
 import shutil
 import shlex
-import os
 from pathlib import Path
 from typing import Optional, Tuple, List
 from datetime import datetime
@@ -12,15 +11,16 @@ from optix.optimizer.interfaces.benchmark import BenchmarkInterface
 from optix.optimizer.utils import remove_file
 from pydantic import BaseModel, Field
 
+
 class MetricAlgorithm(BaseModel):
     metric: str = "TTFT"
     algorithm: str = "average"
 
+
 class PerformanceConfig(BaseModel):
-    time_to_first_token: MetricAlgorithm = MetricAlgorithm(metric="TTFT",
-                                                           algorithm="average")
-    time_per_output_token: MetricAlgorithm = MetricAlgorithm(metric="TPOT",
-                                                             algorithm="average")
+    time_to_first_token: MetricAlgorithm = MetricAlgorithm(metric="TTFT", algorithm="average")
+    time_per_output_token: MetricAlgorithm = MetricAlgorithm(metric="TPOT", algorithm="average")
+
 
 def backup_file(output_path: Path, suffix: Optional[str] = None) -> None:
     """
@@ -46,6 +46,7 @@ def backup_file(output_path: Path, suffix: Optional[str] = None) -> None:
     except Exception as e:
         logging.error(f"failed to backup '{output_path}': {e}")
 
+
 class EvalscopeCommandConfig(BaseModel):
     url: str = ""
     model: str = ""
@@ -54,40 +55,50 @@ class EvalscopeCommandConfig(BaseModel):
     outputs_dir: str = ""
     others: str = ""
 
+
 class EvalscopePerfCommand:
     def __init__(self, benchmark_command_config: EvalscopeCommandConfig):
-        #TODO: adjust to the name in pyproject.toml
+        # TODO: adjust to the name in pyproject.toml
         self.process = shutil.which("evalscope")
         if self.process is None:
-            #TODO: adjust to the name in pyproject.toml
+            # TODO: adjust to the name in pyproject.toml
             raise ValueError("Error: The 'evalscope' executable was not found in the system PATH.")
         self.benchmark_command_config = benchmark_command_config
 
     @property
     def command(self):
-        #TODO:  adjust to your benchmark cli, reference its --help info
-        cmd = [self.process,
-               "perf",
-               "--url", self.benchmark_command_config.url,
-               "--model", self.benchmark_command_config.model,
-               "--tokenizer-path", self.benchmark_command_config.tokenizer_path,
-               "--dataset", self.benchmark_command_config.dataset,
-               "--outputs-dir", self.benchmark_command_config.outputs_dir]
+        # TODO:  adjust to your benchmark cli, reference its --help info
+        cmd = [
+            self.process,
+            "perf",
+            "--url",
+            self.benchmark_command_config.url,
+            "--model",
+            self.benchmark_command_config.model,
+            "--tokenizer-path",
+            self.benchmark_command_config.tokenizer_path,
+            "--dataset",
+            self.benchmark_command_config.dataset,
+            "--outputs-dir",
+            self.benchmark_command_config.outputs_dir,
+        ]
         if self.benchmark_command_config.others:
             cmd.extend(shlex.split(self.benchmark_command_config.others))
         return cmd
 
-#TODO: rename as your benchmark's name.
+
+# TODO: rename as your benchmark's name.
 class EvalscopePerfConfig(BaseModel):
-    #TODO: set output path for result files
+    # TODO: set output path for result files
     output_path: Path = Path("evalscopeperf")
     process_name: str = ""
-    #TODO: rename for your own benchmark
+    # TODO: rename for your own benchmark
     command: EvalscopeCommandConfig = EvalscopeCommandConfig()
     performance_config: PerformanceConfig = PerformanceConfig()
     target_field: List[OptimizerConfigField] = Field(default_factory=list)
 
-#TODO: rename as your benchmark's name
+
+# TODO: rename as your benchmark's name
 class EvalscopePerfBenchMark(BenchmarkInterface):
     def __init__(self, config: Optional[EvalscopePerfConfig] = None, *args, **kwargs):
         if config:
@@ -108,8 +119,8 @@ class EvalscopePerfBenchMark(BenchmarkInterface):
     def _backup_suffix(self) -> Optional[str]:
         """根据 scheduler 设置的 bak_path 生成备份名后缀。
 
-        bak_path 形如 bak/pso_3/5，其中 pso_3 为 {阶段}_{迭代次数}，5 为种子（粒子）序号，
-        组合成 pso_3/5 作为后缀，备份目录形如 <输出目录>_backup/pso_3/5，
+        bak_path 形如 bak/pso_003/5，其中 pso_003 为 {阶段}_{迭代次数}，5 为种子（粒子）序号，
+        组合成 pso_003/5 作为后缀，备份目录形如 <输出目录>_backup/pso_003/5，
         即按阶段_迭代为一级、种子号为二级目录组织。
         bak_path 为空（如超过目录大小限制被置空）时返回 None，由调用方回退到时间戳。
         """
@@ -138,7 +149,7 @@ class EvalscopePerfBenchMark(BenchmarkInterface):
         remove_file(output_path)
         super().before_run(run_params)
 
-    #TODO: find all the needed data elements in your benchmark's performance result file
+    # TODO: find all the needed data elements in your benchmark's performance result file
     def get_performance_index(self) -> PerformanceIndex:
         output_path = Path(self.config.command.outputs_dir)
         performance_index = PerformanceIndex()
@@ -147,7 +158,9 @@ class EvalscopePerfBenchMark(BenchmarkInterface):
             benchmark_file = file
             with open(benchmark_file, mode='r', encoding="utf-8") as f:
                 data = json.load(f)
-            performance_index.generate_speed = data.get("Output Throughput (tok/s)") or data.get("Output token throughput (tok/s)", 0)
+            performance_index.generate_speed = data.get("Output Throughput (tok/s)") or data.get(
+                "Output token throughput (tok/s)", 0
+            )
             # TTFT 首包时延（输出：s）
             ttft_ms = data.get("TTFT (ms)")
             if ttft_ms is not None:
@@ -164,7 +177,9 @@ class EvalscopePerfBenchMark(BenchmarkInterface):
             num_prompts = data.get("Total Requests") or data.get("Total requests") or 1
             completed = data.get("Success Requests") or data.get("Succeed requests", 0)
             performance_index.success_rate = completed / num_prompts
-            performance_index.throughput = data.get("Req Throughput (req/s)") or data.get("Request throughput (req/s)", 0.0)
+            performance_index.throughput = data.get("Req Throughput (req/s)") or data.get(
+                "Request throughput (req/s)", 0.0
+            )
         # 未找到任何结果文件说明本轮测试失败（测试未完成、输出目录配置错误等），
         # 抛异常让寻优器感知本轮失败，避免默认值被当成真实数据污染寻优
         if benchmark_file is None:

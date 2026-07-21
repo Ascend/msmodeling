@@ -89,6 +89,7 @@ class PSOOptimizer(PerformanceTuner):
         self.max_fine_tune = min(max_fine_tune, MAX_ITER_NUM)
         self.use_request_rate_calibration = use_request_rate_calibration
         self._iteration = 0  # op_func call count, used for balanced strategy inter-iteration direction alternation
+        self._refine_iter = 0  # +1 per refine candidate group, so backup dirs look like trial_logs/refine_1
         self._seen_params = {}
 
     @staticmethod
@@ -209,6 +210,8 @@ class PSOOptimizer(PerformanceTuner):
         n_particles = x.shape[0]
         current_iteration = self._iteration
         self._iteration += 1
+        # pyswarms calls op_func once per iteration; use the incremented index so backup dirs look like trial_logs/pso_1
+        self.scheduler.set_backup_phase("pso", self._iteration)
         generate_speed = []
         scheduler_run = (
             self.scheduler.run_with_request_rate if self.use_request_rate_calibration else self.scheduler.run
@@ -268,6 +271,9 @@ class PSOOptimizer(PerformanceTuner):
         _record_res = [self.default_res]
         _record_fitness = [self.default_fitness]
         for _, _pso_info in best_results.iterrows():
+            # The fine-tuning of each optimization candidate group is placed in one refine iteration dir, e.g. trial_logs/refine_1
+            self._refine_iter += 1
+            self.scheduler.set_backup_phase("refine", self._refine_iter)
             _target_field = self.get_target_field_from_case_data(_pso_info)
             for _field in _target_field:
                 if _field.name in REQUESTRATES:
@@ -515,6 +521,8 @@ class PSOOptimizer(PerformanceTuner):
         from ..optimizer.plugins.simulate import Simulator
 
         with logger.contextualize(stage=LogStage.BASELINE.value):
+            # The default-parameter baseline run is placed in the default phase, backup dir looks like trial_logs/default_1
+            self.scheduler.set_backup_phase("default", 1)
             if isinstance(self.scheduler.simulator, Simulator):
                 settings = get_settings()
                 mc = None
@@ -763,7 +771,7 @@ def _run_optimizer() -> None:
         settings = get_settings()
         bak_path = None
         if args.backup:
-            bak_path = settings.output.joinpath("bak")
+            bak_path = settings.output.joinpath("trial_logs")
             if not bak_path.exists():
                 bak_path.mkdir(parents=True, mode=0o750)
         _simu = _bench = None

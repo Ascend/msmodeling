@@ -58,6 +58,45 @@ class TestScheduler(unittest.TestCase):
         mock_get_train_sub_path.return_value = "sub_path"
         self.scheduler.set_back_up_path()
 
+    def test_backup_phase_defaults_to_none(self):
+        """Default state: no phase set, _get_phase_bak_path returns bak_path unchanged"""
+        self.assertIsNone(self.scheduler.backup_phase)
+        self.assertEqual(self.scheduler.backup_iter, 0)
+        self.assertIs(self.scheduler._get_phase_bak_path(), self.bak_path)
+
+    def test_set_backup_phase_updates_state(self):
+        """set_backup_phase records phase and iteration for later path building"""
+        self.scheduler.set_backup_phase("pso", 3)
+        self.assertEqual(self.scheduler.backup_phase, "pso")
+        self.assertEqual(self.scheduler.backup_iter, 3)
+
+    def test_get_phase_bak_path_builds_phase_dir(self):
+        """_get_phase_bak_path creates a <phase>_<iter> subdir under bak_path"""
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.scheduler.bak_path = Path(tmp)
+            self.scheduler.set_backup_phase("refine", 2)
+            phase_dir = self.scheduler._get_phase_bak_path()
+            self.assertEqual(phase_dir, Path(tmp) / "refine_002")
+            self.assertTrue(phase_dir.is_dir())
+
+    @patch("optix.optimizer.scheduler.get_train_sub_path")
+    @patch("optix.optimizer.scheduler.get_folder_size")
+    def test_set_back_up_path_uses_phase_dir(self, mock_get_folder_size, mock_get_train_sub_path):
+        """set_back_up_path routes through the phase dir when a phase is active"""
+        import tempfile
+        from pathlib import Path
+
+        mock_get_folder_size.return_value = FOLDER_LIMIT_SIZE - 1
+        mock_get_train_sub_path.side_effect = lambda p: p
+        with tempfile.TemporaryDirectory() as tmp:
+            self.scheduler.bak_path = Path(tmp)
+            self.scheduler.set_backup_phase("pso", 1)
+            self.scheduler.set_back_up_path()
+            mock_get_train_sub_path.assert_called_once_with(Path(tmp) / "pso_001")
+
     @patch("time.sleep", return_value=None)
     def test_wait_simulate_success(self, mock_sleep):
         self.simulator.health = MagicMock(return_value=ProcessState(stage=Stage.running))
