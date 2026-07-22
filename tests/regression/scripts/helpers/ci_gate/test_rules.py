@@ -1035,3 +1035,192 @@ def test_gate_modified_source_class_method_decorator_import_uses_class_percent(
     assert result.errors == ()
     assert ("Foo::%", {deco_line}) in captured
     assert ("Foo::run@staticmethod", {body_line}) in captured
+
+
+def test_gate_modified_source_paren_import_continuation_uses_stmt_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "\n".join(
+            [
+                "from packaging.version import (",
+                "    InvalidVersion,",
+                "    Version,",
+                ")",
+                "",
+                "CONST = 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cs = ChangeSet.build(modified_source={"cli/main.py": frozenset({2, 3})})
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+
+    class _FakeCoverageData:
+        def read(self) -> None:
+            return None
+
+        def measured_files(self) -> list[str]:
+            return [str(src.resolve())]
+
+        def contexts_by_lineno(self, _path: str) -> dict[int, list[str]]:
+            return {1: [""]}
+
+    monkeypatch.setattr("coverage.data.CoverageData", lambda _path: _FakeCoverageData())
+    result = gate_modified_source(tmp_path, cs, {}, (), ("cli/",), coverage_path=coverage_path)
+    assert result.errors == ()
+
+
+def test_gate_modified_source_class_paren_import_continuation_uses_stmt_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "\n".join(
+            [
+                "class Widget:",
+                "    from os import (",
+                "        path,",
+                "        getcwd,",
+                "    )",
+                "    x = 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cs = ChangeSet.build(modified_source={"cli/main.py": frozenset({3})})
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+
+    class _FakeCoverageData:
+        def read(self) -> None:
+            return None
+
+        def measured_files(self) -> list[str]:
+            return [str(src.resolve())]
+
+        def contexts_by_lineno(self, _path: str) -> dict[int, list[str]]:
+            return {2: [""]}
+
+    monkeypatch.setattr("coverage.data.CoverageData", lambda _path: _FakeCoverageData())
+    result = gate_modified_source(tmp_path, cs, {}, (), ("cli/",), coverage_path=coverage_path)
+    assert result.errors == ()
+
+
+def test_gate_modified_source_multiline_list_continuation_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "\n".join(
+            [
+                "ITEMS = [",
+                "    'a',",
+                "    'b',",
+                "    'c',",
+                "]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cs = ChangeSet.build(modified_source={"cli/main.py": frozenset({3})})
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+
+    class _FakeCoverageData:
+        def read(self) -> None:
+            return None
+
+        def measured_files(self) -> list[str]:
+            return [str(src.resolve())]
+
+        def contexts_by_lineno(self, _path: str) -> dict[int, list[str]]:
+            return {1: [""]}
+
+    monkeypatch.setattr("coverage.data.CoverageData", lambda _path: _FakeCoverageData())
+    result = gate_modified_source(tmp_path, cs, {}, (), ("cli/",), coverage_path=coverage_path)
+    assert result.errors == ()
+
+
+def test_gate_modified_source_multiline_list_continuation_in_function(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "\n".join(
+            [
+                "def run():",
+                "    return [",
+                "        'a',",
+                "        'b',",
+                "        'c',",
+                "    ]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cs = ChangeSet.build(modified_source={"cli/main.py": frozenset({4})})
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+
+    class _FakeCoverageData:
+        def read(self) -> None:
+            return None
+
+        def measured_files(self) -> list[str]:
+            return [str(src.resolve())]
+
+        def contexts_by_lineno(self, _path: str) -> dict[int, list[str]]:
+            return {2: ["tests/regression/cli/test_a.py::test_x"]}
+
+    monkeypatch.setattr("coverage.data.CoverageData", lambda _path: _FakeCoverageData())
+    result = gate_modified_source(tmp_path, cs, {}, (), ("cli/",), coverage_path=coverage_path)
+    assert result.errors == ()
+
+
+def test_gate_modified_source_multiline_list_continuation_miss_still_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "cli" / "main.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "\n".join(
+            [
+                "ITEMS = [",
+                "    'a',",
+                "    'b',",
+                "    'c',",
+                "]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cs = ChangeSet.build(modified_source={"cli/main.py": frozenset({3})})
+    coverage_path = tmp_path / ".coverage"
+    coverage_path.write_text("x", encoding="utf-8")
+
+    class _FakeCoverageData:
+        def read(self) -> None:
+            return None
+
+        def measured_files(self) -> list[str]:
+            return [str(src.resolve())]
+
+        def contexts_by_lineno(self, _path: str) -> dict[int, list[str]]:
+            return {9: [""]}
+
+    monkeypatch.setattr("coverage.data.CoverageData", lambda _path: _FakeCoverageData())
+    result = gate_modified_source(tmp_path, cs, {}, (), ("cli/",), coverage_path=coverage_path)
+    assert len(result.errors) == 1
+    assert result.errors[0].symbol == "%"

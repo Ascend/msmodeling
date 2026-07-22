@@ -26,6 +26,7 @@ from scripts.helpers.common.ast_utils import (
     MODULE_SYMBOL,
     CoverageChecks,
     coverage_checks_for_definition,
+    coverage_measurable_lines,
     executable_lines_for_canonical_symbol,
     gated_coverage_symbols,
     import_symbol_for_definition,
@@ -83,6 +84,7 @@ def _coverage_checks_pass(
         if not _coverage_fallback_passes(
             repo_root,
             file_path,
+            source_path,
             import_symbol,
             set(checks.import_lines),
             coverage_path=coverage_path,
@@ -93,6 +95,7 @@ def _coverage_checks_pass(
         if not _coverage_fallback_passes(
             repo_root,
             file_path,
+            source_path,
             symbol,
             set(checks.strict_lines),
             coverage_path=coverage_path,
@@ -102,6 +105,7 @@ def _coverage_checks_pass(
     elif checks.proxy_lines and not _coverage_fallback_passes(
         repo_root,
         file_path,
+        source_path,
         symbol,
         set(checks.proxy_lines),
         coverage_path=coverage_path,
@@ -114,6 +118,7 @@ def _coverage_checks_pass(
 def _coverage_fallback_passes(
     repo_root: Path,
     file_path: str,
+    source_path: Path,
     symbol: str,
     lines: set[int],
     *,
@@ -122,12 +127,13 @@ def _coverage_fallback_passes(
 ) -> bool:
     if not lines or (coverage_data is None and not coverage_path):
         return False
+    check_lines = set(lines) | coverage_measurable_lines(source_path, lines)
     require_test_context = not (symbol == MODULE_SYMBOL or symbol.endswith(f"::{MODULE_SYMBOL}"))
     if symbol_lines_covered_in_data(
         repo_root,
         file_path,
         symbol,
-        lines,
+        check_lines,
         coverage_path,
         coverage_data=coverage_data,
         require_test_context=require_test_context,
@@ -136,7 +142,7 @@ def _coverage_fallback_passes(
             "Coverage fallback accepted %s::%s (%d executable line(s))",
             file_path,
             symbol,
-            len(lines),
+            len(check_lines),
         )
         return True
     return False
@@ -181,6 +187,7 @@ def _modified_source_mapping_error(
     if _coverage_fallback_passes(
         repo_root,
         path,
+        source_path,
         symbol,
         sym_lines,
         coverage_path=coverage_path,
@@ -205,6 +212,7 @@ def _symbol_error_for_unmapped_source(
     if _coverage_fallback_passes(
         repo_root,
         path,
+        source_path,
         canonical_symbol,
         lines,
         coverage_path=coverage_path,

@@ -642,6 +642,89 @@ def filter_executable_lines(path: Path, changed_lines: set[int] | frozenset[int]
     return _filter_executable_source_lines(path, source_lines, changed_lines)
 
 
+def _node_span(node: ast.AST) -> tuple[int, int, int] | None:
+    """Return (start, end, cov_line) for a node with a valid lineno, else None."""
+    start = getattr(node, "lineno", None)
+    if not isinstance(start, int) or start <= 0:
+        return None
+    end = _end_line(node)
+    if end < start:
+        end = start
+    return (start, end, start)
+
+
+def _match_case_span(node: ast.match_case) -> tuple[int, int, int] | None:
+    """Span for ``case`` headers; CPython 3.14+ omits lineno on ``match_case`` itself."""
+    span = _node_span(node)
+    if span is not None:
+        return span
+    pattern = node.pattern
+    start = getattr(pattern, "lineno", None) if pattern is not None else None
+    if not isinstance(start, int) or start <= 0:
+        return None
+    ends = [_end_line(pattern) if pattern is not None else start]
+    ends.extend(_end_line(stmt) for stmt in node.body)
+    return (start, max(ends), start)
+
+
+def _iter_coverage_spans(tree: ast.AST) -> list[tuple[int, int, int]]:
+    """Return (start, end, cov_line) for stmts, clause headers, and decorators.
+
+    Includes ``ExceptHandler`` / ``match_case`` (not ``ast.stmt``) so those headers
+    map to themselves. ``else:`` / ``finally:`` keyword lines have no AST node and
+    still fall through to the enclosing compound statement.
+    """
+    spans: list[tuple[int, int, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.match_case):
+            span = _match_case_span(node)
+        elif isinstance(node, (ast.stmt, ast.ExceptHandler)):
+            span = _node_span(node)
+        else:
+            span = None
+        if span is not None:
+            spans.append(span)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for dec in node.decorator_list:
+                dec_span = _node_span(dec)
+                if dec_span is not None:
+                    spans.append(dec_span)
+    return spans
+
+
+@lru_cache(maxsize=128)
+def _coverage_spans_cached(path_str: str, mtime_ns: int) -> tuple[tuple[int, int, int], ...]:
+    return tuple(_iter_coverage_spans(_parse_cached(path_str, mtime_ns)))
+
+
+def coverage_measurable_lines(path: Path, lines: set[int] | frozenset[int]) -> set[int]:
+    """Map source lines to Coverage.py statement starts (innermost spanning node).
+
+    Coverage records multi-line statements on ``lineno`` only. Continuation lines
+    inside imports, list/dict/tuple literals, and similar constructs remap to that
+    start line so gate fallback queries the measurable line.
+    """
+    if not lines:
+        return set()
+    try:
+        spans = _coverage_spans_cached(str(path), path.stat().st_mtime_ns)
+    except (OSError, SyntaxError):
+        return set(lines)
+
+    if not spans:
+        return set(lines)
+
+    measurable: set[int] = set()
+    for line_no in lines:
+        best = min(
+            ((start, end, cov) for start, end, cov in spans if start <= line_no <= end),
+            key=lambda item: (item[1] - item[0], item[0]),
+            default=None,
+        )
+        measurable.add(line_no if best is None else best[2])
+    return measurable
+
+
 def _line_text_is_executable(line: str) -> bool:
     stripped = line.strip()
     return bool(stripped) and not stripped.startswith("#")

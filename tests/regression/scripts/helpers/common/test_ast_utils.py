@@ -21,6 +21,7 @@ from scripts.helpers.common.ast_utils import (
     collect_file_symbols,
     collect_shadow_warnings,
     coverage_checks_for_definition,
+    coverage_measurable_lines,
     executable_lines_for_canonical_symbol,
     filter_executable_lines,
     gated_coverage_symbols,
@@ -735,3 +736,185 @@ def test_gated_coverage_symbols_excludes_class_decorator_mangled_key(
     path = PathCls(__file__).resolve().parents[4] / "scripts/helpers/ci_gate/comments.py"
     required = gated_coverage_symbols(path)
     assert "GitCodeCommentConfig@dataclass(frozen=True, slots=True)" not in required
+
+
+# ---------------------------------------------------------------------------
+# coverage_measurable_lines
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_measurable_lines_empty_input(tmp_path: Path) -> None:
+    path = tmp_path / "empty_lines.py"
+    path.write_text("x = 1\n", encoding="utf-8")
+    assert coverage_measurable_lines(path, set()) == set()
+
+
+def test_coverage_measurable_lines_paren_import_continuation(tmp_path: Path) -> None:
+    path = tmp_path / "paren_import.py"
+    path.write_text(
+        "\n".join(
+            [
+                "from packaging.version import (",
+                "    InvalidVersion,",
+                "    Version,",
+                ")",
+                "",
+                "CONST = 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert coverage_measurable_lines(path, {2, 3, 4}) == {1}
+
+
+def test_coverage_measurable_lines_backslash_import(tmp_path: Path) -> None:
+    path = tmp_path / "backslash_import.py"
+    path.write_text(
+        "from packaging.version import \\\n    InvalidVersion, \\\n    Version\n",
+        encoding="utf-8",
+    )
+    assert coverage_measurable_lines(path, {2, 3}) == {1}
+
+
+def test_coverage_measurable_lines_multiline_list_dict_tuple(tmp_path: Path) -> None:
+    path = tmp_path / "literals.py"
+    path.write_text(
+        "\n".join(
+            [
+                "ITEMS = [",
+                "    'a',",
+                "    'b',",
+                "    'c',",
+                "]",
+                "MAPPING = {",
+                "    'k': 1,",
+                "}",
+                "PAIR = (",
+                "    1,",
+                "    2,",
+                ")",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert coverage_measurable_lines(path, {3}) == {1}
+    assert coverage_measurable_lines(path, {7}) == {6}
+    assert coverage_measurable_lines(path, {10}) == {9}
+
+
+def test_coverage_measurable_lines_class_body_inner_stmt(tmp_path: Path) -> None:
+    path = tmp_path / "class_body.py"
+    path.write_text(
+        "\n".join(
+            [
+                "class Bar:",
+                "    from os import (",
+                "        path,",
+                "        getcwd,",
+                "    )",
+                "    VALUES = [",
+                "        1,",
+                "        2,",
+                "    ]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert coverage_measurable_lines(path, {3}) == {2}
+    assert coverage_measurable_lines(path, {8}) == {6}
+
+
+def test_coverage_measurable_lines_nested_call_innermost(tmp_path: Path) -> None:
+    path = tmp_path / "nested.py"
+    path.write_text(
+        "\n".join(
+            [
+                "outer = [",
+                "    foo(",
+                "        1,",
+                "        2,",
+                "    )",
+                "]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    # Single Assign spans the whole statement; no nested stmt for the call.
+    assert coverage_measurable_lines(path, {4}) == {1}
+
+
+def test_coverage_measurable_lines_single_line_identity(tmp_path: Path) -> None:
+    path = tmp_path / "single.py"
+    path.write_text("from os import path\nx = 1\n", encoding="utf-8")
+    assert coverage_measurable_lines(path, {1, 2}) == {1, 2}
+
+
+def test_coverage_measurable_lines_syntax_error_preserves_lines(tmp_path: Path) -> None:
+    path = tmp_path / "broken.py"
+    path.write_text("def foo(\n  pass\n", encoding="utf-8")
+    assert coverage_measurable_lines(path, {1, 2}) == {1, 2}
+
+
+def test_coverage_measurable_lines_multiline_decorator(tmp_path: Path) -> None:
+    path = tmp_path / "deco.py"
+    path.write_text(
+        "\n".join(
+            [
+                "def deco(a, b):",
+                "    def wrap(fn):",
+                "        return fn",
+                "    return wrap",
+                "",
+                "@deco(",
+                "    1,",
+                "    2,",
+                ")",
+                "def run():",
+                "    return 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert coverage_measurable_lines(path, {7, 8}) == {6}
+
+
+def test_coverage_measurable_lines_except_handler_maps_to_own_header(tmp_path: Path) -> None:
+    path = tmp_path / "try_except.py"
+    path.write_text(
+        "\n".join(
+            [
+                "def f(raise_it=False):",
+                "    try:",
+                "        a = 1",
+                "    except ValueError:",
+                "        b = 2",
+                "    finally:",
+                "        c = 3",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert coverage_measurable_lines(path, {4}) == {4}
+    assert coverage_measurable_lines(path, {5}) == {5}
+    # finally: has no AST node; remaps to enclosing Try (intentional AST limit).
+    assert coverage_measurable_lines(path, {6}) == {2}
+
+
+def test_coverage_measurable_lines_match_case_maps_to_own_header(tmp_path: Path) -> None:
+    path = tmp_path / "match_case.py"
+    path.write_text(
+        "\n".join(
+            [
+                "def f(x):",
+                "    match x:",
+                "        case 1:",
+                "            a = 1",
+                "        case 2:",
+                "            b = 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert coverage_measurable_lines(path, {3}) == {3}
+    assert coverage_measurable_lines(path, {5}) == {5}
+    assert coverage_measurable_lines(path, {4}) == {4}

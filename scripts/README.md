@@ -82,7 +82,7 @@ MSMODELING_WHEEL_OUTPUT_DIR=/tmp/wheels bash scripts/build.sh
 - `exemptions.sources` symbols validated at load: must be `path::symbol` with symbol present in source AST; **coverage omit paths cannot be exempted**.
 - Duplicate function defs in changed product files: identical mangled symbol → last-wins for mapping; **non-blocking** GitCode PR comment when `GITCODE_*` set (reports mangled qualified name collisions).
 - Symbol mangling applies to **functions and methods** (`foo@deco`, `Foo::run@staticmethod`); class-level decorators gate via `Class::%`, not `Class@decorator`.
-- Modified definitions: three-branch coverage fallback — decorator diff → relaxed import on `%`/`Class::%` plus body proxy; def-header-only → body proxy; body diff → strict on changed lines (strict suppresses proxy). See [tests/README.md](../tests/README.md) § Coverage fallback.
+- Modified definitions: three-branch coverage fallback — decorator diff → relaxed import on `%`/`Class::%` plus body proxy; def-header-only → body proxy; body diff → strict on changed lines (strict suppresses proxy). Multi-line statement continuations (paren imports, list/dict/tuple, backslash, multi-line decorators) remap to Coverage statement-start lines before fallback query; `except` / `case` headers map to themselves (`ExceptHandler` / `match_case`). See [tests/README.md](../tests/README.md) § Coverage fallback.
 - Execution waves:
   - Changed-test wave: **no `-m`**, skip via `exemptions.tests`.
   - Mapped/guard wave: `-m "not npu and not nightly and not network"`.

@@ -99,6 +99,8 @@ exemptions:
 
 Named symbols (new or modified) pass when `test_map` has an entry or strict same-PR coverage applies (`require_test_context=True`: only `tests/...::test_xxx` contexts count). Body symbols (`%` or `*::%`, suffix rule) pass when `test_map` has an entry or relaxed coverage applies (`require_test_context=False`: import-time/conftest hits count).
 
+Coverage.py records multi-line statements on the **statement start line** only. Gate fallback therefore queries the original diff lines **union** their Coverage-measurable starts (innermost AST stmt / `ExceptHandler` / `match_case` / decorator expr `lineno`). Continuation diffs in parenthesized imports, multi-line list/dict/tuple literals, backslash continuations, and multi-line decorators still trigger the gate, but match coverage on the statement head. Same-statement short-circuit subexpressions share Coverage's statement granularity (no finer model). Keyword-only `else:` / `finally:` lines have no AST node and remap to the enclosing compound statement (intentional AST limit).
+
 Modified definitions use three independent branches (all applicable branches must pass; body strict wins over proxy):
 
 | diff touches | import (`%` / `Class::%`, relaxed) | body coverage |
