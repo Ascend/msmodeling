@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -62,7 +61,7 @@ def _run_teed(cmd: list[str], *, env: dict[str, str], log_path: Path) -> int:
 
 def _run_full_suite(options: BuildOptions) -> int:
     """Run ``pytest tests`` using markers from ``pyproject.toml`` addopts."""
-    bootstrap("test")
+    uv_path = bootstrap("test")
 
     env = os.environ.copy()
     if "offline" in options.extras:
@@ -73,7 +72,7 @@ def _run_full_suite(options: BuildOptions) -> int:
     log_path = _TEST_REPORTS_DIR / "full_suite.log"
     started = time.monotonic()
     exit_code = _run_teed(
-        [sys.executable, "-m", "pytest", "tests"],
+        [uv_path, "run", "pytest", "tests"],
         env=env,
         log_path=log_path,
     )

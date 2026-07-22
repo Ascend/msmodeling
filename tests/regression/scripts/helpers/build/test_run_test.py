@@ -29,15 +29,13 @@ def test_run_test_without_test_map_runs_full_pytest(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Normal: no MSMODELING_TEST_MAP_PATH → pytest tests (pyproject addopts)."""
-    import sys
-
     monkeypatch.delenv("MSMODELING_TEST_MAP_PATH", raising=False)
     with caplog.at_level("WARNING", logger="build"):
         assert run_test(build_options(is_test=True)) == 0
     assert "falling back to full pytest suite" in caplog.text
     assert len(subprocess_capture.merged_output_calls) == 1
     call = subprocess_capture.merged_output_calls[0]
-    assert call["cmd"] == [sys.executable, "-m", "pytest", "tests"]
+    assert call["cmd"] == ["/fake/uv", "run", "pytest", "tests"]
     log_path = repo_root / "artifacts" / "test-reports" / "full_suite.log"
     assert log_path.is_file()
     summary = json.loads(
@@ -55,16 +53,14 @@ def test_run_test_whitespace_test_map_env_runs_full_pytest(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Edge: blank MSMODELING_TEST_MAP_PATH is treated as unset."""
-    import sys
-
     del repo_root
     monkeypatch.setenv("MSMODELING_TEST_MAP_PATH", "  \t  ")
     with caplog.at_level("WARNING", logger="build"):
         assert run_test(build_options(is_test=True)) == 0
     assert "falling back to full pytest suite" in caplog.text
     assert subprocess_capture.merged_output_calls[0]["cmd"] == [
-        sys.executable,
-        "-m",
+        "/fake/uv",
+        "run",
         "pytest",
         "tests",
     ]
@@ -183,16 +179,14 @@ def test_cli_test_without_test_map_runs_full_suite(
     with_uv: None,
 ) -> None:
     """Normal: ``python build.py test`` without map runs full pytest suite."""
-    import sys
-
     del with_uv
     capture = patch_subprocess_run(monkeypatch, SubprocessRunCapture())
     monkeypatch.delenv("MSMODELING_TEST_MAP_PATH", raising=False)
     result = run_cli_main(main, ["test"], prog="build.py")
     assert result.returncode == 0
     assert capture.merged_output_calls[0]["cmd"] == [
-        sys.executable,
-        "-m",
+        "/fake/uv",
+        "run",
         "pytest",
         "tests",
     ]
