@@ -45,6 +45,13 @@ CONCURRENCYS = ("CONCURRENCY", "MAXCONCURRENCY")
 simulate_env = os.getenv(MODEL_EVAL_STATE_SIMULATE) or os.getenv(MODEL_EVAL_STATE_SIMULATE.lower())
 simulate_flag = simulate_env and (simulate_env.lower() == "true" or simulate_env.lower() != "false")
 
+# Switch for reusing the simulator during the fine-tune stage: enabled by default.
+MODEL_EVAL_STATE_REUSE_SIMULATOR_IN_FINE_TUNE = "MODEL_EVAL_STATE_REUSE_SIMULATOR_IN_FINE_TUNE"
+reuse_simulator_env = os.getenv(MODEL_EVAL_STATE_REUSE_SIMULATOR_IN_FINE_TUNE) or os.getenv(
+    MODEL_EVAL_STATE_REUSE_SIMULATOR_IN_FINE_TUNE.lower()
+)
+reuse_simulator_in_fine_tune_flag = reuse_simulator_env is None or reuse_simulator_env.lower() != "false"
+
 MINDIE_BENCHMARK_PERF_COLUMNS = [
     "average",
     "max",

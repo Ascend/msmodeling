@@ -31,6 +31,7 @@ from ..config.base_config import (
     REAL_EVALUATION,
     REQUESTRATES,
     simulate_flag,
+    reuse_simulator_in_fine_tune_flag,
 )
 from ..config.config import DecodeContext, field_to_param, map_param_with_value
 from ..logging import LogStage, format_evaluation_failure
@@ -279,6 +280,10 @@ class PSOOptimizer(PerformanceTuner):
                 if _field.name in REQUESTRATES:
                     _field.value = _field.find_available_value(_field.value * 2)
             params = field_to_param(_target_field)
+            # Fine-tune switch: when enabled, reuse the running simulator and only rerun the benchmark
+            reuse = reuse_simulator_in_fine_tune_flag
+            stop_simulator = not reuse
+            # First run the search params in full (start simulator + benchmark)
             try:
                 _res = self.scheduler.run(params, self.target_field)
                 if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
@@ -298,45 +303,63 @@ class PSOOptimizer(PerformanceTuner):
                 _fitness = inf
                 self.scheduler.save_result(fitness=_fitness)
                 continue
-            self.scheduler.save_result(fitness=_fitness)
+            # When reuse=True, keep the simulator running so a later rerun_benchmark_only can reuse it;
+            # when reuse=False, stop simulator + benchmark following the original path.
+            self.scheduler.save_result(fitness=_fitness, stop_simulator=stop_simulator)
             _record_params.append(params)
             _record_res.append(_res)
             _record_fitness.append(_fitness)
             self.fine_tune.reset_history()
-            for _ in range(self.max_fine_tune):
-                try:
-                    simulate_run_info = self.fine_tune.fine_tune_with_concurrency_and_request_rate(params, _res)
-                except ValueError as e:
-                    logger.error("Failed in fine-tuning parameter. error: {}", e)
-                    break
-                except StopFineTune:
-                    break
-                params = field_to_param(simulate_run_info)
-                if self.params_in_records(params, _record_params):
-                    break
-                try:
-                    _res = self.scheduler.run(params, self.target_field)
-                    if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
+            try:
+                for _ in range(self.max_fine_tune):
+                    try:
+                        simulate_run_info = self.fine_tune.fine_tune_with_concurrency_and_request_rate(params, _res)
+                    except ValueError as e:
+                        logger.error("Failed in fine-tuning parameter. error: {}", e)
+                        break
+                    except StopFineTune:
+                        break
+                    params = field_to_param(simulate_run_info)
+                    if self.params_in_records(params, _record_params):
+                        break
+                    try:
+                        if reuse:
+                            # Only concurrency/request rate changed: reuse the running simulator, rerun benchmark only
+                            _res = self.scheduler.rerun_benchmark_only(
+                                params,
+                                self.target_field,
+                                with_request_rate=self.use_request_rate_calibration,
+                            )
+                        else:
+                            # Restart simulator + benchmark
+                            _res = self.scheduler.run(params, self.target_field)
+                        if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
+                            logger.error(
+                                "Runtime exception. error: {}, please check.",
+                                format_evaluation_failure(self.scheduler, self.scheduler.error_info),
+                            )
+                            _fitness = inf
+                            self.scheduler.save_result(fitness=_fitness, stop_simulator=stop_simulator)
+                            break
+                        _fitness = self.minimum_algorithm(_res)
+                    except Exception as e:
                         logger.error(
                             "Runtime exception. error: {}, please check.",
-                            format_evaluation_failure(self.scheduler, self.scheduler.error_info),
+                            format_evaluation_failure(self.scheduler, e),
                         )
                         _fitness = inf
-                        self.scheduler.save_result(fitness=_fitness)
+                        self.scheduler.save_result(fitness=_fitness, stop_simulator=stop_simulator)
                         break
-                    _fitness = self.minimum_algorithm(_res)
-                except Exception as e:
-                    logger.error(
-                        "Runtime exception. error: {}, please check.",
-                        format_evaluation_failure(self.scheduler, e),
-                    )
-                    _fitness = inf
-                    self.scheduler.save_result(fitness=_fitness)
-                    break
-                self.scheduler.save_result(fitness=_fitness)
-                _record_params.append(params)
-                _record_res.append(_res)
-                _record_fitness.append(_fitness)
+                    self.scheduler.save_result(fitness=_fitness, stop_simulator=stop_simulator)
+                    _record_params.append(params)
+                    _record_res.append(_res)
+                    _record_fitness.append(_fitness)
+            finally:
+                # In the reuse path, save_result keeps the simulator alive throughout, so it must be
+                # stopped explicitly after fine-tuning to make room for the next candidate's full run.
+                if reuse:
+                    del_log = self.scheduler.del_log if self.scheduler.del_log is not None else False
+                    self.scheduler.stop_target_server(del_log)
         return _record_fitness, _record_params, _record_res
 
     def get_max_generate_speed_index(self, performance_index_list, slo_index):

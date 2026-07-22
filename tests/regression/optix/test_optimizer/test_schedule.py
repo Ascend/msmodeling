@@ -706,3 +706,61 @@ class TestSchedulerRunEvaluation(unittest.TestCase):
         self.assertIsNotNone(self.scheduler.last_outcome)
         self.assertEqual(self.scheduler.last_outcome.status, RunStatus.FAILED)
         self.assertIsInstance(result, PerformanceIndex)
+
+
+class TestSchedulerRerunBenchmarkOnly(unittest.TestCase):
+    """Tests for rerun_benchmark_only: reuse the running simulator, rerun only the benchmark."""
+
+    def setUp(self):
+        self.simulator = MagicMock()
+        self.benchmark = MagicMock()
+        self.benchmark.run_log = "/tmp/benchmark.log"
+        self.data_storage = MagicMock()
+        self.scheduler = Scheduler(
+            simulator=self.simulator,
+            benchmark=self.benchmark,
+            data_storage=self.data_storage,
+        )
+        # monitoring_status touches many collaborators; stub it out for these unit tests.
+        self.scheduler.monitoring_status = MagicMock()
+
+        self.params = np.array([64.0, 5.0])
+        self.params_field = (
+            OptimizerConfigField(name="CONCURRENCY", value=64.0, min=1, max=100, dtype="int"),
+            OptimizerConfigField(name="REQUESTRATE", value=5.0, min=5.0, max=5.0, dtype="float"),
+        )
+        self.performance_index = PerformanceIndex(throughput=100.0, generate_speed=100)
+        self.benchmark.get_performance_index.return_value = self.performance_index
+
+    @patch("time.time")
+    @patch("time.sleep")
+    def test_rerun_success_returns_performance_index(self, mock_sleep, mock_time):
+        """A successful rerun returns the performance index and records a SUCCESS outcome."""
+        from optix.optimizer.outcome import RunStatus
+
+        mock_time.return_value = 1000.0
+
+        result = self.scheduler.rerun_benchmark_only(self.params, self.params_field)
+
+        self.assertIsInstance(result, PerformanceIndex)
+        self.assertEqual(result.throughput, 100.0)
+        self.assertEqual(self.scheduler.last_outcome.status, RunStatus.SUCCESS)
+        self.assertIsNone(self.scheduler.error_info)
+        # The live simulator is never stopped; only the benchmark is restarted.
+        self.simulator.stop.assert_not_called()
+        self.benchmark.run.assert_called_once()
+
+    @patch("time.time")
+    @patch("time.sleep")
+    def test_rerun_handles_exception_records_failure(self, mock_sleep, mock_time):
+        """A runtime error records a FAILED outcome instead of raising."""
+        from optix.optimizer.outcome import RunStatus
+
+        mock_time.return_value = 1000.0
+        self.benchmark.run.side_effect = RuntimeError("benchmark crashed")
+
+        result = self.scheduler.rerun_benchmark_only(self.params, self.params_field)
+
+        self.assertIsNotNone(self.scheduler.error_info)
+        self.assertEqual(self.scheduler.last_outcome.status, RunStatus.FAILED)
+        self.assertIsInstance(result, PerformanceIndex)
