@@ -13,26 +13,37 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
+
 import pytest
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
 from optix.config.custom_command import (
-    VllmCommand,
-    VllmCommandConfig,
-    VllmBenchmarkCommand,
-    VllmBenchmarkCommandConfig,
     AisBenchCommand,
     AisBenchCommandConfig,
-    MindieCommand,
-    MindieCommandConfig,
+    VllmBenchmarkCommand,
+    VllmBenchmarkCommandConfig,
+    VllmCommand,
+    VllmCommandConfig,
 )
 
 
+def _require_resolve_mindie_argv() -> Callable[[Mapping[str, str]], list[str]]:
+    import optix.deploy_env as deploy_env_module
+
+    resolve = getattr(deploy_env_module, "resolve_mindie_argv", None)
+    assert resolve is not None, "resolve_mindie_argv is not implemented in optix.deploy_env"
+    return cast("Callable[[Mapping[str, str]], list[str]]", resolve)
+
+
 class TestVllmCommand:
-    @patch("shutil.which")
-    def test_init_success(self, mock_which):
-        """Test successful initialization when vllm is found in PATH"""
-        mock_which.return_value = "/usr/bin/vllm"
+    def test_init_success_without_which(self) -> None:
         config = VllmCommandConfig(
             host="localhost",
             port="8000",
@@ -41,22 +52,9 @@ class TestVllmCommand:
             others="",
         )
         command = VllmCommand(config)
-        assert command.process == "/usr/bin/vllm"
         assert command.command_config == config
 
-    @patch("shutil.which")
-    def test_init_failure_vllm_not_found(self, mock_which):
-        """Test initialization fails when vllm is not found in PATH"""
-        mock_which.return_value = None
-        config = VllmCommandConfig()
-        with pytest.raises(ValueError) as excinfo:
-            VllmCommand(config)
-        assert "Error: The 'vllm' executable was not found in the system PATH." in str(excinfo.value)
-
-    @patch("shutil.which")
-    def test_command_property(self, mock_which):
-        """Test command property generates correct command list"""
-        mock_which.return_value = "/usr/bin/vllm"
+    def test_command_property(self) -> None:
         config = VllmCommandConfig(
             host="127.0.0.1",
             port="8080",
@@ -66,7 +64,7 @@ class TestVllmCommand:
         )
         cmd_obj = VllmCommand(config)
         cmd = cmd_obj.command
-        assert cmd[0] == "/usr/bin/vllm"
+        assert cmd[0] == "vllm"
         assert "serve" in cmd
         assert "/path/to/model" in cmd
         assert "--host" in cmd
@@ -76,20 +74,16 @@ class TestVllmCommand:
         assert "--gpu-memory-utilization" in cmd
         assert "0.9" in cmd
 
-    @patch("shutil.which")
-    def test_command_no_others(self, mock_which):
-        """Test command when others is empty"""
-        mock_which.return_value = "/usr/bin/vllm"
+    def test_command_no_others(self) -> None:
         config = VllmCommandConfig(host="localhost", port="8000", model="m", served_model_name="m", others="")
         cmd_obj = VllmCommand(config)
         cmd = cmd_obj.command
+        assert cmd[0] == "vllm"
         assert "--gpu-memory-utilization" not in cmd
 
 
 class TestVllmBenchmarkCommand:
-    @patch("shutil.which")
-    def test_init_success(self, mock_which):
-        mock_which.return_value = "/usr/bin/vllm"
+    def test_init_success_without_which(self) -> None:
         config = VllmBenchmarkCommandConfig(
             host="localhost",
             port="8000",
@@ -101,18 +95,9 @@ class TestVllmBenchmarkCommand:
             others="",
         )
         cmd_obj = VllmBenchmarkCommand(config)
-        assert cmd_obj.process == "/usr/bin/vllm"
+        assert cmd_obj.benchmark_command_config == config
 
-    @patch("shutil.which")
-    def test_init_failure(self, mock_which):
-        mock_which.return_value = None
-        config = VllmBenchmarkCommandConfig(num_prompts=10)
-        with pytest.raises(ValueError):
-            VllmBenchmarkCommand(config)
-
-    @patch("shutil.which")
-    def test_command_property(self, mock_which):
-        mock_which.return_value = "/usr/bin/vllm"
+    def test_command_property(self) -> None:
         config = VllmBenchmarkCommandConfig(
             host="localhost",
             port="8000",
@@ -125,6 +110,7 @@ class TestVllmBenchmarkCommand:
         )
         cmd_obj = VllmBenchmarkCommand(config)
         cmd = cmd_obj.command
+        assert cmd[0] == "vllm"
         assert "bench" in cmd
         assert "serve" in cmd
         assert "--save-result" in cmd
@@ -135,9 +121,7 @@ class TestVllmBenchmarkCommand:
 
 
 class TestAisBenchCommand:
-    @patch("shutil.which")
-    def test_init_success(self, mock_which):
-        mock_which.return_value = "/usr/bin/ais_bench"
+    def test_init_success_without_which(self) -> None:
         config = AisBenchCommandConfig(
             models="model1",
             mode="perf",
@@ -145,18 +129,9 @@ class TestAisBenchCommand:
             others="",
         )
         cmd_obj = AisBenchCommand(config)
-        assert cmd_obj.process == "/usr/bin/ais_bench"
+        assert cmd_obj.aisbench_command_config == config
 
-    @patch("shutil.which")
-    def test_init_failure(self, mock_which):
-        mock_which.return_value = None
-        config = AisBenchCommandConfig()
-        with pytest.raises(ValueError, match="ais_bench"):
-            AisBenchCommand(config)
-
-    @patch("shutil.which")
-    def test_command_property(self, mock_which):
-        mock_which.return_value = "/usr/bin/ais_bench"
+    def test_command_property(self) -> None:
         config = AisBenchCommandConfig(
             models="model1",
             mode="perf",
@@ -165,7 +140,7 @@ class TestAisBenchCommand:
         )
         cmd_obj = AisBenchCommand(config)
         cmd = cmd_obj.command
-        assert cmd[0] == "/usr/bin/ais_bench"
+        assert cmd[0] == "ais_bench"
         assert "--models" in cmd
         assert "model1" in cmd
         assert "--mode" in cmd
@@ -176,10 +151,8 @@ class TestAisBenchCommand:
         assert "--extra-arg" in cmd
         assert "value" in cmd
 
-    @patch("shutil.which")
-    def test_command_no_others(self, mock_which):
+    def test_command_no_others(self):
         """Test command when others is empty"""
-        mock_which.return_value = "/usr/bin/ais_bench"
         config = AisBenchCommandConfig(
             models="model1",
             mode="perf",
@@ -191,41 +164,51 @@ class TestAisBenchCommand:
         assert "--extra-arg" not in cmd
 
 
-class TestMindieCommand:
-    @patch("os.path.isfile")
-    @patch("shutil.which")
-    def test_default_path_exists(self, mock_which, mock_isfile):
+class TestResolveMindieArgv:
+    @patch("optix.deploy_env.os.path.isfile")
+    def test_default_path_exists(self, mock_isfile: Any) -> None:
+        resolve_mindie_argv = _require_resolve_mindie_argv()
         mock_isfile.return_value = True
-        config = MindieCommandConfig()
-        cmd_obj = MindieCommand(config)
-        cmd = cmd_obj.command
-        assert "mindieservice_daemon" in cmd[0]
+        argv = resolve_mindie_argv({})
+        assert "mindieservice_daemon" in argv[0]
 
-    @patch("os.path.isfile")
-    @patch("shutil.which")
-    def test_fallback_to_new_command(self, mock_which, mock_isfile):
+    @patch("optix.deploy_env.shutil.which")
+    @patch("optix.deploy_env.os.path.isfile")
+    def test_fallback_to_mindie_llm_server_in_deploy_path(
+        self, mock_isfile: Any, mock_which: Any, tmp_path: Path
+    ) -> None:
+        resolve_mindie_argv = _require_resolve_mindie_argv()
+        deploy_bin = tmp_path / "deploy" / "bin"
+        deploy_bin.mkdir(parents=True)
+        mindie_server = deploy_bin / "mindie_llm_server"
+        mindie_server.write_text("#!/bin/sh\n", encoding="utf-8")
+        mindie_server.chmod(0o755)
+
         mock_isfile.return_value = False
-        mock_which.return_value = "/usr/bin/mindie_llm_server"
-        config = MindieCommandConfig()
-        cmd_obj = MindieCommand(config)
-        cmd = cmd_obj.command
-        assert cmd == ["mindie_llm_server"]
+        mock_which.return_value = str(mindie_server.resolve())
+        env = {"PATH": f"{deploy_bin}:/usr/bin"}
+        argv = resolve_mindie_argv(env)
+        assert argv == [str(mindie_server.resolve())]
 
-    @patch("os.path.isfile")
-    @patch("shutil.which")
-    def test_raises_when_no_command_found(self, mock_which, mock_isfile):
+    @patch("optix.deploy_env.shutil.which")
+    @patch("optix.deploy_env.os.path.isfile")
+    def test_raises_when_no_command_found(self, mock_isfile: Any, mock_which: Any) -> None:
+        resolve_mindie_argv = _require_resolve_mindie_argv()
         mock_isfile.return_value = False
         mock_which.return_value = None
-        config = MindieCommandConfig()
-        cmd_obj = MindieCommand(config)
         with pytest.raises(FileNotFoundError):
-            _ = cmd_obj.command
+            resolve_mindie_argv({"PATH": "/usr/bin"})
 
-    @patch("os.path.isfile")
-    def test_custom_install_path(self, mock_isfile, monkeypatch):
-        monkeypatch.setenv("MIES_INSTALL_PATH", "/custom/path")
-        mock_isfile.return_value = True
-        config = MindieCommandConfig()
-        cmd_obj = MindieCommand(config)
-        cmd = cmd_obj.command
-        assert "/custom/path" in cmd[0]
+    @patch("optix.deploy_env.os.path.isfile")
+    def test_custom_install_path(self, mock_isfile: Any, tmp_path: Path) -> None:
+        resolve_mindie_argv = _require_resolve_mindie_argv()
+        custom_root = tmp_path / "custom" / "mindie-service"
+        custom_daemon = custom_root / "bin" / "mindieservice_daemon"
+        custom_daemon.parent.mkdir(parents=True)
+        custom_daemon.write_text("#!/bin/sh\n", encoding="utf-8")
+        custom_daemon.chmod(0o755)
+
+        mock_isfile.side_effect = lambda path: Path(path) == custom_daemon
+        env = {"MIES_INSTALL_PATH": str(custom_root), "PATH": "/usr/bin"}
+        argv = resolve_mindie_argv(env)
+        assert str(custom_daemon) in argv[0]

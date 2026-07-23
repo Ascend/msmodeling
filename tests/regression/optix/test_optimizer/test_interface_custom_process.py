@@ -14,6 +14,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 import os
+import sys
 import tempfile
 from io import StringIO
 from pathlib import Path
@@ -27,10 +28,48 @@ from optix.config.config import (
     MODEL_EVAL_STATE_CONFIG_PATH,
     OptimizerConfigField,
 )
+from optix.deploy_env import RuntimeContext
 from optix.optimizer.interfaces.custom_process import (
     BaseDataField,
     CustomProcess,
 )
+
+
+def test_init_uses_injected_deploy_context_without_resolving_again():
+    runtime_ctx = RuntimeContext(
+        in_virtualenv=True,
+        virtualenv_root=Path("/opt/msmodeling/.venv"),
+        python_executable=Path(sys.executable),
+    )
+    deploy_env = {"PATH": "/usr/bin", "CUSTOM_VALUE": "original"}
+
+    with patch("optix.optimizer.interfaces.custom_process.resolve_deploy_context") as mock_resolve:
+        process = CustomProcess(runtime_ctx=runtime_ctx, deploy_env=deploy_env)
+        second_process = CustomProcess(runtime_ctx=runtime_ctx, deploy_env=deploy_env)
+
+    mock_resolve.assert_not_called()
+    assert process._runtime_ctx is runtime_ctx
+    assert process.env == deploy_env
+    assert process.env is not deploy_env
+    assert second_process.env == deploy_env
+    assert second_process.env is not process.env
+
+    process.env["CUSTOM_VALUE"] = "process"
+    assert deploy_env["CUSTOM_VALUE"] == "original"
+    assert second_process.env["CUSTOM_VALUE"] == "original"
+
+
+def test_init_requires_runtime_context_and_deploy_env_together():
+    runtime_ctx = RuntimeContext(
+        in_virtualenv=False,
+        virtualenv_root=None,
+        python_executable=Path(sys.executable),
+    )
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        CustomProcess(runtime_ctx=runtime_ctx)
+    with pytest.raises(ValueError, match="must be provided together"):
+        CustomProcess(deploy_env={"PATH": "/usr/bin"})
 
 
 def test_before_run_no_run_params(monkeypatch):
@@ -78,7 +117,7 @@ def test_before_run_env_var_already_set(monkeypatch):
     monkeypatch.setattr(
         os,
         "environ",
-        {CUSTOM_OUTPUT: "/result", MODEL_EVAL_STATE_CONFIG_PATH: "config.toml"},
+        {**os.environ, CUSTOM_OUTPUT: "/result", MODEL_EVAL_STATE_CONFIG_PATH: "config.toml"},
     )
 
     process = CustomProcess()
@@ -785,7 +824,8 @@ class TestBeforeRunEnvHandling:
                 value=128,
             ),
         )
-        process.before_run(run_params)
+        with patch("optix.deploy_env.shutil.which", return_value="/usr/bin/vllm"):
+            process.before_run(run_params)
         assert '{"num_tokens": 128, "mode": "full"}' in process.command
         process.stop(del_log=True)
 
@@ -850,7 +890,7 @@ class TestRunCommandChecks:
         fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         process.run_log_fp = fd
         subprocess.run(
-            ["/usr/bin/env", "python3", "-c", "import sys; print('vllm error line', file=sys.stderr)"],
+            [sys.executable, "-c", "import sys; print('vllm error line', file=sys.stderr)"],
             stdout=fd,
             stderr=subprocess.STDOUT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},

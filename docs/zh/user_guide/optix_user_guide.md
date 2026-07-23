@@ -8,9 +8,10 @@
 
 本文适用于需要对 vLLM、MindIE 服务化部署参数进行自动寻优的性能工程师和部署工程师。建议按以下顺序阅读：
 
-1. 先阅读“使用前准备”和“工具安装”，确认服务框架与测评工具可正常运行。
-2. 再阅读“快速入门”和“命令参数说明”，完成一次默认寻优。
-3. 最后阅读“配置文件说明”和“输出结果文件说明”，根据业务 SLO 调整搜索空间并筛选推荐参数。
+1. 先阅读 [推荐实践：环境与部署栈](#推荐实践环境与部署栈) 与 [工具安装](#工具安装)，在 uv 虚拟环境中安装 msmodeling，并确认系统已部署 vLLM/MindIE。
+2. 再阅读 [使用前准备](#使用前准备) 与 [快速入门](#快速入门)，确认服务框架与测评工具可独立运行。
+3. 阅读 [命令参数说明](#命令参数说明) 与 [配置文件说明](#配置文件说明)（含 `[deploy]`），完成一次默认寻优。
+4. 遇问题时查阅 [环境变量与排障](#环境变量与排障)；根据业务 SLO 调整搜索空间请参见 [输出结果文件说明](#输出结果文件说明)。
 
 工具主要包括两大核心功能模块：
 
@@ -53,31 +54,126 @@
 
 ## 使用前准备
 
-**环境准备**
-准备好能正常运行服务化（如[VLLM Server](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html)/[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)）和测评工具（如`vllm_benchmark/AISBench`，参见[测评工具部署](https://github.com/AISBench/benchmark/blob/master/docs/source_zh_cn/get_started/quick_start.md)）的环境。
+**环境与部署栈**
+
+| 层面 | 推荐做法 | 说明 |
+|------|----------|------|
+| **msmodeling / OptiX** | **必须** 使用 **uv 虚拟环境** 安装 | 安装会带上 `torch`、`transformers` 等，供 TensorCast 仿真使用，不是 OptiX 寻优用的；写进系统 Python 会冲掉部署栈里的同名包 |
+| **vLLM / MindIE / 测评工具** | **默认使用系统环境** | 假定机器上已按官方文档完成服务化与测评工具部署，一般不必再建部署 venv |
+
+OptiX 拉起服务或测评子进程时，会从 `PATH`、`PYTHONPATH` 里去掉 msmodeling 虚拟环境的痕迹，再用系统 PATH 找 `vllm`、`mindieservice_daemon`、`ais_bench` 等命令。不必手改子进程环境变量，也不必为部署栈单独再建一个 venv。
+
+若命令不在默认 PATH、或机器上装了多份运行时，可通过 `OPTIX_DEPLOY_PATH` 或 `config.toml` 里的 `[deploy] path_prefix` 指定部署根目录。
+
+完整步骤见 [推荐实践：环境与部署栈](#推荐实践环境与部署栈)；仿真侧通用安装见《[环境搭建指南](../install_guide/msmodeling_install_guide.md#optix-与仿真环境分离)》。
+
+**部署栈准备**
+
+在系统环境，或 `[deploy]` 所指向的路径下，确认服务化与测评工具能正常运行。可参考 [VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)、[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)，以及 [AISBench 测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)。
 
 ## 工具安装
 
-寻优工具是 msmodeling 项目的子工具。安装时请进入包含 OptiX 源码与 `pyproject.toml` 的目录后执行可编辑安装：
+> [!IMPORTANT]
+> **OptiX 必须装在虚拟环境里**。在仓库根目录执行 `uv sync` 即可自动创建 `.venv` 并完成安装。
+>
+> 安装 msmodeling 会同时装上 `torch`、`transformers` 等包。这些依赖给 TensorCast 仿真用，真机寻优并不靠它们。如果在系统 Python 里安装 msmodeling，往往会改掉系统里原有的 `torch`、`transformers` 版本，结果是：
+>
+> - vLLM、MindIE 起不来或推理报错
+> - 和 Ascend 推理栈上已验证的版本对不上
+> - 同机其他部署工具也跟着坏掉
+>
+> 只在 uv 虚拟环境里装 msmodeling；vLLM、MindIE、测评工具继续用系统里现成的那套。
+
+寻优工具集成在 msmodeling 仓库根目录。按以下步骤安装：
 
 ```bash
-git clone https://gitcode.com/Ascend/msmodeling.git # 如已拉取，则不用重复拉取
-cd <optix_source_dir>
-pip install -e .  # 安装寻优工具
+git clone https://gitcode.com/Ascend/msmodeling.git   # 如已拉取，则不用重复拉取
+cd msmodeling
+uv sync
 ```
 
 > [!NOTE]
-> 若当前分支未包含 OptiX 源码目录，请切换到包含 OptiX 代码的发布分支或使用对应发布包；仅复制文档文件无法提供 `msmodeling optix` 命令。
+> `uv sync` 会自动创建 `.venv`、以可编辑模式安装 msmodeling（含 `msmodeling optix` CLI），无需 `uv venv` 或 `pip install -e .`。若当前分支未包含 OptiX 源码目录，请切换到包含 OptiX 代码的发布分支或使用对应发布包；仅复制文档文件无法提供 `msmodeling optix` 命令。
+> [!WARNING]
+> 不要在 msmodeling 虚拟环境里 `pip install vllm`、`mindie_llm` 等部署包。也不要在未建 venv 的系统 Python 里安装 msmodeling。详见 [推荐实践：环境与部署栈](#推荐实践环境与部署栈)。
+
+## 推荐实践：环境与部署栈<a name="推荐实践环境与部署栈"></a>
+
+典型场景：系统里已经部署好 vLLM 或 MindIE，msmodeling 单独装在 uv 虚拟环境里。
+
+**① 安装 msmodeling（uv）**
+
+```bash
+cd /path/to/msmodeling
+uv sync
+```
+
+验证：`uv run msmodeling optix --help`
+
+**② 确认系统部署栈可用**
+
+可先 `deactivate` 退出 msmodeling venv，再检查系统里的命令，例如：
+
+```bash
+which vllm
+vllm --help
+```
+
+`which vllm` 应落在系统路径，例如 `/usr/local/bin/vllm`，而不是 msmodeling 的 `.venv/bin/vllm`。
+
+MindIE 场景请确认 `mindieservice_daemon` 可用，或 `MIES_INSTALL_PATH` 指向的安装正确。
+
+**③ 可选：指定部署根目录**
+
+仅当系统 PATH 找不到正确命令时再配：
+
+```bash
+export OPTIX_DEPLOY_PATH=/path/to/custom-deploy-root
+```
+
+也可写入 `optix/config.toml`，字段说明见 [配置文件说明](#配置文件说明) 中的 `[deploy]`：
+
+```toml
+[deploy]
+path_prefix = "/path/to/custom-deploy-root"
+```
+
+**④ 在 msmodeling venv 中运行 OptiX**
+
+```bash
+source /path/to/msmodeling/.venv/bin/activate
+msmodeling optix -e vllm -b ais_bench
+```
+
+上一步若设置了 `OPTIX_DEPLOY_PATH`，保持 export 即可。
+
+**⑤ 确认日志**
+
+启动日志里出现 `[optix/env] ... 部署命令 vllm → /usr/local/bin/vllm` 一类信息，说明子进程走的是系统部署栈，而不是 msmodeling venv。
+
+> [!NOTE]
+> 默认不必再建部署专用 venv。只有 PATH 布局特殊时才需要 `OPTIX_DEPLOY_PATH` 或 `[deploy] path_prefix`。
 
 ## 工具卸载
 
+在 msmodeling 虚拟环境中卸载：
+
 ```bash
-pip uninstall optix
+pip uninstall msmodeling
 ```
 
 ## 快速入门
 
-1. 完成[使用前准备](#使用前准备)章节要求。
+0. **确认 `which vllm` 不在 msmodeling venv 里**，vLLM 场景示例：
+
+    ```bash
+    source /path/to/msmodeling/.venv/bin/activate
+    which vllm
+    ```
+
+    正确示例：`/usr/local/bin/vllm`。错误示例：`/path/to/msmodeling/.venv/bin/vllm`，见 [环境变量与排障](#环境变量与排障)。
+
+1. 完成[使用前准备](#使用前准备)与[推荐实践：环境与部署栈](#推荐实践环境与部署栈)章节要求。
 
 2. 修改配置文件：启动寻优前需用户按照实际情况配置 `config.toml`，包括寻优参数、测评工具参数、服务化参数。参考[配置文件说明](#配置文件说明)章节完成配置。也可通过 `-c` 参数将配置文件放在任意路径，具体见[命令参数说明](#命令参数说明)。
 
@@ -99,9 +195,10 @@ pip uninstall optix
 
 **注意事项**
 
-- 启动寻优前需保证所选服务框架（`vllm` 或 `mindie`）和测评工具（`ais_bench` 或 `vllm_benchmark`）可独立运行。
+- 启动寻优前，确认 `vllm` 或 `mindie` 以及 `ais_bench` 或 `vllm_benchmark` 已在系统部署环境里能跑，且没有装进 msmodeling 虚拟环境。
 - `config.toml` 中的模型路径、端口、数据集路径和服务启动参数需与实际部署环境保持一致。
 - 自动寻优会反复拉起服务并执行测评，耗时通常较长，建议在独占或资源稳定的环境中运行。
+- 环境隔离异常时，日志前缀 `[optix/env]` 会给出原因与修复建议，详见 [环境变量与排障](#环境变量与排障)。
 
 **命令格式**
 
@@ -205,6 +302,22 @@ msmodeling optix -e vllm -b vllm_benchmark -c ../configs/vllm_config.toml
 ## 附录
 
 ### 配置文件说明
+
+**部署环境 `[deploy]`**
+
+子进程拉起 vLLM、MindIE 或测评工具时，OptiX 会先去掉 msmodeling 虚拟环境相关变量，再按下面配置找部署根目录，`bin/` 下应有 `vllm`、`ais_bench` 等：
+
+| 参数 | 必选 | 说明 |
+|------|------|------|
+| `path_prefix` | 可选 | 部署根目录，用来覆盖默认系统 PATH。不设则剥离 msmodeling venv 后直接走系统 PATH，效果同目录级的 `OPTIX_DEPLOY_PATH` |
+
+与 `optix/config.toml` 注释一致的写法：
+
+```toml
+# 仅当系统 PATH 找不到 vllm、ais_bench 等时再打开
+[deploy]
+# path_prefix = "/path/to/custom-deploy-root"
+```
 
 **寻优参数**： `n_particles` （寻优种子数）、`iters` （迭代轮次数）、 `tpot_slo` （`time_per_output_token`的限制时延）等。
 用户可根据预估时间来自行配置种子和迭代次数。我们单个种子使用时间为拉起服务+测试数据。比如用户拉起服务+完成测试需9-10min，且愿意用8小时来进行寻优，则一共可跑约50个种子，建议用户配置5 * 10。设置种子数为10，迭代次数为5，建议用户配置种子数为迭代次数的2倍左右。
@@ -543,6 +656,43 @@ io_error = ["file not found", "permission denied", "IO error"]
 ### 插件模式
 
 现在寻优工具支持用户自定义搜索参数配置以及测试工具，用户可以根据自己的需求配置。只需适配我们的插件模式，注册对应的插件即可，详情请参见[插件开发操作步骤](./optix_plugin_user_guide.md)。
+
+### 环境变量与排障<a name="环境变量与排障"></a>
+
+**环境变量**
+
+| 变量 | 说明 |
+|------|------|
+| `OPTIX_DEPLOY_PATH` | 可选。部署环境根目录，其 `bin/` 下应有 `vllm`、`ais_bench` 等。优先级高于 `config.toml` 的 `[deploy] path_prefix`；不设则用系统 PATH |
+| `MIES_INSTALL_PATH` | MindIE 安装根目录，子进程会保留，不用为隔离而改 |
+
+优先级从高到低：`OPTIX_DEPLOY_PATH`、`config.toml` 的 `[deploy] path_prefix`、仅剥离 msmodeling venv 后走系统 PATH。
+
+**日常启动**
+
+系统里已经装好 vLLM 时，通常不用设 `OPTIX_DEPLOY_PATH`：
+
+```bash
+source /path/to/msmodeling/.venv/bin/activate
+msmodeling optix -e vllm -b ais_bench
+```
+
+PATH 布局特殊时再设：
+
+```bash
+export OPTIX_DEPLOY_PATH=/path/to/custom-deploy-root
+source /path/to/msmodeling/.venv/bin/activate
+msmodeling optix -e vllm -b ais_bench
+```
+
+**`[optix/env]` 日志对照**
+
+| 日志 | 含义 | 处理 |
+|------|------|------|
+| `当前未检测到虚拟环境` | 没用 venv 装 msmodeling | 在仓库根目录执行 `uv sync`（会自动创建 `.venv`）；别装到系统 Python，否则 `torch`、`transformers` 会冲掉部署栈 |
+| `找不到部署命令：vllm` 或 `mindieservice_daemon` | 剥离 venv 后系统 PATH 里没有命令 | 先确认系统已装 vLLM 或 MindIE；必要时设 `OPTIX_DEPLOY_PATH` 或 `[deploy] path_prefix` |
+| `命令 vllm 解析到 msmodeling 虚拟环境` | msmodeling venv 里误装了 vllm | 在该 venv 里 `pip uninstall vllm`，改用系统里的 vLLM |
+| `部署命令 vllm → ...` 且路径在系统侧 | 正常 | 不用改 |
 
 ### 日志说明
 

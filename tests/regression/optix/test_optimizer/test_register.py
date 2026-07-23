@@ -93,7 +93,7 @@ class TestRegisterBenchmarks:
 
 class TestRegisterOriFunctions:
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/vllm",
     )
     def test_register_all(self, mock_which):

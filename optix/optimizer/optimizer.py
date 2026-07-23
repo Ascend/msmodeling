@@ -792,6 +792,16 @@ def _run_optimizer() -> None:
             register_settings(create_custom_settings)
             logger.info("Using custom config file: {}", custom_config_path)
         settings = get_settings()
+        from ..deploy_env import emit_runtime_hints, resolve_deploy_context, validate_deploy_stack
+
+        runtime_ctx, deploy_env = resolve_deploy_context()
+        emit_runtime_hints(runtime_ctx, engine=args.engine)
+        validate_deploy_stack(
+            engine=args.engine,
+            benchmark=args.benchmark_policy,
+            env=deploy_env,
+            ctx=runtime_ctx,
+        )
         bak_path = None
         if args.backup:
             bak_path = settings.output.joinpath("trial_logs")
@@ -801,11 +811,19 @@ def _run_optimizer() -> None:
         _target_field = []
         if args.engine:
             validate_simulator_policy(args.engine)
-            _simu = simulates[args.engine](bak_path=bak_path)
+            _simu = simulates[args.engine](
+                bak_path=bak_path,
+                runtime_ctx=runtime_ctx,
+                deploy_env=deploy_env,
+            )
             _target_field.extend(_simu.data_field)
         if args.benchmark_policy:
             validate_benchmark_policy(args.benchmark_policy)
-            _bench = benchmarks[args.benchmark_policy](bak_path=bak_path)
+            _bench = benchmarks[args.benchmark_policy](
+                bak_path=bak_path,
+                runtime_ctx=runtime_ctx,
+                deploy_env=deploy_env,
+            )
             _target_field.extend(_bench.data_field)
         _target_field = tuple(_target_field)
         if not _simu:

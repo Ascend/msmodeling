@@ -35,7 +35,7 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from ..common import is_mindie, is_vllm
+from ..common import is_mindie
 from ..config.custom_command import (
     AisBenchCommandConfig,
     MindieCommandConfig,
@@ -827,6 +827,10 @@ class DataStorageConfig(BaseModel):
         return path
 
 
+class DeployConfig(BaseModel):
+    path_prefix: Optional[str] = None
+
+
 class LatencyModel(BaseModel):
     base_path: Path = Path("latency_model")
     model_path: Optional[Path] = Field(
@@ -1015,6 +1019,8 @@ class Settings(BaseSettings):
 
     health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
 
+    deploy: DeployConfig = Field(default_factory=DeployConfig)
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -1056,8 +1062,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def partial_update_vllm(self):
-        if not is_vllm():
-            return self
         output = VllmConfig.model_fields["output"].default
         if self.vllm.output == output:
             self.vllm.output = self.output.joinpath(output)

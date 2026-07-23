@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENV_NAME="myenv"
+ENV_NAME=".venv"
 PYTHON_VERSION=""
 USE_EXISTING_ENV=0
 SET_PROJECT_ENV=0
@@ -14,9 +14,9 @@ usage() {
 Usage: bash ./.agents/skills/msmodeling-env-installer/scripts/install-current-project-deps.sh [options]
 
 Options:
-  --env-name <name>          Virtual environment directory name. Default: myenv
-  --python-version <version> Python version passed to "uv venv". Default: detected major.minor
-  --use-existing-env         Install into an existing environment instead of creating myenv
+  --env-name <name>          Virtual environment directory (UV_PROJECT_ENVIRONMENT). Default: .venv
+  --python-version <version> Python version (UV_PYTHON) for uv sync. Default: detected major.minor
+  --use-existing-env         Legacy fallback: pip install -r requirements.txt (no editable msmodeling CLI)
   --set-project-env          Set PYTHONPATH for this script process and print the export command
   --use-hf-mirror            Set HF_ENDPOINT for this script process and print the export command
   --no-project-uv-cache      Do not set UV_CACHE_DIR to .uv-cache under the repository root
@@ -170,8 +170,8 @@ assert_existing_environment_clean() {
     echo "Existing environment check passed: torch_npu and cudatoolkit are absent."
 }
 
-if [[ ! -f "README.md" || ! -f "requirements.txt" ]]; then
-    echo "README.md or requirements.txt not found. Run this script from msmodeling repository root." >&2
+if [[ ! -f "README.md" || ! -f "pyproject.toml" ]]; then
+    echo "README.md or pyproject.toml not found. Run this script from msmodeling repository root." >&2
     exit 1
 fi
 
@@ -201,23 +201,24 @@ if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
 fi
 
 if [[ "$USE_EXISTING_ENV" -eq 0 ]]; then
-    if [[ -e "$ENV_NAME" ]]; then
-        echo "Environment path already exists: $ENV_NAME. Rerun with --use-existing-env to reuse it, or remove the directory after confirming it can be rebuilt." >&2
-        exit 1
-    fi
-
-    echo "Creating virtual environment: $ENV_NAME (Python $PYTHON_VERSION)"
-    "$UV" venv --python "$PYTHON_VERSION" "$ENV_NAME"
+    echo "Installing msmodeling with uv sync (env: $ENV_NAME, Python: $PYTHON_VERSION)..."
+    export UV_PROJECT_ENVIRONMENT="$ENV_NAME"
+    export UV_PYTHON="$PYTHON_VERSION"
+    "$UV" sync
 
     if [[ ! -x "$VENV_PYTHON" ]]; then
-        echo "Virtual environment python not found: $VENV_PYTHON" >&2
+        echo "Virtual environment python not found after uv sync: $VENV_PYTHON" >&2
         exit 1
     fi
 
-    echo "Installing dependencies with uv pip..."
-    "$UV" pip install --python "$VENV_PYTHON" -r requirements.txt -i "$PYPI_MIRROR"
+    echo "Verifying msmodeling CLI..."
+    "$UV" run msmodeling --help >/dev/null
 else
-    echo "Using existing environment fallback: pip install -r requirements.txt"
+    echo "Using legacy fallback: pip install -r requirements.txt (does not install msmodeling CLI; prefer uv sync)"
+    if [[ ! -f "requirements.txt" ]]; then
+        echo "requirements.txt not found for legacy fallback." >&2
+        exit 1
+    fi
     if [[ -x "$VENV_PYTHON" ]]; then
         assert_existing_environment_clean "$VENV_PYTHON"
         "$VENV_PYTHON" -m pip install -r requirements.txt
@@ -248,7 +249,7 @@ if [[ "$USE_HF_MIRROR" -eq 1 ]]; then
 fi
 
 if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
-    echo "Done. Activation command (Git Bash): source $ENV_NAME/Scripts/activate"
+    echo "Done. Activation: source $ENV_NAME/Scripts/activate  |  Or: uv run <command>"
 else
-    echo "Done. Activation command: source $ENV_NAME/bin/activate"
+    echo "Done. Activation: source $ENV_NAME/bin/activate  |  Or: uv run <command>"
 fi

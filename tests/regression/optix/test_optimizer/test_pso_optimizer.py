@@ -675,6 +675,7 @@ class TestOptimizerMain:
         settings.ftol = 1e-3
         settings.ftol_iter = 5
         settings.data_storage = MagicMock()
+        settings.deploy.path_prefix = None
         mock_get_settings.return_value = settings
 
         # Mock the simulators and benchmarks
@@ -686,6 +687,16 @@ class TestOptimizerMain:
         mock_bench.data_field = [
             OptimizerConfigField(name="CONCURRENCY", min=1, max=64, dtype="int", config_position="env"),
         ]
+        simulator_kwargs = {}
+        benchmark_kwargs = {}
+
+        def _create_simulator(**kwargs):
+            simulator_kwargs.update(kwargs)
+            return mock_simu
+
+        def _create_benchmark(**kwargs):
+            benchmark_kwargs.update(kwargs)
+            return mock_bench
 
         with ExitStack() as stack:
             mock_pso = stack.enter_context(patch("optix.optimizer.optimizer.PSOOptimizer"))
@@ -693,10 +704,10 @@ class TestOptimizerMain:
             stack.enter_context(patch("optix.optimizer.store.DataStorage"))
             mock_fine_tune = stack.enter_context(patch("optix.optimizer.experience_fine_tunning.FineTune"))
             stack.enter_context(patch("optix.optimizer.register.shutil.which", return_value="/usr/bin/ais_bench"))
-            stack.enter_context(patch.dict("optix.optimizer.register.simulates", {"mindie": lambda **kw: mock_simu}))
-            stack.enter_context(
-                patch.dict("optix.optimizer.register.benchmarks", {"ais_bench": lambda **kw: mock_bench})
-            )
+            stack.enter_context(patch("optix.deploy_env.os.path.isfile", return_value=True))
+            stack.enter_context(patch("optix.deploy_env.shutil.which", return_value="/usr/bin/ais_bench"))
+            stack.enter_context(patch.dict("optix.optimizer.register.simulates", {"mindie": _create_simulator}))
+            stack.enter_context(patch.dict("optix.optimizer.register.benchmarks", {"ais_bench": _create_benchmark}))
             stack.enter_context(patch.object(sys, "argv", ["optix", "-e", "mindie", "-b", "ais_bench"]))
 
             optix_main()
@@ -718,6 +729,9 @@ class TestOptimizerMain:
             assert pso_kwargs["load_breakpoint"] is False
             assert pso_kwargs["fine_tune"] is mock_fine_tune.return_value
             assert pso_kwargs["pso_init_kwargs"] == {"ftol": 1e-3, "ftol_iter": 5}
+
+            assert simulator_kwargs["runtime_ctx"] is benchmark_kwargs["runtime_ctx"]
+            assert simulator_kwargs["deploy_env"] is benchmark_kwargs["deploy_env"]
 
             # ---- verify post-construction execution ----
             mock_pso.return_value.run_plugin.assert_called_once()

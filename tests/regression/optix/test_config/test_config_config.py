@@ -1480,8 +1480,7 @@ class TestSettingsValidators(unittest.TestCase):
         assert sources[2].__class__.__name__ == "TomlConfigSettingsSource"
         assert sources[3] is file_secret_settings
 
-    @patch("optix.config.config.is_vllm", return_value=True)
-    def test_partial_update_vllm_syncs_benchmark_command(self, _mock_is_vllm):
+    def test_partial_update_vllm_syncs_benchmark_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             settings = Settings(output=base / "out", simulator_output=base / "sim")

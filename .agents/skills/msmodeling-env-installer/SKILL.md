@@ -1,7 +1,7 @@
 ---
 name: msmodeling-env-installer
-description: Install and verify the msmodeling development environment. Use when the user explicitly asks to install msmodeling dependencies, set up this repository, create `myenv` with `uv`, install this repository's `requirements.txt`, set project `PYTHONPATH`, or configure `HF_ENDPOINT`; if the user only says to install an environment, ask whether they mean msmodeling dependencies before proceeding.
-version: 0.2.1
+description: Install and verify the msmodeling development environment. Use when the user explicitly asks to install msmodeling dependencies, set up this repository, create a uv venv with `uv sync`, install this repository's `requirements.txt` (legacy fallback), set project `PYTHONPATH`, or configure `HF_ENDPOINT`; if the user only says to install an environment, ask whether they mean msmodeling dependencies before proceeding.
+version: 0.3.0
 source: local-session-analysis
 ---
 
@@ -12,7 +12,7 @@ source: local-session-analysis
 直接使用本 skill 的场景：
 
 - 用户明确要求安装 msmodeling 环境依赖、初始化 msmodeling 开发环境或按 msmodeling README 配置环境。
-- 用户明确要求在当前 msmodeling 仓库中创建 `myenv`。
+- 用户明确要求在当前 msmodeling 仓库中通过 `uv sync` 安装依赖。
 - 用户明确要求安装当前仓库的 `requirements.txt`。
 - 用户明确要求检查当前 msmodeling Python 依赖。
 - 用户明确要求为当前 msmodeling 会话配置 `PYTHONPATH`。
@@ -32,17 +32,25 @@ source: local-session-analysis
 
 只有用户确认后，才继续执行本 skill 的安装流程。
 
+### OptiX 场景
+
+用户为 OptiX 寻优安装环境时：
+
+- 本 skill 创建的 venv **仅用于 msmodeling**：在仓库根目录执行 `uv sync` 即可（自动创建 venv、可编辑安装本项目，无需 `pip install -e .`）
+- 必须在 venv 里装：会带上 `torch`、`transformers` 等，给 TensorCast 仿真用，不是 OptiX 寻优用的。装到系统 Python 会冲掉 vLLM、MindIE 依赖，服务可能起不来。
+- 不要在此 venv 里 `pip install vllm`；vLLM、MindIE 默认用系统环境。PATH 特殊时再配 `OPTIX_DEPLOY_PATH`，见 [OptiX 使用指南](../../../docs/zh/user_guide/optix_user_guide.md#工具安装)
+
 ## 默认策略
 
-优先使用 README 推荐的 `uv` 流程创建独立虚拟环境，并在安装后执行依赖一致性检查。
+优先使用 README 推荐的 `uv sync` 流程：自动创建虚拟环境、可编辑安装本项目并同步依赖，安装后执行依赖一致性检查。
 
 默认值和约束：
 
-- 默认虚拟环境名为 `myenv`。
+- 默认虚拟环境名为 `.venv`（`uv sync` 默认路径）。用户指定其他目录名时，通过 `UV_PROJECT_ENVIRONMENT=<name>` 传给 `uv sync`。
 - Python 最低版本为 `3.10`。
 - 默认使用当前机器检测到的 Python 主次版本创建虚拟环境，避免 `uv` 额外下载 Python；只有用户显式要求或本机不可用时才使用 README 示例中的 `3.13`。
 - 默认使用中科大 PyPI 镜像：`https://mirrors.ustc.edu.cn/pypi/web/simple`。
-- 默认不覆盖已有环境；如果 `myenv` 已存在，需说明复用或重建的影响。
+- 默认不覆盖已有环境；如果目标 venv 已存在，`uv sync` 会复用并更新，不会静默删除目录。
 - 默认不持久化系统环境变量，只设置当前 shell 会话或给出可执行命令。
 - 涉及网络安装时，先展示将执行的命令，并按当前工具权限请求用户授权。
 
@@ -61,39 +69,50 @@ source: local-session-analysis
 ## 工作流程
 
 1. 确认用户意图明确指向 msmodeling 环境依赖；如果只是泛化的“安装环境”，先询问是否安装 msmodeling 当前仓库的环境依赖。
-2. 确认当前目录是 msmodeling 仓库根目录，至少包含 `README.md` 和 `requirements.txt`。
+2. 确认当前目录是 msmodeling 仓库根目录，至少包含 `README.md` 和 `pyproject.toml`。
 3. 检测 `python`、`python3` 或 Windows `py -3`，确认 Python 版本为 `3.10+`。
 4. 检查 `uv` 是否可用；缺失时用 `python -m pip install uv -i https://mirrors.ustc.edu.cn/pypi/web/simple` 安装。
 5. 安装或调用 `uv` 后，解析真实 `uv` 可执行路径，不能假设当前 shell 的 `PATH` 已刷新。
 6. 选择安装路径：
-   - 新建 `myenv`：使用 `uv venv --python <detected-python-version> myenv`。
-   - 已有环境 fallback：先检查当前环境不包含 `torch_npu`、`torch-npu`、`cudatoolkit`，再执行 `pip install -r requirements.txt`。
-7. 安装依赖：优先执行 `uv pip install --python <venv-python> -r requirements.txt -i <mirror>`。
+   - **推荐**：在仓库根目录执行 `uv sync`（自动创建 `.venv` 并安装本项目）。
+   - 自定义 venv 目录名：设置 `UV_PROJECT_ENVIRONMENT=<env-name>` 后执行 `uv sync`。
+   - 指定 Python 版本：设置 `UV_PYTHON=<version>`（例如 `3.13`）后执行 `uv sync`。
+   - 已有环境 fallback（仅当用户明确要求且无法使用 `uv sync`）：先检查当前环境不包含 `torch_npu`、`torch-npu`、`cudatoolkit`，再执行 `pip install -r requirements.txt`（此路径**不会**可编辑安装 msmodeling CLI，应提示用户改用 `uv sync`）。
+7. 安装依赖：优先执行 `UV_PROJECT_ENVIRONMENT=<env-name> UV_PYTHON=<version> uv sync`（省略未指定的变量）。
 8. 按需设置当前会话环境变量：
    - `PYTHONPATH` 指向 msmodeling 仓库根目录。
    - `HF_ENDPOINT` 设置为 `https://hf-mirror.com`。
-9. 执行依赖检查：
-   - `uv pip check --python <venv-python>`。
+9. 执行依赖检查与 CLI 验证：
+   - `uv pip check`（在已 sync 的项目环境中）。
+   - `uv run msmodeling --help` 或 `uv run python -m cli.inference.text_generate --help`。
    - 已有环境 fallback 使用 `python -m pip check`。
-10. 向用户报告激活命令、安装结果、验证结果和后续建议。
+10. 向用户报告激活命令、`uv run` 用法、安装结果、验证结果和后续建议。
 
 ## 命令模板
 
-### 新建环境
+### 推荐：uv sync
 
 ```bash
 pip install uv -i https://mirrors.ustc.edu.cn/pypi/web/simple
-uv venv --python <detected-python-version> myenv
-uv pip install --python <venv-python> -r requirements.txt -i https://mirrors.ustc.edu.cn/pypi/web/simple
+cd msmodeling
+uv sync
 ```
 
-激活命令：
+自定义 venv 目录名或 Python 版本：
+
+```bash
+UV_PROJECT_ENVIRONMENT=myenv UV_PYTHON=3.13 uv sync
+```
+
+激活命令（默认 `.venv`）：
 
 | 操作系统 | 命令 |
 |:---|:---|
-| Linux/macOS/WSL/Git Bash | `source myenv/bin/activate` |
-| Windows PowerShell | `myenv\Scripts\Activate.ps1` |
-| Windows cmd | `myenv\Scripts\activate.bat` |
+| Linux/macOS/WSL/Git Bash | `source .venv/bin/activate` |
+| Windows PowerShell | `.venv\Scripts\Activate.ps1` |
+| Windows cmd | `.venv\Scripts\activate.bat` |
+
+不激活也可直接：`uv run python -m cli.inference.text_generate --help`
 
 ### 已有环境 fallback
 
@@ -106,7 +125,7 @@ python -m pip show torch_npu
 python -m pip show cudatoolkit
 ```
 
-如果任一检查显示包存在，不要默认继续 fallback。建议用户新建 `myenv`，或让用户明确确认继续使用该环境。
+如果任一检查显示包存在，不要默认继续 fallback。建议用户改用 `uv sync`，或让用户明确确认继续使用该环境。
 
 ```bash
 python -m pip install -r requirements.txt
@@ -142,8 +161,8 @@ PowerShell 参数：
 
 | 参数 | 说明 |
 |:---|:---|
-| `-EnvName` | 虚拟环境目录名，默认 `myenv` |
-| `-PythonVersion` | `uv venv` 使用的 Python 版本，默认使用检测到的本机 Python 主次版本 |
+| `-EnvName` | 传给 `UV_PROJECT_ENVIRONMENT` 的虚拟环境目录名，默认 `.venv` |
+| `-PythonVersion` | 传给 `UV_PYTHON` 的版本，默认使用检测到的本机 Python 主次版本 |
 | `-UseExistingEnv` | 跳过新建 venv，使用已有环境安装依赖 |
 | `-SetProjectEnv` | 为当前 PowerShell 会话设置 `PYTHONPATH` |
 | `-UseHFMirror` | 为当前 PowerShell 会话设置 `HF_ENDPOINT` |
@@ -153,8 +172,8 @@ Bash 参数：
 
 | 参数 | 说明 |
 |:---|:---|
-| `--env-name <name>` | 虚拟环境目录名，默认 `myenv` |
-| `--python-version <version>` | `uv venv` 使用的 Python 版本，默认使用检测到的本机 Python 主次版本 |
+| `--env-name <name>` | 传给 `UV_PROJECT_ENVIRONMENT` 的虚拟环境目录名，默认 `.venv` |
+| `--python-version <version>` | 传给 `UV_PYTHON` 的版本，默认使用检测到的本机 Python 主次版本 |
 | `--use-existing-env` | 跳过新建 venv，使用已有环境安装依赖 |
 | `--set-project-env` | 输出并为当前脚本进程设置 `PYTHONPATH` |
 | `--use-hf-mirror` | 输出并为当前脚本进程设置 `HF_ENDPOINT` |
@@ -189,6 +208,6 @@ bash ./.agents/skills/msmodeling-env-installer/scripts/install-current-project-d
 - 用户意图已确认指向 msmodeling 环境依赖。
 - 仓库根目录、Python 版本、`uv` 可用性检查完成。
 - 依赖安装流程完成，或失败原因已明确分类。
-- `pip check` 或 `uv pip check --python <venv-python>` 已执行并报告结果。
-- 输出用户后续可直接执行的激活命令。
+- `uv pip check` 或 `uv run msmodeling --help` 已执行并报告结果。
+- 输出用户后续可直接执行的 `uv run` 或 `source .venv/bin/activate` 命令。
 - 明确说明当前会话是否设置了 `PYTHONPATH` 或 `HF_ENDPOINT`。

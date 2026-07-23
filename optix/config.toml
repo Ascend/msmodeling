@@ -136,6 +136,14 @@ port = "port"
 model = "model_path"
 served_model_name = "model_name"
 others = ""
+
+# ------------------------- Deploy Environment Configuration ------------------------------------------------
+# Optional override (DeployConfig.path_prefix). Default: system PATH after stripping msmodeling venv.
+# Set only when vllm/ais_bench are not on system PATH. Priority: OPTIX_DEPLOY_PATH env > path_prefix.
+# Example:
+# [deploy]
+# path_prefix = "/path/to/custom-deploy-root"
+
 [[vllm.target_field]]
 name = "MAX_NUM_BATCHED_TOKENS"
 config_position = "env"

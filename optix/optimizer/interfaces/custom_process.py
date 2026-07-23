@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from math import isinf, isnan
 from pathlib import Path
@@ -34,6 +34,7 @@ from ...config.base_config import (
     MODEL_EVAL_STATE_CONFIG_PATH,
     ms_serviceparam_optimizer_config_path,
 )
+from ...deploy_env import RuntimeContext, materialize_command, resolve_deploy_context
 from ...io_utils import open_file
 from ...logging import format_subprocess_start
 from ..utils import backup, close_file_fp, kill_children, kill_process, remove_file
@@ -69,6 +70,8 @@ class CustomProcess:
         work_path: Optional[Path] = None,
         print_log: bool = False,
         process_name: str = "",
+        runtime_ctx: Optional[RuntimeContext] = None,
+        deploy_env: Optional[Mapping[str, str]] = None,
     ):
         self.command = command
         self.bak_path = bak_path
@@ -79,7 +82,13 @@ class CustomProcess:
         self.process = None
         self.print_log = print_log
         self.process_name = process_name
-        self.env = os.environ.copy()
+        if (runtime_ctx is None) != (deploy_env is None):
+            raise ValueError("runtime_ctx and deploy_env must be provided together")
+        if runtime_ctx is None:
+            self._runtime_ctx, self.env = resolve_deploy_context()
+        else:
+            self._runtime_ctx = runtime_ctx
+            self.env = dict(deploy_env)
         from ...config.constant import ProcessState, Stage
 
         self._process_stage = ProcessState(stage=Stage.stop)
@@ -249,6 +258,17 @@ class CustomProcess:
         from ...config.config import get_settings
 
         if not run_params:
+            if CUSTOM_OUTPUT not in self.env:
+                self.env[CUSTOM_OUTPUT] = str(get_settings().output)
+            if MODEL_EVAL_STATE_CONFIG_PATH not in self.env:
+                self.env[MODEL_EVAL_STATE_CONFIG_PATH] = str(ms_serviceparam_optimizer_config_path)
+            if self.command:
+                self.command = materialize_command(
+                    self.command,
+                    self.env,
+                    self._runtime_ctx,
+                    cwd=getattr(self, "work_path", None),
+                )
             return
         for k in run_params:
             if k.config_position == "env":
@@ -319,6 +339,14 @@ class CustomProcess:
         # Set the json file to read
         if MODEL_EVAL_STATE_CONFIG_PATH not in self.env:
             self.env[MODEL_EVAL_STATE_CONFIG_PATH] = str(ms_serviceparam_optimizer_config_path)
+
+        if self.command:
+            self.command = materialize_command(
+                self.command,
+                self.env,
+                self._runtime_ctx,
+                cwd=getattr(self, "work_path", None),
+            )
 
     def _flush_run_log(self) -> None:
         if self.run_log_fp is None:

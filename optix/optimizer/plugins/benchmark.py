@@ -32,6 +32,7 @@ from ...config.config import (
     get_settings,
 )
 from ...config.custom_command import AisBenchCommand, VllmBenchmarkCommand
+from ...deploy_env import materialize_command
 from ...io_utils import open_file, walk_files
 from ...optimizer.errors import BenchmarkResultError
 from ...optimizer.interfaces.benchmark import BenchmarkInterface
@@ -86,10 +87,11 @@ class AisBench(BenchmarkInterface):
 
     def update_command(self):
         self.command = AisBenchCommand(self.config.command).command
+        self.command = materialize_command(self.command, self.env, self._runtime_ctx, cwd=self.work_path)
 
     def get_models_config_path(self):
         cmd = [self.command[0], "--models", self.config.command.models, "--search"]
-        res = subprocess.run(cmd, text=True, capture_output=True)
+        res = subprocess.run(cmd, text=True, capture_output=True, env=self.env)
         if res.returncode != 0:
             raise ValueError(f"The command {cmd} execution failed, with an exit code of {res.returncode}")
         _output = res.stdout
@@ -245,10 +247,11 @@ class VllmBenchMark(BenchmarkInterface):
             settings = get_settings()
             self.config = settings.vllm_benchmark
         super().__init__(*args, **kwargs)
-        self.command = VllmBenchmarkCommand(self.config.command).command
+        self.update_command()
 
     def update_command(self):
         self.command = VllmBenchmarkCommand(self.config.command).command
+        self.command = materialize_command(self.command, self.env, self._runtime_ctx, cwd=self.work_path)
 
     def stop(self, del_log: bool = True):
         # Delete output files

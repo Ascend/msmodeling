@@ -21,8 +21,8 @@
 <details>
 <summary><b>DeepSeek 系列</b></summary>
 
-🔹 [2026.06.04] msModeling 新增 **DeepSeek-V4** 模型支持  
-🔹 [2026.04.20] msModeling 新增 **DeepSeek V3.2** 模型支持  
+🔹 [2026.06.04] msModeling 新增 **DeepSeek-V4** 模型支持
+🔹 [2026.04.20] msModeling 新增 **DeepSeek V3.2** 模型支持
 🔹 [2025.09.06] msModeling 新增 **DeepSeek V3** 模型支持
 
 </details>
@@ -30,8 +30,8 @@
 <details>
 <summary><b>Kimi 系列</b></summary>
 
-🔹 [2026.06.11] msModeling 新增 **Kimi-K2.6** 模型支持  
-🔹 [2026.05.27] msModeling 新增 **Kimi-K2.5** 模型支持  
+🔹 [2026.06.11] msModeling 新增 **Kimi-K2.6** 模型支持
+🔹 [2026.05.27] msModeling 新增 **Kimi-K2.5** 模型支持
 🔹 [2025.09.06] msModeling 新增 **Kimi-K2** 模型支持
 
 </details>
@@ -39,12 +39,12 @@
 <details>
 <summary><b>Qwen 系列</b></summary>
 
-🔹 [2026.07.14] msModeling 新增 **Qwen3.6** 图片输入支持  
-🔹 [2026.07.14] msModeling 新增 **Qwen3.6 Dense / MoE** 文本输入支持  
-🔹 [2026.04.20] msModeling 新增 **Qwen3.5** 图片输入支持  
-🔹 [2026.03.31] msModeling 新增 **Qwen3.5 Dense / MoE** 文本输入支持  
-🔹 [2025.12.25] msModeling 新增 **Qwen3 MoE** 模型支持  
-🔹 [2025.09.18] msModeling 新增 **Qwen3-Next** 模型支持  
+🔹 [2026.07.14] msModeling 新增 **Qwen3.6** 图片输入支持
+🔹 [2026.07.14] msModeling 新增 **Qwen3.6 Dense / MoE** 文本输入支持
+🔹 [2026.04.20] msModeling 新增 **Qwen3.5** 图片输入支持
+🔹 [2026.03.31] msModeling 新增 **Qwen3.5 Dense / MoE** 文本输入支持
+🔹 [2025.12.25] msModeling 新增 **Qwen3 MoE** 模型支持
+🔹 [2025.09.18] msModeling 新增 **Qwen3-Next** 模型支持
 🔹 [2025.08.18] msModeling 新增 **Qwen3 Dense** 模型支持
 
 </details>
@@ -52,9 +52,9 @@
 <details>
 <summary><b>GLM 系列</b></summary>
 
-🔹 [2026.07.07] msModeling 新增 **GLM5.2** 模型支持  
-🔹 [2026.06.04] msModeling 新增 **GLM5.1** 模型支持  
-🔹 [2026.04.30] msModeling 新增 **GLM5** 模型支持  
+🔹 [2026.07.07] msModeling 新增 **GLM5.2** 模型支持
+🔹 [2026.06.04] msModeling 新增 **GLM5.1** 模型支持
+🔹 [2026.04.30] msModeling 新增 **GLM5** 模型支持
 🔹 [2026.03.31] msModeling 新增 **GLM-4 MoE** 模型支持
 
 </details>
@@ -62,7 +62,7 @@
 <details>
 <summary><b>MiniMax 系列</b></summary>
 
-🔹 [2026.06.25] msModeling 新增 **MiniMax M2.7** 模型支持  
+🔹 [2026.06.25] msModeling 新增 **MiniMax M2.7** 模型支持
 🔹 [2026.05.29] msModeling 新增 **MiniMax M2.5** 模型支持
 
 </details>
@@ -76,15 +76,15 @@
 <details>
 <summary><b>模型推理性能仿真</b></summary>
 
-🔹 多硬件仿真（Atlas 800 A2/A3、Atlas 350 等昇腾设备），支持自定义设备画像  
-🔹 LLM Prefill / Decode 分阶段仿真  
-🔹 Prefix Cache 仿真  
-🔹 MTP 投机解码仿真  
-🔹 编译与图优化、多流通算掩盖  
-🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 等）  
-🔹 并行与 MoE 扩展（TP / DP / EP，及 Embedding TP、Vision TP 等细粒度并行）  
-🔹 性能模型切换（Roofline / Profiling）  
-🔹 Chrome Trace / Debug  
+🔹 多硬件仿真（Atlas 800 A2/A3、Atlas 350 等昇腾设备），支持自定义设备画像
+🔹 LLM Prefill / Decode 分阶段仿真
+🔹 Prefix Cache 仿真
+🔹 MTP 投机解码仿真
+🔹 编译与图优化、多流通算掩盖
+🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 等）
+🔹 并行与 MoE 扩展（TP / DP / EP，及 Embedding TP、Vision TP 等细粒度并行）
+🔹 性能模型切换（Roofline / Profiling）
+🔹 Chrome Trace / Debug
 🔹 视频生成 DiT 仿真（Ulysses、CFG、DiT Cache）
 
 </details>
@@ -92,14 +92,14 @@
 <details>
 <summary><b>服务化性能仿真</b></summary>
 
-🔹 LLM / VLM 约束下吞吐优化（TTFT / TPOT / 服务成本）  
-🔹 PD 模式（混部 / 分离 / 配比）  
-🔹 并行策略搜索（TP / EP / MOE-DP）  
-🔹 MTP 配置搜索  
-🔹 Chunked Prefill 仿真  
-🔹 Prefix Cache 仿真  
-🔹 变长负载仿真  
-🔹 多流通算掩盖  
+🔹 LLM / VLM 约束下吞吐优化（TTFT / TPOT / 服务成本）
+🔹 PD 模式（混部 / 分离 / 配比）
+🔹 并行策略搜索（TP / EP / MOE-DP）
+🔹 MTP 配置搜索
+🔹 Chunked Prefill 仿真
+🔹 Prefix Cache 仿真
+🔹 变长负载仿真
+🔹 多流通算掩盖
 🔹 跨硬件对比
 
 </details>
@@ -107,9 +107,9 @@
 <details>
 <summary><b>Web UI</b></summary>
 
-🔹 LLM / VL 前向仿真与视频生成仿真  
-🔹 吞吐寻优实验（PD 混部 / 分离 / 配比）  
-🔹 命令预览与任务缓存  
+🔹 LLM / VL 前向仿真与视频生成仿真
+🔹 吞吐寻优实验（PD 混部 / 分离 / 配比）
+🔹 命令预览与任务缓存
 🔹 结果展示与导出（曲线、表格、显存/算子明细、Excel）
 
 </details>
@@ -117,8 +117,8 @@
 <details>
 <summary><b>服务化实测寻优</b></summary>
 
-🔹 服务框架实测寻优（PSO + Early Rejection）  
-🔹 多引擎支持（vLLM、MindIE）与评测策略  
+🔹 服务框架实测寻优（PSO + Early Rejection）
+🔹 多引擎支持（vLLM、MindIE）与评测策略
 🔹 自定义寻优配置与断点续跑
 
 </details>
@@ -137,7 +137,7 @@ msModeling 提供模型推理性能仿真、服务化性能仿真和服务化实
 |---------|--------|
 | [**模型推理性能仿真**](./docs/zh/user_guide/msmodeling_tensor_cast_user_guide.md) | 模型仿真模块，拦截 PyTorch 计算图，在指定设备画像上模拟推理过程，输出算子级性能分解、内存占用、算子 shape 及 Chrome Trace。 |
 | [**服务化性能仿真**](./docs/zh/user_guide/msmodeling_throughput_optimizer_user_guide.md) | 吞吐优化仿真模块，在 SLO 约束下自动搜索最优并行策略与 batch 配置，支持 PD 混部、PD 分离、PD 配比三种模式。 |
-| [**服务化实测寻优**](./docs/zh/user_guide/optix_user_guide.md) | 服务化实测寻优，基于 PSO 粒子寻优算法在 vLLM、MindIE 等真实服务框架上自动搜索满足时延约束的最优部署参数。 |
+| [**服务化实测寻优**](./docs/zh/user_guide/optix_user_guide.md) | 服务化实测寻优，基于 PSO 粒子寻优算法在 vLLM、MindIE 等真实服务框架上自动搜索满足时延约束的最优部署参数。msmodeling / OptiX 应安装在 uv 虚拟环境中，vLLM、MindIE 和测评工具默认使用系统部署环境。 |
 
 ## 🚀 快速入门
 

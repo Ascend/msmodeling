@@ -76,7 +76,7 @@ class TestPluginRun(unittest.TestCase):
 
     @patch(_VLLM_BENCH_BEFORE_RUN)
     @patch(_POPEN_TARGET)
-    @patch("optix.config.custom_command.shutil.which", return_value="/usr/bin/vllm")
+    @patch("optix.deploy_env.shutil.which", return_value="/usr/bin/vllm")
     def test_vllm_benchmark_run_invokes_popen(self, mock_which, mock_popen, mock_before_run):
         mock_popen.return_value = FakePopen()
         benchmark = VllmBenchMark.__new__(VllmBenchMark)
@@ -116,7 +116,7 @@ class TestPluginRun(unittest.TestCase):
 
     @patch(_VLLM_BENCH_BEFORE_RUN)
     @patch(_POPEN_TARGET)
-    @patch("optix.config.custom_command.shutil.which", return_value="/usr/bin/vllm")
+    @patch("optix.deploy_env.shutil.which", return_value="/usr/bin/vllm")
     def test_vllm_benchmark_run_invalid_env_logs_error(self, mock_which, mock_popen, mock_before_run):
         mock_popen.return_value = FakePopen()
         benchmark = VllmBenchMark.__new__(VllmBenchMark)
@@ -135,7 +135,7 @@ class TestPluginRun(unittest.TestCase):
     @patch(_MINDIE_BEFORE_RUN)
     @patch(_POPEN_TARGET)
     @patch(
-        "optix.config.custom_command.shutil.which",
+        "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie_llm_server",
     )
     def test_mindie_simulator_run_invokes_popen(
@@ -166,7 +166,7 @@ class TestPluginRun(unittest.TestCase):
 
     @patch(_VLLM_SIM_BEFORE_RUN)
     @patch(_POPEN_TARGET)
-    @patch("optix.config.custom_command.shutil.which", return_value="/usr/local/bin/vllm")
+    @patch("optix.deploy_env.shutil.which", return_value="/usr/local/bin/vllm")
     def test_vllm_simulator_run_invokes_popen(self, mock_which, mock_popen, mock_before_run):
         mock_popen.return_value = FakePopen()
         mock_config = MagicMock()

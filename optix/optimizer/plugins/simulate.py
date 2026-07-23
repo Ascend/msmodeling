@@ -30,7 +30,8 @@ from ...config.config import (
     get_settings,
 )
 from ...config.constant import Stage
-from ...config.custom_command import MindieCommand, VllmCommand
+from ...config.custom_command import VllmCommand
+from ...deploy_env import materialize_command, resolve_mindie_argv
 from ...io_utils import open_file
 from ..interfaces.simulator import SimulatorInterface
 from ..utils import backup, remove_file
@@ -41,6 +42,10 @@ Mindie simulation engine - provides interfaces for starting/stopping mindie simu
 The LocalSimulate class provides comprehensive simulation capabilities for running mindie models
 locally, including configuration management, port resolution, and multi-instance support.
 """
+
+
+def _find_executable(name: str, env: dict[str, str]) -> str | None:
+    return shutil.which(name, path=env.get("PATH") or None)
 
 
 @dataclass
@@ -86,7 +91,7 @@ class Simulator(SimulatorInterface):
             self.config.config_bak_path.unlink()
         with open_file(self.config.config_bak_path, "w") as fout:
             json.dump(self.default_config, fout, indent=4)
-        self.command = MindieCommand(self.config.command).command
+        self.update_command()
 
     @property
     def base_url(self) -> str:
@@ -219,14 +224,15 @@ class Simulator(SimulatorInterface):
         else:
             raise ValueError(f"Not Support type {type(origin_config)}")
 
-    def update_command(self):
-        self.command = MindieCommand(self.config.command).command
+    def update_command(self) -> None:
+        raw_command = resolve_mindie_argv(self.env)
+        self.command = materialize_command(raw_command, self.env, self._runtime_ctx, cwd=self.work_path)
 
     def before_run(self, run_params: Optional[tuple[OptimizerConfigField]] = None):
         self.update_config(run_params)
         super().before_run(run_params)
 
-        pkill_path = shutil.which("pkill")
+        pkill_path = _find_executable("pkill", self.env)
         if not pkill_path:
             logger.warning("pkill command not found in PATH")
             return
@@ -239,7 +245,7 @@ class Simulator(SimulatorInterface):
             cwd=self.work_path,
         )
 
-        npu_smi_path = shutil.which("npu-smi")
+        npu_smi_path = _find_executable("npu-smi", self.env)
         if not npu_smi_path:
             logger.warning("npu-smi command not found in PATH")
             return
@@ -305,7 +311,7 @@ class VllmSimulator(SimulatorInterface):
             self.config = settings.vllm
         super().__init__(*args, process_name=self.config.process_name, **kwargs)
 
-        self.command = VllmCommand(self.config.command).command
+        self.update_command()
 
     @property
     def base_url(self) -> str:
@@ -371,7 +377,7 @@ class VllmSimulator(SimulatorInterface):
             except Exception as e:
                 logger.warning(f"Unexpected error in targeted stop, fallback to pkill: {e}")
 
-        pkill_path = shutil.which("pkill")
+        pkill_path = _find_executable("pkill", self.env)
         if not pkill_path:
             logger.error("pkill command not found in PATH")
             return False
@@ -392,6 +398,7 @@ class VllmSimulator(SimulatorInterface):
                         text=True,
                         timeout=10,
                         check=False,
+                        env=self.env,
                     )
                 except subprocess.SubprocessError as e:
                     logger.warning(f"Failed to send signal {signal} to vllm: {e}")
@@ -409,7 +416,7 @@ class VllmSimulator(SimulatorInterface):
 
     def _is_vllm_running(self) -> bool:
         """Check if vllm process is running"""
-        pgrep_path = shutil.which("pgrep")
+        pgrep_path = _find_executable("pgrep", self.env)
         if not pgrep_path:
             logger.warning("pgrep command not found in PATH")
             return False
@@ -420,6 +427,7 @@ class VllmSimulator(SimulatorInterface):
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=5,
+                env=self.env,
             )
             count = int((result.stdout or "0").strip() or "0")
             return count > 0
@@ -437,7 +445,7 @@ class VllmSimulator(SimulatorInterface):
 
     def _log_residual_processes(self):
         """Log residual process info for diagnostics"""
-        pgrep_path = shutil.which("pgrep")
+        pgrep_path = _find_executable("pgrep", self.env)
         if not pgrep_path:
             logger.warning("pgrep command not found in PATH")
             return
@@ -449,11 +457,13 @@ class VllmSimulator(SimulatorInterface):
                 stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=5,
+                env=self.env,
             )
             if result.stdout:
                 logger.warning(f"Residual vllm processes:\n{result.stdout}")
         except subprocess.SubprocessError:
             pass
 
-    def update_command(self):
-        self.command = VllmCommand(self.config.command).command
+    def update_command(self) -> None:
+        raw_command = VllmCommand(self.config.command).command
+        self.command = materialize_command(raw_command, self.env, self._runtime_ctx, cwd=self.work_path)

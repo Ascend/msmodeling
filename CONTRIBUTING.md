@@ -106,16 +106,12 @@ git fetch upstream
 
 ```bash
 pip install uv
-uv venv --python 3.10 .venv
-
-# Linux / macOS
-source .venv/bin/activate
-# Windows
-# .venv\Scripts\activate
-
+cd msmodeling
 uv sync
-# 或：uv pip install -r requirements.txt
+# 可选：uv sync --group lint
 ```
+
+`uv sync` 会自动创建 `.venv` 并以可编辑模式安装本项目，无需 `uv venv` 或 `pip install -e .`。也可使用备选方式：`uv pip install -r requirements.txt`（见安装指南）。
 
 **安装 pre-commit：**
 

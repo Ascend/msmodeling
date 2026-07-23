@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from optix.config.config import PerformanceIndex, get_settings
+from optix.deploy_env import RuntimeContext
 from optix.io_utils import open_file as _patch_open_file
 from optix.optimizer.plugins.benchmark import (
     VllmBenchMark,
@@ -102,7 +103,7 @@ def results_per_request_file(tmpdir):
 
 
 class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def setUp(self, mock_which):
         # Create a mock benchmark_config object with proper command attributes
         self.mock_benchmark_config = MagicMock()
@@ -151,7 +152,7 @@ class TestBenchMarkGetPerformanceIndex(unittest.TestCase):
 
 
 class TestVllmBenchMarkExtended(unittest.TestCase):
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def setUp(self, mock_which):
         self.mock_benchmark_config = MagicMock()
         self.mock_benchmark_config.command.host = "127.0.0.1"
@@ -164,7 +165,7 @@ class TestVllmBenchMarkExtended(unittest.TestCase):
         mock_which.return_value = "/usr/local/bin/vllm"
         self.benchmark = VllmBenchMark(self.mock_benchmark_config)
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_update_command(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
         self.benchmark.update_command()
@@ -199,7 +200,8 @@ class TestVllmBenchMarkExtended(unittest.TestCase):
             ),
         )
         self.benchmark.command = ["vllm", "bench", "$CONCURRENCY"]
-        self.benchmark.before_run(params)
+        with patch("optix.deploy_env.shutil.which", return_value="/usr/local/bin/vllm"):
+            self.benchmark.before_run(params)
 
 
 class TestParseResultEdgeCases(unittest.TestCase):
@@ -221,7 +223,7 @@ class TestAisBenchInit(unittest.TestCase):
 
     @patch("optix.optimizer.plugins.benchmark.subprocess.run")
     @patch("optix.optimizer.plugins.benchmark.open_file")
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_init_with_config(self, mock_which, mock_open_file, mock_run):
         from optix.optimizer.plugins.benchmark import AisBench
 
@@ -249,7 +251,7 @@ class TestAisBenchInit(unittest.TestCase):
         assert bench.work_path == "/work"
 
     @patch("optix.optimizer.plugins.benchmark.subprocess.run")
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_get_models_config_path_failure(self, mock_which, mock_run):
         from optix.optimizer.plugins.benchmark import AisBench
 
@@ -478,6 +480,11 @@ class TestAisBenchBeforeRun(unittest.TestCase):
             bench.model_config_path = Path(config_file)
             bench.command = ["ais_bench", "--models", "model1", "$CONCURRENCY"]
             bench.env = {}
+            bench._runtime_ctx = RuntimeContext(
+                in_virtualenv=False,
+                virtualenv_root=None,
+                python_executable=Path("/usr/bin/python"),
+            )
             bench.run_log_fp = None
             bench.run_log = None
             bench.run_log_offset = 0
@@ -502,6 +509,7 @@ class TestAisBenchBeforeRun(unittest.TestCase):
             )
 
             with (
+                patch("optix.deploy_env.shutil.which", return_value="/usr/bin/ais_bench"),
                 patch("optix.optimizer.plugins.benchmark.remove_file"),
                 patch(
                     "optix.optimizer.plugins.benchmark.open_file",
@@ -553,7 +561,7 @@ class TestAisBenchBackup(unittest.TestCase):
 class TestVllmBenchMarkBeforeRun(unittest.TestCase):
     """Test VllmBenchMark.before_run"""
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_before_run_cleans_output(self, mock_which):
         mock_which.return_value = "/usr/bin/vllm"
         from optix.config.config import OptimizerConfigField
@@ -587,7 +595,7 @@ class TestVllmBenchMarkBeforeRun(unittest.TestCase):
 class TestVllmBenchMarkGetPerformanceIndexNoJson(unittest.TestCase):
     """Test VllmBenchMark.get_performance_index with invalid json"""
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_get_performance_index_json_decode_error(self, mock_which):
         import os
         import tempfile
@@ -613,7 +621,7 @@ class TestVllmBenchMarkGetPerformanceIndexNoJson(unittest.TestCase):
         # Should not crash, returns empty PerformanceIndex
         assert result is not None
 
-    @patch("optix.config.custom_command.shutil.which")
+    @patch("optix.deploy_env.shutil.which")
     def test_get_performance_index_zero_prompts(self, mock_which):
         import os
         import tempfile
