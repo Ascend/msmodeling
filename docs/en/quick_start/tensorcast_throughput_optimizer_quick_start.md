@@ -1,4 +1,4 @@
-# Model Inference Performance Simulation and Service-Level Performance Simulation Quick Start
+# msModeling Quick Start
 
 <br>
 
@@ -10,13 +10,13 @@ msModeling provides single-model performance simulation and service-level throug
 
 **Experience Map (core operations take about 10 minutes)**
 
-> **Recommended order**: Step 1 is the environment baseline. Step 2 runs TensorCast single-model simulation. Step 3 runs Throughput Optimizer throughput optimization.
+> **Recommended order**: Step 1 is the environment baseline. Step 2 runs model inference performance simulation. Step 3 runs service-level performance simulation.
 
 | Step | Stage | Core Module | Reference Operation Time | Suggested Concept Study |
 | :---: | :---: | :--- | :---: | :---: |
 | **1** | **Environment setup** | `msModeling` | 2 minutes | 5 minutes |
-| **2** | **Single-model simulation** | `TensorCast` | 1 minute | 10 minutes |
-| **3** | **Throughput optimization** | `Throughput Optimizer` | 2 minutes | 15 minutes |
+| **2** | **Model inference performance simulation** | `TensorCast` | 1 minute | 10 minutes |
+| **3** | **Service-level performance simulation** | `Throughput Optimizer` | 2 minutes | 15 minutes |
 
 ### 1.2 Environment Preparation
 
@@ -55,7 +55,7 @@ python -m cli.inference.throughput_optimizer --help
 
 If the commands do not print help information, check that the virtual environment is activated, dependencies are installed, and `PYTHONPATH` points to the msModeling repository root.
 
-### 2.2 Single-Model Simulation: Run TensorCast Text Generation
+### 2.2 Run TensorCast Text Generation
 
 TensorCast performs performance modeling for PyTorch programs. It does not execute the model on a real accelerator. Instead, it intercepts the computation graph and estimates operator latency, memory usage, and overall inference performance based on the target device profile.
 
@@ -116,14 +116,14 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
 
 After generation, open the trace file with `chrome://tracing` or MindStudio Insight.
 
-### 2.3 Throughput Optimization: Run the ServingCast Throughput Optimizer
+### 2.3 Run Throughput Optimizer
 
 The ServingCast throughput optimizer searches for the best parallel strategy and batch configuration under SLO constraints such as TTFT and TPOT. It helps estimate the maximum serving throughput of a target model on target hardware.
 
 > [!NOTE]
 > PD colocated means Prefill and Decode run in the same instance. It is suitable for quickly evaluating overall service throughput. To evaluate Prefill and Decode separately, see the [Throughput Optimizer Guide](../user_guide/msmodeling_throughput_optimizer_user_guide.md).
 
-#### 2.3.1 Run Throughput Optimization
+#### 2.3.1 Run Service-Level Performance Simulation
 
 The following command quickly evaluates a PD colocated scenario. For the first run, no explicit search dimensions are specified, so the tool uses the default TP search range. If the run takes too long, reduce `--num-devices` or specify `--tp-sizes` in advanced usage to narrow the search space.
 
@@ -140,12 +140,31 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### 2.3.2 Check Optimization Results
 
-If the command succeeds, the terminal prints candidate configurations and throughput metrics. Focus on:
+If the command succeeds, the terminal first prints the input configuration and best configuration summary, followed by a candidate parallel configuration table. For example:
+
+```text
+Input Configuration:
+  Model: Qwen/Qwen3-32B
+  Devices: 8 TEST_DEVICE
+  TPOT Limits: 50.0 ms
+
+Overall Best Configuration:
+  Best Throughput: 2161.56 tokens/s
+  TTFT: 13848.08 ms
+  TPOT: 49.98 ms
+
+Top 4 PD Aggregated Configurations:
+| Top | Throughput (token/s) | TTFT (ms) | TPOT (ms) | concurrency | num_devices | parallel           | batch_size |
+|  1  | 2161.56              | 13848.08  | 49.98     | 128         | 8           | TP=4 | PP=1 | DP=2 | 64         |
+```
+
+Focus on the following fields:
 
 - `TP` / `DP`: Recommended parallel strategy.
+- `concurrency`: Number of concurrent requests supported by the candidate configuration.
 - `batch size`: Batch size that satisfies the SLO constraints.
 - `TTFT` / `TPOT`: Time to first token and time per output token.
-- `token throughput`: System-level token throughput.
+- `Throughput (token/s)`: System-level output token throughput. A larger value indicates higher throughput.
 
 Success criteria:
 
