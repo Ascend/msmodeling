@@ -29,11 +29,17 @@
 ### 已完成
 
 - [x] 已完成hunyuanvideo的dit建模
+- [x] 已完成HunyuanVideo1.5 T2V normal-run建模和Diffusers pipeline加载。
+  - 支持的模型ID必须解析为同时提供`HunyuanVideo15Transformer3DModel`和
+    `HunyuanVideo15Pipeline`的canonical Diffusers checkpoint。
+  - 使用`HunyuanVideo_1_5_DiffusionTransformer`的Tencent原始checkpoint会被拒绝；
+    请改用上游或社区提供的Diffusers转换版本。
+  - 明确拒绝I2V variant。建模的T2V视觉输入是全零
+    `[batch_size, 729, image_embed_dim]`张量，其中`image_embed_dim`来自所选
+    canonical Transformer配置。
 
 ### 后续开发
 
-- [ ] 已完成hunyuanvideo1.5的dit建模
 - [ ] image输入的支持
 - [ ] vae建模
-- [ ] diffusers pipeline加载支持
 - [ ] 各种并行特性支持

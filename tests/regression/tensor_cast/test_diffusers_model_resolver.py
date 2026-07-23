@@ -1,10 +1,11 @@
+import json
 import logging
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
-from tensor_cast.diffusers import model_resolver
+from tensor_cast.diffusers import model_resolver, pipeline_metadata
 from tensor_cast.model_config import RemoteSource
 
 
@@ -95,6 +96,207 @@ def test_resolve_diffusers_model_path_does_not_emit_info_log(
 
     assert result == "/cache/hf/Wan-AI/Wan2.2-T2V-A14B-Diffusers"
     assert "resolved to config-only snapshot path" not in caplog.text
+
+
+def test_resolve_diffusers_model_selection_preserves_snapshot_root_and_selected_variant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot_root = tmp_path / "snapshot"
+    target_subfolder = snapshot_root / "transformer" / "480p_t2v_distilled"
+    target_subfolder.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        model_resolver,
+        "snapshot_huggingface_config_only",
+        lambda _model_id: str(snapshot_root),
+    )
+
+    selection = model_resolver.resolve_diffusers_model_selection(
+        "tencent/HunyuanVideo-1.5/transformer/480p_t2v_distilled",
+        "huggingface",
+    )
+
+    assert selection.repository_root == str(snapshot_root)
+    assert selection.variant_path == str(target_subfolder)
+    assert selection.variant_id == "transformer/480p_t2v_distilled"
+    assert selection.is_remote
+
+
+@pytest.mark.parametrize("model_id", ("tencent/HunyuanVideo-1.5", "Tencent-Hunyuan/HunyuanVideo-1.5"))
+def test_resolve_diffusers_model_selection_rejects_raw_tencent_root(
+    model_id: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"_class_name": "HunyuanVideo_1_5_Pipeline"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_resolver, "snapshot_huggingface_config_only", lambda _model_id: str(tmp_path))
+
+    with pytest.raises(ValueError, match="canonical Diffusers checkpoint"):
+        model_resolver.resolve_diffusers_model_selection(model_id, "huggingface")
+
+
+def test_resolve_diffusers_model_selection_rejects_raw_local_tencent_root(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"_class_name": "HunyuanVideo_1_5_Pipeline"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="canonical Diffusers checkpoint"):
+        model_resolver.resolve_diffusers_model_selection(str(tmp_path), "huggingface")
+
+
+def test_resolve_diffusers_model_selection_rejects_direct_local_hunyuan_variant(tmp_path: Path) -> None:
+    variant = tmp_path / "transformer" / "480p_t2v_distilled"
+    variant.mkdir(parents=True)
+    (variant / "config.json").write_text(
+        json.dumps({"_class_name": "HunyuanVideo15Transformer3DModel"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="canonical checkpoint root.*model_index.json"):
+        model_resolver.resolve_diffusers_model_selection(str(variant), "huggingface")
+
+
+def test_resolve_hunyuanvideo15_pipeline_metadata_uses_diffusers_profile() -> None:
+    manifest = model_resolver.DiffusersPipelineManifest(
+        config_path="/snapshot/model_index.json",
+        config={
+            "_class_name": "HunyuanVideo15Pipeline",
+            "transformer": ["diffusers", "HunyuanVideo15Transformer3DModel"],
+        },
+        format="diffusers",
+    )
+    transformer_config = {
+        "_class_name": "HunyuanVideo15Transformer3DModel",
+        "image_embed_dim": 1152,
+        "task_type": "t2v",
+    }
+
+    metadata = pipeline_metadata.resolve_hunyuanvideo15_pipeline_metadata(manifest, transformer_config)
+
+    assert metadata.contract_version == "diffusers-hunyuanvideo15-v1"
+    assert metadata.vision_num_semantic_tokens == 729
+    assert metadata.vision_states_dim == 1152
+
+
+def test_resolve_hunyuanvideo15_pipeline_metadata_uses_transformer_image_embed_dim() -> None:
+    manifest = model_resolver.DiffusersPipelineManifest(
+        config_path="/snapshot/model_index.json",
+        config={
+            "_class_name": "HunyuanVideo15Pipeline",
+            "transformer": ["diffusers", "HunyuanVideo15Transformer3DModel"],
+        },
+        format="diffusers",
+    )
+
+    metadata = pipeline_metadata.resolve_hunyuanvideo15_pipeline_metadata(
+        manifest,
+        {
+            "_class_name": "HunyuanVideo15Transformer3DModel",
+            "image_embed_dim": 1024,
+            "task_type": "t2v",
+        },
+    )
+
+    assert metadata.vision_num_semantic_tokens == 729
+    assert metadata.vision_states_dim == 1024
+
+
+@pytest.mark.parametrize(
+    "transformer_component",
+    (None, "HunyuanVideo15Transformer3DModel", ["diffusers", "WanTransformer3DModel"]),
+)
+def test_resolve_hunyuanvideo15_pipeline_metadata_rejects_invalid_transformer_component(
+    transformer_component: object,
+) -> None:
+    manifest = model_resolver.DiffusersPipelineManifest(
+        config_path="/snapshot/model_index.json",
+        config={"_class_name": "HunyuanVideo15Pipeline", "transformer": transformer_component},
+        format="diffusers",
+    )
+
+    with pytest.raises(ValueError, match="transformer component"):
+        pipeline_metadata.resolve_hunyuanvideo15_pipeline_metadata(
+            manifest,
+            {
+                "_class_name": "HunyuanVideo15Transformer3DModel",
+                "image_embed_dim": 1152,
+                "task_type": "t2v",
+            },
+        )
+
+
+def test_resolve_diffusers_pipeline_manifest_rejects_missing_root_manifest(tmp_path: Path) -> None:
+    selection = model_resolver.DiffusersModelSelection(
+        repository_root=str(tmp_path),
+        variant_path=str(tmp_path / "transformer" / "480p_t2v_distilled"),
+        variant_id="transformer/480p_t2v_distilled",
+        source=RemoteSource.huggingface,
+        is_remote=True,
+    )
+
+    with pytest.raises(ValueError, match="expected model_index.json"):
+        model_resolver.resolve_diffusers_pipeline_manifest(selection)
+
+
+@pytest.mark.parametrize(
+    ("manifest", "transformer_config", "match"),
+    [
+        (
+            model_resolver.DiffusersPipelineManifest(
+                config_path="/snapshot/model_index.json",
+                config={"_class_name": "HunyuanVideo15Pipeline"},
+                format="diffusers",
+            ),
+            {
+                "_class_name": "HunyuanVideo15Transformer3DModel",
+                "image_embed_dim": 1152,
+                "task_type": "i2v",
+            },
+            "I2V variants are not supported",
+        ),
+        (
+            model_resolver.DiffusersPipelineManifest(
+                config_path="/snapshot/model_index.json",
+                config={
+                    "_class_name": "HunyuanVideo15Pipeline",
+                    "transformer": ["diffusers", "HunyuanVideo15Transformer3DModel"],
+                },
+                format="diffusers",
+            ),
+            {
+                "_class_name": "HunyuanVideo15Transformer3DModel",
+                "image_embed_dim": "invalid",
+                "task_type": "t2v",
+            },
+            "image_embed_dim",
+        ),
+        (
+            model_resolver.DiffusersPipelineManifest(
+                config_path="/snapshot/model_index.json",
+                config={"_class_name": "HunyuanVideo15PipelineV2"},
+                format="diffusers",
+            ),
+            {
+                "_class_name": "HunyuanVideo15Transformer3DModel",
+                "image_embed_dim": 1152,
+                "task_type": "t2v",
+            },
+            "Unsupported HunyuanVideo1.5 pipeline contract",
+        ),
+    ],
+)
+def test_resolve_hunyuanvideo15_pipeline_metadata_rejects_invalid_contracts(
+    manifest: model_resolver.DiffusersPipelineManifest,
+    transformer_config: dict,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        pipeline_metadata.resolve_hunyuanvideo15_pipeline_metadata(manifest, transformer_config)
 
 
 def test_resolve_diffusers_model_path_allows_huggingface_repo_subfolder(

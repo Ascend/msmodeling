@@ -465,9 +465,18 @@ class ModelConfig:
             self.num_hidden_layers_override = 0
 
 
+@dataclasses.dataclass(frozen=True)
+class DiffusersPipelineMetadata:
+    pipeline_class: str
+    contract_version: str
+    vision_num_semantic_tokens: int
+    vision_states_dim: int
+
+
 @dataclasses.dataclass
 class DiffusersConfig:
     model_path: Optional[str] = None
+    pipeline_metadata: Optional[DiffusersPipelineMetadata] = None
     text_config: Optional[Type["DiffusersTextConfig"]] = None
     transformer_config: Optional[Type["DiffusersTransformerConfig"]] = None
     vae_config: Optional[Type["DiffusersVaeConfig"]] = None

@@ -9,6 +9,8 @@ from tensor_cast import model_hub
 EXPECTED_CONFIG_JSON_ALLOW_PATTERNS = [
     "config.json",
     "**/config.json",
+    "model_index.json",
+    "**/model_index.json",
     "preprocessor_config.json",
 ]
 
@@ -32,12 +34,20 @@ def test_huggingface_filter_patterns_match_root_and_nested_configs() -> None:
             [
                 "config.json",
                 "sub/config.json",
+                "model_index.json",
+                "sub/model_index.json",
                 "preprocessor_config.json",
                 "weights.safetensors",
             ],
             allow_patterns=model_hub.CONFIG_JSON_ALLOW_PATTERNS,
         )
-    ) == ["config.json", "sub/config.json", "preprocessor_config.json"]
+    ) == [
+        "config.json",
+        "sub/config.json",
+        "model_index.json",
+        "sub/model_index.json",
+        "preprocessor_config.json",
+    ]
 
 
 def test_huggingface_config_only_snapshot_uses_allow_patterns(

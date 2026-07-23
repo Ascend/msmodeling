@@ -106,6 +106,13 @@ def test_cli_video_generate_run_inference_passes_remote_source_to_builder(
 
     captured_builds: list[dict[str, object]] = []
     resolver_calls: list[tuple[str, str]] = []
+    selection = model_resolver.DiffusersModelSelection(
+        repository_root="/cache/modelscope/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        variant_path="/cache/modelscope/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        variant_id=None,
+        source=None,
+        is_remote=True,
+    )
 
     class DummyRuntime:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -140,7 +147,7 @@ def test_cli_video_generate_run_inference_passes_remote_source_to_builder(
         quant_config: object,
         dtype: torch.dtype,
         remote_source: str,
-        resolved_model_path: str | None = None,
+        model_selection: model_resolver.DiffusersModelSelection | None = None,
     ) -> tuple[DummyModel, object]:
         captured_builds.append(
             {
@@ -149,7 +156,7 @@ def test_cli_video_generate_run_inference_passes_remote_source_to_builder(
                 "quant_config": quant_config,
                 "dtype": dtype,
                 "remote_source": remote_source,
-                "resolved_model_path": resolved_model_path,
+                "model_selection": model_selection,
             }
         )
         return DummyModel(), model_config
@@ -168,14 +175,17 @@ def test_cli_video_generate_run_inference_passes_remote_source_to_builder(
         types.SimpleNamespace(build_diffusers_transformer_model=fake_build_diffusers_transformer_model),
     )
 
-    def fake_resolve_diffusers_model_path(model_id: str, remote_source: str) -> str:
+    def fake_resolve_diffusers_model_selection(
+        model_id: str,
+        remote_source: str,
+    ) -> model_resolver.DiffusersModelSelection:
         resolver_calls.append((model_id, remote_source))
-        return "/cache/modelscope/Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+        return selection
 
     monkeypatch.setitem(
         sys.modules,
         "tensor_cast.diffusers.model_resolver",
-        types.SimpleNamespace(resolve_diffusers_model_path=fake_resolve_diffusers_model_path),
+        types.SimpleNamespace(resolve_diffusers_model_selection=fake_resolve_diffusers_model_selection),
     )
     monkeypatch.setattr(video_generate, "AnalyticPerformanceModel", lambda device_profile: object())
     monkeypatch.setattr(video_generate, "MemoryTracker", lambda device_profile: object())
@@ -208,7 +218,7 @@ def test_cli_video_generate_run_inference_passes_remote_source_to_builder(
             "quant_config": captured_builds[0]["quant_config"],
             "dtype": torch.float16,
             "remote_source": "modelscope",
-            "resolved_model_path": "/cache/modelscope/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+            "model_selection": selection,
         }
     ]
     assert resolver_calls == [("Wan-AI/Wan2.2-T2V-A14B-Diffusers", "modelscope")]
@@ -284,7 +294,15 @@ def test_cli_video_generate_run_inference_cfg_batch_concat_path(
     monkeypatch.setitem(
         sys.modules,
         "tensor_cast.diffusers.model_resolver",
-        types.SimpleNamespace(resolve_diffusers_model_path=lambda model_id, remote_source: model_id),
+        types.SimpleNamespace(
+            resolve_diffusers_model_selection=lambda model_id, remote_source: model_resolver.DiffusersModelSelection(
+                repository_root=model_id,
+                variant_path=model_id,
+                variant_id=None,
+                source=None,
+                is_remote=True,
+            )
+        ),
     )
     monkeypatch.setattr(video_generate, "AnalyticPerformanceModel", lambda device_profile: object())
     monkeypatch.setattr(video_generate, "MemoryTracker", lambda device_profile: object())

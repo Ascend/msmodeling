@@ -100,6 +100,7 @@ def generate_extra_input(batch_size, seq_lens, model_config):
             batch_size=batch_size,
             seq_lens=seq_lens,
             dtype=model_config.transformer_config.dtype,
+            pipeline_metadata=getattr(model_config, "pipeline_metadata", None),
             **model_config.transformer_config.model_config,
         )
     )
@@ -152,7 +153,7 @@ def run_inference(
 ):
     from tensor_cast.diffusers.diffusers_attention import set_sp_group, use_custom_sdpa
     from tensor_cast.diffusers.diffusers_model import build_diffusers_transformer_model
-    from tensor_cast.diffusers.model_resolver import resolve_diffusers_model_path
+    from tensor_cast.diffusers.model_resolver import resolve_diffusers_model_selection
 
     if device not in DeviceProfile.all_device_profiles:
         raise ValueError(f"Device '{device}' not recognized.")
@@ -175,7 +176,7 @@ def run_inference(
         **extra_kwargs,
     )
     dtype = str_to_dtype(dtype)
-    resolved_model_path = resolve_diffusers_model_path(model_id, remote_source)
+    model_selection = resolve_diffusers_model_selection(model_id, remote_source)
 
     model, model_config = build_diffusers_transformer_model(
         model_id,
@@ -183,7 +184,7 @@ def run_inference(
         quant_config,
         dtype,
         remote_source=remote_source,
-        resolved_model_path=resolved_model_path,
+        model_selection=model_selection,
     )
 
     def _duplicate_batch_tensors_for_cfg(inputs: dict, batch: int) -> dict:
@@ -220,7 +221,7 @@ def run_inference(
                 quant_config,
                 dtype,
                 remote_source=remote_source,
-                resolved_model_path=resolved_model_path,
+                model_selection=model_selection,
             )
             cache_state = cache_model.enable_dit_block_cache(CacheConfig(block_start=block_start, block_end=block_end))
             if cache_state is None:

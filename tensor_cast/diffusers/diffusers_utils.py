@@ -91,9 +91,17 @@ def generate_hunyuanvideo15_input(**kwargs):
             device=torch.device("meta"),
             dtype=dtype,
         )
-    image_embed_dim = kwargs.get("image_embed_dim")
-    if image_embed_dim is not None:
-        res["image_embeds"] = SafeMetaTensor((image_embed_dim, image_embed_dim, image_embed_dim), dtype=dtype)
+    pipeline_metadata = kwargs.get("pipeline_metadata")
+    if pipeline_metadata is None:
+        raise ValueError("HunyuanVideo1.5 T2V simulation requires pipeline metadata.")
+    res["image_embeds"] = SafeMetaTensor(
+        (
+            batch_size,
+            pipeline_metadata.vision_num_semantic_tokens,
+            pipeline_metadata.vision_states_dim,
+        ),
+        dtype=dtype,
+    )
     return res
 
 
@@ -125,22 +133,21 @@ class SafeMetaTensor(torch.Tensor):
     determine output shapes without real data. This class sidesteps the issue by
     returning a valid-shaped meta tensor directly in `__getitem__`.
 
-    Use this class for all meta tensors involved in indexing—especially boolean masks
-    and the tensors they index into. Avoid operations that convert it back to plain tensors
-    (e.g., `.bool()`, `.float()`), as they break the subclass protection.
+    Use this class for the meta tensor that receives boolean indexing. Protected
+    indexing returns a plain meta tensor so the subclass does not reach later model operations.
     """
 
     @staticmethod
     def __new__(cls, shape, dtype=None, device=None, requires_grad=False):
         if device is not None and device != torch.device("meta"):
             raise ValueError("SafeMetaTensor only supports 'meta' device.")
-        return torch.empty(shape, dtype=dtype, device="meta", requires_grad=requires_grad).as_subclass(cls)
+        return torch.zeros(shape, dtype=dtype, device="meta", requires_grad=requires_grad).as_subclass(cls)
 
     def __bool__(self):
         return True
 
     def __getitem__(self, idx):
         if isinstance(idx, torch.Tensor) and idx.dtype == torch.bool and idx.device.type == "meta":
-            return SafeMetaTensor((self.shape[0],) + self.shape[1:], dtype=self.dtype)
+            return torch.empty((self.shape[0],) + self.shape[1:], dtype=self.dtype, device="meta")
 
         return super().__getitem__(idx)

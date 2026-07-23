@@ -28,6 +28,7 @@ from tensor_cast.diffusers.dit_cache_registry import (
     register_dit_block_cache_spec,
     replace_blocks_in_range,
 )
+from tensor_cast.diffusers.model_resolver import DiffusersModelSelection
 
 
 class TestVideoGeneration(unittest.TestCase):
@@ -99,7 +100,7 @@ class TestVideoGeneration(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _create_mock_model_dir(self, transformer_config, vae_config):
-        temp_dir = tempfile.mkdtemp()
+        temp_dir = tempfile.mkdtemp(dir=os.path.realpath(os.getcwd()))
         model_dir = os.path.join(temp_dir, "mock_model")
         os.makedirs(model_dir, exist_ok=True)
 
@@ -107,6 +108,15 @@ class TestVideoGeneration(unittest.TestCase):
         os.makedirs(transformer_dir, exist_ok=True)
         with open(os.path.join(transformer_dir, "config.json"), "w", encoding="utf-8") as f:
             json.dump(transformer_config, f)
+        if transformer_config.get("_class_name") == "HunyuanVideo15Transformer3DModel":
+            with open(os.path.join(model_dir, "model_index.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "_class_name": "HunyuanVideo15Pipeline",
+                        "transformer": ["diffusers", "HunyuanVideo15Transformer3DModel"],
+                    },
+                    f,
+                )
 
         # Write VAE config
         vae_dir = os.path.join(model_dir, "vae")
@@ -207,6 +217,7 @@ class TestVideoGeneration(unittest.TestCase):
         )
         fake_model = MagicMock()
         fake_model.forward.return_value = torch.zeros(1, device="meta")
+        fake_model_selection = object()
         fake_runtime = MagicMock()
         fake_runtime.__enter__.return_value = fake_runtime
         fake_runtime.__exit__.return_value = False
@@ -222,9 +233,13 @@ class TestVideoGeneration(unittest.TestCase):
             patch.object(video_generate_mod, "create_quant_config") as mock_create_quant_config,
             patch.object(video_generate_mod, "str_to_dtype", return_value=torch.float16),
             patch(
+                "tensor_cast.diffusers.model_resolver.resolve_diffusers_model_selection",
+                return_value=fake_model_selection,
+            ),
+            patch(
                 "tensor_cast.diffusers.diffusers_model.build_diffusers_transformer_model",
                 return_value=(fake_model, fake_model_config),
-            ),
+            ) as mock_build_model,
             patch("tensor_cast.diffusers.diffusers_attention.use_custom_sdpa", return_value=fake_sdpa),
             patch("tensor_cast.diffusers.diffusers_attention.set_sp_group"),
             patch.object(video_generate_mod, "Runtime", return_value=fake_runtime),
@@ -247,10 +262,15 @@ class TestVideoGeneration(unittest.TestCase):
                 frame_num=self.frame_num,
                 sample_step=1,
                 dtype="float16",
+                dit_cache=True,
+                cache_step_range="0,0",
+                cache_step_interval=2,
             )
 
         mock_perf_model.assert_called_once()
         mock_create_quant_config.assert_called_once()
+        assert mock_build_model.call_count == 2
+        assert all(call.kwargs["model_selection"] is fake_model_selection for call in mock_build_model.call_args_list)
 
     def test_cli_main_is_covered_in_process(self):
         from cli.inference import video_generate as video_generate_mod
@@ -894,6 +914,14 @@ class TestCliVideoGenerateRunInference(unittest.TestCase):
         def fake_build_diffusers_transformer_model(*args: object, **kwargs: object) -> tuple[DummyModel, object]:
             return DummyModel(), model_config
 
+        model_selection = DiffusersModelSelection(
+            repository_root="/cache/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+            variant_path="/cache/Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+            variant_id=None,
+            source=None,
+            is_remote=True,
+        )
+
         with (
             patch.object(video_generate_mod, "AnalyticPerformanceModel", lambda device_profile: object()),
             patch.object(video_generate_mod, "MemoryTracker", lambda device_profile: object()),
@@ -919,7 +947,7 @@ class TestCliVideoGenerateRunInference(unittest.TestCase):
                         build_diffusers_transformer_model=fake_build_diffusers_transformer_model
                     ),
                     "tensor_cast.diffusers.model_resolver": types.SimpleNamespace(
-                        resolve_diffusers_model_path=lambda model_id, remote_source: model_id
+                        resolve_diffusers_model_selection=lambda model_id, remote_source: model_selection
                     ),
                 },
             ),

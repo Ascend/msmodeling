@@ -28,11 +28,17 @@ To support model structure parsing and graph construction under the tensor_cast 
 ### Completed
 
 - [x] Completed DIT modeling for hunyuanvideo
+- [x] Completed HunyuanVideo1.5 T2V normal-run modeling and Diffusers pipeline loading.
+  - Supported model IDs must resolve to a canonical Diffusers checkpoint with
+    `HunyuanVideo15Transformer3DModel` and `HunyuanVideo15Pipeline`.
+  - Raw Tencent checkpoints using `HunyuanVideo_1_5_DiffusionTransformer` are rejected;
+    use an upstream or community Diffusers conversion instead.
+  - Image-to-video variants are rejected. The modeled T2V vision input is an all-zero
+    `[batch_size, 729, image_embed_dim]` tensor, where `image_embed_dim` comes from
+    the selected canonical Transformer configuration.
 
 ### Follow-up Development
 
-- [ ] Completed DIT modeling for hunyuanvideo1.5
 - [ ] Support for image input
 - [ ] VAE modeling
-- [ ] Diffusers pipeline loading support
 - [ ]Support for various parallelization features

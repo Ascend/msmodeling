@@ -1,17 +1,52 @@
+import dataclasses
+import json
 import logging
 import os
 
-from ..core.model_source_security import warn_remote_code_risk
+from ..core.model_source_security import validate_local_model_path, warn_remote_code_risk
 from ..model_config import RemoteSource
 from ..model_hub import snapshot_huggingface_config_only, snapshot_modelscope_config_only
 
 logger = logging.getLogger(__name__)
 
 
-def resolve_diffusers_model_path(model_id: str, remote_source: str = RemoteSource.huggingface) -> str:
-    """Resolve a local Diffusers directory or remote repo id to a local directory path."""
+@dataclasses.dataclass(frozen=True)
+class DiffusersModelSelection:
+    """A resolved repository root and explicitly selected Transformer variant."""
+
+    repository_root: str
+    variant_path: str
+    variant_id: str | None
+    source: RemoteSource | None
+    is_remote: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class DiffusersPipelineManifest:
+    """The root pipeline manifest associated with a model selection."""
+
+    config_path: str
+    config: dict
+    format: str
+
+
+def resolve_diffusers_model_selection(
+    model_id: str,
+    remote_source: str = RemoteSource.huggingface,
+) -> DiffusersModelSelection:
+    """Resolve a model repository and its explicitly selected Transformer variant."""
     if os.path.isdir(model_id):
-        return model_id
+        reviewed_path = str(validate_local_model_path(model_id))
+        selection = DiffusersModelSelection(
+            repository_root=reviewed_path,
+            variant_path=reviewed_path,
+            variant_id=None,
+            source=None,
+            is_remote=False,
+        )
+        _validate_supported_hunyuanvideo15_repository(selection)
+        _validate_local_hunyuanvideo15_variant(selection)
+        return selection
     if _looks_like_local_path(model_id):
         raise ValueError(f"Input model_id looks like a local path but is not an existing directory: {model_id!r}")
 
@@ -37,7 +72,68 @@ def resolve_diffusers_model_path(model_id: str, remote_source: str = RemoteSourc
         model_id,
         resolved_path,
     )
-    return resolved_path
+    selection = DiffusersModelSelection(
+        repository_root=os.path.abspath(snapshot_path),
+        variant_path=resolved_path,
+        variant_id=subfolder,
+        source=source,
+        is_remote=True,
+    )
+    _validate_supported_hunyuanvideo15_repository(selection)
+    return selection
+
+
+def resolve_diffusers_pipeline_manifest(selection: DiffusersModelSelection) -> DiffusersPipelineManifest:
+    """Load the root pipeline manifest for an explicitly selected model variant."""
+    candidates = (("model_index.json", "diffusers"),)
+    for filename, manifest_format in candidates:
+        config_path = os.path.join(selection.repository_root, filename)
+        if os.path.isfile(config_path):
+            with open(config_path, encoding="utf-8") as file:
+                return DiffusersPipelineManifest(
+                    config_path=config_path,
+                    config=json.load(file),
+                    format=manifest_format,
+                )
+
+    raise ValueError(
+        f"Selected Transformer variant {selection.variant_id or selection.variant_path!r} requires a root pipeline "
+        f"manifest in {selection.repository_root!r}; expected model_index.json."
+    )
+
+
+def resolve_diffusers_model_path(model_id: str, remote_source: str = RemoteSource.huggingface) -> str:
+    """Resolve a local Diffusers directory or remote repo id to a local directory path."""
+    return resolve_diffusers_model_selection(model_id, remote_source).variant_path
+
+
+def _validate_supported_hunyuanvideo15_repository(selection: DiffusersModelSelection) -> None:
+    config_path = os.path.join(selection.repository_root, "config.json")
+    if not os.path.isfile(config_path):
+        return
+    with open(config_path, encoding="utf-8") as file:
+        root_config = json.load(file)
+    if root_config.get("_class_name") == "HunyuanVideo_1_5_Pipeline":
+        raise ValueError(
+            "Raw Tencent HunyuanVideo-1.5 checkpoints are not supported; use a canonical Diffusers checkpoint "
+            "with HunyuanVideo15Transformer3DModel and HunyuanVideo15Pipeline."
+        )
+
+
+def _validate_local_hunyuanvideo15_variant(selection: DiffusersModelSelection) -> None:
+    """Reject a direct local Hunyuan Transformer path without inferring parents."""
+    config_path = os.path.join(selection.variant_path, "config.json")
+    if not os.path.isfile(config_path):
+        return
+    with open(config_path, encoding="utf-8") as file:
+        config = json.load(file)
+    if config.get("_class_name") == "HunyuanVideo15Transformer3DModel" and not os.path.isfile(
+        os.path.join(selection.repository_root, "model_index.json")
+    ):
+        raise ValueError(
+            "Direct local HunyuanVideo1.5 Transformer paths are not supported; pass the canonical checkpoint root "
+            "that contains model_index.json."
+        )
 
 
 def _looks_like_local_path(model_id: str) -> bool:

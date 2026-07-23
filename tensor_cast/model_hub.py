@@ -12,6 +12,8 @@ from typing import Any
 CONFIG_JSON_ALLOW_PATTERNS = [
     "config.json",
     "**/config.json",
+    "model_index.json",
+    "**/model_index.json",
     "preprocessor_config.json",
 ]
 

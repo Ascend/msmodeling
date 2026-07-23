@@ -24,7 +24,12 @@ from .cache_agent import CacheConfig, CacheState
 from .cache_agent.dit_block_cache import DiTBlockCache
 from .diffusers_utils import get_diffusers_transformer_module
 from .dit_cache_registry import get_dit_block_cache_spec, replace_blocks_in_range
-from .model_resolver import resolve_diffusers_model_path
+from .model_resolver import (
+    DiffusersModelSelection,
+    resolve_diffusers_model_selection,
+    resolve_diffusers_pipeline_manifest,
+)
+from .pipeline_metadata import resolve_hunyuanvideo15_pipeline_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +40,31 @@ def build_diffusers_transformer_model(
     quant_config: None,
     dtype: torch.dtype,
     remote_source: str = RemoteSource.huggingface,
+    model_selection: DiffusersModelSelection | None = None,
     resolved_model_path: str | None = None,
 ):
-    validate_local_path = os.path.isdir(model_id)
-    if resolved_model_path is None:
-        resolved_model_path = resolve_diffusers_model_path(model_id, remote_source)
+    if model_selection is None:
+        if resolved_model_path is None:
+            model_selection = resolve_diffusers_model_selection(model_id, remote_source)
+        else:
+            is_local_path = os.path.isdir(resolved_model_path)
+            model_selection = DiffusersModelSelection(
+                repository_root=resolved_model_path,
+                variant_path=resolved_model_path,
+                variant_id=None,
+                source=None,
+                is_remote=not is_local_path,
+            )
+    validate_local_path = not model_selection.is_remote
     model_config = load_config_from_file(
-        model_path=resolved_model_path,
+        model_path=model_selection.variant_path,
         parallel_config=parallel_config,
         quant_config=quant_config,
         quant_linear_cls=TensorCastQuantLinear,
         attention_cls=AttentionTensorCast,
         dtype=dtype,
         validate_local_path=validate_local_path,
+        model_selection=model_selection,
     )
     model = DiffusersTransformerModel(model_id, model_config.transformer_config)
     return model, model_config
@@ -61,6 +78,7 @@ def load_config_from_file(
     attention_cls: None,
     dtype: torch.dtype,
     validate_local_path: bool = True,
+    model_selection: DiffusersModelSelection | None = None,
 ):
     # TODO add seperate parallel_config and quant_config(atten_cls is needed?) for vae and text
     source_info = normalize_model_source(
@@ -107,11 +125,38 @@ def load_config_from_file(
                 "No transformer/config.json found in input model path. "
                 "Expect a Diffusers-style model directory that contains transformer/config.json."
             )
+    if transformer_config.get("_class_name") == "HunyuanVideo_1_5_DiffusionTransformer":
+        raise ValueError(
+            "Raw Tencent HunyuanVideo-1.5 checkpoints are not supported; use a canonical Diffusers checkpoint "
+            "with HunyuanVideo15Transformer3DModel and HunyuanVideo15Pipeline."
+        )
+
+    pipeline_metadata = None
+    transformer_class = transformer_config.get("_class_name")
+    if model_selection is None:
+        model_selection = DiffusersModelSelection(
+            repository_root=resolved_model_path,
+            variant_path=resolved_model_path,
+            variant_id=None,
+            source=None,
+            is_remote=False,
+        )
+
+    manifest_path = os.path.join(model_selection.repository_root, "model_index.json")
+    manifest = resolve_diffusers_pipeline_manifest(model_selection) if os.path.isfile(manifest_path) else None
+    if transformer_class == "HunyuanVideo15Transformer3DModel":
+        if manifest is None:
+            manifest = resolve_diffusers_pipeline_manifest(model_selection)
+        pipeline_metadata = resolve_hunyuanvideo15_pipeline_metadata(manifest, transformer_config)
+        transformer_config.pop("vision_num_semantic_tokens", None)
+    elif manifest is not None and manifest.config.get("_class_name") == "HunyuanVideo15Pipeline":
+        raise ValueError("HunyuanVideo15Pipeline requires HunyuanVideo15Transformer3DModel.")
 
     vae_config_json_path = config_path_dict.get("vae")
 
     model_config = DiffusersConfig()
     model_config.model_path = resolved_model_path
+    model_config.pipeline_metadata = pipeline_metadata
     model_config.transformer_config = DiffusersTransformerConfig(
         parallel_config=parallel_config,
         quant_config=quant_config,
