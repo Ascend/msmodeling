@@ -901,3 +901,173 @@ class TestRunCommandChecks:
         process.run_log_fp = None
         assert tail is not None
         assert "vllm error line" in tail
+
+
+class TestSaveAsPythonReproducer:
+    """Test save_as_python_reproducer and _get_caller_type behaviour."""
+
+    def test_get_caller_type_custom_process(self):
+        """CustomProcess (no interface in MRO) resolves to 'custom_process'."""
+        process = CustomProcess()
+        assert process._get_caller_type() == "custom_process"
+
+    def test_get_caller_type_simulator(self):
+        """A subclass of SimulatorInterface resolves to 'simulator'."""
+        from optix.optimizer.interfaces.simulator import SimulatorInterface
+
+        class _FakeSimulator(SimulatorInterface):
+            @property
+            def base_url(self):
+                return "http://localhost:8000"
+
+            def update_command(self):
+                return None
+
+        assert _FakeSimulator()._get_caller_type() == "simulator"
+
+    def test_get_caller_type_benchmark(self):
+        """A subclass of BenchmarkInterface resolves to 'benchmark'."""
+        from optix.optimizer.interfaces.benchmark import BenchmarkInterface
+
+        class _FakeBenchmark(BenchmarkInterface):
+            def update_command(self):
+                return None
+
+            def get_performance_index(self):
+                return None
+
+        assert _FakeBenchmark()._get_caller_type() == "benchmark"
+
+    def test_get_caller_type_simulator_takes_precedence(self):
+        """When both interfaces are in the MRO, the first match in MRO wins."""
+
+        from optix.optimizer.interfaces.benchmark import BenchmarkInterface
+        from optix.optimizer.interfaces.simulator import SimulatorInterface
+
+        class _Combined(SimulatorInterface, BenchmarkInterface):
+            @property
+            def base_url(self):
+                return "http://localhost:8000"
+
+            def update_command(self):
+                return None
+
+            def get_performance_index(self):
+                return None
+
+        # SimulatorInterface precedes BenchmarkInterface in the MRO.
+        assert _Combined()._get_caller_type() == "simulator"
+
+    def test_save_as_python_reproducer_writes_executable_script(self, tmp_path):
+        """The reproducer script contains the command, env, work_path and is runnable."""
+        script_path = tmp_path / "custom_process.py"
+        process = CustomProcess()
+        process.command = ["vllm", "serve", "model_path", "--port", "8080"]
+        process.env = {"CUDA_VISIBLE_DEVICES": "0", "MY_FLAG": "1"}
+        process.work_path = "/test/work/path"
+
+        process.save_as_python_reproducer(str(script_path))
+
+        assert script_path.exists()
+        content = script_path.read_text(encoding="utf-8")
+        assert "import subprocess" in content
+        assert repr(process.command) in content
+        assert "'CUDA_VISIBLE_DEVICES': '0'" in content
+        assert "'MY_FLAG': '1'" in content
+        assert repr(process.work_path) in content
+        # Generated script must be syntactically valid Python.
+        compile(content, str(script_path), "exec")
+
+    def test_save_as_python_reproducer_empty_env(self, tmp_path):
+        """Empty env is rendered as an empty dict literal."""
+        script_path = tmp_path / "reproducer.py"
+        process = CustomProcess()
+        process.command = ["echo", "hello"]
+        process.env = {}
+        process.work_path = "/tmp"
+
+        process.save_as_python_reproducer(str(script_path))
+
+        content = script_path.read_text(encoding="utf-8")
+        assert "env = {}" in content
+        compile(content, str(script_path), "exec")
+
+    def test_save_as_python_reproducer_top_level_literals(self, tmp_path):
+        """Top-level command/env/work_path assignments parse to the expected literals."""
+        import ast
+
+        process = CustomProcess()
+        process.command = ["vllm", "serve", "model_path", "--port", "8080"]
+        process.env = {"FOO": "bar"}
+        process.work_path = "/test/work"
+        script_path = tmp_path / "repro.py"
+
+        process.save_as_python_reproducer(str(script_path))
+
+        assert script_path.exists()
+        # Parse (not exec) the script: validates it is syntactically valid Python
+        # and lets us read the top-level literals without running subprocess.Popen.
+        tree = ast.parse(script_path.read_text(encoding="utf-8"))
+        assignments = {
+            node.targets[0].id: ast.literal_eval(node.value)
+            for node in tree.body
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        }
+        assert assignments["command"] == process.command
+        assert assignments["env"] == {"FOO": "bar"}
+        assert assignments["work_path"] == "/test/work"
+
+    @patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+    @patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
+    def test_run_saves_reproducer_using_caller_type(self, mock_popen, mock_before_run, tmp_path):
+        """run() writes a reproducer named after _get_caller_type() under bak_path/Reproduce."""
+        mock_popen.return_value = MagicMock(pid=4242)
+        process = CustomProcess()
+        process.process_name = None
+        process.command = ["vllm", "serve", "model_path"]
+        process.work_path = str(tmp_path / "work")
+        process.run_log_fp = MagicMock()
+        process.run_log = str(tmp_path / "run.log")
+        process.bak_path = str(tmp_path / "bak")
+
+        process.run()
+
+        expected = tmp_path / "bak" / "Reproduce" / "custom_process.py"
+        assert expected.exists()
+        content = expected.read_text(encoding="utf-8")
+        assert repr(process.command) in content
+
+    @patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+    @patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
+    def test_run_reproducer_oserror_is_swallowed(self, mock_popen, mock_before_run, tmp_path):
+        """A failure to write the reproducer must not break run()."""
+        mock_popen.return_value = MagicMock(pid=4242)
+        process = CustomProcess()
+        process.process_name = None
+        process.command = ["vllm", "serve", "model_path"]
+        process.work_path = str(tmp_path / "work")
+        process.run_log_fp = MagicMock()
+        process.run_log = str(tmp_path / "run.log")
+        process.bak_path = str(tmp_path / "bak")
+
+        with patch.object(CustomProcess, "save_as_python_reproducer", side_effect=OSError("disk full")):
+            # Should not raise.
+            process.run()
+        mock_popen.assert_called_once()
+
+    @patch("optix.optimizer.interfaces.custom_process.CustomProcess.before_run")
+    @patch("optix.optimizer.interfaces.custom_process.subprocess.Popen")
+    def test_run_without_bak_path_skips_reproducer(self, mock_popen, mock_before_run, tmp_path):
+        """No bak_path means no reproducer directory is created."""
+        mock_popen.return_value = MagicMock(pid=4242)
+        process = CustomProcess()
+        process.process_name = None
+        process.command = ["vllm", "serve", "model_path"]
+        process.work_path = str(tmp_path / "work")
+        process.run_log_fp = MagicMock()
+        process.run_log = str(tmp_path / "run.log")
+        process.bak_path = None
+
+        process.run()
+
+        assert not (tmp_path / "Reproduce").exists()

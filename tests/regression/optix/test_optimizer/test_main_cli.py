@@ -148,7 +148,7 @@ class TestOptimizerMainCli(unittest.TestCase):
             patch.object(sys, "argv", argv),
         ):
             optix_main()
-        self.assertTrue((tmp_path / "trial_logs").is_dir())
+        self.assertTrue((tmp_path / "back_up").is_dir())
         mock_pso.assert_called_once()
         self.assertFalse(mock_pso.call_args.kwargs["load_breakpoint"])
 

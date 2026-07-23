@@ -48,6 +48,8 @@ FIELD_TO_CLI_FLAG = {
 # Note: non-positive filtering is a semantic constraint for specific fields, not a universal behavior
 NON_POSITIVE_INVALID_FIELDS = frozenset(FIELD_TO_CLI_FLAG.keys())
 
+SENSITIVE_ENV_PATTERNS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+
 
 @contextmanager
 def _run_log_fd_lifecycle(prefix: str = "ms_serviceparam_optimizer_") -> Iterator[tuple[int, str]]:
@@ -415,6 +417,15 @@ class CustomProcess:
         logger.info(format_subprocess_start(self.command, self.run_log, pid=self.process.pid))
         logger.debug("subprocess started pid={}", self.process.pid)
 
+        try:
+            if self.bak_path:
+                save_dir = os.path.join(self.bak_path, "Reproduce")
+                os.makedirs(save_dir, exist_ok=True, mode=0o750)
+                script_name = f"{self._get_caller_type()}.py"
+                self.save_as_python_reproducer(os.path.join(save_dir, script_name))
+        except Exception as e:
+            logger.error(f"Failed to save reproducer. error {e}")
+
     def get_log(self):
         output = None
         if not self.run_log:
@@ -431,6 +442,81 @@ class CustomProcess:
             except (UnicodeError, OSError) as e:
                 logger.debug("failed reading subprocess log path={} error={}", run_log_path, e)
         return output
+
+    def _get_caller_type(self) -> str:
+        for cls in type(self).__mro__:
+            if cls.__name__ == "SimulatorInterface":
+                return "simulator"
+            if cls.__name__ == "BenchmarkInterface":
+                return "benchmark"
+        return "custom_process"
+
+    def save_as_python_reproducer(self, script_path):
+        """Save command and environment as a reproducible Python script, with pretty-printed env and pre-execution logging."""
+
+        # Format env as a multi-line dict literal
+        def format_env(env_dict):
+            if not env_dict:
+                return "{}"
+            lines = ["{"]
+            for k, v in sorted(env_dict.items()):
+                if any(p in k.upper() for p in SENSITIVE_ENV_PATTERNS):
+                    lines.append(f"    {repr(k)}: '***REDACTED***',")
+                else:
+                    lines.append(f"    {repr(k)}: {repr(v)},")
+            lines.append("}")
+            return "\n".join(lines)
+
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write('#!/usr/bin/env python3\n')
+            f.write('# ---------------------------------------------------------------------------\n')
+            f.write('# DISCLAIMER: This script is auto-generated to help reproduce a subprocess\n')
+            f.write('# call for debugging purposes. It is provided "as is", without warranty of\n')
+            f.write('# any kind. The captured command, environment, and working directory may no\n')
+            f.write('# longer be valid, and the script may not run in your current environment.\n')
+            f.write('# Review it before running, and run it at your own risk.\n')
+            f.write('# ---------------------------------------------------------------------------\n')
+            f.write('import subprocess\n')
+            f.write('import sys\n')
+            f.write('import pprint\n\n')
+
+            f.write('# Original command\n')
+            f.write(f'command = {repr(self.command)}\n\n')
+
+            f.write('# Environment variables (pretty printed)\n')
+            f.write(f'env = {format_env(self.env)}\n\n')
+
+            f.write('# Working directory\n')
+            work_path_literal = repr(os.fspath(self.work_path) if self.work_path is not None else None)
+            f.write(f'work_path = {work_path_literal}\n\n')
+
+            f.write('if __name__ == "__main__":\n')
+            f.write('    print("=" * 60)\n')
+            f.write('    print("Reproducing subprocess.Popen call")\n')
+            f.write('    print("=" * 60)\n\n')
+
+            f.write('    print(f"Working directory: {work_path}")\n')
+            f.write('    print(f"Command: {command}")\n\n')
+
+            f.write('    print("Environment variables:")\n')
+            f.write('    pprint.pprint(env, indent=2, width=100)\n')
+            f.write('    print("=" * 60)\n\n')
+
+            f.write('    # Optional: ask for confirmation before running\n')
+            f.write('    # reply = input("Proceed? (y/n): ").strip().lower()\n')
+            f.write('    # if reply != "y":\n')
+            f.write('    #     sys.exit(0)\n\n')
+
+            f.write('    process = subprocess.Popen(\n')
+            f.write('        command,\n')
+            f.write('        env=env,\n')
+            f.write('        cwd=work_path\n')
+            f.write('    )\n')
+            f.write('    print(f"Process started, PID: {process.pid}")\n')
+            f.write('    return_code = process.wait()\n')
+            f.write('    print(f"Process exited with return code: {return_code}")\n')
+
+        os.chmod(script_path, 0o755)
 
     def health(self):
         from ...config.constant import ProcessState, Stage
