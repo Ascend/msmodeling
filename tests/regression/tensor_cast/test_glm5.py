@@ -61,6 +61,55 @@ def test_glm5_old_decoder_compat_propagates_prev_topk_indices():
     assert topk_indices == "next-topk"
 
 
+def test_glm5_old_model_compat_forwards_topk_across_shared_layers(monkeypatch):
+    class FakeAttention(torch.nn.Module):
+        def __init__(self, next_topk_indices):
+            super().__init__()
+            self.next_topk_indices = next_topk_indices
+            self.received_topk_indices = []
+
+        def forward(self, **kwargs):
+            prev_topk_indices = kwargs["prev_topk_indices"]
+            self.received_topk_indices.append(prev_topk_indices)
+            next_topk_indices = self.next_topk_indices or prev_topk_indices
+            return kwargs["hidden_states"], None, next_topk_indices
+
+    class FakeLayer(torch.nn.Module):
+        def __init__(self, next_topk_indices=None):
+            super().__init__()
+            self.input_layernorm = torch.nn.Identity()
+            self.post_attention_layernorm = torch.nn.Identity()
+            self.self_attn = FakeAttention(next_topk_indices)
+            self.mlp = torch.nn.Identity()
+
+    class FakeRotaryEmbedding(torch.nn.Module):
+        def forward(self, hidden_states, position_ids=None):
+            return hidden_states
+
+    class FakeInner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(use_cache=False, num_hidden_layers=3)
+            self.layers = torch.nn.ModuleList([FakeLayer("full-topk"), FakeLayer(), FakeLayer()])
+            self.embed_tokens = torch.nn.Identity()
+            self.norm = torch.nn.Identity()
+
+    monkeypatch.setattr(
+        "tensor_cast.transformers.builtin_model.glm5.create_causal_mask",
+        lambda **_kwargs: None,
+    )
+
+    model = Glm5ModelCompat(FakeInner())
+    model.rotary_emb = FakeRotaryEmbedding()
+    model(input_ids=torch.ones(1, 1, dtype=torch.long))
+
+    assert [layer._inner.self_attn.received_topk_indices for layer in model.layers] == [
+        [None],
+        ["full-topk"],
+        ["full-topk"],
+    ]
+
+
 def test_glm5_decoder_compat_rejects_missing_topk_output():
     class FakeAttention(torch.nn.Module):
         def forward(self, **_kwargs):
