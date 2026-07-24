@@ -35,6 +35,14 @@ from optix.optimizer.health_check import (
 )
 from optix.optimizer.scheduler import Scheduler
 
+# health()-path simulator mock. Omitting check_success avoids Python <3.12
+# isinstance(..., SupportsCheckSuccess) becoming True via MagicMock.__getattr__.
+_HEALTH_SIMULATOR_SPEC = ("health", "process", "run", "backup", "bak_path", "command", "run_log", "get_last_log")
+
+
+def _make_health_simulator() -> MagicMock:
+    return MagicMock(spec=list(_HEALTH_SIMULATOR_SPEC))
+
 
 class TestScheduler(unittest.TestCase):
     def setUp(self):
@@ -60,12 +68,16 @@ class TestScheduler(unittest.TestCase):
 
     @patch("time.sleep", return_value=None)
     def test_wait_simulate_success(self, mock_sleep):
-        self.simulator.health = MagicMock(return_value=ProcessState(stage=Stage.running))
+        simulator = _make_health_simulator()
+        simulator.health = MagicMock(return_value=ProcessState(stage=Stage.running))
+        self.scheduler.simulator = simulator
         self.scheduler.wait_simulate()
 
     @patch("time.sleep", return_value=None)
     def test_wait_simulate_timeout(self, mock_sleep):
-        self.simulator.health = MagicMock(return_value=ProcessState(stage=Stage.error))
+        simulator = _make_health_simulator()
+        simulator.health = MagicMock(return_value=ProcessState(stage=Stage.error))
+        self.scheduler.simulator = simulator
         with self.assertRaises(Exception):
             self.scheduler.wait_simulate()
 
@@ -408,7 +420,7 @@ class TestWaitSimulateHealthBranches(unittest.TestCase):
     """Test wait_simulate with various health() stage returns"""
 
     def setUp(self):
-        self.simulator = MagicMock()
+        self.simulator = _make_health_simulator()
         self.benchmark = MagicMock()
         self.data_storage = MagicMock()
         self.scheduler = Scheduler(self.simulator, self.benchmark, self.data_storage)
@@ -444,9 +456,8 @@ class TestWaitSimulateHealthBranches(unittest.TestCase):
         """Test wait_simulate raises RuntimeError if no health/check_success method"""
         # start_time=0, iter1: elapsed+context
         mock_time.side_effect = [0, 1, 1]
-        # Remove both health and check_success
+        # Remove health; check_success is already absent via _make_health_simulator spec
         del self.simulator.health
-        del self.simulator.check_success
 
         with self.assertRaises(RuntimeError):
             self.scheduler.wait_simulate()
