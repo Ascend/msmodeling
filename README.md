@@ -141,7 +141,7 @@ msModeling 提供模型推理性能仿真、服务化性能仿真和服务化实
 
 ## 🚀 快速入门
 
-以模型推理性能仿真与服务化性能仿真为例，快速跑通核心流程，请参见《[模型推理性能仿真与服务化性能仿真快速入门](./docs/zh/quick_start/tensorcast_throughput_optimizer_quick_start.md)》；也可通过《[Web UI 使用指南](./docs/zh/user_guide/msmodeling_web_ui_user_guide.md)》进行可视化交互配置与结果查看。
+以模型推理性能仿真与服务化性能仿真为例，快速跑通核心流程，请参见《[msModeling快速入门](./docs/zh/quick_start/tensorcast_throughput_optimizer_quick_start.md)》；也可通过《[Web UI 使用指南](./docs/zh/user_guide/msmodeling_web_ui_user_guide.md)》进行可视化交互配置与结果查看。
 
 ## 📦 安装指南
 
