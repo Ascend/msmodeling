@@ -413,7 +413,7 @@ tools/perf_data_collection/comm_bench/generate_comm_microbench.py \
 | `--profiling-path` | 是    |                            | 输入 profiling 路径（`kernel_details*.csv` 文件或 profiling 目录） |
 | `--database-path`  | 否    |                            | 显式输出数据库目录                                               |
 | `--device`         | 否    | ATLAS_800_A3_752T_128G_DIE | 目标设备名称，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用     |
-| `--vllm-version`   | 否    |                            | vLLM 版本，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用    |
+| `--vllm-version`   | 否    |                            | vLLM-Ascend 版本，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用    |
 | `--torch-version`  | 否    |                            | PyTorch 版本，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用 |
 | `--cann-version`   | 否    |                            | CANN 版本，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用    |
 
@@ -446,7 +446,7 @@ tools/perf_data_collection/comm_bench/generate_comm_microbench.py \
 | `--target-models` | 否    |                                  | 逗号分隔的模型 ID（如 "Qwen/Qwen3-32B" ），命名与 `text_generate` 一致；指定时通过对 tp_sizes 枚举，只生成模型实际需要的 GEMM (N,K) 对 |
 | `--data-dir`      | 否    |                                  | 数据库目录路径                                                             |
 | `--device`        | 否    | ATLAS_800_A3_752T_128G_DIE       | 目标设备名称，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用                 |
-| `--vllm-version`  | 否    | vLLM 版本                          | vLLM-Ascend 版本号，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用        |
+| `--vllm-version`  | 否    | vLLM-Ascend 版本                          | vLLM-Ascend 版本号，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用        |
 | `--torch-version` | 否    | PyTorch 版本                       | PyTorch 版本，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用             |
 | `--cann-version`  | 否    | CANN 版本                          | CANN 版本，用于自动推导输出数据库目录，当指定`--database-path`时，此参数无实际作用                |
 | `--rows`          | 否    | 1000 | 每个 CSV 的最大理论行数（0=不限制，所有生成的理论形状行全部保留）                                |

@@ -150,7 +150,7 @@ bash tools/perf_data_collection/comm_bench/run_comm_bench.sh ./hccl_bench_data
 | `--profiling-path` | 是 | 无 | 单个 `kernel_details*.csv` 文件或 profiling 目录。 |
 | `--database-path` | 否 | 自动推导 | 显式输出数据库目录。 |
 | `--device` | 否 | `ATLAS_800_A3_752T_128G_DIE` | 自动推导路径时使用的设备目录名。 |
-| `--vllm-version` | 否 | 无 | 自动推导路径时使用的 vLLM 版本或完整版本目录名。 |
+| `--vllm-version` | 否 | 无 | 自动推导路径时使用的 vLLM-Ascend 版本或完整版本目录名。 |
 | `--torch-version` | 否 | 无 | 自动推导路径时使用的 PyTorch 版本。 |
 | `--cann-version` | 否 | 无 | 自动推导路径时使用的 CANN 版本。 |
 
@@ -175,7 +175,7 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 | `--database-path` | 否 | 自动推导 | 显式 CSV 根目录。 |
 | `--target-models` | 否 | 全量网格 | 逗号分隔模型 ID（如 `deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B`），命名与 `text_generate` 一致，用于裁剪 GEMM `(N, K)` 候选。 |
 | `--device` | 否 | `ATLAS_800_A3_752T_128G_DIE` | 自动推导路径时使用的设备目录名。 |
-| `--vllm-version` | 否 | 无 | 自动推导路径时使用的 vLLM 版本。 |
+| `--vllm-version` | 否 | 无 | 自动推导路径时使用的 vLLM-Ascend 版本。 |
 | `--torch-version` | 否 | 无 | 自动推导路径时使用的 PyTorch 版本。 |
 | `--cann-version` | 否 | 无 | 自动推导路径时使用的 CANN 版本。 |
 | `--rows` | 否 | `1000` | 每个 CSV 最多追加的行数，`0` 表示不限制。 |
@@ -194,7 +194,7 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 | --- | --- | --- | --- |
 | `--database-path` | 否 | 自动推导 | 显式数据库目录。 |
 | `--device` | 否 | `ATLAS_800_A3_752T_128G_DIE` | 自动推导路径时使用的设备目录名。 |
-| `--vllm-version` | 否 | 无 | 自动推导路径时使用的 vLLM 版本。 |
+| `--vllm-version` | 否 | 无 | 自动推导路径时使用的 vLLM-Ascend 版本。 |
 | `--torch-version` | 否 | 无 | 自动推导路径时使用的 PyTorch 版本。 |
 | `--cann-version` | 否 | 无 | 自动推导路径时使用的 CANN 版本。 |
 | `--ops` | 否 | 全部支持算子 | 只 replay 指定算子，支持多个算子名。 |
@@ -227,7 +227,7 @@ python tools/perf_data_collection/start_microbench.py \
 | --- | --- | --- | --- |
 | `--database-path` | 否 | 自动推导 | 显式数据库目录。 |
 | `--device` | 否 | `ATLAS_800_A3_752T_128G_DIE` | 设备目录名。 |
-| `--vllm-version` | 否 | 无 | vLLM 版本或完整版本目录名。 |
+| `--vllm-version` | 否 | 无 | vLLM-Ascend 版本或完整版本目录名。 |
 | `--torch-version` | 否 | 无 | PyTorch 版本。 |
 | `--cann-version` | 否 | 无 | CANN 版本。 |
 | `--repeat-count` | 否 | `30` | 每行 replay 次数；未指定时使用代码默认值，不支持环境变量覆盖。 |

@@ -729,7 +729,7 @@ def build_standard_argparser(
             + "\n\nParameter notes:\n"
             + "  --database-path         Use an explicit database directory and bypass version-dir inference.\n"
             + f"  --device                Selects the device folder under profiling_database/data. Default: {DEFAULT_DEVICE}\n"
-            + "  --vllm-version          Accepts either a plain vLLM version or a full version dir name.\n"
+            + "  --vllm-version          Accepts either a plain vLLM-Ascend version or a full version dir name.\n"
             + "  --torch-version         Optional PyTorch version used to build the version dir name.\n"
             + "  --cann-version          Optional CANN version used to build the version dir name.\n"
             + f"  --repeat-count          Repeat each replay row this many times. Defaults to {DEFAULT_REPLAY_REPEAT_COUNT}\n"

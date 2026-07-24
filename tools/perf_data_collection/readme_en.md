@@ -142,7 +142,7 @@ This script targets **`ATLAS_800_A3_752T_128G_DIE`** (default `grid-shape 48 8 2
 | `--profiling-path` | Yes | — | Single `kernel_details*.csv` file or profiling directory. |
 | `--database-path` | No | auto-derived | Explicit output database directory. |
 | `--device` | No | `ATLAS_800_A3_752T_128G_DIE` | Device directory name when deriving the path. |
-| `--vllm-version` | No | — | vLLM version or full version-directory name. |
+| `--vllm-version` | No | — | vLLM-Ascend version or full version-directory name. |
 | `--torch-version` | No | — | PyTorch version when deriving the path. |
 | `--cann-version` | No | — | CANN version when deriving the path. |
 
@@ -161,7 +161,7 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 | `--database-path` | No | auto-derived | Explicit CSV root directory. |
 | `--target-models` | No | full grid | Comma-separated model IDs (for example, `deepseek-ai/DeepSeek-V3,Qwen/Qwen3-32B`), matching `text_generate`, used to prune GEMM `(N, K)` candidates. |
 | `--device` | No | `ATLAS_800_A3_752T_128G_DIE` | Device directory name when deriving the path. |
-| `--vllm-version` | No | — | vLLM version when deriving the path. |
+| `--vllm-version` | No | — | vLLM-Ascend version when deriving the path. |
 | `--torch-version` | No | — | PyTorch version when deriving the path. |
 | `--cann-version` | No | — | CANN version when deriving the path. |
 | `--rows` | No | `1000` | Max appended rows per CSV; `0` means no cap. |
@@ -174,7 +174,7 @@ python tools/perf_data_collection/parsers/parse_kernel_details.py \
 | --- | --- | --- | --- |
 | `--database-path` | No | auto-derived | Explicit database directory. |
 | `--device` | No | `ATLAS_800_A3_752T_128G_DIE` | Device directory name when deriving the path. |
-| `--vllm-version` | No | — | vLLM version when deriving the path. |
+| `--vllm-version` | No | — | vLLM-Ascend version when deriving the path. |
 | `--torch-version` | No | — | PyTorch version when deriving the path. |
 | `--cann-version` | No | — | CANN version when deriving the path. |
 | `--ops` | No | all supported ops | Restrict replay to specific operator names. |
@@ -207,7 +207,7 @@ Most `op_replay/*_run.py` scripts share:
 | --- | --- | --- | --- |
 | `--database-path` | No | auto-derived | Explicit database directory. |
 | `--device` | No | `ATLAS_800_A3_752T_128G_DIE` | Device directory name. |
-| `--vllm-version` | No | — | vLLM version or full version-directory name. |
+| `--vllm-version` | No | — | vLLM-Ascend version or full version-directory name. |
 | `--torch-version` | No | — | PyTorch version. |
 | `--cann-version` | No | — | CANN version. |
 | `--repeat-count` | No | `30` | Replay count per row; code default when omitted; **not** overridable via env var. |

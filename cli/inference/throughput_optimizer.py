@@ -203,13 +203,13 @@ def arg_parse():
     perf_group = parser.add_argument_group("Performance Model Options")
     perf_group.add_argument(
         "--performance-model",
-        action="append",
-        default=None,
+        type=str,
+        default="analytic",
         dest="performance_model",
         choices=["analytic", "profiling"],
-        help="Performance model type(s). 'analytic': Roofline model (default). "
+        help="Performance model type. 'analytic': Roofline model (default). "
         "'profiling': empirical model backed by measured CSV data "
-        "(requires --profiling-database). May be specified multiple times.",
+        "(requires --profiling-database).",
     )
     perf_group.add_argument(
         "--profiling-database",
@@ -348,10 +348,7 @@ def arg_parse():
 
         return normalized[0], normalized
 
-    # Default performance_model to analytic if not specified
-    if args.performance_model is None:
-        args.performance_model = ["analytic"]
-    if "profiling" in args.performance_model and not args.profiling_database:
+    if args.performance_model == "profiling" and not args.profiling_database:
         parser.error("--profiling-database is required when using --performance-model profiling")
 
     def _normalize_and_validate(values: list[int] | None, arg_name: str, num_devices: int) -> list[int] | None:

@@ -103,7 +103,7 @@ class TestThroughputOptimizer(TestCase):
         with patch.object(sys, "argv", argv):
             args = throughput_optimizer_module.arg_parse()
 
-        self.assertEqual(args.performance_model, ["analytic"])
+        self.assertEqual(args.performance_model, "analytic")
 
     def test_arg_parse_profiling_without_database_errors(self):
         argv = [
@@ -117,6 +117,59 @@ class TestThroughputOptimizer(TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("--profiling-database", result.stderr)
+
+    def test_arg_parse_performance_model_is_string_not_list(self):
+        """--performance-model should produce a single string, not a list."""
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            "--performance-model=profiling",
+            "--profiling-database=/tmp/fake_db",
+            "Qwen/Qwen3-32B",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            args = throughput_optimizer_module.arg_parse()
+
+        self.assertIsInstance(args.performance_model, str)
+        self.assertEqual(args.performance_model, "profiling")
+
+    def test_arg_parse_performance_model_last_wins_when_repeated(self):
+        """When --performance-model is specified twice, the last value wins (not appended)."""
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            "--performance-model=analytic",
+            "--performance-model=profiling",
+            "--profiling-database=/tmp/fake_db",
+            "Qwen/Qwen3-32B",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            args = throughput_optimizer_module.arg_parse()
+
+        self.assertIsInstance(args.performance_model, str)
+        self.assertEqual(args.performance_model, "profiling")
+
+    def test_arg_parse_performance_model_rejects_invalid_choice(self):
+        """--performance-model should reject values outside analytic/profiling."""
+        argv = [
+            "--input-length=1",
+            "--output-length=1",
+            "--performance-model=invalid",
+            "Qwen/Qwen3-32B",
+        ]
+
+        result = self._run_throughput_optimizer(argv, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid choice", result.stderr)
 
     def _run_throughput_optimizer(self, args, check=True):
         """Run throughput_optimizer's main() in-process so coverage sees the core path."""

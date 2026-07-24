@@ -330,7 +330,7 @@ Debug Options:
 
 Performance Model Options:
   --performance-model {analytic,profiling}
-                        Performance model type(s). 'analytic': Roofline model (default). 'profiling': empirical model backed by measured CSV data (requires --profiling-database). May be specified multiple times. (default: None)
+                        Performance model type. 'analytic': Roofline model (default). 'profiling': empirical model backed by measured CSV data (requires --profiling-database). (default: analytic)
   --profiling-database PROFILING_DATABASE
                         Path to the profiling CSV database directory for 'profiling' mode. e.g. tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/ (default: None)
 
@@ -403,7 +403,7 @@ PD Ratio Optimization Options:
 | `--enable-sequence-parallel` | Model & Quantization Options | 可选 | 编译期间启用 sequence parallel 图改写 pass。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--enable-dispatch-ffn-combine` | Model & Quantization Options | 可选 | 编译期间启用 dispatch_ffn_combine 融合模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--word-embedding-tp` | Model & Quantization Options | 可选 | 启用 word embedding 张量并行并指定并行模式。<br>1. 类型：Str。<br>2. 参考值：`col`、`row`。<br>3. 默认值：`None`，表示不启用 embedding TP。 |
-| `--performance-model` | Performance Model Options | 可选 | 指定性能模型类型，可重复指定以对比多个模型。<br>1. 类型：Str。<br>2. 参考值：`analytic`、`profiling`。<br>3. 默认值：`None`，未指定时取 `analytic`。<br>4. `profiling` 模式需配合 `--profiling-database` 使用。 |
+| `--performance-model` | Performance Model Options | 可选 | 指定性能模型类型。<br>1. 类型：Str。<br>2. 参考值：`analytic`、`profiling`。<br>3. 默认值：`analytic`。<br>4. `profiling` 模式需配合 `--profiling-database` 使用。 |
 | `--profiling-database` | Performance Model Options | 条件必选 | 指定 profiling 模式使用的实测算子 CSV 数据库目录。<br>1. 类型：Str。<br>2. 取值范围：数据库目录路径，例如 `tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/`。<br>3. 默认值：`None`；使用 `--performance-model profiling` 时必填。 |
 | `--chrome-trace` | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |
 | `--ttft-limits` | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。 |
@@ -463,8 +463,6 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device TEST_DE
 
 - `--performance-model analytic`（默认）：纯解析 Roofline 模型，无需额外数据。
 - `--performance-model profiling`：使用实测算子数据建模，**必须同时指定 `--profiling-database <目录>`**，否则启动时报错。当某算子 shape 在 CSV 中缺失时，先尝试插值，仍无法命中时回退到解析模型。
-
-`--performance-model` 可重复指定（如同时传 `analytic` 与 `profiling`）以便对比不同模型的结果。
 
 示例：
 

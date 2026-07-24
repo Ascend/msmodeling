@@ -89,7 +89,7 @@ def parse_args() -> argparse.Namespace:
         "--vllm-version",
         dest="vllm_version",
         type=check_version,
-        help="vLLM version, e.g. 0.9.2.",
+        help="vLLM-Ascend version, e.g. 0.9.2.",
     )
     parser.add_argument(
         "--torch-version",

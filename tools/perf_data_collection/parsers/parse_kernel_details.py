@@ -657,7 +657,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--vllm-version",
         dest="vllm_version",
         type=check_version,
-        help="[Optional] vLLM version, e.g. 0.9.2, or a full version-dir name.",
+        help="[Optional] vLLM-Ascend version, e.g. 0.9.2, or a full version-dir name.",
     )
     parser.add_argument(
         "--torch-version",

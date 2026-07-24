@@ -71,7 +71,7 @@ def build_argparser() -> argparse.ArgumentParser:
             "Parameter notes:\n"
             "  --database-path         Passed through to every *_run.py script when provided.\n"
             f"  --device                Passed through to every *_run.py script. Default: {DEFAULT_DEVICE}\n"
-            "  --vllm-version          Accepts either a plain version or a full version dir name.\n"
+            "  --vllm-version          Accepts either a plain vLLM-Ascend version or a full version dir name.\n"
             "  --torch-version         Optional PyTorch version used to build the version dir name.\n"
             "  --cann-version          Optional CANN version used to build the version dir name.\n"
             "  --repeat-count          Passed through to every *_run.py script when provided.\n"
@@ -100,7 +100,7 @@ def build_argparser() -> argparse.ArgumentParser:
         "--vllm-version",
         dest="vllm_version",
         type=check_version,
-        help="vLLM version, e.g. 0.9.2.",
+        help="vLLM-Ascend version, e.g. 0.9.2.",
     )
     parser.add_argument(
         "--torch-version",
