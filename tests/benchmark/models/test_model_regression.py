@@ -2,12 +2,13 @@ import json
 import logging
 import re
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import torch
 from parameterized import parameterized
+from tensor_cast.core.compilation_config import apply_compilation_config
 from tensor_cast.core.input_generator import generate_inputs
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.core.quantization.datatypes import (
@@ -37,6 +38,14 @@ class BasePerfRegressionCase:
 @dataclass
 class TextPerfRegressionCase(BasePerfRegressionCase):
     user_input: Optional[UserInputConfig] = None
+    compilation_config: list[str] = field(default_factory=list)
+    """Optional list of --compilation-config options to apply before running this case.
+
+    Empty list (default) means "no --compilation-config" — all four flags default to
+    False, matching the new unified default in :func:`apply_compilation_config`. Cases
+    whose baseline was recorded under a different default (e.g. matmul-allreduce on)
+    must opt in here to keep the baseline comparison valid.
+    """
 
 
 @dataclass
@@ -162,7 +171,14 @@ def _load_perf_regression_cases() -> list[BasePerfRegressionCase]:
                     else:
                         ui_data[key] = QuantizeAttentionAction[ui_data[key]]
             user_input = UserInputConfig(**ui_data)
-            cases.append(TextPerfRegressionCase(user_input=user_input, **data))
+            compilation_config = data.pop("compilation_config", [])
+            cases.append(
+                TextPerfRegressionCase(
+                    user_input=user_input,
+                    compilation_config=compilation_config,
+                    **data,
+                )
+            )
     return cases
 
 
@@ -179,6 +195,14 @@ class TestPerformanceRegression(unittest.TestCase):
         cls._time_results: list[tuple] = []
         cls._op_results: list[dict] = []
         cls._op_detail_rows: list[tuple] = []
+        # Ensure a clean compilation state before any case runs.
+        apply_compilation_config([])
+
+    def setUp(self):
+        # Reset compilation_config between cases so the previous case's flags
+        # never leak into the next. Each case explicitly re-applies its own
+        # compilation_config (if any) via apply_compilation_config below.
+        apply_compilation_config([])
 
     @classmethod
     def tearDownClass(cls):
@@ -221,6 +245,10 @@ class TestPerformanceRegression(unittest.TestCase):
             table_result = buf.getvalue()
             actual_time_s = _parse_total_time_s(table_result)
         else:
+            # Apply case-level compilation_config so the model is built under the
+            # same flags the baseline was recorded under. An empty list explicitly
+            # resets all four flags to False (the new unified default).
+            apply_compilation_config(case.compilation_config)
             model_runner = ModelRunner(case.user_input)
             result = model_runner.run_inference(generate_inputs_func=generate_inputs)
 

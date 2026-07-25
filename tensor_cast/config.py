@@ -15,7 +15,7 @@ class compilation:
     enable_freezing = True
 
     class multistream:
-        enable = True
+        enable = False
         # Backward-compatible aliases; scheduling logic should read role_to_stream_ids.
         compute_stream_id = 0
         comm_stream_id = 1
@@ -40,9 +40,9 @@ class compilation:
         enable_add_rms_norm = enable_rms_norm
         enable_rope = True
         enable_swiglu = True
-        enable_matmul_allreduce = True
+        enable_matmul_allreduce = False
         enable_grouped_matmul_swiglu = True
-        enable_dispatch_ffn_combine = True
+        enable_dispatch_ffn_combine = False
 
     class debug:
         graph_log_url = None

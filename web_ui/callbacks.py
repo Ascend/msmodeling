@@ -373,7 +373,7 @@ def _build_text_form(*vals):
         "enable_redundant_experts",
         "enable_external_shared_experts",
         "host_external_shared_experts",
-        "enable_sequence_parallel",
+        "compilation_config",
         "enable_shared_expert_tp",
         "remote_source",
         "performance_model",

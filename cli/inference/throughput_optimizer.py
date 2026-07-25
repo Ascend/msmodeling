@@ -36,6 +36,10 @@ from serving_cast.service.utils import (
     resolve_parallel_search_candidates,
 )
 from tensor_cast import device_profiles  # noqa: F401
+from tensor_cast.core.compilation_config import (
+    COMPILATION_CONFIG_OPTIONS,
+    apply_compilation_config,
+)
 from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
     QuantizeLinearAction,
@@ -184,14 +188,13 @@ def arg_parse():
         "This uses dense-MLP TP for shared_experts with delayed down_proj reduction.",
     )
     model_group.add_argument(
-        "--enable-sequence-parallel",
-        action="store_true",
-        help="Enable the sequence parallel graph rewrite pass during compilation.",
-    )
-    model_group.add_argument(
-        "--enable-dispatch-ffn-combine",
-        action="store_true",
-        help="Enable dispatch_ffn_combine fusion pattern during compilation.",
+        "--compilation-config",
+        nargs="*",
+        default=None,
+        choices=COMPILATION_CONFIG_OPTIONS,
+        help="Enable specific compilation features dynamically. "
+        f"Options: {', '.join(COMPILATION_CONFIG_OPTIONS)}. "
+        "If omitted, all compilation features remain at their defaults (disabled).",
     )
     model_group.add_argument(
         "--word-embedding-tp",
@@ -420,6 +423,8 @@ def main():
         format=LOG_FORMAT,
     )
     logger = logging.getLogger(__name__)
+
+    apply_compilation_config(args.compilation_config)
 
     device_targets = check_device_targets(args, logger)
     if device_targets is None:

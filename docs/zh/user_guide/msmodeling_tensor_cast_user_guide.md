@@ -199,7 +199,7 @@ usage: text_generate.py [-h]
                         --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--decode]
                         [--prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE] [--num-mtp-tokens NUM_MTP_TOKENS]
                         [--disable-repetition] [--compile] [--compile-allow-graph-break]
-                        [--enable-sequence-parallel]
+                        [--compilation-config [{enable_multistream,enable_sequence_parallel,enable_matmul_allreduce,enable_dispatch_ffn_combine} ...]]
                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                         [--quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                         [--quantize-lmhead] [--mxfp4-group-size MXFP4_GROUP_SIZE]
@@ -240,7 +240,7 @@ Run a simulated LLM inference pass and dump the perf result.
 | `--disable-repetition` | LLM Options | 可选 | 禁用 transformer 重复模式优化，保留原始模型行为。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--compile` | Optimization Options | 可选 | 在推理前对模型调用 `torch.compile()`。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--compile-allow-graph-break` | Optimization Options | 可选 | 允许 `torch.compile()` 过程中出现 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--enable-sequence-parallel` | Optimization Options | 可选 | 编译期间启用 sequence parallel 图改写 pass。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--compilation-config` | Optimization Options | 可选 | 动态启用指定的编译特性，可一次指定多个选项。<br>1. 类型：List[Str]（`nargs="*"`）。<br>2. 可选值：`enable_multistream`（启用多 stream 调度）、`enable_sequence_parallel`（启用 sequence parallel 图改写 pass）、`enable_matmul_allreduce`（启用 matmul-allreduce 融合）、`enable_dispatch_ffn_combine`（启用 dispatch_ffn_combine 融合）。<br>3. 默认值：不指定时所有编译特性均保持关闭（`False`）。<br>4. 示例：`--compilation-config enable_multistream enable_sequence_parallel`。 |
 | `--quantize-linear-action` | Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`W8A8_DYNAMIC`。 |
 | `--quantize-non-expert-linear-action` | Quantization Options | 可选 | 为 attention 投影、dense MLP、shared experts 等非 expert 线性层指定独立量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`DISABLED`。 |
 | `--quantize-lmhead` | Quantization Options | 可选 | 对 lm head 启用量化。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |

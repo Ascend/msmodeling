@@ -2,7 +2,7 @@
   "type": "text",
   "name": "kimi-k2.5-16k-prefill",
   "description": "Kimi-K2.5 16K prefill, 4 queries, qlen=8000, DP=4, TP=4, EP=16, W4A8, compile",
-  "initial_time_s": 1.033,
+  "initial_time_s": 1.114,
   "baseline_time_s": 1.342,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.3,

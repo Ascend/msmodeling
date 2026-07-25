@@ -353,11 +353,21 @@ class ParallelRunner:
     def _apply_compilation_config(self, user_input: UserInputConfig) -> None:
         """Apply compile-time graph rewrite flags in the current process.
 
+        All four ``--compilation-config`` options are mapped to fields on
+        :class:`UserInputConfig` (set via ``UserInputConfig.from_args``) and
+        then copied to the global config here. This avoids state leakage
+        between tasks executed in the same process (e.g. in
+        ``throughput_optimizer``) because every option is explicitly assigned
+        on each call, including resetting to ``False`` when the user did not
+        select it.
+
         Args:
             user_input: User input configuration.
         """
-        config.compilation.passes.enable_sequence_parallel = user_input.enable_sequence_parallel
-        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = user_input.enable_dispatch_ffn_combine
+        config.compilation.multistream.enable = bool(user_input.enable_multistream)
+        config.compilation.passes.enable_sequence_parallel = bool(user_input.enable_sequence_parallel)
+        config.compilation.fusion_patterns.enable_matmul_allreduce = bool(user_input.enable_matmul_allreduce)
+        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = bool(user_input.enable_dispatch_ffn_combine)
 
     def _submit_task(
         self,

@@ -509,6 +509,7 @@ class TestThroughputOptimizer(TestCase):
             mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
             disagg = False
             enable_optimize_prefill_decode_ratio = False
+            compilation_config = None
 
         mock_tasks = Mock()
         mock_tasks.run_agg.return_value = []
@@ -545,6 +546,7 @@ class TestThroughputOptimizer(TestCase):
             tpot_limits = 50
             disagg = True
             enable_optimize_prefill_decode_ratio = False
+            compilation_config = None
 
         mock_tasks = Mock()
         mock_tasks.run_disagg.return_value = []
@@ -582,6 +584,7 @@ class TestThroughputOptimizer(TestCase):
             tpot_limits = None
             disagg = True
             enable_optimize_prefill_decode_ratio = False
+            compilation_config = None
 
         loaded_distribution = LengthDistribution(
             bins=[
@@ -633,6 +636,7 @@ class TestThroughputOptimizer(TestCase):
             tpot_limits = None
             disagg = True
             enable_optimize_prefill_decode_ratio = False
+            compilation_config = None
 
         loaded_distribution = LengthDistribution(
             bins=[
@@ -681,6 +685,7 @@ class TestThroughputOptimizer(TestCase):
             tpot_limits = None
             disagg = True
             enable_optimize_prefill_decode_ratio = False
+            compilation_config = None
 
         mock_tasks = Mock()
         mock_tasks.run_disagg.return_value = []
@@ -723,6 +728,7 @@ class TestThroughputOptimizer(TestCase):
             tpot_limits = None
             disagg = True
             enable_optimize_prefill_decode_ratio = False
+            compilation_config = None
 
         loaded_distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=500, weight=1.0)])
         mock_tasks = Mock()
@@ -767,6 +773,7 @@ class TestThroughputOptimizer(TestCase):
             disagg = True
             enable_optimize_prefill_decode_ratio = False
             max_batched_tokens = 64
+            compilation_config = None
 
         loaded_distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=500, weight=1.0)])
         mock_tasks = Mock()

@@ -28,7 +28,8 @@ exemptions:
     - symbols:
         - cli/inference/throughput_optimizer.py::%
         - serving_cast/parallel_runner.py::%
-      reason: "Import-scope changes are covered through function-level throughput optimizer tests; coverage.py does not reliably attribute multiline import continuation lines."
+        - web_ui/callbacks.py::_build_text_form
+      reason: "Import-scope changes are covered through function-level throughput optimizer tests; coverage.py does not reliably attribute multiline import continuation lines. _build_text_form is exercised by 5 test cases in tests/regression/web_ui/test_callbacks.py but the static test_map cannot attribute coverage to this modified symbol."
       applicant: stormchasingg
       approver: liujiawang
       deadline: 2026-12-31

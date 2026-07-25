@@ -22,11 +22,6 @@ from ..transformers.model import TransformerModel
 logger = logging.getLogger(__name__)
 
 
-def _requires_glm5_compile_overrides(user_input: UserInputConfig) -> bool:
-    model_name = user_input.model_id.rstrip("/").split("/")[-1]
-    return user_input.do_compile and model_name in {"GLM-5", "GLM-5.1"}
-
-
 def _prepare_vl_compile(model: TransformerModel) -> bool:
     # We intentionally skip compiling the visual encoder (ViT-like) by wrapping
     # visual.forward with torch._dynamo.disable and disabling full-graph:
@@ -83,8 +78,6 @@ def _build_pipeline_model(user_input: UserInputConfig, model_config) -> Pipeline
         if user_input.do_compile:
             import torch
 
-            use_glm5_overrides = _requires_glm5_compile_overrides(user_input)
-            config.compilation.fusion_patterns.enable_matmul_allreduce = not use_glm5_overrides
             config.compilation.fusion_patterns.enable_dispatch_ffn_combine = bool(
                 user_input.enable_dispatch_ffn_combine
             )
@@ -120,8 +113,6 @@ def build_model(
     if user_input.do_compile:
         import torch
 
-        use_glm5_overrides = _requires_glm5_compile_overrides(user_input)
-        config.compilation.fusion_patterns.enable_matmul_allreduce = not use_glm5_overrides
         config.compilation.fusion_patterns.enable_dispatch_ffn_combine = bool(user_input.enable_dispatch_ffn_combine)
         model = torch.compile(
             model,

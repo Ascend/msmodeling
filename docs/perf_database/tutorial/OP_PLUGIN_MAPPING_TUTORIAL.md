@@ -366,7 +366,7 @@ python3.10 -m cli.inference.text_generate $MODEL \
   --profiling-database $DATA_DIR
 ```
 
-如果你在验证 SequenceParallel 对齐，可额外添加 `--enable-sequence-parallel`。
+如果你在验证 SequenceParallel 对齐，可额外添加 `--compilation-config enable_sequence_parallel`。
 该开关只在 `--compile` 打开时生效；同时它与 `matmul_allreduce` 这类
 MC2 融合路径会竞争同一部分通信子图，因此通常应作为单独配置显式开启，
 不要默认与其他 compile pass 一起混用。当前该开关仅用于 prefill 对齐；
@@ -415,7 +415,7 @@ MoE 模型匹配率较低是预期的，因为 TC 的 compile pass 产生的中�
 
 1. **缺少 `--compile`**：不加此参数时，融合算子（SwiGlu、AddRmsNorm、MC2、SequenceParallel）会分解为 70+ 个 aten 原始算子，无法匹配 profiling 内核。profiling 模式下务必使用 `--compile`。
 
-2. **混用 `--enable-sequence-parallel` 与 MC2 配置**：SequenceParallel 与 `matmul_allreduce` 会改写部分重叠的通信模式，通常应视为二选一的 compile 配置。做 profiling 对齐时，先明确当前要验证哪条路径，再决定是否添加 `--enable-sequence-parallel`。另外，当前 SequenceParallel 只用于 prefill，对齐 decode profiling 时不要开启。
+2. **混用 `--compilation-config enable_sequence_parallel` 与 MC2 配置**：SequenceParallel 与 `matmul_allreduce` 会改写部分重叠的通信模式，通常应视为二选一的 compile 配置。做 profiling 对齐时，先明确当前要验证哪条路径，再决定是否添加 `--compilation-config enable_sequence_parallel`。另外，当前 SequenceParallel 只用于 prefill，对齐 decode profiling 时不要开启。
 
 3. **验证参数错误**：用 prefill 参数（`--query-length 3500`）去验证 decode 的 profiling 数据（`batch=4, query-length=1`）会导致大量 shape 不匹配。务必先从 CSV shape 推导参数（见第 9 节步骤 1）。
 

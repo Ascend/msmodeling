@@ -1,4 +1,4 @@
-﻿# TensorCast User Guide
+# TensorCast User Guide
 
 For the complete model list and feature details, see [Model Support and Feature Support Matrix](./support_matrix/support_matrix_user_guide.md).
 
@@ -205,7 +205,7 @@ usage: text_generate.py [-h]
                         --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--decode]
                         [--prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE] [--num-mtp-tokens NUM_MTP_TOKENS]
                         [--disable-repetition] [--compile] [--compile-allow-graph-break]
-                        [--enable-sequence-parallel]
+                        [--compilation-config [{enable_multistream,enable_sequence_parallel,enable_matmul_allreduce,enable_dispatch_ffn_combine} ...]]
                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                         [--quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                         [--quantize-lmhead] [--mxfp4-group-size MXFP4_GROUP_SIZE]
@@ -246,7 +246,7 @@ Main parameters:
 | `--disable-repetition` | LLM Options | Optional | Disables transformer repetition-pattern optimization and preserves the original model behavior.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compile` | Optimization Options | Optional | Invokes `torch.compile()` on the model before inference.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compile-allow-graph-break` | Optimization Options | Optional | Allows graph breaks during `torch.compile()`.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
-| `--enable-sequence-parallel` | Optimization Options | Optional | Enables the sequence parallel graph rewrite pass during compilation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
+| `--compilation-config` | Optimization Options | Optional | Dynamically enable specified compilation features. Multiple options can be provided at once.<br>1. Type: List[Str] (`nargs="*"`).<br>2. Choices: `enable_multistream` (enable multi-stream scheduling), `enable_sequence_parallel` (enable sequence parallel graph rewrite pass), `enable_matmul_allreduce` (enable matmul-allreduce fusion), `enable_dispatch_ffn_combine` (enable dispatch_ffn_combine fusion).<br>3. Default: when omitted, all compilation features remain disabled (`False`).<br>4. Example: `--compilation-config enable_multistream enable_sequence_parallel`. |
 | `--quantize-linear-action` | Quantization Options | Optional | Specifies the linear layer quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`. |
 | `--quantize-non-expert-linear-action` | Quantization Options | Optional | Specifies a separate quantization mode for non-expert linear layers, such as attention projections, dense MLP, and shared experts.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `DISABLED`. |
 | `--quantize-lmhead` | Quantization Options | Optional | Enables quantization for lm head.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |

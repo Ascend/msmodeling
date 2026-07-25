@@ -2,7 +2,7 @@
   "type": "text",
   "name": "kimi-k2.5-3.5k-decode",
   "description": "Kimi-K2.5 3.5K decode, 64 queries, qlen=4, ctx=4250, DP=4, TP=4, EP=16, W4A8, MTP=3, compile",
-  "initial_time_s": 0.058933,
+  "initial_time_s": 0.064553,
   "baseline_time_s": 0.061168,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.2,

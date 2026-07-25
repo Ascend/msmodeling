@@ -3,6 +3,10 @@ import logging
 
 from cli.logo import print_logo
 from tensor_cast import config, device_profiles  # noqa: F401
+from tensor_cast.core.compilation_config import (
+    COMPILATION_CONFIG_OPTIONS,
+    apply_compilation_config,
+)
 from tensor_cast.core.quantization.datatypes import (
     QuantizeAttentionAction,
     QuantizeLinearAction,
@@ -87,9 +91,13 @@ def main():
         help="Allow graph breaks during torch.compile() for models with dynamic control flow.",
     )
     optim_group.add_argument(
-        "--enable-sequence-parallel",
-        action="store_true",
-        help="Enable the sequence parallel graph rewrite pass during compilation.",
+        "--compilation-config",
+        nargs="*",
+        default=None,
+        choices=COMPILATION_CONFIG_OPTIONS,
+        help="Enable specific compilation features dynamically. "
+        f"Options: {', '.join(COMPILATION_CONFIG_OPTIONS)}. "
+        "If omitted, all compilation features remain at their defaults (disabled).",
     )
 
     quant_group = parser.add_argument_group("Quantization Options")
@@ -341,7 +349,7 @@ def main():
 
     if args.graph_log_url:
         config.compilation.debug.graph_log_url = args.graph_log_url
-    config.compilation.passes.enable_sequence_parallel = args.enable_sequence_parallel
+    apply_compilation_config(args.compilation_config)
 
     # Set default performance_model if not specified
     if args.performance_model is None:

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-import tensor_cast.config as tc_config
 from tensor_cast.core.input_generator import generate_inputs
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
@@ -91,8 +90,13 @@ def test_gmm_fusion_ep_smoke():
 
 def test_dfc_dispatch_ffn_combine_smoke():
     """Single DFC prefill scenario; guards DfcPassNightlyTestCase.test_dfc_dsv3_ep."""
-    orig = tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine
-    tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
+    from tensor_cast.core.compilation_config import apply_compilation_config
+
+    # Use the unified entry point so the flag is set exactly the way the CLI does.
+    # The flag is also passed to UserInputConfig because model_builder.py:116
+    # overwrites the global config from user_input before torch.compile runs,
+    # which would otherwise wipe out the True we set above and skip DFC fusion.
+    apply_compilation_config(["enable_dispatch_ffn_combine"])
     try:
         user_input = UserInputConfig(
             model_id="deepseek-ai/DeepSeek-V3",
@@ -106,6 +110,7 @@ def test_dfc_dispatch_ffn_combine_smoke():
             tp_size=2,
             ep_size=2,
             quantize_linear_action=QuantizeLinearAction.W8A8_STATIC,
+            enable_dispatch_ffn_combine=True,
         )
         result = ModelRunner(user_input).run_inference(generate_inputs_func=generate_inputs)
         assert result is not None
@@ -113,7 +118,9 @@ def test_dfc_dispatch_ffn_combine_smoke():
             result = asdict(result)
         assert "tensor_cast.dispatch_ffn_combine" in result["table_result"]
     finally:
-        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = orig
+        # Explicitly reset all four compilation switches to their defaults to avoid
+        # cross-task contamination, per project_memory hard constraint.
+        apply_compilation_config(None)
 
 
 def test_vl_moe_tp_ep_compile_smoke():

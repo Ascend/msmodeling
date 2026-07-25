@@ -7,6 +7,7 @@ try:
 except ImportError:  # pragma: no cover
     gr = None
 
+from tensor_cast.core.compilation_config import COMPILATION_CONFIG_OPTIONS
 from tensor_cast.model_config import RemoteSource
 
 from .callbacks import (
@@ -509,9 +510,10 @@ def build_app() -> gr.Blocks:
                                 value=False,
                             )
                         with gr.Row():
-                            tg_enable_sequence_parallel = gr.Checkbox(
-                                label="enable-sequence-parallel",
-                                value=False,
+                            tg_compilation_config = gr.CheckboxGroup(
+                                COMPILATION_CONFIG_OPTIONS,
+                                value=[],
+                                label="compilation-config",
                             )
                             tg_enable_shared_expert_tp = gr.Checkbox(
                                 label="enable-shared-expert-tp",
@@ -697,7 +699,7 @@ def build_app() -> gr.Blocks:
                 tg_enable_redundant_experts,
                 tg_enable_external_shared_experts,
                 tg_host_external_shared_experts,
-                tg_enable_sequence_parallel,
+                tg_compilation_config,
                 tg_enable_shared_expert_tp,
                 tg_remote_source,
                 tg_performance_model,

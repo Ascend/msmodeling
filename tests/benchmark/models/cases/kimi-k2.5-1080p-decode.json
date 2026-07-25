@@ -2,7 +2,7 @@
   "type": "text",
   "name": "kimi-k2.5-1080p-decode",
   "description": "Kimi-K2.5 1080P decode, 64 queries, qlen=4, ctx=2851, DP=4, TP=4, EP=16, W4A8, MTP=3, compile",
-  "initial_time_s": 0.057654,
+  "initial_time_s": 0.062990,
   "baseline_time_s": 0.059404,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.2,

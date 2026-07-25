@@ -317,10 +317,10 @@ Model & Quantization Options:
                         Enable MOE-DP search. Optional explicit MOE-DP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
   --enable-shared-expert-tp
                         Enable vLLM-style tensor parallel for shared experts. (default: False)
-  --enable-sequence-parallel
-                        Enable the sequence parallel graph rewrite pass during compilation. (default: False)
-  --enable-dispatch-ffn-combine
-                        Enable dispatch_ffn_combine fusion pattern during compilation. (default: False)
+  --compilation-config [{enable_multistream,enable_sequence_parallel,enable_matmul_allreduce,enable_dispatch_ffn_combine} ...]
+                        按需启用指定的编译特性。多个特性以空格分隔，例如
+                        `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`。
+                        不指定时所有编译特性保持关闭。(default: None)
   --word-embedding-tp {col,row}
                         Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled. (default: None)
 
@@ -400,8 +400,7 @@ PD Ratio Optimization Options:
 | `--ep-sizes` | Model & Quantization Options | 可选 | 启用 EP 搜索，并可显式指定 EP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
 | `--moe-dp-sizes` | Model & Quantization Options | 可选 | 启用 MOE-DP 搜索，并可显式指定 MOE-DP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
 | `--enable-shared-expert-tp` | Model & Quantization Options | 可选 | 启用 vLLM 风格的 shared experts 张量并行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. shared experts 使用 dense MLP TP，并延迟执行 `down_proj` 规约。 |
-| `--enable-sequence-parallel` | Model & Quantization Options | 可选 | 编译期间启用 sequence parallel 图改写 pass。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--enable-dispatch-ffn-combine` | Model & Quantization Options | 可选 | 编译期间启用 dispatch_ffn_combine 融合模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--compilation-config` | Model & Quantization Options | 可选 | 按需启用指定的编译特性。<br>1. 类型：List[Str]。<br>2. 取值范围：`enable_multistream`、`enable_sequence_parallel`、`enable_matmul_allreduce`、`enable_dispatch_ffn_combine`，可同时传入多个，以空格分隔，例如 `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`。<br>3. 默认值：`None`，未指定时所有编译特性保持关闭。<br>4. 该参数自 PR #573 起统一替代原 `--enable-sequence-parallel` / `--enable-dispatch-ffn-combine` 等分散开关。 |
 | `--word-embedding-tp` | Model & Quantization Options | 可选 | 启用 word embedding 张量并行并指定并行模式。<br>1. 类型：Str。<br>2. 参考值：`col`、`row`。<br>3. 默认值：`None`，表示不启用 embedding TP。 |
 | `--performance-model` | Performance Model Options | 可选 | 指定性能模型类型。<br>1. 类型：Str。<br>2. 参考值：`analytic`、`profiling`。<br>3. 默认值：`analytic`。<br>4. `profiling` 模式需配合 `--profiling-database` 使用。 |
 | `--profiling-database` | Performance Model Options | 条件必选 | 指定 profiling 模式使用的实测算子 CSV 数据库目录。<br>1. 类型：Str。<br>2. 取值范围：数据库目录路径，例如 `tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/`。<br>3. 默认值：`None`；使用 `--performance-model profiling` 时必填。 |

@@ -8,6 +8,7 @@
   "baseline_tolerance": 0.2,
   "operator_top_n": 10,
   "operator_tolerance": 0.1,
+  "compilation_config": ["enable_matmul_allreduce"],
   "user_input": {
     "device": "ATLAS_800_A2_376T_64G",
     "model_id": "Qwen/Qwen3-8B",

@@ -12,10 +12,10 @@ from tests.helpers.cli_runner import run_cli_main, run_module_main
 def test_user_input_config_enables_dfc_by_default():
     orig_dfc = tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine
     try:
-        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
+        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = False
 
-        assert UserInputConfig().enable_dispatch_ffn_combine is True
-        assert tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine is True
+        assert UserInputConfig().enable_dispatch_ffn_combine is False
+        assert tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine is False
     finally:
         tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = orig_dfc
 
@@ -23,7 +23,7 @@ def test_user_input_config_enables_dfc_by_default():
 def test_user_input_config_uses_internal_dfc_default():
     orig_dfc = tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine
     try:
-        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = False
+        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
 
         assert UserInputConfig().enable_dispatch_ffn_combine is False
     finally:
@@ -47,7 +47,7 @@ def test_cli_main_enables_dfc_by_default_without_cli_flag(monkeypatch):
 
     orig_dfc = tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine
     try:
-        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
+        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = False
         monkeypatch.setattr(cli_text_generate, "print_logo", lambda: None)
         monkeypatch.setattr("tensor_cast.core.model_runner.ModelRunner", FakeModelRunner)
 
@@ -58,7 +58,7 @@ def test_cli_main_enables_dfc_by_default_without_cli_flag(monkeypatch):
         )
 
         assert result.returncode == 0
-        assert captured["user_input"].enable_dispatch_ffn_combine is True
+        assert captured["user_input"].enable_dispatch_ffn_combine is False
         assert captured["printed"] is True
     finally:
         tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = orig_dfc
@@ -101,7 +101,7 @@ def test_build_model_applies_user_dfc_config_before_compile():
     )
     orig_dfc = tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine
     try:
-        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
+        tc_config.compilation.fusion_patterns.enable_dispatch_ffn_combine = False
         with (
             patch.object(model_builder.ConfigResolver, "resolve", return_value=fake_model_config),
             patch.object(model_builder, "TransformerModel", return_value=fake_model),

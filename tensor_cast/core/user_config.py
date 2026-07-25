@@ -8,7 +8,6 @@ import math
 from dataclasses import dataclass, field, fields
 from typing import List, Optional, Union
 
-from .. import config
 from ..core.input_generator import RequestInfo
 from ..core.model_source_security import normalize_model_source
 from ..core.quantization.config import create_quant_config
@@ -46,7 +45,10 @@ class UserInputConfig:
     quantize_lmhead: bool = False
     mxfp4_group_size: int = 32
     quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED
+    enable_multistream: bool = False
     enable_sequence_parallel: bool = False
+    enable_matmul_allreduce: bool = False
+    enable_dispatch_ffn_combine: bool = False
     decode: bool = False
     num_mtp_tokens: int = 0
     mtp_acceptance_rate: List[float] = field(default_factory=lambda: [0.9, 0.6, 0.4, 0.2])
@@ -76,9 +78,6 @@ class UserInputConfig:
     enable_redundant_experts: bool = False
     """Pad routing-expert count to a multiple of EP size for load balancing."""
     enable_shared_expert_tp: bool = False
-    enable_dispatch_ffn_combine: bool = field(
-        default_factory=lambda: config.compilation.fusion_patterns.enable_dispatch_ffn_combine
-    )
     """Apply tensor-parallelism to shared experts across the EP group.
     Requires expert_parallel_size > 1.
     Mutually exclusive with ``host_external_shared_experts``.
@@ -302,4 +301,18 @@ class UserInputConfig:
                 filtered_kwargs[special_input_key_map[field_name]] = field_value
             elif field_name in field_names:
                 filtered_kwargs[field_name] = field_value
+
+        # Handle --compilation-config: convert the list of feature names into
+        # individual boolean fields so that downstream code (e.g. parallel_runner)
+        # can read them as usual bool attributes. The set of accepted names is
+        # the same as the CLI choices — keep them in sync via the unified
+        # ``tensor_cast.core.compilation_config`` module.
+        compilation_config = getattr(args, "compilation_config", None)
+        if compilation_config:
+            from .compilation_config import COMPILATION_CONFIG_OPTIONS
+
+            for flag_name in compilation_config:
+                if flag_name in COMPILATION_CONFIG_OPTIONS:
+                    filtered_kwargs[flag_name] = True
+
         return cls(**filtered_kwargs)

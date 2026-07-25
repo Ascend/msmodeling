@@ -1,4 +1,4 @@
-﻿# Text Generate Parameter Guidance
+# Text Generate Parameter Guidance
 
 This reference summarizes high-value parameters for `python -m cli.inference.text_generate`.
 
@@ -18,7 +18,7 @@ This reference summarizes high-value parameters for `python -m cli.inference.tex
 
 - `--compile`: enables compiled path simulation; the skill adds it by default for realistic compiled-path validation, shows the assumption, and lets the user disable it before execution.
 - `--compile-allow-graph-break`: allows graph breaks during compile for dynamic models.
-- `--enable-sequence-parallel`: enables sequence parallel graph rewrite during compilation.
+- `--compilation-config`: enables specific compilation features dynamically. Options: `enable_multistream`, `enable_sequence_parallel`, `enable_matmul_allreduce`, `enable_dispatch_ffn_combine`. Multiple values can be passed, e.g. `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`. When omitted, all compilation features remain disabled.
 - `--quantize-linear-action`: default is `W8A8_DYNAMIC`.
 - `--quantize-attention-action`: default is `DISABLED`.
 - `--quantize-lmhead`: off by default because LM head quantization can affect accuracy.
@@ -36,7 +36,6 @@ This reference summarizes high-value parameters for `python -m cli.inference.tex
 - `--word-embedding-tp`: enables word embedding TP with `col` or `row`.
 - `--enable-redundant-experts`: enables redundant experts for relevant MoE layouts.
 - `--enable-shared-expert-tp`: enables vLLM-style TP for shared experts.
-- `--enable-dispatch-ffn-combine`: enables dispatch/FFN/combine fusion during compilation.
 - `--enable-external-shared-experts`: uses external shared experts.
 - `--host-external-shared-experts`: hosts external shared experts on the current device.
 

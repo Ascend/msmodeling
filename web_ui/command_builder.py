@@ -140,7 +140,7 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             "enable_redundant_experts": _as_bool(form.get("enable_redundant_experts", False)),
             "enable_external_shared_experts": _as_bool(form.get("enable_external_shared_experts", False)),
             "host_external_shared_experts": _as_bool(form.get("host_external_shared_experts", False)),
-            "enable_sequence_parallel": _as_bool(form.get("enable_sequence_parallel", False)),
+            "compilation_config": parse_scalar_or_list(form.get("compilation_config"), str),
             "enable_shared_expert_tp": _as_bool(form.get("enable_shared_expert_tp", False)),
             "remote_source": str(form.get("remote_source") or DEFAULT_REMOTE_SOURCE),
             "performance_model": _performance_models(form.get("performance_model")),
@@ -213,8 +213,8 @@ def build_text_generate_tasks(form: dict[str, Any]) -> list[ExperimentTask]:
             cmd.append("--enable-external-shared-experts")
         if params["host_external_shared_experts"]:
             cmd.append("--host-external-shared-experts")
-        if params["enable_sequence_parallel"]:
-            cmd.append("--enable-sequence-parallel")
+        if params["compilation_config"]:
+            cmd += ["--compilation-config"] + list(params["compilation_config"])
         if params["enable_shared_expert_tp"]:
             cmd.append("--enable-shared-expert-tp")
         if params["image_batch_size"] is not None:

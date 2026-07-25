@@ -2,7 +2,7 @@
   "type": "text",
   "name": "kimi-k2.5-1080p-prefill",
   "description": "Kimi-K2.5 1080P+30 prefill, 4 queries, qlen=30, img=1080x1920, DP=4, TP=4, EP=16, W4A8, compile",
-  "initial_time_s": 0.505217,
+  "initial_time_s": 0.536191,
   "baseline_time_s": 0.707843,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.3,
