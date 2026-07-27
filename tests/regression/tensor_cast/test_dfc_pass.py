@@ -12,6 +12,7 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.compilation.freezing_passes.dispatch_ffn_combine_pass import (
     DispatchFFNCombinePass,
 )
+from tensor_cast.core.compilation_config import apply_compilation_config
 from tensor_cast.core.config_resolver import ConfigResolver
 from tensor_cast.core.input_generator import generate_inputs
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
@@ -35,10 +36,10 @@ class DfcPassTestMixin:
 
     def setUp(self):
         torch.compiler.reset()
-        self._orig_enable_dispatch_ffn_combine = config.compilation.fusion_patterns.enable_dispatch_ffn_combine
+        apply_compilation_config([])
 
     def tearDown(self):
-        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = self._orig_enable_dispatch_ffn_combine
+        apply_compilation_config(None)
 
     def _assert_no_dfc_residual_ops(self, table_result: str):
         residual_ops = [
@@ -73,7 +74,7 @@ class DfcPassTestMixin:
         quantize_linear_action,
     ):
         """Verify that DFC is effective for DSv3 large EP configuration (Phase 1)"""
-        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
+        apply_compilation_config(["enable_dispatch_ffn_combine"])
         model_id = "deepseek-ai/DeepSeek-V3"
         user_input = UserInputConfig(
             device="ATLAS_800_A3_752T_128G_DIE",
@@ -88,6 +89,7 @@ class DfcPassTestMixin:
             dp_size=2,
             ep_size=16,
             quantize_linear_action=quantize_linear_action,
+            enable_dispatch_ffn_combine=True,
         )
         model_runner = ModelRunner(user_input)
         result = model_runner.run_inference(generate_inputs_func=generate_inputs)
@@ -137,7 +139,7 @@ class DfcPassTestMixin:
 
     def test_dfc_dsv3_w8a8_dynamic_profiling(self):
         """Verify DFC profiling performance model with DeepSeek-V3 config."""
-        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
+        apply_compilation_config(["enable_dispatch_ffn_combine"])
         user_input = UserInputConfig(
             device="ATLAS_800_A3_752T_128G_DIE",
             model_id="deepseek-ai/DeepSeek-V3",
@@ -156,6 +158,7 @@ class DfcPassTestMixin:
                 "ATLAS_800_A3_752T_128G_DIE/vllm_ascend/"
                 "vllm0.15.0_torch2.9.0_cann8.5"
             ),
+            enable_dispatch_ffn_combine=True,
         )
         model_runner = ModelRunner(user_input)
         result = model_runner.run_inference(generate_inputs_func=generate_inputs)
@@ -171,7 +174,7 @@ class DfcPassTestMixin:
 
     def test_dfc_estimator_produces_nonzero_time(self):
         """Verify DFC estimator computes meaningful execution time (not memory-only)."""
-        config.compilation.fusion_patterns.enable_dispatch_ffn_combine = True
+        apply_compilation_config(["enable_dispatch_ffn_combine"])
         model_id = "deepseek-ai/DeepSeek-V3"
         user_input = UserInputConfig(
             device="ATLAS_800_A3_752T_128G_DIE",
@@ -186,6 +189,7 @@ class DfcPassTestMixin:
             dp_size=2,
             ep_size=16,
             quantize_linear_action=QuantizeLinearAction.W8A8_STATIC,
+            enable_dispatch_ffn_combine=True,
         )
         model_runner = ModelRunner(user_input)
         result = model_runner.run_inference(generate_inputs_func=generate_inputs)

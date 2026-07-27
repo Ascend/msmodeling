@@ -4,6 +4,7 @@ from dataclasses import asdict
 import pytest
 import torch
 from parameterized import parameterized
+from tensor_cast.core.compilation_config import apply_compilation_config
 from tensor_cast.core.input_generator import generate_inputs
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
@@ -17,6 +18,10 @@ class MatmulAllReducePassTestCase(unittest.TestCase):
 
     def setUp(self):
         torch.compiler.reset()
+        apply_compilation_config(["enable_matmul_allreduce"])
+
+    def tearDown(self):
+        apply_compilation_config(None)
 
     def _base_user_config(self, quant_action: QuantizeLinearAction) -> UserInputConfig:
         return UserInputConfig(
@@ -30,6 +35,7 @@ class MatmulAllReducePassTestCase(unittest.TestCase):
             num_hidden_layers_override=1,
             world_size=2,
             tp_size=2,
+            enable_matmul_allreduce=True,
         )
 
     def test_qwen3_fp_matmul_allreduce_fused(self):
