@@ -34,6 +34,7 @@ from ..config.base_config import (
 )
 from ..config.config import DecodeContext, field_to_param, map_param_with_value
 from ..logging import LogStage, format_evaluation_failure
+from ..optimizer.experience_fine_tunning import FINE_TUNE_MODE_PD_DISAGGREGATION, FINE_TUNE_MODE_PD_MIXED
 from ..optimizer.errors import (
     BaselineRunError,
     ConfigFileNotFoundError,
@@ -61,8 +62,10 @@ class PSOOptimizer(PerformanceTuner):
         load_breakpoint: bool = False,
         pso_init_kwargs: dict | None = None,
         fine_tune=None,
-        max_fine_tune: int = 10,
+        max_fine_tune: int = 30,
+        skip_pso: bool = False,
         use_request_rate_calibration: bool = True,
+        manage_simulator_lifecycle: bool = True,
         **kwargs,
     ):
         from ..config.config import PsoOptions, default_support_field
@@ -87,9 +90,55 @@ class PSOOptimizer(PerformanceTuner):
         self.sample_data = None
         self.fine_tune = fine_tune
         self.max_fine_tune = min(max_fine_tune, MAX_ITER_NUM)
+        self.skip_pso = skip_pso
         self.use_request_rate_calibration = use_request_rate_calibration
+        self.manage_simulator_lifecycle = manage_simulator_lifecycle
         self._iteration = 0  # op_func call count, used for balanced strategy inter-iteration direction alternation
         self._seen_params = {}
+
+    def _run_benchmark_only_without_service_monitor(self, params, params_field):
+        return self.scheduler.run_benchmark_only(params, params_field, monitor_service=False)
+
+    def _stop_after_fine_tune(self):
+        if self.manage_simulator_lifecycle:
+            self.scheduler.stop_target_server()
+        else:
+            self.scheduler.benchmark.stop()
+
+    def _is_pd_mixed_fine_tune(self):
+        return getattr(self.fine_tune, "fine_tune_mode", None) == FINE_TUNE_MODE_PD_MIXED
+
+    def _should_keep_service_for_pd_mixed_fine_tune(self):
+        return self.manage_simulator_lifecycle and self._is_pd_mixed_fine_tune()
+
+    @staticmethod
+    def _pso_state_allows_retry(optimizer) -> bool:
+        is_global_best_missing = getattr(optimizer, "_is_global_best_missing", None)
+        if not callable(is_global_best_missing):
+            return False
+        try:
+            return bool(is_global_best_missing())
+        except (TypeError, ValueError):
+            return False
+
+    def _run_pso_optimize(self, optimizer):
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return optimizer.optimize(self.op_func, iters=self.iters)
+            except ValueError as error:
+                should_retry = attempt < max_attempts and self._pso_state_allows_retry(optimizer)
+                if not should_retry:
+                    if attempt > 1:
+                        logger.warning("PSO optimization retry failed; aborting. error: {}", error)
+                    raise
+                logger.warning(
+                    "PSO optimization failed before establishing a global best; retrying ({}/{}). error: {}",
+                    attempt + 1,
+                    max_attempts,
+                    error,
+                )
+        raise RuntimeError("unreachable PSO retry state")
 
     @staticmethod
     def is_within_boundary(target_pos, min_bound, max_bound):
@@ -261,9 +310,160 @@ class PSOOptimizer(PerformanceTuner):
             d += 1
         return d
 
-    def refine_optimization_candidates(self, best_results: pd.DataFrame):
+    def _run_and_record_fine_tune_params(
+        self,
+        params,
+        record_fitness,
+        record_params,
+        record_res,
+        run_method=None,
+        stop_service=True,
+        force_run=False,
+    ):
+        params_recorded = self.params_in_records(params, record_params)
+        if params_recorded and not force_run:
+            return None, None, False
+        if run_method is None:
+            run_method = self.scheduler.run
+        try:
+            result = run_method(params, self.target_field)
+            if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
+                logger.error(
+                    "Runtime exception. error: {}, please check.",
+                    format_evaluation_failure(self.scheduler, self.scheduler.error_info),
+                )
+                fitness = inf
+                self.scheduler.save_result(fitness=fitness, stop_service=stop_service)
+                return None, None, False
+            fitness = self.minimum_algorithm(result)
+        except Exception as e:
+            logger.error(
+                "Runtime exception. error: {}, please check.",
+                format_evaluation_failure(self.scheduler, e),
+            )
+            fitness = inf
+            self.scheduler.save_result(fitness=fitness, stop_service=stop_service)
+            return None, None, False
+        self.scheduler.save_result(fitness=fitness, stop_service=stop_service)
+        if not params_recorded:
+            record_params.append(params)
+            record_res.append(result)
+            record_fitness.append(fitness)
+        return result, fitness, True
+
+    def _fine_tune_from_candidate(self, params, result, record_fitness, record_params, record_res):
         from ..optimizer.experience_fine_tunning import StopFineTune
 
+        if self.fine_tune.fine_tune_mode == FINE_TUNE_MODE_PD_DISAGGREGATION:
+            self._fine_tune_pd_disaggregation_from_candidate(params, result, record_fitness, record_params, record_res)
+            return
+
+        self.fine_tune.reset_history()
+        try:
+            for _ in range(self.max_fine_tune):
+                try:
+                    simulate_run_info = self.fine_tune.fine_tune_with_concurrency_and_request_rate(params, result)
+                except ValueError as e:
+                    logger.error("Failed in fine-tuning parameter. error: {}", e)
+                    break
+                except StopFineTune:
+                    break
+                params = field_to_param(simulate_run_info)
+                fine_tune_run_method = (
+                    self.scheduler.run_benchmark_only
+                    if self.manage_simulator_lifecycle
+                    else self._run_benchmark_only_without_service_monitor
+                )
+                result, _, was_recorded = self._run_and_record_fine_tune_params(
+                    params,
+                    record_fitness,
+                    record_params,
+                    record_res,
+                    run_method=fine_tune_run_method,
+                    stop_service=False,
+                )
+                if not was_recorded:
+                    break
+        finally:
+            self._stop_after_fine_tune()
+
+    def _fine_tune_pd_disaggregation_from_candidate(self, params, result, record_fitness, record_params, record_res):
+        from ..optimizer.experience_fine_tunning import StopFineTune
+
+        self.fine_tune.reset_history()
+        try:
+            try:
+                probe_run_info = self.fine_tune.prepare_pd_disaggregation_probe(params)
+            except ValueError as e:
+                logger.error("Failed in PD disaggregation probe setup. error: {}", e)
+                return
+            probe_params = field_to_param(probe_run_info)
+            probe_run_method = (
+                self.scheduler.run
+                if self.manage_simulator_lifecycle
+                else self._run_benchmark_only_without_service_monitor
+            )
+            probe_result, _, was_recorded = self._run_and_record_fine_tune_params(
+                probe_params,
+                record_fitness,
+                record_params,
+                record_res,
+                run_method=probe_run_method,
+                stop_service=False,
+                force_run=True,
+            )
+            if not was_recorded:
+                return
+            try:
+                fixed_request_rate = self.fine_tune.init_pd_disaggregation_request_rate(probe_result)
+            except ValueError as e:
+                logger.error("Failed in PD disaggregation request rate setup. error: {}", e)
+                return
+            logger.info("PD disaggregation fixed request rate: {}", fixed_request_rate)
+
+            params = probe_params
+            result = probe_result
+            for _ in range(self.max_fine_tune):
+                try:
+                    simulate_run_info = self.fine_tune.fine_tune_pd_disaggregation(params, result)
+                except ValueError as e:
+                    logger.error("Failed in PD disaggregation fine-tuning parameter. error: {}", e)
+                    break
+                except StopFineTune:
+                    break
+                params = field_to_param(simulate_run_info)
+                fine_tune_run_method = (
+                    self.scheduler.run_benchmark_only
+                    if self.manage_simulator_lifecycle
+                    else self._run_benchmark_only_without_service_monitor
+                )
+                result, _, was_recorded = self._run_and_record_fine_tune_params(
+                    params,
+                    record_fitness,
+                    record_params,
+                    record_res,
+                    run_method=fine_tune_run_method,
+                    stop_service=False,
+                )
+                if not was_recorded:
+                    break
+        finally:
+            self._stop_after_fine_tune()
+
+    def refine_default_candidate(self):
+        record_params = [self.default_run_param]
+        record_res = [self.default_res]
+        record_fitness = [self.default_fitness]
+        self._fine_tune_from_candidate(
+            self.default_run_param,
+            self.default_res,
+            record_fitness,
+            record_params,
+            record_res,
+        )
+        return record_fitness, record_params, record_res
+
+    def refine_optimization_candidates(self, best_results: pd.DataFrame):
         _record_params = [self.default_run_param]
         _record_res = [self.default_res]
         _record_fitness = [self.default_fitness]
@@ -292,45 +492,14 @@ class PSOOptimizer(PerformanceTuner):
                 _fitness = inf
                 self.scheduler.save_result(fitness=_fitness)
                 continue
-            self.scheduler.save_result(fitness=_fitness)
+            self.scheduler.save_result(
+                fitness=_fitness,
+                stop_service=not self._should_keep_service_for_pd_mixed_fine_tune(),
+            )
             _record_params.append(params)
             _record_res.append(_res)
             _record_fitness.append(_fitness)
-            self.fine_tune.reset_history()
-            for _ in range(self.max_fine_tune):
-                try:
-                    simulate_run_info = self.fine_tune.fine_tune_with_concurrency_and_request_rate(params, _res)
-                except ValueError as e:
-                    logger.error("Failed in fine-tuning parameter. error: {}", e)
-                    break
-                except StopFineTune:
-                    break
-                params = field_to_param(simulate_run_info)
-                if self.params_in_records(params, _record_params):
-                    break
-                try:
-                    _res = self.scheduler.run(params, self.target_field)
-                    if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
-                        logger.error(
-                            "Runtime exception. error: {}, please check.",
-                            format_evaluation_failure(self.scheduler, self.scheduler.error_info),
-                        )
-                        _fitness = inf
-                        self.scheduler.save_result(fitness=_fitness)
-                        break
-                    _fitness = self.minimum_algorithm(_res)
-                except Exception as e:
-                    logger.error(
-                        "Runtime exception. error: {}, please check.",
-                        format_evaluation_failure(self.scheduler, e),
-                    )
-                    _fitness = inf
-                    self.scheduler.save_result(fitness=_fitness)
-                    break
-                self.scheduler.save_result(fitness=_fitness)
-                _record_params.append(params)
-                _record_res.append(_res)
-                _record_fitness.append(_fitness)
+            self._fine_tune_from_candidate(params, _res, _record_fitness, _record_params, _record_res)
         return _record_fitness, _record_params, _record_res
 
     def get_max_generate_speed_index(self, performance_index_list, slo_index):
@@ -343,6 +512,37 @@ class PSOOptimizer(PerformanceTuner):
                 _max = v.generate_speed
                 _best_index = i
         return _best_index
+
+    @staticmethod
+    def _performance_speed(performance_index):
+        if performance_index.throughput is not None:
+            return performance_index.throughput
+        return performance_index.generate_speed
+
+    def best_pd_disaggregation_params(self, fitnese_list, params_list, performance_index_list):
+        _tpot_threshold = self.fine_tune.tpot_upper_bound
+        if _tpot_threshold == 0:
+            return fitnese_list[0], params_list[0], performance_index_list[0]
+        _tpot_lt_slo_index = [
+            i for i, p in enumerate(performance_index_list) if p.time_per_output_token <= _tpot_threshold
+        ]
+        if _tpot_lt_slo_index:
+            _best_index = max(
+                _tpot_lt_slo_index,
+                key=lambda i: self._performance_speed(performance_index_list[i]),
+            )
+            return (
+                fitnese_list[_best_index],
+                params_list[_best_index],
+                performance_index_list[_best_index],
+            )
+        _tpot_diff = [(p.time_per_output_token - _tpot_threshold) / _tpot_threshold for p in performance_index_list]
+        _best_index = _tpot_diff.index(min(_tpot_diff))
+        return (
+            fitnese_list[_best_index],
+            params_list[_best_index],
+            performance_index_list[_best_index],
+        )
 
     def best_params(self, fitnese_list, params_list, performance_index_list):
         if not performance_index_list or not fitnese_list or not params_list:
@@ -368,6 +568,9 @@ class PSOOptimizer(PerformanceTuner):
                 _p.time_to_first_token = inf
             if _p.time_per_output_token is None:
                 _p.time_per_output_token = inf
+
+        if getattr(self.fine_tune, "fine_tune_mode", None) == FINE_TUNE_MODE_PD_DISAGGREGATION:
+            return self.best_pd_disaggregation_params(fitnese_list, params_list, performance_index_list)
 
         if self.tpot_penalty == 0 and self.ttft_penalty == 0:
             _generate_speed = [p.generate_speed for p in performance_index_list]
@@ -472,8 +675,11 @@ class PSOOptimizer(PerformanceTuner):
         if not self.scheduler.error_info:
             return
         err = BaselineRunError.from_scheduler(self.scheduler)
-        del_log = self.scheduler.del_log if self.scheduler.del_log is not None else False
-        self.scheduler.stop_target_server(del_log)
+        if self.manage_simulator_lifecycle:
+            del_log = self.scheduler.del_log if self.scheduler.del_log is not None else False
+            self.scheduler.stop_target_server(del_log)
+        else:
+            self.scheduler.benchmark.stop()
         raise err
 
     @staticmethod
@@ -527,12 +733,24 @@ class PSOOptimizer(PerformanceTuner):
                         )
                     elif _field.config_position == "env":
                         _field.value = os.getenv(_field.name, _field.value)
-                self.default_res = self._run_baseline_preserving_search_space()
+                if self.manage_simulator_lifecycle:
+                    self.default_res = self._run_baseline_preserving_search_space()
+                else:
+                    self.default_run_param = field_to_param(self.target_field)
+                    self.default_res = self.scheduler.run_benchmark_only(
+                        self.default_run_param,
+                        self.target_field,
+                        monitor_service=False,
+                    )
                 self._raise_if_baseline_failed()
                 if self.default_res.generate_speed:
                     self.gen_speed_target = 10 * self.default_res.generate_speed
                 self.default_fitness = self.minimum_algorithm(self.default_res)
-                self.scheduler.save_result(fitness=self.default_fitness)
+                self.scheduler.save_result(
+                    fitness=self.default_fitness,
+                    stop_service=self.manage_simulator_lifecycle
+                    and not (self.skip_pso and self._is_pd_mixed_fine_tune()),
+                )
                 if is_mindie():
                     self.mindie_prepare(mc)
                 if isinstance(self.scheduler.benchmark, AisBench):
@@ -546,10 +764,22 @@ class PSOOptimizer(PerformanceTuner):
                             else:
                                 _field.value = _field.max
             else:
-                self.default_res = self._run_baseline_preserving_search_space()
+                if self.manage_simulator_lifecycle:
+                    self.default_res = self._run_baseline_preserving_search_space()
+                else:
+                    self.default_run_param = field_to_param(self.target_field)
+                    self.default_res = self.scheduler.run_benchmark_only(
+                        self.default_run_param,
+                        self.target_field,
+                        monitor_service=False,
+                    )
                 self._raise_if_baseline_failed()
                 self.default_fitness = self.minimum_algorithm(self.default_res)
-                self.scheduler.save_result(fitness=self.default_fitness)
+                self.scheduler.save_result(
+                    fitness=self.default_fitness,
+                    stop_service=self.manage_simulator_lifecycle
+                    and not (self.skip_pso and self._is_pd_mixed_fine_tune()),
+                )
 
             if (
                 self.default_res.generate_speed is None
@@ -569,31 +799,35 @@ class PSOOptimizer(PerformanceTuner):
             logger.success("Baseline established")
 
     def run_plugin(self):
-        from ..optimizer.global_best_custom import CustomGlobalBestPSO
-
         self.prepare_plugin()
-        with adapter_target_field(self):
-            if self.load_breakpoint:
-                self.load_history_data = self.scheduler.data_storage.load_history_position(
-                    self.scheduler.data_storage.config.store_dir,
-                    filter_field={REAL_EVALUATION: True},
+        if self.skip_pso:
+            logger.info("skip_pso is enabled; refining the baseline result without running PSO.")
+            _record_fitness, _record_params, _record_res = self.refine_default_candidate()
+        else:
+            from ..optimizer.global_best_custom import CustomGlobalBestPSO
+
+            with adapter_target_field(self):
+                if self.load_breakpoint:
+                    self.load_history_data = self.scheduler.data_storage.load_history_position(
+                        self.scheduler.data_storage.config.store_dir,
+                        filter_field={REAL_EVALUATION: True},
+                    )
+                if self.load_history_data and self.load_breakpoint:
+                    self.history_pos, self.history_cost = self.computer_fitness()
+                optimizer = CustomGlobalBestPSO(
+                    n_particles=self.n_particles,
+                    dimensions=self.dimensions(),
+                    options=self.pso_options.model_dump(),
+                    bounds=self.constructing_bounds(),
+                    init_pos=self.init_pos,
+                    breakpoint_pos=self.history_pos,
+                    breakpoint_cost=self.history_cost,
+                    **self.pso_init_kwargs,
                 )
-            if self.load_history_data and self.load_breakpoint:
-                self.history_pos, self.history_cost = self.computer_fitness()
-            optimizer = CustomGlobalBestPSO(
-                n_particles=self.n_particles,
-                dimensions=self.dimensions(),
-                options=self.pso_options.model_dump(),
-                bounds=self.constructing_bounds(),
-                init_pos=self.init_pos,
-                breakpoint_pos=self.history_pos,
-                breakpoint_cost=self.history_cost,
-                **self.pso_init_kwargs,
-            )
-            with enable_simulate(self.scheduler):
-                cost, joint_vars = optimizer.optimize(self.op_func, iters=self.iters)
-                best_results = self.scheduler.data_storage.get_best_result()
-        _record_fitness, _record_params, _record_res = self.refine_optimization_candidates(best_results)
+                with enable_simulate(self.scheduler):
+                    cost, joint_vars = self._run_pso_optimize(optimizer)
+                    best_results = self.scheduler.data_storage.get_best_result()
+            _record_fitness, _record_params, _record_res = self.refine_optimization_candidates(best_results)
         best_fitness, best_param, best_performance_index = self.best_params(
             _record_fitness, _record_params, _record_res
         )
@@ -793,6 +1027,7 @@ def _run_optimizer() -> None:
             tpot_slo=settings.tpot_slo,
             slo_coefficient=settings.slo_coefficient,
             step_size=settings.step_size,
+            fine_tune_mode=settings.fine_tune_mode,
         )
         pso = PSOOptimizer(
             scheduler,
@@ -809,7 +1044,9 @@ def _run_optimizer() -> None:
             load_breakpoint=args.load_breakpoint,
             fine_tune=fine_tune,
             max_fine_tune=settings.max_fine_tune,
+            skip_pso=settings.skip_pso,
             use_request_rate_calibration=settings.use_request_rate_calibration,
+            manage_simulator_lifecycle=settings.manage_simulator_lifecycle,
             pso_init_kwargs={"ftol": settings.ftol, "ftol_iter": settings.ftol_iter},
         )
         with logger.contextualize(stage=LogStage.SEARCH.value):

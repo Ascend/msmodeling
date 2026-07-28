@@ -14,7 +14,7 @@
 # See the Mulan PSL v2 for more details.
 # -------------------------------------------------------------------------
 from itertools import cycle
-from math import isinf, isnan
+from math import floor, isinf, isnan
 from typing import Optional, Tuple
 
 import numpy as np
@@ -26,6 +26,9 @@ from ..config.config import (
     OptimizerConfigField,
 )
 from ..config.base_config import REQUESTRATES, CONCURRENCYS
+
+FINE_TUNE_MODE_PD_MIXED = "pd_mixed"
+FINE_TUNE_MODE_PD_DISAGGREGATION = "pd_disaggregation"
 
 
 class StopFineTune(Exception):
@@ -42,6 +45,7 @@ class FineTune:
         tpot_slo: float = 0.05,
         slo_coefficient: float = 0.1,
         step_size: float = 0.5,
+        fine_tune_mode: str = FINE_TUNE_MODE_PD_MIXED,
     ):
         self.ttft_penalty = ttft_penalty  # Penalty coefficient in optimization algorithm
         self.tpot_penalty = tpot_penalty
@@ -52,6 +56,7 @@ class FineTune:
         self.fine_tune_target = ["REQUESTRATE"]
         self.fine_tune_type = cycle(self.fine_tune_target)
         self.step_size = step_size
+        self.fine_tune_mode = fine_tune_mode
         self.ttft_lower_bound = self.ttft_slo * (1 - self.slo_coefficient)
         self.ttft_upper_bound = self.ttft_slo
         self.tpot_lower_bound = self.tpot_slo * (1 - self.slo_coefficient)
@@ -68,6 +73,9 @@ class FineTune:
         self.tpot_under_lower_bound = False
         self.last_signed_factor = {}
         self.last_value = {}
+        self.pd_fixed_request_rate = None
+        self.pd_lower_concurrency = None
+        self.pd_upper_concurrency = None
 
     @staticmethod
     def update_field(
@@ -75,6 +83,7 @@ class FineTune:
         signed_factor,
         field_names: tuple = REQUESTRATES,
         last: Optional[float] = None,
+        force_min_change: bool = False,
     ) -> bool:
         if signed_factor == 0 or isinf(signed_factor) or isnan(signed_factor):
             return False
@@ -83,9 +92,21 @@ class FineTune:
                 if _field.constant is not None or _field.min == _field.max:
                     return False
                 original_value = _field.value
-                if last:
+                if _field.name.upper().strip() in REQUESTRATES and _field.value == 0:
+                    if signed_factor > 0:
+                        return False
+                    # For benchmark tools, REQUESTRATE=0 means unlimited QPS, not numeric zero.
+                    # When reducing pressure from unlimited, start from the finite upper bound.
+                    finite_base = _field.max
+                    if isinf(finite_base) or isnan(finite_base) or finite_base <= 0:
+                        finite_base = last if last and last > 0 else _field.min
+                    min_change_base = finite_base
+                    _new_value = finite_base * (1 + signed_factor)
+                elif last:
+                    min_change_base = _field.value
                     _new_value = _field.value + signed_factor * abs(_field.value - last)
                 else:
+                    min_change_base = _field.value
                     _new_value = _field.value * (1 + signed_factor)
                 if isinf(_new_value) or isnan(_new_value):
                     return False
@@ -95,7 +116,13 @@ class FineTune:
                     _field.value = original_value
                     return False
                 _field.value = _new_value
-                # Check if value changed by a significant amount (>=0.1)
+                if abs(_field.value - original_value) >= 0.1:
+                    return True
+                if not force_min_change:
+                    return False
+                min_delta = 1 if _field.dtype == "int" else 0.1
+                direction = 1 if signed_factor > 0 else -1
+                _field.value = _field.find_available_value(min_change_base + direction * min_delta)
                 return abs(_field.value - original_value) >= 0.1
         return False
 
@@ -109,6 +136,98 @@ class FineTune:
     def reset_history(self):
         self.last_signed_factor = {}
         self.last_value = {}
+        self.pd_fixed_request_rate = None
+        self.pd_lower_concurrency = None
+        self.pd_upper_concurrency = None
+
+    @staticmethod
+    def is_field_name(field: OptimizerConfigField, names: tuple) -> bool:
+        return field.name.upper().strip() in names
+
+    @staticmethod
+    def floor_to_one_decimal(value: float) -> float:
+        return floor(value * 10) / 10
+
+    @staticmethod
+    def get_qps(performance_index: PerformanceIndex) -> float:
+        if performance_index.throughput is not None and performance_index.throughput > 0:
+            return performance_index.throughput
+        raise ValueError("Missing positive throughput/QPS metric for PD disaggregation fine-tune.")
+
+    @staticmethod
+    def find_field(simulate_run_info: Tuple[OptimizerConfigField, ...], names: tuple):
+        for field in simulate_run_info:
+            if FineTune.is_field_name(field, names):
+                return field
+        return None
+
+    @staticmethod
+    def set_field_value(field: OptimizerConfigField, value, allow_below_min: bool = False) -> bool:
+        if field is None:
+            return False
+        original_value = field.value
+        if allow_below_min:
+            field.value = field.convert_dtype(value)
+        else:
+            field.value = field.find_available_value(value)
+        return abs(float(field.value) - float(original_value)) >= 0.1
+
+    def prepare_pd_disaggregation_probe(self, params: np.ndarray):
+        simulate_run_info = map_param_with_value(params, self.target_field)
+        request_rate_field = self.find_field(simulate_run_info, REQUESTRATES)
+        if request_rate_field is None:
+            raise ValueError("PD disaggregation fine-tune requires REQUESTRATE.")
+        self.set_field_value(request_rate_field, 0, allow_below_min=True)
+        return simulate_run_info
+
+    def init_pd_disaggregation_request_rate(self, performance_index: PerformanceIndex) -> float:
+        request_rate = self.floor_to_one_decimal(self.get_qps(performance_index))
+        if request_rate <= 0:
+            raise ValueError("PD disaggregation fine-tune got non-positive request rate.")
+        self.pd_fixed_request_rate = request_rate
+        return request_rate
+
+    def handle_pd_disaggregation_concurrency(
+        self,
+        simulate_run_info: Tuple[OptimizerConfigField, ...],
+        performance_index: PerformanceIndex,
+    ) -> bool:
+        concurrency_field = self.find_field(simulate_run_info, CONCURRENCYS)
+        request_rate_field = self.find_field(simulate_run_info, REQUESTRATES)
+        if concurrency_field is None or request_rate_field is None:
+            raise ValueError("PD disaggregation fine-tune requires CONCURRENCY and REQUESTRATE.")
+        if self.pd_fixed_request_rate is None:
+            raise ValueError("PD disaggregation fixed request rate is not initialized.")
+        if performance_index.time_per_output_token is None:
+            raise ValueError("Missing performance data for TPOT.")
+
+        current_concurrency = float(concurrency_field.value)
+        if current_concurrency <= 0:
+            raise StopFineTune("Current concurrency must be positive.")
+
+        if performance_index.time_per_output_token > self.tpot_upper_bound:
+            self.pd_upper_concurrency = current_concurrency
+            if self.pd_lower_concurrency is None:
+                next_concurrency = current_concurrency / 2
+            else:
+                next_concurrency = (self.pd_lower_concurrency + current_concurrency) / 2
+        else:
+            self.pd_lower_concurrency = current_concurrency
+            if self.pd_upper_concurrency is None:
+                next_concurrency = current_concurrency * 2
+            else:
+                next_concurrency = (current_concurrency + self.pd_upper_concurrency) / 2
+
+        self.set_field_value(request_rate_field, self.pd_fixed_request_rate)
+        was_updated = self.set_field_value(concurrency_field, next_concurrency)
+        if not was_updated:
+            raise StopFineTune("Parameter value reached its boundary or did not change.")
+        return True
+
+    def fine_tune_pd_disaggregation(self, params: np.ndarray, performance_index: PerformanceIndex):
+        simulate_run_info = map_param_with_value(params, self.target_field)
+        self.handle_pd_disaggregation_concurrency(simulate_run_info, performance_index)
+        return simulate_run_info
 
     def check_config_and_performance(self, performance_index: PerformanceIndex):
         if self.ttft_penalty == 0 and self.tpot_penalty == 0:
@@ -165,6 +284,7 @@ class FineTune:
                 signed_factor_c,
                 field_names=CONCURRENCYS,
                 last=last_concurrency,
+                force_min_change=self.tpot_over_slo,
             )
         return was_updated_c
 
@@ -196,6 +316,7 @@ class FineTune:
                 signed_factor_r,
                 field_names=REQUESTRATES,
                 last=last_req_rate,
+                force_min_change=self.ttft_over_slo,
             )
         return was_updated_r
 

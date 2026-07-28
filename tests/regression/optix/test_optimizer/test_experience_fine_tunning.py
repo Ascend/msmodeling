@@ -22,23 +22,24 @@ from optix.optimizer.experience_fine_tunning import FineTune, StopFineTune
 from optix.config.config import OptimizerConfigField, PerformanceIndex
 
 
-def _make_field(name, value, min_val=0.0, max_val=100.0, constant=None):
+def _make_field(name, value, min_val=0.0, max_val=100.0, constant=None, dtype="float"):
     return OptimizerConfigField(
         name=name,
         value=value,
         min=min_val,
         max=max_val,
-        dtype="float",
+        dtype=dtype,
         constant=constant,
     )
 
 
-def _make_perf(ttft=0.3, tpot=0.04, gen_speed=2000, success_rate=1.0):
+def _make_perf(ttft=0.3, tpot=0.04, gen_speed=2000, success_rate=1.0, throughput=None):
     return PerformanceIndex(
         time_to_first_token=ttft,
         time_per_output_token=tpot,
         generate_speed=gen_speed,
         success_rate=success_rate,
+        throughput=throughput,
     )
 
 
@@ -89,6 +90,18 @@ class TestUpdateField:
         result = FineTune.update_field((field,), 0.5, field_names=("REQUESTRATE",))
         assert result is True
         assert field.value <= 100.0
+
+    def test_request_rate_zero_unlimited_adjusts_down_to_finite_rate(self):
+        field = _make_field("REQUESTRATE", 0.0, 0.1, 100.0)
+        result = FineTune.update_field((field,), -0.5, field_names=("REQUESTRATE",))
+        assert result is True
+        assert field.value == 50.0
+
+    def test_request_rate_zero_unlimited_cannot_adjust_up(self):
+        field = _make_field("REQUESTRATE", 0.0, 0.1, 100.0)
+        result = FineTune.update_field((field,), 0.5, field_names=("REQUESTRATE",))
+        assert result is False
+        assert field.value == 0.0
 
     def test_update_no_matching_field(self):
         field = _make_field("OTHER", 50.0)
@@ -230,6 +243,21 @@ class TestHandleConcurrency:
         result = ft.handle_concurrency((field,), perf)
         assert result is False
 
+    def test_slight_tpot_over_slo_forces_min_concurrency_decrease(self):
+        ft = FineTune(
+            ttft_penalty=3.0,
+            tpot_penalty=3.0,
+            tpot_slo=0.05,
+            ttft_slo=0.5,
+            step_size=0.5,
+        )
+        perf = _make_perf(tpot=0.05001, ttft=0.3)
+        ft.direction_of_field_update(perf)
+        field = _make_field("CONCURRENCY", 50, 1, 100, dtype="int")
+        result = ft.handle_concurrency((field,), perf)
+        assert result is True
+        assert field.value == 49
+
     def test_oscillation_uses_midpoint(self):
         ft = FineTune(
             ttft_penalty=3.0,
@@ -265,6 +293,21 @@ class TestHandleRequestRate:
         assert result is True
         assert field.value < 50.0
 
+    def test_ttft_over_slo_adjusts_unlimited_request_rate_down(self):
+        ft = FineTune(
+            ttft_penalty=3.0,
+            tpot_penalty=3.0,
+            tpot_slo=0.05,
+            ttft_slo=0.5,
+            step_size=0.5,
+        )
+        perf = _make_perf(tpot=0.04, ttft=0.8)
+        ft.direction_of_field_update(perf)
+        field = _make_field("REQUESTRATE", 0.0, 0.1, 100.0)
+        result = ft.handle_request_rate((field,), perf)
+        assert result is True
+        assert 0.0 < field.value < 100.0
+
     def test_ttft_under_lower_bound_adjusts_up(self):
         ft = FineTune(
             ttft_penalty=3.0,
@@ -293,6 +336,36 @@ class TestHandleRequestRate:
         field = _make_field("REQUESTRATE", 50.0, 1.0, 100.0)
         result = ft.handle_request_rate((field,), perf)
         assert result is False
+
+    def test_slight_ttft_over_slo_forces_min_request_rate_decrease(self):
+        ft = FineTune(
+            ttft_penalty=3.0,
+            tpot_penalty=3.0,
+            tpot_slo=0.05,
+            ttft_slo=0.5,
+            step_size=0.5,
+        )
+        perf = _make_perf(tpot=0.04, ttft=0.5001)
+        ft.direction_of_field_update(perf)
+        field = _make_field("REQUESTRATE", 50.0, 0.1, 100.0)
+        result = ft.handle_request_rate((field,), perf)
+        assert result is True
+        assert field.value == pytest.approx(49.9)
+
+    def test_slight_ttft_over_slo_forces_unlimited_request_rate_down_from_max(self):
+        ft = FineTune(
+            ttft_penalty=3.0,
+            tpot_penalty=3.0,
+            tpot_slo=0.05,
+            ttft_slo=0.5,
+            step_size=0.5,
+        )
+        perf = _make_perf(tpot=0.04, ttft=0.5001)
+        ft.direction_of_field_update(perf)
+        field = _make_field("REQUESTRATE", 0.0, 0.1, 100.0)
+        result = ft.handle_request_rate((field,), perf)
+        assert result is True
+        assert field.value == pytest.approx(99.99)
 
     def test_oscillation_uses_midpoint(self):
         ft = FineTune(
@@ -389,3 +462,62 @@ class TestFineTuneFullFlow:
         field = _make_field("REQUESTRATE", 50.0, 50.0, 50.0)
         result = FineTune.update_field((field,), 0.5, field_names=("REQUESTRATE",))
         assert result is False
+
+
+class TestPdDisaggregationFineTune:
+    def test_request_rate_uses_qps_floor_to_one_decimal(self):
+        ft = FineTune(ttft_penalty=1.0, tpot_penalty=0, fine_tune_mode="pd_disaggregation")
+        request_rate = ft.init_pd_disaggregation_request_rate(_make_perf(throughput=12.39))
+        assert request_rate == 12.3
+
+    def test_request_rate_requires_throughput(self):
+        ft = FineTune(ttft_penalty=1.0, tpot_penalty=0, fine_tune_mode="pd_disaggregation")
+        with pytest.raises(ValueError, match="throughput/QPS"):
+            ft.init_pd_disaggregation_request_rate(_make_perf(gen_speed=12.39, throughput=None))
+
+    def test_probe_sets_request_rate_to_zero(self):
+        ft = FineTune(
+            ttft_penalty=1.0,
+            tpot_penalty=0,
+            fine_tune_mode="pd_disaggregation",
+            target_field=(
+                _make_field("CONCURRENCY", 16.0, 1.0, 128.0),
+                _make_field("REQUESTRATE", 8.0, 0.1, 100.0),
+            ),
+        )
+        fields = (
+            _make_field("CONCURRENCY", 16.0, 1.0, 128.0),
+            _make_field("REQUESTRATE", 8.0, 0.1, 100.0),
+        )
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(
+                "optix.optimizer.experience_fine_tunning.map_param_with_value",
+                lambda p, f: fields,
+            )
+            result = ft.prepare_pd_disaggregation_probe(np.array([16.0, 8.0]))
+        assert result[1].value == 0.0
+
+    def test_tpot_over_slo_halves_concurrency_and_fixes_request_rate(self):
+        ft = FineTune(
+            ttft_penalty=1.0,
+            tpot_penalty=0,
+            tpot_slo=0.05,
+            fine_tune_mode="pd_disaggregation",
+            target_field=(
+                _make_field("CONCURRENCY", 16.0, 1.0, 128.0),
+                _make_field("REQUESTRATE", 0.0, 0.1, 100.0),
+            ),
+        )
+        ft.pd_fixed_request_rate = 12.3
+        fields = (
+            _make_field("CONCURRENCY", 16.0, 1.0, 128.0),
+            _make_field("REQUESTRATE", 0.0, 0.1, 100.0),
+        )
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(
+                "optix.optimizer.experience_fine_tunning.map_param_with_value",
+                lambda p, f: fields,
+            )
+            result = ft.fine_tune_pd_disaggregation(np.array([16.0, 0.0]), _make_perf(tpot=0.08))
+        assert result[0].value == 8.0
+        assert result[1].value == 12.3

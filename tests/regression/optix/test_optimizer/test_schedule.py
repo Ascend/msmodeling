@@ -259,6 +259,80 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.scheduler.save_result()
         assert self.scheduler.first_duration is not None
 
+    @patch("time.time")
+    def test_save_result_can_keep_service_running(self, mock_time):
+        """Test save_result can persist metrics without stopping service."""
+        mock_time.return_value = 1000.0
+        self.scheduler.run_start_timestamp = 999.0
+        self.scheduler.performance_index = PerformanceIndex()
+        self.scheduler.simulate_run_info = self.params_field
+        self.scheduler.error_info = None
+        self.scheduler.current_back_path = None
+        self.scheduler.save_result(stop_service=False)
+        self.data_storage.save.assert_called_once()
+        self.simulator.stop.assert_not_called()
+        self.benchmark.stop.assert_not_called()
+
+    @patch("time.time")
+    @patch("time.sleep")
+    def test_run_benchmark_only_does_not_start_simulator(self, mock_sleep, mock_time):
+        """Test benchmark-only run updates benchmark and keeps the simulator running."""
+        mock_time.return_value = 1000.0
+        self.simulator.check_success = MagicMock(return_value=True)
+        self.benchmark.check_success = MagicMock(return_value=True)
+
+        result = self.scheduler.run_benchmark_only(self.params, self.params_field)
+
+        assert result == self.performance_index
+        self.simulator.run.assert_not_called()
+        self.benchmark.stop.assert_called_once()
+        self.benchmark.run.assert_called_once()
+        self.benchmark.get_performance_index.assert_called_once()
+
+    @patch("time.time")
+    @patch("time.sleep")
+    def test_run_benchmark_only_can_skip_service_monitoring(self, mock_sleep, mock_time):
+        """Test benchmark-only run can skip service monitoring for externally managed services."""
+        mock_time.return_value = 1000.0
+        self.benchmark.check_success = MagicMock(return_value=True)
+        self.scheduler.service_checks = MagicMock()
+
+        self.scheduler.run_benchmark_only(self.params, self.params_field, monitor_service=False)
+
+        self.scheduler.service_checks.run.assert_not_called()
+
+    @patch("time.time")
+    @patch("time.sleep")
+    def test_run_benchmark_only_supports_health_only_benchmark(self, mock_sleep, mock_time):
+        """Test benchmark-only run supports benchmarks without check_success."""
+
+        class HealthOnlyBenchmark:
+            def __init__(self, performance_index):
+                self.data_field = None
+                self.run_log = None
+                self.bak_path = None
+                self.performance_index = performance_index
+                self.stop = MagicMock()
+                self.run = MagicMock()
+                self.update_command = MagicMock()
+
+            def health(self):
+                return ProcessState(stage=Stage.stop)
+
+            def get_performance_index(self):
+                return self.performance_index
+
+        mock_time.return_value = 1000.0
+        benchmark = HealthOnlyBenchmark(self.performance_index)
+        scheduler = Scheduler(self.simulator, benchmark, self.data_storage)
+        scheduler.service_checks = MagicMock()
+
+        result = scheduler.run_benchmark_only(self.params, self.params_field, monitor_service=False)
+
+        assert result == self.performance_index
+        scheduler.service_checks.run.assert_not_called()
+        benchmark.run.assert_called_once()
+
     def test_stop_target_server(self):
         """Test stop_target_server delegates to simulator and benchmark"""
         self.scheduler.stop_target_server(del_log=True)
@@ -286,7 +360,7 @@ class TestSchedulerRunMethods(unittest.TestCase):
 
 class TestSchedulerRunWithRequestRate(unittest.TestCase):
     def setUp(self):
-        self.simulator = MagicMock()
+        self.simulator = _make_health_simulator()
         self.benchmark = MagicMock()
         self.data_storage = MagicMock()
         self.scheduler = Scheduler(
@@ -307,7 +381,7 @@ class TestSchedulerRunWithRequestRate(unittest.TestCase):
         mock_time.return_value = 1000.0
         perf = PerformanceIndex(throughput=4.0, generate_speed=100)
         self.benchmark.get_performance_index.return_value = perf
-        self.benchmark.check_success.return_value = True
+        self.benchmark.check_success = MagicMock(return_value=True)
         self.simulator.check_success = MagicMock(return_value=True)
 
         result = self.scheduler.run_with_request_rate(self.params, self.params_field)
@@ -333,7 +407,7 @@ class TestSchedulerRunWithRequestRate(unittest.TestCase):
         )
         perf = PerformanceIndex(throughput=4.0, generate_speed=100)
         self.benchmark.get_performance_index.return_value = perf
-        self.benchmark.check_success.return_value = True
+        self.benchmark.check_success = MagicMock(return_value=True)
         self.simulator.check_success = MagicMock(return_value=True)
 
         result = self.scheduler.run_with_request_rate(self.params, params_field_fixed)
@@ -383,7 +457,7 @@ class TestSchedulerMonitoringStatus(unittest.TestCase):
         del self.simulator.check_success
         self.simulator.__class__ = type("OtherSim", (), {})
         self.simulator.health = MagicMock(return_value=MagicMock(stage=Stage.running))
-        self.benchmark.health.return_value = MagicMock(stage=Stage.stop)
+        self.benchmark.health = MagicMock(return_value=MagicMock(stage=Stage.stop))
 
         self.scheduler.monitoring_status()
 
@@ -401,10 +475,12 @@ class TestSchedulerMonitoringStatus(unittest.TestCase):
         self.simulator.__class__ = type("OtherSim", (), {})
         self.simulator.health = MagicMock(return_value=MagicMock(stage=Stage.running))
         # First iter: running so we reach duration check; second iter: stop so we return
-        self.benchmark.health.side_effect = [
-            MagicMock(stage=Stage.running),
-            MagicMock(stage=Stage.stop),
-        ]
+        self.benchmark.health = MagicMock(
+            side_effect=[
+                MagicMock(stage=Stage.running),
+                MagicMock(stage=Stage.stop),
+            ]
+        )
         self.scheduler.run_start_timestamp = 1.0
         self.scheduler.first_duration = 1.0
 
@@ -515,7 +591,7 @@ class TestMonitoringStatusBranches(unittest.TestCase):
         mock_vllm.return_value = False
         self.simulator.process.poll.return_value = None
         self.simulator.check_success = MagicMock(return_value=True)
-        self.benchmark.check_success.return_value = True
+        self.benchmark.check_success = MagicMock(return_value=True)
 
         self.scheduler.monitoring_status()
         self.benchmark.check_success.assert_called()

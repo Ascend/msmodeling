@@ -973,8 +973,10 @@ class Settings(BaseSettings):
     pso_strategy: PsoStrategy = PsoStrategy()
     particles_time_out: int = 1 * 60 * 60
     wait_start_time: int = 1800
-    n_particles: int = Field(default=5, gt=0, lt=1000)
-    iters: int = Field(default=10, gt=0, lt=1000)
+    skip_pso: bool = False
+    fine_tune_mode: str = "pd_mixed"
+    n_particles: int = Field(default=5, ge=0, lt=1000)
+    iters: int = Field(default=10, ge=0, lt=1000)
     ftol: float = -np.inf
     ftol_iter: int = 1
     ttft_penalty: float = 3.0
@@ -986,8 +988,9 @@ class Settings(BaseSettings):
     slo_coefficient: float = 0.1
     generate_speed_target: float = 5000.0
     mem_coefficient: float = 0.8
-    max_fine_tune: int = 10
+    max_fine_tune: int = 30
     use_request_rate_calibration: bool = True
+    manage_simulator_lifecycle: bool = True
     scaling_coefficient: float = 1.3
     step_size: float = 0.6
     theory_guided_enable: bool = True
@@ -1014,6 +1017,20 @@ class Settings(BaseSettings):
     )
 
     health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
+
+    @model_validator(mode="after")
+    def validate_pso_settings(self):
+        if self.fine_tune_mode not in {"pd_mixed", "pd_disaggregation"}:
+            raise ValueError("fine_tune_mode must be 'pd_mixed' or 'pd_disaggregation'.")
+        if not self.manage_simulator_lifecycle and not self.skip_pso:
+            raise ValueError("manage_simulator_lifecycle=false requires skip_pso=true.")
+        if self.skip_pso:
+            return self
+        if self.n_particles <= 0:
+            raise ValueError("n_particles must be greater than 0 when skip_pso is false.")
+        if self.iters <= 0:
+            raise ValueError("iters must be greater than 0 when skip_pso is false.")
+        return self
 
     @classmethod
     def settings_customise_sources(

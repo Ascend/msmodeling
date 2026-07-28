@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 
 from optix.config.config import (
     DecodeContext,
@@ -1499,6 +1500,31 @@ class TestSettingsValidators(unittest.TestCase):
 
 
 class TestGetSettingsAndRegister:
+    def test_settings_allows_zero_pso_counts_when_skip_pso_enabled(self):
+        settings = Settings(skip_pso=True, n_particles=0, iters=0)
+        assert settings.skip_pso is True
+        assert settings.n_particles == 0
+        assert settings.iters == 0
+
+    def test_settings_allows_external_simulator_lifecycle_when_skip_pso_enabled(self):
+        settings = Settings(skip_pso=True, n_particles=0, iters=0, manage_simulator_lifecycle=False)
+        assert settings.manage_simulator_lifecycle is False
+
+    def test_settings_rejects_external_simulator_lifecycle_when_skip_pso_disabled(self):
+        with pytest.raises(ValidationError, match="manage_simulator_lifecycle=false requires skip_pso=true"):
+            Settings(skip_pso=False, n_particles=1, iters=1, manage_simulator_lifecycle=False)
+
+    def test_settings_rejects_zero_pso_counts_when_skip_pso_disabled(self):
+        with pytest.raises(ValidationError, match="n_particles must be greater than 0"):
+            Settings(skip_pso=False, n_particles=0, iters=1)
+
+        with pytest.raises(ValidationError, match="iters must be greater than 0"):
+            Settings(skip_pso=False, n_particles=1, iters=0)
+
+    def test_settings_rejects_unknown_fine_tune_mode(self):
+        with pytest.raises(ValidationError, match="fine_tune_mode"):
+            Settings(fine_tune_mode="unknown")
+
     def test_register_settings_custom_func(self):
         """Test register_settings with custom function"""
         import optix.config.config as config_mod

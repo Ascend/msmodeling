@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from loguru import logger
 
 from ..common import read_csv_s
 from ..config.base_config import RUN_TIME
@@ -103,6 +104,8 @@ class DataStorage:
         params: tuple[OptimizerConfigField],
         **kwargs,
     ):
+        logger.info(f"Save result with DataStorage. File path: {self.save_file!r}")
+
         def safe_sanitize_csv_value(value):
             """
             Safely handle CSV values, particularly parameter values with -- prefix.

@@ -7,11 +7,12 @@ success_rate_penalty = 5.0
 ttft_slo = 1
 tpot_slo = 0.05
 service = "master"
-# false: use scheduler.run, search CONCURRENCY during PSO, REQUESTRATE fixed to max.
-#   scheduler.run is called at max request rate for each candidate concurrency.
-# true: use scheduler.run_with_request_rate, CONCURRENCY fixed to max, REQUESTRATE fixed to max.
+# false: use scheduler.run, search CONCURRENCY during PSO. REQUESTRATE is fixed
+#   to 0 when its range contains 0 (unlimited rate), otherwise it is fixed to max.
+# true: use scheduler.run_with_request_rate, CONCURRENCY fixed to max. A
+#   REQUESTRATE range containing 0 remains at unlimited rate and skips calibration.
 use_request_rate_calibration = true
-
+skip_pso = false
 # ------------------------- Select top_k for fine-tuning ------------------------------------------------
 [data_storage]
 pso_top_k = 0

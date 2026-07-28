@@ -199,18 +199,37 @@ class Scheduler:
         self.simulator.backup()
         self.benchmark.backup()
 
-    def monitoring_status(self):
+    def _benchmark_finished(self) -> bool:
+        if isinstance(self.benchmark, SupportsCheckSuccess):
+            return self.benchmark.check_success()
+        if isinstance(self.benchmark, SupportsHealth):
+            res = self.benchmark.health()
+            if res.stage == Stage.error:
+                proc = getattr(self.benchmark, "process", None)
+                rc = getattr(proc, "returncode", None) if proc is not None else None
+                raise subprocess.SubprocessError(
+                    f"Benchmark subprocess failed exit_code={rc} "
+                    f"log={getattr(self.benchmark, 'run_log', None)} "
+                    f"info={getattr(res, 'info', None)}"
+                )
+            return res.stage != Stage.running
+        raise RuntimeError(
+            f"No actionable method found. the expected is check_success or health. benchmark: {type(self.benchmark)}"
+        )
+
+    def monitoring_status(self, monitor_service: bool = True):
         start_time = time.time()
         for _ in range(get_settings().particles_time_out):
             elapsed = time.time() - start_time
             context = self._create_check_context(elapsed)
-            service_result = self.service_checks.run(ServiceHookPoint.RUNTIME_MONITOR, context)
-            if not service_result.is_healthy:
-                self._handle_error(service_result.error_context)
+            if monitor_service:
+                service_result = self.service_checks.run(ServiceHookPoint.RUNTIME_MONITOR, context)
+                if not service_result.is_healthy:
+                    self._handle_error(service_result.error_context)
             benchmark_result = self.benchmark_checks.run(BenchmarkHookPoint.RUNTIME_MONITOR, context)
             if not benchmark_result.is_healthy:
                 self._handle_error(benchmark_result.error_context)
-            if isinstance(self.simulator, SupportsCheckSuccess):
+            if monitor_service and isinstance(self.simulator, SupportsCheckSuccess):
                 if is_mindie() or is_vllm():
                     if self.simulator.process.poll() is not None:
                         logger.debug(
@@ -218,9 +237,12 @@ class Scheduler:
                             self.simulator.process.returncode,
                         )
                         raise subprocess.SubprocessError(self._simulator_failure_message())
-                if self.benchmark.check_success():
+                if self._benchmark_finished():
                     return
-            if isinstance(self.simulator, SupportsHealth):
+            elif not monitor_service:
+                if self._benchmark_finished():
+                    return
+            if monitor_service and isinstance(self.simulator, SupportsHealth):
                 if not isinstance(self.simulator, Simulator):
                     res = self.simulator.health()
                     if res.stage != Stage.running:
@@ -229,8 +251,7 @@ class Scheduler:
                             res.stage,
                         )
                         raise subprocess.SubprocessError(self._simulator_failure_message())
-                res = self.benchmark.health()
-                if res.stage != Stage.running:
+                if self._benchmark_finished():
                     return
             if self.run_start_timestamp and self.first_duration:
                 _duration = time.time() - self.run_start_timestamp
@@ -284,7 +305,7 @@ class Scheduler:
         self.simulator.stop(del_log)
         self.benchmark.stop(del_log)
 
-    def save_result(self, **kwargs):
+    def save_result(self, stop_service: bool = True, **kwargs):
         duration = None
         if self.run_start_timestamp:
             duration = time.time() - self.run_start_timestamp
@@ -304,8 +325,9 @@ class Scheduler:
         )
         if self.bak_path:
             self.backup()
-        del_log = self.del_log if self.del_log is not None else False
-        self.stop_target_server(del_log)
+        if stop_service:
+            del_log = self.del_log if self.del_log is not None else False
+            self.stop_target_server(del_log)
 
     def update_data_field(self, params_field: tuple[OptimizerConfigField]):
         if isinstance(self.simulator, SupportsDataField):
@@ -414,3 +436,60 @@ class Scheduler:
         params: 1D array whose values correspond to mindie related configurations.
         """
         return self._run_evaluation(params, params_field, decode_context, with_request_rate=True)
+
+    def run_benchmark_only(
+        self,
+        params: np.ndarray,
+        params_field: tuple[OptimizerConfigField],
+        decode_context: Optional[DecodeContext] = None,
+        monitor_service: bool = True,
+    ) -> PerformanceIndex:
+        """
+        Run benchmark with updated benchmark-side parameters against the existing service.
+
+        This is used by fine-tuning flows whose service-side parameters stay unchanged.
+        """
+        with logger.contextualize(stage=LogStage.EVALUATE.value):
+            self.run_start_timestamp = time.time()
+            logger.debug("benchmark-only evaluation start param_count={} values={}", len(params), params.tolist())
+            self.simulate_run_info = map_param_with_value(params, params_field, decode_context)
+            logger.opt(lazy=True).trace(
+                "benchmark-only param info {}",
+                lambda: {v.name: v.value for v in self.simulate_run_info},
+            )
+            self._error_info = None
+            self.last_outcome = None
+            self.del_log = True
+            self.performance_index = PerformanceIndex()
+            try:
+                self.benchmark.stop()
+                if isinstance(self.benchmark, SupportsDataField):
+                    self.benchmark.data_field = tuple(self.simulate_run_info)
+                    self.benchmark.update_command()
+                if isinstance(self.benchmark, SupportsPrepare):
+                    self.benchmark.prepare()
+                self.benchmark.run(tuple(self.simulate_run_info))
+                time.sleep(1)
+                self.monitoring_status(monitor_service=monitor_service)
+                time.sleep(1)
+                self.performance_index = self.benchmark.get_performance_index()
+            except OptimizerError:
+                raise
+            except Exception as e:
+                self._error_info = e
+                self.del_log = False
+            status = RunStatus.FAILED if self._error_info else RunStatus.SUCCESS
+            duration = time.time() - self.run_start_timestamp if self.run_start_timestamp else None
+            error_type = type(self._error_info).__name__ if self._error_info else "-"
+            logger.debug(
+                "benchmark-only evaluation finished status={} duration={:.2f}s error_type={}",
+                status.value,
+                duration or 0.0,
+                error_type,
+            )
+            self.last_outcome = RunOutcome(
+                status=status,
+                performance_index=self.performance_index,
+                error_context=self._error_info,
+            )
+            return self.performance_index
