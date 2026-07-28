@@ -648,12 +648,12 @@ def adapter_target_field(pso_optimizer: PSOOptimizer):
     fix_concurrency = pso_optimizer.use_request_rate_calibration
     for _field in target_field:
         if _field.name in CONCURRENCYS and _field.constant is None and fix_concurrency:
-            # true 模式：CONCURRENCY 固定为 max，由 run_with_request_rate 内部校准请求速率
+            # True mode fixes CONCURRENCY at max while run_with_request_rate calibrates the request rate.
             _field.constant = _field.value = _field.convert_dtype(_field.max)
         elif _field.name in REQUESTRATES and _field.constant is None:
-            # 两种模式均将 REQUESTRATE 固定为 max：
-            #   true  → run_with_request_rate 需要最大速率上限
-            #   false → scheduler.run 在最大请求速率下对每个候选并发做单次压测
+            # Both modes fix REQUESTRATE at max:
+            #   true  -> run_with_request_rate needs the maximum rate as its upper bound.
+            #   false -> scheduler.run benchmarks each concurrency candidate once at the maximum request rate.
             _field.constant = _field.convert_dtype(_field.max)
             _field.value = None
         elif _field.constant and _field.constant != _field.value:

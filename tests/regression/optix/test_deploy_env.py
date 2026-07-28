@@ -155,7 +155,7 @@ def test_resolve_path_executable_rejects_msmodeling_venv(tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr("optix.deploy_env.shutil.which", _which)
-    with pytest.raises(OptixDeployEnvError, match="msmodeling 虚拟环境"):
+    with pytest.raises(OptixDeployEnvError, match="msmodeling virtual environment"):
         resolve_path_executable("vllm", env, ctx)
 
 
@@ -190,7 +190,7 @@ def test_validate_missing_executable_raises(tmp_path, monkeypatch):
         msmodeling_install_editable=False,
     )
     env = {"PATH": "/usr/bin"}
-    with pytest.raises(OptixDeployEnvError, match="找不到部署命令"):
+    with pytest.raises(OptixDeployEnvError, match="Deployment command not found"):
         validate_deploy_stack(engine="vllm", benchmark="ais_bench", env=env, ctx=ctx)
 
 
@@ -205,7 +205,7 @@ def test_validate_executable_in_msmodeling_venv_raises(tmp_path, monkeypatch):
         msmodeling_install_editable=False,
     )
     env = {"PATH": str(venv_root / "bin")}
-    with pytest.raises(OptixDeployEnvError, match="msmodeling 虚拟环境"):
+    with pytest.raises(OptixDeployEnvError, match="msmodeling virtual environment"):
         validate_deploy_stack(engine="vllm", benchmark="ais_bench", env=env, ctx=ctx)
 
 
@@ -672,7 +672,7 @@ def test_materialize_command_rejects_relative_executable_in_venv(tmp_path):
         msmodeling_install_editable=False,
     )
 
-    with pytest.raises(OptixDeployEnvError, match="msmodeling 虚拟环境"):
+    with pytest.raises(OptixDeployEnvError, match="msmodeling virtual environment"):
         materialize_command(["./.venv/bin/custom-server"], {}, ctx, cwd=tmp_path)
 
 
@@ -690,7 +690,7 @@ def test_materialize_command_rejects_parent_relative_executable_in_venv(tmp_path
         msmodeling_install_editable=False,
     )
 
-    with pytest.raises(OptixDeployEnvError, match="msmodeling 虚拟环境"):
+    with pytest.raises(OptixDeployEnvError, match="msmodeling virtual environment"):
         materialize_command(["../.venv/bin/custom-server"], {}, ctx, cwd=work_path)
 
 

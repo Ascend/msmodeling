@@ -73,10 +73,12 @@ def detect_runtime_context() -> RuntimeContext:
 def emit_runtime_hints(ctx: RuntimeContext, *, engine: str) -> None:
     if not ctx.in_virtualenv:
         logger.warning(
-            f"{_OPTIX_ENV_LOG_PREFIX} 当前未在虚拟环境中运行。\n"
-            "安装 msmodeling 会带上 torch、transformers 等包，它们给 TensorCast 仿真用，不是 OptiX 真机寻优用的。\n"
-            "装到系统 Python 里会改掉 vLLM、MindIE 依赖的版本，服务可能起不来或推理出错。\n"
-            "请改用虚拟环境：\n"
+            f"{_OPTIX_ENV_LOG_PREFIX} msmodeling is not running in a virtual environment.\n"
+            "Installing msmodeling also installs packages such as torch and transformers. "
+            "These packages are intended for TensorCast simulation, not OptiX optimization on real hardware.\n"
+            "Installing them into the system Python may replace versions required by vLLM or MindIE, "
+            "which can prevent services from starting or cause inference errors.\n"
+            "Use a virtual environment instead:\n"
             "  1. uv sync\n"
             "  2. source .venv/bin/activate\n"
             f"  3. msmodeling optix -e {engine} ..."
@@ -88,7 +90,7 @@ def resolve_deploy_path_prefix() -> str | None:
     if env_path:
         resolved = Path(env_path).expanduser().resolve()
         if not resolved.is_dir():
-            raise OptixDeployEnvError(f"{_OPTIX_ENV_LOG_PREFIX} OPTIX_DEPLOY_PATH 不是有效目录：{resolved}")
+            raise OptixDeployEnvError(f"{_OPTIX_ENV_LOG_PREFIX} OPTIX_DEPLOY_PATH is not a valid directory: {resolved}")
         return str(resolved)
 
     config_prefix = get_settings().deploy.path_prefix
@@ -96,7 +98,7 @@ def resolve_deploy_path_prefix() -> str | None:
         resolved = Path(config_prefix).expanduser().resolve()
         if not resolved.is_dir():
             raise OptixDeployEnvError(
-                f"{_OPTIX_ENV_LOG_PREFIX} config.toml [deploy] path_prefix 不是有效目录：{resolved}"
+                f"{_OPTIX_ENV_LOG_PREFIX} config.toml [deploy] path_prefix is not a valid directory: {resolved}"
             )
         return str(resolved)
     return None
@@ -132,7 +134,10 @@ def _is_under_venv(segment: str, venv_root: Path) -> bool:
     try:
         resolved = Path(segment).resolve()
     except OSError:
-        logger.warning(f"{_OPTIX_ENV_LOG_PREFIX} 无法解析路径段 {segment!r}，保守视为非 venv 路径")
+        logger.warning(
+            f"{_OPTIX_ENV_LOG_PREFIX} Failed to resolve path segment {segment!r}; "
+            "treating it as outside the virtual environment"
+        )
         return False
     try:
         resolved.relative_to(venv_root)
@@ -205,10 +210,12 @@ def resolve_deploy_executable(
     path_value = env.get("PATH", "")
     resolved = shutil.which(name, path=path_value or None)
     if resolved is None:
-        raise OptixDeployEnvError(f"{_OPTIX_ENV_LOG_PREFIX} 找不到部署命令：{name}。")
+        raise OptixDeployEnvError(f"{_OPTIX_ENV_LOG_PREFIX} Deployment command not found: {name}.")
     executable = Path(resolved).resolve()
     if msmodeling_venv is not None and _is_under_venv(str(executable), msmodeling_venv.resolve()):
-        raise OptixDeployEnvError(f"{_OPTIX_ENV_LOG_PREFIX} 命令 {name} 解析到 msmodeling 虚拟环境：{executable}")
+        raise OptixDeployEnvError(
+            f"{_OPTIX_ENV_LOG_PREFIX} Command {name} resolves inside the msmodeling virtual environment: {executable}"
+        )
     return executable
 
 
@@ -259,8 +266,9 @@ def materialize_command(
 
     if ctx.virtualenv_root is not None and _is_under_venv(str(resolved_command), ctx.virtualenv_root.resolve()):
         raise OptixDeployEnvError(
-            f"{_OPTIX_ENV_LOG_PREFIX} 命令落在 msmodeling 虚拟环境里：{resolved_command}\n"
-            "不要在 msmodeling 环境里安装部署命令，会和仿真依赖搅在一起。"
+            f"{_OPTIX_ENV_LOG_PREFIX} Command is inside the msmodeling virtual environment: {resolved_command}\n"
+            "Do not install deployment commands in the msmodeling environment because they may conflict "
+            "with simulation dependencies."
         )
 
     return [str(resolved_command), *argv[1:]]
@@ -268,20 +276,21 @@ def materialize_command(
 
 def _skip_unless_in_registry(name: str, registry: Mapping[str, str]) -> bool:
     if name not in registry:
-        logger.info(f"{_OPTIX_ENV_LOG_PREFIX} 跳过内置 deploy 校验：{name} 不在 registry 中")
+        logger.info(f"{_OPTIX_ENV_LOG_PREFIX} Skipping built-in deployment validation: {name} is not registered")
         return True
     return False
 
 
 def _raise_missing_executable(executable_name: str, *, engine: str | None = None) -> NoReturn:
-    context = f"，当前引擎为 {engine}" if engine else ""
+    context = f", current engine: {engine}" if engine else ""
     raise OptixDeployEnvError(
-        f"{_OPTIX_ENV_LOG_PREFIX} 找不到部署命令：{executable_name}{context}。\n"
-        "子进程已去掉 msmodeling 虚拟环境的 PATH，系统 PATH 里还没有可用的 "
-        f"{executable_name}。\n"
-        f"  1. 先确认系统已安装：which {executable_name}\n"
-        "  2. 若命令不在系统 PATH，可 export OPTIX_DEPLOY_PATH=/path/to/custom-deploy-root\n"
-        "     或在 config.toml 的 [deploy] 里设置 path_prefix\n"
+        f"{_OPTIX_ENV_LOG_PREFIX} Deployment command not found: {executable_name}{context}.\n"
+        "The subprocess PATH excludes the msmodeling virtual environment, and no usable "
+        f"{executable_name} was found on the system PATH.\n"
+        f"  1. Verify that it is installed on the system: which {executable_name}\n"
+        "  2. If the command is not on the system PATH, export "
+        "OPTIX_DEPLOY_PATH=/path/to/custom-deploy-root\n"
+        "     or set path_prefix in the [deploy] section of config.toml\n"
         f"  3. msmodeling optix -e {engine or 'vllm'} ..."
     )
 
@@ -296,14 +305,17 @@ def _validate_resolved_executable(
     executable = Path(resolved).resolve()
     if ctx.virtualenv_root is not None and _is_under_venv(str(executable), ctx.virtualenv_root):
         raise OptixDeployEnvError(
-            f"{_OPTIX_ENV_LOG_PREFIX} 命令 {executable_name} 落在 msmodeling 虚拟环境里：{executable}\n"
-            f"不要在 msmodeling 环境里安装 {executable_name}，会和仿真依赖搅在一起。\n"
-            f"  1. 在该 venv 里执行：pip uninstall {executable_name}\n"
-            "  2. 改用系统里已部署的 vLLM 或 MindIE；PATH 特殊时再设 OPTIX_DEPLOY_PATH"
+            f"{_OPTIX_ENV_LOG_PREFIX} Command {executable_name} is inside the msmodeling virtual environment: "
+            f"{executable}\n"
+            f"Do not install {executable_name} in the msmodeling environment because it may conflict "
+            "with simulation dependencies.\n"
+            f"  1. Run this command in that virtual environment: pip uninstall {executable_name}\n"
+            "  2. Use the system deployment of vLLM or MindIE; set OPTIX_DEPLOY_PATH only when "
+            "the system PATH needs an override"
         )
     logger.info(
-        f"{_OPTIX_ENV_LOG_PREFIX} msmodeling 运行于虚拟环境 {ctx.virtualenv_root or '系统 Python'}；"
-        f"部署命令 {executable_name} → {executable}"
+        f"{_OPTIX_ENV_LOG_PREFIX} msmodeling runtime: {ctx.virtualenv_root or 'system Python'}; "
+        f"deployment command {executable_name}: {executable}"
     )
 
 
@@ -313,14 +325,16 @@ def _validate_engine(engine: str, env: dict[str, str], ctx: RuntimeContext) -> N
 
     path_value = env.get("PATH", "")
     if not path_value.strip():
-        raise OptixDeployEnvError(f"{_OPTIX_ENV_LOG_PREFIX} 找不到部署命令：{_ENGINE_EXECUTABLES[engine]}；PATH 为空。")
+        raise OptixDeployEnvError(
+            f"{_OPTIX_ENV_LOG_PREFIX} Deployment command not found: {_ENGINE_EXECUTABLES[engine]}; PATH is empty."
+        )
 
     if engine == "mindie":
         try:
             argv = resolve_mindie_argv(env)
         except FileNotFoundError as exc:
             raise OptixDeployEnvError(
-                f"{_OPTIX_ENV_LOG_PREFIX} 找不到部署命令：mindie，当前引擎为 mindie。\n  {exc}"
+                f"{_OPTIX_ENV_LOG_PREFIX} Deployment command not found: mindie, current engine: mindie.\n  {exc}"
             ) from exc
         first = argv[0]
         resolved: str

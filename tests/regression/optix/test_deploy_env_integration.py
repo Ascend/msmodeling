@@ -234,7 +234,7 @@ def test_optimizer_main_fail_fast_on_missing_vllm(monkeypatch: pytest.MonkeyPatc
     _run_optimizer_main_expect_deploy_error(
         monkeypatch,
         ["msmodeling-optix", "-e", "vllm", "-b", "ais_bench"],
-        "找不到部署命令",
+        "Deployment command not found",
     )
 
 
@@ -339,7 +339,7 @@ def test_warn_when_not_in_venv() -> None:
 
     combined = "\n".join(messages)
     assert "[optix/env]" in combined
-    assert "虚拟环境" in combined
+    assert "virtual environment" in combined
     assert "uv sync" in combined
     assert "pip install -e ." not in combined
 
