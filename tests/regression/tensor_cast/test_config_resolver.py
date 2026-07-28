@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from tensor_cast.core.config_resolver import ConfigResolver
 from tensor_cast.model_config import ParallelConfig
@@ -49,6 +50,32 @@ class ValidateMoeParallelConfigTestCase(unittest.TestCase):
         moe_config.host_external_shared_experts = False
         resolver.model_config.moe_config = moe_config
         resolver.validate_moe_parallel_config()  # should not raise
+
+
+class DsaCpStructureTestCase(unittest.TestCase):
+    def test_has_dsa_structure_matches_index_topk(self):
+        resolver = _make_resolver()
+        resolver.hf_config = SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=8))
+
+        self.assertTrue(resolver._has_dsa_structure())
+
+    def test_has_dsa_structure_matches_normalized_topk_limit_and_index_heads(self):
+        resolver = _make_resolver()
+        resolver.hf_config = SimpleNamespace(topk_limit=8, index_n_heads=64)
+
+        self.assertTrue(resolver._has_dsa_structure())
+
+    @patch("tensor_cast.core.config_resolver.get_mla_module")
+    @patch("tensor_cast.core.config_resolver.get_model_profile", return_value=None)
+    @patch("tensor_cast.core.config_resolver.get_mla_module_name", return_value="FakeMla")
+    def test_update_mla_config_owns_dsa_cp_layout(self, _module_name, _profile, mla_cls):
+        resolver = _make_resolver()
+        resolver.hf_config = SimpleNamespace(model_type="fake_mla")
+
+        resolver.update_mla_config(enable_dsa_cp=True)
+
+        self.assertTrue(resolver.model_config.mla_config.enable_dsa_cp)
+        self.assertIs(resolver.model_config.mla_config.mla_cls, mla_cls.return_value)
 
 
 if __name__ == "__main__":

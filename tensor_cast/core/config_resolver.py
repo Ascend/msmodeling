@@ -103,7 +103,9 @@ class ConfigResolver:
             enable_external_shared_experts=self.user_input.enable_external_shared_experts,
             host_external_shared_experts=self.user_input.host_external_shared_experts,
         )
-        self.update_mla_config()
+        self.update_mla_config(
+            enable_dsa_cp=self.user_input.enable_sequence_parallel and self._has_dsa_structure(),
+        )
         self.update_mtp_config(num_mtp_tokens=self.user_input.num_mtp_tokens)
         self.update_parallel_config()
         self.validate_moe_parallel_config()
@@ -152,12 +154,13 @@ class ConfigResolver:
             moe_config.host_external_shared_experts = host_external_shared_experts
         self.model_config.moe_config = moe_config
 
-    def update_mla_config(self, model_type: str = ""):
+    def update_mla_config(self, model_type: str = "", enable_dsa_cp: bool = False):
         """
         Update the Multihead Latent Attention (MLA) configuration.
 
         Args:
             model_type: The type of the model. If empty, uses the loaded model's type.
+            enable_dsa_cp: Whether to use the DSA-CP MLA projection layout.
         """
         if not model_type:
             model_type = self.hf_config.model_type
@@ -170,11 +173,13 @@ class ConfigResolver:
                 mla_config = profile.build_mla_config()
                 if mla_config is not None:
                     mla_config.mla_cls = get_mla_module(model_type)
+                    mla_config.enable_dsa_cp = enable_dsa_cp
                     self.model_config.mla_config = mla_config
             else:
                 mla_config = MlaConfig(
                     module_name=mla_module_name,
                     mla_cls=get_mla_module(model_type),
+                    enable_dsa_cp=enable_dsa_cp,
                 )
                 self.model_config.mla_config = mla_config
 
@@ -196,7 +201,31 @@ class ConfigResolver:
             )
             self.model_config.mtp_config = mtp_config
 
-    def update_hf_config(self, enable_repetition: bool = False, num_hidden_layers_override: int = 0):
+    def _has_dsa_structure(self) -> bool:
+        """Return whether the model text config describes a DSA indexer.
+
+        ``index_topk`` is the checkpoint-facing field used by DSA's lightning
+        indexer.  Model adapters may normalize it to ``topk_limit``; in that
+        form ``index_n_heads`` is also required so an unrelated top-k setting
+        is not mistaken for DSA.
+
+        Composite Hugging Face configs keep language-model fields under
+        ``text_config``.  Compatibility loaders may expose the same object as
+        ``hf_text_config``, while text-only configs keep the fields at the
+        root.  Prefer those locations in that order.  This structural check is
+        intentional: a model-type allowlist would miss compatible derivatives.
+        If upstream renames the indexer fields or changes config nesting, keep
+        this predicate aligned with the corresponding model adapter.
+        """
+        text_config = getattr(self.hf_config, "text_config", None) or getattr(self.hf_config, "hf_text_config", None)
+        config = text_config or self.hf_config
+        return hasattr(config, "index_topk") or (hasattr(config, "topk_limit") and hasattr(config, "index_n_heads"))
+
+    def update_hf_config(
+        self,
+        enable_repetition: bool = False,
+        num_hidden_layers_override: int = 0,
+    ):
         """
         Update the HuggingFace configuration settings.
 

@@ -10,8 +10,10 @@ from tensor_cast.layers.mla import (
     MultiheadLatentAttentionTensorCast,
 )
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
-from tensor_cast.model_config import LinearQuantConfig
+from tensor_cast.model_config import LinearQuantConfig, MlaConfig, QuantConfig
+from tensor_cast.parallel_group import ParallelGroup
 from tensor_cast.quantize_utils import LinearQuantType, QuantGranularity, QuantScheme
+from tensor_cast.transformers.transformations import quantize_linear
 from tensor_cast.transformers.builtin_model.deepseek_v32 import DeepseekV32Config
 
 
@@ -52,6 +54,64 @@ class TestMlaIndexerCacheHooks(unittest.TestCase):
 
         self.assertEqual(wrapper.W_UV.shape[0], num_heads)
         self.assertEqual(wrapper.W_UK_T.shape[0], num_heads)
+
+    def test_singleton_tp_group_uses_full_head_layout(self):
+        num_heads = 4
+        kv_lora_rank = 64
+        qk_nope = 32
+        v_head = 16
+        kv_b_proj = nn.Linear(kv_lora_rank, num_heads * (qk_nope + v_head), bias=False)
+        inner = nn.Module()
+        inner.num_heads = num_heads
+        inner.kv_lora_rank = kv_lora_rank
+        inner.qk_nope_head_dim = qk_nope
+        inner.v_head_dim = v_head
+        inner.kv_b_proj = kv_b_proj
+
+        wrapper = MultiheadLatentAttentionTensorCast(
+            MlaConfig(module_name="FakeMla"),
+            inner,
+            ParallelGroup(rank=0, rank_groups=[[0]], global_world_size=2),
+        )
+
+        self.assertEqual(wrapper._num_heads_per_rank, num_heads)
+        self.assertEqual(wrapper.W_UV.shape, torch.Size([num_heads, kv_lora_rank, v_head]))
+        self.assertEqual(wrapper.W_UK_T.shape, torch.Size([num_heads, qk_nope, kv_lora_rank]))
+
+    def test_dsa_cp_keeps_selected_linears_unquantized(self):
+        inner = nn.Module()
+        inner.self_attn = nn.Module()
+        inner.self_attn.q_b_proj = nn.Linear(4, 8, bias=False)
+        inner.self_attn.kv_b_proj = nn.Linear(4, 8, bias=False)
+        inner.self_attn.indexer = nn.Module()
+        inner.self_attn.indexer.wq_b = nn.Linear(4, 8, bias=False)
+        inner.self_attn.indexer.wk = nn.Linear(4, 2, bias=False)
+        inner.self_attn.indexer.weights_proj = nn.Linear(4, 1, bias=False)
+        quant_config = QuantConfig(
+            linear_configs={
+                "*": LinearQuantConfig(
+                    quant_type=LinearQuantType.W8A8,
+                    weight_scale=torch.tensor(1.0),
+                    activation_scale=torch.tensor(1.0),
+                )
+            }
+        )
+        model = SimpleNamespace(
+            _inner=inner,
+            model_config=SimpleNamespace(
+                quant_linear_cls=TensorCastQuantLinear,
+                quant_config=quant_config,
+                mla_config=MlaConfig(module_name="FakeMla", enable_dsa_cp=True),
+            ),
+        )
+
+        quantize_linear(model)
+
+        self.assertIsInstance(model._inner.self_attn.q_b_proj, TensorCastQuantLinear)
+        self.assertIsInstance(model._inner.self_attn.kv_b_proj, nn.Linear)
+        self.assertIsInstance(model._inner.self_attn.indexer.wq_b, TensorCastQuantLinear)
+        self.assertIsInstance(model._inner.self_attn.indexer.wk, nn.Linear)
+        self.assertIsInstance(model._inner.self_attn.indexer.weights_proj, nn.Linear)
 
     @patch("torch.ops.tensor_cast.quantize", side_effect=lambda t, *args, **kwargs: t)
     def test_quantize_kv_b_decomposition(self, _mock_quantize):

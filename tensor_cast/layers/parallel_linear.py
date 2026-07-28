@@ -72,11 +72,13 @@ class RowParallelLinear(ParallelLinearBase):
         slice_input_by_last_dim: bool = False,
         reduce_output: bool = True,
         gather_slice_data: Optional[bool] = None,
+        disable_tp: bool = False,
     ):
         super().__init__(linear_layer)
         self.tp_group = tp_group
-        self.tp_size = self.tp_group.world_size
-        self.tp_rank = self.tp_group.rank_in_group
+        self.disable_tp = disable_tp
+        self.tp_size = 1 if disable_tp else self.tp_group.world_size
+        self.tp_rank = 0 if disable_tp else self.tp_group.rank_in_group
         if head_num is None:
             self.in_features_per_partition = math.ceil(self.in_features / self.tp_size)
         else:
@@ -88,12 +90,18 @@ class RowParallelLinear(ParallelLinearBase):
         self.create_weights()
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
-        auto_gather_slice_data = (
-            self.tp_group.world_size > 1 and self.global_tp_group.world_size != self.tp_group.world_size
-        )
+        auto_gather_slice_data = self.tp_size > 1 and self.global_tp_group.world_size != self.tp_size
         self.gather_slice_data = auto_gather_slice_data if gather_slice_data is None else gather_slice_data
         self.slice_input_by_last_dim = slice_input_by_last_dim
         self.reduce_output = reduce_output
+
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"tp_size={self.tp_size}, "
+            f"disable_tp={self.disable_tp}, reduce_output={self.reduce_output}, "
+            f"gather_slice_data={self.gather_slice_data}"
+        )
 
     def create_weights(self, dim: int = 1):
         replace_with_sharded_tensor(
@@ -149,7 +157,7 @@ class RowParallelLinear(ParallelLinearBase):
             x = get_partial_sharded(x, self.tp_size, self.tp_rank, dim=-1)
 
         output = self._inner(x)
-        if self.reduce_output:
+        if self.reduce_output and self.tp_size > 1:
             output = self.tp_group.all_reduce(output)
 
         if self.gather_slice_data:
@@ -172,11 +180,13 @@ class ColumnParallelLinear(ParallelLinearBase):
         gather_output: bool = False,
         dim: int = 0,
         gather_slice_data: Optional[bool] = None,
+        disable_tp: bool = False,
     ):
         super().__init__(linear_layer)
         self.tp_group = tp_group
-        self.tp_size = self.tp_group.world_size
-        self.tp_rank = self.tp_group.rank_in_group
+        self.disable_tp = disable_tp
+        self.tp_size = 1 if disable_tp else self.tp_group.world_size
+        self.tp_rank = 0 if disable_tp else self.tp_group.rank_in_group
         self.in_features_per_partition = self.in_features
         if head_num is None:
             self.out_features_per_partition = math.ceil(self.out_features / self.tp_size)
@@ -193,11 +203,17 @@ class ColumnParallelLinear(ParallelLinearBase):
         self.create_weights(dim=dim)
         self.tp_group = tp_group
         self.global_tp_group = global_tp_group
-        auto_gather_slice_data = (
-            self.tp_group.world_size > 1 and self.global_tp_group.world_size != self.tp_group.world_size
-        )
+        auto_gather_slice_data = self.tp_size > 1 and self.global_tp_group.world_size != self.tp_size
         self.gather_slice_data = auto_gather_slice_data if gather_slice_data is None else gather_slice_data
         self.gather_output = gather_output
+
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"tp_size={self.tp_size}, "
+            f"disable_tp={self.disable_tp}, gather_output={self.gather_output}, "
+            f"gather_slice_data={self.gather_slice_data}"
+        )
 
     def create_weights(self, dim: int = 0):
         replace_with_sharded_tensor(
@@ -253,7 +269,7 @@ class ColumnParallelLinear(ParallelLinearBase):
             x = self.tp_group.all_gather(x, dim=0)
 
         output = self._inner(x)
-        if self.gather_slice_data or self.gather_output:
+        if self.gather_slice_data or (self.gather_output and self.tp_size > 1):
             output = self.tp_group.all_gather(output)
             output = output[..., : self.out_features]
 

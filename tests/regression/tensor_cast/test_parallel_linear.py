@@ -7,7 +7,7 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.layers.attention import AttentionTensorCast
 from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
-from tensor_cast.layers.parallel_linear import ColumnParallelLinear, get_qparam_shard_dim, RowParallelLinear
+from tensor_cast.layers.parallel_linear import ColumnParallelLinear, RowParallelLinear, get_qparam_shard_dim
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
 from tensor_cast.model_config import MlaConfig, ModelConfig, ParallelConfig, QuantConfig, WordEmbeddingTPMode
 from tensor_cast.parallel_group import ParallelGroup
@@ -89,6 +89,66 @@ class TestParallelLinearGatherSliceData(unittest.TestCase):
         )
 
         self.assertFalse(wrapper.gather_slice_data)
+
+
+class TestDisableTpParallelLinear(unittest.TestCase):
+    def setUp(self):
+        self.tp_group = ParallelGroup(rank=0, rank_groups=[[0, 1]], global_world_size=2)
+        self.global_tp_group = ParallelGroup(rank=0, rank_groups=[[0, 1, 2, 3]], global_world_size=4)
+
+    def test_column_parallel_disable_tp_keeps_full_weight_and_skips_gather(self):
+        linear = torch.nn.Linear(8, 16, bias=False)
+        module = ColumnParallelLinear(
+            linear,
+            self.tp_group,
+            self.global_tp_group,
+            gather_output=True,
+            disable_tp=True,
+        )
+
+        self.assertTrue(module.disable_tp)
+        self.assertTrue(module.gather_output)
+        self.assertEqual(module.tp_size, 1)
+        self.assertEqual(module.out_features_per_partition, 16)
+        self.assertFalse(module.gather_slice_data)
+        self.assertEqual(module._inner.weight.shape, torch.Size([16, 8]))
+        self.assertEqual(module(torch.randn(3, 8)).shape, torch.Size([3, 16]))
+
+    def test_row_parallel_disable_tp_keeps_full_weight_and_skips_reduce(self):
+        linear = torch.nn.Linear(8, 16, bias=False)
+        module = RowParallelLinear(
+            linear,
+            self.tp_group,
+            self.global_tp_group,
+            reduce_output=True,
+            disable_tp=True,
+        )
+
+        self.assertTrue(module.disable_tp)
+        self.assertEqual(module.tp_size, 1)
+        self.assertEqual(module.in_features_per_partition, 8)
+        self.assertFalse(module.gather_slice_data)
+        self.assertEqual(module._inner.weight.shape, torch.Size([16, 8]))
+        self.assertEqual(module(torch.randn(3, 8)).shape, torch.Size([3, 16]))
+
+    def test_parallel_linear_repr_includes_tp_size(self):
+        column = ColumnParallelLinear(
+            torch.nn.Linear(8, 16, bias=False),
+            self.tp_group,
+            self.global_tp_group,
+        )
+        row = RowParallelLinear(
+            torch.nn.Linear(8, 16, bias=False),
+            self.tp_group,
+            self.global_tp_group,
+        )
+
+        self.assertIn("tp_size=2", repr(column))
+        self.assertNotIn("tp_rank", repr(column))
+        self.assertIn("gather_output=False", repr(column))
+        self.assertIn("tp_size=2", repr(row))
+        self.assertNotIn("tp_rank", repr(row))
+        self.assertIn("reduce_output=True", repr(row))
 
 
 def get_parallel_config(parallel_configuration: tuple):

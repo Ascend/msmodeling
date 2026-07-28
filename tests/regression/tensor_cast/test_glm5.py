@@ -306,6 +306,7 @@ def test_patch_mla_validates_glm5_indexer_types_before_indexing():
                 module_name="GlmMoeDsaAttention",
                 mla_cls=FakeGlm5SparseAttention,
                 field_names=object(),
+                enable_dsa_cp=False,
             )
         ),
         parallel_group_manager=SimpleNamespace(tp_group=None),

@@ -380,10 +380,16 @@ def patch_mla(
                     _candidate_aliases(module, missing_fields),
                 )
                 continue
+            mla_tp_group = model.parallel_group_manager.tp_group
+            if mla_config.enable_dsa_cp:
+                mla_tp_group = copy.copy(mla_tp_group)
+                mla_tp_group.rank_group = [mla_tp_group.rank]
+                mla_tp_group.rank_in_group = 0
+                mla_tp_group.world_size = 1
             mla = mla_config.mla_cls(
                 mla_config,
                 module,
-                model.parallel_group_manager.tp_group,
+                mla_tp_group,
                 **extra_kwargs,
             )
             effective_hf_config = getattr(model._inner, "hf_config", model.hf_config)
@@ -562,12 +568,16 @@ def shard_model_by_tp(
             if self.model_config.mla_config:
                 params.update({"head_num": config_info.num_attention_heads})
                 mla_cls = self.model_config.mla_config.mla_cls
+                enable_dsa_cp = self.model_config.mla_config.enable_dsa_cp
                 for prefix in layer_prefixes:
+                    q_b_kv_b_params = dict(params)
+                    if enable_dsa_cp:
+                        q_b_kv_b_params["disable_tp"] = True
                     tp_plan.update(
                         {
                             tp_plan_module_path(prefix, "self_attn.q_proj"): (COLWISE_LINEAR, params),
-                            tp_plan_module_path(prefix, "self_attn.q_b_proj"): (COLWISE_LINEAR, params),
-                            tp_plan_module_path(prefix, "self_attn.kv_b_proj"): (COLWISE_LINEAR, params),
+                            tp_plan_module_path(prefix, "self_attn.q_b_proj"): (COLWISE_LINEAR, q_b_kv_b_params),
+                            tp_plan_module_path(prefix, "self_attn.kv_b_proj"): (COLWISE_LINEAR, q_b_kv_b_params),
                         }
                     )
                     tp_plan.update(mla_cls.build_tp_plan_extras(prefix, params, config_info))
@@ -600,6 +610,8 @@ def shard_model_by_tp(
                 "head_num": config_info.num_attention_heads,
             }
             mla_cls = self.model_config.mla_config.mla_cls if self.model_config.mla_config else None
+            if self.model_config.mla_config is not None and self.model_config.mla_config.enable_dsa_cp:
+                params["disable_tp"] = True
             for prefix in layer_prefixes:
                 tp_plan.update({tp_plan_nested_module_path(prefix, "o_proj"): (ROWWISE_LINEAR, params)})
                 if mla_cls is not None:
@@ -884,6 +896,21 @@ def shard_model(model: "ModelWrapperBase") -> "ModelWrapperBase":
     return model
 
 
+def _exclude_unquantized_dsa_linears(model_config) -> None:
+    modules_to_not_convert = model_config.quant_config.modules_to_not_convert
+    if modules_to_not_convert is None:
+        modules_to_not_convert = []
+        model_config.quant_config.modules_to_not_convert = modules_to_not_convert
+
+    for pattern in (
+        "*.kv_b_proj",
+        "*indexer*.wk",
+        "*indexer*.weights_proj",
+    ):
+        if pattern not in modules_to_not_convert:
+            modules_to_not_convert.append(pattern)
+
+
 def quantize_linear(
     model: "ModelWrapperBase",
     report: PatchReport | None = None,
@@ -922,6 +949,9 @@ def quantize_linear(
     else:
         if not model.model_config.quant_linear_cls:
             return model
+        mla_config = model.model_config.mla_config
+        if mla_config is not None and mla_config.enable_dsa_cp:
+            _exclude_unquantized_dsa_linears(model.model_config)
         before = {
             name: type(module).__name__
             for name, module in model._inner.named_modules()

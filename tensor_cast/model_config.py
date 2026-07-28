@@ -421,6 +421,8 @@ class MlaConfig:
     module_name: str
     mla_cls: Optional[Type["MultiheadLatentAttentionBase"]] = None  # noqa: F821
     field_names: MlaFieldNames = MlaFieldNames()
+    enable_dsa_cp: bool = False
+    """Keep DSA q_b_proj/kv_b_proj and o_proj replicated for MLA context parallelism."""
 
 
 @dataclasses.dataclass
