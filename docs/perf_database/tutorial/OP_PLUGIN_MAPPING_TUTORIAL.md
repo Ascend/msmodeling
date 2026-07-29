@@ -83,7 +83,7 @@ torch_npu_reference:
 
 ```text
 PyTorch aten 算子 (如 aten.mm)
-  → op-plugin 分发 (op_plugin_functions.yaml)
+  → OpPlugin 分发 (op_plugin_functions.yaml)
     → C++ 实现 (opapi/*.cpp)
       → EXEC_NPU_CMD(aclnn*) 调用
         → CANN aclnn Host API
@@ -98,9 +98,9 @@ PyTorch aten 算子 (如 aten.mm)
 
 ## 3. 三种映射路径
 
-### 路径 A：aten → op-plugin → aclnn（最常见）
+### 路径 A：aten → OpPlugin → aclnn（最常见）
 
-适用于通过 Ascend op-plugin 分发的标准 PyTorch 算子：
+适用于通过 Ascend OpPlugin 分发的标准 PyTorch 算子：
 
 1. **在 op-plugin 中查找算子：** `grep "aten::mm" op_plugin/config/op_plugin_functions.yaml`
 2. **找到 C++ 实现：** `op_plugin/ops/opapi/MmKernelNpuOpApi.cpp`
@@ -111,14 +111,14 @@ PyTorch aten 算子 (如 aten.mm)
 **示例：aten.mm.default → MatMulV2**
 
 ```text
-op-plugin YAML → MmKernelNpuOpApi.cpp → EXEC_NPU_CMD(aclnnMm)
+ OpPlugin YAML → MmKernelNpuOpApi.cpp → EXEC_NPU_CMD(aclnnMm)
   → cann-ops-nn/matmul/mat_mul_v2/ → OP_TYPE_REGISTER(MatMulV2)
   → Profiling: Type=MatMulV2
 ```
 
 ### 路径 B：torch_npu.npu_* → op-plugin → aclnn
 
-适用于使用 torch_npu API 的 vLLM-ascend 专用算子：
+适用于使用 TorchNPU API 的 vLLM-ascend 专用算子：
 
 1. **找到 vllm-ascend 调用：** `torch_npu.npu_grouped_matmul_swiglu_quant(...)`
 2. **在 op-plugin 中查找：** `grep "npu_grouped_matmul_swiglu_quant" op_plugin/`
@@ -128,14 +128,14 @@ op-plugin YAML → MmKernelNpuOpApi.cpp → EXEC_NPU_CMD(aclnnMm)
 
 ```text
 vllm-ascend moe_mlp.py → torch_npu.npu_grouped_matmul_swiglu_quant
-  → op-plugin → aclnnGroupedMatmulSwigluQuantWeightNZ
+  → OpPlugin → aclnnGroupedMatmulSwigluQuantWeightNZ
   → cann-ops-transformer/gmm/ → OP_TYPE_REGISTER(GroupedMatmulSwigluQuant)
   → Profiling: Type=GroupedMatmulSwigluQuant
 ```
 
 ### 路径 C：vLLM-ascend 自定义算子 / Triton 内核
 
-适用于不在 op-plugin 中的算子（自定义内核、Triton、ATB）：
+适用于不在 OpPlugin 中的算子（自定义内核、Triton、ATB）：
 
 1. **找到 vllm-ascend 自定义算子：** 如 `vllm_ascend/ops/attention.py`
 2. **判断是 Triton、csrc 还是 ATB：** 函数名通常 = profiling Type
@@ -151,7 +151,7 @@ vllm-ascend mla_v1.py → torch_npu.atb.npu_ring_mla()
 
 ### 通信算子 (HCCL)
 
-通信算子完全绕过 op-plugin：
+通信算子完全绕过 OpPlugin：
 
 ```text
 TC all_reduce → torch.distributed.all_reduce → HCCL → hcom_allReduce_
@@ -170,7 +170,7 @@ grep -r "def swiglu" tensor_cast/ops/
 # → tensor_cast/ops/activation.py: SwiGlu 激活函数 (gate * sigmoid(gate) * up)
 ```
 
-**步骤 2：找到 aten/torch_npu 路径**
+**步骤 2：找到 aten/TorchNPU 路径**
 
 SwiGlu 是一个自定义 TC 算子，因此检查 vLLM-ascend：
 
@@ -179,7 +179,7 @@ grep -r "swiglu\|silu_and_mul" /path/to/vllm-ascend/
 # → vllm_ascend/ops/activation.py → torch_npu.npu_swiglu(...)
 ```
 
-**步骤 3：查找 op-plugin 条目**
+**步骤 3：查找 OpPlugin 条目**
 
 ```bash
 grep "npu_swiglu" /path/to/op-plugin/op_plugin/config/op_plugin_functions.yaml
@@ -505,7 +505,7 @@ view, permute, split, split_with_sizes, select, slice, transpose, unsqueeze, exp
 | `validate.py` | 验证 CSV 数据库质量 | `--database` |
 | `discover_operators.py` | 对比 profiling 与 op_mapping 覆盖率 | — |
 | `generate_shape_grid.py` | 生成微基准测试 shape 网格 | — |
-| `generate_microbench.py` | 生成 torch_npu 基准测试脚本 | — |
+| `generate_microbench.py` | 生成 TorchNPU 基准测试脚本 | — |
 | `build_database.py` | 合并多个 CSV 数据源 | `--sources`, `--target` |
 
 ## 13. 相关文档
@@ -535,7 +535,7 @@ view, permute, split, split_with_sizes, select, slice, transpose, unsqueeze, exp
 开始之前，确保具备：
 
 - [ ] tensor_cast/ops/ 中已定义目标 TC 融合算子
-- [ ] 有访问 vllm-ascend、op-plugin、CANN 相关仓库的权限
+- [ ] 有访问 vllm-ascend、OpPlugin、CANN 相关仓库的权限
 - [ ] 有目标设备的 profiling 数据（kernel_details.csv）
 
 ### 14.2 映射流程
@@ -576,7 +576,7 @@ grep -r "register_tensor_cast_op.*<op_name>" tensor_cast/ops/
 
 根据算子来源选择追踪路径：
 
-**路径 A: 标准 aten 算子（op-plugin 分发）**
+**路径 A: 标准 aten 算子（OpPlugin 分发）**
 
 ```bash
 # 1. 在 op-plugin 中查找
@@ -1251,7 +1251,7 @@ Phase 6: CORRECT   — 迭代修复 MISS
    - 并行配置: world-size, tp-size, dp-size, ep flag
    - 量化方式: DISABLED / W8A8_STATIC / W4A8_STATIC / FP8 / MXFP4
    - Profiling CSV: kernel_details.csv 路径
-   - 软件栈版本: vLLM、vLLM-ascend、op-plugin、pytorch-npu、CANN ops 各仓库版本
+   - 软件栈版本: vLLM、vLLM-ascend、OpPlugin、TorchNPU、CANN ops 各仓库版本
    - 本地仓库路径: 各仓库的 checkout 路径（或 URL + tag 自动 clone）
    ```
 

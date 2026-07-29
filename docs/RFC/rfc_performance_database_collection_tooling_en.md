@@ -373,7 +373,7 @@ Validation must not hide partial coverage. Accepted miss, zero-cost ops, interpo
 
 Before a data refresh or tooling change is sent for human review, it should provide at least:
 
-- Target software stack: device, vLLM-Ascend, PyTorch, CANN, op-plugin, and collection date.
+- Target software stack: device, vLLM-Ascend, PyTorch, CANN, OpPlugin, and collection date.
 - Raw input sources: profiling bundle name or path summary, whether `operator_details.csv` / `trace_view.json` exist, and whether FIA runtime JSONL exists.
 - CSV schema changes: added, removed, or renamed columns; whether empty tensor slots are preserved; whether latency-column priority is still satisfied.
 - `op_mapping.yaml` changes: added/modified mappings, evidence chains, `alternate_kernel_types`, `tc_input_count`, `accepted_miss`, `zero_cost`, and composite/decomposer impact.

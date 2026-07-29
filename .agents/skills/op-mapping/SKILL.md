@@ -26,8 +26,8 @@ Collect ALL of these from the user before proceeding:
 |------|-------------|-------------|
 | vLLM | `https://github.com/vllm-project/vllm.git` | (ask user) |
 | vLLM-ascend | `https://github.com/vllm-project/vllm-ascend.git` | (ask user) |
-| op-plugin | `https://gitcode.com/Ascend/op-plugin.git` | (ask user) |
-| pytorch-npu | `https://github.com/Ascend/pytorch.git` | (ask user) |
+| OpPlugin | `https://gitcode.com/Ascend/op-plugin.git` | (ask user) |
+| TorchNPU | `https://github.com/Ascend/pytorch.git` | (ask user) |
 | CANN ops-nn | `https://gitcode.com/cann/ops-nn.git` | (ask user) |
 | CANN ops-transformer | `https://gitcode.com/cann/ops-transformer.git` | (ask user) |
 | CANN ops-math | `https://gitcode.com/cann/ops-math.git` | (ask user) |
@@ -52,7 +52,7 @@ Teach these to all sub-agents:
 
 1. **Profiling Name 3-part structure**: `aclnnAPI_DispatchFunc_L0OpType` — the 3rd segment = Profiling Type = our lookup key
 2. **Type column = OPTYPE** from CANN `op_host/CMakeLists.txt` = CSV filename for database query
-3. **Three paths**: A (aten→op-plugin→aclnn), B (torch_npu.npu_*→op-plugin→aclnn), C (vllm-ascend custom/triton)
+3. **Three paths**: A (aten→OpPlugin→aclnn), B (torch_npu.npu_*→OpPlugin→aclnn), C (vllm-ascend custom/triton)
 4. **10 shape differences** between TC tensors and NPU profiling shapes (see worker prompt + `ref/shape_matching_catalog.md`)
 5. **Mutually exclusive**: `kernel_type` vs `composite` vs `zero_cost` — exactly one per entry
 6. **Communication ops** use message_bytes + num_devices, NOT shape matching

@@ -1,6 +1,6 @@
 ---
 name: microbench-run-script-generator
-description: Use when generating or updating tools/perf_data_collection/op_replay/<KernelType>_run.py from perf database CSV data, op_mapping.yaml torch_npu_reference.microbench_api, and upstream operator docs/tests across vLLM, vLLM-ascend, op-plugin, pytorch-npu, CANN, or ATB repos
+description: Use when generating or updating tools/perf_data_collection/op_replay/<KernelType>_run.py from perf database CSV data, op_mapping.yaml torch_npu_reference.microbench_api, and upstream operator docs/tests across vLLM, vLLM-ascend, OpPlugin, TorchNPU, CANN, or ATB repos
 version: 1.0.0
 source: local-session-analysis
 ---
@@ -34,7 +34,7 @@ Use local repos first. If the needed repo is missing, clone it next to `msmodeli
 | vLLM | `../vllm` |
 | vLLM-ascend | `../vllm-ascend` |
 | op-plugin | `../op-plugin` |
-| pytorch-npu | `../pytorch` |
+| TorchNPU | `../pytorch` |
 | CANN ops-nn | `../cann-ops-nn` |
 | CANN ops-transformer | `../cann-ops-transformer` |
 | CANN ops-math | `../cann-ops-math` |
@@ -76,7 +76,7 @@ Priority:
 1. Operator-specific markdown docs under `op-plugin/docs/context/`
 2. Operator tests under `op-plugin/test/`
 3. vLLM-ascend custom-op Python or Triton implementation
-4. op-plugin / pytorch-npu C++ registration or op-api entry
+4. OpPlugin / TorchNPU C++ registration or op-api entry
 5. CANN / ATB sources for cache/layout semantics
 
 Typical search patterns:

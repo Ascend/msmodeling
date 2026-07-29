@@ -373,7 +373,7 @@ Output Data Types
 
 数据刷新或工具链变更提交给 human review 前，应至少提供以下信息：
 
-- 目标软件栈：device、vLLM-Ascend、PyTorch、CANN、op-plugin、collection date。
+- 目标软件栈：device、vLLM-Ascend、PyTorch、CANN、OpPlugin、collection date。
 - 原始输入来源：profiling bundle 名称或路径摘要、是否包含 `operator_details.csv` / `trace_view.json`、是否包含 FIA runtime JSONL。
 - CSV schema 变更：新增、删除或重命名的列；是否保留空 tensor 槽位；是否仍满足 latency 列优先级。
 - `op_mapping.yaml` 变更：新增/修改的 mapping、证据链、`alternate_kernel_types`、`tc_input_count`、`accepted_miss`、`zero_cost`、composite/decomposer 影响。

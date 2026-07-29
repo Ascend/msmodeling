@@ -25,7 +25,7 @@ Understanding the full call path from Python to device kernel is essential. Ever
 ```text
 Layer 0: vLLM Python — model.forward() dispatches ops via 3 paths
     ↓
-Layer 1: op-plugin — C++ dispatch, routes aten/npu ops to CANN aclnn APIs
+Layer 1: OpPlugin — C++ dispatch, routes aten/npu ops to CANN aclnn APIs
     ↓
 Layer 2: CANN aclnn Host API — op_host/op_api/aclnn_*.cpp defines the C interface
     ↓
@@ -40,7 +40,7 @@ Layer 4: AI Core Execution — Profiling captures: Name=aclnnXxx_Yyy_OpType, Typ
 aclnnMatmulWeightNz  _  MatMulCommon  _  MatMulV2
 │                       │                │
 ├─ 1st: aclnn API       ├─ 2nd: Host     ├─ 3rd: L0 OpType
-│  (op-plugin calls)    │  dispatch fn    │  (= Profiling Type column)
+│  (OpPlugin calls)    │  dispatch fn    │  (= Profiling Type column)
 │                       │                 │  (= CSV filename for DB query)
 ```
 
@@ -56,7 +56,7 @@ Kernel types can change between CANN versions — renames, fusions, or removals.
 - Use `alternate_kernel_types` to list both old and new kernel names for cross-version compatibility.
 - Some ops may be fused into larger kernels in newer CANN versions (e.g., separate matmul + activation → single fused kernel). These require updating `kernel_type`, not just adding alternates.
 
-Prefer the CANN/op-plugin branch that matches the target CANN/torch-npu stack.
+Prefer the CANN/OpPlugin branch that matches the target CANN/TorchNPU stack.
 Use the user-provided version or profiling metadata to select the branch/tag,
 and verify the resolved ref. For example, CANN 8.5 transformer kernels may use
 `https://gitcode.com/cann/ops-transformer.git` branch `8.5.0`, but that is a
@@ -81,10 +81,10 @@ START: What is the op?
 │     - Dtype-relaxed with byte-ratio scaling
 │
 ├─ aten.* op (standard PyTorch)?
-│  └─ PATH A: ATen → op-plugin → aclnn → L0 OpType
+│  └─ PATH A: ATen → OpPlugin → aclnn → L0 OpType
 │
 ├─ tensor_cast.* with known torch_npu.npu_* equivalent?
-│  └─ PATH B: torch_npu pybind → op-plugin → aclnn → L0 OpType
+│  └─ PATH B: TorchNPU pybind → OpPlugin → aclnn → L0 OpType
 │
 ├─ Communication op (all_reduce, all_gather, reduce_scatter, all_to_all)?
 │  └─ HCCL DIRECT: torch.distributed → ProcessGroupHCCL → hcom_* kernel
@@ -93,16 +93,16 @@ START: What is the op?
 │  └─ PATH C: vllm-ascend custom → Profiling Type = function name or OP_ADD name
 │
 └─ Reverse direction (profiling Type → TC op)?
-   └─ Parse aclnn prefix from Name → search op-plugin → find aten/npu function → match TC op
+   └─ Parse aclnn prefix from Name → search OpPlugin → find aten/npu function → match TC op
 ```
 
-## Path A: ATen → op-plugin (Standard PyTorch Ops)
+## Path A: ATen → OpPlugin (Standard PyTorch Ops)
 
 **When to use:** op_name starts with `aten.`
 
 **Search sequence:**
 
-1. Search op-plugin YAML for the function signature:
+1. Search OpPlugin YAML for the function signature:
 
    ```bash
    grep -n "func: <op_name_without_aten_prefix>" $OP_PLUGIN/op_plugin/config/op_plugin_functions.yaml
@@ -145,19 +145,19 @@ START: What is the op?
 - CANN: `ops-nn/matmul/mat_mul_v3/` → OPTYPE: `mat_mul_v3`, OP_TYPE_REGISTER(MatMulV2)
 - Profiling: Type=`MatMulV2`
 
-## Path B: torch_npu.npu_* → op-plugin (NPU Custom Ops)
+## Path B: torch_npu.npu_* → OpPlugin (NPU Custom Ops)
 
-**When to use:** TC op maps to a torch_npu custom function (fused kernels like SwiGlu, attention, RoPE, etc.)
+**When to use:** TC op maps to a TorchNPU custom function (fused kernels like SwiGlu, attention, RoPE, etc.)
 
 **Search sequence:**
 
-1. Search vllm-ascend for the torch_npu API call:
+1. Search vllm-ascend for the TorchNPU API call:
 
    ```bash
    grep -rn "torch_npu\." $VLLM_ASCEND/vllm_ascend/ --include="*.py" | grep "<keyword>"
    ```
 
-2. Find op-plugin YAML entry for the npu_* function:
+2. Find OpPlugin YAML entry for the npu_* function:
 
    ```bash
    grep -n "func: npu_<function_name>" $OP_PLUGIN/op_plugin/config/op_plugin_functions.yaml
@@ -182,7 +182,7 @@ START: What is the op?
 
 - vLLM-Ascend v0.18.0: `vllm_ascend/attention/sfa_v1.py` sets
   `use_torch_npu_lightning_indexer=True` for `hf_config.model_type == "glm_moe_dsa"`.
-- Selected path: `torch_npu.npu_lightning_indexer()` -> op-plugin
+- Selected path: `torch_npu.npu_lightning_indexer()` -> OpPlugin
   `op_plugin_functions.yaml` -> `LightningIndexerKernelNpuOpApi.cpp`
   -> `aclnnLightningIndexer`.
 - CANN: ops-transformer branch matching the target CANN version, e.g. 8.5.0
@@ -200,7 +200,7 @@ START: What is the op?
 
 ## Path C: vllm-ascend Custom / Triton
 
-**When to use:** Op is NOT in op-plugin; it's a vllm-ascend C++ custom op or Triton kernel.
+**When to use:** Op is NOT in OpPlugin; it's a vllm-ascend C++ custom op or Triton kernel.
 
 **Search sequence:**
 
@@ -238,7 +238,7 @@ START: What is the op?
 
 **When to use:** op_name contains all_reduce, all_gather, reduce_scatter, all_to_all
 
-Communication ops bypass op-plugin entirely:
+Communication ops bypass OpPlugin entirely:
 
 - `torch.distributed.all_reduce()` → ProcessGroupHCCL → HCCL library → `hcom_allReduce_`
 - Category must be set to `communication` in op_mapping.yaml
@@ -255,7 +255,7 @@ Communication ops bypass op-plugin entirely:
    ```
 
 2. Parse the 3-part Name to extract the aclnn prefix (1st segment)
-3. Search op-plugin for the aclnn name:
+3. Search OpPlugin for the aclnn name:
 
    ```bash
    grep -r "<aclnn_prefix>" $OP_PLUGIN/op_plugin/ops/ --include="*.cpp" -l
@@ -324,7 +324,7 @@ Some ops should be `zero_cost: true` instead of `kernel_type`. Full rules: `ref/
 
 **Where operators live in each repo:**
 
-- **op-plugin**: `op_plugin/config/op_plugin_functions.yaml` (master YAML), `op_plugin/ops/opapi/` (C++ implementations)
+- **OpPlugin**: `op_plugin/config/op_plugin_functions.yaml` (master YAML), `op_plugin/ops/opapi/` (C++ implementations)
 - **vllm-ascend**: `vllm_ascend/ops/` (Python APIs), `csrc/` (C++ custom ops), `vllm_ascend/ops/triton/` (Triton kernels), `vllm_ascend/compilation/passes/` (graph fusion)
 - **CANN ops-transformer**: `attention/`, `mc2/`, `moe/`, `gmm/`, `posembedding/`, `ffn/` — most LLM fusion kernels
 - **CANN ops-nn**: `matmul/`, `norm/`, `quant/`, `index/`, `activation/` — basic building blocks
@@ -338,7 +338,7 @@ Your notes field MUST include:
 
 ```text
 [HIGH|MEDIUM|LOW] path: A|B|C|HCCL.
-op-plugin: <yaml_entry_name> / <ImplFile.cpp> (or N/A for Path C / HCCL).
+OpPlugin: <yaml_entry_name> / <ImplFile.cpp> (or N/A for Path C / HCCL).
 aclnn: <aclnn_kernel_name> (or N/A for Triton/HCCL).
 CANN: <ops-xxx/category/opname/> OPTYPE: <value> (or N/A for Triton).
 Profiling: <Type(count)> (or N/A if no profiling data).
@@ -348,7 +348,7 @@ shape_flags: [<applicable flags from checklist>].
 Confidence levels:
 
 - **HIGH**: Verified against profiling data (Type matches, count > 0)
-- **MEDIUM**: op-plugin evidence exists but no profiling verification
+- **MEDIUM**: OpPlugin evidence exists but no profiling verification
 - **LOW**: Placeholder or uncertain mapping (e.g., untested quant path)
 
 ## Output

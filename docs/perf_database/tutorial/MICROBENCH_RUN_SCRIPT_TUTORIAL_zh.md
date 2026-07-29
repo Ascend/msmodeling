@@ -66,7 +66,7 @@ torch_npu_reference:
 1. `op-plugin/docs/context/` 下的算子文档
 2. `op-plugin/test/` 下的测试用例
 3. `vllm-ascend` 中的 Python/Triton/custom op 实现
-4. `op-plugin` / `pytorch-npu` 中的 op-api 或注册代码
+4. `OpPlugin` / `TorchNPU` 中的 op-api 或注册代码
 5. CANN / ATB 仓库里的 layout、cache、融合语义
 
 常用搜索命令：
@@ -189,7 +189,7 @@ from common import (
 - `torch.ops._C_ascend.*`
 - `atb.*`
 
-那就不能只看 `torch_npu` 文档了，必须同时检查：
+那就不能只看 `TorchNPU` 文档了，必须同时检查：
 
 1. 自定义 op 是否已注册
 2. 是否需要手动 import 注册模块

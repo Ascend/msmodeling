@@ -160,7 +160,7 @@ TensorCast 新模型接入流程 skill——从仿真命令和 MindStudio Insigh
 
 - `kernel_type` 必须与 CSV 文件名完全一致（无 `.csv` 后缀）。
 
-- 三个映射路径：aten→op-plugin→aclnn、torch_npu.npu_*→op-plugin→aclnn、vllm-ascend 自定义/Triton。
+- 三个映射路径：aten→OpPlugin→aclnn、torch_npu.npu_*→OpPlugin→aclnn、vllm-ascend 自定义/Triton。
 
 - `alternate_kernel_types` 必须在同一抽象层级，禁止用融合大 op 作为子 op 的备选。
 
