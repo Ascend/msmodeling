@@ -40,6 +40,7 @@ def _make_mla_decode_args(
     v_head_dim=128,
     batch_size=16,
     avg_seq_len=4096,
+    topk_limit=None,
 ):
     """Build args for multihead_latent_attention in decode mode."""
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -52,7 +53,7 @@ def _make_mla_decode_args(
     W_UK_T = torch.empty(num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=torch.bfloat16)
     W_UV = torch.empty(num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=torch.bfloat16)
     kv_b_proj = None  # decode
-    return [
+    args = [
         q,
         kv_cache,
         block_table,
@@ -64,6 +65,9 @@ def _make_mla_decode_args(
         kv_b_proj,
         v_head_dim,
     ]
+    if topk_limit is not None:
+        args.append(topk_limit)
+    return args
 
 
 def _make_mla_prefill_args(
@@ -1174,12 +1178,13 @@ def _make_mlapo_args(
     produce wrong intermediate activation shapes.
     """
     hidden_states = torch.empty(num_tokens, hidden_size, device="meta", dtype=torch.bfloat16)
-    # args[1], args[2]: norms (unused by decomposer but need placeholders)
+    # args[1], args[2]: rotary embedding inputs (unused by decomposer).
+    cos = torch.empty(num_tokens, 64, device="meta", dtype=torch.bfloat16)
+    sin = torch.empty(num_tokens, 64, device="meta", dtype=torch.bfloat16)
+    # args[4]: q_a_layernorm_weight
     q_a_layernorm = torch.empty(q_lora_rank, device="meta", dtype=torch.bfloat16)
-    q_a_scale = None
     # args[3]: q_a_proj (out_features=q_lora_rank, in_features=hidden_size)
     q_a_proj = torch.empty(q_lora_rank, hidden_size, device="meta", dtype=torch.bfloat16)
-    q_a_proj_scale = None
     # args[5]: q_b_proj (out_features=num_heads*qk_head_dim, in_features=q_lora_rank)
     q_b_proj = torch.empty(num_heads_x_qk_head_dim, q_lora_rank, device="meta", dtype=torch.bfloat16)
     # args[6]: kv_a_proj (out_features=kv_proj_dim, in_features=hidden_size)
@@ -1189,10 +1194,10 @@ def _make_mlapo_args(
     # Pad to 20 args (decomposer checks len(args) >= 14 for mlapo, >= 20 for quant)
     args = [
         hidden_states,  # 0
-        q_a_layernorm,  # 1
-        q_a_scale,  # 2
+        cos,  # 1
+        sin,  # 2
         q_a_proj,  # 3
-        q_a_proj_scale,  # 4
+        q_a_layernorm,  # 4
         q_b_proj,  # 5
         kv_a_proj,  # 6
         kv_a_layernorm,  # 7
@@ -1212,6 +1217,11 @@ def _make_mlapo_args(
     return args
 
 
+def _specs_for_kernel(specs, kernel_type):
+    """Select decomposed specs by kernel type without depending on global order."""
+    return [spec for spec in specs if spec.kernel_type == kernel_type]
+
+
 class TestDecomposeMlapo:
     """Tests for _decompose_mlapo weight dimension direction (bugfix 2618b0b).
 
@@ -1220,21 +1230,24 @@ class TestDecomposeMlapo:
     weight=(out_features, in_features), shape[1]=hidden_size, which is wrong.
     """
 
-    def test_returns_3_specs(self):
-        """NPU fuses q_a_proj + kv_a_proj into fused_qkv_a_proj → 3 specs."""
+    def test_returns_4_specs(self):
+        """BF16 MLAPO exposes two matmuls, RmsNorm, and cache postprocess."""
         args = _make_mlapo_args()
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
         assert specs is not None
-        assert len(specs) == 3
+        assert len(specs) == 4
 
     def test_kernel_types(self):
         args = _make_mlapo_args()
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
-        assert specs[0].kernel_type == "MatMulV2"  # fused_qkv_a_proj
-        assert specs[1].kernel_type == "MatMulV2"  # q_b_proj
-        assert specs[2].kernel_type == "KvRmsNormRopeCache"
+        assert [spec.kernel_type for spec in specs] == [
+            "MatMulV2",
+            "RmsNorm",
+            "MatMulV2",
+            "KvRmsNormRopeCache",
+        ]
 
     def test_q_lora_rank_from_out_features(self):
         """q_compressed @ q_b_proj: activation shape must use q_lora_rank (shape[0]),
@@ -1243,9 +1256,10 @@ class TestDecomposeMlapo:
         args = _make_mlapo_args(num_tokens=136, hidden_size=5120, q_lora_rank=1536)
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
+        matmul_specs = _specs_for_kernel(specs, "MatMulV2")
         # Op2: q_compressed @ q_b_proj → input_shapes[0] = (num_tokens, q_lora_rank)
         # Bug would produce (136, 5120) instead of (136, 1536)
-        assert specs[1].input_shapes[0] == (136, 1536)
+        assert matmul_specs[1].input_shapes[0] == (136, 1536)
 
     def test_kv_proj_dim_from_out_features(self):
         """KvRmsNormRopeCache shape must use kv_proj_dim (shape[0]),
@@ -1255,17 +1269,19 @@ class TestDecomposeMlapo:
         args = _make_mlapo_args(num_tokens=136, hidden_size=5120, kv_proj_dim=576)
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
-        # KvRmsNormRopeCache is now specs[2] (was [3] before fused_qkv_a_proj merge)
         # MISS #3 fix: NPU CSV shape is 4D (T,1,1,D), not 2D (T,D)
-        assert specs[2].input_shapes[0] == (136, 1, 1, 576)
+        kv_spec = _specs_for_kernel(specs, "KvRmsNormRopeCache")[0]
+        assert kv_spec.query_mode == "compute"
+        assert kv_spec.input_shapes == [(136, 1, 1, 576)]
 
     def test_fused_qkv_a_proj_shape(self):
         """Op1: hidden @ fused_qkv_a_proj with N = q_lora_rank + kv_proj_dim."""
         args = _make_mlapo_args(num_tokens=100, hidden_size=5120, q_lora_rank=1536, kv_proj_dim=576)
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
+        matmul_specs = _specs_for_kernel(specs, "MatMulV2")
         # Fused: (num_tokens, hidden_size) @ (q_lora_rank+kv_proj_dim, hidden_size)
-        assert specs[0].input_shapes == [(100, 5120), (2112, 5120)]
+        assert matmul_specs[0].input_shapes == [(100, 5120), (2112, 5120)]
 
     def test_insufficient_args_returns_none(self):
         op = _make_op_info(
@@ -1279,39 +1295,47 @@ class TestDecomposeMlapo:
         args = _make_mlapo_args()
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         specs = _decompose_mlapo(op, {})
-        assert specs[0].tc_input_count == 2  # fused_qkv_a_proj
-        assert specs[1].tc_input_count == 2  # q_b_proj
-        assert specs[2].tc_input_count is None  # KvRmsNormRopeCache
+        assert all(spec.tc_input_count == 2 for spec in _specs_for_kernel(specs, "MatMulV2"))
+        assert _specs_for_kernel(specs, "RmsNorm")[0].tc_input_count == 2
+        assert _specs_for_kernel(specs, "KvRmsNormRopeCache")[0].tc_input_count is None
 
-    def test_none_weight_returns_none(self):
+    def test_invalid_inputs_return_none(self):
         args = _make_mlapo_args()
         args[3] = None  # q_a_proj = None
         op = _make_op_info(torch.ops.tensor_cast.mlapo.default, args)
         assert _decompose_mlapo(op, {}) is None
 
+        valid_op = _make_op_info(torch.ops.tensor_cast.mlapo.default, _make_mlapo_args())
+        invalid_mapping = {"decomposer_options": {"kv_cache_query": {"mode": "unsupported"}}}
+        assert _decompose_mlapo(valid_op, invalid_mapping) is None
+
 
 class TestDecomposeMlapoQuant:
     """Tests for _decompose_mlapo_quant weight dimension direction (bugfix 2618b0b)."""
 
-    def test_returns_3_specs_with_quant_kernel(self):
-        """NPU fuses q_a_proj + kv_a_proj into fused_qkv_a_proj → 3 specs."""
+    def test_returns_6_specs_with_quant_kernel(self):
+        """Quant MLAPO exposes quantization, matmul, norm, and cache kernels."""
         args = _make_mlapo_args()
         op = _make_op_info(torch.ops.tensor_cast.mlapo_quant.default, args)
         specs = _decompose_mlapo_quant(op, {})
         assert specs is not None
-        assert len(specs) == 3
-        # Quant variant uses QuantBatchMatmulV3 for projections
-        assert specs[0].kernel_type == "QuantBatchMatmulV3"  # fused_qkv_a_proj
-        assert specs[1].kernel_type == "QuantBatchMatmulV3"  # q_b_proj
-        assert specs[2].kernel_type == "KvRmsNormRopeCache"
+        assert [spec.kernel_type for spec in specs] == [
+            "AscendQuantV2",
+            "QuantBatchMatmulV3",
+            "RmsNorm",
+            "AscendQuantV2",
+            "QuantBatchMatmulV3",
+            "KvRmsNormRopeCache",
+        ]
 
     def test_q_lora_rank_from_out_features_quant(self):
         """Same bugfix regression: q_lora_rank must come from shape[0]."""
         args = _make_mlapo_args(num_tokens=136, hidden_size=5120, q_lora_rank=1536)
         op = _make_op_info(torch.ops.tensor_cast.mlapo_quant.default, args)
         specs = _decompose_mlapo_quant(op, {})
+        qbmv3_specs = _specs_for_kernel(specs, "QuantBatchMatmulV3")
         # Bug would produce (136, 5120) instead of (136, 1536)
-        assert specs[1].input_shapes[0] == (136, 1536)
+        assert qbmv3_specs[1].input_shapes[0] == (136, 1536)
 
     def test_kv_proj_dim_from_out_features_quant(self):
         """Same bugfix regression: kv_proj_dim must come from shape[0].
@@ -1320,18 +1344,18 @@ class TestDecomposeMlapoQuant:
         args = _make_mlapo_args(num_tokens=136, hidden_size=5120, kv_proj_dim=576)
         op = _make_op_info(torch.ops.tensor_cast.mlapo_quant.default, args)
         specs = _decompose_mlapo_quant(op, {})
-        # KvRmsNormRopeCache is now specs[2] (was [3] before fused merge)
         # MISS #3 fix: NPU CSV shape is 4D (T,1,1,D), not 2D (T,D)
-        assert specs[2].input_shapes[0] == (136, 1, 1, 576)
+        kv_spec = _specs_for_kernel(specs, "KvRmsNormRopeCache")[0]
+        assert kv_spec.input_shapes == [(136, 1, 1, 576)]
 
     def test_qbmv3_specs_have_tc_input_count_2(self):
         """QuantBatchMatmulV3 CSV has extra bias inputs; tc_input_count=2 is required."""
         args = _make_mlapo_args()
         op = _make_op_info(torch.ops.tensor_cast.mlapo_quant.default, args)
         specs = _decompose_mlapo_quant(op, {})
-        assert specs[0].tc_input_count == 2  # fused_qkv_a_proj
-        assert specs[1].tc_input_count == 2  # q_b_proj
-        assert specs[2].tc_input_count is None  # KvRmsNormRopeCache
+        assert all(spec.tc_input_count == 2 for spec in _specs_for_kernel(specs, "QuantBatchMatmulV3"))
+        assert all(spec.tc_input_count == 3 for spec in _specs_for_kernel(specs, "AscendQuantV2"))
+        assert _specs_for_kernel(specs, "KvRmsNormRopeCache")[0].tc_input_count is None
 
     def test_insufficient_args_returns_none(self):
         """mlapo_quant requires len(args) >= 20."""
@@ -1489,11 +1513,9 @@ class TestDecomposeMLAPOQuantFix:
         op = self._make_op()
         specs = _decompose_mlapo_quant(op, {})
         assert specs is not None
-        # First two specs are QBMV3 matmuls
-        assert specs[0].kernel_type == "QuantBatchMatmulV3"
-        assert specs[1].kernel_type == "QuantBatchMatmulV3"
-        assert specs[0].dtype == "INT8", f"Expected INT8 for QBMV3, got {specs[0].dtype!r}"
-        assert specs[1].dtype == "INT8", f"Expected INT8 for QBMV3, got {specs[1].dtype!r}"
+        qbmv3_specs = _specs_for_kernel(specs, "QuantBatchMatmulV3")
+        assert len(qbmv3_specs) == 2
+        assert all(spec.dtype == "INT8" for spec in qbmv3_specs)
 
     def test_q_b_proj_uses_full_weight_shape(self):
         """MISS #2: q_b_proj weight must use full shape (num_heads*qk_head_dim, q_lora_rank).
@@ -1504,9 +1526,7 @@ class TestDecomposeMLAPOQuantFix:
         op = self._make_op(num_heads=16, qk_head_dim=192, q_lora_rank=1536)
         specs = _decompose_mlapo_quant(op, {})
         assert specs is not None
-        # q_b_proj spec is specs[1]
-        q_b_proj_spec = specs[1]
-        assert q_b_proj_spec.kernel_type == "QuantBatchMatmulV3"
+        q_b_proj_spec = _specs_for_kernel(specs, "QuantBatchMatmulV3")[1]
         # Full weight shape: (num_heads * qk_head_dim, q_lora_rank) = (3072, 1536)
         weight_shape = q_b_proj_spec.input_shapes[1]
         assert weight_shape == (3072, 1536), (
@@ -1522,8 +1542,7 @@ class TestDecomposeMLAPOQuantFix:
         op = self._make_op(num_tokens=8, kv_proj_dim=576)
         specs = _decompose_mlapo_quant(op, {})
         assert specs is not None
-        kv_spec = specs[2]
-        assert kv_spec.kernel_type == "KvRmsNormRopeCache"
+        kv_spec = _specs_for_kernel(specs, "KvRmsNormRopeCache")[0]
         # Must be 4D: (T, 1, 1, kv_proj_dim)
         input_shape = kv_spec.input_shapes[0]
         assert len(input_shape) == 4, f"Expected 4D shape (T,1,1,D), got {len(input_shape)}D: {input_shape}"
@@ -1538,8 +1557,7 @@ class TestDecomposeMLAPOQuantFix:
         op = self._make_op()
         specs = _decompose_mlapo_quant(op, {})
         assert specs is not None
-        kv_spec = specs[2]
-        assert kv_spec.kernel_type == "KvRmsNormRopeCache"
+        kv_spec = _specs_for_kernel(specs, "KvRmsNormRopeCache")[0]
         assert kv_spec.dtype == "DT_BF16", f"Expected DT_BF16 for KvRmsNormRopeCache, got {kv_spec.dtype!r}"
 
 
@@ -1589,6 +1607,15 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 "136,5120;2112,5120","DT_BF16;DT_BF16","ND;ND","136,2112","DT_BF16","ND",10.0
 "136,1536;3072,1536","DT_BF16;DT_BF16","ND;ND","136,3072","DT_BF16","ND",8.0"""
 
+RMSNORM_MLAPO_CSV = """\
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"136,1536;1536","DT_BF16;DT_BF16","ND;ND","136,1536","DT_BF16","ND",5.0"""
+
+ASCEND_QUANT_MLAPO_CSV = """\
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"136,7168;7168;7168","DT_BF16;DT_BF16;DT_BF16","ND;ND;ND","136,7168","INT8","ND",2.0
+"136,1536;1536;1536","DT_BF16;DT_BF16;DT_BF16","ND;ND;ND","136,1536","INT8","ND",1.0"""
+
 # KvRmsNormRopeCache CSV with real 4D NPU shapes.
 # NPU shape is (T, 1, 1, kv_proj_dim) = (136, 1, 1, 576) for T=136, kv_proj_dim=576.
 # The NPU kernel has 12 inputs total; decomposer passes only 1 shape.
@@ -1610,12 +1637,14 @@ KVRNRC_CSV_4D = (
 
 @pytest.fixture
 def mlapo_data_dir(tmp_path):
-    """Fixture: tmp dir with op_mapping + QBMV3 + MatMulV2 + KvRmsNormRopeCache CSVs."""
+    """Fixture with CSV rows for every visible MLAPO child kernel."""
     d = tmp_path / "mlapo"
     d.mkdir()
     (d / "op_mapping.yaml").write_text(MLAPO_OP_MAPPING)
     (d / "QuantBatchMatmulV3.csv").write_text(QBMV3_MLAPO_CSV.strip())
     (d / "MatMulV2.csv").write_text(MATMULV2_MLAPO_CSV.strip())
+    (d / "RmsNorm.csv").write_text(RMSNORM_MLAPO_CSV.strip())
+    (d / "AscendQuantV2.csv").write_text(ASCEND_QUANT_MLAPO_CSV.strip())
     (d / "KvRmsNormRopeCache.csv").write_text(KVRNRC_CSV_4D.strip())
     return d
 
@@ -1641,10 +1670,9 @@ class TestCompositeLookupMLAPO:
         result = ds.lookup(op)
         assert result is not None, "Expected HIT for mlapo_quant but got None"
         assert result.details.get("composite") is True
-        # 15.0 (fused_qkv_a_proj QBMV3) + 12.0 (q_b_proj QBMV3) + 3.5 (KvRmsNormRopeCache)
-        assert abs(result.latency_us - (15.0 + 12.0 + 3.5)) < 0.01, (
-            f"Expected latency {15.0 + 12.0 + 3.5}, got {result.latency_us}"
-        )
+        # 2x quantize + 2x QBMV3 + RmsNorm + KvRmsNormRopeCache.
+        assert result.source == QuerySource.MEASURED
+        assert result.latency_us == pytest.approx(38.5)
 
     def test_mlapo_bf16_full_hit(self, mlapo_data_dir):
         """Mlapo BF16 decomposed: 2x MatMulV2 + KvRmsNormRopeCache all HIT → sum latency."""
@@ -1662,10 +1690,9 @@ class TestCompositeLookupMLAPO:
         result = ds.lookup(op)
         assert result is not None, "Expected HIT for mlapo BF16 but got None"
         assert result.details.get("composite") is True
-        # 10.0 (fused_qkv_a_proj MatMulV2) + 8.0 (q_b_proj MatMulV2) + 3.5 (KvRmsNormRopeCache)
-        assert abs(result.latency_us - (10.0 + 8.0 + 3.5)) < 0.01, (
-            f"Expected latency {10.0 + 8.0 + 3.5}, got {result.latency_us}"
-        )
+        # 2x MatMulV2 + RmsNorm + KvRmsNormRopeCache.
+        assert result.source == QuerySource.MEASURED
+        assert result.latency_us == pytest.approx(26.5)
 
     def test_mlapo_quant_shape_miss_returns_partial(self, mlapo_data_dir):
         """mlapo_quant with wrong num_tokens → QBMV3 miss → PARTIAL result."""
@@ -1866,25 +1893,20 @@ class TestDecomposeMlaSparse:
             f"Expected SparseFlashAttention, got {specs[1].kernel_type}"
         )
 
-    def test_sfa_spec_uses_compute_mode(self):
-        """H2 regression: SFA spec must use compute mode (not attention mode).
-
-        SFA CSV has no avg_seq_len column, so query_mode='attention' would always
-        miss. compute mode matches on q shape (tc_input_count=1).
-        """
-        args = _make_mla_decode_args(num_tokens=16, num_heads=16, kv_lora_rank=512)
+    def test_sfa_spec_uses_attention_mode(self):
+        """SFA lookup carries the runtime semantics needed to select a row."""
+        args = _make_mla_decode_args(num_tokens=16, num_heads=16, kv_lora_rank=512, topk_limit=2048)
         op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
         specs = _decompose_mla_sparse(op, {})
         sfa_spec = specs[1]
         assert sfa_spec.kernel_type == "SparseFlashAttention"
-        # Must use compute mode: input_shapes non-empty, query_mode != "attention"
-        assert sfa_spec.query_mode != "attention", (
-            "SFA must use compute mode, not attention mode (CSV has no avg_seq_len)"
-        )
-        assert len(sfa_spec.input_shapes) > 0, "SFA compute spec must have input_shapes"
-        assert sfa_spec.tc_input_count == 1, "SFA uses tc_input_count=1 (q shape only)"
-        # q shape: (num_tokens, num_heads, kv_lora_rank)
-        assert sfa_spec.input_shapes[0] == (16, 16, 512)
+        assert sfa_spec.query_mode == "attention"
+        assert sfa_spec.input_shapes == []
+        assert sfa_spec.is_attention is True
+        assert sfa_spec.attention_params["q_shape_3d"] == (16, 16, 512)
+        assert sfa_spec.attention_params["avg_seq_len"] == 4096
+        assert sfa_spec.attention_params["topk"] == 2048
+        assert sfa_spec.attention_params["block_size"] == 16
 
     def test_prefill_produces_sfa(self):
         """D2+D6: prefill decomposes to 2 specs; spec[1].kernel_type == SparseFlashAttention."""
@@ -2122,13 +2144,11 @@ operator_mappings:
 # whether SparseFlashAttention.csv is present, not in op_mapping content.
 MLA_SPARSE_OP_MAPPING_WITH_SFA = MLA_SPARSE_OP_MAPPING_NO_SFA
 
-# SparseFlashAttention CSV uses compute-mode shape matching on q shape slot-0.
-# SFA CSV has no avg_seq_len column, so it cannot use FIA-style attn-params query.
-# tc_input_count=1 means only the first input (q: num_tokens × num_heads × kv_lora_rank)
-# is compared. Row matches: q=(16,16,512), Duration=30us.
-SFA_CSV = """Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
-"16,16,512","DT_BF16","ND","16,16,512","DT_BF16","ND",30.0
-"32,16,512","DT_BF16","ND","32,16,512","DT_BF16","ND",60.0"""
+# SparseFlashAttention rows carry the runtime semantics required by the
+# attention query. The second row guards selection by effective sequence length.
+SFA_CSV = """Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us),Runtime avg_seq_len,Runtime sparse_mode,Runtime num_key_value_heads,Runtime input_layout,Runtime topk,Runtime block_size
+"16,16,512","DT_BF16","ND","16,16,512","DT_BF16","ND",30.0,4096,3,1,TND,2048,16
+"32,16,512","DT_BF16","ND","32,16,512","DT_BF16","ND",60.0,8192,3,1,TND,2048,16"""
 
 
 @pytest.fixture
@@ -2175,6 +2195,7 @@ class TestMlaSparseProfilingFallback:
             v_head_dim=128,
             batch_size=16,
             avg_seq_len=4096,
+            topk_limit=2048,
         )
         op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
         result = ds.lookup(op)
@@ -2183,11 +2204,9 @@ class TestMlaSparseProfilingFallback:
     def test_no_sfa_csv_returns_none(self, mla_sparse_no_sfa_dir):
         """F2: without SFA CSV the SFA sub-kernel misses → None (analytic fallback).
 
-        SFA matches in compute mode (its CSV has no avg_seq_len column) but is
-        flagged is_attention=True. A miss therefore forces None → analytic
-        fallback rather than a PARTIAL result that would silently drop the
-        dominant attention latency. BMM + TBMM sub-kernels hit, but the SFA
-        attention miss short-circuits to None before any PARTIAL is returned.
+        The semantic attention query is complete, but the CSV is absent. The
+        attention miss therefore forces analytic fallback instead of returning
+        a PARTIAL result that silently drops the dominant attention latency.
         """
         ds = ProfilingDataSource(mla_sparse_no_sfa_dir)
         args = _make_mla_decode_args(
@@ -2199,6 +2218,7 @@ class TestMlaSparseProfilingFallback:
             v_head_dim=128,
             batch_size=16,
             avg_seq_len=4096,
+            topk_limit=2048,
         )
         op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
         result = ds.lookup(op)
@@ -2219,6 +2239,7 @@ class TestMlaSparseProfilingFallback:
             v_head_dim=128,
             batch_size=16,
             avg_seq_len=4096,
+            topk_limit=2048,
         )
         op = _make_op_info(torch.ops.tensor_cast.mla_sparse_attention.default, args)
         result = ds.lookup(op)

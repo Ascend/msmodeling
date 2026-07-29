@@ -1323,7 +1323,8 @@ def _decompose_mlapo_common(
         )
     )
     kv_cache_query = decomposer_options.get("kv_cache_query", {})
-    if kv_cache_query.get("mode") == "pool_dim0_agnostic":
+    kv_cache_query_mode = kv_cache_query.get("mode")
+    if kv_cache_query_mode == "pool_dim0_agnostic":
         kv_lora_rank = int(kv_a_norm_weight.shape[0])
         rope_dim = kv_proj_dim - kv_lora_rank
         block_size = kv_cache_query.get("block_size")
@@ -1344,22 +1345,21 @@ def _decompose_mlapo_common(
                 },
             )
         )
-    else:
+    elif kv_cache_query_mode is None:
+        # Older mappings do not provide semantic cache-query metadata. Keep
+        # their original exact-shape lookup instead of constructing an
+        # attention query whose required sequence context is unavailable on
+        # the MLAPO op.
         specs.append(
             SubKernelSpec(
                 kernel_type="KvRmsNormRopeCache",
-                input_shapes=[],
+                input_shapes=[(physical_tokens, 1, 1, kv_proj_dim)],
                 dtype=dtype_str,
-                query_mode="attention",
-                attention_params={
-                    "q_shape_3d": (physical_tokens, 1, kv_proj_dim),
-                    "avg_seq_len": None,
-                    "phase": None,
-                    "required_context_fields": ("avg_seq_len", "phase"),
-                    "available_norm_weight_shape": tuple(kv_a_norm_weight.shape),
-                },
             )
         )
+    else:
+        logger.warning("Unsupported MLAPO kv_cache_query mode: %s", kv_cache_query_mode)
+        return None
     return specs
 
 
