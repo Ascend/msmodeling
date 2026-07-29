@@ -105,6 +105,12 @@
 # Background: The input number/order of TC op and NPU kernel may be different (for example, NPU has additional axis parameters).
 # Example: tc_input_count: 2 → only match the shape of the first 2 tensor inputs
 #
+# tp_linear_projection (mapping, optional):
+# Versioned deterministic TP shape contract for a linear op. logical_global_dims
+# lists the exact visible dimensions that must be projected by TP on shard_axis;
+# every other dimension is physical_local and is queried unchanged. Supported
+# shard_axis values: input | output. otherwise must be physical_local.
+#
 # zero_cost (bool, optional):
 # true means that the op has no actual kernel execution on the NPU (shape-only view, fusion absorption, etc.).
 # The query returns 0 directly, without accessing CSV.
@@ -196,6 +202,32 @@ collection_date: "2026-03-27"
 communication_data_ref: "../../hccl/v8.5/"
 communication_fallback: analytic
 
+latency_policy:
+  kernel_overrides:
+    QuantBatchMatmulV3:
+      # MIX_AIC runs AIC and AIV concurrently, so max(aicore_time, aiv_time)
+      # is the device-core execution envelope. In this A3/CANN 8.5 snapshot,
+      # consistent duration/core ratios end at 1.309; suspicious rows start at
+      # 1.788 and extend to 19.481. The versioned 1.5 boundary lies in that
+      # observed gap and must be recalibrated for another device or CANN build.
+      profiling_core_envelope_fallback:
+        max_duration_to_core_ratio: 1.5
+    LightningIndexer:
+      prefer_profiling_rows: true
+    ScatterNdUpdate:
+      prefer_profiling_rows: true
+
+query_selection_policy:
+  kernel_overrides:
+    FusedInferAttentionScore:
+      require_semantic_unique: true
+    SparseFlashAttention:
+      require_semantic_unique: true
+    LightningIndexer:
+      require_semantic_unique: true
+    KvRmsNormRopeCache:
+      require_semantic_unique: true
+
 interpolation_policy:
   kernel_overrides:
     MatMulV2:
@@ -203,6 +235,13 @@ interpolation_policy:
     MatMulV3:
       max_interpolation_dim: 1
     MatMulCommon:
+      max_interpolation_dim: 1
+    QuantBatchMatmulV3:
+      # A value of 1 allows one-dimensional interpolation; it does not disable
+      # interpolation. Generic compute varies activation axis 0 (M/token count)
+      # while the activation tail, queried weight shape, and input dtypes remain
+      # exact in the regime key. static_quant_linear uses tc_input_count=2, so
+      # its scale/offset slots are intentionally not interpolation axes.
       max_interpolation_dim: 1
     FusedInferAttentionScore:
       axis_transform: sqrt_seq
@@ -248,10 +287,13 @@ operator_mappings:
   "aten.bmm.default":
     kernel_type: BatchMatMulV2
     alternate_kernel_types: [TransposeBatchMatMul, BatchMatMulNd]
+    degenerate_bmm_kernel_type: Mul
     notes: >
       [HIGH] op-plugin: BmmKernelNpuOpApi.cpp → aclnnBatchMatMul → BatchMatMulV2.
       Dispatch: transpose_b parameter → TransposeBatchMatMul (MLA attn_output @ W_UV).
       Standard BMM → BatchMatMulV2. 0313 profiling: BatchMatMulV2(305x), TransposeBatchMatMul(305x).
+      GLM5 sampling uses (1,32,1)@(1,1,T); CANN lowers this degenerate K=1
+      BMM to a broadcast Mul kernel, matched only on the exact two input shapes.
 
   "aten.embedding.default":
     kernel_type: GatherV2
@@ -311,10 +353,21 @@ operator_mappings:
   "tensor_cast.static_quant_linear.default":
     kernel_type: QuantBatchMatmulV3
     tc_input_count: 2
+    query_mode: mtp_projection
+    mtp_projection_kernel_type: MatMulV2
+    tp_linear_projection:
+      shard_axis: input
+      logical_global_dims: [16384]
+      otherwise: physical_local
     notes: >
       [HIGH] op-plugin: WeightQuantBatchMatmulV2KernelNpuOpApi.cpp.
       aclnn: aclnnWeightQuantBatchMatmulV2/V3. W8A8 path.
       TC has (x, weight, scale, ...); NPU CSV has (x, weight_NZ, scale, scale) — tc_input_count=2 for (x, weight).
+      A structural 2H-to-H concat projection follows the service BF16 path;
+      datasource resolves its MatMulV2 row.
+      In this versioned GLM5 layout, K=16384 is the replicated logical-global
+      DSA CP o_proj input and is always projected by TP. Other K dimensions are
+      already physical-local and are never sharded a second time.
 
   "tensor_cast.static_quant_linear_int4.default":
     kernel_type: QuantBatchMatmulV3
@@ -402,7 +455,7 @@ operator_mappings:
   "tensor_cast.dispatch_ffn_combine.default":
     kernel_type: DispatchFFNCombine
     query_mode: moe_fused
-    tc_input_count: 1
+    project_full_shape: true
     notes: >
       [HIGH] path: C. vllm-ascend v0.15.0 Super Fusion MoE op (csrc/dispatch_ffn_combine/).
       torch binding: torch.ops._C_ascend.dispatch_ffn_combine.
@@ -410,32 +463,45 @@ operator_mappings:
       CANN: OP_ADD(DispatchFFNCombine) in dispatch_ffn_combine_def.cpp. Profiling: DispatchFFNCombine(928x, 35.3%).
       TC fusion pass (DispatchFFNCombinePass): replaces init_routing_v2 + grouped_matmul(×N) + unpermute_tokens
       into single fused op with args (x, expert_indices).
-      TC has 2 tensor args (x, expert_indices); NPU has 7 (x, w1, w2, expert_idx, scale1, scale2, probs).
-      tc_input_count=1: match on x shape (batch, hidden_size) only — weights are model-fixed.
-      shape_flags: [flatten_batch — TC x is 3D (bs, seq, hidden), NPU CSV is 2D (batch, hidden)].
+      TC semantic args are projected to the real 7-input NPU shape before lookup;
+      weights, expert indices, workspaces and probabilities must all align.
 
   "tensor_cast.dispatch_ffn_combine_quant.default":
     kernel_type: DispatchFFNCombine
     query_mode: moe_fused
-    tc_input_count: 1
-    notes: "W8A8 DFC variant. Same NPU kernel as dispatch_ffn_combine."
+    project_full_shape: true
+    embedded_compute:
+      - kernel_type: AddRmsNormBias
+        input_projection: residual_norm_from_activation
+      - kernel_type: Cast
+        input_projection: routing_weight_cast
+        output_dtype: FLOAT
+    embedded_communication:
+      kernel_type: hcom_alltoall_
+      message_bytes_mode: routed_input
+      group_type: expert_parallel
+      interpolation_method: alpha_beta
+    notes: >
+      W8A8 DFC variant. Prefill records one routed-input hcom_alltoall_ child
+      per fused MoE block; message bytes are x bytes times top-k. The minimum
+      HCCL lookup is used only within the measured message-size range.
 
   "tensor_cast.dispatch_ffn_combine_quant_int4.default":
     kernel_type: DispatchFFNCombine
     query_mode: moe_fused
-    tc_input_count: 1
+    project_full_shape: true
     notes: "W4A8 DFC variant."
 
   "tensor_cast.dispatch_ffn_combine_fp8.default":
     kernel_type: DispatchFFNCombine
     query_mode: moe_fused
-    tc_input_count: 1
+    project_full_shape: true
     notes: "FP8 DFC variant."
 
   "tensor_cast.dispatch_ffn_combine_mxfp4.default":
     kernel_type: DispatchFFNCombine
     query_mode: moe_fused
-    tc_input_count: 1
+    project_full_shape: true
     notes: "MXFP4 DFC variant."
 
   "tensor_cast.init_routing_v2.default":
@@ -460,9 +526,13 @@ operator_mappings:
 
   "tensor_cast.moe_gating_top_k_softmax.default":
     kernel_type: MoeGatingTopK
+    tc_input_count: 1
     notes: >
       [HIGH] op-plugin: MoeGatingTopKKernelNpuOpApi.cpp.
       aclnn: aclnnMoeGatingTopK.
+      The second profiling input is the fixed expert-bias vector; TensorCast
+      already passes processed logits, so only the first tensor participates
+      in runtime shape matching.
 
 
   # ========== 6. Attention ==========
@@ -508,6 +578,10 @@ operator_mappings:
   "tensor_cast.mlapo.default":
     composite: true
     decomposer: true
+    decomposer_options:
+      kv_cache_query:
+        mode: pool_dim0_agnostic
+        block_size: 128
     notes: >
       [HIGH] MLAPO composite. Python decomposer (_decompose_mlapo_common) handles
       shape derivation. NPU kernel sequence:
@@ -517,25 +591,79 @@ operator_mappings:
   "tensor_cast.mlapo_quant.default":
     composite: true
     decomposer: true
+    require_all_sub_kernels: true
+    decomposer_options:
+      visible_kernel_regime:
+        requires_sequence_parallel: true
+        # Opaque means that TC cannot see the internal kernel sequence. The
+        # latency is still modeled by the versioned opaque_kernel query below.
+        otherwise: opaque_kernel_query
+      projection_token_partition: tp
+      reconstruct_q_heads_by_tp: false
+      kv_cache_query:
+        mode: pool_dim0_agnostic
+        block_size: 128
+      opaque_kernel:
+        kernel_type: mla_preprocess_0_mix_aic
+        query_mode: mlapo_preprocess
+        block_size: 128
+        cache_mode: krope_ctkv
+        quant_mode: per_tensor_quant_asymm
+        enable_inner_out: true
+        weight_quantized: true
+        weight_format: FRACTAL_NZ
     notes: >
       [HIGH] Quantized MLAPO composite. Python decomposer (_decompose_mlapo_common) handles
-      shape derivation. Same decomposition as mlapo but uses QuantBatchMatmulV3
-      for projections instead of MatMulV2.
+      shape derivation. Quantized projections explicitly include AscendQuantV2 +
+      QuantBatchMatmulV3 around shared RmsNorm/KvRmsNormRopeCache semantics. The
+      visible ordinary sub-kernels are a sequence-parallel prefill regime; the
+      non-SP W8A8 decode regime queries mla_preprocess_0_mix_aic by its runtime
+      semantics. DSA CP already supplies the global q-head count, so the
+      datasource must not multiply it by TP a second time. Partial ordinary-
+      kernel matches remain prohibited.
+
+  "tensor_cast.dsa_indexer.default":
+    composite: true
+    decomposer: true
+    primary_kernel_type: LightningIndexer
+    alternate_kernel_types: [LightningIndexerVllm]
+    notes: >
+      [HIGH] GLM5 BF16 DSA indexer. Python decomposition derives ordinary
+      projection and normalization kernels from OpInvokeInfo tensors and
+      weights. LightningIndexer requires query-token, effective-sequence,
+      phase and top-k context; cache pool capacity is not a semantic key.
 
 
   "tensor_cast.mla_sparse_attention.default":
     composite: true
     decomposer: true
+    decomposer_options:
+      dsa_cp_layout:
+        attention_heads_already_global: true
+        tail_width_partition: tp
+      prefill_tail_transpose:
+        requires_sequence_parallel: true
+        kernel_type: Transpose
     notes: >
       [HIGH] Sparse MLA composite (DeepSeek-V3.2 / GLM-5.1 DSA path).
       Same decomposition structure as multihead_latent_attention but
       attention kernel maps to SparseFlashAttention (SFA) instead of FIA.
       vllm-ascend: AscendSFABackend → npu_sparse_flash_attention.
-      Dispatch condition: hf_config has index_topk attribute.
+      Dispatch condition: hf_config has index_topk attribute. With DSA CP the
+      TensorCast op already carries global heads, so sequence-parallel prefill
+      projects only the token axis from T to T/TP. Decode and SP-disabled runs
+      keep the runtime shape.
 
   "tensor_cast.mla_sparse_attention_quant.default":
     composite: true
     decomposer: true
+    decomposer_options:
+      dsa_cp_layout:
+        attention_heads_already_global: true
+        tail_width_partition: tp
+      prefill_tail_transpose:
+        requires_sequence_parallel: true
+        kernel_type: Transpose
     notes: >
       [HIGH] Quantized sparse MLA composite. SFA variant of
       multihead_latent_attention_quant.default.
@@ -554,16 +682,6 @@ operator_mappings:
       _normalize_reshape_and_cache_inputs handles: key/value 2D→3D (N,D)→(N,1,D),
       kv_cache split (2,blocks,...) → cache_k + cache_v, slot_mapping reordered.
       v0.18.0: Decode uses reshape_and_cache_200000000 (Triton variant).
-
-  "tensor_cast.concat_and_cache_mla.default":
-    accepted_miss: >
-      MLA cache write absorbed by KvRmsNormRopeCache on NPU. DSV3 kernel_details
-      confirms no standalone ReshapeAndCacheNdKernel for MLA. Latency accounted
-      for in mlapo decomposer's KvRmsNormRopeCache sub-kernel.
-    notes: >
-      [LOW] MLA KV cache write. On NPU, absorbed by KvRmsNormRopeCache (verified:
-      kernel_details has no standalone ReshapeAndCacheNdKernel for DSV3 MLA).
-      Latency accounted for in mlapo decomposer's KvRmsNormRopeCache sub-kernel.
 
   "tensor_cast.kv_rmsnorm_rope_cache.default":
     kernel_type: KvRmsNormRopeCache
@@ -704,7 +822,15 @@ operator_mappings:
 
   "tensor_cast.dynamic_quantize_symmetric.default":
     kernel_type: DynamicQuant
+    alternate_kernel_types: [AscendQuantV2, AscendQuantV2Aicore]
+    tc_input_count: 1
+    kernel_types_by_input_rank:
+      3: [AscendQuantV2, AscendQuantV2Aicore, DynamicQuant]
     notes: >
+      GLM5 sparse-attention output remains (T,H,D) in TC, while the graph
+      flattens it to (T,H*D) and dispatches AscendQuantV2 with internal
+      scale/offset inputs. Rank-3 therefore prefers AscendQuantV2; rank-2 keeps
+      DynamicQuant first. tc_input_count=1 matches only the semantic x input.
       [HIGH] op-plugin: npu_dynamic_quant → aclnnDynamicQuant/V2.
 
   "tensor_cast.dynamic_quantize_asymmetric.default":
@@ -790,8 +916,18 @@ operator_mappings:
     composite: true
     sub_kernels: [QuantBatchMatmulV3, hcom_allReduce_]
     tc_input_count: 2
+    runtime_comm_variants:
+      sequence_parallel:
+        source_kernel_type: hcom_allReduce_
+        kernel_type: hcom_reduceScatter_
+        message_bytes_mode: per_rank_output
+        group_type: tensor_parallel
+        interpolation_method: bracket_linear
     notes: >
       [MEDIUM] op-plugin: npu_mm_all_reduce_base → aclnnQuantMatmulAllReduce/V2/V3 (MC2 with quant).
+      The sequence-parallel path lowers the collective to reduce-scatter;
+      datasource derives receive bytes from the per-rank output. Non-SP keeps
+      all-reduce.
 
   "tensor_cast.static_quant_linear_int4_all_reduce.default":
     composite: true
@@ -819,8 +955,11 @@ operator_mappings:
 
   "tensor_cast.shift_and_update_input_ids.default":
     kernel_type: TensorMove
+    zero_cost: true
     notes: >
-      [LOW] MTP tool ops, broken down into base aten ops.
+      [HIGH] TensorCast-only MTP state-update wrapper. The service graph lowers
+      this into sampling/control-flow children and has no standalone TensorMove
+      kernel with the wrapper's three-input signature.
 
   # ========== 19. MoE Routing Elementwise ==========
 
@@ -903,20 +1042,12 @@ operator_mappings:
     kernel_type: Index
     alternate_kernel_types: [GatherV2]
     tc_input_count: 1
-    accepted_miss: >
-      CachingRotaryEmb RoPE cache lookup. TC replaces all models' RotaryEmbedding
-      with cached index_select; --compile decomposes this into aten.index.Tensor.
-      DSv3 (old HF RotaryEmb): NPU also uses index lookup → Index(163840,64) exists
-      in CSV → HIT after cos/sin split. Qwen3 (new HF RotaryEmb): NPU computes
-      cos/sin on-the-fly (matmul+cat+cos/sin), no Index kernel in profiling →
-      Index(40960,128) will always MISS. This is a TC CachingRotaryEmb artifact,
-      not a real NPU kernel. Latency <10us per call, <0.1% of total.
     notes: >
       [HIGH] op-plugin: IndexKernelNpuOpApi.cpp → aclnnIndex. Profiling: Qwen3 CANN 8.5 Index(54x).
       tc_input_count=1: TC passes self + variable-length index tensors; match on self shape only.
       CachingRotaryEmb cos/sin split (this PR): fixes DSv3 (163840,64) HIT.
-      Qwen3 (40960,128) remains accepted_miss — NPU has no corresponding Index kernel.
-      PR#92 accepted_miss was incorrect — 163840 is max_position_embeddings
+      Qwen3 (40960,128) remains an ordinary MISS because NPU has no corresponding
+      Index kernel. 163840 is max_position_embeddings
       (not MoE related), 128 = 2*qk_rope_head_dim (not pre-SwiGlu dim).
 
   "prims.convert_element_type.default":

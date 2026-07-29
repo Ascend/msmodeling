@@ -1,5 +1,7 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 import torch
 from tensor_cast.device import CommGrid, InterconnectTopology
@@ -10,8 +12,17 @@ from tensor_cast.performance_model.profiling_database.profiling_data_source impo
     DTYPE_MAP,
     ProfilingDataSource,
     SubKernelSpec,
+    _decompose_dsa_indexer,
+    _decompose_mla_common,
+    _decompose_mlapo,
+    _decompose_mlapo_quant,
     _dtype_byte_size,
     _is_block_padded,
+    _parse_runtime_int_list_cell,
+    _project_dispatch_ffn_combine_inputs,
+    _project_tp_sharded_linear_inputs,
+    _project_tp_sharded_output_linear_inputs,
+    _sparse_runtime_attention_params,
     fractal_nz_to_nd,
     get_topology_tier,
 )
@@ -45,6 +56,10 @@ def test_fractal_nz_to_nd_batched():
     assert fractal_nz_to_nd((64, 48, 448, 16, 32)) == (64, 1536, 7168)
 
 
+def test_fractal_nz_to_nd_preserves_short_shape():
+    assert fractal_nz_to_nd((8, 6144, 4096)) == (8, 6144, 4096)
+
+
 def test_dtype_map():
     assert DTYPE_MAP[torch.bfloat16] == "DT_BF16"
     assert DTYPE_MAP[torch.float16] == "DT_BF16"
@@ -59,6 +74,22 @@ def test_dtype_byte_size():
     assert _dtype_byte_size("INT32") == 4
     assert _dtype_byte_size("INT64") == 8
     assert _dtype_byte_size("UNKNOWN") == 0
+
+
+def test_sparse_attention_does_not_require_unknown_valid_count():
+    params = _sparse_runtime_attention_params(
+        work_tokens=1,
+        work_heads=32,
+        head_dim=128,
+        seq_lens=torch.tensor([128], dtype=torch.int64),
+        avg_seq_len=128,
+        topk=0,
+        block_size=128,
+        include_sparse_block_size=True,
+    )
+
+    assert params["sparse_indices_valid_count"] is None
+    assert "sparse_indices_valid_count" not in params["required_context_fields"]
 
 
 # --- ProfilingDataSource tests ---
@@ -100,12 +131,12 @@ def sample_data_dir(tmp_path):
     return data_dir
 
 
-def _make_op_info(func, input_tensors, output_tensors=None):
+def _make_op_info(func, input_tensors, output_tensors=None, kwargs=None):
     """Create a mock OpInvokeInfo with real torch.ops func and meta tensors."""
     mock = MagicMock()
     mock.func = func
     mock.args = tuple(input_tensors)
-    mock.kwargs = {}
+    mock.kwargs = {} if kwargs is None else kwargs
     if output_tensors:
         mock.out = output_tensors[0] if len(output_tensors) == 1 else tuple(output_tensors)
     else:
@@ -2489,7 +2520,6 @@ def test_kernel_type_equals_csv_filename(moe_data_dir):
 
 # --- Integration tests: real CANN 8.3 / 8.5 data directories ---
 
-from pathlib import Path  # noqa: E402
 
 _CANN83_DATA_DIR = Path(__file__).resolve().parents[4] / (
     "tensor_cast/performance_model/profiling_database/data/"
@@ -2610,7 +2640,6 @@ def test_miss_reason_respects_tc_input_count():
     import os
     import tempfile
 
-    import pandas as pd
     import yaml
 
     op_mapping = {
@@ -3269,6 +3298,39 @@ class TestCompositePartialMatch:
         assert result.sub_kernel_shapes[0].kernel_shapes == [[4099, 7168], [2112, 7168]]
         assert result.sub_kernel_shapes[0].shape_match_rule == "identity"
 
+    def test_required_attention_miss_forces_complete_fallback(self, partial_match_data_dir):
+        ds = ProfilingDataSource(partial_match_data_dir)
+        specs = [
+            SubKernelSpec(
+                kernel_type="QuantBatchMatmulV3",
+                input_shapes=[(4099, 7168), (2112, 7168)],
+                dtype="DT_BF16",
+            ),
+            SubKernelSpec(
+                kernel_type="SparseFlashAttention",
+                input_shapes=[],
+                dtype="DT_BF16",
+                query_mode="attention",
+                attention_params={"q_shape_3d": (4099, 1, 512), "avg_seq_len": 4099},
+                is_attention=True,
+            ),
+        ]
+        op = _make_op_info(
+            torch.ops.tensor_cast.mlapo_quant.default,
+            [torch.empty(4099, 7168, device="meta", dtype=torch.bfloat16)],
+        )
+
+        result = ds._lookup_composite_decomposed(
+            op,
+            # A legacy opt-in must not allow the required attention latency to
+            # disappear from the measured decomposition.
+            {"preserve_partial_on_required_miss": True},
+            lambda _op, _mapping: specs,
+        )
+
+        assert result is None
+        assert ds.last_miss_reason.startswith("attention_sub_kernel_miss:SparseFlashAttention:")
+
     def test_all_hit_returns_measured(self, partial_match_data_dir):
         """When all sub-kernels hit, return MEASURED."""
         ds = ProfilingDataSource(partial_match_data_dir)
@@ -3526,3 +3588,644 @@ def test_accepted_miss_does_not_affect_normal_ops(accepted_miss_data_dir):
     )
     result = ds.lookup(op)
     assert result is None  # no CSV → MISS
+
+
+# --- GLM5 measured lookup regression tests ---
+
+
+def _make_glm5_dsa_op():
+    op = _make_op_info(
+        _FakeTorchOp("tensor_cast.dsa_indexer.default"),
+        [
+            torch.empty(1, 4096, 6144, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, 4096, 2048, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, 4096, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, 4096, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(33, 128, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(4096, device="meta", dtype=torch.int64),
+            torch.empty(1, 33, device="meta", dtype=torch.int64),
+            torch.tensor([4096], dtype=torch.int64),
+            torch.empty(4096, 2048, device="meta", dtype=torch.int8),
+            torch.empty(128, 6144, device="meta", dtype=torch.bfloat16),
+            torch.empty(32, 6144, device="meta", dtype=torch.bfloat16),
+            torch.empty(128, device="meta", dtype=torch.bfloat16),
+            32,
+            128,
+            64,
+            2048,
+        ],
+    )
+    op.kwargs = {"phase": "prefill"}
+    return op
+
+
+def _make_glm5_quant_dfc_op(num_tokens: int):
+    num_experts = 8
+    return _make_op_info(
+        torch.ops.tensor_cast.dispatch_ffn_combine_quant.default,
+        [
+            torch.empty(num_tokens, 6144, device="meta", dtype=torch.bfloat16),
+            torch.empty(num_tokens, 8, device="meta", dtype=torch.int64),
+            [torch.empty(6144, 4096, device="meta", dtype=torch.int8) for _ in range(num_experts)],
+            [torch.empty(4096, device="meta", dtype=torch.float32) for _ in range(num_experts)],
+            [None] * num_experts,
+            [None] * num_experts,
+            torch.bfloat16,
+            [torch.empty(2048, 6144, device="meta", dtype=torch.int8) for _ in range(num_experts)],
+            [torch.empty(6144, device="meta", dtype=torch.float32) for _ in range(num_experts)],
+            [None] * num_experts,
+            [None] * num_experts,
+            torch.bfloat16,
+            0,
+            list(range(32)),
+        ],
+    )
+
+
+def _make_glm5_bf16_mlapo_op():
+    return _make_op_info(
+        torch.ops.tensor_cast.mlapo.default,
+        [
+            torch.empty(8, 64, device="meta", dtype=torch.bfloat16),
+            None,
+            None,
+            torch.empty(16, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(16, device="meta", dtype=torch.bfloat16),
+            torch.empty(32, 16, device="meta", dtype=torch.bfloat16),
+            torch.empty(24, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(16, device="meta", dtype=torch.bfloat16),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+    )
+
+
+def _make_glm5_sparse_mla_op():
+    return _make_op_info(
+        torch.ops.tensor_cast.multihead_latent_attention.default,
+        [
+            torch.empty(4096, 2, 192, device="meta", dtype=torch.bfloat16),
+            torch.empty(64, 128, 576, device="meta", dtype=torch.bfloat16),
+            None,
+            None,
+            torch.tensor([4096], dtype=torch.int64),
+            torch.tensor([4096], dtype=torch.int64),
+            torch.empty(2, 128, 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(2, 512, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            None,
+            2048,
+        ],
+    )
+
+
+def _glm5_a3_data_dir() -> Path:
+    return (
+        Path(__file__).resolve().parents[4]
+        / "tensor_cast/performance_model/profiling_database/data"
+        / "ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5"
+    )
+
+
+def _is_materialized_lfs_payload(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    with path.open("rb") as stream:
+        return not stream.read(64).startswith(b"version https://git-lfs.github.com/spec/v1")
+
+
+_GLM5_A3_HCCL_DATA_DIR = _glm5_a3_data_dir().parents[1] / "hccl/v8.5"
+_skip_no_glm5_a3_hccl = pytest.mark.skipif(
+    not all(
+        _is_materialized_lfs_payload(_GLM5_A3_HCCL_DATA_DIR / filename)
+        for filename in ("hcom_alltoall_.csv", "hcom_allReduce_.csv")
+    ),
+    reason="GLM5 A3 HCCL data is not materialized",
+)
+
+
+def test_glm5_bf16_mlapo_cache_postprocess_can_hit(tmp_path):
+    versioned_mapping = ProfilingDataSource(_glm5_a3_data_dir())._op_mapping["operator_mappings"][
+        "tensor_cast.mlapo.default"
+    ]
+    specs = _decompose_mlapo(_make_glm5_bf16_mlapo_op(), versioned_mapping)
+    assert specs is not None
+    assert specs[-1].query_mode == "cache_postprocess"
+
+    (tmp_path / "op_mapping.yaml").write_text(
+        'version: "test"\n'
+        "operator_mappings:\n"
+        '  "tensor_cast.mlapo.default":\n'
+        "    composite: true\n"
+        "    decomposer: true\n"
+        "    decomposer_options:\n"
+        "      kv_cache_query:\n"
+        "        mode: pool_dim0_agnostic\n"
+        "        block_size: 128\n",
+        encoding="utf-8",
+    )
+    csv_header = (
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us)\n"
+    )
+    (tmp_path / "MatMulV2.csv").write_text(
+        csv_header
+        + '"8,64;40,64","DT_BF16;DT_BF16","ND;ND","8,40","DT_BF16","ND",10.0\n'
+        + '"8,16;32,16","DT_BF16;DT_BF16","ND;ND","8,32","DT_BF16","ND",20.0\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "RmsNorm.csv").write_text(
+        csv_header + '"8,16;16","DT_BF16;DT_BF16","ND;ND","8,16","DT_BF16","ND",5.0\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "KvRmsNormRopeCache.csv").write_text(
+        csv_header + '"8,1,1,24;16;8,1,1,8;8,1,1,8;8;1170,128,1,8;1170,128,1,16",'
+        '"DT_BF16;DT_BF16;DT_BF16;DT_BF16;INT64;DT_BF16;DT_BF16",'
+        '"ND;ND;ND;ND;ND;ND;ND","","","",7.0\n',
+        encoding="utf-8",
+    )
+
+    result = ProfilingDataSource(tmp_path).lookup(_make_glm5_bf16_mlapo_op())
+
+    assert result is not None
+    assert result.source == QuerySource.MEASURED
+    assert result.latency_us == pytest.approx(42.0)
+    assert "KvRmsNormRopeCache" in result.details["kernel_type"]
+
+
+def test_glm5_runtime_list_and_tp_projection_helpers():
+    inputs = [
+        ((4, 8), torch.bfloat16),
+        ((8, 16), torch.bfloat16),
+        ((16,), torch.bfloat16),
+    ]
+
+    assert _parse_runtime_int_list_cell("1; 2,3") == [1, 2, 3]
+    assert _project_tp_sharded_linear_inputs(inputs, 4) == [
+        ((4, 2), torch.bfloat16),
+        ((2, 16), torch.bfloat16),
+        ((16,), torch.bfloat16),
+    ]
+    assert _project_tp_sharded_output_linear_inputs(inputs, 4) == [
+        ((4, 8), torch.bfloat16),
+        ((8, 4), torch.bfloat16),
+        ((16,), torch.bfloat16),
+    ]
+
+
+def test_glm5_sparse_mla_projects_sequence_parallel_shapes():
+    specs = _decompose_mla_common(
+        _make_glm5_sparse_mla_op(),
+        {
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+            "decomposer_options": {
+                "prefill_tail_transpose": {
+                    "requires_sequence_parallel": True,
+                    "kernel_type": "Transpose",
+                }
+            },
+        },
+        "BatchMatMulV2",
+        attention_kernel_type="SparseFlashAttention",
+    )
+
+    assert specs is not None
+    assert specs[0].input_shapes == [(32, 256, 128), (32, 128, 512)]
+    assert specs[1].attention_params["q_shape_3d"] == (256, 32, 512)
+    assert specs[-1].input_shapes == [(256, 16, 256), (3,)]
+
+
+def test_glm5_sparse_mla_dsa_cp_does_not_reconstruct_global_heads_twice():
+    op = _make_op_info(
+        _FakeTorchOp("tensor_cast.mla_sparse_attention.default"),
+        [
+            torch.empty(4096, 64, 256, device="meta", dtype=torch.bfloat16),
+            torch.empty(64, 128, 576, device="meta", dtype=torch.bfloat16),
+            None,
+            None,
+            torch.tensor([4096], dtype=torch.int64),
+            torch.tensor([4096], dtype=torch.int64),
+            torch.empty(64, 192, 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(64, 512, 256, device="meta", dtype=torch.bfloat16),
+            None,
+            None,
+            2048,
+        ],
+    )
+    specs = _decompose_mla_common(
+        op,
+        {
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+            "decomposer_options": {
+                "dsa_cp_layout": {
+                    "attention_heads_already_global": True,
+                    "tail_width_partition": "tp",
+                },
+                "prefill_tail_transpose": {
+                    "requires_sequence_parallel": True,
+                    "kernel_type": "Transpose",
+                },
+            },
+        },
+        "BatchMatMulV2",
+        attention_kernel_type="SparseFlashAttention",
+    )
+
+    assert specs is not None
+    assert specs[0].input_shapes == [(64, 256, 192), (64, 192, 512)]
+    assert specs[1].attention_params["q_shape_3d"] == (256, 64, 512)
+    assert specs[2].input_shapes == [(64, 256, 512), (64, 512, 256)]
+    assert specs[-1].input_shapes == [(256, 16, 1024), (3,)]
+
+
+def test_glm5_mlapo_quant_dsa_cp_uses_global_q_head_count_once():
+    op = _make_op_info(
+        _FakeTorchOp("tensor_cast.mlapo_quant.default"),
+        [
+            torch.empty(4096, 6144, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, 4096, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, 4096, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(2048, 6144, device="meta", dtype=torch.int8),
+            torch.empty(2048, device="meta", dtype=torch.bfloat16),
+            torch.empty(16384, 2048, device="meta", dtype=torch.int8),
+            torch.empty(576, 6144, device="meta", dtype=torch.int8),
+            torch.empty(512, device="meta", dtype=torch.bfloat16),
+            64,
+            256,
+            192,
+            64,
+            512,
+            2048,
+            torch.empty(1, device="meta", dtype=torch.float32),
+            None,
+            torch.empty(1, device="meta", dtype=torch.float32),
+            None,
+            torch.empty(1, device="meta", dtype=torch.float32),
+            None,
+        ],
+    )
+    specs = _decompose_mlapo_quant(
+        op,
+        {
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+            "decomposer_options": {
+                "projection_token_partition": "tp",
+                "reconstruct_q_heads_by_tp": False,
+                "kv_cache_query": {"mode": "pool_dim0_agnostic", "block_size": 128},
+            },
+        },
+    )
+
+    assert specs is not None
+    assert specs[0].input_shapes[0] == (256, 6144)
+    assert specs[4].input_shapes == [(256, 2048), (16384, 2048)]
+
+
+def test_glm5_dsa_cp_full_o_proj_queries_tp_physical_shape(tmp_path):
+    (tmp_path / "op_mapping.yaml").write_text(
+        "version: test\n"
+        "operator_mappings:\n"
+        '  "tensor_cast.static_quant_linear.default":\n'
+        "    kernel_type: QuantBatchMatmulV3\n"
+        "    tc_input_count: 2\n"
+        "    tp_linear_projection:\n"
+        "      shard_axis: input\n"
+        "      logical_global_dims: [16384]\n"
+        "      otherwise: physical_local\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "QuantBatchMatmulV3.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us)\n"
+        '"4096,16384;16384,6144","INT8;INT8","ND;ND","4096,6144",'
+        '"DT_BF16","ND",29.0\n'
+        '"4096,1024;1024,6144","INT8;INT8","ND;ND","4096,6144",'
+        '"DT_BF16","ND",17.0\n',
+        encoding="utf-8",
+    )
+    op = _make_op_info(
+        _FakeTorchOp("tensor_cast.static_quant_linear.default"),
+        [
+            torch.empty(4096, 16384, device="meta", dtype=torch.int8),
+            torch.empty(16384, 6144, device="meta", dtype=torch.int8),
+        ],
+        output_tensors=[torch.empty(4096, 6144, device="meta", dtype=torch.bfloat16)],
+    )
+
+    result = ProfilingDataSource(
+        tmp_path,
+        parallel_config=_make_parallel_config(ep_size=32, world_size=32, tp_size=16),
+    ).lookup(op)
+
+    assert result is not None
+    assert result.latency_us == pytest.approx(17.0)
+    assert result.details["kernel_type"] == "QuantBatchMatmulV3"
+    assert result.shape_match_info.simulation_shapes == [[4096, 1024], [1024, 6144]]
+
+
+def test_tp_physical_local_input_is_not_sharded_twice(tmp_path):
+    (tmp_path / "op_mapping.yaml").write_text(
+        "version: test\n"
+        "operator_mappings:\n"
+        '  "tensor_cast.static_quant_linear.default":\n'
+        "    kernel_type: QuantBatchMatmulV3\n"
+        "    tc_input_count: 2\n"
+        "    tp_linear_projection:\n"
+        "      shard_axis: input\n"
+        "      logical_global_dims: [16384]\n"
+        "      otherwise: physical_local\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "QuantBatchMatmulV3.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us)\n"
+        '"4096,1024;1024,6144","INT8;INT8","ND;ND","4096,6144",'
+        '"DT_BF16","ND",17.0\n'
+        '"4096,64;64,6144","INT8;INT8","ND;ND","4096,6144",'
+        '"DT_BF16","ND",5.0\n',
+        encoding="utf-8",
+    )
+    op = _make_op_info(
+        _FakeTorchOp("tensor_cast.static_quant_linear.default"),
+        [
+            torch.empty(4096, 1024, device="meta", dtype=torch.int8),
+            torch.empty(1024, 6144, device="meta", dtype=torch.int8),
+        ],
+        output_tensors=[torch.empty(4096, 6144, device="meta", dtype=torch.bfloat16)],
+    )
+
+    result = ProfilingDataSource(
+        tmp_path,
+        parallel_config=_make_parallel_config(ep_size=32, world_size=32, tp_size=16),
+    ).lookup(op)
+
+    assert result is not None
+    assert result.latency_us == pytest.approx(17.0)
+    assert result.shape_match_info.simulation_shapes == [[4096, 1024], [1024, 6144]]
+
+
+def test_composite_per_rank_output_reports_nondivisible_message_bytes(tmp_path):
+    (tmp_path / "op_mapping.yaml").write_text("version: test\noperator_mappings: {}\n", encoding="utf-8")
+    ds = ProfilingDataSource(tmp_path)
+    op = _make_op_info(
+        _FakeTorchOp("tensor_cast.matmul_all_reduce.default"),
+        [
+            torch.empty(3, 5, device="meta", dtype=torch.bfloat16),
+            torch.empty(5, 7, device="meta", dtype=torch.bfloat16),
+            [0, 1, 2, 3],
+        ],
+    )
+
+    result = ds._lookup_comm_for_composite(
+        op,
+        "hcom_allReduce_",
+        message_bytes_mode="per_rank_output",
+    )
+
+    assert result is None
+    assert ds.last_miss_reason == "nondivisible_per_rank_output:message_bytes=42;num_devices=4"
+
+
+def test_glm5_sampling_bmm_uses_mul_only_for_the_degenerate_shape(tmp_path):
+    (tmp_path / "op_mapping.yaml").write_text(
+        "version: test\n"
+        "operator_mappings:\n"
+        '  "aten.bmm.default":\n'
+        "    kernel_type: BatchMatMulV2\n"
+        "    alternate_kernel_types: [TransposeBatchMatMul, BatchMatMulNd]\n"
+        "    degenerate_bmm_kernel_type: Mul\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "Mul.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us)\n"
+        '"1,32,1;1,1,27","DT_BF16;DT_BF16","ND;ND","1,32,27","DT_BF16","ND",4.0\n'
+        '"1,16,2;1,2,8","DT_BF16;DT_BF16","ND;ND","1,16,8","DT_BF16","ND",5.0\n',
+        encoding="utf-8",
+    )
+    degenerate_op = _make_op_info(
+        _FakeTorchOp("aten.bmm.default"),
+        [
+            torch.empty(1, 32, 1, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, 1, 27, device="meta", dtype=torch.bfloat16),
+        ],
+    )
+    ordinary_op = _make_op_info(
+        _FakeTorchOp("aten.bmm.default"),
+        [
+            torch.empty(1, 16, 2, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, 2, 8, device="meta", dtype=torch.bfloat16),
+        ],
+    )
+    ds = ProfilingDataSource(tmp_path)
+
+    degenerate_result = ds.lookup(degenerate_op)
+    ordinary_result = ds.lookup(ordinary_op)
+
+    assert degenerate_result is not None
+    assert degenerate_result.latency_us == pytest.approx(4.0)
+    assert degenerate_result.details["kernel_type"] == "Mul"
+    assert ordinary_result is None
+
+
+def test_glm5_semantic_query_guards(tmp_path):
+    (tmp_path / "op_mapping.yaml").write_text("version: test\noperator_mappings: {}\n", encoding="utf-8")
+    ds = ProfilingDataSource(tmp_path)
+    invalid_op = _make_op_info(
+        _FakeTorchOp("tensor_cast.invalid.default"),
+        [torch.empty(4, 16, device="meta", dtype=torch.bfloat16)],
+    )
+
+    assert ds._query_mlapo_preprocess(["Mlapo"], {}, "DT_BF16") is None
+    assert ds.last_miss_reason == "semantic_context_missing:target:mlapo_preprocess"
+    misaligned_mlapo = {
+        "num_tokens": 1,
+        "hidden_size": 6150,
+        "local_num_heads": 32,
+        "q_lora_rank": 1536,
+        "kv_lora_rank": 512,
+        "qk_nope_head_dim": 128,
+        "qk_rope_head_dim": 64,
+        "block_size": 128,
+        "cache_mode": "krope_ctkv",
+        "quant_mode": "per_tensor_quant_asymm",
+        "weight_format": "FRACTAL_NZ",
+        "enable_inner_out": True,
+        "weight_quantized": True,
+    }
+    assert ds._query_mlapo_preprocess(["Mlapo"], misaligned_mlapo, "DT_BF16") is None
+    assert ds.last_miss_reason == "semantic_key_mismatch:mlapo_preprocess:fractal_nz_alignment"
+    assert ds._query_scatter_cache_write(["ScatterNdUpdate"], {}, "DT_BF16") is None
+    assert ds.last_miss_reason == "semantic_context_missing:target:scatter_cache_write"
+    assert ds._find_embedded_routing_weight_cast(invalid_op, {}) is None
+    assert ds._find_embedded_residual_norm(invalid_op.args[0], {}) is None
+    assert ds._lookup_mtp_projection(invalid_op, {}) is None
+
+
+def test_glm5_mtp_projection_hit_and_measured_main_kernel_fallback(tmp_path):
+    mapping = (
+        "version: test\n"
+        "operator_mappings:\n"
+        '  "tensor_cast.static_quant_linear.default":\n'
+        "    kernel_type: QuantBatchMatmulV3\n"
+        "    tc_input_count: 2\n"
+        "    query_mode: mtp_projection\n"
+        "    mtp_projection_kernel_type: MatMulV2\n"
+    )
+    header = (
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,"
+        "Output Data Types,Output Formats,Average Duration(us)\n"
+    )
+    (tmp_path / "op_mapping.yaml").write_text(mapping, encoding="utf-8")
+    (tmp_path / "QuantBatchMatmulV3.csv").write_text(
+        header + '"4,16;16,8","DT_BF16;INT8","ND;ND","4,8","DT_BF16","ND",9.0\n',
+        encoding="utf-8",
+    )
+    op = _make_op_info(
+        _FakeTorchOp("tensor_cast.static_quant_linear.default"),
+        [
+            torch.empty(4, 16, device="meta", dtype=torch.bfloat16),
+            torch.empty(16, 8, device="meta", dtype=torch.int8),
+        ],
+        output_tensors=[torch.empty(4, 8, device="meta", dtype=torch.bfloat16)],
+    )
+
+    fallback = ProfilingDataSource(tmp_path).lookup(op)
+    (tmp_path / "MatMulV2.csv").write_text(
+        header + '"4,16;16,8","DT_BF16;DT_BF16","ND;ND","4,8","DT_BF16","ND",6.0\n',
+        encoding="utf-8",
+    )
+    projection = ProfilingDataSource(tmp_path).lookup(op)
+
+    assert fallback is not None
+    assert fallback.latency_us == pytest.approx(9.0)
+    assert fallback.details["kernel_type"] == "QuantBatchMatmulV3"
+    assert projection is not None
+    assert projection.latency_us == pytest.approx(6.0)
+    assert projection.details["kernel_type"] == "MatMulV2"
+
+
+def test_glm5_lightning_indexer_uses_rank_zero_sp_context():
+    specs = _decompose_dsa_indexer(
+        _make_glm5_dsa_op(),
+        {
+            "primary_kernel_type": "LightningIndexer",
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+        },
+    )
+
+    assert specs is not None
+    assert specs[0].input_shapes == [(256, 6144), (128, 6144)]
+    assert specs[-1].attention_params["q_shape_3d"] == (256, 32, 128)
+    assert specs[-1].attention_params["actual_seq_lengths_values"] == [256]
+    assert specs[-1].attention_params["actual_seq_lengths_kv_values"] == [256]
+
+
+def test_glm5_sfa_selects_effective_sequence_context(tmp_path):
+    data_dir = tmp_path / "sfa"
+    data_dir.mkdir()
+    (data_dir / "op_mapping.yaml").write_text("version: test\noperator_mappings: {}\n")
+    (data_dir / "SparseFlashAttention.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Average Duration(us),Runtime avg_seq_len,"
+        "Runtime sparse_mode,Runtime num_key_value_heads,Runtime input_layout,Runtime topk,Runtime block_size\n"
+        '"27,16,512","DT_BF16","ND",100.0,5000,0,1,TND,2048,128\n'
+        '"27,16,512","DT_BF16","ND",200.0,10000,0,1,TND,2048,128\n'
+    )
+    ds = ProfilingDataSource(data_dir)
+    params = {
+        "q_shape_3d": (27, 16, 512),
+        "sparse_mode": 0,
+        "num_kv_heads": 1,
+        "input_layout": "TND",
+        "topk": 2048,
+        "block_size": 128,
+        "required_context_fields": (
+            "avg_seq_len",
+            "sparse_mode",
+            "num_kv_heads",
+            "input_layout",
+            "topk",
+            "block_size",
+        ),
+    }
+
+    short = ds._query_by_attn_params(["SparseFlashAttention"], {**params, "avg_seq_len": 5000}, "DT_BF16")
+    long = ds._query_by_attn_params(["SparseFlashAttention"], {**params, "avg_seq_len": 10000}, "DT_BF16")
+
+    assert short == (100.0, "SparseFlashAttention")
+    assert long == (200.0, "SparseFlashAttention")
+
+
+def test_glm5_dfc_projects_the_complete_physical_shape():
+    projected = _project_dispatch_ffn_combine_inputs(_make_glm5_quant_dfc_op(157))
+
+    assert projected is not None
+    assert [shape for shape, _dtype in projected] == [
+        (157, 6144),
+        (8, 6144, 4096),
+        (8, 2048, 6144),
+        (157, 8),
+        (32768,),
+        (49152,),
+        (157, 8),
+    ]
+
+
+def test_glm5_dfc_embedded_alltoall_uses_routed_input_bytes():
+    ds = ProfilingDataSource(
+        _glm5_a3_data_dir(),
+        parallel_config=_make_parallel_config(ep_size=32, world_size=32, tp_size=16),
+    )
+    context = ds._moe_embedded_comm_context(
+        _make_glm5_quant_dfc_op(256),
+        {"message_bytes_mode": "routed_input", "group_type": "expert_parallel"},
+    )
+
+    assert context is not None
+    assert context["message_bytes"] == 25165824
+    assert context["num_devices"] == 32
+
+
+@_skip_no_glm5_a3_hccl
+def test_glm5_dfc_partial_comm_miss_is_reported_in_result(monkeypatch):
+    ds = ProfilingDataSource(
+        _glm5_a3_data_dir(),
+        parallel_config=_make_parallel_config(ep_size=32, world_size=32, tp_size=16),
+    )
+
+    def _miss_comm(*_args, **_kwargs):
+        ds.last_miss_reason = "csv_not_found"
+        return None
+
+    monkeypatch.setattr(ds, "_query_comm_csv", _miss_comm)
+    result = ds.lookup(_make_glm5_quant_dfc_op(256))
+
+    assert result is not None
+    assert result.source == QuerySource.PARTIAL
+    assert result.details["partial_miss_reason"] == "moe_embedded_communication_miss:hcom_alltoall_"
+    assert ds.last_miss_reason == ""
+
+
+@_skip_no_glm5_a3_hccl
+def test_glm5_alltoall_exact_sample_is_queryable():
+    ds = ProfilingDataSource(
+        _glm5_a3_data_dir(),
+        parallel_config=_make_parallel_config(ep_size=32, world_size=32, tp_size=16),
+    )
+
+    assert ds._query_comm_csv("hcom_alltoall_", 25165824, 32, 0) == (972.378, False)
+
+
+@_skip_no_glm5_a3_hccl
+def test_glm5_allreduce_exact_sample_is_queryable():
+    ds = ProfilingDataSource(_glm5_a3_data_dir())
+
+    assert ds._query_comm_csv("hcom_allReduce_", 331776, 4, 1) == (24.87465, False)
