@@ -40,6 +40,7 @@ class TestServiceUtils(unittest.TestCase):
         """Test check_positive_integer with valid integers"""
         self.assertEqual(check_positive_integer("1"), 1)
         self.assertEqual(check_positive_integer("100"), 100)
+        self.assertEqual(check_positive_integer("1048576"), 1048576)
         self.assertEqual(check_positive_integer(5), 5)
 
     def test_check_positive_integer_invalid_string(self):
@@ -57,8 +58,8 @@ class TestServiceUtils(unittest.TestCase):
 
     def test_check_positive_integer_too_large(self):
         """Test check_positive_integer with very large value"""
-        with self.assertRaises(argparse.ArgumentTypeError):
-            check_positive_integer("2000000")  # Greater than 1e6
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "100000001.*too large"):
+            check_positive_integer("100000001")  # Greater than 1e8
 
     def test_check_positive_integer_and_string_accepts_positive_integer(self):
         self.assertEqual(check_positive_integer_and_string("128"), 128)

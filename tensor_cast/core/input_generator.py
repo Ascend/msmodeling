@@ -356,7 +356,7 @@ def _load_preprocessor_pixel_limits(model_id: str):
 
 def generate_image_inputs(model, image_batch_size, image_height, image_width, concurrency):
     if image_batch_size is None or image_height is None or image_width is None:
-        print("For vision-language models,without image input")
+        logger.info("Vision-language model is running without image input; skip the visual encoder.")
         return {}
     hf_config = model.model_config.hf_config
     vision_config = hf_config.vision_config

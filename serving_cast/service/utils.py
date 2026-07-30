@@ -21,7 +21,7 @@ LOG_LEVELS = {
     "fatal": logging.FATAL,
     "critical": logging.CRITICAL,
 }
-LIMIT_COUNT = 1e6
+LIMIT_COUNT = 1e8
 DEFAULT_MAX_SEARCH_COMBINATIONS = 100
 BYTES_TO_GB = 1024**3
 MAX_ITER_NUMS = 10
@@ -99,7 +99,7 @@ class OptimizerData:
     prefill_devices_per_instance: Optional[int] = None
     decode_devices_per_instance: Optional[int] = None
     prefix_cache_hit_rate: float = 0.0
-    concurrency_search_strategy: str = 'exponential'
+    concurrency_search_strategy: str = "exponential"
 
     def get_representative_rows(self, strategy: str = "mid") -> list[dict]:
         """
@@ -307,7 +307,7 @@ def check_positive_integer(value):
         raise argparse.ArgumentTypeError(f"Invalid integer value: {value!r}") from None
     if value <= 0:
         raise argparse.ArgumentTypeError(f"{value!r} is not a positive integer")
-    if value > 1e6:
+    if value > LIMIT_COUNT:
         raise argparse.ArgumentTypeError(f"{value!r} is too large")
     return value
 
