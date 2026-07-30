@@ -484,17 +484,26 @@ def main():
         )
         return 1
 
-    # Validate PD ratio optimization parameters
+    # Validate PD ratio optimization parameters. Use getattr for compatibility
+    # with programmatic callers that provide a minimal argparse namespace.
+    prefill_devices_per_instance = getattr(args, "prefill_devices_per_instance", None)
+    decode_devices_per_instance = getattr(args, "decode_devices_per_instance", None)
     if args.enable_optimize_prefill_decode_ratio:
         if args.disagg:
             logger.error("--enable-optimize-prefill-decode-ratio cannot be used together with --disagg.")
             return 1
-        if args.prefill_devices_per_instance is None or args.decode_devices_per_instance is None:
+        if prefill_devices_per_instance is None or decode_devices_per_instance is None:
             logger.error(
                 "Both --prefill-devices-per-instance and --decode-devices-per-instance "
                 "are required when PD ratio optimization is enabled."
             )
             return 1
+    elif prefill_devices_per_instance is not None or decode_devices_per_instance is not None:
+        logger.error(
+            "--prefill-devices-per-instance and --decode-devices-per-instance require "
+            "--enable-optimize-prefill-decode-ratio. This mode cannot be used together with --disagg."
+        )
+        return 1
 
     # Terminal ASCII curves (plotext) run automatically when structurally allowed.
     plot_curves_allowed = len(device_targets) == 1

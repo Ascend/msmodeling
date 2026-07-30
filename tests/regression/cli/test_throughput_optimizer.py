@@ -90,6 +90,24 @@ class TestThroughputOptimizer(TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("num_mtp_tokens candidates [6] exceed", "\n".join(logs.output))
 
+    def test_pd_instance_device_arguments_require_pd_ratio_mode(self):
+        args = [
+            "--input-length=1",
+            "--output-length=1",
+            "Qwen/Qwen3-32B",
+            "--device=TEST_DEVICE",
+            "--num-devices=1",
+            "--disagg",
+            "--prefill-devices-per-instance=1",
+            "--decode-devices-per-instance=1",
+        ]
+
+        with self.assertLogs("cli.inference.throughput_optimizer", "ERROR") as logs:
+            result = self._run_throughput_optimizer(args, check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("require --enable-optimize-prefill-decode-ratio", "\n".join(logs.output))
+
     def test_arg_parse_performance_model_defaults_to_analytic(self):
         from cli.inference import throughput_optimizer as throughput_optimizer_module
 
