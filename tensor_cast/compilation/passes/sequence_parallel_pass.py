@@ -856,8 +856,9 @@ class MoeLocalTokenRewriter:
                 and local_tokens is not None
             ):
                 shape = list(node.args[1])
+                # Do not rewrite flattened 2-D views when hidden_size happens to equal full_tokens.
                 seq_dim = _shard_dim(node)
-                if seq_dim < len(shape) and shape[seq_dim] == full_tokens:
+                if len(shape) == 3 and seq_dim < len(shape) and shape[seq_dim] == full_tokens:
                     shape[seq_dim] = local_tokens
                 node.args = (node.args[0], shape, *node.args[2:])
             if node.target is _ADD_RMS_NORM2:

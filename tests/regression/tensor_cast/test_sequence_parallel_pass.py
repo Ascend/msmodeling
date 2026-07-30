@@ -119,13 +119,24 @@ class SequenceParallelPassRegressionTestCase(unittest.TestCase):
     def test_local_descendants_rewrites_only_sequence_dimension(self):
         graph = Graph()
         local = graph.placeholder("local")
-        view = graph.call_function(torch.ops.aten.view.default, (local, [1, 128, 128]))
-        view.meta["val"] = torch.empty((1, 128, 128), device="meta")
-        graph.output(view)
+        sequence_view = graph.call_function(torch.ops.aten.view.default, (local, [1, 16384, -1]))
+        sequence_view.meta["val"] = torch.empty((1, 16384, 16384), device="meta")
+        flattened_view = graph.call_function(torch.ops.aten.view.default, (sequence_view, [-1, 16384]))
+        # Preserve the stale rank-3 metadata seen during the compiler rewrite:
+        # it must not make the 2-D target shape's hidden dimension look like
+        # the sequence dimension.
+        flattened_view.meta["val"] = torch.empty((1, 16384, 16384), device="meta")
+        graph.output(flattened_view)
 
-        MoeLocalTokenRewriter._mark_local_descendants(view, full_tokens=128, local_tokens=64)
+        MoeLocalTokenRewriter._mark_local_descendants(
+            sequence_view,
+            full_tokens=16384,
+            local_tokens=1024,
+        )
 
-        self.assertEqual(view.args[1], [1, 64, 128])
+        self.assertEqual(sequence_view.args[1], [1, 1024, -1])
+        self.assertEqual(flattened_view.args[1], [-1, 16384])
+        self.assertTrue(flattened_view.meta["tensor_cast_sp_local"])
 
     @parameterized.expand(
         [
