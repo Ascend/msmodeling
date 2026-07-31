@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import import_module
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Optional
 
@@ -143,6 +144,9 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
         query_start_loc=query_start_loc,
         seq_lens=seq_lens,
         query_lens=query_lens,
+        seq_lens_values=[seq_len] * batch_size,
+        query_lens_values=[query_len] * batch_size,
+        is_decode_values=[is_decode] * batch_size,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         max_total_seq_len=int(seq_len),
@@ -425,6 +429,10 @@ def _resolve_sparse_attention_kv_cache_width(model, attention_layer=None) -> int
     return int(model.text_config.kv_lora_rank + model.text_config.qk_rope_head_dim)
 
 
+def _is_integral_non_bool(value) -> bool:
+    return isinstance(value, Integral) and not isinstance(value, bool)
+
+
 def _resolve_sparse_attention_indexer_cache_width(model, attention_layer) -> int | None:
     """Resolve the auxiliary indexer cache width for sparse-attention wrappers.
 
@@ -432,31 +440,34 @@ def _resolve_sparse_attention_indexer_cache_width(model, attention_layer) -> int
     (`index_head_dim`), which is intentionally different from the main KV cache
     width (`head_dim`).
     """
-    for attr in ("_index_head_dim",):
+    for attr in ("_index_head_dim", "indexer_head_dim"):
         width = getattr(attention_layer, attr, None)
-        if width is not None:
+        if _is_integral_non_bool(width):
             return int(width)
 
     indexer = getattr(attention_layer, "indexer", None)
     if indexer is not None:
         width = getattr(indexer, "head_dim", None)
-        if width is not None:
+        if _is_integral_non_bool(width):
             return int(width)
 
     width = getattr(model.text_config, "index_head_dim", None)
-    if width is not None:
+    if _is_integral_non_bool(width):
         return int(width)
     return None
 
 
 def _layer_uses_sparse_attention_indexer(attention_layer) -> bool:
+    is_sparse_layer = getattr(attention_layer, "is_sparse_layer", None)
+    if isinstance(is_sparse_layer, bool):
+        return is_sparse_layer
     use_indexer = getattr(attention_layer, "use_indexer", None)
-    if use_indexer is not None:
-        return bool(use_indexer)
+    if isinstance(use_indexer, bool):
+        return use_indexer
     return getattr(attention_layer, "indexer", None) is not None
 
 
-def _resolve_decoder_attention_layer(layer):
+def _resolve_decoder_attention_layer(layer, preserve_attention_wrapper: bool = False):
     """Resolve a decoder layer's attention module through lightweight wrappers."""
     from ..layers.utils import ModelWrapperBase
 
@@ -467,6 +478,8 @@ def _resolve_decoder_attention_layer(layer):
 
         attention_layer = getattr(current, "self_attn", None)
         if attention_layer is not None:
+            if preserve_attention_wrapper:
+                return attention_layer
             while isinstance(attention_layer, ModelWrapperBase) and attention_layer._inner is not None:
                 attention_layer = attention_layer._inner
             if isinstance(attention_layer, torch.nn.Module):
@@ -744,6 +757,7 @@ def _resolve_decoder_layers(model):
     msmodeling can wrap the underlying HF model in several layouts:
         * ``TransformerModel(_inner=CausalLmWrapper(_inner=HFModel))``
         * ``TransformerModel(_inner=ModelWrapper(_inner=HFModel))``
+        * ``TransformerModel(_inner=ConditionalGeneration(language_model=...))``
         * ``OptimizedModule(_orig_mod=TransformerModel(...))`` when --compile is on
         * ``MtpWrapper(_inner=...)`` when MTP is enabled
 
@@ -783,9 +797,12 @@ def _resolve_decoder_layers(model):
         if missing_layers:
             raise AttributeError(f"Unable to locate pipeline decoder layer(s): {missing_layers}")
         return layers
+    language_model = getattr(inner, "language_model", None)
+    if language_model is not None and hasattr(language_model, "layers"):
+        return language_model.layers
     raise AttributeError(
-        "Unable to locate decoder layers; neither `unwrap().layers` nor "
-        "`unwrap().model.layers` is available on this model"
+        "Unable to locate decoder layers in `unwrap().layers`, "
+        "`unwrap().model.layers`, or `unwrap().language_model.layers`"
     )
 
 
@@ -807,7 +824,24 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     """
     model_config = model.model_config
     mla_config = model_config.mla_config
-    if mla_config is None or not mla_config.mla_cls.requires_indexer_cache():
+    try:
+        decoder_layers = _resolve_decoder_layers(model)
+    except AttributeError:
+        decoder_layers = None
+
+    has_sparse_indexer = False
+    if decoder_layers is not None:
+        has_sparse_indexer = any(
+            _layer_uses_sparse_attention_indexer(
+                _resolve_decoder_attention_layer(layer, preserve_attention_wrapper=True)
+            )
+            for layer in decoder_layers
+        )
+
+    mla_requires_indexer = (
+        mla_config is not None and mla_config.mla_cls is not None and mla_config.mla_cls.requires_indexer_cache()
+    )
+    if not has_sparse_indexer and not mla_requires_indexer:
         return {}
 
     is_v4_model = _is_v4_model(model)
@@ -815,10 +849,6 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     glm5_indexer_types = _get_glm5_indexshare_indexer_types(model)
     indexer_cache_by_layers = {}
     indexer_cache_per_token = 0
-    try:
-        decoder_layers = _resolve_decoder_layers(model)
-    except AttributeError:
-        decoder_layers = None
     for i in range(model.num_hidden_layers):
         try:
             owns_indexer_cache = _glm5_indexshare_layer_owns_indexer_cache(glm5_indexer_types, i)
@@ -830,7 +860,10 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
             continue
 
         attention_layer = (
-            _resolve_decoder_attention_layer(decoder_layers[i])
+            _resolve_decoder_attention_layer(
+                decoder_layers[i],
+                preserve_attention_wrapper=True,
+            )
             if decoder_layers is not None and i < len(decoder_layers)
             else None
         )
@@ -905,6 +938,9 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
         query_start_loc=query_start_loc,
         query_lens=query_len_t,
         seq_lens=seq_lens_t,
+        query_lens_values=list(query_lens),
+        seq_lens_values=list(seq_lens),
+        is_decode_values=list(is_decode_list),
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         max_total_seq_len=max_total_seq_len,

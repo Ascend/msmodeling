@@ -72,9 +72,11 @@ def patch_method_for_qwen3_next(_model):
         cache_params=None,
         cache_position=None,
         attention_mask=None,
+        **kwargs,
     ):
         # Route Qwen3Next GatedDeltaNet through tensor_cast.linear_attention so
         # TensorCast can model mixed full/linear attention explicitly.
+        del kwargs
         del cache_params
         local_num_k_heads, local_num_v_heads = _get_local_linear_attn_heads(self)
 

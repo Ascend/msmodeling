@@ -30,6 +30,15 @@ class AttentionMetadataBase:
     """(num_tokens,) The indices of the token slots that input tokens will be
     stored into."""
 
+    seq_lens_values: Optional[list[int]] = None
+    """Materialized sequence lengths retained when tensor values become Fake/Meta."""
+
+    query_lens_values: Optional[list[int]] = None
+    """Materialized query lengths retained when tensor values become Fake/Meta."""
+
+    is_decode_values: Optional[list[bool]] = None
+    """Per-request phase retained for model-specific decode/prefill Roofline paths."""
+
     max_total_seq_len: Optional[int] = None
     """Python scalar equal to ``max(seq_lens)`` for this metadata batch.
 
@@ -71,11 +80,15 @@ def flash_attention_forward(
 ):
     attention_by_layers: Optional[dict[int, AttentionBase]] = kwargs.pop("attention_by_layers", None)
     is_vision_attention = False
-    if attention_by_layers is None:
+    _tensor_cast_context = getattr(module, "_tensor_cast_context", None)
+    if _tensor_cast_context is not None and not hasattr(module, "layer_idx"):
+        is_vision_attention = True
+        if attention_by_layers is None:
+            attention_by_layers = _tensor_cast_context.get("attention_by_layers")
+    elif attention_by_layers is None:
         # For VL models, the visual layer's attention_by_layers cannot be obtained from kwargs,
         # so it is retrieved from the module's _tensor_cast_context instead.
         is_vision_attention = True
-        _tensor_cast_context = getattr(module, "_tensor_cast_context", None)
         if _tensor_cast_context is not None:
             attention_by_layers = _tensor_cast_context.get("attention_by_layers")
 
@@ -86,6 +99,9 @@ def flash_attention_forward(
         self_attn = attention_by_layers[depth_layer_idx]
         kv_cache = None
         attention_meta = None
+        kwargs.pop("attention_meta", None)
+        kwargs.pop("attention_meta_by_layers", None)
+        kwargs.pop("kv_cache_by_layers", None)
         query, key, value = (x.transpose(1, 2) for x in (query, key, value))
         num_tokens = query.shape[0] * query.shape[1]
         # For subsequent time calculation, the key and value do not need to be reshaped

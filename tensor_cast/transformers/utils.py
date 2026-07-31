@@ -300,6 +300,13 @@ class AutoModelConfigLoader:
         try:
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=False)
             self.is_transformers_natively_supported = True
+            if getattr(hf_config, "model_type", None) == "kimi_k25":
+                hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+                self.is_transformers_natively_supported = False
+            elif getattr(hf_config, "model_type", None) == "mimo_v2_flash":
+                from .builtin_model.mimo_v2_flash_hf.configuration_mimo_v2_flash import MiMoV2FlashConfig
+
+                hf_config = MiMoV2FlashConfig.from_dict(hf_config.to_dict())
         except Exception:
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 

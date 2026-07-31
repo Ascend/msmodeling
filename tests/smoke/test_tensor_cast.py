@@ -17,3 +17,17 @@ def test_tensor_cast_parallel_layer_smoke():
     x = torch.randn(2, 8, dtype=torch.float32)
     y = quant_layer(x)
     assert y.shape == (2, 4)
+
+
+def test_quant_linear_base_weight_property_preserves_public_linear_contract():
+    linear = torch.nn.Linear(8, 4, bias=False, dtype=torch.float32)
+    quant_layer = QuantLinearBase(
+        linear,
+        get_linear_quant_config(LinearQuantType.W8A16, linear.weight.data),
+    )
+
+    weight = quant_layer.weight
+
+    assert weight.shape == linear.weight.shape
+    assert weight.dtype == linear.weight.dtype
+    assert weight.device == quant_layer.qweight.device

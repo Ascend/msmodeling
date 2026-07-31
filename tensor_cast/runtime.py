@@ -26,10 +26,63 @@ from .performance_model.op_invoke_info import OpInvokeInfo, Region
 logger = logging.getLogger(__name__)
 
 _current_runtime = threading.local()
+_META_DEVICE_COMPATIBLE_FUNCS = {
+    torch.ops.aten.add.Tensor,
+    torch.ops.aten.div.Tensor,
+    torch.ops.aten.eq.Tensor,
+    torch.ops.aten.ge.Tensor,
+    torch.ops.aten.gt.Tensor,
+    torch.ops.aten.le.Tensor,
+    torch.ops.aten.lt.Tensor,
+    torch.ops.aten.mul.Tensor,
+    torch.ops.aten.rsub.Scalar,
+    torch.ops.aten.sub.Tensor,
+    torch.ops.prims.add.default,
+    torch.ops.prims.div.default,
+    torch.ops.prims.eq.default,
+    torch.ops.prims.ge.default,
+    torch.ops.prims.gt.default,
+    torch.ops.prims.le.default,
+    torch.ops.prims.lt.default,
+    torch.ops.prims.mul.default,
+    torch.ops.prims.sub.default,
+}
 
 
 def current_runtime():
     return getattr(_current_runtime, "value", None)
+
+
+def _contains_meta_tensor(value: Any) -> bool:
+    if isinstance(value, torch.Tensor):
+        return value.device.type == "meta"
+    if isinstance(value, (list, tuple)):
+        return any(_contains_meta_tensor(item) for item in value)
+    if isinstance(value, dict):
+        return any(_contains_meta_tensor(item) for item in value.values())
+    return False
+
+
+def _move_cpu_tensors_to_meta(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        if value.device.type == "cpu" and value.ndim > 0:
+            return torch.empty_strided(value.shape, value.stride(), dtype=value.dtype, device="meta")
+        return value
+    if isinstance(value, tuple):
+        return tuple(_move_cpu_tensors_to_meta(item) for item in value)
+    if isinstance(value, list):
+        return [_move_cpu_tensors_to_meta(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _move_cpu_tensors_to_meta(item) for key, item in value.items()}
+    return value
+
+
+def _normalize_meta_elementwise_args(func, args, kwargs):
+    if func not in _META_DEVICE_COMPATIBLE_FUNCS:
+        return args, kwargs
+    if not (_contains_meta_tensor(args) or _contains_meta_tensor(kwargs)):
+        return args, kwargs
+    return _move_cpu_tensors_to_meta(args), _move_cpu_tensors_to_meta(kwargs)
 
 
 BoundComponentTotals = Dict[str, float]
@@ -113,6 +166,7 @@ class Runtime(TorchDispatchMode):
 
         if not torch.compiler.is_compiling():
             func_name = func.__qualname__ if hasattr(func, "__qualname__") else str(func)
+            args, kwargs = _normalize_meta_elementwise_args(func, args, kwargs)
             start = time.perf_counter() if logger.isEnabledFor(logging.DEBUG) else None
             out = func(*args, **kwargs)
             if logger.isEnabledFor(logging.DEBUG):

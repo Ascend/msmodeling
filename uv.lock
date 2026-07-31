@@ -1567,7 +1567,7 @@ requires-dist = [
     { name = "strenum", specifier = ">=0.4.15" },
     { name = "torch", specifier = ">=2.8,<=2.10", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", specifier = ">=0.23.0", index = "https://download.pytorch.org/whl/cpu" },
-    { name = "transformers", specifier = ">=5.6.0,<5.8.0" },
+    { name = "transformers", specifier = ">=5.13.0,<5.14.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -3444,7 +3444,7 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.7.0"
+version = "5.13.1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -3458,11 +3458,10 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://mirrors.aliyun.com/pypi/packages/4d/fe/7e84d20ac7d4d5d14bac2eab5976088d86342959fc2c0da54b4c2fc99856/transformers-5.7.0.tar.gz", hash = "sha256:a9d35cf39804e3456c1f9bc1a79ad5ffa878640a61f51f66f71c97f4b4e2ce10" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/6e/f7/418169401560cec2b61512e6bf37b0cfb4c8e27700cfa868a1de073cb65d/transformers-5.13.1.tar.gz", hash = "sha256:1e2452d6778a7482158df5d5dacf6bf775d5b2fdcfce33caaf7f6b0e5f3e3397" }
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/60/60/86a9fe3037bec221094e2acb680219ad88b77006edba42fc0407a577ca93/transformers-5.7.0-py3-none-any.whl", hash = "sha256:869660cd8fc92badc041f5551bf755a42f4b9558c93341bf3fa3eeed7065079c" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/29/47/54eacf96b5c835bbd6ca631aa2740e7705ed63d9e3a8afd2d2cc6d09cae5/transformers-5.13.1-py3-none-any.whl", hash = "sha256:53f0ea8aa397e29244c2377ba981bcaf0c87adcf44fbdd447ef6306522afcacd" },
 ]
-
 [[package]]
 name = "typer"
 version = "0.25.1"

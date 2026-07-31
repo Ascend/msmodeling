@@ -17,6 +17,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from transformers import AutoConfig, AutoModel, DeepseekV3Config
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from transformers.cache_utils import Cache
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
@@ -38,7 +39,7 @@ register_model_profile(
         moe_module_name="DeepseekV32MoE",
         moe_num_experts_key="n_routed_experts",
         moe_gate_returns_raw_logits=False,
-        mla_module_name="DeepseekV32SparseAttention",
+        mla_module_name="DeepseekV32Attention",
         mla_module_class_type=DeepseekSparseAttention,
     )
 )
@@ -237,5 +238,39 @@ class DeepseekV32Model(DeepseekV3Model):
         self.post_init()
 
 
-AutoConfig.register("deepseek_v32", DeepseekV32Config)
-AutoModel.register(DeepseekV32Config, DeepseekV32Model)
+def _safe_register_auto_config() -> None:
+    model_type = DeepseekV32Config.model_type
+    extra_content = getattr(CONFIG_MAPPING, "_extra_content", None)
+    existing_extra = extra_content.get(model_type) if isinstance(extra_content, dict) else None
+    if existing_extra is DeepseekV32Config:
+        return
+    if existing_extra is not None:
+        raise ValueError(
+            f"{model_type} is already registered to an incompatible AutoConfig class: "
+            f"{existing_extra.__module__}.{existing_extra.__name__}"
+        )
+    if model_type in CONFIG_MAPPING:
+        return
+    AutoConfig.register(model_type, DeepseekV32Config)
+
+
+def _safe_register_auto_model() -> None:
+    mapping = getattr(AutoModel, "_model_mapping", None)
+    extra_content = getattr(mapping, "_extra_content", None)
+    existing = extra_content.get(DeepseekV32Config) if isinstance(extra_content, dict) else None
+    if existing is DeepseekV32Model:
+        return
+    if existing is not None:
+        raise ValueError(
+            "deepseek_v32 is already registered to an incompatible AutoModel class: "
+            f"{existing.__module__}.{existing.__name__}"
+        )
+    try:
+        AutoModel.register(DeepseekV32Config, DeepseekV32Model)
+    except ValueError as exc:
+        if "already used by a Transformers model" not in str(exc):
+            raise
+
+
+_safe_register_auto_config()
+_safe_register_auto_model()

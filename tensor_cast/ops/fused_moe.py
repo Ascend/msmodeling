@@ -134,7 +134,37 @@ def _(x: torch.Tensor, top_k: int) -> Tuple[torch.Tensor, torch.Tensor]:
             - topk_weights (torch.Tensor): Corresponding normalized weights (e.g., after softmax),
               with shape `(*x.shape[:-1], top_k)`, dtype and device as input `x`.
             - topk_indices (torch.Tensor): Indices of the selected experts,
-              with shape `(*x.shape[:-1], top_k)` and device as input `x`, dtype int64.
+              with shape `(*x.shape[:-1], top_k)` and dtype int64, device as input `x`.
+    """
+    out_shape = (*x.shape[:-1], top_k)
+    return (
+        torch.empty(out_shape, dtype=x.dtype, device=x.device),
+        torch.empty(out_shape, dtype=torch.int64, device=x.device),
+    )
+
+
+@register_tensor_cast_op("moe_gating_top_k_sigmoid")
+def _(
+    x: torch.Tensor,
+    top_k: int,
+    routed_scaling_factor: float = 1.0,
+    correction_bias: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Fused MoE gating with sigmoid scoring + top-k selection.
+
+    Matches the NPU profiling operator gate_gatingsigmoid
+    (npu_moe_gating_top_k with norm_type=1 / sigmoid scoring).
+    Used by MiniMax-M3 which has scoring_func="sigmoid".
+
+    Args:
+        x: (num_tokens, num_experts) raw gating logits.
+        top_k: number of top experts to select.
+        routed_scaling_factor: scaling factor applied to routed expert weights.
+        correction_bias: optional (num_experts,) bias added to scores before top-k.
+
+    Returns:
+        topk_weights: (*x.shape[:-1], top_k), dtype same as x.
+        topk_indices: (*x.shape[:-1], top_k), dtype int64.
     """
     out_shape = (*x.shape[:-1], top_k)
     return (

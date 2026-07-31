@@ -5,6 +5,12 @@ import torch
 from ..patch_torch import support_autocast_for_meta
 
 
+def _call_rotary_emb(rotary_emb: torch.nn.Module, x: torch.Tensor, position_ids: torch.Tensor, layer_type=None):
+    if layer_type is None:
+        return rotary_emb(x, position_ids)
+    return rotary_emb(x, position_ids, layer_type=layer_type)
+
+
 class CachingRotaryEmb(torch.nn.Module):
     """
     Cache the position embeddings so that we can do quick index_select without
@@ -31,8 +37,13 @@ class CachingRotaryEmb(torch.nn.Module):
         if expand_to_3d_position_ids:
             # Expand to (3, 1, max_position_embeddings) for T/H/W dimensions
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        if getattr(rotary_emb, "layer_types", None):
+            self.cos_cache = None
+            self.sin_cache = None
+            self.rotary_emb = rotary_emb
+            return
         with support_autocast_for_meta():
-            position_embeddings = rotary_emb(x, position_ids)
+            position_embeddings = _call_rotary_emb(rotary_emb, x, position_ids)
         self.cos_cache: Optional[torch.Tensor]
         self.sin_cache: Optional[torch.Tensor]
         if isinstance(position_embeddings, (tuple, list)) and len(position_embeddings) == 2:
@@ -49,7 +60,7 @@ class CachingRotaryEmb(torch.nn.Module):
             self.rotary_emb = rotary_emb
 
     def forward(
-        self, x: torch.Tensor, position_ids: torch.Tensor
+        self, x: torch.Tensor, position_ids: torch.Tensor, layer_type=None
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         if self.cos_cache is not None and x.dtype == self.act_dtype:
             if self.use_3d_position_index:
@@ -67,4 +78,4 @@ class CachingRotaryEmb(torch.nn.Module):
             sin = self.sin_cache.index_select(0, flat_ids).reshape(position_ids.size(0), -1, self.sin_cache.size(-1))
             return cos, sin
         else:
-            return self.rotary_emb(x, position_ids)
+            return _call_rotary_emb(self.rotary_emb, x, position_ids, layer_type=layer_type)

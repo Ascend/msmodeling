@@ -195,10 +195,11 @@ class SinkSplitPass(TensorCastGraphModulePass):
             split_with_sizes_extra_check,
         )
 
-        # Binary ops
+        # Binary ops (gate/up split consumers; m3_* must match swiglu for sink_split rewrite)
         binary_ops = [
             torch.ops.aten.mul.Tensor,
             torch.ops.tensor_cast.swiglu.default,
+            torch.ops.tensor_cast.m3_swiglu.default,
         ]
         for op in binary_ops:
             add_config(op, {0, 1}, {0})

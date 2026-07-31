@@ -1,12 +1,23 @@
 import torch
 from transformers import AutoConfig, AutoModel
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from ..custom_model_registry import ModelProfile, register_model_profile
 from .mimo_v2_flash_hf.configuration_mimo_v2_flash import MiMoV2FlashConfig
 from .mimo_v2_flash_hf.modeling_mimo_v2_flash import MiMoV2Model
 
-AutoConfig.register("mimo_v2_flash", MiMoV2FlashConfig)
-AutoModel.register(MiMoV2FlashConfig, MiMoV2Model)
+
+_AUTO_MODEL_ALREADY_REGISTERED_MSG = "already used by a Transformers model"
+
+
+def _safe_register_mimo_v2_flash_family() -> None:
+    model_type = MiMoV2FlashConfig.model_type
+    if model_type not in CONFIG_MAPPING:
+        AutoConfig.register(model_type, MiMoV2FlashConfig)
+    AutoModel.register(MiMoV2FlashConfig, MiMoV2Model, exist_ok=True)
+
+
+_safe_register_mimo_v2_flash_family()
 
 
 class MiMoV2MoeExpertMLP(torch.nn.Module):

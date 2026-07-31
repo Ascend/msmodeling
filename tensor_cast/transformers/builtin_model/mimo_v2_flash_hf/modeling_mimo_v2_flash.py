@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from typing import Callable, Optional, Union
 
 import torch
@@ -52,6 +53,11 @@ MIMOV2_CACHE_POSITION_DOCSTRING = r"""
             Indices depicting the position of the input sequence tokens in the sequence. It is used to update the cache
             in the correct position and infer complete sequence length.
 """
+
+
+def _call_mask_factory(mask_factory, **kwargs):
+    accepted = inspect.signature(mask_factory).parameters
+    return mask_factory(**{key: value for key, value in kwargs.items() if key in accepted})
 
 
 def rotate_half(x):
@@ -450,10 +456,16 @@ class MiMoV2FlashRotaryEmbedding(nn.Module):
     def __init__(self, config: MiMoV2FlashConfig, is_swa, device=None):
         super().__init__()
         # BC: "rope_type" was originally "type"
-        if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+        rope_scaling = getattr(config, "rope_scaling", None)
+        if isinstance(rope_scaling, dict) and ("full_attention" in rope_scaling or "sliding_attention" in rope_scaling):
+            layer_type = "sliding_attention" if is_swa else "full_attention"
+            rope_scaling = rope_scaling.get(layer_type, {})
+        if isinstance(rope_scaling, dict):
+            self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", "default"))
         else:
             self.rope_type = "llama3"
+        if self.rope_type is None:
+            self.rope_type = "default"
         self.max_seq_len_cached = config.max_position_embeddings
         self.original_max_seq_len = config.max_position_embeddings
 
@@ -552,7 +564,7 @@ class MiMoV2Model(PreTrainedModel):
             # Prepare mask arguments
             mask_kwargs = {
                 "config": self.config,
-                "input_embeds": inputs_embeds,
+                "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
                 "cache_position": cache_position,
                 "past_key_values": past_key_values,
@@ -560,11 +572,13 @@ class MiMoV2Model(PreTrainedModel):
             }
             # Create the masks
             causal_mask_mapping = {
-                "full_attention": create_causal_mask(**mask_kwargs),
+                "full_attention": _call_mask_factory(create_causal_mask, **mask_kwargs),
             }
             # The sliding window alternating layers are not always activated depending on the config
             if self.has_sliding_layers:
-                causal_mask_mapping["sliding_window_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+                causal_mask_mapping["sliding_window_attention"] = _call_mask_factory(
+                    create_sliding_window_causal_mask, **mask_kwargs
+                )
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)

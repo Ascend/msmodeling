@@ -26,6 +26,7 @@ class QuantLinearBase(torch.nn.Module):
         #               instead but they are not set correctly when the linear layer is sharded.
         self.in_features = linear_layer.weight.shape[1]
         self.out_features = linear_layer.weight.shape[0]
+        self.weight_dtype = linear_layer.weight.dtype
         self.quant_config = quant_config
         self.dynamic_quant_dtype = quant_type_to_dynamic_quant_dtype(quant_config.quant_type)
 
@@ -87,6 +88,22 @@ class QuantLinearBase(torch.nn.Module):
             self.register_buffer("activation_offset", quant_config.activation_offset)
         else:
             self.register_buffer("activation_offset", None)
+
+    @property
+    def weight(self) -> torch.Tensor:
+        """Expose lightweight Linear-compatible weight metadata.
+
+        Some HF model code only inspects ``weight.shape`` or ``weight.dtype``
+        after TensorCast replaces a Linear with QuantLinearBase. Returning an
+        empty tensor preserves that public contract without dequantizing or
+        changing the quantized forward path.
+        """
+        return torch.empty(
+            self.out_features,
+            self.in_features,
+            dtype=self.weight_dtype,
+            device=self.qweight.device,
+        )
 
     def quantize_weight(
         self,
@@ -309,18 +326,27 @@ class TensorCastQuantLinear(QuantLinearBase):
     def __init__(self, linear_layer: torch.nn.Linear, quant_config: LinearQuantConfig):
         super().__init__(linear_layer, quant_config)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        external_activation_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """
         Performs the quantized linear operation using custom tensor_cast ops.
 
         This method selects the appropriate custom operator based on the
         availability of static activation quantization parameters.
+        If external_activation_scale is passed in, x is treated as already
+        quantized by an upstream fused activation op.
         """
         x_shape = x.shape
         x = x.reshape(-1, x_shape[-1])
         qweight = self.qweight.transpose(0, 1)
         out_dtype = self.quant_config.out_dtype if self.quant_config.out_dtype is not None else x.dtype
-        if self.activation_scale is None:
+        if external_activation_scale is not None:
+            activation_scale = external_activation_scale
+            activation_offset = None
+        elif self.activation_scale is None:
             # Dynamic quantization path
             if self.quant_config.dynamic_quant_granularity == QuantGranularity.PER_TENSOR:
                 dims = []

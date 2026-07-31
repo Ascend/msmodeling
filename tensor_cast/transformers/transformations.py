@@ -46,6 +46,8 @@ from ..adapter.patch_report import PatchReport, attach_patch_report
 
 logger = logging.getLogger(__name__)
 
+_MINIMAX_M3_MODEL_TYPE = "minimax_m3_vl"
+
 
 def wrap_model(model: "ModelWrapperBase") -> "ModelWrapperBase":
     """
@@ -217,8 +219,11 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
     visual_layers = get_visual_layers(model)
     if visual_layers is not None:
         reuse_layers(visual_layers)
-        # Uniformly use get_language_layers to obtain paths
-        from ..transformers.custom_model_registry import get_language_layers
+
+    if model.is_vl_model:
+        # Some VL models run text-only simulations where the visual module is
+        # absent or disabled, but their reusable decoder layers still live
+        # under a language path such as language_model.layers.
         import operator
 
         language_layers_path = get_language_layers(model.hf_config.model_type)
@@ -468,10 +473,13 @@ def patch_moe(
         target_module_name=moe_config.module_name,
         expected_replacements=_expected_replacements_from_layers(model),
     )
-    model.top_k = None
-    model.num_routing_experts = None
+    reset_moe_metadata = False
     for name, module in model._inner.named_modules():
         if type(module).__name__ == moe_config.module_name:
+            if not reset_moe_metadata:
+                model.top_k = None
+                model.num_routing_experts = None
+                reset_moe_metadata = True
             report.matched_modules.append(name)
             missing_fields = _missing_required_fields(module, moe_config.field_names)
             if missing_fields:
@@ -584,6 +592,15 @@ def shard_model_by_tp(
             else:
                 params.update({"head_num": config_info.num_attention_heads})
                 tp_plan.update({f"{language_layers}.*.q_proj": (COLWISE_LINEAR, params)})
+                if self.hf_config.model_type == _MINIMAX_M3_MODEL_TYPE and self.model_config.mtp_config is not None:
+                    tp_plan.update(
+                        {
+                            tp_plan_nested_module_path("mtp.layers.*.mtp_block", "q_proj"): (
+                                COLWISE_LINEAR,
+                                params,
+                            ),
+                        }
+                    )
                 params = params.copy()
                 params.update(
                     {
@@ -603,6 +620,19 @@ def shard_model_by_tp(
                         ),
                     }
                 )
+                if self.hf_config.model_type == _MINIMAX_M3_MODEL_TYPE and self.model_config.mtp_config is not None:
+                    tp_plan.update(
+                        {
+                            tp_plan_nested_module_path("mtp.layers.*.mtp_block", "k_proj"): (
+                                COLWISE_LINEAR,
+                                params,
+                            ),
+                            tp_plan_nested_module_path("mtp.layers.*.mtp_block", "v_proj"): (
+                                COLWISE_LINEAR,
+                                params,
+                            ),
+                        }
+                    )
 
             params = {
                 "tp_group": o_proj_tp_group,

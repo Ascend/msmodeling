@@ -183,10 +183,11 @@ def _validate_local_entry(path: Path, *, enforce_permission_bits: bool) -> None:
 
 
 def _validate_owner(path: Path, owner_uid: int) -> None:
-    if not hasattr(os, "geteuid"):
+    get_euid = getattr(os, "geteuid", None)
+    if get_euid is None:
         return
 
-    current_uid = os.geteuid()
+    current_uid = get_euid()
     allowed_uids = {current_uid}
     if current_uid != 0:
         allowed_uids.add(0)

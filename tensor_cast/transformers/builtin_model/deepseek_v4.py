@@ -61,6 +61,8 @@ def _safe_register_auto_config() -> None:
             "deepseek_v4 is already registered to an incompatible AutoConfig class: "
             f"{existing.__module__}.{existing.__name__}"
         )
+    if "deepseek_v4" in CONFIG_MAPPING:
+        return
     AutoConfig.register("deepseek_v4", DeepseekV4Config)
 
 
@@ -73,7 +75,11 @@ def _safe_register_auto_model() -> None:
             "deepseek_v4 is already registered to an incompatible AutoModel class: "
             f"{existing.__module__}.{existing.__name__}"
         )
-    AutoModel.register(DeepseekV4Config, DeepseekV4Model)
+    try:
+        AutoModel.register(DeepseekV4Config, DeepseekV4Model)
+    except ValueError as exc:
+        if "already used by a Transformers model" not in str(exc):
+            raise
 
 
 def _register_deepseek_v4_family() -> None:

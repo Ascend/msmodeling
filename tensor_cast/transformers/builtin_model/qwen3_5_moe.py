@@ -45,6 +45,15 @@ def _set_qwen3_5_linear_attn_tp_size(model):
             module.tensor_cast_tp_size = tp_size
 
 
+def _get_qwen3_5_layer_type(layer) -> str:
+    layer_type = getattr(layer, "layer_type", None)
+    if layer_type is None:
+        layer_type = getattr(layer, "block_type", None)
+    if layer_type is None:
+        raise AttributeError(f"{type(layer).__name__} has neither 'layer_type' nor 'block_type' attribute")
+    return str(layer_type)
+
+
 def patch_method_for_qwen3_5(model):
     from transformers.models.qwen3_5.modeling_qwen3_5 import (
         Qwen3_5GatedDeltaNet,
@@ -262,14 +271,15 @@ def patch_method_for_qwen3_5(model):
         hidden_states = self.input_layernorm(hidden_states)
         cache_position = kwargs.get("cache_position")
 
-        if self.layer_type == "linear_attention":
+        layer_type = _get_qwen3_5_layer_type(self)
+        if layer_type == "linear_attention":
             hidden_states = self.linear_attn(
                 cache_params=past_key_values,
                 cache_position=cache_position,
                 attention_mask=attention_mask,
                 hidden_states=hidden_states,
             )
-        elif self.layer_type == "full_attention":
+        elif layer_type == "full_attention":
             hidden_states, _ = self.self_attn(
                 position_ids=position_ids,
                 past_key_values=past_key_values,
@@ -279,7 +289,7 @@ def patch_method_for_qwen3_5(model):
                 **kwargs,
             )
         else:
-            raise ValueError(f"Unknown layer_type: {self.layer_type}")
+            raise ValueError(f"Unknown layer_type: {layer_type}")
 
         hidden_states = residual + hidden_states
         residual = hidden_states

@@ -47,6 +47,53 @@ def _fake_mtp_input_model(num_mtp_tokens=2):
     )
 
 
+def _fake_minimax_m3_indexer_cache_model():
+    attention = SimpleNamespace(
+        is_sparse_layer=True,
+        indexer_head_dim=128,
+    )
+    layer = SimpleNamespace(self_attn=attention)
+    unwrapped = SimpleNamespace(layers=[layer])
+    return SimpleNamespace(
+        unwrap=lambda: unwrapped,
+        num_hidden_layers=1,
+        text_config=SimpleNamespace(index_head_dim=128),
+        model_config=SimpleNamespace(
+            mla_config=None,
+            dtype=torch.float16,
+            hf_config=SimpleNamespace(model_type="minimax_m3_vl"),
+        ),
+    )
+
+
+def test_resolve_decoder_layers_from_language_model_layout():
+    layers = [SimpleNamespace()]
+    model = SimpleNamespace(
+        unwrap=lambda: SimpleNamespace(
+            language_model=SimpleNamespace(layers=layers),
+        )
+    )
+
+    assert _resolve_decoder_layers(model) is layers
+
+
+@patch(
+    "tensor_cast.core.input_generator._resolve_indexer_cache_dtype",
+    return_value=torch.float16,
+)
+def test_minimax_m3_allocates_indexer_cache_without_mla(_mock_cache_dtype):
+    cache_info = get_sparse_attention_indexer_cache_info(
+        _fake_minimax_m3_indexer_cache_model(),
+        num_blocks=34,
+        block_size=128,
+        batch_size=1,
+        total_kv_tokens=4334,
+    )
+
+    assert cache_info["indexer_cache_by_layers"][0].shape == (34, 128, 128)
+    assert cache_info["indexer_cache_per_token"] == 128 * torch.float16.itemsize
+
+
 def _proposal_indices(spec_metadata):
     spec_window = spec_metadata.num_speculative_tokens + 1
     return spec_metadata.logits_indices.view(spec_metadata.num_active_requests, spec_window)[:, -1]
