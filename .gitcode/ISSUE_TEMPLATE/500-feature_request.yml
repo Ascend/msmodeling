@@ -32,6 +32,34 @@ body:
     description: Which user groups will benefit from this feature? How will it improve the experience? | 哪些用户组将从该功能受益？它将如何改进用户体验？
   validations:
     required: true
+- type: textarea
+  id: acceptance
+  attributes:
+    label: Acceptance Criteria | 验收标准
+    description: List observable, testable completion conditions and explicitly excluded scope. | 列出可观察、可测试的完成条件，以及明确不包含的范围。
+    placeholder: |
+      - [ ] Given/When/Then or measurable result | 可度量结果
+      - [ ] Required tests and documentation | 必需测试与文档
+      - Out of scope | 非目标
+  validations:
+    required: true
+- type: textarea
+  id: evidence
+  attributes:
+    label: Evidence and Context | 证据与上下文
+    description: Provide versions, configuration, logs, screenshots, related code or links. Do not include secrets. | 提供版本、配置、日志、截图、相关代码或链接，请勿包含敏感信息。
+  validations:
+    required: false
+- type: dropdown
+  id: ai_mode
+  attributes:
+    label: Preferred AI Collaboration Mode | AI 协作模式
+    options:
+      - Guided / 关键阶段确认
+      - Autonomous within explicit scope / 在明确范围内自动推进
+      - No preference / 无偏好
+  validations:
+    required: false
 - type: checkboxes
   id: contribution
   attributes:

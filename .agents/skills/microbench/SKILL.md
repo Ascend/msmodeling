@@ -1,8 +1,9 @@
 ---
 name: microbench-run-script-generator
-description: Use when generating or updating tools/perf_data_collection/op_replay/<KernelType>_run.py from perf database CSV data, op_mapping.yaml torch_npu_reference.microbench_api, and upstream operator docs/tests across vLLM, vLLM-ascend, OpPlugin, TorchNPU, CANN, or ATB repos
-version: 1.0.0
-source: local-session-analysis
+description: Use when generating or updating tools/perf_data_collection/op_replay/<KernelType>_run.py from perf database CSV data, op_mapping.yaml torch_npu_reference.microbench_api, and upstream operator docs/tests across vLLM, vLLM-ascend, op-plugin, pytorch-npu, CANN, or ATB repos
+metadata:
+  version: 1.0.0
+  source: local-session-analysis
 ---
 
 # Microbench Run Script Generator
@@ -34,7 +35,7 @@ Use local repos first. If the needed repo is missing, clone it next to `msmodeli
 | vLLM | `../vllm` |
 | vLLM-ascend | `../vllm-ascend` |
 | op-plugin | `../op-plugin` |
-| TorchNPU | `../pytorch` |
+| pytorch-npu | `../pytorch` |
 | CANN ops-nn | `../cann-ops-nn` |
 | CANN ops-transformer | `../cann-ops-transformer` |
 | CANN ops-math | `../cann-ops-math` |

@@ -1,8 +1,9 @@
 ---
 name: device-profile-natural-language-importer
 description: 在需要根据自然语言规格为未支持硬件新增或更新 TensorCast DeviceProfile 条目时使用
-version: 0.4.0
-source: local-session-analysis
+metadata:
+  version: 0.4.0
+  source: local-session-analysis
 ---
 
 # 设备画像自然语言导入器

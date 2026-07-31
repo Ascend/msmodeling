@@ -1,6 +1,9 @@
 ---
 name: optix-config
 description: Automates the configuration of msmodeling optix config.toml for parameter optimization. Use when modifying optimizer parameters, setting up VLLM/MindIE target fields, configuring benchmark tools (AISBench/vllm_benchmark), or preparing config.toml for service parameter optimization.
+metadata:
+  version: 1.0.0
+  source: local-session-analysis
 ---
 
 # msmodeling optix 寻优工具配置管理

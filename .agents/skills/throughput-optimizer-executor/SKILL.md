@@ -1,8 +1,9 @@
 ---
 name: throughput-optimizer-executor
 description: Interactively gather parameters for `python -m cli.inference.throughput_optimizer`, generate a deployment simulation command, explain assumptions, ask for execution confirmation, then run the simulation and summarize the best parallel strategy. Use when the user wants to evaluate a model on one or more hardware profiles, compare hardware targets, compare aggregation versus disaggregation versus PD ratio optimization, choose TP/EP/MOE-DP search ranges, or obtain recommended concurrency, throughput, TTFT, and TPOT results from throughput modeling.
-version: 0.1.0
-source: local-session-analysis
+metadata:
+  version: 0.1.0
+  source: local-session-analysis
 ---
 
 # Throughput Optimizer Executor

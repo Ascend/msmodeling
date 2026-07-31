@@ -2,8 +2,8 @@
 name: sig-review
 description: msmodeling SIG 化代码检视技能，覆盖从"请求检视"到"完成移交"的全流程。PR 作者说"请求检视"自动路由 SIG 并指派 chair；检视者说"检视PR {number}"自动分析 diff 并提交意见；说"分析PR {number}的检视意见"自动拉取 diff_comment 评论并逐条分析合理性、给出修改建议；还支持查看待检视列表、查看状态、责任传递、完成移交。适用于 cursor/claude code/opencode/codex 等各类 agent。
 metadata:
-  version: 1.1.0
-  source: sig-workflow
+  version: 2.1.0
+  source: sig-workflow+cli-migration
 ---
 
 # SIG PR 代码检视
@@ -44,13 +44,13 @@ msmodeling 按目录划分为 10 个子 SIG，每个 SIG 有明确的 chair（�
 
 | 工作流 | 触发者 | 触发词 | 命令 |
 |--------|--------|--------|------|
-| **分配检视** | PR 作者 | "请求检视" | `assign` |
-| **查看待检视** | reviewer / chair | "我有哪些待检视PR" | `list` |
-| **查看状态** | 任何人 | "PR 123 状态" | `status` |
-| **代码检视** | reviewer / chair | "检视PR {number}" | `fetch` → `comment` |
-| **责任传递** | 当前 assignee | "转给 XXX" | `handoff` |
-| **完成移交** | reviewer（非 PR 作者） | "完成检视" | `complete` |
-| **分析检视意见** | PR 作者 / 检视者 | "分析PR {number}的检视意见" | `fetch` → 分析 |
+| **分配检视** | PR 作者 | "请求检视" | `gitcode pr view` → `gitcode api` |
+| **查看待检视** | reviewer / chair | "我有哪些待检视PR" | `gitcode pr list` |
+| **查看状态** | 任何人 | "PR 123 状态" | `gitcode pr view --json` |
+| **代码检视** | reviewer / chair | "检视PR {number}" | `gitcode pr diff` → `gitcode pr comment` |
+| **责任传递** | 当前 assignee | "转给 XXX" | `gitcode api` |
+| **完成移交** | reviewer（非 PR 作者） | "完成检视" | `gitcode pr comment "/lgtm"` |
+| **分析检视意见** | PR 作者 / 检视者 | "分析PR {number}的检视意见" | `gitcode pr comments` → 分析 |
 
 **典型流程：**
 
@@ -63,45 +63,37 @@ msmodeling 按目录划分为 10 个子 SIG，每个 SIG 有明确的 chair（�
 
 ## 前置条件
 
-- **GitCode 令牌已配置**（首次使用前执行一次，持久生效）：
+- **gitcode CLI 已安装并认证**：
 
 ```bash
-# 在 msmodeling 仓库根目录执行
-# 方式 1：直接指定令牌（会在 shell 历史留痕）
-python3 .agents/skills/sig-review/scripts/review_api.py auth --token <你的GitCode令牌>
-
-# 方式 2：从 stdin 读取（不在 shell 历史留痕，推荐）
-echo '<你的GitCode令牌>' | python3 .agents/skills/sig-review/scripts/review_api.py auth --stdin
-
-# 方式 3：交互式输入（隐藏输入）
-python3 .agents/skills/sig-review/scripts/review_api.py auth
+gitcode version
+gitcode auth status
 ```
 
-令牌保存在 `~/.config/sig-review/config.json`（权限 600），后续所有命令自动读取，无需设置环境变量。也支持 `GITCODE_TOKEN` 环境变量作为备选。
+认证由 gitcode CLI 全局管理，令牌保存在 git credential store，本技能不单独保存 Token、不直接访问 GitCode API。
 
-- Python 3.8+（脚本仅依赖标准库，零外部依赖）
 - 本地有 msmodeling 仓库克隆（用于阅读完整文件、理解上下文，使检视更深入）
 
 ## 硬性规则：禁止用 git diff 获取 PR 变更
 
-> **PR 代码变更的唯一来源是 `review_api.py fetch` 返回的 `patch` 字段。**
+> **PR 代码变更的唯一来源是 `gitcode pr diff` 返回的 diff。**
 >
 > **禁止执行的命令（用于获取 PR 变更时）：**
 > - `git diff` — 会因本地分支状态、merge、rebase 等因素识别出大量与 PR 无关的变更
 > - `git log -p` / `git show <commit>` — 同样会产生不准确的变更集
 >
-> **原因：** `git diff` 依赖本地工作区状态，经常因分支未更新、merge 残留、rebase 等原因产生大量无关 diff，导致检视准确性下降、token 消耗激增。GitCode API 返回的 `patch` 是服务端权威数据，精确对应 PR 的实际变更。
+> **原因：** `git diff` 依赖本地工作区状态，经常因分支未更新、merge 残留、rebase 等原因产生大量无关 diff，导致检视准确性下降、token 消耗激增。GitCode API 返回的 diff 是服务端权威数据，精确对应 PR 的实际变更。
 >
 > **允许且鼓励的做法：**
-> - 执行 `python3 review_api.py fetch <PR编号>` 获取 PR 变更（`patch` 字段）
+> - 执行 `gitcode pr diff <PR编号> -R <TARGET_REPO>` 获取 PR 变更
 > - 读取本地仓库文件**理解上下文**（如完整函数定义、类结构、导入关系），使检视更深入
 > - `git fetch` / `git pull` 同步本地仓库到最新 master，保证上下文准确
 
 ## 默认策略
 
-- **PR 变更的唯一来源是 `review_api.py fetch` 返回的 `patch` 字段，禁止用 `git diff` 获取变更**
-- 本地代码仓用于理解上下文：需要看完整函数、类定义、调用关系时可读取本地文件，但变更内容以 `patch` 为准
-- 只关注 PR 新增代码（patch 中 `+` 开头的行），不审查未修改的上下文代码
+- **PR 变更的唯一来源是 `gitcode pr diff` 返回的 diff，禁止用 `git diff` 获取变更**
+- 本地代码仓用于理解上下文：需要看完整函数、类定义、调用关系时可读取本地文件，但变更内容以 diff 为准
+- 只关注 PR 新增代码（diff 中 `+` 开头的行），不审查未修改的上下文代码
 - 测试代码（`tests/` 目录下）简单检视：只查明显逻辑错误、断言缺失、边界遗漏，跳过风格和架构问题
 - 忽略纯格式问题（由 pre-commit 负责）
 - 评论措辞委婉，使用"请考虑"、"建议"等表达
@@ -114,13 +106,13 @@ python3 .agents/skills/sig-review/scripts/review_api.py auth
 
 ```bash
 # 先用 --dry-run 预览分析结果（不实际指派）
-python3 review_api.py assign <PR编号> --dry-run
+gitcode pr view <PR编号> -R <TARGET_REPO> --json  # 预览分析结果，不实际指派
 
 # 确认后实际指派
-python3 review_api.py assign <PR编号>
+gitcode api PATCH "/repos/<TARGET_REPO>/pulls/<PR编号>" -f assignee=<chair用户名> && gitcode pr label <PR编号> -R <TARGET_REPO> --add sig:XXX
 ```
 
-### 脚本做的事
+### 做的事
 
 1. 获取 PR 变更文件列表
 2. 逐文件匹配 SIG 目录归属表（最长前缀匹配 + fallback 兜底）
@@ -133,7 +125,7 @@ python3 review_api.py assign <PR编号>
 
 ### 幂等
 
-若 PR 已有 assignee，脚本提示而不重复指派。
+若 PR 已有 assignee，提示而不重复指派。
 
 ### Agent 输出要求
 
@@ -158,7 +150,7 @@ PR #123 分析结果：
 - 已添加标签：sig:ServingCast, sig:Throughput寻优, cross-sig
 ```
 
-有未匹配文件时，脚本会自动尝试 fallback 归类（按顶层目录推断 SIG）。fallback 匹配的文件追加：
+有未匹配文件时，agent 会自动尝试 fallback 归类（按顶层目录推断 SIG）。fallback 匹配的文件追加：
 
 ```
 ℹ️ 有 1 个文件未在 SIG 归属表中，已自动归类：
@@ -184,14 +176,14 @@ PR #123 分析结果：
 
 ## 检视流程
 
-> 以下命令均在技能的 `scripts/` 目录下执行（即 `.agents/skills/sig-review/scripts/`）。
+> 以下命令在仓库根目录或任意目录执行，`-R <TARGET_REPO>` 指定目标仓库。
 
 ### Step 0: 环境准备
 
 **首先检查令牌是否已配置**（运行任意命令即可检测）：
 
 ```bash
-python3 review_api.py list 2>&1 | head -1
+gitcode auth status 2>&1 | head -1
 ```
 
 **如果返回正常 JSON**（PR 列表或空列表）→ 令牌已配置，继续后续步骤。
@@ -204,7 +196,7 @@ python3 review_api.py list 2>&1 | head -1
 >
 > ```bash
 > cd <msmodeling 仓库根>
-> echo '<你的GitCode令牌>' | python3 .agents/skills/sig-review/scripts/review_api.py auth --stdin
+> gitcode auth login  # 交互式配置，令牌保存在 git credential
 > ```
 >
 > 令牌获取方式：GitCode → 设置 → 私人令牌 → 生成新令牌（需要 repo 读写权限）。
@@ -226,33 +218,32 @@ git -C <msmodeling 仓库根> pull --ff-only origin master
 > `<msmodeling 仓库根>` 即技能目录上三级（`.agents/skills/sig-review` 的上三级）。
 > 若有未提交改动，先 `git stash` 再同步，同步后按需 `git stash pop`。
 >
-> **注意：** 此处 `git fetch` / `git pull` 仅用于同步本地代码以提供准确的上下文阅读环境，**不是用来获取 PR 变更**。PR 变更只能通过 Step 1 的 `review_api.py fetch` 获取。**禁止执行 `git diff`。**
+> **注意：** 此处 `git fetch` / `git pull` 仅用于同步本地代码以提供准确的上下文阅读环境，**不是用来获取 PR 变更**。PR 变更只能通过 Step 1 的 `gitcode pr diff` 获取。**禁止执行 `git diff`。**
 
 ### Step 1: 获取 PR 信息
 
 获取 PR 完整信息（详情 + 文件 + diff + 已有评论）：
 
 ```bash
-python3 review_api.py fetch <PR编号>
+gitcode pr view <PR编号> -R <TARGET_REPO> --json
+gitcode pr diff <PR编号> -R <TARGET_REPO>
+gitcode pr comments <PR编号> -R <TARGET_REPO> --json
 ```
 
-返回 JSON 包含：
+数据来源：
 
-| 字段 | 说明 |
-|------|------|
-| `title`, `body`, `author` | PR 标题、描述、作者 |
-| `head_sha` | PR 最新提交 SHA（提交评论时自动使用） |
-| `labels`, `assignees` | PR 标签、审查人 |
-| `diff_lines` | 总变更行数（新增 + 删除） |
-| `files` | 变更文件列表，每个含 `filename`、`status`、`additions`、`deletions`、`patch` |
-| `existing_comments` | 已有检视评论（用于防重复） |
+| 命令 | 提供的信息 |
+|------|----------|
+| `gitcode pr view --json` | PR 标题、描述、作者、head SHA、标签、审查人、变更行数 |
+| `gitcode pr diff` | 变更文件列表和每个文件的 diff（`filename`、`status`、`additions`、`deletions`） |
+| `gitcode pr comments --json` | 已有检视评论（用于防重复） |
 
 ### Step 2: 理解 PR
 
 1. 分析 PR 标题、描述（`body` 字段），理解作者意图和检视重点
 2. 审查变更文件列表，识别变更范围
-3. 逐文件阅读 `patch` 字段，理解每处变更的目的
-4. 如需更深入的上下文（如完整函数定义、类结构、调用关系），可读取本地仓库中对应文件的完整内容——但变更内容以 `patch` 为准
+3. 逐文件阅读 diff，理解每处变更的目的
+4. 如需更深入的上下文（如完整函数定义、类结构、调用关系），可读取本地仓库中对应文件的完整内容——但变更内容以 diff 为准
 5. 测试代码（`tests/` 目录下）简单检视：只查明显逻辑错误、断言缺失、边界遗漏，跳过风格和架构问题
 
 **大 PR 策略（diff_lines > 500）：**
@@ -305,7 +296,7 @@ python3 review_api.py fetch <PR编号>
 **在提交每条检视意见前，快速检查以下 5 点：**
 
 1. **问题确实存在**：确认指出的问题不是误报，能在 diff 中找到具体代码
-2. **行号准确**：`--line` 对应的行必须是 diff 中新增或修改的行（`+` 开头），**绝对不要提交在未修改的上下文行上**
+2. **行号准确**：`--position` 对应的行必须是 diff 中新增或修改的行（`+` 开头），**绝对不要提交在未修改的上下文行上**
 3. **建议可行**：代码建议在实际场景中可执行
 4. **语句通顺**：评论语句流畅、表达清晰
 5. **措辞得体**：使用委婉表达，避免武断措辞
@@ -317,22 +308,22 @@ python3 review_api.py fetch <PR编号>
 **短内容（不含代码块）直接传递：**
 
 ```bash
-python3 review_api.py comment <PR编号> \
-  --file "path/to/file.py" \
-  --line 42 \
-  --category "逻辑缺陷" \
-  --content "缺少最大重试次数限制，可能导致无限重试，建议添加重试次数上限。"
+gitcode pr comment <PR编号> -R <TARGET_REPO> \
+  --path "path/to/file.py" \
+  --position 42 \
+  # category 逻辑缺陷 (in comment body prefix) \
+  --body "【逻辑缺陷】缺少最大重试次数限制，可能导致无限重试，建议添加重试次数上限。"
 ```
 
 **含代码块的多行内容（推荐方式）：**
 
-将评论内容写入临时文件，再用 `--content-file` 提交。临时文件请写入系统临时目录，提交后删除：
+将评论内容写入临时文件，再用 `--body-file` 提交。临时文件请写入系统临时目录，提交后删除：
 
 ```bash
 # 1. 获取系统临时目录（跨平台）
 TMPDIR=$(python3 -c "import tempfile; print(tempfile.gettempdir())")
 
-# 2. 写入评论内容（注意：content 不需要包含【review】【类别】前缀，脚本会自动添加）
+# 2. 写入评论内容（agent 手动添加【review】【类别】前缀）
 cat > "$TMPDIR/review_123.md" << 'EOF'
 缺少最大重试次数限制，可能导致无限重试，建议添加重试次数上限。代码建议：
 
@@ -349,49 +340,61 @@ for attempt in range(max_retries):
 EOF
 
 # 3. 提交评论
-python3 review_api.py comment 123 \
-  --file "path/to/file.py" \
-  --line 42 \
-  --category "逻辑缺陷" \
-  --content-file "$TMPDIR/review_123.md"
+gitcode pr comment 123 -R <TARGET_REPO> \
+  --path "path/to/file.py" \
+  --position 42 \
+  # category 逻辑缺陷 (in comment body prefix) \
+  --body-file "$TMPDIR/review_123.md"
 
 # 4. 删除临时文件
 rm -f "$TMPDIR/review_123.md"
 ```
 
-> **重要**：`--content` / `--content-file` 提供的是评论正文，脚本会自动添加 `【review】【类别】` 前缀。不要在内容中重复包含前缀。
+> **重要**：agent 在 `--body` / `--body-file` 的评论正文中手动添加 `【review】【类别】` 前缀。
 
-> **自动移交**：每提交一条检视意见，脚本会自动将 PR 责任人移回 PR 作者。作者收到 GitCode 站内信通知"有新的检视意见需要处理"。SLA 24h 计时清零，等作者修改后再次"请求检视"时重新计时。
+> **自动移交**：提交行内评论后，可通过 `gitcode api` 将 PR 责任人移回 PR 作者。作者收到 GitCode 站内信通知"有新的检视意见需要处理"。SLA 24h 计时清零，等作者修改后再次"请求检视"时重新计时。
 
 **撤回评论（如果发现误报）：**
 
 ```bash
 # comment_id 是提交评论时返回的 comment_id 字段（数字 ID）
-python3 review_api.py withdraw <comment_id>
+gitcode api DELETE "/repos/<TARGET_REPO>/pulls/comments/<comment_id>"
 ```
 
 ### Step 6: 完成检视
 
 检视意见全部提交后，reviewer 根据是否有修改意见选择完成方式：
 
-**通过（无修改意见或意见已解决）→ 指派 approver：**
+**通过（无修改意见或意见已解决）→ 提交检视摘要 + 评论 `/lgtm`：**
 
 ```bash
-python3 review_api.py complete <PR编号> --to <approver用户名> --event approved --body "..."
+# 1. 提交检视摘要（三项评价），写入临时文件
+cat > "$TMPDIR/verdict.md" << 'EOF'
+1. 个人理解：本 PR 为 attention 层新增了 KV cache 压缩支持，目的是降低长序列场景的显存占用。
+2. 功能评价：压缩逻辑正确，与现有 attention 接口兼容。建议补充 L=0 边界场景的测试。
+3. 代码质量：命名清晰，异常处理完整。compress_ratio 提取为常量更好。
+EOF
+
+# 2. 提交检视摘要
+gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/verdict.md"
+
+# 3. 评论 /lgtm，ascend-robot 自动打 lgtm 标签
+gitcode pr comment <PR编号> -R <TARGET_REPO> --body "/lgtm"
 ```
 
-**有修改意见 → 移交回作者修改（不指派 approver）：**
+**有修改意见 → 提交检视摘要但不评论 `/lgtm`：**
 
 ```bash
-python3 review_api.py complete <PR编号> --event comment --body "..."
+gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/verdict.md"
 ```
 
-> `--event approved` 时 `--to` 必填（指定 approver），approver 收到站内信通知。
-> `--event comment` 时不需要 `--to`，PR 自动转回给作者修改，作者收到站内信通知。
+不评论 `/lgtm`，PR 保持待修改状态。作者看到行内意见后修改，修改完成后再次请求检视。
 
-> **注意**：`complete` 是 reviewer 的动作，不是 PR 作者的动作。PR 作者只负责 `assign`，reviewer 负责检视和 `complete`。
+> **`/lgtm` 机制**：reviewer 评论 `/lgtm` → ascend-robot 自动打 `lgtm` 标签。approver 评论 `/approve` → robot 打 `approved` 标签。两个标签齐了 PR 才允许合入。只有 SIG 授权的 chair/reviewer 有权评论 `/lgtm`，approver 有权评论 `/approve`。
 
-**检视摘要（--body）必须包含 SIG 规范要求的三项评价：**
+> **注意**：评论 `/lgtm` 是 reviewer 的动作，不是 PR 作者的动作。PR 作者只负责请求检视，reviewer 负责检视和评论 `/lgtm`。
+
+**检视摘要必须包含 SIG 规范要求的三项评价：**
 
 根据 SIG 组织规范，每次检视须显式写出以下三项，缺一不可，否则视为未检视：
 
@@ -399,33 +402,19 @@ python3 review_api.py complete <PR编号> --event comment --body "..."
 2. **功能 / 业务层面评价**：是否正确实现预期功能、是否引入业务风险、是否存在更优方案
 3. **编码与代码质量评价**：命名 / 结构 / 可读性、边界与异常处理、性能与资源占用
 
-示例：
+**如果只需提交阶段性检视结论但不完成检视：**
 
 ```bash
-python3 review_api.py complete 123 --to lutean --event approved --body-file "$TMPDIR/verdict.md"
+gitcode pr comment <PR编号> -R <TARGET_REPO> --body "阶段性意见：..."
 ```
 
-其中 `verdict.md` 内容：
-
-```
-1. 个人理解：本 PR 为 attention 层新增了 KV cache 压缩支持，目的是降低长序列场景的显存占用。
-2. 功能评价：压缩逻辑正确，与现有 attention 接口兼容。建议补充 L=0 边界场景的测试。
-3. 代码质量：命名清晰，异常处理完整。compress_ratio 提取为常量更好。
-```
-
-**如果只需提交检视结论但不移交 approver**（如中途提交阶段性意见）：
+**如果需要转给其他 reviewer（责任传递）：**
 
 ```bash
-python3 review_api.py verdict <PR编号> --event comment --body "阶段性意见：..."
+gitcode api PATCH "/repos/<TARGET_REPO>/pulls/<PR编号>" -f assignee=<reviewer用户名>
 ```
 
-**如果需要转给其他 reviewer**（责任传递）：
-
-```bash
-python3 review_api.py handoff <PR编号> --to <reviewer用户名>
-```
-
-`handoff` 移除自己的 assignee 并指派新人，GitCode 自动通知新人。
+修改 assignee 移除自己并指派新人，GitCode 自动通知新人。
 
 ## 分析检视意见
 
@@ -434,14 +423,14 @@ python3 review_api.py handoff <PR编号> --to <reviewer用户名>
 ### 命令
 
 ```bash
-python3 review_api.py fetch <PR编号>
+gitcode pr diff <PR编号> -R <TARGET_REPO> && gitcode pr view <PR编号> -R <TARGET_REPO> --json && gitcode pr comments <PR编号> -R <TARGET_REPO> --json
 ```
 
-从返回的 `existing_comments` 中筛选 `comment_type == "diff_comment"` 的评论。
+从 `gitcode pr comments` 返回的评论列表中筛选行级检视意见。
 
 ### 分析流程
 
-1. **拉取评论**：执行 `fetch` 获取 PR 完整信息，从 `existing_comments` 中筛选 `diff_comment` 类型
+1. **拉取评论**：执行 `gitcode pr comments` 获取 PR 评论列表，筛选行级检视意见
 2. **去重**：多位检视者可能提出相同问题，按问题实质（而非措辞）去重，合并为独立问题
 3. **逐条分析**：对每个独立问题，结合本地代码仓验证：
    - **问题简介**：一句话概括评论指出的具体问题
@@ -472,7 +461,7 @@ python3 review_api.py fetch <PR编号>
 ```
 | # | 问题 | 重复数 | 合理性 | 优先级 | 涉及文件 |
 |---|------|--------|--------|--------|----------|
-| 1 | ... | 3 | ✅ | 高 | review_api.py |
+| 1 | ... | 3 | ✅ | 高 | (file path) |
 ```
 
 ### Agent 行为要求
@@ -481,11 +470,11 @@ python3 review_api.py fetch <PR编号>
 - **去重时按问题实质**：不同检视者可能用不同措辞描述同一问题，应合并为一个独立问题，在"重复数"列标注
 - **不合理的评论也要说明原因**：如果评论是误报，说明为什么是误报，引用代码证据
 - **改法要具体可操作**：指明文件名、函数名、行号，给出修改后的关键代码片段
-- **向用户报告时使用自然语言**，不暴露命令名、脚本文件名等技术细节
+- **向用户报告时使用自然语言**，不暴露命令名等技术细节
 
 ## 评论格式规范
 
-脚本自动将提交内容格式化为：
+agent 提交评论时应格式化为：
 
 ```
 【review】【类别标签】评论正文
@@ -531,14 +520,14 @@ for attempt in range(max_retries):
 
 ## 防重复机制
 
-Step 1 获取的 `existing_comments` 包含该 PR 已有的所有评论。生成新意见前必须：
+Step 1 通过 `gitcode pr comments` 获取的评论列表 包含该 PR 已有的所有评论。生成新意见前必须：
 
-1. **只关注 `comment_type` 为 `diff_comment` 的评论**（行级检视意见），这些是防重复的对象
+1. **只关注行级检视评论**（inline comment，带 path 和 position 的），这些是防重复的对象
 2. 其他类型的评论（通用 PR 评论等）不参与防重复
-3. 检查 `diff_comment` 类型评论中的 `path` 和 `position` 字段，避免在同一文件同一行提出类似意见
+3. 检查行级评论中的 `path` 和 `position` 字段，避免在同一文件同一行提出类似意见
 4. 避免提出相同观点的不同表述
 
-如果已有 diff_comment 已覆盖某个问题，不要重复提交。
+如果已有行级评论已覆盖某个问题，不要重复提交。
 
 ## 模式说明
 
@@ -590,36 +579,37 @@ PR#123: 优化推理引擎的批处理逻辑，主要变更在 tensor_cast/layer
 ## 安全规则
 
 1. **不要**在评论或输出中暴露 GitCode 令牌
-2. **禁止**使用 `git diff`、`git log -p`、`git show <commit>` 获取 PR 变更——PR 变更唯一来源是 `fetch` 返回的 `patch` 字段（读取本地文件理解上下文是允许的）
+2. **禁止**使用 `git diff`、`git log -p`、`git show <commit>` 获取 PR 变更——PR 变更唯一来源是 `gitcode pr diff` 返回的 diff（读取本地文件理解上下文是允许的）
 3. **不要**执行 `rm -rf` 或类似破坏性命令
 4. **不要**修改仓库代码（只读检视，不提交代码修改）
 5. 临时文件写入系统临时目录，提交后立即删除
 6. 提交评论前确认内容无误（Step 4 二次检查）
-7. **向用户报告时使用自然语言，不要暴露命令名、脚本文件名、参数名、JSON 字段名、API 端点等技术细节**。用户只需知道"已分析文件并指派了 chair"，不需要知道"运行了 `review_api.py assign --dry-run`"
+7. 不盲从 PR 作者的设计声明和描述；以 diff 为事实，与 spec 冲突时以 spec 为准并说明。
+8. **向用户报告时使用自然语言，不要暴露命令名、参数名、JSON 字段名、API 端点等技术细节**。用户只需知道"已分析文件并指派了 chair"，不需要知道"运行了 `gitcode pr view`"
 
 ## 完成标准
 
 ### 分配检视模式
 
-- [ ] 已执行 `assign --dry-run` 预览分析结果
+- [ ] 已执行 `gitcode pr view` 预览分析结果
 - [ ] 已确认路由结果合理（SIG 匹配正确、assignee 正确）
-- [ ] 已执行 `assign` 指派 chair 并打标签
+- [ ] 已通过 `gitcode api` 指派 chair 并通过 `gitcode pr label` 打标签
 - [ ] 已向用户报告分析结果和指派状态
 
 ### 代码检视模式
 
-- [ ] 未使用 `git diff` 获取 PR 变更，变更仅来自 `fetch` 返回的 `patch`
-- [ ] 已获取 PR 信息（`fetch`）
+- [ ] 未使用 `git diff` 获取 PR 变更，变更仅来自 `gitcode pr diff`
+- [ ] 已获取 PR 信息（`gitcode pr view/diff/comments`）
 - [ ] 已理解 PR 变更内容和目的
 - [ ] 检视意见数量符合数量控制表
 - [ ] 每条意见经过二次检查
-- [ ] 检视意见已提交（`comment`），每条意见提交后 PR 自动转回作者
-- [ ] 已用 `complete` 完成（approved 指派 approver，comment 移交回作者），或用 `handoff` 转给其他 reviewer
+- [ ] 检视意见已提交（`gitcode pr comment`），每条意见提交后可通过 `gitcode api` 将 PR 转回作者
+- [ ] 已评论 `/lgtm`（通过时）或已提交检视摘要但不评论 `/lgtm`（有修改意见时），或通过 `gitcode api` 转给其他 reviewer
 - [ ] 输出检视摘要：检视了哪些文件，提出了几个意见，关键发现是什么
 
 ### 分析检视意见模式
 
-- [ ] 已通过 `fetch` 拉取 PR 的 diff_comment 评论
+- [ ] 已通过 `gitcode pr comments` 拉取 PR 的评论
 - [ ] 已对重复问题去重，合并为独立问题
 - [ ] 每个问题已结合本地代码验证合理性
 - [ ] 不合理的评论已说明原因并引用代码证据

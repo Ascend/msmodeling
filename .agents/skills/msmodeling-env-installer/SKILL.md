@@ -1,8 +1,9 @@
 ---
 name: msmodeling-env-installer
 description: Install and verify the msmodeling development environment. Use when the user explicitly asks to install msmodeling dependencies, set up this repository, create a uv venv with `uv sync`, install this repository's `requirements.txt` (legacy fallback), set project `PYTHONPATH`, or configure `HF_ENDPOINT`; if the user only says to install an environment, ask whether they mean msmodeling dependencies before proceeding.
-version: 0.3.0
-source: local-session-analysis
+metadata:
+  version: 0.3.0
+  source: local-session-analysis
 ---
 
 # msModeling 环境安装器
@@ -86,7 +87,8 @@ source: local-session-analysis
    - `uv pip check`（在已 sync 的项目环境中）。
    - `uv run msmodeling --help` 或 `uv run python -m cli.inference.text_generate --help`。
    - 已有环境 fallback 使用 `python -m pip check`。
-10. 向用户报告激活命令、`uv run` 用法、安装结果、验证结果和后续建议。
+10. 安装 pre-commit gitleaks 本地二进制：`gitleaks-offline-scan` hook 用 `language: system`，pre-commit 不自动安装。执行 `python scripts/ai/install_gitleaks.py`（幂等、平台感知、固定版本 8.21.2，自动维护 `.gitignore`）。
+11. 向用户报告激活命令、`uv run` 用法、安装结果、验证结果和后续建议。
 
 ## 命令模板
 
@@ -157,6 +159,14 @@ $env:HF_ENDPOINT = "https://hf-mirror.com"
 | `scripts/install-current-project-deps.ps1` | Windows PowerShell |
 | `scripts/install-current-project-deps.sh` | Linux/macOS/WSL/Git Bash |
 
+pre-commit gitleaks 本地二进制（仓库级，跨平台）：
+
+```bash
+python scripts/ai/install_gitleaks.py          # 幂等安装，缺失才下载
+python scripts/ai/install_gitleaks.py --json    # 机器可读输出
+python scripts/ai/install_gitleaks.py --force   # 强制重装
+```
+
 PowerShell 参数：
 
 | 参数 | 说明 |
@@ -211,3 +221,4 @@ bash ./.agents/skills/msmodeling-env-installer/scripts/install-current-project-d
 - `uv pip check` 或 `uv run msmodeling --help` 已执行并报告结果。
 - 输出用户后续可直接执行的 `uv run` 或 `source .venv/bin/activate` 命令。
 - 明确说明当前会话是否设置了 `PYTHONPATH` 或 `HF_ENDPOINT`。
+- pre-commit gitleaks 本地二进制已就绪（`python scripts/ai/install_gitleaks.py` 通过）。

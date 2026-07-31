@@ -41,6 +41,24 @@ body:
       - Follow-up considerations, e.g., impacts on existing systems, security hardening, performance optimization, etc. | 后续需考虑的问题，如对现有系统的影响、安全加固、性能等
   validations:
     required: true
+- type: textarea
+  attributes:
+    label: Alternatives and Trade-offs | 备选方案与权衡
+    description: Explain rejected alternatives and why the proposed solution is preferred. | 说明未采用的方案，以及选择当前方案的原因。
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: Risks, Rollback and Compatibility | 风险、回滚与兼容性
+    description: Cover public behavior, data, security, performance, migration and rollback. | 覆盖公共行为、数据、安全、性能、迁移和回滚。
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: Acceptance and Audit Evidence | 验收与审计证据
+    description: Define testable completion criteria and the Issue/PR evidence required for review. | 定义可测试的完成标准和评审所需的 Issue/PR 证据。
+  validations:
+    required: true
 - type: markdown
   attributes:
     value: |

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "canonical_repository": "Ascend/msmodeling",
+  "default_base_branch": "master",
+  "source_repository": {
+    "strategy": "git-remote",
+    "default_remote": "origin"
+  },
+  "upstream_remote": "upstream",
+  "operation_target": {
+    "read_default": "canonical",
+    "write_requires_explicit_repository": true
+  },
+  "ci": {
+    "provider": "openLiBing",
+    "required_for_canonical_pull_request": true,
+    "fork_staging_pull_request": "not-applicable"
+  }
+}

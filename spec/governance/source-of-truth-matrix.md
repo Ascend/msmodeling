@@ -72,16 +72,21 @@ AI agent 在执行任务时，应按以下顺序确认事实：
 
 ```text
 spec/
+├── README.md                    # 规范入口与任务路由
 ├── governance/                 # 治理规则
-│   ├── source-of-truth-matrix.md   # 本文件
-│   └── ai-collaboration.md         # AI 协作规范（后续补齐）
-├── foundations/                # 基础规范（不变量，后续补齐）
-├── workflows/                  # 工作流（动态流程，后续补齐）
+│   ├── source-of-truth-matrix.md
+│   └── ai-collaboration.md
+├── foundations/                # AI 执行不变量
+│   ├── ai-execution-policy.md
+│   ├── audit-record-contract.md
+│   └── gitcode-cli-contract.md
+└── workflows/                  # 可独立执行、可组合的工作流
 │   ├── issue-workflow.md
+│   ├── issue-review-workflow.md
+│   ├── development-workflow.md
 │   ├── pr-workflow.md
-│   └── review-workflow.md
-└── delivery/                   # 交付（后续补齐）
-    └── release-process.md
+│   ├── review-workflow.md
+│   └── ci-recovery-workflow.md
 ```
 
 **新增 spec 文件的原则**：

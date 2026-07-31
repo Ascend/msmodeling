@@ -1,14 +1,15 @@
 # msmodeling skills
 
-本目录存放 msmodeling 项目专用的 Claude Code skills，用于把常见性能建模、设备建模和 profiling 辅助任务沉淀为可复用的执行流程。
-
-> **使用提示**：如需在 Claude Code 中启用这些 skills，请将本目录 `.agents/skills` 完整复制到 `.claude/skills`。
+本目录存放 msmodeling 的 AI Native Skills。它们同时服务于通用 AI 客户端，不再要求复制到客户端专属目录。
+仓库级路由由 [AGENTS.md](../AGENTS.md) 负责，强制规则位于 [spec/](../spec/README.md)。
 >
 > **AI agents 必读**：请先阅读项目根目录的 [AGENTS.md](../AGENTS.md)，了解项目规范和 Skill 体系。
 
 ## Table of Contents
 
 - [msmodeling skills](#msmodeling-skills)
+- [AI Native 工作流](#ai-native-工作流)
+- [GitCode CLI 能力](#gitcode-cli-能力)
 - [msmodeling-env-installer](#msmodeling-env-installer)
 - [model-adaptation](#model-adaptation)
 - [device_config](#device_config)
@@ -18,6 +19,39 @@
 - [throughput-optimizer-executor](#throughput-optimizer-executor)
 - [throughput-optimizer-explainer](#throughput-optimizer-explainer)
 - [sig-review](#sig-review)
+
+## AI Native 工作流
+
+工作流 Skill 面向完整作业目标，组合 GitCode CLI、领域 Skill、本地 Git、测试和审计记录；被组合的 Skill
+仍可独立触发。
+
+| Skill | 场景 |
+|---|---|
+| `msmodeling-issue-draft` | 从模糊描述补齐事实、生成 Issue 草稿，并在确认后通过 CLI 提交 |
+| `msmodeling-my-issues-review` | 查询当前用户负责的开放 Issue，输出接受、拒绝或需补充信息的完整结论 |
+| `msmodeling-issue-delivery` | 将指定 Issue 编排至需求分析、设计、开发、Draft PR、CI 和 ready-for-review |
+| `sig-review` | SIG 路由、深度检视、CLI 行内评论、风险评级和合入建议 |
+| `msmodeling-ci-recovery` | 读取 openLiBing 结果、定位日志、修复、复验并循环至通过或明确阻塞 |
+| `msmodeling-review-feedback` | 分析和处理 PR 检视意见，验证修改并通过 CLI 回复 |
+
+默认是逐阶段确认的 `guided` 模式。用户明确给出仓库、Issue、分支和目标范围后，可切换为
+`autonomous`；安全、权限、门禁绕过、强制推送、审批和合并仍是硬停止点。
+
+## GitCode CLI 能力
+
+所有 GitCode Issue、PR、评论、评审、标签和状态操作必须调用 `gitcode` CLI。启动远端任务前运行：
+
+```bash
+gitcode version
+gitcode auth status
+gitcode schema "<required command>"
+python scripts/ai/check_gitcode_cli.py
+python scripts/ai/resolve_repository_context.py --json
+```
+
+canonical repository 为 `Ascend/msmodeling`，默认分支为 `master`；source repository 从 Git remote
+动态识别。所有写操作显式指定 operation target。canonical PR 的 openLiBing 流水线由
+`gitcode-pipeline-analyzer` 分析。上游 Skills 版本与本仓适配记录在 `.agents/gitcode-skills.lock.json`。
 
 ## msmodeling-env-installer
 
@@ -296,68 +330,44 @@ Microbench Run Script 生成器——从 profiling CSV 生成可在 NPU 上重�
 
 ## sig-review
 
-GitCode PR 检视技能——支持三种工作流：(1) PR 作者推送后说"请求检视"，自动分析变更文件归属 SIG 并指派 chair；(2) reviewer 收到检视通知后说"检视PR {number}"，自动分析 diff 并提交结构化检视意见；(3) 收到检视意见后说"分析PR {number}的检视意见"，自动拉取 diff_comment 评论并逐条分析合理性、给出修改建议。全程自然语言交互，无需安装任何外部工具。
+GitCode CLI 驱动的 SIG 检视技能。它保留目录到 SIG 的路由、多角色检查清单和 reviewer/approver 建议，
+并将所有远端操作统一收敛到 `gitcode` CLI。
 
 ### What it does
 
 引导 AI agent 完成端到端的 PR 代码检视：
 
-1. **获取 PR 信息**：一条命令获取 PR 详情、变更文件、diff、已有评论。
-2. **理解 PR**：分析标题、描述、变更范围，以 diff 为最关键依据。
-3. **生成检视意见**：按类别（逻辑缺陷 / 性能 / 安全 / 架构 / 规范）和数量控制生成结构化意见。
-4. **二次检查**：提交前检查问题准确性、行号准确性、建议可行性、措辞得体。
-5. **提交检视意见**：通过 GitCode API 提交评论，自动添加 `【review】【类别】` 前缀。
-6. **完成检视**：提交检视结论，通过则指派 approver，有意见则转回作者修改。
+1. **读取远端事实**：通过 `gitcode pr view/diff/comments` 获取 PR、权威 diff 和已有评论。
+2. **SIG 路由**：用 `sig_ownership.json` 最长前缀匹配建议 reviewer/approver。
+3. **多角色分析**：执行架构、正确性、领域、性能、测试、安全、文档和 CI 检查。
+4. **二次核验**：确认问题由本 PR 引入、影响成立、建议可执行、目标行属于新增或修改行。
+5. **提交意见**：确认后通过 `gitcode pr comment --path --position` 写入行内评论。
+6. **总体结论**：通过 `gitcode pr review` 提交风险与合入建议，不自动审批或合并。
 
 ### File layout
 
 | File | Purpose |
 | ---- | ------- |
 | `sig-review/SKILL.md` | Skill 定义、分配检视流程、代码检视流程、评论格式规范 |
-| `sig-review/scripts/review_api.py` | 自包含 GitCode API 工具（零外部依赖，仅 Python 标准库），含 auth/fetch/assign/list/status/comment/handoff/complete/verdict/comments/withdraw 共 11 个命令 |
 | `sig-review/sig_ownership.json` | SIG 目录归属映射表（10 个 SIG 的路径、chair、reviewer、approver） |
 | `sig-review/ref/review-checklist.md` | 检视质量标准、什么该 / 不该检视、msmodeling 专项关注 |
 
 ### Quick start
 
-**首次使用前配置令牌**（一次配置，持久生效）：
-
 ```bash
-python3 .agents/skills/sig-review/scripts/review_api.py auth --token <你的GitCode令牌>
-# 或从 stdin 读取（不在 shell 历史留痕）：
-echo '<你的令牌>' | python3 .agents/skills/sig-review/scripts/review_api.py auth --stdin
-```
-
-令牌保存在 `~/.config/sig-review/config.json`（权限 600），后续所有命令自动读取。
-
-PR 作者推送代码后，对 agent 说"请求检视"即可触发分配流程。Agent 自动分析变更文件归属哪个 SIG，指派对应 chair 并打标签。
-
-reviewer 收到检视通知后，对 agent 说"我有哪些待检视PR"即可列出任务，然后说"检视PR 123"开始检视。
-
-```bash
-# 分配检视（PR 作者用）
-python3 .agents/skills/sig-review/scripts/review_api.py assign 123 --dry-run  # 预览
-python3 .agents/skills/sig-review/scripts/review_api.py assign 123            # 指派
-
-# 查看待检视 PR（reviewer 用）
-python3 .agents/skills/sig-review/scripts/review_api.py list
-
-# 代码检视（reviewer 用）
-python3 .agents/skills/sig-review/scripts/review_api.py fetch 123
-
-# 提交检视意见
-python3 .agents/skills/sig-review/scripts/review_api.py comment 123 \
-  --file tensor_cast/core/config.py --line 42 --category 逻辑缺陷 \
-  --content "缺少空指针检查"
-
-# 完成检视，移交给 approver
-python3 .agents/skills/sig-review/scripts/review_api.py complete 123 --to lutean --event approved
+gitcode auth status
+gitcode pr view 123 -R Ascend/msmodeling --json
+gitcode pr diff 123 -R Ascend/msmodeling
+gitcode pr comments 123 -R Ascend/msmodeling --json
+gitcode pr comment 123 -R Ascend/msmodeling \
+  --path tensor_cast/core/config.py --position 42 \
+  --body "【review】【逻辑缺陷】缺少空值处理。"
 ```
 
 ### Key constraints
 
-- 脚本仅依赖 Python 标准库，零外部依赖，适用于任何 agent 环境。
-- PR 变更唯一来源是 GitCode API 的 `patch` 字段，禁止用 `git diff` 获取变更。
-- `assign` 命令使用最长前缀匹配路由文件到 SIG，支持 chair==author 自动改指派 reviewer、跨 SIG 双签、根目录文件标记架构共审。
-- 检视意见自动添加 `【review】【类别】` 前缀，`--content` 只需提供正文。
+- PR 变更的远端权威来源是 `gitcode pr diff`；本地工作树只用于补充上下文。
+- `--position` 是新版本文件的实际行号，不是 unified diff 偏移量。
+- SIG 路由使用最长前缀匹配；跨 SIG 变更需要列出所有相关 SIG。
+- 多角色分析不冒充多个独立评审主体。
 - 评论必须提交在 diff 中新增或修改的行上，不能提交在未修改的上下文行上。

@@ -98,7 +98,7 @@ git remote add upstream https://gitcode.com/Ascend/msmodeling.git
 git fetch upstream
 ```
 
-> **注意**：请始终通过 Fork 仓库提交 PR，不要直接推送到上游主分支。
+> **注意**：外部贡献者默认通过 Fork 提交 PR；具备权限的维护者也可在上游功能分支开发。任何角色都不得直接推送到 `master`。
 
 ### 3. 搭建开发环境
 
@@ -176,19 +176,34 @@ git commit -s -m "feat(tensor_cast): add new operator support
 
 ```bash
 git push origin feat/your-feature-name
+gitcode pr create \
+  -R Ascend/msmodeling \
+  --fork YOUR_USERNAME/msmodeling \
+  --base master \
+  --head feat/your-feature-name \
+  --title "feat(scope): summary" \
+  --body-file pr-body.md \
+  --draft
 ```
 
-在 GitCode 页面创建 PR，PR 应遵循 [PR 规范](#pr-规范)。
+AI 或自动化创建 PR、添加评论、设置标签和提交评审时必须使用 `gitcode` CLI。人工可使用 GitCode 页面，
+但 PR 仍应遵循 [PR 规范](#pr-规范)。创建前可运行 `gitcode schema "pr create"` 核对当前 CLI 参数。
+有主仓分支写权限时可以省略 `--fork`，但仍不得直接在 `master` 开发。
 
-创建 PR 后，对 AI agent 说"请求检视"，自动分析变更文件归属哪个 SIG 并指派对应 chair（详见 `.agents/skills/sig-review/SKILL.md`）。
+创建 PR 后，对 AI agent 说“请求检视”，即可按 SIG 路由执行深度检视；经确认后，AI 使用 CLI 提交
+准确的行内评论和总体结论（详见 `.agents/skills/sig-review/SKILL.md`）。
 
 ### 8. 门禁流水线与 CI
 
-PR 提交后，会自动触发 CI 门禁流水线。**如果门禁流水线有报错**，例如：
+PR 提交后，openLiBing 会在 PR 评论区反馈门禁流水线。AI 必须通过 `gitcode pr comments` 读取远端状态，
+并使用 `gitcode-pipeline-analyzer` 获取和分析日志。**如果门禁流水线有报错**，例如：
 
 - **pre-commit 检查失败**：请查看 CI 日志，定位失败的具体检查项（如 ruff lint error、typo 等），在本地修复后重新推送。
 - **UT 失败**：请查看 CI 日志中的测试报告，找到失败的用例及错误堆栈，在本地复现并修复。
 - **其他门禁失败**：认真阅读日志输出，定位根因，解决问题后再次推送。
+
+修复后在本地复验、推送新 commit，并重复监控下一轮流水线。每轮应在 PR 留下任务链接、失败签名、根因、
+修复 commit 和验证结果；无法获得新证据或需要绕过门禁时必须停止。
 
 > ⚠️ **门禁必须全部通过后 PR 才能进入评审流程。** 如有疑问，可在 PR 评论区求助。
 
@@ -350,7 +365,15 @@ msModeling 致力于打造**高质量、高可靠、可持续演进**的开源�
 
 ## AI 辅助编程
 
-我们欢迎开发者使用 AI 工具（如 Claude Code、Copilot 等）辅助编程，但请注意：
+本仓提供跨 AI 客户端的统一入口 [AGENTS.md](AGENTS.md)、强制规范 [spec/](spec/README.md) 和
+[AI Native 工作流指南](docs/ai-native/workflow-guide.md)。开发者可以独立触发 Issue、开发、PR 检视、
+CI 恢复等场景，也可以让工作流 Skill 编排完整交付。
+
+- 默认使用 `guided` 模式，在关键阶段由开发者确认；`autonomous` 必须明确限定仓库、Issue、分支和目标。
+- AI 对 GitCode Issue、PR、评论、评审、标签和状态的操作必须使用 `gitcode` CLI。
+- 关键决策、验证证据、暂停点和恢复点必须记录到 Issue/PR，且不得包含 Token 或本地敏感信息。
+- 开发者可随时暂停、修改计划、接管或恢复；审批、合并、强推、关闭 Issue 和门禁绕过不会被自动执行。
+- 交互式流程不依赖 Superpowers；需求与设计使用仓库已有的 `spec/`、RFC 和 design 体系，不要求 OpenSpec。
 
 - **与 AI Agent 协作产出的代码，必须由开发者本人进行人工审视**
 - 开发者须**对代码质量负全责**，做好把关

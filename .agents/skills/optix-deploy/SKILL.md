@@ -1,6 +1,9 @@
 ---
 name: optix-deploy
 description: 当用户需要部署 msmodeling optix 服务化自动寻优工具时使用。负责安装与验证。
+metadata:
+  version: 1.0.0
+  source: local-session-analysis
 ---
 
 # 服务化参数自动寻优部署

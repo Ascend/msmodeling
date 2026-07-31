@@ -170,6 +170,20 @@ msModeling 提供模型推理性能仿真、服务化性能仿真和服务化实
 
 欢迎参与项目贡献！详细的贡献流程、代码规范、Commit 规范、测试要求等，请参见《[CONTRIBUTING.md](CONTRIBUTING.md)》。如有疑问，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues)。
 
+### AI Native 开发
+
+本仓支持由 AI 辅助完成 Issue 草拟与评审、Issue 到 PR/CI 的端到端交付、PR 多角色与行内检视，以及
+openLiBing CI 故障闭环。AI 的统一入口是 [AGENTS.md](AGENTS.md)，工作流说明与业务示例见
+[AI Native 开发指南](docs/ai-native/README.md)。
+
+- GitCode 远端操作统一使用 `gitcode` CLI；
+- 默认逐阶段确认，也可对限定范围显式授权自动推进；
+- 关键决策和验证证据记录在 Issue/PR 评论中；
+- 人工可随时暂停、修改计划、接管或恢复；
+- AI 不自动审批、合并、强推或绕过门禁。
+
+示例：`实现 Issue 123，先给出需求分析和方案，每个关键阶段让我确认，并在 Issue/PR 留下审计记录。`
+
 ## ⚖️ 相关说明
 
 🔹 《[版本说明](https://gitcode.com/Ascend/msmodeling/releases)》<br>

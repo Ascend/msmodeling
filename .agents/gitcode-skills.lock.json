@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "repository": "gitcode-cli/skills",
+  "source_commit": "6f0d8b0eb2bc3fb6f4c112a90432f3fcbf491d75",
+  "minimum_gitcode_cli": "0.8.0",
+  "canonical_repository": "Ascend/msmodeling",
+  "source_repository": "runtime:git-remote",
+  "default_branch": "master",
+  "skills": {
+    "gitcode-issue-triage": {
+      "version": "1.0.0",
+      "adaptations": ["metadata", "repository contract"]
+    },
+    "gitcode-pr-create": {
+      "version": "1.0.0",
+      "adaptations": ["metadata", "master base branch", "repository contract"]
+    },
+    "gitcode-pipeline-analyzer": {
+      "version": "1.0.0",
+      "adaptations": ["metadata", "repository-relative script path"]
+    },
+    "gitcode-precommit": {
+      "version": "1.0.0",
+      "adaptations": ["metadata"]
+    },
+    "gitcode-security-check": {
+      "version": "1.0.0",
+      "adaptations": ["metadata"]
+    }
+  }
+}

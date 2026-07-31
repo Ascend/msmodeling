@@ -1,6 +1,9 @@
 ---
 name: op-mapping-generator
 description: Use when creating or updating op_mapping.yaml to map TensorCast simulation ops to NPU profiling kernel types, given a model, device, profiling data, and software stack versions
+metadata:
+  version: 1.0.0
+  source: local-session-analysis
 ---
 
 # op_mapping Generator
@@ -9,7 +12,9 @@ description: Use when creating or updating op_mapping.yaml to map TensorCast sim
 
 Generate a complete `op_mapping.yaml` that maps TensorCast (TC) virtual runtime operators to real NPU profiling kernel types. The mapping bridges TC simulation and profiling-based performance estimation by matching each TC op to its corresponding NPU kernel (identified by the Profiling Type column in `kernel_details.csv`).
 
-**Core approach:** Dispatch parallel sub-agent teams — one agent per operator — each independently traces the full vLLM→CANN call chain using grep/read/web search. This avoids context contamination between operators.
+**Core approach:** Trace each operator's full vLLM→CANN call chain independently. Clients that support independent workers may parallelize
+operators; other clients must execute the same isolation strategy sequentially. Parallel-agent support is an optimization, not a correctness
+requirement.
 
 ## Required Inputs
 

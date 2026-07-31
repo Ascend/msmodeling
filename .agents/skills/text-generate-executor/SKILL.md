@@ -1,8 +1,9 @@
 ﻿---
 name: text-generate-executor
 description: Interactively gather parameters for `python -m cli.inference.text_generate`, generate a concrete text generation simulation command, explain assumptions, ask for execution confirmation, then run the command and summarize performance metrics. Use when the user wants to validate a specific model, hardware profile, batch/query size, prefill or decode scenario, TP/DP/EP/MOE parallel strategy, profiling database, chrome trace, empirical metrics export, or a best row produced by throughput_optimizer.
-version: 0.1.0
-source: local-session-analysis
+metadata:
+  version: 0.1.0
+  source: local-session-analysis
 ---
 
 # Text Generate Executor

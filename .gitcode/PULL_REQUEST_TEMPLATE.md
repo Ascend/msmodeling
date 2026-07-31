@@ -1,54 +1,70 @@
-# PR Template
+# Pull Request
 
-Thanks for your contribution; we appreciate it a lot. The following instructions will make your pull request healthier and help you get feedback more easily. If you do not understand some items, don't worry, just make the pull request and seek help from maintainers.
-感谢您的贡献，我们非常重视。以下说明将使您的拉取请求更健康，更易于获得反馈。如果您不理解某些项目，请不要担心，只需提交拉取请求并从维护人员那里寻求帮助即可。
+## Type / 类型
 
-**PR Type / PR类型**
+- [ ] Feature / 功能
+- [ ] Bugfix / 修复
+- [ ] Docs / 文档
+- [ ] CI/CD
+- [ ] Refactor / 重构
+- [ ] Performance / 性能
+- [ ] Tests / 测试
+- [ ] Other / 其他
 
-- [ ] Feature（功能新增）
-- [ ] Bugfix（Bug 修复）
-- [ ] Docs（文档更新）
-- [ ] CI/CD（持续集成/持续部署）
-- [ ] Refactor（代码重构）
-- [ ] Perf（性能优化）
-- [ ] Test-Cases（测试用例更新）
-- [ ] Other（其他）
+## Related Issue / 关联 Issue
 
-## 🔍 Motivation / 变更动机
+Closes #
 
-**Please describe the motivation of this PR and the goal you want to achieve through this PR.**
-**请描述您的拉取请求的动机和您希望通过此拉取请求实现的目标。**
+## Motivation and Scope / 动机与范围
 
-------
+<!-- Why is this change needed? What is explicitly out of scope? -->
 
-## 📝 Modification / 修改内容
+## Changes / 修改内容
 
-**Please briefly describe what modification is made in this PR.**
-**请简要描述此拉取请求中进行的修改。**
+<!-- List behavior, interfaces, configuration, documentation and migration changes. -->
 
-------
+## Validation Evidence / 验证证据
 
-## 📐 Associated Test Results / 关联测试结果
+<!-- Paste commands and concise results. Do not write "all passed" for checks that were not run. -->
 
-**Please provide the related test results, such as test reports, etc.**
-**请提供相关测试结果，例如测试报告等。**
+- Affected tests:
+- `pre-commit`:
+- Build:
+- Other:
+- Not run and reason:
 
-------
+## Risk, Compatibility and Rollback / 风险、兼容性与回滚
 
-## 🌟 Use cases (Optional) / 使用案例（可选）
+- Risk level: Low / Medium / High
+- Public behavior or compatibility impact:
+- Security/performance impact:
+- Rollback:
+- Residual risk:
 
-**If this PR introduces a new feature, it is better to list some use cases here and update the documentation.**
-**如果此拉取请求引入了新功能，最好在此处列出一些用例并更新文档。**
+## AI Participation and Audit / AI 参与与审计
 
-------
+- [ ] No AI-assisted changes / 未使用 AI
+- [ ] AI-assisted analysis or implementation / AI 辅助分析或实现
+- [ ] AI-authored changes were manually reviewed / AI 产出已经人工审视
+- Workflow mode: guided / autonomous / not applicable
+- Run ID:
+- Issue/PR audit comments:
 
-## ✅ Checklist / 检查列表
+## CI / 流水线
 
-**Before PR**:
+- openLiBing status or task link:
+- Failure analysis and repair rounds:
 
-- [ ] Bug fixes are fully covered by unit tests, the case that causes the bug should be added in the unit tests. / 修复的 Bug 已完全由单元测试覆盖，导致 Bug 的情况应在单元测试中添加。
-- [ ] The modification is covered by complete unit tests. If not, please add more unit tests to ensure the correctness. / 此拉取请求中的修改已完全由单元测试覆盖。如果不是，请添加更多单元测试以确保正确性。
-- [ ] All relevant documentation (API docs, docstrings, example tutorials) has been updated to reflect these changes. / 所有相关文档（API 文档、文档字符串、示例教程）已更新以反映这些更改。
-- [ ] Please ensure code files contain no Chinese comments. / 请保证代码文件中不含中文注释。
+## Use Cases / 使用案例
 
-------
+<!-- Required for user-visible features. Link updated documentation or provide commands/configuration. -->
+
+## Checklist / 检查列表
+
+- [ ] The commit follows Conventional Commits and includes sign-off.
+- [ ] New behavior has tests; bug fixes include a regression test.
+- [ ] Relevant documentation, examples and templates are updated.
+- [ ] No secrets, credentials or private local paths are included.
+- [ ] Code files contain no Chinese comments.
+- [ ] All unresolved review findings are answered or tracked.
+- [ ] AI self-review is not presented as independent approval.

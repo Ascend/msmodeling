@@ -1,6 +1,9 @@
 ---
 name: optix-param-recommend
 description: 当首次使用 msmodeling optix 的用户需要根据硬件、模型、负载和优化目标推荐 MindIE/vLLM 寻优参数、搜索范围、benchmark 侧字段或 config.toml 片段时使用。
+metadata:
+  version: 1.0.0
+  source: local-session-analysis
 ---
 
 # 参数范围推荐
