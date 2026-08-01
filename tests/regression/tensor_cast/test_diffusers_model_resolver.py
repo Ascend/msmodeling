@@ -123,8 +123,71 @@ def test_resolve_diffusers_model_selection_preserves_snapshot_root_and_selected_
     assert selection.is_remote
 
 
-@pytest.mark.parametrize("model_id", ("tencent/HunyuanVideo-1.5", "Tencent-Hunyuan/HunyuanVideo-1.5"))
+@pytest.mark.parametrize(
+    ("source", "repository_id", "selector"),
+    (
+        ("huggingface", "tencent/HunyuanVideo-1.5", "transformer/480p_t2v"),
+        ("huggingface", "tencent/HunyuanVideo-1.5", "transformer/480p_t2v_distilled"),
+        ("huggingface", "tencent/HunyuanVideo-1.5", "transformer/720p_t2v"),
+        ("modelscope", "Tencent-Hunyuan/HunyuanVideo-1.5", "transformer/480p_t2v"),
+        ("modelscope", "Tencent-Hunyuan/HunyuanVideo-1.5", "transformer/480p_t2v_distilled"),
+        ("modelscope", "Tencent-Hunyuan/HunyuanVideo-1.5", "transformer/720p_t2v"),
+    ),
+)
+def test_resolve_diffusers_model_selection_accepts_official_raw_tencent_t2v_selector(
+    source: str,
+    repository_id: str,
+    selector: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_id = f"{repository_id}/{selector}"
+    variant_id = selector
+    (tmp_path / variant_id).mkdir(parents=True)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"_class_name": "HunyuanVideo_1_5_Pipeline"}),
+        encoding="utf-8",
+    )
+
+    def snapshot(_model_id: str) -> str:
+        return str(tmp_path)
+
+    monkeypatch.setattr(model_resolver, f"snapshot_{source}_config_only", snapshot)
+
+    selection = model_resolver.resolve_diffusers_model_selection(model_id, source)
+
+    assert selection.variant_id == variant_id
+    assert selection.variant_path == str(tmp_path / variant_id)
+
+
+def test_resolve_diffusers_model_selection_rejects_unofficial_raw_tencent_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    variant = tmp_path / "transformer" / "480p_t2v"
+    variant.mkdir(parents=True)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"_class_name": "HunyuanVideo_1_5_Pipeline"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(model_resolver, "snapshot_huggingface_config_only", lambda _model_id: str(tmp_path))
+
+    with pytest.raises(ValueError, match="official raw Tencent"):
+        model_resolver.resolve_diffusers_model_selection(
+            "unofficial/HunyuanVideo-1.5/transformer/480p_t2v",
+            "huggingface",
+        )
+
+
+@pytest.mark.parametrize(
+    ("source", "model_id"),
+    (
+        ("huggingface", "tencent/HunyuanVideo-1.5"),
+        ("modelscope", "Tencent-Hunyuan/HunyuanVideo-1.5"),
+    ),
+)
 def test_resolve_diffusers_model_selection_rejects_raw_tencent_root(
+    source: str,
     model_id: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -133,10 +196,10 @@ def test_resolve_diffusers_model_selection_rejects_raw_tencent_root(
         json.dumps({"_class_name": "HunyuanVideo_1_5_Pipeline"}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(model_resolver, "snapshot_huggingface_config_only", lambda _model_id: str(tmp_path))
+    monkeypatch.setattr(model_resolver, f"snapshot_{source}_config_only", lambda _model_id: str(tmp_path))
 
-    with pytest.raises(ValueError, match="canonical Diffusers checkpoint"):
-        model_resolver.resolve_diffusers_model_selection(model_id, "huggingface")
+    with pytest.raises(ValueError, match="explicit transformer"):
+        model_resolver.resolve_diffusers_model_selection(model_id, source)
 
 
 def test_resolve_diffusers_model_selection_rejects_raw_local_tencent_root(tmp_path: Path) -> None:
@@ -145,7 +208,7 @@ def test_resolve_diffusers_model_selection_rejects_raw_local_tencent_root(tmp_pa
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="canonical Diffusers checkpoint"):
+    with pytest.raises(ValueError, match="local roots are not supported"):
         model_resolver.resolve_diffusers_model_selection(str(tmp_path), "huggingface")
 
 
@@ -228,6 +291,122 @@ def test_resolve_hunyuanvideo15_pipeline_metadata_rejects_invalid_transformer_co
                 "task_type": "t2v",
             },
         )
+
+
+def test_resolve_diffusers_pipeline_manifest_loads_raw_tencent_root_config(tmp_path: Path) -> None:
+    variant = tmp_path / "transformer" / "480p_t2v_distilled"
+    variant.mkdir(parents=True)
+    root_config = {
+        "_class_name": "HunyuanVideo_1_5_Pipeline",
+        "transformer": [
+            "hyvideo.models.transformers.hunyuanvideo_1_5_transformer",
+            "HunyuanVideo_1_5_DiffusionTransformer",
+        ],
+        "vision_num_semantic_tokens": 729,
+        "vision_states_dim": 1152,
+    }
+    (tmp_path / "config.json").write_text(json.dumps(root_config), encoding="utf-8")
+    selection = model_resolver.DiffusersModelSelection(
+        repository_root=str(tmp_path),
+        variant_path=str(variant),
+        variant_id="transformer/480p_t2v_distilled",
+        source=RemoteSource.huggingface,
+        is_remote=True,
+    )
+
+    manifest = model_resolver.resolve_diffusers_pipeline_manifest(selection)
+
+    assert manifest.config == root_config
+    assert manifest.format == "tencent"
+    assert manifest.config_path == str(tmp_path / "config.json")
+
+
+def test_load_repository_root_json_uses_repository_root(tmp_path: Path) -> None:
+    variant = tmp_path / "transformer" / "480p_t2v_distilled"
+    variant.mkdir(parents=True)
+    root_config = {"_class_name": "HunyuanVideo_1_5_Pipeline"}
+    (tmp_path / "config.json").write_text(json.dumps(root_config), encoding="utf-8")
+    selection = model_resolver.DiffusersModelSelection(
+        repository_root=str(tmp_path),
+        variant_path=str(variant),
+        variant_id="transformer/480p_t2v_distilled",
+        source=RemoteSource.huggingface,
+        is_remote=True,
+    )
+
+    loaded = model_resolver._load_repository_root_json(selection, "config.json")
+
+    assert loaded == (str(tmp_path / "config.json"), root_config)
+    assert model_resolver._load_repository_root_json(selection, "missing.json") is None
+
+
+def test_try_resolve_diffusers_pipeline_manifest_returns_none_without_supported_manifest(tmp_path: Path) -> None:
+    selection = model_resolver.DiffusersModelSelection(
+        repository_root=str(tmp_path),
+        variant_path=str(tmp_path),
+        variant_id=None,
+        source=None,
+        is_remote=False,
+    )
+
+    assert model_resolver.try_resolve_diffusers_pipeline_manifest(selection) is None
+
+
+def test_try_resolve_diffusers_pipeline_manifest_prefers_model_index(tmp_path: Path) -> None:
+    model_index = {"_class_name": "CanonicalPipeline"}
+    (tmp_path / "model_index.json").write_text(json.dumps(model_index), encoding="utf-8")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"_class_name": "HunyuanVideo_1_5_Pipeline"}),
+        encoding="utf-8",
+    )
+    selection = model_resolver.DiffusersModelSelection(
+        repository_root=str(tmp_path),
+        variant_path=str(tmp_path),
+        variant_id=None,
+        source=None,
+        is_remote=False,
+    )
+
+    manifest = model_resolver.try_resolve_diffusers_pipeline_manifest(selection)
+
+    assert manifest is not None
+    assert manifest.config == model_index
+    assert manifest.format == "diffusers"
+    assert manifest.config_path == str(tmp_path / "model_index.json")
+
+
+def test_try_resolve_diffusers_pipeline_manifest_ignores_unrelated_root_config(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"_class_name": "WanTransformer3DModel"}),
+        encoding="utf-8",
+    )
+    selection = model_resolver.DiffusersModelSelection(
+        repository_root=str(tmp_path),
+        variant_path=str(tmp_path),
+        variant_id=None,
+        source=None,
+        is_remote=False,
+    )
+
+    assert model_resolver.try_resolve_diffusers_pipeline_manifest(selection) is None
+
+
+def test_try_resolve_diffusers_pipeline_manifest_propagates_malformed_model_index(tmp_path: Path) -> None:
+    (tmp_path / "model_index.json").write_text("{", encoding="utf-8")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"_class_name": "HunyuanVideo_1_5_Pipeline"}),
+        encoding="utf-8",
+    )
+    selection = model_resolver.DiffusersModelSelection(
+        repository_root=str(tmp_path),
+        variant_path=str(tmp_path),
+        variant_id=None,
+        source=None,
+        is_remote=False,
+    )
+
+    with pytest.raises(json.JSONDecodeError):
+        model_resolver.try_resolve_diffusers_pipeline_manifest(selection)
 
 
 def test_resolve_diffusers_pipeline_manifest_rejects_missing_root_manifest(tmp_path: Path) -> None:
@@ -409,3 +588,24 @@ def test_resolve_diffusers_model_path_wraps_remote_download_errors(monkeypatch: 
     assert "not a local directory" in message
     assert "automatic" in message
     assert "Download the Diffusers model directory manually" in message
+
+
+def test_resolve_diffusers_model_path_gives_remote_only_recovery_for_raw_tencent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_hf(model_id: str) -> str:
+        raise RuntimeError(f"network denied for {model_id}")
+
+    monkeypatch.setattr(model_resolver, "snapshot_huggingface_config_only", fail_hf)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        model_resolver.resolve_diffusers_model_path(
+            "tencent/HunyuanVideo-1.5/transformer/480p_t2v_distilled",
+            RemoteSource.huggingface,
+        )
+
+    message = str(exc_info.value)
+    assert "tencent/HunyuanVideo-1.5" in message
+    assert "huggingface" in message
+    assert "explicit transformer" in message
+    assert "local path" not in message

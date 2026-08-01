@@ -205,6 +205,26 @@ class MultiStreamPassTestCase(unittest.TestCase):
     def setUp(self):
         torch.compiler.reset()
 
+    def test_upward_rank_handles_long_graph_without_recursion(self):
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        current = x
+        nodes = []
+        for _ in range(1500):
+            current = graph.call_function(torch.ops.aten.neg.default, args=(current,))
+            nodes.append(current)
+        graph.output(current)
+
+        pass_ = MultiStreamSchedulePass(device_name=TEST_DEVICE.name)
+        pass_._allowed_streams = lambda node: (0,)
+        pass_._estimate_node_cost_s = lambda node, stream_id: 1.0
+        original_order = {node: i for i, node in enumerate(graph.nodes)}
+
+        pass_._compute_upward_ranks(nodes, original_order)
+
+        self.assertEqual(pass_._ranks[nodes[-1]], 1.0)
+        self.assertEqual(pass_._ranks[nodes[0]], 1500.0)
+
     def test_unsafe_schema_allows_readonly_view_aliases(self):
         self.assertFalse(MultiStreamSchedulePass._target_has_unsafe_schema(torch.ops.aten.view.default))
         self.assertFalse(MultiStreamSchedulePass._target_has_unsafe_schema(torch.ops.aten.transpose.int))

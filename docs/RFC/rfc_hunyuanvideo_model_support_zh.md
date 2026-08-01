@@ -30,13 +30,15 @@
 
 - [x] 已完成hunyuanvideo的dit建模
 - [x] 已完成HunyuanVideo1.5 T2V normal-run建模和Diffusers pipeline加载。
-  - 支持的模型ID必须解析为同时提供`HunyuanVideo15Transformer3DModel`和
-    `HunyuanVideo15Pipeline`的canonical Diffusers checkpoint。
-  - 使用`HunyuanVideo_1_5_DiffusionTransformer`的Tencent原始checkpoint会被拒绝；
-    请改用上游或社区提供的Diffusers转换版本。
-  - 明确拒绝I2V variant。建模的T2V视觉输入是全零
-    `[batch_size, 729, image_embed_dim]`张量，其中`image_embed_dim`来自所选
-    canonical Transformer配置。
+  - canonical Diffusers checkpoint 使用`HunyuanVideo15Transformer3DModel`和
+    `HunyuanVideo15Pipeline`。
+  - 官方远端Tencent仓库也支持显式的原始T2V `transformer/<variant>` selector；
+    TensorCast会校验其原生pipeline和Transformer JSON契约，并将配置转换为内置
+    Diffusers模型配置。本地原始目录仍不受支持；TensorCast不会执行Tencent
+    `hyvideo`代码或转换checkpoint权重。
+  - 明确拒绝I2V和超分variant。建模的T2V视觉输入是全零
+    `[batch_size, 729, image_embed_dim]`张量，其中`image_embed_dim`来自已校验的
+    Transformer配置。
 
 ### 后续开发
 

@@ -19,6 +19,22 @@ def _(
     return q_embed.contiguous(), k_embed.contiguous()
 
 
+@register_tensor_cast_op("apply_rope_single")
+def _(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    is_neox: bool = True,
+    transpose_output: bool = True,
+) -> torch.Tensor:
+    """Return single-RoPE output metadata, optionally transposing BHSD to BSHD."""
+    del cos, sin, is_neox
+    if transpose_output:
+        # The fused op converts its BHSD input layout to BSHD.
+        return torch.empty_like(x).transpose(1, 2).contiguous()
+    return torch.empty_like(x).contiguous()
+
+
 @register_tensor_cast_op("apply_rope_inplace", mutates_args=("x",))
 def _(
     x: torch.Tensor,

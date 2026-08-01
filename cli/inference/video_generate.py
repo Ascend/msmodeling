@@ -7,6 +7,7 @@ import torch
 
 from cli.logo import print_logo
 from tensor_cast import device_profiles  # noqa: F401
+from tensor_cast.compilation import get_backend
 from tensor_cast.core.quantization.config import create_quant_config
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from tensor_cast.device import DeviceProfile
@@ -15,6 +16,7 @@ from tensor_cast.diffusers.diffusers_utils import (
     get_ulysses_split_dim,
     model_class_to_input,
     model_class_to_vae_stride,
+    use_hunyuanvideo15_t2v_static_branch,
 )
 from tensor_cast.model_config import ParallelConfig, RemoteSource
 from tensor_cast.parallel_group import ParallelGroup
@@ -142,6 +144,8 @@ def run_inference(
     quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.W8A8_DYNAMIC,
     quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED,
     mxfp4_group_size: int = 32,
+    compile: bool = False,
+    compile_allow_graph_break: bool = False,
     use_cfg: bool = False,
     world_size: int = 1,
     ulysses_size: int = 1,
@@ -244,6 +248,21 @@ def run_inference(
             print(f"CFG enabled (batch-concat): effective batch_size={cfg_input_kwargs['hidden_states'].shape[0]}")
     active_inputs = cfg_input_kwargs or input_kwargs
 
+    if compile:
+        model = torch.compile(
+            model,
+            backend=get_backend(device_name=device),
+            dynamic=False,
+            fullgraph=not compile_allow_graph_break,
+        )
+        if cache_model is not None:
+            cache_model = torch.compile(
+                cache_model,
+                backend=get_backend(device_name=device),
+                dynamic=False,
+                fullgraph=not compile_allow_graph_break,
+            )
+
     print(input_kwargs)
     print("Running simulated inference...")
     run_start = time.perf_counter()
@@ -252,6 +271,7 @@ def run_inference(
         Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
         torch.no_grad(),
         use_custom_sdpa(quant_config.attention_configs.get(-1)),
+        use_hunyuanvideo15_t2v_static_branch(model_config.transformer_config.model_config),
     ):
         for step_idx in range(sample_step):
             in_cache_window = cache_state is not None and cache_step_start <= step_idx <= cache_step_end
@@ -377,6 +397,18 @@ def main():
         default=False,
     )
 
+    optim_group = parser.add_argument_group("Optimization Options")
+    optim_group.add_argument(
+        "--compile",
+        action="store_true",
+        help="If set, invoke torch.compile() on the model before inference.",
+    )
+    optim_group.add_argument(
+        "--compile-allow-graph-break",
+        action="store_true",
+        help="Allow graph breaks during torch.compile() for models with dynamic control flow.",
+    )
+
     parallel_group = parser.add_argument_group("Parallel Options")
     parallel_group.add_argument(
         "--world-size",
@@ -450,6 +482,8 @@ def main():
         ulysses_size=args.ulysses_size,
         quantize_linear_action=args.quantize_linear_action,
         quantize_attention_action=args.quantize_attention_action,
+        compile=args.compile,
+        compile_allow_graph_break=args.compile_allow_graph_break,
         cfg_parallel=args.cfg_parallel,
         dit_cache=args.dit_cache,
         cache_step_range=args.cache_step_range,

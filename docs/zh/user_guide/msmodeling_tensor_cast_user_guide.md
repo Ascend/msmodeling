@@ -295,7 +295,8 @@ usage: video_generate.py [-h]
                          [--remote-source {huggingface,modelscope}]
                          [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                          [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg] [--world-size WORLD_SIZE]
-                         [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--dit-cache]
+                         [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--compile]
+                         [--compile-allow-graph-break] [--dit-cache]
                          [--cache-step-range CACHE_STEP_RANGE] [--cache-step-interval CACHE_STEP_INTERVAL]
                          [--cache-block-range CACHE_BLOCK_RANGE]
                          model_id
@@ -325,9 +326,13 @@ Run a simulated diffusion transformer forward and dump perf stats.
 | `--world-size` | Parallel Options | 可选 | 指定参与分布式仿真的总设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
 | `--ulysses-size` | Parallel Options | 可选 | 指定 Ulysses 并行规模。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
 | `--cfg-parallel` | Parallel Options | 可选 | 启用 CFG 并行策略。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--compile` | Optimization Options | 可选 | 在仿真前编译主 transformer。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 使用 `dynamic=False, fullgraph=True`；启用 DiT cache 时，cache transformer 使用相同策略。 |
+| `--compile-allow-graph-break` | Optimization Options | 可选 | 允许编译期间发生 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 会将主 transformer 和 DiT cache transformer 的编译方式改为 `fullgraph=False`。 |
 | `--dit-cache` | Cache Options | 可选 | 启用 DiT block cache。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--cache-step-range` | Cache Options | 可选 | 指定启用 cache 的采样步范围。<br>1. 类型：Str。<br>2. 格式：`start,end`，闭区间。<br>3. 默认值：`None`。<br>4. 设置 `--dit-cache` 时必填。 |
 | `--cache-step-interval` | Cache Options | 可选 | 指定 cache 更新步间隔。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`，表示不启用 cache 更新复用。 |
 | `--cache-block-range` | Cache Options | 可选 | 指定启用 cache 的 block 范围。<br>1. 类型：Str。<br>2. 格式：`start,end`，左闭右开。<br>3. 默认值：`None`。 |
+
+> **说明：** 如果需要仿真官方原始 Tencent HunyuanVideo1.5 模型，Hugging Face 应使用 `tencent/HunyuanVideo-1.5/transformer/<t2v_variant>`，ModelScope 应使用 `Tencent-Hunyuan/HunyuanVideo-1.5/transformer/<t2v_variant>`。当前已验证的 T2V variant 为 `480p_t2v`、`480p_t2v_distilled` 和 `720p_t2v`。
 
 运行 `python -m cli.inference.video_generate --help` 查看详情。

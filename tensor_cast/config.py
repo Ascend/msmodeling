@@ -38,8 +38,14 @@ class compilation:
         enable_rms_norm = True
         enable_rms_norm_quant = enable_rms_norm
         enable_add_rms_norm = enable_rms_norm
+        enable_layer_norm = True
+        enable_modulated_layer_norm = True
         enable_rope = True
         enable_swiglu = True
+        enable_gelu = True
+        enable_silu = True
+        # Disabled by default until trace evidence provides a narrower residual-specific graph form.
+        enable_gated_residual_add = False
         enable_matmul_allreduce = False
         enable_grouped_matmul_swiglu = True
         enable_dispatch_ffn_combine = False

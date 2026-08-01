@@ -1,4 +1,5 @@
 from . import (  # noqa: F401
+    activation,
     attention,
     cat,
     communication,
@@ -13,6 +14,7 @@ from . import (  # noqa: F401
     mtp,
     quantization,
     rotary_embedding,
+    static_mask,
     minimax_m3_sparse_attention,
     swiglu,
 )

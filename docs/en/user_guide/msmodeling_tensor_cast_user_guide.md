@@ -301,7 +301,8 @@ usage: video_generate.py [-h]
                          [--remote-source {huggingface,modelscope}]
                          [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                          [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg] [--world-size WORLD_SIZE]
-                         [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--dit-cache]
+                         [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--compile]
+                         [--compile-allow-graph-break] [--dit-cache]
                          [--cache-step-range CACHE_STEP_RANGE] [--cache-step-interval CACHE_STEP_INTERVAL]
                          [--cache-block-range CACHE_BLOCK_RANGE]
                          model_id
@@ -331,9 +332,13 @@ Main parameters:
 | `--world-size` | Parallel Options | Optional | Specifies the total number of devices participating in distributed simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
 | `--ulysses-size` | Parallel Options | Optional | Specifies Ulysses parallel size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
 | `--cfg-parallel` | Parallel Options | Optional | Enables CFG parallel strategy.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
+| `--compile` | Optimization Options | Optional | Compiles the primary transformer before simulation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Uses `dynamic=False, fullgraph=True`; when DiT cache is active, the cache transformer uses the same policy. |
+| `--compile-allow-graph-break` | Optimization Options | Optional | Allows graph breaks during compilation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Changes compilation to `fullgraph=False` for both the primary and DiT cache transformers. |
 | `--dit-cache` | Cache Options | Optional | Enables DiT block cache.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--cache-step-range` | Cache Options | Optional | Specifies sampling step range for cache.<br>1. Type: Str.<br>2. Format: `start,end`, inclusive interval.<br>3. Default: `None`.<br>4. Required when `--dit-cache` is set. |
 | `--cache-step-interval` | Cache Options | Optional | Specifies cache update step interval.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`, which disables cache update reuse. |
 | `--cache-block-range` | Cache Options | Optional | Specifies block range for cache.<br>1. Type: Str.<br>2. Format: `start,end`, start inclusive and end exclusive.<br>3. Default: `None`. |
+
+> **Note:** When simulating HunyuanVideo1.5 from the official raw Tencent repository, use `tencent/HunyuanVideo-1.5/transformer/<t2v_variant>` on Hugging Face or `Tencent-Hunyuan/HunyuanVideo-1.5/transformer/<t2v_variant>` on ModelScope. The currently verified selectors are `480p_t2v`, `480p_t2v_distilled`, and `720p_t2v`. Raw repository roots, local raw layouts, I2V variants, and SR variants are not supported. TensorCast validates the downloaded JSON configuration and maps it to the built-in Diffusers simulation model; it does not execute the Tencent `hyvideo` package or convert checkpoint weights.
 
 Run `python -m cli.inference.video_generate --help` for details.

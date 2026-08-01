@@ -67,6 +67,173 @@ def test_rms_norm_non_default_eps_path_consistency():
     torch.testing.assert_close(added, hidden_states + residual, rtol=0.0, atol=0.0)
 
 
+def _semantic_op_properties(op, *args):
+    out = op(*args)
+    return out, OpInvokeInfo(op, args, {}, out).get_perf_properties()
+
+
+@pytest.mark.parametrize(
+    ("op", "extra_args"),
+    (
+        (torch.ops.tensor_cast.rms_norm.default, (None, 1e-6)),
+        (torch.ops.tensor_cast.layer_norm.default, (None, None, 1e-6)),
+        (
+            torch.ops.tensor_cast.modulated_layer_norm.default,
+            (
+                None,
+                None,
+                torch.empty((2, 1, 0), device="meta", dtype=torch.bfloat16),
+                torch.empty((2, 1, 0), device="meta", dtype=torch.bfloat16),
+                1e-6,
+            ),
+        ),
+    ),
+)
+def test_norm_properties_support_zero_width(op, extra_args):
+    x = torch.empty((2, 3, 0), device="meta", dtype=torch.bfloat16)
+
+    out, properties = _semantic_op_properties(op, x, *extra_args)
+
+    assert out.shape == x.shape
+    assert properties.compute_ops == {}
+    assert properties.memory_read_bytes == 0
+    assert properties.memory_write_bytes == 0
+
+
+@pytest.mark.parametrize(
+    ("op", "extra_args"),
+    (
+        (torch.ops.tensor_cast.rms_norm.default, (None, 1e-6)),
+        (torch.ops.tensor_cast.layer_norm.default, (None, None, 1e-6)),
+        (
+            torch.ops.tensor_cast.modulated_layer_norm.default,
+            (
+                None,
+                None,
+                torch.empty((), device="meta", dtype=torch.bfloat16),
+                torch.empty((), device="meta", dtype=torch.bfloat16),
+                1e-6,
+            ),
+        ),
+    ),
+)
+def test_norm_properties_reject_scalar_inputs(op, extra_args):
+    x = torch.empty((), device="meta", dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="at least one dimension"):
+        _semantic_op_properties(op, x, *extra_args)
+
+
+def test_semantic_fusion_ops_preserve_meta_contracts_and_roofline_properties():
+    x = torch.empty((2, 3, 4), device="meta", dtype=torch.bfloat16)
+    weight = torch.empty((4,), device="meta", dtype=torch.float32)
+    bias = torch.empty((4,), device="meta", dtype=torch.float32)
+
+    expected_layer_norm_cases = [
+        (None, None, 144, 48),
+        (weight, None, 168, 64),
+        (None, bias, 168, 64),
+        (weight, bias, 192, 80),
+    ]
+    for layer_weight, layer_bias, expected_gp_ops, expected_read_bytes in expected_layer_norm_cases:
+        out, properties = _semantic_op_properties(
+            torch.ops.tensor_cast.layer_norm.default,
+            x,
+            layer_weight,
+            layer_bias,
+            1e-6,
+        )
+        assert out.shape == x.shape
+        assert out.dtype == x.dtype
+        assert properties.compute_ops[torch.float32].gp_ops == expected_gp_ops
+        assert properties.memory_read_bytes == expected_read_bytes
+        assert properties.memory_write_bytes == 48
+        assert properties.memory_readwrite_bytes == 0
+
+    scale = torch.empty((2, 1, 4), device="meta", dtype=torch.bfloat16)
+    shift = torch.empty((2, 1, 4), device="meta", dtype=torch.bfloat16)
+    out, properties = _semantic_op_properties(
+        torch.ops.tensor_cast.modulated_layer_norm.default,
+        x,
+        weight,
+        bias,
+        scale,
+        shift,
+        1e-6,
+    )
+    assert out.shape == x.shape
+    assert properties.compute_ops[torch.float32].gp_ops == 192
+    assert properties.compute_ops[torch.bfloat16].gp_ops == 72
+    assert properties.memory_read_bytes == 112
+    assert properties.memory_write_bytes == 48
+
+    for approximate, expected_gp_ops in (("none", 384), ("tanh", 312)):
+        out, properties = _semantic_op_properties(torch.ops.tensor_cast.gelu.default, x, approximate)
+        assert out.shape == x.shape
+        assert out.dtype == x.dtype
+        assert properties.compute_ops[torch.float32].gp_ops == expected_gp_ops
+        assert properties.memory_read_bytes == 48
+        assert properties.memory_write_bytes == 48
+
+    residual = torch.empty((1, 3, 1), device="meta", dtype=torch.float16)
+    update = torch.empty((2, 1, 4), device="meta", dtype=torch.float32)
+    gate = torch.empty((1, 3, 4), device="meta", dtype=torch.bfloat16)
+    out, properties = _semantic_op_properties(torch.ops.tensor_cast.gated_residual_add.default, residual, update, gate)
+    assert out.shape == (2, 3, 4)
+    assert out.dtype == torch.float32
+    assert properties.compute_ops[torch.float32].gp_ops == 48
+    assert properties.memory_read_bytes == 62
+    assert properties.memory_write_bytes == 96
+
+    query = torch.empty((2, 3, 4), device="meta", dtype=torch.bfloat16)
+    key = torch.empty((2, 3, 4), device="meta", dtype=torch.float32)
+    cos = torch.empty((3, 4), device="meta", dtype=torch.float32)
+    sin = torch.empty((3, 4), device="meta", dtype=torch.float32)
+    (query_out, key_out), properties = _semantic_op_properties(
+        torch.ops.tensor_cast.apply_rope.default,
+        query,
+        key,
+        cos,
+        sin,
+        False,
+    )
+    assert query_out.dtype == torch.bfloat16
+    assert key_out.dtype == torch.float32
+    assert torch.bfloat16 not in properties.compute_ops
+    assert properties.compute_ops[torch.float32].gp_ops == 144
+    assert properties.memory_read_bytes == 240
+    assert properties.memory_write_bytes == 144
+
+    out, properties = _semantic_op_properties(
+        torch.ops.tensor_cast.apply_rope_single.default,
+        query,
+        cos,
+        sin,
+        False,
+        False,
+    )
+    assert out.shape == query.shape
+    assert out.dtype == query.dtype
+    assert torch.bfloat16 not in properties.compute_ops
+    assert properties.compute_ops[torch.float32].gp_ops == 72
+    assert properties.memory_read_bytes == 144
+    assert properties.memory_write_bytes == 48
+
+    out, properties = _semantic_op_properties(
+        torch.ops.tensor_cast.apply_rope_single.default,
+        query,
+        cos.to(torch.bfloat16),
+        sin.to(torch.bfloat16),
+        False,
+        False,
+    )
+    assert out.dtype == query.dtype
+    assert torch.bfloat16 not in properties.compute_ops
+    assert properties.compute_ops[torch.float32].gp_ops == 72
+    assert properties.memory_read_bytes == 96
+    assert properties.memory_write_bytes == 48
+
+
 def test_quant_attention_config_can_target_single_layer():
     quant_config = QuantConfig()
     attn_config = AttentionQuantConfig(

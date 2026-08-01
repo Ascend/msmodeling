@@ -149,6 +149,18 @@ class MetaConstantFolder(torch.fx.Interpreter):
         return out
 
 
+def _remove_dead_get_attrs(gm: GraphModule) -> None:
+    for child in gm.children():
+        if isinstance(child, GraphModule):
+            _remove_dead_get_attrs(child)
+
+    dead_nodes = [node for node in gm.graph.find_nodes(op="get_attr") if not node.users]
+    for node in dead_nodes:
+        if hasattr(gm, node.target):
+            delattr(gm, node.target)
+        gm.graph.erase_node(node)
+
+
 def fold_meta_constants(gm: GraphModule) -> GraphModule:
     """
     Performs constant folding on a GraphModule with 'meta' device tensors.
@@ -170,7 +182,8 @@ def fold_meta_constants(gm: GraphModule) -> GraphModule:
         for node, constant in folder.node_replacements.items():
             replace_node_with_constant(gm, node, constant)
 
-    # Clean up the graph
+    # Clean up dead constants before DCE recursively lints child GraphModules.
+    _remove_dead_get_attrs(gm)
     gm.graph.eliminate_dead_code()
     gm.graph.lint()
     gm.recompile()

@@ -1,8 +1,11 @@
 import importlib
 import json
+from contextlib import contextmanager
 from typing import Union
 
 import torch
+
+from ..ops.static_mask import static_false_mask
 
 
 def get_diffusers_transformer_module(config_or_json_path: Union[str, dict]):
@@ -113,6 +116,36 @@ _model_class_input = {
 
 def model_class_to_input(model_class):
     return _model_class_input.get(model_class, lambda **kwargs: {})
+
+
+class _HunyuanVideo15T2VTorchProxy:
+    def __getattr__(self, name):
+        return getattr(torch, name)
+
+    @torch.compiler.assume_constant_result
+    def all(self, *args, **kwargs):
+        return True
+
+    def zeros(self, *args, **kwargs):
+        return static_false_mask(torch.zeros(*args, **kwargs))
+
+
+@contextmanager
+def use_hunyuanvideo15_t2v_static_branch(model_config):
+    if not (
+        model_config.get("_class_name") == "HunyuanVideo15Transformer3DModel" and model_config.get("task_type") == "t2v"
+    ):
+        yield
+        return
+
+    from diffusers.models.transformers import transformer_hunyuan_video15
+
+    original_torch = transformer_hunyuan_video15.torch
+    transformer_hunyuan_video15.torch = _HunyuanVideo15T2VTorchProxy()
+    try:
+        yield
+    finally:
+        transformer_hunyuan_video15.torch = original_torch
 
 
 def get_ulysses_split_dim(hidden_states: torch.Tensor, ulysses_size: int) -> int:

@@ -18,6 +18,7 @@ from .freezing_passes.dispatch_ffn_combine_pass import DispatchFFNCombinePass
 from .freezing_passes.grouped_matmul_swiglu_pass import GroupedMatmulSwigluPass
 from .freezing_passes.sink_split_pass import SinkSplitPass
 from .passes.lift_quant_pass import LiftCombineQuantPass
+from .passes.static_boolean_index_pass import StaticBooleanIndexPass
 from .passes.merge_linear_pass import MergeLinearPass
 from .passes.multistream_pass import MultiStreamSchedulePass
 from .passes.peep_hole_pass import PeepHolePass
@@ -48,8 +49,8 @@ class CompilerBackend:
         Returns:
             fx.Graph: The processed FX graph with custom operation fusing applied.
         """
-        gm = self.compile(gm, example_inputs)
-        return gm
+        StaticBooleanIndexPass()(gm)
+        return self.compile(gm, example_inputs)
 
     def compile(
         self,

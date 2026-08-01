@@ -18,6 +18,9 @@ from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, Qua
 from tensor_cast.diffusers.cache_agent.cache import CacheState
 from tensor_cast.diffusers.cache_agent.dit_block_cache import DiTBlockCache
 from tensor_cast.diffusers.diffusers_attention import _attention, use_custom_sdpa
+from tensor_cast.diffusers.diffusers_model import DiffusersTransformerModel
+from tensor_cast.transformers.transformations import wrap_model
+from tensor_cast.diffusers.diffusers_utils import SafeMetaTensor
 from tensor_cast.diffusers.dit_cache_registry import (
     DiTBlockCacheSpec,
     _get_hunyuanvideo15_blocks_with_setters,
@@ -29,6 +32,17 @@ from tensor_cast.diffusers.dit_cache_registry import (
     replace_blocks_in_range,
 )
 from tensor_cast.diffusers.model_resolver import DiffusersModelSelection
+
+
+def test_safe_meta_tensor_boolean_index_returns_plain_meta_tensor():
+    image_embeds = SafeMetaTensor((2, 3), dtype=torch.float16)
+    image_mask = torch.ones(2, dtype=torch.bool, device="meta")
+
+    result = image_embeds[image_mask]
+
+    assert type(result) is torch.Tensor
+    assert result.device.type == "meta"
+    assert result.shape == image_embeds.shape
 
 
 class TestVideoGeneration(unittest.TestCase):
@@ -293,6 +307,253 @@ class TestVideoGeneration(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         mock_run_inference.assert_called_once()
+
+    def test_cli_main_given_compile_arguments_when_invoked_then_passes_compile_options_to_inference(self):
+        from cli.inference import video_generate as video_generate_mod
+
+        with patch.object(video_generate_mod, "run_inference") as mock_run_inference:
+            result = run_module_main(
+                "cli.inference.video_generate",
+                [
+                    "--device",
+                    "TEST_DEVICE",
+                    self.model_id,
+                    "--batch-size",
+                    str(self.batch_size),
+                    "--seq-len",
+                    str(self.seq_len),
+                    "--compile",
+                    "--compile-allow-graph-break",
+                ],
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(mock_run_inference.call_args.kwargs["compile"])
+        self.assertTrue(mock_run_inference.call_args.kwargs["compile_allow_graph_break"])
+
+    def test_run_inference_given_compile_when_invoked_then_compiles_model_before_forward(self):
+        from types import SimpleNamespace
+        from cli.inference import video_generate as video_generate_mod
+
+        fake_device = SimpleNamespace(name="TEST_DEVICE")
+        fake_model_config = SimpleNamespace(
+            transformer_config=SimpleNamespace(
+                parallel_config=SimpleNamespace(ulysses_size=1, world_size=1),
+                dtype=torch.float16,
+                model_config={
+                    "_class_name": "HunyuanVideoTransformer3DModel",
+                    "in_channels": 16,
+                    "text_embed_dim": 4096,
+                    "guidance_embeds": "true",
+                    "pooled_projection_dim": 768,
+                },
+            )
+        )
+        fake_model = MagicMock()
+        fake_model.forward.return_value = torch.zeros(1, device="meta")
+        fake_runtime = MagicMock()
+        fake_runtime.__enter__.return_value = fake_runtime
+        fake_runtime.__exit__.return_value = False
+        fake_runtime.table_averages.return_value = {"ok": True}
+        fake_sdpa = MagicMock()
+        fake_sdpa.__enter__.return_value = fake_sdpa
+        fake_sdpa.__exit__.return_value = False
+        fake_backend = MagicMock()
+
+        with (
+            patch.object(video_generate_mod.DeviceProfile, "all_device_profiles", {"TEST_DEVICE": fake_device}),
+            patch.object(video_generate_mod, "AnalyticPerformanceModel"),
+            patch.object(
+                video_generate_mod, "ParallelConfig", return_value=SimpleNamespace(ulysses_size=1, world_size=1)
+            ),
+            patch.object(
+                video_generate_mod, "create_quant_config", return_value=SimpleNamespace(attention_configs={-1: None})
+            ),
+            patch.object(video_generate_mod, "str_to_dtype", return_value=torch.float16),
+            patch.object(video_generate_mod, "get_backend", return_value=fake_backend) as mock_get_backend,
+            patch.object(
+                video_generate_mod.torch, "compile", side_effect=lambda model, **kwargs: model
+            ) as mock_compile,
+            patch(
+                "tensor_cast.diffusers.diffusers_model.build_diffusers_transformer_model",
+                return_value=(fake_model, fake_model_config),
+            ),
+            patch("tensor_cast.diffusers.diffusers_attention.use_custom_sdpa", return_value=fake_sdpa),
+            patch.object(video_generate_mod, "Runtime", return_value=fake_runtime),
+            patch.object(video_generate_mod, "MemoryTracker", return_value=MagicMock()),
+            patch.object(video_generate_mod, "time") as mock_time,
+            patch.object(video_generate_mod, "print"),
+        ):
+            mock_time.perf_counter.side_effect = [1.0, 2.0]
+
+            video_generate_mod.run_inference(
+                device="TEST_DEVICE",
+                model_id=self.model_id,
+                batch_size=self.batch_size,
+                seq_len=self.seq_len,
+                height=self.height,
+                width=self.width,
+                frame_num=self.frame_num,
+                sample_step=1,
+                dtype="float16",
+                compile=True,
+                compile_allow_graph_break=True,
+            )
+
+        mock_get_backend.assert_called_once_with(device_name="TEST_DEVICE")
+        mock_compile.assert_called_once_with(fake_model, backend=fake_backend, dynamic=False, fullgraph=False)
+        fake_model.forward.assert_called_once()
+
+    def test_run_inference_given_compile_with_dit_cache_then_compiles_both_models_with_fullgraph(self):
+        from types import SimpleNamespace
+        from cli.inference import video_generate as video_generate_mod
+
+        fake_device = SimpleNamespace(name="TEST_DEVICE")
+        fake_model_config = SimpleNamespace(
+            transformer_config=SimpleNamespace(
+                parallel_config=SimpleNamespace(ulysses_size=1, world_size=1),
+                dtype=torch.float16,
+                model_config={
+                    "_class_name": "HunyuanVideoTransformer3DModel",
+                    "in_channels": 16,
+                    "text_embed_dim": 4096,
+                    "guidance_embeds": "true",
+                    "pooled_projection_dim": 768,
+                },
+            )
+        )
+        primary_model = MagicMock()
+        primary_model.forward.return_value = torch.zeros(1, device="meta")
+        cache_model = MagicMock()
+        cache_model.forward.return_value = torch.zeros(1, device="meta")
+        cache_model.enable_dit_block_cache.return_value = CacheState()
+        fake_runtime = MagicMock()
+        fake_runtime.__enter__.return_value = fake_runtime
+        fake_runtime.__exit__.return_value = False
+        fake_runtime.table_averages.return_value = {"ok": True}
+        fake_sdpa = MagicMock()
+        fake_sdpa.__enter__.return_value = fake_sdpa
+        fake_sdpa.__exit__.return_value = False
+        fake_backend = MagicMock()
+
+        with (
+            patch.object(video_generate_mod.DeviceProfile, "all_device_profiles", {"TEST_DEVICE": fake_device}),
+            patch.object(video_generate_mod, "AnalyticPerformanceModel"),
+            patch.object(
+                video_generate_mod, "ParallelConfig", return_value=SimpleNamespace(ulysses_size=1, world_size=1)
+            ),
+            patch.object(
+                video_generate_mod, "create_quant_config", return_value=SimpleNamespace(attention_configs={-1: None})
+            ),
+            patch.object(video_generate_mod, "str_to_dtype", return_value=torch.float16),
+            patch.object(video_generate_mod, "get_backend", return_value=fake_backend),
+            patch.object(
+                video_generate_mod.torch, "compile", side_effect=lambda model, **kwargs: model
+            ) as mock_compile,
+            patch(
+                "tensor_cast.diffusers.diffusers_model.build_diffusers_transformer_model",
+                side_effect=[(primary_model, fake_model_config), (cache_model, fake_model_config)],
+            ),
+            patch("tensor_cast.diffusers.diffusers_attention.use_custom_sdpa", return_value=fake_sdpa),
+            patch.object(video_generate_mod, "Runtime", return_value=fake_runtime),
+            patch.object(video_generate_mod, "MemoryTracker", return_value=MagicMock()),
+            patch.object(video_generate_mod, "time") as mock_time,
+            patch.object(video_generate_mod, "print"),
+        ):
+            mock_time.perf_counter.side_effect = [1.0, 2.0]
+            video_generate_mod.run_inference(
+                device="TEST_DEVICE",
+                model_id=self.model_id,
+                batch_size=self.batch_size,
+                seq_len=self.seq_len,
+                height=self.height,
+                width=self.width,
+                frame_num=self.frame_num,
+                sample_step=1,
+                dtype="float16",
+                compile=True,
+                dit_cache=True,
+                cache_step_range="0,0",
+                cache_step_interval=2,
+            )
+
+        assert mock_compile.call_args_list == [
+            unittest.mock.call(primary_model, backend=fake_backend, dynamic=False, fullgraph=True),
+            unittest.mock.call(cache_model, backend=fake_backend, dynamic=False, fullgraph=True),
+        ]
+
+    def test_wan_attention_uses_upstream_processor_with_tensor_cast_backend(self):
+        from diffusers.models.transformers.transformer_wan import WanAttention, WanAttnProcessor, WanTransformer3DModel
+
+        transformer = WanTransformer3DModel(
+            patch_size=(1, 1, 1),
+            num_attention_heads=2,
+            attention_head_dim=2,
+            in_channels=4,
+            out_channels=4,
+            text_dim=4,
+            freq_dim=4,
+            ffn_dim=8,
+            num_layers=1,
+        )
+        model = object.__new__(DiffusersTransformerModel)
+        torch.nn.Module.__init__(model)
+        model._inner = transformer
+
+        wrap_model(model)
+
+        wan_attention = next(module for module in transformer.modules() if isinstance(module, WanAttention))
+        assert isinstance(wan_attention.processor, WanAttnProcessor)
+        assert wan_attention.processor._attention_backend == "tensor_cast"
+
+    def test_wan_upstream_processor_given_text_context_then_dispatches_once(self):
+        from diffusers.models.transformers.transformer_wan import WanAttention, WanAttnProcessor
+
+        attn = WanAttention(
+            dim=4,
+            heads=2,
+            dim_head=2,
+            cross_attention_dim_head=2,
+            processor=WanAttnProcessor(),
+        )
+        attn.processor._attention_backend = "tensor_cast"
+        hidden_states = torch.zeros((1, 3, 4))
+        encoder_hidden_states = torch.zeros((1, 5, 4))
+
+        with patch(
+            "diffusers.models.transformers.transformer_wan.dispatch_attention_fn",
+            side_effect=lambda query, *args, **kwargs: query,
+        ) as dispatch:
+            output = attn(hidden_states, encoder_hidden_states)
+
+        assert output.shape == hidden_states.shape
+        dispatch.assert_called_once()
+        assert dispatch.call_args.kwargs["backend"] == "tensor_cast"
+
+    def test_wan_upstream_processor_given_image_context_then_dispatches_twice(self):
+        from diffusers.models.transformers.transformer_wan import WanAttention, WanAttnProcessor
+
+        attn = WanAttention(
+            dim=4,
+            heads=2,
+            dim_head=2,
+            cross_attention_dim_head=2,
+            added_kv_proj_dim=4,
+            processor=WanAttnProcessor(),
+        )
+        attn.processor._attention_backend = "tensor_cast"
+        hidden_states = torch.zeros((1, 3, 4))
+        encoder_hidden_states = torch.zeros((1, 514, 4))
+
+        with patch(
+            "diffusers.models.transformers.transformer_wan.dispatch_attention_fn",
+            side_effect=lambda query, *args, **kwargs: query,
+        ) as dispatch:
+            output = attn(hidden_states, encoder_hidden_states)
+
+        assert output.shape == hidden_states.shape
+        assert dispatch.call_count == 2
+        assert all(call.kwargs["backend"] == "tensor_cast" for call in dispatch.call_args_list)
 
     def test_custom_sdpa_given_fp8_attention_quantization_when_called_then_uses_quantized_attention_op(self):
         quant_config = create_attention_quant_config(QuantizeAttentionAction.FP8)
@@ -726,6 +987,85 @@ class TestVideoGeneration(unittest.TestCase):
 
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_video_inference_with_raw_tencent_hunyuanvideo15_t2v_selector(self):
+        temp_dir = tempfile.mkdtemp(dir=os.path.realpath(os.getcwd()))
+        snapshot_root = os.path.join(temp_dir, "snapshot")
+        variant_dir = os.path.join(snapshot_root, "transformer", "480p_t2v_distilled")
+        os.makedirs(variant_dir, exist_ok=True)
+        with open(os.path.join(snapshot_root, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "_class_name": "HunyuanVideo_1_5_Pipeline",
+                    "transformer": [
+                        "hyvideo.models.transformers.hunyuanvideo_1_5_transformer",
+                        "HunyuanVideo_1_5_DiffusionTransformer",
+                    ],
+                    "vision_num_semantic_tokens": 729,
+                    "vision_states_dim": 1152,
+                },
+                f,
+            )
+        with open(os.path.join(variant_dir, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "_class_name": "HunyuanVideo_1_5_DiffusionTransformer",
+                    "concat_condition": True,
+                    "glyph_byT5_v2": True,
+                    "guidance_embed": False,
+                    "heads_num": 16,
+                    "hidden_size": 2048,
+                    "ideal_resolution": "480p",
+                    "ideal_task": "t2v",
+                    "in_channels": 32,
+                    "is_reshape_temporal_channels": False,
+                    "mlp_act_type": "gelu_tanh",
+                    "mlp_width_ratio": 4,
+                    "mm_double_blocks_depth": 54,
+                    "mm_single_blocks_depth": 0,
+                    "out_channels": 32,
+                    "patch_size": [1, 1, 1],
+                    "qk_norm": True,
+                    "qk_norm_type": "rms",
+                    "qkv_bias": True,
+                    "rope_dim_list": [16, 56, 56],
+                    "rope_theta": 256,
+                    "text_pool_type": None,
+                    "text_projection": "single_refiner",
+                    "text_states_dim": 3584,
+                    "text_states_dim_2": None,
+                    "use_attention_mask": True,
+                    "use_cond_type_embedding": True,
+                    "use_meanflow": False,
+                    "vision_projection": "linear",
+                    "vision_states_dim": 1152,
+                },
+                f,
+            )
+        try:
+            with patch(
+                "tensor_cast.diffusers.model_resolver.snapshot_huggingface_config_only",
+                return_value=snapshot_root,
+            ):
+                run_inference(
+                    device="TEST_DEVICE",
+                    model_id="tencent/HunyuanVideo-1.5/transformer/480p_t2v_distilled",
+                    batch_size=1,
+                    seq_len=128,
+                    height=480,
+                    width=832,
+                    frame_num=121,
+                    sample_step=1,
+                    dtype="float16",
+                    world_size=1,
+                    ulysses_size=1,
+                    compile=True,
+                )
+            self._validate_inference_result("test_video_inference_with_raw_tencent_hunyuanvideo15_t2v_selector")
+        finally:
+            import shutil
+
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 def _make_cache_wrapped_forward(agent):
     def factory(orig_forward):
@@ -941,7 +1281,7 @@ class TestCliVideoGenerateRunInference(unittest.TestCase):
                 {
                     "tensor_cast.diffusers.diffusers_attention": types.SimpleNamespace(
                         set_sp_group=lambda group: None,
-                        use_custom_sdpa=contextlib.nullcontext,
+                        use_custom_sdpa=lambda *args, **kwargs: contextlib.nullcontext(),
                     ),
                     "tensor_cast.diffusers.diffusers_model": types.SimpleNamespace(
                         build_diffusers_transformer_model=fake_build_diffusers_transformer_model

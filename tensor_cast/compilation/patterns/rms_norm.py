@@ -1,13 +1,199 @@
 import torch
+import torch._prims as prims
+import torch.nn.functional as F
 
 from ... import config
 
 _RMS_NORM_DTYPE_LIST = [torch.float16, torch.bfloat16]
+_LAYER_NORM_DTYPE_LIST = [torch.float16, torch.bfloat16, torch.float32]
 _DEFAULT_EPS_SCALAR_WORKAROUND = {"eps": 1e-6}
 
 
 def _create_pattern_result(pattern, replacement, example_inputs):
     return pattern, replacement, example_inputs, _DEFAULT_EPS_SCALAR_WORKAROUND
+
+
+class TorchRMSNormPattern:
+    """Match direct torch.rms_norm calls."""
+
+    @staticmethod
+    def create(shape=(2, 4)):
+        def get_inputs():
+            hidden_states = torch.empty(*shape, dtype=torch.bfloat16, device="meta")
+            weight = torch.empty(shape[-1], dtype=torch.float32, device="meta")
+            return [hidden_states, weight]
+
+        def pattern(hidden_states, weight, eps):
+            return torch.rms_norm(hidden_states, (shape[-1],), weight, eps)
+
+        def replacement(hidden_states, weight, eps):
+            return torch.ops.tensor_cast.rms_norm(hidden_states, weight, eps)
+
+        return _create_pattern_result(pattern, replacement, get_inputs())
+
+
+class LayerNormPattern:
+    """Match functional layer normalization with optional affine parameters."""
+
+    @staticmethod
+    def create(dtype, affine: bool, shape=(2, 4)):
+        def get_inputs():
+            hidden_states = torch.empty(*shape, dtype=dtype, device="meta")
+            if affine:
+                weight = torch.empty(shape[-1], dtype=torch.float32, device="meta")
+                bias = torch.empty(shape[-1], dtype=torch.float32, device="meta")
+                return [hidden_states, weight, bias]
+            return [hidden_states]
+
+        def pattern_affine(hidden_states, weight, bias, eps):
+            out = F.layer_norm(
+                prims.convert_element_type(hidden_states, torch.float32),
+                (shape[-1],),
+                prims.convert_element_type(weight, torch.float32),
+                prims.convert_element_type(bias, torch.float32),
+                eps,
+            )
+            return prims.convert_element_type(out, dtype)
+
+        def replacement_affine(hidden_states, weight, bias, eps):
+            return torch.ops.tensor_cast.layer_norm(hidden_states, weight, bias, eps)
+
+        def pattern_no_affine(hidden_states, eps):
+            out = F.layer_norm(
+                prims.convert_element_type(hidden_states, torch.float32),
+                (shape[-1],),
+                None,
+                None,
+                eps,
+            )
+            return prims.convert_element_type(out, dtype)
+
+        def replacement_no_affine(hidden_states, eps):
+            return torch.ops.tensor_cast.layer_norm(hidden_states, None, None, eps)
+
+        if affine:
+            return _create_pattern_result(pattern_affine, replacement_affine, get_inputs())
+        return _create_pattern_result(pattern_no_affine, replacement_no_affine, get_inputs())
+
+
+class LayerNormDecomposedPattern:
+    """Match decomposed layer normalization graphs."""
+
+    @staticmethod
+    def create(dtype, affine: bool, shape=(2, 4), output_cast: bool = True):
+        def get_inputs():
+            hidden_states = torch.empty(*shape, dtype=dtype, device="meta")
+            if affine:
+                weight = torch.empty(shape[-1], dtype=torch.float32, device="meta")
+                bias = torch.empty(shape[-1], dtype=torch.float32, device="meta")
+                return [hidden_states, weight, bias]
+            return [hidden_states]
+
+        def _layer_norm_core(hidden_states, eps):
+            hidden_states_fp32 = prims.convert_element_type(hidden_states, torch.float32)
+            reduction_dim = hidden_states.ndim - 1
+            variance, mean = torch.ops.aten.var_mean.correction(
+                hidden_states_fp32,
+                [reduction_dim],
+                correction=0,
+                keepdim=True,
+            )
+            centered = torch.ops.aten.sub.Tensor(hidden_states_fp32, mean)
+            rstd = torch.ops.aten.rsqrt.default(torch.ops.aten.add.Tensor(variance, eps))
+            return torch.ops.aten.mul.Tensor(centered, rstd)
+
+        def pattern_affine(hidden_states, weight, bias, eps):
+            out = _layer_norm_core(hidden_states, eps)
+            out = torch.ops.aten.mul.Tensor(out, weight)
+            out = torch.ops.aten.add.Tensor(out, bias)
+            if output_cast:
+                return prims.convert_element_type(out, dtype)
+            return out
+
+        def replacement_affine(hidden_states, weight, bias, eps):
+            return torch.ops.tensor_cast.layer_norm(hidden_states, weight, bias, eps)
+
+        def pattern_no_affine(hidden_states, eps):
+            out = _layer_norm_core(hidden_states, eps)
+            if output_cast:
+                return prims.convert_element_type(out, dtype)
+            return out
+
+        def replacement_no_affine(hidden_states, eps):
+            return torch.ops.tensor_cast.layer_norm(hidden_states, None, None, eps)
+
+        if affine:
+            return _create_pattern_result(pattern_affine, replacement_affine, get_inputs())
+        return _create_pattern_result(pattern_no_affine, replacement_no_affine, get_inputs())
+
+
+class TorchRMSNormDecomposedPattern:
+    """Match decomposed torch RMS normalization graphs."""
+
+    @staticmethod
+    def create(dtype, shape=(2, 4)):
+        def get_inputs():
+            hidden_states = torch.empty(*shape, dtype=dtype, device="meta")
+            weight = torch.empty(shape[-1], dtype=torch.float32, device="meta")
+            return [hidden_states, weight]
+
+        def pattern(hidden_states, weight, eps):
+            hidden_states_fp32 = prims.convert_element_type(hidden_states, torch.float32)
+            reduction_dim = hidden_states.ndim - 1
+            variance = torch.ops.aten.mean.dim(
+                torch.ops.aten.pow.Tensor_Scalar(hidden_states_fp32, 2),
+                [reduction_dim],
+                True,
+            )
+            hidden_states_normed = torch.ops.aten.mul.Tensor(
+                hidden_states_fp32,
+                torch.ops.aten.rsqrt.default(torch.ops.aten.add.Scalar(variance, eps)),
+            )
+            out = torch.ops.aten.mul.Tensor(hidden_states_normed, weight)
+            return prims.convert_element_type(out, dtype)
+
+        def replacement(hidden_states, weight, eps):
+            return torch.ops.tensor_cast.rms_norm(hidden_states, weight, eps)
+
+        return _create_pattern_result(pattern, replacement, get_inputs())
+
+
+class ModulatedLayerNormPattern:
+    """Match layer normalization followed by scale and shift modulation."""
+
+    @staticmethod
+    def create(affine: bool):
+        def get_inputs():
+            hidden_states = torch.empty(2, 3, 4, dtype=torch.bfloat16, device="meta")
+            scale = torch.empty(2, 3, 4, dtype=torch.bfloat16, device="meta")
+            shift = torch.empty(2, 3, 4, dtype=torch.bfloat16, device="meta")
+            if affine:
+                weight = torch.empty(4, dtype=torch.float32, device="meta")
+                bias = torch.empty(4, dtype=torch.float32, device="meta")
+                return [hidden_states, weight, bias, scale, shift]
+            return [hidden_states, scale, shift]
+
+        def pattern_affine(hidden_states, weight, bias, scale, shift, eps):
+            normed = torch.ops.tensor_cast.layer_norm(hidden_states, weight, bias, eps)
+            return torch.ops.aten.add.Tensor(
+                torch.ops.aten.mul.Tensor(normed, torch.ops.aten.add.Tensor(scale, 1.0)), shift
+            )
+
+        def replacement_affine(hidden_states, weight, bias, scale, shift, eps):
+            return torch.ops.tensor_cast.modulated_layer_norm(hidden_states, weight, bias, scale, shift, eps)
+
+        def pattern_no_affine(hidden_states, scale, shift, eps):
+            normed = torch.ops.tensor_cast.layer_norm(hidden_states, None, None, eps)
+            return torch.ops.aten.add.Tensor(
+                torch.ops.aten.mul.Tensor(normed, torch.ops.aten.add.Tensor(scale, 1.0)), shift
+            )
+
+        def replacement_no_affine(hidden_states, scale, shift, eps):
+            return torch.ops.tensor_cast.modulated_layer_norm(hidden_states, None, None, scale, shift, eps)
+
+        if affine:
+            return _create_pattern_result(pattern_affine, replacement_affine, get_inputs())
+        return _create_pattern_result(pattern_no_affine, replacement_no_affine, get_inputs())
 
 
 class RMSNormPattern:
@@ -33,6 +219,28 @@ class RMSNormPattern:
         def replacement(hidden_states, weight, eps):
             out = torch.ops.tensor_cast.rms_norm(hidden_states, weight, eps)
             return out
+
+        return _create_pattern_result(pattern, replacement, get_inputs())
+
+
+class DiffusersRMSNormPattern:
+    """Match the same-low-precision path in diffusers.models.normalization.RMSNorm."""
+
+    @staticmethod
+    def create(dtype, shape=(2, 4)):
+        def get_inputs():
+            hidden_states = torch.empty(*shape, dtype=dtype, device="meta")
+            weight = torch.empty(shape[-1], dtype=dtype, device="meta")
+            return [hidden_states, weight]
+
+        def pattern(hidden_states, weight, eps):
+            variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+            hidden_states = hidden_states * torch.rsqrt(variance + eps)
+            hidden_states = hidden_states.to(dtype)
+            return hidden_states * weight
+
+        def replacement(hidden_states, weight, eps):
+            return torch.ops.tensor_cast.rms_norm(hidden_states, weight, eps)
 
         return _create_pattern_result(pattern, replacement, get_inputs())
 
@@ -437,8 +645,41 @@ class AddRMSNormDynamicQuant2MXFP4Pattern:
 def register_all_patterns():
     from . import register_pattern
 
+    norm_pattern_shapes = [(2, 4), (2, 3, 4), (2, 3, 5, 4)]
+
     if config.compilation.fusion_patterns.enable_rms_norm:
+        for shape in norm_pattern_shapes:
+            pattern, replacement, example_inputs, scalar_workaround = TorchRMSNormPattern.create(shape)
+            register_pattern(
+                f"torch_rms_norm_pattern_rank_{len(shape)}",
+                pattern,
+                replacement,
+                example_inputs,
+                scalar_workaround=scalar_workaround,
+                level=0,
+            )
         for dtype in _RMS_NORM_DTYPE_LIST:
+            for shape in norm_pattern_shapes:
+                pattern, replacement, example_inputs, scalar_workaround = TorchRMSNormDecomposedPattern.create(
+                    dtype, shape
+                )
+                register_pattern(
+                    f"torch_rms_norm_decomposed_pattern_{dtype}_rank_{len(shape)}",
+                    pattern,
+                    replacement,
+                    example_inputs,
+                    scalar_workaround=scalar_workaround,
+                    level=0,
+                )
+                pattern, replacement, example_inputs, scalar_workaround = DiffusersRMSNormPattern.create(dtype, shape)
+                register_pattern(
+                    f"diffusers_rms_norm_pattern_{dtype}_rank_{len(shape)}",
+                    pattern,
+                    replacement,
+                    example_inputs,
+                    scalar_workaround=scalar_workaround,
+                    level=0,
+                )
             pattern, replacement, example_inputs, scalar_workaround = RMSNormPattern.create(dtype)
             register_pattern(
                 f"rms_norm_pattern_{dtype}",
@@ -447,6 +688,49 @@ def register_all_patterns():
                 example_inputs,
                 scalar_workaround=scalar_workaround,
                 level=0,
+            )
+
+    if config.compilation.fusion_patterns.enable_layer_norm:
+        for dtype in _LAYER_NORM_DTYPE_LIST:
+            for shape in norm_pattern_shapes:
+                for affine in (False, True):
+                    if dtype in _RMS_NORM_DTYPE_LIST:
+                        pattern, replacement, example_inputs, scalar_workaround = LayerNormPattern.create(
+                            dtype, affine, shape
+                        )
+                        register_pattern(
+                            f"layer_norm_pattern_{dtype}_rank_{len(shape)}_affine_{affine}",
+                            pattern,
+                            replacement,
+                            example_inputs,
+                            scalar_workaround=scalar_workaround,
+                            level=0,
+                        )
+                    pattern, replacement, example_inputs, scalar_workaround = LayerNormDecomposedPattern.create(
+                        dtype,
+                        affine,
+                        shape,
+                        output_cast=dtype in _RMS_NORM_DTYPE_LIST,
+                    )
+                    register_pattern(
+                        f"layer_norm_decomposed_pattern_{dtype}_rank_{len(shape)}_affine_{affine}",
+                        pattern,
+                        replacement,
+                        example_inputs,
+                        scalar_workaround=scalar_workaround,
+                        level=0,
+                    )
+
+    if config.compilation.fusion_patterns.enable_modulated_layer_norm:
+        for affine in (False, True):
+            pattern, replacement, example_inputs, scalar_workaround = ModulatedLayerNormPattern.create(affine)
+            register_pattern(
+                f"modulated_layer_norm_pattern_affine_{affine}",
+                pattern,
+                replacement,
+                example_inputs,
+                scalar_workaround=scalar_workaround,
+                level=1,
             )
 
     if config.compilation.fusion_patterns.enable_rms_norm_quant:

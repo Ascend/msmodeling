@@ -425,14 +425,59 @@ def _elementwise_silu_ops(numel: int) -> int:
     return numel * 6
 
 
+# Semantic fusion estimators add arithmetic only. get_memory_access_properties() charges
+# the stored bytes of every tensor argument as a read and every tensor output as a
+# write, including broadcast operands at their physical (not expanded) sizes. Fused
+# decomposition intermediates are deliberately not charged as separate HBM traffic.
+# None of the following normalization, activation, residual, or RoPE formulas has MMA.
+
+
+def _gelu_ops(numel: int, approximate: str) -> int:
+    if approximate == "tanh":
+        # GELU_tanh(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).
+        # Its algebra costs 8 GP ops: x^3 (2 mul), coefficient multiply, inner add,
+        # sqrt(2/pi) multiply, final add, x/2 multiply, and final multiply. Model
+        # tanh's approximate special-function work as 5 GP-equivalents, for 13N total.
+        return numel * 13
+
+    # GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2))). Its algebra costs 4 GP ops:
+    # divide by sqrt(2), add one, x/2 multiply, and final multiply. Model erf as
+    # 12 GP-equivalents for its heavier exact special-function evaluation, for 16N total.
+    # The 5/12 special-function weights are architecture-agnostic GP-equivalent costs,
+    # rather than literal instruction counts; they preserve erf GELU as the slower path.
+    return numel * 16
+
+
 def _rmsnorm_ops(num_rows: int, row_width: int) -> int:
-    # Approximate RMSNorm by mean(square) + rsqrt + normalization.
+    # Let N = num_rows * row_width. RMSNorm: mean(x^2) + rsqrt + x * rstd ≈ 5N fp32 GP ops.
     return num_rows * row_width * 5
 
 
 def _l2norm_ops(num_rows: int, row_width: int) -> int:
     # Approximate L2 norm by square + reduction + rsqrt + scaling.
     return num_rows * row_width * 4
+
+
+def _layernorm_ops(num_rows: int, row_width: int, has_weight: bool, has_bias: bool) -> int:
+    # Let N = num_rows * row_width. LayerNorm core (mean/variance, center, rsqrt,
+    # normalize) is 6N fp32 GP ops; each independently present affine operand adds N.
+    num_elements = num_rows * row_width
+    gp_ops = num_elements * 6
+    if has_weight:
+        gp_ops += num_elements
+    if has_bias:
+        gp_ops += num_elements
+    return gp_ops
+
+
+def _norm_rows_and_width(x: torch.Tensor) -> Tuple[int, int]:
+    if x.ndim == 0:
+        raise ValueError("Normalization input must have at least one dimension, got a scalar tensor.")
+    row_width = int(x.size(-1))
+    if row_width == 0:
+        return 0, 0
+    num_rows = int(x.numel() // row_width)
+    return num_rows, row_width
 
 
 def _accumulate_compute_ops(
@@ -453,6 +498,116 @@ def _accumulate_compute_ops(
 
 def _bytes(num_elements: int, dtype: torch.dtype) -> int:
     return int(bytes_of_elements(num_elements, dtype))
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.rms_norm.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x = op_invoke_info.args[0]
+    assert isinstance(x, torch.Tensor)
+    num_rows, row_width = _norm_rows_and_width(x)
+    properties = op_invoke_info.get_memory_access_properties()
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=_rmsnorm_ops(num_rows, row_width))
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.layer_norm.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x = op_invoke_info.args[0]
+    weight = op_invoke_info.args[1]
+    bias = op_invoke_info.args[2]
+    assert isinstance(x, torch.Tensor)
+    num_rows, row_width = _norm_rows_and_width(x)
+    properties = op_invoke_info.get_memory_access_properties()
+    # FP32 GP = 6N + N * [weight is present] + N * [bias is present].
+    _accumulate_compute_ops(
+        properties, torch.float32, gp_ops=_layernorm_ops(num_rows, row_width, weight is not None, bias is not None)
+    )
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.silu.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x = op_invoke_info.args[0]
+    assert isinstance(x, torch.Tensor)
+    properties = op_invoke_info.get_memory_access_properties()
+    # FP32 GP = N * (sigmoid approximation: 5 + final x * sigmoid(x): 1) = 6N.
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=x.numel() * 6)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.gated_residual_add.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    output = op_invoke_info.out
+    assert isinstance(output, torch.Tensor)
+    properties = op_invoke_info.get_memory_access_properties()
+    # y = residual + update * gate: one multiply plus one add for every output element.
+    # GP = 2N_out in the promoted output dtype, including broadcast-expanded elements.
+    _accumulate_compute_ops(properties, output.dtype, gp_ops=output.numel() * 2)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.modulated_layer_norm.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x = op_invoke_info.args[0]
+    weight = op_invoke_info.args[1]
+    bias = op_invoke_info.args[2]
+    assert isinstance(x, torch.Tensor)
+    num_rows, row_width = _norm_rows_and_width(x)
+    properties = op_invoke_info.get_memory_access_properties()
+    # FP32 normalization GP = 6N + N * [weight] + N * [bias].
+    _accumulate_compute_ops(
+        properties, torch.float32, gp_ops=_layernorm_ops(num_rows, row_width, weight is not None, bias is not None)
+    )
+    # Activation-dtype GP = N * ((scale + 1) + normed * adjusted_scale + shift add) = 3N.
+    _accumulate_compute_ops(properties, x.dtype, gp_ops=x.numel() * 3)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.gelu.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x = op_invoke_info.args[0]
+    assert isinstance(x, torch.Tensor)
+    approximate = op_invoke_info.kwargs.get("approximate")
+    if approximate is None:
+        approximate = op_invoke_info.args[1] if len(op_invoke_info.args) > 1 else "none"
+    properties = op_invoke_info.get_memory_access_properties()
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=_gelu_ops(x.numel(), approximate))
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.apply_rope.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    q = op_invoke_info.args[0]
+    k = op_invoke_info.args[1]
+    cos = op_invoke_info.args[2]
+    sin = op_invoke_info.args[3]
+    assert isinstance(q, torch.Tensor)
+    assert isinstance(k, torch.Tensor)
+    assert isinstance(cos, torch.Tensor)
+    assert isinstance(sin, torch.Tensor)
+    properties = op_invoke_info.get_memory_access_properties()
+    # Per result element, x * cos + rotate(x) * sin costs two multiplies and one add.
+    # The fused pattern promotes each query/key multiplication to the frequency dtype.
+    q_compute_dtype = torch.promote_types(q.dtype, torch.promote_types(cos.dtype, sin.dtype))
+    k_compute_dtype = torch.promote_types(k.dtype, torch.promote_types(cos.dtype, sin.dtype))
+    _accumulate_compute_ops(properties, q_compute_dtype, gp_ops=q.numel() * 3)
+    _accumulate_compute_ops(properties, k_compute_dtype, gp_ops=k.numel() * 3)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.apply_rope_single.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x = op_invoke_info.args[0]
+    cos = op_invoke_info.args[1]
+    sin = op_invoke_info.args[2]
+    assert isinstance(x, torch.Tensor)
+    assert isinstance(cos, torch.Tensor)
+    assert isinstance(sin, torch.Tensor)
+    properties = op_invoke_info.get_memory_access_properties()
+    # The fused pattern converts x to FP32 before its two multiplies and one add per output element.
+    compute_dtype = torch.promote_types(torch.float32, torch.promote_types(cos.dtype, sin.dtype))
+    _accumulate_compute_ops(properties, compute_dtype, gp_ops=x.numel() * 3)
+    return properties
 
 
 def _linear_attention_state_bytes(

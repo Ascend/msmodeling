@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -11,6 +11,29 @@ def _(
     weight: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
+    return torch.empty_like(x).contiguous()
+
+
+@register_tensor_cast_op("layer_norm")
+def _(
+    x: torch.Tensor,
+    weight: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+    eps: float,
+) -> torch.Tensor:
+    return torch.empty_like(x).contiguous()
+
+
+@register_tensor_cast_op("modulated_layer_norm")
+def _(
+    x: torch.Tensor,
+    weight: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    del scale, shift
     return torch.empty_like(x).contiguous()
 
 
