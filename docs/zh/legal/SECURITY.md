@@ -78,7 +78,7 @@ msModeling项目采用Python开发，对外提供CLI命令行入口及Python API
 - msModeling Web UI默认绑定`127.0.0.1`，浏览器与服务在同一台机器上使用时属于localhost内通信。
 - 若用户将Web UI绑定到非本地地址，或通过代理、端口转发、共享链接等方式远程访问，属于非默认安全使用模式，请自行关注远程通信带来的安全风险。
 - 为了消减安全风险，建议通过防火墙、iptables、访问控制列表、VPN、nginx等反向代理工具及HTTPS加固通信安全，并限制可访问客户端范围。
-- 性能数据库采集工具在采集通信算子性能数据场景下会使用`torchrun`建立TCP通信，请仅在可信网络环境中使用，并在使用脚本进行通信脚本采集之前进行安全加固，参考[昇腾pytorch仓通信安全加固](https://gitcode.com/ascend/pytorch/blob/master/SECURITYNOTE.md#%E9%80%9A%E4%BF%A1%E5%AE%89%E5%85%A8%E5%8A%A0%E5%9B%BA)。另外请确保`MASTER_ADDR`、`MASTER_PORT`等环境变量配置符合预期。
+- 性能数据库采集工具在采集通信算子性能数据场景下会使用`torchrun`建立TCP通信，请仅在可信网络环境中使用，并在使用脚本进行通信脚本采集之前进行安全加固，参考[昇腾pytorch仓通信安全加固](https://gitcode.com/Ascend/pytorch/blob/v2.7.1-26.1.0/docs/zh/SECURITYNOTE.md#%E9%80%9A%E4%BF%A1%E5%AE%89%E5%85%A8%E5%8A%A0%E5%9B%BA)。另外请确保`MASTER_ADDR`、`MASTER_PORT`等环境变量配置符合预期。
 
 ## 通信矩阵
 
