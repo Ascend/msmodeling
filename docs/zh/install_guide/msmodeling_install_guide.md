@@ -10,11 +10,21 @@ msModeling 是面向大模型推理性能仿真、服务化吞吐优化和 OptiX
 - 运行环境可访问 GitCode 与 Python 包源。
 - 若需要直接拉取 Hugging Face 模型配置，运行环境可访问 Hugging Face；否则请按本文配置镜像或使用本地模型路径。
 
-msModeling 当前仅支持源码安装。本文不涉及在线安装包、离线安装包或 run 包安装方式。
+## 2. 安装方式
 
-## 2. 源码安装
+### 2.1 在线安装
 
-### 2.1 克隆源码
+若您的设备具备互联网访问能力，可通过一条命令自动完成工具的下载与安装。请参见昇腾社区MindStudio[下载](https://www.hiascend.com/developer/software/mindstudio/download)页面，选择“推理开发”使用场景，对应的CANN版本以及对应的工具，并在安装方式中选择"在线安装"，系统将引导您完成后续操作。
+
+### 2.2 离线安装
+
+对处于企业内网等无外网环境的设备，请先在可联网的机器上下载完整的离线安装包，再将其传输至目标设备进行安装。请参见昇腾社区MindStudio[下载](https://www.hiascend.com/developer/software/mindstudio/download)页面，选择“推理开发”使用场景，对应的CANN版本以及对应的工具，并在安装方式中选择"离线安装"，获取对应的安装包及操作指引。
+
+### 2.3 源码安装
+
+如需使用最新代码的功能，或对源码进行修改以增强功能，可下载本仓库代码，自行编译、打包工具并完成安装。
+
+#### 2.3.1 克隆源码
 
 执行如下命令下载源码：
 
@@ -23,7 +33,7 @@ git clone https://gitcode.com/Ascend/msmodeling.git
 cd msmodeling
 ```
 
-### 2.2 推荐方式：uv
+#### 2.3.2 推荐方式：uv
 
 项目推荐使用 `uv` 管理虚拟环境和依赖。仓库包含 `pyproject.toml` 时，`scripts/` 下的脚本也会自动识别并使用 `uv`。
 
@@ -45,7 +55,7 @@ uv sync --group ci
 > [!NOTE]
 > 如果使用 `uv` 创建或管理虚拟环境，后续查看、升级、卸载也建议使用 `uv pip ...` 或 `uv run ...`。不要仅通过 `which pip` 判断当前环境，部分场景下 `pip` 可能指向非预期的 Python 环境。
 
-### 2.3 备选方式：pip + requirements.txt
+#### 2.3.3 备选方式：pip + requirements.txt
 
 如果不使用 `uv`，也可以通过 Python 原生虚拟环境和 `requirements.txt` 安装依赖。CPU 环境建议先从 PyTorch CPU 源安装 `torch` 与 `torchvision`，再安装其余依赖。
 
@@ -84,7 +94,7 @@ pip install -r requirements.txt -i https://repo.huaweicloud.com/repository/pypi/
 > [!WARNING]
 > Windows 上 PyTorch 2.10 可能运行不正常。如遇问题，建议使用 PyTorch 2.8 或更早版本。
 
-### 2.4 配置环境变量
+#### 2.3.4 配置环境变量
 
 msModeling 常用环境变量如下：
 
@@ -169,23 +179,35 @@ uv pip show msmodeling
 pip show msmodeling
 ```
 
-进入 msModeling 仓库根目录，拉取目标版本源码后升级：
+### 5.1 方式一：覆盖升级
 
-```bash
-cd msmodeling
-git fetch
-git checkout 26.1.0
-git pull
+升级即“先卸后装”。若选择覆盖升级，直接通过[2.1 在线安装](#21-在线安装)和[2.2 离线安装](#22-离线安装)内容执行安装操作，工具将自动卸载旧版本，并引导您完成覆盖安装。
 
-# uv 环境
-uv pip install --upgrade -e .
+### 5.2 方式二：源码升级
 
-# uv 环境临时指定镜像源
-uv pip install --upgrade -e . -i https://mirrors.aliyun.com/pypi/simple
+若选择源码升级，请按照如下操作完成升级：
 
-# pip 环境
-pip install --upgrade -e .
-```
+1. 进入 msModeling 仓库根目录，拉取目标版本源码。
+
+    ```bash
+    cd msmodeling
+    git fetch
+    git checkout 26.1.0
+    git pull
+    ```
+
+2. 选择对应的环境升级到目标版本。
+
+    ```bash
+    # uv 环境
+    uv pip install --upgrade -e .
+
+    # uv 环境临时指定镜像源
+    uv pip install --upgrade -e . -i https://mirrors.aliyun.com/pypi/simple
+
+    # pip 环境
+    pip install --upgrade -e .
+    ```
 
 升级版本时需要关注版本配套关系，请参见《[版本说明](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.1.0/release_notes.md)》。
 

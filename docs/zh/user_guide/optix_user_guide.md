@@ -69,7 +69,7 @@ OptiX 拉起服务或测评子进程时，会从 `PATH`、`PYTHONPATH` 里去掉
 
 **部署栈准备**
 
-在系统环境，或 `[deploy]` 所指向的路径下，确认服务化与测评工具能正常运行。可参考 [VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)、[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)，以及 [AISBench 测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)。
+在系统环境，或 `[deploy]` 所指向的路径下，确认服务化与测评工具能正常运行。可参考 [VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)、[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start_motor.md)，以及 [AISBench 测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)。
 
 ## 工具安装
 
