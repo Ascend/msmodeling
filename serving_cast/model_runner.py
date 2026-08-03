@@ -93,6 +93,7 @@ class ModelRunner:
                 ep_size=parallel_config.ep_size,
                 moe_tp_size=parallel_config.moe_tp_size,
                 moe_dp_size=parallel_config.moe_dp_size,
+                dcp_size=parallel_config.dcp_size,
                 reserved_memory_gb=0.0,
                 block_size=common_config.serving_config.block_size,
             )
@@ -323,6 +324,12 @@ class ModelRunner:
         block_size = self.common_config.serving_config.block_size
         all_mem_for_kv_cache = inference_metrics.device_memory_available_gb + inference_metrics.kv_cache_size_gb
         num_blocks = int(all_mem_for_kv_cache / inference_metrics.kv_cache_per_token_gb // block_size)
+        # Decode Context Parallel shards the KV cache along the token dimension, so
+        # the same per-card byte budget can hold more tokens. The factor is 1 when DCP
+        # is off, and also whenever the shard buys no real per-card saving (GQA with
+        # h_kv >= tp, where the KV-head growth cancels the sequence shrink) or is not
+        # modeled (V4/SFA caches); see ``dcp_kv_token_capacity_factor``.
+        num_blocks *= inference_metrics.kv_cache_token_capacity_factor
         logger.debug("warmup result: %d blocks", num_blocks)
         return num_blocks, block_size
 

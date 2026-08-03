@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
 from functools import partial
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 import torch
 
 from .. import ops  # noqa: F401
 from ..model_config import MlaConfig, MultiheadLatentAttentionQuantConfig
-from ..parallel_group import ParallelGroup
+from ..parallel_group import _DEFAULT_PG, ParallelGroup
 from ..utils import exact_division
+
+if TYPE_CHECKING:
+    from ..parallel_group import ParallelGroupManager
 from .attention import AttentionMetadataBase
 from .quant_linear import TensorCastQuantLinear
 from .utils import get_partial_sharded, ModelWrapperBase
@@ -109,15 +112,29 @@ def apply_rotary_pos_emb_interleave(q, k, cos, sin, unsqueeze_dim=1):
 
 
 class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
+    # Accept the parallel-group manager so we can pick up the DCP group; this also
+    # makes ``patch_mla`` pass the manager to every MLA subclass (all of which now
+    # forward ``parallel_group_manager`` to this __init__).
+    supports_parallel_group_manager: bool = True
+
     def __init__(
         self,
         mla_config: MlaConfig,
         mla_module: torch.nn.Module,
         tp_group: ParallelGroup,
         decode_only: bool = False,
+        parallel_group_manager: Optional["ParallelGroupManager"] = None,
     ):
         super().__init__(mla_config, mla_module, decode_only)
         self.tp_group = tp_group
+        # Decode Context Parallel group (a contiguous sub-slice of the TP group).
+        # Falls back to the singleton _DEFAULT_PG (world_size == 1) when no manager
+        # is supplied or DCP is disabled, so every DCP collective is then a no-op.
+        self.dcp_group = (
+            parallel_group_manager.dcp_group
+            if parallel_group_manager is not None and getattr(parallel_group_manager, "dcp_group", None) is not None
+            else _DEFAULT_PG
+        )
         self._num_heads_per_rank = exact_division(self.num_heads, tp_group.world_size)
         self._setup_kv_b_decomposition(tp_group)
 
@@ -288,6 +305,45 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         query_start_loc = attention_meta.query_start_loc if attention_meta else None
         seq_lens = attention_meta.seq_lens if attention_meta else None
         query_lens = attention_meta.query_lens if attention_meta else None
+
+        # --- Decode Context Parallel (decode path only) ---
+        # Gather Q heads across the DCP group so each rank holds h_q*dcp/tp heads,
+        # then shard the KV context so each rank only attends over its local S/dcp.
+        # Unlike GQA, MLA's latent KV is NOT partitioned across the TP heads, so DCP
+        # genuinely seq-shards it: the gathered Q heads (cost model reads
+        # ``num_heads = q.size(1)``) and the sharded ``seq_lens`` are both real
+        # per-rank changes. ``is_dcp_decode_batch`` accepts ordinary decode and MTP
+        # (query_len = 1 + num_spec) while rejecting prefill. all_gather Q keeps the
+        # model dtype; the seq-len shard is a fresh tensor (attention_meta.seq_lens is
+        # shared across layers - never mutate it).
+        #
+        # Only the FIA part of the op consumes the gathered head count. The two absorb
+        # matmuls (``q @ W_UK_T`` and ``@ W_UV``) stay at this rank's h_q/tp heads --
+        # real DCP does the former before this all_gather and the latter after the merge,
+        # since a rank holds no other rank's absorb weights (``W_UK_T``/``W_UV`` here are
+        # built at ``_num_heads_per_rank``). The cost model derives that from
+        # ``W_UK_T.size(0)`` rather than ``q.size(1)``; see the decode branch of
+        # ``_multihead_latent_attention_properties_helper``.
+        apply_dcp = self.dcp_group.world_size > 1 and attention_meta is not None and attention_meta.is_dcp_decode
+        if apply_dcp:
+            q_states = self.dcp_group.all_gather(q_states, dim=1)
+            dcp_size = self.dcp_group.world_size
+            # Round the shard UP, and clamp to >= 1. Two reasons this is not floor:
+            #
+            # 1. Critical path: real DCP splits the context at block granularity, so
+            #    the remainder lands on a subset of ranks that then hold
+            #    ``ceil(S/dcp)`` tokens. The merge all_to_all below is a
+            #    synchronization point, so the step's latency is set by the LONGEST
+            #    shard -- flooring models every rank at its most optimistic length
+            #    (e.g. S=2001, dcp=8 -> 250 instead of the real 251).
+            # 2. Short contexts: ``is_dcp_decode_batch`` only requires
+            #    ``seq_len > query_len``, so seq_len can be as low as 2 and
+            #    ``seq_len < dcp`` is reachable (e.g. --context-length 4 --dcp-size 8).
+            #    Flooring to 0 there makes the cost model bill the layer as "no KV to
+            #    read" (both the FLOPs term ``sum(query_lens * seq_lens)`` and the
+            #    KV-read term ``sum(seq_lens * ...)`` collapse), understating its time.
+            seq_lens = torch.clamp(torch.div(seq_lens + (dcp_size - 1), dcp_size, rounding_mode="floor"), min=1)
+
         if self.quant_config is not None:
             quant_config = self.quant_config
             out_dtype = self.quant_config.get_quant_dtype()
@@ -365,6 +421,17 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             seq_lens=seq_lens,
             query_lens=query_lens,
         )
+
+        # --- Decode Context Parallel merge ---
+        # Each rank produced partial attention for h_q*dcp/tp gathered heads over its
+        # local S/dcp KV. Redistribute (output + lse) across the DCP group so every
+        # rank can online-softmax-merge its own h_q/tp heads from the dcp partials.
+        # vllm-ascend upcasts output & lse to fp32 before this all_to_all, so the
+        # communication volume must be counted in fp32 (4 bytes/elem) regardless of
+        # the model/KV dtype - enforced here purely via the fp32 meta tensor.
+        if apply_dcp:
+            attn_output = self._dcp_merge_all_to_all(attn_output, batch_size, seq_length)
+
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return self._format_forward_output(attn_output, None, pre_attn_out)
@@ -372,6 +439,45 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
     def _format_forward_output(self, attn_output, attn_weights, pre_attn_out) -> tuple:
         """Hook for subclasses to attach sparse-attention intermediates to forward output."""
         return attn_output, attn_weights
+
+    def _dcp_merge_all_to_all(
+        self,
+        attn_output: torch.Tensor,
+        batch_size: int,
+        seq_length: int,
+    ) -> torch.Tensor:
+        """Model the DCP output+lse all_to_all and return output reduced to h_q/tp heads.
+
+        ``attn_output`` enters as ``(num_tokens, h_q*dcp/tp, v_head_dim)``. We build a
+        synthetic fp32 ``output + lse`` payload with the gathered heads on dim 0 (the
+        dimension ``all_to_all`` splits) and exchange ``h_q/tp``-head shards across the
+        ``dcp`` ranks. The exchanged tensor is only needed for its communication cost;
+        the local online-softmax merge collapses the ``dcp`` partials back to the rank's
+        own ``h_q/tp`` heads, so we slice ``attn_output`` accordingly for ``o_proj``.
+        """
+        dcp = self.dcp_group.world_size
+        heads_per_rank = self._num_heads_per_rank
+        gathered_heads = heads_per_rank * dcp
+        num_tokens = batch_size * seq_length
+        # output (v_head_dim) + lse (1 column per head), upcast to fp32 for the a2a.
+        # The payload must carry a value edge from the placeholder-derived
+        # ``attn_output``: a bare ``torch.empty`` is an all-constant input, so the meta
+        # constant-folder would precompute the whole ``empty -> all_to_all`` chain and
+        # erase the collective (dropping its communication cost). Adding a value-neutral
+        # ``[0] * 0`` term keeps the a2a *input* non-constant so it survives folding.
+        out_lse = torch.empty(
+            (gathered_heads, num_tokens * (self.v_head_dim + 1)),
+            dtype=torch.float32,
+            device=attn_output.device,
+        )
+        out_lse = out_lse + attn_output.reshape(-1)[0].to(torch.float32) * 0
+        split_sizes = [heads_per_rank] * dcp
+        exchanged = self.dcp_group.all_to_all(out_lse, split_sizes, split_sizes)
+        # After the local merge each rank keeps its own h_q/tp heads. Bind the a2a
+        # output back (value-neutrally) so torch.compile's DCE keeps the collective.
+        merged = attn_output[:, :heads_per_rank, :].contiguous()
+        merged = merged + exchanged.reshape(-1)[0].to(merged.dtype) * 0
+        return merged
 
     def _get_backend_kwargs(self, pre_attn_out) -> dict:
         """
@@ -458,8 +564,15 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
         mla_module: torch.nn.Module,
         tp_group: ParallelGroup,
         decode_only: bool = False,
+        parallel_group_manager: Optional["ParallelGroupManager"] = None,
     ):
-        super().__init__(mla_config, mla_module, tp_group, decode_only)
+        super().__init__(
+            mla_config,
+            mla_module,
+            tp_group,
+            decode_only,
+            parallel_group_manager=parallel_group_manager,
+        )
         self.indexer = DeepseekSparseAttentionIndexer(
             self._inner.indexer,
             topk_limit=_resolve_sparse_topk_limit(

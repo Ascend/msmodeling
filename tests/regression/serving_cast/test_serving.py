@@ -37,6 +37,7 @@ class ServingTestCase(unittest.TestCase):
         self.fake_ret.device_memory_available_gb = 40.0
         self.fake_ret.kv_cache_size_gb = 0
         self.fake_ret.kv_cache_per_token_gb = 0.001
+        self.fake_ret.kv_cache_token_capacity_factor = 1
         self.latency_thresholds = build_latency_thresholds(
             ttft_ms=self.dummy_duration.get("analytic"),
             tpot_ms=self.dummy_duration.get("analytic"),

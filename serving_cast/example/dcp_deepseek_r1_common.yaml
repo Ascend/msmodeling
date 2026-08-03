@@ -1,0 +1,46 @@
+# DCP serving_cast common config — DeepSeek-R1 (MLA + MoE).
+#
+# Mirrors the model/quantization knobs of the reference tensor_cast command:
+#   python -m tensor_cast.scripts.text_generate deepseek-ai/DeepSeek-R1 \
+#     --quantize-linear-action W8A8_STATIC --compile \
+#     --context-length 4096 --query-length 1 ...
+#
+# Pair with serving_cast/example/dcp_test_instance.yaml for the parallel layout
+# (world_size=16, tp=8, dp=2, ep=16, dcp=2).
+#
+# Note: command-line flags that serving_cast does not plumb through to
+# tensor_cast (--word-embedding-tp, --enable-shared-expert-tp,
+# --enable-dispatch-ffn-combine, --performance-model/--profiling-database) have
+# no field here. serving_cast always evaluates with the analytic performance
+# model.
+
+model_config:
+  name: deepseek-ai/DeepSeek-R1
+  num_mtp_tokens: 0                          # MTP disabled (matches --dcp reference run)
+  quantize_linear_action: W8A8_STATIC        # from --quantize-linear-action W8A8_STATIC
+  quantize_lmhead: False
+  mxfp4_group_size: 32
+  quantize_attention_action: DISABLED
+  do_compile: True                           # from --compile
+  allow_graph_break: False
+  dump_input_shapes: False
+  chrome_trace: null
+  enable_multi_process: False
+  num_processes: 10
+  predict_steps: 20
+  enable_interpolate: True
+  interpolation_seed: 1234
+  enable_preprocessing_modeling: True
+  enable_kv_transfer_modeling: True
+
+load_gen:
+  load_gen_type: fixed_length
+  num_requests: 200
+  num_input_tokens: 4096                      # matches --context-length 4096
+  num_output_tokens: 1024                     # long-ish decode so DCP KV sharding matters
+  request_rate: 4.0
+
+serving_config:
+  max_concurrency: 100
+  block_size: 128
+  max_tokens_budget: 8192

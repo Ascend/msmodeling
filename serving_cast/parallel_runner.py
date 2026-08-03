@@ -24,6 +24,7 @@ from .service.utils import (
     count_search_combinations,
     load_length_distribution,
     resolve_parallel_search_candidates,
+    resolve_search_sizes,
     select_tightest_memory_info,
 )
 
@@ -122,7 +123,7 @@ class ParallelRunner:
             overwrite_optimizer_data = copy.deepcopy(self.optimizer_data)
             overwrite_optimizer_data.ttft_limits = self.args.ttft_limits or float("inf")
             overwrite_optimizer_data.tpot_limits = None
-            summary_list = self._get_df_list(overwrite_optimizer_data)
+            summary_list = self._get_df_list(overwrite_optimizer_data, is_prefill=True)
             self._add_summary_result(summary_list, overwrite_optimizer_data)
 
         if self.args.tpot_limits is not None:
@@ -215,7 +216,9 @@ class ParallelRunner:
 
         return model_runner
 
-    def _get_user_config(self, num_devices: Optional[int] = None) -> Iterator[UserInputConfig]:
+    def _get_user_config(
+        self, num_devices: Optional[int] = None, is_prefill: bool = False
+    ) -> Iterator[UserInputConfig]:
         target_devices = num_devices if num_devices is not None else self.args.num_devices
 
         base_args = copy.copy(self.args)
@@ -223,7 +226,7 @@ class ParallelRunner:
         base_user_input = UserInputConfig.from_args(base_args)
         base_chrome_trace = getattr(base_args, "chrome_trace", None)
 
-        def _build_user_input(tp: int, ep: int, moe_dp: int, num_mtp_tokens: int) -> UserInputConfig:
+        def _build_user_input(tp: int, ep: int, moe_dp: int, num_mtp_tokens: int, dcp: int) -> UserInputConfig:
             tmp_user_input = copy.copy(base_user_input)
             tmp_user_input.tp_size = tp
             tmp_user_input.dp_size = target_devices // tp
@@ -234,6 +237,7 @@ class ParallelRunner:
             tmp_user_input.moe_tp_size = target_devices // (ep * moe_dp)
             tmp_user_input.num_mtp_tokens = num_mtp_tokens
             tmp_user_input.dynamic_shapes = not tmp_user_input.enable_sequence_parallel
+            tmp_user_input.dcp_size = dcp
             if base_chrome_trace:
                 name, ext = os.path.splitext(base_chrome_trace)
                 tmp_user_input.chrome_trace = (
@@ -249,7 +253,11 @@ class ParallelRunner:
             self.args.num_mtp_tokens,
             target_devices,
         )
-        total_combinations = count_search_combinations(tp_list, ep_list, moe_dp_list, mtp_list)
+        # DCP applies to the Decode phase only and reuses TP devices (a contiguous
+        # sub-slice of the TP group), so it is constrained by ``tp % dcp == 0`` rather
+        # than by the device budget. Prefill is always run with dcp=1.
+        dcp_list = [1] if is_prefill else resolve_search_sizes(getattr(self.args, "dcp_sizes", None), target_devices, 1)
+        total_combinations = count_search_combinations(tp_list, ep_list, moe_dp_list, mtp_list) * len(dcp_list)
         max_search_combinations = getattr(
             self.args,
             "max_search_combinations",
@@ -261,14 +269,16 @@ class ParallelRunner:
             and not getattr(self.args, "search_combination_warning_emitted", False)
         ):
             logger.warning(
-                "Large number of parallel search combinations (%d = TP:%d x EP:%d x MOE-DP:%d x MTP:%d), "
+                "Large number of parallel search combinations "
+                "(%d = TP:%d x EP:%d x MOE-DP:%d x MTP:%d x DCP:%d), "
                 "optimization may take a long time. Consider narrowing --tp-sizes, --ep-sizes, "
-                "--moe-dp-sizes, or --num-mtp-tokens; or increase --max-search-combinations.",
+                "--moe-dp-sizes, --num-mtp-tokens, or --dcp-sizes; or increase --max-search-combinations.",
                 total_combinations,
                 len(tp_list),
                 len(ep_list),
                 len(moe_dp_list),
                 len(mtp_list),
+                len(dcp_list),
             )
 
         for tp in tp_list:
@@ -281,13 +291,17 @@ class ParallelRunner:
                     if target_devices % (ep * moe_dp) != 0:
                         continue
                     for num_mtp_tokens in mtp_list:
-                        yield _build_user_input(tp=tp, ep=ep, moe_dp=moe_dp, num_mtp_tokens=num_mtp_tokens)
+                        for dcp in dcp_list:
+                            if tp % dcp != 0:
+                                continue
+                            yield _build_user_input(tp=tp, ep=ep, moe_dp=moe_dp, num_mtp_tokens=num_mtp_tokens, dcp=dcp)
 
     def _get_df_list(
         self,
         overwrite_optimizer_data: OptimizerData,
         user_configs: Optional[list] = None,
         disagg_mode: Optional[bool] = None,
+        is_prefill: bool = False,
     ) -> list[OptimizerSummary]:
         """Execute optimization tasks in parallel and return list of OptimizerSummary.
 
@@ -298,11 +312,13 @@ class ParallelRunner:
             overwrite_optimizer_data: Optimizer data for tasks.
             user_configs: Optional list of user configs. If None, use self._get_user_config().
             disagg_mode: Optional override for strategy selection.
+            is_prefill: When generating configs internally, force dcp=1 for the Prefill
+                phase (DCP is decode-only). Ignored when ``user_configs`` is provided.
 
         Returns:
             List of OptimizerSummary (non-None results only).
         """
-        configs = list(user_configs) if user_configs is not None else list(self._get_user_config())
+        configs = list(user_configs) if user_configs is not None else list(self._get_user_config(is_prefill=is_prefill))
 
         with self._executor_class(max_workers=self.args.jobs, initializer=self._worker_initializer) as executor:
             results = executor.map(
@@ -449,8 +465,9 @@ class ParallelRunner:
             overwrite_optimizer_data.tpot_limits = self.args.tpot_limits
         overwrite_optimizer_data.num_devices = devices_per_instance
 
-        # Get user configs for the specified device count
-        user_configs = list(self._get_user_config(num_devices=devices_per_instance))
+        # Get user configs for the specified device count. Prefill forces dcp=1
+        # (DCP is a decode-only optimization); Decode searches the dcp dimension.
+        user_configs = list(self._get_user_config(num_devices=devices_per_instance, is_prefill=is_prefill))
 
         if not user_configs:
             phase_name = "Prefill" if is_prefill else "Decode"

@@ -166,6 +166,23 @@ class ParallelGroupManager:
             pipeline_parallel_size=pipeline_parallel_size,
         )
 
+        # Decode Context Parallel reuses the TP communication domain: each DCP
+        # group is a contiguous sub-slice of size ``decode_context_parallel_size``
+        # within a TP group. TP is the fastest-varying axis of the rank grid and
+        # ``tp_size % dcp_size == 0`` is enforced by ParallelConfig, so the plain
+        # ``all_ranks.reshape(-1, dcp_size)`` produced by the TENSOR_PARALLEL path
+        # always lies inside a single TP group, regardless of pp/dp. We collapse
+        # the remaining dims into ``data_parallel_size`` (and keep pp=1) purely so
+        # the intermediate 5-D reshape stays valid. dcp_size == 1 yields singleton
+        # groups, so all DCP collectives become no-ops via the ``world_size == 1``
+        # guards.
+        dcp_size = self.parallel_config.decode_context_parallel_size
+        self.dcp_group = initialize_parallel(
+            ParallelGroupType.TENSOR_PARALLEL,
+            dcp_size,
+            world_size // dcp_size,
+        )
+
         self.dp_group = initialize_parallel(
             ParallelGroupType.DATA_PARALLEL,
             tensor_parallel_size,

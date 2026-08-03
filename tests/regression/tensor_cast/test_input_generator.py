@@ -27,6 +27,7 @@ from tensor_cast.layers.sampler import Sampler
 from tensor_cast.model_config import MtpConfig
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
+from tensor_cast.performance_model.utils import bytes_of_tensor
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.model import TransformerModel
 
@@ -40,7 +41,9 @@ def _fake_mtp_input_model(num_mtp_tokens=2):
                 num_mtp_layers=num_mtp_tokens,
                 mtp_block_module_name="DeepseekV3DecoderLayer",
             ),
-            parallel_config=SimpleNamespace(data_parallel_size=1, tensor_parallel_size=1),
+            parallel_config=SimpleNamespace(
+                data_parallel_size=1, tensor_parallel_size=1, decode_context_parallel_size=1
+            ),
             mla_config=None,
             hf_config=SimpleNamespace(model_type="deepseek_v3"),
         ),
@@ -218,6 +221,7 @@ def test_varlen_qwen3_5_cache_position_starts_at_context(_mock_kv_cache, _mock_s
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="qwen3_5"),
             mtp_config=None,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         )
     )
     requests = [
@@ -244,7 +248,7 @@ def test_qwen3_5_decode_mtp_cache_position_metadata(_mock_kv_cache, _mock_sparse
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="qwen3_5"),
             mtp_config=SimpleNamespace(num_mtp_layers=3),
-            parallel_config=SimpleNamespace(data_parallel_size=1),
+            parallel_config=SimpleNamespace(data_parallel_size=1, decode_context_parallel_size=1),
         ),
     )
 
@@ -279,7 +283,7 @@ def test_generate_inputs_sets_max_total_seq_len(_mock_kv_cache, _mock_sparse_cac
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="deepseek_v4"),
             mtp_config=None,
-            parallel_config=SimpleNamespace(data_parallel_size=1),
+            parallel_config=SimpleNamespace(data_parallel_size=1, decode_context_parallel_size=1),
         ),
     )
 
@@ -308,6 +312,7 @@ def test_generate_inputs_varlen_sets_max_total_seq_len(_mock_kv_cache, _mock_spa
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(model_type="deepseek_v4"),
             mtp_config=None,
+            parallel_config=SimpleNamespace(data_parallel_size=1, decode_context_parallel_size=1),
         ),
     )
     requests = [
@@ -381,6 +386,52 @@ def test_load_preprocessor_pixel_limits_no_config_json_returns_none(tmp_path):
     min_px, max_px = _load_preprocessor_pixel_limits(str(tmp_path))
     assert min_px is None
     assert max_px is None
+
+
+def _total_kv_cache_bytes(inputs) -> int:
+    return sum(bytes_of_tensor(t) for t in inputs["kv_cache_by_layers"].values())
+
+
+@pytest.mark.parametrize("generate_fn", [generate_inputs, generate_inputs_varlen])
+def test_dcp_does_not_shrink_gqa_kv_cache_when_kv_heads_cover_tp(qwen3_32b_lmhead_attention_transformer, generate_fn):
+    """A GQA model with ``h_kv >= tp`` gets NO per-card KV footprint saving from DCP.
+
+    DCP moves a rank from ``h_kv/tp`` heads over ``S`` to ``h_kv*dcp/tp`` heads over
+    ``S/dcp``, so per-card KV bytes ``(h_kv*dcp/tp) * D * (S/dcp) == (h_kv/tp) * D * S``
+    are invariant -- the head growth cancels the sequence shrink. This fixture is
+    Qwen3-32B (``h_kv=8``) at ``tp=1``, so TP replicates nothing and the factor is 1.
+
+    Regression: this used to assert ``bytes / dcp_size``, which fabricated a
+    ``dcp``-fold footprint saving that no GQA deployment has. See
+    ``dcp_kv_token_capacity_factor``; the MLA case (a real ``dcp`` saving) and the
+    ``h_kv < tp`` de-duplication case are covered in ``test_dcp_modeling.py``.
+
+    Both the fixed-batch (``generate_inputs``) and varlen entry points are checked,
+    since ``text_generate`` uses the former and serving uses the latter.
+    """
+    model = qwen3_32b_lmhead_attention_transformer
+    parallel_config = model.model_config.parallel_config
+    block_size = 128
+    request = RequestInfo(query_len=1, seq_len=8192, concurrency=2, is_decode=True)
+
+    def _bytes_for(dcp):
+        original = parallel_config.decode_context_parallel_size
+        parallel_config.decode_context_parallel_size = dcp
+        try:
+            if generate_fn is generate_inputs:
+                inputs = generate_inputs(model, [request], block_size=block_size)
+            else:
+                varlen_reqs = [RequestInfo(query_len=1, seq_len=8192, is_decode=True) for _ in range(2)]
+                inputs = generate_inputs_varlen(model, varlen_reqs, block_size)
+            return _total_kv_cache_bytes(inputs)
+        finally:
+            parallel_config.decode_context_parallel_size = original
+
+    bytes_dcp1 = _bytes_for(1)
+    assert bytes_dcp1 > 0
+    # Exactly equal, not approximately: the factor is 1, so nothing divides num_blocks.
+    for dcp in (2, 4, 8):
+        assert _bytes_for(dcp) == bytes_dcp1, dcp
 
 
 _DSA_INDEXER_CACHE_QUERY_LEN = 32

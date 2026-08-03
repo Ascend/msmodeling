@@ -164,8 +164,16 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     # total_kv_tokens mirrors the numerator behind num_blocks (max_context_length
     # per request, summed over the batch); V4 sizing compresses this footprint.
     total_kv_tokens = max_context_length * batch_size
+    # Decode Context Parallel stores only ``1 / dcp`` of each sequence's tokens on
+    # a card, so where that shard is a real per-card saving the KV footprint (the
+    # ``num_blocks`` sizing the physical cache tensors) shrinks accordingly. Per-token
+    # cost is unaffected (both the tensor bytes and the ``num_blocks`` denominator
+    # scale together inside ``_get_kv_cache_info``). The factor is layout-dependent
+    # (``dcp`` for MLA, TP-replication-capped for GQA, 1 for SFA); see
+    # ``dcp_kv_token_capacity_factor``.
+    kv_num_blocks = dcp_sharded_num_blocks(model, num_blocks)
     kv_cache_by_layers, kv_cache_per_token = _get_kv_cache_info(
-        model, num_blocks, block_size, batch_size, total_kv_tokens
+        model, kv_num_blocks, block_size, batch_size, total_kv_tokens
     )
     sampling_metadata = SamplingMetadata(
         query_start_loc=attn_meta.query_start_loc,
@@ -556,6 +564,92 @@ def _resolve_sparse_attention_indexer_num_blocks(
     return max(1, (compressed_slots + block_size - 1) // block_size)
 
 
+def _is_mla_model(model) -> bool:
+    """Return True when the model stores latent (MLA-style) KV instead of GQA heads."""
+    return getattr(getattr(model, "model_config", None), "mla_config", None) is not None
+
+
+def _model_uses_sparse_attention_indexer(model) -> bool:
+    """Return True when this model allocates the auxiliary SFA indexer cache.
+
+    Mirrors the gate in ``get_sparse_attention_indexer_cache_info``, so any model
+    that gets an indexer cache (DeepSeek V3.2 ``deepseek_v32``, GLM-5 ``glm_moe_dsa``
+    via ``Glm5SparseAttention``, DeepSeek V4) is recognised here by its KV layout
+    rather than by model name.
+    """
+    mla_config = getattr(getattr(model, "model_config", None), "mla_config", None)
+    requires_indexer_cache = getattr(getattr(mla_config, "mla_cls", None), "requires_indexer_cache", None)
+    return bool(requires_indexer_cache()) if callable(requires_indexer_cache) else False
+
+
+def _gqa_kv_replication_factor(model) -> int:
+    """How many cards of a TP group redundantly hold the same GQA KV head.
+
+    The paged cache in ``_get_kv_cache_info`` gives a card ``h_kv / tp`` KV heads,
+    or 1 replicated head when ``h_kv < tp``. So a TP group stores each KV head
+    ``max(1, tp / h_kv)`` times, and that replication is the only KV redundancy DCP
+    can convert into capacity. Returns 1 when ``num_key_value_heads`` is unavailable
+    (layout unverifiable -> claim no gain).
+    """
+    num_key_value_heads = getattr(getattr(model, "text_config", None), "num_key_value_heads", None)
+    if not isinstance(num_key_value_heads, int) or num_key_value_heads <= 0:
+        return 1
+    tp_size = model.model_config.parallel_config.tensor_parallel_size
+    return max(1, tp_size // num_key_value_heads)
+
+
+def dcp_kv_token_capacity_factor(model) -> int:
+    """Per-card KV token capacity multiplier under Decode Context Parallel.
+
+    DCP shards the KV cache along the token dimension, so a card holds only
+    ``1 / dcp_size`` of every sequence's tokens. Whether that buys extra token
+    capacity depends on the KV layout, so this is gated on layout -- not model name:
+
+    * **MLA (latent KV)**: the latent cache is not partitioned across TP heads, so
+      per-card bytes per sequence really do fall by ``dcp_size``. Factor ``dcp_size``.
+    * **GQA**: DCP re-partitions KV heads across the same TP domain, moving a rank
+      from ``h_kv/tp`` heads over ``S`` to ``h_kv*dcp/tp`` heads over ``S/dcp``
+      (see ``AttentionTensorCast.forward``). Per-card KV bytes are
+      ``(h_kv*dcp/tp) * D * (S/dcp) == (h_kv/tp) * D * S`` -- invariant. The only
+      real gain is de-duplicating KV heads that TP replicated when ``h_kv < tp``,
+      capped by that replication: ``min(dcp_size, max(1, tp/h_kv))``. For
+      ``h_kv >= tp`` (e.g. Qwen3-32B, ``h_kv=8``/``tp=8``) the factor is 1;
+      returning ``dcp_size`` there would fabricate ``dcp`` times the real token
+      capacity and make the optimizer over-estimate servable concurrency/context.
+
+    Callers multiply the warmup ``num_blocks`` by the factor; per-token cost stays
+    the true physical per-card cost. Returns 1 when DCP is off.
+
+    Gated off for sparse-attention (SFA) models -- V4 plus every model that
+    allocates an indexer cache: their main cache is sized by a sliding window +
+    ``seq_len // compress_ratio`` rather than a plain ``S``, and the indexer cache
+    is not sequence-sharded at all yet its per-token cost is folded into
+    ``kv_cache_per_token_gb``, so a blanket multiplier would also inflate the
+    un-sharded indexer part. Modeling SFA + DCP memory is an explicit RFC non-goal
+    (rfc_context_parallel_dcp §1.3 #4).
+    """
+    dcp_size = model.model_config.parallel_config.decode_context_parallel_size
+    if dcp_size <= 1:
+        return 1
+    if _is_v4_model(model) or _model_uses_sparse_attention_indexer(model):
+        return 1
+    if _is_mla_model(model):
+        return dcp_size
+    return min(dcp_size, _gqa_kv_replication_factor(model))
+
+
+def dcp_sharded_num_blocks(model, num_blocks: int) -> int:
+    """Per-card paged-block count after the DCP token shard.
+
+    Rounds UP: blocks are the allocation unit, so a card holding the remainder of a
+    ``dcp``-way split still needs a whole block for it. Flooring would model a
+    slightly smaller per-card KV footprint than any real deployment can have (e.g.
+    ``num_blocks=17``, factor 8 -> 2 blocks instead of 3). Always >= 1.
+    """
+    factor = dcp_kv_token_capacity_factor(model)
+    return max(1, -(-num_blocks // factor))
+
+
 def _resolve_main_kv_cache_dtype(model, layer_idx: int) -> torch.dtype:
     """Resolve storage dtype for the primary (attention) KV cache.
 
@@ -663,6 +757,18 @@ def _get_kv_cache_info(
                 device="meta",
             )
         kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (num_blocks * block_size)
+
+    # Decode Context Parallel slices the KV cache along the token (sequence)
+    # dimension: each device stores only ``1 / dcp_size`` of every sequence's
+    # tokens, while the per-token byte cost on a device is UNCHANGED (the physical
+    # slot ``[2, N_blk, block_size, h_kv/tp, D]`` stores the same bytes per token).
+    # The saving is therefore "more tokens fit per device" (token capacity grows
+    # by ``dcp_size``), NOT "each token costs less". So ``kv_cache_per_token`` is
+    # left as the true physical per-card cost here; the DCP capacity multiplier is
+    # applied where ``num_blocks`` is derived (serving warmup), via
+    # ``dcp_kv_token_capacity_factor``. This keeps the reported per-token metric
+    # and the KV-transfer byte accounting (get_kv_cache_num_bytes) physically
+    # correct, instead of dividing the per-token cost as a prior version did.
     return kv_cache_by_layers, kv_cache_per_token
 
 
@@ -930,6 +1036,13 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     max_total_seq_len = int(max(seq_lens))
     total_kv_tokens = sum(seq_lens) + batch_size * (num_mtp_tokens + 1)
     num_blocks = (total_kv_tokens + block_size - 1) // block_size
+    # Decode Context Parallel stores only ``1 / dcp`` of each sequence's tokens on
+    # a card, so where that shard is a real per-card saving the physical KV footprint
+    # shrinks accordingly (per-token cost is invariant; bytes and the num_blocks
+    # denominator scale together in ``_get_kv_cache_info``). The factor is layout-
+    # dependent -- ``dcp`` for MLA, capped by TP KV replication for GQA, 1 for SFA;
+    # see ``dcp_kv_token_capacity_factor``.
+    kv_num_blocks = dcp_sharded_num_blocks(model, num_blocks)
     max_num_blocks_per_seq = (max_total_seq_len + block_size - 1) // block_size
     block_table_tensor = torch.empty((batch_size, max_num_blocks_per_seq), dtype=torch.long, device="meta")
     slot_mapping = torch.empty((num_tokens,), dtype=torch.long, device="meta")
@@ -950,7 +1063,7 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
 
     kv_cache_by_layers, kv_cache_per_token = get_kv_cache_info(
-        model, num_blocks, block_size, batch_size, total_kv_tokens
+        model, kv_num_blocks, block_size, batch_size, total_kv_tokens
     )
 
     sampling_meta = SamplingMetadata(query_start_loc=query_start_loc)

@@ -1,0 +1,43 @@
+# DCP serving_cast instance config.
+#
+# Derived from the tensor_cast micro-benchmark command:
+#   python -m tensor_cast.scripts.text_generate deepseek-ai/DeepSeek-R1 \
+#     --tp-size 8 --dp-size 2 --ep-size 16 --dcp-size 1 \
+#     --device ATLAS_800_A3_752T_128G_DIE --world-size 16 ...
+#
+# Differences vs. that command (and why):
+#   * dcp_size is set to 2, not 1. These example files exist to exercise Decode
+#     Context Parallel; dcp_size=1 would disable the feature under test. dcp_size
+#     must divide tp_size (8 % 2 == 0). For the GQA model (Qwen3-32B, h_kv=8) the
+#     constraint h_kv >= tp/dcp (8 >= 4) holds; DeepSeek-R1 (MLA) is unconstrained.
+#   * EP / MoE knobs (ep_size, moe_tp_size, moe_dp_size) only take effect for the
+#     MoE model (DeepSeek-R1). They are ignored for the dense model (Qwen3-32B),
+#     where ep is disabled automatically because the model has no MoE config.
+#
+# This single instance file is paired with either common file, e.g.:
+#   python -m serving_cast.main \
+#     --instance_config_path serving_cast/example/dcp_test_instance.yaml \
+#     --common_config_path   serving_cast/example/dcp_deepseek_r1_common.yaml
+
+instance_groups:
+  - num_instances: 1
+    num_devices_per_instance: 16
+    device_type: ATLAS_800_A3_752T_128G_DIE
+    pd_role: both
+    parallel_config:
+      world_size: 16
+      tp_size: 8
+      dp_size: 2
+      dcp_size: 2          # Decode Context Parallel; reuses TP devices, must divide tp_size
+      mlp_tp_size: null
+      mlp_dp_size: null
+      lmhead_tp_size: null
+      lmhead_dp_size: null
+      ep_size: 16          # MoE only (DeepSeek-R1); ignored for the dense Qwen3-32B
+      moe_tp_size: 1
+      moe_dp_size: 1
+    communication_config:
+      host2device_bandwidth: 10000000000  # 10 GB/s
+      host2device_rate: 0.5
+      device2device_bandwidth: 4000000000 # 4 GB/s
+      device2device_rate: 0.5

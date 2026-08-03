@@ -1,0 +1,40 @@
+# DCP serving_cast common config — Qwen3-32B (dense, GQA).
+#
+# A dense GQA counterpart to dcp_deepseek_r1_common.yaml, used to exercise Decode
+# Context Parallel on a GQA model. Qwen3-32B has num_key_value_heads = 8, so with
+# tp=8 / dcp=2 the GQA constraint h_kv >= tp/dcp (8 >= 4) is satisfied.
+#
+# Pair with serving_cast/example/dcp_test_instance.yaml. The EP / MoE knobs in
+# that instance file are ignored here because Qwen3-32B is dense (no MoE config),
+# so only world_size=16 / tp=8 / dp=2 / dcp=2 apply.
+
+model_config:
+  name: Qwen/Qwen3-32B
+  num_mtp_tokens: 0
+  quantize_linear_action: W8A8_DYNAMIC
+  quantize_lmhead: False
+  mxfp4_group_size: 32
+  quantize_attention_action: DISABLED
+  do_compile: True                           # from --compile
+  allow_graph_break: False
+  dump_input_shapes: False
+  chrome_trace: null
+  enable_multi_process: False
+  num_processes: 10
+  predict_steps: 20
+  enable_interpolate: True
+  interpolation_seed: 1234
+  enable_preprocessing_modeling: True
+  enable_kv_transfer_modeling: True
+
+load_gen:
+  load_gen_type: fixed_length
+  num_requests: 200
+  num_input_tokens: 4096                      # matches --context-length 4096
+  num_output_tokens: 1024                     # long-ish decode so DCP KV sharding matters
+  request_rate: 4.0
+
+serving_config:
+  max_concurrency: 100
+  block_size: 128
+  max_tokens_budget: 8192

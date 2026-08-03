@@ -408,6 +408,7 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
             data_parallel_size=4,
+            decode_context_parallel_size=1,
         )
 
         optimizer_data = OptimizerData(
@@ -450,6 +451,7 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
             data_parallel_size=4,
+            decode_context_parallel_size=1,
         )
 
         optimizer_data = OptimizerData(
@@ -509,6 +511,7 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
             data_parallel_size=4,
+            decode_context_parallel_size=1,
         )
 
         optimizer_data = OptimizerData(
@@ -557,6 +560,7 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
             data_parallel_size=4,
+            decode_context_parallel_size=1,
         )
 
         optimizer_data = OptimizerData(

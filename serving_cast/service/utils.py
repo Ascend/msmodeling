@@ -478,4 +478,7 @@ def format_parallel_label(
         )
     if num_mtp_tokens is not None and num_mtp_tokens > 0:
         parts.append(f"MTP={num_mtp_tokens}")
+    # Only surface DCP when it is actually enabled, so non-DCP runs keep their label.
+    if getattr(parallel_config, "decode_context_parallel_size", 1) > 1:
+        parts.append(f"DCP={parallel_config.decode_context_parallel_size}")
     return " | ".join(parts)

@@ -199,6 +199,48 @@ class TestTaskRunner(unittest.TestCase):
         configs = list(task_runner._get_user_config())
         self.assertEqual({config.num_mtp_tokens for config in configs}, {1, 2, 3})
 
+    def test_get_user_config_dcp_constrained_by_tp(self):
+        """DCP search yields only (tp, dcp) pairs where dcp divides tp; it does not consume devices."""
+        self.args.tp_sizes = [4]
+        self.args.ep_sizes = [1]
+        self.args.moe_dp_sizes = [1]
+        self.args.dcp_sizes = [1, 2, 4, 8]
+        self.args.num_devices = 4
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+        dcps = sorted(config.dcp_size for config in configs)
+        # dcp=8 is pruned (8 does not divide tp=4); world_size is unchanged by dcp.
+        self.assertEqual(dcps, [1, 2, 4])
+        for config in configs:
+            self.assertEqual(config.tp_size, 4)
+            self.assertEqual(config.dp_size, 1)  # DCP reuses TP devices, dp = num_devices // tp
+
+    def test_get_user_config_dcp_default_disabled(self):
+        """Without --dcp-sizes, dcp stays 1 for every config."""
+        self.args.tp_sizes = [1, 2, 4]
+        self.args.dcp_sizes = None
+        self.args.num_devices = 4
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+        self.assertTrue(configs)
+        self.assertTrue(all(config.dcp_size == 1 for config in configs))
+
+    def test_get_user_config_prefill_forces_dcp_one(self):
+        """Prefill phase ignores the dcp search space (DCP is decode-only)."""
+        self.args.tp_sizes = [4]
+        self.args.dcp_sizes = [1, 2, 4]
+        self.args.num_devices = 4
+
+        task_runner = ParallelRunner(self.args)
+        prefill_configs = list(task_runner._get_user_config(is_prefill=True))
+        self.assertTrue(prefill_configs)
+        self.assertTrue(all(config.dcp_size == 1 for config in prefill_configs))
+        # Decode (default) does search the dcp dimension.
+        decode_configs = list(task_runner._get_user_config(is_prefill=False))
+        self.assertEqual(sorted({c.dcp_size for c in decode_configs}), [1, 2, 4])
+
     def test_run_with_tpot_limit(self):
         """Test run method with TPOT limit"""
         self.args.tpot_limits = 50

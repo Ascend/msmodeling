@@ -940,6 +940,46 @@ class TestModelRunnerIntegration(unittest.TestCase):
         self.assertIsInstance(block_size, int)
         runner.shutdown()
 
+    def test_warmup_scales_num_blocks_by_dcp_capacity_factor(self):
+        """warmup() multiplies num_blocks by the DCP token-capacity factor.
+
+        DCP shards the KV cache along the token dimension, so the same per-card
+        byte budget can hold more tokens (how many is layout-dependent; see
+        ``dcp_kv_token_capacity_factor``). ``run_inference`` is stubbed so only the
+        warmup arithmetic is exercised: a factor of 2 must exactly double num_blocks
+        relative to a factor of 1.
+        """
+        from unittest.mock import patch
+
+        parallel_config = ParallelConfig(world_size=1, tp_size=1, moe_dp_size=1)
+        runner = ModelRunner(parallel_config, "TEST_DEVICE", dp_rank=0)
+
+        def _fake_metrics(factor):
+            return ModelRunnerMetrics(
+                total_device_memory_gb=80.0,
+                model_weight_size_gb=0.0,
+                peak_memory_usage_gb=0.0,
+                kv_cache_size_gb=0.0,
+                kv_cache_per_token_gb=0.001,
+                kv_cache_token_capacity_factor=factor,
+                model_activation_size_gb=0.0,
+                reserved_memory_gb=0.0,
+                device_memory_available_gb=40.0,
+                execution_time_s={"analytic": 0.3},
+                tps_per_model={"analytic": 100.0},
+                run_time_s=1.0,
+                batch_size=1,
+            )
+
+        with patch.object(runner.tensor_cast_model_runner, "run_inference", return_value=_fake_metrics(1)):
+            blocks_dcp1, _ = runner.warmup()
+        with patch.object(runner.tensor_cast_model_runner, "run_inference", return_value=_fake_metrics(2)):
+            blocks_dcp2, _ = runner.warmup()
+
+        self.assertGreater(blocks_dcp1, 0)
+        self.assertEqual(blocks_dcp2, blocks_dcp1 * 2)
+        runner.shutdown()
+
     def test_apply_interpolation_model_not_ready(self):
         """Test apply_interpolation_model raises when not ready."""
         parallel_config = ParallelConfig(

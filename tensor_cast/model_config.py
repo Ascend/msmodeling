@@ -220,9 +220,18 @@ class ParallelConfig:
     ulysses_size: int = 1
     vision_tensor_parallel_size: int = 1
     vision_data_parallel_size: Optional[int] = None
+    decode_context_parallel_size: int = 1
+    """Decode Context Parallel (DCP) size. Reuses the TP communication domain
+    (a contiguous sub-slice of each TP group), so it does NOT expand world_size;
+    it only layers sequence-sharding semantics onto the TP partitioning. The KV
+    cache is sliced along the sequence dimension so per-device per-sequence KV
+    occupancy drops to ``1 / decode_context_parallel_size``."""
 
     def has_attn_tp(self) -> bool:
         return self.tensor_parallel_size > 1
+
+    def has_dcp(self) -> bool:
+        return self.decode_context_parallel_size > 1
 
     def has_o_proj_tp(self) -> bool:
         return self.o_proj_tensor_parallel_size > 1
@@ -272,6 +281,20 @@ class ParallelConfig:
             )
 
         moe_world_size = self.world_size // self.pipeline_parallel_size
+
+        # DCP reuses the TP communication domain, so its group is a contiguous
+        # sub-slice of each TP group. This requires tp_size to be a multiple of
+        # dcp_size (and at least as large). The GQA-only constraint
+        # ``num_key_value_heads >= tp_size / dcp_size`` depends on the concrete
+        # model and is validated where the model config is available.
+        if self.decode_context_parallel_size < 1:
+            raise ValueError(f"decode_context_parallel_size ({self.decode_context_parallel_size}) must be >= 1")
+        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+            raise ValueError(
+                f"tensor_parallel_size ({self.tensor_parallel_size}) must be divisible by "
+                f"decode_context_parallel_size ({self.decode_context_parallel_size})"
+            )
+
         if self.moe_tensor_parallel_size is None:
             self.moe_tensor_parallel_size = moe_world_size // self.moe_data_parallel_size // self.expert_parallel_size
         if self.moe_data_parallel_size * self.moe_tensor_parallel_size * self.expert_parallel_size != moe_world_size:

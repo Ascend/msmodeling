@@ -16,8 +16,10 @@ from serving_cast.service.utils import (
     check_positive_integer,
     check_positive_integer_and_string,
     check_string_valid,
+    format_parallel_label,
     load_length_distribution,
 )
+from tensor_cast.model_config import ParallelConfig
 
 
 def _simple_length_distribution():
@@ -411,3 +413,30 @@ class TestBatchRangeAction(unittest.TestCase):
         # Test with min > max (should raise ArgumentTypeError)
         with self.assertRaises(argparse.ArgumentTypeError):
             self.action(parser, namespace, [100, 10])
+
+
+class TestFormatParallelLabel(unittest.TestCase):
+    """M5: the output parallel label surfaces DCP only when it is enabled."""
+
+    def test_label_omits_dcp_when_disabled(self):
+        pc = ParallelConfig(world_size=8, tensor_parallel_size=8, decode_context_parallel_size=1)
+        label = format_parallel_label(pc, is_moe_model=False)
+        self.assertEqual(label, "TP=8 | PP=1 | DP=1")
+        self.assertNotIn("DCP", label)
+
+    def test_label_includes_dcp_when_enabled(self):
+        pc = ParallelConfig(world_size=8, tensor_parallel_size=8, decode_context_parallel_size=4)
+        label = format_parallel_label(pc, is_moe_model=False)
+        self.assertEqual(label, "TP=8 | PP=1 | DP=1 | DCP=4")
+
+    def test_label_includes_dcp_after_moe_fields(self):
+        pc = ParallelConfig(
+            world_size=8,
+            tensor_parallel_size=8,
+            expert_parallel_size=8,
+            moe_data_parallel_size=1,
+            decode_context_parallel_size=2,
+        )
+        label = format_parallel_label(pc, is_moe_model=True)
+        self.assertTrue(label.endswith("DCP=2"))
+        self.assertIn("EP=8", label)

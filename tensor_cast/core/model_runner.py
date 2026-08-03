@@ -24,6 +24,7 @@ from ..performance_model.utils import bytes_of_tensor
 from ..pipeline_parallel import PipelineModel, PipelineRunResult, PipelineRunner
 from ..runtime import Runtime
 from ..transformers.custom_model_registry import get_visual
+from .input_generator import dcp_kv_token_capacity_factor
 from .input_generator import (
     generate_inputs_varlen,
     get_inputs_num_bytes,
@@ -244,6 +245,12 @@ class ModelRunner:
         kv_cache_per_token_gb = (
             input_kwargs["kv_cache_per_token"] + input_kwargs.get("indexer_cache_per_token", 0)
         ) / 1024**3
+        # DCP shards the KV cache along the token dimension, so a card can hold more
+        # tokens for the same byte budget where that shard is a real saving (``dcp``
+        # for MLA latent KV, capped by TP KV replication for GQA, 1 for SFA). The
+        # per-token cost above stays the true physical cost; the capacity gain is
+        # surfaced as a multiplier that warmup() applies to ``num_blocks``.
+        kv_cache_token_capacity_factor = dcp_kv_token_capacity_factor(self.model)
         if get_visual(self.model) and input_kwargs.get("pixel_values") is None:
             # If there is no image input, the visual part does not participate
             # in the calculation and needs to be removed
@@ -283,6 +290,7 @@ class ModelRunner:
             peak_memory_usage_gb=peak_memory_usage_gb,
             kv_cache_size_gb=kv_cache_size_gb,
             kv_cache_per_token_gb=kv_cache_per_token_gb,
+            kv_cache_token_capacity_factor=kv_cache_token_capacity_factor,
             indexer_cache_size_gb=indexer_cache_bytes / 1024**3,
             indexer_cache_per_token_gb=input_kwargs.get("indexer_cache_per_token", 0) / 1024**3,
             model_activation_size_gb=model_activation_size_gb,
@@ -433,6 +441,10 @@ class ModelRunnerMetrics:
     """TPS per performance model, keyed by model name."""
     run_time_s: float
     batch_size: int
+    kv_cache_token_capacity_factor: int = 1
+    """Per-card KV token capacity multiplier from DCP (1 when DCP is off, and when the
+    token shard buys no real per-card saving). warmup() multiplies ``num_blocks`` by
+    this; see ``dcp_kv_token_capacity_factor``."""
     indexer_cache_size_gb: float = 0.0
     indexer_cache_per_token_gb: float = 0.0
     table_result: str = ""
@@ -518,6 +530,7 @@ class ModelRunnerMetrics:
                 "peak_usage": self.peak_memory_usage_gb,
                 "kv_cache": self.kv_cache_size_gb,
                 "kv_cache_per_token": self.kv_cache_per_token_gb,
+                "kv_cache_token_capacity_factor": self.kv_cache_token_capacity_factor,
                 "model_activation": self.model_activation_size_gb,
                 "reserved": self.reserved_memory_gb,
                 "available": self.device_memory_available_gb,

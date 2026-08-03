@@ -74,6 +74,9 @@ class UserInputConfig:
     ep_size: int = 1
     moe_dp_size: int = 1
     moe_tp_size: Optional[int] = None
+    dcp_size: int = 1
+    """Decode Context Parallel size. Reuses TP devices (must divide ``tp_size``);
+    slices the KV cache along the sequence dimension during decode."""
     word_embedding_tp: Optional[WordEmbeddingTPMode] = None
     enable_redundant_experts: bool = False
     """Pad routing-expert count to a multiple of EP size for load balancing."""
@@ -208,6 +211,7 @@ class UserInputConfig:
             embedding_parallel=self.word_embedding_tp,
             vision_tensor_parallel_size=self.vision_tp_size,
             pipeline_parallel_size=self.pp_size,
+            decode_context_parallel_size=self.dcp_size,
         )
 
     def get_quant_config(self) -> QuantConfig:

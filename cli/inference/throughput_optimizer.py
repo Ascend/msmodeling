@@ -34,6 +34,7 @@ from serving_cast.service.utils import (
     count_search_combinations,
     load_length_distribution,
     resolve_parallel_search_candidates,
+    resolve_search_sizes,
 )
 from tensor_cast import device_profiles  # noqa: F401
 from tensor_cast.core.compilation_config import (
@@ -180,6 +181,16 @@ def arg_parse():
         help="Enable MOE-DP search. Optional explicit MOE-DP sizes. "
         "If no value is provided, defaults to powers of 2 up to world_size. "
         "Combined TP/EP/MOE-DP/MTP candidates are evaluated as a Cartesian product.",
+    )
+    model_group.add_argument(
+        "--dcp-sizes",
+        type=check_positive_integer,
+        nargs="*",
+        default=None,
+        help="Enable Decode Context Parallel (DCP) search. Optional explicit DCP sizes. "
+        "If no value is provided, defaults to powers of 2 up to world_size. DCP reuses TP "
+        "devices (each candidate must divide the TP size, so it does not expand world_size) "
+        "and applies to the Decode phase only; Prefill is always searched with dcp=1.",
     )
     model_group.add_argument(
         "--enable-shared-expert-tp",
@@ -371,6 +382,9 @@ def arg_parse():
     args.tp_sizes = _normalize_and_validate(args.tp_sizes, "tp-sizes", args.num_devices)
     args.ep_sizes = _normalize_and_validate(args.ep_sizes, "ep-sizes", args.num_devices)
     args.moe_dp_sizes = _normalize_and_validate(args.moe_dp_sizes, "moe-dp-sizes", args.num_devices)
+    # DCP reuses TP devices, so its candidates are bounded by TP (hence num_devices), not
+    # by a separate device budget; the per-combination tp % dcp == 0 check happens below.
+    args.dcp_sizes = _normalize_and_validate(args.dcp_sizes, "dcp-sizes", args.num_devices)
 
     tp_candidates, ep_candidates, moe_dp_candidates, mtp_candidates = resolve_parallel_search_candidates(
         args.tp_sizes,
@@ -380,18 +394,23 @@ def arg_parse():
         args.num_mtp_tokens,
         args.num_devices,
     )
+    dcp_candidates = resolve_search_sizes(args.dcp_sizes, args.num_devices, 1)
     total_combinations = count_search_combinations(
         tp_candidates,
         ep_candidates,
         moe_dp_candidates,
         mtp_candidates,
-    )
+    ) * len(dcp_candidates)
 
     has_valid_combination = any(
-        args.num_devices % tp == 0 and args.num_devices % ep == 0 and args.num_devices % (ep * moe_dp) == 0
+        args.num_devices % tp == 0
+        and args.num_devices % ep == 0
+        and args.num_devices % (ep * moe_dp) == 0
+        and tp % dcp == 0
         for tp in tp_candidates
         for ep in ep_candidates
         for moe_dp in moe_dp_candidates
+        for dcp in dcp_candidates
     )
     if not has_valid_combination:
         parser.error(
@@ -404,9 +423,9 @@ def arg_parse():
         print(
             "[WARNING] Large number of parallel search combinations "
             f"({total_combinations} = TP:{len(tp_candidates)} x EP:{len(ep_candidates)} "
-            f"x MOE-DP:{len(moe_dp_candidates)} x MTP:{len(mtp_candidates)}). "
+            f"x MOE-DP:{len(moe_dp_candidates)} x MTP:{len(mtp_candidates)} x DCP:{len(dcp_candidates)}). "
             "Optimization may take a long time. Consider narrowing --tp-sizes, --ep-sizes, "
-            "--moe-dp-sizes, or --num-mtp-tokens; or increase --max-search-combinations.",
+            "--moe-dp-sizes, --num-mtp-tokens, or --dcp-sizes; or increase --max-search-combinations.",
             file=sys.stderr,
             flush=True,
         )

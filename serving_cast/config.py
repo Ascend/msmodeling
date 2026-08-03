@@ -12,6 +12,7 @@ class ParallelConfig:
     world_size: int = 1
     tp_size: int = 1
     dp_size: int = 1
+    dcp_size: int = 1  # Decode Context Parallel size; reuses TP devices, must divide tp_size
     mlp_tp_size: Optional[int] = None
     mlp_dp_size: Optional[int] = None
     lmhead_tp_size: Optional[int] = None

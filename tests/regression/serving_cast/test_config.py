@@ -34,6 +34,16 @@ class TestParallelConfig(unittest.TestCase):
         self.assertEqual(config.mlp_tp_size, 2)
         self.assertEqual(config.mlp_dp_size, 2)
 
+    def test_dcp_size_default(self):
+        """DCP defaults to 1 (disabled)."""
+        config = ParallelConfig()
+        self.assertEqual(config.dcp_size, 1)
+
+    def test_dcp_size_from_yaml_kwargs(self):
+        """dcp_size flows in from a parallel_config YAML block (kwargs splat)."""
+        config = ParallelConfig(**{"world_size": 8, "tp_size": 8, "dcp_size": 4})
+        self.assertEqual(config.dcp_size, 4)
+
 
 class TestCommunicationConfig(unittest.TestCase):
     def test_default_values(self):

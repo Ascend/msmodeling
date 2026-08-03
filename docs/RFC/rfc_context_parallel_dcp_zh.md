@@ -38,6 +38,7 @@ DCP 的本质是：**沿序列维度切分 KV cache，使原本在 TP 组内冗�
 5. **不建模 MLAPO 融合算子在 DCP 下的内部切分**：MLAPO（RMSNorm + QKV proj + RoPE + KV-write 融合 op）在 DCP 启用时按 `dcp_rank` 写入本地 KV 分片，本期把它视为一个普通融合算子按 `tp` 切，不细化 fused 内部的 dcp 子切分；
 6. **不建模 ACLGraph 录制阶段的 launch-overhead 合并优化**：graph 模式下 kernel launch 时间会被合并，但分析模型仍按 kernel 累加，最坏高估 launch 开销；
 7. **不修改 vllm-ascend 上游代码**：仿真行为对齐已合入 vllm-ascend PR #3260 / #4572 / #5672 / #6563 的实现，不引入新的算子或通信原语。
+8. **不建模混合 prefill+decode batch 内的按请求 decode 掩码**：DCP 由整批判定谓词（`is_dcp_decode_batch`，`tensor_cast/layers/attention.py`）门控，仅当批内**每一个**请求都是真正的 decode 步（`query_len < _PREDICTIVE_DECODING_THRESHOLD` 且 `seq_len > query_len`）时才启用。在 vllm-ascend 的 chunked-prefill / continuous batching 下，prefill chunk 与 decode 请求常被合入同一步，此类混合 batch 无法通过 `.all()` 判定，因此 DCP 会对整批（含其中的 decode 请求）一并关闭。这是**有意为之**：MsModeling 将纯 Prefill 步与纯 Decode 步**分开建模**（吞吐优化器分别产出 prefill-only 与 decode-only 配置，`is_prefill` 在 Prefill 阶段强制 `dcp=1`），因此 DCP 收益只在纯 decode 步上计量，无需按请求粒度的 decode 掩码。让混合 batch 内的 decode 请求也能受益的细化留作后续 RFC。
 
 本期 **仅建模 Decode 路径**，Prefill Context Parallel (PCP) 留作后续 RFC。
 
@@ -139,8 +140,8 @@ DCP 的核心节省是 "**每条序列在本卡的 KV 占用减为 `1/dcp`**"（
 
 | 张量 | 启用 DCP 前 | 启用 DCP 后 | 备注 |
 | :--- | :--- | :--- | :--- |
-| `block_size` | `block_size` | 物理 `block_size` 不变；调度器视角下逻辑 `block_size · dcp`（吞下 `dcp×` 更长的序列） | 模拟时 `per_seq_kv_bytes_per_rank ÷= dcp`，物理 tensor 维度不变（与下方 `kv_cache` 物理 shape 描述一致） |
-| `kv_cache` (GQA) | `[2, N_blk, block_size, h_kv/tp, D]` | **物理 shape 不变**；但每条 seq 在本卡的 block 占用 `≈ 1/dcp`（block 内交错） | 仿真口径：`per_seq_kv_bytes_per_rank` 除以 `dcp`，`N_blk` 不动 |
+| `block_size` | `block_size` | 物理 `block_size` 不变；调度器视角下逻辑 `block_size · dcp`（吞下 `dcp×` 更长的序列） | 仿真口径：**per-token 字节开销不变**，DCP 体现为单卡 token 容量 ×`dcp_kv_token_capacity_factor`（MLA `dcp`；GQA `min(dcp, tp/h_kv)`；SFA 为 1），即 `warmup()` 的 `num_blocks` 乘以该因子（物理 tensor 维度不变） |
+| `kv_cache` (GQA) | `[2, N_blk, block_size, h_kv/tp, D]` | **物理 shape 不变**；本卡改持 `h_kv·dcp/tp` 个 head × `S/dcp` 段序列 | 仿真口径：`kv_cache_per_token` **不除以** `dcp`（保持物理真实）。注意 GQA 单卡 KV 字节 `(h_kv·dcp/tp)·D·(S/dcp) = (h_kv/tp)·D·S` **与 `dcp` 无关**，容量倍数只来自消除 `h_kv < tp` 时 TP 组内的 KV 重复，故计入 `num_blocks` 的是 `min(dcp, tp/h_kv)` 而非 `dcp` |
 | `kv_cache` (MLA) | `[N_blk, block_size, kv_lora_rank + qk_rope_head_dim]` | **物理 shape 不变**；同上 | latent KV 单独存 |
 | `block_table` | `[N_d + N_p, max_blk_per_seq]` | **DCP-only 不变**；DCP + spec_decode 时扁平化为 `[N_d · decode_threshold + N_p, max_blk_per_seq]` | 扁平化路径需要计算这块空间 |
 | `slot_mapping` | `[total_num_tokens]` int32 | **DCP-only 不变**（PCP 才有 `pcp_padded_slot_mapping` 扩到 `[total_num_tokens · pcp]`，见 `vllm_ascend/worker/pcp_utils.py:470-482`） | DCP 的 slot 路由通过 block 内交错完成，不改 slot_mapping 长度 |
@@ -229,7 +230,7 @@ DCP-only 路径下，真正**新增**的 metadata buffer 只有 `attn_lse_local`
 | 测试项 | 描述 | 通过标准 |
 | :--- | :--- | :--- |
 | 单元测试：约束校验 | MLA / GQA 场景下非法 `(tp, dcp)` 组合被剪枝 | 100% 覆盖 |
-| 单元测试：KV 显存公式 | `dcp_size` 从 1 增到 8 时，`kv_cache_size_gb` 单调下降为 `1/dcp` | 数值误差 ≤ 0.5% |
+| 单元测试：KV 容量公式 | `dcp_size` 从 1 增到 8 时，`kv_cache_per_token_gb` 保持不变；warmup 的 token 容量（`num_blocks`）按 `dcp_kv_token_capacity_factor` 增长——MLA `dcp` 倍，GQA `min(dcp, tp/h_kv)` 倍（`h_kv ≥ tp` 时不变），SFA 不变 | 数值误差 ≤ 0.5% |
 | 单元测试：通信量公式 | MLA 与 GQA 后端的 `V_DCP` 与 通信量计算公式完全一致 | 完全匹配 |
 | 集成测试：TPOT 收敛 | 固定 batch / 输入，扫 `dcp ∈ {1,2,4,8}`，TPOT 单调下降直到通信项占优 | 曲线形状符合预期 |
 | 精度对照：vllm-ascend | 取 `DeepSeek-R1-W8A8 + DCP8`、`Qwen3-235B + DCP2` 两组实测 | 仿真 TPOT 与实测误差 ≤ 15% |
@@ -249,11 +250,12 @@ DCP-only 路径下，真正**新增**的 metadata buffer 只有 `attn_lse_local`
 
 | 文件 | 说明 |
 | :--- | :--- |
-| `tensor_cast/core/input_generator.py` | `_get_kv_cache_info` 增加 `block_size` 针对 `dcp_size` 的缩放 |
+| `tensor_cast/core/input_generator.py` | `_get_kv_cache_info` **保持** `kv_cache_per_token` 为真实单卡物理 per-token 开销（**不除以 `dcp_size`**）；新增 `dcp_kv_token_capacity_factor(model)`，返回 DCP 单卡 token 容量倍数，**按 KV 布局门控**：MLA（latent KV 不按 TP head 切分）为 `dcp_size`；GQA 为 `min(dcp_size, max(1, tp/h_kv))`——head 增长与序列缩短相互抵消，只有 `h_kv < tp` 时 TP 组内的 KV 重复才能被 DCP 转成容量（`h_kv ≥ tp` 时为 1）；V4/SFA（含 `deepseek_v32`、`glm_moe_dsa`，凡分配 indexer cache 者）门控为 1 |
 | `serving_cast/config.py` | `ParallelConfig` 增加 `dcp_size`、`cp_kv_cache_interleave_size` |
 | `tensor_cast/core/user_config.py` | `UserInputConfig` 新增字段并透传到 `ParallelConfig` |
 | `tensor_cast/model_config.py` | `ParallelConfig` 增加 `decode_context_parallel_size` |
-| `tensor_cast/core/model_runner.py` | `kv_cache_size_gb` 公式按 `dcp_size` 缩放 |
+| `tensor_cast/core/model_runner.py` | `run_inference` 计算 `dcp_kv_token_capacity_factor` 并写入 `ModelRunnerMetrics.kv_cache_token_capacity_factor`（per-token / `kv_cache_size_gb` **不缩放**，保持物理真实，使 KV 搬运字节口径正确） |
+| `serving_cast/model_runner.py` | `warmup()` 在求得 `num_blocks` 后乘以 `kv_cache_token_capacity_factor`，把 DCP 的"单卡可容纳 token 数 ×`dcp`"体现在 block 容量上 |
 | `tensor_cast/layers/mla.py` | MLA decode 路径注入 `all_gather Q` + `all_to_all_single(output ⊕ lse)`，KV 取数按 dcp_rank 切片；attention estimator 的 `num_heads` / `seq_len` 改为 `h_q · dcp / tp` 与 `S / dcp` |
 | `tensor_cast/layers/attention.py` | GQA decode 路径注入 `all_gather Q` + `all_to_all_single(output ⊕ lse)`（与 MLA 同模板） |
 | `tensor_cast/performance_model/comm_analytic.py` | 复用现有原语，新增 DCP 组解析（rank 列表是 TP 组的子集） |

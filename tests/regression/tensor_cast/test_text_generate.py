@@ -1750,6 +1750,7 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
         self.assertAlmostEqual(memory["peak_usage"], 12.0)
         self.assertAlmostEqual(memory["kv_cache"], 3.0)
         self.assertAlmostEqual(memory["kv_cache_per_token"], 0.001)
+        self.assertEqual(memory["kv_cache_token_capacity_factor"], 1)
         self.assertAlmostEqual(memory["model_activation"], 4.0)
         self.assertAlmostEqual(memory["reserved"], 1.0)
         self.assertAlmostEqual(memory["available"], 6.0)

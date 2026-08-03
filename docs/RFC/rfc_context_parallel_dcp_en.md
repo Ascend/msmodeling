@@ -38,6 +38,7 @@ The essence of DCP is: **slice the KV cache along the sequence dimension, so tha
 5. **No modeling of MLAPO fused op's internal partitioning under DCP**: MLAPO (the RMSNorm + QKV proj + RoPE + KV-write fused op) writes to the local KV shard by `dcp_rank` when DCP is enabled. In this phase, we treat it as an ordinary fused op partitioned by `tp` and do not refine the dcp sub-partitioning inside the fused op;
 6. **No modeling of launch-overhead consolidation during ACLGraph capture**: In graph mode, kernel launch times are consolidated, but the analytic model still sums per-kernel — in the worst case, overestimating launch overhead;
 7. **No modifications to vllm-ascend upstream code**: Simulation behavior aligns with the implementation in merged vllm-ascend PRs #3260 / #4572 / #5672 / #6563, with no new ops or communication primitives introduced.
+8. **No per-request decode masking in mixed prefill+decode batches**: DCP is gated on a whole-batch predicate (`is_dcp_decode_batch`, `tensor_cast/layers/attention.py`) that fires only when *every* request in the batch is a genuine decode step (`query_len < _PREDICTIVE_DECODING_THRESHOLD` and `seq_len > query_len`). Under vllm-ascend chunked-prefill / continuous batching, a prefill chunk and decode requests are often fused into one step; such a batch fails the `.all()` predicate, so DCP is switched off for the entire batch — including its decode requests. This is intentional: MsModeling models the pure-Prefill step and the pure-Decode step **separately** (the throughput optimizer emits prefill-only and decode-only configs, `is_prefill` forcing `dcp=1` on the Prefill phase), so DCP benefit is scored on pure-decode steps and never needs a request-granular decode mask. Refining DCP to let decode requests inside a mixed batch still benefit is deferred to a future RFC.
 
 This phase **only models the Decode path**; Prefill Context Parallel (PCP) is left to a follow-up RFC.
 
@@ -139,8 +140,8 @@ The core savings of DCP is "**per-sequence KV occupancy on the current device is
 
 | Tensor | Before DCP | After DCP | Notes |
 | :--- | :--- | :--- | :--- |
-| `block_size` | `block_size` | Physical `block_size` unchanged; logical `block_size · dcp` from the scheduler's view (absorbs sequences `dcp×` longer) | In simulation, `per_seq_kv_bytes_per_rank ÷= dcp`; the physical tensor dimensions are unchanged (consistent with the `kv_cache` physical shape rows below) |
-| `kv_cache` (GQA) | `[2, N_blk, block_size, h_kv/tp, D]` | **Physical shape unchanged**; but each seq's block occupancy on the local device is `≈ 1/dcp` (interleaved within blocks) | Simulation scope: `per_seq_kv_bytes_per_rank` is divided by `dcp`, `N_blk` unchanged |
+| `block_size` | `block_size` | Physical `block_size` unchanged; logical `block_size · dcp` from the scheduler's view (absorbs sequences `dcp×` longer) | Simulation scope: **per-token byte cost is unchanged**; DCP is modeled as per-card token capacity ×`dcp_kv_token_capacity_factor` (`dcp` for MLA, `min(dcp, tp/h_kv)` for GQA, 1 for SFA), i.e. `warmup()` multiplies `num_blocks` by that factor (physical tensor dimensions unchanged) |
+| `kv_cache` (GQA) | `[2, N_blk, block_size, h_kv/tp, D]` | **Physical shape unchanged**; the card now holds `h_kv·dcp/tp` heads over an `S/dcp` slice of the sequence | Simulation scope: `kv_cache_per_token` is **not divided** by `dcp` (kept physically true). Note per-card GQA KV bytes `(h_kv·dcp/tp)·D·(S/dcp) = (h_kv/tp)·D·S` are **independent of `dcp`**; the capacity gain comes only from removing the TP-group KV replication present when `h_kv < tp`, so the multiplier folded into `num_blocks` is `min(dcp, tp/h_kv)`, not `dcp` |
 | `kv_cache` (MLA) | `[N_blk, block_size, kv_lora_rank + qk_rope_head_dim]` | **Physical shape unchanged**; same as above | latent KV stored separately |
 | `block_table` | `[N_d + N_p, max_blk_per_seq]` | **Unchanged for DCP-only**; with DCP + spec_decode, flattened to `[N_d · decode_threshold + N_p, max_blk_per_seq]` | The flattened path requires accounting for this space |
 | `slot_mapping` | `[total_num_tokens]` int32 | **Unchanged for DCP-only** (PCP introduces `pcp_padded_slot_mapping` extending to `[total_num_tokens · pcp]`, see `vllm_ascend/worker/pcp_utils.py:470-482`) | DCP's slot routing is done via intra-block interleaving and does not change `slot_mapping` length |
@@ -229,7 +230,7 @@ All shape changes in 2.1.4.1-2.1.4.4 are grouped by code file, providing a roadm
 | Test Item | Description | Pass Criteria |
 | :--- | :--- | :--- |
 | Unit test: constraint validation | Illegal `(tp, dcp)` combinations under MLA / GQA scenarios are pruned | 100% coverage |
-| Unit test: KV memory formula | As `dcp_size` increases from 1 to 8, `kv_cache_size_gb` monotonically decreases to `1/dcp` | Numerical error ≤ 0.5% |
+| Unit test: KV capacity formula | As `dcp_size` increases from 1 to 8, `kv_cache_per_token_gb` stays invariant while the warmup token capacity (`num_blocks`) scales as `dcp_kv_token_capacity_factor` — `dcp` for MLA, `min(dcp, tp/h_kv)` for GQA (flat when `h_kv >= tp`), flat for SFA | Numerical error ≤ 0.5% |
 | Unit test: communication volume formula | `V_DCP` and communication volume formulas of MLA and GQA backends are fully consistent | Exact match |
 | Integration test: TPOT convergence | With fixed batch / input, sweep `dcp ∈ {1,2,4,8}`, TPOT monotonically decreases until the communication term dominates | Curve shape matches expectations |
 | Accuracy comparison: vllm-ascend | Take two real-world measurements: `DeepSeek-R1-W8A8 + DCP8`, `Qwen3-235B + DCP2` | Simulation TPOT error ≤ 15% vs. real measurements |
@@ -249,11 +250,12 @@ All shape changes in 2.1.4.1-2.1.4.4 are grouped by code file, providing a roadm
 
 | File | Description |
 | :--- | :--- |
-| `tensor_cast/core/input_generator.py` | `_get_kv_cache_info` adds scaling of `block_size` against `dcp_size` |
+| `tensor_cast/core/input_generator.py` | `_get_kv_cache_info` **keeps** `kv_cache_per_token` as the true per-card physical per-token cost (**not divided by `dcp_size`**); adds `dcp_kv_token_capacity_factor(model)` returning the per-card token-capacity multiplier, **gated on KV layout**: `dcp_size` for MLA (latent KV is not partitioned across TP heads); `min(dcp_size, max(1, tp/h_kv))` for GQA — the KV-head growth cancels the sequence shrink, so only the TP-group KV replication present when `h_kv < tp` can be converted into capacity (factor 1 when `h_kv >= tp`); gated to 1 for V4/SFA (every model allocating an indexer cache, incl. `deepseek_v32` and `glm_moe_dsa`) |
 | `serving_cast/config.py` | `ParallelConfig` adds `dcp_size`, `cp_kv_cache_interleave_size` |
 | `tensor_cast/core/user_config.py` | `UserInputConfig` adds new field and passes through to `ParallelConfig` |
 | `tensor_cast/model_config.py` | `ParallelConfig` adds `decode_context_parallel_size` |
-| `tensor_cast/core/model_runner.py` | `kv_cache_size_gb` formula scaled by `dcp_size` |
+| `tensor_cast/core/model_runner.py` | `run_inference` computes `dcp_kv_token_capacity_factor` and records it on `ModelRunnerMetrics.kv_cache_token_capacity_factor` (per-token / `kv_cache_size_gb` are **not scaled**, kept physically true so KV-transfer byte accounting stays correct) |
+| `serving_cast/model_runner.py` | `warmup()` multiplies the derived `num_blocks` by `kv_cache_token_capacity_factor`, expressing DCP's "per-card token capacity ×`dcp`" as block capacity |
 | `tensor_cast/layers/mla.py` | MLA decode path injects `all_gather Q` + `all_to_all_single(output ⊕ lse)`, KV fetch sliced by dcp_rank; attention estimator's `num_heads` / `seq_len` changed to `h_q · dcp / tp` and `S / dcp` |
 | `tensor_cast/layers/attention.py` | GQA decode path injects `all_gather Q` + `all_to_all_single(output ⊕ lse)` (same template as MLA) |
 | `tensor_cast/performance_model/comm_analytic.py` | Reuse existing primitives, add DCP group resolution (rank list is a subset of the TP group) |

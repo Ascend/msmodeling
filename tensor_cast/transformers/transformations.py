@@ -264,6 +264,35 @@ def patch_rotary_emb(model: "ModelWrapperBase") -> "ModelWrapperBase":
     return model
 
 
+def _validate_gqa_dcp_kv_heads(model: "ModelWrapperBase", dcp_group) -> None:
+    """Enforce the GQA-only DCP constraint ``num_key_value_heads >= tp / dcp``.
+
+    DCP re-partitions KV heads across the TP domain, so each dcp rank holds
+    ``h_kv * dcp / tp`` KV heads; this must be >= 1, otherwise the rank has no KV
+    head to read and the configuration is illegal on vllm-ascend. We raise here so
+    such a config errors at model-build time instead of being silently modeled with
+    a degenerate single KV head and reported as optimal. No-op when DCP is disabled
+    or ``num_key_value_heads`` is unavailable (e.g. MLA-style configs).
+    """
+    dcp_size = getattr(dcp_group, "world_size", 1) or 1
+    if dcp_size <= 1:
+        return
+    parallel_config = model.model_config.parallel_config
+    tp_size = parallel_config.tensor_parallel_size
+    text_config = getattr(model, "text_config", None)
+    num_kv_heads = getattr(text_config, "num_key_value_heads", None)
+    if num_kv_heads is None:
+        return
+    # tp % dcp == 0 is already guaranteed by ParallelConfig, so tp / dcp is exact.
+    min_kv_heads = tp_size // dcp_size
+    if num_kv_heads < min_kv_heads:
+        raise ValueError(
+            f"Illegal GQA + DCP configuration: num_key_value_heads ({num_kv_heads}) must be >= "
+            f"tensor_parallel_size / decode_context_parallel_size ({tp_size} / {dcp_size} = "
+            f"{min_kv_heads}); otherwise a DCP rank holds no KV head."
+        )
+
+
 def patch_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
     # Assign a depth_layer_idx to each attention layer in the vision model
     # and append them sequentially to attention_by_layers.
@@ -275,9 +304,25 @@ def patch_attention(model: "ModelWrapperBase") -> "ModelWrapperBase":
     if model.model_config.attention_cls is None:
         return model
 
+    # DCP reuses the TP communication domain; attach the DCP group so the text
+    # attention layers can gather Q / shard the KV context on the decode path.
+    # Vision attention layers below intentionally keep the default no-op group.
+    dcp_group = getattr(getattr(model, "parallel_group_manager", None), "dcp_group", None)
+
+    # GQA-only DCP constraint (rfc_context_parallel_dcp §2.1.3): each dcp rank holds
+    # ``h_kv * dcp / tp`` KV heads, which must be >= 1, i.e. ``h_kv >= tp / dcp``.
+    # This depends on the concrete model's ``num_key_value_heads`` and so is validated
+    # here -- after ModelConfig is loaded and before any GQA attention layer runs --
+    # rather than in the model-agnostic ParallelConfig. MLA models use ``patch_mla``
+    # and are exempt (latent KV is not partitioned across TP heads).
+    _validate_gqa_dcp_kv_heads(model, dcp_group)
+
     model.attention_by_layers = {}
     for i in range(model.num_hidden_layers):
-        model.attention_by_layers[i] = model.model_config.attention_cls()
+        attention_layer = model.model_config.attention_cls()
+        if dcp_group is not None:
+            attention_layer.dcp_group = dcp_group
+        model.attention_by_layers[i] = attention_layer
 
     visual_model = get_visual(model)
     if visual_model is not None:

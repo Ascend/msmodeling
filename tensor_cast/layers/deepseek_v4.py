@@ -394,7 +394,14 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         decode_only: bool = False,
         parallel_group_manager: Optional["ParallelGroupManager"] = None,
     ):
-        MultiheadLatentAttentionTensorCast.__init__(self, mla_config, mla_module, tp_group, decode_only)
+        MultiheadLatentAttentionTensorCast.__init__(
+            self,
+            mla_config,
+            mla_module,
+            tp_group,
+            decode_only,
+            parallel_group_manager=parallel_group_manager,
+        )
         self.compress_ratio = getattr(self._inner, "compress_ratio", 0)
         self.use_indexer = bool(getattr(self._inner, "use_indexer", False))
         self.use_compressor = bool(getattr(self._inner, "use_compressor", False))

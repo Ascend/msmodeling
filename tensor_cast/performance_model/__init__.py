@@ -1208,11 +1208,15 @@ def _mla_metadata_properties(
     decode_fma_ops = 0
     decode_gp_ops = 0
     if W_UK_T is not None and W_UV is not None:
+        # Absorb matmuls run at the WEIGHT's head count, not ``q``'s: under DCP ``q``
+        # is all-gathered to ``h_q*dcp/tp`` heads but the absorb weights stay at this
+        # rank's ``h_q/tp``. See the concrete-value path for the full rationale.
+        absorb_heads = int(W_UK_T.size(0))
         decode_fma_ops = (
-            total_tokens * num_heads * qk_nope_head_dim * kv_lora_rank * 2
+            total_tokens * absorb_heads * qk_nope_head_dim * kv_lora_rank * 2
             + decode_context_sum * num_heads * (kv_lora_rank + qk_rope_head_dim) * 2
             + decode_context_sum * num_heads * kv_lora_rank * 2
-            + total_tokens * num_heads * kv_lora_rank * v_head_dim * 2
+            + total_tokens * absorb_heads * kv_lora_rank * v_head_dim * 2
         )
         decode_gp_ops = decode_context_sum * num_heads * 4
 
@@ -1672,9 +1676,22 @@ def _multihead_latent_attention_properties_helper(
         decode_context_sum = torch.sum(decode_num_tokens_per_seq.to(decode_attn_len.dtype) * decode_attn_len).item()
 
         # The decode formula is: softmax(q_nope @ W_UK_T @ k_cache) @ v_cache @ W_UV
+        #
+        # Under DCP, ``q`` arrives all-gathered to ``h_q*dcp/tp`` heads while the absorb
+        # weights stay at this rank's ``h_q/tp`` heads, so the two absorb matmuls below
+        # must be counted at the WEIGHT's head count, not ``q``'s. Real DCP does
+        # ``q @ W_UK`` before the all_gather and ``@ W_UV`` after the merge, precisely
+        # because a rank holds no other rank's absorb weights. Only the FIA terms
+        # (op2/op3/op4) run on gathered heads -- and there the ``dcp``-fold head growth
+        # cancels the ``S/dcp`` context shrink, which is what makes MLA's DCP KV-read
+        # saving show up. Deriving this from ``W_UK_T`` keeps it consistent with the
+        # weight-read-bytes term below (also only ``h_q/tp`` worth) and needs no dcp
+        # parameter; without DCP it equals ``num_heads`` and nothing changes.
+        absorb_heads = W_UK_T.size(0)
+
         # Op 1: `q_nope @ W_UK_T`
-        # Shapes: (num_decode_tokens, num_heads, qk_nope_head_dim) @ (num_heads, qk_nope_head_dim, kv_lora_rank)
-        decode_op1_ops = num_decode_tokens * num_heads * qk_nope_head_dim * kv_lora_rank * 2
+        # Shapes: (num_decode_tokens, absorb_heads, qk_nope_head_dim) @ (absorb_heads, qk_nope_head_dim, kv_lora_rank)
+        decode_op1_ops = num_decode_tokens * absorb_heads * qk_nope_head_dim * kv_lora_rank * 2
 
         # Op 2: `(result_op1, q_rope) @ kv_cache`
         decode_op2_ops = decode_context_sum * num_heads * (kv_lora_rank + qk_rope_head_dim) * 2
@@ -1686,8 +1703,8 @@ def _multihead_latent_attention_properties_helper(
         decode_op4_ops = decode_context_sum * num_heads * kv_lora_rank * 2
 
         # Op 5: `(result_op4) @ W_UV`
-        # Shapes: (num_decode_tokens, num_heads, kv_lora_rank) @ (num_heads, kv_lora_rank, v_head_dim)
-        decode_op5_ops = num_decode_tokens * num_heads * kv_lora_rank * v_head_dim * 2
+        # Shapes: (num_decode_tokens, absorb_heads, kv_lora_rank) @ (absorb_heads, kv_lora_rank, v_head_dim)
+        decode_op5_ops = num_decode_tokens * absorb_heads * kv_lora_rank * v_head_dim * 2
 
         total_fma_ops += decode_op1_ops + decode_op2_ops + decode_op4_ops + decode_op5_ops
         total_gp_ops += decode_op3_ops

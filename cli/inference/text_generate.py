@@ -182,6 +182,13 @@ def main():
         help="The pipeline parallel size for the whole model",
     )
     par_group.add_argument(
+        "--dcp-size",
+        type=check_positive_integer,
+        default=1,
+        help="The Decode Context Parallel (DCP) size. Reuses TP devices, so it must divide tp-size "
+        "(does not expand world-size). Slices the KV cache along the sequence dimension during decode.",
+    )
+    par_group.add_argument(
         "--dp-size",
         type=check_positive_integer,
         default=None,
