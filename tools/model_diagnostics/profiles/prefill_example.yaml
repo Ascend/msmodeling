@@ -1,0 +1,16 @@
+# Example run profile for category 1: Dense + standard attention.
+# Qwen3-8B W8A8_DYNAMIC prefill is one representative sample.
+#   python -m tools.model_diagnostics tools/model_diagnostics/profiles/prefill_example.yaml
+model_name: Qwen/Qwen3-8B
+phase: prefill
+batch_size: 1
+query_length: 2
+num_hidden_layers_override: 1
+# Optional validation subset. Indices are zero-based and must be smaller than
+# num_hidden_layers_override. Omit to validate every executed layer.
+# selected_language_layers: [0]
+quantize_linear_action: W8A8_DYNAMIC
+
+# Optional embedding tensor parallelism: col (hidden dimension) or row
+# (vocabulary dimension). Omit this field to keep embedding TP disabled.
+# word_embedding_tp: col

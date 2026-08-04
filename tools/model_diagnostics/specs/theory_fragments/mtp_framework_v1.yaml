@@ -1,0 +1,174 @@
+fragment_id: mtp_framework_v1
+fragment_kind: mtp_framework
+# Common TensorCast speculative-decode framework. Theory follows the semantic rows
+# in text_generate_shape_dtype_alignment.md; Runtime options are overridable defaults
+# for the shared MtpWrapper/MultiTokenPredictor implementation.
+# Stage definitions follow stage_groups order: request, then proposal_prefix/suffix.
+stage_groups:
+  request: [target_selection, target_lm_head, verification_sampler, mtp_output]
+  proposal_prefix: [input_shift, embedding, input_fusion]
+  proposal_suffix: [proposal_selection, proposal_lm_head, proposal_sampler]
+stages:
+  # --- request ---
+  - id: target_selection
+    modules:
+      - name: mtp_target_select
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Rtgt]", dtype: int64}
+          OUTPUT[0]: {shape: "[Rtgt, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [aten.index.Tensor]
+      ignored_operators: [device_put, alias]
+  - id: target_lm_head
+    modules:
+      - name: lm_head
+        tensors:
+          INPUT[0]: {shape: "[Rtgt, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Rtgt, Vtp]", dtype: OUT}
+    runtime: &lm_head_runtime
+      boundary_operators:
+        - mm
+        - static_quant_linear
+        - static_quant_linear_int4
+        - fp8_linear
+        - mxfp4_linear
+      ignored_operators:
+        - view
+        - slice
+        - alias
+        - copy_
+        - device_put
+        - select
+        - argmax
+  - id: verification_sampler
+    modules:
+      - name: mtp_target_sampler
+        tensors:
+          OUTPUT[0]: {shape: "[B, MTP + 1]", dtype: int64}
+    runtime:
+      boundary_operators: [cat]
+      # PyTorch 2.10 may place output-buffer update mechanics before the
+      # following select_scatter boundary.
+      ignored_operators: [select, copy]
+  - id: mtp_output
+    modules:
+      - name: mtp_output
+        tensors:
+          OUTPUT[0]: {shape: "[B, MTP + 1]", dtype: int64}
+    runtime:
+      # Older graphs expose the initialized output through slice; PyTorch 2.10
+      # can eliminate that slice and expose the updated buffer as select_scatter.
+      boundary_operators: [slice, select_scatter]
+      ignored_operators:
+        - select
+        - copy
+        - slice_scatter
+        - unsqueeze
+        - expand
+        - bmm
+        - permute
+        - clone
+        - cos
+        - sin
+        - mul
+        - convert_element_type
+    # Runtime retains multiple slice calls in this stage. Select the wrapper
+    # output boundary explicitly instead of using call-count-sensitive one_to_one.
+    comparisons:
+      theory-runtime:
+        strategy: boundary_equal
+        options:
+          mapping:
+            mode: explicit
+            pairs:
+              - left_call_index: 0
+                left_slot: {direction: output, index: 0, name: null}
+                right_call_index: 0
+                right_slot: {direction: output, index: 0, name: null}
+            relations: []
+  # --- proposal_prefix ---
+  - id: input_shift
+    modules:
+      - name: mtp_input_shift
+        tensors:
+          INPUT[0]: {shape: "[1, T]", dtype: int64}
+          INPUT[1]: {shape: "[B + 1]", dtype: int64}
+          # next_tokens may be [B, MTP+1] (step 0) or [B,1] (later).
+          INPUT[2]: {shape: "[B, max(MTP + 1 - LAYER * MTP, 1)]", dtype: int64}
+          OUTPUT[0]: {shape: "[1, T]", dtype: int64}
+    runtime:
+      boundary_operators: [shift_and_update_input_ids]
+  - id: embedding
+    modules:
+      - name: mtp_embedding
+        tensors:
+          INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
+          INPUT[1]: {shape: "[1, T]", dtype: int64}
+          OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
+    runtime:
+      boundary_operators: [embedding]
+      # Ignore fused and expanded RMSNorm mechanics between embedding and fusion.
+      ignored_operators:
+        - convert_element_type
+        - pow
+        - mean
+        - add
+        - rsqrt
+        - mul
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+  - id: input_fusion
+    modules:
+      - name: mtp_fusion_projection
+        tensors:
+          INPUT[0]: {shape: "[T, 2 * H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [cat]
+      ignored_operators:
+        - cat
+        - view
+        - convert_element_type
+        - pow
+        - mean
+        - add
+        - rsqrt
+        - mul
+        - dynamic_quantize_symmetric
+  # --- proposal_suffix ---
+  - id: proposal_selection
+    modules:
+      - name: mtp_proposal_select
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: ACT}
+          # The semantic API consumes the complete target+bonus index window and
+          # derives one proposal row per request before the captured index op.
+          INPUT[1]: {shape: "[Rprop]", dtype: int64}
+          OUTPUT[0]: {shape: "[Rprop, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [aten.index.Tensor]
+      ignored_operators: [device_put, alias]
+  - id: proposal_lm_head
+    modules:
+      - name: mtp_proposal_lm_head
+        tensors:
+          INPUT[0]: {shape: "[Rprop, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Rprop, Vtp]", dtype: OUT}
+    runtime:
+      <<: *lm_head_runtime
+  - id: proposal_sampler
+    modules:
+      - name: mtp_proposal_sampler
+        tensors:
+          INPUT[0]: {shape: "[Rprop, Vtp]", dtype: OUT}
+          OUTPUT[0]: {shape: "[B, 1]", dtype: int64}
+    runtime:
+      boundary_operators: [argmax]
+      ignored_operators:
+        - slice
+        - select
+        - copy
+        - select_scatter
+        - slice_scatter
+        - copy_

@@ -1,0 +1,20 @@
+# Decode example run profile for category 1: Dense + standard attention.
+# Qwen3-8B W8A8_DYNAMIC single-token decode is one representative sample.
+#   python -m tools.model_diagnostics tools/model_diagnostics/profiles/decode_example.yaml
+model_name: Qwen/Qwen3-8B
+# A conventional autoregressive decode evaluates one new token at a time.
+# query_length: 1 is representative, not a schema requirement: multi-token
+# and MTP decode may use a larger query length.
+phase: decode
+batch_size: 1
+query_length: 1
+context_length: 128
+num_hidden_layers_override: 1
+# Optional validation subset. Indices are zero-based and must be smaller than
+# num_hidden_layers_override. Omit to validate every executed layer.
+# selected_language_layers: [0]
+quantize_linear_action: W8A8_DYNAMIC
+
+# Optional embedding tensor parallelism: col (hidden dimension) or row
+# (vocabulary dimension). Omit this field to keep embedding TP disabled.
+# word_embedding_tp: col

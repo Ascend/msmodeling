@@ -296,6 +296,9 @@ def test_patch_mla_validates_glm5_indexer_types_before_indexing():
             self.layer_idx = 2
 
     class FakeGlm5SparseAttention(Glm5SparseAttention):
+        # Keep the legacy 3-arg constructor; do not inherit DCP's manager kwarg.
+        supports_parallel_group_manager = False
+
         def __init__(self, _config, module, _tp_group):
             torch.nn.Module.__init__(self)
             self.layer_idx = module.layer_idx

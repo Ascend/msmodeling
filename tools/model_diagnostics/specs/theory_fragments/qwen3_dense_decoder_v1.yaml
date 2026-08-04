@@ -1,0 +1,101 @@
+fragment_id: qwen3_dense_decoder_v1
+fragment_kind: model_decoder
+# Authoritative Qwen3 Dense decoder stage defaults. Language stages and MTP
+# compose.predictor reuse both Theory contracts and Runtime segmentation.
+stages:
+  - id: attention_qkv
+    modules:
+      - name: q_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: k_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+      - name: v_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+      ignored_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+        - view
+        - index
+        - reshape_and_cache
+        - split_with_sizes
+        - alias
+        - copy_
+        - slice
+        - select
+        - apply_rope
+        - permute
+        - dynamic_quantize_symmetric
+    comparisons:
+      theory-runtime:
+        strategy: concat_shape
+  - id: attention
+    modules:
+      - name: attention
+        tensors:
+          INPUT[0]: {shape: "[T, Lh * Dh]", dtype: ACT}
+          INPUT[1]: {shape: "[Nblk, Bs, Lkv, Dh]", dtype: ACT}
+          INPUT[2]: {shape: "[Nblk, Bs, Lkv, Dh]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: o_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Lh * Dh]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [attention]
+      ignored_operators:
+        - view
+        - index
+        - reshape_and_cache
+        - split_with_sizes
+        - alias
+        - copy_
+        - slice
+        - select
+        - apply_rope
+        - dynamic_quantize_symmetric
+        - quantize
+  - id: dense_ffn
+    modules:
+      - name: gate_up_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, 2 * Ftp]", dtype: OUT}
+      - name: swiglu
+        tensors:
+          INPUT[0]: {shape: "[B, Q, Ftp]", dtype: ACT}
+          INPUT[1]: {shape: "[B, Q, Ftp]", dtype: ACT}
+          OUTPUT[0]: {shape: "[B, Q, Ftp]", dtype: ACT}
+      - name: down_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Ftp]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - add_rms_norm2
+        - add_rms_norm_dynamic_quant2_symmetric
+        - add_rms_norm_quant2
+      ignored_operators:
+        - add_rms_norm2
+        - add_rms_norm_dynamic_quant2_symmetric
+        - add_rms_norm_quant2
+        - add
+        - slice
+        - select
+        - device_put
+        - rms_norm
+        - view
+        - split_with_sizes
+        - dynamic_quantize_symmetric
+        - quantize

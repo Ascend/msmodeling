@@ -6,7 +6,8 @@
 **/coverage
 .coverage*
 
-artifacts/
+# Capture/output dumps at repo root only (not model_diagnostics/artifacts package).
+/artifacts/
 
 # Local pre-commit binary (downloaded, not committed)
 /gitleaks
