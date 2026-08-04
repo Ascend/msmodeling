@@ -184,9 +184,9 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device ATLAS_8
 
 ## 3 Result Information
 
-The script outputs performance metrics (throughput, TTFT, TPOT, concurrency, and mode-specific fields such as QPS or PD ratio). Example:
+After a successful run, the terminal first prints the input configuration and best-configuration summary, then shows the candidate parallel configuration table. Metrics include throughput, TTFT, TPOT, concurrency, and mode-specific fields such as QPS or PD ratio. Example:
 
-```bash
+```text
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration:
@@ -213,6 +213,20 @@ Top 4 Aggregation Configurations:
 +-----+----------------------+-----------+-----------+-------------+-------------+--------------------+------------+
 ********************************************************************************
 ```
+
+Key fields:
+
+- `TP` / `DP`: recommended parallel strategy.
+- `concurrency`: number of concurrent requests supported by the candidate configuration.
+- `batch size`: batch size that satisfies the SLO constraints.
+- `TTFT` / `TPOT`: time to first token and time per output token.
+- `Throughput (token/s)`: system-level output token throughput; higher is better.
+
+Success criteria:
+
+- The terminal prints `Overall Best Configuration` or a candidate configuration table.
+- Metrics such as `Throughput`, `TTFT`, and `TPOT` are present.
+- There is no model-configuration load failure or parameter-conflict error.
 
 ## 4 Parameters
 
@@ -253,8 +267,11 @@ Model & Quantization Options:
   --compile             If set, invoke torch.compile() on the model before inference. (default: False)
   --compile-allow-graph-break
                         If set, allows graph breaks during torch.compile() to improve compilation speed or handle unsupported ops. (default: False)
-  --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9}
-                        Number of MTP tokens, 0 means disabled - only support models having MTP like DeepSeek (default: 0)
+  --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9} [{0,1,2,3,4,5,6,7,8,9} ...]
+                        MTP token count candidate(s). Pass one value for a fixed configuration, or multiple values to
+                        sweep during throughput optimization. 0 means disabled and only models with MTP support will
+                        benefit from non-zero values. When combined with TP/EP/MOE-DP search, total combinations grow as
+                        TP x EP x MOE-DP x MTP. (default: None)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
                         Quantize all linear layers in the model from choices (currently only support symmetric quant) (default: W8A8_DYNAMIC)
   --quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -333,7 +350,7 @@ Main parameters:
 | `--log-level` | General Options | Optional | Log level.<br>1. Type: Str.<br>2. Reference values: `debug`, `info`, `warning`, `error`, `critical`.<br>3. Default: `error`. |
 | `--compile` | Model & Quantization Options | Optional | Invokes `torch.compile()` before inference.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compile-allow-graph-break` | Model & Quantization Options | Optional | Allows graph breaks during `torch.compile()`.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
-| `--num-mtp-tokens` | Model & Quantization Options | Optional | Number of MTP tokens. `0` means disabled.<br>1. Type: Int.<br>2. Valid range: `0` to `9`.<br>3. Default: `0`. |
+| `--num-mtp-tokens` | Model & Quantization Options | Optional | MTP token count candidates. Pass one or more values to search; `0` means disabled.<br>1. Type: List[Int] (`nargs="+"`).<br>2. Valid range: each candidate is an integer from `0` to `9`; multiple values are allowed, for example `--num-mtp-tokens 0 1 2`.<br>3. Default: if omitted, equivalent to `0` (MTP disabled).<br>4. A single value fixes the MTP configuration; multiple values are swept during throughput optimization and multiply with TP / EP / MOE-DP search combinations.<br>5. Only models with MTP support benefit from non-zero values; each candidate value must not exceed `len(--mtp-acceptance-rate) + 1` (default acceptance-rate list length is `4`, so the limit is `5`; exceeding it triggers a runtime error: `exceed the supported mtp_acceptance_rate length`). |
 | `--quantize-linear-action` | Model & Quantization Options | Optional | Linear layer quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`. |
 | `--quantize-non-expert-linear-action` | Model & Quantization Options | Optional | Separate quantization mode for non-expert linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `DISABLED`.<br>4. Mainly intended for DeepSeek V4-style MoE models. Routed MoE experts still use `--quantize-linear-action`. |
 | `--mxfp4-group-size` | Model & Quantization Options | Optional | MXFP4 quantization group size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `32`. |

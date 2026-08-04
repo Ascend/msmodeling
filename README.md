@@ -16,54 +16,54 @@
 
 <span style="font-size:14px;">
 
-持续支持 DeepSeek、Kimi、Qwen、GLM、MiniMax 等国内主流大模型，点击系列名称展开查看新增支持记录。
+持续支持 DeepSeek、Kimi、Qwen、GLM、MiniMax 等国内主流大模型，点击系列名称展开查看新增支持记录。<br>
 
 <details>
 <summary><b>DeepSeek 系列</b></summary>
 
-🔹 [2026.06.04] msModeling 新增 **DeepSeek-V4** 模型支持
-🔹 [2026.04.20] msModeling 新增 **DeepSeek V3.2** 模型支持
-🔹 [2025.09.06] msModeling 新增 **DeepSeek V3** 模型支持
+🔹 [2026.06.04] msModeling 新增 **DeepSeek-V4** 模型支持<br>
+🔹 [2026.04.20] msModeling 新增 **DeepSeek V3.2** 模型支持<br>
+🔹 [2025.09.06] msModeling 新增 **DeepSeek V3** 模型支持<br>
 
 </details>
 
 <details>
 <summary><b>Kimi 系列</b></summary>
 
-🔹 [2026.06.11] msModeling 新增 **Kimi-K2.6** 模型支持
-🔹 [2026.05.27] msModeling 新增 **Kimi-K2.5** 模型支持
-🔹 [2025.09.06] msModeling 新增 **Kimi-K2** 模型支持
+🔹 [2026.06.11] msModeling 新增 **Kimi-K2.6** 模型支持<br>
+🔹 [2026.05.27] msModeling 新增 **Kimi-K2.5** 模型支持<br>
+🔹 [2025.09.06] msModeling 新增 **Kimi-K2** 模型支持<br>
 
 </details>
 
 <details>
 <summary><b>Qwen 系列</b></summary>
 
-🔹 [2026.07.14] msModeling 新增 **Qwen3.6** 图片输入支持
-🔹 [2026.07.14] msModeling 新增 **Qwen3.6 Dense / MoE** 文本输入支持
-🔹 [2026.04.20] msModeling 新增 **Qwen3.5** 图片输入支持
-🔹 [2026.03.31] msModeling 新增 **Qwen3.5 Dense / MoE** 文本输入支持
-🔹 [2025.12.25] msModeling 新增 **Qwen3 MoE** 模型支持
-🔹 [2025.09.18] msModeling 新增 **Qwen3-Next** 模型支持
-🔹 [2025.08.18] msModeling 新增 **Qwen3 Dense** 模型支持
+🔹 [2026.07.14] msModeling 新增 **Qwen3.6** 图片输入支持<br>
+🔹 [2026.07.14] msModeling 新增 **Qwen3.6 Dense / MoE** 文本输入支持<br>
+🔹 [2026.04.20] msModeling 新增 **Qwen3.5** 图片输入支持<br>
+🔹 [2026.03.31] msModeling 新增 **Qwen3.5 Dense / MoE** 文本输入支持<br>
+🔹 [2025.12.25] msModeling 新增 **Qwen3 MoE** 模型支持<br>
+🔹 [2025.09.18] msModeling 新增 **Qwen3-Next** 模型支持<br>
+🔹 [2025.08.18] msModeling 新增 **Qwen3 Dense** 模型支持<br>
 
 </details>
 
 <details>
 <summary><b>GLM 系列</b></summary>
 
-🔹 [2026.07.07] msModeling 新增 **GLM5.2** 模型支持
-🔹 [2026.06.04] msModeling 新增 **GLM5.1** 模型支持
-🔹 [2026.04.30] msModeling 新增 **GLM5** 模型支持
-🔹 [2026.03.31] msModeling 新增 **GLM-4 MoE** 模型支持
+🔹 [2026.07.07] msModeling 新增 **GLM5.2** 模型支持<br>
+🔹 [2026.06.04] msModeling 新增 **GLM5.1** 模型支持<br>
+🔹 [2026.04.30] msModeling 新增 **GLM5** 模型支持<br>
+🔹 [2026.03.31] msModeling 新增 **GLM-4 MoE** 模型支持<br>
 
 </details>
 
 <details>
 <summary><b>MiniMax 系列</b></summary>
 
-🔹 [2026.06.25] msModeling 新增 **MiniMax M2.7** 模型支持
-🔹 [2026.05.29] msModeling 新增 **MiniMax M2.5** 模型支持
+🔹 [2026.06.25] msModeling 新增 **MiniMax M2.7** 模型支持<br>
+🔹 [2026.05.29] msModeling 新增 **MiniMax M2.5** 模型支持<br>
 
 </details>
 
@@ -71,55 +71,55 @@
 
 <span style="font-size:14px; display:block; margin-top:24px;">
 
-点击模块名称展开查看**已支持特性**。
+点击模块名称展开查看**已支持特性**。<br>
 
 <details>
 <summary><b>模型推理性能仿真</b></summary>
 
-🔹 多硬件仿真（Atlas 800 A2/A3、Atlas 350 等昇腾设备），支持自定义设备画像
-🔹 LLM Prefill / Decode 分阶段仿真
-🔹 Prefix Cache 仿真
-🔹 MTP 投机解码仿真
-🔹 编译与图优化、多流通算掩盖
-🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 等）
-🔹 并行与 MoE 扩展（TP / DP / EP，及 Embedding TP、Vision TP 等细粒度并行）
-🔹 性能模型切换（Roofline / Profiling）
-🔹 Chrome Trace / Debug
-🔹 视频生成 DiT 仿真（Ulysses、CFG、DiT Cache）
+🔹 多硬件仿真（Atlas 800 A2/A3、Atlas 350 等昇腾设备），支持自定义设备画像<br>
+🔹 LLM Prefill / Decode 分阶段仿真<br>
+🔹 Prefix Cache 仿真<br>
+🔹 MTP 投机解码仿真<br>
+🔹 编译与图优化、多流通算掩盖<br>
+🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 等）<br>
+🔹 并行与 MoE 扩展（TP / DP / EP，及 Embedding TP、Vision TP 等细粒度并行）<br>
+🔹 性能模型切换（Roofline / Profiling）<br>
+🔹 Chrome Trace / Debug<br>
+🔹 视频生成 DiT 仿真（Ulysses、CFG、DiT Cache）<br>
 
 </details>
 
 <details>
 <summary><b>服务化性能仿真</b></summary>
 
-🔹 LLM / VLM 约束下吞吐优化（TTFT / TPOT / 服务成本）
-🔹 PD 模式（混部 / 分离 / 配比）
-🔹 并行策略搜索（TP / EP / MOE-DP）
-🔹 MTP 配置搜索
-🔹 Chunked Prefill 仿真
-🔹 Prefix Cache 仿真
-🔹 变长负载仿真
-🔹 多流通算掩盖
-🔹 跨硬件对比
+🔹 LLM / VLM 约束下吞吐优化（TTFT / TPOT / 服务成本）<br>
+🔹 PD 模式（混部 / 分离 / 配比）<br>
+🔹 并行策略搜索（TP / EP / MOE-DP）<br>
+🔹 MTP 配置搜索<br>
+🔹 Chunked Prefill 仿真<br>
+🔹 Prefix Cache 仿真<br>
+🔹 变长负载仿真<br>
+🔹 多流通算掩盖<br>
+🔹 跨硬件对比<br>
 
 </details>
 
 <details>
 <summary><b>Web UI</b></summary>
 
-🔹 LLM / VL 前向仿真与视频生成仿真
-🔹 吞吐寻优实验（PD 混部 / 分离 / 配比）
-🔹 命令预览与任务缓存
-🔹 结果展示与导出（曲线、表格、显存/算子明细、Excel）
+🔹 LLM / VL 前向仿真与视频生成仿真<br>
+🔹 吞吐寻优实验（PD 混部 / 分离 / 配比）<br>
+🔹 命令预览与任务缓存<br>
+🔹 结果展示与导出（曲线、表格、显存/算子明细、Excel）<br>
 
 </details>
 
 <details>
 <summary><b>服务化实测寻优</b></summary>
 
-🔹 服务框架实测寻优（PSO + Early Rejection）
-🔹 多引擎支持（vLLM、MindIE）与评测策略
-🔹 自定义寻优配置与断点续跑
+🔹 服务框架实测寻优（PSO + Early Rejection）<br>
+🔹 多引擎支持（vLLM、MindIE）与评测策略<br>
+🔹 自定义寻优配置与断点续跑<br>
 
 </details>
 

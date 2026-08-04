@@ -133,9 +133,9 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 
 ## 3 结果说明
 
-脚本会输出性能指标（吞吐量、TTFT、TPOT、并发度，以及模式相关字段如 QPS 或 PD 配比）。示例：
+命令执行成功后，终端会先打印输入配置和最优配置摘要，随后展示候选并行配置表。输出指标包括吞吐量、TTFT、TPOT、并发度，以及模式相关字段（如 QPS 或 PD 配比）。例如：
 
-```bash
+```text
 ********************************************************************************
   ----------------------------------------------------------------------------
   Input Configuration:
@@ -162,6 +162,20 @@ Top 4 Aggregation Configurations:
 +-----+----------------------+-----------+-----------+-------------+-------------+--------------------+------------+
 ********************************************************************************
 ```
+
+重点关注以下字段：
+
+- `TP` / `DP`：推荐的并行策略。
+- `concurrency`：当前候选配置支持的并发请求数。
+- `batch size`：满足 SLO 约束下的批大小。
+- `TTFT` / `TPOT`：首 token 时间与每输出 token 时间。
+- `Throughput (token/s)`：系统级输出 token 吞吐，数值越大表示吞吐越高。
+
+成功标准：
+
+- 终端输出 `Overall Best Configuration` 或候选配置表。
+- 输出 `Throughput`、`TTFT`、`TPOT` 等指标。
+- 没有出现模型配置加载失败或参数冲突报错。
 
 ### 3.1 多硬件配置对比
 
@@ -299,8 +313,11 @@ Model & Quantization Options:
   --compile             If set, invoke torch.compile() on the model before inference. (default: False)
   --compile-allow-graph-break
                         If set, allows graph breaks during torch.compile() to improve compilation speed or handle unsupported ops. (default: False)
-  --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9}
-                        Number of MTP tokens, 0 means disabled - only support models having MTP like DeepSeek (default: 0)
+  --num-mtp-tokens {0,1,2,3,4,5,6,7,8,9} [{0,1,2,3,4,5,6,7,8,9} ...]
+                        MTP token count candidate(s). Pass one value for a fixed configuration, or multiple values to
+                        sweep during throughput optimization. 0 means disabled and only models with MTP support will
+                        benefit from non-zero values. When combined with TP/EP/MOE-DP search, total combinations grow as
+                        TP x EP x MOE-DP x MTP. (default: None)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
                         Quantize all linear layers in the model from choices (currently only support symmetric quant) (default: W8A8_DYNAMIC)
   --quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -391,7 +408,7 @@ PD Ratio Optimization Options:
 | `--log-level` | General Options | 可选 | 指定日志级别。<br>1. 类型：Str。<br>2. 参考值：`debug`、`info`、`warning`、`error`、`critical`。<br>3. 默认值：`error`。 |
 | `--compile` | Model & Quantization Options | 可选 | 在推理前对模型调用 `torch.compile()`。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--compile-allow-graph-break` | Model & Quantization Options | 可选 | 允许 `torch.compile()` 过程中出现 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--num-mtp-tokens` | Model & Quantization Options | 可选 | 指定 MTP token 数量，`0` 表示不启用。<br>1. 类型：Int。<br>2. 取值范围：`0` 到 `9`。<br>3. 默认值：`0`。 |
+| `--num-mtp-tokens` | Model & Quantization Options | 可选 | 指定 MTP token 数量候选，支持传入一个或多个值进行搜索；`0` 表示不启用。<br>1. 类型：List[Int]（`nargs="+"`）。<br>2. 取值范围：每个候选为 `0` 到 `9`；可一次传入多个值，例如 `--num-mtp-tokens 0 1 2`。<br>3. 默认值：未指定时等价于 `0`（不启用 MTP）。<br>4. 传入单个值时固定该 MTP 配置；传入多个值时在吞吐寻优中对候选组合进行搜索，并与 TP / EP / MOE-DP 搜索组合相乘。<br>5. 仅支持具备 MTP 能力的模型；每个候选值不能超过 `len(--mtp-acceptance-rate) + 1`（默认接受率列表长度为 `4`，故上限为 `5`；超过时运行时提示 `exceed the supported mtp_acceptance_rate length`）。 |
 | `--quantize-linear-action` | Model & Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`W8A8_DYNAMIC`。 |
 | `--quantize-non-expert-linear-action` | Model & Quantization Options | 可选 | 为 attention 投影、dense MLP、shared experts 等非 expert 线性层指定独立量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`DISABLED`。<br>4. 主要用于 DeepSeek V4 风格 MoE 模型；路由 MoE experts 仍使用 `--quantize-linear-action`。 |
 | `--mxfp4-group-size` | Model & Quantization Options | 可选 | 指定 MXFP4 量化的 group size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`32`。 |

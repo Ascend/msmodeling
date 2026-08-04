@@ -27,16 +27,36 @@ cd msmodeling
 
 The project recommends using `uv` to manage the virtual environment and dependencies. When the repository contains `pyproject.toml`, scripts under `scripts/` also automatically detect and use `uv`.
 
+In networks where the default PyPI index is slow or unreachable, configure an Alibaba Cloud PyPI mirror before running `uv sync` (see [Appendix: Switch PyPI Mirrors](#63-switch-pypi-mirrors) for other mirrors and usage):
+
 ```bash
 pip install uv
 cd msmodeling
+
+# Recommended in China: speed up dependency downloads with Alibaba Cloud mirror
+export UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+
 uv sync
 
 # Optional: specify the Python version (defaults to an available local version)
 # UV_PYTHON=3.13 uv sync
+```
 
-# Optional: install lint or CI dependency groups
+`uv sync` installs only the runtime and simulation dependencies by default. Install optional groups only when needed:
+
+| Group | When needed | Install command | Typical use |
+| ----- | ----------- | --------------- | ----------- |
+| (default) | Run simulation, Throughput Optimizer, Web UI, OptiX, and similar workflows | `uv sync` | Daily use and quick start |
+| `lint` | Contribute code and run local pre-commit style/commit checks | `uv sync --group lint` | `uv run pre-commit install`, `uv run pre-commit run --all-files` |
+| `ci` | Run local pytest or align with the CI Gate / `scripts/run_*.sh` test environment | `uv sync --group ci` | `uv run pytest ...`, `./scripts/run_ci_gate.sh` |
+
+For tool evaluation only, `uv sync` is enough; you do not need `lint` or `ci`. Add them later as needed:
+
+```bash
+# Development: install pre-commit and other lint dependencies
 uv sync --group lint
+
+# Local testing: install pytest and other CI dependencies
 uv sync --group ci
 ```
 
@@ -66,20 +86,7 @@ pip install -e .
 > [!NOTE]
 > `pip install -e .` installs msModeling in editable source mode and registers the `msmodeling` CLI. After source code updates, you do not need to copy files again; rerun the installation command when needed.
 
-If dependency downloads fail or are slow, temporarily switch to a PyPI mirror and retry:
-
-```bash
-# Temporarily use Tsinghua mirror
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-# Or temporarily use Alibaba Cloud mirror
-pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
-
-# Or temporarily use Huawei Cloud mirror
-pip install -r requirements.txt -i https://repo.huaweicloud.com/repository/pypi/simple
-```
-
-If a mirror is not synchronized in time and a version cannot be found, switch to another mirror or temporarily fall back to the official index `https://pypi.org/simple`.
+If dependency downloads fail or are slow, switch to a PyPI mirror and retry. See [Appendix: Switch PyPI Mirrors](#63-switch-pypi-mirrors).
 
 > [!WARNING]
 > PyTorch 2.10 may not run properly on Windows. If you encounter issues, use PyTorch 2.8 or earlier.
@@ -180,12 +187,11 @@ git pull
 # uv environment
 uv pip install --upgrade -e .
 
-# uv environment with a temporary mirror
-uv pip install --upgrade -e . -i https://mirrors.aliyun.com/pypi/simple
-
 # pip environment
 pip install --upgrade -e .
 ```
+
+If dependency downloads are slow during upgrade, temporarily specify a mirror as described in [Appendix: Switch PyPI Mirrors](#63-switch-pypi-mirrors).
 
 When upgrading versions, pay attention to version compatibility. See the [Release Notes](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.1.0/release_notes.md).
 
@@ -206,4 +212,38 @@ OptiX child processes automatically strip the msModeling virtual environment and
 - If `--help` cannot display help, first check the virtual environment, `PYTHONPATH`, and dependency installation.
 - If `cli` or `tensor_cast` cannot be found, confirm that the current directory is the repository root or that `PYTHONPATH` is configured correctly.
 - If model configuration download fails, confirm that the network can access Hugging Face. If the `HF_ENDPOINT` mirror is still unavailable, use a local model path.
-- If dependency installation fails, first confirm that the virtual environment is activated. If you use `uv`, rerun `uv sync`; if you use pip, upgrade `pip` and rerun `pip install -r requirements.txt` followed by `pip install -e .`. Switch PyPI mirrors if needed.
+- If dependency installation fails, first confirm that the virtual environment is activated. If you use `uv`, rerun `uv sync`; if you use pip, upgrade `pip` and rerun `pip install -r requirements.txt` followed by `pip install -e .`. Switch PyPI mirrors as described in [Appendix: Switch PyPI Mirrors](#63-switch-pypi-mirrors) if needed.
+- You do not need the `lint` or `ci` groups for tool evaluation only. Install them later with `uv sync --group lint` or `uv sync --group ci` when you need local pre-commit or pytest.
+
+### 6.3 Switch PyPI Mirrors<a name="63-switch-pypi-mirrors"></a>
+
+If dependency downloads fail or are slow, temporarily switch to a PyPI mirror. Prefer the Alibaba Cloud mirror in China. If you already use an internal company index or another configured mirror, keep that configuration.
+
+**uv (recommended for `uv sync`)**
+
+```bash
+# Apply for the current shell session (recommended)
+export UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+uv sync
+
+# Or apply for a single command
+UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple uv sync
+
+# Temporarily specify a mirror for uv pip install/upgrade
+uv pip install --upgrade -e . -i https://mirrors.aliyun.com/pypi/simple
+```
+
+**pip**
+
+```bash
+# Temporarily use Alibaba Cloud mirror (recommended)
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+
+# Temporarily use Tsinghua mirror
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# Temporarily use Huawei Cloud mirror
+pip install -r requirements.txt -i https://repo.huaweicloud.com/repository/pypi/simple
+```
+
+If a mirror is not synchronized in time and a version cannot be found, switch to another mirror or temporarily fall back to the official index `https://pypi.org/simple`.
