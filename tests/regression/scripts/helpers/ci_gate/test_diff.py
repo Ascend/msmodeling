@@ -1,38 +1,67 @@
-"""Tests for ci_gate.diff — resolve_base_ref, fetch_diff_line_map, classify_changes."""
+"""Tests for ci_gate.diff — resolve_base_ref, fetch_diff_line_map."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 from scripts.helpers._config import ConfigError
 from scripts.helpers.ci_gate.diff import (
-    DiffEntry,
-    GitDiffResult,
-    _classify_rename,
-    classify_changes,
+    _fetch_deepen,
+    _parse_fetch_remote_branch,
+    cleanup_all_ephemeral_checkouts,
+    fetch_changed_paths,
+    fetch_diff,
     fetch_diff_line_map,
+    fetch_ref,
+    is_git_ancestor,
     resolve_base_ref,
+    resolve_head_commit,
+    resolve_ref_commit,
+    resolve_remote_ref,
+    resolve_target_head,
 )
-from scripts.helpers.ci_gate.gate_policy import default_test_discovery
-from scripts.helpers.common.coverage_config import product_roots
 from tests.helpers.fake_subprocess import FakeCompleted
-
-_DEFAULT_ROOTS = product_roots()
-
-
-def _diff_result(
-    *,
-    entries: tuple[DiffEntry, ...] = (),
-    line_map: dict[str, set[int]] | None = None,
-) -> GitDiffResult:
-    return GitDiffResult(line_map=line_map or {}, entries=entries)
-
 
 # ---------------------------------------------------------------------------
 # resolve_base_ref
 # ---------------------------------------------------------------------------
+
+
+def test_resolve_head_commit_returns_full_sha(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "abc123deadbeef\n", ""))
+    assert resolve_head_commit(tmp_path) == "abc123deadbeef"
+
+
+def test_resolve_head_commit_git_failure_raises_config_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: FakeCompleted(1, "", "fatal: not a git repository"),
+    )
+    with pytest.raises(ConfigError, match=r"Cannot resolve HEAD commit"):
+        resolve_head_commit(tmp_path)
+
+
+def test_resolve_ref_commit_returns_full_sha(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "deadbeef\n", ""))
+    assert resolve_ref_commit(tmp_path, "master") == "deadbeef"
+
+
+def test_fetch_changed_paths_returns_names(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: FakeCompleted(0, "cli/main.py\ntensor_cast/foo.py\n", ""),
+    )
+    assert fetch_changed_paths(tmp_path, "base", "head") == frozenset({"cli/main.py", "tensor_cast/foo.py"})
+
+
+def test_is_git_ancestor_true_when_git_succeeds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "", ""))
+    assert is_git_ancestor(tmp_path, "aaa", "bbb") is True
 
 
 def test_resolve_base_ref_merge_base_success_returns_sha(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -57,8 +86,55 @@ def test_resolve_base_ref_both_fail_raises_config_error_with_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(1, "", "not found"))
-    with pytest.raises(ConfigError, match="Cannot resolve base ref.*'nonexistent'.*not found either"):
+    with pytest.raises(ConfigError, match=r"Cannot resolve base ref.*'nonexistent'.*not found either"):
         resolve_base_ref(tmp_path, "nonexistent")
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("origin/master", ("origin", "master")),
+        ("center/develop", ("center", "develop")),
+        ("master", ("origin", "master")),
+    ],
+)
+def test_parse_fetch_remote_branch_splits_remote_and_branch(ref: str, expected: tuple[str, str]) -> None:
+    assert _parse_fetch_remote_branch(ref) == expected
+
+
+def test_fetch_deepen_invokes_git_fetch_with_remote_and_branch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    recorded: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        recorded.append(cmd)
+        return FakeCompleted(0, "", "")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    _fetch_deepen(tmp_path, "origin/master")
+    assert recorded[-1][-4:] == ["fetch", "--depth=50", "origin", "master"]
+
+
+def test_resolve_base_ref_deepens_with_split_fetch_before_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = iter(
+        [
+            FakeCompleted(1, "", ""),
+            FakeCompleted(1, "", ""),
+            FakeCompleted(0, "", ""),
+            FakeCompleted(0, "mergebase\n", ""),
+        ]
+    )
+    recorded: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        recorded.append(cmd)
+        return next(calls)
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    result = resolve_base_ref(tmp_path, "master")
+    assert result == "mergebase"
+    assert recorded[2][-4:] == ["fetch", "--depth=50", "origin", "master"]
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +161,15 @@ def test_fetch_diff_line_map_single_line_hunk_returns_single_line(
     assert result["a.py"] == {1}
 
 
+def test_fetch_diff_line_map_pure_deletion_hunk_records_touch_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    diff_output = "+++ b/tensor_cast/ops.py\n@@ -10,3 +9,0 @@\n"
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, diff_output, ""))
+    result = fetch_diff_line_map(tmp_path, "abc123")
+    assert result["tensor_cast/ops.py"] == {9}
+
+
 def test_fetch_diff_line_map_empty_diff_returns_empty_dict(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "", ""))
     result = fetch_diff_line_map(tmp_path, "abc123")
@@ -92,8 +177,6 @@ def test_fetch_diff_line_map_empty_diff_returns_empty_dict(monkeypatch: pytest.M
 
 
 def test_fetch_diff_parses_added_and_deleted_entries(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from scripts.helpers.ci_gate.diff import fetch_diff
-
     diff_output = (
         "diff --git a/cli/old.py b/cli/old.py\n"
         "deleted file mode 100644\n"
@@ -110,294 +193,135 @@ def test_fetch_diff_parses_added_and_deleted_entries(monkeypatch: pytest.MonkeyP
     assert any(entry.status == "A" and entry.new_path == "tests/smoke/test_new.py" for entry in result.entries)
 
 
-# ---------------------------------------------------------------------------
-# classify_changes
-# ---------------------------------------------------------------------------
+def test_fetch_diff_git_failure_raises_config_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(1, "", "fatal: bad revision"))
+    with pytest.raises(ConfigError, match=r"git diff failed"):
+        fetch_diff(tmp_path, "abc123")
 
 
-def test_classify_changes_helpers_path_not_new_test(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(entries=(DiffEntry(status="A", old_path=None, new_path="tests/helpers/assert_utils.py"),)),
-        roots=_DEFAULT_ROOTS,
+def test_fetch_ref_delegates_to_fetch_deepen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    recorded: list[str] = []
+
+    def _fake_deepen(_repo_root: Path, ref: str) -> None:
+        recorded.append(ref)
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.diff._fetch_deepen", _fake_deepen)
+    fetch_ref(tmp_path, "origin/master")
+    assert recorded == ["origin/master"]
+
+
+def test_resolve_remote_ref_returns_explicit_remote_branch() -> None:
+    assert resolve_remote_ref("origin/master") == "origin/master"
+
+
+def test_resolve_remote_ref_adds_origin_prefix_for_bare_branch() -> None:
+    assert resolve_remote_ref("master") == "origin/master"
+
+
+def test_resolve_target_head_fetches_and_resolves_sha(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def _fake_fetch(_repo_root: Path, ref: str) -> None:
+        calls.append(ref)
+
+    monkeypatch.setattr("scripts.helpers.ci_gate.diff.fetch_ref", _fake_fetch)
+    monkeypatch.setattr("scripts.helpers.ci_gate.diff.resolve_remote_ref", lambda ref: "origin/master")
+    monkeypatch.setattr(
+        "scripts.helpers.ci_gate.diff.resolve_ref_commit",
+        lambda _root, _ref: "deadbeef",
     )
-    assert result.new_test == ()
+    assert resolve_target_head(tmp_path, "master") == "deadbeef"
+    assert calls == ["master"]
 
 
-def test_classify_changes_added_test_populates_new_test(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(entries=(DiffEntry(status="A", old_path=None, new_path="tests/smoke/test_new.py"),)),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert "tests/smoke/test_new.py" in result.new_test
-
-
-def test_classify_changes_modified_source_includes_lines(tmp_path: Path) -> None:
-    diff_map = {"cli/main.py": {10, 11}}
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(
-            entries=(DiffEntry(status="M", old_path="cli/main.py", new_path="cli/main.py"),),
-            line_map=diff_map,
-        ),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert len(result.modified_source) == 1
-    assert result.modified_source[0][0] == "cli/main.py"
-    assert result.modified_source[0][1] == frozenset({10, 11})
-
-
-def test_classify_changes_modified_test_populates_modified_test(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(
-            entries=(
-                DiffEntry(
-                    status="M", old_path="tests/regression/cli/test_foo.py", new_path="tests/regression/cli/test_foo.py"
-                ),
-            ),
-        ),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert result.modified_test == ("tests/regression/cli/test_foo.py",)
-    assert result.new_test == ()
-    assert result.modified_source == ()
-
-
-def test_classify_changes_deleted_test_populates_del_test(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(entries=(DiffEntry(status="D", old_path="tests/smoke/test_old.py", new_path=None),)),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert "tests/smoke/test_old.py" in result.del_test
-
-
-def test_classify_changes_config_triggers_full_suite(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(entries=(DiffEntry(status="M", old_path="pyproject.toml", new_path="pyproject.toml"),)),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert result.config == ("pyproject.toml",)
-
-
-def test_classify_changes_requirements_txt_triggers_full_suite(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(entries=(DiffEntry(status="M", old_path="requirements.txt", new_path="requirements.txt"),)),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert result.config == ("requirements.txt",)
-
-
-def test_classify_changes_uv_lock_triggers_full_suite(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(entries=(DiffEntry(status="M", old_path="uv.lock", new_path="uv.lock"),)),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert result.config == ("uv.lock",)
-
-
-def test_classify_changes_gate_policy_yaml_does_not_trigger_full_suite(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(
-            entries=(
-                DiffEntry(status="M", old_path="tests/.ci/gate_policy.yaml", new_path="tests/.ci/gate_policy.yaml"),
-            ),
-        ),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert result.config == ()
-
-
-def test_classify_changes_deleted_source_populates_del_source(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(entries=(DiffEntry(status="D", old_path="cli/old_main.py", new_path=None),)),
-        roots=_DEFAULT_ROOTS,
-    )
-    assert "cli/old_main.py" in result.del_source
-
-
-# ---------------------------------------------------------------------------
-# _classify_rename (PR review: old/new path boundary)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("old_path", "new_path", "score", "expected"),
-    [
-        (
-            "tests/smoke/test_foo.py",
-            "tests/regression/test_foo.py",
-            100,
-            {
-                "del_test": ["tests/smoke/test_foo.py"],
-                "new_test": ["tests/regression/test_foo.py"],
-                "del_source": [],
-                "renames": [],
-                "modified": {},
-            },
-        ),
-        (
-            "tests/smoke/test_foo.py",
-            "scripts/helpers/foo.py",
-            100,
-            {
-                "del_test": ["tests/smoke/test_foo.py"],
-                "new_test": [],
-                "del_source": [],
-                "renames": [],
-                "modified": {},
-            },
-        ),
-        (
-            "tests/regression/test_bar.py",
-            "tests/helpers/test_bar.py",
-            100,
-            {
-                "del_test": ["tests/regression/test_bar.py"],
-                "new_test": [],
-                "del_source": [],
-                "renames": [],
-                "modified": {},
-            },
-        ),
-        (
-            "tensor_cast/old_module.py",
-            "tests/regression/test_old_module.py",
-            100,
-            {
-                "del_test": [],
-                "new_test": ["tests/regression/test_old_module.py"],
-                "del_source": ["tensor_cast/old_module.py"],
-                "renames": [],
-                "modified": {},
-            },
-        ),
-        (
-            "tensor_cast/foo.py",
-            "tensor_cast/bar.py",
-            100,
-            {
-                "del_test": [],
-                "new_test": [],
-                "del_source": [],
-                "renames": [("tensor_cast/foo.py", "tensor_cast/bar.py", 100)],
-                "modified": {},
-            },
-        ),
-        (
-            "tensor_cast/foo.py",
-            "tensor_cast/bar.py",
-            85,
-            {
-                "del_test": [],
-                "new_test": [],
-                "del_source": [],
-                "renames": [("tensor_cast/foo.py", "tensor_cast/bar.py", 85)],
-                "modified": {"tensor_cast/bar.py": frozenset({10, 11})},
-            },
-        ),
-    ],
-)
-def test_classify_rename_paths(
-    old_path: str,
-    new_path: str,
-    score: int,
-    expected: dict[str, object],
+def test_cleanup_all_ephemeral_checkouts_restores_each_repo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    discovery = default_test_discovery()
-    diff = {"tensor_cast/bar.py": {10, 11}}
+    from scripts.helpers.ci_gate import diff as diff_mod
 
-    del_test, new_test, del_source, renames, modified = _classify_rename(
-        old_path,
-        new_path,
-        score,
-        diff,
-        discovery,
-        _DEFAULT_ROOTS,
+    repo_a = tmp_path / "repo_a"
+    repo_b = tmp_path / "repo_b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    diff_mod._ephemeral_checkouts[str(repo_a.resolve())] = diff_mod._EphemeralCheckoutState(
+        "msmodeling-sync/1",
+        "main",
     )
-
-    assert del_test == expected["del_test"]
-    assert new_test == expected["new_test"]
-    assert del_source == expected["del_source"]
-    assert renames == expected["renames"]
-    assert modified == expected["modified"]
-
-
-def test_classify_changes_rename_test_to_non_test_records_del_test_only(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(
-            entries=(
-                DiffEntry(
-                    status="R100",
-                    old_path="tests/smoke/test_foo.py",
-                    new_path="scripts/helpers/foo.py",
-                ),
-            ),
-        ),
-        discovery=default_test_discovery(),
-        roots=_DEFAULT_ROOTS,
+    diff_mod._ephemeral_checkouts[str(repo_b.resolve())] = diff_mod._EphemeralCheckoutState(
+        "msmodeling-sync/2",
+        "develop",
     )
-    assert result.del_test == ("tests/smoke/test_foo.py",)
-    assert result.new_test == ()
-    assert result.renames == ()
+    cleaned: list[Path] = []
+
+    def _fake_cleanup(repo_root: Path) -> None:
+        cleaned.append(repo_root)
+        diff_mod._ephemeral_checkouts.pop(str(repo_root.resolve()), None)
+
+    monkeypatch.setattr(diff_mod, "_cleanup_ephemeral_checkout", _fake_cleanup)
+    cleanup_all_ephemeral_checkouts()
+    assert len(cleaned) == 2
+    assert diff_mod._ephemeral_checkouts == {}
 
 
-def test_classify_changes_rename_product_to_test_records_del_source_and_new_test(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(
-            entries=(
-                DiffEntry(
-                    status="R100",
-                    old_path="tensor_cast/old.py",
-                    new_path="tests/regression/test_old.py",
-                ),
-            ),
-        ),
-        discovery=default_test_discovery(),
-        roots=_DEFAULT_ROOTS,
+# ---------------------------------------------------------------------------
+# ephemeral checkout cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_ephemeral_checkout_force_checkout_then_deletes_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from scripts.helpers.ci_gate import diff as diff_mod
+
+    work_branch = "msmodeling-sync/99999"
+    diff_mod._ephemeral_checkouts[str(tmp_path.resolve())] = diff_mod._EphemeralCheckoutState(
+        work_branch,
+        "main",
     )
-    assert result.del_source == ("tensor_cast/old.py",)
-    assert result.new_test == ("tests/regression/test_old.py",)
-    assert result.renames == ()
+    git_calls: list[tuple[str, ...]] = []
+
+    def _fake_run_git(_repo_root: Path, *args: str) -> FakeCompleted:
+        git_calls.append(args)
+        if args == ("checkout", "main"):
+            return FakeCompleted(1, "", "checkout failed")
+        if args == ("checkout", "-f", "main"):
+            return FakeCompleted(0, "", "")
+        if args == ("branch", "-D", work_branch):
+            return FakeCompleted(0, "", "")
+        return FakeCompleted(0, "", "")
+
+    monkeypatch.setattr(diff_mod, "_run_git", _fake_run_git)
+    diff_mod._cleanup_ephemeral_checkout(tmp_path)
+
+    assert ("checkout", "main") in git_calls
+    assert ("checkout", "-f", "main") in git_calls
+    assert ("branch", "-D", work_branch) in git_calls
+    assert str(tmp_path.resolve()) not in diff_mod._ephemeral_checkouts
 
 
-def test_classify_changes_rename_product_populates_renames(tmp_path: Path) -> None:
-    result = classify_changes(
-        tmp_path,
-        "abc123",
-        _diff_result(
-            entries=(
-                DiffEntry(
-                    status="R100",
-                    old_path="tensor_cast/foo.py",
-                    new_path="tensor_cast/bar.py",
-                ),
-            ),
-        ),
-        discovery=default_test_discovery(),
-        roots=_DEFAULT_ROOTS,
+def test_cleanup_ephemeral_checkout_skips_delete_when_checkout_unrecoverable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from scripts.helpers.ci_gate import diff as diff_mod
+
+    work_branch = "msmodeling-sync/88888"
+    diff_mod._ephemeral_checkouts[str(tmp_path.resolve())] = diff_mod._EphemeralCheckoutState(
+        work_branch,
+        "main",
     )
-    assert result.renames == (("tensor_cast/foo.py", "tensor_cast/bar.py", 100),)
-    assert result.del_test == ()
-    assert result.new_test == ()
+    git_calls: list[tuple[str, ...]] = []
+
+    def _fake_run_git(_repo_root: Path, *args: str) -> FakeCompleted:
+        git_calls.append(args)
+        if args[0] == "checkout":
+            return FakeCompleted(1, "", "checkout failed")
+        return FakeCompleted(0, "", "")
+
+    monkeypatch.setattr(diff_mod, "_run_git", _fake_run_git)
+    diff_mod._cleanup_ephemeral_checkout(tmp_path)
+
+    assert ("branch", "-D", work_branch) not in git_calls
+    assert str(tmp_path.resolve()) not in diff_mod._ephemeral_checkouts

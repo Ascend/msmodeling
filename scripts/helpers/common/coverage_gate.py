@@ -7,9 +7,12 @@ import logging
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from scripts.helpers._config import Config
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from scripts.helpers._config import Config
 from scripts.helpers._paths import REPO_ROOT
 
 DEFAULT_COVERAGE_DATA = REPO_ROOT / ".coverage"
@@ -97,8 +100,5 @@ def load_totals(coverage_data: Path) -> CoverageTotals:
     totals = data["totals"]
     line = float(totals["percent_covered_display"].rstrip("%"))
     num_branches = totals["num_branches"]
-    if num_branches == 0:
-        branch = 100.0
-    else:
-        branch = 100.0 * totals["covered_branches"] / num_branches
+    branch = 100.0 if num_branches == 0 else 100.0 * totals["covered_branches"] / num_branches
     return CoverageTotals(line_percent=line, branch_percent=branch)

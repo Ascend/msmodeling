@@ -33,8 +33,8 @@ def _report(**overrides: object) -> FeishuReportInput:
         coverage_line_threshold=70.0,
         coverage_branch_threshold=50.0,
         coverage_gate_passed=True,
-        test_map_source_files=12,
-        test_map_symbols=56,
+        test_map_test_nodes=12,
+        test_map_symbol_refs=56,
         test_map_written=True,
         failed_cases=(),
         first_error="",
@@ -64,7 +64,7 @@ def test_payload_includes_coverage_section_when_present() -> None:
 
 def test_payload_includes_test_map_updated_when_written() -> None:
     payload = build_feishu_payload(_report())
-    assert "12 files / 56 symbols (updated)" in payload["content"]["text"]
+    assert "12 test nodes / 56 symbol refs (updated)" in payload["content"]["text"]
 
 
 # ---------------------------------------------------------------------------

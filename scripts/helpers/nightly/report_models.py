@@ -18,8 +18,8 @@ class EnvInfo:
 
 @dataclass(frozen=True, slots=True)
 class MapCoverageSummary:
-    source_files: int
-    symbols: int
+    test_nodes: int
+    symbol_refs: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +57,8 @@ class FeishuReportInput:
     coverage_line_threshold: float | None
     coverage_branch_threshold: float | None
     coverage_gate_passed: bool | None
-    test_map_source_files: int
-    test_map_symbols: int
+    test_map_test_nodes: int
+    test_map_symbol_refs: int
     test_map_written: bool
     failed_cases: tuple[str, ...]
     first_error: str

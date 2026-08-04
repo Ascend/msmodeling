@@ -1,7 +1,11 @@
 # Package ######################################################################
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "liuren_modeling"
+name = "msmodeling"
 description = "Light-weight full-system simulation framework"
 readme = "README.md"
 version = "0.2.0"
@@ -37,10 +41,15 @@ dependencies = [
     "transformers>=5.3.0,<5.8.0",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["tensor_cast", "serving_cast", "cli", "web_ui"]
+
 # Test tools ###################################################################
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# Default norecursedirs includes "build", which skips tests/regression/scripts/helpers/build/.
+norecursedirs = ["__pycache__"]
 markers = [
     "nightly: do_compile=True large model cases, only run in nightly",
     "npu: requires NPU hardware",
@@ -86,6 +95,7 @@ lint = [
 ]
 ci = [
     "pydantic>=2",
+    "pydantic-settings",
     "pathspec>=0.12",
     "pyyaml>=6",
     "pytest-cov>=7.1.0",

@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import signal
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -17,10 +16,11 @@ if TYPE_CHECKING:
 import pytest
 
 from scripts.helpers._config import Config
-from scripts.helpers.ci_gate.gate_policy import GatePolicy, default_test_discovery
+from scripts.helpers.ci_gate.gate_policy import GatePolicy
+from scripts.helpers.ci_gate.models import PathPatterns
+from scripts.helpers.common.test_map_config import TEST_MAP_COLLECTION_MARKER
 from scripts.helpers.nightly.main import (
     _PHASE_LABELS,
-    _TEST_MAP_MARKER,
     _build_benchmark_pytest_cmd,
     _build_network_pytest_cmd,
     _build_nightly_pytest_cmd,
@@ -38,8 +38,17 @@ from scripts.helpers.nightly.main import (
 )
 from scripts.helpers.nightly.pytest_parser import NightlyRunStats
 from scripts.helpers.nightly.report_models import CoverageSummary
-from tests.helpers.fake_subprocess import FakeCompleted
+from tests.helpers.fake_subprocess import FakeCompleted, FakePopen, FakePopenTimeoutOnFirstWait
 from tests.helpers.junit_xml import write_junit_xml, write_phase_junit
+
+_GATE_TEST_INCLUDE = ("tests/**/test_*.py", "tests/**/*_test.py")
+_GATE_TEST_EXCLUDE = ("tests/helpers/**", "tests/assets/**")
+_GATE_CONFIG_INCLUDE = (
+    "pyproject.toml",
+    "requirements.txt",
+    "uv.lock",
+    "tests/**/conftest.py",
+)
 
 # ---------------------------------------------------------------------------
 # Config fixtures
@@ -73,7 +82,9 @@ _PARALLEL_CFG = Config(
 # ---------------------------------------------------------------------------
 
 
-def test_test_map_cmd_contains_smoke_and_regression_and_coverage(tmp_path: Path) -> None:
+def test_test_map_cmd_contains_smoke_and_regression_and_coverage(
+    tmp_path: Path,
+) -> None:
     junit = tmp_path / "phase1.xml"
     cmd = _build_test_map_pytest_cmd("python3", junit_xml=junit)
     assert "tests/smoke/" in cmd
@@ -88,7 +99,7 @@ def test_test_map_cmd_contains_smoke_and_regression_and_coverage(tmp_path: Path)
 
 
 def test_test_map_write_marker_keeps_npu_tests_collectible() -> None:
-    assert _TEST_MAP_MARKER == "not nightly and not network"
+    assert TEST_MAP_COLLECTION_MARKER == "not nightly and not network"
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +355,7 @@ def test_emit_report_merges_nightly_pipeline_phase_junit_xml(
     )
 
     with caplog.at_level(logging.WARNING, logger="nightly"):
-        stats = emit_report(
+        stats, _phase_stats = emit_report(
             junit_xml_paths=(phase1, phase2a, phase2b),
             coverage=None,
             test_map_written=False,
@@ -508,41 +519,13 @@ class _InterruptingStdout:
         self.closed = True
 
 
-class _FakePytestProc:
-    pid = 4242
-
-    def __init__(self) -> None:
-        self._returncode: int | None = None
-        self.stdout = _InterruptingStdout()
-        self.terminate_calls = 0
-        self.kill_calls = 0
-        self.wait_calls = 0
-
-    def poll(self) -> int | None:
-        return self._returncode
-
-    def wait(self, timeout: float | None = None) -> int:
-        self.wait_calls += 1
-        if self._returncode is None:
-            self._returncode = -signal.SIGTERM
-        return self._returncode
-
-    def terminate(self) -> None:
-        self.terminate_calls += 1
-        self._returncode = -signal.SIGTERM
-
-    def kill(self) -> None:
-        self.kill_calls += 1
-        self._returncode = -signal.SIGKILL
-
-
 def test_stream_pytest_keyboard_interrupt_terminates_process_group(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    fake_proc = _FakePytestProc()
+    fake_proc = FakePopen(stdout=_InterruptingStdout())
     killpg_calls: list[tuple[int, int]] = []
 
-    def _fake_popen(*_args: Any, **_kwargs: Any) -> _FakePytestProc:
+    def _fake_popen(*_args: Any, **_kwargs: Any) -> FakePopen:
         return fake_proc
 
     def _fake_killpg(pgid: int, sig: int) -> None:
@@ -562,26 +545,18 @@ def test_stream_pytest_keyboard_interrupt_terminates_process_group(
 def test_terminate_process_tree_escalates_to_sigkill_on_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_proc = _FakePytestProc()
+    fake_proc = FakePopenTimeoutOnFirstWait()
     killpg_calls: list[tuple[int, int]] = []
-
-    def _wait(timeout: float | None = None) -> int:
-        fake_proc.wait_calls += 1
-        if fake_proc.wait_calls == 1:
-            raise subprocess.TimeoutExpired(cmd=["pytest"], timeout=timeout or 0.01)
-        fake_proc._returncode = -signal.SIGKILL
-        return fake_proc._returncode
 
     def _fake_killpg(pgid: int, sig: int) -> None:
         killpg_calls.append((pgid, sig))
         if sig == signal.SIGKILL:
             fake_proc._returncode = -signal.SIGKILL
 
-    fake_proc.wait = _wait  # type: ignore[method-assign]
     monkeypatch.setattr("scripts.helpers.nightly.main.os.getpgid", lambda _pid: fake_proc.pid)
     monkeypatch.setattr("scripts.helpers.nightly.main.os.killpg", _fake_killpg)
 
-    _terminate_process_tree(cast("subprocess.Popen[str]", fake_proc), sigterm_timeout_seconds=0.01)
+    _terminate_process_tree(fake_proc, sigterm_timeout_seconds=0.01)
 
     assert killpg_calls == [
         (fake_proc.pid, signal.SIGTERM),
@@ -603,9 +578,14 @@ def _cfg_with_map_path(map_path: Path) -> Config:
 
 
 def _minimal_gate_policy() -> GatePolicy:
+    roots = ("cli/", "tensor_cast/", "serving_cast/", "web_ui/", "scripts/", "tools/")
     return GatePolicy(
-        discovery=default_test_discovery(),
-        roots=("cli/", "tensor_cast/", "serving_cast/", "web_ui/", "scripts/", "tools/"),
+        sources=PathPatterns(include_patterns=roots, exclude_patterns=()),
+        tests=PathPatterns(
+            include_patterns=_GATE_TEST_INCLUDE,
+            exclude_patterns=_GATE_TEST_EXCLUDE,
+        ),
+        configs=PathPatterns(include_patterns=_GATE_CONFIG_INCLUDE, exclude_patterns=()),
         source_exemptions=(),
         test_exemptions=(),
         approvers=frozenset({"fangkai"}),
@@ -645,8 +625,8 @@ def test_write_test_map_artifacts_writes_map_and_returns_audit(
     from scripts.helpers.nightly import main as nightly_main
 
     map_path = tmp_path / "map.json"
-    fresh_map = {"cli/main.py": {"run": ["tests/regression/cli/test_run.py::test_run"]}}
-    collect_calls: list[tuple[str, tuple[str, ...]]] = []
+    fresh_map = {"tests/regression/cli/test_run.py::test_run": {"cli/main.py": ["run"]}}
+    collect_calls: list[tuple[str, tuple[str, ...], frozenset[str] | None]] = []
     write_calls: list[tuple[Path, dict[str, dict[str, list[str]]]]] = []
 
     allowed = frozenset({"tests/regression/cli/test_run.py::test_run"})
@@ -669,7 +649,9 @@ def test_write_test_map_artifacts_writes_map_and_returns_audit(
     monkeypatch.setattr(nightly_main, "write_test_map", _fake_write)
     monkeypatch.setattr(nightly_main, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(
-        nightly_main, "detect_redundant_cases", lambda mapping: [{"case": "x"}] if mapping == fresh_map else []
+        nightly_main,
+        "detect_redundant_cases",
+        lambda mapping: [{"case": "x"}] if mapping == fresh_map else [],
     )
     weak_calls: list[dict[str, object]] = []
 
@@ -685,7 +667,7 @@ def test_write_test_map_artifacts_writes_map_and_returns_audit(
 
     monkeypatch.setattr(nightly_main, "compute_weak_coverage_symbols", _fake_weak)
     monkeypatch.setattr(nightly_main, "load_gate_policy", lambda _root: gate_policy)
-    monkeypatch.setattr(nightly_main, "find_expired_unmapped", lambda _p, _m: ())
+    monkeypatch.setattr(nightly_main, "find_expired_unmapped_in_map", lambda _p, _m: ())
     monkeypatch.setattr(nightly_main, "find_expired_test_exemptions", lambda _p: ())
     monkeypatch.setattr(nightly_main, "format_expired_exemptions_section", lambda _e: "")
     monkeypatch.setattr(nightly_main, "format_expired_test_exemptions_section", lambda _e: "")
@@ -700,7 +682,7 @@ def test_write_test_map_artifacts_writes_map_and_returns_audit(
         allowed_node_ids=allowed,
     )
     assert written is True
-    assert collect_calls == [(_TEST_MAP_MARKER, gate_policy.roots, allowed)]
+    assert collect_calls == [(TEST_MAP_COLLECTION_MARKER, gate_policy.roots, allowed)]
     assert write_calls == [(map_path, fresh_map)]
     assert weak_calls == [{"mapping": fresh_map}]
     assert weak == ("cli/main.py::run",)
@@ -715,13 +697,17 @@ def test_write_test_map_artifacts_uses_fresh_collect_mapping_not_cfg_baseline(
     from scripts.helpers.nightly import main as nightly_main
 
     map_path = tmp_path / "map.json"
-    fresh_map = {"cli/main.py": {"run": ["tests/regression/cli/test_run.py::test_fresh"]}}
-    stale_map = {"cli/main.py": {"run": ["tests/regression/cli/test_run.py::test_stale"]}}
+    fresh_map = {"tests/regression/cli/test_run.py::test_fresh": {"cli/main.py": ["run"]}}
+    stale_map = {"tests/regression/cli/test_run.py::test_stale": {"cli/main.py": ["run"]}}
     expired_maps: list[dict[str, dict[str, list[str]]]] = []
     redundant_maps: list[dict[str, dict[str, list[str]]]] = []
 
     monkeypatch.setattr(nightly_main, "collect_test_map", lambda **_kwargs: fresh_map)
-    monkeypatch.setattr(nightly_main, "write_test_map", lambda path, mapping: path.write_text("{}", encoding="utf-8"))
+    monkeypatch.setattr(
+        nightly_main,
+        "write_test_map",
+        lambda path, mapping: path.write_text("{}", encoding="utf-8"),
+    )
     monkeypatch.setattr(nightly_main, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(
         "scripts.helpers.common.test_map_loader.load_test_map",
@@ -739,7 +725,7 @@ def test_write_test_map_artifacts_uses_fresh_collect_mapping_not_cfg_baseline(
     monkeypatch.setattr(nightly_main, "detect_redundant_cases", _track_redundant)
     monkeypatch.setattr(nightly_main, "compute_weak_coverage_symbols", lambda _p, _c, **_kw: ())
     monkeypatch.setattr(nightly_main, "load_gate_policy", lambda _root: _minimal_gate_policy())
-    monkeypatch.setattr(nightly_main, "find_expired_unmapped", _track_expired)
+    monkeypatch.setattr(nightly_main, "find_expired_unmapped_in_map", _track_expired)
     monkeypatch.setattr(nightly_main, "find_expired_test_exemptions", lambda _p: ())
     monkeypatch.setattr(nightly_main, "format_expired_exemptions_section", lambda _e: "")
     monkeypatch.setattr(nightly_main, "format_expired_test_exemptions_section", lambda _e: "")
@@ -787,7 +773,7 @@ def test_write_test_map_artifacts_includes_expired_test_section(
     monkeypatch.setattr(nightly_main, "detect_redundant_cases", lambda _m: ())
     monkeypatch.setattr(nightly_main, "compute_weak_coverage_symbols", lambda _p, _c, **_kw: ())
     monkeypatch.setattr(nightly_main, "load_gate_policy", lambda _root: gate_policy)
-    monkeypatch.setattr(nightly_main, "find_expired_unmapped", lambda _p, _m: ())
+    monkeypatch.setattr(nightly_main, "find_expired_unmapped_in_map", lambda _p, _m: ())
     monkeypatch.setattr(nightly_main, "find_expired_test_exemptions", lambda _p: (expired_report,))
     monkeypatch.setattr(nightly_main, "format_expired_exemptions_section", lambda _e: "")
     monkeypatch.setattr(
@@ -848,7 +834,12 @@ def test_build_terminal_summary_includes_phase_coverage_drift_and_logs(
         overall_exit=1,
         stats=stats,
         phase_labels=_PHASE_LABELS,
-        junit_paths=(phase1, phase2a, tmp_path / "missing.xml", tmp_path / "missing2.xml"),
+        junit_paths=(
+            phase1,
+            phase2a,
+            tmp_path / "missing.xml",
+            tmp_path / "missing2.xml",
+        ),
         phase_exits=(0, 1, 0, 0),
         coverage=coverage,
         drift_warnings=("some/Model [fixture] model_type: vendored='a' hub='b'",),
@@ -865,7 +856,9 @@ def test_build_terminal_summary_includes_phase_coverage_drift_and_logs(
     assert f"long-running tests log: {phase_logs[1]}" in lines
 
 
-def test_build_terminal_summary_omits_phase_logs_without_webhook(tmp_path: Path) -> None:
+def test_build_terminal_summary_omits_phase_logs_without_webhook(
+    tmp_path: Path,
+) -> None:
     junit = tmp_path / "phase1.xml"
     write_phase_junit(junit, file_path="tests/regression/cli/test_run.py", passed=1, duration=1.0)
     log_path = tmp_path / "phase1.log"
@@ -886,7 +879,9 @@ def test_build_terminal_summary_omits_phase_logs_without_webhook(tmp_path: Path)
     assert all(" log: " not in line for line in lines)
 
 
-def test_main_returns_130_on_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_returns_130_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr("scripts.helpers.nightly.main.Config.from_env", lambda: _BASE_CFG)
     monkeypatch.setattr(
         "scripts.helpers.nightly.main.resolve_test_map_path",

@@ -1,4 +1,4 @@
-"""Tests for ci_gate.gate_policy."""
+"""Tests for ci_gate.gate_policy re-exports."""
 
 from __future__ import annotations
 
@@ -13,10 +13,10 @@ import yaml
 from scripts.helpers._config import ConfigError
 from scripts.helpers.ci_gate.gate_policy import (
     GatePolicy,
+    PathPatterns,
     SourceExemption,
     TestExemption,
     _load_gate_policy_cached,
-    default_test_discovery,
     find_expired_test_exemptions,
     find_expired_unmapped,
     format_expired_exemptions_section,
@@ -29,40 +29,30 @@ from scripts.helpers.ci_gate.gate_policy import (
     validate_gate_policy_if_changed,
 )
 from tests.helpers.fake_subprocess import FakeCompleted
-
-_DEFAULT_ROOTS = (
-    "cli/",
-    "serving_cast/",
-    "tensor_cast/",
-    "web_ui/",
-    "scripts/",
-    "tools/",
+from tests.regression.scripts.helpers.gate_policy_writer import (
+    DEFAULT_CONFIG_INCLUDE,
+    DEFAULT_GATE_ROOTS,
+    DEFAULT_TEST_EXCLUDE,
+    DEFAULT_TEST_INCLUDE,
+    write_gate_policy,
+    write_repo_file,
 )
 
 
 def _write_ci_policy(
     repo: Path,
     *,
-    exemptions: list | None = None,
-    test_exemptions: list | None = None,
+    exemptions: list[dict[str, object]] | None = None,
+    test_exemptions: list[dict[str, object]] | None = None,
     roots: list[str] | None = None,
-    test_discovery: dict | None = None,
+    tests: dict[str, list[str]] | None = None,
 ) -> None:
-    ci_dir = repo / "tests" / ".ci"
-    ci_dir.mkdir(parents=True, exist_ok=True)
-    policy = {
-        "roots": roots or list(_DEFAULT_ROOTS),
-        "exemptions": {"sources": exemptions or [], "tests": test_exemptions or []},
-        "test_discovery": test_discovery
-        or {
-            "include": ["**/test_*.py", "**/*_test.py"],
-            "exclude": ["tests/helpers/**", "tests/assets/**"],
-        },
-    }
-    (ci_dir / "gate_policy.yaml").write_text(yaml.dump(policy), encoding="utf-8")
-    (ci_dir / "approvers.yaml").write_text(
-        yaml.dump({"approvers": ["fangkai", "hexiaowu", "gongjiong", "liujiawang"]}),
-        encoding="utf-8",
+    write_gate_policy(
+        repo,
+        roots=roots,
+        tests=tests,
+        source_exemptions=exemptions,
+        test_exemptions=test_exemptions,
     )
 
 
@@ -79,8 +69,12 @@ def _sample_exemption(file: str, symbol: str) -> SourceExemption:
 
 def _empty_policy(*, source_exemptions: tuple[SourceExemption, ...] = ()) -> GatePolicy:
     return GatePolicy(
-        discovery=default_test_discovery(),
-        roots=_DEFAULT_ROOTS,
+        sources=PathPatterns(include_patterns=DEFAULT_GATE_ROOTS, exclude_patterns=()),
+        tests=PathPatterns(
+            include_patterns=DEFAULT_TEST_INCLUDE,
+            exclude_patterns=DEFAULT_TEST_EXCLUDE,
+        ),
+        configs=PathPatterns(include_patterns=DEFAULT_CONFIG_INCLUDE, exclude_patterns=()),
         source_exemptions=source_exemptions,
         test_exemptions=(),
         approvers=frozenset({"fangkai"}),
@@ -106,6 +100,8 @@ def test_load_gate_policy_cached_until_yaml_mtime_changes(tmp_path: Path) -> Non
 
 def test_load_gate_policy_expands_symbols(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
+    write_repo_file(repo, "tensor_cast/foo.py", "def fn():\n    pass\n")
+    write_repo_file(repo, "cli/main.py", "def run():\n    pass\n")
     _write_ci_policy(
         repo,
         exemptions=[
@@ -122,7 +118,7 @@ def test_load_gate_policy_expands_symbols(tmp_path: Path) -> None:
     assert len(policy.source_exemptions) == 2
     assert policy.source_exemptions[0].file == "tensor_cast/foo.py"
     assert policy.source_exemptions[0].symbol == "fn"
-    assert policy.roots == _DEFAULT_ROOTS
+    assert policy.roots == DEFAULT_GATE_ROOTS
 
 
 def test_load_gate_policy_invalid_symbol_raises_config_error(tmp_path: Path) -> None:
@@ -143,16 +139,180 @@ def test_load_gate_policy_invalid_symbol_raises_config_error(tmp_path: Path) -> 
         load_gate_policy(repo)
 
 
-def test_load_gate_policy_pydantic_validation_error_includes_field_path(tmp_path: Path) -> None:
+def test_load_gate_policy_rejects_unknown_symbol(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(repo, "cli/main.py", "def run():\n    pass\n")
+    _write_ci_policy(
+        repo,
+        exemptions=[
+            {
+                "symbols": ["cli/main.py::missing"],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    with pytest.raises(ConfigError, match="unknown symbol"):
+        load_gate_policy(repo)
+
+
+def test_load_gate_policy_rejects_coverage_omitted_source(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(
+        repo,
+        "tensor_cast/transformers/builtin_model/foo.py",
+        "def run():\n    pass\n",
+    )
+    _write_ci_policy(
+        repo,
+        exemptions=[
+            {
+                "symbols": ["tensor_cast/transformers/builtin_model/foo.py::run"],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    with pytest.raises(ConfigError, match="coverage-omitted"):
+        load_gate_policy(repo)
+
+
+def test_load_gate_policy_accepts_decorator_suffix_symbol(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(
+        repo,
+        "cli/main.py",
+        "def _decorator(arg):\n"
+        "    def wrapper(fn):\n"
+        "        return fn\n"
+        "    return wrapper\n\n"
+        "@_decorator(torch.ops.foo.bar)\n"
+        "def _():\n"
+        "    pass\n",
+    )
+    _write_ci_policy(
+        repo,
+        exemptions=[
+            {
+                "symbols": ["cli/main.py::_@_decorator(torch.ops.foo.bar)"],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    policy = load_gate_policy(repo)
+    assert policy.source_exemptions[0].symbol == "_@_decorator(torch.ops.foo.bar)"
+
+
+def test_load_gate_policy_rejects_legacy_dot_symbol(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(
+        repo,
+        "cli/main.py",
+        "class Widget:\n    def run(self):\n        pass\n",
+    )
+    _write_ci_policy(
+        repo,
+        exemptions=[
+            {
+                "symbols": ["cli/main.py::Widget.run"],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    with pytest.raises(ConfigError, match="unknown symbol"):
+        load_gate_policy(repo)
+
+
+def test_load_gate_policy_accepts_symbol_with_internal_colons(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(repo, "cli/main.py", "def run():\n    pass\n")
+    _write_ci_policy(
+        repo,
+        exemptions=[
+            {
+                "symbols": ["cli/main.py::run::extra"],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    with pytest.raises(ConfigError, match="unknown symbol"):
+        load_gate_policy(repo)
+
+
+def test_load_gate_policy_accepts_canonical_class_method_symbol(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(
+        repo,
+        "cli/main.py",
+        "class Widget:\n    def run(self):\n        pass\n",
+    )
+    _write_ci_policy(
+        repo,
+        exemptions=[
+            {
+                "symbols": ["cli/main.py::Widget::run"],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    policy = load_gate_policy(repo)
+    assert policy.source_exemptions[0].symbol == "Widget::run"
+
+
+def test_load_gate_policy_accepts_underscore_class_method_symbol(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(
+        repo,
+        "cli/main.py",
+        "class _InternalHelper:\n    def run(self):\n        pass\n",
+    )
+    _write_ci_policy(
+        repo,
+        exemptions=[
+            {
+                "symbols": ["cli/main.py::_InternalHelper::run"],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    policy = load_gate_policy(repo)
+    assert policy.source_exemptions[0].symbol == "_InternalHelper::run"
+
+
+def test_load_gate_policy_pydantic_validation_error_includes_field_path(
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repo"
     ci_dir = repo / "tests" / ".ci"
     ci_dir.mkdir(parents=True, exist_ok=True)
     (ci_dir / "gate_policy.yaml").write_text(
         yaml.dump(
             {
-                "roots": list(_DEFAULT_ROOTS),
+                "roots": list(DEFAULT_GATE_ROOTS),
+                "tests": {"include": "not-a-list", "exclude": []},
+                "configs": {"include": ["pyproject.toml"], "exclude": []},
                 "exemptions": {"sources": [], "tests": []},
-                "test_discovery": {"include": "not-a-list", "exclude": []},
             }
         ),
         encoding="utf-8",
@@ -161,19 +321,22 @@ def test_load_gate_policy_pydantic_validation_error_includes_field_path(tmp_path
         yaml.dump({"approvers": ["fangkai"]}),
         encoding="utf-8",
     )
-    with pytest.raises(ConfigError, match=r"tests/\.ci/gate_policy\.yaml.*test_discovery"):
+    with pytest.raises(ConfigError, match=r"tests/\.ci/gate_policy\.yaml.*tests"):
         load_gate_policy(repo)
 
 
 def test_load_gate_policy_roots_must_end_with_slash(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _write_ci_policy(repo, roots=["cli"])
-    with pytest.raises(ConfigError, match="root must end with"):
+    with pytest.raises(ConfigError, match="must end with"):
         load_gate_policy(repo)
 
 
-def test_load_gate_policy_unknown_approver_allowed_without_strict_validate(tmp_path: Path) -> None:
+def test_load_gate_policy_unknown_approver_allowed_without_strict_validate(
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repo"
+    write_repo_file(repo, "cli/main.py", "def run():\n    pass\n")
     _write_ci_policy(
         repo,
         exemptions=[
@@ -192,6 +355,7 @@ def test_load_gate_policy_unknown_approver_allowed_without_strict_validate(tmp_p
 
 def test_validate_gate_policy_if_changed_checks_approver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "repo"
+    write_repo_file(repo, "cli/main.py", "def run():\n    pass\n")
     _write_ci_policy(
         repo,
         exemptions=[
@@ -205,7 +369,7 @@ def test_validate_gate_policy_if_changed_checks_approver(tmp_path: Path, monkeyp
         ],
     )
     monkeypatch.setattr(
-        "scripts.helpers.ci_gate.gate_policy.gate_policy_changed_in_diff",
+        "scripts.helpers.ci_gate.policy.gate_policy_changed_in_diff",
         lambda *_args, **_kwargs: True,
     )
     with pytest.raises(ConfigError, match="not in approver registry"):
@@ -213,7 +377,14 @@ def test_validate_gate_policy_if_changed_checks_approver(tmp_path: Path, monkeyp
 
 
 def test_is_gate_test_path_excludes_helpers_and_assets() -> None:
-    discovery = default_test_discovery()
+    discovery = GatePolicy(
+        sources=PathPatterns(include_patterns=DEFAULT_GATE_ROOTS, exclude_patterns=()),
+        tests=PathPatterns(include_patterns=DEFAULT_TEST_INCLUDE, exclude_patterns=DEFAULT_TEST_EXCLUDE),
+        configs=PathPatterns(include_patterns=DEFAULT_CONFIG_INCLUDE, exclude_patterns=()),
+        source_exemptions=(),
+        test_exemptions=(),
+        approvers=frozenset(),
+    ).discovery
     assert is_gate_test_path("tests/regression/cli/test_run.py", discovery) is True
     assert is_gate_test_path("tests/helpers/assert_utils.py", discovery) is False
     assert is_gate_test_path("tests/assets/model_config/foo.py", discovery) is False
@@ -260,15 +431,68 @@ def test_load_gate_policy_rejects_class_only_test_exemption(tmp_path: Path) -> N
         load_gate_policy(repo)
 
 
-def test_load_gate_policy_custom_test_discovery_validates_collectible_paths(tmp_path: Path) -> None:
+def test_load_gate_policy_batches_test_exemption_pytest_collection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    write_repo_file(repo, "tests/regression/cli/test_a.py", "def test_one():\n    pass\n")
+    write_repo_file(repo, "tests/regression/cli/test_b.py", "def test_two():\n    pass\n")
+    _write_ci_policy(
+        repo,
+        test_exemptions=[
+            {
+                "symbols": [
+                    "tests/regression/cli/test_a.py::test_one",
+                    "tests/regression/cli/test_b.py::test_two",
+                ],
+                "reason": "x",
+                "applicant": "a",
+                "approver": "fangkai",
+                "deadline": "2026-06-30",
+            }
+        ],
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def _fake_collect(targets: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+        calls.append(tuple(targets))
+        return tuple(
+            f"{target}::test_one" if target.endswith("test_a.py") else f"{target}::test_two" for target in targets
+        )
+
+    monkeypatch.setattr(
+        "scripts.helpers.common.pytest_runner.collect_all_test_node_ids",
+        _fake_collect,
+    )
+    _load_gate_policy_cached.cache_clear()
+    policy = load_gate_policy(repo)
+    assert len(calls) == 1
+    assert set(calls[0]) == {
+        "tests/regression/cli/test_a.py",
+        "tests/regression/cli/test_b.py",
+    }
+    assert {entry.test_id for entry in policy.test_exemptions} == {
+        "tests/regression/cli/test_a.py::test_one",
+        "tests/regression/cli/test_b.py::test_two",
+    }
+
+
+def test_load_gate_policy_custom_test_discovery_validates_collectible_paths(
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repo"
     custom_discovery = {
-        "include": ["**/test_*.py", "**/*_test.py"],
-        "exclude": ["tests/helpers/**", "tests/assets/**", "tests/regression/nightly/**"],
+        "include": ["tests/**/test_*.py", "tests/**/*_test.py"],
+        "exclude": [
+            "tests/helpers/**",
+            "tests/assets/**",
+            "tests/regression/nightly/**",
+        ],
     }
     _write_ci_policy(
         repo,
-        test_discovery=custom_discovery,
+        tests=custom_discovery,
         test_exemptions=[
             {
                 "symbols": ["tests/regression/nightly/test_x.py::test_case"],
@@ -284,7 +508,7 @@ def test_load_gate_policy_custom_test_discovery_validates_collectible_paths(tmp_
 
     _write_ci_policy(
         repo,
-        test_discovery=custom_discovery,
+        tests=custom_discovery,
         test_exemptions=[
             {
                 "symbols": ["tests/regression/cli/test_run.py::test_case"],
@@ -313,7 +537,7 @@ def test_load_gate_policy_rejects_file_only_test_exemption(tmp_path: Path) -> No
             }
         ],
     )
-    with pytest.raises(ConfigError, match="must contain '::'"):
+    with pytest.raises(ConfigError, match=r"invalid test exemption id"):
         load_gate_policy(repo)
 
 
@@ -343,14 +567,18 @@ def test_find_expired_unmapped_skips_when_test_map_has_symbol() -> None:
         deadline=date(2020, 1, 1),
     )
     policy = _empty_policy(source_exemptions=(expired,))
-    test_map = {"cli/main.py": {"run": ["tests/smoke/test_a.py::test_x"]}}
+    test_map = {"tests/smoke/test_a.py::test_x": {"cli/main.py": ["run"]}}
     assert find_expired_unmapped(policy, test_map, today=date(2026, 1, 1)) == ()
 
 
 def test_find_expired_test_exemptions_reports_past_deadline() -> None:
     policy = GatePolicy(
-        discovery=default_test_discovery(),
-        roots=_DEFAULT_ROOTS,
+        sources=PathPatterns(include_patterns=DEFAULT_GATE_ROOTS, exclude_patterns=()),
+        tests=PathPatterns(
+            include_patterns=DEFAULT_TEST_INCLUDE,
+            exclude_patterns=DEFAULT_TEST_EXCLUDE,
+        ),
+        configs=PathPatterns(include_patterns=DEFAULT_CONFIG_INCLUDE, exclude_patterns=()),
         source_exemptions=(),
         test_exemptions=(
             TestExemption(
@@ -375,8 +603,12 @@ def test_format_expired_exemptions_section_empty_returns_empty_string() -> None:
 def test_format_expired_test_exemptions_section_includes_test_id() -> None:
     report = find_expired_test_exemptions(
         GatePolicy(
-            discovery=default_test_discovery(),
-            roots=_DEFAULT_ROOTS,
+            sources=PathPatterns(include_patterns=DEFAULT_GATE_ROOTS, exclude_patterns=()),
+            tests=PathPatterns(
+                include_patterns=DEFAULT_TEST_INCLUDE,
+                exclude_patterns=DEFAULT_TEST_EXCLUDE,
+            ),
+            configs=PathPatterns(include_patterns=DEFAULT_CONFIG_INCLUDE, exclude_patterns=()),
             source_exemptions=(),
             test_exemptions=(
                 TestExemption(
@@ -394,6 +626,7 @@ def test_format_expired_test_exemptions_section_includes_test_id() -> None:
     section = format_expired_test_exemptions_section((report,))
     assert "Expired test exemptions" in section
     assert "tests/regression/nightly/test_x.py::test_case" in section
+    assert "gate_policy.yaml" in section
 
 
 def test_gate_policy_changed_in_diff_true_when_file_listed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,31 +11,24 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
+
+from tensor_cast.core.model_source_security import warn_remote_code_risk
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
+from tensor_cast.model_hub import (
+    snapshot_huggingface_config_only,
+    snapshot_modelscope_config_only,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_SCAN_DIR = REPO_ROOT / "tests"
 DEFAULT_DEST_DIR = REPO_ROOT / "tests" / "assets" / "cache"
-
-_MODELSCOPE_WEIGHT_IGNORE_PATTERNS = [
-    "*.safetensors",
-    "*.safetensors.index.json",
-    "*.bin",
-    "*.pt",
-    "*.pth",
-    "*.ckpt",
-    "*.h5",
-    "*.npz",
-    "*.onnx",
-    "*.gguf",
-    "*.zip",
-    "*.tar",
-    "*.tar.gz",
-]
 
 _IGNORE_PREFIXES = (
     "tests/",
@@ -50,6 +43,8 @@ _IGNORE_PREFIXES = (
 )
 _IGNORE_OWNERS = frozenset({"tests", "tensor_cast", "serving_cast", "trace", "docs", "web_ui"})
 _MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_HUB_ALLOWLIST_REL: Final = Path("tests/assets/hub_model_allowlist.txt")
+_MODEL_ASSIGNMENT_NAME_HINTS: Final = ("MODEL", "model_id", "pretrained")
 _KNOWN_EXTENSIONS = frozenset({".yaml", ".yml", ".json", ".py", ".md", ".txt", ".csv"})
 
 
@@ -114,12 +109,14 @@ class HuggingFacePrefetcher:
         self._AutoConfig = AutoConfig
 
     def fetch(self, model_id: str) -> PrefetchResult:
+        warn_remote_code_risk(model_id, "huggingface")
+        snapshot_path = snapshot_huggingface_config_only(model_id)
         try:
-            self._AutoConfig.from_pretrained(model_id)
+            self._AutoConfig.from_pretrained(snapshot_path)
         except Exception as exc:
             if "trust_remote_code" not in str(exc):
                 raise
-            self._AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+            self._AutoConfig.from_pretrained(snapshot_path, trust_remote_code=True)
         return PrefetchResult(model_id=model_id, source="huggingface", success=True)
 
 
@@ -128,27 +125,17 @@ class ModelScopePrefetcher:
         import modelscope
 
         self._AutoConfig = modelscope.AutoConfig
-        self._snapshot_download = modelscope.snapshot_download
 
     def fetch(self, model_id: str) -> PrefetchResult:
-        kwargs = self._build_snapshot_kwargs(model_id)
-        local_dir = self._snapshot_download(model_id, **kwargs)
+        warn_remote_code_risk(model_id, "modelscope")
+        snapshot_path = snapshot_modelscope_config_only(model_id)
         try:
-            self._AutoConfig.from_pretrained(local_dir)
+            self._AutoConfig.from_pretrained(snapshot_path)
         except Exception as exc:
             if "trust_remote_code" not in str(exc):
                 raise
-            self._AutoConfig.from_pretrained(local_dir, trust_remote_code=True)
+            self._AutoConfig.from_pretrained(snapshot_path, trust_remote_code=True)
         return PrefetchResult(model_id=model_id, source="modelscope", success=True)
-
-    def _build_snapshot_kwargs(self, model_id: str) -> dict[str, Any]:
-        """Detect which ignore-pattern kwarg the installed modelscope accepts."""
-        import inspect
-
-        sig = inspect.signature(self._snapshot_download)  # pylint: disable=no-member
-        if "ignore_file_pattern" in sig.parameters:
-            return {"ignore_file_pattern": _MODELSCOPE_WEIGHT_IGNORE_PATTERNS}
-        return {"ignore_patterns": _MODELSCOPE_WEIGHT_IGNORE_PATTERNS}
 
 
 def _looks_like_model_id(value: str) -> bool:
@@ -177,6 +164,99 @@ def _looks_like_model_id(value: str) -> bool:
     return True
 
 
+def _hub_model_allowlist(scan_dir: Path) -> frozenset[str]:
+    ids: set[str] = set()
+    for base in (scan_dir, REPO_ROOT):
+        path = base / _HUB_ALLOWLIST_REL
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                ids.add(stripped)
+    return frozenset(ids)
+
+
+def _is_model_assignment_target(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _MODEL_ASSIGNMENT_NAME_HINTS)
+
+
+def _candidate_from_literal(value: str, allowlist: frozenset[str]) -> str | None:
+    candidate = value.strip()
+    if candidate not in allowlist or not _looks_like_model_id(candidate):
+        return None
+    return candidate
+
+
+def _string_literal(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _collect_from_python(path: Path, allowlist: frozenset[str]) -> set[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError):
+        return set()
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            literal = _string_literal(node.value)
+            if literal is None:
+                continue
+            candidate = _candidate_from_literal(literal, allowlist)
+            if candidate is None:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and _is_model_assignment_target(target.id):
+                    found.add(candidate)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            candidate = _candidate_from_literal(node.value, allowlist)
+            if candidate is not None:
+                found.add(candidate)
+    return found
+
+
+def _collect_from_json(path: Path, allowlist: frozenset[str]) -> set[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    found: set[str] = set()
+    for value in _iter_string_values(data):
+        candidate = _candidate_from_literal(value, allowlist)
+        if candidate is not None:
+            found.add(candidate)
+    return found
+
+
+def collect_model_ids(scan_dir: Path) -> list[str]:
+    allowlist = _hub_model_allowlist(scan_dir)
+    if not allowlist:
+        return []
+    model_ids: set[str] = set()
+    for pattern in ("*.py", "*.json"):
+        for path in scan_dir.rglob(pattern):
+            if not path.is_file():
+                continue
+            try:
+                rel = path.relative_to(REPO_ROOT).as_posix()
+            except ValueError:
+                try:
+                    rel = path.relative_to(scan_dir).as_posix()
+                except ValueError:
+                    continue
+            if rel.startswith(("tests/.ci/", "tests/assets/cache/", "scripts/helpers/")):
+                continue
+            if path.suffix == ".py":
+                model_ids.update(_collect_from_python(path, allowlist))
+            elif path.suffix == ".json":
+                model_ids.update(_collect_from_json(path, allowlist))
+    return sorted(model_ids)
+
+
 def _iter_string_values(data: Any) -> Iterator[str]:
     if isinstance(data, str):
         yield data
@@ -188,63 +268,12 @@ def _iter_string_values(data: Any) -> Iterator[str]:
             yield from _iter_string_values(item)
 
 
-def _collect_from_python(path: Path) -> set[str]:
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (OSError, SyntaxError):
-        return set()
-    found: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            candidate = node.value.strip()
-            if _looks_like_model_id(candidate):
-                found.add(candidate)
-    return found
-
-
-def _collect_from_json(path: Path) -> set[str]:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    found: set[str] = set()
-    for value in _iter_string_values(data):
-        if _looks_like_model_id(value):
-            found.add(value.strip())
-    return found
-
-
-def collect_model_ids(scan_dir: Path) -> list[str]:
-    model_ids: set[str] = set()
-    for path in scan_dir.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            rel = path.relative_to(REPO_ROOT).as_posix()
-        except ValueError:
-            try:
-                rel = path.relative_to(scan_dir).as_posix()
-            except ValueError:
-                continue
-        if rel.startswith(("tests/.ci/", "tests/assets/cache/", "scripts/helpers/")):
-            continue
-        if path.suffix == ".py":
-            model_ids.update(_collect_from_python(path))
-        elif path.suffix == ".json":
-            model_ids.update(_collect_from_json(path))
-    return sorted(model_ids)
-
-
 def _build_prefetchers() -> list[ConfigPrefetcher]:
     prefetchers: list[ConfigPrefetcher] = []
-    try:
+    with contextlib.suppress(ImportError):
         prefetchers.append(HuggingFacePrefetcher())
-    except ImportError:
-        pass
-    try:
+    with contextlib.suppress(ImportError):
         prefetchers.append(ModelScopePrefetcher())
-    except ImportError:
-        pass
     return prefetchers
 
 

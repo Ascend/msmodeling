@@ -6,15 +6,20 @@ import textwrap
 from pathlib import Path
 
 import pytest
+
 from scripts.helpers._config import Config
-from scripts.helpers.ci_gate.gate_policy import default_test_discovery
-from scripts.helpers.ci_gate.models import Baseline
+from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.ci_gate.models import Baseline, CiGatePolicy
+from scripts.helpers.ci_gate.policy import load_gate_policy
 from scripts.helpers.common.coverage_gate import GateConfig
+
+
+def default_ci_gate_policy() -> CiGatePolicy:
+    return load_gate_policy(REPO_ROOT)
 
 
 @pytest.fixture(scope="session")
 def base_config() -> Config:
-    """Base Config with all defaults — individual tests override env vars as needed."""
     return Config(
         test_map_path="",
         base_branch="master",
@@ -29,46 +34,27 @@ def base_config() -> Config:
 
 @pytest.fixture(scope="session")
 def gate_config(base_config: Config) -> GateConfig:
-    """GateConfig derived from base_config — used by coverage_gate and nightly tests."""
     return GateConfig.from_config(base_config)
 
 
 @pytest.fixture(scope="session")
 def baseline() -> Baseline:
-    """Minimal Baseline with two product source entries and cross-layer test."""
     test_map = {
-        "cli/main.py": {
-            "run": ["tests/regression/cli/test_run.py::test_run"],
+        "tests/regression/cli/test_run.py::test_run": {
+            "cli/main.py": ["run"],
         },
-        "tensor_cast/ops.py": {
-            "add": [
-                "tests/regression/tensor_cast/test_ops.py::test_add",
-                "tests/regression/cli/test_cross.py::test_cross",
-            ],
+        "tests/regression/tensor_cast/test_ops.py::test_add": {
+            "tensor_cast/ops.py": ["add"],
+        },
+        "tests/regression/cli/test_cross.py::test_cross": {
+            "tensor_cast/ops.py": ["add"],
         },
     }
-    return Baseline(
-        test_map=test_map,
-        exemptions=(),
-        test_exemptions=(),
-        discovery=default_test_discovery(),
-        roots=(
-            "cli/",
-            "tensor_cast/",
-            "serving_cast/",
-            "web_ui/",
-            "scripts/",
-            "tools/",
-        ),
-    )
+    return Baseline(test_map=test_map, policy=default_ci_gate_policy())
 
 
 @pytest.fixture(scope="session")
 def sample_py_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Write a real .py file with functions, classes, docstrings, annotations.
-
-    Used by test_ast_utils and test_rules for AST-based gate checks.
-    """
     content = textwrap.dedent("""\
         \"\"\"Module docstring.\"\"\"
         __all__ = ["foo"]

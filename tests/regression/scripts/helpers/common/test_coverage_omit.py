@@ -52,7 +52,7 @@ omit = "not-a-list"
     )
     monkeypatch.setattr(coverage_omit, "REPO_ROOT", repo)
 
-    with pytest.raises(ConfigError, match="omit must be a list"):
+    with pytest.raises(ConfigError, match=r"Expected '\[tool\.coverage\.run\]\.omit' to be a list"):
         coverage_omit.load_coverage_omit_patterns()
 
 

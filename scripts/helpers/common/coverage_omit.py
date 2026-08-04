@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
-from scripts.helpers._config import ConfigError
+from scripts.helpers._config import ConfigError, format_expected_got
 from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.common.pyproject_toml import read_pyproject_data
 from scripts.helpers.common.test_map_loader import is_product_source
 
 _PYPROJECT_REL: Final = Path("pyproject.toml")
@@ -17,34 +17,7 @@ _PYPROJECT_REL: Final = Path("pyproject.toml")
 @lru_cache(maxsize=1)
 def load_coverage_omit_patterns() -> tuple[str, ...]:
     """Return ``[tool.coverage.run].omit`` patterns from repo pyproject.toml."""
-    pyproject_path = REPO_ROOT / _PYPROJECT_REL
-    if not pyproject_path.is_file():
-        raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: file not found")
-
-    try:
-        raw = pyproject_path.read_bytes()
-    except OSError as exc:
-        raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: cannot read file: {exc}") from exc
-
-    if sys.version_info >= (3, 11):
-        import tomllib
-
-        try:
-            data = tomllib.loads(raw.decode("utf-8"))
-        except tomllib.TOMLDecodeError as exc:
-            raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: invalid TOML: {exc}") from exc
-    else:
-        try:
-            import tomli
-        except ImportError as exc:
-            raise ConfigError(
-                "tomli required to parse pyproject.toml on Python < 3.11. Run: uv sync --frozen --group ci"
-            ) from exc
-        try:
-            data = tomli.loads(raw.decode("utf-8"))
-        except tomli.TOMLDecodeError as exc:
-            raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: invalid TOML: {exc}") from exc
-
+    data = read_pyproject_data(repo_root=REPO_ROOT)
     coverage_run = data.get("tool", {}).get("coverage", {}).get("run")
     if not isinstance(coverage_run, dict):
         raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: [tool.coverage.run] section missing")
@@ -53,13 +26,16 @@ def load_coverage_omit_patterns() -> tuple[str, ...]:
     if omit is None:
         return ()
     if not isinstance(omit, list):
-        raise ConfigError(f"{_PYPROJECT_REL.as_posix()}: [tool.coverage.run].omit must be a list")
+        raise ConfigError(
+            f"{_PYPROJECT_REL.as_posix()}: {format_expected_got('[tool.coverage.run].omit', 'a list', omit)}"
+        )
 
     patterns: list[str] = []
     for index, pattern in enumerate(omit):
         if not isinstance(pattern, str) or not pattern.strip():
             raise ConfigError(
-                f"{_PYPROJECT_REL.as_posix()}: [tool.coverage.run].omit[{index}] must be a non-empty string"
+                f"{_PYPROJECT_REL.as_posix()}: "
+                f"{format_expected_got(f'[tool.coverage.run].omit[{index}]', 'a non-empty string', pattern)}"
             )
         patterns.append(pattern)
     return tuple(patterns)

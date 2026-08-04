@@ -1,0 +1,504 @@
+"""Regression tests for scripts.helpers.build.run_build."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from scripts.helpers.build import run_build as run_build_mod
+from scripts.helpers.build.run_build import _run_shell, run_build
+from tests.regression.scripts.helpers.build.conftest import (
+    SubprocessRunCapture,
+    build_options,
+    fake_build_bash,
+    patch_subprocess_run,
+    patch_uv_in_path,
+)
+
+
+def test_run_build_delegates_to_build_sh(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-3.2.1-py3-none-any.whl",
+    )
+
+    assert run_build(build_options(version="3.2.1", version_explicit=True)) == 0
+    call = subprocess_capture.shell_calls[0]
+    assert call["cmd"] == ["bash", str(repo_root / "scripts" / "build.sh")]
+    assert call["kwargs"]["env"]["MSMODELING_WHEEL_OUTPUT_DIR"] == str(repo_root / "artifacts")
+    manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == "3.2.1"
+    assert manifest["pyproject_version"] == "0.2.0"
+    assert manifest["version_explicit"] is True
+    assert manifest["wheel_path"].endswith("msmodeling-3.2.1-py3-none-any.whl")
+    assert subprocess_capture.version_calls == ["3.2.1", "0.2.0"]
+
+
+def test_run_build_stages_and_restores_pyproject_version(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-9.9.9-py3-none-any.whl",
+    )
+
+    assert run_build(build_options(version="9.9.9", version_explicit=True)) == 0
+    assert subprocess_capture.version_calls == ["9.9.9", "0.2.0"]
+    wheel_dir = repo_root / "artifacts"
+    assert (wheel_dir / "msmodeling-9.9.9-py3-none-any.whl").is_file()
+    manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == "9.9.9"
+    assert manifest["version_explicit"] is True
+
+
+def test_run_build_restores_version_when_build_fails(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    def fail_bash(cmd: list[str], _kwargs: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 3, "", "")
+
+    subprocess_capture.on_bash = fail_bash
+
+    assert run_build(build_options(version="9.9.9", version_explicit=True)) == 3
+    assert subprocess_capture.version_calls == ["9.9.9", "0.2.0"]
+
+
+def test_run_build_propagates_subprocess_exit_code_without_staging(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    def fail_bash(cmd: list[str], _kwargs: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 5, "", "")
+
+    subprocess_capture.on_bash = fail_bash
+    assert run_build(build_options()) == 5
+
+
+def test_run_build_without_uv_install_failure_returns_1(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Abnormal: missing uv and non-interactive install fails → exit 1, no second fallback."""
+    del repo_root
+    from scripts.helpers.build import bootstrap as bootstrap_mod
+
+    patch_uv_in_path(monkeypatch, uv_path=None)
+
+    def fail_install(*_args: Any, **_kwargs: Any) -> None:
+        raise SystemExit(1)
+
+    monkeypatch.setattr(bootstrap_mod, "ensure_uv", fail_install)
+    monkeypatch.setattr(run_build_mod, "bootstrap", bootstrap_mod.bootstrap)
+    with caplog.at_level("WARNING"):
+        # bootstrap may SystemExit; run_build should surface non-zero
+        try:
+            code = run_build(build_options())
+        except SystemExit as exc:
+            code = int(exc.code or 1)
+    assert code == 1
+
+
+def test_run_build_missing_uv_warns_installs_then_continues(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Normal: missing uv → WARNING + install + sync build group, then build.sh."""
+    from scripts.helpers.build import bootstrap as bootstrap_mod
+
+    which_state: dict[str, str | None] = {"uv": None}
+
+    def fake_which(name: str) -> str | None:
+        return which_state.get(name)
+
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.shutil.which", fake_which)
+    monkeypatch.setattr("scripts.helpers.build.run_build.shutil.which", fake_which)
+
+    capture = SubprocessRunCapture()
+    install_calls: list[list[str]] = []
+
+    def fake_bootstrap_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pip":
+            install_calls.append(list(cmd))
+            which_state["uv"] = "/fake/uv"
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return capture.run(cmd, **kwargs)
+
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.subprocess.run", fake_bootstrap_run)
+    monkeypatch.setattr(run_build_mod, "bootstrap", bootstrap_mod.bootstrap)
+    # Route run_build subprocess.run / merged output through capture after bootstrap.
+    patch_subprocess_run(monkeypatch, capture)
+    # Re-bind bootstrap run after patch_subprocess_run overwrote bootstrap.subprocess.run
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.subprocess.run", fake_bootstrap_run)
+    capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-0.2.0-py3-none-any.whl",
+    )
+
+    with caplog.at_level("WARNING"):
+        assert run_build(build_options()) == 0
+    assert install_calls
+    assert "-i" not in install_calls[0]
+    assert "uv not found" in caplog.text.lower() or "installing" in caplog.text.lower()
+    assert capture.sync_calls
+    sync_cmd = capture.sync_calls[0]
+    assert "--group" in sync_cmd
+    assert sync_cmd[sync_cmd.index("--group") + 1] == "build"
+    assert "ci" not in sync_cmd
+    assert capture.shell_calls
+
+
+def test_run_build_reuses_bootstrap_uv_path_when_not_on_path(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Normal: Scripts-only uv (not on PATH) is returned by bootstrap and used for uv version."""
+    import sys
+
+    from scripts.helpers.build import bootstrap as bootstrap_mod
+
+    scripts_dir = tmp_path / "pybin"
+    scripts_dir.mkdir(parents=True)
+    uv_candidate = scripts_dir / "uv"
+    uv_candidate.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(scripts_dir / "python"))
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.shutil.which", lambda name: None)
+    monkeypatch.setattr("scripts.helpers.build.run_build.shutil.which", lambda name: None)
+
+    capture = SubprocessRunCapture()
+    version_cmds: list[list[str]] = []
+
+    def combined_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "pip":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if len(cmd) >= 2 and Path(cmd[0]).name == "uv" and cmd[1] == "version":
+            version_cmds.append(list(cmd))
+        return capture.run(cmd, **kwargs)
+
+    monkeypatch.setattr(run_build_mod, "bootstrap", bootstrap_mod.bootstrap)
+    patch_subprocess_run(monkeypatch, capture)
+    # run_build/bootstrap share the subprocess module; one combined stub covers both.
+    monkeypatch.setattr("scripts.helpers.build.bootstrap.subprocess.run", combined_run)
+    capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-9.9.9-py3-none-any.whl",
+    )
+
+    assert run_build(build_options(version="9.9.9", version_explicit=True)) == 0
+    assert version_cmds
+    assert all(cmd[0] == str(uv_candidate) for cmd in version_cmds)
+    assert capture.version_calls == ["9.9.9", "0.2.0"]
+
+
+def test_run_build_version_stage_failure_returns_exit_code(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_uv: None,
+) -> None:
+    del repo_root, with_uv
+    capture = patch_subprocess_run(monkeypatch, SubprocessRunCapture())
+
+    def fail_stage(version: str) -> subprocess.CompletedProcess[str]:
+        if version == "9.9.9":
+            return subprocess.CompletedProcess(["uv", "version", version], 2, "", "")
+        return subprocess.CompletedProcess(["uv", "version", version], 0, "", "")
+
+    capture.on_uv_version = fail_stage
+    assert run_build(build_options(version="9.9.9", version_explicit=True)) == 2
+
+
+def test_run_build_restore_failure_returns_1_after_successful_build(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_uv: None,
+) -> None:
+    del with_uv
+    capture = patch_subprocess_run(monkeypatch, SubprocessRunCapture())
+    capture.on_bash = fake_build_bash(repo_root, wheel_name="msmodeling-9.9.9-py3-none-any.whl")
+
+    def fail_restore(version: str) -> subprocess.CompletedProcess[str]:
+        if version == "0.2.0":
+            return subprocess.CompletedProcess(["uv", "version", version], 2, "", "")
+        return subprocess.CompletedProcess(["uv", "version", version], 0, "", "")
+
+    capture.on_uv_version = fail_restore
+
+    assert run_build(build_options(version="9.9.9", version_explicit=True)) == 1
+    assert capture.version_calls == ["9.9.9", "0.2.0"]
+    assert not (repo_root / "artifacts" / "build-manifest.json").exists()
+
+
+def test_run_shell_without_tee_uses_run_not_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    popen_called = False
+    merged_called = False
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    def fake_popen(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal popen_called
+        popen_called = True
+        return None
+
+    def fake_merged(*_args: Any, **_kwargs: Any) -> int:
+        nonlocal merged_called
+        merged_called = True
+        return 0
+
+    monkeypatch.setattr("scripts.helpers.build.run_build.subprocess.run", fake_run)
+    monkeypatch.setattr("scripts.helpers.build.run_build.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("scripts.helpers.build.run_build.run_merged_output", fake_merged)
+    _run_shell(["bash", "x.sh"], cwd=Path("."), env={}, timeout=10, tee_path=None)
+    assert not popen_called
+    assert not merged_called
+
+
+def test_run_shell_with_tee_merges_stderr_into_stdout(tmp_path: Path) -> None:
+    tee = tmp_path / "out.log"
+    _run_shell(
+        ["bash", "-c", "echo line1; echo line2 >&2"],
+        cwd=tmp_path,
+        env={},
+        timeout=30,
+        tee_path=tee,
+    )
+    assert tee.read_text(encoding="utf-8") == "line1\nline2\n"
+
+
+def test_run_shell_nonzero_exit_preserves_tee(tmp_path: Path) -> None:
+    tee = tmp_path / "fail.log"
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _run_shell(
+            ["bash", "-c", "echo before-fail; exit 3"],
+            cwd=tmp_path,
+            env={},
+            timeout=30,
+            tee_path=tee,
+        )
+    assert exc_info.value.returncode == 3
+    assert "before-fail" in tee.read_text(encoding="utf-8")
+
+
+def test_run_shell_timeout_preserves_partial_tee(tmp_path: Path) -> None:
+    tee = tmp_path / "timeout.log"
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_shell(
+            ["bash", "-c", "echo banner; sleep 5"],
+            cwd=tmp_path,
+            env={},
+            timeout=1,
+            tee_path=tee,
+        )
+    assert "banner" in tee.read_text(encoding="utf-8")
+
+
+def test_e2e_explicit_version_stages_pyproject(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-26.1.1-py3-none-any.whl",
+    )
+    wheel_dir = repo_root / "artifacts"
+    wheel_dir.mkdir(parents=True, exist_ok=True)
+    (wheel_dir / "msmodeling-1.0.0-py3-none-any.whl").write_bytes(b"stale")
+
+    assert run_build(build_options(version="26.1.1", version_explicit=True)) == 0
+    assert subprocess_capture.version_calls == ["26.1.1", "0.2.0"]
+    wheels = list(wheel_dir.glob("msmodeling-*.whl"))
+    assert len(wheels) == 1
+    assert wheels[0].name == "msmodeling-26.1.1-py3-none-any.whl"
+    manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == "26.1.1"
+    assert manifest["version_explicit"] is True
+
+
+def test_e2e_default_version_keeps_pyproject_wheel_name(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-0.2.0-py3-none-any.whl",
+    )
+    wheel_dir = repo_root / "artifacts"
+    wheel_dir.mkdir(parents=True, exist_ok=True)
+    (wheel_dir / "msmodeling-9.9.9-py3-none-any.whl").write_bytes(b"stale")
+
+    assert run_build(build_options()) == 0
+    assert subprocess_capture.version_calls == []
+    wheels = list(wheel_dir.glob("msmodeling-*.whl"))
+    assert len(wheels) == 1
+    assert wheels[0].name == "msmodeling-0.2.0-py3-none-any.whl"
+    manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == "0.2.0"
+    assert manifest["version_explicit"] is False
+
+
+def test_e2e_explicit_version_matching_pyproject_skips_staging(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-0.2.0-py3-none-any.whl",
+    )
+    assert run_build(build_options(version="0.2.0", version_explicit=True)) == 0
+    assert subprocess_capture.version_calls == []
+
+
+def test_e2e_build_subprocess_failure_propagates(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    def fail_bash(cmd: list[str], _kwargs: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 9, "", "")
+
+    subprocess_capture.on_bash = fail_bash
+    assert run_build(build_options(version="1.2.3", version_explicit=True)) == 9
+    assert not (repo_root / "artifacts" / "build-manifest.json").exists()
+
+
+def test_e2e_missing_build_script_returns_1(repo_root: Path, with_uv: None) -> None:
+    del with_uv
+    (repo_root / "scripts" / "build.sh").unlink()
+    assert run_build(build_options()) == 1
+
+
+def test_e2e_no_wheel_produced_writes_empty_manifest_path(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    def empty_build(cmd: list[str], _kwargs: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+    subprocess_capture.on_bash = empty_build
+    assert run_build(build_options(version="3.0.0", version_explicit=True)) == 0
+    manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["wheel_path"] == ""
+
+
+def test_run_build_malformed_pyproject_returns_1(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    (repo_root / "pyproject.toml").write_text("[project\nversion = bad\n", encoding="utf-8")
+    with caplog.at_level("ERROR"):
+        assert run_build(build_options()) == 1
+    assert subprocess_capture.shell_calls == []
+
+
+def test_run_build_missing_version_returns_1_without_build_sh(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    (repo_root / "pyproject.toml").write_text('[project]\nname = "msmodeling"\n', encoding="utf-8")
+    with caplog.at_level("ERROR"):
+        assert run_build(build_options()) == 1
+    assert subprocess_capture.shell_calls == []
+
+
+def test_run_build_version_explicit_without_value_returns_1(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    del repo_root
+    with caplog.at_level("ERROR"):
+        assert run_build(build_options(version=None, version_explicit=True)) == 1
+    assert "internal error" in caplog.text
+    assert subprocess_capture.shell_calls == []
+
+
+def test_run_build_read_project_version_from_repo_root(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    seen_roots: list[Path | None] = []
+
+    def fake_read_project_version(*, repo_root: Path | None = None) -> str:
+        seen_roots.append(repo_root)
+        return "4.5.6"
+
+    monkeypatch.setattr("scripts.helpers.build.run_build.read_project_version", fake_read_project_version)
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-4.5.6-py3-none-any.whl",
+    )
+
+    assert run_build(build_options()) == 0
+    assert seen_roots == [repo_root]
+    manifest = json.loads((repo_root / "artifacts" / "build-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pyproject_version"] == "4.5.6"
+    assert manifest["version"] == "4.5.6"
+
+
+def test_run_build_read_project_version_config_error_returns_1(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_capture: SubprocessRunCapture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from scripts.helpers._config import ConfigError
+
+    def raise_config(*, repo_root: Path | None = None) -> str:
+        del repo_root
+        raise ConfigError("pyproject.toml: invalid project table")
+
+    monkeypatch.setattr("scripts.helpers.build.run_build.read_project_version", raise_config)
+    with caplog.at_level("ERROR"):
+        assert run_build(build_options()) == 1
+    assert "failed to read version from pyproject.toml" in caplog.text
+    assert subprocess_capture.shell_calls == []
+
+
+def test_run_build_reads_version_when_tomllib_missing(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    import importlib
+
+    real_import_module = importlib.import_module
+
+    class FakeTomli:
+        @staticmethod
+        def loads(text: str) -> dict[str, object]:
+            del text
+            return {"project": {"version": "0.2.0"}}
+
+        class TOMLDecodeError(ValueError):
+            pass
+
+    def fake_import_module(name: str, package: str | None = None) -> Any:
+        if name == "tomllib":
+            msg = "No module named 'tomllib'"
+            raise ModuleNotFoundError(msg)
+        if name == "tomli":
+            return FakeTomli()
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
+    subprocess_capture.on_bash = fake_build_bash(
+        repo_root,
+        wheel_name="msmodeling-0.2.0-py3-none-any.whl",
+    )
+    assert run_build(build_options()) == 0
+    assert subprocess_capture.shell_calls
