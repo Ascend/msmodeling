@@ -17,6 +17,7 @@ _TEST_EXCLUDE = ("tests/helpers/**", "tests/assets/**")
 _CONFIG_INCLUDE = (
     "pyproject.toml",
     "requirements.txt",
+    "requirements-ci.txt",
     "uv.lock",
     "tests/**/conftest.py",
 )

@@ -17,8 +17,8 @@
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import ClassVar, Optional
-
-import requests
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 from ...config.config import OptimizerConfigField
 from ...config.constant import ProcessState, Stage
@@ -83,19 +83,26 @@ class SimulatorInterface(CustomProcess, BaseDataField, ABC):
         if process_res.stage == Stage.error:
             return process_res
         try:
-            res = requests.get(self.base_url, timeout=10)
-        except requests.exceptions.RequestException as e:
+            with urlopen(self.base_url, timeout=10) as response:
+                status_code = response.status
+                response_text = response.read().decode("utf-8", errors="replace") if status_code != 200 else ""
+        except HTTPError as e:
+            response_text = e.read().decode("utf-8", errors="replace")
+            return ProcessState(
+                stage=Stage.error,
+                info=f"return code {e.code}. text {response_text}",
+            )
+        except (URLError, TimeoutError, OSError) as e:
             if last_process_stage.stage == Stage.start:
                 return ProcessState(stage=Stage.start, info=str(e))
             return ProcessState(stage=Stage.error, info=str(e))
         else:
-            if res.status_code == 200:
+            if status_code == 200:
                 return ProcessState(stage=Stage.running)
-            else:
-                return ProcessState(
-                    stage=Stage.error,
-                    info=f"return code {res.status_code}. text {res.text}",
-                )
+            return ProcessState(
+                stage=Stage.error,
+                info=f"return code {status_code}. text {response_text}",
+            )
 
     @contextmanager
     def enable_simulation_model(self):

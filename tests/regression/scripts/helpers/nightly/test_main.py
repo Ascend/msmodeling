@@ -46,6 +46,7 @@ _GATE_TEST_EXCLUDE = ("tests/helpers/**", "tests/assets/**")
 _GATE_CONFIG_INCLUDE = (
     "pyproject.toml",
     "requirements.txt",
+    "requirements-ci.txt",
     "uv.lock",
     "tests/**/conftest.py",
 )

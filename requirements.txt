@@ -1,13 +1,12 @@
-# Legacy pip install path. Recommended: `uv sync` — see README.
+# Legacy pip install path. Recommended: `uv sync` - see README.
 # Pip-only CPU setup: install torch from the CPU index first, then the rest:
 #   pip install "torch>=2.8,<=2.10" "torchvision>=0.23.0" --index-url https://download.pytorch.org/whl/cpu
 #   pip install -r requirements.txt
+# Test/CI dependencies are maintained separately in requirements-ci.txt.
 
 torch>=2.8,<=2.10
 torchvision>=0.23.0
-optree
 
-Pillow>=12.3.0
 transformers>=5.13.0,<5.14.0
 modelscope
 diffusers>=0.38.0
@@ -17,24 +16,18 @@ strenum
 aenum
 overrides
 colorama>=0.4.6
+optree>=0.13.0
 
 # serving_cast
 salabim
 blinker
-greenlet
-scikit-learn
+greenlet>=3.5.1
 scipy
 prettytable
 pyyaml
 pandas
 matplotlib
 plotext
-
-# test
-pytest
-pytest-cov
-pytest-xdist
-parameterized
 
 # web ui
 gradio>=6.7.0,<7

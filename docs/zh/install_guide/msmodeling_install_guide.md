@@ -93,6 +93,13 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+如需使用 pip 运行测试或 CI 检查，请安装同时包含运行时和测试依赖的 `requirements-ci.txt`：
+
+```bash
+pip install -r requirements-ci.txt
+pip install -e .
+```
+
 > [!NOTE]
 > `pip install -e .` 会以源码可编辑模式安装 msModeling，并注册 `msmodeling` CLI。源码更新后无需重新复制文件，必要时重新执行安装命令即可。
 

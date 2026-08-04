@@ -20,6 +20,7 @@ DEFAULT_TEST_EXCLUDE: Final = ("tests/helpers/**", "tests/assets/**")
 DEFAULT_CONFIG_INCLUDE: Final = (
     "pyproject.toml",
     "requirements.txt",
+    "requirements-ci.txt",
     "uv.lock",
     "tests/**/conftest.py",
 )

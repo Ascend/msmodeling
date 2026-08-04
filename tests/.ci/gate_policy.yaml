@@ -19,6 +19,7 @@ configs:
   include:
     - "pyproject.toml"
     - "requirements.txt"
+    - "requirements-ci.txt"
     - "uv.lock"
     - "tests/**/conftest.py"
   exclude: []

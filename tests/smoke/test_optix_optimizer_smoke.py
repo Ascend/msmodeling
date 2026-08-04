@@ -62,6 +62,9 @@ class TestOptixOptimizerSmoke(unittest.TestCase):
 
         argv = ["optix", "-e", "vllm", "-b", "ais_bench"]
         with (
+            patch("optix.deploy_env.resolve_deploy_context", return_value=(MagicMock(), {})),
+            patch("optix.deploy_env.emit_runtime_hints"),
+            patch("optix.deploy_env.validate_deploy_stack"),
             patch.dict("optix.optimizer.register.simulates", {"vllm": lambda **kw: mock_simu}),
             patch.dict("optix.optimizer.register.benchmarks", {"ais_bench": lambda **kw: mock_bench}),
             patch.object(sys, "argv", argv),

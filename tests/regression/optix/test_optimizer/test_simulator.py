@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 
 from optix.optimizer.plugins.simulate import Simulator
 
@@ -436,9 +437,11 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
         simulator.print_log = False
 
         mock_response = MagicMock()
-        mock_response.status_code = 200
-        with patch("requests.get", return_value=mock_response):
+        mock_response.status = 200
+        with patch("optix.optimizer.interfaces.simulator.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__.return_value = mock_response
             result = simulator.health()
+        mock_urlopen.assert_called_once_with(simulator.base_url, timeout=10)
         assert result.stage == Stage.running
 
     @patch("optix.deploy_env.shutil.which")
@@ -462,17 +465,17 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
         simulator.print_log = False
 
         mock_response = MagicMock()
-        mock_response.status_code = 500
-        mock_response.text = "Internal Server Error"
-        with patch("requests.get", return_value=mock_response):
+        mock_response.status = 500
+        mock_response.read.return_value = b"Internal Server Error"
+        with patch("optix.optimizer.interfaces.simulator.urlopen") as mock_urlopen:
+            mock_urlopen.return_value.__enter__.return_value = mock_response
             result = simulator.health()
         assert result.stage == Stage.error
+        assert result.info == "return code 500. text Internal Server Error"
 
     @patch("optix.deploy_env.shutil.which")
     def test_health_request_exception_during_start(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
-        import requests
-
         from optix.config.constant import ProcessState, Stage
         from optix.optimizer.plugins.simulate import VllmSimulator
 
@@ -491,15 +494,16 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
         simulator.print_log = False
         simulator._process_stage = ProcessState(stage=Stage.start)
 
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("refused")):
+        with patch(
+            "optix.optimizer.interfaces.simulator.urlopen",
+            side_effect=URLError("refused"),
+        ):
             result = simulator.health()
         assert result.stage == Stage.start
 
     @patch("optix.deploy_env.shutil.which")
     def test_health_request_exception_during_running(self, mock_which):
         mock_which.return_value = "/usr/local/bin/vllm"
-        import requests
-
         from optix.config.constant import ProcessState, Stage
         from optix.optimizer.plugins.simulate import VllmSimulator
 
@@ -518,9 +522,46 @@ class TestSimulatorInterfaceHealth(unittest.TestCase):
         simulator.print_log = False
         simulator._process_stage = ProcessState(stage=Stage.running)
 
-        with patch("requests.get", side_effect=requests.exceptions.ConnectionError("refused")):
+        with patch(
+            "optix.optimizer.interfaces.simulator.urlopen",
+            side_effect=URLError("refused"),
+        ):
             result = simulator.health()
         assert result.stage == Stage.error
+
+    @patch("optix.deploy_env.shutil.which")
+    def test_health_returns_error_details_on_http_error(self, mock_which):
+        mock_which.return_value = "/usr/local/bin/vllm"
+        from io import BytesIO
+
+        from optix.config.constant import Stage
+        from optix.optimizer.plugins.simulate import VllmSimulator
+
+        mock_config = MagicMock()
+        mock_config.process_name = "vllm"
+        mock_config.command = MagicMock()
+        mock_config.command.host = "localhost"
+        mock_config.command.port = "8000"
+        mock_config.command.model = "gpt2"
+        mock_config.command.served_model_name = "gpt2"
+        mock_config.command.others = ""
+
+        simulator = VllmSimulator(mock_config)
+        simulator.process = MagicMock()
+        simulator.process.poll.return_value = None
+        simulator.print_log = False
+
+        error = HTTPError(
+            simulator.base_url,
+            503,
+            "Service Unavailable",
+            hdrs=None,
+            fp=BytesIO(b"not ready"),
+        )
+        with patch("optix.optimizer.interfaces.simulator.urlopen", side_effect=error):
+            result = simulator.health()
+        assert result.stage == Stage.error
+        assert result.info == "return code 503. text not ready"
 
     @patch("optix.deploy_env.shutil.which")
     def test_enable_simulation_model(self, mock_which):

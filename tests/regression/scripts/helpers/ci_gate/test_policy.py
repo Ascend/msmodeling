@@ -116,6 +116,7 @@ def test_is_policy_config_path_uses_policy_configs(tmp_path: Path) -> None:
     _write_gate_policy(repo)
     policy = load_gate_policy(repo)
     assert is_policy_config_path("pyproject.toml", policy.configs) is True
+    assert is_policy_config_path("requirements-ci.txt", policy.configs) is True
     assert is_policy_config_path("tests/regression/conftest.py", policy.configs) is True
     assert is_policy_config_path("tests/.ci/gate_policy.yaml", policy.configs) is False
     assert is_policy_config_path("cli/main.py", policy.configs) is False

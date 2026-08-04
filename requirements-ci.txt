@@ -1,0 +1,7 @@
+# Legacy pip fallback for running tests and CI checks.
+-r requirements.txt
+
+pytest
+pytest-cov
+pytest-xdist
+parameterized

@@ -83,6 +83,13 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+To run tests or CI checks with pip, install `requirements-ci.txt`, which includes both runtime and test dependencies:
+
+```bash
+pip install -r requirements-ci.txt
+pip install -e .
+```
+
 > [!NOTE]
 > `pip install -e .` installs msModeling in editable source mode and registers the `msmodeling` CLI. After source code updates, you do not need to copy files again; rerun the installation command when needed.
 
