@@ -16,14 +16,19 @@ intake -> clarifying -> analyzed -> drafted -> confirmed -> created
 5. 分析代码、测试、文档和历史，区分事实、推断和待确认项。
 6. 根据 Bug、Feature 或 RFC 模板形成草稿。
 7. 检查真实标签；不得发明不存在的标签。
-8. 对显式 operation target 执行 `gitcode issue create -R <target> --dry-run --json`。
-9. 向用户展示最终标题、正文和元数据。
-10. 用户确认后创建，并回读验证编号、标题、状态和正文。
+8. **SIG 路由**：读取 `sig_ownership.json`，按标题关键词、正文路径提及和标签推断归属 SIG 和 chair。
+9. 对显式 operation target 执行 `gitcode issue create -R <target> --assignee <chair> --dry-run --json`。
+10. 向用户展示最终标题、正文、元数据和 SIG 路由结果。
+11. 用户确认后创建（含 `--assignee`，无权限时省略并评论 @chair），并回读验证编号、标题、状态和正文。
+12. **飞书通知**（可选）：`gitcode lark doctor` 通过时向 chair 发送通知；无配置时跳过。
 
 ## 完成标准
 
 - 不存在未说明的关键假设；
 - 验收标准可测试；
 - 已执行重复检查；
+- SIG 路由结果已展示；
 - 用户确认最终草稿；
-- CLI 创建和回读成功。
+- CLI 创建和回读成功；
+- assignee 已指派或无权限时已评论 @chair；
+- 飞书通知已发送或已记录跳过原因。

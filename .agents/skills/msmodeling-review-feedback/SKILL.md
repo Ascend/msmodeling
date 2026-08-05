@@ -2,7 +2,7 @@
 name: msmodeling-review-feedback
 description: 拉取 MindStudio-Modeling PR 的行内和总体检视意见，分类、修复、验证并通过 GitCode CLI 回复和解决讨论。
 metadata:
-  version: 1.1.0
+  version: 1.2.0
   source: issue-25-ai-native
 ---
 
@@ -24,6 +24,8 @@ metadata:
 - PR 评论（含行内检视意见）：`gitcode pr comments <PR> -R <repo> --json`
 - PR diff：`gitcode pr diff <PR> -R <repo>`
 - 回复 discussion：`gitcode pr reply <PR> --discussion <id> --body <text> -R <repo>`
+- 解决讨论：`gitcode pr comment resolve <PR> <discussion-id> -R <repo>`
+- 取消解决：`gitcode pr comment unresolve <PR> <discussion-id> -R <repo>`
 - 提交汇总：`gitcode pr comment <PR> -R <repo> --body <text>`
 
 ## 工作流程
@@ -76,11 +78,26 @@ gitcode pr reply <PR编号> -R <TARGET_REPO> --discussion <discussion_id> --body
 
 ### 5. 解决讨论（resolve）
 
-> **已知缺口**：GitCode API v5 尚未公开 resolve 端点，gitcode CLI 无 `pr resolve` 子命令。当前无法通过 CLI/API 将 diff_comment 从「未解决」标记为「已解决」。
->
-> **临时方案**：回复意见后，提醒用户在 GitCode 网页点击「已解决」按钮。当检视意见数 = 已解决数时，PR 才被后台允许合入。
->
-> **待办**：gitcode CLI 增加 `gitcode pr resolve <PR> --comment <id>` 子命令后，替换为 CLI 操作。
+对已修复的 diff_comment，回复后在同一步骤中通过 CLI 标记为「已解决」，无需用户手动操作网页：
+
+```bash
+gitcode pr comment resolve <PR编号> <discussion_id> -R <TARGET_REPO>
+```
+
+- **已修复的意见**：回复处理结果后立即 resolve。
+- **延期/拒绝的意见**：回复说明原因，**不 resolve**，保持「未解决」状态让 reviewer 可见。
+- **幂等**：resolve 前检查评论的 `resolved` 字段，已解决的不重复操作。
+- **discussion_id 获取**：从第 1 步 `gitcode pr comments --json` 返回的 `discussion_id` 字段获取。
+
+如需取消解决（如误操作或 reviewer 有补充意见）：
+
+```bash
+gitcode pr comment unresolve <PR编号> <discussion_id> -R <TARGET_REPO>
+```
+
+> **权限说明**：fork 贡献者可能无 resolve 写权限。如返回 403，引导用户通过
+> [项目协作权限申请链接](https://gitcode.com/invite/link/ff088415445e4722837f)申请，或提醒用户在
+> GitCode 网页手动点击「已解决」。
 
 ### 6. Commit、Push 和 CI
 
@@ -102,7 +119,8 @@ gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/feedback-sum
 - 拒绝：N 条（原因）
 - 验证：受影响测试已通过
 - CI：<状态>
-- 待手动 resolve：N 条（已在网页标记 / 待标记）
+- 已通过 CLI resolve：N 条
+- 未 resolve（延期/拒绝）：N 条
 ```
 
 ## 安全规则
@@ -114,4 +132,4 @@ gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/feedback-sum
 
 ## 完成标准
 
-所有意见有明确状态和回复；接受项已验证；CI 已闭环或记录阻塞；汇总已提交；待手动 resolve 的意见已提醒用户。
+所有意见有明确状态和回复；接受项已验证；CI 已闭环或记录阻塞；汇总已提交；已修复的意见已通过 CLI resolve。

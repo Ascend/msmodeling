@@ -58,6 +58,7 @@ GitCode 配置：
 | `op-mapping` | `/op_mapping` 或"生成 op_mapping.yaml" | 将 TensorCast 仿真算子映射到 NPU profiling 内核类型 |
 | `microbench` | `/microbench` 或"生成 xxx_run.py" | 从 profiling CSV 生成可在 NPU 上重放的 run script |
 | `msmodeling-env-installer` | "安装 msmodeling 环境"、"uv sync" | 安装并验证当前仓库开发环境、依赖和必要环境变量 |
+| `gitcode-cli-installer` | "安装 gitcode-cli"、"gitcode 认证"、"gc auth login" | 安装和认证 gitcode CLI（npm + auth login + lark），一次性配置 |
 | `model-adaptation` | "接入新模型"、"生成 ModelProfile"、"处理 doctor report" | 从仿真命令和 raw profiling 出发，完成 TensorCast 新模型适配流程 |
 | `text-generate-executor` | "跑 text_generate"、"验证 best row"、"导出 trace" | 生成并执行 `python -m cli.inference.text_generate` 单点验证命令 |
 | `throughput-optimizer-executor` | "搜索最佳 TP/EP"、"硬件对比"、"PD 配比优化" | 生成并执行 `python -m cli.inference.throughput_optimizer` 吞吐规划命令 |
@@ -150,6 +151,7 @@ python scripts/ai/resolve_repository_context.py --json
 | `op-mapping` | 生成或更新 `op_mapping.yaml` |
 | `microbench` | 从 profiling 数据生成 NPU 重放脚本 |
 | `msmodeling-env-installer` | 安装和验证开发环境 |
+| `gitcode-cli-installer` | 安装和认证 gitcode CLI |
 | `model-adaptation` | 接入新模型和生成 ModelProfile |
 | `text-generate-executor` | 执行单点模型仿真验证 |
 | `throughput-optimizer-executor` | 搜索并行策略和吞吐配置 |

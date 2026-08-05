@@ -120,6 +120,17 @@ uv sync --group lint
 uv run pre-commit install    # 只需运行一次
 ```
 
+**安装 gitcode CLI（AI Native 工作流远端操作入口，一次性）：**
+
+```bash
+npm config set @gitcode-cli:registry https://registry.npmjs.org
+npm install -g @gitcode-cli/cli
+gitcode auth login    # 交互式认证，令牌在 GitCode → 设置 → 私人令牌 → 生成（需 repo 读写权限）
+gitcode version && gitcode auth status    # 验证
+```
+
+> Windows PowerShell 中 `gc` 是 `Get-Content` 的内置别名，请使用 `gitcode` 全称。
+
 更多环境细节请参考 [README.md](README.md) 中的安装与使用指南部分。
 
 ### 4. 创建功能分支并开发

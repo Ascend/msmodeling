@@ -47,7 +47,7 @@ python scripts/ai/resolve_repository_context.py \
 以下操作必须经 CLI：
 
 - Issue：list/view/create/edit/comment/label/close/reopen；
-- PR：list/view/diff/create/edit/comment/review/reply/label/ready；
+- PR：list/view/diff/create/edit/comment/review/reply/label/ready/resolve/unresolve；
 - Commit 和关联关系查询；
 - GitCode 流水线状态查询。
 
