@@ -76,7 +76,7 @@
 # Special query mode, overriding the default shape matching logic.
 # Optional values: attention_special | elementwise | moe_fused
 # - attention_special: query by (batch, seq, heads, head_dim) quadruple
-# - elementwise: match by output shape, scale using byte-ratio dtype
+# - elementwise: interpolate total tensor I/O elements with exact dtype and broadcast matching
 # - moe_fused: MoE fusion operator special query mode
 # Example: query_mode: attention_special
 #
@@ -293,8 +293,8 @@ operator_mappings:
     notes: >
       [HIGH] op-plugin: AddKernelNpuOpApi.cpp.
       aclnn: aclnnAdd. Profiling: Qwen3 CANN 8.5 Add(30x).
-      query_mode=elementwise: output-shape matching with byte-ratio dtype scaling.
-      Solves FP32 vs BF16 dtype gap and broadcast pattern ambiguity.
+      query_mode=elementwise: total tensor I/O interpolation with exact dtype matching.
+      Keeps broadcast patterns isolated without borrowing latency across dtypes.
 
   "aten.to.dtype":
     kernel_type: Cast
@@ -398,6 +398,7 @@ operator_mappings:
 
   "tensor_cast.dispatch_ffn_combine.default":
     kernel_type: DispatchFFNCombine
+    query_mode: moe_fused
     tc_input_count: 1
     notes: >
       [HIGH] path: C. vllm-ascend v0.15.0 Super Fusion MoE op (csrc/dispatch_ffn_combine/).
@@ -406,8 +407,9 @@ operator_mappings:
       CANN: OP_ADD(DispatchFFNCombine) in dispatch_ffn_combine_def.cpp. Profiling: DispatchFFNCombine(928x, 35.3%).
       TC fusion pass (DispatchFFNCombinePass): replaces init_routing_v2 + grouped_matmul(×N) + unpermute_tokens
       into single fused op with args (x, expert_indices).
-      TC has 2 tensor args (x, expert_indices); NPU has 7 (x, w1, w2, expert_idx, scale1, scale2, probs).
-      tc_input_count=1: match on x shape (batch, hidden_size) only — weights are model-fixed.
+      TC fused ops carry activation, expert indices, and GMM weight lists; the NPU CSV records x, w1, w2,
+      expert indices, scales, and probabilities. tc_input_count=1 limits legacy base matching to x, while the
+      moe_fused CandidateIndex additionally matches complete GMM1/GMM2 weight shapes.
       shape_flags: [flatten_batch — TC x is 3D (bs, seq, hidden), NPU CSV is 2D (batch, hidden)].
 
   "tensor_cast.dispatch_ffn_combine_quant.default":
@@ -807,7 +809,7 @@ operator_mappings:
     notes: >
       [MEDIUM] op-plugin: MulKernelNpuOpApi.cpp → aclnnMul.
       MulAiCore: AiCore-accelerated variant (CANN 8.5+). 0313 profiling: Mul(176x), MulAiCore(268x).
-      query_mode=elementwise: output-shape matching with byte-ratio dtype scaling.
+      query_mode=elementwise: total tensor I/O interpolation with exact dtype matching.
 
   "aten.div.Tensor":
     kernel_type: Div
@@ -815,7 +817,7 @@ operator_mappings:
     query_mode: elementwise
     notes: >
       [MEDIUM] op-plugin: DivKernelNpuOpApi.cpp → aclnnDiv. Qwen3 CANN 8.5 RealDiv(60x).
-      query_mode=elementwise: output-shape matching with byte-ratio dtype scaling.
+      query_mode=elementwise: total tensor I/O interpolation with exact dtype matching.
 
   "aten.sigmoid.default":
     zero_cost: true

@@ -13,7 +13,7 @@ import math
 import weakref
 from dataclasses import replace
 from itertools import combinations
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import pandas as pd
 import torch
@@ -27,17 +27,16 @@ from .interpolation_index import (
     InterpolationTarget,
     make_regime_key,
 )
-from .interpolation_math import validate_positive_latency
 from .profiling_data_source import (
     _DTYPE_COMPAT,
     _DTYPE_RELAXED_KERNELS,
-    _dtype_byte_size,
     _is_block_padded,
     _MATMUL_KERNELS,
     _normalize_fia_q_shape,
     _normalize_func_name,
     _parse_shape_str,
     _parse_str_list,
+    _project_dispatch_ffn_combine_inputs,
     _strip_batch_dim,
     COMPOSITE_DECOMPOSERS,
     DTYPE_MAP,
@@ -67,6 +66,8 @@ def _to_int_cell(value: Any) -> Optional[int]:
     except (TypeError, ValueError, OverflowError):
         return None
     if not math.isfinite(numeric):
+        return None
+    if not numeric.is_integer():
         return None
     return int(numeric)
 
@@ -158,8 +159,8 @@ _COMPUTE_AXIS_GROUPS = (
 _GENERIC_COMPUTE_AXIS_GROUPS = (("axis_0",),)
 _GENERIC_COMPUTE_AXIS_0 = "axis_0"
 _GENERIC_COMPUTE_OUTPUT_NUMEL_AXIS = "output_numel"
-_LATENCY_SOURCE_SELECTED = "selected_column"
-_LATENCY_SOURCE_FALLBACK = "fallback_column"
+_LATENCY_COLUMN_PREFERRED = "preferred_latency_column"
+_LATENCY_COLUMN_ALTERNATE = "alternate_latency_column"
 
 _ATTENTION_AXES = (
     "seq",
@@ -168,6 +169,8 @@ _ATTENTION_AXES = (
     "head_dim",
 )
 _ATTENTION_AXIS_GROUPS = tuple(axes for dim in range(1, 4) for axes in combinations(_ATTENTION_AXES, dim))
+_MOE_FUSED_AXIS_GROUPS = (("tokens",),)
+_ELEMENTWISE_AXIS_GROUPS = (("io_numel",),)
 
 
 class InterpolatingDataSource(DataSourcePerformanceModel):
@@ -185,6 +188,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         self._kernel_overrides = ip.get("kernel_overrides", {})
         self._compute_index_cache: Dict[tuple[Any, ...], CandidateIndex] = {}
         self._attention_index_cache: Dict[tuple[Any, ...], CandidateIndex] = {}
+        self._moe_fused_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
         self._elementwise_index_cache: Dict[tuple[Any, ...], CandidateIndex] = {}
         self._dataframe_fingerprint_cache: Dict[int, tuple[weakref.ReferenceType, str]] = {}
         self._compute_index_diagnostics: Dict[str, dict[str, Any]] = {}
@@ -273,13 +277,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             )
             return None
         if mapping.get("query_mode") == "moe_fused":
-            # Phase 1 compute interpolation does not model EP Size regimes yet.
-            self._record_miss(
-                "wrapper_moe_fused_disabled",
-                op_name=func_str,
-                base_miss_reason=self.base.last_miss_reason,
-            )
-            return None
+            return self._interpolate_moe_fused(op_invoke_info, mapping, fallback_from=fallback_from)
         if mapping.get("query_mode") == "attention_special":
             return self._interpolate_attention(op_invoke_info, mapping, fallback_from=fallback_from)
         if mapping.get("query_mode") == "elementwise":
@@ -320,6 +318,24 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         return fingerprint
 
     @staticmethod
+    def _build_candidate_index(
+        df: pd.DataFrame,
+        candidate_builder: Callable[
+            [Any, int],
+            tuple[Optional[CandidatePoint], Optional[str]],
+        ],
+    ) -> tuple[CandidateIndex, dict[str, int]]:
+        points: list[CandidatePoint] = []
+        rejected_reasons: dict[str, int] = {}
+        for row_index, (_, row) in enumerate(df.iterrows()):
+            point, reason = candidate_builder(row, row_index)
+            if point is not None:
+                points.append(point)
+            elif reason:
+                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+        return CandidateIndex(points), rejected_reasons
+
+    @staticmethod
     def _logical_csv_shape(shape: Tuple[int, ...], fmt: str) -> Tuple[int, ...]:
         if fmt == "FRACTAL_NZ":
             return fractal_nz_to_nd(shape)
@@ -346,7 +362,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             if latency is not None:
                 return latency, {
                     "latency_column": column,
-                    "latency_selection": "selected_column" if column == latency_col else "fallback_column",
+                    "latency_column_selection": (
+                        _LATENCY_COLUMN_PREFERRED if column == latency_col else _LATENCY_COLUMN_ALTERNATE
+                    ),
                     "raw_latency_us": latency,
                 }
             try:
@@ -624,6 +642,81 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         return default_reason
 
     @staticmethod
+    def _moe_fused_activation_shape_info(shape: Tuple[int, ...]) -> Optional[tuple[float, int, Tuple[int, ...]]]:
+        if len(shape) < 2:
+            return None
+        token_count = math.prod(int(dim) for dim in shape[:-1])
+        hidden = int(shape[-1])
+        return float(token_count), hidden, tuple(shape[:-1])
+
+    @staticmethod
+    def _first_output_tensor(op_invoke_info: "OpInvokeInfo") -> Optional[torch.Tensor]:
+        out = getattr(op_invoke_info, "out", None)
+        if isinstance(out, (list, tuple)):
+            out = out[0] if out else None
+        return out if isinstance(out, torch.Tensor) and out.ndim > 0 else None
+
+    @staticmethod
+    def _moe_fused_topk(
+        input_shapes: List[Tuple[int, ...]],
+        *,
+        tokens: float,
+        input_dtypes: Optional[List[str]] = None,
+    ) -> Optional[int]:
+        dtype_list = input_dtypes or []
+        topk_candidates: list[int] = []
+        for idx, shape in enumerate(input_shapes[1:], start=1):
+            dtype = dtype_list[idx] if idx < len(dtype_list) else ""
+            dtype_key = str(dtype).upper()
+            topk = int(shape[-1]) if len(shape) >= 2 else 0
+            route_tokens = math.prod(int(dim) for dim in shape[:-1]) if len(shape) >= 2 else 0
+            if float(route_tokens) == float(tokens) and 0 < topk <= 256 and "INT" in dtype_key:
+                # The DFC routing contract supplies one integer [..., topk]
+                # tensor whose leading dimensions cover all tokens.
+                topk_candidates.append(topk)
+        if len(topk_candidates) == 1:
+            return topk_candidates[0]
+        return None
+
+    @staticmethod
+    def _elementwise_axes_from_shapes(
+        input_shapes: List[Tuple[int, ...]],
+        output_shape: Tuple[int, ...],
+    ) -> dict[str, float]:
+        read_numel = sum(math.prod(shape) for shape in input_shapes)
+        write_numel = math.prod(output_shape)
+        return {"io_numel": float(read_numel + write_numel)}
+
+    @staticmethod
+    def _elementwise_broadcast_pattern(
+        output_shape: Tuple[int, ...],
+        input_shapes: Optional[List[Tuple[int, ...]]] = None,
+    ) -> tuple[Any, ...]:
+        if not output_shape or not input_shapes:
+            return ()
+        output_shape = tuple(output_shape)
+        patterns = []
+        for input_shape in input_shapes:
+            logical_shape = tuple(input_shape)
+            padded = (None,) * max(0, len(output_shape) - len(logical_shape)) + logical_shape[-len(output_shape) :]
+            relation = []
+            for input_dim, output_dim in zip(padded, output_shape):
+                if input_dim is None:
+                    relation.append("missing")
+                elif int(input_dim) == int(output_dim):
+                    relation.append("same")
+                elif int(input_dim) == 1 and int(output_dim) != 1:
+                    relation.append("broadcast")
+                else:
+                    relation.append("other")
+            patterns.append((len(logical_shape), tuple(relation)))
+        return tuple(patterns)
+
+    @staticmethod
+    def _elementwise_axis_groups_for(candidate_group: CandidateGroup) -> tuple[tuple[str, ...], ...]:
+        return _ELEMENTWISE_AXIS_GROUPS
+
+    @staticmethod
     def _generic_compute_shape_signature(input_shapes: List[Tuple[int, ...]]) -> tuple[Any, ...]:
         if not input_shapes:
             return ()
@@ -754,10 +847,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 return None, "generic_compute_dtype_unavailable"
             dtype_key = tuple(self._dtype_key(kernel_type, dtype) for dtype in dtype_values[:input_count])
         axes_and_extra_regime, reason = self._generic_compute_axes_and_regime_with_reason(
-            kernel_type,
-            logical_shapes,
-            output_shapes,
-            policy_kernel_type,
+            kernel_type, logical_shapes, output_shapes, policy_kernel_type
         )
         if axes_and_extra_regime is None:
             return None, reason
@@ -978,8 +1068,10 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         attempts: list[dict[str, Any]] = []
         override = self._kernel_overrides.get(target.kernel_type, {})
         for candidate_group in candidate_groups:
-            for source_attempt, source_group in self._source_pure_candidate_group_attempts(candidate_group):
-                result = source_group.interpolate(
+            for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
+                candidate_group
+            ):
+                result = candidate_subset.interpolate(
                     target.axes,
                     self._generic_compute_axis_groups(target.kernel_type, policy_kernel_type),
                     fallback_from=fallback_from,
@@ -988,15 +1080,15 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                         "kernel_type": target.kernel_type,
                         "query_mode": target.query_mode,
                         "interpolation_path": interpolation_path,
-                        "latency_source_attempt": source_attempt,
+                        "latency_column_group": latency_column_group,
                     },
                 )
                 if result is None:
                     attempts.append(
                         {
-                            "regime_key": dict(source_group.regime_key),
-                            "latency_source_attempt": source_attempt,
-                            "diagnostics": source_group.last_diagnostics,
+                            "regime_key": dict(candidate_subset.regime_key),
+                            "latency_column_group": latency_column_group,
+                            "diagnostics": candidate_subset.last_diagnostics,
                         }
                     )
                     continue
@@ -1021,9 +1113,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         return 1, -len(candidate_group.points)
 
     @staticmethod
-    def _candidate_latency_source(point: CandidatePoint) -> Optional[str]:
-        value = point.row_meta.get("latency_selection")
-        if value in {_LATENCY_SOURCE_SELECTED, _LATENCY_SOURCE_FALLBACK}:
+    def _candidate_latency_column_selection(point: CandidatePoint) -> Optional[str]:
+        value = point.row_meta.get("latency_column_selection")
+        if value in {_LATENCY_COLUMN_PREFERRED, _LATENCY_COLUMN_ALTERNATE}:
             return str(value)
         return None
 
@@ -1034,27 +1126,29 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         return candidate == target or _is_block_padded(candidate, target) or _is_block_padded(target, candidate)
 
     @classmethod
-    def _source_pure_candidate_group_attempts(cls, candidate_group: CandidateGroup) -> list[tuple[str, CandidateGroup]]:
-        selected_points: list[CandidatePoint] = []
-        fallback_points: list[CandidatePoint] = []
-        unknown_points: list[CandidatePoint] = []
+    def _latency_column_pure_candidate_group_attempts(
+        cls, candidate_group: CandidateGroup
+    ) -> list[tuple[str, CandidateGroup]]:
+        preferred_column_points: list[CandidatePoint] = []
+        alternate_column_points: list[CandidatePoint] = []
+        unlabeled_points: list[CandidatePoint] = []
         for point in candidate_group.points:
-            source = cls._candidate_latency_source(point)
-            if source == _LATENCY_SOURCE_SELECTED:
-                selected_points.append(point)
-            elif source == _LATENCY_SOURCE_FALLBACK:
-                fallback_points.append(point)
+            selection = cls._candidate_latency_column_selection(point)
+            if selection == _LATENCY_COLUMN_PREFERRED:
+                preferred_column_points.append(point)
+            elif selection == _LATENCY_COLUMN_ALTERNATE:
+                alternate_column_points.append(point)
             else:
-                unknown_points.append(point)
+                unlabeled_points.append(point)
 
-        if not selected_points and not fallback_points:
+        if not preferred_column_points and not alternate_column_points:
             return [("all", candidate_group)]
 
         attempts: list[tuple[str, CandidateGroup]] = []
         for label, points in (
-            ("selected_only", selected_points),
-            ("fallback_only", fallback_points),
-            ("unknown_only", unknown_points),
+            ("preferred_column_only", preferred_column_points),
+            ("alternate_column_only", alternate_column_points),
+            ("unlabeled_only", unlabeled_points),
         ):
             if points:
                 attempts.append((label, CandidateGroup(candidate_group.regime_key, points)))
@@ -1091,8 +1185,10 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         attempts: list[dict[str, Any]] = []
         override = self._kernel_overrides.get(target.kernel_type, {})
         for candidate_group in sorted(candidate_groups, key=self._compute_candidate_group_rank):
-            for source_attempt, source_group in self._source_pure_candidate_group_attempts(candidate_group):
-                result = source_group.interpolate(
+            for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
+                candidate_group
+            ):
+                result = candidate_subset.interpolate(
                     target.axes,
                     _COMPUTE_AXIS_GROUPS,
                     fallback_from=fallback_from,
@@ -1101,15 +1197,15 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                         "kernel_type": target.kernel_type,
                         "query_mode": target.query_mode,
                         "interpolation_path": interpolation_path,
-                        "latency_source_attempt": source_attempt,
+                        "latency_column_group": latency_column_group,
                     },
                 )
                 if result is None:
                     attempts.append(
                         {
-                            "regime_key": dict(source_group.regime_key),
-                            "latency_source_attempt": source_attempt,
-                            "diagnostics": source_group.last_diagnostics,
+                            "regime_key": dict(candidate_subset.regime_key),
+                            "latency_column_group": latency_column_group,
+                            "diagnostics": candidate_subset.last_diagnostics,
                         }
                     )
                     continue
@@ -1176,6 +1272,247 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             "compute_multidim_interpolation_failed",
             attempted_kernel_types=kernel_types,
             attempts=attempts,
+        )
+        return None
+
+    # ---- MoE / DispatchFFNCombine interpolation ----
+
+    def _candidate_from_moe_fused_row(
+        self,
+        row: Any,
+        kernel_type: str,
+        latency_col: str,
+        row_index: int,
+    ) -> tuple[Optional[CandidatePoint], Optional[str]]:
+        csv_shapes = _parse_shape_str(str(row.get("Input Shapes", "")))
+        csv_dtypes = _parse_str_list(str(row.get("Input Data Types", "")))
+        csv_formats = _parse_str_list(str(row.get("Input Formats", "")))
+        if not csv_shapes:
+            return None, "input_shapes_missing"
+        if not csv_dtypes:
+            return None, "input_dtypes_missing"
+        if not csv_formats:
+            return None, "input_formats_missing"
+        if len(csv_shapes) != len(csv_dtypes) or len(csv_shapes) != len(csv_formats):
+            return None, "moe_physical_signature_incomplete"
+        if len(csv_shapes) != 7:
+            return None, "moe_physical_signature_incomplete"
+        input_dtype_signature = tuple(csv_dtypes)
+
+        logical_shapes = [tuple(shape) for shape in csv_shapes]
+        gmm1_weight_shape = logical_shapes[1]
+        gmm2_weight_shape = logical_shapes[2]
+        if len(gmm1_weight_shape) < 3 or len(gmm2_weight_shape) < 3:
+            return None, "moe_weight_shapes_unextractable"
+        first_format = csv_formats[0]
+        first_shape = self._logical_csv_shape(tuple(csv_shapes[0]), first_format)
+        logical_shapes[0] = first_shape
+        shape_info = self._moe_fused_activation_shape_info(first_shape)
+        if shape_info is None:
+            return None, "token_axis_unextractable"
+        tokens, hidden, leading_dims = shape_info
+
+        latency, latency_meta = self._candidate_latency(row, latency_col)
+        if latency is None:
+            return None, str(latency_meta["latency_rejected_reason"])
+
+        has_ep_size = hasattr(row, "index") and "EP Size" in row.index
+        ep_size = _to_int_cell(row.get("EP Size")) if has_ep_size and hasattr(row, "get") else None
+        if not has_ep_size or ep_size is None:
+            return None, "ep_size_missing"
+        if ep_size <= 0:
+            return None, "ep_size_invalid"
+        topk = self._moe_fused_topk(
+            logical_shapes,
+            tokens=tokens,
+            input_dtypes=csv_dtypes,
+        )
+        if topk is None:
+            return None, "topk_unextractable"
+        axes = {"tokens": float(tokens)}
+        regime_fields: list[tuple[str, Any]] = [
+            ("kernel_type", kernel_type),
+            ("activation_dtype", self._dtype_key(kernel_type, csv_dtypes[0])),
+            ("activation_format", first_format),
+            ("input_dtype_signature", input_dtype_signature),
+            ("gmm1_weight_shape", gmm1_weight_shape),
+            ("gmm2_weight_shape", gmm2_weight_shape),
+            ("hidden", hidden),
+            ("topk", topk),
+            ("ep_size", ep_size),
+        ]
+
+        return CandidatePoint(
+            kernel_type=kernel_type,
+            axes=axes,
+            latency_us=latency,
+            regime_key=make_regime_key(regime_fields),
+            input_shapes=logical_shapes,
+            input_dtypes=csv_dtypes,
+            input_formats=csv_formats,
+            row_index=row_index,
+            row_meta={
+                "tokens": tokens,
+                "hidden": hidden,
+                "leading_dims": leading_dims,
+                "ep_size": ep_size,
+                "input_dtype_signature": input_dtype_signature,
+                "input_format_signature": tuple(csv_formats),
+                "gmm1_weight_shape": gmm1_weight_shape,
+                "gmm2_weight_shape": gmm2_weight_shape,
+                "moe_axes": dict(axes),
+                **latency_meta,
+            },
+        ), None
+
+    def _get_moe_fused_index(self, kernel_type: str) -> tuple[Optional[CandidateIndex], dict[str, int]]:
+        df = self.base._load_csv(kernel_type)
+        if df is None:
+            return None, {}
+        cache_key = (
+            "moe_fused",
+            kernel_type,
+            self._dataframe_fingerprint(df),
+            self._policy_hash,
+        )
+        if cache_key in self._moe_fused_index_cache:
+            return self._moe_fused_index_cache[cache_key]
+
+        latency_col = self.base._latency_col(df)
+        rejected_reasons: dict[str, int] = {}
+        if "EP Size" not in df.columns:
+            rejected_reasons["ep_size_missing"] = len(df)
+            index = CandidateIndex([])
+            self._moe_fused_index_cache[cache_key] = (index, rejected_reasons)
+            return index, rejected_reasons
+        index, rejected_reasons = self._build_candidate_index(
+            df,
+            lambda row, row_index: self._candidate_from_moe_fused_row(row, kernel_type, latency_col, row_index),
+        )
+        self._moe_fused_index_cache[cache_key] = (index, rejected_reasons)
+        return index, rejected_reasons
+
+    def _build_moe_fused_target(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[InterpolationTarget]:
+        kernel_type = mapping.get("kernel_type")
+        if not kernel_type:
+            return None
+        projected_inputs = _project_dispatch_ffn_combine_inputs(op_invoke_info)
+        if projected_inputs is None:
+            return None
+
+        projected_shapes = [tuple(int(dim) for dim in shape) for shape, _dtype in projected_inputs]
+        first_shape, first_dtype = projected_inputs[0]
+        shape_info = self._moe_fused_activation_shape_info(tuple(first_shape))
+        if shape_info is None:
+            return None
+        tokens, hidden, _leading_dims = shape_info
+        dtype_str = DTYPE_MAP.get(first_dtype, str(first_dtype))
+        input_dtype_signature = tuple(DTYPE_MAP.get(dtype, str(dtype)) for _shape, dtype in projected_inputs)
+        gmm1_weight_shape = projected_shapes[1]
+        gmm2_weight_shape = projected_shapes[2]
+
+        regime_fields: list[tuple[str, Any]] = [
+            ("kernel_type", kernel_type),
+            ("activation_dtype", self._dtype_key(kernel_type, dtype_str)),
+            ("activation_format", "ND"),
+            ("input_dtype_signature", input_dtype_signature),
+            ("gmm1_weight_shape", gmm1_weight_shape),
+            ("gmm2_weight_shape", gmm2_weight_shape),
+            ("hidden", hidden),
+        ]
+        if self.base.ep_size is None:
+            return None
+        regime_fields.append(("ep_size", int(self.base.ep_size)))
+
+        topk = self._moe_fused_topk(
+            projected_shapes,
+            tokens=tokens,
+            input_dtypes=list(input_dtype_signature),
+        )
+        if topk is None:
+            return None
+        regime_fields.append(("topk", topk))
+        return InterpolationTarget(
+            func_name=_normalize_func_name(op_invoke_info.func),
+            kernel_type=kernel_type,
+            axes={"tokens": float(tokens)},
+            regime_key=make_regime_key(regime_fields),
+            tc_shapes=projected_shapes,
+            input_dtypes=[dtype_str],
+            query_mode="moe_fused",
+        )
+
+    def _interpolate_moe_fused(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        mapping: dict,
+        *,
+        fallback_from: str = "exact_miss",
+    ) -> Optional[QueryResult]:
+        kernel_type = mapping.get("kernel_type")
+        if not kernel_type:
+            return None
+        override = self._kernel_overrides.get(kernel_type, {})
+        if self.base.ep_size is None:
+            self._record_miss("ep_size_not_configured", kernel_type=kernel_type, query_mode="moe_fused")
+            return None
+
+        index, rejected_reasons = self._get_moe_fused_index(kernel_type)
+        if index is None:
+            self._record_miss("csv_not_found", kernel_type=kernel_type, query_mode="moe_fused")
+            return None
+        target = self._build_moe_fused_target(op_invoke_info, mapping)
+        if target is None:
+            self._record_miss("moe_fused_target_unextractable", kernel_type=kernel_type)
+            return None
+
+        target_regime = dict(target.regime_key)
+        candidate_groups = index.candidate_groups_matching(target.regime_key)
+        attempts: list[dict[str, Any]] = []
+        if not candidate_groups:
+            attempts.append({"status": "regime_key_unmatched", "target_regime": dict(target.regime_key)})
+        for candidate_group in candidate_groups:
+            for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
+                candidate_group
+            ):
+                result = candidate_subset.interpolate(
+                    target.axes,
+                    _MOE_FUSED_AXIS_GROUPS,
+                    max_interpolation_dim=override.get("max_interpolation_dim"),
+                    fallback_from=fallback_from,
+                    extra_details={
+                        "kernel_type": target.kernel_type,
+                        "query_mode": "moe_fused",
+                        "interpolation_path": "moe_fused_1d",
+                        "latency_column_group": latency_column_group,
+                        "ep_size": self.base.ep_size,
+                        "input_dtype_signature": target_regime.get("input_dtype_signature"),
+                        "target_moe_axes": dict(target.axes),
+                        "rejected_reasons": rejected_reasons,
+                    },
+                )
+                if result is None:
+                    attempts.append(
+                        {
+                            "status": "candidate_group_failed",
+                            "regime_key": dict(candidate_subset.regime_key),
+                            "latency_column_group": latency_column_group,
+                            "diagnostics": candidate_subset.last_diagnostics,
+                        }
+                    )
+                    continue
+                return self._query_result_from_interpolation(target, result)
+
+        self._record_miss(
+            self._candidate_failure_reason(
+                "moe_fused_interpolation_failed", attempts[-1].get("diagnostics") if attempts else {}
+            ),
+            kernel_type=kernel_type,
+            query_mode="moe_fused",
+            candidate_count=len(index.points),
+            rejected_reasons=rejected_reasons,
+            attempts=attempts,
+            target_axes=target.axes,
         )
         return None
 
@@ -2096,8 +2433,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         kernel_type: str,
         latency_col: str,
         row_index: int,
-        tc_dtype_str: Optional[str],
+        tc_dtype_str: Optional[str] = None,
     ) -> Optional[CandidatePoint]:
+        csv_input_shapes = _parse_shape_str(str(row.get("Input Shapes", "")))
         csv_out_shapes = _parse_shape_str(str(row.get("Output Shapes", "")))
         csv_out_dtypes = _parse_str_list(str(row.get("Output Data Types", "")))
         if not csv_out_shapes:
@@ -2106,48 +2444,43 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         csv_shape = _strip_batch_dim(tuple(csv_out_shapes[0]))
         if not csv_shape:
             return None
-        csv_input_shapes = [tuple(shape) for shape in _parse_shape_str(str(row.get("Input Shapes", "")))]
-        input_signature = self._elementwise_input_signature(csv_input_shapes, csv_shape)
-        if input_signature is None:
-            return None
 
         latency, latency_meta = self._candidate_latency(row, latency_col)
         if latency is None:
             return None
 
         csv_dtype_str = csv_out_dtypes[0] if csv_out_dtypes else None
-        scale = 1.0
-        if csv_dtype_str and tc_dtype_str and csv_dtype_str != tc_dtype_str:
-            tc_bytes = _dtype_byte_size(tc_dtype_str)
-            csv_bytes = _dtype_byte_size(csv_dtype_str)
-            if tc_bytes > 0 and csv_bytes > 0:
-                scale = tc_bytes / csv_bytes
-                latency *= scale
-        if not validate_positive_latency(latency):
+        if not csv_dtype_str or not tc_dtype_str or csv_dtype_str != tc_dtype_str:
             return None
 
+        input_shapes = [_strip_batch_dim(tuple(shape)) for shape in csv_input_shapes]
+        axes = self._elementwise_axes_from_shapes(input_shapes, csv_shape)
+        broadcast_pattern = self._elementwise_broadcast_pattern(csv_shape, input_shapes)
         regime_key = make_regime_key(
             [
                 ("kernel_type", kernel_type),
                 ("query_mode", "elementwise"),
-                ("output_shape_tail", tuple(csv_shape[1:])),
-                ("input_signature", input_signature),
-                ("csv_output_dtype", csv_dtype_str or ""),
+                ("output_rank", len(csv_shape)),
+                ("input_count", len(input_shapes)),
+                ("output_dtype", csv_dtype_str),
+                ("broadcast_pattern", broadcast_pattern),
             ]
         )
         return CandidatePoint(
             kernel_type=kernel_type,
-            axes={"axis_0": float(csv_shape[0])},
+            axes=axes,
             latency_us=latency,
             regime_key=regime_key,
-            input_shapes=csv_input_shapes,
-            input_dtypes=[csv_dtype_str] if csv_dtype_str else [],
+            input_shapes=input_shapes or [csv_shape],
+            input_dtypes=[csv_dtype_str],
             row_index=row_index,
             row_meta={
                 **latency_meta,
-                "dtype_scale": scale,
                 "csv_output_dtype": csv_dtype_str,
-                "input_signature": input_signature,
+                "target_output_dtype": tc_dtype_str,
+                "output_shape": csv_shape,
+                "broadcast_pattern": broadcast_pattern,
+                "elementwise_axes": dict(axes),
             },
         )
 
@@ -2166,47 +2499,15 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return self._elementwise_index_cache[cache_key]
 
         latency_col = self.base._latency_col(df)
-        points = []
-        for row_index, (_, row) in enumerate(df.iterrows()):
-            point = self._candidate_from_elementwise_row(row, kernel_type, latency_col, row_index, tc_dtype_str)
-            if point is not None:
-                points.append(point)
-        index = CandidateIndex(points)
+        index, _rejected_reasons = self._build_candidate_index(
+            df,
+            lambda row, row_index: (
+                self._candidate_from_elementwise_row(row, kernel_type, latency_col, row_index, tc_dtype_str),
+                None,
+            ),
+        )
         self._elementwise_index_cache[cache_key] = index
         return index
-
-    @staticmethod
-    def _elementwise_candidate_group_attempts(
-        index: CandidateIndex,
-        kernel_type: str,
-        output_shape_tail: tuple[int, ...],
-        input_signature: tuple[tuple[str, tuple[int, ...]], ...],
-        tc_dtype_str: Optional[str],
-    ) -> list[tuple[str, CandidateGroup]]:
-        base_fields = [
-            ("kernel_type", kernel_type),
-            ("query_mode", "elementwise"),
-            ("output_shape_tail", output_shape_tail),
-            ("input_signature", input_signature),
-        ]
-        attempts: list[tuple[str, CandidateGroup]] = []
-        if tc_dtype_str:
-            same_dtype_key = make_regime_key([*base_fields, ("csv_output_dtype", tc_dtype_str)])
-            attempts.extend(("same_dtype", group) for group in index.candidate_groups_matching(same_dtype_key))
-
-        fallback_key = make_regime_key(base_fields)
-        fallback_groups = []
-        target_bytes = _dtype_byte_size(tc_dtype_str) if tc_dtype_str else 0
-        for group in index.candidate_groups_matching(fallback_key, allow_extra_fields={"csv_output_dtype"}):
-            csv_dtype = dict(group.regime_key).get("csv_output_dtype")
-            if tc_dtype_str and csv_dtype == tc_dtype_str:
-                continue
-            csv_bytes = _dtype_byte_size(csv_dtype) if csv_dtype else 0
-            byte_distance = abs(target_bytes - csv_bytes) if target_bytes > 0 and csv_bytes > 0 else 999
-            fallback_groups.append((byte_distance, group))
-        for _byte_distance, group in sorted(fallback_groups, key=lambda item: (-len(item[1].points), item[0])):
-            attempts.append(("scaled_dtype", group))
-        return attempts
 
     def _interpolate_elementwise(
         self,
@@ -2215,55 +2516,77 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         *,
         fallback_from: str = "exact_miss",
     ) -> Optional[QueryResult]:
-        """Interpolate elementwise ops on first dim of output shape, dtype-relaxed.
-
-        Groups CSV rows by output_shape[1:] (hidden dims must match exactly).
-        Collects (output_shape[0], latency_scaled) candidates and interpolates
-        on the first dim (num_tokens). Byte-ratio scaling applied per-candidate
-        before interpolation.
-        """
+        """Interpolate elementwise ops using guarded 1D total-I/O work."""
         kernel_type = mapping.get("kernel_type")
         if not kernel_type:
             return None
+        kernel_types = [kernel_type]
+        for alt in mapping.get("alternate_kernel_types", []):
+            if alt not in kernel_types:
+                kernel_types.append(alt)
 
-        df = self.base._load_csv(kernel_type)
-        if df is None:
-            return None
+        attempts: list[dict[str, Any]] = []
+        for kt in kernel_types:
+            result = self._interpolate_elementwise_kernel(
+                op_invoke_info,
+                mapping,
+                kt,
+                fallback_from=fallback_from,
+            )
+            if result is not None:
+                return result
+            attempts.append(
+                {
+                    "kernel_type": kt,
+                    "status": self.last_miss_reason or "candidate_group_failed",
+                    "miss_details": self.last_miss_details,
+                }
+            )
 
-        # NOTE: OpInvokeInfo uses .out (not .output); aten ops may return tuple.
-        out = op_invoke_info.out
-        if isinstance(out, (list, tuple)):
-            out = out[0] if out else None
-        if out is None or not isinstance(out, torch.Tensor) or out.ndim == 0:
+        if len(attempts) > 1:
+            self._record_miss(
+                "elementwise_interpolation_failed",
+                attempted_kernel_types=kernel_types,
+                attempts=attempts,
+            )
+        return None
+
+    def _interpolate_elementwise_kernel(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        mapping: dict,
+        kernel_type: str,
+        *,
+        fallback_from: str,
+    ) -> Optional[QueryResult]:
+        """Interpolate one concrete elementwise kernel type."""
+        override = self._kernel_overrides.get(kernel_type, {})
+
+        out = self._first_output_tensor(op_invoke_info)
+        if out is None:
             return None
 
         output_shape = _strip_batch_dim(tuple(out.shape))
         if len(output_shape) < 1:
             return None
-        target_dim = float(output_shape[0])
         tc_dtype_str = DTYPE_MAP.get(out.dtype)
-        input_shapes = [
-            tuple(arg.shape) for arg in getattr(op_invoke_info, "args", ()) if isinstance(arg, torch.Tensor)
-        ]
-        input_signature = self._elementwise_input_signature(input_shapes, output_shape)
-        if input_signature is None:
-            self._record_miss(
-                "elementwise_input_signature_unavailable",
-                kernel_type=kernel_type,
-                interpolation_path="elementwise_1d",
-            )
-            return None
+        tc_inputs = self.base._extract_tensor_inputs(op_invoke_info)
+        input_shapes = [_strip_batch_dim(tuple(shape)) for shape, _ in tc_inputs]
+        target_axes = self._elementwise_axes_from_shapes(input_shapes, output_shape)
+        broadcast_pattern = self._elementwise_broadcast_pattern(output_shape, input_shapes)
 
         target = InterpolationTarget(
             func_name=_normalize_func_name(op_invoke_info.func),
             kernel_type=kernel_type,
-            axes={"axis_0": target_dim},
+            axes=target_axes,
             regime_key=make_regime_key(
                 [
                     ("kernel_type", kernel_type),
                     ("query_mode", "elementwise"),
-                    ("output_shape_tail", tuple(output_shape[1:])),
-                    ("input_signature", input_signature),
+                    ("output_rank", len(output_shape)),
+                    ("input_count", len(input_shapes)),
+                    ("output_dtype", tc_dtype_str or ""),
+                    ("broadcast_pattern", broadcast_pattern),
                 ]
             ),
             tc_shapes=[tuple(output_shape)],
@@ -2279,71 +2602,73 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             )
             return None
 
-        candidate_attempts = self._elementwise_candidate_group_attempts(
-            index,
-            kernel_type,
-            tuple(output_shape[1:]),
-            input_signature,
-            tc_dtype_str,
-        )
-        candidate_count = sum(len(group.points) for _label, group in candidate_attempts)
-        if (
-            not candidate_attempts
-            or max(
-                (len({point.axes["axis_0"] for point in group.points}) for _label, group in candidate_attempts),
-                default=0,
-            )
-            < 2
-        ):
+        candidate_groups = index.candidate_groups_matching(target.regime_key)
+        candidate_count = sum(len(group.points) for group in candidate_groups)
+        if not candidate_groups:
             self._record_miss(
                 "insufficient_filtered_candidates",
                 kernel_type=kernel_type,
+                query_mode="elementwise",
                 interpolation_path="elementwise_1d",
-                target=float(target_dim),
+                target=float(target_axes.get("io_numel", 0.0)),
+                target_axes=target_axes,
+                target_regime_key=dict(target.regime_key),
                 candidate_count=candidate_count,
             )
             return None
 
         attempts: list[dict[str, Any]] = []
-        for dtype_attempt, candidate_group in candidate_attempts:
-            result = candidate_group.interpolate(
-                target.axes,
-                _GENERIC_COMPUTE_AXIS_GROUPS,
-                fallback_from=fallback_from,
-                extra_details={
-                    "kernel_type": kernel_type,
-                    "query_mode": "elementwise",
-                    "interpolation_path": "elementwise_1d",
-                    "dtype_attempt": dtype_attempt,
-                    "csv_output_dtype": dict(candidate_group.regime_key).get("csv_output_dtype"),
-                },
-            )
-            if result is None:
-                attempts.append(
-                    {
-                        "regime_key": dict(candidate_group.regime_key),
-                        "dtype_attempt": dtype_attempt,
-                        "diagnostics": candidate_group.last_diagnostics,
-                    }
-                )
-                continue
-            selected_scales = [float(point.row_meta.get("dtype_scale", 1.0)) for point in result.matched_points]
-            has_dtype_scaling = any(scale != 1.0 for scale in selected_scales)
-            details = dict(result.details)
-            details["dtype_scaled"] = has_dtype_scaling
-            details["dtype_attempt"] = dtype_attempt
-            if has_dtype_scaling:
-                details["dtype_scales"] = sorted(set(selected_scales))
-            result = replace(result, details=details)
-            return self._query_result_from_interpolation(target, result)
+        for candidate_group in candidate_groups:
+            for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
+                candidate_group
+            ):
+                result = None
+                interpolation_group = candidate_subset
+                axis_groups = self._elementwise_axis_groups_for(candidate_subset)
+                for axis_group in axis_groups:
+                    if any(axis not in target.axes for axis in axis_group):
+                        continue
+                    result = interpolation_group.interpolate(
+                        target.axes,
+                        (axis_group,),
+                        max_interpolation_dim=override.get("max_interpolation_dim"),
+                        fallback_from=fallback_from,
+                        extra_details={
+                            "kernel_type": kernel_type,
+                            "query_mode": "elementwise",
+                            "interpolation_path": f"elementwise_{len(axis_group)}d",
+                            "latency_column_group": latency_column_group,
+                            "csv_output_dtype": dict(candidate_subset.regime_key).get("output_dtype"),
+                            "target_elementwise_axes": dict(target.axes),
+                        },
+                    )
+                    if result is not None:
+                        break
+                if result is None:
+                    attempts.append(
+                        {
+                            "regime_key": dict(candidate_subset.regime_key),
+                            "latency_column_group": latency_column_group,
+                            "diagnostics": interpolation_group.last_diagnostics,
+                        }
+                    )
+                    continue
+                details = dict(result.details)
+                details["dtype_scaled"] = False
+                details["latency_column_group"] = latency_column_group
+                result = replace(result, details=details)
+                return self._query_result_from_interpolation(target, result)
 
         self._record_miss(
             self._candidate_failure_reason(
                 "candidate_group_failed", attempts[-1].get("diagnostics") if attempts else {}
             ),
             kernel_type=kernel_type,
+            query_mode="elementwise",
             interpolation_path="elementwise_1d",
-            target=float(target_dim),
+            target=float(target_axes.get("io_numel", 0.0)),
+            target_axes=target_axes,
+            target_regime_key=dict(target.regime_key),
             candidate_count=candidate_count,
             attempts=attempts,
         )

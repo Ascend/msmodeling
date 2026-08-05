@@ -81,7 +81,7 @@
 # Special query mode, overriding the default shape matching logic.
 # Optional values: attention_special | elementwise | moe_fused
 # - attention_special: query by (batch, seq, heads, head_dim) quadruple
-# - elementwise: match by output shape, scale using byte-ratio dtype
+# - elementwise: interpolate total tensor I/O elements with exact dtype and broadcast matching
 # - moe_fused: MoE fusion operator special query mode
 # Example: query_mode: attention_special
 #
@@ -336,8 +336,8 @@ operator_mappings:
     notes: >
       [HIGH] op-plugin: AddKernelNpuOpApi.cpp.
       aclnn: aclnnAdd. Profiling: Qwen3 CANN 8.5 Add(30x).
-      query_mode=elementwise: output-shape matching with byte-ratio dtype scaling.
-      Solves FP32 vs BF16 dtype gap and broadcast pattern ambiguity.
+      query_mode=elementwise: total tensor I/O interpolation with exact dtype matching.
+      Keeps broadcast patterns isolated without borrowing latency across dtypes.
 
   "aten.to.dtype":
     kernel_type: Cast
@@ -465,6 +465,8 @@ operator_mappings:
       into single fused op with args (x, expert_indices).
       TC semantic args are projected to the real 7-input NPU shape before lookup;
       weights, expert indices, workspaces and probabilities must all align.
+      The moe_fused interpolation index preserves the complete GMM1/GMM2 weight
+      shapes and the same discrete operator regime after an exact miss.
 
   "tensor_cast.dispatch_ffn_combine_quant.default":
     kernel_type: DispatchFFNCombine
@@ -970,7 +972,7 @@ operator_mappings:
     notes: >
       [MEDIUM] op-plugin: MulKernelNpuOpApi.cpp → aclnnMul.
       MulAiCore: AiCore-accelerated variant (CANN 8.5+). 0313 profiling: Mul(176x), MulAiCore(268x).
-      query_mode=elementwise: output-shape matching with byte-ratio dtype scaling.
+      query_mode=elementwise: total tensor I/O interpolation with exact dtype matching.
 
   "aten.div.Tensor":
     zero_cost: true
@@ -979,7 +981,7 @@ operator_mappings:
       All scenarios < 0.002ms (< 0.01% of total time).
       Original kernel: RealDiv (op-plugin: DivKernelNpuOpApi.cpp → aclnnDiv).
       0325 profiling: Qwen3 RealDiv(6-382x), DSv3 RealDiv(4-130x). "Div" never appears.
-      query_mode=elementwise: output-shape matching with byte-ratio dtype scaling.
+      query_mode=elementwise: total tensor I/O interpolation with exact dtype matching.
 
   "aten.sigmoid.default":
     zero_cost: true

@@ -217,3 +217,25 @@ def test_elementwise_excludes_tc_input_count(version_ctx):
     for op_name, entry in entries.items():
         if entry.get("query_mode") == "elementwise" and "tc_input_count" in entry:
             pytest.fail(f"[{label}] {op_name}: query_mode=elementwise must not have tc_input_count")
+
+
+def test_phase2_dfc_variants_use_guarded_query_mode(version_ctx):
+    label, entries, _ = version_ctx
+    dfc_ops = {
+        "tensor_cast.dispatch_ffn_combine.default",
+        "tensor_cast.dispatch_ffn_combine_quant.default",
+        "tensor_cast.dispatch_ffn_combine_quant_int4.default",
+        "tensor_cast.dispatch_ffn_combine_fp8.default",
+        "tensor_cast.dispatch_ffn_combine_mxfp4.default",
+    }
+    for op_name in dfc_ops & entries.keys():
+        assert entries[op_name].get("query_mode") == "moe_fused", f"[{label}] {op_name} bypasses DFC regime checks"
+
+
+def test_phase2_add_mapping_uses_elementwise_query_mode(version_ctx):
+    label, entries, data_dir = version_ctx
+    if not (data_dir / "Add.csv").exists():
+        return
+    entry = entries.get("aten.add.Tensor")
+    if entry is not None and entry.get("kernel_type") == "Add":
+        assert entry.get("query_mode") == "elementwise", f"[{label}] aten.add.Tensor needs elementwise query mode"

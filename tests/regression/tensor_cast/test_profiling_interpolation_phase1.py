@@ -1602,7 +1602,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
     assert ds.last_miss_reason == "interpolation_dim_disabled"
 
 
-def test_compute_interpolation_uses_source_pure_selected_candidates(tmp_path, monkeypatch):
+def test_compute_interpolation_uses_preferred_latency_column_candidates(tmp_path, monkeypatch):
     key = make_regime_key(
         {
             "kernel_type": "MatMulV2",
@@ -1616,28 +1616,28 @@ def test_compute_interpolation_uses_source_pure_selected_candidates(tmp_path, mo
             {"M": 100.0, "K": 512.0, "N": 1024.0},
             10.0,
             key,
-            row_meta={"latency_selection": "selected_column"},
+            row_meta={"latency_column_selection": "preferred_latency_column"},
         ),
         CandidatePoint(
             "MatMulV2",
             {"M": 200.0, "K": 512.0, "N": 1024.0},
             20.0,
             key,
-            row_meta={"latency_selection": "selected_column"},
+            row_meta={"latency_column_selection": "preferred_latency_column"},
         ),
         CandidatePoint(
             "MatMulV2",
             {"M": 100.0, "K": 512.0, "N": 1024.0},
             1000.0,
             key,
-            row_meta={"latency_selection": "fallback_column"},
+            row_meta={"latency_column_selection": "alternate_latency_column"},
         ),
         CandidatePoint(
             "MatMulV2",
             {"M": 200.0, "K": 512.0, "N": 1024.0},
             2000.0,
             key,
-            row_meta={"latency_selection": "fallback_column"},
+            row_meta={"latency_column_selection": "alternate_latency_column"},
         ),
     ]
     ds = InterpolatingDataSource(ProfilingDataSource(tmp_path))
@@ -1659,10 +1659,10 @@ def test_compute_interpolation_uses_source_pure_selected_candidates(tmp_path, mo
 
     assert result is not None
     assert result.latency_us == pytest.approx(15.0)
-    assert result.details["latency_source_attempt"] == "selected_only"
+    assert result.details["latency_column_group"] == "preferred_column_only"
 
 
-def test_compute_interpolation_falls_back_to_source_pure_fallback_candidates(tmp_path, monkeypatch):
+def test_compute_interpolation_uses_alternate_latency_column_candidates(tmp_path, monkeypatch):
     key = make_regime_key(
         {
             "kernel_type": "MatMulV2",
@@ -1676,21 +1676,21 @@ def test_compute_interpolation_falls_back_to_source_pure_fallback_candidates(tmp
             {"M": 100.0, "K": 512.0, "N": 1024.0},
             10.0,
             key,
-            row_meta={"latency_selection": "selected_column"},
+            row_meta={"latency_column_selection": "preferred_latency_column"},
         ),
         CandidatePoint(
             "MatMulV2",
             {"M": 100.0, "K": 512.0, "N": 1024.0},
             100.0,
             key,
-            row_meta={"latency_selection": "fallback_column"},
+            row_meta={"latency_column_selection": "alternate_latency_column"},
         ),
         CandidatePoint(
             "MatMulV2",
             {"M": 200.0, "K": 512.0, "N": 1024.0},
             200.0,
             key,
-            row_meta={"latency_selection": "fallback_column"},
+            row_meta={"latency_column_selection": "alternate_latency_column"},
         ),
     ]
     ds = InterpolatingDataSource(ProfilingDataSource(tmp_path))
@@ -1712,7 +1712,7 @@ def test_compute_interpolation_falls_back_to_source_pure_fallback_candidates(tmp
 
     assert result is not None
     assert result.latency_us == pytest.approx(150.0)
-    assert result.details["latency_source_attempt"] == "fallback_only"
+    assert result.details["latency_column_group"] == "alternate_column_only"
 
 
 @pytest.fixture
@@ -3205,7 +3205,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
     assert result is None
     assert ds.last_miss_reason == "insufficient_filtered_candidates"
     assert ds.last_miss_details["interpolation_path"] == "elementwise_1d"
-    assert ds.last_miss_details["target"] == pytest.approx(150.0)
+    assert ds.last_miss_details["target"] == pytest.approx(19200.0)
 
 
 def test_elementwise_decode_batch_shape_interpolates_positive_rms_norm_latency(tmp_path):
@@ -3245,7 +3245,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
     assert result.source == QuerySource.INTERPOLATED
     assert result.latency_us == pytest.approx(5.531)
     assert result.latency_us > 0.0
-    assert result.details["axis_boundary"] == {"axis_0": [6.0, 8.0]}
+    assert result.details["axis_boundary"] == {"io_numel": [79872.0, 104448.0]}
 
 
 def test_elementwise_input_signature_separates_broadcast_and_full_tensor_inputs(tmp_path):
@@ -3341,7 +3341,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
     ) == (("full", (7168,)), ("unknown", (1,)))
 
 
-def test_elementwise_dtype_scaled_fallback_keeps_input_signature_boundary(tmp_path):
+def test_elementwise_cross_dtype_candidates_are_rejected(tmp_path):
     data_dir = tmp_path / "elementwise_scaled_signature"
     data_dir.mkdir()
     _write_text(
@@ -3376,10 +3376,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 
     result = ds.lookup(broadcast_op)
 
-    assert result is not None
-    assert result.latency_us == pytest.approx(30.0)
-    assert result.details["dtype_attempt"] == "scaled_dtype"
-    assert result.details["dtype_scaled"] is True
+    assert result is None
 
 
 def test_model_runner_wraps_profiling_datasource_by_default(monkeypatch, tmp_path):

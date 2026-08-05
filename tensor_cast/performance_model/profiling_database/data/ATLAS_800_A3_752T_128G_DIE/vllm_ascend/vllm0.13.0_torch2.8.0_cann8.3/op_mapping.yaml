@@ -61,7 +61,7 @@
 # Special query mode, overriding the default shape matching logic.
 # Optional values: attention_special | elementwise
 # - attention_special: query by (batch, seq, heads, head_dim) quadruple
-# - elementwise: match by output shape, scale using byte-ratio dtype
+# - elementwise: interpolate total tensor I/O elements with exact dtype and broadcast matching
 # Example: query_mode: attention_special
 #
 # composite (bool, optional):
@@ -261,6 +261,7 @@ operator_mappings:
 
   "aten.add.Tensor":
     kernel_type: Add
+    query_mode: elementwise
     notes: >
       [HIGH] op-plugin: YAML:862 / AddKernelNpuOpApi.cpp.
       aclnn: aclnnAdd (tensor+tensor), aclnnAdds (tensor+scalar); all produce Type=Add.

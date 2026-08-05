@@ -140,7 +140,7 @@ def test_compute_interpolation_midpoint(interp_data_dir):
     assert result.source == QuerySource.INTERPOLATED
 
 
-def test_moe_fused_query_mode_skips_phase1_interpolation(tmp_path, monkeypatch):
+def test_moe_fused_query_mode_uses_dedicated_path(tmp_path, monkeypatch):
     data_dir = tmp_path / "moe_fused"
     data_dir.mkdir()
     (data_dir / "op_mapping.yaml").write_text(
@@ -168,8 +168,7 @@ operator_mappings:
 
     ds.base.last_miss_reason = "latency_invalid"
     assert ds._interpolate(op) is None
-    assert ds.last_miss_reason == "wrapper_moe_fused_disabled"
-    assert ds.last_miss_details["base_miss_reason"] == "latency_invalid"
+    assert ds.last_miss_reason == "ep_size_not_configured"
 
 
 def test_compute_interpolation_quarter(interp_data_dir):
@@ -386,14 +385,8 @@ def test_interpolate_elementwise_basic(interp_data_dir):
     assert result.confidence == 0.7
 
 
-def test_interpolate_elementwise_dtype_scaled(interp_data_dir):
-    """FP32 target, BF16 CSV: candidates are dtype-scaled before 1D interpolation.
-
-    CSV rows: (128,7168) BF16 → 6.0us, (256,7168) BF16 → 12.0us
-    FP32 is 4 bytes, BF16 is 2 bytes → scale factor 2.0
-    Scaled candidates: (128,7168) → 12.0us, (256,7168) → 24.0us
-    Interpolate at 192: t=0.5, latency = 12.0 + 0.5*(24.0-12.0) = 18.0us
-    """
+def test_interpolate_elementwise_rejects_cross_dtype_candidates(interp_data_dir):
+    """Elementwise interpolation does not infer latency across output dtypes."""
     base = ProfilingDataSource(interp_data_dir)
     ds = InterpolatingDataSource(base)
     out = torch.empty(192, 7168, device="meta", dtype=torch.float32)
@@ -406,10 +399,7 @@ def test_interpolate_elementwise_dtype_scaled(interp_data_dir):
         out,
     )
     result = ds.lookup(op)
-    assert result is not None, "Should interpolate FP32 target with dtype-scaled BF16 candidates"
-    assert abs(result.latency_us - 18.0) < 1.0, f"Expected ~18.0 us, got {result.latency_us}"
-    assert result.source == QuerySource.INTERPOLATED
-    assert result.confidence == 0.7, f"1D interpolation should have fixed confidence=0.7, got {result.confidence}"
+    assert result is None
 
 
 def test_interpolate_elementwise_hidden_dim_filter(interp_data_dir):
@@ -475,8 +465,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 
     assert result is not None
     assert result.latency_us == pytest.approx(45.0)
-    assert result.details["dtype_attempt"] == "same_dtype"
-    assert result.details["exact_fields"]["csv_output_dtype"] == "FLOAT"
+    assert result.details["exact_fields"]["output_dtype"] == "FLOAT"
     assert not result.details["dtype_scaled"]
 
 
@@ -497,17 +486,14 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
     index = ds._get_elementwise_index("Add", "FLOAT")
     assert index is not None
 
-    input_signature = index.points[0].row_meta["input_signature"]
-    groups = InterpolatingDataSource._elementwise_candidate_group_attempts(
-        index, "Add", (7168,), input_signature, "FLOAT"
-    )
+    groups = index.candidate_groups_matching(index.points[0].regime_key)
 
-    assert [label for label, _group in groups] == ["same_dtype", "scaled_dtype"]
-    assert [dict(group.regime_key)["csv_output_dtype"] for _label, group in groups] == ["FLOAT", "DT_BF16"]
-    assert all(len({point.input_dtypes[0] for point in group.points}) == 1 for _label, group in groups)
+    assert len(groups) == 1
+    assert dict(groups[0].regime_key)["output_dtype"] == "FLOAT"
+    assert {point.input_dtypes[0] for point in groups[0].points} == {"FLOAT"}
 
 
-def test_elementwise_dtype_scaled_cache_is_scoped_to_target_dtype(interp_data_dir):
+def test_elementwise_exact_dtype_cache_is_scoped_to_target_dtype(interp_data_dir):
     ds = InterpolatingDataSource(ProfilingDataSource(interp_data_dir))
     bf16_out = torch.empty(192, 7168, device="meta", dtype=torch.bfloat16)
     fp32_out = torch.empty(192, 7168, device="meta", dtype=torch.float32)
@@ -532,10 +518,8 @@ def test_elementwise_dtype_scaled_cache_is_scoped_to_target_dtype(interp_data_di
     fp32_result = ds.lookup(fp32_op)
 
     assert bf16_result is not None
-    assert fp32_result is not None
+    assert fp32_result is None
     assert bf16_result.latency_us == pytest.approx(9.0)
-    assert fp32_result.latency_us == pytest.approx(18.0)
-    assert fp32_result.details["dtype_scaled"]
     assert len(ds._elementwise_index_cache) == 2
 
     bf16_index = ds._get_elementwise_index("Add", "DT_BF16")
@@ -675,7 +659,7 @@ def test_partial_returns_none_when_interpolation_fails(interp_data_dir):
     assert result is None
 
 
-def test_candidate_latency_scans_fallback_after_zero_primary_column():
+def test_candidate_latency_uses_alternate_after_zero_preferred_column():
     ds = object.__new__(InterpolatingDataSource)
     row = pd.Series(
         {
@@ -688,10 +672,10 @@ def test_candidate_latency_scans_fallback_after_zero_primary_column():
 
     assert latency == pytest.approx(12.5)
     assert meta["latency_column"] == "Profiling Average Duration(us)"
-    assert meta["latency_selection"] == "fallback_column"
+    assert meta["latency_column_selection"] == "alternate_latency_column"
 
 
-def test_candidate_latency_uses_wrapper_median_fallback_column():
+def test_candidate_latency_uses_alternate_profiling_median_column():
     ds = object.__new__(InterpolatingDataSource)
     row = pd.Series(
         {
@@ -706,7 +690,7 @@ def test_candidate_latency_uses_wrapper_median_fallback_column():
 
     assert latency == pytest.approx(12.0)
     assert meta["latency_column"] == "Profiling Median Duration(us)"
-    assert meta["latency_selection"] == "fallback_column"
+    assert meta["latency_column_selection"] == "alternate_latency_column"
 
 
 def test_candidate_latency_rejects_non_finite_and_non_positive_cells():
