@@ -53,24 +53,18 @@ def test_iter_rename_pairs_extracts_rename_entries() -> None:
     assert iter_rename_pairs(entries) == (("old.py", "new.py"),)
 
 
-def test_gate_exemption_drift_deleted_source() -> None:
+def test_gate_exemption_drift_deleted_source_is_not_checked_here() -> None:
+    """Source existence is validated at policy load — drift must not duplicate it."""
     policy = _policy(source_exemptions=(_source_exemption("tensor_cast/ops.py", "add"),))
     changes = ChangeSet.build(del_source=("tensor_cast/ops.py",))
-    errors = gate_exemption_drift(policy, changes, ())
-    assert len(errors) == 1
-    assert errors[0].category == "exemption_drift"
-    assert errors[0].path == "tensor_cast/ops.py"
-    assert errors[0].symbol == "add"
+    assert gate_exemption_drift(policy, changes, ()) == ()
 
 
-def test_gate_exemption_drift_renamed_source() -> None:
+def test_gate_exemption_drift_renamed_source_is_not_checked_here() -> None:
     policy = _policy(source_exemptions=(_source_exemption("tensor_cast/old.py", "fn"),))
     changes = ChangeSet.build(del_source=("tensor_cast/old.py",), new_source=("tensor_cast/new.py",))
     rename_pairs = (("tensor_cast/old.py", "tensor_cast/new.py"),)
-    errors = gate_exemption_drift(policy, changes, rename_pairs)
-    assert len(errors) == 1
-    assert "renamed source" in errors[0].detail
-    assert "tensor_cast/new.py::fn" in errors[0].detail
+    assert gate_exemption_drift(policy, changes, rename_pairs) == ()
 
 
 def test_gate_exemption_drift_deleted_test() -> None:

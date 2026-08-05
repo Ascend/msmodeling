@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -11,6 +12,17 @@ if TYPE_CHECKING:
 
 _VALID_TOKENS = frozenset({"local", "test"})
 _TEST_EXTRA_KEYS = frozenset({"test_map_path", "base_branch", "offline", "weights_prune"})
+_SUITE_VALUES = ("ci_gate", "full", "smoke", "regression", "benchmark")
+
+
+class BuildSuite(str, Enum):
+    """Test modes for ``python build.py test --suite``."""
+
+    CI_GATE = "ci_gate"
+    FULL = "full"
+    SMOKE = "smoke"
+    REGRESSION = "regression"
+    BENCHMARK = "benchmark"
 
 
 @dataclass(frozen=True)
@@ -20,6 +32,7 @@ class BuildOptions:
     version: str | None
     version_explicit: bool
     extras: Mapping[str, str]
+    suite: BuildSuite
 
 
 def _parse_extras(raw_extras: Sequence[str], parser: argparse.ArgumentParser) -> dict[str, str]:
@@ -70,6 +83,7 @@ def _parse_tokens(tokens: Sequence[str], parser: argparse.ArgumentParser) -> tup
 
 def parse_argv(argv: Sequence[str] | None = None) -> BuildOptions:
     """Parse CLI arguments into :class:`BuildOptions`."""
+    suite_choices = ", ".join(_SUITE_VALUES)
     parser = argparse.ArgumentParser(prog="build.py")
     parser.add_argument(
         "-v",
@@ -89,6 +103,12 @@ def parse_argv(argv: Sequence[str] | None = None) -> BuildOptions:
         ),
     )
     parser.add_argument(
+        "--suite",
+        default=None,
+        choices=list(_SUITE_VALUES),
+        help=f"test-only suite to run (default: ci_gate); choices: {suite_choices}",
+    )
+    parser.add_argument(
         "tokens",
         nargs="*",
         metavar="COMMAND",
@@ -98,10 +118,14 @@ def parse_argv(argv: Sequence[str] | None = None) -> BuildOptions:
     is_test, is_local = _parse_tokens(args.tokens, parser)
     extras = _parse_extras(args.extra, parser)
     _validate_extras(is_test, extras, parser)
+    if args.suite is not None and not is_test:
+        parser.error("--suite is only supported with the test command")
+    suite = BuildSuite(args.suite) if args.suite is not None else BuildSuite.CI_GATE
     return BuildOptions(
         is_test=is_test,
         is_local=is_local,
         version=args.version,
         version_explicit=args.version is not None,
         extras=extras,
+        suite=suite,
     )

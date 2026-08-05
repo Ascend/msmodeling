@@ -193,7 +193,12 @@ def test_my_feature():
 ### 5. Verify locally
 
 ```bash
-bash scripts/run_smoke.sh        # or run_regression.sh / run_benchmark.sh
+python build.py test --suite smoke
+python build.py test --suite regression
+python build.py test --suite benchmark
+
+# CI gate (auto-downloads test_map when unset)
+python build.py test
 
 # check collection scope
 PYTHONPATH=. python -m pytest tests/smoke/ tests/regression/ \

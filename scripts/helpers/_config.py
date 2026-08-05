@@ -12,6 +12,7 @@ from pydantic import Field, ValidationError, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scripts.helpers._errors import ConfigError, format_expected_got
+from scripts.helpers.defaults import DEFAULT_BASE_BRANCH, DEFAULT_MSMODELING_CACHE
 
 _THRESHOLD_MAX: Final = 100.0
 _BOOL_TRUE = frozenset({"1", "true", "yes", "on"})
@@ -88,12 +89,12 @@ class Config(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", populate_by_name=True, frozen=True)
 
     test_map_path: str | None = Field(default=None, validation_alias="MSMODELING_TEST_MAP_PATH")
-    base_branch: str = Field(default="master", validation_alias="MSMODELING_TEST_BASE_BRANCH")
+    base_branch: str = Field(default=DEFAULT_BASE_BRANCH, validation_alias="MSMODELING_TEST_BASE_BRANCH")
     line_threshold: float = Field(default=60.0, validation_alias="MSMODELING_TEST_LINE_THRESHOLD")
     branch_threshold: float = Field(default=40.0, validation_alias="MSMODELING_TEST_BRANCH_THRESHOLD")
     benchmark_parallel: bool = Field(default=False, validation_alias="MSMODELING_BENCHMARK_PARALLEL")
     feishu_webhook_url: str = Field(default="", validation_alias="FEISHU_WEBHOOK_URL")
-    msmodeling_cache: str = Field(default=".msmodeling_cache", validation_alias="MSMODELING_CACHE")
+    msmodeling_cache: str = Field(default=DEFAULT_MSMODELING_CACHE, validation_alias="MSMODELING_CACHE")
     weights_prune: bool = Field(default=False, validation_alias="MSMODELING_TEST_WEIGHTS_PRUNE")
     gitcode_owner: str = Field(default="", validation_alias="GITCODE_OWNER")
     gitcode_repo: str = Field(default="", validation_alias="GITCODE_REPO")

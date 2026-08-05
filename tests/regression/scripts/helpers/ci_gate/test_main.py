@@ -154,7 +154,8 @@ def test_plan_blocking_errors_combined(baseline: Baseline, tmp_path: Path) -> No
     assert len(errors) == 1
 
 
-def test_plan_exemption_drift_deleted_source_blocking(baseline: Baseline) -> None:
+def test_plan_exemption_drift_deleted_source_not_in_drift(baseline: Baseline) -> None:
+    """Deleted source exemptions are load-time errors, not drift."""
     policy = CiGatePolicy(
         sources=baseline.policy.sources,
         tests=baseline.policy.tests,
@@ -166,8 +167,7 @@ def test_plan_exemption_drift_deleted_source_blocking(baseline: Baseline) -> Non
     cs = ChangeSet.build(del_source=("tensor_cast/unknown.py",))
     errors = build_hard_blocking_plan(cs, baseline.test_map, policy)
     drift = [err for err in errors if err.category == "exemption_drift"]
-    assert len(drift) == 1
-    assert drift[0].path == "tensor_cast/unknown.py"
+    assert drift == []
 
 
 def test_collect_product_shadow_warnings_reports_duplicate_defs(tmp_path: Path) -> None:

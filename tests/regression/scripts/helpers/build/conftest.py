@@ -11,7 +11,7 @@ import pytest
 
 from scripts.helpers.build import run_build as run_build_mod
 from scripts.helpers.build import run_test as run_test_mod
-from scripts.helpers.build.argv import BuildOptions
+from scripts.helpers.build.argv import BuildOptions, BuildSuite
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -135,6 +135,7 @@ def build_options(**overrides: Any) -> BuildOptions:
         "version": None,
         "version_explicit": False,
         "extras": {},
+        "suite": BuildSuite.CI_GATE,
     }
     defaults.update(overrides)
     return BuildOptions(**defaults)
@@ -199,6 +200,21 @@ def repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "build.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     (scripts_dir / "run_ci_gate.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (scripts_dir / "run_smoke.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (scripts_dir / "run_regression.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (scripts_dir / "run_benchmark.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (scripts_dir / "defaults.env").write_text(
+        "\n".join(
+            [
+                "UV_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple",
+                "HF_ENDPOINT=https://hf-mirror.com",
+                "MSMODELING_TEST_BASE_BRANCH=master",
+                "MSMODELING_CACHE=.msmodeling_cache",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "msmodeling"\nversion = "0.2.0"\n',
         encoding="utf-8",
@@ -209,7 +225,16 @@ def repo_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(run_build_mod, "_ARTIFACTS_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(run_build_mod, "_WHEEL_OUTPUT_DIR", tmp_path / "artifacts")
     monkeypatch.setattr(run_test_mod, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(run_test_mod, "_CI_GATE_SCRIPT", scripts_dir / "run_ci_gate.sh")
+    monkeypatch.setattr(
+        run_test_mod,
+        "_SUITE_SCRIPTS",
+        {
+            BuildSuite.CI_GATE: scripts_dir / "run_ci_gate.sh",
+            BuildSuite.SMOKE: scripts_dir / "run_smoke.sh",
+            BuildSuite.REGRESSION: scripts_dir / "run_regression.sh",
+            BuildSuite.BENCHMARK: scripts_dir / "run_benchmark.sh",
+        },
+    )
     monkeypatch.setattr(run_test_mod, "_TEST_REPORTS_DIR", tmp_path / "artifacts" / "test-reports")
     try:
         from scripts.helpers.build import bootstrap as bootstrap_mod

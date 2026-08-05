@@ -32,8 +32,38 @@ TESTS_BENCHMARK="${PROJECT_DIR}/tests/benchmark"
 # pytest-xdist: worksteal balances workers when case durations vary widely.
 PYTEST_XDIST_ARGS=(-n auto --dist=worksteal)
 
-export PYTHONPATH="${PROJECT_DIR}"
+# Apply scripts/defaults.env with setdefault (never override user-exported values).
+# Grammar MUST match scripts/helpers/defaults.py::parse_defaults_env_line:
+#   - empty lines ignored
+#   - '#' starts a comment through end of line (including mid-line)
+#   - KEY=VALUE; trim whitespace; values must not contain '#'
+_DEFAULTS_ENV="${SCRIPT_DIR}/defaults.env"
+if [[ -f "${_DEFAULTS_ENV}" ]]; then
+  while IFS= read -r _line || [[ -n "${_line}" ]]; do
+    _line="${_line%%#*}"
+    _line="${_line#"${_line%%[![:space:]]*}"}"
+    _line="${_line%"${_line##*[![:space:]]}"}"
+    [[ -z "${_line}" || "${_line}" != *=* ]] && continue
+    _key="${_line%%=*}"
+    _val="${_line#*=}"
+    # Trim key and value (same as defaults.py strip on both sides).
+    _key="${_key#"${_key%%[![:space:]]*}"}"
+    _key="${_key%"${_key##*[![:space:]]}"}"
+    _val="${_val#"${_val%%[![:space:]]*}"}"
+    _val="${_val%"${_val##*[![:space:]]}"}"
+    [[ -z "${_key}" ]] && continue
+    case "${_key}" in
+      UV_INDEX_URL|HF_ENDPOINT|MSMODELING_TEST_BASE_BRANCH|MSMODELING_CACHE)
+        if [[ -z "${!_key:-}" ]]; then
+          export "${_key}=${_val}"
+        fi
+        ;;
+    esac
+  done < "${_DEFAULTS_ENV}"
+  unset _line _key _val
+fi
 
+export PYTHONPATH="${PROJECT_DIR}"
 # Determine if uv should be used (cache the result)
 USE_UV=false
 if [[ -z "${PYTHON:-}" ]] && command -v uv >/dev/null 2>&1 && [[ -f "${PROJECT_DIR}/pyproject.toml" ]]; then

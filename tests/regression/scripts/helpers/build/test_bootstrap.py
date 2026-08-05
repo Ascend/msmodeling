@@ -203,6 +203,7 @@ def test_bootstrap_fail_fast_missing_uv_lock(tmp_path: Path, monkeypatch: pytest
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "build.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (scripts_dir / "defaults.env").write_text("UV_INDEX_URL=x\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
     monkeypatch.setattr(bootstrap_mod, "REPO_ROOT", tmp_path)
     with pytest.raises(SystemExit) as exc_info:
@@ -215,6 +216,7 @@ def test_bootstrap_is_noninteractive(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "build.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (scripts_dir / "defaults.env").write_text("UV_INDEX_URL=x\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8")
     (tmp_path / "uv.lock").write_text("# lock\n", encoding="utf-8")
     monkeypatch.setattr(bootstrap_mod, "REPO_ROOT", tmp_path)
@@ -246,6 +248,7 @@ def test_bootstrap_prepends_uv_dir_to_path(
     scripts_dir = repo / "scripts"
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "build.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    (scripts_dir / "defaults.env").write_text("UV_INDEX_URL=x\n", encoding="utf-8")
     (repo / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8")
     (repo / "uv.lock").write_text("# lock\n", encoding="utf-8")
 

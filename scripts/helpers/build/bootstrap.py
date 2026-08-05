@@ -48,7 +48,17 @@ def _uv_beside_interpreter() -> str | None:
 
 
 def fail_fast(*, mode: Mode) -> None:
-    """Exit early on missing prerequisites (before install/sync)."""
+    """Exit early on missing prerequisites (before install/sync).
+
+    Shared checks: Python version, pyproject.toml, uv.lock, scripts/defaults.env.
+    Build mode also requires scripts/build.sh here.
+
+    Test mode intentionally does **not** check suite shell scripts here: the
+    required script depends on ``--suite`` (ci_gate / smoke / regression /
+    benchmark), and ``full`` needs none. Suite script presence is validated in
+    ``run_test`` before ``bootstrap("test")`` / ``uv sync``, so missing scripts
+    still fail before dependency install.
+    """
     if sys.version_info < _MIN_PYTHON:
         _fail(
             f"Python {_MIN_PYTHON[0]}.{_MIN_PYTHON[1]}+ required; "
@@ -63,10 +73,15 @@ def fail_fast(*, mode: Mode) -> None:
     if not lock.is_file():
         _fail(f"missing required file: {lock}")
 
-    script_name = "build.sh" if mode == "build" else "run_ci_gate.sh"
-    script = REPO_ROOT / "scripts" / script_name
-    if not script.is_file():
-        _fail(f"missing required script: {script}")
+    defaults_env = REPO_ROOT / "scripts" / "defaults.env"
+    if not defaults_env.is_file():
+        _fail(f"missing required file: {defaults_env}")
+
+    # build.sh only: test suite scripts are checked per --suite in run_test.
+    if mode == "build":
+        script = REPO_ROOT / "scripts" / "build.sh"
+        if not script.is_file():
+            _fail(f"missing required script: {script}")
 
 
 def ensure_uv() -> str:

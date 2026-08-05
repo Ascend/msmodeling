@@ -7,9 +7,9 @@
 #   MSMODELING_CACHE                   optional repo-local Hub cache (unset = use ~/.cache like develop)
 #   PYTHON                             absolute path to interpreter; if unset, uses uv or python3
 #
-# Optional (not set by default):
-#   UV_INDEX_URL                       custom UV package index URL
-#   HF_ENDPOINT                        custom HuggingFace endpoint URL
+# Optional (defaults from scripts/defaults.env when unset):
+#   UV_INDEX_URL                       UV package index URL
+#   HF_ENDPOINT                        HuggingFace endpoint URL
 #
 # Pytest: tests/regression/, -m "not npu and not network" (includes nightly), -n auto --dist=worksteal, -vv --tb=short.
 set -euo pipefail

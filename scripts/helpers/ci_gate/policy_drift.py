@@ -1,4 +1,8 @@
-"""Detect gate_policy exemption entries broken by deleted or renamed paths."""
+"""Detect gate_policy test-exemption entries broken by deleted or renamed paths.
+
+Source exemptions are validated at policy load (``validate_source_exemption_symbol``).
+Do not re-check missing/renamed source paths here — that is redundant with load.
+"""
 
 from __future__ import annotations
 
@@ -28,34 +32,10 @@ def gate_exemption_drift(
     changes: ChangeSet,
     rename_pairs: tuple[tuple[str, str], ...],
 ) -> tuple[GateError, ...]:
-    """Return blocking errors when exemptions reference deleted or renamed paths."""
+    """Return blocking errors when *test* exemptions reference deleted or renamed paths."""
     errors: list[GateError] = []
-    deleted_sources = set(changes.del_source)
     deleted_tests = set(changes.del_test)
     rename_by_old = dict(rename_pairs)
-
-    for entry in policy.source_exemptions:
-        if entry.file in rename_by_old:
-            new_path = rename_by_old[entry.file]
-            errors.append(
-                GateError(
-                    category="exemption_drift",
-                    path=entry.file,
-                    symbol=entry.symbol,
-                    detail=(
-                        f"exemption {entry.symbol_key} references renamed source; update to {new_path}::{entry.symbol}"
-                    ),
-                )
-            )
-        elif entry.file in deleted_sources:
-            errors.append(
-                GateError(
-                    category="exemption_drift",
-                    path=entry.file,
-                    symbol=entry.symbol,
-                    detail=f"exemption {entry.symbol_key} references deleted source file",
-                )
-            )
 
     for entry in policy.test_exemptions:
         test_file = entry.test_id.split("::", 1)[0]

@@ -1,23 +1,32 @@
-"""Run tests for ``python build.py test`` — full suite or CI gate."""
+"""Run tests for ``python build.py test`` — CI gate, full suite, or named suites."""
 
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.build.argv import BuildSuite
 from scripts.helpers.build.bootstrap import bootstrap
+from scripts.helpers.build.runtime_env import apply_test_defaults
+from scripts.helpers.build.test_map_fetch import MapFetchError, resolve_test_map_path
 from scripts.helpers.common._logging import setup_logger
 from scripts.helpers.common.subprocess_stream import run_merged_output
+from scripts.helpers.defaults import DEFAULT_BASE_BRANCH, PYTEST_XDIST_ARGS
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from scripts.helpers.build.argv import BuildOptions
 
-_CI_GATE_SCRIPT: Final = REPO_ROOT / "scripts" / "run_ci_gate.sh"
+_SUITE_SCRIPTS: Final = {
+    BuildSuite.CI_GATE: REPO_ROOT / "scripts" / "run_ci_gate.sh",
+    BuildSuite.SMOKE: REPO_ROOT / "scripts" / "run_smoke.sh",
+    BuildSuite.REGRESSION: REPO_ROOT / "scripts" / "run_regression.sh",
+    BuildSuite.BENCHMARK: REPO_ROOT / "scripts" / "run_benchmark.sh",
+}
 _TEST_REPORTS_DIR: Final = REPO_ROOT / "artifacts" / "test-reports"
 _SHELL_TIMEOUT_SECONDS: Final = 36000
 
@@ -25,14 +34,12 @@ logger: Final = setup_logger("build")
 
 
 def run_test(options: BuildOptions) -> int:
-    """Run full ``pytest tests``, or CI gate when test_map is provided."""
-    raw = options.extras.get("test_map_path") or os.environ.get("MSMODELING_TEST_MAP_PATH")
-    if not raw or not raw.strip():
-        logger.warning(
-            "MSMODELING_TEST_MAP_PATH not set; falling back to full pytest suite. Set it explicitly to use CI gate.",
-        )
+    """Dispatch ``python build.py test --suite ...``."""
+    if options.suite == BuildSuite.CI_GATE:
+        return _run_ci_gate(options)
+    if options.suite == BuildSuite.FULL:
         return _run_full_suite(options)
-    return _run_ci_gate(options, raw.strip())
+    return _run_named_suite(options)
 
 
 def _run_teed(cmd: list[str], *, env: dict[str, str], log_path: Path) -> int:
@@ -59,73 +66,23 @@ def _run_teed(cmd: list[str], *, env: dict[str, str], log_path: Path) -> int:
         return 1
 
 
-def _run_full_suite(options: BuildOptions) -> int:
-    """Run ``pytest tests`` using markers from ``pyproject.toml`` addopts."""
-    uv_path = bootstrap("test")
-
-    env = os.environ.copy()
+def _apply_extras(env: dict[str, str], options: BuildOptions) -> dict[str, str]:
     if "offline" in options.extras:
         env["MSMODELING_OFFLINE"] = options.extras["offline"]
     if "weights_prune" in options.extras:
         env["MSMODELING_TEST_WEIGHTS_PRUNE"] = options.extras["weights_prune"]
+    if "base_branch" in options.extras:
+        env["MSMODELING_TEST_BASE_BRANCH"] = options.extras["base_branch"]
+    return env
 
-    log_path = _TEST_REPORTS_DIR / "full_suite.log"
-    started = time.monotonic()
-    exit_code = _run_teed(
-        [uv_path, "run", "pytest", "tests"],
-        env=env,
-        log_path=log_path,
-    )
+
+def _write_summary(*, exit_code: int, mode: str, test_map_path: str | None, started: float) -> None:
+    _TEST_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     (_TEST_REPORTS_DIR / "gate-summary.json").write_text(
         json.dumps(
             {
                 "exit_code": exit_code,
-                "mode": "full_suite",
-                "test_map_path": None,
-                "duration_seconds": time.monotonic() - started,
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return exit_code
-
-
-def _run_ci_gate(options: BuildOptions, test_map_path: str) -> int:
-    """Run CI gate via scripts/run_ci_gate.sh."""
-    if not _CI_GATE_SCRIPT.is_file():
-        logger.error("missing script: %s", _CI_GATE_SCRIPT)
-        return 1
-    if not Path(test_map_path).is_file():
-        logger.error("test_map_path is not a file: %s", test_map_path)
-        return 1
-
-    bootstrap("test")
-
-    env = os.environ.copy()
-    env["MSMODELING_TEST_MAP_PATH"] = test_map_path
-    env["MSMODELING_TEST_BASE_BRANCH"] = options.extras.get(
-        "base_branch",
-        os.environ.get("MSMODELING_TEST_BASE_BRANCH", "master"),
-    )
-    if "offline" in options.extras:
-        env["MSMODELING_OFFLINE"] = options.extras["offline"]
-    if "weights_prune" in options.extras:
-        env["MSMODELING_TEST_WEIGHTS_PRUNE"] = options.extras["weights_prune"]
-
-    log_path = _TEST_REPORTS_DIR / "ci_gate.log"
-    started = time.monotonic()
-    exit_code = _run_teed(
-        ["bash", str(_CI_GATE_SCRIPT)],
-        env=env,
-        log_path=log_path,
-    )
-    (_TEST_REPORTS_DIR / "gate-summary.json").write_text(
-        json.dumps(
-            {
-                "exit_code": exit_code,
-                "mode": "ci_gate",
+                "mode": mode,
                 "test_map_path": test_map_path,
                 "duration_seconds": time.monotonic() - started,
             },
@@ -133,5 +90,89 @@ def _run_ci_gate(options: BuildOptions, test_map_path: str) -> int:
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def _run_full_suite(options: BuildOptions) -> int:
+    """Run ``pytest tests`` with pyproject markers plus xdist worksteal."""
+    uv_path = bootstrap("test")
+    env = _apply_extras(apply_test_defaults(), options)
+    log_path = _TEST_REPORTS_DIR / "full_suite.log"
+    started = time.monotonic()
+    cmd = [uv_path, "run", "pytest", "tests", *PYTEST_XDIST_ARGS]
+    exit_code = _run_teed(cmd, env=env, log_path=log_path)
+    _write_summary(exit_code=exit_code, mode="full", test_map_path=None, started=started)
+    return exit_code
+
+
+def _run_named_suite(options: BuildOptions) -> int:
+    # Before bootstrap/sync: suite script is not checked in fail_fast (suite-dependent).
+    script = _SUITE_SCRIPTS[options.suite]
+    if not script.is_file():
+        logger.error(
+            "Missing suite script for --suite %s: %s. "
+            "Re-clone the repository or restore scripts/ from the default branch.",
+            options.suite.value,
+            script,
+        )
+        return 1
+
+    bootstrap("test")
+    env = _apply_extras(apply_test_defaults(), options)
+    log_path = _TEST_REPORTS_DIR / f"{options.suite.value}.log"
+    started = time.monotonic()
+    exit_code = _run_teed(["bash", str(script)], env=env, log_path=log_path)
+    _write_summary(
+        exit_code=exit_code,
+        mode=options.suite.value,
+        test_map_path=None,
+        started=started,
+    )
+    return exit_code
+
+
+def _run_ci_gate(options: BuildOptions) -> int:
+    """Resolve test_map (download if needed) then run scripts/run_ci_gate.sh."""
+    # Before bootstrap/sync: ci_gate script is not checked in fail_fast (suite-dependent).
+    script = _SUITE_SCRIPTS[BuildSuite.CI_GATE]
+    if not script.is_file():
+        logger.error(
+            "Missing CI gate script: %s. Re-clone the repository or restore scripts/run_ci_gate.sh.",
+            script,
+        )
+        return 1
+
+    env = _apply_extras(apply_test_defaults(), options)
+    configured = options.extras.get("test_map_path") or env.get("MSMODELING_TEST_MAP_PATH")
+    base_branch = env.get("MSMODELING_TEST_BASE_BRANCH", DEFAULT_BASE_BRANCH)
+    cache_dir = env.get("MSMODELING_CACHE")
+    try:
+        test_map_path = resolve_test_map_path(
+            configured=configured,
+            base_branch=base_branch,
+            cache_dir=cache_dir,
+        )
+    except MapFetchError as exc:
+        logger.error("%s", exc)
+        logger.error(
+            "Cannot start CI gate without a test_map. "
+            "Fix network/OBS access, set MSMODELING_TEST_MAP_PATH to an existing file, "
+            "or pass -e test_map_path=/path/to/test_map.json. "
+            "Wrong MSMODELING_TEST_BASE_BRANCH also yields 404 (URL uses that branch name)."
+        )
+        return 1
+
+    bootstrap("test")
+    env["MSMODELING_TEST_MAP_PATH"] = str(test_map_path)
+    env["MSMODELING_TEST_BASE_BRANCH"] = base_branch
+
+    log_path = _TEST_REPORTS_DIR / "ci_gate.log"
+    started = time.monotonic()
+    exit_code = _run_teed(["bash", str(script)], env=env, log_path=log_path)
+    _write_summary(
+        exit_code=exit_code,
+        mode="ci_gate",
+        test_map_path=str(test_map_path),
+        started=started,
     )
     return exit_code

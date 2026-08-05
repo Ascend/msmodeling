@@ -2,11 +2,15 @@
 
 Shell entry points for local runs, PR incremental gate, nightly, and `test_map` maintenance. Python logic lives in `scripts/helpers/`; `scripts/lib/common.sh` bootstraps env, optional `uv sync --frozen --group ci`, and invokes helpers.
 
-**Department unified entry:** repo-root [`build.py`](../build.py) wraps `scripts/build.sh` (default) and test mode (full suite or CI gate). Prefer:
+**Department unified entry:** repo-root [`build.py`](../build.py). Prefer:
 
 ```bash
-python build.py          # build wheel (bootstraps tools)
-python build.py test     # full pytest tests (pyproject.toml markers); set MSMODELING_TEST_MAP_PATH for CI gate
+python build.py                              # build wheel (bootstraps tools)
+python build.py test                         # CI gate (default --suite ci_gate)
+python build.py test --suite full            # full pytest tests/
+python build.py test --suite smoke           # tests/smoke
+python build.py test --suite regression      # tests/regression
+python build.py test --suite benchmark       # tests/benchmark
 ```
 
 `build.py` is fully non-interactive (CI-safe). It **strongly depends on `uv`**: if `uv` is missing it logs a WARNING and installs `uv` non-interactively via `pip` (default index; configure `PIP_INDEX_URL` yourself if download is slow), then runs `uv sync --frozen` for the mode's dependency group (`build` or `ci`). Network/permission failures exit with no venv/pip build fallback. On Python < 3.11, `tomli` comes from the `build` group (build mode) or `ci` group (test mode).
@@ -17,10 +21,13 @@ Test case layout, markers, and authoring rules: see [tests/README.md](../tests/R
 
 ```bash
 scripts/
+├── defaults.env             # unpublished defaults (UV/HF/base branch/cache/test_map URL)
 ├── run_*.sh                 # entry scripts
 ├── lib/common.sh            # shell bootstrap: env + uv sync --frozen --group ci + invoke helpers
 ├── helpers/
+│   ├── defaults.py          # loads defaults.env (Python SSOT consumer)
 │   ├── _config.py           # Env → Config (pydantic-settings)
+│   ├── build/               # build.py: argv, bootstrap, suites, test_map download
 │   ├── ci_gate/             # PR incremental gate + test_map sync
 │   ├── nightly/             # Scheduled nightly phases + report
 │   └── common/              # test_map build, pytest runner, coverage
@@ -28,40 +35,61 @@ scripts/
 └── build.sh
 ```
 
-Test rules/markers: [tests/README.md](../tests/README.md)
-
 ## Unified entry (`build.py`)
-
-Department-standard root entry. Thin wrapper over existing shell scripts. Requires Python ≥ 3.10. Bootstraps tools before the main action:
 
 | Mode | Sync | Delegates to |
 |------|------|--------------|
 | `python build.py` | `uv sync --frozen --group build` | `bash scripts/build.sh` → wheel under `artifacts/` |
-| `python build.py test` (no `MSMODELING_TEST_MAP_PATH`) | `uv sync --frozen --group ci` | `uv run pytest tests` → markers from `pyproject.toml` `[tool.pytest.ini_options] addopts`; log under `artifacts/test-reports/full_suite.log` |
-| `python build.py test` (with `MSMODELING_TEST_MAP_PATH` or `-e test_map_path=...`) | `uv sync --frozen --group ci` | `bash scripts/run_ci_gate.sh` → log under `artifacts/test-reports/ci_gate.log` |
+| `python build.py test` | `uv sync --frozen --group ci` | CI gate (`--suite ci_gate`, default) |
+| `python build.py test --suite full` | same | `uv run pytest tests -n auto --dist worksteal` (markers from `pyproject.toml` `addopts`) |
+| `python build.py test --suite smoke` | same | `bash scripts/run_smoke.sh` |
+| `python build.py test --suite regression` | same | `bash scripts/run_regression.sh` |
+| `python build.py test --suite benchmark` | same | `bash scripts/run_benchmark.sh` |
 
 - **`build` group**: build-time helpers only (e.g. `tomli` on Python < 3.11). Does not pull CI/test packages.
 - **`ci` group**: gate/test dependencies (pytest, pydantic, `tomli`, …).
 
 `local` is accepted for spec compatibility but is a no-op in this pure-Python repo (same behavior as omitting it).
 
-`-e` / `--extra` is **test-only** (`python build.py test ...`). Allowed keys: `test_map_path`, `base_branch`, `offline`, `weights_prune`. Build mode rejects any `-e`. Other options use environment variables (e.g. `MSMODELING_TEST_MAP_PATH`).
+`-e` / `--extra` is **test-only**. Allowed keys: `test_map_path`, `base_branch`, `offline`, `weights_prune`. Build mode rejects any `-e`.
 
-`-v` / `--version` temporarily writes `project.version` in `pyproject.toml` via `uv version --frozen` for the wheel build, then restores the original version. Prefer `python build.py -v <ver>` (or `python build.py --version <ver>`). If you wrap with `uv run`, use `uv run -- python build.py -v <ver>` so uv does not consume `-v`.
+`--suite` is **test-only**. Default: `ci_gate`. Choices: `ci_gate`, `full`, `smoke`, `regression`, `benchmark`.
 
-**Test mode routing (fail-fast before bootstrap):**
+`-v` / `--version` temporarily writes `project.version` in `pyproject.toml` via `uv version --frozen` for the wheel build, then restores the original version. Prefer `python build.py -v <ver>`. If you wrap with `uv run`, use `uv run -- python build.py -v <ver>` so uv does not consume `-v`.
 
-- No `test_map_path` / `MSMODELING_TEST_MAP_PATH` (or blank) → run full `pytest tests` **without** overriding markers (inherits `pyproject.toml` `addopts`, currently `-m 'not npu and not nightly and not network'`).
-- `test_map_path` from `-e test_map_path=...` first, then `MSMODELING_TEST_MAP_PATH` → require the map file and `scripts/run_ci_gate.sh` before bootstrap, then run CI gate.
+### CI gate test_map resolution
+
+1. If `MSMODELING_TEST_MAP_PATH` (or `-e test_map_path=...`) points to an existing file with valid JSON object root → use it.
+2. If unset, empty, not a file, or JSON invalid → **warning**, then use branch-scoped cache:
+   `{MSMODELING_CACHE}/test_map/{MSMODELING_TEST_BASE_BRANCH}/test_map.json`
+   (e.g. `.msmodeling_cache/test_map/poc/AiClusterHub/test_map.json`). Different base branches never share one file.
+3. If that cache file is missing or corrupt → download with a **30s** socket timeout. URL:
+   `https://mindstudio-pr.obs.cn-north-4.myhuaweicloud.com/msmodeling/sync/{MSMODELING_TEST_BASE_BRANCH}/test_map.json`
+4. Download writes via `*.tmp` then replaces; failure deletes the tmp. A killed process may leave a stale `*.tmp` (safe to delete).
+5. HTTP errors (404, …), timeout, or network failure → **exit non-zero** (no silent full-suite fallback).
+
+Wrong `MSMODELING_TEST_BASE_BRANCH` → wrong OBS path → usually 404.
+
+**Cache lifecycle:** downloads are kept for reuse. There is no TTL. To force refresh, delete the branch directory under `{MSMODELING_CACHE}/test_map/` (or the whole `.msmodeling_cache/`). Corrupt JSON is detected and re-downloaded automatically.
+
+### Zero-config expectation
+
+With no env vars set, `python build.py test` should:
+
+1. Apply defaults from `scripts/defaults.env` into the child process env dict (setdefault; does not mutate the calling process `os.environ`).
+2. Download `master`'s map into `.msmodeling_cache/test_map/master/test_map.json`.
+3. Run the CI gate.
+
+If OBS is unreachable, set `MSMODELING_TEST_MAP_PATH` to a local map, or use `--suite full` intentionally.
 
 ## Entry scripts
 
 | Script | Role |
 |--------|------|
-| `run_smoke.sh` | Full `tests/smoke/` (local/CI `/run_tests smoke`) |
+| `run_smoke.sh` | Full `tests/smoke/` (also: `python build.py test --suite smoke`) |
 | `run_regression.sh` | Full `tests/regression/` |
 | `run_benchmark.sh` | Full `tests/benchmark/` |
-| `run_ci_gate.sh` | PR `compile`: read-only `test_map`, diff-driven pytest |
+| `run_ci_gate.sh` | PR incremental gate (also: `python build.py test`) |
 | `run_nightly.sh` | Scheduled: multi-phase pytest; phase1 pass → writes `test_map` |
 | `run_test_map_sync.sh` | Incremental/full `test_map` update (`--once`/`--watch`) |
 | `build.sh` | Build `msmodeling` wheel via `uv build --wheel` |
@@ -78,17 +106,16 @@ MSMODELING_WHEEL_OUTPUT_DIR=/tmp/wheels bash scripts/build.sh
 ## ci_gate (`run_ci_gate.sh`)
 
 - **Read-only** `MSMODELING_TEST_MAP_PATH`; stale/broken map → block or warn (no self-heal).
-- Pre-run hard block: deleted tests, sole-coverage deleted source, invalid `gate_policy.yaml`, **stale exemptions** (deleted/renamed product or test paths).
-- `exemptions.sources` symbols validated at load: must be `path::symbol` with symbol present in source AST; **coverage omit paths cannot be exempted**.
-- Duplicate function defs in changed product files: identical mangled symbol → last-wins for mapping; **non-blocking** GitCode PR comment when `GITCODE_*` set (reports mangled qualified name collisions).
+- Pre-run hard block: deleted tests, sole-coverage deleted source, invalid `gate_policy.yaml`, **stale test exemptions** (deleted/renamed test paths). Source exemptions that point at missing files fail at **policy load** (single check — not re-checked in drift).
+- `exemptions.sources` symbols validated at load: must be `path::symbol` with file present and symbol present in source AST; **coverage omit paths cannot be exempted**.
+- Duplicate function defs in changed product files: identical mangled symbol → last-wins for mapping; **non-blocking** GitCode PR comment when `GITCODE_*` set.
 - Symbol mangling applies to **functions and methods** (`foo@deco`, `Foo::run@staticmethod`); class-level decorators gate via `Class::%`, not `Class@decorator`.
-- Modified definitions: three-branch coverage fallback — decorator diff → relaxed import on `%`/`Class::%` plus body proxy; def-header-only → body proxy; body diff → strict on changed lines (strict suppresses proxy). Multi-line statement continuations (paren imports, list/dict/tuple, backslash, multi-line decorators) remap to Coverage statement-start lines before fallback query; `except` / `case` headers map to themselves (`ExceptHandler` / `match_case`). See [tests/README.md](../tests/README.md) § Coverage fallback.
 - Execution waves:
   - Changed-test wave: **no `-m`**, skip via `exemptions.tests`.
   - Mapped/guard wave: `-m "not npu and not nightly and not network"`.
   - Config change → full `tests/` with regression marker.
 - Marker policy rationale: [tests/README.md](../tests/README.md) § ci_gate marker policy.
-- Best-effort GitCode PR comments if `GITCODE_*` env set (unscoped Python, all-exempt tests, **exemption drift**, **shadowed defs**).
+- Best-effort GitCode PR comments if `GITCODE_*` env set.
 
 ## test_map sync (`run_test_map_sync.sh`)
 
@@ -108,17 +135,19 @@ MSMODELING_WHEEL_OUTPUT_DIR=/tmp/wheels bash scripts/build.sh
 
 Boolean: `0`/`1`/`true`/`false`/`yes`/`no`/`on`/`off` (case-insensitive).
 
+Defaults below come from [`scripts/defaults.env`](defaults.env) (not shipped in the wheel). Changing the file updates both `build.py` and `run_*.sh` (via `common.sh`). **Exporting a variable always wins** over the default.
+
 | Variable | Required | Default | Used by | Description |
 |----------|----------|---------|---------|-------------|
-| `MSMODELING_TEST_MAP_PATH` | ci_gate, nightly, sync | — | gate, nightly, sync | External test_map JSON path |
+| `MSMODELING_TEST_MAP_PATH` | ci_gate (auto-download if missing) | `{MSMODELING_CACHE}/test_map/{base_branch}/test_map.json` | gate, nightly, sync, `build.py test` | External test_map JSON path |
 | `MSMODELING_TEST_MAP_TARGET_BRANCH` | Optional | `MSMODELING_TEST_BASE_BRANCH` | sync | Sync target (e.g. `develop`) |
 | `MSMODELING_TEST_MAP_SYNC_INTERVAL` | Optional | `60` | sync `--watch` | Poll interval (seconds) |
-| `MSMODELING_TEST_BASE_BRANCH` | Optional | `master` | ci_gate, sync | Merge-base branch; sync fallback target |
+| `MSMODELING_TEST_BASE_BRANCH` | Optional | `master` | ci_gate, sync, download URL | Merge-base branch; OBS path segment + cache subdirectory for test_map |
 | `MSMODELING_TEST_LINE_THRESHOLD` | Optional | `60` | nightly | Line coverage report threshold (%) |
 | `MSMODELING_TEST_BRANCH_THRESHOLD` | Optional | `40` | nightly | Branch coverage threshold (%) |
 | `MSMODELING_TEST_WEIGHTS_PRUNE` | Optional | `0` | all `run_*.sh` | Prune Hub weights after session |
 | `MSMODELING_BENCHMARK_PARALLEL` | Optional | `0` | benchmark, nightly | `1` → pytest xdist |
-| `MSMODELING_CACHE` | Optional | `.msmodeling_cache` | all | Repo-local Hub cache path |
+| `MSMODELING_CACHE` | Optional | `.msmodeling_cache` | all | Repo-local Hub cache + test_map download root |
 | `MSMODELING_OFFLINE` | Optional | `0` | all `run_*.sh` | Hub offline mode |
 | `FEISHU_WEBHOOK_URL` | Optional | — | nightly | Feishu notification webhook |
 | `GITCODE_OWNER` | Optional | — | ci_gate | GitCode repo owner (PR comments) |
@@ -127,16 +156,27 @@ Boolean: `0`/`1`/`true`/`false`/`yes`/`no`/`on`/`off` (case-insensitive).
 | `GITCODE_PAT` | Optional | — | ci_gate | PAT for GitCode comment API |
 | `MSMODELING_WHEEL_OUTPUT_DIR` | Optional | `dist` | `build.sh` | Wheel output directory |
 | `PYTHON` | Optional | — | `common.sh` | Python interpreter override |
-| `UV_INDEX_URL` | Optional | — | `common.sh` | Custom UV index |
+| `UV_INDEX_URL` | Optional | Huawei Cloud PyPI | `common.sh`, `build.py` | UV package index |
+| `HF_ENDPOINT` | Optional | `https://hf-mirror.com` | `common.sh`, `build.py` | Hugging Face mirror |
+
+### Override consequences
+
+| Change | Effect |
+|--------|--------|
+| Wrong `MSMODELING_TEST_BASE_BRANCH` | Merge-base against wrong ref; test_map download 404 → gate aborts |
+| Point `MSMODELING_TEST_MAP_PATH` at stale/missing/corrupt file | Warning + branch-scoped re-download when not a valid JSON object |
+| Keep an old file under `test_map/{branch}/` after OBS refresh | Reused until you delete that cache path (no TTL) |
+| Unset `UV_INDEX_URL` / `HF_ENDPOINT` | Uses `defaults.env`; slow or broken mirrors → sync / Hub failures |
+| `--suite full` when you meant gate | Runs entire `tests/` (still excludes npu/nightly/network via addopts) — much slower |
 
 ## CI / CodeArts triggers
 
-| Trigger | Command |
-|---------|---------|
-| PR `compile` | `MSMODELING_TEST_MAP_PATH=<path> bash scripts/run_ci_gate.sh` |
-| `/run_tests smoke` | `bash scripts/run_smoke.sh` |
-| `/run_tests regression` | `bash scripts/run_regression.sh` |
-| `/run_tests benchmark` | `bash scripts/run_benchmark.sh` |
+| Trigger | Preferred command |
+|---------|-------------------|
+| PR `compile` | `python build.py test` (or `MSMODELING_TEST_MAP_PATH=<path> python build.py test`) |
+| `/run_tests smoke` | `python build.py test --suite smoke` |
+| `/run_tests regression` | `python build.py test --suite regression` |
+| `/run_tests benchmark` | `python build.py test --suite benchmark` |
 | Scheduled nightly | `MSMODELING_TEST_MAP_PATH=<path> bash scripts/run_nightly.sh` |
 | Sync once | `MSMODELING_TEST_MAP_PATH=<path> bash scripts/run_test_map_sync.sh --once` |
 | Sync watch | `MSMODELING_TEST_MAP_PATH=<path> bash scripts/run_test_map_sync.sh --watch` |
@@ -144,33 +184,21 @@ Boolean: `0`/`1`/`true`/`false`/`yes`/`no`/`on`/`off` (case-insensitive).
 ### Examples
 
 ```bash
-# local — full suite (pyproject.toml markers)
-uv run python build.py
+# zero-config CI gate (downloads test_map for master)
 uv run python build.py test
 
-# local / CI — CI gate when test_map is provided
+# PR into a non-master base
+MSMODELING_TEST_BASE_BRANCH=poc/AiClusterHub uv run python build.py test
+
+# explicit local map
 uv run python build.py test -e test_map_path=/data/test_map.json
-bash scripts/run_smoke.sh
-bash scripts/run_regression.sh
-bash scripts/run_benchmark.sh
-bash scripts/build.sh
 
-# PR compile
-export MSMODELING_TEST_MAP_PATH=/data/test_map.json
-export MSMODELING_TEST_BASE_BRANCH=master
-export GITCODE_OWNER=Ascend GITCODE_REPO=msmodeling
-export GITCODE_PR_NUMBER=394 GITCODE_PAT=<pat>
-bash scripts/run_ci_gate.sh
+# full suite / smoke / regression / benchmark
+uv run python build.py test --suite full
+uv run python build.py test --suite smoke
+uv run python build.py test --suite regression
+uv run python build.py test --suite benchmark
 
-# nightly
-MSMODELING_TEST_MAP_PATH=/data/test_map.json bash scripts/run_nightly.sh
-
-# sync — once, then upload to OBS in pipeline
-MSMODELING_TEST_MAP_PATH=/data/test_map.json \
-MSMODELING_TEST_MAP_TARGET_BRANCH=develop \
-  bash scripts/run_test_map_sync.sh --once
-
-# sync — watch
-MSMODELING_TEST_MAP_PATH=/data/test_map.json \
-  bash scripts/run_test_map_sync.sh --watch
+# build wheel
+uv run python build.py
 ```

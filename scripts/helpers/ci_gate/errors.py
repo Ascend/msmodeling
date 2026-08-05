@@ -20,7 +20,7 @@ _CATEGORY_HEADER: dict[str, str] = {
     "modified_source": "modified symbol(s) have no coverage mapping entry and are not exempt",
     "deleted_test": "deleted test(s) are sole coverage for source symbols",
     "deleted_source": "deleted source file(s) still have sole-coverage test mapping entries",
-    "exemption_drift": "gate_policy exemption(s) reference deleted or renamed paths",
+    "exemption_drift": "gate_policy test exemption(s) reference deleted or renamed test paths",
 }
 
 _CATEGORY_SUGGESTION: dict[str, str] = {
@@ -35,7 +35,9 @@ _CATEGORY_SUGGESTION: dict[str, str] = {
     "deleted_test": "Add replacement test cases or delete the corresponding source symbols.",
     "deleted_source": ("Delete the sole-coverage test node(s) in the same PR, or refresh test_map after nightly/sync."),
     "exemption_drift": (
-        "Update or remove stale entries in tests/.ci/gate_policy.yaml to match the renamed or deleted paths in this PR."
+        "Update or remove stale exemptions.tests entries in tests/.ci/gate_policy.yaml "
+        "to match the renamed or deleted test paths in this PR. "
+        "Stale exemptions.sources are rejected when the policy is loaded."
     ),
 }
 

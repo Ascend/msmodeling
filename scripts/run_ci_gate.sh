@@ -11,9 +11,9 @@
 #   MSMODELING_TEST_BASE_BRANCH        merge-base branch (default: master)
 #   PYTHON                             absolute path to interpreter; if unset, uses uv or python3
 #
-# Optional (not set by default):
-#   UV_INDEX_URL                       custom UV package index URL
-#   HF_ENDPOINT                        custom HuggingFace endpoint URL
+# Optional (defaults from scripts/defaults.env when unset):
+#   UV_INDEX_URL                       UV package index URL
+#   HF_ENDPOINT                        HuggingFace endpoint URL
 #
 # Pytest (ci_gate/main.py):
 #   Plan-first: classify diff, validate policy, build gate plan, then run deduplicated selection.

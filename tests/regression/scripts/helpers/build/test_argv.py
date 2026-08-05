@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.helpers.build.argv import BuildOptions, parse_argv
+from scripts.helpers.build.argv import BuildOptions, BuildSuite, parse_argv
 
 
 def test_parse_argv_defaults() -> None:
@@ -15,6 +15,7 @@ def test_parse_argv_defaults() -> None:
         version=None,
         version_explicit=False,
         extras={},
+        suite=BuildSuite.CI_GATE,
     )
 
 
@@ -120,4 +121,32 @@ def test_parse_argv_extra_empty_key_exits_2() -> None:
 def test_parse_argv_duplicate_extra_key_exits_2() -> None:
     with pytest.raises(SystemExit) as exc_info:
         parse_argv(["--extra", "a=1", "--extra", "a=2"])
+    assert exc_info.value.code == 2
+
+
+def test_parse_argv_suite_default_ci_gate() -> None:
+    options = parse_argv(["test"])
+    assert options.suite == BuildSuite.CI_GATE
+
+
+def test_parse_argv_suite_full() -> None:
+    options = parse_argv(["test", "--suite", "full"])
+    assert options.suite == BuildSuite.FULL
+
+
+@pytest.mark.parametrize("suite", ["smoke", "regression", "benchmark", "ci_gate"])
+def test_parse_argv_suite_named(suite: str) -> None:
+    options = parse_argv(["test", "--suite", suite])
+    assert options.suite.value == suite
+
+
+def test_parse_argv_suite_without_test_exits_2() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_argv(["--suite", "full"])
+    assert exc_info.value.code == 2
+
+
+def test_parse_argv_suite_unknown_exits_2() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_argv(["test", "--suite", "nightly"])
     assert exc_info.value.code == 2

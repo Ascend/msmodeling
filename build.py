@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Department unified entry: build wheel or run tests (full suite / CI gate)."""
+"""Department unified entry: build wheel or run tests (``python build.py test --suite``)."""
 
 from __future__ import annotations
 

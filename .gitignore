@@ -9,5 +9,10 @@
 # Capture/output dumps at repo root only (not model_diagnostics/artifacts package).
 /artifacts/
 
+# Local caches / tool installs (not committed)
+.msmodeling_cache/
+.uv-python/
+.venv/
+
 # Local pre-commit binary (downloaded, not committed)
 /gitleaks

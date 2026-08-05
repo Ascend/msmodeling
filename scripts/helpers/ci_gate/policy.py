@@ -191,12 +191,23 @@ def known_symbols_for_file(repo_root: Path, file_path: str) -> frozenset[str]:
 
 
 def validate_source_exemption_symbol(repo_root: Path, file_path: str, symbol: str) -> str | None:
-    """Return an error message when the exemption target is missing or unknown."""
+    """Return an error message when the exemption target is missing or unknown.
+
+    This is the single source of truth for source-exemption path/symbol existence.
+    ``gate_exemption_drift`` must not re-check missing source files.
+    """
     abs_path = repo_root / file_path
     if not abs_path.is_file():
-        return f"source file not found: {file_path!r}"
+        return (
+            f"source file {file_path!r} does not exist in the working tree. "
+            f"Remove or update this exemption in {GATE_POLICY_REL.as_posix()} "
+            f"(large refactors that delete/rename product files must sync exemptions)."
+        )
     if symbol not in known_symbols_for_file(repo_root, file_path):
-        return f"unknown symbol {symbol!r}"
+        return (
+            f"unknown symbol {symbol!r} in {file_path!r}. "
+            f"Fix the symbol name or remove the exemption in {GATE_POLICY_REL.as_posix()}."
+        )
     return None
 
 
