@@ -1,0 +1,17 @@
+# 二进制输出（xlsx）
+*.xlsx
+
+# 运行时生成的目录
+output/
+forward_segments/
+compare_test/
+compare_result/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 临时文件
+*.tmp
+*.bak
