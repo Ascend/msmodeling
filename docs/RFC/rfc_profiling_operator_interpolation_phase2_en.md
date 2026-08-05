@@ -179,8 +179,8 @@ Coordinate and semantic-field names in the table mean the following. Each subcat
 | Elementwise | Broadcast / Shared-token | `aten.div.Tensor` | v0.13, v0.15, v0.18 | v0.13 reuses generic compute; v0.15 uses `io_numel`; v0.18 is not interpolated | 1D; v0.18 zero-cost | v0.18 is explicitly unaccounted by the mapping. |
 | Attention | LightningIndexer | `LightningIndexer` leaf decomposed from `tensor_cast.dsa_indexer.default` | v0.18 | `q_tokens`; `effective_kv_len`; their pair | 2D | Phase, topk, heads, layouts, and cache mode are regime fields; missing runtime sequence values fail closed. |
 | Attention | SparseFlashAttention | `SparseFlashAttention` leaf decomposed from `mla_sparse_attention*` | v0.18 | `q_tokens`; `effective_kv_len`; their pair | 2D | Uses the same workload semantics as LightningIndexer with additional sparse-block and sparse-index regime fields. |
-| Compute | Concat | `aten.cat.default` | v0.13, v0.18; zero-cost in v0.15 | `axis_0` | 1D | Versions with `ConcatD.csv` use generic compute. |
-| Compute | Concat | `tensor_cast.cat.default` | v0.13, v0.18; zero-cost in v0.15 | `axis_0` | 1D | Reuses the `aten.cat.default` kernel policy. |
+| Compute | Concat | `aten.cat.default` | v0.13, v0.18; zero-cost in v0.15 | `output_numel` | 1D | Versions with `ConcatD.csv` use generic compute. |
+| Compute | Concat | `tensor_cast.cat.default` | v0.13, v0.18; zero-cost in v0.15 | `output_numel` | 1D | Reuses the `aten.cat.default` kernel policy. |
 | Compute | Gather | `aten.embedding.default` | v0.13, v0.15, v0.18 | `output_numel` | 1D | Gather policy uses output element count; alternates inherit the axis. |
 | Compute | Cast | `aten.to.dtype` | v0.13, v0.15, v0.18 | `axis_0` | 1D | Cast and TensorMove variants use generic compute. |
 | Compute | LayerNorm | `aten.native_layer_norm.default` | v0.18 | `axis_0` | 1D | `tc_input_count: 3` excludes non-tensor metadata. |
@@ -312,6 +312,8 @@ Non-monotonic cumulative offsets, an offset total different from `q_tokens`, inv
 
 Coordinate-level leave-one-coordinate-out holdout on the real v0.18 CSV recovers 87.53% with 1D and 98.50% with conditional 1D+2D. The combined median relative error is 2.07% and P90 is 8.98%. This validates the axis choice and the incremental value of 2D; it is not an end-to-end model-error claim.
 
+By phase, the conditional 1D+2D recovery rates are 97.79% for decode, 99.03% for mixed, and 97.93% for prefill.
+
 #### 4.3.2 SparseFlashAttention
 
 `SparseFlashAttention` is emitted as an attention leaf by the existing decomposers for `tensor_cast.mla_sparse_attention.default` and its quantized variant. Phase2 reuses the same runtime-workload construction as LightningIndexer and adds no parent-decomposition algorithm. Only v0.18 currently provides usable `SparseFlashAttention.csv`; other versions return a stable miss when data is absent.
@@ -333,6 +335,8 @@ Axis groups are attempted in this order:
 The regime inherits LightningIndexer fields and adds sparse block size, sparse-index pattern, and valid-index count. SparseFlashAttention candidates never mix with LightningIndexer or Phase1 FusedInferAttentionScore candidates. Legacy CSV rows without complete runtime metadata are rejected.
 
 Coordinate-level holdout on the real v0.18 CSV recovers 84.43% with 1D and 91.33% with conditional 1D+2D. The combined median relative error is 1.15% and P90 is 19.39%. Points recovered only by 2D have 0.49% median error and 1.82% P90, showing a clear second-axis gain; the combined P90 tail remains a known data risk.
+
+By phase, the conditional 1D+2D recovery rates are 91.60% for decode, 94.48% for mixed, and 79.95% for prefill. The lower prefill recovery remains a known coverage risk.
 
 ### 4.4 Compute
 
@@ -388,6 +392,8 @@ FP16 DynamicQuant matches the CSV `DT_FLOAT16` dtype. This local rule does not c
 
 `quantized_matmul` reuses Phase1 M/K/N interpolation math, but its target coordinates come from rank-2 activation and output shapes. `tc_input_count: 2` still controls the candidate CSV input signature. Input dtype/format, output dtype/format, and output count are regime fields. Packed physical weight shape is neither a continuous coordinate nor inferred from the function name. Phase1 `scale_matrix` denotes the M/K 2D overhead of applying a scale during static quantization; it has different semantics and is not reused as this selector.
 
+A mapping may keep an existing base-only `query_mode`, such as `mtp_projection`, together with `compute_subcategory: quantized_matmul`. The base query owns the exact lookup; `compute_subcategory` selects the wrapper interpolation fallback only after that lookup misses.
+
 Static quant, INT4, FP8, and MXFP4 linear mappings may point to `QuantBatchMatmulV3`, but candidates remain isolated by actual input dtype and layout. Measured INT8 rows cannot satisfy FP8 or MXFP4 targets.
 
 `tensor_cast.quantize.default` applies an existing scale through `AscendQuantV2`. It remains on generic compute and does not enter `compute_scale`.
@@ -441,6 +447,7 @@ Phase2 uses existing `op_mapping.yaml` fields and does not add a separate config
 | `query_mode` | Select DFC, Elementwise, Phase1 Attention, or independent cache-update paths; runtime attention leaves use `SubKernelSpec.query_mode: attention` |
 | `compute_subcategory` | Select `compute_scale` or `quantized_matmul` |
 | `tc_input_count` | Match only the first N TensorCast inputs against the CSV |
+| `expected_input_formats` | Required by `quantized_matmul`; declares the complete ordered input-format regime used to isolate packed weights |
 | `interpolation_policy.kernel_overrides.<kernel>.max_interpolation_dim` | Narrow a kernel's maximum interpolation dimension |
 
 | Operator category | Subcategory/path | Mapping selector |
@@ -451,7 +458,7 @@ Phase2 uses existing `op_mapping.yaml` fields and does not add a separate config
 | Attention | SparseFlashAttention | `composite: true`, `decomposer: true`, and a leaf with `SubKernelSpec.query_mode: attention` plus `attention_params` |
 | Compute | Generic compute mapping refinements | `kernel_type`, `alternate_kernel_types`, `tc_input_count` |
 | Compute | Quant-scale / Dynamic quant | `compute_subcategory: compute_scale` |
-| Compute | Quant-scale / Quantized matrix compute | `compute_subcategory: quantized_matmul`, `tc_input_count: 2` |
+| Compute | Quant-scale / Quantized matrix compute | `compute_subcategory: quantized_matmul`, `tc_input_count: 2`, `expected_input_formats` |
 | Compute | MLA cache update | `query_mode: scatter_nd_update_mla` |
 
 `attention_special` and ordinary compute mappings without a Phase2 selector continue to use Phase1 paths.

@@ -2527,6 +2527,7 @@ operator_mappings:
     assert result.details["target_pre_transform"]["seq"] == pytest.approx(225.0)
     assert result.details["axis_boundary_pre_transform"]["seq"] == [100.0, 400.0]
     assert result.shape_match_info.shape_match_rule == "interpolated_1d_linear_sqrt"
+    assert result.shape_match_info.kernel_shapes == [[100.0], [400.0]]
 
 
 def test_axis_transform_requires_pre_transform_axes():

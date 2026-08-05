@@ -236,6 +236,9 @@ interpolation_policy:
       max_interpolation_dim: 1
     MatMulCommon:
       max_interpolation_dim: 1
+    ConcatD:
+      generic_compute:
+        axis: output_numel
     QuantBatchMatmulV3:
       # A value of 1 allows one-dimensional interpolation; it does not disable
       # interpolation. Generic compute varies activation axis 0 (M/token count)
@@ -246,13 +249,14 @@ interpolation_policy:
     FusedInferAttentionScore:
       axis_transform: sqrt_seq
     SparseFlashAttention:
-      # SFA is matched in compute mode on the q-shape (num_tokens, num_heads,
+      # Legacy generic SFA is matched in compute mode on the q-shape (num_tokens, num_heads,
       # fia_head_dim); this shape carries no seq/topk dimension, so the transform
       # interpolates over num_tokens, not avg_seq_len. The single-q-shape key
       # cannot yet distinguish context/topk length — revisit whether to encode
       # avg_seq_len/topk in the key before importing real SFA profiling data
       # (see issue #213). linear = no sqrt transform (compute-mode default).
       axis_transform: linear
+      # The Phase2 canonical leaf path uses q_tokens/effective_kv_len directly.
     GatherV2:
       generic_compute:
         axis: output_numel
@@ -318,16 +322,17 @@ operator_mappings:
       aclnn: aclnnConvolution. LLM does not contain convolutional layers; only used for video/image models.
 
   "aten.cat.default":
-    zero_cost: true
+    kernel_type: ConcatD
     notes: >
-      [HIGH] NPU concat is typically zero-copy view when tensors are contiguous.
-      ConcatD appears in 0326 profiling for non-contiguous cases but with negligible latency.
-      MoE shared expert path concat is negligible.
+      [MEDIUM] v0.18.0 ships local ConcatD.csv, so cat should query measured
+      ConcatD rows instead of unconditional zero_cost. MoE shared expert path
+      concat is still negligible in common traces, but database coverage wins
+      when a measured kernel exists.
 
   "tensor_cast.cat.default":
-    zero_cost: true
+    kernel_type: ConcatD
     notes: >
-      [HIGH] Same as aten.cat.default; NPU concat is zero-copy view.
+      [MEDIUM] Same as aten.cat.default; use ConcatD.csv when present.
 
   "aten.add.Tensor":
     kernel_type: Add
@@ -341,7 +346,7 @@ operator_mappings:
 
   "aten.to.dtype":
     kernel_type: Cast
-    alternate_kernel_types: [TensorMove, CastAiCore]
+    alternate_kernel_types: [TensorMove, CastAiCore, TensorMoveAiCore]
     notes: >
       [HIGH] op-plugin: CastKernelNpuOpApi.cpp → aclnnCast.
       Dispatch (CANN internal): src_dtype != dst_dtype → Cast; src_dtype == dst_dtype → TensorMove.
@@ -353,6 +358,8 @@ operator_mappings:
   "tensor_cast.static_quant_linear.default":
     kernel_type: QuantBatchMatmulV3
     tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     query_mode: mtp_projection
     mtp_projection_kernel_type: MatMulV2
     tp_linear_projection:
@@ -371,17 +378,26 @@ operator_mappings:
 
   "tensor_cast.static_quant_linear_int4.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [MEDIUM] op-plugin: npu_weight_quant_batchmatmul / npu_quant_matmul.
       W4A8; INT4 weights packed as INT32.
 
   "tensor_cast.fp8_linear.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [LOW] FP8 matmul; mapping to QuantBatchMatmulV3 is a design assumption, to be verified by FP8 profiling.
 
   "tensor_cast.mxfp4_linear.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [LOW] MXFP4 matmul; placeholder, to be verified after hardware support.
 
@@ -554,7 +570,6 @@ operator_mappings:
       [HIGH] op-plugin: V1 with dequant/quant scales + V2 with quant_mode.
       aclnn: aclnnFusedInferAttentionScoreV2/V3/V4.
 
-
   # ========== 7. MLA (Multihead Latent Attention) ==========
 
   "tensor_cast.multihead_latent_attention.default":
@@ -691,8 +706,16 @@ operator_mappings:
       [HIGH] op-plugin: npu_kv_rmsnorm_rope_cache.
       aclnn: aclnnKvRmsNormRopeCache/V2. DSV3 only (MLA).
 
-
   # ========== 9. Norm Basics ==========
+
+  "aten.native_layer_norm.default":
+    kernel_type: LayerNormV3
+    alternate_kernel_types: [LayerNormV3WithImplMode]
+    tc_input_count: 3
+    notes: >
+      [MEDIUM] PyTorch native layer norm maps to CANN LayerNormV3 family when
+      unfused. CSV records tensor inputs (input, weight, bias); tc_input_count=3
+      ignores normalized_shape/eps metadata.
 
   "tensor_cast.rms_norm.default":
     kernel_type: RmsNorm
@@ -824,6 +847,7 @@ operator_mappings:
 
   "tensor_cast.dynamic_quantize_symmetric.default":
     kernel_type: DynamicQuant
+    compute_subcategory: compute_scale
     alternate_kernel_types: [AscendQuantV2, AscendQuantV2Aicore]
     tc_input_count: 1
     kernel_types_by_input_rank:
@@ -837,11 +861,13 @@ operator_mappings:
 
   "tensor_cast.dynamic_quantize_asymmetric.default":
     kernel_type: DynamicQuant
+    compute_subcategory: compute_scale
     notes: >
       [HIGH] op-plugin: npu_dynamic_quant_asymmetric → aclnnDynamicQuantV2 (with offset).
 
   "tensor_cast.dynamic_quantize_mxfp4.default":
     kernel_type: DynamicBlockQuant
+    compute_subcategory: compute_scale
     notes: >
       [MEDIUM] op-plugin: npu_dynamic_block_quant → aclnnDynamicBlockQuant. MXFP4 block-wise.
 

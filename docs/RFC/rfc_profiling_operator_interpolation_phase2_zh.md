@@ -180,8 +180,8 @@ MOE/DFC 大类本次只新增 `DispatchFFNCombine` 专用插值路径。
 | Elementwise | Broadcast / Shared-token | `aten.div.Tensor` | v0.13、v0.15、v0.18 | v0.13 复用 generic compute；v0.15 使用 `io_numel`；v0.18 不插值 | 1D；v0.18 zero-cost | v0.18 由 mapping 显式不计量。 |
 | Attention | LightningIndexer | `tensor_cast.dsa_indexer.default` 拆出的 `LightningIndexer` 叶子 | v0.18 | `q_tokens`；`effective_kv_len`；二者组合 | 2D | phase、topk、head、layout、cache mode 等属于 regime；缺运行时序列值时稳定 miss。 |
 | Attention | SparseFlashAttention | `mla_sparse_attention*` 拆出的 `SparseFlashAttention` 叶子 | v0.18 | `q_tokens`；`effective_kv_len`；二者组合 | 2D | 与 LightningIndexer 使用同一 workload 语义，额外隔离 sparse block 和 indices 字段。 |
-| Compute | Concat | `aten.cat.default` | v0.13、v0.18；v0.15 为 zero-cost | `axis_0` | 1D | 有 `ConcatD.csv` 的版本走 generic compute。 |
-| Compute | Concat | `tensor_cast.cat.default` | v0.13、v0.18；v0.15 为 zero-cost | `axis_0` | 1D | 与 `aten.cat.default` 共用 kernel policy。 |
+| Compute | Concat | `aten.cat.default` | v0.13、v0.18；v0.15 为 zero-cost | `output_numel` | 1D | 有 `ConcatD.csv` 的版本走 generic compute。 |
+| Compute | Concat | `tensor_cast.cat.default` | v0.13、v0.18；v0.15 为 zero-cost | `output_numel` | 1D | 与 `aten.cat.default` 共用 kernel policy。 |
 | Compute | Gather | `aten.embedding.default` | v0.13、v0.15、v0.18 | `output_numel` | 1D | Gather policy 使用输出元素数，alternate kernel 继承该轴。 |
 | Compute | Cast | `aten.to.dtype` | v0.13、v0.15、v0.18 | `axis_0` | 1D | Cast / TensorMove 变体走 generic compute。 |
 | Compute | LayerNorm | `aten.native_layer_norm.default` | v0.18 | `axis_0` | 1D | `tc_input_count: 3` 排除非 tensor 元数据。 |
@@ -313,6 +313,8 @@ regime 包含 kernel type、query dtype、prefill/decode/mixed phase、query ran
 
 基于 v0.18 真实 CSV 的按坐标 leave-one-coordinate-out holdout：1D 恢复率为 87.53%，加入条件性 2D 后为 98.50%；组合方案中位相对误差 2.07%，P90 8.98%。该结果用于证明轴选择和二维补充价值，不代表端到端模型误差。
 
+按 phase 统计，条件性 1D+2D 恢复率分别为 decode 97.79%、mixed 99.03%、prefill 97.93%。
+
 #### 4.3.2 SparseFlashAttention
 
 `SparseFlashAttention` 由 `tensor_cast.mla_sparse_attention.default` 及量化变体的既有 decomposer 生成 attention leaf。Phase2 复用与 LightningIndexer 相同的 runtime workload 构造，不新增父算子拆分算法。当前仅 v0.18 提供可用 `SparseFlashAttention.csv`；其他版本缺数据时稳定 miss。
@@ -334,6 +336,8 @@ regime 包含 kernel type、query dtype、prefill/decode/mixed phase、query ran
 regime 继承 LightningIndexer 字段，并增加 `sparse_block_size`、sparse indices pattern 和有效 indices 数。SparseFlashAttention 候选不与 LightningIndexer 或 Phase1 FusedInferAttentionScore 候选混用。缺少完整 runtime metadata 的 legacy CSV 行被拒绝。
 
 基于 v0.18 真实 CSV 的按坐标 holdout：1D 恢复率为 84.43%，加入条件性 2D 后为 91.33%；组合方案中位相对误差 1.15%，P90 19.39%。2D 独立补回的点中位误差 0.49%、P90 1.82%，说明第二轴有明确增益；总体 P90 长尾仍作为已知数据风险保留。
+
+按 phase 统计，条件性 1D+2D 恢复率分别为 decode 91.60%、mixed 94.48%、prefill 79.95%。prefill 恢复率较低，作为已知覆盖风险保留。
 
 ### 4.4 Compute
 
@@ -389,6 +393,8 @@ DynamicQuant 的 FP16 数据按 CSV 的 `DT_FLOAT16` 匹配，不改变 Phase1 �
 
 `quantized_matmul` 复用 Phase1 的 M/K/N 插值数学，但 target 坐标由 rank-2 activation/output 定义。`tc_input_count: 2` 仍用于候选 CSV 的输入签名；输入 dtype/format、输出 dtype/format 和输出个数属于 regime。packed weight 的物理 shape 不作为连续坐标，也不按函数名反推。Phase1 的 `scale_matrix` 表示静态量化应用 scale 的 M/K 2D 开销，语义不同，本次不复用该 selector。
 
+同一 mapping 可以同时保留 `mtp_projection` 等仅由 base 处理的既有 `query_mode`，并声明 `compute_subcategory: quantized_matmul`。base 查询负责 exact；只有 base miss 后，`compute_subcategory` 才选择 wrapper 的插值 fallback。
+
 static quant、INT4、FP8 和 MXFP4 linear mapping 可以指向同一个 `QuantBatchMatmulV3` kernel，但候选仍按真实输入 dtype 和 layout 隔离。INT8 实测行不能用于 FP8 或 MXFP4 target。
 
 `tensor_cast.quantize.default` 是应用已有 scale 的 `AscendQuantV2` 路径，继续使用 generic compute，不进入 `compute_scale`。
@@ -442,6 +448,7 @@ Phase2 使用现有 `op_mapping.yaml` 字段，不增加独立配置文件。
 | `query_mode` | 选择 DFC、Elementwise、Phase1 Attention 或独立 cache-update 专用路径；runtime attention leaf 使用 `SubKernelSpec.query_mode: attention` |
 | `compute_subcategory` | 选择 `compute_scale` 或 `quantized_matmul` |
 | `tc_input_count` | 只使用前 N 个 TensorCast 输入与 CSV 对齐 |
+| `expected_input_formats` | `quantized_matmul` 必填；声明用于隔离 packed weight 的完整有序输入 format regime |
 | `interpolation_policy.kernel_overrides.<kernel>.max_interpolation_dim` | 收紧 kernel 的最高插值维度 |
 
 | 算子大类 | 子类/路径 | Mapping selector |
@@ -452,7 +459,7 @@ Phase2 使用现有 `op_mapping.yaml` 字段，不增加独立配置文件。
 | Attention | SparseFlashAttention | `composite: true`、`decomposer: true`，叶子 `SubKernelSpec.query_mode: attention` + `attention_params` |
 | Compute | Generic compute mapping 精修 | `kernel_type`、`alternate_kernel_types`、`tc_input_count` |
 | Compute | Quant-scale / Dynamic quant | `compute_subcategory: compute_scale` |
-| Compute | Quant-scale / Quantized matrix compute | `compute_subcategory: quantized_matmul`、`tc_input_count: 2` |
+| Compute | Quant-scale / Quantized matrix compute | `compute_subcategory: quantized_matmul`、`tc_input_count: 2`、`expected_input_formats` |
 | Compute | MLA cache update | `query_mode: scatter_nd_update_mla` |
 
 `attention_special` 和未声明 Phase2 selector 的 ordinary compute 继续使用 Phase1 路径。

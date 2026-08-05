@@ -239,3 +239,31 @@ def test_phase2_add_mapping_uses_elementwise_query_mode(version_ctx):
     entry = entries.get("aten.add.Tensor")
     if entry is not None and entry.get("kernel_type") == "Add":
         assert entry.get("query_mode") == "elementwise", f"[{label}] aten.add.Tensor needs elementwise query mode"
+
+
+def test_concat_mapping_uses_output_numel_axis(version_ctx):
+    label, entries, data_dir = version_ctx
+    cat_entries = [entries[name] for name in ("aten.cat.default", "tensor_cast.cat.default") if name in entries]
+    if not cat_entries or not all(entry.get("kernel_type") == "ConcatD" for entry in cat_entries):
+        return
+    with open(data_dir / "op_mapping.yaml", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+    generic_compute = (
+        config.get("interpolation_policy", {}).get("kernel_overrides", {}).get("ConcatD", {}).get("generic_compute")
+    )
+    assert generic_compute == {"axis": "output_numel"}, f"[{label}] ConcatD must interpolate by output_numel"
+
+
+def test_quantized_matmul_mapping_declares_input_formats(version_ctx):
+    label, entries, _data_dir = version_ctx
+    for op_name, entry in entries.items():
+        if entry.get("compute_subcategory") != "quantized_matmul":
+            continue
+        input_count = entry.get("tc_input_count")
+        expected_formats = entry.get("expected_input_formats")
+        assert isinstance(input_count, int) and input_count > 0, f"[{label}] {op_name} needs tc_input_count"
+        assert isinstance(expected_formats, list), f"[{label}] {op_name} needs expected_input_formats"
+        assert len(expected_formats) == input_count, f"[{label}] {op_name} input format count must match inputs"
+        assert all(isinstance(fmt, str) and fmt for fmt in expected_formats), (
+            f"[{label}] {op_name} has an invalid expected input format"
+        )

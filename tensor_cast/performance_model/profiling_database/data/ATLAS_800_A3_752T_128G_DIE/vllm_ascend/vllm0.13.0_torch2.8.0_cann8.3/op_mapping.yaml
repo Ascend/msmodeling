@@ -167,6 +167,9 @@ interpolation_policy:
       max_interpolation_dim: 1
     MatMulCommon:
       max_interpolation_dim: 1
+    ConcatD:
+      generic_compute:
+        axis: output_numel
     FusedInferAttentionScore:
       axis_transform: sqrt_seq
     SparseFlashAttention:
@@ -284,6 +287,9 @@ operator_mappings:
 
   "tensor_cast.static_quant_linear.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [HIGH] op-plugin: YAML:6529 / WeightQuantBatchMatmulV2KernelNpuOpApi.cpp.
       aclnn: aclnnWeightQuantBatchMatmulV2/V3; inner_precise=1 → V3 (vLLM default).
@@ -292,6 +298,9 @@ operator_mappings:
 
   "tensor_cast.static_quant_linear_int4.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [MEDIUM] op-plugin: YAML:6529 (npu_weight_quant_batchmatmul) + YAML:6257 (npu_quant_matmul).
       aclnn: aclnnWeightQuantBatchMatmulV2/V3, aclnnQuantMatmulV5.
@@ -301,6 +310,9 @@ operator_mappings:
 
   "tensor_cast.fp8_linear.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [LOW] There is no FP8-specific matmul API in op-plugin.
       FP8 may pass npu_weight_quant_batchmatmul passed in FP8 dtype,
@@ -308,6 +320,9 @@ operator_mappings:
 
   "tensor_cast.mxfp4_linear.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [LOW] There is no MXFP4 dedicated API in op-plugin. MXFP4 in TC only supports meta tensor.
       Mapping to QuantBatchMatmulV3 as placeholder, to be verified after hardware support.
@@ -680,6 +695,7 @@ operator_mappings:
 
   "tensor_cast.dynamic_quantize_symmetric.default":
     kernel_type: DynamicQuant
+    compute_subcategory: compute_scale
     notes: >
       [HIGH] op-plugin: YAML:5841 (npu_dynamic_quant) / DynamicQuantKernelNpuOpApi.cpp.
       aclnn: aclnnDynamicQuant/V2; returns (quantized, scale); V2 is preferred.
@@ -687,6 +703,7 @@ operator_mappings:
 
   "tensor_cast.dynamic_quantize_asymmetric.default":
     kernel_type: DynamicQuant
+    compute_subcategory: compute_scale
     notes: >
       [HIGH] op-plugin: YAML:5845 (npu_dynamic_quant_asymmetric) / DynamicQuantKernelNpuOpApi.cpp.
       aclnn: aclnnDynamicQuant/V2; returns (quantized, scale, offset).
@@ -694,6 +711,7 @@ operator_mappings:
 
   "tensor_cast.dynamic_quantize_mxfp4.default":
     kernel_type: DynamicBlockQuant
+    compute_subcategory: compute_scale
     notes: >
       [MEDIUM] op-plugin: YAML:6929 (npu_dynamic_block_quant) / DynamicBlockQuantNpuOpApi.cpp.
       aclnn: aclnnDynamicBlockQuant.

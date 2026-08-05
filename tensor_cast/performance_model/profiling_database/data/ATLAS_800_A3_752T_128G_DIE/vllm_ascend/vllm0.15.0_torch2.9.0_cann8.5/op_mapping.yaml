@@ -253,7 +253,7 @@ operator_mappings:
 
   "aten.embedding.default":
     kernel_type: GatherV2
-    alternate_kernel_types: [GatherV3]
+    alternate_kernel_types: [GatherV3, GatherV2AiCore]
     tc_input_count: 2
     notes: >
       [HIGH] op-plugin: EmbeddingKernelNpuOpApi.cpp.
@@ -310,6 +310,8 @@ operator_mappings:
   "tensor_cast.static_quant_linear.default":
     kernel_type: QuantBatchMatmulV3
     tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [HIGH] op-plugin: WeightQuantBatchMatmulV2KernelNpuOpApi.cpp.
       aclnn: aclnnWeightQuantBatchMatmulV2/V3. W8A8 path.
@@ -317,17 +319,26 @@ operator_mappings:
 
   "tensor_cast.static_quant_linear_int4.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [MEDIUM] op-plugin: npu_weight_quant_batchmatmul / npu_quant_matmul.
       W4A8; INT4 weights packed as INT32.
 
   "tensor_cast.fp8_linear.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [LOW] FP8 matmul; mapping to QuantBatchMatmulV3 is a design assumption, to be verified by FP8 profiling.
 
   "tensor_cast.mxfp4_linear.default":
     kernel_type: QuantBatchMatmulV3
+    tc_input_count: 2
+    compute_subcategory: quantized_matmul
+    expected_input_formats: [ND, FRACTAL_NZ]
     notes: >
       [LOW] MXFP4 matmul; placeholder, to be verified after hardware support.
 
@@ -683,16 +694,19 @@ operator_mappings:
 
   "tensor_cast.dynamic_quantize_symmetric.default":
     kernel_type: DynamicQuant
+    compute_subcategory: compute_scale
     notes: >
       [HIGH] op-plugin: npu_dynamic_quant → aclnnDynamicQuant/V2.
 
   "tensor_cast.dynamic_quantize_asymmetric.default":
     kernel_type: DynamicQuant
+    compute_subcategory: compute_scale
     notes: >
       [HIGH] op-plugin: npu_dynamic_quant_asymmetric → aclnnDynamicQuantV2 (with offset).
 
   "tensor_cast.dynamic_quantize_mxfp4.default":
     kernel_type: DynamicBlockQuant
+    compute_subcategory: compute_scale
     notes: >
       [MEDIUM] op-plugin: npu_dynamic_block_quant → aclnnDynamicBlockQuant. MXFP4 block-wise.
 

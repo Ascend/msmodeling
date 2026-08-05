@@ -13,7 +13,7 @@ import math
 import weakref
 from dataclasses import replace
 from itertools import combinations
-from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import pandas as pd
 import torch
@@ -156,6 +156,9 @@ _COMPUTE_AXIS_GROUPS = (
     ("K", "N"),
     ("M", "K", "N"),
 )
+_COMPUTE_SCALE_AXIS_GROUPS = (("M",), ("K",), ("M", "K"))
+_COMPUTE_SCALE_SUBCATEGORY = "compute_scale"
+_QUANTIZED_MATMUL_SUBCATEGORY = "quantized_matmul"
 _GENERIC_COMPUTE_AXIS_GROUPS = (("axis_0",),)
 _GENERIC_COMPUTE_AXIS_0 = "axis_0"
 _GENERIC_COMPUTE_OUTPUT_NUMEL_AXIS = "output_numel"
@@ -171,6 +174,17 @@ _ATTENTION_AXES = (
 _ATTENTION_AXIS_GROUPS = tuple(axes for dim in range(1, 4) for axes in combinations(_ATTENTION_AXES, dim))
 _MOE_FUSED_AXIS_GROUPS = (("tokens",),)
 _ELEMENTWISE_AXIS_GROUPS = (("io_numel",),)
+_LIGHTNING_INDEXER_AXIS_GROUPS = (
+    ("q_tokens",),
+    ("effective_kv_len",),
+    ("q_tokens", "effective_kv_len"),
+)
+_SPARSE_ATTENTION_AXIS_GROUPS = _LIGHTNING_INDEXER_AXIS_GROUPS
+_SCATTER_ND_UPDATE_AXIS_GROUPS = (("tokens",),)
+_RUNTIME_ATTENTION_KERNELS = frozenset({"LightningIndexer", "LightningIndexerVllm"})
+_SPARSE_RUNTIME_ATTENTION_KERNELS = frozenset({"SparseFlashAttention"})
+_MOE_FUSED_ROUTE_INPUT_INDEX = 3
+_MOE_FUSED_ROUTE_DTYPE = "INT32"
 
 
 class InterpolatingDataSource(DataSourcePerformanceModel):
@@ -190,8 +204,11 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         self._attention_index_cache: Dict[tuple[Any, ...], CandidateIndex] = {}
         self._moe_fused_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
         self._elementwise_index_cache: Dict[tuple[Any, ...], CandidateIndex] = {}
+        self._lightning_indexer_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
+        self._sparse_attention_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
+        self._scatter_nd_update_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
         self._dataframe_fingerprint_cache: Dict[int, tuple[weakref.ReferenceType, str]] = {}
-        self._compute_index_diagnostics: Dict[str, dict[str, Any]] = {}
+        self._compute_index_diagnostics: Dict[Any, dict[str, Any]] = {}
         self._attention_index_diagnostics: Dict[str, dict[str, Any]] = {}
         self._last_miss_reason = ""
         self._last_miss_details: dict[str, Any] = {}
@@ -280,8 +297,31 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return self._interpolate_moe_fused(op_invoke_info, mapping, fallback_from=fallback_from)
         if mapping.get("query_mode") == "attention_special":
             return self._interpolate_attention(op_invoke_info, mapping, fallback_from=fallback_from)
+        if mapping.get("query_mode") == "attention_lightning_indexer":
+            self._record_miss(
+                "runtime_attention_leaf_required",
+                kernel_type=mapping.get("kernel_type"),
+                query_mode="attention_lightning_indexer",
+            )
+            return None
+        if mapping.get("query_mode") == "scatter_nd_update_mla":
+            return self._interpolate_scatter_nd_update(op_invoke_info, mapping, fallback_from=fallback_from)
         if mapping.get("query_mode") == "elementwise":
             return self._interpolate_elementwise(op_invoke_info, mapping, fallback_from=fallback_from)
+        # query_mode values such as mtp_projection are owned by the base exact
+        # path; compute_subcategory explicitly selects the wrapper fallback.
+        compute_subcategory = self._compute_subcategory(mapping)
+        if compute_subcategory == _COMPUTE_SCALE_SUBCATEGORY:
+            return self._interpolate_compute_scale(op_invoke_info, mapping, fallback_from=fallback_from)
+        if compute_subcategory == _QUANTIZED_MATMUL_SUBCATEGORY:
+            return self._interpolate_compute_multidim(op_invoke_info, mapping, fallback_from=fallback_from)
+        if compute_subcategory is not None:
+            self._record_miss(
+                "compute_subcategory_unknown",
+                op_name=func_str,
+                compute_subcategory=compute_subcategory,
+            )
+            return None
         return self._interpolate_compute(op_invoke_info, mapping, fallback_from=fallback_from)
 
     # ---- Multidimensional index helpers ----
@@ -291,6 +331,11 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if kernel_type in _DTYPE_RELAXED_KERNELS:
             return _DTYPE_COMPAT.get(dtype_str, dtype_str)
         return dtype_str
+
+    @staticmethod
+    def _compute_subcategory(mapping: dict) -> Optional[str]:
+        value = mapping.get("compute_subcategory")
+        return str(value) if value is not None else None
 
     @staticmethod
     def _stable_digest(value: Any) -> str:
@@ -334,6 +379,81 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             elif reason:
                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
         return CandidateIndex(points), rejected_reasons
+
+    @staticmethod
+    def _runtime_int_values(value: Any) -> Optional[tuple[int, ...]]:
+        if isinstance(value, torch.Tensor):
+            if value.device.type == "meta":
+                return None
+            try:
+                value = value.detach().cpu().reshape(-1).tolist()
+            except (RuntimeError, TypeError, ValueError):
+                return None
+        elif isinstance(value, str):
+            value = [item.strip() for item in value.split(",") if item.strip()]
+        elif not isinstance(value, (list, tuple)):
+            value = [value]
+
+        result: list[int] = []
+        for item in value:
+            parsed = _to_int_cell(item)
+            if parsed is None:
+                return None
+            result.append(parsed)
+        return tuple(result) if result else None
+
+    @staticmethod
+    def _query_lengths_from_cumulative(
+        q_tokens: int,
+        cumulative_offsets: Sequence[int],
+    ) -> Optional[tuple[int, ...]]:
+        if q_tokens <= 0 or not cumulative_offsets:
+            return None
+        previous = 0
+        query_lengths: list[int] = []
+        for offset in cumulative_offsets:
+            current = int(offset)
+            if current < previous or current > q_tokens:
+                return None
+            query_lengths.append(current - previous)
+            previous = current
+        if previous != q_tokens:
+            return None
+        return tuple(query_lengths)
+
+    @staticmethod
+    def _attention_runtime_workload(
+        *,
+        q_tokens: int,
+        query_lengths: Sequence[int],
+        kv_lengths: Sequence[int],
+    ) -> Optional[dict[str, Any]]:
+        if q_tokens <= 0 or not query_lengths or len(query_lengths) != len(kv_lengths):
+            return None
+        query_values = tuple(int(value) for value in query_lengths)
+        kv_values = tuple(int(value) for value in kv_lengths)
+        if any(value < 0 for value in query_values) or any(value < 0 for value in kv_values):
+            return None
+        if sum(query_values) != q_tokens:
+            return None
+        active = [(query_len, kv_len) for query_len, kv_len in zip(query_values, kv_values) if query_len > 0]
+        if not active or any(kv_len <= 0 for _, kv_len in active):
+            return None
+        if all(query_len == kv_len for query_len, kv_len in active):
+            phase = "prefill"
+        elif all(query_len == 1 for query_len, _ in active):
+            phase = "decode"
+        else:
+            phase = "mixed"
+        effective_kv_len = sum(query_len * kv_len for query_len, kv_len in active) / q_tokens
+        if not math.isfinite(effective_kv_len) or effective_kv_len <= 0:
+            return None
+        return {
+            "q_tokens": float(q_tokens),
+            "effective_kv_len": float(effective_kv_len),
+            "phase": phase,
+            "batch_size": len(query_values),
+        }
 
     @staticmethod
     def _logical_csv_shape(shape: Tuple[int, ...], fmt: str) -> Tuple[int, ...]:
@@ -424,6 +544,8 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         latency_col: str,
         row_index: int,
         tc_input_count: Optional[int],
+        *,
+        include_output_signature: bool = False,
     ) -> tuple[Optional[CandidatePoint], Optional[str]]:
         csv_shapes = _parse_shape_str(str(row.get("Input Shapes", "")))
         if tc_input_count is not None:
@@ -453,20 +575,35 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
 
         input_count = tc_input_count if tc_input_count is not None else len(csv_shapes)
         dtype_key = tuple(self._dtype_key(kernel_type, dtype) for dtype in csv_dtypes[:input_count])
-        regime_key = make_regime_key(
-            [
-                ("kernel_type", kernel_type),
-                ("input_count", input_count),
-                ("input_dtypes", dtype_key),
-                ("batch_dims", batch_dims),
-                ("input_formats", tuple(csv_formats[:input_count])),
-            ]
-        )
+        regime_fields: list[tuple[str, Any]] = [
+            ("kernel_type", kernel_type),
+            ("input_count", input_count),
+            ("input_dtypes", dtype_key),
+            ("batch_dims", batch_dims),
+            ("input_formats", tuple(csv_formats[:input_count])),
+        ]
+        if include_output_signature:
+            output_shapes = _parse_shape_str(str(row.get("Output Shapes", "")))
+            output_dtypes = _parse_str_list(str(row.get("Output Data Types", "")))
+            output_formats = _parse_str_list(str(row.get("Output Formats", "")))
+            if (
+                not output_shapes
+                or len(output_dtypes) != len(output_shapes)
+                or len(output_formats) != len(output_shapes)
+            ):
+                return None, "output_signature_missing"
+            regime_fields.extend(
+                [
+                    ("output_count", len(output_shapes)),
+                    ("output_dtypes", tuple(output_dtypes)),
+                    ("output_formats", tuple(output_formats)),
+                ]
+            )
         return CandidatePoint(
             kernel_type=kernel_type,
             axes=axes,
             latency_us=latency,
-            regime_key=regime_key,
+            regime_key=make_regime_key(regime_fields),
             input_shapes=logical_shapes,
             input_dtypes=csv_dtypes[:input_count],
             input_formats=csv_formats[:input_count],
@@ -478,11 +615,19 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         self,
         kernel_type: str,
         tc_input_count: Optional[int],
+        *,
+        include_output_signature: bool = False,
     ) -> Optional[CandidateIndex]:
         df = self.base._load_csv(kernel_type)
         if df is None:
             return None
-        cache_key = (kernel_type, tc_input_count, self._dataframe_fingerprint(df), self._policy_hash)
+        cache_key = (
+            kernel_type,
+            tc_input_count,
+            include_output_signature,
+            self._dataframe_fingerprint(df),
+            self._policy_hash,
+        )
         if cache_key in self._compute_index_cache:
             return self._compute_index_cache[cache_key]
         latency_col = self.base._latency_col(df)
@@ -490,13 +635,18 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         rejected_reasons: dict[str, int] = {}
         for row_index, (_, row) in enumerate(df.iterrows()):
             point, reason = self._candidate_from_compute_row_with_reason(
-                row, kernel_type, latency_col, row_index, tc_input_count
+                row,
+                kernel_type,
+                latency_col,
+                row_index,
+                tc_input_count,
+                include_output_signature=include_output_signature,
             )
             if point is not None:
                 points.append(point)
             elif reason:
                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
-        self._compute_index_diagnostics[kernel_type] = {
+        self._compute_index_diagnostics[(kernel_type, include_output_signature)] = {
             "csv_rows": len(df),
             "usable_points": len(points),
             "rejected_reasons": rejected_reasons,
@@ -522,10 +672,28 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return None
 
         input_shapes = [tuple(shape) for shape, _ in tc_inputs]
-        axes_and_batch = self._extract_matmul_axes_from_shapes(kernel_type, input_shapes)
-        if axes_and_batch is None:
-            return None
-        axes, batch_dims, _source_layout = axes_and_batch
+        compute_subcategory = self._compute_subcategory(mapping)
+        if compute_subcategory == _QUANTIZED_MATMUL_SUBCATEGORY:
+            output_tensors = self._output_tensors(getattr(op_invoke_info, "out", None))
+            activation_shape = input_shapes[0]
+            if output_tensors is None or len(activation_shape) != 2 or output_tensors[0].ndim != 2:
+                return None
+            output_shape = tuple(output_tensors[0].shape)
+            if any(int(dim) <= 0 for dim in (*activation_shape, *output_shape)):
+                return None
+            if int(activation_shape[0]) != int(output_shape[0]):
+                return None
+            axes = {
+                "M": float(activation_shape[0]),
+                "K": float(activation_shape[1]),
+                "N": float(output_shape[1]),
+            }
+            batch_dims = ((), ())
+        else:
+            axes_and_batch = self._extract_matmul_axes_from_shapes(kernel_type, input_shapes)
+            if axes_and_batch is None:
+                return None
+            axes, batch_dims, _source_layout = axes_and_batch
 
         dtype_values = []
         for _, dtype in tc_inputs:
@@ -535,14 +703,35 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             dtype_values.append(self._dtype_key(kernel_type, dtype_str))
 
         input_count = tc_input_count if tc_input_count is not None else len(tc_inputs)
-        regime_key = make_regime_key(
-            [
-                ("kernel_type", kernel_type),
-                ("input_count", input_count),
-                ("input_dtypes", tuple(dtype_values[:input_count])),
-                ("batch_dims", batch_dims),
-            ]
-        )
+        regime_fields: list[tuple[str, Any]] = [
+            ("kernel_type", kernel_type),
+            ("input_count", input_count),
+            ("input_dtypes", tuple(dtype_values[:input_count])),
+            ("batch_dims", batch_dims),
+        ]
+        if compute_subcategory == _QUANTIZED_MATMUL_SUBCATEGORY:
+            expected_input_formats = mapping.get("expected_input_formats")
+            if (
+                not isinstance(expected_input_formats, list)
+                or len(expected_input_formats) != input_count
+                or any(not isinstance(fmt, str) or not fmt.strip() for fmt in expected_input_formats)
+            ):
+                return None
+            regime_fields.append(("input_formats", tuple(fmt.strip() for fmt in expected_input_formats)))
+            output_dtypes = []
+            for tensor in output_tensors:
+                dtype_str = DTYPE_MAP.get(tensor.dtype)
+                if dtype_str is None:
+                    return None
+                output_dtypes.append(dtype_str)
+            regime_fields.extend(
+                [
+                    ("output_count", len(output_tensors)),
+                    ("output_dtypes", tuple(output_dtypes)),
+                    ("output_formats", tuple("ND" for _ in output_tensors)),
+                ]
+            )
+        regime_key = make_regime_key(regime_fields)
         return InterpolationTarget(
             func_name=_normalize_func_name(op_invoke_info.func),
             kernel_type=kernel_type,
@@ -598,9 +787,11 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
 
     @staticmethod
     def _matched_axis_shapes(result: InterpolationResult) -> List[List[float]]:
-        return [
-            [float(point.axes[axis]) for axis in result.axes if axis in point.axes] for point in result.matched_points
-        ]
+        matched_shapes = []
+        for point in result.matched_points:
+            reported_axes = point.row_meta.get("pre_transform_axes", point.axes)
+            matched_shapes.append([float(reported_axes[axis]) for axis in result.axes if axis in reported_axes])
+        return matched_shapes
 
     def _query_result_from_interpolation(
         self,
@@ -664,27 +855,29 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         input_dtypes: Optional[List[str]] = None,
     ) -> Optional[int]:
         dtype_list = input_dtypes or []
-        topk_candidates: list[int] = []
-        for idx, shape in enumerate(input_shapes[1:], start=1):
-            dtype = dtype_list[idx] if idx < len(dtype_list) else ""
-            dtype_key = str(dtype).upper()
-            topk = int(shape[-1]) if len(shape) >= 2 else 0
-            route_tokens = math.prod(int(dim) for dim in shape[:-1]) if len(shape) >= 2 else 0
-            if float(route_tokens) == float(tokens) and 0 < topk <= 256 and "INT" in dtype_key:
-                # The DFC routing contract supplies one integer [..., topk]
-                # tensor whose leading dimensions cover all tokens.
-                topk_candidates.append(topk)
-        if len(topk_candidates) == 1:
-            return topk_candidates[0]
-        return None
+        if len(input_shapes) <= _MOE_FUSED_ROUTE_INPUT_INDEX or len(dtype_list) <= _MOE_FUSED_ROUTE_INPUT_INDEX:
+            return None
+        route_shape = input_shapes[_MOE_FUSED_ROUTE_INPUT_INDEX]
+        route_dtype = str(dtype_list[_MOE_FUSED_ROUTE_INPUT_INDEX]).upper()
+        if len(route_shape) < 2 or route_dtype != _MOE_FUSED_ROUTE_DTYPE:
+            return None
+        topk = int(route_shape[-1])
+        route_tokens = math.prod(int(dim) for dim in route_shape[:-1])
+        if float(route_tokens) != float(tokens) or topk <= 0:
+            return None
+        return topk
 
-    @staticmethod
+    @classmethod
     def _elementwise_axes_from_shapes(
+        cls,
         input_shapes: List[Tuple[int, ...]],
         output_shape: Tuple[int, ...],
-    ) -> dict[str, float]:
-        read_numel = sum(math.prod(shape) for shape in input_shapes)
-        write_numel = math.prod(output_shape)
+    ) -> Optional[dict[str, float]]:
+        input_numels = [cls._shape_numel(shape) for shape in input_shapes]
+        write_numel = cls._shape_numel(output_shape)
+        if any(numel is None for numel in input_numels) or write_numel is None:
+            return None
+        read_numel = sum(numel for numel in input_numels if numel is not None)
         return {"io_numel": float(read_numel + write_numel)}
 
     @staticmethod
@@ -711,10 +904,6 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                     relation.append("other")
             patterns.append((len(logical_shape), tuple(relation)))
         return tuple(patterns)
-
-    @staticmethod
-    def _elementwise_axis_groups_for(candidate_group: CandidateGroup) -> tuple[tuple[str, ...], ...]:
-        return _ELEMENTWISE_AXIS_GROUPS
 
     @staticmethod
     def _generic_compute_shape_signature(input_shapes: List[Tuple[int, ...]]) -> tuple[Any, ...]:
@@ -1013,27 +1202,22 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if cache_key in self._compute_index_cache:
             return self._compute_index_cache[cache_key]
         latency_col = self.base._latency_col(df)
-        points = []
-        rejected_reasons: dict[str, int] = {}
-        for row_index, (_, row) in enumerate(df.iterrows()):
-            point, reason = self._candidate_from_generic_compute_row_with_reason(
+        index, rejected_reasons = self._build_candidate_index(
+            df,
+            lambda row, row_index: self._candidate_from_generic_compute_row_with_reason(
                 row,
                 kernel_type,
                 latency_col,
                 row_index,
                 tc_input_count,
                 policy_kernel_type,
-            )
-            if point is not None:
-                points.append(point)
-            elif reason:
-                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+            ),
+        )
         self._compute_index_diagnostics[kernel_type] = {
             "csv_rows": len(df),
-            "usable_points": len(points),
+            "usable_points": len(index.points),
             "rejected_reasons": rejected_reasons,
         }
-        index = CandidateIndex(points)
         self._compute_index_cache[cache_key] = index
         return index
 
@@ -1119,12 +1303,6 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return str(value)
         return None
 
-    @staticmethod
-    def _attention_q_tokens_match(candidate_value: float, target_value: float) -> bool:
-        candidate = int(candidate_value)
-        target = int(target_value)
-        return candidate == target or _is_block_padded(candidate, target) or _is_block_padded(target, candidate)
-
     @classmethod
     def _latency_column_pure_candidate_group_attempts(
         cls, candidate_group: CandidateGroup
@@ -1161,8 +1339,17 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         *,
         fallback_from: str,
         interpolation_path: str,
+        compute_subcategory: Optional[str] = None,
     ) -> Optional[QueryResult]:
-        index = self._get_compute_index(target.kernel_type, tc_input_count)
+        include_output_signature = compute_subcategory == _QUANTIZED_MATMUL_SUBCATEGORY
+        if include_output_signature:
+            index = self._get_compute_index(
+                target.kernel_type,
+                tc_input_count,
+                include_output_signature=True,
+            )
+        else:
+            index = self._get_compute_index(target.kernel_type, tc_input_count)
         if index is None:
             self._record_miss(
                 "compute_csv_not_found",
@@ -1170,7 +1357,10 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 interpolation_path=interpolation_path,
             )
             return None
-        candidate_groups = index.candidate_groups_matching(target.regime_key, allow_extra_fields={"input_formats"})
+        allow_extra_fields = {"output_count", "output_dtypes", "output_formats"}
+        if compute_subcategory != _QUANTIZED_MATMUL_SUBCATEGORY:
+            allow_extra_fields.add("input_formats")
+        candidate_groups = index.candidate_groups_matching(target.regime_key, allow_extra_fields=allow_extra_fields)
         if not candidate_groups:
             self._record_miss(
                 "regime_key_unmatched",
@@ -1178,10 +1368,12 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 interpolation_path=interpolation_path,
                 target_axes=target.axes,
                 target_regime_key=dict(target.regime_key),
-                index_diagnostics=self._compute_index_diagnostics.get(target.kernel_type, {}),
+                index_diagnostics=self._compute_index_diagnostics.get(
+                    (target.kernel_type, include_output_signature),
+                    {},
+                ),
             )
             return None
-
         attempts: list[dict[str, Any]] = []
         override = self._kernel_overrides.get(target.kernel_type, {})
         for candidate_group in sorted(candidate_groups, key=self._compute_candidate_group_rank):
@@ -1198,6 +1390,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                         "query_mode": target.query_mode,
                         "interpolation_path": interpolation_path,
                         "latency_column_group": latency_column_group,
+                        **({"compute_subcategory": compute_subcategory} if compute_subcategory is not None else {}),
                     },
                 )
                 if result is None:
@@ -1218,6 +1411,8 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                     result.method,
                     result.confidence,
                 )
+                if compute_subcategory is not None:
+                    result.details["interpolation_path"] = f"{compute_subcategory}_{result.interpolation_dim}d"
                 return self._query_result_from_interpolation(target, result)
 
         self._record_miss(
@@ -1247,6 +1442,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 kernel_types.append(alt)
 
         tc_input_count = mapping.get("tc_input_count")
+        compute_subcategory = self._compute_subcategory(mapping)
+        if compute_subcategory != _QUANTIZED_MATMUL_SUBCATEGORY:
+            compute_subcategory = None
         attempts: list[dict[str, Any]] = []
         for kt in kernel_types:
             target = self._build_compute_target(op_invoke_info, mapping, kt)
@@ -1257,7 +1455,8 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 target,
                 tc_input_count,
                 fallback_from=fallback_from,
-                interpolation_path="multidim",
+                interpolation_path=compute_subcategory or "multidim",
+                compute_subcategory=compute_subcategory,
             )
             if result is not None:
                 return result
@@ -1820,6 +2019,12 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         return None
 
     @staticmethod
+    def _attention_q_tokens_match(candidate_value: float, target_value: float) -> bool:
+        candidate = int(candidate_value)
+        target = int(target_value)
+        return candidate == target or _is_block_padded(candidate, target) or _is_block_padded(target, candidate)
+
+    @staticmethod
     def _attention_input_layout_from_params(params: Dict[str, Any]) -> Optional[str]:
         explicit_layout = params.get("input_layout")
         if explicit_layout is not None:
@@ -2055,6 +2260,882 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             shape_match_rule=f"{result.shape_match_rule}_sqrt",
         )
 
+    # ---- Attention auxiliary: LightningIndexer ----
+
+    @staticmethod
+    def _runtime_attention_regime_fields(
+        kernel_type: str,
+        dtype_str: str,
+        q_shape: tuple[int, ...],
+        workload: dict[str, Any],
+        params: dict[str, Any],
+        *,
+        include_sparse_fields: bool,
+    ) -> Optional[list[tuple[str, Any]]]:
+        required = (
+            "sparse_mode",
+            "num_kv_heads",
+            "input_layout",
+            "topk",
+            "block_size",
+            "num_heads",
+            "cache_layout",
+            "kv_cache_mode",
+        )
+        if any(params.get(field) is None for field in required):
+            return None
+        sparse_mode = _to_int_cell(params["sparse_mode"])
+        kv_heads = _to_int_cell(params["num_kv_heads"])
+        topk = _to_int_cell(params["topk"])
+        block_size = _to_int_cell(params["block_size"])
+        num_heads = _to_int_cell(params["num_heads"])
+        if (
+            sparse_mode is None
+            or kv_heads is None
+            or kv_heads <= 0
+            or topk is None
+            or topk <= 0
+            or block_size is None
+            or block_size <= 0
+            or num_heads is None
+            or num_heads <= 0
+        ):
+            return None
+        fields: list[tuple[str, Any]] = [
+            ("kernel_type", kernel_type),
+            ("dtype", dtype_str),
+            ("phase", workload["phase"]),
+            ("query_rank", len(q_shape)),
+            ("head_dim", int(q_shape[-1])),
+            ("sparse_mode", sparse_mode),
+            ("kv_heads", kv_heads),
+            ("input_layout", str(params["input_layout"])),
+            ("topk", topk),
+            ("block_size", block_size),
+            ("num_heads", num_heads),
+            ("cache_layout", str(params["cache_layout"])),
+            ("kv_cache_mode", str(params["kv_cache_mode"])),
+        ]
+        if include_sparse_fields:
+            sparse_required = ("sparse_block_size", "sparse_indices_pattern", "sparse_indices_valid_count")
+            if any(params.get(field) is None for field in sparse_required):
+                return None
+            sparse_block_size = _to_int_cell(params["sparse_block_size"])
+            sparse_indices_valid_count = _to_int_cell(params["sparse_indices_valid_count"])
+            if (
+                sparse_block_size is None
+                or sparse_block_size <= 0
+                or sparse_indices_valid_count is None
+                or sparse_indices_valid_count <= 0
+            ):
+                return None
+            fields.extend(
+                [
+                    ("sparse_block_size", sparse_block_size),
+                    ("sparse_indices_pattern", str(params["sparse_indices_pattern"])),
+                    ("sparse_indices_valid_count", sparse_indices_valid_count),
+                ]
+            )
+        return fields
+
+    def _candidate_from_runtime_attention_row(
+        self,
+        row: Any,
+        kernel_type: str,
+        latency_col: str,
+        row_index: int,
+        *,
+        include_sparse_fields: bool,
+    ) -> tuple[Optional[CandidatePoint], Optional[str]]:
+        if "Runtime metadata_completeness" in row.index:
+            completeness = _optional_str_cell(row.get("Runtime metadata_completeness"))
+            if completeness != "complete":
+                return None, "runtime_metadata_incomplete"
+        input_shapes = _parse_shape_str(str(row.get("Input Shapes", "")))
+        input_dtypes = _parse_str_list(str(row.get("Input Data Types", "")))
+        if not input_shapes or not input_dtypes:
+            return None, "input_signature_missing"
+        q_shape = tuple(input_shapes[0])
+        if len(q_shape) != 3 or any(int(dim) <= 0 for dim in q_shape):
+            return None, "query_shape_unextractable"
+        q_tokens = int(q_shape[0])
+        cumulative = self._runtime_int_values(row.get("Runtime actual_seq_lengths_values"))
+        kv_lengths = self._runtime_int_values(row.get("Runtime actual_seq_lengths_kv_values"))
+        if cumulative is None or kv_lengths is None:
+            return None, "runtime_sequence_values_missing"
+        query_lengths = self._query_lengths_from_cumulative(q_tokens, cumulative)
+        if query_lengths is None:
+            return None, "runtime_query_offsets_invalid"
+        workload = self._attention_runtime_workload(
+            q_tokens=q_tokens,
+            query_lengths=query_lengths,
+            kv_lengths=kv_lengths,
+        )
+        if workload is None:
+            return None, "runtime_workload_unextractable"
+        params = {
+            "sparse_mode": _to_int_cell(row.get("Runtime sparse_mode")),
+            "num_kv_heads": _to_int_cell(row.get("Runtime num_key_value_heads")),
+            "input_layout": _optional_str_cell(row.get("Runtime input_layout")),
+            "topk": _to_int_cell(row.get("Runtime topk")),
+            "block_size": _to_int_cell(row.get("Runtime block_size")),
+            "num_heads": _to_int_cell(row.get("Runtime num_heads")),
+            "cache_layout": _optional_str_cell(row.get("Runtime cache_layout")),
+            "kv_cache_mode": _optional_str_cell(row.get("Runtime kv_cache_mode")),
+            "sparse_block_size": _to_int_cell(row.get("Runtime sparse_block_size")),
+            "sparse_indices_pattern": _optional_str_cell(row.get("Runtime sparse_indices_pattern")),
+            "sparse_indices_valid_count": _to_int_cell(row.get("Runtime sparse_indices_valid_count")),
+        }
+        regime_fields = self._runtime_attention_regime_fields(
+            kernel_type,
+            input_dtypes[0],
+            q_shape,
+            workload,
+            params,
+            include_sparse_fields=include_sparse_fields,
+        )
+        if regime_fields is None:
+            return None, "runtime_regime_incomplete"
+        latency, latency_meta = self._candidate_latency(row, latency_col)
+        if latency is None:
+            return None, str(latency_meta["latency_rejected_reason"])
+        return CandidatePoint(
+            kernel_type=kernel_type,
+            axes={
+                "q_tokens": workload["q_tokens"],
+                "effective_kv_len": workload["effective_kv_len"],
+            },
+            latency_us=latency,
+            regime_key=make_regime_key(regime_fields),
+            input_shapes=[q_shape],
+            input_dtypes=[input_dtypes[0]],
+            row_index=row_index,
+            row_meta={
+                "phase": workload["phase"],
+                "batch_size": workload["batch_size"],
+                "query_lengths": query_lengths,
+                "kv_lengths": kv_lengths,
+                **latency_meta,
+            },
+        ), None
+
+    def _candidate_from_lightning_indexer_row(
+        self,
+        row: Any,
+        kernel_type: str,
+        latency_col: str,
+        row_index: int,
+    ) -> tuple[Optional[CandidatePoint], Optional[str]]:
+        return self._candidate_from_runtime_attention_row(
+            row,
+            kernel_type,
+            latency_col,
+            row_index,
+            include_sparse_fields=False,
+        )
+
+    def _candidate_from_sparse_attention_row(
+        self,
+        row: Any,
+        kernel_type: str,
+        latency_col: str,
+        row_index: int,
+    ) -> tuple[Optional[CandidatePoint], Optional[str]]:
+        return self._candidate_from_runtime_attention_row(
+            row,
+            kernel_type,
+            latency_col,
+            row_index,
+            include_sparse_fields=True,
+        )
+
+    def _build_runtime_attention_target_from_params(
+        self,
+        kernel_type: str,
+        params: dict[str, Any],
+        dtype_str: str,
+        *,
+        include_sparse_fields: bool,
+    ) -> Optional[InterpolationTarget]:
+        q_shape_value = params.get("q_shape_3d")
+        if not isinstance(q_shape_value, (list, tuple)):
+            return None
+        try:
+            q_shape = tuple(int(dim) for dim in q_shape_value)
+        except (TypeError, ValueError):
+            return None
+        if len(q_shape) != 3 or any(dim <= 0 for dim in q_shape):
+            return None
+        q_tokens = q_shape[0]
+        cumulative = self._runtime_int_values(params.get("actual_seq_lengths_values"))
+        kv_lengths = self._runtime_int_values(params.get("actual_seq_lengths_kv_values"))
+        if cumulative is None or kv_lengths is None:
+            return None
+        query_lengths = self._query_lengths_from_cumulative(q_tokens, cumulative)
+        if query_lengths is None:
+            return None
+        workload = self._attention_runtime_workload(
+            q_tokens=q_tokens,
+            query_lengths=query_lengths,
+            kv_lengths=kv_lengths,
+        )
+        if workload is None:
+            return None
+        regime_fields = self._runtime_attention_regime_fields(
+            kernel_type,
+            dtype_str,
+            q_shape,
+            workload,
+            params,
+            include_sparse_fields=include_sparse_fields,
+        )
+        if regime_fields is None:
+            return None
+        path = "sparse_attention" if include_sparse_fields else "lightning_indexer"
+        return InterpolationTarget(
+            func_name=kernel_type,
+            kernel_type=kernel_type,
+            axes={
+                "q_tokens": workload["q_tokens"],
+                "effective_kv_len": workload["effective_kv_len"],
+            },
+            regime_key=make_regime_key(regime_fields),
+            tc_shapes=[q_shape],
+            input_dtypes=[dtype_str],
+            query_mode=path,
+            metadata={
+                "phase": workload["phase"],
+                "batch_size": workload["batch_size"],
+            },
+        )
+
+    def _get_lightning_indexer_index(self, kernel_type: str) -> tuple[Optional[CandidateIndex], dict[str, int]]:
+        df = self.base._load_csv(kernel_type)
+        if df is None:
+            return None, {}
+        cache_key = ("lightning_indexer", kernel_type, self._dataframe_fingerprint(df), self._policy_hash)
+        if cache_key in self._lightning_indexer_index_cache:
+            return self._lightning_indexer_index_cache[cache_key]
+        latency_col = self.base._latency_col(df)
+        index, rejected_reasons = self._build_candidate_index(
+            df,
+            lambda row, row_index: self._candidate_from_lightning_indexer_row(
+                row,
+                kernel_type,
+                latency_col,
+                row_index,
+            ),
+        )
+        self._lightning_indexer_index_cache[cache_key] = (index, rejected_reasons)
+        return index, rejected_reasons
+
+    def _get_sparse_attention_index(self, kernel_type: str) -> tuple[Optional[CandidateIndex], dict[str, int]]:
+        df = self.base._load_csv(kernel_type)
+        if df is None:
+            return None, {}
+        cache_key = ("sparse_attention", kernel_type, self._dataframe_fingerprint(df), self._policy_hash)
+        if cache_key in self._sparse_attention_index_cache:
+            return self._sparse_attention_index_cache[cache_key]
+        latency_col = self.base._latency_col(df)
+        index, rejected_reasons = self._build_candidate_index(
+            df,
+            lambda row, row_index: self._candidate_from_sparse_attention_row(
+                row,
+                kernel_type,
+                latency_col,
+                row_index,
+            ),
+        )
+        self._sparse_attention_index_cache[cache_key] = (index, rejected_reasons)
+        return index, rejected_reasons
+
+    # ---- V4 MLA cache update: ScatterNdUpdate ----
+
+    @staticmethod
+    def _scatter_update_shape(shape: tuple[int, ...]) -> tuple[int, ...]:
+        if len(shape) <= 2:
+            return shape
+        return (int(math.prod(shape[:-1])), int(shape[-1]))
+
+    def _candidate_from_scatter_nd_update_row(
+        self,
+        row: Any,
+        kernel_type: str,
+        latency_col: str,
+        row_index: int,
+    ) -> tuple[Optional[CandidatePoint], Optional[str]]:
+        input_shapes = _parse_shape_str(str(row.get("Input Shapes", "")))
+        input_dtypes = _parse_str_list(str(row.get("Input Data Types", "")))
+        input_formats = _parse_str_list(str(row.get("Input Formats", "")))
+        if len(input_shapes) < 3:
+            return None, "input_shapes_missing"
+        if len(input_dtypes) < 3:
+            return None, "input_dtypes_missing"
+        if len(input_formats) < 3:
+            return None, "input_formats_missing"
+        cache_shape = tuple(input_shapes[0])
+        update_shape = self._scatter_update_shape(tuple(input_shapes[2]))
+        if not cache_shape or not update_shape:
+            return None, "scatter_shape_unextractable"
+        latency, latency_meta = self._candidate_latency(row, latency_col)
+        if latency is None:
+            return None, str(latency_meta["latency_rejected_reason"])
+        key_fields: list[tuple[str, Any]] = [
+            ("kernel_type", kernel_type),
+            ("cache_dtype", input_dtypes[0]),
+            ("index_dtype", input_dtypes[1]),
+            ("update_dtype", input_dtypes[2]),
+            ("full_cache_shape", cache_shape),
+            ("update_tail", update_shape[1:]),
+            ("input_formats", tuple(input_formats[:3])),
+        ]
+        return CandidatePoint(
+            kernel_type=kernel_type,
+            axes={"tokens": float(update_shape[0])},
+            latency_us=latency,
+            regime_key=make_regime_key(key_fields),
+            input_shapes=[cache_shape, tuple(input_shapes[1]), update_shape],
+            input_dtypes=input_dtypes[:3],
+            input_formats=input_formats[:3],
+            row_index=row_index,
+            row_meta=latency_meta,
+        ), None
+
+    def _build_scatter_nd_update_target(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        kernel_type: str,
+    ) -> Optional[InterpolationTarget]:
+        args = getattr(op_invoke_info, "args", ())
+        if len(args) < 3:
+            return None
+        # TensorCast calls (update, cache, index), while the profiling CSV stores
+        # physical inputs as (cache, index, update).
+        update, cache, index = args[:3]
+        if not all(isinstance(arg, torch.Tensor) for arg in (update, cache, index)):
+            return None
+        update_shape = self._scatter_update_shape(tuple(update.shape))
+        cache_shape = tuple(cache.shape)
+        if not update_shape or not cache_shape:
+            return None
+        cache_dtype = DTYPE_MAP.get(cache.dtype)
+        update_dtype = DTYPE_MAP.get(update.dtype)
+        index_dtype = DTYPE_MAP.get(index.dtype)
+        if cache_dtype is None or update_dtype is None or index_dtype is None:
+            return None
+        return InterpolationTarget(
+            func_name=_normalize_func_name(op_invoke_info.func),
+            kernel_type=kernel_type,
+            axes={"tokens": float(update_shape[0])},
+            regime_key=make_regime_key(
+                [
+                    ("kernel_type", kernel_type),
+                    ("cache_dtype", cache_dtype),
+                    ("index_dtype", index_dtype),
+                    ("update_dtype", update_dtype),
+                    ("full_cache_shape", cache_shape),
+                    ("update_tail", update_shape[1:]),
+                    # TensorCast tensors do not carry physical format metadata;
+                    # the current cache-update mapping is intentionally ND-only.
+                    ("input_formats", ("ND", "ND", "ND")),
+                ]
+            ),
+            tc_shapes=[cache_shape, tuple(index.shape), update_shape],
+            input_dtypes=[cache_dtype, index_dtype, update_dtype],
+            query_mode="scatter_nd_update_mla",
+        )
+
+    @staticmethod
+    def _build_scatter_nd_update_target_from_shapes(
+        kernel_type: str,
+        input_shapes: Sequence[Tuple[int, ...]],
+        input_dtypes: Sequence[str],
+    ) -> Optional[InterpolationTarget]:
+        if len(input_shapes) < 3 or len(input_dtypes) < 3:
+            return None
+        cache_shape = tuple(input_shapes[0])
+        index_shape = tuple(input_shapes[1])
+        update_shape = InterpolatingDataSource._scatter_update_shape(tuple(input_shapes[2]))
+        if not cache_shape or not index_shape or not update_shape:
+            return None
+        return InterpolationTarget(
+            func_name=kernel_type,
+            kernel_type=kernel_type,
+            axes={"tokens": float(update_shape[0])},
+            regime_key=make_regime_key(
+                [
+                    ("kernel_type", kernel_type),
+                    ("cache_dtype", input_dtypes[0]),
+                    ("index_dtype", input_dtypes[1]),
+                    ("update_dtype", input_dtypes[2]),
+                    ("full_cache_shape", cache_shape),
+                    ("update_tail", update_shape[1:]),
+                    ("input_formats", ("ND", "ND", "ND")),
+                ]
+            ),
+            tc_shapes=[cache_shape, index_shape, update_shape],
+            input_dtypes=list(input_dtypes[:3]),
+            query_mode="scatter_cache_write",
+        )
+
+    def _get_scatter_nd_update_index(self, kernel_type: str) -> tuple[Optional[CandidateIndex], dict[str, int]]:
+        df = self.base._load_csv(kernel_type)
+        if df is None:
+            return None, {}
+        cache_key = ("scatter_nd_update", kernel_type, self._dataframe_fingerprint(df), self._policy_hash)
+        if cache_key in self._scatter_nd_update_index_cache:
+            return self._scatter_nd_update_index_cache[cache_key]
+        latency_col = self.base._latency_col(df)
+        index, rejected_reasons = self._build_candidate_index(
+            df,
+            lambda row, row_index: self._candidate_from_scatter_nd_update_row(
+                row,
+                kernel_type,
+                latency_col,
+                row_index,
+            ),
+        )
+        self._scatter_nd_update_index_cache[cache_key] = (index, rejected_reasons)
+        return index, rejected_reasons
+
+    def _interpolate_scatter_nd_update_by_shapes(
+        self,
+        kernel_types: Sequence[str],
+        input_shapes: Sequence[Tuple[int, ...]],
+        input_dtypes: Sequence[str],
+    ) -> Optional[QueryResult]:
+        attempts: list[dict[str, Any]] = []
+        for kernel_type in kernel_types:
+            index, rejected_reasons = self._get_scatter_nd_update_index(kernel_type)
+            if index is None:
+                attempts.append({"kernel_type": kernel_type, "status": "csv_not_found"})
+                continue
+            target = self._build_scatter_nd_update_target_from_shapes(
+                kernel_type,
+                input_shapes,
+                input_dtypes,
+            )
+            if target is None:
+                attempts.append({"kernel_type": kernel_type, "status": "scatter_target_unextractable"})
+                continue
+            override = self._kernel_overrides.get(kernel_type, {})
+            candidate_groups = index.candidate_groups_matching(target.regime_key)
+            if not candidate_groups:
+                attempts.append(
+                    {
+                        "kernel_type": kernel_type,
+                        "status": "regime_key_unmatched",
+                        "target_regime": dict(target.regime_key),
+                        "rejected_reasons": rejected_reasons,
+                    }
+                )
+                continue
+            for candidate_group in candidate_groups:
+                for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
+                    candidate_group
+                ):
+                    result = candidate_subset.interpolate(
+                        target.axes,
+                        _SCATTER_ND_UPDATE_AXIS_GROUPS,
+                        max_interpolation_dim=override.get("max_interpolation_dim"),
+                        fallback_from="composite",
+                        extra_details={
+                            "kernel_type": kernel_type,
+                            "query_mode": "scatter_cache_write",
+                            "interpolation_path": "scatter_cache_write_1d",
+                            "latency_column_group": latency_column_group,
+                            "rejected_reasons": rejected_reasons,
+                        },
+                    )
+                    if result is not None:
+                        return self._query_result_from_interpolation(target, result)
+                    attempts.append(
+                        {
+                            "kernel_type": kernel_type,
+                            "status": "candidate_group_failed",
+                            "latency_column_group": latency_column_group,
+                            "diagnostics": candidate_subset.last_diagnostics,
+                        }
+                    )
+        final_diagnostics = attempts[-1].get("diagnostics") if attempts else None
+        self._record_miss(
+            self._candidate_failure_reason("scatter_cache_write_interpolation_failed", final_diagnostics),
+            attempted_kernel_types=list(kernel_types),
+            attempts=attempts,
+        )
+        return None
+
+    def _interpolate_scatter_nd_update(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        mapping: dict,
+        *,
+        fallback_from: str = "exact_miss",
+    ) -> Optional[QueryResult]:
+        kernel_types = [mapping.get("kernel_type")]
+        kernel_types.extend(mapping.get("alternate_kernel_types") or [])
+        kernel_types = [str(kernel_type) for kernel_type in kernel_types if kernel_type]
+        attempts: list[dict[str, Any]] = []
+        for kernel_type in kernel_types:
+            index, rejected_reasons = self._get_scatter_nd_update_index(kernel_type)
+            if index is None:
+                attempts.append({"kernel_type": kernel_type, "status": "csv_not_found"})
+                continue
+            target = self._build_scatter_nd_update_target(op_invoke_info, kernel_type)
+            if target is None:
+                attempts.append({"kernel_type": kernel_type, "status": "scatter_target_unextractable"})
+                continue
+            candidate_groups = index.candidate_groups_matching(target.regime_key)
+            if not candidate_groups:
+                attempts.append(
+                    {
+                        "kernel_type": kernel_type,
+                        "status": "regime_key_unmatched",
+                        "target_regime": dict(target.regime_key),
+                    }
+                )
+                continue
+            override = self._kernel_overrides.get(kernel_type, {})
+            for candidate_group in candidate_groups:
+                for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
+                    candidate_group
+                ):
+                    result = candidate_subset.interpolate(
+                        target.axes,
+                        _SCATTER_ND_UPDATE_AXIS_GROUPS,
+                        max_interpolation_dim=override.get("max_interpolation_dim"),
+                        fallback_from=fallback_from,
+                        extra_details={
+                            "kernel_type": kernel_type,
+                            "query_mode": "scatter_nd_update_mla",
+                            "interpolation_path": "scatter_nd_update_mla_1d",
+                            "latency_column_group": latency_column_group,
+                            "rejected_reasons": rejected_reasons,
+                        },
+                    )
+                    if result is not None:
+                        return self._query_result_from_interpolation(target, result)
+                    attempts.append(
+                        {
+                            "kernel_type": kernel_type,
+                            "status": "candidate_group_failed",
+                            "latency_column_group": latency_column_group,
+                            "diagnostics": candidate_subset.last_diagnostics,
+                        }
+                    )
+
+        self._record_miss(
+            self._candidate_failure_reason(
+                "scatter_nd_update_interpolation_failed",
+                attempts[-1].get("diagnostics") if attempts else {},
+            ),
+            query_mode="scatter_nd_update_mla",
+            attempted_kernel_types=kernel_types,
+            attempts=attempts,
+        )
+        return None
+
+    # ---- Compute subcategory: quantization scale ----
+
+    @staticmethod
+    def _compute_scale_axes(shape: Tuple[int, ...]) -> Optional[dict[str, float]]:
+        if not shape or any(int(dim) <= 0 for dim in shape):
+            return None
+        tokens = math.prod(int(dim) for dim in shape[:-1])
+        return {"M": float(tokens), "K": float(shape[-1])}
+
+    @staticmethod
+    def _compute_scale_profiling_dtype(dtype: torch.dtype) -> Optional[str]:
+        if dtype == torch.float16:
+            return "DT_FLOAT16"
+        return DTYPE_MAP.get(dtype)
+
+    @staticmethod
+    def _scalar_aware_numel(shape: Tuple[int, ...]) -> Optional[int]:
+        numel = 1
+        for dim in shape:
+            if int(dim) < 0:
+                return None
+            numel *= int(dim)
+        return numel
+
+    @classmethod
+    def _compute_scale_mode(
+        cls,
+        input_shape: Tuple[int, ...],
+        scale_shape: Tuple[int, ...],
+        kernel_type: str,
+    ) -> Optional[tuple[str, Optional[int]]]:
+        axes = cls._compute_scale_axes(input_shape)
+        scale_numel = cls._scalar_aware_numel(scale_shape)
+        if axes is None or scale_numel is None or scale_numel <= 0:
+            return None
+        if not scale_shape:
+            return "per_tensor", None
+        tokens = int(axes["M"])
+        channels = int(axes["K"])
+        if kernel_type == "DynamicBlockQuant":
+            if len(scale_shape) != 1 or scale_numel > channels:
+                return None
+            block_size = (channels + scale_numel - 1) // scale_numel
+            return "per_block", block_size
+        if scale_numel == tokens:
+            return "per_token", None
+        if scale_numel == channels:
+            return "per_channel", None
+        return None
+
+    @staticmethod
+    def _output_tensors(output: Any) -> Optional[list[torch.Tensor]]:
+        if isinstance(output, torch.Tensor):
+            return [output]
+        if isinstance(output, (list, tuple)) and output and all(isinstance(item, torch.Tensor) for item in output):
+            return list(output)
+        return None
+
+    def _candidate_from_compute_scale_row(
+        self,
+        row: Any,
+        kernel_type: str,
+        latency_col: str,
+        row_index: int,
+    ) -> tuple[Optional[CandidatePoint], Optional[str]]:
+        input_shapes = _parse_shape_str(str(row.get("Input Shapes", "")))
+        input_dtypes = _parse_str_list(str(row.get("Input Data Types", "")))
+        input_formats = _parse_str_list(str(row.get("Input Formats", "")))
+        output_shapes = _parse_shape_str(str(row.get("Output Shapes", "")))
+        output_dtypes = _parse_str_list(str(row.get("Output Data Types", "")))
+        output_formats = _parse_str_list(str(row.get("Output Formats", "")))
+        if not input_shapes:
+            return None, "input_shapes_missing"
+        if not input_dtypes:
+            return None, "input_dtypes_missing"
+        if not input_formats:
+            return None, "input_formats_missing"
+        if len(output_shapes) < 2:
+            return None, "compute_scale_outputs_lt_2"
+        if len(output_dtypes) != len(output_shapes):
+            return None, "output_dtypes_mismatch"
+        if len(output_formats) != len(output_shapes):
+            return None, "output_formats_mismatch"
+
+        input_shape = self._logical_csv_shape(tuple(input_shapes[0]), input_formats[0])
+        quant_shape = self._logical_csv_shape(tuple(output_shapes[0]), output_formats[0])
+        if quant_shape != input_shape:
+            return None, "quant_output_shape_mismatch"
+        axes = self._compute_scale_axes(input_shape)
+        extracted_modes = [
+            self._compute_scale_mode(input_shape, tuple(shape), kernel_type) for shape in output_shapes[1:]
+        ]
+        if axes is None or any(mode is None for mode in extracted_modes):
+            return None, "compute_scale_mode_unextractable"
+        auxiliary_modes = tuple(mode for mode in extracted_modes if mode is not None)
+        scale_mode, block_size = auxiliary_modes[0]
+        latency, latency_meta = self._candidate_latency(row, latency_col)
+        if latency is None:
+            return None, str(latency_meta["latency_rejected_reason"])
+
+        regime_fields: list[tuple[str, Any]] = [
+            ("kernel_type", kernel_type),
+            ("input_dtype", self._dtype_key(kernel_type, input_dtypes[0])),
+            ("input_format", input_formats[0]),
+            ("output_count", len(output_shapes)),
+            ("output_dtypes", tuple(output_dtypes)),
+            ("output_formats", tuple(output_formats)),
+            ("scale_mode", scale_mode),
+            ("auxiliary_modes", auxiliary_modes),
+        ]
+        if block_size is not None:
+            regime_fields.append(("block_size", block_size))
+        return CandidatePoint(
+            kernel_type=kernel_type,
+            axes=axes,
+            latency_us=latency,
+            regime_key=make_regime_key(regime_fields),
+            input_shapes=[input_shape],
+            input_dtypes=[input_dtypes[0]],
+            input_formats=[input_formats[0]],
+            row_index=row_index,
+            row_meta={
+                "compute_subcategory": _COMPUTE_SCALE_SUBCATEGORY,
+                "scale_mode": scale_mode,
+                "block_size": block_size,
+                "auxiliary_modes": auxiliary_modes,
+                **latency_meta,
+            },
+        ), None
+
+    def _get_compute_scale_index(self, kernel_type: str) -> Optional[CandidateIndex]:
+        df = self.base._load_csv(kernel_type)
+        if df is None:
+            return None
+        cache_key = (
+            _COMPUTE_SCALE_SUBCATEGORY,
+            kernel_type,
+            self._dataframe_fingerprint(df),
+            self._policy_hash,
+        )
+        if cache_key in self._compute_index_cache:
+            return self._compute_index_cache[cache_key]
+        latency_col = self.base._latency_col(df)
+        index, rejected_reasons = self._build_candidate_index(
+            df,
+            lambda row, row_index: self._candidate_from_compute_scale_row(
+                row,
+                kernel_type,
+                latency_col,
+                row_index,
+            ),
+        )
+        diagnostics_key = (_COMPUTE_SCALE_SUBCATEGORY, kernel_type)
+        self._compute_index_diagnostics[diagnostics_key] = {
+            "csv_rows": len(df),
+            "usable_points": len(index.points),
+            "rejected_reasons": rejected_reasons,
+        }
+        self._compute_index_cache[cache_key] = index
+        return index
+
+    def _build_compute_scale_target(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        kernel_type: str,
+    ) -> Optional[InterpolationTarget]:
+        tc_inputs = self.base._extract_tensor_inputs(op_invoke_info)
+        if not tc_inputs:
+            return None
+        input_shape, input_dtype = tc_inputs[0]
+        input_shape = tuple(input_shape)
+        axes = self._compute_scale_axes(input_shape)
+        input_dtype_str = self._compute_scale_profiling_dtype(input_dtype)
+        output_tensors = self._output_tensors(getattr(op_invoke_info, "out", None))
+        if axes is None or input_dtype_str is None or output_tensors is None or len(output_tensors) < 2:
+            return None
+        output_shapes = [tuple(tensor.shape) for tensor in output_tensors]
+        if output_shapes[0] != input_shape:
+            return None
+        output_dtypes = []
+        for tensor in output_tensors:
+            dtype_str = self._compute_scale_profiling_dtype(tensor.dtype)
+            if dtype_str is None:
+                return None
+            output_dtypes.append(dtype_str)
+        extracted_modes = [self._compute_scale_mode(input_shape, shape, kernel_type) for shape in output_shapes[1:]]
+        if any(mode is None for mode in extracted_modes):
+            return None
+        auxiliary_modes = tuple(mode for mode in extracted_modes if mode is not None)
+        scale_mode, block_size = auxiliary_modes[0]
+        regime_fields: list[tuple[str, Any]] = [
+            ("kernel_type", kernel_type),
+            ("input_dtype", self._dtype_key(kernel_type, input_dtype_str)),
+            ("input_format", "ND"),
+            ("output_count", len(output_tensors)),
+            ("output_dtypes", tuple(output_dtypes)),
+            ("output_formats", tuple("ND" for _ in output_tensors)),
+            ("scale_mode", scale_mode),
+            ("auxiliary_modes", auxiliary_modes),
+        ]
+        if block_size is not None:
+            regime_fields.append(("block_size", block_size))
+        return InterpolationTarget(
+            func_name=_normalize_func_name(op_invoke_info.func),
+            kernel_type=kernel_type,
+            axes=axes,
+            regime_key=make_regime_key(regime_fields),
+            tc_shapes=[input_shape],
+            input_dtypes=[input_dtype_str],
+            query_mode="compute_scale",
+            metadata={
+                "scale_mode": scale_mode,
+                "block_size": block_size,
+                "auxiliary_modes": auxiliary_modes,
+            },
+        )
+
+    def _interpolate_compute_scale(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        mapping: dict,
+        *,
+        fallback_from: str = "exact_miss",
+    ) -> Optional[QueryResult]:
+        kernel_type = mapping.get("kernel_type")
+        if not kernel_type:
+            self._record_miss("compute_kernel_type_missing")
+            return None
+        kernel_types = [kernel_type]
+        for alternate in mapping.get("alternate_kernel_types", []):
+            if alternate not in kernel_types:
+                kernel_types.append(alternate)
+
+        attempts: list[dict[str, Any]] = []
+        for candidate_kernel in kernel_types:
+            target = self._build_compute_scale_target(op_invoke_info, candidate_kernel)
+            if target is None:
+                attempts.append({"kernel_type": candidate_kernel, "status": "target_unavailable"})
+                continue
+            index = self._get_compute_scale_index(candidate_kernel)
+            diagnostics_key = (_COMPUTE_SCALE_SUBCATEGORY, candidate_kernel)
+            if index is None:
+                attempts.append({"kernel_type": candidate_kernel, "status": "csv_not_found"})
+                continue
+            candidate_groups = index.candidate_groups_matching(target.regime_key)
+            if not candidate_groups:
+                attempts.append(
+                    {
+                        "kernel_type": candidate_kernel,
+                        "status": "regime_key_unmatched",
+                        "target_regime": dict(target.regime_key),
+                        "index_diagnostics": self._compute_index_diagnostics.get(diagnostics_key, {}),
+                    }
+                )
+                continue
+            override = {
+                **self._kernel_overrides.get(kernel_type, {}),
+                **self._kernel_overrides.get(candidate_kernel, {}),
+            }
+            for candidate_group in candidate_groups:
+                for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
+                    candidate_group
+                ):
+                    result = candidate_subset.interpolate(
+                        target.axes,
+                        _COMPUTE_SCALE_AXIS_GROUPS,
+                        fallback_from=fallback_from,
+                        max_interpolation_dim=override.get("max_interpolation_dim"),
+                        extra_details={
+                            "kernel_type": candidate_kernel,
+                            "query_mode": target.query_mode,
+                            "compute_subcategory": _COMPUTE_SCALE_SUBCATEGORY,
+                            "scale_mode": target.metadata["scale_mode"],
+                            "block_size": target.metadata["block_size"],
+                            "auxiliary_modes": target.metadata["auxiliary_modes"],
+                            "latency_column_group": latency_column_group,
+                        },
+                    )
+                    if result is None:
+                        attempts.append(
+                            {
+                                "kernel_type": candidate_kernel,
+                                "status": "candidate_group_failed",
+                                "regime_key": dict(candidate_subset.regime_key),
+                                "latency_column_group": latency_column_group,
+                                "diagnostics": candidate_subset.last_diagnostics,
+                            }
+                        )
+                        continue
+                    result.details["interpolation_path"] = f"{_COMPUTE_SCALE_SUBCATEGORY}_{result.interpolation_dim}d"
+                    return self._query_result_from_interpolation(target, result)
+
+        final_diagnostics = attempts[-1].get("diagnostics") if attempts else None
+        self._record_miss(
+            self._candidate_failure_reason("compute_scale_interpolation_failed", final_diagnostics),
+            compute_subcategory=_COMPUTE_SCALE_SUBCATEGORY,
+            attempted_kernel_types=kernel_types,
+            attempts=attempts,
+        )
+        return None
+
     # ---- Compute interpolation ----
 
     def _interpolate_compute(
@@ -2112,8 +3193,6 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         fallback_from: str = "exact_miss",
     ) -> Optional[QueryResult]:
         return self._interpolate_attention_multidim(op_invoke_info, mapping, fallback_from=fallback_from)
-
-    # ---- Composite interpolation ----
 
     def _interpolate_composite(
         self, op_invoke_info: "OpInvokeInfo", mapping: dict, func_str: str
@@ -2187,6 +3266,13 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 if spec.query_mode == "attention" and spec.attention_params:
                     result_interp = self._interpolate_attention_by_params(
                         kernel_types, spec.attention_params, spec.dtype
+                    )
+                elif spec.query_mode == "scatter_cache_write":
+                    input_dtypes = spec.input_dtypes or [spec.dtype for _ in spec.input_shapes]
+                    result_interp = self._interpolate_scatter_nd_update_by_shapes(
+                        kernel_types,
+                        spec.input_shapes,
+                        input_dtypes,
                     )
                 else:
                     result_interp = self._interpolate_compute_by_shapes(
@@ -2368,6 +3454,20 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         params: Dict,
         dtype_str: str,
     ) -> Optional[QueryResult]:
+        if kernel_type in _RUNTIME_ATTENTION_KERNELS:
+            return self._interpolate_runtime_attention_by_params_one(
+                kernel_type,
+                params,
+                dtype_str,
+                include_sparse_fields=False,
+            )
+        if kernel_type in _SPARSE_RUNTIME_ATTENTION_KERNELS:
+            return self._interpolate_runtime_attention_by_params_one(
+                kernel_type,
+                params,
+                dtype_str,
+                include_sparse_fields=True,
+            )
         index = self._get_attention_index(kernel_type)
         if index is None:
             self._record_miss(
@@ -2389,6 +3489,90 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             fallback_from="composite",
             interpolation_path="composite_attention",
         )
+
+    def _interpolate_runtime_attention_by_params_one(
+        self,
+        kernel_type: str,
+        params: Dict[str, Any],
+        dtype_str: str,
+        *,
+        include_sparse_fields: bool,
+    ) -> Optional[QueryResult]:
+        if include_sparse_fields:
+            index, rejected_reasons = self._get_sparse_attention_index(kernel_type)
+            axis_groups = _SPARSE_ATTENTION_AXIS_GROUPS
+            interpolation_path = "sparse_attention"
+        else:
+            index, rejected_reasons = self._get_lightning_indexer_index(kernel_type)
+            axis_groups = _LIGHTNING_INDEXER_AXIS_GROUPS
+            interpolation_path = "lightning_indexer"
+        if index is None:
+            self._record_miss(
+                "csv_not_found",
+                kernel_type=kernel_type,
+                interpolation_path=interpolation_path,
+            )
+            return None
+        target = self._build_runtime_attention_target_from_params(
+            kernel_type,
+            params,
+            dtype_str,
+            include_sparse_fields=include_sparse_fields,
+        )
+        if target is None:
+            self._record_miss(
+                f"{interpolation_path}_target_unextractable",
+                kernel_type=kernel_type,
+                rejected_reasons=rejected_reasons,
+            )
+            return None
+
+        attempts: list[dict[str, Any]] = []
+        candidate_groups = index.candidate_groups_matching(target.regime_key)
+        if not candidate_groups:
+            attempts.append({"status": "regime_key_unmatched", "target_regime": dict(target.regime_key)})
+        override = self._kernel_overrides.get(kernel_type, {})
+        for candidate_group in candidate_groups:
+            for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
+                candidate_group
+            ):
+                result = candidate_subset.interpolate(
+                    target.axes,
+                    axis_groups,
+                    max_interpolation_dim=override.get("max_interpolation_dim"),
+                    fallback_from="composite",
+                    extra_details={
+                        "kernel_type": kernel_type,
+                        "query_mode": target.query_mode,
+                        "interpolation_path": interpolation_path,
+                        "phase": target.metadata["phase"],
+                        "latency_column_group": latency_column_group,
+                        "rejected_reasons": rejected_reasons,
+                    },
+                )
+                if result is not None:
+                    return self._query_result_from_interpolation(target, result)
+                attempts.append(
+                    {
+                        "status": "candidate_group_failed",
+                        "regime_key": dict(candidate_subset.regime_key),
+                        "latency_column_group": latency_column_group,
+                        "diagnostics": candidate_subset.last_diagnostics,
+                    }
+                )
+        self._record_miss(
+            self._candidate_failure_reason(
+                f"{interpolation_path}_interpolation_failed",
+                attempts[-1].get("diagnostics") if attempts else {},
+            ),
+            kernel_type=kernel_type,
+            query_mode=target.query_mode,
+            candidate_count=len(index.points),
+            rejected_reasons=rejected_reasons,
+            attempts=attempts,
+            target_axes=target.axes,
+        )
+        return None
 
     # ---- Elementwise interpolation ----
 
@@ -2433,7 +3617,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         kernel_type: str,
         latency_col: str,
         row_index: int,
-        tc_dtype_str: Optional[str] = None,
+        tc_dtype_str: str,
     ) -> Optional[CandidatePoint]:
         csv_input_shapes = _parse_shape_str(str(row.get("Input Shapes", "")))
         csv_out_shapes = _parse_shape_str(str(row.get("Output Shapes", "")))
@@ -2455,6 +3639,8 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
 
         input_shapes = [_strip_batch_dim(tuple(shape)) for shape in csv_input_shapes]
         axes = self._elementwise_axes_from_shapes(input_shapes, csv_shape)
+        if axes is None:
+            return None
         broadcast_pattern = self._elementwise_broadcast_pattern(csv_shape, input_shapes)
         regime_key = make_regime_key(
             [
@@ -2564,15 +3750,20 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
 
         out = self._first_output_tensor(op_invoke_info)
         if out is None:
+            self._record_miss("elementwise_output_unavailable", kernel_type=kernel_type)
             return None
 
         output_shape = _strip_batch_dim(tuple(out.shape))
         if len(output_shape) < 1:
+            self._record_miss("elementwise_output_shape_unavailable", kernel_type=kernel_type)
             return None
         tc_dtype_str = DTYPE_MAP.get(out.dtype)
         tc_inputs = self.base._extract_tensor_inputs(op_invoke_info)
         input_shapes = [_strip_batch_dim(tuple(shape)) for shape, _ in tc_inputs]
         target_axes = self._elementwise_axes_from_shapes(input_shapes, output_shape)
+        if target_axes is None:
+            self._record_miss("elementwise_shape_invalid", kernel_type=kernel_type)
+            return None
         broadcast_pattern = self._elementwise_broadcast_pattern(output_shape, input_shapes)
 
         target = InterpolationTarget(
@@ -2622,34 +3813,26 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             for latency_column_group, candidate_subset in self._latency_column_pure_candidate_group_attempts(
                 candidate_group
             ):
-                result = None
-                interpolation_group = candidate_subset
-                axis_groups = self._elementwise_axis_groups_for(candidate_subset)
-                for axis_group in axis_groups:
-                    if any(axis not in target.axes for axis in axis_group):
-                        continue
-                    result = interpolation_group.interpolate(
-                        target.axes,
-                        (axis_group,),
-                        max_interpolation_dim=override.get("max_interpolation_dim"),
-                        fallback_from=fallback_from,
-                        extra_details={
-                            "kernel_type": kernel_type,
-                            "query_mode": "elementwise",
-                            "interpolation_path": f"elementwise_{len(axis_group)}d",
-                            "latency_column_group": latency_column_group,
-                            "csv_output_dtype": dict(candidate_subset.regime_key).get("output_dtype"),
-                            "target_elementwise_axes": dict(target.axes),
-                        },
-                    )
-                    if result is not None:
-                        break
+                result = candidate_subset.interpolate(
+                    target.axes,
+                    _ELEMENTWISE_AXIS_GROUPS,
+                    max_interpolation_dim=override.get("max_interpolation_dim"),
+                    fallback_from=fallback_from,
+                    extra_details={
+                        "kernel_type": kernel_type,
+                        "query_mode": "elementwise",
+                        "interpolation_path": "elementwise_1d",
+                        "latency_column_group": latency_column_group,
+                        "csv_output_dtype": dict(candidate_subset.regime_key).get("output_dtype"),
+                        "target_elementwise_axes": dict(target.axes),
+                    },
+                )
                 if result is None:
                     attempts.append(
                         {
                             "regime_key": dict(candidate_subset.regime_key),
                             "latency_column_group": latency_column_group,
-                            "diagnostics": interpolation_group.last_diagnostics,
+                            "diagnostics": candidate_subset.last_diagnostics,
                         }
                     )
                     continue
