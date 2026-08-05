@@ -1,4 +1,5 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
 import unittest
 from unittest.mock import patch
 
@@ -123,6 +124,7 @@ class TestDisaggStrategy(unittest.TestCase):
                         "second": float(10 - len(captured_calls)),
                     }
                 }
+                op_profile_summary = None
 
             return DummyMetrics()
 
@@ -176,6 +178,7 @@ class TestDisaggStrategy(unittest.TestCase):
                 execution_time_s = {"analytic": 0.001}
                 device_memory_available_gb = 1.0
                 breakdowns = {}
+                op_profile_summary = None
 
             return DummyMetrics()
 
@@ -206,6 +209,7 @@ class TestDisaggStrategy(unittest.TestCase):
             execution_time_s = {"analytic": 0.005}
             device_memory_available_gb = 2.0
             breakdowns = {}
+            op_profile_summary = None
 
         self.strategy.model_runner.total_device_memory_gb = 64.0
         self.strategy.model_runner.model_weight_size_gb = 20.0
@@ -244,6 +248,7 @@ class TestDisaggStrategy(unittest.TestCase):
             execution_time_s = {"analytic": 0.009}
             device_memory_available_gb = 2.0
             breakdowns = {}
+            op_profile_summary = None
 
         self.strategy.model_runner.total_device_memory_gb = 64.0
         self.strategy.model_runner.model_weight_size_gb = 20.0

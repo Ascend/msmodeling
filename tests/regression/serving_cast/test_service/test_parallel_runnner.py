@@ -1,4 +1,5 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
 import unittest
 from concurrent.futures.process import BrokenProcessPool
 from unittest.mock import MagicMock, Mock
@@ -234,7 +235,7 @@ class TestTaskRunner(unittest.TestCase):
         )
 
         task_runner = ParallelRunner(self.args)
-        result_df = task_runner._submit_task(user_config, optimizer_data)
+        result_df, _ = task_runner._submit_task(user_config, optimizer_data)
         self.assertIsNotNone(result_df)
         row = result_df.iloc[0]
         self.assertEqual(row["model_id"], self.args.model_id)
@@ -294,7 +295,7 @@ class TestParallelRunnerPDMode(unittest.TestCase):
             }
         )
 
-        task_runner._add_summary_result([df], optimizer_data)
+        task_runner._add_summary_result([(df, {})], optimizer_data)
         self.assertEqual(len(task_runner.summary_result), 1)
 
     def test_pd_phase_forces_disaggregation_strategy(self):
@@ -328,7 +329,7 @@ class TestParallelRunnerPDMode(unittest.TestCase):
                 disagg_mode=None,
             ):
                 self.disagg_modes.append(disagg_mode)
-                return pd.DataFrame({"ttft": [100.0], "concurrency": [1]})
+                return (pd.DataFrame({"ttft": [100.0], "concurrency": [1]}), {})
 
         self.args.disagg = False
         task_runner = RecordingParallelRunner(self.args)

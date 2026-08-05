@@ -147,11 +147,11 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
             calls.append((batch_size, is_decode))
             if not is_decode and batch_size == 2:
-                return (10.0, 8.0, "prefill")
+                return (10.0, 8.0, "prefill", None)
             if not is_decode and batch_size == 1:
-                return (4.0, 6.0, "remainder")
+                return (4.0, 6.0, "remainder", None)
             if is_decode and batch_size == 3:
-                return (2.0, 7.0, "decode")
+                return (2.0, 7.0, "decode", None)
             raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
 
         with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
@@ -199,11 +199,11 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
             calls.append((batch_size, is_decode, kwargs))
             if is_decode:
-                return (5.0, 7.0, "decode")
+                return (5.0, 7.0, "decode", None)
             if kwargs["query_len"] == 3:
-                return (10.0, 9.0, "prefill-0")
+                return (10.0, 9.0, "prefill-0", None)
             if kwargs["query_len"] == 2:
-                return (20.0, 8.0, "prefill-1")
+                return (20.0, 8.0, "prefill-1", None)
             raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}, kwargs={kwargs}")
 
         with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
@@ -260,9 +260,9 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         """Test _get_or_compute_prefill_latency with cached value"""
         # Set up cache with a pre-computed value
         optimizer_data = OptimizerData(input_length=10, output_length=10)
-        self.strategy._prefill_cache[(False, 4, 10, 10)] = (50.0, 2.0, "")
+        self.strategy._prefill_cache[(False, 4, 10, 10)] = (50.0, 2.0, "", None)
 
-        latency, memory_left, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
+        latency, memory_left, _, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
 
         # Should return cached value
         self.assertEqual(latency, 50.0)
@@ -274,21 +274,24 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             input_length=10,
             output_length=10,
         )
-        latency, memory_left, breakdown = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=False)
+
+        latency, memory_left, breakdown, op_profile = self.strategy._get_or_compute_latency(
+            4, optimizer_data, is_decode=False
+        )
 
         # Should cache the result
         self.assertEqual(
             self.strategy._prefill_cache[(False, 4, 10, 10)],
-            (latency, memory_left, breakdown),
+            (latency, memory_left, breakdown, op_profile),
         )
 
     def test_get_or_compute_decode_latency_cached(self):
         """Test _get_or_compute_decode_latency with cached value"""
         # Set up cache with a pre-computed value
         optimizer_data = OptimizerData(input_length=10, output_length=10)
-        self.strategy._decode_cache[(True, 4, 1, 16)] = (10.0, 2.0, "")
+        self.strategy._decode_cache[(True, 4, 1, 16)] = (10.0, 2.0, "", None)
 
-        latency, memory_left, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=True)
+        latency, memory_left, _, _ = self.strategy._get_or_compute_latency(4, optimizer_data, is_decode=True)
 
         self.assertEqual(latency, 10.0)
         self.assertEqual(memory_left, 2.0)
@@ -310,7 +313,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
 
         def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
             captured_calls.append((batch_size, is_decode))
-            return (1.0, 1.0, "")
+            return (1.0, 1.0, "", None)
 
         with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
             self.strategy.get_inference_info(optimizer_data)
@@ -330,7 +333,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         )
 
         def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            return (1.0, 1.0, "")
+            return (1.0, 1.0, "", None)
 
         with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
             summary = self.strategy.get_inference_info(optimizer_data)
@@ -364,6 +367,8 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             decode_latency=1.0,
             prefill_breakdowns="",
             decode_breakdowns="",
+            prefill_op_profile=None,
+            decode_op_profile=None,
         )
 
         with patch.object(self.strategy, "_simulate_chunked_prefill", return_value=metrics) as mock_simulate:
@@ -392,6 +397,8 @@ class TestAggThroughputOptimizer(unittest.TestCase):
             decode_latency=1.0,
             prefill_breakdowns="",
             decode_breakdowns="",
+            prefill_op_profile=None,
+            decode_op_profile=None,
         )
 
         self.strategy.model_runner.total_device_memory_gb = 20.0
@@ -421,11 +428,11 @@ class TestAggThroughputOptimizer(unittest.TestCase):
 
         def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
             if not is_decode and batch_size == 256:
-                return (1000.0, -37.15, "wave")
+                return (1000.0, -37.15, "wave", None)
             if not is_decode and batch_size == 1:
-                return (342.0, 12.5, "effective")
+                return (342.0, 12.5, "effective", None)
             if is_decode and batch_size == 1:
-                return (15.0, 9.0, "decode")
+                return (15.0, 9.0, "decode", None)
             raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
 
         with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
@@ -450,11 +457,11 @@ class TestAggThroughputOptimizer(unittest.TestCase):
 
         def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
             if not is_decode and batch_size == 8:
-                return (1000.0, -37.15, "wave")
+                return (1000.0, -37.15, "wave", None)
             if not is_decode and batch_size == 1:
-                return (342.0, 12.5, "remainder")
+                return (342.0, 12.5, "remainder", None)
             if is_decode and batch_size == 9:
-                return (15.0, 9.0, "decode")
+                return (15.0, 9.0, "decode", None)
             raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
 
         with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
@@ -475,7 +482,7 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         )
 
         def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
-            return (1.0, 1.0, "")
+            return (1.0, 1.0, "", None)
 
         with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
             summary = self.strategy.get_inference_info(optimizer_data)

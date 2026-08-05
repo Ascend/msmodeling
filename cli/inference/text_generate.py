@@ -322,6 +322,9 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
+    if args.model_id is None:
+        parser.error("model_id is required.")
+
     if args.graph_log_url:
         config.compilation.debug.graph_log_url = args.graph_log_url
     config.compilation.passes.enable_sequence_parallel = args.enable_sequence_parallel

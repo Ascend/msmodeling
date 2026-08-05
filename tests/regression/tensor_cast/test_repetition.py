@@ -135,11 +135,12 @@ class RepetitionTestCase(RepetitionTestMixin, unittest.TestCase):
             peak_mem_usage_with_repeats,
         )
 
-    def _run_test_deepseek_with_kvcache(self, model_id):
+    def _run_test_deepseek_with_kvcache(self, model_id, remote_source: str = "huggingface"):
         num_mtp_layers = 3
         user_config = UserInputConfig(
             model_id=model_id,
             num_mtp_tokens=num_mtp_layers,
+            remote_source=remote_source,
         )
 
         model = get_cached_build_model(RepetitionTestMixin._model_cache, user_config)
@@ -217,8 +218,8 @@ class RepetitionNightlyTestCase(RepetitionTestMixin, unittest.TestCase):
 
     @parameterized.expand(
         [
-            ["moonshotai/Kimi-K2-Base"],
+            ["moonshotai/Kimi-K2-Base", "modelscope"],
         ]
     )
-    def test_deepseek_with_kvcache(self, model_id):
-        RepetitionTestCase._run_test_deepseek_with_kvcache(self, model_id)
+    def test_deepseek_with_kvcache(self, model_id, remote_source):
+        RepetitionTestCase._run_test_deepseek_with_kvcache(self, model_id, remote_source=remote_source)

@@ -11,7 +11,8 @@ def _(
     id: int,
 ) -> torch.Tensor:
     """Mark the beginning of a region of execution."""
-    return x
+    # torch.library custom ops are not allowed to return an input alias.
+    return x.clone()
 
 
 @register_tensor_cast_op("_internal_mark_region_end")
@@ -20,7 +21,8 @@ def _(
     id: int,
 ) -> torch.Tensor:
     """Mark the end of a region of execution."""
-    return x
+    # torch.library custom ops are not allowed to return an input alias.
+    return x.clone()
 
 
 @register_tensor_cast_op("_internal_copy_region")
@@ -29,7 +31,8 @@ def _(
     id: int,
 ) -> torch.Tensor:
     """Copy a region of execution marked previously."""
-    return x
+    # torch.library custom ops are not allowed to return an input alias.
+    return x.clone()
 
 
 @register_tensor_cast_op("_internal_wait_and_bind")

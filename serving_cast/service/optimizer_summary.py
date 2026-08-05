@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import logging
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 from prettytable import PrettyTable
 
+from tensor_cast.core.model_runner import OpProfileSummary
 from serving_cast.utils import best_pd_row_per_group, rank_pd_ratio_rows, sort_pd_ratio_dict_rows
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,9 @@ class OptimizerSummary:
         self._summary_df = None
         self.data_config = data_config
         self._search_info = None
+        self._op_profile_map: Dict[str, OpProfileSummary] = {}
+
+        self._op_profiles_by_key: Dict[Tuple[str, int], Dict[str, OpProfileSummary]] = {}
 
     def set_summary_df(self, summary_df):
         self._summary_df = summary_df
@@ -93,6 +97,24 @@ class OptimizerSummary:
 
     def get_search_info(self) -> dict:
         return self._search_info
+
+    def set_op_profile(self, op_profile_map: Dict[str, OpProfileSummary]):
+        """Attach per-phase OpProfileSummary (keys: 'prefill' and/or 'decode')."""
+        self._op_profile_map = op_profile_map or {}
+
+    def get_op_profile(self) -> Dict[str, OpProfileSummary]:
+        return self._op_profile_map
+
+    def set_op_profiles_by_key(self, op_profiles_by_key: Dict[Tuple[str, int], Dict[str, OpProfileSummary]]):
+        """Store merged op profiles keyed by (parallel_str, batch_size)."""
+        self._op_profiles_by_key = op_profiles_by_key or {}
+
+    def get_op_profiles_by_key(self) -> Dict[Tuple[str, int], Dict[str, OpProfileSummary]]:
+        return self._op_profiles_by_key
+
+    def get_op_profile_for(self, parallel: str, batch_size: int) -> Optional[Dict[str, OpProfileSummary]]:
+        """Look up op profile for a specific (parallel, batch_size) combination."""
+        return self._op_profiles_by_key.get((str(parallel), int(batch_size)))
 
     def set_early_stop_flag(self, memory_left, tpot, ttft):
         def check(value, limit):

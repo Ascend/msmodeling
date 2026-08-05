@@ -141,9 +141,12 @@ def get_common_argparser(reserved_memory_gb_default: float = 0.0):
     general_group.add_argument(
         "model_id",
         type=check_string_valid,
+        nargs="?",
+        default=None,
         help="The model identifier, which can be: "
         "1) A Hugging Face model ID (e.g., 'meta-llama/Llama-2-7b-hf') to load from the Hub; "
-        "2) A local directory path containing a diffusers model (must include 'transformer/config.json').",
+        "2) A local directory path containing a diffusers model (must include 'transformer/config.json'). "
+        "Optional when --input-csv is used (model_id comes from each CSV row).",
     )
 
     general_group.add_argument(

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from abc import ABC, abstractmethod
 
 from typing import Optional
@@ -22,6 +23,9 @@ from tensor_cast.core.input_generator import generate_inputs, RequestInfo
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from .optimizer_summary import OptimizerSummary
 from .utils import AGG_COLUMNS, MAX_ITER_NUMS, OptimizerData
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseThroughputOptimizer(ABC):
@@ -70,6 +74,7 @@ class BaseThroughputOptimizer(ABC):
         left, right = 1, 512
         result = []
         result_df = pd.DataFrame(columns=AGG_COLUMNS)
+        op_profiles_by_batch = {}  # batch_size -> {"prefill": ..., "decode": ...}
 
         if batch_range:
             if len(batch_range) == 2:
@@ -82,6 +87,7 @@ class BaseThroughputOptimizer(ABC):
         summary = self.get_inference_info(optimizer_data)
         if summary.check_early_stop_flag():
             return None
+        op_profiles_by_batch[left] = summary.get_op_profile()
 
         if not batch_range:
             if optimizer_data.concurrency_search_strategy == 'exponential':
@@ -98,6 +104,7 @@ class BaseThroughputOptimizer(ABC):
             else:
                 left = mid + 1
                 result.append(summary.get_summary_df())
+                op_profiles_by_batch[mid] = summary.get_op_profile()
 
         if result:
             result_df = pd.concat(result, axis=0, ignore_index=True)
@@ -106,8 +113,27 @@ class BaseThroughputOptimizer(ABC):
 
         ret_summary = OptimizerSummary(optimizer_data)
         ret_summary.set_summary_df(sorted_df)
+        ret_summary.set_op_profiles_by_key(self._build_op_profiles_by_key(sorted_df, op_profiles_by_batch))
 
         return ret_summary
+
+    @staticmethod
+    def _build_op_profiles_by_key(sorted_df, op_profiles_by_batch):
+        """Build (parallel, batch_size) -> op_profile_map from sorted_df + per-batch cache."""
+        if sorted_df is None or sorted_df.empty:
+            return {}
+        merged = {}
+
+        for row in sorted_df.itertuples(index=False):
+            parallel = str(getattr(row, "parallel", ""))
+
+            batch_size = int(getattr(row, "batch_size", 0))
+            op_map = op_profiles_by_batch.get(batch_size)
+            if op_map:
+                merged[(parallel, batch_size)] = op_map
+            else:
+                logger.debug("No op_profile found for batch_size=%d, parallel=%s", batch_size, parallel)
+        return merged
 
     def _exponential_search(self, optimizer_data, left, right, summary_left, linear_acc_search=False):
         estimated_right = float("inf")

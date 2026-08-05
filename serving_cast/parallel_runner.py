@@ -158,11 +158,11 @@ class ParallelRunner:
         if result_df.empty:
             logger.info("No PD ratio results found.")
         else:
-            self._add_summary_result([result_df], self.optimizer_data)
+            self._add_summary_result([(result_df, {})], self.optimizer_data)
 
         return self.summary_result
 
-    def _add_summary_result(self, df_list: list[pd.DataFrame], overwrite_data_config: OptimizerData):
+    def _add_summary_result(self, df_list: list[tuple[pd.DataFrame, dict]], overwrite_data_config: OptimizerData):
         if len(df_list) == 0:
             logger.info(
                 "No results found with ttft %r ms, tpot %r ms",
@@ -170,8 +170,15 @@ class ParallelRunner:
                 overwrite_data_config.tpot_limits,
             )
             return
+        dfs = []
+        merged_op_profiles = {}
+        for df, op_profiles_by_key in df_list:
+            dfs.append(df)
+            if op_profiles_by_key:
+                merged_op_profiles.update(op_profiles_by_key)
         summary = OptimizerSummary(overwrite_data_config)
-        summary.set_summary_df(pd.concat(df_list, axis=0, ignore_index=True))
+        summary.set_summary_df(pd.concat(dfs, axis=0, ignore_index=True))
+        summary.set_op_profiles_by_key(merged_op_profiles)
         self.summary_result.append(summary)
 
     def _get_model_runnner(self, user_input: UserInputConfig) -> ModelRunner:
@@ -221,8 +228,8 @@ class ParallelRunner:
         overwrite_optimizer_data: OptimizerData,
         user_configs: Optional[list] = None,
         disagg_mode: Optional[bool] = None,
-    ) -> list[pd.DataFrame]:
-        """Execute optimization tasks in parallel and return list of DataFrames.
+    ) -> list[tuple[pd.DataFrame, dict]]:
+        """Execute optimization tasks in parallel and return list of (DataFrame, op_profiles) tuples.
 
         Args:
             overwrite_optimizer_data: Optimizer data for tasks.
@@ -230,7 +237,7 @@ class ParallelRunner:
             disagg_mode: Optional override for strategy selection.
 
         Returns:
-            List of result DataFrames (non-None results only).
+            List of (result DataFrame, op_profiles_by_key) tuples (non-None results only).
         """
         configs = user_configs if user_configs is not None else list(self._get_user_config())
 
@@ -294,7 +301,7 @@ class ParallelRunner:
             disagg_mode: Optional override for strategy selection.
 
         Returns:
-            DataFrame with optimization results or None.
+            Tuple of (DataFrame, op_profiles_by_key) with optimization results or None.
         """
         # 1. get model config
         if self.args.compile:
@@ -325,12 +332,13 @@ class ParallelRunner:
             return None
 
         result_df = result.get_summary_df()
+        op_profiles_by_key = result.get_op_profiles_by_key()
         logger.info(
             "Finish processing TP size: %d",
             model_runner.model.model_config.parallel_config.tensor_parallel_size,
         )
 
-        return result_df
+        return result_df, op_profiles_by_key
 
     def _run_pd_phase(
         self,
@@ -376,7 +384,5 @@ class ParallelRunner:
         )
 
         # Concatenate all DataFrames
-        if not df_list:
-            return pd.DataFrame()
-
-        return pd.concat(df_list, axis=0, ignore_index=True)
+        dfs = [df for df, _ in df_list]
+        return pd.concat(dfs, axis=0, ignore_index=True) if dfs else pd.DataFrame()

@@ -64,13 +64,13 @@ def arg_parse():
     parser.add_argument(
         "--input-length",
         type=check_positive_integer,
-        required=True,
+        default=None,
         help="The input length of the prompt.",
     )
     parser.add_argument(
         "--output-length",
         type=check_positive_integer,
-        required=True,
+        default=None,
         help="The expected output length.",
     )
     model_group = parser.add_argument_group("Model & Quantization Options")
@@ -251,7 +251,36 @@ def arg_parse():
         action="store_true",
         help="Enable PD ratio optimization mode",
     )
+    batch_group = parser.add_argument_group("Batch Cases Options")
+    batch_group.add_argument(
+        "--input-csv",
+        type=str,
+        default=None,
+        help="Path to input CSV with benchmark cases. When set, runs batch mode "
+        "(one case per row, aggregated output CSV).",
+    )
+    batch_group.add_argument(
+        "--output-csv",
+        type=str,
+        default=None,
+        help="Path to output CSV for batch results. "
+        "Defaults to 'benchmark_cases_results.csv' when --input-csv is used.",
+    )
+    batch_group.add_argument(
+        "--export-op-profile",
+        action="store_true",
+        default=False,
+        help="Export per-case operator-level CSV files under <output-dir>/op_profiles/. "
+        "Only effective with --input-csv.",
+    )
     args = parser.parse_args()
+
+    if args.input_csv is not None:
+        return args
+
+    if not args.input_csv and args.model_id is None:
+        parser.error("model_id is required when --input-csv is not provided")
+
     if all(x is None for x in (args.tp_sizes, args.ep_sizes, args.moe_dp_sizes)):
         # Backward-compatible default: search TP only with default range.
         args.tp_sizes = []
@@ -295,11 +324,31 @@ def main():
     start_time = time.time()
     args = arg_parse()
     print_logo()
+
+    if args.input_csv is not None:
+        from ._batch_cases import run_cases_and_save
+
+        output_path = args.output_csv or "benchmark_cases_results.csv"
+        run_cases_and_save(
+            args.input_csv,
+            output_path,
+            base_args=args,
+            export_op_profile=args.export_op_profile,
+        )
+        return 0
+
     logging.basicConfig(
         level=LOG_LEVELS[args.log_level.lower()],
         format=LOG_FORMAT,
     )
     logger = logging.getLogger(__name__)
+
+    if args.export_op_profile:
+        logger.warning("--export-op-profile is only effective with --input-csv; ignored.")
+
+    if args.input_length is None or args.output_length is None:
+        logger.error("--input-length and --output-length are required when --input-csv is not set.")
+        return 1
 
     device_targets = check_device_targets(args, logger)
     if device_targets is None:

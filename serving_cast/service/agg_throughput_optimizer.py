@@ -15,10 +15,11 @@
 import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from typing import Optional
 
 import pandas as pd
 
-from tensor_cast.core.model_runner import ModelRunner
+from tensor_cast.core.model_runner import ModelRunner, OpProfileSummary
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .optimizer_summary import OptimizerSummary
 from .scheduler import DecodeFirstWithSlack, Scheduler, SchedulerState
@@ -53,6 +54,8 @@ class _ChunkedAggMetrics:
     decode_latency: float
     prefill_breakdowns: str
     decode_breakdowns: str
+    prefill_op_profile: Optional["OpProfileSummary"] = None
+    decode_op_profile: Optional["OpProfileSummary"] = None
 
 
 class AggThroughputOptimizer(BaseThroughputOptimizer):
@@ -149,6 +152,13 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         summary.set_summary_df(result_df)
         summary.set_early_stop_flag(memory_left, metrics.tpot, metrics.ttft)
 
+        summary.set_op_profile(
+            {
+                "prefill": metrics.prefill_op_profile,
+                "decode": metrics.decode_op_profile,
+            }
+        )
+
         self._maybe_set_search_info(optimizer_data, memory_left, batch_size, metrics.ttft, metrics.tpot, summary)
 
         return summary
@@ -169,14 +179,14 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         calc_nums_for_ttft = concurrency // prefill_batch_size
         left_calc_num = concurrency % prefill_batch_size
 
-        prefill_latency, prefill_memory_left_gb, prefill_breakdowns = self._get_or_compute_latency(
+        prefill_latency, prefill_memory_left_gb, prefill_breakdowns, prefill_op_profile = self._get_or_compute_latency(
             prefill_batch_size, optimizer_data, is_decode=False
         )
         prefill_last_latency = prefill_latency
         prefill_min_memory_left_gb = prefill_memory_left_gb
         left_latency = 0
         if left_calc_num != 0:
-            left_latency, left_memory_left_gb, _ = self._get_or_compute_latency(
+            left_latency, left_memory_left_gb, _, _ = self._get_or_compute_latency(
                 left_calc_num,
                 optimizer_data,
                 is_decode=False,
@@ -193,7 +203,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         ) * calc_nums_for_ttft / 2 + left_batch_time
         ttft = sum_for_ttft / concurrency
 
-        decode_latency, decode_memory_left_gb, decode_breakdowns = self._get_or_compute_latency(
+        decode_latency, decode_memory_left_gb, decode_breakdowns, decode_op_profile = self._get_or_compute_latency(
             batch_size, optimizer_data, is_decode=True
         )
         tpot = (ttft + decode_latency * output_length) / output_length
@@ -210,6 +220,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             decode_latency=decode_latency,
             prefill_breakdowns=prefill_breakdowns,
             decode_breakdowns=decode_breakdowns,
+            prefill_op_profile=prefill_op_profile,
+            decode_op_profile=decode_op_profile,
         )
 
     def _simulate_chunked_prefill(
@@ -245,6 +257,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         decode_breakdowns = ""
         last_prefill_latency = 0.0
         last_decode_latency = 0.0
+        prefill_op_profile = None
+        decode_op_profile = None
 
         while finished < concurrency:
             chunk = chunk_plan[pending_prefill[0].chunk_index] if pending_prefill else None
@@ -268,31 +282,49 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             prefill_step_latency = 0.0
             if p_step > 0:
                 # p_step is already the model-level request count chosen by the scheduler.
-                prefill_step_latency, prefill_memory_left, current_prefill_breakdowns = self._get_or_compute_latency(
-                    p_step,
-                    optimizer_data,
-                    is_decode=False,
-                    query_len=chunk.query_len,
-                    seq_len=chunk.seq_len,
-                    concurrency_is_model=True,
+
+                prefill_step_latency, prefill_memory_left, current_prefill_breakdowns, chunk_prefill_op_profile = (
+                    self._get_or_compute_latency(
+                        p_step,
+                        optimizer_data,
+                        is_decode=False,
+                        query_len=chunk.query_len,
+                        seq_len=chunk.seq_len,
+                        concurrency_is_model=True,
+                    )
                 )
                 memory_left_gb = min(memory_left_gb, prefill_memory_left)
                 prefill_memory_left_gb = min(prefill_memory_left_gb, prefill_memory_left)
                 prefill_breakdowns = prefill_breakdowns or current_prefill_breakdowns
                 last_prefill_latency = prefill_step_latency
 
+                prefill_op_profile = (
+                    chunk_prefill_op_profile
+                    if prefill_op_profile is None
+                    else prefill_op_profile.merge(chunk_prefill_op_profile)
+                )
+
             decode_step_latency = 0.0
             if d_step > 0:
                 # d_step counts active decode requests; each request consumes one token budget in this step.
-                decode_step_latency, decode_memory_left, current_decode_breakdowns = self._get_or_compute_latency(
-                    d_step,
-                    optimizer_data,
-                    is_decode=True,
-                    concurrency_is_model=True,
+
+                decode_step_latency, decode_memory_left, current_decode_breakdowns, chunk_decode_op_profile = (
+                    self._get_or_compute_latency(
+                        d_step,
+                        optimizer_data,
+                        is_decode=True,
+                        concurrency_is_model=True,
+                    )
                 )
                 memory_left_gb = min(memory_left_gb, decode_memory_left)
                 decode_breakdowns = decode_breakdowns or current_decode_breakdowns
                 last_decode_latency = decode_step_latency
+
+                decode_op_profile = (
+                    chunk_decode_op_profile
+                    if decode_op_profile is None
+                    else decode_op_profile.merge(chunk_decode_op_profile)
+                )
 
             # The default mixed scheduler models prefill and decode as overlapping in the same step.
             step_latency = scheduler.step_latency(prefill_step_latency, decode_step_latency)
@@ -339,6 +371,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             decode_latency=last_decode_latency,
             prefill_breakdowns=prefill_breakdowns,
             decode_breakdowns=decode_breakdowns,
+            prefill_op_profile=prefill_op_profile,
+            decode_op_profile=decode_op_profile,
         )
 
     @staticmethod
@@ -490,7 +524,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             is_decode: Whether this is a decode operation (affects latency calculation)
 
         Returns:
-            Tuple of (latency_ms, memory_left_gb, breakdowns)
+            Tuple of (latency_ms, memory_left_gb, breakdowns, op_profile_summary)
 
         Optional query_len/seq_len override the default request shape for chunked prefill.
         When concurrency_is_model is true, batch_size is already model-level concurrency
@@ -514,7 +548,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         batch_flag = cache.get(cache_key)
 
         if batch_flag is not None:
-            (latency, memory_left_gb, breakdowns) = cache[cache_key]
+            (latency, memory_left_gb, breakdowns, op_profile_summary) = cache[cache_key]
         else:
             # Compute result
             batch_result = self._get_forward_info(
@@ -530,6 +564,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             memory_left_gb = batch_result.device_memory_available_gb
             breakdowns = format_breakdowns(batch_result.breakdowns)
 
+            op_profile_summary = batch_result.op_profile_summary
+
             # Apply decode-specific adjustments
             if is_decode:
                 num_mtp_tokens = optimizer_data.num_mtp_tokens or 0
@@ -540,6 +576,6 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
 
             # Cache result
             if memory_left_gb > 0:
-                cache[cache_key] = (latency, memory_left_gb, breakdowns)
+                cache[cache_key] = (latency, memory_left_gb, breakdowns, op_profile_summary)
 
-        return latency, memory_left_gb, breakdowns
+        return latency, memory_left_gb, breakdowns, op_profile_summary

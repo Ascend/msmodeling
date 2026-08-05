@@ -1,5 +1,4 @@
 # Copyright (c) 2026-2026 Huawei Technologies Co., Ltd.
-
 import logging
 
 import pandas as pd
@@ -53,6 +52,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
 
         if decode_flag or len(chunk_plan) == 1:
             batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
+            op_profile_summary = batch_result.op_profile_summary
             latency_ms = batch_result.execution_time_s.get("analytic") * 1000 + optimizer_data.serving_cost
             device_memory_available_gb = batch_result.device_memory_available_gb
             breakdowns = format_breakdowns(batch_result.breakdowns)
@@ -62,6 +62,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             breakdowns = ""
             breakdown_sums = {}
             breakdown_counts = {}
+            op_profile_summary = None
             # Keep disaggregated prefill modeling simple and deterministic: each wave contains
             # only one chunk shape and is capped by max_batched_tokens. We do not aggregate
             # different chunk positions across queries into one wave, so this may be conservative
@@ -79,6 +80,12 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                         decode_flag,
                         query_len=chunk.query_len,
                         seq_len=chunk.seq_len,
+                    )
+
+                    op_profile_summary = (
+                        batch_result.op_profile_summary
+                        if op_profile_summary is None
+                        else op_profile_summary.merge(batch_result.op_profile_summary)
                     )
                     latency_ms += batch_result.execution_time_s.get("analytic") * 1000
                     device_memory_available_gb = min(
@@ -166,6 +173,11 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         ).round(3)
         summary.set_summary_df(result_df)
         summary.set_early_stop_flag(device_memory_available_gb, tpot, ttft)
+
+        if decode_flag:
+            summary.set_op_profile({"decode": op_profile_summary})
+        else:
+            summary.set_op_profile({"prefill": op_profile_summary})
 
         self._maybe_set_search_info(optimizer_data, device_memory_available_gb, batch_size, ttft, tpot, summary)
 

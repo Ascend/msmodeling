@@ -42,9 +42,9 @@ class ModelLoadTestCase(ModelLoadTestMixin, unittest.TestCase):
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (2, num_tokens, model.vocab_size))
 
-    def _run_test_deepseek_without_kvcache(self, model_id, do_compile):
+    def _run_test_deepseek_without_kvcache(self, model_id, do_compile, remote_source: str = "huggingface"):
         num_tokens = 100
-        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile)
+        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile, remote_source=remote_source)
         model = self._get_model(user_config)
         # make sure all original attention modules have been replaced
         self.assertTrue(has_submodule_with_cls_name(model, "MultiheadLatentAttentionTensorCast"))
@@ -54,8 +54,8 @@ class ModelLoadTestCase(ModelLoadTestMixin, unittest.TestCase):
             outputs = model.forward(inputs, position_ids)
             self.assertEqual(outputs.shape, (2, num_tokens, model.vocab_size))
 
-    def _run_test_deepseek_with_kvcache(self, model_id, do_compile):
-        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile)
+    def _run_test_deepseek_with_kvcache(self, model_id, do_compile, remote_source: str = "huggingface"):
+        user_config = UserInputConfig(model_id=model_id, do_compile=do_compile, remote_source=remote_source)
         model = self._get_model(user_config)
         attn_meta, kv_cache_by_layers, num_tokens = create_mla_metadata_and_kv_cache(model, model.model_config)
         # make sure all original attention modules have been replaced
@@ -178,7 +178,6 @@ class ModelLoadTestCase(ModelLoadTestMixin, unittest.TestCase):
                 position_ids,
                 attention_meta=attn_meta,
                 kv_cache_by_layers=kv_cache_by_layers,
-                cache_position=torch.arange(0, num_tokens, dtype=torch.long, device="cpu"),
             )
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
 
@@ -209,21 +208,21 @@ class ModelLoadNightlyTestCase(ModelLoadTestMixin, unittest.TestCase):
 
     @parameterized.expand(
         [
-            ["deepseek-ai/DeepSeek-V3.1"],
-            ["moonshotai/Kimi-K2-Base"],
+            ["deepseek-ai/DeepSeek-V3.1", "huggingface"],
+            ["moonshotai/Kimi-K2-Base", "modelscope"],
         ]
     )
-    def test_deepseek_without_kvcache(self, model_id):
-        ModelLoadTestCase._run_test_deepseek_without_kvcache(self, model_id, True)
+    def test_deepseek_without_kvcache(self, model_id, remote_source):
+        ModelLoadTestCase._run_test_deepseek_without_kvcache(self, model_id, True, remote_source=remote_source)
 
     @parameterized.expand(
         [
-            ["deepseek-ai/DeepSeek-V3.1"],
-            ["moonshotai/Kimi-K2-Base"],
+            ["deepseek-ai/DeepSeek-V3.1", "huggingface"],
+            ["moonshotai/Kimi-K2-Base", "modelscope"],
         ]
     )
-    def test_deepseek_with_kvcache(self, model_id):
-        ModelLoadTestCase._run_test_deepseek_with_kvcache(self, model_id, True)
+    def test_deepseek_with_kvcache(self, model_id, remote_source):
+        ModelLoadTestCase._run_test_deepseek_with_kvcache(self, model_id, True, remote_source=remote_source)
 
     @parameterized.expand(
         [

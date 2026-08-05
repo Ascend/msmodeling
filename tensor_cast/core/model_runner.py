@@ -239,6 +239,7 @@ class ModelRunner:
             breakdowns=runtime.get_breakdowns(),
             runtime_event_list=runtime_event_list,
             perf_model_name=perf_model_name,
+            op_profile_summary=OpProfileSummary(runtime_event_list),
         )
 
     def get_inputs_num_bytes(self, requests: List[RequestInfo]) -> int:
@@ -277,6 +278,70 @@ class ModelRunner:
 
 
 @dataclass
+class OpProfileSummary:
+    """Structured wrapper around aggregated runtime event list for op-level profiling.
+
+    Wraps the output of ModelRunner._aggregate_runtime_events so upper layers
+    (strategy classes, OptimizerSummary, ParallelRunner, _batch_cases) can
+    propagate op-level data without touching Runtime.
+    """
+
+    rows: List[Dict] = field(default_factory=list)
+
+    def to_csv_rows(self) -> List[List]:
+        """Return rows for CSV export, including a header row as the first element."""
+        header = ["Op_Name", "Perf_Model", "Perf_Total_s", "Perf_Avg_s", "Call_Times"]
+        data = [
+            [
+                r.get("name", ""),
+                r.get("perf_model", ""),
+                r.get("perf_total", 0.0),
+                r.get("perf_avg", 0.0),
+                r.get("call_times", 0),
+            ]
+            for r in self.rows
+        ]
+        return [header] + data
+
+    def merge(self, other: "OpProfileSummary") -> "OpProfileSummary":
+        """Merge another OpProfileSummary into a new one, summing perf_total and call_times."""
+
+        if other is None:
+            return OpProfileSummary(rows=list(self.rows))
+
+        merged: Dict[tuple, Dict] = {}
+        for row in self.rows + other.rows:
+            key = (row.get("name", ""), row.get("perf_model", ""))
+            if key not in merged:
+                merged[key] = {
+                    "name": row.get("name", ""),
+                    "perf_model": row.get("perf_model", ""),
+                    "perf_total": 0.0,
+                    "call_times": 0,
+                }
+            merged[key]["perf_total"] += row.get("perf_total", 0.0)
+            merged[key]["call_times"] += row.get("call_times", 0)
+
+        items = []
+        for entry in merged.values():
+            total = entry["perf_total"]
+            count = entry["call_times"]
+            items.append(
+                {
+                    "name": entry["name"],
+                    "perf_model": entry["perf_model"],
+                    "perf_total": total,
+                    "perf_avg": total / count if count else 0.0,
+                    "call_times": count,
+                }
+            )
+
+        items.sort(key=lambda x: x["perf_total"], reverse=True)
+
+        return OpProfileSummary(rows=items)
+
+
+@dataclass
 class ModelRunnerMetrics:
     total_device_memory_gb: float
     model_weight_size_gb: float
@@ -298,6 +363,8 @@ class ModelRunnerMetrics:
     breakdowns: Dict[str, Dict[str, float]] = field(default_factory=dict)
     runtime_event_list: List[Dict] = field(default_factory=list)
     perf_model_name: Optional[str] = None
+    op_profile_summary: Optional[OpProfileSummary] = None
+    """Typed wrapper of runtime_event_list for op-level CSV export. None when not populated."""
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")
