@@ -1,14 +1,20 @@
 # Web UI 使用说明
 
+> **⚠ 安全须知**
+>
+> Web UI 服务**无认证机制**，绑定在回环地址（`127.0.0.1` / `::1`）。回环绑定仅阻止*远程*网络访问——TCP 回环对**本机所有用户可见**。同机上的任何用户都可以调用全部 API、提交任务、读取结果。
+>
+> **本服务仅限单用户、单机使用。** 请勿在多用户共享主机上运行。若服务进程以高权限（root / 管理员）运行，则构成本地提权风险。
+
 本文档面向 Modeling 的日常使用者和即将接入项目的开发者，目标是帮助你快速理解工具能做什么、如何从 Web UI 或 CLI 发起仿真、如何解读结果，以及在不同业务场景下应该如何配置参数。
 
-如果只想启动前端页面，直接执行：
+如果只想启动 Web UI，在仓库根目录（venv 已激活）运行启动器即可：
 
 ```bash
-python -m web_ui.web_ui_start --port 2345
+python web_ui/main.py
 ```
 
-启动后在浏览器打开 `http://127.0.0.1:2345`。
+启动后在浏览器打开 `http://127.0.0.1:5173`。前端会自动将 `/api` 请求代理到后端 `http://127.0.0.1:8000`。
 
 ---
 
@@ -21,7 +27,6 @@ python -m web_ui.web_ui_start --port 2345
 | 配置视频生成仿真 | [5. Video Generation 仿真使用指南](#video-generation-simulation) |
 | 使用吞吐优化器 | [6. Optimizer 吞吐寻优使用指南](#optimizer-guide) |
 | 解读结果与导出数据 | [7. 结果图和明细表怎么看](#results-guide) |
-| 排查常见问题 | [9. 常见问题](#faq) |
 
 ---
 
@@ -33,13 +38,13 @@ Modeling 是一个面向模型推理性能分析的仿真工具，核心能力�
 - 支持 LLM 文本推理、VL 多模态推理、视频生成 Diffusion Transformer 推理，以及服务化吞吐寻优。
 - 支持多芯片横向对比，帮助判断同一个模型在不同设备上的性能差异。
 - 支持并发、TP、量化、MTP、Prefix Cache、Ulysses、DiT Cache、PD 混部、PD 分离、PD 配比等参数组合分析。
-- Web UI 提供可视化图表、明细表格、case 选择、Excel 导出和历史缓存；CLI 适合脚本化批量实验。
+- Web UI 提供可视化图表、明细表格、case 选择、CSV 导出、任务历史、Chrome trace 下载和历史缓存；CLI 适合脚本化批量实验。
 
 仓库中与用户最相关的入口如下：
 
 | 入口 | 作用 | 推荐使用场景 |
 |---|---|---|
-| `python -m web_ui.web_ui_start` | 启动 Gradio 前端 | 交互式配置、结果可视化、非开发用户使用 |
+| `python web_ui/main.py` | 启动 Vue 3 + FastAPI Web UI（单命令同时启动前后端） | 交互式配置、结果可视化、非开发用户使用 |
 | `python -m cli.inference.text_generate` | LLM / VL 前向推理仿真 | 单次或脚本化 LLM/VL 性能分析 |
 | `python -m cli.inference.video_generate` | 视频生成模型仿真 | Diffusion Transformer / Wan / HunyuanVideo 等场景 |
 | `python -m cli.inference.throughput_optimizer` | 服务吞吐寻优 | 在 TTFT/TPOT/SLO 约束下寻找最优并行和 batch |
@@ -52,6 +57,25 @@ Modeling 是一个面向模型推理性能分析的仿真工具，核心能力�
 
 若已完成环境搭建，从仓库根目录启动 Web UI 一般无需额外配置。工具会读取模型配置，常见来源包括 Hugging Face、ModelScope 或本地模型目录；若网络无法访问 Hugging Face，可在 Web UI 的 `remote-source` 中选择 `modelscope`，或按安装指南设置 `HF_ENDPOINT` 镜像。
 
+### 2.1 Web UI 额外依赖
+
+Web UI 采用前后端分离架构，除上述 Python 依赖外，还需要安装前端依赖：
+
+**后端依赖**（已包含在仓库根 `pyproject.toml` 中，随主项目一起安装）：
+
+- FastAPI、uvicorn、sqlmodel、alembic、pydantic 等
+
+**前端依赖**（需要 Node.js ≥ 18 和 npm）：
+
+```bash
+cd web_ui/frontend
+npm install
+```
+
+此命令安装 Vue 3、Element Plus、ECharts、Pinia 等前端库，只需执行一次。后续 `npm run dev` 会自动检测依赖变化。
+
+> **Node.js 安装**：如未安装 Node.js，可从 [nodejs.org](https://nodejs.org/) 下载 LTS 版本，或使用 nvm / fnm 等版本管理工具。
+
 ---
 
 <a id="web-ui-quick-start"></a>
@@ -60,35 +84,73 @@ Modeling 是一个面向模型推理性能分析的仿真工具，核心能力�
 
 ### 3.1 启动本地页面
 
+Web UI 采用前后端分离架构。
+
+**首次启动前**，需安装前端依赖（只需一次）：
+
 ```bash
-python -m web_ui.web_ui_start --port 2345
+cd web_ui/frontend && npm install
 ```
 
-适合本机使用。浏览器打开：
+同时确保已安装 Python 依赖（详见 [安装指南](../install_guide/msmodeling_install_guide.md)）：
+
+```bash
+uv sync  # 或 pip install -e .
+```
+
+然后在仓库根目录（venv 已激活）运行启动器：
+
+```bash
+python web_ui/main.py
+```
+
+启动器会并发启动前端（Vite dev server，默认端口 5173）和后端（FastAPI，默认端口 8000），两路输出以 `[backend]` / `[frontend]` 前缀合并显示，Ctrl+C 同时清理整个进程树。
+
+浏览器打开：
 
 ```text
-http://127.0.0.1:2345
+http://127.0.0.1:5173
 ```
+
+前端 Vite dev server 会自动将 `/api` 请求代理到后端 `http://127.0.0.1:8000`。
 
 ### 3.2 Web UI 页面说明
 
-当前 Web UI 主要包含三类工作区：
+Web UI 为单页应用（SPA），顶部导航栏提供以下功能：
 
-| 页面 | 能力 |
+| 导航按钮 | 说明 |
 |---|---|
-| Simulator - LLM Forward | LLM 文本推理仿真，支持并发列表、TP 列表、量化、MTP、Prefix Cache、并行细分、算子和显存分析 |
-| Simulator - VL Forward | 多模态 VL 推理仿真，在 LLM 参数基础上增加 image batch、height、width 等图像参数 |
-| Video Generation | 视频生成模型推理仿真，支持 Ulysses、CFG、DiT Cache、Chrome Trace 等参数 |
-| Optimizer | 服务吞吐寻优，支持 `PD 混部`、`PD 分离`、`PD 配比` 三种部署模式 |
+| 主页 | 返回工作台（Console） |
+| 使用文档 | 内嵌本文档 |
+| 历史记录 | 查看已提交任务的历史列表、状态和结果 |
+| 语言切换 | 中文 / English 实时切换 |
+| 主题切换 | 亮色 / 暗色 实时切换 |
+
+主工作区 **Console（工作台）** 采用 **Tab + 上下分屏** 布局，三个模块共享同一页面：
+
+| Tab | 能力 |
+|---|---|
+| 文本生成 (Text Generation) | LLM / VL 前向推理仿真，支持并发列表、TP 列表、量化、MTP、Prefix Cache、并行细分、算子和显存分析 |
+| 视频生成 (Video Generation) | 视频生成模型推理仿真，支持 Ulysses、CFG、DiT Cache、Chrome Trace 等参数 |
+| 吞吐优化 (Throughput Optimizer) | 服务吞吐寻优，支持 `PD 混部`、`PD 分离`、`PD 配比` 三种部署模式 |
+
+每个 Tab 的工作区分为上下两部分：
+
+- **上半部分**：配置表单（字段从 TypeScript 配置动态生成，分组折叠，鼠标悬停字段名可查看中英文说明）
+- **下半部分**：结果面板（随任务状态变化：空闲占位 → 运行中 → 成功结果 / 失败详情）
+- 中间有可拖拽的分割条，可调整表单和结果的显示比例
 
 ### 3.3 Web UI 的基本操作流程
 
 1. 选择模型、主芯片和可选竞品芯片。
 2. 填写卡数、并发、长度、量化、并行等参数。
-3. 点击“预览配置”或“预览命令”，确认将要执行的 CLI 命令。
-4. 点击“开始运行”。
-5. 查看汇总结论、曲线图、显存分析、带宽瓶颈、算子详情和导出结果。
-6. 如果设置了并发列表或 TP 列表，在明细分析区选择具体 case，例如 `Concurrency=32 | TP=2`，再查看该 case 的显存和算子数据。
+3. 点击 **▶ 运行** 按钮提交任务。提交成功后会弹出 Toast 通知（含任务 ID）。
+4. 结果面板自动切换为运行中状态，显示旋转图标和进度文本，可随时查看日志或取消任务。
+5. 任务完成后，结果面板展示汇总结论、散点图/曲线图、显存分析、算子详情等。
+6. 如果设置了多值字段（如并发列表、TP 列表），系统自动展开为多个 case，结果区以多用例视图分组展示。
+7. 点击顶部 **历史记录** 可查看所有历史任务，点击可直接查看结果。
+
+> **提示**：任务运行中不可切换 Tab（会弹出警告提示），需等待完成或取消后再切换。
 
 ---
 
@@ -222,16 +284,7 @@ TP 列表: [1,2]
 | 1 | 并发 16、32、64 |
 | 2 | 并发 16、32、64 |
 
-后续显存、带宽、算子详情区域会出现 case 选择项，例如：
-
-```text
-并发=16 | TP=1
-并发=32 | TP=1
-并发=64 | TP=1
-并发=16 | TP=2
-并发=32 | TP=2
-并发=64 | TP=2
-```
+后续结果面板会自动切换为 **多用例视图**：Summary 表格列出每个 case 的核心指标（如并发、TP、推理时间、显存等），点击某一行可 drill-down 到该 case 的完整结果（显存分布图、算子耗时表等）。
 
 查看明细时请先选芯片，再选具体 case，否则容易混淆不同并发和 TP 的显存与算子数据。
 
@@ -615,18 +668,21 @@ Web UI 还会展示：
 
 ## 7. 结果图和明细表怎么看
 
-### 7.1 LLM / VL 结果
+Web UI 的结果展示采用模块化组件，不同模块有独立的结果视图。结果面板支持亮色 / 暗色主题，图表自动适配。
 
-建议按以下顺序阅读：
+### 7.1 Text Generation 结果
 
-1. 汇总结论：先看总时间、TPS/Device、是否有失败或告警。
-2. 推理时间曲线：看并发或 TP 增大后是否仍能降低耗时。
-3. 显存分析：看模型权重、KV Cache、激活和预留显存占比。
-4. 带宽瓶颈：看 memory bound、communication bound、compute bound。
-5. 算子详情：按总耗时排序，定位最主要算子。
-6. 算子分类统计：从 GEMM、Attention、Communication 等类别判断优化方向。
+结果面板从上到下依次展示：
 
-如果配置了并发列表或 TP 列表，查看明细前一定要选择 case。
+1. **摘要指标卡**：batch_size / execution_time / peak_usage / total_device 等关键数值一目了然。
+2. **仿真程序耗时**：独立显示模拟器 wall-clock 耗时（含编译，非模型执行时间）。
+3. **TPS/设备柱状图**：多芯片对比时每设备一条柱。
+4. **显存分布图**：total_device / model_weight / kv_cache / peak_usage / available 的可视化分解。
+5. **算子瓶颈分布（OpBound）**：紧凑文本显示 memory bound / communication bound / compute bound 占比。
+6. **算子耗时表**：Name / total / avg / # of Calls，按耗时降序排列，可展开 input shapes 和 bound 分析。
+7. **Chrome Trace 下载**：按 case / seq 索引提供 JSON 下载链接（需启用 `--chrome-trace`）。
+
+如果配置了多值字段（多设备、多量化、并发列表等），结果自动切换为 **多用例视图**：Summary 表格列出每个 case 的核心指标，点击可 drill-down 到单 case 完整结果。
 
 ### 7.2 Video 结果
 
@@ -636,16 +692,66 @@ Web UI 还会展示：
 - Ulysses 后通信算子的占比。
 - CFG / CFG Parallel 是否引入额外 all-gather 或 batch 扩张。
 - DiT Cache 是否显著减少重复 block 的计算耗时。
+- 算子耗时表 / 图和 Chrome Trace 下载（与 Text Generation 共享相同的展示组件）。
+
+多用例时同样展示 Summary 表 + drill-down。
 
 ### 7.3 Optimizer 结果
 
-推荐阅读顺序：
+Optimizer 的结果根据部署模式不同展示不同视图：
 
-1. 推荐结论：看最优芯片、吞吐、并行方式、batch、并发。
-2. 各芯片最优对比：用于竞品和主芯片横向比较。
-3. 固定配置横向对比：确保比较是在同一配置下进行，而不是只比较各自最优点。
-4. PD 配比：如果是 PD 分离架构，查看 Balanced QPS 和 Prefill / Decode 实例配比。
-5. 单芯片 Pareto：判断是否存在“吞吐更高但延迟略差”的备选点。
+**PD 混部（AggregatedView）**：
+
+- 散点图：Throughput vs Concurrency / TPOT，按并行策略着色分组
+- 跨设备最优吞吐对比柱状图（多设备时）
+- Sweep 排序表：rank / throughput / TTFT / TPOT / concurrency / num_devices / parallel / batch_size
+- CSV 导出
+
+**PD 分离（DisaggregatedView）**：
+
+- Prefill 表（TTFT-oriented）+ Best 配置卡
+- Decode 表（TPOT-oriented）+ Best 配置卡
+- CSV 导出
+
+**PD 配比（PDRatioView）**：
+
+- PD Ratio 表：PD Ratio / Balanced QPS / P/D QPS / TTFT / TPOT / 并行配置
+- Best PD 配比卡
+
+**散点图（OptimizerCurves）**：
+
+- 数据来源为全量探索点（raw records），按并行策略着色
+- 自动过滤内存溢出点（OOM）和重复行
+- 模式感知：聚合 2 张图 / 分离 4 张图 / PD 配比 2 张图
+- 亮色 / 暗色主题自动适配
+
+**多用例视图（ThroughputMultiCaseResult）**：
+
+- Summary 表（每 case 一行：设备 + 指标）
+- 点击 drill-down 到单 case 完整结果（含散点图 + 模式视图）
+
+### 7.4 任务日志
+
+在工作区或任务状态页点击”日志”按钮，可打开日志抽屉（JobLogDrawer）：
+
+| 功能 | 说明 |
+|---|---|
+| 全量日志 | 任务主日志（banner + 所有 case 交织输出） |
+| Per-case 日志 | 按 case 过滤的独立日志（radio 切换） |
+| 日志搜索 | 大小写不敏感行过滤（显示匹配行数 / 总行数） |
+| ANSI 渲染 | 终端彩色输出 → HTML（保留 bold / color / italic / underline） |
+
+### 7.5 历史记录
+
+顶部导航点击 **历史记录** 进入 History 页：
+
+| 功能 | 说明 |
+|---|---|
+| 任务列表 | 表格展示：Job ID / 模块 / 标签 / 状态 / 创建时间 / 完成时间 |
+| 状态标签 | 颜色编码：成功(绿) / 失败(红) / 运行中(蓝) / 取消(黄) |
+| 过滤 | 按模块 / 状态筛选，按 Job ID / 标签搜索 |
+| 分页 | 可选每页 10 / 20 / 50 / 100 条 |
+| 操作 | 查看结果（succeeded）/ 查看状态（running）/ 查看详情（failed） |
 
 ---
 
@@ -725,212 +831,101 @@ jobs: 8
 
 ---
 
-<a id="faq"></a>
+## 9. 开发者补充说明
 
-## 9. 常见问题
-
-### 9.1 Web UI 启动后浏览器打不开
-
-检查：
-
-- 是否使用了正确地址：`http://127.0.0.1:2345`。
-- 端口是否被占用，可换成 `--port 2346`。
-
-### 9.2 提示设备名不合法
-
-`--device` 必须来自 `DeviceProfile.all_device_profiles`。Web UI 会从设备画像自动加载品牌和芯片列表。CLI 下可以查看报错中的 choices，或在 Web UI 中先选择可用芯片。
-
-### 9.3 TP / DP / EP 配置不合法
-
-常见原因：
-
-- `num-devices` 不能被 `tp-size` 整除。
-- `world-size` 不能被 `ulysses-size` 整除。
-- `TP * DP * EP` 超过部署卡数。
-- 某些细分 TP/DP 参数与总卡数不匹配。
-
-处理建议：先用简单配置跑通，例如 `tp-size=1, dp-size=auto, ep-size=1`，再逐步增加并行复杂度。
-
-### 9.4 Optimizer 没有可行方案
-
-常见原因：
-
-- TTFT 或 TPOT 约束过严。
-- `max-batched-tokens` 小于有效输入长度。
-- batch 搜索范围太小。
-- 卡数不足或 TP 搜索空间不合适。
-- 显存预留过大导致可用显存不足。
-
-处理建议：
-
-1. 先去掉 TTFT/TPOT 约束，看是否能找到离线最优。
-2. 放宽 `tpot-limits` 或 `ttft-limits`。
-3. 增大 `batch-range` 上限。
-4. 检查 `tp-sizes` 是否包含可行值。
-5. 降低 `reserved-memory-gb` 或使用更强设备画像。
-
-### 9.5 结果来自缓存，想重新运行
-
-Web UI 会根据 task hash 读取 `.msmodeling_ui/results.sqlite3` 和 `.msmodeling_ui/logs/` 中的缓存。若需要完全重跑，可以清理对应缓存目录，或调整一个会影响仿真的参数生成新 task hash。
-
-### 9.6 图表标题遮挡内容
-
-新版 Web UI 已将图标题放在图像区域外的独立标题位置，不再使用 Gradio 左上角覆盖式标题。如果仍看到旧样式，确认浏览器没有加载旧页面，并重启 Web UI。
-
----
-
-## 10. 推荐工作流案例
-
-### 10.1 案例 A：比较两张芯片的 LLM decode 能力
-
-Web UI：
+如果你要修改 Web UI，建议先阅读设计文档：
 
 ```text
-模型: Qwen/Qwen3-32B
-主芯片: ATLAS_800_A2_280T_32G_PCIE
-竞品芯片: 选择另一张芯片
-部署卡数: 8
-并发列表: [16,32,64]
-TP列表: [1,2,4,8]
-生成token数量: 8
-上下文长度: 4500
-Decode模式: 开启
-量化: MLP=W8A8_DYNAMIC, Attention=DISABLED
+docs/design/web_ui_refactor_design.md
 ```
 
-观察：
+### 9.1 架构概览
 
-- 哪张芯片在同 TP 和同并发下推理时间更低。
-- 是否存在某张芯片在高 TP 下通信瓶颈更明显。
-- 显存和算子详情中瓶颈是否一致。
-
-### 10.2 案例 B：评估 VL 图像尺寸影响
-
-第一轮：
+Web UI 采用前后端分离架构：
 
 ```text
-image-height: 720
-image-width: 1080
+浏览器 (Vue 3 SPA)  ──HTTP/JSON──▶  FastAPI 后端  ──subprocess──▶  CLI 核心
 ```
 
-第二轮：
+- **前端**：Vue 3 + Element Plus + Pinia + ECharts + Vite，构建产物由后端 StaticFiles 挂载
+- **后端**：FastAPI + SQLite（WAL mode）+ Alembic 迁移，任务在独立子进程中执行
+- **前端源码**：`web_ui/frontend/`
+- **后端源码**：`web_ui/backend/`
+
+### 9.2 核心文件关系
+
+**前端**：
 
 ```text
-image-height: 1024
-image-width: 1024
+web_ui/frontend/src/
+├── App.vue                    # 根组件（app-bar + router-view）
+├── main.ts                    # 入口（Vue + Element Plus + Pinia）
+├── router/index.ts            # 路由（Console / History / JobResult / Docs）
+├── pages/                     # 路由页（Console / History / JobResult / JobStatus / Docs）
+├── components/
+│   ├── workspace/             # 工作区（ModuleWorkspace + ResultPane）
+│   ├── form/                  # 动态表单（SchemaForm + SchemaFormItem）
+│   ├── result/                # 结果组件（text / video / throughput 各子目录）
+│   └── job-status/            # 任务状态卡 + 日志抽屉
+├── composables/               # 组合式函数（useJobRunner / useFormValidation 等）
+├── stores/                    # Pinia store（formState / telemetry）
+├── services/                  # API 层（axios 封装）
+├── config/forms/              # 表单配置 source of truth（.ts 文件）
+└── styles/theme.css           # CSS 变量主题
 ```
 
-保持其他参数不变，对比：
-
-- 总推理时间变化。
-- 显存占用变化。
-- Vision 相关算子的耗时变化。
-
-### 10.3 案例 C：视频生成 Ulysses 扩展性
-
-依次测试：
+**后端**：
 
 ```text
-world-size=8, ulysses-size=1
-world-size=8, ulysses-size=2
-world-size=8, ulysses-size=4
-world-size=8, ulysses-size=8
+web_ui/backend/
+├── main.py                    # FastAPI app + lifespan + uvicorn 入口
+├── db.py                      # SQLite engine + Alembic 迁移
+├── api/
+│   ├── routers/               # API 路由（jobs / cases / modules / options）
+│   ├── schemas.py             # Pydantic 响应模型
+│   └── errors.py              # 异常处理
+├── models/                    # 数据实体 + ORM 定义
+├── services/
+│   ├── job_manager.py         # 异步任务管理
+│   ├── job_runner.py          # 任务执行（ThreadPoolExecutor + subprocess）
+│   ├── result_view.py         # 结果组装（Top-N + SLO + 多用例）
+│   ├── ranking.py             # 排名计算
+│   ├── repositories.py        # 数据访问层
+│   ├── schema_registry.py     # 表单 schema 快照 + hash
+│   └── capture.py             # 日志捕获
+├── runners/                   # Runner 适配器（text_generate / video_generate / throughput_optimizer）
+└── migrations/                # Alembic 迁移
 ```
 
-观察：
-
-- 总耗时是否随 Ulysses 增大下降。
-- 通信算子占比是否上升。
-- 是否存在最优 Ulysses，而不是越大越好。
-
-### 10.4 案例 D：在线服务容量评估
-
-Web UI Optimizer：
-
-```text
-部署模式: PD 混部
-模型: Qwen/Qwen3-32B
-部署卡数: 8
-输入长度: 3500
-输出长度: 1500
-TP并行大小列表: [1,2,4,8]
-Batch范围: [1,256]
-TTFT: 2000
-TPOT: 50
-量化: MLP=W8A8_DYNAMIC, Attention=INT8
-```
-
-输出中重点查看：
-
-- 是否有可行解。
-- 最优吞吐、TTFT、TPOT 是否同时满足目标。
-- 最优 parallel 和 batch 是否符合部署预期。
-
-### 10.5 案例 E：PD 配比部署规划
-
-Web UI Optimizer：
-
-```text
-部署模式: PD 配比
-部署卡数: 16
-Prefill 单实例卡数: 4
-Decode 单实例卡数: 2
-输入长度: 3500
-输出长度: 1500
-TTFT: 2000
-TPOT: 50
-```
-
-观察：
-
-- Balanced QPS。
-- Prefill QPS 与 Decode QPS 谁更低。
-- 推荐 P/D 实例数量和总卡数是否匹配实际集群规划。
-
----
-
-## 11. 开发者补充说明
-
-如果你要修改 Web UI，建议先阅读：
-
-```text
-web_ui/README.md
-```
-
-核心文件关系：
-
-```text
-web_ui/__init__.py          包入口点，延迟暴露 launch_app
-web_ui/app.py               页面布局和事件绑定
-web_ui/components.py        复用组件和结果区域
-web_ui/callbacks.py         表单构建、校验、运行、结果整理
-web_ui/command_builder.py   CLI 命令和任务矩阵生成
-web_ui/runner.py            缓存、子进程运行、进度流
-web_ui/parsers.py           日志解析
-web_ui/result_store.py      SQLite 和日志缓存
-web_ui/charts.py            图表绘制
-web_ui/styles.py            共享CSS、主题助手和头部样式
-web_ui/schemas.py           构建器、运行器、解析器和存储之间共享的数据类
-web_ui/utils.py             共享解析、哈希和标准化助手
-web_ui/time_tracker.py      跟踪和显示仿真时间信息
-web_ui/web_ui_start.py      Web UI服务器启动入口
-```
-
-修改前端功能后建议执行：
+### 9.3 Web 启动
 
 ```bash
-python -m py_compile web_ui/__init__.py web_ui/app.py web_ui/callbacks.py web_ui/command_builder.py web_ui/components.py web_ui/charts.py web_ui/parsers.py web_ui/result_store.py web_ui/runner.py web_ui/schemas.py web_ui/styles.py web_ui/time_tracker.py web_ui/utils.py web_ui/web_ui_start.py
+# 首次需安装前端依赖（只需一次）
+cd web_ui/frontend && npm install
+
+# 启动（单命令并发启动前后端）
+python web_ui/main.py
 ```
+
+### 9.4 表单配置开发
+
+表单字段定义在 `web_ui/frontend/src/config/forms/*.ts` 中（source of truth），构建时通过 `npm run gen:schemas` 生成 data-only JSON 供后端 schema_registry 加载。修改字段后需 bump 版本号。
 
 ---
 
-## 12. 快速命令索引
+## 10. 快速命令索引
 
 启动 Web UI：
 
 ```bash
-python -m web_ui.web_ui_start --port 2345
+# 首次需安装前端依赖（只需一次）
+cd web_ui/frontend && npm install
+
+# 启动（单命令并发启动前后端）
+python web_ui/main.py
 ```
+
+浏览器打开 `http://127.0.0.1:5173`。
 
 LLM decode：
 

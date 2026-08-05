@@ -1,0 +1,272 @@
+/* msmodeling console theme.
+   LIGHT is the default; DARK is opt-in via the `html.dark` class (toggled at
+   runtime). Design system: ui-ux-pro-max "Data-Dense Dashboard" style —
+   blue primary (#1E40AF) + amber CTA, slate-50 canvas, Fira Sans/Code.
+   Loaded AFTER element-plus css-vars so these overrides win. */
+
+@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
+
+/* ───────────────────────── LIGHT (default) ─────────────────────────
+   ui-ux-pro-max "Analytics Dashboard" palette: #1E40AF primary on a #F8FAFC
+   canvas. Text ramp is WCAG-AA-verified (slate-900 body ≈ 19:1 on white,
+   slate-600 muted ≈ 7.5:1). Surfaces ramp canvas→white→slate-100→slate-200 so
+   cards lift cleanly and recessed wells (logs/code) read quietly — calm for a
+   console stared at for hours. */
+:root {
+  /* surface ramp (canvas → recessed) */
+  --msm-bg:         #F8FAFC;   /* slate-50  page canvas */
+  --msm-bg-panel:   #FFFFFF;   /* white     cards / surfaces (lifts off canvas) */
+  --msm-bg-panel-2: #F1F5F9;   /* slate-100 headers / hover / recessed */
+  --msm-bg-deep:    #E2E8F0;   /* slate-200 deepest recess (log wells, app bar) */
+  /* borders */
+  --msm-border:        #E2E8F0;/* slate-200 hairline (skill: "border-gray-200") */
+  --msm-border-strong: #CBD5E1;/* slate-300 inputs / emphasis */
+  /* text — all ≥ AA on bg-panel & bg */
+  --msm-text:       #0F172A;   /* slate-900 primary  (~19:1 on white) */
+  --msm-text-muted: #475569;   /* slate-600 secondary(~7.5:1 — skill minimum) */
+  --msm-text-err:   #DC2626;   /* red-600   error text (~5.2:1) */
+  /* accents */
+  --msm-accent:       #1E40AF; /* blue-800 primary brand/action (white-on ≈ 8.7:1 AAA) */
+  --msm-accent-hover: #1E3A8A; /* blue-900 hover/active */
+  --msm-accent-soft:  #E8ECF7; /* blue tint — tags, focus halo */
+  --msm-green: #16A34A;        /* green-600 success semantic */
+  --msm-amber: #D97706;        /* amber-600 warning semantic */
+  --msm-red:   #DC2626;        /* red-600 danger semantic */
+
+  /* shape */
+  --msm-radius-sm: 6px;
+  --msm-radius:    8px;
+  --msm-radius-lg: 12px;
+
+  /* elevation — light needs soft shadows where dark used border-only lifts */
+  --msm-shadow-sm: 0 1px 2px 0 rgba(15, 23, 42, 0.06);
+  --msm-shadow:    0 1px 3px 0 rgba(15, 23, 42, 0.10), 0 1px 2px -1px rgba(15, 23, 42, 0.08);
+  --msm-shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.10), 0 4px 6px -4px rgba(15, 23, 42, 0.06);
+
+  /* ── Element Plus token mapping (LIGHT) ── */
+  --el-color-primary: #1E40AF;
+  --el-color-primary-light-3: #6179C7;
+  --el-color-primary-light-5: #8E9FD7;
+  --el-color-primary-light-7: #BBC5E7;
+  --el-color-primary-light-8: #D2D9EF;
+  --el-color-primary-light-9: #E8ECF7;
+  --el-color-primary-dark-2:  #18338C;
+
+  --el-color-success: #16A34A;
+  --el-color-warning: #D97706;
+  --el-color-danger:  #DC2626;
+  --el-color-error:   #DC2626;
+  --el-color-info:    #64748B;
+
+  --el-bg-color:           #FFFFFF;
+  --el-bg-color-page:      #F8FAFC;
+  --el-bg-color-overlay:   #FFFFFF;
+  --el-fill-color:         #F1F5F9;
+  --el-fill-color-light:   #F8FAFC;
+  --el-fill-color-lighter: #FCFDFE;
+  --el-fill-color-blank:   #FFFFFF;
+  --el-fill-color-dark:    #E2E8F0;
+
+  --el-text-color-primary:     #0F172A;
+  --el-text-color-regular:     #1E293B;
+  --el-text-color-secondary:   #475569;
+  --el-text-color-placeholder: #94A3B8;
+  --el-text-color-disabled:    #94A3B8;
+
+  --el-border-color:        #E2E8F0;
+  --el-border-color-light:  #E2E8F0;
+  --el-border-color-lighter:#F1F5F9;
+  --el-border-color-dark:   #CBD5E1;
+  --el-border-color-darker: #94A3B8;
+
+  --el-mask-color:            rgba(15, 23, 42, 0.5);
+  --el-disabled-bg-color:     #F1F5F9;
+  --el-disabled-text-color:   #94A3B8;
+  --el-disabled-border-color: #E2E8F0;
+
+  --el-box-shadow:        var(--msm-shadow);
+  --el-box-shadow-light:  var(--msm-shadow-sm);
+  --el-box-shadow-dark:   var(--msm-shadow-lg);
+
+  --el-font-family: 'Fira Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* ───────────────────────── DARK (opt-in) ─────────────────────────
+   Preserved verbatim from the original dark-only theme so a runtime toggle
+   (`html.dark`) still renders the established dark console (green primary).
+   Every var above is re-pointed to the dark ramp here. */
+html.dark {
+  --msm-bg:         #0f172a;   /* slate-900 page */
+  --msm-bg-panel:   #1e293b;   /* slate-800 panes */
+  --msm-bg-panel-2: #18233a;   /* slate-800 deeper headers */
+  --msm-bg-deep:    #0b1220;   /* near-black code/log wells */
+  --msm-border:        #334155;
+  --msm-border-strong: #475569;
+  --msm-text:       #f8fafc;
+  --msm-text-muted: #94a3b8;
+  --msm-text-err:   #fca5a5;
+  --msm-accent:       #22c55e; /* dark keeps the original green brand */
+  --msm-accent-hover: #16a34a;
+  --msm-accent-soft:  #14532d;
+  --msm-green: #22c55e;
+  --msm-amber: #f59e0b;
+  --msm-red:   #ef4444;
+
+  /* Element Plus surface overrides for a cohesive dark look */
+  --el-bg-color: var(--msm-bg-panel);
+  --el-bg-color-page: var(--msm-bg);
+  --el-bg-color-overlay: var(--msm-bg-panel-2);
+  --el-fill-color: #1e293b;
+  --el-fill-color-light: #18233a;
+  --el-fill-color-lighter: #0f172a;
+  --el-fill-color-blank: var(--msm-bg-panel);
+  --el-text-color-primary: var(--msm-text);
+  --el-text-color-regular: #cbd5e1;
+  --el-text-color-secondary: var(--msm-text-muted);
+  --el-text-color-placeholder: #64748b;
+  --el-border-color: var(--msm-border);
+  --el-border-color-light: #2c3a52;
+  --el-border-color-lighter: #233047;
+  --el-mask-color: rgba(2, 6, 23, 0.7);
+  --el-disabled-bg-color: #18233a;
+  --el-disabled-text-color: #475569;
+
+  /* primary = run-green, with hand-tuned derived shades */
+  --el-color-primary: #22c55e;
+  --el-color-primary-light-3: #4cd47a;
+  --el-color-primary-light-5: #7ce2a3;
+  --el-color-primary-light-7: #adf0cc;
+  --el-color-primary-light-8: #c8f5dd;
+  --el-color-primary-light-9: #e3faee;
+  --el-color-primary-dark-2: #1ba64f;
+
+  --el-color-success: #22c55e;
+  --el-color-warning: #f59e0b;
+  --el-color-danger: #ef4444;
+  --el-color-info: #64748b;
+
+  --el-box-shadow:        0 0 0 1px var(--msm-border);
+  --el-box-shadow-light:  0 0 0 1px var(--msm-border);
+  --el-box-shadow-dark:   0 0 0 1px var(--msm-border-strong);
+
+  --el-font-family: 'Fira Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--msm-bg);
+  color: var(--msm-text);
+  font-family: 'Fira Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#app {
+  height: 100%;
+}
+
+code, pre, .mono {
+  font-family: 'Fira Code', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+}
+
+/* tabular numbers for metric readouts */
+.num {
+  font-family: 'Fira Code', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* slim scrollbars — light by default, dark under html.dark */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #CBD5E1 transparent;
+}
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 6px; }
+*::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+*::-webkit-scrollbar-track { background: transparent; }
+html.dark * { scrollbar-color: #334155 transparent; }
+html.dark *::-webkit-scrollbar-thumb { background: #334155; }
+html.dark *::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+/* keep focus visible for keyboard nav (a11y) */
+:focus-visible {
+  outline: 2px solid var(--msm-accent);
+  outline-offset: 2px;
+}
+
+/* ── ECharts palette (light-panel-friendly, colorblind-aware) ──
+   Chart options are plain JS (they cannot read CSS vars), so chart components
+   import these via composables/useChartTheme.ts. Values mirrored there; this
+   comment is the doc of record.
+   axis text #475569 · grid #E2E8F0 · tooltip white/slate-800 · series
+   #1D4ED8 #16A34A #D97706 #DC2626 #7C3AED #0891B2 #DB2777 #475569 */
+
+/* ───────────────────────── MOTION + INTERACTION SYSTEM ─────────────────────────
+   Shared motion tokens, named <Transition> classes, and interaction utilities.
+   Drives every transition/hover/loader in the app from one place. Per the
+   ui-ux-pro-max motion rule: ease-out for enter / ease-in for exit, 150–300ms,
+   animate at most 1-2 key elements per view, infinite loops only for loaders. */
+:root {
+  /* motion durations */
+  --msm-transition-fast: 150ms;   /* hovers, presses, small affordances */
+  --msm-transition:      200ms;   /* view swaps, panel transitions   */
+  /* motion easing: ease-out enter, ease-in exit */
+  --msm-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --msm-ease-in:  cubic-bezier(0.7, 0, 0.84, 0);
+
+  /* z-index scale (10/20/30/50 — no magic 9999) */
+  --msm-z-sticky:  10;   /* sticky headers, app bar, resizers */
+  --msm-z-overlay: 20;   /* drawers, dropdowns                */
+  --msm-z-modal:   30;   /* dialogs                           */
+  --msm-z-toast:   50;   /* messages, notifications           */
+}
+
+/* ── Named Vue <Transition> classes (name="msm-fade" / "msm-fade-up") ── */
+.msm-fade-enter-active  { transition: opacity var(--msm-transition) var(--msm-ease-out); }
+.msm-fade-leave-active  { transition: opacity var(--msm-transition-fast) var(--msm-ease-in); }
+.msm-fade-enter-from,
+.msm-fade-leave-to      { opacity: 0; }
+
+.msm-fade-up-enter-active { transition: opacity var(--msm-transition) var(--msm-ease-out),
+                                        transform var(--msm-transition) var(--msm-ease-out); }
+.msm-fade-up-leave-active { transition: opacity var(--msm-transition-fast) var(--msm-ease-in); }
+.msm-fade-up-enter-from   { opacity: 0; transform: translateY(6px); }
+.msm-fade-up-leave-to     { opacity: 0; }
+
+/* ── Interaction utilities (for click targets the framework doesn't style) ── */
+.msm-clickable {
+  cursor: pointer;
+  transition: background-color var(--msm-transition-fast) var(--msm-ease-out),
+              color            var(--msm-transition-fast) var(--msm-ease-out);
+}
+.msm-clickable:hover  { background: var(--msm-bg-panel-2); }
+.msm-clickable:active { background: var(--msm-bg-deep); }
+
+/* resting + lifted card shadow, eased — for status/metric cards */
+.msm-card-hover {
+  box-shadow: var(--msm-shadow);
+  transition: box-shadow var(--msm-transition-fast) var(--msm-ease-out);
+}
+.msm-card-hover:hover { box-shadow: var(--msm-shadow-lg); }
+
+/* shared infinite loader (loaders may loop; reduced-motion guard below) */
+@keyframes msm-spin { to { transform: rotate(360deg); } }
+.msm-spin { animation: msm-spin 1s linear infinite; }
+
+/* ── Reduced-motion override (the app-wide a11y guard) ──
+   Neutralizes transitions/animations for vestibular-sensitive users. Loaders
+   become a static mark (correct: they opted out of motion). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

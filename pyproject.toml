@@ -12,6 +12,7 @@ version = "0.2.0"
 requires-python = ">=3.10"
 dependencies = [
     "aenum>=3.1.17",
+    "alembic>=1.18.5",
     "blinker>=1.9.0",
     "colorama>=0.4.6",
     "compressed-tensors>=0.16.0",
@@ -36,6 +37,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "salabim>=26.0.6",
     "scipy>=1.15.3",
+    "sqlmodel>=0.0.39",
     "strenum>=0.4.15",
     "torch>=2.8,<=2.10",
     "torchvision>=0.23.0",

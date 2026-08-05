@@ -1,14 +1,20 @@
 # Web UI User Guide
 
+> **⚠ Security Notice**
+>
+> The Web UI service has **no authentication** and binds to the loopback address (`127.0.0.1` / `::1`). Loopback only blocks *remote* network access — TCP loopback is visible to **all users on the same host**. Any local user can call every API, submit jobs, and read results.
+>
+> **This service is designed for single-user, single-machine use only.** Do NOT run it on shared or multi-user hosts. If the server process runs with elevated privileges (root / admin), this constitutes a local privilege-escalation risk.
+
 This document is intended for daily users of Modeling and developers who are about to integrate the project. Its goal is to help you quickly understand what the tool can do, how to launch simulations from the Web UI or CLI, how to interpret results, and how to configure parameters for different business scenarios.
 
-If you only want to start the frontend page, simply run:
+If you only want to start the Web UI, run the launcher from the repo root (with the venv activated):
 
 ```bash
-python -m web_ui.web_ui_start --port 2345
+python web_ui/main.py
 ```
 
-After starting, open `http://127.0.0.1:2345` in your browser.
+After starting, open `http://127.0.0.1:5173` in your browser. The frontend will automatically proxy `/api` requests to the backend at `http://127.0.0.1:8000`.
 
 ---
 
@@ -21,7 +27,6 @@ After starting, open `http://127.0.0.1:2345` in your browser.
 | Configuring video generation simulations | [5. Video Generation Simulation Guide](#video-generation-simulation) |
 | Using the throughput optimizer | [6. Optimizer Throughput Tuning Guide](#optimizer-guide) |
 | Interpreting results and exporting data | [7. How to Read Result Charts and Detail Tables](#results-guide) |
-| Troubleshooting common issues | [9. FAQ](#faq) |
 
 ---
 
@@ -33,13 +38,13 @@ Modeling is a simulation tool for model inference performance analysis. Its core
 - Supporting LLM text inference, VL multimodal inference, video generation Diffusion Transformer inference, and service throughput tuning.
 - Supporting cross-chip comparisons to help evaluate performance differences of the same model on different devices.
 - Supporting parameter combination analysis for concurrency, TP, quantization, MTP, Prefix Cache, Ulysses, DiT Cache, PD Aggregated, PD Disaggregated, PD Ratio, and more.
-- The Web UI provides visual charts, detail tables, case selection, Excel export, and historical caching; the CLI is suitable for scripted batch experiments.
+- The Web UI provides visual charts, detail tables, case selection, CSV export, job history, Chrome trace download, and historical caching; the CLI is suitable for scripted batch experiments.
 
 The most relevant entry points in the repository are as follows:
 
 | Entry Point | Purpose | Recommended Scenario |
 |---|---|---|
-| `python -m web_ui.web_ui_start` | Launch the Gradio frontend | Interactive configuration, result visualization, non-developer users |
+| `python web_ui/main.py` | Launch the Vue 3 + FastAPI Web UI (single launcher starts both frontend and backend) | Interactive configuration, result visualization, non-developer users |
 | `python -m cli.inference.text_generate` | LLM / VL forward inference simulation | One-off or scripted LLM/VL performance analysis |
 | `python -m cli.inference.video_generate` | Video generation model simulation | Diffusion Transformer / Wan / HunyuanVideo scenarios |
 | `python -m cli.inference.throughput_optimizer` | Service throughput tuning | Finding optimal parallel and batch under TTFT/TPOT/SLO constraints |
@@ -52,6 +57,24 @@ For complete environment setup steps (cloning the repository, creating a virtual
 
 If the environment is already set up, launching the Web UI from the repository root generally requires no additional configuration. The tool reads model configurations, with common sources including Hugging Face, ModelScope, or local model directories. If the network cannot access Hugging Face, you can select `modelscope` in the Web UI's `remote-source`, or set the `HF_ENDPOINT` mirror as described in the installation guide.
 
+### 2.1 Additional Web UI Dependencies
+
+The Web UI uses a frontend-backend separation architecture. In addition to the Python dependencies above, you also need to install frontend dependencies:
+
+**Backend dependencies** (already included in the repository root `pyproject.toml`, installed with the main project):
+- FastAPI, uvicorn, sqlmodel, alembic, pydantic, etc.
+
+**Frontend dependencies** (requires Node.js ≥ 18 and npm):
+
+```bash
+cd web_ui/frontend
+npm install
+```
+
+This installs Vue 3, Element Plus, ECharts, Pinia, and other frontend libraries. Only needs to be run once. Subsequent `npm run dev` will detect dependency changes automatically.
+
+> **Node.js installation**: If Node.js is not installed, download the LTS version from [nodejs.org](https://nodejs.org/), or use a version manager such as nvm or fnm.
+
 ---
 
 <a id="web-ui-quick-start"></a>
@@ -60,35 +83,72 @@ If the environment is already set up, launching the Web UI from the repository r
 
 ### 3.1 Launch the Local Page
 
+The Web UI uses a frontend-backend separation architecture.
+
+**Before first launch**, install frontend dependencies (only once):
+
 ```bash
-python -m web_ui.web_ui_start --port 2345
+cd web_ui/frontend && npm install
 ```
 
-Suitable for local use. Open in your browser:
+Also ensure Python dependencies are installed (see [Install Guide](../install_guide/msmodeling_install_guide.md)):
+
+```bash
+uv sync  # or pip install -e .
+```
+
+Then run the launcher from the repo root (with the venv activated):
+
+```bash
+python web_ui/main.py
+```
+
+The launcher concurrently starts the frontend (Vite dev server, default port 5173) and the backend (FastAPI, default port 8000), streams both outputs with `[backend]` / `[frontend]` prefixes, and tree-kills both on Ctrl+C.
+
+Open in your browser:
 
 ```text
-http://127.0.0.1:2345
+http://127.0.0.1:5173
 ```
+
+The frontend Vite dev server will automatically proxy `/api` requests to the backend at `http://127.0.0.1:8000`.
 
 ### 3.2 Web UI Page Overview
 
-The current Web UI mainly includes three types of workspaces:
+The Web UI is a single-page application (SPA). The top navigation bar provides the following:
 
-| Page | Capabilities |
+| Navigation Button | Description |
 |---|---|
-| Simulator - LLM Forward | LLM text inference simulation, supporting concurrency list, TP list, quantization, MTP, Prefix Cache, parallel breakdown, operator and memory analysis |
-| Simulator - VL Forward | Multimodal VL inference simulation, adding image batch, height, width and other image parameters on top of LLM parameters |
+| Home | Return to the workspace (Console) |
+| Docs | Embedded user guide |
+| History | View submitted job history, status, and results |
+| Locale Switch | Chinese / English real-time switching |
+| Theme Switch | Light / Dark real-time switching |
+
+The main workspace **Console** uses a **Tab + vertical split** layout. Three modules share the same page:
+
+| Tab | Capabilities |
+|---|---|
+| Text Generation | LLM / VL forward inference simulation, supporting concurrency list, TP list, quantization, MTP, Prefix Cache, parallel breakdown, operator and memory analysis |
 | Video Generation | Video generation model inference simulation, supporting Ulysses, CFG, DiT Cache, Chrome Trace and other parameters |
-| Optimizer | Service throughput tuning, supporting three deployment modes: `PD Aggregated`, `PD Disaggregated`, `PD Ratio` |
+| Throughput Optimizer | Service throughput tuning, supporting three deployment modes: `PD Aggregated`, `PD Disaggregated`, `PD Ratio` |
+
+Each Tab's workspace is divided into two parts:
+- **Upper part**: Configuration form (fields dynamically generated from TypeScript config, grouped into collapsible sections, hover over field names to see bilingual tooltips)
+- **Lower part**: Result pane (changes with job status: idle placeholder → running → success result / failure details)
+- A draggable divider between them allows resizing the form and result areas
 
 ### 3.3 Basic Web UI Workflow
 
 1. Select the model, primary chip, and optional competitor chip.
 2. Fill in parameters such as number of devices, concurrency, length, quantization, and parallelism.
-3. Click "Preview Configuration" or "Preview Command" to confirm the CLI command that will be executed.
-4. Click "Start Run".
-5. View the summary conclusion, charts, memory analysis, bandwidth bottleneck, operator details, and export results.
-6. If a concurrency list or TP list is configured, select a specific case in the detail analysis area, for example `Concurrency=32 | TP=2`, then view the memory and operator data for that case.
+3. Click the **▶ Run** button to submit the job. A Toast notification will appear on success (with the job ID).
+4. The result pane automatically switches to the running state, showing a spinning icon and progress text. You can view logs or cancel the job at any time.
+5. After the job completes, the result pane displays the summary, scatter plots / charts, memory analysis, operator details, etc.
+6. If multi-value fields are set (e.g., concurrency list, TP list), the system automatically expands them into multiple cases, and the results are displayed in a multi-case view.
+7. Click **History** in the top navigation bar to view all historical jobs and their results.
+
+> **Note**: Tab switching is blocked while a job is running (a warning toast appears). You must wait for it to complete or cancel it before switching tabs.
 
 ---
 
@@ -222,18 +282,9 @@ The tool will sweep concurrency for each TP and output a concurrency curve for e
 | 1 | Concurrency 16, 32, 64 |
 | 2 | Concurrency 16, 32, 64 |
 
-Subsequently, the memory, bandwidth, and operator detail areas will show case selectors, for example:
+Subsequently, the result pane automatically switches to the **multi-case view**: a Summary table lists the core metrics for each case (concurrency, TP, inference time, memory, etc.). Clicking a row drills down to the full result for that case (memory distribution chart, operator timing table, etc.).
 
-```text
-Concurrency=16 | TP=1
-Concurrency=32 | TP=1
-Concurrency=64 | TP=1
-Concurrency=16 | TP=2
-Concurrency=32 | TP=2
-Concurrency=64 | TP=2
-```
-
-When viewing details, please select a chip first and then a specific case; otherwise, it is easy to confuse memory and operator data across different concurrency and TP configurations.
+The old manual case selector has been replaced by automatic multi-case expansion + drill-down interaction.
 
 ### 4.7 DeepSeek / MTP Example
 
@@ -615,18 +666,21 @@ The Web UI also displays:
 
 ## 7. How to Read Result Charts and Detail Tables
 
-### 7.1 LLM / VL Results
+The Web UI uses modular result components. Different modules have dedicated result views. The result pane supports both light and dark themes, and charts adapt automatically.
 
-It is recommended to read in the following order:
+### 7.1 Text Generation Results
 
-1. Summary conclusion: first check the total time, TPS/Device, and whether there are any failures or warnings.
-2. Inference time chart: check whether increasing concurrency or TP still reduces latency.
-3. Memory analysis: check the proportion of model weights, KV Cache, activations, and reserved memory.
-4. Bandwidth bottleneck: check for memory bound, communication bound, and compute bound.
-5. Operator details: sorted by total latency to identify the main operators.
-6. Operator category statistics: determine optimization direction from categories such as GEMM, Attention, and Communication.
+The result pane displays the following from top to bottom:
 
-If a concurrency list or TP list is configured, be sure to select a case before viewing details.
+1. **Summary metric cards**: batch_size / execution_time / peak_usage / total_device — key values at a glance.
+2. **Simulator run time**: standalone display of the simulator wall-clock time (including compile; not the model execution time).
+3. **TPS per Device bar chart**: one bar per chip for multi-chip comparisons.
+4. **Memory distribution chart**: visual breakdown of total_device / model_weight / kv_cache / peak_usage / available.
+5. **Operator bottleneck distribution (OpBound)**: compact text showing memory bound / communication bound / compute bound proportions.
+6. **Operator timing table**: Name / total / avg / # of Calls, sorted by total latency descending, with expandable input shapes and bound analysis.
+7. **Chrome Trace downloads**: JSON download links per case / seq index (requires `--chrome-trace`).
+
+If multi-value fields are configured (multiple devices, multiple quantization methods, concurrency lists, etc.), the result automatically switches to the **multi-case view**: a Summary table lists core metrics for each case; click to drill down to the full single-case result.
 
 ### 7.2 Video Results
 
@@ -636,16 +690,61 @@ Key areas of focus:
 - The proportion of communication operators after Ulysses.
 - Whether CFG / CFG Parallel introduces additional all-gather or batch expansion.
 - Whether DiT Cache significantly reduces the computation time of repeated blocks.
+- Operator timing table / chart and Chrome Trace downloads (shared display components with Text Generation).
+
+Multi-case results also show a Summary table + drill-down.
 
 ### 7.3 Optimizer Results
 
-Recommended reading order:
+The Optimizer displays different views depending on the deployment mode:
 
-1. Recommended conclusion: check the optimal chip, throughput, parallel configuration, batch, and concurrency.
-2. Optimal comparison across chips: used for cross-chip comparison between the primary chip and competitors.
-3. Fixed-configuration cross-chip comparison: ensure the comparison is done under the same configuration, not just comparing each chip's individual optimum.
-4. PD Ratio: if using a PD disaggregated architecture, check the Balanced QPS and Prefill / Decode instance ratio.
-5. Single-chip Pareto: determine whether there are alternative points with higher throughput but slightly worse latency.
+**PD Aggregated (AggregatedView)**:
+- Scatter plot: Throughput vs Concurrency / TPOT, colored by parallel strategy
+- Cross-device optimal throughput comparison bar chart (for multi-device cases)
+- Sweep ranking table: rank / throughput / TTFT / TPOT / concurrency / num_devices / parallel / batch_size
+- CSV export
+
+**PD Disaggregated (DisaggregatedView)**:
+- Prefill table (TTFT-oriented) + Best configuration card
+- Decode table (TPOT-oriented) + Best configuration card
+- CSV export
+
+**PD Ratio (PDRatioView)**:
+- PD Ratio table: PD Ratio / Balanced QPS / P/D QPS / TTFT / TPOT / parallel configuration
+- Best PD ratio card
+
+**Scatter Plot (OptimizerCurves)**:
+- Data source: all raw exploration points (raw records), colored by parallel strategy
+- Automatically filters out-of-memory points (OOM) and duplicate rows
+- Mode-aware: 2 charts for Aggregated / 4 charts for Disaggregated / 2 charts for PD Ratio
+- Light / dark theme auto-adaptation
+
+**Multi-case View (ThroughputMultiCaseResult)**:
+- Summary table (one row per case: device + metrics)
+- Click to drill down to single-case full results (scatter plot + mode view)
+
+### 7.4 Job Logs
+
+Click the "Logs" button in the workspace or job status page to open the log drawer (JobLogDrawer):
+
+| Feature | Description |
+|---|---|
+| Full log | Main job log (banner + all cases interleaved output) |
+| Per-case log | Independent log filtered by case (radio switch) |
+| Log search | Case-insensitive line filter (shows matching lines / total lines) |
+| ANSI rendering | Terminal colors → HTML (preserves bold / color / italic / underline) |
+
+### 7.5 History
+
+Click **History** in the top navigation bar to enter the History page:
+
+| Feature | Description |
+|---|---|
+| Job list | Table display: Job ID / Module / Label / Status / Created / Completed |
+| Status labels | Color-coded: success (green) / failed (red) / running (blue) / cancelled (yellow) |
+| Filtering | Filter by module / status; search by Job ID / label |
+| Pagination | Select 10 / 20 / 50 / 100 per page |
+| Actions | View result (succeeded) / View status (running) / View details (failed) |
 
 ---
 
@@ -725,212 +824,101 @@ Note: The simulation tool focuses on performance and resource estimation, and do
 
 ---
 
-<a id="faq"></a>
+## 9. Developer Notes
 
-## 9. FAQ
-
-### 9.1 Browser Cannot Open After Web UI Launch
-
-Check:
-
-- Whether the correct address is used: `http://127.0.0.1:2345`.
-- Whether the port is occupied; you can switch to `--port 2346`.
-
-### 9.2 Invalid Device Name
-
-`--device` must come from `DeviceProfile.all_device_profiles`. The Web UI automatically loads the brand and chip list from device profiles. In the CLI, you can check the choices in the error message, or select an available chip in the Web UI first.
-
-### 9.3 Invalid TP / DP / EP Configuration
-
-Common causes:
-
-- `num-devices` is not evenly divisible by `tp-size`.
-- `world-size` is not evenly divisible by `ulysses-size`.
-- `TP * DP * EP` exceeds the number of deployed devices.
-- Certain fine-grained TP/DP parameters do not match the total number of devices.
-
-Recommended approach: first run with a simple configuration, such as `tp-size=1, dp-size=auto, ep-size=1`, then gradually increase parallel complexity.
-
-### 9.4 Optimizer Has No Feasible Solution
-
-Common causes:
-
-- TTFT or TPOT constraints are too strict.
-- `max-batched-tokens` is smaller than the effective input length.
-- The batch search range is too small.
-- Insufficient number of devices or an unsuitable TP search space.
-- Excessive reserved memory leading to insufficient available memory.
-
-Recommended approach:
-
-1. First remove TTFT/TPOT constraints to see if an offline optimum can be found.
-2. Relax `tpot-limits` or `ttft-limits`.
-3. Increase the upper limit of `batch-range`.
-4. Check whether `tp-sizes` includes feasible values.
-5. Reduce `reserved-memory-gb` or use a stronger device profile.
-
-### 9.5 Results Come from Cache and You Want to Re-run
-
-The Web UI reads cache from `.msmodeling_ui/results.sqlite3` and `.msmodeling_ui/logs/` based on the task hash. If you need to completely re-run, you can clear the corresponding cache directories, or adjust a parameter that affects the simulation to generate a new task hash.
-
-### 9.6 Chart Title Overlapping Content
-
-The current version of the Web UI places chart titles in a separate title area outside the image region, no longer using the Gradio overlay title in the upper-left corner. If you still see the old style, confirm that the browser is not loading the old page, and restart the Web UI.
-
----
-
-## 10. Recommended Workflow Examples
-
-### 10.1 Example A: Comparing LLM Decode Capabilities of Two Chips
-
-Web UI:
+If you want to modify the Web UI, it is recommended to first read the design document:
 
 ```text
-Model: Qwen/Qwen3-32B
-Primary chip: ATLAS_800_A2_280T_32G_PCIE
-Competitor chip: select another chip
-Number of devices: 8
-Concurrency list: [16,32,64]
-TP list: [1,2,4,8]
-Generated token count: 8
-Context length: 4500
-Decode mode: enabled
-Quantization: MLP=W8A8_DYNAMIC, Attention=DISABLED
+docs/design/web_ui_refactor_design.md
 ```
 
-Observe:
+### 9.1 Architecture Overview
 
-- Which chip has lower inference time under the same TP and same concurrency.
-- Whether one chip has more obvious communication bottlenecks at high TP.
-- Whether the bottlenecks in memory and operator details are consistent.
-
-### 10.2 Example B: Evaluating the Impact of VL Image Dimensions
-
-First round:
+The Web UI uses a frontend-backend separation architecture:
 
 ```text
-image-height: 720
-image-width: 1080
+Browser (Vue 3 SPA)  ──HTTP/JSON──▶  FastAPI Backend  ──subprocess──▶  CLI Core
 ```
 
-Second round:
+- **Frontend**: Vue 3 + Element Plus + Pinia + ECharts + Vite. Build artifacts are served by the backend via StaticFiles.
+- **Backend**: FastAPI + SQLite (WAL mode) + Alembic migrations. Jobs run in isolated subprocesses.
+- **Frontend source**: `web_ui/frontend/`
+- **Backend source**: `web_ui/backend/`
+
+### 9.2 Core File Relationships
+
+**Frontend**:
 
 ```text
-image-height: 1024
-image-width: 1024
+web_ui/frontend/src/
+├── App.vue                    # Root component (app-bar + router-view)
+├── main.ts                    # Entry (Vue + Element Plus + Pinia)
+├── router/index.ts            # Routes (Console / History / JobResult / Docs)
+├── pages/                     # Route pages (Console / History / JobResult / JobStatus / Docs)
+├── components/
+│   ├── workspace/             # Workspace (ModuleWorkspace + ResultPane)
+│   ├── form/                  # Dynamic form (SchemaForm + SchemaFormItem)
+│   ├── result/                # Result components (text / video / throughput subdirs)
+│   └── job-status/            # Job status card + log drawer
+├── composables/               # Composable functions (useJobRunner / useFormValidation etc.)
+├── stores/                    # Pinia stores (formState / telemetry)
+├── services/                  # API layer (axios wrappers)
+├── config/forms/              # Form config source of truth (.ts files)
+└── styles/theme.css           # CSS variable theme
 ```
 
-Keep other parameters unchanged and compare:
-
-- Changes in total inference time.
-- Changes in memory usage.
-- Changes in latency of vision-related operators.
-
-### 10.3 Example C: Video Generation Ulysses Scalability
-
-Test sequentially:
+**Backend**:
 
 ```text
-world-size=8, ulysses-size=1
-world-size=8, ulysses-size=2
-world-size=8, ulysses-size=4
-world-size=8, ulysses-size=8
+web_ui/backend/
+├── main.py                    # FastAPI app + lifespan + uvicorn entry
+├── db.py                      # SQLite engine + Alembic migrations
+├── api/
+│   ├── routers/               # API routes (jobs / cases / modules / options)
+│   ├── schemas.py             # Pydantic response models
+│   └── errors.py              # Error handling
+├── models/                    # Data entities + ORM definitions
+├── services/
+│   ├── job_manager.py         # Async job management
+│   ├── job_runner.py          # Job execution (ThreadPoolExecutor + subprocess)
+│   ├── result_view.py         # Result assembly (Top-N + SLO + multi-case)
+│   ├── ranking.py             # Rank calculation
+│   ├── repositories.py        # Data access layer
+│   ├── schema_registry.py     # Form schema snapshots + hash
+│   └── capture.py             # Log capture
+├── runners/                   # Runner adapters (text_generate / video_generate / throughput_optimizer)
+└── migrations/                # Alembic migrations
 ```
 
-Observe:
-
-- Whether total latency decreases as Ulysses increases.
-- Whether the proportion of communication operators increases.
-- Whether there is an optimal Ulysses rather than bigger being better.
-
-### 10.4 Example D: Online Service Capacity Evaluation
-
-Web UI Optimizer:
-
-```text
-Deployment mode:PD Aggregated
-Model: Qwen/Qwen3-32B
-Number of devices: 8
-Input length: 3500
-Output length: 1500
-TP parallel size list: [1,2,4,8]
-Batch range: [1,256]
-TTFT: 2000
-TPOT: 50
-Quantization: MLP=W8A8_DYNAMIC, Attention=INT8
-```
-
-Key areas to check in the output:
-
-- Whether a feasible solution exists.
-- Whether the optimal throughput, TTFT, and TPOT all meet the targets simultaneously.
-- Whether the optimal parallel and batch match deployment expectations.
-
-### 10.5 Example E: PD Ratio Deployment Planning
-
-Web UI Optimizer:
-
-```text
-Deployment mode: PD Ratio
-Number of devices: 16
-Devices per Prefill instance: 4
-Devices per Decode instance: 2
-Input length: 3500
-Output length: 1500
-TTFT: 2000
-TPOT: 50
-```
-
-Observe:
-
-- Balanced QPS.
-- Whether Prefill QPS or Decode QPS is lower.
-- Whether the recommended number of P/D instances and total devices match actual cluster planning.
-
----
-
-## 11. Developer Notes
-
-If you want to modify the Web UI, it is recommended to first read:
-
-```text
-web_ui/README.md
-```
-
-Core file relationships:
-
-```text
-web_ui/__init__.py          Package entry point, lazily exposes launch_app
-web_ui/app.py               Page layout and event bindings
-web_ui/components.py        Reusable components and result areas
-web_ui/callbacks.py         Form building, validation, execution, result organization
-web_ui/command_builder.py   CLI command and task matrix generation
-web_ui/runner.py            Cache, subprocess execution, progress streaming
-web_ui/parsers.py           Log parsing
-web_ui/result_store.py      SQLite and log caching
-web_ui/charts.py            Chart rendering
-web_ui/styles.py            Shared CSS, theme helpers, and header styles
-web_ui/schemas.py           Data classes shared between builder, runner, parser, and store
-web_ui/utils.py             Shared parsing, hashing, and normalization helpers
-web_ui/time_tracker.py      Tracking and displaying simulation time information
-web_ui/web_ui_start.py      Web UI server launch entry point
-```
-
-After modifying frontend functionality, it is recommended to run:
+### 9.3 Web Startup
 
 ```bash
-python -m py_compile web_ui/__init__.py web_ui/app.py web_ui/callbacks.py web_ui/command_builder.py web_ui/components.py web_ui/charts.py web_ui/parsers.py web_ui/result_store.py web_ui/runner.py web_ui/schemas.py web_ui/styles.py web_ui/time_tracker.py web_ui/utils.py web_ui/web_ui_start.py
+# Install frontend dependencies first (only once)
+cd web_ui/frontend && npm install
+
+# Start the launcher (concurrently runs frontend on :5173 and backend on :8000)
+python web_ui/main.py
 ```
+
+### 9.4 Form Configuration Development
+
+Form field definitions live in `web_ui/frontend/src/config/forms/*.ts` (source of truth). At build time, `npm run gen:schemas` generates data-only JSON for the backend schema_registry to load. After modifying fields, you must bump the version number.
 
 ---
 
-## 12. Quick Command Index
+## 10. Quick Command Index
 
 Launch Web UI:
 
 ```bash
-python -m web_ui.web_ui_start --port 2345
+# Install frontend dependencies first (only once)
+cd web_ui/frontend && npm install
+
+# Start (single command, runs both frontend and backend)
+python web_ui/main.py
 ```
+
+Open `http://127.0.0.1:5173` in your browser.
 
 LLM decode:
 

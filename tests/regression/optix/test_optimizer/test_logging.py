@@ -208,7 +208,13 @@ def test_debug_format_includes_file_line(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "test_logging.py:" in output
 
 
-def test_trace_format_includes_file_line() -> None:
+def test_trace_format_includes_file_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    # configure_logger() injects DEFAULT_LOG_EXTRA (run_id/stage/engine) so
+    # LOG_FORMAT_DEBUG's ``{extra[run_id]}`` resolves. Without it this test
+    # only passed by leaking extra state from a prior test's configure_logger()
+    # call — running it in isolation (or first under xdist) raised KeyError.
+    monkeypatch.setenv("OPTIX_LOG_LEVEL", "DEBUG")
+    configure_logger()
     buffer, handler_id = _capture_logs(format=LOG_FORMAT_DEBUG, level="TRACE")
     logger.trace("trace probe")
     logger.remove(handler_id)
