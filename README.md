@@ -168,7 +168,7 @@ msModeling 提供模型推理性能仿真、服务化性能仿真和服务化实
 
 ## 🛠️ 贡献指南
 
-欢迎参与项目贡献！详细的贡献流程、代码规范、Commit 规范、测试要求等，请参见《[CONTRIBUTING.md](CONTRIBUTING.md)》。如有疑问，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues)。
+欢迎参与项目贡献！详细的贡献流程、代码规范、Commit 规范、测试要求等，请参见《[msModeling 贡献指南](CONTRIBUTING.md)》。如有疑问，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues)。
 
 ### AI Native 开发
 

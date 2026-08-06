@@ -13,8 +13,8 @@
 - [贡献方式](#贡献方式)
 - [开发者如何贡献代码](#开发者如何贡献代码)
   - [1. 找到要参与的 Issue 或提出想法](#1-找到要参与的-issue-或提出想法)
-  - [2. Fork 并克隆仓库](#2-fork-并克隆仓库)
-  - [3. 搭建开发环境](#3-搭建开发环境)
+  - [2. 环境准备（包括克隆仓库）](#2-环境准备包括克隆仓库)
+  - [3. 配置开发环境](#3-配置开发环境)
   - [4. 创建功能分支并开发](#4-创建功能分支并开发)
   - [5. 本地测试与检查](#5-本地测试与检查)
   - [6. 提交代码](#6-提交代码)
@@ -84,7 +84,11 @@ msModeling 采用 [木兰宽松许可证 第2版（Mulan PSL v2）](http://licen
 - 如果你有新的想法或发现了 bug，请先创建一个 Issue，描述你的方案或问题。等待维护者确认方向后再开始开发，避免返工。
 - 对于较大的功能变更，建议先提交 [RFC（设计文档）](#设计文档与-rfc)。
 
-### 2. Fork 并克隆仓库
+### 2. 环境准备（包括克隆仓库）
+
+按照《[msModeling 安装指南 — 源码安装](docs/zh/install_guide/msmodeling_install_guide.md#231-环境准备)》章节完成编译和测试环境的搭建。
+
+> **说明：** 环境镜像的构建方法及配套软件版本由 MindStudio 统一镜像制作指南维护，本仓库不重复定义。
 
 请先将仓库 Fork 到你的个人空间，然后在本地克隆你的 Fork 副本：
 
@@ -100,27 +104,164 @@ git fetch upstream
 
 > **注意**：外部贡献者默认通过 Fork 提交 PR；具备权限的维护者也可在上游功能分支开发。任何角色都不得直接推送到 `master`。
 
-### 3. 搭建开发环境
+### 3. 配置开发环境
 
-**推荐使用 uv 管理环境（Python ≥ 3.10）：**
+本节按“**安装依赖 →（可选）切换镜像源 → 配置环境变量 → 安装辅助工具**”的顺序组织。可先按下表按自己的使用目的找到需要完成的步骤：
+
+| 使用目的 | 需要完成的步骤 |
+|----------|----------------|
+| 仅体验工具（仿真、Throughput Optimizer、Web UI、OptiX 等） | 3.1（推荐）或 3.2 安装依赖 |
+| 本地运行测试（pytest） | 安装依赖时补充 `ci` 依赖组（见 3.1 依赖组表格） |
+| 参与代码贡献（本地 pre-commit 检查） | 安装依赖时补充 `lint` 依赖组 + 3.5 安装 pre-commit |
+| 使用 AI Native 工作流 | 额外完成 3.6 安装 gitcode CLI |
+| 依赖下载失败或速度慢 | 参考 3.3 切换 PyPI 镜像源 |
+| 不在仓库根目录运行、无法访问 Hugging Face | 参考 3.4 配置环境变量 |
+
+#### 3.1 方式一：uv（推荐）
+
+如上编译容器已准备好 uv 和源设置，使用 uv 只需一条命令完成虚拟环境创建与依赖安装：
 
 ```bash
-pip install uv
 cd msmodeling
 uv sync
 # 可选：uv sync --group lint
 ```
 
-`uv sync` 会自动创建 `.venv` 并以可编辑模式安装本项目，无需 `uv venv` 或 `pip install -e .`。也可使用备选方式：`uv pip install -r requirements.txt`（见安装指南）。
+`uv sync` 会自动创建 `.venv` 并以可编辑模式安装本项目，无需 `uv venv` 或 `pip install -e .`。
 
-**安装 pre-commit：**
+**按需安装可选依赖组**：`uv sync` 默认只安装运行与仿真所需依赖，按使用场景再决定是否安装可选依赖组：
+
+| 依赖组 | 何时需要 | 安装命令 | 典型用途 |
+| -------- | -------- | -------- | -------- |
+| （默认） | 安装后运行仿真、Throughput Optimizer、Web UI、OptiX 等 | `uv sync` | 日常使用与体验 |
+| `lint` | 参与代码贡献，需要本地 pre-commit 风格/提交检查时 | `uv sync --group lint` | `uv run pre-commit install`、`uv run pre-commit run --all-files` |
+| `ci` | 本地运行 pytest、对齐 CI Gate / `scripts/run_*.sh` 测试环境时 | `uv sync --group ci` | `uv run pytest ...`、`./scripts/run_ci_gate.sh` |
+
+仅体验工具时执行 `uv sync` 即可，无需安装 `lint` 或 `ci`。需要时再按上表补充：
+
+```bash
+# 开发贡献：安装 pre-commit 等 lint 依赖
+uv sync --group lint
+
+# 本地测试：安装 pytest 等 CI 依赖
+uv sync --group ci
+```
+
+**使用环境**：完成后，可使用 `uv run ...` 执行命令；如需手动激活虚拟环境，可激活 `uv sync` 自动创建的 `.venv`。
+
+> [!NOTE]
+> 如果使用 `uv` 创建或管理虚拟环境，后续查看、升级、卸载也建议使用 `uv pip ...` 或 `uv run ...`。不要仅通过 `which pip` 判断当前环境，部分场景下 `pip` 可能指向非预期的 Python 环境。
+
+#### 3.2 方式二：pip + requirements.txt（备选）
+
+如果不使用 `uv`，也可以通过 Python 原生虚拟环境和 `requirements.txt` 安装依赖。CPU 环境建议先从 PyTorch CPU 源安装 `torch` 与 `torchvision`，再安装其余依赖。
+
+```bash
+python -m venv .venv
+
+# Linux / macOS
+source .venv/bin/activate
+
+# Windows
+.venv\Scripts\activate
+
+pip install "torch>=2.8,<=2.10" "torchvision>=0.23.0" --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+pip install -e .
+```
+
+如需使用 pip 运行测试或 CI 检查，请安装同时包含运行时和测试依赖的 `requirements-ci.txt`：
+
+```bash
+pip install -r requirements-ci.txt
+pip install -e .
+```
+
+> [!NOTE]
+> `pip install -e .` 会以源码可编辑模式安装 msModeling，并注册 `msmodeling` CLI。源码更新后无需重新复制文件，必要时重新执行安装命令即可。
+
+如果依赖下载失败或速度较慢，可切换 PyPI 镜像源后重试，详见[切换 PyPI 镜像源](#33-切换-pypi-镜像源)。
+
+> [!WARNING]
+> Windows 上 PyTorch 2.10 可能运行不正常。如遇问题，建议使用 PyTorch 2.8 或更早版本。
+
+#### 3.3 切换 PyPI 镜像源
+
+国内网络环境下，依赖下载失败或速度较慢时，可临时切换 PyPI 镜像源。推荐优先使用阿里云镜像；若已有公司内网源或其他镜像配置，可继续沿用，不必强制更换。
+
+**uv（推荐用于 `uv sync`）**
+
+```bash
+# 当前终端会话生效（推荐）
+export UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+uv sync
+
+# 或仅对单次命令生效
+UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple uv sync
+
+# uv pip 安装/升级时临时指定镜像
+uv pip install --upgrade -e . -i https://mirrors.aliyun.com/pypi/simple
+```
+
+**pip**
+
+```bash
+# 临时使用阿里云源（推荐）
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
+
+# 临时使用清华源
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 临时使用华为云源
+pip install -r requirements.txt -i https://repo.huaweicloud.com/repository/pypi/simple
+```
+
+如某个镜像源同步不及时导致版本找不到，请更换其他镜像源或临时回退到官方源 `https://pypi.org/simple` 后重试。
+
+#### 3.4 配置环境变量
+
+msModeling 常用环境变量如下：
+
+| 环境变量 | 可选/必选 | 说明 |
+| -------- | -------- | ---- |
+| PYTHONPATH | 可选 | 不在 msModeling 仓库根目录下运行时，可将该变量配置为仓库根目录，避免出现 `No module named cli`、`No module named tensor_cast` 等模块导入错误。 |
+| HF_ENDPOINT | 可选 | 无法直接访问 Hugging Face 时，可配置 Hugging Face 镜像地址，例如 `https://hf-mirror.com`。 |
+| OPTIX_DEPLOY_PATH | 可选 | 使用 OptiX 且系统 `PATH` 特殊时，可配置部署栈命令所在路径。通常无需配置。 |
+
+如果不在 msModeling 根目录下运行，需要设置 `PYTHONPATH`：
+
+```bash
+# Linux / macOS
+export PYTHONPATH=/path/to/msmodeling:$PYTHONPATH
+
+# Windows PowerShell
+$env:PYTHONPATH = "C:\path\to\msmodeling;$env:PYTHONPATH"
+```
+
+工具运行时可能需要从 Hugging Face 读取模型配置文件。如果无法直接访问，可以设置镜像：
+
+```bash
+# Linux / macOS
+export HF_ENDPOINT="https://hf-mirror.com"
+
+# Windows PowerShell
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+```
+
+在受限网络中，即使设置 `HF_ENDPOINT`，仍可能因代理策略、DNS、TLS 证书、镜像站不可达、模型仓库需要鉴权，或依赖库未使用该环境变量而下载失败。此时建议使用经审核的本地模型路径。
+
+#### 3.5 安装 pre-commit
+
+参与代码贡献时，需要安装一次 pre-commit 钩子（对应的 `lint` 依赖组见 3.1）：
 
 ```bash
 uv sync --group lint
 uv run pre-commit install    # 只需运行一次
 ```
 
-**安装 gitcode CLI（AI Native 工作流远端操作入口，一次性）：**
+#### 3.6 安装 gitcode CLI（AI Native 工作流远端操作入口，一次性）
+
+使用 AI Native 工作流（远端操作 Issue、PR、流水线等）时，需要安装并认证 gitcode CLI：
 
 ```bash
 npm config set @gitcode-cli:registry https://registry.npmjs.org

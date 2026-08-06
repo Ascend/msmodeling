@@ -1,83 +1,104 @@
-# msModeling工具安装指南
+# msModeling 安装指南
+
+<br>
 
 ## 1. 安装说明
 
-msModeling 是面向大模型推理性能仿真、服务化吞吐优化和 OptiX 服务化实测寻优的工具。读完本文，您将能够完成环境安装、验证命令行入口，并运行一次基础仿真。
+请确认运行环境满足以下条件：
 
-本文适用于首次使用 msModeling 的开发者和测试人员。开始前请确认：
+- Python 版本 ≥ 3.10，建议使用独立虚拟环境。
+- 网络可正常访问 GitCode 及 Python 包源。
+- 如需拉取 Hugging Face 模型配置，需确保网络可访问 Hugging Face。
 
-- 已安装 Python 3.10 或更高版本，推荐使用独立虚拟环境。
-- 运行环境可访问 GitCode 与 Python 包源。
-- 若需要直接拉取 Hugging Face 模型配置，运行环境可访问 Hugging Face；否则请按本文配置镜像或使用本地模型路径。
+本工具支持以下三种安装方式：[在线安装](#21-在线安装)、[离线安装](#22-离线安装)、[源码安装](#23-源码安装)。
 
 ## 2. 安装方式
 
 ### 2.1 在线安装
 
-若您的设备具备互联网访问能力，可通过一条命令自动完成工具的下载与安装。请参见昇腾社区MindStudio[下载](https://www.hiascend.com/developer/software/mindstudio/download)页面，选择“推理开发”使用场景，对应的CANN版本以及对应的工具，并在安装方式中选择"在线安装"，系统将引导您完成后续操作。
+**Linux / macOS 环境**
+
+若您的设备具备互联网访问能力，可通过一条命令自动完成工具的下载与安装。请参见昇腾社区 MindStudio [下载](https://www.hiascend.com/developer/software/mindstudio/download)页面，选择产品版本，选择“推理开发”使用场景，选择 msModeling 工具，并在安装方式中选择“在线安装”，系统将引导您完成后续操作。
+
+**Windows 环境**
+
+请依次执行以下命令完成安装（whl 包链接可从 [发行版页面](https://gitcode.com/Ascend/msmodeling/releases) 中获取）：
+
+```bash
+# 1. 创建并激活虚拟环境（必须使用虚拟环境，以防止破坏执行环境）
+python -m venv .venv
+.venv\Scripts\activate
+# 2. 安装 msmodeling（以下为示例链接）
+pip install https://gitcode.com/Ascend/msmodeling/releases/download/tag_MindStudio_26.1.0.B100_002/msmodeling-26.1.0-py3-none-any.whl
+```
 
 ### 2.2 离线安装
 
-对处于企业内网等无外网环境的设备，请先在可联网的机器上下载完整的离线安装包，再将其传输至目标设备进行安装。请参见昇腾社区MindStudio[下载](https://www.hiascend.com/developer/software/mindstudio/download)页面，选择“推理开发”使用场景，对应的CANN版本以及对应的工具，并在安装方式中选择"离线安装"，获取对应的安装包及操作指引。
+对处于企业内网等无外网环境的设备，请先在可联网的机器上下载完整的离线安装包，再将其传输至目标设备进行安装。
+
+**Linux / macOS 环境**
+
+请参见昇腾社区 MindStudio [下载](https://www.hiascend.com/developer/software/mindstudio/download)页面，选择产品版本，选择“推理开发”使用场景，选择 msModeling 工具，并在安装方式中选择“离线安装”，获取对应的安装包及操作指引。
+
+**Windows 环境**
+
+请依次执行以下命令完成安装（whl 包链接可从 [发行版页面](https://gitcode.com/Ascend/msmodeling/releases) 中获取）：
+
+```bash
+# 1. 创建并激活虚拟环境（必须使用虚拟环境，以防止破坏执行环境）
+python -m venv .venv
+.venv\Scripts\activate
+# 2. 安装 msmodeling（以下为示例文件名）
+pip install msmodeling-26.1.0-py3-none-any.whl
+```
 
 ### 2.3 源码安装
 
 如需使用最新代码的功能，或对源码进行修改以增强功能，可下载本仓库代码，自行编译、打包工具并完成安装。
 
-#### 2.3.1 克隆源码
+#### 2.3.1 环境准备
 
-执行如下命令下载源码：
+源码编译统一使用 MindStudio 标准构建环境。
+
+- 日常开发或使用已发布镜像，请参考《[MindStudio 工具开发环境安装指导](https://gitcode.com/Ascend/msot/blob/master/docs/zh/common/dev_env_setup.md)》。
+- 需要从基础操作系统复现环境、执行源码构建验证或单元测试验证时，必须参考《[MindStudio 统一构建镜像制作指南](https://gitcode.com/Ascend/msot/blob/master/docs/zh/common/docker_image_build_guide.md)》，从 openEuler 基础镜像现场构建环境镜像。
+
+本文档后续的源码编译和单元测试命令，均在上述指定镜像容器或现场构建的环境镜像的容器中执行，CANN 软件包版本、GCC 版本和 Python 版本以统一镜像制作指南为准，本仓库不重复维护。
+
+镜像构建完成后，必须使用统一镜像制作指南第 7 章给出的 `ctr_in.py` 命令，在交互式终端中启动并进入容器。不得使用普通 `docker run` 创建容器，也不得使用 `docker exec <容器名> bash -c '<命令>'` 替代交互式环境；否则可能跳过 Python、GCC 和 CANN 环境初始化。
+
+进入 `ctr_in.py` 打开的交互式容器 Shell 后，执行如下命令克隆本仓库：
 
 ```bash
+cd ~
 git clone https://gitcode.com/Ascend/msmodeling.git
-cd msmodeling
 ```
 
-#### 2.3.2 推荐方式：uv
+#### 2.3.2 执行编译
 
-项目推荐使用 `uv` 管理虚拟环境和依赖。仓库包含 `pyproject.toml` 时，`scripts/` 下的脚本也会自动识别并使用 `uv`。
-
-国内网络环境建议先配置阿里云 PyPI 镜像，再执行 `uv sync`（其他镜像与用法见[附录：切换 PyPI 镜像源](#63-切换-pypi-镜像源)）：
+保持在 `ctr_in.py` 打开的同一个交互式容器 Shell 中，在仓库根目录执行以下命令，自动完成依赖下载与构建：
 
 ```bash
-pip install uv
-cd msmodeling
-
-# 国内网络建议：使用阿里云镜像加速依赖下载
-export UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
-
-uv sync
-
-# 可选：指定 Python 版本（默认使用本机可用版本）
-# UV_PYTHON=3.13 uv sync
+cd ~/msmodeling
+python3 build.py
 ```
 
-`uv sync` 默认只安装运行与仿真所需依赖，按使用场景再决定是否安装可选依赖组：
+构建成功后，安装包将生成在 `artifacts/` 目录下。
 
-| 依赖组 | 何时需要 | 安装命令 | 典型用途 |
-| -------- | -------- | -------- | -------- |
-| （默认） | 安装后运行仿真、Throughput Optimizer、Web UI、OptiX 等 | `uv sync` | 日常使用与体验 |
-| `lint` | 参与代码贡献，需要本地 pre-commit 风格/提交检查时 | `uv sync --group lint` | `uv run pre-commit install`、`uv run pre-commit run --all-files` |
-| `ci` | 本地运行 pytest、对齐 CI Gate / `scripts/run_*.sh` 测试环境时 | `uv sync --group ci` | `uv run pytest ...`、`./scripts/run_ci_gate.sh` |
+#### 2.3.3 执行单元测试（可选）
 
-仅体验工具时执行 `uv sync` 即可，无需安装 `lint` 或 `ci`。需要时再按上表补充：
+此步骤非安装必需。如需验证代码基本功能，可执行单元测试：
 
 ```bash
-# 开发贡献：安装 pre-commit 等 lint 依赖
-uv sync --group lint
-
-# 本地测试：安装 pytest 等 CI 依赖
-uv sync --group ci
+cd ~/msmodeling
+python3 build.py test
 ```
 
-完成后，可使用 `uv run ...` 执行命令；如需手动激活虚拟环境，可激活 `uv sync` 自动创建的 `.venv`。
+命令返回码为 0，且测试用例均无失败，表示单元测试通过。
 
-> [!NOTE]
-> 如果使用 `uv` 创建或管理虚拟环境，后续查看、升级、卸载也建议使用 `uv pip ...` 或 `uv run ...`。不要仅通过 `which pip` 判断当前环境，部分场景下 `pip` 可能指向非预期的 Python 环境。
+#### 2.3.4 安装
 
-#### 2.3.3 备选方式：pip + requirements.txt
-
-如果不使用 `uv`，也可以通过 Python 原生虚拟环境和 `requirements.txt` 安装依赖。CPU 环境建议先从 PyTorch CPU 源安装 `torch` 与 `torchvision`，再安装其余依赖。
+将 whl 包拷贝到运行环境中（本机安装无需拷贝），执行如下安装操作：
 
 ```bash
 python -m venv .venv
@@ -88,194 +109,57 @@ source .venv/bin/activate
 # Windows
 .venv\Scripts\activate
 
-pip install "torch>=2.8,<=2.10" "torchvision>=0.23.0" --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
-pip install -e .
+pip install msmodeling-xxxxx.whl
 ```
-
-如需使用 pip 运行测试或 CI 检查，请安装同时包含运行时和测试依赖的 `requirements-ci.txt`：
-
-```bash
-pip install -r requirements-ci.txt
-pip install -e .
-```
-
-> [!NOTE]
-> `pip install -e .` 会以源码可编辑模式安装 msModeling，并注册 `msmodeling` CLI。源码更新后无需重新复制文件，必要时重新执行安装命令即可。
-
-如果依赖下载失败或速度较慢，可切换 PyPI 镜像源后重试，详见[附录：切换 PyPI 镜像源](#63-切换-pypi-镜像源)。
-
-> [!WARNING]
-> Windows 上 PyTorch 2.10 可能运行不正常。如遇问题，建议使用 PyTorch 2.8 或更早版本。
-
-#### 2.3.4 配置环境变量
-
-msModeling 常用环境变量如下：
-
-| 环境变量 | 可选/必选 | 说明 |
-| -------- | -------- | ---- |
-| PYTHONPATH | 可选 | 不在 msModeling 仓库根目录下运行时，可将该变量配置为仓库根目录，避免出现 `No module named cli`、`No module named tensor_cast` 等模块导入错误。 |
-| HF_ENDPOINT | 可选 | 无法直接访问 Hugging Face 时，可配置 Hugging Face 镜像地址，例如 `https://hf-mirror.com`。 |
-| OPTIX_DEPLOY_PATH | 可选 | 使用 OptiX 且系统 `PATH` 特殊时，可配置部署栈命令所在路径。通常无需配置。 |
-
-如果不在 msModeling 根目录下运行，需要设置 `PYTHONPATH`：
-
-```bash
-# Linux / macOS
-export PYTHONPATH=/path/to/msmodeling:$PYTHONPATH
-
-# Windows PowerShell
-$env:PYTHONPATH = "C:\path\to\msmodeling;$env:PYTHONPATH"
-```
-
-工具运行时可能需要从 Hugging Face 读取模型配置文件。如果无法直接访问，可以设置镜像：
-
-```bash
-# Linux / macOS
-export HF_ENDPOINT="https://hf-mirror.com"
-
-# Windows PowerShell
-$env:HF_ENDPOINT = "https://hf-mirror.com"
-```
-
-在受限网络中，即使设置 `HF_ENDPOINT`，仍可能因代理策略、DNS、TLS 证书、镜像站不可达、模型仓库需要鉴权，或依赖库未使用该环境变量而下载失败。此时建议使用经审核的本地模型路径。
 
 ## 3. 验证安装
 
-安装完成后，在已激活的 Python 环境中执行以下命令确认 CLI 入口可用。
+安装完成后，在已激活的 Python 环境中执行以下命令：
 
 ```bash
-python -m cli.inference.text_generate --help
-python -m cli.inference.throughput_optimizer --help
-python -m serving_cast.main --help
-msmodeling optix --help
-pip show msmodeling
+msmodeling --help
 ```
 
-若安装正常，上述命令应分别输出 `text_generate`、`throughput_optimizer`、`serving_cast` 和 `msmodeling optix` 的用法说明与参数列表，且不报 `ModuleNotFoundError`。
-
-如需运行一次基础仿真，建议优先在可访问外网的环境中提前下载并审核模型仓库中的配置文件（仅需 `.json`、`.yaml`、`.yml`、`.txt` 后缀），再将 `model_id` 指向本地绝对路径：
-
-```bash
-python -m cli.inference.text_generate /data/models/Qwen3-32B --num-queries 2 --query-length 3500 --device TEST_DEVICE
-```
-
-若命令无法正常执行，请确认当前终端已激活安装 msModeling 的 Python 环境。
+若命令执行无报错，且能显示帮助信息，则表明安装成功。
 
 ## 4. 卸载
 
-可在安装 msModeling 的 Python 环境中执行如下命令卸载。
+### 4.1 通过昇腾社区方式安装
 
-如果使用 `uv` 管理虚拟环境，执行：
+1. 下载脚本。
 
-```bash
-uv pip uninstall msmodeling
-```
+   ```bash
+   curl -O https://inst.obs.cn-north-4.myhuaweicloud.com/26.1.0/ms_install.py
+   ```
 
-如果使用 `pip + requirements.txt` 方式安装，执行：
+   > [!NOTE]
+   >
+   > - 需要联网环境才能下载，若环境不允许联网或处于离线状态，请先在可联网的环境下载该脚本后拷贝到目标设备。
+   > - 若执行命令无响应或出现连接失败、SSL证书错误等问题，请参见[FAQ](https://www.hiascend.com/developer/blog/details/02176213671719317003)。
+
+2. 执行卸载。
+
+   ```bash
+   python ms_install.py uninstall msmodeling
+   ```
+   
+   卸载成功打印如下信息：
+
+   ```text
+   Successfully uninstalled 1 tool (msmodeling)
+   ```
+
+### 4.2 通过 pip install 命令安装
+
+激活安装 msmodeling 的 Python 虚拟环境（venv），执行以下命令：
 
 ```bash
 pip uninstall msmodeling
 ```
 
 > [!NOTE]
-> 卸载前请确认当前终端使用的是安装 msModeling 的 Python 环境，避免卸载到其他环境中的同名包。若通过 `uv` 管理环境，优先使用 `uv pip uninstall msmodeling`。若不再需要源码目录，可在卸载后手动删除。
+> 卸载前请确认当前终端环境是安装 msModeling 的 Python 环境，避免卸载到其他环境中的同名包。
 
 ## 5. 升级
 
-升级前可先查看当前环境中的版本信息：
-
-```bash
-# uv 环境
-uv pip show msmodeling
-
-# pip 环境
-pip show msmodeling
-```
-
-### 5.1 方式一：覆盖升级
-
-升级即“先卸后装”。若选择覆盖升级，直接通过[2.1 在线安装](#21-在线安装)和[2.2 离线安装](#22-离线安装)内容执行安装操作，工具将自动卸载旧版本，并引导您完成覆盖安装。
-
-### 5.2 方式二：源码升级
-
-若选择源码升级，请按照如下操作完成升级：
-
-1. 进入 msModeling 仓库根目录，拉取目标版本源码。
-
-    ```bash
-    cd msmodeling
-    git fetch
-    git checkout 26.1.0
-    git pull
-    ```
-
-2. 选择对应的环境升级到目标版本。
-
-    ```bash
-    # uv 环境
-    uv pip install --upgrade -e .
-
-    # uv 环境临时指定镜像源
-    uv pip install --upgrade -e . -i https://mirrors.aliyun.com/pypi/simple
-
-    # pip 环境
-    pip install --upgrade -e .
-    ```
-
-升级时如遇依赖下载较慢，可按[附录：切换 PyPI 镜像源](#63-切换-pypi-镜像源)临时指定镜像。
-
-升级版本时需要关注版本配套关系，请参见《[版本说明](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.1.0/release_notes.md)》。
-
-## 6. 附录
-
-### 6.1 OptiX 与仿真环境分离<a name="optix-与仿真环境分离"></a>
-
-若使用 [OptiX 服务化自动寻优](../user_guide/optix_user_guide.md)：
-
-- msModeling、OptiX 必须装在独立虚拟环境里，例如 `.venv`。安装会带上 `torch`、`transformers` 等依赖，它们给仿真使用，不是 OptiX 寻优使用的部署栈。
-- vLLM、MindIE、测评工具默认使用系统里已部署好的环境，一般不必再创建部署虚拟环境。
-- 不要在 msModeling 虚拟环境里执行 `pip install vllm`。
-
-OptiX 子进程会自动剥离 msModeling 虚拟环境，使用系统 `PATH`；仅当 `PATH` 特殊时可配置 `OPTIX_DEPLOY_PATH`。详见《[OptiX 使用指南 · 推荐实践：环境与部署栈](../user_guide/optix_user_guide.md#推荐实践环境与部署栈)》。
-
-### 6.2 常见问题
-
-- 若 `--help` 无法显示帮助信息，请优先排查虚拟环境、`PYTHONPATH` 与依赖安装。
-- 如果提示无法找到 `cli` 或 `tensor_cast` 模块，请确认当前目录为仓库根目录，或已正确设置 `PYTHONPATH`。
-- 如果模型配置下载失败，请确认网络可访问 Hugging Face；若 `HF_ENDPOINT` 镜像仍不可用，请改用本地模型路径。
-- 如果依赖安装失败，请先确认虚拟环境已激活。若使用 `uv`，请重新执行 `uv sync`；若使用 pip 方式，请升级 `pip` 后依次重新执行 `pip install -r requirements.txt` 和 `pip install -e .`，必要时按[附录：切换 PyPI 镜像源](#63-切换-pypi-镜像源)切换镜像。
-- 仅体验仿真工具时无需安装 `lint` / `ci` 依赖组；需要本地 pre-commit 或 pytest 时再分别执行 `uv sync --group lint`、`uv sync --group ci`。
-
-### 6.3 切换 PyPI 镜像源<a name="63-切换-pypi-镜像源"></a>
-
-国内网络环境下，依赖下载失败或速度较慢时，可临时切换 PyPI 镜像源。推荐优先使用阿里云镜像；若已有公司内网源或其他镜像配置，可继续沿用，不必强制更换。
-
-**uv（推荐用于 `uv sync`）**
-
-```bash
-# 当前终端会话生效（推荐）
-export UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
-uv sync
-
-# 或仅对单次命令生效
-UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple uv sync
-
-# uv pip 安装/升级时临时指定镜像
-uv pip install --upgrade -e . -i https://mirrors.aliyun.com/pypi/simple
-```
-
-**pip**
-
-```bash
-# 临时使用阿里云源（推荐）
-pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
-
-# 临时使用清华源
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-# 临时使用华为云源
-pip install -r requirements.txt -i https://repo.huaweicloud.com/repository/pypi/simple
-```
-
-如某个镜像源同步不及时导致版本找不到，请更换其他镜像源或临时回退到官方源 `https://pypi.org/simple` 后重试。
+升级即“先卸后装”。直接执行安装命令，工具将自动卸载旧版本，并引导您完成覆盖安装。 升级版本时需要关注版本配套关系，请参见《[版本说明](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.1.0/release_notes.md)》。

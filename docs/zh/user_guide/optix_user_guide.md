@@ -65,7 +65,15 @@ OptiX 拉起服务或测评子进程时，会从 `PATH`、`PYTHONPATH` 里去掉
 
 若命令不在默认 PATH、或机器上装了多份运行时，可通过 `OPTIX_DEPLOY_PATH` 或 `config.toml` 里的 `[deploy] path_prefix` 指定部署根目录。
 
-完整步骤见 [推荐实践：环境与部署栈](#推荐实践环境与部署栈)；仿真侧通用安装见《[环境搭建指南](../install_guide/msmodeling_install_guide.md#optix-与仿真环境分离)》。
+完整步骤见 [推荐实践：环境与部署栈](#推荐实践环境与部署栈)。
+
+> [!NOTE]
+> 
+> 仿真侧通用安装：
+>
+> - msModeling、OptiX 必须装在独立虚拟环境里，例如 `.venv`。安装会带上 `torch`、`transformers` 等依赖，它们给仿真使用，不是 OptiX 寻优使用的部署栈。
+> - vLLM、MindIE、测评工具默认使用系统里已部署好的环境，一般不必再创建部署虚拟环境。
+> - 不要在 msModeling 虚拟环境里执行 `pip install vllm`。
 
 **部署栈准备**
 
