@@ -44,3 +44,7 @@ metadata:
 ## 完成标准
 
 CI 全绿（以 `ci-pipeline-passed` label 为准），或存在证据充分、责任和下一步清晰的 blocker 记录。
+
+## `/govern` 治理集成
+
+CI 阻塞责任移交时（标记阻塞、转交修复等），在 PR 评论写一行 `/next <login> <verb>` 触发通知 + 看板。协议见 `spec/governance/next-comment-protocol.md`。

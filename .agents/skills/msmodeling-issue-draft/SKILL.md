@@ -170,3 +170,7 @@ gitcode issue create -R <TARGET_REPO> --title "<title>" --body-file <file> --iss
 - CLI 创建和回读成功；
 - assignee 已指派（或无权限时评论 @chair）；
 - 飞书通知已发送或已记录跳过原因。
+
+## `/govern` 治理集成
+
+Issue 创建后的责任移交时（分类、退回补信息、转交等），在 Issue 评论写一行 `/next <login> <verb>` 触发通知 + 看板。协议见 `spec/governance/next-comment-protocol.md`。

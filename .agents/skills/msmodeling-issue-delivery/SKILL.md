@@ -61,3 +61,7 @@ metadata:
 - Issue/PR 审计链完整；
 - 作者自检未冒充独立评审；
 - 未自动审批或合并。
+
+## `/govern` 治理集成
+
+状态移交时（请求检视、退回作者、转交等），在 PR/Issue 评论写一行 `/next <login> <verb>` 触发通知 + 看板。协议见 `spec/governance/next-comment-protocol.md`。

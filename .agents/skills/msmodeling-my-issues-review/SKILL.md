@@ -52,3 +52,7 @@ metadata:
 ## 完成标准
 
 结论有代码和远端事实支撑，且无论结论类型都包含可执行建议。
+
+## `/govern` 治理集成
+
+Issue 评审结论移交时（分类、退回补信息、转交等），在 Issue 评论写一行 `/next <login> <verb>` 触发通知 + 看板。协议见 `spec/governance/next-comment-protocol.md`。

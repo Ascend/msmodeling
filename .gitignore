@@ -36,3 +36,8 @@ web_ui/backend/var/config/forms/*
 # web_ui frontend src/config/forms/*.json — generated from the .ts sources by
 # scripts/gen-form-schemas.mjs (npm run dev/build); the .ts are the SSOT.
 web_ui/frontend/src/config/forms/*.json
+
+# msmodeling-govern local tool state (off-repo tool runtime artifacts)
+people.local.yaml
+govern-state.json
+msmodeling-govern-logs/

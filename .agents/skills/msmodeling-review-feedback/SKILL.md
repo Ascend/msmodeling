@@ -133,3 +133,7 @@ gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/feedback-sum
 ## 完成标准
 
 所有意见有明确状态和回复；接受项已验证；CI 已闭环或记录阻塞；汇总已提交；已修复的意见已通过 CLI resolve。
+
+## `/govern` 治理集成
+
+检视意见处理后的责任移交时（退回作者、检视通过、转交等），在 PR 评论写一行 `/next <login> <verb>` 触发通知 + 看板。协议见 `spec/governance/next-comment-protocol.md`。
