@@ -11,7 +11,7 @@
 
 ### 1.1 简介
 
-NPU Layer Analyzer是一套NPU前向推理算子分析与层结构对比工具集，从 Chrome Trace Event JSON / kernel_details CSV 出发，完成 Forward 切分 → 层提取 → 子结构标注 → 双工具对比** 全流程。本 RFC 描述该工具集的整体架构、核心算法、模块设计与输出规范。
+NPU Layer Analyzer是一套NPU前向推理算子分析与层结构对比工具集，从 Chrome Trace Event JSON / kernel_details CSV 出发，完成 Forward 切分 → 层提取 → 子结构标注 → **双工具对比** 全流程。本 RFC 描述该工具集的整体架构、核心算法、模块设计与输出规范。
 
 工具集由 5 个独立脚本组成，构成一条完整的数据流水线：
 
@@ -52,11 +52,24 @@ NPU Layer Analyzer是一套NPU前向推理算子分析与层结构对比工具�
 - 提供 5 个可独立使用的脚本，覆盖 JSON→CSV、Forward 切分、层提取、对比全流程
 - 通过 `npu_layer_compare.py` 统一入口一键跑完全流程，输出 3 个 xlsx（npu_out / layer_out / compare_result）
 - 层边界以 Attention 为锚点，稳定应对未融合 RMSNorm 场景
-- 每层标注 2 段 Stage（Attention / FFN 或 MOE），由 `is_moe` 参数控制第二段类型，与 Transformer 语义对齐
+- 每层标注 2 段 Stage（Attention / FFN 或 MOE），由 MoE 自动检测结果（内部 `is_moe` 标志）决定第二段类型，与 Transformer 语义对齐
 - 自动识别未融合 RMSNorm 序列（rsqrt 锚点）
 - 自动检测 MoE 层并分别选取 Dense / MoE 代表层
 - 对比时自动排除通信算子，保证 Stage 时间纯净
 - 支持 task-id 定位特定 Forward segment
+
+## 环境依赖
+
+| 依赖 | 版本要求 | 用途 |
+|------|----------|------|
+| Python | ≥ 3.10 | 使用 dataclass(slots=True)、新 match 语法 |
+| openpyxl | ≥ 3.0 | xlsx 生成（layer_compare.py） |
+
+安装：
+
+```bash
+pip install "openpyxl>=3.0"
+```
 
 **非目标**：
 

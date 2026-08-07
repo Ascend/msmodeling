@@ -1,5 +1,8 @@
 # NPU Forward Inspector
 
+> **版本**：v1.0
+> **最后更新**：2026-08-06
+
 NPU 前向推理算子分析与层结构对比工具集。从 Chrome Trace Event JSON / kernel_details CSV 出发，
 完成 **Forward 切分 → 层提取 → 子结构标注 → 双工具对比** 全流程。
 
@@ -13,6 +16,8 @@ NPU 前向推理算子分析与层结构对比工具集。从 Chrome Trace Event
 | `layer_compare.py` | 两个 layer CSV | compare_result.xlsx | 按 Stage 对比时间/算子/Shape |
 | `npu_layer_compare.py` | CSV + JSON/CSV | 完整输出目录 | **统一入口**，一键跑完全流程 |
 | `layer_common.py` | - | - | 共享工具：正则、子结构标注、层提取（被两侧复用） |
+
+> **输出格式说明**：独立运行各工具时输出 CSV 文件；通过 `npu_layer_compare.py` 统一入口运行时，所有 CSV 会被自动封装为 xlsx 文件（无 CSV 残留）。
 
 ## 工程结构
 
@@ -43,6 +48,15 @@ openpyxl          # layer_compare.py 生成 xlsx
 pip install openpyxl
 ```
 
+## 输入格式兼容性
+
+| 输入 | 支持格式 | 字段要求 |
+|------|----------|----------|
+| `--csv` (kernel_details) | NPU profiling 导出 CSV | 必须包含 Stream ID、Task ID、Name、Type、Start Time(us)、Duration(us)、Input/Output Shapes |
+| `--json` (trace) | Chrome Trace Event Format | 标准 `traceEvents` 数组，含 name、cat、ts、dur、pid、tid 字段 |
+
+> 上游 trace 格式变更可能导致解析失败，如遇问题请检查字段是否匹配。
+
 ## 快速开始
 
 ### 一键全流程（推荐）
@@ -54,7 +68,7 @@ pip install openpyxl
 # CSV(NPU侧) + JSON(框架侧) → 全部结果
 python npu_layer_compare.py --csv samples/kernel_details.csv --json samples/qwen1.json
 
-# 指定 task-id 定位特定 Forward segment
+# 指定 task-id 定位特定 Forward segment（task-id 来源说明见「核心算法」节）
 python npu_layer_compare.py --csv samples/kernel_details.csv --json samples/qwen1.json --task-id 41500
 
 # 指定输出目录
@@ -121,6 +135,15 @@ python layer_compare.py -a forward_003_layer.csv -b kernel_details_layer.csv -o 
 
 ## 核心算法
 
+### Task ID 说明
+
+`task-id` 是 NPU profiling 日志中每个算子的唯一标识符，用于定位特定 Forward segment。
+
+**获取方式**：
+
+1. 运行 `npu_layer_analyzer.py` 后查看 `summary.csv` 中的 `start_task_id` / `end_task_id` 列
+2. 直接打开 kernel_details CSV，在 `Task ID` 列查找目标算子的 ID
+
 ### 主 Stream 选择
 
 按 `(attention 数, embedding 数, 非 N/A, 总行数)` 评分选主 stream：
@@ -138,9 +161,9 @@ python layer_compare.py -a forward_003_layer.csv -b kernel_details_layer.csv -o 
 - **多 Attention 模型**：取第一对相邻 Attention 之间的算子作为一层
 - **单 Attention 模型**：从 Attention 到其后第一个 SwiGlu/MLP
 
-### Stage 标注（2 段）
+### Stage 标注（实际每层 2 段）
 
-每个层提取 CSV 包含 `Stage` 列，标注 2 个阶段：
+每个层提取 CSV 包含 `Stage` 列，标注阶段名称如下：
 
 | Stage | 含义 | 关键算子 |
 |-------|------|----------|
@@ -213,7 +236,7 @@ aten.rsqrt.default → aten.mul.Tensor → aten.mul.Tensor
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--input` | kernel_details.csv | 输入 CSV |
+| `--input` / `-i` | kernel_details.csv | 输入 CSV |
 | `--output-dir` | forward_segments | 输出目录 |
 | `--task-id` | - | 算子 Task ID，定位 Forward |
 | `--expected-attention` | 0 | 预期每 Forward 的 Attention 数（<=0 禁用） |
@@ -232,3 +255,26 @@ aten.rsqrt.default → aten.mul.Tensor → aten.mul.Tensor
 | `--no-html` | - | 不输出 HTML |
 | `--no-global` | - | 不输出全局标注 |
 | `--no-layer` | - | 不输出层提取 |
+
+### trace_json_to_csv.py
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--input` / `-i` | - | 输入 Chrome Trace Event JSON 文件 |
+| `--output` / `-o` | - | 输出 CSV 文件路径 |
+
+### layer_compare.py
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `-a` | - | 文件A（来自 npu_layer_analyzer） |
+| `-b` | - | 文件B（来自 layer_analyzer） |
+| `-o` | compare_result.xlsx | 输出 xlsx 路径 |
+
+---
+
+## 版本信息
+
+- **版本**：v1.0
+- **最后更新**：2026-08-06
+- **适配工具版本**：npu_layer_analyzer v1.0+
