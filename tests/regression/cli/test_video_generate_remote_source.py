@@ -165,8 +165,9 @@ def test_cli_video_generate_run_inference_passes_remote_source_to_builder(
         sys.modules,
         "tensor_cast.diffusers.diffusers_attention",
         types.SimpleNamespace(
+            get_sp_group=lambda: None,
             set_sp_group=lambda group: None,
-            use_custom_sdpa=contextlib.nullcontext,
+            use_custom_sdpa=lambda **kwargs: contextlib.nullcontext(),
         ),
     )
     monkeypatch.setitem(
@@ -277,8 +278,9 @@ def test_cli_video_generate_run_inference_cfg_batch_concat_path(
         sys.modules,
         "tensor_cast.diffusers.diffusers_attention",
         types.SimpleNamespace(
+            get_sp_group=lambda: None,
             set_sp_group=lambda group: None,
-            use_custom_sdpa=contextlib.nullcontext,
+            use_custom_sdpa=lambda **kwargs: contextlib.nullcontext(),
         ),
     )
     monkeypatch.setitem(

@@ -18,7 +18,13 @@ from tensor_cast.diffusers.diffusers_utils import (
     model_class_to_vae_stride,
     use_hunyuanvideo15_t2v_static_branch,
 )
-from tensor_cast.model_config import ParallelConfig, RemoteSource
+from tensor_cast.model_config import (
+    AttentionBackend,
+    AttentionRoutePlan,
+    DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE,
+    ParallelConfig,
+    RemoteSource,
+)
 from tensor_cast.parallel_group import ParallelGroup
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.memory_tracker import MemoryTracker
@@ -28,6 +34,13 @@ from tensor_cast.utils import str_to_dtype
 from ..utils import check_positive_integer, LOG_LEVELS, parse_int_range
 
 logger = logging.getLogger(__name__)
+
+
+def check_attention_sparsity(value: str) -> float:
+    sparsity = float(value)
+    if not 0.0 <= sparsity < 1.0:
+        raise argparse.ArgumentTypeError("attention sparsity must be in [0.0, 1.0)")
+    return sparsity
 
 
 def generate_diffusers_inputs(batch_size, height, width, frame_num, seq_lens, model_config):
@@ -144,6 +157,9 @@ def run_inference(
     quantize_linear_action: QuantizeLinearAction = QuantizeLinearAction.W8A8_DYNAMIC,
     quantize_attention_action: QuantizeAttentionAction = QuantizeAttentionAction.DISABLED,
     mxfp4_group_size: int = 32,
+    attention_backend: AttentionBackend | str = AttentionBackend.dense,
+    attention_block_size: int = DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE,
+    attention_sparsity: float = 0.0,
     compile: bool = False,
     compile_allow_graph_break: bool = False,
     use_cfg: bool = False,
@@ -155,9 +171,20 @@ def run_inference(
     cache_step_interval: int = 1,
     cache_block_range: Optional[str] = None,
 ):
-    from tensor_cast.diffusers.diffusers_attention import set_sp_group, use_custom_sdpa
+    from tensor_cast.diffusers.diffusers_attention import get_sp_group, set_sp_group, use_custom_sdpa
     from tensor_cast.diffusers.diffusers_model import build_diffusers_transformer_model
     from tensor_cast.diffusers.model_resolver import resolve_diffusers_model_selection
+
+    route_plan = AttentionRoutePlan(
+        backend=attention_backend,
+        block_size=attention_block_size,
+        sparsity=attention_sparsity,
+    )
+    if (
+        route_plan.backend == AttentionBackend.block_sparse_attention
+        and quantize_attention_action != QuantizeAttentionAction.DISABLED
+    ):
+        raise ValueError("block_sparse_attention does not support attention quantization in the first version.")
 
     if device not in DeviceProfile.all_device_profiles:
         raise ValueError(f"Device '{device}' not recognized.")
@@ -219,7 +246,7 @@ def run_inference(
                 cache_step_interval,
             )
         else:
-            cache_model, _ = build_diffusers_transformer_model(
+            cache_model, cache_model_config = build_diffusers_transformer_model(
                 model_id,
                 parallel_config,
                 quant_config,
@@ -266,25 +293,34 @@ def run_inference(
     print(input_kwargs)
     print("Running simulated inference...")
     run_start = time.perf_counter()
+    original_sp_group = get_sp_group()
 
-    with (
-        Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
-        torch.no_grad(),
-        use_custom_sdpa(quant_config.attention_configs.get(-1)),
-        use_hunyuanvideo15_t2v_static_branch(model_config.transformer_config.model_config),
-    ):
-        for step_idx in range(sample_step):
-            in_cache_window = cache_state is not None and cache_step_start <= step_idx <= cache_step_end
-            if cache_state is not None:
-                cache_state.reuse = in_cache_window and ((step_idx - cache_step_start) % cache_step_interval != 0)
-            active_model = cache_model if in_cache_window else model
-            if ulysses_size > 1:
-                set_sp_group(active_model.sp_group)
-            out = active_model.forward(**active_inputs)
-            if ulysses_size > 1:
-                out = active_model.sp_group.all_gather(out, dim=split_dim)
-            if use_cfg and cfg_parallel:  # use cfg and use cfg parallel, do all-gather after each step of DiT forward
-                out = cfg_parallel_group.all_gather(out, dim=0)
+    try:
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+            use_custom_sdpa(
+                quant_config=quant_config.attention_configs.get(-1),
+                route_plan=route_plan,
+            ),
+            use_hunyuanvideo15_t2v_static_branch(model_config.transformer_config.model_config),
+        ):
+            for step_idx in range(sample_step):
+                in_cache_window = cache_state is not None and cache_step_start <= step_idx <= cache_step_end
+                if cache_state is not None:
+                    cache_state.reuse = in_cache_window and ((step_idx - cache_step_start) % cache_step_interval != 0)
+                active_model = cache_model if in_cache_window else model
+                if ulysses_size > 1:
+                    set_sp_group(active_model.sp_group)
+                out = active_model.forward(**active_inputs)
+                if ulysses_size > 1:
+                    out = active_model.sp_group.all_gather(out, dim=split_dim)
+                if (
+                    use_cfg and cfg_parallel
+                ):  # use cfg and use cfg parallel, do all-gather after each step of DiT forward
+                    out = cfg_parallel_group.all_gather(out, dim=0)
+    finally:
+        set_sp_group(original_sp_group)
 
     run_end = time.perf_counter()
     print()
@@ -397,6 +433,27 @@ def main():
         default=False,
     )
 
+    attention_group = parser.add_argument_group("Attention Options")
+    attention_group.add_argument(
+        "--attention-backend",
+        type=AttentionBackend,
+        choices=list(AttentionBackend),
+        default=AttentionBackend.dense,
+        help="Attention backend semantics for simulation.",
+    )
+    attention_group.add_argument(
+        "--attention-block-size",
+        type=check_positive_integer,
+        default=DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE,
+        help="Block size for block sparse attention route planning.",
+    )
+    attention_group.add_argument(
+        "--attention-sparsity",
+        type=check_attention_sparsity,
+        default=0.0,
+        help="Skipped KV-block ratio for block sparse attention.",
+    )
+
     optim_group = parser.add_argument_group("Optimization Options")
     optim_group.add_argument(
         "--compile",
@@ -482,6 +539,9 @@ def main():
         ulysses_size=args.ulysses_size,
         quantize_linear_action=args.quantize_linear_action,
         quantize_attention_action=args.quantize_attention_action,
+        attention_backend=args.attention_backend,
+        attention_block_size=args.attention_block_size,
+        attention_sparsity=args.attention_sparsity,
         compile=args.compile,
         compile_allow_graph_break=args.compile_allow_graph_break,
         cfg_parallel=args.cfg_parallel,

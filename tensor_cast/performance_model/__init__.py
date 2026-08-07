@@ -1,5 +1,6 @@
 import logging
 import math
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -607,6 +608,69 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     # The fused pattern converts x to FP32 before its two multiplies and one add per output element.
     compute_dtype = torch.promote_types(torch.float32, torch.promote_types(cos.dtype, sin.dtype))
     _accumulate_compute_ops(properties, compute_dtype, gp_ops=x.numel() * 3)
+    return properties
+
+
+def _attention_4d_dimensions(query: torch.Tensor, key: torch.Tensor) -> tuple[int, int, int, int, int]:
+    assert query.ndim == 4, "sparse attention expects 4D query"
+    assert key.ndim == 4, "sparse attention expects 4D key"
+    batch_size, query_len_per_seq, num_q_heads, head_size = query.size()
+    _, key_len_per_seq, _, _ = key.size()
+    return batch_size, query_len_per_seq, key_len_per_seq, num_q_heads, head_size
+
+
+def _ceil_div(value: int, divisor: int) -> int:
+    return (value + divisor - 1) // divisor
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.attention_route_generate.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    assert len(op_invoke_info.args) == 4
+    query = op_invoke_info.args[0]
+    key = op_invoke_info.args[1]
+    block_size = op_invoke_info.args[2]
+    batch_size, query_len_per_seq, key_len_per_seq, num_q_heads, head_size = _attention_4d_dimensions(query, key)
+    q_blocks = _ceil_div(query_len_per_seq, block_size)
+    kv_blocks = _ceil_div(key_len_per_seq, block_size)
+    block_pairs = batch_size * num_q_heads * q_blocks * kv_blocks
+
+    properties = op_invoke_info.get_memory_access_properties()
+    pooled_qk_ops = block_pairs * head_size * 2
+    selection_ops = block_pairs
+    _accumulate_compute_ops(properties, query.dtype, gp_ops=pooled_qk_ops + selection_ops)
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.block_sparse_attention.default)
+def _(
+    op_invoke_info: OpInvokeInfo,
+) -> OpInvokeInfo.PerformanceProperties:
+    assert len(op_invoke_info.args) == 7
+    query = op_invoke_info.args[0]
+    key = op_invoke_info.args[1]
+    block_size = op_invoke_info.args[5]
+    sparsity = op_invoke_info.args[6]
+    batch_size, query_len_per_seq, key_len_per_seq, num_q_heads, head_size = _attention_4d_dimensions(query, key)
+    q_blocks = _ceil_div(query_len_per_seq, block_size)
+    kv_blocks = _ceil_div(key_len_per_seq, block_size)
+    # Preserve the mathematical ceil at decimal boundaries such as 10 * (1 - 0.7) == 3.
+    kept_kv_blocks = max(
+        1,
+        int((Decimal(kv_blocks) * (Decimal(1) - Decimal(str(sparsity)))).to_integral_value(rounding=ROUND_CEILING)),
+    )
+    selected_block_pairs = batch_size * num_q_heads * q_blocks * kept_kv_blocks
+    padded_interactions = selected_block_pairs * block_size * block_size
+
+    bmm1_ops = padded_interactions * head_size * 2
+    softmax_ops = padded_interactions * 4
+    bmm2_ops = bmm1_ops
+
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={4})
+    properties.memory_read_bytes += bytes_of_tensor(op_invoke_info.args[4])
+    _accumulate_compute_ops(properties, query.dtype, mma_ops=bmm1_ops + bmm2_ops)
+    _accumulate_compute_ops(properties, query.dtype, gp_ops=softmax_ops)
     return properties
 
 

@@ -1,3 +1,4 @@
+import argparse
 import contextlib
 import json
 import os
@@ -11,14 +12,27 @@ from tests.helpers.cli_runner import run_module_main
 
 import pytest
 import torch
-from cli.inference.video_generate import main, process_input, run_inference
+from cli.inference.video_generate import (
+    check_attention_sparsity,
+    main,
+    process_input,
+    run_inference,
+)
 from parameterized import parameterized
 from tensor_cast.core.quantization.config import create_attention_quant_config
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
 from tensor_cast.diffusers.cache_agent.cache import CacheState
 from tensor_cast.diffusers.cache_agent.dit_block_cache import DiTBlockCache
-from tensor_cast.diffusers.diffusers_attention import _attention, use_custom_sdpa
+from tensor_cast.diffusers.diffusers_attention import (
+    _attention,
+    _get_block_sparse_attention_fallback_reason,
+    get_sp_group,
+    set_sp_group,
+    use_custom_sdpa,
+)
 from tensor_cast.diffusers.diffusers_model import DiffusersTransformerModel
+from tensor_cast.model_config import AttentionBackend, AttentionRoutePlan
+from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.transformations import wrap_model
 from tensor_cast.diffusers.diffusers_utils import SafeMetaTensor
 from tensor_cast.diffusers.dit_cache_registry import (
@@ -43,6 +57,49 @@ def test_safe_meta_tensor_boolean_index_returns_plain_meta_tensor():
     assert type(result) is torch.Tensor
     assert result.device.type == "meta"
     assert result.shape == image_embeds.shape
+
+
+def test_bsa_fallback_reason_uses_documented_priority():
+    route_plan = AttentionRoutePlan(backend=AttentionBackend.block_sparse_attention)
+    query = torch.zeros((1, 2, 4, 3), device="meta")
+    key = torch.zeros((1, 2, 5, 3), device="meta")
+
+    assert (
+        _get_block_sparse_attention_fallback_reason(query, key, key, route_plan, is_causal=True, enable_gqa=True)
+        == "qkv_shape_mismatch"
+    )
+    assert (
+        _get_block_sparse_attention_fallback_reason(torch.zeros((1, 4, 3), device="meta"), key, key, route_plan)
+        == "non_4d_qkv"
+    )
+    assert (
+        _get_block_sparse_attention_fallback_reason(
+            query,
+            query,
+            query,
+            route_plan,
+            attention_mask=torch.zeros((1, 2, 4, 4), device="meta"),
+        )
+        == "unsupported_attention_mask"
+    )
+
+
+def test_bsa_context_aggregates_fallbacks_and_warns_once(caplog):
+    route_plan = AttentionRoutePlan(backend=AttentionBackend.block_sparse_attention)
+    query = torch.zeros((1, 2, 4, 3), device="meta")
+
+    with patch.object(torch.ops.tensor_cast, "attention", return_value=query):
+        with use_custom_sdpa(route_plan=route_plan) as stats:
+            torch.nn.functional.scaled_dot_product_attention(query, query, query, is_causal=True)
+            torch.nn.functional.scaled_dot_product_attention(query, query, query, is_causal=True)
+            torch.nn.functional.scaled_dot_product_attention(query, query, query, enable_gqa=True)
+            assert stats["dense_fallback_calls"] == 3
+            assert stats["dense_fallback_reasons"] == {"causal": 2, "gqa": 1}
+
+    warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "block_sparse_attention_calls=0" in warnings[0].message
+    assert "causal=2, gqa=1" in warnings[0].message
 
 
 class TestVideoGeneration(unittest.TestCase):
@@ -189,6 +246,28 @@ class TestVideoGeneration(unittest.TestCase):
         )
         self._validate_inference_result("test_basic_video_inference")
 
+    def test_run_inference_restores_outer_sequence_parallel_group(self):
+        outer_sp_group = MagicMock(world_size=1)
+        set_sp_group(outer_sp_group)
+        try:
+            run_inference(
+                device=self.device,
+                model_id=self.model_id,
+                batch_size=self.batch_size,
+                seq_len=self.seq_len,
+                height=self.height,
+                width=self.width,
+                frame_num=self.frame_num,
+                sample_step=self.sample_step,
+                dtype="float16",
+                world_size=1,
+                ulysses_size=1,
+            )
+
+            self.assertIs(get_sp_group(), outer_sp_group)
+        finally:
+            set_sp_group(None)
+
     def test_main_given_fp8_attention_quantization_when_invoked_then_passes_action_to_inference(self):
         original_argv = sys.argv
         try:
@@ -331,6 +410,180 @@ class TestVideoGeneration(unittest.TestCase):
         self.assertTrue(mock_run_inference.call_args.kwargs["compile"])
         self.assertTrue(mock_run_inference.call_args.kwargs["compile_allow_graph_break"])
 
+    def test_cli_given_block_sparse_attention_options_then_forwards_route_plan(self):
+        from cli.inference import video_generate as video_generate_mod
+
+        with patch.object(video_generate_mod, "run_inference") as mock_run_inference:
+            result = run_module_main(
+                "cli.inference.video_generate",
+                [
+                    "--device",
+                    "TEST_DEVICE",
+                    self.model_id,
+                    "--batch-size",
+                    str(self.batch_size),
+                    "--seq-len",
+                    str(self.seq_len),
+                    "--attention-backend",
+                    "block_sparse_attention",
+                    "--attention-block-size",
+                    "64",
+                    "--attention-sparsity",
+                    "0.5",
+                ],
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        kwargs = mock_run_inference.call_args.kwargs
+        self.assertEqual(kwargs["attention_backend"], AttentionBackend.block_sparse_attention)
+        self.assertEqual(kwargs["attention_block_size"], 64)
+        self.assertEqual(kwargs["attention_sparsity"], 0.5)
+
+    def test_block_sparse_attention_rejects_attention_quantization(self):
+        with self.assertRaises(ValueError, msg="attention quantization must be rejected"):
+            run_inference(
+                device=self.device,
+                model_id=self.model_id,
+                batch_size=self.batch_size,
+                seq_len=self.seq_len,
+                attention_backend=AttentionBackend.block_sparse_attention,
+                quantize_attention_action=QuantizeAttentionAction.FP8,
+            )
+        with self.assertRaises(argparse.ArgumentTypeError):
+            check_attention_sparsity("1.0")
+
+    def test_direct_sdpa_rejects_bsa_attention_quantization_before_installation(self):
+        quant_config = create_attention_quant_config(QuantizeAttentionAction.FP8)
+        route_plan = AttentionRoutePlan(backend=AttentionBackend.block_sparse_attention)
+        original_sdpa = torch.nn.functional.scaled_dot_product_attention
+
+        with self.assertRaisesRegex(ValueError, "does not support attention quantization"):
+            with use_custom_sdpa(quant_config, route_plan):
+                self.fail("use_custom_sdpa should reject the incompatible configuration")
+
+        self.assertIs(torch.nn.functional.scaled_dot_product_attention, original_sdpa)
+
+    def test_block_sparse_attention_routes_equal_qkv_before_sparse_attention(self):
+        route_plan = AttentionRoutePlan(backend=AttentionBackend.block_sparse_attention, block_size=2, sparsity=0.5)
+        query = torch.zeros((1, 4, 1, 2), device="meta")
+        route_metadata = torch.empty((1, 1, 2, 2), dtype=torch.int32, device="meta")
+        events = []
+
+        def generate_route(*args):
+            events.append("attention_route_generate")
+            return route_metadata
+
+        def run_sparse_attention(*args):
+            events.append("block_sparse_attention")
+            return query
+
+        def run_dense_attention(*args):
+            events.append("attention")
+            return query
+
+        with (
+            patch.object(
+                torch.ops.tensor_cast, "attention_route_generate", side_effect=generate_route
+            ) as route_generate,
+            patch.object(
+                torch.ops.tensor_cast, "block_sparse_attention", side_effect=run_sparse_attention
+            ) as sparse_attention,
+            patch.object(torch.ops.tensor_cast, "attention", side_effect=run_dense_attention) as dense_attention,
+            use_custom_sdpa(route_plan=route_plan) as stats,
+        ):
+            _attention(query, query, query)
+            self.assertEqual(events, ["attention_route_generate", "block_sparse_attention"])
+            _attention(query, torch.zeros((1, 2, 1, 2), device="meta"), torch.zeros((1, 2, 1, 2), device="meta"))
+            _attention(query, query, query, attn_mask=torch.zeros((1, 1, 4, 4), device="meta"))
+
+        route_generate.assert_called_once_with(query, query, 2, 0.5)
+        sparse_attention.assert_called_once()
+        self.assertEqual(dense_attention.call_count, 2)
+        self.assertEqual(events, ["attention_route_generate", "block_sparse_attention", "attention", "attention"])
+        self.assertEqual(stats["block_sparse_attention_calls"], 1)
+        self.assertEqual(stats["dense_fallback_calls"], 2)
+        self.assertEqual(
+            stats["dense_fallback_reasons"],
+            {"qkv_shape_mismatch": 1, "unsupported_attention_mask": 1},
+        )
+
+    def test_direct_sdpa_block_sparse_attention_normalizes_tensor_layout(self):
+        route_plan = AttentionRoutePlan(backend=AttentionBackend.block_sparse_attention, block_size=2, sparsity=0.5)
+        sdpa_query = torch.zeros((1, 2, 4, 3), device="meta")
+        route_metadata = torch.empty((1, 3, 2, 2), dtype=torch.int32, device="meta")
+        events = []
+
+        def generate_route(query, key, *args):
+            events.append("attention_route_generate")
+            self.assertEqual(query.shape, (1, 4, 2, 3))
+            self.assertEqual(key.shape, (1, 4, 2, 3))
+            return route_metadata
+
+        def run_sparse_attention(query, key, value, *args):
+            events.append("block_sparse_attention")
+            self.assertEqual(query.shape, (1, 4, 2, 3))
+            return query
+
+        with (
+            patch.object(
+                torch.ops.tensor_cast, "attention_route_generate", side_effect=generate_route
+            ) as route_generate,
+            patch.object(
+                torch.ops.tensor_cast, "block_sparse_attention", side_effect=run_sparse_attention
+            ) as sparse_attention,
+            use_custom_sdpa(route_plan=route_plan),
+        ):
+            output = torch.nn.functional.scaled_dot_product_attention(sdpa_query, sdpa_query, sdpa_query)
+
+        self.assertEqual(output.shape, sdpa_query.shape)
+        self.assertEqual(events, ["attention_route_generate", "block_sparse_attention"])
+        route_generate.assert_called_once()
+        sparse_attention.assert_called_once()
+
+    def test_direct_sdpa_unsupported_semantics_fall_back_to_dense_attention(self):
+        route_plan = AttentionRoutePlan(backend=AttentionBackend.block_sparse_attention, block_size=2, sparsity=0.5)
+        query = torch.zeros((1, 2, 4, 3), device="meta")
+
+        def run_dense_attention(query, key, value, *args):
+            self.assertEqual(query.shape, (1, 4, 2, 3))
+            self.assertEqual(key.shape, (1, 4, 2, 3))
+            self.assertEqual(value.shape, (1, 4, 2, 3))
+            return query
+
+        with (
+            patch.object(torch.ops.tensor_cast, "attention_route_generate") as route_generate,
+            patch.object(torch.ops.tensor_cast, "block_sparse_attention") as sparse_attention,
+            patch.object(torch.ops.tensor_cast, "attention", side_effect=run_dense_attention) as dense_attention,
+            use_custom_sdpa(route_plan=route_plan),
+        ):
+            output = torch.nn.functional.scaled_dot_product_attention(query, query, query, is_causal=True)
+
+        self.assertEqual(output.shape, query.shape)
+        route_generate.assert_not_called()
+        sparse_attention.assert_not_called()
+        dense_attention.assert_called_once()
+
+    def test_sequence_parallel_non_4d_bsa_call_falls_back_before_all_to_all(self):
+        route_plan = AttentionRoutePlan(backend=AttentionBackend.block_sparse_attention, block_size=2, sparsity=0.5)
+        query = torch.zeros((4, 2, 3), device="meta")
+        sp_group = MagicMock(world_size=2)
+
+        set_sp_group(sp_group)
+        try:
+            with (
+                patch.object(torch.ops.tensor_cast, "attention", return_value=query) as dense_attention,
+                use_custom_sdpa(route_plan=route_plan) as stats,
+            ):
+                output = _attention(query, query, query)
+        finally:
+            set_sp_group(None)
+
+        self.assertEqual(output.shape, query.shape)
+        sp_group.all_to_all.assert_not_called()
+        dense_attention.assert_called_once()
+        self.assertEqual(stats["dense_fallback_calls"], 1)
+        self.assertEqual(stats["dense_fallback_reasons"], {"non_4d_qkv": 1})
+
     def test_run_inference_given_compile_when_invoked_then_compiles_model_before_forward(self):
         from types import SimpleNamespace
         from cli.inference import video_generate as video_generate_mod
@@ -409,19 +662,24 @@ class TestVideoGeneration(unittest.TestCase):
         from cli.inference import video_generate as video_generate_mod
 
         fake_device = SimpleNamespace(name="TEST_DEVICE")
-        fake_model_config = SimpleNamespace(
-            transformer_config=SimpleNamespace(
-                parallel_config=SimpleNamespace(ulysses_size=1, world_size=1),
-                dtype=torch.float16,
-                model_config={
-                    "_class_name": "HunyuanVideoTransformer3DModel",
-                    "in_channels": 16,
-                    "text_embed_dim": 4096,
-                    "guidance_embeds": "true",
-                    "pooled_projection_dim": 768,
-                },
+
+        def make_model_config():
+            return SimpleNamespace(
+                transformer_config=SimpleNamespace(
+                    parallel_config=SimpleNamespace(ulysses_size=1, world_size=1),
+                    dtype=torch.float16,
+                    model_config={
+                        "_class_name": "HunyuanVideoTransformer3DModel",
+                        "in_channels": 16,
+                        "text_embed_dim": 4096,
+                        "guidance_embeds": "true",
+                        "pooled_projection_dim": 768,
+                    },
+                )
             )
-        )
+
+        primary_model_config = make_model_config()
+        cache_model_config = make_model_config()
         primary_model = MagicMock()
         primary_model.forward.return_value = torch.zeros(1, device="meta")
         cache_model = MagicMock()
@@ -452,9 +710,11 @@ class TestVideoGeneration(unittest.TestCase):
             ) as mock_compile,
             patch(
                 "tensor_cast.diffusers.diffusers_model.build_diffusers_transformer_model",
-                side_effect=[(primary_model, fake_model_config), (cache_model, fake_model_config)],
+                side_effect=[(primary_model, primary_model_config), (cache_model, cache_model_config)],
             ),
-            patch("tensor_cast.diffusers.diffusers_attention.use_custom_sdpa", return_value=fake_sdpa),
+            patch(
+                "tensor_cast.diffusers.diffusers_attention.use_custom_sdpa", return_value=fake_sdpa
+            ) as mock_use_custom_sdpa,
             patch.object(video_generate_mod, "Runtime", return_value=fake_runtime),
             patch.object(video_generate_mod, "MemoryTracker", return_value=MagicMock()),
             patch.object(video_generate_mod, "time") as mock_time,
@@ -469,11 +729,11 @@ class TestVideoGeneration(unittest.TestCase):
                 height=self.height,
                 width=self.width,
                 frame_num=self.frame_num,
-                sample_step=1,
+                sample_step=3,
                 dtype="float16",
                 compile=True,
                 dit_cache=True,
-                cache_step_range="0,0",
+                cache_step_range="0,1",
                 cache_step_interval=2,
             )
 
@@ -481,6 +741,45 @@ class TestVideoGeneration(unittest.TestCase):
             unittest.mock.call(primary_model, backend=fake_backend, dynamic=False, fullgraph=True),
             unittest.mock.call(cache_model, backend=fake_backend, dynamic=False, fullgraph=True),
         ]
+        primary_model.forward.assert_called_once()
+        self.assertEqual(cache_model.forward.call_count, 2)
+        mock_use_custom_sdpa.assert_called_once()
+        self.assertEqual(
+            mock_use_custom_sdpa.call_args.kwargs["route_plan"].backend,
+            AttentionBackend.dense,
+        )
+        self.assertFalse(hasattr(primary_model_config.transformer_config, "attention_route_plan"))
+        self.assertFalse(hasattr(cache_model_config.transformer_config, "attention_route_plan"))
+
+    def test_diffusers_transformer_config_does_not_own_attention_route_plan(self):
+        from tensor_cast.model_config import DiffusersTransformerConfig, ParallelConfig
+
+        config = DiffusersTransformerConfig(
+            parallel_config=ParallelConfig(),
+            quant_config=MagicMock(),
+        )
+
+        self.assertFalse(hasattr(config, "attention_route_plan"))
+
+    def test_unrelated_diffusers_import_does_not_register_attention_backend(self):
+        import subprocess
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "import tensor_cast.diffusers.dit_cache_registry; "
+                    "print('tensor_cast.diffusers.diffusers_attention' in sys.modules)"
+                ),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.stdout.strip(), "False")
 
     def test_wan_attention_uses_upstream_processor_with_tensor_cast_backend(self):
         from diffusers.models.transformers.transformer_wan import WanAttention, WanAttnProcessor, WanTransformer3DModel
@@ -1041,25 +1340,40 @@ class TestVideoGeneration(unittest.TestCase):
                 },
                 f,
             )
+        captured_runtimes = []
+
+        class CapturingRuntime(Runtime):
+            def __enter__(self):
+                captured_runtimes.append(self)
+                return super().__enter__()
+
         try:
-            with patch(
-                "tensor_cast.diffusers.model_resolver.snapshot_huggingface_config_only",
-                return_value=snapshot_root,
+            with (
+                patch(
+                    "tensor_cast.diffusers.model_resolver.snapshot_huggingface_config_only",
+                    return_value=snapshot_root,
+                ),
+                patch("cli.inference.video_generate.Runtime", CapturingRuntime),
             ):
-                run_inference(
-                    device="TEST_DEVICE",
-                    model_id="tencent/HunyuanVideo-1.5/transformer/480p_t2v_distilled",
-                    batch_size=1,
-                    seq_len=128,
-                    height=480,
-                    width=832,
-                    frame_num=121,
-                    sample_step=1,
-                    dtype="float16",
-                    world_size=1,
-                    ulysses_size=1,
-                    compile=True,
-                )
+                for compile_model in (False, True):
+                    run_inference(
+                        device="TEST_DEVICE",
+                        model_id="tencent/HunyuanVideo-1.5/transformer/480p_t2v_distilled",
+                        batch_size=1,
+                        seq_len=128,
+                        height=480,
+                        width=832,
+                        frame_num=121,
+                        sample_step=1,
+                        dtype="float16",
+                        world_size=1,
+                        ulysses_size=1,
+                        attention_backend=AttentionBackend.block_sparse_attention,
+                        compile=compile_model,
+                    )
+                    event_funcs = {str(event.op_invoke_info.func) for event in captured_runtimes[-1].event_list}
+                    self.assertIn(str(torch.ops.tensor_cast.attention_route_generate.default), event_funcs)
+                    self.assertIn(str(torch.ops.tensor_cast.block_sparse_attention.default), event_funcs)
             self._validate_inference_result("test_video_inference_with_raw_tencent_hunyuanvideo15_t2v_selector")
         finally:
             import shutil
@@ -1203,6 +1517,8 @@ class TestCliVideoGenerateMain(unittest.TestCase):
                     "DISABLED",
                     "--sample-step",
                     "2",
+                    "--attention-backend",
+                    "block_sparse_attention",
                 ],
             )
 
@@ -1213,6 +1529,27 @@ class TestCliVideoGenerateMain(unittest.TestCase):
         assert captured["seq_len"] == 128
         assert captured["sample_step"] == 2
         assert captured["remote_source"] == "huggingface"
+        assert captured["attention_backend"] is AttentionBackend.block_sparse_attention
+        assert "trace" not in captured
+
+    @parameterized.expand(["--trace", "--trace-ops"])
+    def test_main_rejects_removed_trace_flags(self, removed_flag):
+        with patch("cli.inference.video_generate.run_inference") as mock_run_inference:
+            result = run_module_main(
+                "cli.inference.video_generate",
+                [
+                    "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+                    "--batch-size",
+                    "1",
+                    "--seq-len",
+                    "128",
+                    removed_flag,
+                ],
+            )
+
+        assert result.returncode == 2
+        assert f"unrecognized arguments: {removed_flag}" in result.stderr
+        mock_run_inference.assert_not_called()
 
 
 class TestCliVideoGenerateRunInference(unittest.TestCase):
@@ -1280,6 +1617,7 @@ class TestCliVideoGenerateRunInference(unittest.TestCase):
                 sys.modules,
                 {
                     "tensor_cast.diffusers.diffusers_attention": types.SimpleNamespace(
+                        get_sp_group=lambda: None,
                         set_sp_group=lambda group: None,
                         use_custom_sdpa=lambda *args, **kwargs: contextlib.nullcontext(),
                     ),

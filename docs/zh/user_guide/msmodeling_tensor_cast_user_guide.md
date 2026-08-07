@@ -118,7 +118,19 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --quantize-linear-action W8A8_DYNAMIC
 ```
 
-**关键参数：** `model_id`、`--device`、`--batch-size`、`--seq-len`、`--height`、`--width`、`--frame-num`、`--sample-step`、`--dtype`、`--quantize-linear-action`、`--chrome-trace`
+如需使用block sparse attention（BSA）后端，可在上面的 dense 示例基础上增加 BSA 专用选项：
+
+```bash
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+  --device ATLAS_800_A2_280T_32G_PCIE \
+  --batch-size 1 \
+  --seq-len 128 \
+  --attention-backend block_sparse_attention \
+  --attention-block-size 128 \
+  --attention-sparsity 0.5
+```
+
+**关键参数：** `model_id`、`--device`、`--batch-size`、`--seq-len`、`--height`、`--width`、`--frame-num`、`--sample-step`、`--dtype`、`--quantize-linear-action`、`--chrome-trace`、`--attention-backend`、`--attention-block-size`、`--attention-sparsity`
 
 **输出：** 性能汇总表；若设置了 `--chrome-trace`，还可选输出 Chrome trace 文件。
 
@@ -289,12 +301,14 @@ Run a simulated LLM inference pass and dump the perf result.
 ```text
 usage: video_generate.py [-h]
                          [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
-                         --batch-size BATCH_SIZE --seq-len SEQ_LEN [--chrome-trace CHROME_TRACE] [--height HEIGHT]
-                         [--width WIDTH] [--frame-num FRAME_NUM] [--sample-step SAMPLE_STEP]
+                         --batch-size BATCH_SIZE --seq-len SEQ_LEN [--chrome-trace CHROME_TRACE]
+                         [--height HEIGHT] [--width WIDTH] [--frame-num FRAME_NUM] [--sample-step SAMPLE_STEP]
                          [--log-level {debug,info,warning,error,critical}] [--dtype {float16,float32,bfloat16}]
                          [--remote-source {huggingface,modelscope}]
                          [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
-                         [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg] [--world-size WORLD_SIZE]
+                         [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg]
+                         [--attention-backend {dense,block_sparse_attention}] [--attention-block-size ATTENTION_BLOCK_SIZE]
+                         [--attention-sparsity ATTENTION_SPARSITY] [--world-size WORLD_SIZE]
                          [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--compile]
                          [--compile-allow-graph-break] [--dit-cache]
                          [--cache-step-range CACHE_STEP_RANGE] [--cache-step-interval CACHE_STEP_INTERVAL]
@@ -323,6 +337,9 @@ Run a simulated diffusion transformer forward and dump perf stats.
 | `--quantize-linear-action` | options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`W8A8_DYNAMIC`。 |
 | `--quantize-attention-action` | options | 可选 | 指定 attention 计算量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`。<br>3. 默认值：`DISABLED`。 |
 | `--use-cfg` | options | 可选 | 启用 classifier-free guidance 相关仿真路径。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--attention-backend` | Attention Options | 可选 | 选择 attention 后端。<br>1. 类型：Str。<br>2. 参考值：`dense`、`block_sparse_attention`。<br>3. 默认值：`dense`。 |
+| `--attention-block-size` | Attention Options | 可选 | 设置 BSA block size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`128`。 |
+| `--attention-sparsity` | Attention Options | 可选 | 设置 BSA 跳过的 KV block 比例。<br>1. 类型：Float。<br>2. 取值范围：`[0.0, 1.0)`。<br>3. 默认值：`0.0`。 |
 | `--world-size` | Parallel Options | 可选 | 指定参与分布式仿真的总设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
 | `--ulysses-size` | Parallel Options | 可选 | 指定 Ulysses 并行规模。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
 | `--cfg-parallel` | Parallel Options | 可选 | 启用 CFG 并行策略。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
@@ -333,6 +350,20 @@ Run a simulated diffusion transformer forward and dump perf stats.
 | `--cache-step-interval` | Cache Options | 可选 | 指定 cache 更新步间隔。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`，表示不启用 cache 更新复用。 |
 | `--cache-block-range` | Cache Options | 可选 | 指定启用 cache 的 block 范围。<br>1. 类型：Str。<br>2. 格式：`start,end`，左闭右开。<br>3. 默认值：`None`。 |
 
-> **说明：** 如果需要仿真官方原始 Tencent HunyuanVideo1.5 模型，Hugging Face 应使用 `tencent/HunyuanVideo-1.5/transformer/<t2v_variant>`，ModelScope 应使用 `Tencent-Hunyuan/HunyuanVideo-1.5/transformer/<t2v_variant>`。当前已验证的 T2V variant 为 `480p_t2v`、`480p_t2v_distilled` 和 `720p_t2v`。
+BSA 行为与限制：
+
+- BSA route 仅接受 Q、K、V 均为 4D 且 shape 完全相同的输入；mask 必须为 `None`，或为 shape `(batch, 1, query_len, key_len)` 的 4D bool tensor。要求 dropout 为 `0`、非 causal、不提供 custom scale，并且不启用 GQA。
+- 不支持的 call 会使用 dense fallback，以兼容混合 self-attention 和 cross-attention 的模型。每个 SDPA context 只输出一份聚合 warning 摘要。稳定的 fallback reason code 为 `non_4d_qkv`、`qkv_shape_mismatch`、`unsupported_attention_mask`、`dropout`、`causal`、`custom_scale` 和 `gqa`。
+- BSA 不能与 attention quantization 同时使用。以下完整命令是非法命令，会在执行前报错：
+
+  ```bash
+  python -m cli.inference.video_generate example-model --batch-size 1 --seq-len 128 --attention-backend block_sparse_attention --quantize-attention-action INT8
+  ```
+
+  linear quantization 不受此规则禁止，仍可独立使用。
+- dense backend 只接受 BSA-only 参数的默认值（`--attention-block-size 128` 和 `--attention-sparsity 0.0`），非默认 BSA-only 值会明确拒绝，不会静默忽略。
+- estimator 会按 `ceil` 向上取整 query 和 KV block 数。保留的 KV blocks 为 `max(1, ceil(KV_blocks * (1 - sparsity)))`。边界 block 按完整 `block_size x block_size` padded tile 计费，因此序列长度不能整除时，即使 sparsity 为 `0.0`，估算也可能高于 token-exact dense attention。route generation 会扫描完整 block-pair 空间。memory 使用 analytic approximation：Q、K、V 各完整读取一次，K/V bytes 不按 sparsity 缩放。
+
+> **说明：** 如果需要仿真官方原始 Tencent HunyuanVideo1.5 模型，Hugging Face 应使用 `tencent/HunyuanVideo-1.5/transformer/<t2v_variant>`，ModelScope 应使用 `Tencent-Hunyuan/HunyuanVideo-1.5/transformer/<t2v_variant>`。支持的 T2V variant 为 `480p_t2v`、`480p_t2v_distilled` 和 `720p_t2v`。
 
 运行 `python -m cli.inference.video_generate --help` 查看详情。

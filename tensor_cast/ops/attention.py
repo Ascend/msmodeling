@@ -101,6 +101,67 @@ def _(
     return torch.empty_like(query, dtype=out_dtype).contiguous()
 
 
+@register_tensor_cast_op("attention_route_generate")
+def _(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    block_size: int,
+    sparsity: float,
+) -> torch.Tensor:
+    """
+    TensorCast semantic op for block-level attention route generation.
+
+    The returned int32 tensor carries shape metadata for tracing and performance
+    modeling. Its values are unspecified and are not consumed by TensorCast.
+    Sparsity affects analytic BSA cost, not route metadata shape.
+
+    Args:
+        query: (batch_size, query_seq_len, num_heads, head_size)
+        key: (batch_size, key_seq_len, num_kv_heads, head_size)
+        block_size: query/key-value block size used by the route plan
+        sparsity: skipped KV-block ratio in [0.0, 1.0)
+    """
+    if query.ndim == 4:
+        batch_size, query_seq_len, num_heads, _ = query.shape
+        key_seq_len = key.shape[1]
+    else:
+        batch_size = 1
+        query_seq_len = query.shape[0]
+        num_heads = 1
+        key_seq_len = key.shape[0]
+    q_blocks = (query_seq_len + block_size - 1) // block_size
+    kv_blocks = (key_seq_len + block_size - 1) // block_size
+    return torch.empty((batch_size, num_heads, q_blocks, kv_blocks), device=query.device, dtype=torch.int32)
+
+
+@register_tensor_cast_op("block_sparse_attention")
+def _(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    route_metadata: torch.Tensor,
+    block_size: int,
+    sparsity: float,
+) -> torch.Tensor:
+    """
+    TensorCast semantic op for block sparse attention.
+
+    This op models output shape and performance properties. It does not execute
+    numerical sparse attention or read route metadata values.
+
+    Args:
+        query: (batch_size, query_seq_len, num_heads, head_size)
+        key: (batch_size, key_seq_len, num_kv_heads, head_size)
+        value: (batch_size, key_seq_len, num_kv_heads, head_size)
+        attention_mask: optional dense attention mask
+        route_metadata: shape-only metadata from attention_route_generate
+        block_size: query/key-value block size used by the route plan
+        sparsity: skipped KV-block ratio in [0.0, 1.0)
+    """
+    return torch.empty_like(query).contiguous()
+
+
 @register_tensor_cast_op("linear_attention")
 def _(
     hidden_states: torch.Tensor,

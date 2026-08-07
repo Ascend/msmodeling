@@ -118,7 +118,19 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --quantize-linear-action W8A8_DYNAMIC
 ```
 
-**Key flags:** `model_id`, `--device`, `--batch-size`, `--seq-len`, `--height`, `--width`, `--frame-num`, `--sample-step`, `--dtype`, `--quantize-linear-action`, `--chrome-trace`
+To run the block sparse attention (BSA) backend, retain the dense example above for the default path and add the BSA-only options:
+
+```bash
+python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
+  --device ATLAS_800_A2_280T_32G_PCIE \
+  --batch-size 1 \
+  --seq-len 128 \
+  --attention-backend block_sparse_attention \
+  --attention-block-size 128 \
+  --attention-sparsity 0.5
+```
+
+**Key flags:** `model_id`, `--device`, `--batch-size`, `--seq-len`, `--height`, `--width`, `--frame-num`, `--sample-step`, `--dtype`, `--quantize-linear-action`, `--chrome-trace`, `--attention-backend`, `--attention-block-size`, `--attention-sparsity`
 
 **Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace` is set.
 
@@ -295,12 +307,14 @@ Its general usage is shown below:
 ```text
 usage: video_generate.py [-h]
                          [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
-                         --batch-size BATCH_SIZE --seq-len SEQ_LEN [--chrome-trace CHROME_TRACE] [--height HEIGHT]
-                         [--width WIDTH] [--frame-num FRAME_NUM] [--sample-step SAMPLE_STEP]
+                         --batch-size BATCH_SIZE --seq-len SEQ_LEN [--chrome-trace CHROME_TRACE]
+                         [--height HEIGHT] [--width WIDTH] [--frame-num FRAME_NUM] [--sample-step SAMPLE_STEP]
                          [--log-level {debug,info,warning,error,critical}] [--dtype {float16,float32,bfloat16}]
                          [--remote-source {huggingface,modelscope}]
                          [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
-                         [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg] [--world-size WORLD_SIZE]
+                         [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg]
+                         [--attention-backend {dense,block_sparse_attention}] [--attention-block-size ATTENTION_BLOCK_SIZE]
+                         [--attention-sparsity ATTENTION_SPARSITY] [--world-size WORLD_SIZE]
                          [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--compile]
                          [--compile-allow-graph-break] [--dit-cache]
                          [--cache-step-range CACHE_STEP_RANGE] [--cache-step-interval CACHE_STEP_INTERVAL]
@@ -329,6 +343,9 @@ Main parameters:
 | `--quantize-linear-action` | options | Optional | Specifies linear layer quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`. |
 | `--quantize-attention-action` | options | Optional | Specifies attention computation quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`.<br>3. Default: `DISABLED`. |
 | `--use-cfg` | options | Optional | Enables classifier-free guidance simulation path.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
+| `--attention-backend` | Attention Options | Optional | Selects the attention backend.<br>1. Type: Str.<br>2. Reference values: `dense`, `block_sparse_attention`.<br>3. Default: `dense`. |
+| `--attention-block-size` | Attention Options | Optional | Sets the BSA block size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `128`. |
+| `--attention-sparsity` | Attention Options | Optional | Sets the ratio of KV blocks skipped by BSA.<br>1. Type: Float.<br>2. Valid range: `[0.0, 1.0)`.<br>3. Default: `0.0`. |
 | `--world-size` | Parallel Options | Optional | Specifies the total number of devices participating in distributed simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
 | `--ulysses-size` | Parallel Options | Optional | Specifies Ulysses parallel size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
 | `--cfg-parallel` | Parallel Options | Optional | Enables CFG parallel strategy.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
@@ -339,6 +356,20 @@ Main parameters:
 | `--cache-step-interval` | Cache Options | Optional | Specifies cache update step interval.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`, which disables cache update reuse. |
 | `--cache-block-range` | Cache Options | Optional | Specifies block range for cache.<br>1. Type: Str.<br>2. Format: `start,end`, start inclusive and end exclusive.<br>3. Default: `None`. |
 
-> **Note:** When simulating HunyuanVideo1.5 from the official raw Tencent repository, use `tencent/HunyuanVideo-1.5/transformer/<t2v_variant>` on Hugging Face or `Tencent-Hunyuan/HunyuanVideo-1.5/transformer/<t2v_variant>` on ModelScope. The currently verified selectors are `480p_t2v`, `480p_t2v_distilled`, and `720p_t2v`. Raw repository roots, local raw layouts, I2V variants, and SR variants are not supported. TensorCast validates the downloaded JSON configuration and maps it to the built-in Diffusers simulation model; it does not execute the Tencent `hyvideo` package or convert checkpoint weights.
+BSA behavior and limits:
+
+- The BSA route accepts only Q, K, and V that are all 4D tensors with exactly matching shapes; the mask must be `None` or a 4D bool tensor with shape `(batch, 1, query_len, key_len)`. It requires dropout `0`, non-causal attention, no custom scale, and GQA disabled.
+- Unsupported calls use dense fallback so models mixing self-attention and cross-attention remain compatible. Each SDPA context emits one aggregated warning summary. Stable fallback reason codes are `non_4d_qkv`, `qkv_shape_mismatch`, `unsupported_attention_mask`, `dropout`, `causal`, `custom_scale`, and `gqa`.
+- BSA cannot be combined with attention quantization. The following complete command is invalid and fails before execution:
+
+  ```bash
+  python -m cli.inference.video_generate example-model --batch-size 1 --seq-len 128 --attention-backend block_sparse_attention --quantize-attention-action INT8
+  ```
+
+  Linear quantization remains independent and is not disallowed by this rule.
+- The dense backend accepts BSA-only defaults (`--attention-block-size 128` and `--attention-sparsity 0.0`) but explicitly rejects non-default BSA-only values; it never silently ignores them.
+- The estimator rounds query and KV block counts up with `ceil`. Retained KV blocks are `max(1, ceil(KV_blocks * (1 - sparsity)))`. Boundary blocks are charged as complete `block_size x block_size` padded tiles, so a non-divisible sequence can cost more than token-exact dense attention even when sparsity is `0.0`. Route generation scans the complete block-pair space. Memory is an analytic approximation: Q, K, and V are each read once in full, and K/V bytes are not scaled by sparsity.
+
+> **Note:** When simulating HunyuanVideo1.5 from the official raw Tencent repository, use `tencent/HunyuanVideo-1.5/transformer/<t2v_variant>` on Hugging Face or `Tencent-Hunyuan/HunyuanVideo-1.5/transformer/<t2v_variant>` on ModelScope. Supported T2V selectors are `480p_t2v`, `480p_t2v_distilled`, and `720p_t2v`. Raw repository roots, local raw layouts, I2V variants, and SR variants are not supported. TensorCast validates the downloaded JSON configuration and maps it to the built-in Diffusers simulation model; it does not execute the Tencent `hyvideo` package or convert checkpoint weights.
 
 Run `python -m cli.inference.video_generate --help` for details.

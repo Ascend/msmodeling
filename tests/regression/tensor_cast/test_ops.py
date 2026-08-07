@@ -6,7 +6,13 @@ import torch.fx as fx
 from tensor_cast.config import performance_model as perf_config
 from tensor_cast.compilation.shape_prop import shape_propagation
 from tensor_cast.device import TEST_DEVICE
-from tensor_cast.model_config import AttentionQuantConfig, QuantConfig
+from tensor_cast.model_config import (
+    AttentionBackend,
+    AttentionQuantConfig,
+    AttentionRoutePlan,
+    DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE,
+    QuantConfig,
+)
 from tensor_cast.performance_model.op_benchmark import (
     OpBenchmark,
     get_op_impl,
@@ -232,6 +238,162 @@ def test_semantic_fusion_ops_preserve_meta_contracts_and_roofline_properties():
     assert properties.compute_ops[torch.float32].gp_ops == 72
     assert properties.memory_read_bytes == 96
     assert properties.memory_write_bytes == 48
+
+
+def test_block_sparse_attention_route_plan_and_semantic_ops():
+    route_plan = AttentionRoutePlan(backend="block_sparse_attention")
+    assert route_plan.backend is AttentionBackend.block_sparse_attention
+    assert route_plan.block_size == DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE
+    with pytest.raises(ValueError, match="block size"):
+        AttentionRoutePlan(block_size=0)
+    with pytest.raises(ValueError, match="sparsity"):
+        AttentionRoutePlan(sparsity=1.0)
+    with pytest.raises(ValueError, match="dense attention.*sparsity"):
+        AttentionRoutePlan(sparsity=0.5)
+    with pytest.raises(ValueError, match="dense attention.*block size"):
+        AttentionRoutePlan(block_size=64)
+
+    query = torch.empty((1, 5, 2, 4), device="meta", dtype=torch.float16)
+    attention_mask = torch.empty((1, 1, 5, 5), device="meta", dtype=torch.bool)
+    route_metadata, route_properties = _semantic_op_properties(
+        torch.ops.tensor_cast.attention_route_generate.default,
+        query,
+        query,
+        4,
+        0.5,
+    )
+    assert route_metadata.shape == (1, 2, 2, 2)
+    assert route_metadata.dtype == torch.int32
+    assert route_properties.compute_ops[torch.float16].gp_ops == 72
+    assert route_properties.memory_write_bytes == 32
+
+    dense_out, dense_properties = _semantic_op_properties(
+        torch.ops.tensor_cast.block_sparse_attention.default,
+        query,
+        query,
+        query,
+        None,
+        route_metadata,
+        4,
+        0.0,
+    )
+    sparse_out, sparse_properties = _semantic_op_properties(
+        torch.ops.tensor_cast.block_sparse_attention.default,
+        query,
+        query,
+        query,
+        None,
+        route_metadata,
+        4,
+        0.5,
+    )
+    masked_out, masked_properties = _semantic_op_properties(
+        torch.ops.tensor_cast.block_sparse_attention.default,
+        query,
+        query,
+        query,
+        attention_mask,
+        route_metadata,
+        4,
+        0.5,
+    )
+    assert dense_out.shape == sparse_out.shape == masked_out.shape == query.shape
+    assert dense_out.dtype == sparse_out.dtype == masked_out.dtype == query.dtype
+    assert (
+        sparse_properties.compute_ops[torch.float16].mma_ops * 2 == dense_properties.compute_ops[torch.float16].mma_ops
+    )
+    assert sparse_properties.compute_ops[torch.float16].gp_ops * 2 == dense_properties.compute_ops[torch.float16].gp_ops
+    assert sparse_properties.memory_read_bytes == 272
+    assert sparse_properties.memory_write_bytes == 80
+    assert masked_properties.memory_read_bytes == 297
+    assert masked_properties.memory_write_bytes == 80
+
+
+@pytest.mark.parametrize(
+    ("block_size", "query_len", "key_len", "sparsity", "expected_mma", "expected_gp"),
+    (
+        (4, 9, 17, 0.5, 4608, 1152),
+        (8, 9, 17, 0.5, 8192, 2048),
+    ),
+)
+def test_block_sparse_attention_charges_padded_block_interactions(
+    block_size, query_len, key_len, sparsity, expected_mma, expected_gp
+):
+    query = torch.empty((1, query_len, 2, 4), device="meta", dtype=torch.float16)
+    route_metadata = torch.empty(
+        (1, 2, (query_len + block_size - 1) // block_size, (key_len + block_size - 1) // block_size),
+        device="meta",
+        dtype=torch.int32,
+    )
+
+    _, properties = _semantic_op_properties(
+        torch.ops.tensor_cast.block_sparse_attention.default,
+        query,
+        torch.empty((1, key_len, 2, 4), device="meta", dtype=torch.float16),
+        torch.empty((1, key_len, 2, 4), device="meta", dtype=torch.float16),
+        None,
+        route_metadata,
+        block_size,
+        sparsity,
+    )
+
+    assert properties.compute_ops[torch.float16].mma_ops == expected_mma
+    assert properties.compute_ops[torch.float16].gp_ops == expected_gp
+
+
+def test_block_sparse_attention_rounds_retained_blocks_at_decimal_boundary():
+    block_size = 4
+    query = torch.empty((1, 5, 1, 2), device="meta", dtype=torch.float16)
+    route_metadata = torch.empty((1, 1, 2, 50), device="meta", dtype=torch.int32)
+
+    _, properties = _semantic_op_properties(
+        torch.ops.tensor_cast.block_sparse_attention.default,
+        query,
+        torch.empty((1, 200, 1, 2), device="meta", dtype=torch.float16),
+        torch.empty((1, 200, 1, 2), device="meta", dtype=torch.float16),
+        None,
+        route_metadata,
+        block_size,
+        0.58,
+    )
+
+    # ceil(50 * (1 - 0.58)) is mathematically 21, despite binary float artifacts.
+    assert properties.compute_ops[torch.float16].mma_ops == 5376
+    assert properties.compute_ops[torch.float16].gp_ops == 2688
+
+
+def test_block_sparse_attention_memory_is_independent_of_sparsity():
+    query = torch.empty((1, 5, 2, 4), device="meta", dtype=torch.float16)
+    key = torch.empty((1, 9, 2, 4), device="meta", dtype=torch.float16)
+    route_metadata = torch.empty((1, 2, 2, 3), device="meta", dtype=torch.int32)
+    op = torch.ops.tensor_cast.block_sparse_attention.default
+
+    properties = [
+        _semantic_op_properties(op, query, key, key, None, route_metadata, 4, sparsity)[1]
+        for sparsity in (0.0, 0.5, 0.9)
+    ]
+
+    assert [(p.memory_read_bytes, p.memory_write_bytes) for p in properties] == [(416, 80)] * 3
+
+
+@pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float32))
+def test_block_sparse_attention_softmax_uses_query_dtype(dtype):
+    query = torch.empty((1, 5, 2, 4), device="meta", dtype=dtype)
+    route_metadata = torch.empty((1, 2, 2, 2), device="meta", dtype=torch.int32)
+
+    _, properties = _semantic_op_properties(
+        torch.ops.tensor_cast.block_sparse_attention.default,
+        query,
+        query,
+        query,
+        None,
+        route_metadata,
+        4,
+        0.5,
+    )
+
+    assert properties.compute_ops[dtype].gp_ops > 0
+    assert torch.half not in properties.compute_ops
 
 
 def test_quant_attention_config_can_target_single_layer():

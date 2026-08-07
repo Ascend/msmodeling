@@ -461,6 +461,33 @@ class RemoteSource(StrEnum):
     modelscope = "modelscope"
 
 
+class AttentionBackend(StrEnum):
+    dense = "dense"
+    block_sparse_attention = "block_sparse_attention"
+
+
+DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE = 128
+
+
+@dataclasses.dataclass
+class AttentionRoutePlan:
+    backend: AttentionBackend = AttentionBackend.dense
+    block_size: int = DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE
+    sparsity: float = 0.0
+
+    def __post_init__(self):
+        self.backend = AttentionBackend(self.backend)
+        if self.block_size <= 0:
+            raise ValueError("attention block size must be positive")
+        if not 0.0 <= self.sparsity < 1.0:
+            raise ValueError("attention sparsity must be in [0.0, 1.0)")
+        if self.backend == AttentionBackend.dense:
+            if self.sparsity != 0.0:
+                raise ValueError("dense attention requires sparsity to be 0.0")
+            if self.block_size != DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE:
+                raise ValueError(f"dense attention requires block size {DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE}")
+
+
 @dataclasses.dataclass
 class ModelConfig:
     parallel_config: ParallelConfig
