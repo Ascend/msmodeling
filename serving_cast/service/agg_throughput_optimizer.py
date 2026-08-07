@@ -181,13 +181,13 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         This keeps the original wave-based TTFT/TPOT formula for short prompts while also
         checking memory across both the full prefill wave and any remainder wave.
         """
-        max_batched_tokens = optimizer_data.max_batched_tokens
+        global_batched_token_limit = self._get_global_batched_token_limit(optimizer_data)
         effective_input_length = optimizer_data.get_effective_input_length()
         output_length = optimizer_data.output_length
         batch_size = optimizer_data.batch_size
 
         # Preserve the existing short-prompt formula when one request fits in a single prefill chunk.
-        prefill_batch_size = max_batched_tokens // effective_input_length
+        prefill_batch_size = global_batched_token_limit // effective_input_length
         calc_nums_for_ttft = concurrency // prefill_batch_size
         left_calc_num = concurrency % prefill_batch_size
 
@@ -320,6 +320,7 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         scheduler: Scheduler,
     ) -> list[_ScheduleStep]:
         """Build a latency-free schedule plan for chunked prefill."""
+        global_batched_token_limit = self._get_global_batched_token_limit(optimizer_data)
         # pending_prefill keeps requests that have not emitted the first visible token yet.
         pending_prefill = deque([_PrefillGroup(count=concurrency, chunk_index=0)])
         # ready_decode keeps requests whose final prefill chunk has completed and can decode immediately.
@@ -337,8 +338,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             state = SchedulerState(
                 ready_decode=ready_decode_count,
                 pending_prefill=pending_count,
-                chunk_query_len=chunk.query_len if chunk is not None else optimizer_data.max_batched_tokens,
-                max_batched_tokens=optimizer_data.max_batched_tokens,
+                chunk_query_len=chunk.query_len if chunk is not None else global_batched_token_limit,
+                max_batched_tokens=global_batched_token_limit,
             )
             decision = scheduler.decide(state)
             p_step = decision.p_step

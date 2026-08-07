@@ -139,7 +139,7 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["output_length"], 50)
         self.assertIsNone(row["tpot"])
 
-    def test_chunked_prefill_splits_each_chunk_into_token_budget_waves(self):
+    def test_chunked_prefill_splits_each_chunk_into_per_dp_token_budget_waves(self):
         optimizer_data = OptimizerData(
             ttft_limits=1000,
             tpot_limits=None,
@@ -178,26 +178,24 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(
             captured_calls,
             [
-                (1, 4, 4),
-                (1, 4, 8),
-                (2, 2, 10),
+                (4, 4, 4),
+                (4, 4, 8),
+                (4, 2, 10),
             ],
         )
         self.assertTrue(
             all(
-                concurrency * query_len <= optimizer_data.max_batched_tokens
+                ((concurrency + self.strategy.dp - 1) // self.strategy.dp) * query_len
+                <= optimizer_data.max_batched_tokens
                 for concurrency, query_len, _ in captured_calls
             )
         )
         self.assertEqual(row["prefill_num_chunks"], 3)
-        # The two final-chunk waves complete at 11 ms and 12 ms for two requests
-        # each, so TTFT is their request-weighted average. Throughput still uses
-        # the full 12 ms Prefill makespan.
-        self.assertEqual(row["ttft"], 11.5)
-        self.assertEqual(row["token/s"], 3333.333)
-        self.assertEqual(row["percentage_breakdowns"], "Mem 18.00 | Comm 82.00 | Cube 0.00 | Vec 0.00")
+        # All four requests occupy one wave on four DP replicas for every chunk.
+        self.assertEqual(row["ttft"], 5.0)
+        self.assertEqual(row["token/s"], 8000.0)
 
-    def test_single_chunk_prefill_splits_when_concurrency_exceeds_token_budget(self):
+    def test_single_chunk_prefill_uses_the_token_budget_on_every_dp_replica(self):
         optimizer_data = OptimizerData(
             ttft_limits=1000,
             tpot_limits=None,
@@ -228,10 +226,9 @@ class TestDisaggStrategy(unittest.TestCase):
             result = self.strategy.get_inference_info(optimizer_data)
 
         row = result.get_summary_df().iloc[0]
-        self.assertEqual(captured_calls, [(2, 4, 4)])
+        self.assertEqual(captured_calls, [(4, None, None)])
         self.assertEqual(row["prefill_num_chunks"], 1)
-        # Two waves complete at 1 ms and 2 ms, respectively.
-        self.assertEqual(row["ttft"], 1.5)
+        self.assertEqual(row["ttft"], 1.0)
 
     def test_chunked_prefill_stops_when_any_record_memory_is_negative(self):
         optimizer_data = OptimizerData(
@@ -261,7 +258,7 @@ class TestDisaggStrategy(unittest.TestCase):
             result = self.strategy.get_inference_info(optimizer_data)
 
         row = result.get_summary_df().iloc[0]
-        self.assertEqual(captured_calls, [(1, 4, 4), (1, 4, 8)])
+        self.assertEqual(captured_calls, [(4, 4, 4), (4, 4, 8)])
         self.assertTrue(result.check_early_stop_flag())
         self.assertLess(row["ttft"], 12.0)
 

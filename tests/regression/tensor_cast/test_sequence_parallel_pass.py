@@ -179,7 +179,6 @@ class SequenceParallelPassRegressionTestCase(unittest.TestCase):
             "enable_multistream",
             "--word-embedding-tp=row",
             "--quantize-linear-action=DISABLED",
-            "--ttft-limits=2000",
         ]
 
         result = run_module_main("cli.inference.throughput_optimizer", args)

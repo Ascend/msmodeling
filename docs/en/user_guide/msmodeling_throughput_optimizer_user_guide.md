@@ -53,7 +53,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### Constraints
 
-- `--max-batched-tokens` sets the token budget for one prefill or mixed prefill/decode step. If omitted, the optimizer starts from `4 * input_length`, then falls back to `2 * input_length` and `1 * input_length` when the Prefill phase OOMs. If `effective_input_length` is greater than the active `max_batched_tokens`, the optimizer automatically splits Prefill into chunks. Set `--max-batched-tokens` explicitly to match the serving engine's scheduling budget.
+- `--max-batched-tokens` sets the token budget for one data-parallel (DP) replica in one prefill or mixed prefill/decode step. With multiple DP replicas, the optimizer schedules up to this budget independently on every replica. If omitted, the optimizer starts from `4 * input_length`, then falls back to `2 * input_length` and `1 * input_length` when the Prefill phase OOMs. If `effective_input_length` is greater than the active `max_batched_tokens`, the optimizer automatically splits Prefill into chunks. Set `--max-batched-tokens` explicitly to match the serving engine's per-replica scheduling budget.
 
 ### 2.2 PD Disaggregation Scenario
 
@@ -299,7 +299,7 @@ Service Options:
   --tpot-limits TPOT_LIMITS
                         TPOT constraints under which to search for the best throughput. None means no constraint. (default: None)
   --max-batched-tokens MAX_BATCHED_TOKENS
-                        Max batched tokens for one prefill or mixed prefill/decode step. If omitted, starts from 4 * input_length and falls back on Prefill OOM. (default: None)
+                        Max batched tokens per data-parallel replica for one prefill or mixed prefill/decode step. If omitted, starts from 4 * input_length and falls back on Prefill OOM. (default: None)
   --prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE
                         Prefix cache hit rate for token-level prefill reuse approximation. Valid range: [0, 1). (default: 0.0)
   --batch-range BATCH_RANGE [BATCH_RANGE ...]
@@ -366,7 +366,7 @@ Main parameters:
 | `--chrome-trace` | Debug Options | Optional | Generates a Chrome Trace file for operator-level performance visualization.<br>1. Type: Str.<br>2. Reference value: trace file path, such as `trace.json`.<br>3. Default: `None`. |
 | `--ttft-limits` | Service Options | Optional | TTFT constraint for throughput search.<br>1. Type: Float.<br>2. Valid range: positive number, in ms.<br>3. Default: `None`, meaning no TTFT constraint. |
 | `--tpot-limits` | Service Options | Optional | TPOT constraint for throughput search.<br>1. Type: Float.<br>2. Valid range: positive number, in ms.<br>3. Default: `None`, meaning no TPOT constraint. |
-| `--max-batched-tokens` | Service Options | Optional | Maximum batched tokens for one prefill or mixed prefill/decode step.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`; auto mode starts from `4 * input_length` and falls back to `2 * input_length` then `1 * input_length` on Prefill OOM. |
+| `--max-batched-tokens` | Service Options | Optional | Maximum batched tokens per data-parallel replica for one prefill or mixed prefill/decode step.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`; auto mode starts from `4 * input_length` and falls back to `2 * input_length` then `1 * input_length` on Prefill OOM. |
 | `--batch-range` | Service Options | Optional | Batch size search range.<br>1. Type: List[Int].<br>2. Format: `[min max]` or `[max]`.<br>3. Default: `None`; if `min` is omitted, search starts from `1`; if `max` is omitted, no upper limit is set. |
 | `--serving-cost` | Service Options | Optional | Serving cost used for cost-related metrics.<br>1. Type: Float.<br>2. Valid range: non-negative number.<br>3. Default: `0`. |
 | `--disagg` | Service Options | Optional | Enables PD disaggregation mode.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
@@ -386,19 +386,22 @@ Main parameters:
 
   When `effective_input_length <= max_batched_tokens`, we keep the original full-prefill formula.
   We get average `ttft = sum_for_ttft / concurrency`. For sum_for_ttft, we assume the prefill
-  batch size is the max batched tokens divided by effective input length.
-  So `prefill_batch_size = max_batched_tokens // effective_input_length`. And request was
-  processed in prefill_batch_size steps one by one. We can get the total ttft time as follows:
+  phase concurrency is the total DP budget divided by effective input length.
+  So `prefill_concurrency = (max_batched_tokens * dp_size) // effective_input_length`. Here,
+  `prefill_concurrency` is the number of requests processed concurrently in one Prefill scheduling step,
+  rather than the batch size of the entire workload. Requests are processed in steps at this concurrency,
+  and `calc_nums_for_ttft` is the required number of Prefill scheduling steps. The total TTFT time is:
 
-  `sum_for_ttft = (prefill_latency * prefill_batch_size) * (1 + calc_nums_for_ttft) * (calc_nums_for_ttft) / 2`
+  `sum_for_ttft = (prefill_latency * prefill_concurrency) * (1 + calc_nums_for_ttft) * (calc_nums_for_ttft) / 2`
 
-  For example, if we have 12 requests, and max_batched_tokens is 8192, input_length is 2048,
-  then prefill_batch_size is 4. And 12 requests were processed in 3 steps.
-  so
+  For example, if we have 36 requests on 3 DP replicas, max_batched_tokens is 8192, and input_length is 2048,
+  then prefill_concurrency is 12, so the 36 requests require three Prefill scheduling steps. The first 12
+  requests have a TTFT of one prefill_latency, the second batch has two prefill_latency, and the third batch
+  has three prefill_latency. Therefore:
 
-  `sum_for_ttft = (prefill_latency * 4 ) * (1 + 3) * 3 / 2`
+  `sum_for_ttft = (prefill_latency * 12) * (1 + 3) * 3 / 2 = prefill_latency * 72`
 
-  `ttft = sum_for_ttft / 12`
+  `ttft = sum_for_ttft / 36 = 2 * prefill_latency`
 
   When `effective_input_length > max_batched_tokens`, the optimizer automatically splits prefill
   into multiple chunks. The first version uses a fixed decode-first mixed scheduler with 15% token

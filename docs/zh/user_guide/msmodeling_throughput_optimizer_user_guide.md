@@ -52,7 +52,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### 约束
 
-- `--max-batched-tokens` 设置单个 Prefill 或混合 Prefill/Decode 步骤的 token 预算。未传入时，优化器先使用 `4 * input_length`，如果 Prefill 阶段 OOM，则依次降级为 `2 * input_length` 和 `1 * input_length`。如果 `effective_input_length` 大于当前生效的 `max_batched_tokens`，优化器会自动将 Prefill 拆分为多个分块（chunk）。如需匹配服务引擎调度预算，请显式设置 `--max-batched-tokens`。
+- `--max-batched-tokens` 设置单个数据并行（DP）副本在一次 Prefill 或混合 Prefill/Decode 步骤中的 token 预算。多个 DP 副本时，优化器会让每个副本独立使用该预算。未传入时，优化器先使用 `4 * input_length`，如果 Prefill 阶段 OOM，则依次降级为 `2 * input_length` 和 `1 * input_length`。如果 `effective_input_length` 大于当前生效的 `max_batched_tokens`，优化器会自动将 Prefill 拆分为多个分块（chunk）。如需匹配服务引擎单副本调度预算，请显式设置 `--max-batched-tokens`。
 
 ### 2.2 PD 分离场景
 
@@ -357,7 +357,7 @@ Service Options:
   --tpot-limits TPOT_LIMITS
                         TPOT constraints under which to search for the best throughput. None means no constraint. (default: None)
   --max-batched-tokens MAX_BATCHED_TOKENS
-                        Max batched tokens for one prefill or mixed prefill/decode step. If omitted, starts from 4 * input_length and falls back on Prefill OOM. (default: None)
+                        Max batched tokens per data-parallel replica for one prefill or mixed prefill/decode step. If omitted, starts from 4 * input_length and falls back on Prefill OOM. (default: None)
   --prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE
                         Prefix cache hit rate for token-level prefill reuse approximation. Valid range: [0, 1). (default: 0.0)
   --batch-range BATCH_RANGE [BATCH_RANGE ...]
@@ -424,7 +424,7 @@ PD Ratio Optimization Options:
 | `--chrome-trace` | Debug Options | 可选 | 生成 Chrome Trace 文件，用于可视化分析算子级性能。<br>1. 类型：Str。<br>2. 参考值：Trace 文件路径，例如 `trace.json`。<br>3. 默认值：`None`，表示不生成 Chrome Trace 文件。 |
 | `--ttft-limits` | Service Options | 可选 | 指定 TTFT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TTFT。 |
 | `--tpot-limits` | Service Options | 可选 | 指定 TPOT 约束，用于在约束内搜索最优吞吐。<br>1. 类型：Float。<br>2. 取值范围：正数，单位 ms。<br>3. 默认值：`None`，表示不限制 TPOT。 |
-| `--max-batched-tokens` | Service Options | 可选 | 指定单个 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；自动模式先使用 `4 * input_length`，并在 Prefill OOM 时依次降级为 `2 * input_length`、`1 * input_length`。 |
+| `--max-batched-tokens` | Service Options | 可选 | 指定单个数据并行（DP）副本在一次 prefill 或混合 prefill/decode step 的最大 batched tokens。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`；自动模式先使用 `4 * input_length`，并在 Prefill OOM 时依次降级为 `2 * input_length`、`1 * input_length`。 |
 | `--batch-range` | Service Options | 可选 | 指定 batch size 搜索范围。<br>1. 类型：List[Int]。<br>2. 格式：`[min max]` 或 `[max]`。<br>3. 默认值：`None`；未指定 `min` 时默认从 `1` 开始搜索，未指定 `max` 时不设置上限。 |
 | `--serving-cost` | Service Options | 可选 | 指定服务成本，用于成本相关指标计算。<br>1. 类型：Float。<br>2. 取值范围：非负数。<br>3. 默认值：`0`。 |
 | `--disagg` | Service Options | 可选 | 启用 PD 分离模式。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
@@ -496,19 +496,20 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device ATLAS_8
 
   当 `effective_input_length <= max_batched_tokens` 时，保留原有完整 Prefill 公式。
   平均值为 `ttft = sum_for_ttft / concurrency`。对于 sum_for_ttft，假设 Prefill
-  批大小为最大批处理 token 数除以有效输入长度。
-  因此 `prefill_batch_size = max_batched_tokens // effective_input_length`。请求按
-  prefill_batch_size 分步逐批处理。总 ttft 时间计算如下：
+  阶段并发为所有 DP 副本的总 token 预算除以有效输入长度。
+  因此 `prefill_concurrency = (max_batched_tokens * dp_size) // effective_input_length`。这里的
+  `prefill_concurrency` 表示单个 Prefill 调度步骤可同时处理的请求数，而非整个工作负载的 batch
+  大小。请求按该并发度分步处理，`calc_nums_for_ttft` 为所需的 Prefill 调度步骤数。总 ttft 时间计算如下：
 
-  `sum_for_ttft = (prefill_latency * prefill_batch_size) * (1 + calc_nums_for_ttft) * calc_nums_for_ttft / 2`
+  `sum_for_ttft = (prefill_latency * prefill_concurrency) * (1 + calc_nums_for_ttft) * calc_nums_for_ttft / 2`
 
-  例如，若有 12 个请求，max_batched_tokens 为 8192，input_length 为 2048，
-  则 prefill_batch_size 为 4，12 个请求分 3 步处理。
-  因此
+  例如，若有 3 个 DP 副本和 36 个请求，max_batched_tokens 为 8192，input_length 为 2048，
+  则 prefill_concurrency 为 12，36 个请求需要 3 个 Prefill 调度步骤完成。前 12 个请求的 TTFT
+  为 1 个 prefill_latency，第二批为 2 个 prefill_latency，第三批为 3 个 prefill_latency。因此
 
-  `sum_for_ttft = (prefill_latency * 4 ) * (1 + 3) * 3 / 2`
+  `sum_for_ttft = (prefill_latency * 12) * (1 + 3) * 3 / 2 = prefill_latency * 72`
 
-  `ttft = sum_for_ttft / 12`
+  `ttft = sum_for_ttft / 36 = 2 * prefill_latency`
 
   当 `effective_input_length > max_batched_tokens` 时，优化器会自动将 Prefill
   拆分为多个分块（chunk）。当前版本使用固定的 decode-first 混合调度器，并保留 15% 的 token

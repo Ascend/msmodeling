@@ -49,11 +49,12 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         batch_size = optimizer_data.batch_size
         input_length = optimizer_data.input_length
         effective_input_length = optimizer_data.get_effective_input_length()
-        max_batched_tokens = optimizer_data.max_batched_tokens
         if decode_flag:
             chunk_plan = []
+            global_batched_token_limit = None
         else:
             chunk_plan = optimizer_data.get_prefill_chunk_plan()
+            global_batched_token_limit = self._get_global_batched_token_limit(optimizer_data)
         output_length = optimizer_data.output_length
         concurrency = batch_size * self.dp * self.pp
         prefill_ttft_sum_ms = None
@@ -62,7 +63,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             not decode_flag
             and not variable_input_mode
             and len(chunk_plan) == 1
-            and concurrency * chunk_plan[0].query_len <= max_batched_tokens
+            and concurrency * chunk_plan[0].query_len <= global_batched_token_limit
         )
 
         if decode_flag or variable_input_mode or single_prefill_fits_budget:
@@ -85,14 +86,14 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             wave_specs = []
             prefill_ttft_sum_ms = 0.0
             # Keep disaggregated prefill modeling simple and deterministic: each wave contains
-            # only one chunk shape and is capped by max_batched_tokens. We do not aggregate
+            # only one chunk shape and is capped by the combined DP token budget. We do not aggregate
             # different chunk positions across queries into one wave, so this may be conservative
             # compared with engines that do cross-query chunk packing.
             # serving_cost is treated as one fixed phase overhead, while breakdowns are averaged
             # across all modeled waves to include every chunk shape. latency_ms is the phase
             # makespan; final-chunk wave completion timestamps are used for request-level TTFT.
             for chunk_index, chunk in enumerate(chunk_plan):
-                wave_size = max(max_batched_tokens // chunk.query_len, 1)
+                wave_size = max(global_batched_token_limit // chunk.query_len, 1)
                 remaining = concurrency
                 while remaining > 0:
                     wave_concurrency = min(wave_size, remaining)
@@ -213,7 +214,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             input_length,
             output_length,
             effective_input_length,
-            max_batched_tokens,
+            optimizer_data.max_batched_tokens,
             len(chunk_plan),
             concurrency,
             ttft,

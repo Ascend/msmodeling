@@ -175,6 +175,35 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(metrics.prefill_breakdowns, "prefill")
         self.assertEqual(metrics.decode_breakdowns, "decode")
 
+    def test_get_full_prefill_metrics_uses_the_combined_dp_token_budget(self):
+        """Each DP replica may independently consume max_batched_tokens."""
+        self.strategy.dp = 4
+        optimizer_data = OptimizerData(
+            input_length=10,
+            output_length=5,
+            batch_size=2,
+            max_batched_tokens=20,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        calls = []
+
+        def fake_latency(batch_size, optimizer_data, is_decode=False, **kwargs):
+            calls.append((batch_size, is_decode))
+            if not is_decode and batch_size == 8:
+                return (10.0, 8.0, "prefill", None)
+            if is_decode and batch_size == 2:
+                return (2.0, 7.0, "decode", None)
+            raise AssertionError(f"unexpected call: batch_size={batch_size}, is_decode={is_decode}")
+
+        with patch.object(self.strategy, "_get_or_compute_latency", side_effect=fake_latency):
+            metrics = self.strategy._get_full_prefill_metrics(optimizer_data, concurrency=8)
+
+        self.assertEqual(calls, [(8, False), (2, True)])
+        self.assertEqual(metrics.ttft, 10.0)
+        self.assertEqual(metrics.tpot, 4.0)
+        self.assertEqual(metrics.output_throughput, 2000.0)
+
     def test_get_full_prefill_metrics_stops_before_decode_when_prefill_memory_is_negative(self):
         optimizer_data = OptimizerData(
             input_length=10,

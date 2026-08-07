@@ -95,6 +95,20 @@ class BaseThroughputOptimizer(ABC):
             return self._run_with_auto_max_batched_tokens(optimizer_data, batch_range)
         return self._run_once(optimizer_data, batch_range)
 
+    def _get_global_batched_token_limit(self, optimizer_data: OptimizerData) -> int:
+        """Return the total scheduler budget across all data-parallel replicas.
+
+        ``max_batched_tokens`` is a per-DP-replica serving-engine limit.  The
+        optimizer schedules global request concurrency and TensorCast divides
+        that concurrency across data-parallel replicas before modeling a
+        forward pass, so scheduling must use the sum of those identical per-DP
+        budgets.
+        """
+        max_batched_tokens = optimizer_data.max_batched_tokens
+        if max_batched_tokens is None or max_batched_tokens <= 0:
+            raise ValueError(f"max_batched_tokens must be a positive integer, got {max_batched_tokens!r}.")
+        return max_batched_tokens * self.dp
+
     def _run_with_auto_max_batched_tokens(
         self,
         optimizer_data: OptimizerData,

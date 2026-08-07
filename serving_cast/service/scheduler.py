@@ -23,7 +23,7 @@ class SchedulerState:
     pending_prefill: int
     # New tokens computed by one prefill request in the current chunk.
     chunk_query_len: int
-    # User-facing token budget for one prefill or mixed prefill/decode step.
+    # Scheduler-wide token budget for one prefill or mixed prefill/decode step.
     max_batched_tokens: int
 
 
