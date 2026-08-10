@@ -99,6 +99,8 @@ uv pip uninstall msmodeling
 
 1. **Modify the configuration file**: after [Environment Preparation and Installation](#environment-preparation-and-installation), modify the configuration file `config.toml` as needed, including optimization parameters, benchmark tool parameters, and service parameters. See [Configuration File Description](#configuration-file-description).
 
+   > **Note:** If you are unsure which parameters to tune and what ranges to use, use the **`optix-param-recommend` parameter recommendation skill**: provide the hardware, model, workload, and optimization target, and it returns recommended parameters and search ranges. Review them against your actual deployment environment (GPU memory, number of cards, latency requirements, and so on) before writing them into `config.toml`.
+
 2. **Start optimization**: by default, vLLM service parameter optimization based on `AISBench` is executed. For other usage, see [Command Parameters](#command-parameters).
 
     ```bash
