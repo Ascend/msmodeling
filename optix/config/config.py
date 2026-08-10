@@ -818,7 +818,7 @@ class PerformanceIndex(BaseModel):
 
 class DataStorageConfig(BaseModel):
     store_dir: Path = Path("store")
-    pso_top_k: int = 3
+    pso_top_k: int = 0
 
     @field_validator("store_dir")
     @classmethod

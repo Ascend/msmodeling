@@ -282,8 +282,8 @@ subprocess.Popen(command, env=deploy_env, cwd="/opt/custom")
 ### 参考资料
 
 - [OptiX 服务参数寻优设计](../design/optix-service-parameter-optimizer-design.md)
-- [OptiX 用户指南](../zh/user_guide/optix_user_guide.md)
-- [OptiX 插件开发指导](../zh/user_guide/optix_plugin_user_guide.md)
+- [OptiX 用户指南](../zh/user_guide/msmodeling_optix_user_guide.md)
+- [OptiX 插件开发指导](../zh/user_guide/msmodeling_optix_plugin_user_guide.md)
 - [msmodeling 环境安装 RFC](rfc_msmodeling_env_installer_skill_zh.md)
 
 ### 术语表

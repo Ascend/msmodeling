@@ -39,7 +39,7 @@ metadata:
 
 - 本 skill 创建的 venv **仅用于 msmodeling**：在仓库根目录执行 `uv sync` 即可（自动创建 venv、可编辑安装本项目，无需 `pip install -e .`）
 - 必须在 venv 里装：会带上 `torch`、`transformers` 等，给 TensorCast 仿真用，不是 OptiX 寻优用的。装到系统 Python 会冲掉 vLLM、MindIE 依赖，服务可能起不来。
-- 不要在此 venv 里 `pip install vllm`；vLLM、MindIE 默认用系统环境。PATH 特殊时再配 `OPTIX_DEPLOY_PATH`，见 [OptiX 使用指南](../../../docs/zh/user_guide/optix_user_guide.md#工具安装)
+- 不要在此 venv 里 `pip install vllm`；vLLM、MindIE 默认用系统环境。PATH 特殊时再配 `OPTIX_DEPLOY_PATH`，见 [推荐实践：服务化实测寻优环境与部署栈](../../../docs/zh/install_guide/msmodeling_optix_env_and_deployment_stack.md)
 
 ## 默认策略
 

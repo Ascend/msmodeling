@@ -36,7 +36,7 @@ metadata:
 
 用户说"安装""部署"时，直接执行以下步骤，**不要只给命令**。
 
-完整说明见 [OptiX 使用指南 · 推荐实践：环境与部署栈](../../../docs/zh/user_guide/optix_user_guide.md#推荐实践环境与部署栈)。
+完整说明见 [推荐实践：服务化实测寻优环境与部署栈](../../../docs/zh/install_guide/msmodeling_optix_env_and_deployment_stack.md)。
 
 **为何必须用 venv**：`uv sync` 会装上 `torch`、`transformers` 等，给 TensorCast 仿真用，不是 OptiX 真机寻优用的。装到系统 Python 会改掉 vLLM、MindIE 依赖的版本，服务可能起不来。在仓库根目录 `uv sync` 会自动创建 `.venv` 并隔离安装；vLLM、MindIE 继续用系统里那套。
 

@@ -48,7 +48,7 @@ cd contrib
 ```
 
 2. 安装依赖：
-参考[自定义插件开发指导](https://gitcode.com/Ascend/msmodeling/blob/develop/docs/zh/user_guide/optix_plugin_user_guide.md)完成插件安装
+参考[自定义插件开发指导](https://gitcode.com/Ascend/msmodeling/blob/develop/docs/zh/user_guide/msmodeling_optix_plugin_user_guide.md)完成插件安装
 ```bash
 pip install -e .
 ```

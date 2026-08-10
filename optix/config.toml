@@ -1,12 +1,11 @@
 # ------------------------- Optimization Parameter Configuration ------------------------------------------------
-n_particles = 10
-iters = 5
+n_particles = 8
+iters = 4
 ttft_penalty = 1
-tpot_penalty = 0
+tpot_penalty = 1
 success_rate_penalty = 5.0
-ttft_slo = 1
+ttft_slo = 2
 tpot_slo = 0.05
-service = "master"
 # false: use scheduler.run, search CONCURRENCY during PSO, REQUESTRATE fixed to max.
 #   scheduler.run is called at max request rate for each candidate concurrency.
 # true: use scheduler.run_with_request_rate, CONCURRENCY fixed to max, REQUESTRATE fixed to max.

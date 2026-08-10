@@ -162,4 +162,63 @@ pip uninstall msmodeling
 
 ## 5. 升级
 
-升级即“先卸后装”。直接执行安装命令，工具将自动卸载旧版本，并引导您完成覆盖安装。 升级版本时需要关注版本配套关系，请参见《[版本说明](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.1.0/release_notes.md)》。
+升级前可先查看当前环境中的版本信息：
+
+```bash
+# uv 环境
+uv pip show msmodeling
+
+# pip 环境
+pip show msmodeling
+```
+
+### 5.1 方式一：覆盖升级
+
+升级即“先卸后装”。若选择覆盖升级，直接通过[2.1 在线安装](#21-在线安装)和[2.2 离线安装](#22-离线安装)内容执行安装操作，工具将自动卸载旧版本，并引导您完成覆盖安装。
+
+### 5.2 方式二：源码升级
+
+若选择源码升级，请按照如下操作完成升级：
+
+1. 进入 msModeling 仓库根目录，拉取目标版本源码。
+
+    ```bash
+    cd msmodeling
+    git fetch
+    git checkout 26.1.0
+    git pull
+    ```
+
+2. 选择对应的环境升级到目标版本。
+
+    ```bash
+    # uv 环境
+    uv pip install --upgrade -e .
+
+    # uv 环境临时指定镜像源
+    uv pip install --upgrade -e . -i https://mirrors.aliyun.com/pypi/simple
+
+    # pip 环境
+    pip install --upgrade -e .
+    ```
+
+升级版本时需要关注版本配套关系，请参见《[版本说明](https://gitcode.com/Ascend/release-management/blob/master/MindStudio/26.1.0/release_notes.md)》。
+
+## 6. 附录
+
+### 6.1 服务化实测寻优与仿真环境分离<a name="optix-与仿真环境分离"></a>
+
+若使用 [服务化实测寻优optix](../user_guide/msmodeling_optix_user_guide.md)：
+
+- msModeling、OptiX 必须装在独立虚拟环境里，例如 `.venv`。安装会带上 `torch`、`transformers` 等依赖，它们给仿真使用，不是 OptiX 寻优使用的部署栈。
+- vLLM、MindIE、测评工具默认使用系统里已部署好的环境，一般不必再创建部署虚拟环境。
+- 不要在 msModeling 虚拟环境里执行 `pip install vllm`。
+
+OptiX 子进程会自动剥离 msModeling 虚拟环境，使用系统 `PATH`；仅当 `PATH` 特殊时可配置 `OPTIX_DEPLOY_PATH`。详见《[推荐实践：环境与部署栈](msmodeling_optix_env_and_deployment_stack.md)》。
+
+### 6.2 常见问题
+
+- 若 `--help` 无法显示帮助信息，请优先排查虚拟环境、`PYTHONPATH` 与依赖安装。
+- 如果提示无法找到 `cli` 或 `tensor_cast` 模块，请确认当前目录为仓库根目录，或已正确设置 `PYTHONPATH`。
+- 如果模型配置下载失败，请确认网络可访问 Hugging Face；若 `HF_ENDPOINT` 镜像仍不可用，请改用本地模型路径。
+- 如果依赖安装失败，请先确认虚拟环境已激活。若使用 `uv`，请重新执行 `uv sync`；若使用 pip 方式，请升级 `pip` 后依次重新执行 `pip install -r requirements.txt` 和 `pip install -e .`，必要时切换 PyPI 镜像源。

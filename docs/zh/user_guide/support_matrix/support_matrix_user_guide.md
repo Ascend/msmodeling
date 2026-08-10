@@ -9,10 +9,10 @@
 - 如需了解各模块详细用法，请结合以下使用指南阅读：
   - 《[模型推理性能仿真 使用指南](../msmodeling_tensor_cast_user_guide.md)》
   - 《[服务化性能仿真 使用指南](../msmodeling_throughput_optimizer_user_guide.md)》
-  - 《[服务化实测寻优 使用指南](../optix_user_guide.md)》
+  - 《[服务化实测寻优 使用指南](../msmodeling_optix_user_guide.md)》
   - 《[Web UI 使用说明](../msmodeling_web_ui_user_guide.md)》
   - 《[TensorCast 新模型适配开发指导](../msmodeling_tensor_cast_new_model_adaptation_user_guide.md)》
-  - 《[OptiX 插件开发指导](../optix_plugin_user_guide.md)》
+  - 《[OptiX 插件开发指导](../msmodeling_optix_plugin_user_guide.md)》
 - 如需了解实验性服务仿真能力，请结合《[服务化细粒度仿真 使用指南](../msmodeling_serving_cast_simulation_user_guide.md)》阅读。
 
 ## 目前已经支持的模型

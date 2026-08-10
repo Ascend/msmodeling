@@ -206,13 +206,13 @@ When upgrading versions, pay attention to version compatibility. See the [Releas
 
 ### 6.1 OptiX and Simulation Environment Isolation<a name="optix-and-simulation-environment-isolation"></a>
 
-If you use [OptiX service parameter optimization](../user_guide/optix_user_guide.md):
+If you use [OptiX service parameter optimization](../user_guide/msmodeling_optix_user_guide.md):
 
 - Install msModeling and OptiX in an isolated virtual environment such as `.venv`. The installation brings in dependencies such as `torch` and `transformers`; they are used for simulation, not for the OptiX deployment stack.
 - vLLM, MindIE, and benchmark tools use the system deployment environment by default. Usually, you do not need to create another deployment virtual environment.
 - Do not run `pip install vllm` in the msModeling virtual environment.
 
-OptiX child processes automatically strip the msModeling virtual environment and use the system `PATH`. Set `OPTIX_DEPLOY_PATH` only when `PATH` is non-standard. For details, see [OptiX User Guide - Recommended Practice: Environment and Deploy Stack](../user_guide/optix_user_guide.md#recommended-practice-environment-and-deploy-stack).
+OptiX child processes automatically strip the msModeling virtual environment and use the system `PATH`. Set `OPTIX_DEPLOY_PATH` only when `PATH` is non-standard. For details, see [Recommended Practice: Service Parameter Optimization Environment and Deployment Stack](msmodeling_optix_env_and_deployment_stack.md).
 
 ### 6.2 Troubleshooting
 

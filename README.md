@@ -137,7 +137,7 @@ msModeling 提供模型推理性能仿真、服务化性能仿真和服务化实
 |---------|--------|
 | [**模型推理性能仿真**](./docs/zh/user_guide/msmodeling_tensor_cast_user_guide.md) | 模型仿真模块，拦截 PyTorch 计算图，在指定设备画像上模拟推理过程，输出算子级性能分解、内存占用、算子 shape 及 Chrome Trace。 |
 | [**服务化性能仿真**](./docs/zh/user_guide/msmodeling_throughput_optimizer_user_guide.md) | 吞吐优化仿真模块，在 SLO 约束下自动搜索最优并行策略与 batch 配置，支持 PD 混部、PD 分离、PD 配比三种模式。 |
-| [**服务化实测寻优**](./docs/zh/user_guide/optix_user_guide.md) | 服务化实测寻优，基于 PSO 粒子寻优算法在 vLLM、MindIE 等真实服务框架上自动搜索满足时延约束的最优部署参数。msmodeling / OptiX 应安装在 uv 虚拟环境中，vLLM、MindIE 和测评工具默认使用系统部署环境。 |
+| [**服务化实测寻优**](docs/zh/user_guide/msmodeling_optix_user_guide.md) | 服务化实测寻优，基于 PSO 粒子寻优算法在 vLLM、MindIE 等真实服务框架上自动搜索满足时延约束的最优部署参数。msmodeling / OptiX 应安装在 uv 虚拟环境中，vLLM、MindIE 和测评工具默认使用系统部署环境。 |
 
 ## 🚀 快速入门
 

@@ -205,8 +205,8 @@ HH:mm:ss | LEVEL    | run_id | stage | file:line | message
 
 ### 参考资料
 
-- [optix 用户指南（中文）](../zh/user_guide/optix_user_guide.md)
-- [optix 用户指南（英文）](../en/user_guide/optix_user_guide.md)
+- [optix 用户指南（中文）](../zh/user_guide/msmodeling_optix_user_guide.md)
+- [optix 用户指南（英文）](../en/user_guide/msmodeling_optix_user_guide.md)
 - [设计文档：服务参数寻优](../design/optix-service-parameter-optimizer-design.md)
 
 ### 术语表
