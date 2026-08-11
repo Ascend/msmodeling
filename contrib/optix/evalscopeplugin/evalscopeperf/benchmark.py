@@ -163,12 +163,16 @@ class EvalscopePerfBenchMark(BenchmarkInterface):
             )
             # TTFT 首包时延（输出：s）
             ttft_ms = data.get("TTFT (ms)")
+            if ttft_ms is None:
+                ttft_ms = data.get("Avg TTFT (ms)")
             if ttft_ms is not None:
                 performance_index.time_to_first_token = ttft_ms / 1000
             else:
                 performance_index.time_to_first_token = data.get("Average time to first token (s)", 0)
             # TPOT 每输出token时延（输出：s）
             tpot_ms = data.get("TPOT (ms)")
+            if tpot_ms is None:
+                tpot_ms = data.get("Avg TPOT (ms)")
             if tpot_ms is not None:
                 performance_index.time_per_output_token = tpot_ms / 1000
             else:
