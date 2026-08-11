@@ -469,6 +469,52 @@ class CompletionEventManager:
             self.completion_queue.task_done()
 
 
+def _run_async_task_worker(
+    barrier,
+    stop_event,
+    task_queue,
+    metrics_cache,
+    completion_queue,
+    device_type,
+    parallel_config,
+    common_config,
+) -> None:
+    """Module-level worker target so Process can pickle under forkserver/spawn.
+
+    Pass Manager proxies only — not CompletionEventManager (holds a Thread).
+    """
+    try:
+        tensor_cast_model_runner = ModelRunner.init_tensor_cast_model_runner(
+            common_config, parallel_config, device_type
+        )
+        barrier.wait()  # ensure all processes have built the model
+    except Exception:
+        logger.exception("Worker initialization failed")
+        return
+
+    while not stop_event.is_set():
+        try:
+            task = task_queue.get(timeout=1)
+            task_hash = task.hash_value
+        except queue.Empty:
+            continue
+        except Exception as e:
+            if stop_event.is_set():
+                logger.debug("Worker exiting, stop event set")
+                break
+            raise RuntimeError("AsyncTaskManager get task failed") from e
+
+        try:
+            result = tensor_cast_model_runner.run_inference(task.batch, with_sampler=True)
+        except Exception as e:
+            raise RuntimeError("AsyncTaskManager execute task failed") from e
+
+        if task_hash not in metrics_cache:
+            raise KeyError(f"record_cache failed, cache with cache_id {task_hash} not found")
+        metrics_cache[task_hash] = result
+        completion_queue.put(task_hash)
+
+
 class AsyncTaskManager:
     def __init__(self, device_type, parallel_config, num_workers: int = 2):
         self.manager = Manager()
@@ -525,40 +571,24 @@ class AsyncTaskManager:
         logger.debug("Shutdown: Manager closed")
 
     def _init_multi_process(self, device_type, parallel_config) -> None:
-        def worker(barrier):
-            try:
-                common_config = Config.get_instance().common_config
-                tensor_cast_model_runner = ModelRunner.init_tensor_cast_model_runner(
-                    common_config, parallel_config, device_type
-                )
-                barrier.wait()  # ensure all processes have built the model
-            except Exception:
-                logger.exception("Worker initialization failed")
-                return
-
-            while not self.stop_event.is_set():
-                try:
-                    task = self.task_queue.get(timeout=1)
-                    task_hash = task.hash_value
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    if self.stop_event.is_set():
-                        logger.debug("Worker exiting, stop event set")
-                        break
-                    raise RuntimeError("AsyncTaskManager get task failed") from e
-
-                try:
-                    result = tensor_cast_model_runner.run_inference(task.batch, with_sampler=True)
-                except Exception as e:
-                    raise RuntimeError("AsyncTaskManager execute task failed") from e
-
-                self.model_runner_metrics_cache_manager.record_cache(task_hash, result)
-                self.event_manager.set_completion_event(task_hash)
-
+        # Resolve config in the parent: forkserver/spawn children do not inherit Config.
+        common_config = Config.get_instance().common_config
         barrier = mp.Barrier(self.num_workers + 1)
         for _ in range(self.num_workers):
-            p = mp.Process(target=worker, args=(barrier,), daemon=True)
+            p = mp.Process(
+                target=_run_async_task_worker,
+                args=(
+                    barrier,
+                    self.stop_event,
+                    self.task_queue,
+                    self.model_runner_metrics_cache_manager.cache,
+                    self.event_manager.completion_queue,
+                    device_type,
+                    parallel_config,
+                    common_config,
+                ),
+                daemon=True,
+            )
             p.start()
             self.workers.append(p)
         barrier.wait()
