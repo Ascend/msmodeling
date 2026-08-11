@@ -200,28 +200,72 @@ def test_run_test_propagates_subprocess_exit_code(
     assert summary["test_map_path"] == str(map_file)
 
 
-def test_cli_test_default_suite_is_ci_gate(
+def test_cli_test_default_suite_is_full(
     repo_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     with_uv: None,
 ) -> None:
     del with_uv
+    del repo_root
     capture = patch_subprocess_run(monkeypatch, SubprocessRunCapture())
     monkeypatch.delenv("MSMODELING_TEST_MAP_PATH", raising=False)
-    dest = repo_root / ".msmodeling_cache" / "test_map" / "master" / "test_map.json"
-
-    def fake_resolve(**_kwargs: Any) -> Path:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text("{}", encoding="utf-8")
-        return dest
-
-    monkeypatch.setattr(run_test_mod, "resolve_test_map_path", fake_resolve)
     result = run_cli_main(main, ["test"], prog="build.py")
     assert result.returncode == 0
-    assert capture.merged_output_calls[0]["cmd"] == [
-        "bash",
-        str(repo_root / "scripts" / "run_ci_gate.sh"),
-    ]
+    assert capture.merged_output_calls[0]["cmd"][:4] == ["/fake/uv", "run", "pytest", "tests"]
+
+
+def test_run_test_ci_gate_fail_fast_before_test_map_download(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python/prereq fail-fast must run before any test_map download."""
+    del repo_root
+    order: list[str] = []
+
+    def record_fail_fast(*, mode: str) -> None:
+        order.append(f"fail_fast:{mode}")
+        raise SystemExit(42)
+
+    def record_resolve(**_kwargs: Any) -> Path:
+        order.append("resolve")
+        return Path("/tmp/should-not-be-used.json")
+
+    monkeypatch.setattr(run_test_mod, "fail_fast", record_fail_fast)
+    monkeypatch.setattr(run_test_mod, "resolve_test_map_path", record_resolve)
+    monkeypatch.delenv("MSMODELING_TEST_MAP_PATH", raising=False)
+    with pytest.raises(SystemExit) as exc_info:
+        run_test(build_options(is_test=True, suite=BuildSuite.CI_GATE))
+    assert exc_info.value.code == 42
+    assert order == ["fail_fast:test"]
+
+
+def test_run_test_ci_gate_orders_fail_fast_then_download_then_bootstrap(
+    repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    order: list[str] = []
+    dest = repo_root / "map.json"
+    dest.write_text("{}", encoding="utf-8")
+
+    def record_fail_fast(*, mode: str) -> None:
+        order.append(f"fail_fast:{mode}")
+
+    def record_resolve(**_kwargs: Any) -> Path:
+        order.append("resolve")
+        return dest
+
+    def record_bootstrap(mode: str) -> str:
+        order.append(f"bootstrap:{mode}")
+        return "/fake/uv"
+
+    monkeypatch.setattr(run_test_mod, "fail_fast", record_fail_fast)
+    monkeypatch.setattr(run_test_mod, "resolve_test_map_path", record_resolve)
+    monkeypatch.setattr(run_test_mod, "bootstrap", record_bootstrap)
+    monkeypatch.delenv("MSMODELING_TEST_MAP_PATH", raising=False)
+    assert run_test(build_options(is_test=True, suite=BuildSuite.CI_GATE)) == 0
+    assert order[:3] == ["fail_fast:test", "resolve", "bootstrap:test"]
+    assert subprocess_capture.merged_output_calls
 
 
 def test_run_test_download_failure_stops(

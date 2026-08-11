@@ -15,7 +15,7 @@ def test_parse_argv_defaults() -> None:
         version=None,
         version_explicit=False,
         extras={},
-        suite=BuildSuite.CI_GATE,
+        suite=BuildSuite.FULL,
     )
 
 
@@ -124,9 +124,9 @@ def test_parse_argv_duplicate_extra_key_exits_2() -> None:
     assert exc_info.value.code == 2
 
 
-def test_parse_argv_suite_default_ci_gate() -> None:
+def test_parse_argv_suite_default_full() -> None:
     options = parse_argv(["test"])
-    assert options.suite == BuildSuite.CI_GATE
+    assert options.suite == BuildSuite.FULL
 
 
 def test_parse_argv_suite_full() -> None:

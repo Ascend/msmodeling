@@ -52,7 +52,7 @@ def test_main_test_branch_via_cli_runner(
 
     result = run_cli_main(
         main,
-        ["test", "-e", f"test_map_path={map_file}"],
+        ["test", "--suite", "ci_gate", "-e", f"test_map_path={map_file}"],
         prog="build.py",
     )
     assert result.returncode == 0

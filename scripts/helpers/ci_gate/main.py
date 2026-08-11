@@ -368,12 +368,55 @@ def _sample_nodes(nodes: tuple[str, ...], limit: int = _SAMPLE_NODE_LIMIT) -> st
     return sample
 
 
-def _log_execution_plan(logger: logging.Logger, execution: ExecutionPlan) -> None:
+def _changeset_has_gate_paths(changes: ChangeSet) -> bool:
+    return bool(
+        changes.config
+        or changes.new_test
+        or changes.del_test
+        or changes.new_source
+        or changes.del_source
+        or changes.modified_source
+        or changes.modified_test
+        or changes.unscoped_python
+    )
+
+
+def _no_work_reason(changes: ChangeSet) -> str:
+    if not _changeset_has_gate_paths(changes):
+        return "empty or out-of-scope diff vs base branch (no gate-relevant file changes)"
+    if changes.unscoped_python and not (
+        changes.config
+        or changes.new_test
+        or changes.del_test
+        or changes.new_source
+        or changes.del_source
+        or changes.modified_source
+        or changes.modified_test
+    ):
+        return "only unscoped Python changes outside gate_policy roots"
+    return "diff classified but no mapped/changed tests selected"
+
+
+def _log_execution_plan(
+    logger: logging.Logger,
+    execution: ExecutionPlan,
+    *,
+    changes: ChangeSet | None = None,
+    base_branch: str | None = None,
+) -> None:
     if execution.full_suite:
         logger.info("Selected full test suite: %s", _REASON_CONFIG)
         return
     if not execution.has_work:
-        logger.info("No pytest targets after policy checks; skipping test run")
+        reason = _no_work_reason(changes) if changes is not None else "no selectable pytest targets"
+        logger.info(
+            "suite=ci_gate base_branch=%s: no pytest work (%s); skipping test run. "
+            "Next: for a full local suite run `python build.py test --suite full`; "
+            "for incremental gate ensure your branch has a diff vs %s.",
+            base_branch or "?",
+            reason,
+            base_branch or "the configured base branch",
+        )
         return
 
     counts = Counter(execution.reasons.values())
@@ -431,6 +474,15 @@ def _success_user_message(execution: ExecutionPlan, changes: ChangeSet) -> str:
     if reason_parts:
         return f"CI gate passed: {node_count} test node(s) ({reason_parts})"
     return f"CI gate passed: {node_count} test node(s)"
+
+
+def _no_work_user_message(changes: ChangeSet, *, base_branch: str) -> str:
+    reason = _no_work_reason(changes)
+    return (
+        f"CI gate passed: no pytest scheduled "
+        f"(suite=ci_gate, base_branch={base_branch}, reason={reason}). "
+        f"Local tip: python build.py test --suite full"
+    )
 
 
 def _log_change_summary(logger: logging.Logger, changes: ChangeSet, cfg: Config) -> None:
@@ -607,10 +659,11 @@ def _run_gate_finalize(
     *,
     modified_source_step: GateStepResult | None = None,
     use_cov: bool,
+    base_branch: str,
     logger: logging.Logger,
 ) -> int:
     if not execution.has_work and not _needs_post_run_mapping_check(changes, baseline.roots):
-        print("CI gate passed")
+        print(_no_work_user_message(changes, base_branch=base_branch))
         return 0
 
     pytest_code = 0
@@ -636,7 +689,7 @@ def _run_gate_finalize(
     if execution.has_work:
         print(_success_user_message(execution, changes))
     else:
-        print("CI gate passed")
+        print(_no_work_user_message(changes, base_branch=base_branch))
     return 0
 
 
@@ -645,7 +698,10 @@ def main() -> int:
     cfg = Config.from_env()
     log_env_audit(cfg, logger)
 
-    logger.info("CI gate: classify diff, validate policy, plan tests, run deduplicated selection")
+    logger.info(
+        "CI gate suite=ci_gate base_branch=%s: classify diff, validate policy, plan tests, run deduplicated selection",
+        cfg.base_branch,
+    )
 
     prepared = _prepare_gate_inputs(cfg, logger)
     if isinstance(prepared, _PrepareFailure):
@@ -675,7 +731,12 @@ def main() -> int:
     _log_all_exempt_test_files(plan, cfg, logger)
 
     execution = compute_execution_plan(plan, prepared.baseline.test_exemptions)
-    _log_execution_plan(logger, execution)
+    _log_execution_plan(
+        logger,
+        execution,
+        changes=prepared.changes,
+        base_branch=cfg.base_branch,
+    )
 
     use_cov = _needs_union_coverage(prepared.changes, prepared.baseline.roots)
     if use_cov and execution.has_work:
@@ -687,6 +748,7 @@ def main() -> int:
         execution,
         modified_source_step=modified_source_step,
         use_cov=use_cov,
+        base_branch=cfg.base_branch,
         logger=logger,
     )
 

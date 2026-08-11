@@ -6,8 +6,9 @@ Shell entry points for local runs, PR incremental gate, nightly, and `test_map` 
 
 ```bash
 python build.py                              # build wheel (bootstraps tools)
-python build.py test                         # CI gate (default --suite ci_gate)
-python build.py test --suite full            # full pytest tests/
+python build.py test                         # full pytest tests/ (default --suite full)
+python build.py test --suite ci_gate         # PR incremental CI gate
+python build.py test --suite full            # same as default
 python build.py test --suite smoke           # tests/smoke
 python build.py test --suite regression      # tests/regression
 python build.py test --suite benchmark       # tests/benchmark
@@ -40,7 +41,8 @@ scripts/
 | Mode | Sync | Delegates to |
 |------|------|--------------|
 | `python build.py` | `uv sync --frozen --group build` | `bash scripts/build.sh` → wheel under `artifacts/` |
-| `python build.py test` | `uv sync --frozen --group ci` | CI gate (`--suite ci_gate`, default) |
+| `python build.py test` | `uv sync --frozen --group ci` | full suite (`--suite full`, default) |
+| `python build.py test --suite ci_gate` | same | CI gate (downloads `test_map` when unset) |
 | `python build.py test --suite full` | same | `uv run pytest tests -n auto --dist worksteal` (markers from `pyproject.toml` `addopts`) |
 | `python build.py test --suite smoke` | same | `bash scripts/run_smoke.sh` |
 | `python build.py test --suite regression` | same | `bash scripts/run_regression.sh` |
@@ -53,7 +55,7 @@ scripts/
 
 `-e` / `--extra` is **test-only**. Allowed keys: `test_map_path`, `base_branch`, `offline`, `weights_prune`. Build mode rejects any `-e`.
 
-`--suite` is **test-only**. Default: `ci_gate`. Choices: `ci_gate`, `full`, `smoke`, `regression`, `benchmark`.
+`--suite` is **test-only**. Default: `full`. Choices: `ci_gate`, `full`, `smoke`, `regression`, `benchmark`. CI / PR incremental jobs must pass `--suite ci_gate` explicitly.
 
 `-v` / `--version` temporarily writes `project.version` in `pyproject.toml` via `uv version --frozen` for the wheel build, then restores the original version. Prefer `python build.py -v <ver>`. If you wrap with `uv run`, use `uv run -- python build.py -v <ver>` so uv does not consume `-v`.
 
@@ -74,11 +76,20 @@ Wrong `MSMODELING_TEST_BASE_BRANCH` → wrong OBS path → usually 404.
 
 ### Zero-config expectation
 
-With no env vars set, `python build.py test` should:
+With no env vars set, `python build.py test` runs the **full** suite (`uv run pytest tests ...`).
+
+For the PR incremental gate:
+
+```bash
+python build.py test --suite ci_gate
+```
+
+With no env vars, that path should:
 
 1. Apply defaults from `scripts/defaults.env` into the child process env dict (setdefault; does not mutate the calling process `os.environ`).
-2. Download `master`'s map into `.msmodeling_cache/test_map/master/test_map.json`.
-3. Run the CI gate.
+2. Run cheap fail-fast checks (Python ≥3.10, pyproject.toml, uv.lock, defaults.env) **before** any `test_map` download.
+3. Download `master`'s map into `.msmodeling_cache/test_map/master/test_map.json` when needed.
+4. Run the CI gate.
 
 If OBS is unreachable, set `MSMODELING_TEST_MAP_PATH` to a local map, or use `--suite full` intentionally.
 
@@ -89,7 +100,7 @@ If OBS is unreachable, set `MSMODELING_TEST_MAP_PATH` to a local map, or use `--
 | `run_smoke.sh` | Full `tests/smoke/` (also: `python build.py test --suite smoke`) |
 | `run_regression.sh` | Full `tests/regression/` |
 | `run_benchmark.sh` | Full `tests/benchmark/` |
-| `run_ci_gate.sh` | PR incremental gate (also: `python build.py test`) |
+| `run_ci_gate.sh` | PR incremental gate (also: `python build.py test --suite ci_gate`) |
 | `run_nightly.sh` | Scheduled: multi-phase pytest; phase1 pass → writes `test_map` |
 | `run_test_map_sync.sh` | Incremental/full `test_map` update (`--once`/`--watch`) |
 | `build.sh` | Build `msmodeling` wheel via `uv build --wheel` |
@@ -167,13 +178,14 @@ Defaults below come from [`scripts/defaults.env`](defaults.env) (not shipped in 
 | Point `MSMODELING_TEST_MAP_PATH` at stale/missing/corrupt file | Warning + branch-scoped re-download when not a valid JSON object |
 | Keep an old file under `test_map/{branch}/` after OBS refresh | Reused until you delete that cache path (no TTL) |
 | Unset `UV_INDEX_URL` / `HF_ENDPOINT` | Uses `defaults.env`; slow or broken mirrors → sync / Hub failures |
+| `--suite ci_gate` when you meant full | Incremental vs base branch only; empty local diffs schedule no pytest |
 | `--suite full` when you meant gate | Runs entire `tests/` (still excludes npu/nightly/network via addopts) — much slower |
 
 ## CI / CodeArts triggers
 
 | Trigger | Preferred command |
 |---------|-------------------|
-| PR `compile` | `python build.py test` (or `MSMODELING_TEST_MAP_PATH=<path> python build.py test`) |
+| PR `compile` | `python build.py test --suite ci_gate` (or `MSMODELING_TEST_MAP_PATH=<path> python build.py test --suite ci_gate`) |
 | `/run_tests smoke` | `python build.py test --suite smoke` |
 | `/run_tests regression` | `python build.py test --suite regression` |
 | `/run_tests benchmark` | `python build.py test --suite benchmark` |
@@ -184,14 +196,17 @@ Defaults below come from [`scripts/defaults.env`](defaults.env) (not shipped in 
 ### Examples
 
 ```bash
-# zero-config CI gate (downloads test_map for master)
+# default local full suite
 uv run python build.py test
 
+# zero-config CI gate (downloads test_map for master)
+uv run python build.py test --suite ci_gate
+
 # PR into a non-master base
-MSMODELING_TEST_BASE_BRANCH=poc/AiClusterHub uv run python build.py test
+MSMODELING_TEST_BASE_BRANCH=poc/AiClusterHub uv run python build.py test --suite ci_gate
 
 # explicit local map
-uv run python build.py test -e test_map_path=/data/test_map.json
+uv run python build.py test --suite ci_gate -e test_map_path=/data/test_map.json
 
 # full suite / smoke / regression / benchmark
 uv run python build.py test --suite full

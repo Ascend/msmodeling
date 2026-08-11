@@ -197,8 +197,11 @@ python build.py test --suite smoke
 python build.py test --suite regression
 python build.py test --suite benchmark
 
-# CI gate (auto-downloads test_map when unset)
+# default local full suite
 python build.py test
+
+# CI gate (auto-downloads test_map when unset)
+python build.py test --suite ci_gate
 
 # check collection scope
 PYTHONPATH=. python -m pytest tests/smoke/ tests/regression/ \

@@ -106,6 +106,27 @@ def test_log_execution_plan_logs_reason_counts(
     assert "Phase" not in caplog.text
 
 
+def test_log_execution_plan_empty_diff_explains_skip(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    execution = ExecutionPlan(full_suite=False, waves=(), reasons={})
+    changes = ChangeSet.build()
+
+    with caplog.at_level(logging.INFO, logger="ci_gate"):
+        _log_execution_plan(
+            logging.getLogger("ci_gate"),
+            execution,
+            changes=changes,
+            base_branch="master",
+        )
+
+    assert "suite=ci_gate" in caplog.text
+    assert "base_branch=master" in caplog.text
+    assert "empty or out-of-scope diff" in caplog.text
+    assert "--suite full" in caplog.text
+    assert "Phase" not in caplog.text
+
+
 def test_main_returns_one_on_resolve_base_ref_error(
     monkeypatch: pytest.MonkeyPatch,
     gate_cfg: Config,

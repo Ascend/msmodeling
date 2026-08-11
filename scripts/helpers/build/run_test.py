@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Final
 
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.build.argv import BuildSuite
-from scripts.helpers.build.bootstrap import bootstrap
+from scripts.helpers.build.bootstrap import bootstrap, fail_fast
 from scripts.helpers.build.runtime_env import apply_test_defaults
 from scripts.helpers.build.test_map_fetch import MapFetchError, resolve_test_map_path
 from scripts.helpers.common._logging import setup_logger
@@ -142,10 +142,17 @@ def _run_ci_gate(options: BuildOptions) -> int:
         )
         return 1
 
+    # Cheap prerequisites before network I/O (test_map download) or uv sync.
+    fail_fast(mode="test")
+
     env = _apply_extras(apply_test_defaults(), options)
     configured = options.extras.get("test_map_path") or env.get("MSMODELING_TEST_MAP_PATH")
     base_branch = env.get("MSMODELING_TEST_BASE_BRANCH", DEFAULT_BASE_BRANCH)
     cache_dir = env.get("MSMODELING_CACHE")
+    logger.info(
+        "suite=ci_gate base_branch=%s; resolving test_map (download only if needed)",
+        base_branch,
+    )
     try:
         test_map_path = resolve_test_map_path(
             configured=configured,
@@ -158,7 +165,8 @@ def _run_ci_gate(options: BuildOptions) -> int:
             "Cannot start CI gate without a test_map. "
             "Fix network/OBS access, set MSMODELING_TEST_MAP_PATH to an existing file, "
             "or pass -e test_map_path=/path/to/test_map.json. "
-            "Wrong MSMODELING_TEST_BASE_BRANCH also yields 404 (URL uses that branch name)."
+            "Wrong MSMODELING_TEST_BASE_BRANCH also yields 404 (URL uses that branch name). "
+            "For a full local run without test_map: python build.py test --suite full"
         )
         return 1
 

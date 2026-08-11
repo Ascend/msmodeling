@@ -106,7 +106,7 @@ def parse_argv(argv: Sequence[str] | None = None) -> BuildOptions:
         "--suite",
         default=None,
         choices=list(_SUITE_VALUES),
-        help=f"test-only suite to run (default: ci_gate); choices: {suite_choices}",
+        help=f"test-only suite to run (default: full); choices: {suite_choices}",
     )
     parser.add_argument(
         "tokens",
@@ -120,7 +120,7 @@ def parse_argv(argv: Sequence[str] | None = None) -> BuildOptions:
     _validate_extras(is_test, extras, parser)
     if args.suite is not None and not is_test:
         parser.error("--suite is only supported with the test command")
-    suite = BuildSuite(args.suite) if args.suite is not None else BuildSuite.CI_GATE
+    suite = BuildSuite(args.suite) if args.suite is not None else BuildSuite.FULL
     return BuildOptions(
         is_test=is_test,
         is_local=is_local,
