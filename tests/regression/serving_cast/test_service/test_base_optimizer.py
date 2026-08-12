@@ -13,6 +13,7 @@ from serving_cast.service.utils import (
     LengthBin,
     LengthDistribution,
     OptimizerData,
+    PrefillChunk,
 )
 from tensor_cast.core.input_generator import RequestInfo
 
@@ -696,14 +697,17 @@ class TestBaseBackend(unittest.TestCase):
             breakdowns={"prefill_a": {"Mem": 0.0, "Comm": 0.0, "Cube": 6.0, "Vec": 4.0}},
         )
 
-        metrics, composition_rows = self.backend._get_batched_forward_info(4, optimizer_data)
+        chunk_results, composition_rows = self.backend._get_batched_forward_info(4, optimizer_data)
 
         self.backend.model_runner.run_inference.assert_called_once()
         requests = self.backend.model_runner.run_inference.call_args.args[0]
         self.assertEqual(len(requests), 4)
         self.assertTrue(all(isinstance(req, RequestInfo) for req in requests))
         self.assertEqual([row["samples"] for row in composition_rows], [2, 1, 1])
+        self.assertEqual(len(chunk_results), 1)
+        metrics, completed_requests = chunk_results[0]
         self.assertEqual(metrics.execution_time_s["analytic"], 0.010)
+        self.assertEqual(completed_requests, 4)
 
     def test_get_batched_forward_info_uses_query_len_and_num_input_tokens(self):
         self.backend.model_runner = Mock()
@@ -761,6 +765,23 @@ class TestBaseBackend(unittest.TestCase):
         optimizer_data.build_concurrency_samples.assert_called_once_with(1)
         requests = self.backend.model_runner.run_inference.call_args.args[0]
         self.assertEqual(len(requests), 1)
+
+    def test_get_batched_forward_info_rejects_unordered_chunk_indices(self):
+        self.backend.model_runner = Mock()
+        self.backend.model_runner.model.model_config.parallel_config.data_parallel_size = 1
+        optimizer_data = Mock()
+        optimizer_data.build_concurrency_samples.return_value = []
+
+        chunk_plan = [
+            PrefillChunk(index=0, query_len=100, seq_len=100),
+            PrefillChunk(index=1, query_len=100, seq_len=200),
+            PrefillChunk(index=0, query_len=100, seq_len=100),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "contiguous and non-decreasing"):
+            self.backend._get_batched_forward_info(1, optimizer_data, chunk_plan)
+
+        self.backend.model_runner.run_inference.assert_not_called()
 
 
 if __name__ == "__main__":

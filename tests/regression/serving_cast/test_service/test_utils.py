@@ -112,7 +112,7 @@ class TestServiceUtils(unittest.TestCase):
         config = OptimizerData(input_length=4096, max_batched_tokens=8192)
         self.assertEqual(
             config.get_prefill_chunk_plan(),
-            [PrefillChunk(index=0, query_len=4096, seq_len=4096)],
+            [PrefillChunk(index=0, query_len=4096, seq_len=4096, is_last_chunk=True)],
         )
 
     def test_optimizer_data_prefill_chunk_plan_multiple_chunks(self):
@@ -122,7 +122,7 @@ class TestServiceUtils(unittest.TestCase):
             [
                 PrefillChunk(index=0, query_len=4096, seq_len=4096),
                 PrefillChunk(index=1, query_len=4096, seq_len=8192),
-                PrefillChunk(index=2, query_len=1808, seq_len=10000),
+                PrefillChunk(index=2, query_len=1808, seq_len=10000, is_last_chunk=True),
             ],
         )
 
@@ -133,9 +133,42 @@ class TestServiceUtils(unittest.TestCase):
             config.get_prefill_chunk_plan(),
             [
                 PrefillChunk(index=0, query_len=3, seq_len=3),
-                PrefillChunk(index=1, query_len=2, seq_len=5),
+                PrefillChunk(index=1, query_len=2, seq_len=5, is_last_chunk=True),
             ],
         )
+
+    def test_optimizer_data_variable_prefill_chunk_plan_uses_concurrency_samples(self):
+        config = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=100, weight=1.0),
+                    LengthBin(min_tokens=100, max_tokens=200, weight=1.0),
+                ]
+            ),
+            max_batched_tokens=200,
+        )
+
+        self.assertEqual(
+            config.get_prefill_chunk_plan(concurrency=4),
+            [
+                PrefillChunk(index=0, query_len=50, seq_len=50, is_last_chunk=True),
+                PrefillChunk(index=0, query_len=50, seq_len=50, is_last_chunk=True),
+                PrefillChunk(index=0, query_len=100, seq_len=100),
+                PrefillChunk(index=1, query_len=50, seq_len=150, is_last_chunk=True),
+                PrefillChunk(index=1, query_len=150, seq_len=150, is_last_chunk=True),
+            ],
+        )
+        chunk_plan = config.get_prefill_chunk_plan(concurrency=4)
+        self.assertEqual(config.get_prefill_num_chunks(chunk_plan), 2)
+
+    def test_optimizer_data_variable_prefill_chunk_plan_requires_concurrency(self):
+        config = OptimizerData(
+            length_distribution=_simple_length_distribution(),
+            max_batched_tokens=200,
+        )
+
+        with self.assertRaisesRegex(ValueError, "concurrency is required"):
+            config.get_prefill_chunk_plan()
 
     def test_optimizer_data_prefill_chunk_plan_returns_empty_without_input_length(self):
         config = OptimizerData(max_batched_tokens=None)
@@ -164,8 +197,9 @@ class TestServiceUtils(unittest.TestCase):
 
     def test_optimizer_data_prefill_num_chunks_matches_chunk_plan(self):
         config = OptimizerData(input_length=9, max_batched_tokens=4)
+        chunk_plan = config.get_prefill_chunk_plan()
 
-        self.assertEqual(config.get_prefill_num_chunks(), 3)
+        self.assertEqual(config.get_prefill_num_chunks(chunk_plan), 3)
 
     def test_optimizer_data_effective_input_length_uses_distribution_midpoint_average(
         self,

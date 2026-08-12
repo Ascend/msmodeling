@@ -27,7 +27,6 @@ from serving_cast.service.optimizer_curve_plots import (
 from serving_cast.service.utils import (
     BatchRangeAction,
     DEFAULT_MAX_SEARCH_COMBINATIONS,
-    OptimizerData,
     check_positive_float,
     check_positive_integer,
     check_positive_integer_and_string,
@@ -450,47 +449,20 @@ def main():
         return 1
 
     if isinstance(args.input_length, str) and (
-        not args.disagg
-        or args.enable_optimize_prefill_decode_ratio
-        or args.ttft_limits is None
-        or args.tpot_limits is not None
+        args.enable_optimize_prefill_decode_ratio
+        or (args.disagg and (args.ttft_limits is None or args.tpot_limits is not None))
     ):
         logger.warning(
-            "--input-length FILE currently only supports disaggregation "
+            "--input-length FILE currently supports aggregation runs or disaggregation "
             "prefill-only runs with --ttft-limits and without --tpot-limits."
         )
         return 1
 
     if isinstance(args.input_length, str):
         try:
-            length_distribution = load_length_distribution(args.input_length)
+            load_length_distribution(args.input_length)
         except ValueError as err:
             logger.error("Failed to load length distribution from %s: %s", args.input_length, err)
-            return 1
-        optimizer_data = OptimizerData(
-            length_distribution=length_distribution,
-            prefix_cache_hit_rate=args.prefix_cache_hit_rate,
-            max_batched_tokens=args.max_batched_tokens,
-        )
-        if optimizer_data.max_batched_tokens is None:
-            candidates = optimizer_data.get_auto_max_batched_tokens_candidates()
-            if not candidates:
-                logger.error("No available max_batched_tokens candidates for auto fallback.")
-                return 1
-            precheck_max_batched_tokens = candidates[0]
-        else:
-            precheck_max_batched_tokens = optimizer_data.max_batched_tokens
-
-        original_max_batched_tokens = optimizer_data.max_batched_tokens
-        try:
-            optimizer_data.max_batched_tokens = precheck_max_batched_tokens
-            prefill_num_chunks = optimizer_data.get_prefill_num_chunks()
-        finally:
-            optimizer_data.max_batched_tokens = original_max_batched_tokens
-        if prefill_num_chunks > 1:
-            logger.warning(
-                "--input-length FILE currently does not support chunked prefill. Please increase --max-batched-tokens."
-            )
             return 1
 
     mtp_candidates = args.num_mtp_token_sizes or [args.num_mtp_tokens]
@@ -525,7 +497,7 @@ def main():
         return 1
 
     # Terminal ASCII curves (plotext) run automatically when structurally allowed.
-    plot_curves_allowed = len(device_targets) == 1
+    plot_curves_allowed = len(device_targets) == 1 and not isinstance(args.input_length, str)
 
     logger.info("Starting experiments.")
     hw_rows = run_multi_device_loop(

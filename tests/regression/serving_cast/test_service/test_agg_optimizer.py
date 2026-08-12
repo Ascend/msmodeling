@@ -12,7 +12,8 @@ from serving_cast.service.agg_throughput_optimizer import (
     _ScheduleStep,
 )
 from serving_cast.service.latency_table import ForwardLatencyRecord, ForwardShapeKey
-from serving_cast.service.utils import OptimizerData, PrefillChunk
+from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData, PrefillChunk
+from tensor_cast.core.input_generator import generate_inputs_varlen
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
@@ -261,6 +262,114 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertLess(metrics.memory_left_gb, 0)
         self.assertEqual(metrics.prefill_memory_left_gb, -1.0)
         self.assertEqual(metrics.decode_latency, 0)
+
+    def test_get_inference_info_variable_mode_splits_prefill_by_token_budget(self):
+        optimizer_data = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=100, weight=1.0),
+                    LengthBin(min_tokens=100, max_tokens=200, weight=1.0),
+                ]
+            ),
+            output_length=5,
+            batch_size=4,
+            max_batched_tokens=200,
+            num_devices=1,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+
+        batch_result = SimpleNamespace(
+            execution_time_s={"analytic": 0.01},
+            total_device_memory_gb=64.0,
+            model_weight_size_gb=20.0,
+            kv_cache_size_gb=4.0,
+            model_activation_size_gb=1.0,
+            reserved_memory_gb=0.0,
+            device_memory_available_gb=8.0,
+            breakdowns={},
+        )
+        with (
+            patch.object(self.strategy.model_runner, "run_inference", return_value=batch_result) as mock_run_inference,
+            patch.object(self.strategy, "_get_or_compute_latency", return_value=(2.0, 7.0, "decode", None)),
+        ):
+            summary = self.strategy.get_inference_info(optimizer_data)
+
+        self.assertEqual(mock_run_inference.call_count, 2)
+        self.assertEqual(
+            [
+                [(request.query_len, request.seq_len) for request in call.args[0]]
+                for call in mock_run_inference.call_args_list
+            ],
+            [
+                [(50, 50), (50, 50), (100, 100)],
+                [(50, 150), (150, 150)],
+            ],
+        )
+        self.assertTrue(
+            all(
+                call.kwargs["generate_inputs_func"] is generate_inputs_varlen
+                for call in mock_run_inference.call_args_list
+            )
+        )
+        df = summary.get_summary_df()
+        self.assertEqual(list(df["num_input_tokens"]), ["all", 50, 150])
+        self.assertEqual(list(df["samples"]), [4, 2, 2])
+        self.assertEqual(df.iloc[0]["prefill_num_chunks"], 2)
+        self.assertEqual(df.iloc[0]["ttft"], 15.0)
+        self.assertEqual(df.iloc[0]["tpot"], 5.0)
+        self.assertTrue(pd.isna(df.iloc[1]["ttft"]))
+
+    def test_get_inference_info_variable_mode_aggregates_prefill_breakdowns(self):
+        optimizer_data = OptimizerData(
+            length_distribution=LengthDistribution(
+                bins=[
+                    LengthBin(min_tokens=0, max_tokens=100, weight=1.0),
+                    LengthBin(min_tokens=100, max_tokens=200, weight=1.0),
+                ]
+            ),
+            output_length=5,
+            batch_size=4,
+            max_batched_tokens=200,
+            num_devices=1,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+
+        def make_batch_result(latency_s, breakdowns):
+            return SimpleNamespace(
+                execution_time_s={"analytic": latency_s},
+                total_device_memory_gb=64.0,
+                model_weight_size_gb=20.0,
+                kv_cache_size_gb=4.0,
+                model_activation_size_gb=1.0,
+                reserved_memory_gb=0.0,
+                device_memory_available_gb=8.0,
+                breakdowns=breakdowns,
+            )
+
+        # Two chunks with different latencies: the aggregated breakdown must be
+        # normalized per chunk and weighted by each chunk's latency.
+        batch_results = [
+            make_batch_result(0.01, {"prefill": {"Mem": 1.0, "Comm": 1.0, "Cube": 1.0, "Vec": 1.0}}),
+            make_batch_result(0.03, {"prefill": {"Mem": 4.0, "Comm": 0.0, "Cube": 0.0, "Vec": 0.0}}),
+        ]
+        with (
+            patch.object(self.strategy.model_runner, "run_inference", side_effect=batch_results),
+            patch.object(self.strategy, "_get_or_compute_latency", return_value=(2.0, 7.0, "decode", None)),
+        ):
+            summary = self.strategy.get_inference_info(optimizer_data)
+
+        df = summary.get_summary_df()
+        # chunk1: 10ms at 25% each; chunk2: 30ms at 100% Mem ->
+        # Mem (25*10+100*30)/40=81.25, others (25*10+0)/40=6.25.
+        self.assertEqual(
+            df.iloc[0]["percentage_breakdowns(p)"],
+            "Mem 81.25 | Comm 6.25 | Cube 6.25 | Vec 6.25",
+        )
+        self.assertEqual(df.iloc[0]["percentage_breakdowns(d)"], "decode")
 
     def test_simulate_chunked_prefill_accumulates_scheduler_metrics(self):
         optimizer_data = OptimizerData(

@@ -23,7 +23,16 @@ from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable, ForwardShapeKey
 from .optimizer_summary import EARLY_STOP_DECODE_OOM, EARLY_STOP_PREFILL_OOM, OptimizerSummary
 from .scheduler import DecodeFirstWithSlack, Scheduler, SchedulerState
-from .utils import AGG_COLUMNS, MemoryInfo, format_parallel_label, OptimizerData, select_tightest_memory_info
+from .utils import (
+    AGG_COLUMNS,
+    build_memory_info,
+    format_breakdowns,
+    format_parallel_label,
+    MemoryInfo,
+    OptimizerData,
+    PrefillChunk,
+    select_tightest_memory_info,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -92,10 +101,21 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         effective_input_length = optimizer_data.get_effective_input_length()
         output_length = optimizer_data.output_length
         concurrency = batch_size * self.dp * self.pp
-        chunk_plan = optimizer_data.get_prefill_chunk_plan()
+        variable_input_mode = optimizer_data.length_distribution is not None
+        chunk_plan = optimizer_data.get_prefill_chunk_plan(
+            (concurrency + self.dp - 1) // self.dp if variable_input_mode else None
+        )
+        prefill_num_chunks = optimizer_data.get_prefill_num_chunks(chunk_plan)
 
         # Single-chunk prompts keep the historical formula so existing short-prompt results stay stable.
-        if len(chunk_plan) == 1:
+        composition_rows = []
+        if variable_input_mode:
+            metrics, composition_rows = self._get_batched_full_prefill_metrics(
+                optimizer_data,
+                concurrency,
+                chunk_plan,
+            )
+        elif len(chunk_plan) == 1:
             metrics = self._get_full_prefill_metrics(optimizer_data, concurrency)
         else:
             metrics = self._simulate_chunked_prefill(optimizer_data, chunk_plan, concurrency, self.scheduler)
@@ -133,36 +153,54 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         memory_info = getattr(metrics, "memory_info", None)
         if memory_info:
             summary.set_memory_info(memory_info)
-        result_df = pd.DataFrame(
-            columns=AGG_COLUMNS,
-            data=[
-                [
-                    self.model_runner.user_input.device,
-                    optimizer_data.num_devices,
-                    self.model_runner.user_input.model_id,
-                    self.model_runner.user_input.quantize_linear_action,
-                    self.model_runner.user_input.quantize_attention_action,
-                    input_length,
-                    output_length,
-                    effective_input_length,
-                    max_batched_tokens,
-                    len(chunk_plan),
-                    concurrency,
-                    metrics.ttft,
-                    metrics.tpot,
-                    metrics.output_throughput,
-                    token_s_device,
-                    parallel,
-                    batch_size,
-                    metrics.prefill_breakdowns,
-                    metrics.decode_breakdowns,
-                    memory_info["model_weight_size_gb"] if memory_info else float("nan"),
-                    memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
-                    memory_info["model_activation_size_gb"] if memory_info else float("nan"),
-                    memory_info["device_memory_available_gb"] if memory_info else float("nan"),
-                ]
-            ],
-        ).round(3)
+        columns = AGG_COLUMNS.copy()
+        data = [
+            self.model_runner.user_input.device,
+            optimizer_data.num_devices,
+            self.model_runner.user_input.model_id,
+            self.model_runner.user_input.quantize_linear_action,
+            self.model_runner.user_input.quantize_attention_action,
+            input_length,
+            output_length,
+            effective_input_length,
+            max_batched_tokens,
+            prefill_num_chunks,
+            concurrency,
+            metrics.ttft,
+            metrics.tpot,
+            metrics.output_throughput,
+            token_s_device,
+            parallel,
+            batch_size,
+            metrics.prefill_breakdowns,
+            metrics.decode_breakdowns,
+            memory_info["model_weight_size_gb"] if memory_info else float("nan"),
+            memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
+            memory_info["model_activation_size_gb"] if memory_info else float("nan"),
+            memory_info["device_memory_available_gb"] if memory_info else float("nan"),
+        ]
+        rows = [data]
+        if variable_input_mode:
+            columns.insert(columns.index("output_length"), "num_input_tokens")
+            data.insert(columns.index("output_length") - 1, "all")
+            columns.insert(columns.index("concurrency"), "request_ratio")
+            data.insert(columns.index("concurrency") - 1, 1.0)
+            columns.insert(columns.index("concurrency"), "samples")
+            data.insert(columns.index("concurrency") - 1, concurrency)
+            for composition_row in composition_rows:
+                detail_row = data.copy()
+                detail_row[columns.index("num_input_tokens")] = composition_row["num_input_tokens"]
+                detail_row[columns.index("request_ratio")] = composition_row["request_ratio"]
+                detail_row[columns.index("samples")] = composition_row["samples"]
+                detail_row[columns.index("ttft")] = None
+                detail_row[columns.index("tpot")] = None
+                detail_row[columns.index("token/s")] = None
+                detail_row[columns.index("token/s/device")] = None
+                detail_row[columns.index("percentage_breakdowns(p)")] = None
+                detail_row[columns.index("percentage_breakdowns(d)")] = None
+                rows.append(detail_row)
+
+        result_df = pd.DataFrame(columns=columns, data=rows).round(3)
         summary.set_summary_df(result_df)
         early_stop_reason = None
         if metrics.prefill_memory_left_gb < 0:
@@ -174,6 +212,116 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         self._maybe_set_search_info(optimizer_data, memory_left, batch_size, metrics.ttft, metrics.tpot, summary)
 
         return summary
+
+    def _get_batched_full_prefill_metrics(
+        self,
+        optimizer_data: OptimizerData,
+        concurrency: int,
+        chunk_plan: list[PrefillChunk],
+    ) -> tuple[_ChunkedAggMetrics, list[dict]]:
+        chunk_results, composition_rows = self._get_batched_forward_info(
+            concurrency,
+            optimizer_data,
+            chunk_plan,
+        )
+        current_time = 0.0
+        first_token_time_sum = 0.0
+        prefill_latency = 0.0
+        prefill_last_latency = 0.0
+        prefill_memory_left_gb = float("inf")
+        prefill_memory_infos = []
+        is_first_chunk = True
+        # Accumulate per-chunk breakdowns normalized to fractions and weighted by each
+        # chunk's latency, so the aggregated percentages reflect the total prefill time.
+        breakdown_weighted_sums = {}
+        breakdown_weight_totals = {}
+        for batch_result, completed_requests in chunk_results:
+            prefill_last_latency = self._select_latency_s(batch_result.execution_time_s) * 1000
+            if is_first_chunk:
+                prefill_latency = prefill_last_latency
+                is_first_chunk = False
+
+            # Chunks execute sequentially, so requests completed by this chunk
+            # observe the cumulative latency of this and all preceding chunks.
+            current_time += prefill_last_latency
+
+            # Weight that completion time by the number of requests whose final
+            # prefill chunk has just run; the total is averaged below for TTFT.
+            first_token_time_sum += completed_requests * current_time
+            prefill_memory_left_gb = min(prefill_memory_left_gb, batch_result.device_memory_available_gb)
+            prefill_memory_infos.append(build_memory_info(batch_result))
+
+            for breakdown_name, breakdown in batch_result.breakdowns.items():
+                total = sum(breakdown.values())
+                if total == 0 or prefill_last_latency <= 0:
+                    continue
+                accumulated = breakdown_weighted_sums.setdefault(breakdown_name, {})
+                for category, value in breakdown.items():
+                    if isinstance(value, float):
+                        accumulated[category] = accumulated.get(category, 0.0) + (value / total * prefill_last_latency)
+                weight_total = breakdown_weight_totals.get(breakdown_name, 0.0)
+                breakdown_weight_totals[breakdown_name] = weight_total + prefill_last_latency
+
+        prefill_breakdowns = ""
+        if breakdown_weighted_sums:
+            weighted_breakdowns = {
+                breakdown_name: {
+                    category: value / breakdown_weight_totals[breakdown_name] for category, value in breakdown.items()
+                }
+                for breakdown_name, breakdown in breakdown_weighted_sums.items()
+            }
+            prefill_breakdowns = format_breakdowns(weighted_breakdowns)
+
+        prefill_memory_info = select_tightest_memory_info(prefill_memory_infos)
+        if prefill_memory_left_gb < 0:
+            return (
+                _ChunkedAggMetrics(
+                    ttft=float("inf"),
+                    tpot=float("inf"),
+                    output_throughput=0,
+                    memory_left_gb=prefill_memory_left_gb,
+                    prefill_latency=prefill_latency,
+                    prefill_last_latency=prefill_last_latency,
+                    prefill_memory_left_gb=prefill_memory_left_gb,
+                    decode_latency=0,
+                    prefill_breakdowns=prefill_breakdowns,
+                    decode_breakdowns="",
+                    memory_info=prefill_memory_info,
+                ),
+                composition_rows,
+            )
+
+        decode_query_len = self.num_mtp_tokens + 1
+        decode_seq_len = (
+            optimizer_data.output_length // 2 + optimizer_data.get_effective_input_length() + decode_query_len
+        )
+        decode_latency, decode_memory_left_gb, decode_breakdowns, decode_memory_info = self._get_or_compute_latency(
+            optimizer_data.batch_size,
+            optimizer_data,
+            is_decode=True,
+            query_len=decode_query_len,
+            seq_len=decode_seq_len,
+        )
+        request_count = sum(row["samples"] for row in composition_rows)
+        ttft = first_token_time_sum / request_count
+        tpot = (ttft + decode_latency * optimizer_data.output_length) / optimizer_data.output_length
+        output_throughput = 1000 * (optimizer_data.output_length * concurrency) / (tpot * optimizer_data.output_length)
+        return (
+            _ChunkedAggMetrics(
+                ttft=ttft,
+                tpot=tpot,
+                output_throughput=output_throughput,
+                memory_left_gb=min(prefill_memory_left_gb, decode_memory_left_gb),
+                prefill_latency=prefill_latency,
+                prefill_last_latency=prefill_last_latency,
+                prefill_memory_left_gb=prefill_memory_left_gb,
+                decode_latency=decode_latency,
+                prefill_breakdowns=prefill_breakdowns,
+                decode_breakdowns=decode_breakdowns,
+                memory_info=select_tightest_memory_info((prefill_memory_info, decode_memory_info)),
+            ),
+            composition_rows,
+        )
 
     def _get_full_prefill_metrics(self, optimizer_data: OptimizerData, concurrency: int) -> _ChunkedAggMetrics:
         """Compute aggregation metrics for prompts that fit in one prefill chunk.

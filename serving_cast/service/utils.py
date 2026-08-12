@@ -78,6 +78,7 @@ class PrefillChunk:
     index: int
     query_len: int
     seq_len: int
+    is_last_chunk: bool = False
 
 
 @dataclass
@@ -156,8 +157,42 @@ class OptimizerData:
             )
         return effective_input_length
 
-    def get_prefill_chunk_plan(self) -> list[PrefillChunk]:
+    def get_prefill_chunk_plan(self, concurrency: Optional[int] = None) -> list[PrefillChunk]:
         """Split the effective prefill prompt into chunks bounded by max_batched_tokens."""
+        if self.length_distribution is not None:
+            if concurrency is None:
+                raise ValueError("concurrency is required for variable-length prefill chunk planning.")
+            if self.max_batched_tokens is None or self.max_batched_tokens <= 0:
+                raise ValueError(f"max_batched_tokens must be a positive integer, got {self.max_batched_tokens!r}.")
+
+            chunks = []
+            chunk_index = 0
+            remaining_token_budget = self.max_batched_tokens
+            for row in self.build_concurrency_samples(concurrency):
+                for _ in range(row["samples"]):
+                    request_query_len = row["query_len"]
+                    consumed_query_len = 0
+                    while consumed_query_len < request_query_len:
+                        if remaining_token_budget == 0:
+                            chunk_index += 1
+                            remaining_token_budget = self.max_batched_tokens
+
+                        query_len = min(
+                            request_query_len - consumed_query_len,
+                            remaining_token_budget,
+                        )
+                        consumed_query_len += query_len
+                        remaining_token_budget -= query_len
+                        chunks.append(
+                            PrefillChunk(
+                                index=chunk_index,
+                                query_len=query_len,
+                                seq_len=consumed_query_len,
+                                is_last_chunk=consumed_query_len == request_query_len,
+                            )
+                        )
+            return chunks
+
         effective_input_length = self.get_effective_input_length(is_decode=False)
         if effective_input_length is None:
             return []
@@ -170,7 +205,14 @@ class OptimizerData:
         while consumed < effective_input_length:
             query_len = min(self.max_batched_tokens, effective_input_length - consumed)
             seq_len = consumed + query_len
-            chunks.append(PrefillChunk(index=index, query_len=query_len, seq_len=seq_len))
+            chunks.append(
+                PrefillChunk(
+                    index=index,
+                    query_len=query_len,
+                    seq_len=seq_len,
+                    is_last_chunk=seq_len == effective_input_length,
+                )
+            )
             consumed += query_len
             index += 1
 
@@ -196,9 +238,9 @@ class OptimizerData:
                 candidates.append(candidate)
         return candidates
 
-    def get_prefill_num_chunks(self) -> int:
-        """Return the number of prefill chunks produced by the current token budget."""
-        return len(self.get_prefill_chunk_plan())
+    def get_prefill_num_chunks(self, chunk_plan: list[PrefillChunk]) -> int:
+        """Return the number of chunks represented by a prefill chunk plan."""
+        return max(chunk.index for chunk in chunk_plan) + 1 if chunk_plan else 0
 
     def build_concurrency_samples(self, concurrency: int):
         rows = self.get_representative_rows()

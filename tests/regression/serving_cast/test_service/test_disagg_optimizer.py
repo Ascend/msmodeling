@@ -484,7 +484,7 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
         with patch.object(
             strategy,
             "_get_batched_forward_info",
-            return_value=(batch_result, composition_rows),
+            return_value=([(batch_result, 5)], composition_rows),
         ):
             result = strategy.get_inference_info(optimizer_data)
 
@@ -520,18 +520,37 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
             serving_cost=7,
             max_batched_tokens=8192,
         )
+        composition_rows = [
+            {
+                "num_input_tokens": 250,
+                "query_len": 250,
+                "request_ratio": 0.6,
+                "samples": 3,
+            },
+            {
+                "num_input_tokens": 1000,
+                "query_len": 1000,
+                "request_ratio": 0.4,
+                "samples": 2,
+            },
+        ]
 
         with (
             patch.object(
                 strategy,
                 "_get_batched_forward_info",
                 return_value=(
-                    Mock(
-                        execution_time_s={"analytic": 0.123},
-                        device_memory_available_gb=2.0,
-                        breakdowns={"prefill": {"Mem": 1.0}},
-                    ),
-                    [],
+                    [
+                        (
+                            Mock(
+                                execution_time_s={"analytic": 0.123},
+                                device_memory_available_gb=2.0,
+                                breakdowns={"prefill": {"Mem": 1.0}},
+                            ),
+                            5,
+                        )
+                    ],
+                    composition_rows,
                 ),
             ),
             patch.object(strategy, "_get_forward_info") as mock_forward,
@@ -593,13 +612,81 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
         with patch.object(
             strategy,
             "_get_batched_forward_info",
-            return_value=(batch_result, composition_rows),
+            return_value=([(batch_result, 5)], composition_rows),
         ):
             result = strategy.get_inference_info(optimizer_data)
 
         row = result.get_summary_df().iloc[0]
         self.assertEqual(row["concurrency"], 20)
         self.assertEqual(row["token/s"], 11000000.0)
+
+    def test_distribution_chunked_prefill_uses_request_weighted_ttft(self):
+        strategy = DisaggThroughputOptimizer()
+        strategy.dp = 4
+        strategy.tp = 1
+        strategy.pp = 1
+        strategy.is_moe_model = False
+        strategy.num_mtp_tokens = 0
+        strategy.model_runner = Mock()
+        strategy.model_runner.user_input.device = "TEST_DEVICE"
+        strategy.model_runner.user_input.model_id = "test-model"
+        strategy.model_runner.user_input.quantize_linear_action = "DISABLED"
+        strategy.model_runner.user_input.quantize_attention_action = "DISABLED"
+        strategy.model_runner.model.model_config.parallel_config = Mock(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=4,
+            decode_context_parallel_size=1,
+        )
+
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=5,
+            length_distribution=_simple_length_distribution(),
+            output_length=50,
+            serving_cost=7,
+            max_batched_tokens=200,
+        )
+        composition_rows = [
+            {
+                "num_input_tokens": 250,
+                "query_len": 250,
+                "request_ratio": 0.6,
+                "samples": 3,
+            },
+            {
+                "num_input_tokens": 1000,
+                "query_len": 1000,
+                "request_ratio": 0.4,
+                "samples": 2,
+            },
+        ]
+        first_chunk = Mock(
+            execution_time_s={"analytic": 0.010},
+            device_memory_available_gb=3.0,
+            breakdowns={"prefill": {"Cube": 3.0, "Mem": 1.0}},
+        )
+        second_chunk = Mock(
+            execution_time_s={"analytic": 0.020},
+            device_memory_available_gb=2.0,
+            breakdowns={"prefill": {"Cube": 1.0, "Mem": 1.0}},
+        )
+
+        with patch.object(
+            strategy,
+            "_get_batched_forward_info",
+            return_value=([(first_chunk, 3), (second_chunk, 2)], composition_rows),
+        ) as mock_get_batched:
+            result = strategy.get_inference_info(optimizer_data)
+
+        chunk_plan = mock_get_batched.call_args.args[2]
+        self.assertGreater(len(chunk_plan), 1)
+        row = result.get_summary_df().iloc[0]
+        # Model-only completion times are 10 ms and 30 ms; serving cost is added once.
+        self.assertEqual(row["ttft"], 25.0)
+        self.assertAlmostEqual(row["token/s"], 11000 / 0.037, places=3)
+        self.assertEqual(row["avail_GB"], 2.0)
 
 
 if __name__ == "__main__":

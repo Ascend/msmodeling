@@ -49,14 +49,18 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         batch_size = optimizer_data.batch_size
         input_length = optimizer_data.input_length
         effective_input_length = optimizer_data.get_effective_input_length()
+        concurrency = batch_size * self.dp * self.pp
         if decode_flag:
             chunk_plan = []
             global_batched_token_limit = None
         else:
-            chunk_plan = optimizer_data.get_prefill_chunk_plan()
+            chunk_plan = optimizer_data.get_prefill_chunk_plan(
+                (concurrency + self.dp - 1) // self.dp if variable_input_mode else None
+            )
             global_batched_token_limit = self._get_global_batched_token_limit(optimizer_data)
+
+        prefill_num_chunks = optimizer_data.get_prefill_num_chunks(chunk_plan)
         output_length = optimizer_data.output_length
-        concurrency = batch_size * self.dp * self.pp
         prefill_ttft_sum_ms = None
         prefill_ttft_request_count = 0
         single_prefill_fits_budget = (
@@ -68,13 +72,62 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
 
         if decode_flag or variable_input_mode or single_prefill_fits_budget:
             if variable_input_mode:
-                batch_result, composition_rows = self._get_batched_forward_info(concurrency, optimizer_data)
+                chunk_results, composition_rows = self._get_batched_forward_info(
+                    concurrency,
+                    optimizer_data,
+                    chunk_plan,
+                )
+                latency_ms = optimizer_data.serving_cost
+                device_memory_available_gb = float("inf")
+                memory_info = None
+                breakdown_sums = {}
+                breakdown_counts = {}
+                prefill_ttft_sum_ms = 0.0
+                for batch_result, completed_requests in chunk_results:
+                    chunk_latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000
+                    latency_ms += chunk_latency_ms
+                    device_memory_available_gb = min(
+                        device_memory_available_gb,
+                        batch_result.device_memory_available_gb,
+                    )
+                    memory_info = select_tightest_memory_info((memory_info, build_memory_info(batch_result)))
+                    if batch_result.device_memory_available_gb < 0:
+                        break
+
+                    # Chunks execute sequentially, so requests completed by this chunk
+                    # observe the cumulative latency of this and all preceding chunks.
+                    prefill_ttft_sum_ms += completed_requests * latency_ms
+                    prefill_ttft_request_count += completed_requests
+
+                    for breakdown_name, breakdown in batch_result.breakdowns.items():
+                        total = sum(breakdown.values())
+                        if total == 0:
+                            continue
+                        normalized_breakdown = {}
+                        for category, value in breakdown.items():
+                            if isinstance(value, float):
+                                normalized_breakdown[category] = value / total
+                        if normalized_breakdown:
+                            accumulated = breakdown_sums.setdefault(breakdown_name, {})
+                            for category, value in normalized_breakdown.items():
+                                accumulated[category] = accumulated.get(category, 0.0) + value
+                            breakdown_counts[breakdown_name] = breakdown_counts.get(breakdown_name, 0) + 1
+
+                breakdowns = ""
+                if breakdown_sums:
+                    average_breakdowns = {
+                        breakdown_name: {
+                            category: value / breakdown_counts[breakdown_name] for category, value in breakdown.items()
+                        }
+                        for breakdown_name, breakdown in breakdown_sums.items()
+                    }
+                    breakdowns = format_breakdowns(average_breakdowns)
             else:
                 batch_result = self._get_forward_info(concurrency, optimizer_data, decode_flag)
-            latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000 + optimizer_data.serving_cost
-            device_memory_available_gb = batch_result.device_memory_available_gb
-            breakdowns = format_breakdowns(batch_result.breakdowns)
-            memory_info = build_memory_info(batch_result)
+                latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000 + optimizer_data.serving_cost
+                device_memory_available_gb = batch_result.device_memory_available_gb
+                breakdowns = format_breakdowns(batch_result.breakdowns)
+                memory_info = build_memory_info(batch_result)
         else:
             latency_ms = optimizer_data.serving_cost
             device_memory_available_gb = float("inf")
@@ -172,8 +225,13 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 total_input_tokens *= self.dp
             else:
                 total_input_tokens = concurrency * input_length
-            if prefill_ttft_sum_ms is not None and prefill_ttft_request_count == concurrency:
-                ttft = prefill_ttft_sum_ms / concurrency
+            expected_request_count = (
+                sum(composition_row["samples"] for composition_row in composition_rows)
+                if variable_input_mode
+                else concurrency
+            )
+            if prefill_ttft_sum_ms is not None and prefill_ttft_request_count == expected_request_count:
+                ttft = prefill_ttft_sum_ms / expected_request_count
             else:
                 # OOM/partial replay has no complete request-level TTFT average. Keep the
                 # phase latency for diagnostics; memory-based early stop takes precedence.
@@ -215,7 +273,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             output_length,
             effective_input_length,
             optimizer_data.max_batched_tokens,
-            len(chunk_plan),
+            prefill_num_chunks,
             concurrency,
             ttft,
             tpot,

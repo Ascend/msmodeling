@@ -14,6 +14,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from itertools import groupby
 from typing import Optional
 
 import pandas as pd
@@ -33,6 +34,7 @@ from .utils import (
     format_breakdowns,
     MAX_ITER_NUMS,
     OptimizerData,
+    PrefillChunk,
 )
 
 
@@ -538,11 +540,44 @@ class BaseThroughputOptimizer(ABC):
         return resolved_query_len, resolved_seq_len
 
     def _get_batched_forward_info(
-        self, concurrency: int, optimizer_data: OptimizerData
-    ) -> tuple[ModelRunnerMetrics, list[dict]]:
+        self,
+        concurrency: int,
+        optimizer_data: OptimizerData,
+        chunk_plan: Optional[list[PrefillChunk]] = None,
+    ) -> tuple[list[tuple[ModelRunnerMetrics, int]], list[dict]]:
         dp_size = self.model_runner.model.model_config.parallel_config.data_parallel_size
         concurrency = (concurrency + dp_size - 1) // dp_size
         composition_rows = optimizer_data.build_concurrency_samples(concurrency)
+
+        if chunk_plan is not None:
+            chunk_indices = [chunk.index for chunk in chunk_plan]
+            if chunk_indices:
+                expected_indices = list(range(max(chunk_indices) + 1))
+                actual_indices = list(dict.fromkeys(chunk_indices))
+                if chunk_indices != sorted(chunk_indices) or actual_indices != expected_indices:
+                    raise ValueError(f"chunk_plan indices must be contiguous and non-decreasing, got {chunk_indices}")
+
+            chunk_results = []
+            for _, chunks in groupby(chunk_plan, key=lambda chunk: chunk.index):
+                chunks = list(chunks)
+                requests = [
+                    RequestInfo(
+                        query_len=chunk.query_len,
+                        seq_len=chunk.seq_len,
+                        is_decode=False,
+                        num_output_tokens=optimizer_data.output_length,
+                    )
+                    for chunk in chunks
+                ]
+                metrics = self.model_runner.run_inference(
+                    requests,
+                    generate_inputs_func=generate_inputs_varlen,
+                )
+                completed_requests = sum(chunk.is_last_chunk for chunk in chunks)
+                chunk_results.append((metrics, completed_requests))
+                if metrics.device_memory_available_gb < 0:
+                    break
+            return chunk_results, composition_rows
 
         requests = []
         for row in composition_rows:
@@ -559,5 +594,6 @@ class BaseThroughputOptimizer(ABC):
                 )
 
         metrics = self.model_runner.run_inference(requests, generate_inputs_func=generate_inputs_varlen)
+        completed_requests = sum(row["samples"] for row in composition_rows)
 
-        return metrics, composition_rows
+        return [(metrics, completed_requests)], composition_rows

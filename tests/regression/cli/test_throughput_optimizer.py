@@ -509,41 +509,6 @@ class TestThroughputOptimizer(TestCase):
             with self.assertRaises(SystemExit):
                 throughput_optimizer_module.arg_parse()
 
-    def test_main_length_distribution_mode_rejects_aggregation_mode(self):
-        from cli.inference import throughput_optimizer as throughput_optimizer_module
-
-        class DummyArgs:
-            log_level = "error"
-            model_id = "test-model"
-            device = ["TEST_DEVICE"]
-            num_devices = 1
-            input_length = LENGTH_DISTRIBUTION_PATH
-            word_embedding_tp = None
-            output_length = 16
-            prefix_cache_hit_rate = 0.0
-            max_batched_tokens = 8192
-            num_mtp_tokens = 0
-            num_mtp_token_sizes = []
-            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
-            disagg = False
-            enable_optimize_prefill_decode_ratio = False
-            compilation_config = None
-
-        mock_tasks = Mock()
-        mock_tasks.run_agg.return_value = []
-
-        with (
-            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
-            patch.object(
-                throughput_optimizer_module,
-                "check_device_targets",
-                return_value=DummyArgs.device,
-            ),
-            patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks),
-        ):
-            self.assertEqual(throughput_optimizer_module.main(), 1)
-            mock_tasks.run_agg.assert_not_called()
-
     def test_main_length_distribution_mode_rejects_decode_only_disagg(self):
         from cli.inference import throughput_optimizer as throughput_optimizer_module
 
@@ -719,95 +684,6 @@ class TestThroughputOptimizer(TestCase):
                 throughput_optimizer_module,
                 "load_length_distribution",
                 side_effect=ValueError("bad distribution"),
-            ),
-            patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks),
-        ):
-            self.assertEqual(throughput_optimizer_module.main(), 1)
-            mock_tasks.run_disagg.assert_not_called()
-
-    def test_main_rejects_length_distribution_when_auto_max_batched_candidates_are_empty(self):
-        from cli.inference import throughput_optimizer as throughput_optimizer_module
-        from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
-
-        class DummyArgs:
-            log_level = "error"
-            model_id = "test-model"
-            device = ["TEST_DEVICE"]
-            num_devices = 1
-            input_length = LENGTH_DISTRIBUTION_PATH
-            word_embedding_tp = None
-            output_length = 16
-            prefix_cache_hit_rate = 0.0
-            max_batched_tokens = None
-            num_mtp_tokens = 0
-            num_mtp_token_sizes = []
-            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
-            ttft_limits = 1000
-            tpot_limits = None
-            disagg = True
-            enable_optimize_prefill_decode_ratio = False
-            compilation_config = None
-
-        loaded_distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=500, weight=1.0)])
-        mock_tasks = Mock()
-        mock_tasks.run_disagg.return_value = []
-
-        with (
-            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
-            patch.object(
-                throughput_optimizer_module,
-                "check_device_targets",
-                return_value=DummyArgs.device,
-            ),
-            patch.object(
-                throughput_optimizer_module,
-                "load_length_distribution",
-                return_value=loaded_distribution,
-            ),
-            patch.object(OptimizerData, "get_auto_max_batched_tokens_candidates", return_value=[]),
-            patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks),
-        ):
-            self.assertEqual(throughput_optimizer_module.main(), 1)
-            mock_tasks.run_disagg.assert_not_called()
-
-    def test_main_rejects_length_distribution_with_chunked_prefill(self):
-        from cli.inference import throughput_optimizer as throughput_optimizer_module
-        from serving_cast.service.utils import LengthBin, LengthDistribution
-
-        class DummyArgs:
-            log_level = "error"
-            model_id = "test-model"
-            device = ["TEST_DEVICE"]
-            num_devices = 1
-            input_length = LENGTH_DISTRIBUTION_PATH
-            word_embedding_tp = None
-            output_length = 16
-            prefix_cache_hit_rate = 0.0
-            num_mtp_tokens = 0
-            num_mtp_token_sizes = []
-            mtp_acceptance_rate = [0.9, 0.6, 0.4, 0.2]
-            ttft_limits = 1000
-            tpot_limits = None
-            disagg = True
-            enable_optimize_prefill_decode_ratio = False
-            max_batched_tokens = 64
-            compilation_config = None
-
-        loaded_distribution = LengthDistribution(bins=[LengthBin(min_tokens=0, max_tokens=500, weight=1.0)])
-        mock_tasks = Mock()
-        mock_tasks.run_disagg.return_value = []
-
-        with (
-            patch.object(throughput_optimizer_module, "arg_parse", return_value=DummyArgs()),
-            patch.object(
-                throughput_optimizer_module,
-                "check_device_targets",
-                return_value=DummyArgs.device,
-            ),
-            patch.object(
-                throughput_optimizer_module,
-                "load_length_distribution",
-                return_value=loaded_distribution,
             ),
             patch("serving_cast.parallel_runner.ParallelRunner", return_value=mock_tasks),
         ):

@@ -385,7 +385,7 @@ class OptimizerSummary:
             final_out.append(f"    TPOT: {best_result['tpot']:.2f} ms")
         final_out.append("  " + "-" * 76)
 
-        table_buf = _get_disagg_table_buf_batched(final_df)
+        table_buf = _get_agg_disagg_table_buf_batched(final_df, args.disagg)
         final_out.append(table_buf)
         final_out.append("*" * 80)
 
@@ -615,14 +615,15 @@ def _get_disagg_table_buf(df: pd.DataFrame, output_length: Optional[int] = None)
     return "\n".join(table_buf)
 
 
-def _get_disagg_table_buf_batched(df: pd.DataFrame):
+def _get_agg_disagg_table_buf_batched(df: pd.DataFrame, is_disagg: bool):
     aggregate_mask = df["num_input_tokens"].astype(str) == "all"
     show_len = int(aggregate_mask.sum())
     table_buf = []
     table = PrettyTable()
 
-    table_buf.append(f"Top {show_len} Disaggregation (Prefill) Configurations: ")
-    table.field_names = [
+    title = "Disaggregation (Prefill)" if is_disagg else "Aggregation"
+    table_buf.append(f"Top {show_len} {title} Configurations: ")
+    field_names = [
         "Top",
         "num_devices",
         "num_input_tokens",
@@ -634,6 +635,9 @@ def _get_disagg_table_buf_batched(df: pd.DataFrame):
         "parallel",
         "batch_size",
     ]
+    if not is_disagg:
+        field_names.insert(field_names.index(TTFT_COLUMN) + 1, TPOT_COLUMN)
+    table.field_names = field_names
 
     def _format_value(value, fmt: str = None):
         if pd.isna(value):
@@ -647,25 +651,21 @@ def _get_disagg_table_buf_batched(df: pd.DataFrame):
         is_aggregate = str(row.get("num_input_tokens", "-")) == "all"
         if is_aggregate:
             top_idx += 1
-        throughput = _format_value(row["token/s"], "\033[1m{:.2f}\033[0m")
-        latency = _format_value(row["ttft"], "{:.2f}")
-        request_ratio = _format_value(row.get("request_ratio"), "{:.3f}")
-        samples = _format_value(row.get("samples"))
-
-        table.add_row(
-            [
-                top_idx if is_aggregate else "-",
-                row["num_devices"],
-                row.get("num_input_tokens", "-"),
-                request_ratio,
-                samples,
-                row["concurrency"],
-                latency,
-                throughput,
-                row["parallel"],
-                row["batch_size"],
-            ]
-        )
+        row_data = [
+            top_idx if is_aggregate else "-",
+            row["num_devices"],
+            row.get("num_input_tokens", "-"),
+            _format_value(row.get("request_ratio"), "{:.3f}"),
+            _format_value(row.get("samples")),
+            row["concurrency"],
+            _format_value(row["ttft"], "{:.2f}"),
+            _format_value(row["token/s"], "\033[1m{:.2f}\033[0m"),
+            row["parallel"],
+            row["batch_size"],
+        ]
+        if not is_disagg:
+            row_data.insert(field_names.index(TPOT_COLUMN), _format_value(row["tpot"], "{:.2f}"))
+        table.add_row(row_data)
 
     table_buf.append(table.get_string())
     return "\n".join(table_buf)

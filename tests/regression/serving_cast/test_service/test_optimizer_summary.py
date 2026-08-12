@@ -10,8 +10,8 @@ from serving_cast.service.optimizer_summary import (
     OptimizerSummary,
     _fmt_memory,
     _fmt_memory_info,
+    _get_agg_disagg_table_buf_batched,
     _get_agg_table_buf,
-    _get_disagg_table_buf_batched,
 )
 from serving_cast.service.utils import OptimizerData
 
@@ -521,6 +521,73 @@ class TestMixedBatchOptimizerSummary(unittest.TestCase):
             ["*" * 80, "No configurations satisfy the current TTFT/TPOT filters.", "*" * 80],
         )
 
+    def test_report_final_result_renders_batched_aggregation_rows(self):
+        self.data_config.tpot_limits = 10.0
+        test_df = pd.DataFrame(
+            [
+                {
+                    "device_name": "TEST_DEVICE",
+                    "num_devices": 4,
+                    "model_id": "test-model",
+                    "quantize_linear_action": "DISABLED",
+                    "quantize_attention_action": "DISABLED",
+                    "input_length": None,
+                    "num_input_tokens": "all",
+                    "output_length": 50,
+                    "request_ratio": 1.0,
+                    "samples": 4,
+                    "concurrency": 4,
+                    "ttft": 100.0,
+                    "tpot": 5.0,
+                    "token/s": 2000.0,
+                    "token/s/device": 500.0,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "percentage_breakdowns(p)": "prefill:100%",
+                    "percentage_breakdowns(d)": "decode:100%",
+                },
+                {
+                    "device_name": "TEST_DEVICE",
+                    "num_devices": 4,
+                    "model_id": "test-model",
+                    "quantize_linear_action": "DISABLED",
+                    "quantize_attention_action": "DISABLED",
+                    "input_length": None,
+                    "num_input_tokens": 250,
+                    "output_length": 50,
+                    "request_ratio": 0.25,
+                    "samples": 1,
+                    "concurrency": 4,
+                    "ttft": None,
+                    "tpot": None,
+                    "token/s": None,
+                    "token/s/device": None,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                    "percentage_breakdowns(p)": None,
+                    "percentage_breakdowns(d)": None,
+                },
+            ]
+        )
+        self.summary.set_summary_df(test_df)
+
+        class Args:
+            model_id = "test-model"
+            num_devices = 4
+            device = "TEST_DEVICE"
+            dump_original_results = False
+            quantize_linear_action = "DISABLED"
+            quantize_attention_action = "DISABLED"
+            disagg = False
+            input_length = "serving_cast/example/length_distribution.yaml"
+
+        result = self.summary._get_agg_disagg_final_out(Args())
+        result_str = "\n".join(result)
+        self.assertIn("Top 1 Aggregation Configurations:", result_str)
+        self.assertIn("TPOT (ms)", result_str)
+        self.assertIn("num_input_tokens", result_str)
+        self.assertNotIn("Disaggregation (Prefill)", result_str)
+
     def test_expand_composition_rows_keeps_aggregate_first_then_detail_sorted_by_tokens(self):
         test_df = pd.DataFrame(
             [
@@ -564,7 +631,7 @@ class TestMixedBatchOptimizerSummary(unittest.TestCase):
 
         self.assertEqual(list(expanded_df["num_input_tokens"]), ["all", 250, 1000])
 
-    def test_get_disagg_table_buf_batched_numbers_only_aggregate_rows(self):
+    def test_get_agg_disagg_table_buf_batched_numbers_only_aggregate_rows(self):
         df = pd.DataFrame(
             [
                 {
@@ -614,12 +681,74 @@ class TestMixedBatchOptimizerSummary(unittest.TestCase):
             ]
         )
 
-        result = _get_disagg_table_buf_batched(df)
+        result = _get_agg_disagg_table_buf_batched(df, is_disagg=True)
 
         self.assertIn("Top 2 Disaggregation (Prefill) Configurations:", result)
         self.assertIn("|  1  |", result)
         self.assertIn("|  2  |", result)
         self.assertIn("|  -  |", result)
+
+    def test_get_agg_disagg_table_buf_batched_renders_aggregation_rows(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "num_devices": 4,
+                    "num_input_tokens": "all",
+                    "request_ratio": 1.0,
+                    "samples": 4,
+                    "concurrency": 4,
+                    "ttft": 100.0,
+                    "tpot": 5.0,
+                    "token/s": 2000.0,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                },
+                {
+                    "num_devices": 4,
+                    "num_input_tokens": 250,
+                    "request_ratio": 0.25,
+                    "samples": 1,
+                    "concurrency": 4,
+                    "ttft": None,
+                    "tpot": None,
+                    "token/s": None,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                },
+            ]
+        )
+
+        result = _get_agg_disagg_table_buf_batched(df, is_disagg=False)
+
+        self.assertIn("Top 1 Aggregation Configurations:", result)
+        self.assertIn("TPOT (ms)", result)
+        self.assertIn("5.00", result)
+
+    def test_get_agg_disagg_table_buf_batched_controls_tpot_column(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "num_devices": 4,
+                    "num_input_tokens": "all",
+                    "request_ratio": 1.0,
+                    "samples": 4,
+                    "concurrency": 4,
+                    "ttft": 100.0,
+                    "tpot": 5.0,
+                    "token/s": 2000.0,
+                    "parallel": "TP=1 | PP=1 | DP=4",
+                    "batch_size": 1,
+                },
+            ]
+        )
+
+        agg_result = _get_agg_disagg_table_buf_batched(df, is_disagg=False)
+        disagg_result = _get_agg_disagg_table_buf_batched(df, is_disagg=True)
+
+        self.assertIn("Top 1 Aggregation Configurations:", agg_result)
+        self.assertIn("TPOT (ms)", agg_result)
+        self.assertIn("Top 1 Disaggregation (Prefill) Configurations:", disagg_result)
+        self.assertNotIn("TPOT (ms)", disagg_result)
 
 
 if __name__ == "__main__":
