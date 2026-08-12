@@ -101,6 +101,16 @@ def _cache_dir_configured() -> bool:
 
 
 def pytest_sessionstart(session) -> None:
+    # Non-root umask 0002 yields group-writable checkout/tmp trees; keep product
+    # security checks strict and make the test process create compliant paths.
+    from tests.helpers.local_model_path_permissions import (
+        apply_test_safe_umask,
+        harden_vendored_model_config_assets,
+    )
+
+    apply_test_safe_umask()
+    harden_vendored_model_config_assets(Path(__file__).resolve().parent)
+
     _apply_hub_offline_env()
     if not _cache_dir_configured():
         return

@@ -171,6 +171,8 @@ class TestVideoGeneration(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _create_mock_model_dir(self, transformer_config, vae_config):
+        from tests.helpers.local_model_path_permissions import harden_local_model_tree
+
         temp_dir = tempfile.mkdtemp(dir=os.path.realpath(os.getcwd()))
         model_dir = os.path.join(temp_dir, "mock_model")
         os.makedirs(model_dir, exist_ok=True)
@@ -194,6 +196,8 @@ class TestVideoGeneration(unittest.TestCase):
         os.makedirs(vae_dir, exist_ok=True)
         with open(os.path.join(vae_dir, "config.json"), "w", encoding="utf-8") as f:
             json.dump(vae_config, f)
+        # tempfile/makedirs honor process umask; keep mock trees security-check safe.
+        harden_local_model_tree(model_dir)
         return temp_dir, model_dir
 
     def _validate_inference_result(self, test_name: str = ""):
