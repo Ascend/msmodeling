@@ -17,6 +17,7 @@ from tensor_cast.device import DeviceProfile
 from .service.optimizer_factory import OptimizerFactory
 from .service.optimizer_summary import OptimizerSummary
 from .service.pd_ratio_throughput_optimizer import PDRatioThroughputOptimizer
+from .service.workload_cache import WorkloadCache, WorkloadReuseModelRunner
 from .service.utils import (
     DEFAULT_MAX_SEARCH_COMBINATIONS,
     LIMIT_COUNT,
@@ -38,6 +39,7 @@ class ParallelRunner:
         args: argparse.Namespace,
         executor_class: Optional[Type[Executor]] = None,
         worker_initializer: Optional[Callable] = None,
+        workload_cache: WorkloadCache | None = None,
     ) -> None:
         """Initializes the optimizer with device configuration and execution backend.
 
@@ -67,6 +69,7 @@ class ParallelRunner:
 
         self._executor_class = executor_class or ProcessPoolExecutor
         self._worker_initializer = worker_initializer or self._init_worker
+        self._workload_cache = workload_cache
 
         self.summary_result = []
         max_batched_tokens = getattr(self.args, "max_batched_tokens", None)
@@ -410,9 +413,23 @@ class ParallelRunner:
 
         logger.info("Start processing TP size: %d", user_input.tp_size)
 
-        model_runner = self._get_model_runnner(user_input)
-        if model_runner is None:
-            return None
+        if self._workload_cache is None:
+            model_runner = self._get_model_runnner(user_input)
+            if model_runner is None:
+                return None
+        else:
+            model_key = self._workload_cache.make_model_key(user_input)
+            capture_runner = None
+            if self._workload_cache.get_template(model_key) is None:
+                capture_runner = self._get_model_runnner(user_input)
+                if capture_runner is None:
+                    return None
+            model_runner = WorkloadReuseModelRunner(
+                user_input=user_input,
+                workload_cache=self._workload_cache,
+                model_key=model_key,
+                capture_runner=capture_runner,
+            )
 
         task_optimizer_data = copy.deepcopy(overwrite_optimizer_data)
         task_optimizer_data.num_mtp_tokens = user_input.num_mtp_tokens

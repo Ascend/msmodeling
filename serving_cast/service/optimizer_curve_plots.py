@@ -563,35 +563,52 @@ def run_multi_device_loop(
     plot_curves_allowed: bool,
     logger: logging.Logger,
 ) -> MultiDeviceComparisonRows:
-    """Run ParallelRunner per device and collect cross-hardware rows."""
+    """Run each device profile and collect cross-hardware rows.
+
+    A manager-hosted coordinator shares frozen workload traces between the
+    existing process-pool workers when two or more profiles are requested.
+    The optimizer's ``--jobs`` parallelism is deliberately unchanged.
+    """
     from serving_cast.parallel_runner import ParallelRunner
+    from serving_cast.service.workload_cache import create_workload_cache_manager
 
     rows = MultiDeviceComparisonRows()
     multi_hw = len(device_targets) > 1
+    cache_manager = None
+    workload_cache = None
+    if multi_hw:
+        cache_manager, workload_cache = create_workload_cache_manager(estimate_jobs=args.jobs)
 
-    for profile_name in device_targets:
-        run_args = copy(args)
-        run_args.device = profile_name
-        logger.info("Hardware profile: %s", profile_name)
-        tasks = ParallelRunner(run_args)
+    try:
+        for profile_name in device_targets:
+            run_args = copy(args)
+            run_args.device = profile_name
+            logger.info("Hardware profile: %s", profile_name)
+            tasks = ParallelRunner(run_args, workload_cache=workload_cache)
 
-        results = (
-            tasks.run_agg()
-            if not run_args.enable_optimize_prefill_decode_ratio and not run_args.disagg
-            else tasks.run_disagg()
-        )
-
-        for res in results:
-            res.report_final_result(run_args, silent=False)
-            if multi_hw:
-                _collect_cross_hardware_row(rows, res, profile_name, run_args)
-
-        if plot_curves_allowed:
-            _plot_single_device_optimizer_curves(
-                results,
-                run_args,
-                basename_prefix=f"{profile_name}_{run_args.model_id}",
+            results = (
+                tasks.run_agg()
+                if not run_args.enable_optimize_prefill_decode_ratio and not run_args.disagg
+                else tasks.run_disagg()
             )
+
+            for res in results:
+                res.report_final_result(run_args, silent=False)
+                if multi_hw:
+                    _collect_cross_hardware_row(rows, res, profile_name, run_args)
+
+            if plot_curves_allowed:
+                _plot_single_device_optimizer_curves(
+                    results,
+                    run_args,
+                    basename_prefix=f"{profile_name}_{run_args.model_id}",
+                )
+
+        if workload_cache is not None:
+            logger.info(workload_cache.summary())
+    finally:
+        if cache_manager is not None:
+            cache_manager.shutdown()
 
     return rows
 

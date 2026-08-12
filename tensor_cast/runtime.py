@@ -357,11 +357,20 @@ class Runtime(TorchDispatchMode):
             self._record_single_memory_invocation(event.op_invoke_info, reference_id)
 
     def replay_op_invoke_infos(self):
+        self.replay_flat_op_invoke_infos(self._iter_flat_invocations())
+
+    def replay_flat_op_invoke_infos(self, invocations: List[tuple[OpInvokeInfo, int]]) -> None:
+        """Replay already-flattened invocations with their region reference ids.
+
+        A frozen workload trace carries the flattened representation instead of
+        live ``Region`` and tensor objects.  Keeping this entry point on
+        ``Runtime`` lets that trace use the existing estimator and memory
+        tracker without making the trace depend on Runtime internals.
+        """
         self._pending_wait_stream_id = None
         self._pending_wait_dependency_token_ids.clear()
         self.event_list.clear()
         self._event_reference_ids.clear()
-        invocations = self._iter_flat_invocations()
         for op_invoke_info, reference_id in invocations:
             num_events_before_replay = len(self.event_list)
             self._replay_single_op(op_invoke_info)

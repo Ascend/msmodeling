@@ -63,32 +63,7 @@ class ModelRunner:
         logger.debug("Device profile loaded: %s", self.device_profile)
 
         logger.info("Initializing performance model")
-        perf_model_types: List[str] = getattr(user_input, "performance_model", ["analytic"])
-        profiling_database = getattr(user_input, "profiling_database", None)
-
-        self.perf_models: List[PerformanceModel] = []
-        for perf_model_type in perf_model_types:
-            if perf_model_type == "profiling":
-                # Exact match against pre-collected Profiling CSV database
-                if not profiling_database:
-                    raise ValueError("--profiling-database must be specified when using --performance-model profiling")
-                data_source = ProfilingDataSource(
-                    profiling_database,
-                    self.device_profile,
-                    parallel_config=user_input.get_parallel_config(),
-                )
-                if not getattr(user_input, "disable_profiling_interpolation", False):
-                    data_source = InterpolatingDataSource(data_source)
-                self.perf_models.append(
-                    EmpiricalPerformanceModel(
-                        self.device_profile,
-                        data_source=data_source,
-                        fallback_model=AnalyticPerformanceModel(self.device_profile),
-                    )
-                )
-            elif perf_model_type == "analytic":
-                # Default: analytic (Roofline)
-                self.perf_models.append(AnalyticPerformanceModel(self.device_profile))
+        self.perf_models = self.create_performance_models(user_input, self.device_profile)
         logger.debug("Performance models initialized: %s", self.perf_models)
 
         #  ---------- 2. generate default request from user config----------
@@ -112,6 +87,43 @@ class ModelRunner:
         logger.info("Initializing Sampler")
         self.sampler = Sampler()
         logger.debug("Sampler initialized: %s", self.sampler)
+
+    @staticmethod
+    def create_performance_models(
+        user_input: "UserInputConfig",
+        device_profile: DeviceProfile,
+    ) -> List["PerformanceModel"]:
+        """Create performance models without building a model graph.
+
+        Workload-reuse callers use this factory to bind an already captured runtime
+        workload to another device profile. Keeping the construction here ensures
+        the replay path uses exactly the same analytic/profiling setup as
+        ``ModelRunner``'s direct path.
+        """
+        perf_model_types: List[str] = getattr(user_input, "performance_model", ["analytic"])
+        profiling_database = getattr(user_input, "profiling_database", None)
+        perf_models: List[PerformanceModel] = []
+        for perf_model_type in perf_model_types:
+            if perf_model_type == "profiling":
+                if not profiling_database:
+                    raise ValueError("--profiling-database must be specified when using --performance-model profiling")
+                data_source = ProfilingDataSource(
+                    profiling_database,
+                    device_profile,
+                    parallel_config=user_input.get_parallel_config(),
+                )
+                if not getattr(user_input, "disable_profiling_interpolation", False):
+                    data_source = InterpolatingDataSource(data_source)
+                perf_models.append(
+                    EmpiricalPerformanceModel(
+                        device_profile,
+                        data_source=data_source,
+                        fallback_model=AnalyticPerformanceModel(device_profile),
+                    )
+                )
+            elif perf_model_type == "analytic":
+                perf_models.append(AnalyticPerformanceModel(device_profile))
+        return perf_models
 
     def _check_peak_memory_usage_gb(
         self,

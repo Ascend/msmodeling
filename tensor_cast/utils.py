@@ -1,7 +1,9 @@
 import fnmatch
 import logging
 import re
-from typing import List, Optional, Union
+import threading
+from contextlib import contextmanager
+from typing import Iterator, List, Optional, Union
 
 import torch
 from transformers.utils.quantization_config import (
@@ -133,25 +135,36 @@ class EquivalentKeyManager:
         self.parent = {}
         # Map each root key to its creation order (for determining oldest root)
         self.root_order = {}
+        # Replay scopes must not mutate the process-global mappings.  A
+        # thread-local overlay keeps concurrent workload replays independent
+        # while preserving the existing public ``parent``/``root_order`` maps
+        # for normal model recording.
+        self._local = threading.local()
+
+    def _state(self):
+        state = getattr(self._local, "state", None)
+        return state if state is not None else (self.parent, self.root_order)
 
     def _find(self, key):
         """Find the root of the key with path compression."""
-        if key not in self.parent:
+        parent, _ = self._state()
+        if key not in parent:
             raise KeyError(f"Key '{key}' not found in EquivalentKeyManager")
-        if self.parent[key] != key:
-            self.parent[key] = self._find(self.parent[key])
-        return self.parent[key]
+        if parent[key] != key:
+            parent[key] = self._find(parent[key])
+        return parent[key]
 
     def add_equivalent_keys(self, keys):
         """Add a list of equivalent keys to the same group."""
         if not keys:
             return
 
+        parent, root_order = self._state()
         # Ensure all keys are in the parent map
         for key in keys:
-            if key not in self.parent:
-                self.parent[key] = key
-                self.root_order[key] = len(self.root_order)
+            if key not in parent:
+                parent[key] = key
+                root_order[key] = len(root_order)
 
         # Collect all unique roots of the keys
         roots = set()
@@ -159,17 +172,38 @@ class EquivalentKeyManager:
             roots.add(self._find(key))
 
         # Find the oldest root (smallest order)
-        oldest_root = min(roots, key=lambda r: self.root_order[r])
+        oldest_root = min(roots, key=lambda r: root_order[r])
 
         # Union all roots to the oldest root
         for root in roots:
             if root != oldest_root:
-                self.parent[root] = oldest_root
+                parent[root] = oldest_root
                 # Remove old root from root_order as it's no longer a root
-                del self.root_order[root]
+                del root_order[root]
+
+    @contextmanager
+    def scoped_aliases(self) -> Iterator[None]:
+        """Temporarily add equivalence mappings without leaking them to later runs.
+
+        Region aliases are normally built while a single model forward is being
+        recorded. A frozen workload replay creates short-lived meta tensors,
+        whose object ids must not remain in this process-global manager after
+        the replay finishes.
+        """
+        previous_state = getattr(self._local, "state", None)
+        parent, root_order = self._state()
+        self._local.state = (parent.copy(), root_order.copy())
+        try:
+            yield
+        finally:
+            if previous_state is None:
+                del self._local.state
+            else:
+                self._local.state = previous_state
 
     def get_group_root_key(self, key):
         """Get the root key of the group containing the given key."""
-        if key not in self.parent:
+        parent, _ = self._state()
+        if key not in parent:
             return None
         return self._find(key)
