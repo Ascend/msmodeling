@@ -7,7 +7,8 @@
 | **状态**     | 已批准                              |
 | **作者**     | —                                   |
 | **创建日期** | 2026-07-25                          |
-| **相关链接** | TensorCast 适配 MiniMax-M3 设计文档 |
+| **最后更新日期** | 2026-08-06                      |
+| **相关链接** | [TensorCast 适配 MiniMax-M3 设计文档](../design/minimax_m3_adaptation_design.md) |
 
 ## 1. 概述
 
@@ -377,8 +378,25 @@ attn_mma = 4 * N_q * attended_pairs * D
 attn_gp = 6 * N_q * attended_pairs
 qo_bytes = 2 * dtype_size * T * N_q * D
 topk_bytes = 4 * T * N_kv * K
-kv_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
+kv_read_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
 ```
+
+变量：
+
+| 变量 | 含义 | 量纲 |
+| :--- | :--- | :--- |
+| `N_q` | query head 数 | head |
+| `N_kv` | KV head 数 | head |
+| `T` | 当前 batch 中 query token 总数，即 `sum_b(Q_b)` | token |
+| `D` | attention head dim | hidden dim |
+| `K` | 每个 query 选择的 top-k KV block 数 | block |
+| `attended_tokens_q` | 单个 query 实际可见/参与 attention 的 token 数 | token |
+| `attended_pairs` | 全部 query 的语义 attention pair 总数，即 `sum_q(attended_tokens_q)` | token pair |
+| `effective_attended_pairs` | 考虑 prefill kernel 内 KV block 复用后的有效 KV 读取 pair 数 | token pair |
+| `dtype_size` | query/KV/output 数据类型的字节数 | byte |
+| `B_n` | 可见 block 数，`ceil(L_b / block_size)` | block |
+| `B_s` | sparse attention block size，即每个 KV block 包含的 token 数 | token/block |
+| `context_len` | 当前 request 的上下文长度，与变量表中的 `L_b` 同义 | token |
 
 其中当前 KV read 计算公式为：
 
@@ -394,7 +412,7 @@ if _minimax_m3_is_prefill_request(Q_b, request_idx, is_decode_values):
 else:
     effective_attended_pairs = min(K * B_s, L_b)
 
-kv_read_bytes = 2 * s * effective_attended_pairs * N_kv * D
+kv_read_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
 ```
 
 ---
@@ -445,7 +463,10 @@ kv_read_bytes = 2 * s * effective_attended_pairs * N_kv * D
 MiniMax3 依赖新版 Transformers 中的原生 `minimax_m3_vl` 源码，因此依赖约束需要提升到：
 
 ```text
+Python>=3.10
+torch>=2.5.0
 transformers>=5.13.0,<5.14.0
+CANN/Ascend 驱动：需与目标 Ascend NPU 软件栈配套，建议使用项目 CI 或部署环境已验证版本
 ```
 
 升级后部分模型如 `deepseek_v32/deepseek_v4/mimo_v2_flash` 已被 Transformers 内置，需要 safe register 兼容，避免重复 `AutoConfig.register` 报错。
@@ -454,6 +475,17 @@ MiniMax3 sparse attention 配置解析同时兼容：
 
 - 旧式 `layer_types`、`index_n_heads`、`index_head_dim`、`index_topk_blocks`、`index_block_size`、`index_local_blocks`。
 - 新式 `sparse_attention_config.sparse_attention_freq`、`sparse_num_index_heads`、`sparse_index_dim`、`sparse_topk_blocks`、`sparse_block_size`、`sparse_local_block`。
+
+新式 `sparse_attention_config` 字段约束如下：
+
+| 字段 | 类型 | 默认值/回退 | 是否必填 | 取值约束 |
+| :--- | :--- | :--- | :--- | :--- |
+| `sparse_attention_freq` | `int` | 回退到 `layer_types` 推导 | 否 | 大于 0 时表示 sparse layer 出现频率；缺失时使用旧式逐层配置 |
+| `sparse_num_index_heads` | `int` | 回退到 `index_n_heads` | 是 | 正整数，表示 indexer query/key head 数 |
+| `sparse_index_dim` | `int` | 回退到 `index_head_dim` | 是 | 正整数，表示 indexer head dim |
+| `sparse_topk_blocks` | `int` | 回退到 `index_topk_blocks` | 是 | 正整数，表示每个 query 选择的 KV block 数 |
+| `sparse_block_size` | `int` | 回退到 `index_block_size` | 是 | 正整数，单位为 token；用于计算可见 block 数 |
+| `sparse_local_block` | `int` | 回退到 `index_local_blocks` | 否 | 非负整数，表示强制保留的局部 block 数 |
 
 ---
 
@@ -556,15 +588,6 @@ python -m cli.inference.text_generate MiniMaxAI/MiniMax-M3 \
 
 ---
 
-## 10. 未解决问题
-
-1. Ascend sparse attention 内部 kernel 的精确 KV 复用策略尚未完全从公开源码确认。
-2. `minimax_sparse_attention` 与不同实测 kernel 组合的映射口径需要在 op_mapping 文档中进一步固化。
-3. 长上下文 prefill 下 indexer/sparse attention 的误差仍需要更多 case 校准。
-4. 当前 MTP sparse attention 通过继承最后一层 sparse 配置避免 wrapper 漏替换；是否需要为 MTP 单独建立更细的 op_mapping 或性能校准，需要后续结合实测确认。
-
----
-
 ## 附录 A：术语表
 
 | 术语 | 含义 |
@@ -576,5 +599,10 @@ python -m cli.inference.text_generate MiniMaxAI/MiniMax-M3 \
 | `siso_reshape_and_cache` | single-input single-output cache 写入 op，用于 index K cache |
 | `minimax_indexer` | TensorCast MiniMax3 语义 op，覆盖 block score 和 TopK 选择 |
 | `minimax_sparse_attention` | TensorCast MiniMax3 语义 op，覆盖 sparse QK/PV/softmax body |
+| MTP | Multi-Token Prediction，多 token 预测层；MiniMax-M3 的 MTP 层需要继承主干层 dense/sparse 配置以保持 wrapper 替换一致 |
+| Roofline | 屋顶线性能模型，用计算量、访存量和硬件峰值估算算子性能上界 |
+| FakeTensor/meta tensor | PyTorch 编译或 meta 执行中的无真实数据张量；只携带 shape/dtype，可能缺失真实序列长度 |
+| SinkSplitPass | TensorCast 中用于把特定 binary/activation 消费者从上游融合结构中拆分出来的图改写 pass |
+| grouped matmul | MoE expert 场景中按专家分组执行的矩阵乘，用于批量处理不同 expert 的 token |
 | OAI SwiGLU | MiniMax3 使用的 SwiGLU 变体，带 `alpha/limit` 参数 |
 | Gemma RMSNorm | 有效权重为 `1 + weight` 的 RMSNorm 语义 |

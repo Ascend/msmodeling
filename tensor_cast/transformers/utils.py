@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import contextlib
+import importlib
 import logging
 import os
 import torch
@@ -299,14 +300,6 @@ class AutoModelConfigLoader:
         # platforms that support it), which blocks headless simulation runs.
         try:
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=False)
-            self.is_transformers_natively_supported = True
-            if getattr(hf_config, "model_type", None) == "kimi_k25":
-                hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-                self.is_transformers_natively_supported = False
-            elif getattr(hf_config, "model_type", None) == "mimo_v2_flash":
-                from .builtin_model.mimo_v2_flash_hf.configuration_mimo_v2_flash import MiMoV2FlashConfig
-
-                hf_config = MiMoV2FlashConfig.from_dict(hf_config.to_dict())
         except Exception:
             hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 
@@ -318,12 +311,39 @@ class AutoModelConfigLoader:
                 logger.warning("Using a model of type %s to instantiate again.", real_type)
                 hf_config = AutoConfig.for_model(real_type).from_dict(hf_config.to_dict())
                 self.is_transformers_natively_supported = True
+        else:
+            self.is_transformers_natively_supported = True
+            if getattr(hf_config, "model_type", None) == "kimi_k25":
+                hf_config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+                self.is_transformers_natively_supported = False
+            elif getattr(hf_config, "model_type", None) == "mimo_v2_flash":
+                from .builtin_model.mimo_v2_flash_hf.configuration_mimo_v2_flash import MiMoV2FlashConfig
+
+                hf_config = MiMoV2FlashConfig.from_dict(hf_config.to_dict())
+            elif getattr(hf_config, "model_type", None) == "deepseek_v4":
+                hf_config = self._load_builtin_deepseek_v4_config(hf_config)
 
         logger.info(
             "is_transformers_natively_supported = %s",
             self.is_transformers_natively_supported,
         )
         return hf_config
+
+    @staticmethod
+    def _load_builtin_deepseek_v4_config(hf_config: PretrainedConfig) -> PretrainedConfig:
+        try:
+            module = importlib.import_module(".builtin_model.deepseek_v4", package=__package__)
+            deepseek_v4_config_cls = getattr(module, "DeepseekV4Config")
+        except (ImportError, AttributeError) as error:
+            message = (
+                "DeepSeek V4 native config was detected, but TensorCast builtin DeepseekV4Config "
+                "could not be imported. This usually indicates an incomplete checkout or an "
+                "inconsistent builtin model path; refusing to silently fall back to remote code."
+            )
+            logger.error(message)
+            raise ImportError(message) from error
+        logger.info("Converting Transformers deepseek_v4 config to TensorCast builtin DeepseekV4Config.")
+        return deepseek_v4_config_cls.from_dict(hf_config.to_dict())
 
     def _apply_hf_config_patches(self, hf_config: PretrainedConfig, model_id: str):
         model_type = getattr(hf_config, "model_type", None)

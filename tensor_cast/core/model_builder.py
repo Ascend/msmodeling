@@ -3,12 +3,17 @@
 model_builder
 """
 
+import contextlib
 import logging
+
+import torch
+from transformers.initialization import no_init_weights
 
 from .. import config
 from ..compilation import get_backend
 from ..core.config_resolver import ConfigResolver
 from ..core.user_config import UserInputConfig
+from ..layers.mtp import MtpWrapper
 from ..pipeline_parallel import (
     apply_stage_boundaries,
     build_pipeline_plan,
@@ -16,8 +21,13 @@ from ..pipeline_parallel import (
     PipelineModel,
     PipelineStageModel,
 )
-from ..transformers.custom_model_registry import get_visual
-from ..transformers.model import TransformerModel
+from ..transformers.custom_model_registry import (
+    get_model_profile,
+    get_visual,
+    get_vl_language_model,
+)
+from ..transformers.model import CausalLmWrapper, TransformerModel
+from ..transformers.utils import init_on_device_without_buffers
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +64,57 @@ def _prepare_vl_compile(model: TransformerModel) -> bool:
     return False
 
 
-def _build_pipeline_model(user_input: UserInputConfig, model_config) -> PipelineModel:
-    if getattr(model_config.hf_config, "vision_config", None) is not None:
-        raise ValueError("Pipeline parallel model construction only supports text-only decoder models for now.")
-    if model_config.mtp_config is not None:
-        raise ValueError("Pipeline parallel model construction does not support MTP models yet.")
+def _supports_pipeline_text_path(model_config) -> bool:
+    """Return whether a VL profile exposes a language-only layer path for PP."""
+    hf_config = getattr(model_config, "hf_config", None)
+    if getattr(hf_config, "vision_config", None) is None:
+        return True
+    profile = get_model_profile(getattr(hf_config, "model_type", ""))
+    return bool(
+        profile
+        and getattr(profile, "language_module_path", None)
+        and getattr(profile, "language_layers_path_str", None)
+    )
 
+
+def _narrow_pipeline_vl_stage_to_language_model(
+    stage_model: TransformerModel,
+) -> TransformerModel:
+    """Run pipeline stages through the VL profile's language module only."""
+    if not getattr(stage_model, "is_vl_model", False) or not hasattr(stage_model, "unwrap"):
+        return stage_model
+    existing_inner = getattr(stage_model, "_inner", None)
+    existing_mtp_wrapper = existing_inner if isinstance(existing_inner, MtpWrapper) else None
+    existing_lm_head = getattr(existing_inner, "lm_head", None)
+    try:
+        language_model = get_vl_language_model(stage_model)
+    except AttributeError:
+        return stage_model
+    if language_model is None:
+        return stage_model
+
+    dtype_context = (
+        stage_model.set_default_dtype() if hasattr(stage_model, "set_default_dtype") else contextlib.nullcontext()
+    )
+    with dtype_context, init_on_device_without_buffers("meta"), no_init_weights():
+        language_wrapper = CausalLmWrapper(stage_model.text_config, language_model)
+    if isinstance(existing_lm_head, torch.nn.Module):
+        language_wrapper.lm_head = existing_lm_head
+    if existing_mtp_wrapper is not None:
+        existing_mtp_wrapper._inner = language_wrapper
+        stage_model._inner = existing_mtp_wrapper
+    else:
+        stage_model._inner = language_wrapper
+    stage_model.is_vl_model = False
+    return stage_model
+
+
+def _build_pipeline_model(user_input: UserInputConfig, model_config) -> PipelineModel:
+    if not _supports_pipeline_text_path(model_config):
+        raise ValueError(
+            "Pipeline parallel model construction only supports text-only decoder models "
+            "or VL profiles with an explicit language module path for now."
+        )
     pp_size = model_config.parallel_config.pipeline_parallel_size
     plan = build_pipeline_plan(model_config, pp_size)
     logger.info("Building pipeline model with %d stages", pp_size)
@@ -74,6 +129,7 @@ def _build_pipeline_model(user_input: UserInputConfig, model_config) -> Pipeline
         )
         stage_model_config = build_stage_model_config(model_config, stage_spec)
         stage_model = TransformerModel(user_input.model_id, stage_model_config)
+        stage_model = _narrow_pipeline_vl_stage_to_language_model(stage_model)
         apply_stage_boundaries(stage_model, stage_spec)
         if user_input.do_compile:
             import torch

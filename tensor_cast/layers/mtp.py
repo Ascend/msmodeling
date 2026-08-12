@@ -1,4 +1,5 @@
 import functools
+import inspect
 from typing import Callable, Optional
 
 import torch
@@ -56,6 +57,68 @@ def _resolve_mtp_layer_cls(hf_config, mtp_block):
 
         return HyperConnectedMultiTokenPredictorLayer
     return MultiTokenPredictorLayer
+
+
+def _rotary_emb_accepts_dtype(rotary_emb: torch.nn.Module) -> bool:
+    try:
+        signature = inspect.signature(rotary_emb.forward)
+    except (TypeError, ValueError):
+        return False
+    return "dtype" in signature.parameters
+
+
+def _build_position_embeddings(
+    rotary_emb: torch.nn.Module,
+    accepts_dtype: bool,
+    hidden_states: torch.Tensor,
+    position_ids: torch.Tensor,
+):
+    if accepts_dtype:
+        return rotary_emb(hidden_states, position_ids, hidden_states.dtype)
+    return rotary_emb(hidden_states, position_ids)
+
+
+def _find_text_rotary_emb(module: torch.nn.Module):
+    fallback = None
+    for name, submodule in module.named_modules():
+        if name.endswith(".rotary_emb"):
+            if "language_model" in name or name.startswith("model."):
+                return submodule
+            if fallback is None:
+                fallback = submodule
+    return fallback
+
+
+def _shift_and_update_inputs_embeds(
+    inputs_embeds: torch.Tensor,
+    query_start_loc: Optional[torch.Tensor],
+    update_embeds: torch.Tensor,
+) -> torch.Tensor:
+    if inputs_embeds.is_meta:
+        return torch.empty_like(inputs_embeds)
+
+    new_inputs_embeds = inputs_embeds.clone()
+    flat_update_embeds = update_embeds.reshape(-1, inputs_embeds.size(-1)).to(inputs_embeds.device)
+
+    if query_start_loc is None:
+        if inputs_embeds.ndim == 2:
+            new_inputs_embeds[:-1] = inputs_embeds[1:]
+            new_inputs_embeds[-1] = flat_update_embeds[0]
+            return new_inputs_embeds
+        new_inputs_embeds[..., :-1, :] = inputs_embeds[..., 1:, :]
+        new_inputs_embeds[..., -1, :] = flat_update_embeds.reshape(new_inputs_embeds[..., -1, :].shape)
+        return new_inputs_embeds
+
+    flat_inputs_embeds = inputs_embeds.reshape(-1, inputs_embeds.size(-1))
+    flat_new_inputs_embeds = new_inputs_embeds.reshape(-1, inputs_embeds.size(-1))
+    starts = query_start_loc.to(device="cpu", dtype=torch.long).tolist()
+    for request_idx, (start, end) in enumerate(zip(starts[:-1], starts[1:])):
+        if end <= start:
+            continue
+        if end - start > 1:
+            flat_new_inputs_embeds[start : end - 1] = flat_inputs_embeds[start + 1 : end]
+        flat_new_inputs_embeds[end - 1] = flat_update_embeds[request_idx]
+    return new_inputs_embeds
 
 
 class MultiTokenPredictor(torch.nn.Module):
@@ -139,6 +202,7 @@ class MtpWrapper(ModelWrapperBase):
         self.rotary_emb = self.get_rotary_emb()
         if self.rotary_emb is None:
             raise ValueError(f"Unable to find rotary embedding module from {model}")
+        self._rotary_emb_accepts_dtype = _rotary_emb_accepts_dtype(self.rotary_emb)
 
     def get_mtp_block_cls(self):
         for _, module in self._inner.named_modules():
@@ -147,10 +211,7 @@ class MtpWrapper(ModelWrapperBase):
         return None
 
     def get_rotary_emb(self):
-        for name, module in self._inner.named_modules():
-            if name.endswith(".rotary_emb"):
-                return module
-        return None
+        return _find_text_rotary_emb(self._inner)
 
     def forward(
         self,
@@ -161,8 +222,10 @@ class MtpWrapper(ModelWrapperBase):
     ) -> torch.Tensor:
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
         assert sampling_metadata is not None, "No sampling metadata given for MTP"
+        target_input_ids = None if inputs_embeds is not None else input_ids
+        mtp_inputs_embeds = inputs_embeds
         logits, hidden_states = self._inner(
-            input_ids,
+            target_input_ids,
             position_ids,
             inputs_embeds,
             output_intermediate_hidden_states=True,
@@ -177,16 +240,29 @@ class MtpWrapper(ModelWrapperBase):
             device=next_tokens.device,
         )
         output[:, 0] = next_tokens[:, -1]
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings = _build_position_embeddings(
+            self.rotary_emb,
+            self._rotary_emb_accepts_dtype,
+            hidden_states,
+            position_ids,
+        )
         for i in range(self.mtp_config.num_mtp_layers):
-            input_ids = torch.ops.tensor_cast.shift_and_update_input_ids(
-                input_ids, sampling_metadata.query_start_loc, next_tokens
-            )
+            if input_ids is not None:
+                input_ids = torch.ops.tensor_cast.shift_and_update_input_ids(
+                    input_ids, sampling_metadata.query_start_loc, next_tokens
+                )
+            if mtp_inputs_embeds is not None:
+                update_embeds = self.mtp.embed_tokens(next_tokens[:, -1])
+                mtp_inputs_embeds = _shift_and_update_inputs_embeds(
+                    mtp_inputs_embeds,
+                    sampling_metadata.query_start_loc,
+                    update_embeds,
+                )
             logits, hidden_states = self.mtp.forward(
                 input_ids,
                 position_ids,
                 hidden_states,
-                inputs_embeds,
+                mtp_inputs_embeds,
                 position_embeddings=position_embeddings,
                 spec_step_idx=i,
                 **kwargs,

@@ -254,7 +254,7 @@ def patch_minimax_m3_attention(model: TransformerModel) -> TransformerModel:
         block_size,
         local_blocks,
     ) = _resolve_minimax_m3_sparse_attention_config(text_config)
-    if not sparse_attention_freq or not any(sparse_attention_freq):
+    if not sparse_attention_freq:
         logger.info("No MiniMax-M3 sparse attention config found, skipping M3 attention patch")
         return model
 

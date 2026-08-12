@@ -139,6 +139,36 @@ class TestDeepseekV4Config(unittest.TestCase):
         )
         assert config.layer_types == ["sliding_attention", "compressed_sparse_attention"]
 
+    def test_hf_513_config_aliases_are_normalized(self):
+        """Test Transformers 5.13 DeepSeek-V4 field names map to local V4 fields."""
+        config = DeepseekV4Config(
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=32,
+            num_hidden_layers=4,
+            vocab_size=128256,
+            layer_types=[
+                "sliding_attention",
+                "compressed_sparse_attention",
+                "heavily_compressed_attention",
+                "compressed_sparse_attention",
+            ],
+            compress_rates={
+                "compressed_sparse_attention": 4,
+                "heavily_compressed_attention": 128,
+            },
+            mlp_layer_types=["hash_moe", "hash_moe", "moe", "moe"],
+        )
+
+        assert config.compress_ratios == [0, 4, 128, 4]
+        assert config.num_hash_layers == 2
+
+    def test_auto_model_uses_builtin_deepseek_v4_model(self):
+        """Test local DeepSeek-V4 configs are bound to the local modeling class."""
+        from transformers import AutoModel
+
+        assert AutoModel._model_mapping[DeepseekV4Config] is DeepseekV4Model
+
     def test_index_topk_alias_to_topk_limit(self):
         """Test index_topk is aliased to topk_limit."""
         config = DeepseekV4Config(

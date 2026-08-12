@@ -61,7 +61,7 @@
 
 <details>
 <summary><b>MiniMax 系列</b></summary>
-
+🔹 [2026.07.31] msModeling 新增 MiniMax M3 模型支持<br>
 🔹 [2026.06.25] msModeling 新增 **MiniMax M2.7** 模型支持<br>
 🔹 [2026.05.29] msModeling 新增 **MiniMax M2.5** 模型支持<br>
 

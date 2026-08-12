@@ -24,9 +24,9 @@ MiniMax-M3 / MiniMax-M3-VL 是 MiniMax 系列中和 MiniMax-M2 差异较大的�
 
 6. **真实长度在 `torch.compile` / meta tensor 下容易丢失**：MiniMax-M3 sparse indexer 和 sparse attention 的成本强依赖每个 request 的 `seq_len`、`query_len`、decode/prefill 阶段。如果只从 FakeTensor shape fallback，会把长上下文 decode 或长 prefill 建模错误。
 
-7. **Transformers 新旧配置字段不完全一致**：部分版本使用 `layer_types` 与 `index_*` 字段描述 sparse attention；升级到较新 Transformers 后，相关字段可能嵌套在 `text_config.sparse_attention_config` 中，字段名也变为 `sparse_*`。如果 patch 只识别旧字段，会导致 MiniMax3 attention wrapper 被跳过。
+7. **Transformers 新旧配置字段不完全一致**：部分版本使用 `layer_types` 与 `index_*` 字段描述 sparse attention；升级到较新 Transformers 后，相关字段可能嵌套在 `text_config.sparse_attention_config` 中，字段名也变为 `sparse_*`。如果 patch 只识别旧字段，会导致 MiniMax-M3 attention wrapper 被跳过。
 
-本设计目标是在保持 `ModelProfile` 最小化、不新增通用 profile 字段、不修改 Transformers 安装包源码的前提下，使 TensorCast 能稳定执行 MiniMax-M3 的 decode/prefill 仿真命令，并在 trace 中输出可与实测 kernel 组合对齐的 MiniMax3 专用语义算子。
+本设计目标是在保持 `ModelProfile` 最小化、不新增通用 profile 字段、不修改 Transformers 安装包源码的前提下，使 TensorCast 能稳定执行 MiniMax-M3 的 decode/prefill 仿真命令，并在 trace 中输出可与实测 kernel 组合对齐的 MiniMax-M3 专用语义算子。
 
 ---
 
@@ -46,7 +46,7 @@ MiniMax-M3 适配分为六层：
 
 5. **语义算子层**：新增或复用 `minimax_indexer`、`minimax_sparse_attention`、`m3_swiglu`、`m3_swiglu_quant`、`fused_rope`、`siso_reshape_and_cache` 等 virtual op，使 trace 中的核心边界可见。
 
-6. **性能模型层**：在 `tensor_cast/performance_model/__init__.py` 为 MiniMax3 专用 op 注册 Roofline 属性，区分 MMA、GP、Q/O/topk metadata、K/V cache 访存和通信边界。
+6. **性能模型层**：在 `tensor_cast/performance_model/__init__.py` 为 MiniMax-M3 专用 op 注册 Roofline 属性，区分 MMA、GP、Q/O/topk metadata、K/V cache 访存和通信边界。
 
 整体链路如下：
 
@@ -83,9 +83,9 @@ register_model_profile(
 - `model_type="minimax_m3_vl"` 与 Transformers config 对齐。
 - `moe_module_name` 指向上游 MiniMax-M3 的 sparse MoE block。
 - `moe_num_experts_key="num_local_experts"` 复用通用 MoE 框架读取专家数。
-- `moe_gate_router=route_minimax_m3_gate` 用于 MiniMax3 sigmoid top-k routing。
-- `patch_method` 只承载 MiniMax3 的结构差异，不新增 `ModelProfile` 通用字段。
-- `custom_expert_module_type=MiniMaxM3MoeExpertMLP` 只解决 MiniMax3 expert fused `gate_up_proj` 的结构问题。
+- `moe_gate_router=route_minimax_m3_gate` 用于 MiniMax-M3 sigmoid top-k routing。
+- `patch_method` 只承载 MiniMax-M3 的结构差异，不新增 `ModelProfile` 通用字段。
+- `custom_expert_module_type=MiniMaxM3MoeExpertMLP` 只解决 MiniMax-M3 expert fused `gate_up_proj` 的结构问题。
 
 ### 2.3 Patch Method
 
@@ -106,7 +106,7 @@ def patch_method_for_minimax_m3(model: TransformerModel) -> TransformerModel:
 
 | 步骤 | 作用 | 必要性 |
 | --- | --- | --- |
-| `cache_rotary_embedding=False` | 关闭通用 rotary cache rewrite | MiniMax3 有 partial/3D RoPE，通用缓存形状可能不兼容 |
+| `cache_rotary_embedding=False` | 关闭通用 rotary cache rewrite | MiniMax-M3 有 partial/3D RoPE，通用缓存形状可能不兼容 |
 | `patch_minimax_m3_attention` | 替换每层 `self_attn` 为 `MiniMaxM3AttentionWrapper` | 显式区分 dense attention 与 sparse attention |
 | `patch_minimax_m3_layernorm` | 替换 RMSNorm wrapper，并 patch decoder layer forward | 建模 Gemma RMSNorm 和 `add_rms_norm2` |
 | `patch_minimax_m3_dense_mlp` | 替换 dense MLP fused `gate_up_proj` | 让 dense MLP 与 MoE expert 使用统一 split gate/up 结构 |
@@ -115,7 +115,7 @@ def patch_method_for_minimax_m3(model: TransformerModel) -> TransformerModel:
 
 ### 2.4 Attention Wrapper 设计
 
-`MiniMaxM3AttentionWrapper` 是 MiniMax3 与 MiniMax2 最大差异的核心。它不是重新实现完整 attention 数值，而是把 Transformers 原始 attention 拆成 TensorCast 可建模边界。
+`MiniMaxM3AttentionWrapper` 是 MiniMax-M3 与 MiniMax2 最大差异的核心。它不是重新实现完整 attention 数值，而是把 Transformers 原始 attention 拆成 TensorCast 可建模边界。
 
 #### 2.4.0 Sparse attention 配置解析
 
@@ -135,7 +135,7 @@ def patch_method_for_minimax_m3(model: TransformerModel) -> TransformerModel:
   text_config.sparse_attention_config.sparse_local_block
 ```
 
-这样做的原因是 Transformers 版本升级后，MiniMax3-VL config 可能出现 `hf_config.text_config` 这类嵌套结构。如果只从 `model.text_config` 直接读取旧字段，可能误判“没有 sparse layer”，进而让 sparse attention 和 MTP attention 走回 HF 原始实现。
+这样做的原因是 Transformers 版本升级后，MiniMax-M3-VL config 可能出现 `hf_config.text_config` 这类嵌套结构。如果只从 `model.text_config` 直接读取旧字段，可能误判“没有 sparse layer”，进而让 sparse attention 和 MTP attention 走回 HF 原始实现。
 
 MTP 处理策略：
 
@@ -157,7 +157,7 @@ hidden_states
   -> o_proj
 ```
 
-Dense layer 的目的不是引入 MiniMax3 专用 sparse op，而是保证 Q/K norm、RoPE、cache 写入和 output projection 在 trace 中仍然显式可见。
+Dense layer 的目的不是引入 MiniMax-M3 专用 sparse op，而是保证 Q/K norm、RoPE、cache 写入和 output projection 在 trace 中仍然显式可见。
 
 #### 2.4.2 Sparse attention layer
 
@@ -193,7 +193,7 @@ hidden_states
 KV cache: [2, num_blocks, block_size, kv_heads, head_dim]
 ```
 
-MiniMax3 indexer 只需要 index key cache，不需要 index value，因此使用 single-input single-output cache：
+MiniMax-M3 indexer 只需要 index key cache，不需要 index value，因此使用 single-input single-output cache：
 
 ```text
 index_k:      [T, indexer_heads, index_head_dim]
@@ -208,7 +208,7 @@ index cache:  [num_blocks, block_size, index_head_dim]
 
 ### 2.6 Dense MLP 与 MoE Expert
 
-Transformers MiniMax3 的 MLP/Expert 原始结构是：
+Transformers MiniMax-M3 的 MLP/Expert 原始结构是：
 
 ```text
 gate_up_proj(hidden)
@@ -241,9 +241,9 @@ gate_proj/up_proj
 - 让 grouped matmul + SwiGLU 融合 pass 能识别 gate/up/down 边界。
 - 量化场景下将 activation scale 显式传给后续 quant linear，避免接口不匹配。
 
-### 2.7 MiniMax3 MoE Gate Router
+### 2.7 MiniMax-M3 MoE Gate Router
 
-`route_minimax_m3_gate` 建模 MiniMax3 sigmoid top-k routing：
+`route_minimax_m3_gate` 建模 MiniMax-M3 sigmoid top-k routing：
 
 1. 使用 gate weight 计算 `router_logits`。
 2. TP 场景下按 token 维 pad 并切到当前 rank。
@@ -254,7 +254,7 @@ gate_proj/up_proj
 与通用 MoE 的关系：
 
 - dispatch、all-to-all、grouped matmul、combine 仍复用通用 MoE pipeline。
-- MiniMax3 仅特化 gate routing 和 expert MLP 结构。
+- MiniMax-M3 仅特化 gate routing 和 expert MLP 结构。
 
 ### 2.8 RMSNorm 与 RoPE
 
@@ -279,7 +279,7 @@ RoPE 设计：
 边界：
 
 ```text
-gate, up -> MiniMax3 OAI SwiGLU output
+gate, up -> MiniMax-M3 OAI SwiGLU output
 ```
 
 建模：
@@ -361,16 +361,31 @@ attn_mma = 4 * N_q * attended_pairs * D
 attn_gp = 6 * N_q * attended_pairs
 qo_bytes = 2 * dtype_size * T * N_q * D
 topk_bytes = 4 * T * N_kv * K
-kv_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
+kv_read_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
 ```
 
 其中：
+
+| 变量 | 含义 |
+| --- | --- |
+| `N_q` | query head 数 |
+| `N_kv` | KV head 数 |
+| `D` | attention head dim |
+| `T=sum_b Q_b` | 当前 batch 的 query token 总数 |
+| `K` | 每个 query 选择的 top-k KV block 数 |
+| `B_s` | block size，表示每个 KV block 包含的 token 数 |
+| `B_n=ceil(L_b/B_s)` | 第 b 个 request 的可见 block 数 |
+| `attended_tokens_q` | 单个 query token 实际参与 sparse attention 的 KV token 数 |
+| `attended_pairs=sum_q(attended_tokens_q)` | 当前 batch 内 query token 与被关注 KV token 的配对总数 |
+| `effective_attended_pairs` | 用于估算 K/V cache 实际读取量的有效 token 配对数；prefill 会结合 `context_len`、`Q_b`、`K`、`B_s` 与 `attended_pairs` 校正，decode 近似为 `min(K * B_s, L_b)` |
+| `dtype_size` | op 输入 dtype 的字节数，例如 fp16/bf16 为 2 |
+| `context_len` | 当前 request 的可见上下文长度，与 `L_b` 同一口径 |
 
 - `attn_mma` 系数 4 表示 QK 和 PV 两个 matmul，每个 FMA 按 2 FLOPs。
 - `attn_gp` 用每个 attention score 约 6 个 GP ops 近似 softmax / scale / reduce。
 - `qo_bytes` 覆盖 query 输入和 output 写出。
 - `topk_bytes` 覆盖 TopK index metadata 读。
-- `kv_bytes` 覆盖 K/V cache 读。
+- `kv_read_bytes` 覆盖 K/V cache 读。
 
 当前实现中的 KV read 计算公式为：
 
@@ -386,7 +401,7 @@ if _minimax_m3_is_prefill_request(Q_b, request_idx, is_decode_values):
 else:
     effective_attended_pairs = min(K * B_s, L_b)
 
-kv_read_bytes = 2 * s * effective_attended_pairs * N_kv * D
+kv_read_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
 ```
 
 ---
@@ -487,6 +502,6 @@ pre-commit run --files \
 
 1. MiniMax-M3 decode 和 prefill 命令能完成 `--compile` 仿真。
 2. `--dump-input-shapes` 能输出 dense attention、sparse indexer、sparse attention、MoE 的关键 shape。
-3. `--dump-op-bound-results` 中 MiniMax3 专用 op 的调用次数与模型层类型一致。
-4. MiniMax2、GLM、DeepSeek 等已有模型的通用 MoE/attention 路径不受 MiniMax3 patch 影响。
+3. `--dump-op-bound-results` 中 MiniMax-M3 专用 op 的调用次数与模型层类型一致。
+4. MiniMax2、GLM、DeepSeek 等已有模型的通用 MoE/attention 路径不受 MiniMax-M3 patch 影响。
 5. pre-commit 和相关 regression tests 通过。

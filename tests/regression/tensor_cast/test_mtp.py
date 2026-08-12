@@ -6,7 +6,13 @@ import torch
 from parameterized import parameterized
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.layers.deepseek_v4 import HyperConnectedMultiTokenPredictorLayer
-from tensor_cast.layers.mtp import MultiTokenPredictorLayer, _resolve_mtp_layer_cls
+from tensor_cast.layers.mtp import (
+    MultiTokenPredictorLayer,
+    _build_position_embeddings,
+    _find_text_rotary_emb,
+    _resolve_mtp_layer_cls,
+    _rotary_emb_accepts_dtype,
+)
 from tensor_cast.layers.sampler import SamplingMetadata
 from tensor_cast.patch_torch import patch_torch
 from tensor_cast.transformers.custom_model_registry import get_mtp_block_module_name
@@ -30,6 +36,74 @@ class TestResolveMtpLayerCls(unittest.TestCase):
     def test_v4_hc_mult_returns_hyper_connected_layer(self):
         mtp_block = MagicMock(hc_mult=4)
         assert _resolve_mtp_layer_cls(MagicMock(), mtp_block) is HyperConnectedMultiTokenPredictorLayer
+
+
+class TestRotaryEmbeddingSignature(unittest.TestCase):
+    def test_two_argument_rotary_embedding_does_not_accept_dtype(self):
+        class RotaryEmbedding(torch.nn.Module):
+            def forward(self, hidden_states, position_ids):
+                return hidden_states, position_ids
+
+        assert not _rotary_emb_accepts_dtype(RotaryEmbedding())
+
+    def test_minimax_m3_style_rotary_embedding_accepts_dtype(self):
+        class RotaryEmbedding(torch.nn.Module):
+            def forward(self, hidden_states, position_ids, dtype):
+                return hidden_states.to(dtype), position_ids
+
+        assert _rotary_emb_accepts_dtype(RotaryEmbedding())
+
+    def test_two_argument_rotary_embedding_call_is_preserved(self):
+        class RotaryEmbedding(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.call_arg_count = 0
+
+            def forward(self, hidden_states, position_ids):
+                self.call_arg_count = 2
+                return hidden_states, position_ids
+
+        rotary_emb = RotaryEmbedding()
+        hidden_states = torch.empty(1, 2, dtype=torch.float16)
+        position_ids = torch.empty(1, 2, dtype=torch.long)
+
+        _build_position_embeddings(rotary_emb, False, hidden_states, position_ids)
+
+        assert rotary_emb.call_arg_count == 2
+
+    def test_dtype_rotary_embedding_receives_hidden_state_dtype(self):
+        class RotaryEmbedding(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.received_dtype = None
+
+            def forward(self, hidden_states, position_ids, dtype):
+                self.received_dtype = dtype
+                return hidden_states.to(dtype), position_ids
+
+        rotary_emb = RotaryEmbedding()
+        hidden_states = torch.empty(1, 2, dtype=torch.bfloat16)
+        position_ids = torch.empty(1, 2, dtype=torch.long)
+
+        _build_position_embeddings(rotary_emb, True, hidden_states, position_ids)
+
+        assert rotary_emb.received_dtype is torch.bfloat16
+
+    def test_vl_mtp_prefers_language_rotary_embedding(self):
+        class RotaryEmbedding(torch.nn.Module):
+            pass
+
+        class VlModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.vision_tower = torch.nn.Module()
+                self.vision_tower.rotary_emb = RotaryEmbedding()
+                self.language_model = torch.nn.Module()
+                self.language_model.rotary_emb = RotaryEmbedding()
+
+        model = VlModel()
+
+        assert _find_text_rotary_emb(model) is model.language_model.rotary_emb
 
 
 class MtpTestMixin:

@@ -75,11 +75,7 @@ def _safe_register_auto_model() -> None:
             "deepseek_v4 is already registered to an incompatible AutoModel class: "
             f"{existing.__module__}.{existing.__name__}"
         )
-    try:
-        AutoModel.register(DeepseekV4Config, DeepseekV4Model)
-    except ValueError as exc:
-        if "already used by a Transformers model" not in str(exc):
-            raise
+    AutoModel.register(DeepseekV4Config, DeepseekV4Model, exist_ok=True)
 
 
 def _register_deepseek_v4_family() -> None:
@@ -277,6 +273,8 @@ class DeepseekV4Config(DeepseekV3Config):
         expert_dtype: Optional[str] = None,
         swiglu_limit: Optional[float] = None,
         compress_rope_theta: Optional[float] = None,
+        compress_rates: Optional[dict[str, int]] = None,
+        mlp_layer_types: Optional[list[str]] = None,
         # Reference Gate.forward score function and route scaling. Surfaced on
         # Config so MoELayer.route() can read them via `gate.score_func` /
         # `gate.route_scale` and emit the matmul + score path explicitly.
@@ -306,8 +304,18 @@ class DeepseekV4Config(DeepseekV3Config):
 
         if "num_hash_layers" in kwargs:
             num_hash_layers = kwargs.pop("num_hash_layers")
+        if num_hash_layers == 0 and mlp_layer_types is not None:
+            num_hash_layers = next(
+                (idx for idx, layer_type in enumerate(mlp_layer_types) if layer_type != "hash_moe"),
+                len(mlp_layer_types),
+            )
         scoring_func = kwargs.pop("scoring_func", None)
         routed_scaling_factor = kwargs.pop("routed_scaling_factor", None)
+        if compress_ratios is None and layer_types is not None:
+            compress_ratios = [
+                0 if layer_type == "sliding_attention" else int((compress_rates or {}).get(layer_type, -1))
+                for layer_type in layer_types
+            ]
 
         # In the V4 reference (deepseek-ai/DeepSeek-V4-Flash/inference/model.py; Pro shares
         # the same model.py), every Block uses MoE — there is no
@@ -347,6 +355,8 @@ class DeepseekV4Config(DeepseekV3Config):
         self.expert_dtype = expert_dtype
         self.swiglu_limit = swiglu_limit
         self.compress_rope_theta = compress_rope_theta
+        self.compress_rates = compress_rates
+        self.mlp_layer_types = mlp_layer_types
         self.score_func = str(scoring_func if scoring_func is not None else score_func)
         self.route_scale = float(routed_scaling_factor if routed_scaling_factor is not None else route_scale)
         self.routed_scaling_factor = self.route_scale

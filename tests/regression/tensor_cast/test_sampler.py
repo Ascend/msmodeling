@@ -11,6 +11,7 @@ from tensor_cast.layers.sampler import (
     select_lm_head_hidden_states,
 )
 from tensor_cast.model_config import MtpConfig
+from tensor_cast.ops import mtp as _mtp_ops  # noqa: F401
 from tensor_cast.transformers.model import CausalLmWrapper
 
 
@@ -36,6 +37,17 @@ def _lm_head_weight():
 
 def _project(hidden_states):
     return hidden_states @ _lm_head_weight().T
+
+
+def test_shift_and_update_input_ids_updates_each_query_window():
+    input_ids = torch.tensor([[10, 11, 12, 20, 21, 22]], dtype=torch.long)
+    query_start_loc = torch.tensor([0, 3, 6], dtype=torch.long)
+    next_tokens = torch.tensor([[100, 101], [200, 201]], dtype=torch.long)
+
+    output = torch.ops.tensor_cast.shift_and_update_input_ids(input_ids, query_start_loc, next_tokens)
+
+    assert output.tolist() == [[11, 12, 101, 21, 22, 201]]
+    assert input_ids.tolist() == [[10, 11, 12, 20, 21, 22]]
 
 
 def test_spec_decode_selects_target_and_proposal_rows():
@@ -210,7 +222,7 @@ def test_mtp_wrapper_forward_feeds_bonus_token_and_projects_mtp_proposal_rows():
     )
 
     output = wrapper(
-        input_ids=torch.zeros(1, 8, dtype=torch.long),
+        input_ids=torch.full((1, 8), 99, dtype=torch.long),
         position_ids=torch.arange(8, dtype=torch.long).view(1, 8),
         inputs_embeds=torch.zeros(1, 8, 2),
         sampling_metadata=sampling_metadata,

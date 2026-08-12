@@ -7,7 +7,8 @@
 | **Status** | Approved |
 | **Author** | - |
 | **Created** | 2026-07-25 |
-| **Related Link** | TensorCast MiniMax-M3 adaptation design document |
+| **Last Updated** | 2026-08-06 |
+| **Related Link** | [TensorCast MiniMax-M3 adaptation design document](../design/minimax_m3_adaptation_design.md) |
 
 ## 1. Overview
 
@@ -377,8 +378,25 @@ attn_mma = 4 * N_q * attended_pairs * D
 attn_gp = 6 * N_q * attended_pairs
 qo_bytes = 2 * dtype_size * T * N_q * D
 topk_bytes = 4 * T * N_kv * K
-kv_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
+kv_read_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
 ```
+
+Variables:
+
+| Variable | Meaning | Dimension |
+| :--- | :--- | :--- |
+| `N_q` | Number of query heads | head |
+| `N_kv` | Number of KV heads | head |
+| `T` | Total query tokens in the current batch, namely `sum_b(Q_b)` | token |
+| `D` | Attention head dimension | hidden dim |
+| `K` | Number of top-k KV blocks selected for each query | block |
+| `attended_tokens_q` | Number of tokens actually visible to / participating in attention for a single query | token |
+| `attended_pairs` | Total semantic attention pairs across all queries, namely `sum_q(attended_tokens_q)` | token pair |
+| `effective_attended_pairs` | Effective KV read pair count after considering KV block reuse inside prefill kernels | token pair |
+| `dtype_size` | Byte size of the query/KV/output dtype | byte |
+| `B_n` | Number of visible blocks, `ceil(L_b / block_size)` | block |
+| `B_s` | Sparse attention block size, namely the number of tokens in each KV block | token/block |
+| `context_len` | Context length of the current request, equivalent to `L_b` in the variable table | token |
 
 Current KV read formula:
 
@@ -394,7 +412,7 @@ if _minimax_m3_is_prefill_request(Q_b, request_idx, is_decode_values):
 else:
     effective_attended_pairs = min(K * B_s, L_b)
 
-kv_read_bytes = 2 * s * effective_attended_pairs * N_kv * D
+kv_read_bytes = 2 * dtype_size * effective_attended_pairs * N_kv * D
 ```
 
 ---
@@ -445,7 +463,10 @@ This design is expected not to affect existing models such as MiniMax2, DeepSeek
 MiniMax3 depends on native `minimax_m3_vl` source in newer Transformers releases, so the dependency constraint should be raised to:
 
 ```text
+Python>=3.10
+torch>=2.5.0
 transformers>=5.13.0,<5.14.0
+CANN/Ascend driver: must match the target Ascend NPU software stack; use versions already verified by project CI or the deployment environment when possible
 ```
 
 After the upgrade, some models such as `deepseek_v32/deepseek_v4/mimo_v2_flash` may already be registered upstream in Transformers. Safe-register compatibility is needed to avoid duplicate `AutoConfig.register` errors.
@@ -454,6 +475,17 @@ MiniMax3 sparse attention config parsing supports both:
 
 - Old-style `layer_types`, `index_n_heads`, `index_head_dim`, `index_topk_blocks`, `index_block_size`, `index_local_blocks`.
 - New-style `sparse_attention_config.sparse_attention_freq`, `sparse_num_index_heads`, `sparse_index_dim`, `sparse_topk_blocks`, `sparse_block_size`, `sparse_local_block`.
+
+New-style `sparse_attention_config` field constraints:
+
+| Field | Type | Default / Fallback | Required | Value Constraint |
+| :--- | :--- | :--- | :--- | :--- |
+| `sparse_attention_freq` | `int` | Fall back to derivation from `layer_types` | No | When greater than 0, indicates the sparse-layer frequency; when missing, use old-style per-layer configuration |
+| `sparse_num_index_heads` | `int` | Fall back to `index_n_heads` | Yes | Positive integer, number of indexer query/key heads |
+| `sparse_index_dim` | `int` | Fall back to `index_head_dim` | Yes | Positive integer, indexer head dimension |
+| `sparse_topk_blocks` | `int` | Fall back to `index_topk_blocks` | Yes | Positive integer, number of KV blocks selected for each query |
+| `sparse_block_size` | `int` | Fall back to `index_block_size` | Yes | Positive integer in tokens; used to compute visible block count |
+| `sparse_local_block` | `int` | Fall back to `index_local_blocks` | No | Non-negative integer, number of local blocks that must be kept |
 
 ---
 
@@ -554,17 +586,6 @@ Mitigations:
 - Only apply safe AddRMSNorm fusion and do not change the main attention/MLP semantics.
 - Re-check this function if the upstream decoder forward structure changes.
 
----
-
-## 10. Open Issues
-
-1. The exact KV reuse strategy inside the Ascend sparse attention kernel has not been fully confirmed from public source.
-2. The mapping between `minimax_sparse_attention` and different profiling kernel combinations needs to be further standardized in op_mapping documentation.
-3. Long-context prefill indexer/sparse attention error still needs calibration with more cases.
-4. Current MTP sparse attention inherits the last layer sparse configuration to avoid missing the wrapper. Whether MTP needs a more detailed op_mapping or performance calibration should be confirmed with profiling.
-
----
-
 ## Appendix A: Glossary
 
 | Term | Meaning |
@@ -576,5 +597,10 @@ Mitigations:
 | `siso_reshape_and_cache` | Single-input single-output cache write op for index K cache |
 | `minimax_indexer` | TensorCast MiniMax3 semantic op covering block score and TopK selection |
 | `minimax_sparse_attention` | TensorCast MiniMax3 semantic op covering sparse QK/PV/softmax body |
+| MTP | Multi-Token Prediction layer. MiniMax-M3 MTP layers need to inherit the backbone dense/sparse configuration so wrapper replacement remains consistent |
+| Roofline | Performance upper-bound model that estimates operator performance using compute, memory traffic, and hardware peaks |
+| FakeTensor/meta tensor | Tensor without real data during PyTorch compile or meta execution; it only carries shape/dtype and may miss real sequence length |
+| SinkSplitPass | TensorCast graph rewrite pass that splits specific binary/activation consumers out of upstream fused structures |
+| grouped matmul | Matrix multiplication grouped by expert in MoE expert scenarios, used to batch tokens routed to different experts |
 | OAI SwiGLU | MiniMax3 SwiGLU variant with `alpha/limit` parameters |
 | Gemma RMSNorm | RMSNorm semantics whose effective weight is `1 + weight` |

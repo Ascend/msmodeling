@@ -25,6 +25,7 @@ from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
 from tensor_cast.transformers.builtin_model.minimax_m3 import (
     _get_minimax_m3_effective_text_config,
     _resolve_minimax_m3_sparse_attention_config,
+    patch_minimax_m3_attention,
 )
 from tensor_cast.transformers.custom_model_registry import get_model_profile
 from tensor_cast.transformers.transformations import shard_model_by_tp
@@ -144,6 +145,41 @@ class _FakeTransformerModelForTp:
     def _replace_module(self, name: str, new_module: torch.nn.Module):
         path = name.split(".")
         parent = self._inner.get_submodule(".".join(path[:-1]))
+        setattr(parent, path[-1], new_module)
+
+
+class MiniMaxM3VLDecoderLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = _DummyM3Attention()
+
+
+class _FakeDenseOnlyM3Model(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList([MiniMaxM3VLDecoderLayer()])
+
+
+class _FakeDenseOnlyTransformer:
+    def __init__(self):
+        self._inner = _FakeDenseOnlyM3Model()
+        self.parallel_group_manager = None
+        self.text_config = SimpleNamespace(
+            hidden_size=8,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=4,
+            layer_types=["full_attention"],
+            index_n_heads=1,
+            index_head_dim=4,
+            index_topk_blocks=2,
+            index_block_size=4,
+            index_local_blocks=1,
+        )
+
+    def _replace_module(self, name: str, new_module: torch.nn.Module):
+        path = name.split(".")
+        parent = self._inner if len(path) == 1 else self._inner.get_submodule(".".join(path[:-1]))
         setattr(parent, path[-1], new_module)
 
 
@@ -297,6 +333,16 @@ def test_minimax_m3_nested_sparse_attention_config_is_resolved():
 
     assert resolved_text_config is text_config
     assert sparse_config == ([0, 0, 0, 1], 4, 128, 16, 128, 1)
+
+
+def test_minimax_m3_attention_patch_keeps_dense_only_stage_wrapped():
+    model = _FakeDenseOnlyTransformer()
+
+    patch_minimax_m3_attention(model)
+
+    attention = model._inner.layers[0].self_attn
+    assert isinstance(attention, MiniMaxM3AttentionWrapper)
+    assert attention.is_sparse_layer is False
 
 
 def test_minimax_m3_mtp_attention_qkv_uses_tp_plan():

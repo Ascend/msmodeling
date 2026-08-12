@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
@@ -311,6 +312,23 @@ def test_build_model_returns_real_split_pipeline_model_for_pp_size(monkeypatch):
     assert all(build.parallel_config.data_parallel_size == 1 for build in builds)
 
 
+def test_build_model_keeps_mtp_only_on_last_pipeline_stage(monkeypatch):
+    model_config = _make_model_config(num_layers=5, pp_size=2, world_size=4)
+    model_config.mtp_config = MtpConfig(num_mtp_layers=2)
+    builds = _install_fake_builder(monkeypatch, model_config)
+    user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=2, pp_size=2)
+
+    model = model_builder.build_model(user_input)
+
+    assert isinstance(model, PipelineModel)
+    assert model.num_hidden_layers == 7
+    assert [stage.stage_spec.extra_tail_layers for stage in model.stages] == [0, 2]
+    assert builds[0].mtp_config is None
+    assert builds[1].mtp_config is not None
+    assert builds[1].mtp_config.num_mtp_layers == 2
+    assert [build.num_hidden_layers_override for build in builds] == [3, 2]
+
+
 def test_pipeline_model_supports_standard_decoder_input_generation():
     model = _make_pipeline_model(num_layers=4, pp_size=2, world_size=4)
 
@@ -356,6 +374,30 @@ def test_pipeline_stage_model_uses_hidden_state_contract():
     assert middle_stage.model.forward_calls[-1]["output_intermediate_hidden_states"] is True
     assert last_stage.model.forward_calls[-1]["inputs_embeds"] is middle_hidden_states
     assert last_stage.model.forward_calls[-1]["output_intermediate_hidden_states"] is False
+
+
+def test_last_pipeline_stage_passes_input_ids_for_mtp_tail():
+    stage_spec = PipelineStageSpec(
+        stage_id=1,
+        pp_size=2,
+        layer_start=3,
+        layer_end=5,
+        is_first=False,
+        is_last=True,
+        extra_tail_layers=3,
+    )
+    stage = PipelineStageModel(
+        stage_spec=stage_spec,
+        model=_FakeTransformerModel("fake/model", _make_model_config(num_layers=2, pp_size=1, world_size=2)),
+    )
+    input_ids = torch.empty(2, 7, dtype=torch.long, device="meta")
+    position_ids = torch.empty(2, 7, dtype=torch.long, device="meta")
+    hidden_states = torch.empty(2, 7, 16, device="meta")
+
+    stage(input_ids=input_ids, hidden_states=hidden_states, position_ids=position_ids)
+
+    assert stage.model.forward_calls[-1]["input_ids"] is input_ids
+    assert stage.model.forward_calls[-1]["inputs_embeds"] is hidden_states
 
 
 def test_pipeline_stage_model_rejects_missing_intermediate_hidden_states():
@@ -760,6 +802,8 @@ def test_apply_stage_boundaries_replaces_nested_causal_lm_modules():
         def __init__(self):
             super().__init__()
             self.model = _BaseModel()
+            self.language_model = _BaseModel()
+            self.language_model.lm_head = torch.nn.Linear(4, 8)
             self.lm_head = torch.nn.Linear(4, 8)
 
     class _Wrapper(torch.nn.Module):
@@ -791,10 +835,14 @@ def test_apply_stage_boundaries_replaces_nested_causal_lm_modules():
     assert isinstance(stage_model.unwrap().model.embed_tokens, PPMissingLayer)
     assert isinstance(stage_model.unwrap().model.word_embeddings, PPMissingLayer)
     assert isinstance(stage_model.unwrap().model.norm, PPMissingLayer)
+    assert isinstance(stage_model.unwrap().language_model.embed_tokens, PPMissingLayer)
+    assert isinstance(stage_model.unwrap().language_model.word_embeddings, PPMissingLayer)
+    assert isinstance(stage_model.unwrap().language_model.norm, PPMissingLayer)
+    assert isinstance(stage_model.unwrap().language_model.lm_head, PPMissingLayer)
     assert isinstance(stage_model.unwrap().lm_head, PPMissingLayer)
 
 
-def test_build_model_rejects_unsupported_pipeline_vl_and_mtp(monkeypatch):
+def test_build_model_rejects_unsupported_pipeline_vl_without_language_path(monkeypatch):
     vl_config = _make_model_config()
     vl_config.hf_config.vision_config = object()
     _install_fake_builder(monkeypatch, vl_config)
@@ -802,11 +850,151 @@ def test_build_model_rejects_unsupported_pipeline_vl_and_mtp(monkeypatch):
     with pytest.raises(ValueError, match="Pipeline parallel model construction only supports text-only"):
         model_builder.build_model(user_input)
 
-    mtp_config = _make_model_config()
-    mtp_config.mtp_config = MtpConfig(num_mtp_layers=1)
-    _install_fake_builder(monkeypatch, mtp_config)
-    with pytest.raises(ValueError, match="MTP"):
-        model_builder.build_model(user_input)
+
+def test_build_model_allows_vl_profile_with_language_path_for_pipeline(monkeypatch):
+    builds = _install_fake_builder(monkeypatch, _make_model_config(num_layers=4, pp_size=2, world_size=4))
+    _FakeResolver.model_config.hf_config.model_type = "minimax_m3_vl"
+    _FakeResolver.model_config.hf_config.vision_config = object()
+    monkeypatch.setattr(
+        model_builder,
+        "get_model_profile",
+        lambda model_type: SimpleNamespace(
+            language_module_path="language_model",
+            language_layers_path_str="language_model.layers",
+        )
+        if model_type == "minimax_m3_vl"
+        else None,
+    )
+    user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=2, pp_size=2)
+
+    model = model_builder.build_model(user_input)
+
+    assert isinstance(model, PipelineModel)
+    assert len(builds) == 2
+    assert [build.num_hidden_layers_override for build in builds] == [2, 2]
+
+
+def test_pipeline_vl_stage_uses_language_model_wrapper(monkeypatch):
+    class _VLStage(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hf_config = SimpleNamespace(model_type="minimax_m3_vl")
+            self.text_config = _FakeTextConfig(num_hidden_layers=2)
+            self.language_model = torch.nn.Module()
+            self.language_model.layers = torch.nn.ModuleList()
+            self._inner = torch.nn.Module()
+            self._inner.lm_head = torch.nn.Identity()
+            self.is_vl_model = True
+
+        def unwrap(self):
+            return self
+
+    monkeypatch.setattr(
+        model_builder,
+        "get_model_profile",
+        lambda _model_type: SimpleNamespace(
+            language_module_path="language_model",
+            language_layers_path_str="language_model.layers",
+        ),
+    )
+    stage_model = _VLStage()
+
+    narrowed = model_builder._narrow_pipeline_vl_stage_to_language_model(stage_model)
+
+    assert narrowed is stage_model
+    assert isinstance(stage_model._inner, model_builder.CausalLmWrapper)
+    assert stage_model._inner._inner is stage_model.language_model
+    assert isinstance(stage_model._inner.lm_head, torch.nn.Identity)
+    assert stage_model.is_vl_model is False
+
+
+def test_pipeline_vl_stage_preserves_existing_mtp_wrapper(monkeypatch):
+    class _FakeMtpWrapper(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self._inner = inner
+
+        def __getattr__(self, item):
+            try:
+                return super().__getattr__(item)
+            except AttributeError:
+                return getattr(self._inner, item)
+
+    class _VLStage(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hf_config = SimpleNamespace(model_type="minimax_m3_vl")
+            self.text_config = _FakeTextConfig(num_hidden_layers=2)
+            self.language_model = torch.nn.Module()
+            self.language_model.layers = torch.nn.ModuleList()
+            original_inner = torch.nn.Module()
+            original_inner.lm_head = torch.nn.Identity()
+            self._inner = _FakeMtpWrapper(original_inner)
+            self.is_vl_model = True
+
+        def unwrap(self):
+            return self
+
+    monkeypatch.setattr(model_builder, "MtpWrapper", _FakeMtpWrapper)
+    monkeypatch.setattr(
+        model_builder,
+        "get_model_profile",
+        lambda _model_type: SimpleNamespace(
+            language_module_path="language_model",
+            language_layers_path_str="language_model.layers",
+        ),
+    )
+    stage_model = _VLStage()
+    mtp_wrapper = stage_model._inner
+
+    narrowed = model_builder._narrow_pipeline_vl_stage_to_language_model(stage_model)
+
+    assert narrowed is stage_model
+    assert stage_model._inner is mtp_wrapper
+    assert isinstance(stage_model._inner._inner, model_builder.CausalLmWrapper)
+    assert stage_model._inner._inner._inner is stage_model.language_model
+    assert isinstance(stage_model._inner._inner.lm_head, torch.nn.Identity)
+    assert stage_model.is_vl_model is False
+
+
+def test_pipeline_vl_stage_fallback_lm_head_uses_meta_dtype(monkeypatch):
+    class _VLStage(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hf_config = SimpleNamespace(model_type="minimax_m3_vl")
+            self.text_config = _FakeTextConfig(num_hidden_layers=2)
+            self.language_model = torch.nn.Module()
+            self.language_model.layers = torch.nn.ModuleList()
+            self._inner = torch.nn.Module()
+            self.is_vl_model = True
+            self.model_config = SimpleNamespace(dtype=torch.float16)
+
+        def unwrap(self):
+            return self
+
+        @contextlib.contextmanager
+        def set_default_dtype(self):
+            original_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(torch.float16)
+            try:
+                yield
+            finally:
+                torch.set_default_dtype(original_dtype)
+
+    monkeypatch.setattr(
+        model_builder,
+        "get_model_profile",
+        lambda _model_type: SimpleNamespace(
+            language_module_path="language_model",
+            language_layers_path_str="language_model.layers",
+        ),
+    )
+    stage_model = _VLStage()
+
+    narrowed = model_builder._narrow_pipeline_vl_stage_to_language_model(stage_model)
+
+    assert narrowed._inner.lm_head.weight.device.type == "meta"
+    assert narrowed._inner.lm_head.weight.dtype == torch.float16
 
 
 def test_build_model_allows_text_config_with_none_vision_config(monkeypatch):
@@ -816,7 +1004,11 @@ def test_build_model_allows_text_config_with_none_vision_config(monkeypatch):
     _install_fake_builder(monkeypatch, model_config)
     pipeline_model = object()
 
-    monkeypatch.setattr(model_builder, "_build_pipeline_model", lambda _user_input, _model_config: pipeline_model)
+    monkeypatch.setattr(
+        model_builder,
+        "_build_pipeline_model",
+        lambda _user_input, _model_config: pipeline_model,
+    )
 
     assert model_builder.build_model(user_input) is pipeline_model
 
@@ -859,6 +1051,41 @@ def test_pipeline_runner_remaps_stage_local_kv_and_indexer_cache():
     )
 
 
+def test_pipeline_stage_kwargs_remaps_mtp_tail_cache_to_last_stage():
+    model_config = _make_model_config(num_layers=5, pp_size=2, world_size=4)
+    model_config.mtp_config = MtpConfig(num_mtp_layers=2)
+    plan = build_pipeline_plan(model_config, pp_size=2)
+    hidden_states = torch.empty(2, 7, 16, device="meta")
+    input_kwargs = {
+        "position_ids": torch.empty(2, 7, dtype=torch.long, device="meta"),
+        "input_ids": torch.empty(2, 7, dtype=torch.long, device="meta"),
+        "kv_cache_by_layers": {
+            layer_idx: torch.empty(1, layer_idx + 1, device="meta")
+            for layer_idx in range(model_config.hf_config.num_hidden_layers + 2)
+        },
+        "kv_cache_per_token": 1.0,
+        "indexer_cache_by_layers": {
+            layer_idx: torch.empty(1, layer_idx + 1, device="meta")
+            for layer_idx in range(model_config.hf_config.num_hidden_layers + 2)
+        },
+        "indexer_cache_per_token": 1.0,
+    }
+
+    stage_kwargs, _ = build_pipeline_stage_kwargs(
+        plan.stages[-1],
+        input_kwargs,
+        hidden_states=hidden_states,
+    )
+
+    assert set(stage_kwargs["kv_cache_by_layers"]) == {0, 1, 2, 3}
+    assert set(stage_kwargs["indexer_cache_by_layers"]) == {0, 1, 2, 3}
+    assert stage_kwargs["input_ids"] is input_kwargs["input_ids"]
+    assert stage_kwargs["kv_cache_by_layers"][0] is input_kwargs["kv_cache_by_layers"][3]
+    assert stage_kwargs["kv_cache_by_layers"][1] is input_kwargs["kv_cache_by_layers"][4]
+    assert stage_kwargs["kv_cache_by_layers"][2] is input_kwargs["kv_cache_by_layers"][5]
+    assert stage_kwargs["kv_cache_by_layers"][3] is input_kwargs["kv_cache_by_layers"][6]
+
+
 def test_pipeline_model_sparse_indexer_cache_resolves_stage_layers():
     model_config = _make_model_config(num_layers=4, pp_size=2, world_size=4)
     model_config.mla_config = MlaConfig(module_name="self_attn", mla_cls=_RequiresIndexerCache)
@@ -870,14 +1097,20 @@ def test_pipeline_model_sparse_indexer_cache_resolves_stage_layers():
             stage_spec=plan.stages[0],
             model=_StageLayerModel(
                 model_config,
-                [_FakeDecoderLayer(_FakeDenseAttention()), _FakeDecoderLayer(_FakeSparseAttention())],
+                [
+                    _FakeDecoderLayer(_FakeDenseAttention()),
+                    _FakeDecoderLayer(_FakeSparseAttention()),
+                ],
             ),
         ),
         PipelineStageModel(
             stage_spec=plan.stages[1],
             model=_StageLayerModel(
                 model_config,
-                [_FakeDecoderLayer(_FakeDenseAttention()), _FakeDecoderLayer(_FakeSparseAttention())],
+                [
+                    _FakeDecoderLayer(_FakeDenseAttention()),
+                    _FakeDecoderLayer(_FakeSparseAttention()),
+                ],
             ),
         ),
     ]
@@ -1126,6 +1359,42 @@ def test_pipeline_runner_executes_stage_dataflow_and_reports_pipeline_costs():
         sum(bytes_of_tensor(input_kwargs["kv_cache_by_layers"][layer_idx]) for layer_idx in (2, 3)),
         sum(bytes_of_tensor(input_kwargs["kv_cache_by_layers"][layer_idx]) for layer_idx in (4, 5)),
     )
+
+
+def test_pipeline_runner_exports_pp_trace_with_global_timeline_and_tracks():
+    model = _make_pipeline_model(num_layers=4, pp_size=2, world_size=4)
+    runner = PipelineRunner(
+        model=model,
+        perf_models=[_ConstantPerformanceModel()],
+        device_profile=DeviceProfile.all_device_profiles["TEST_DEVICE"],
+    )
+
+    result = runner.run(_make_pipeline_input_kwargs(num_layers=4))
+    complete_events = [event for event in result.trace_events if event.get("ph") == "X"]
+    stage0_events = [event for event in complete_events if event["name"].startswith("pp_stage_0:")]
+    stage1_events = [event for event in complete_events if event["name"].startswith("pp_stage_1:")]
+    comm_events = [event for event in complete_events if event["name"].startswith("pp_comm_0_to_1:")]
+
+    assert stage0_events
+    assert stage1_events
+    assert comm_events
+    assert {event["tid"] for event in stage0_events} == {0}
+    assert {event["tid"] for event in stage1_events} == {1}
+    assert {event["tid"] for event in comm_events} == {10_000}
+
+    stage0_end_us = max(event["ts"] + event["dur"] for event in stage0_events)
+    comm_start_us = min(event["ts"] for event in comm_events)
+    comm_end_us = max(event["ts"] + event["dur"] for event in comm_events)
+    stage1_start_us = min(event["ts"] for event in stage1_events)
+    assert comm_start_us >= stage0_end_us
+    assert stage1_start_us >= comm_end_us
+
+    thread_names = {
+        event.get("args", {}).get("name")
+        for event in result.trace_events
+        if event.get("ph") == "M" and event.get("name") == "thread_name"
+    }
+    assert {"PP Stage 0", "PP Stage 1", "PP Comm 0->1"}.issubset(thread_names)
 
 
 def test_pipeline_runner_uses_stage_consistent_memory_accounting():
