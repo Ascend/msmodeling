@@ -1,5 +1,6 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import unittest
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from unittest.mock import MagicMock, Mock, patch
 
@@ -495,8 +496,8 @@ class TestParallelRunnerPDMode(unittest.TestCase):
         task_runner = ParallelRunner(self.args)
         phase_calls = []
 
-        def fake_run_pd_phase(devices_per_instance, is_prefill):
-            phase_calls.append((devices_per_instance, is_prefill))
+        def fake_run_pd_phase(devices_per_instance, is_prefill, process_context=None):
+            phase_calls.append((devices_per_instance, is_prefill, process_context))
             if is_prefill:
                 df = pd.DataFrame({"p_qps": [24.0]})
                 df.attrs["memory_info"] = {
@@ -522,12 +523,14 @@ class TestParallelRunnerPDMode(unittest.TestCase):
             result = task_runner._run_pd_ratio()
 
         self.assertEqual(
-            phase_calls,
+            [(devices_per_instance, is_prefill) for devices_per_instance, is_prefill, _ in phase_calls],
             [
                 (self.args.prefill_devices_per_instance, True),
                 (self.args.decode_devices_per_instance, False),
             ],
         )
+        self.assertEqual(phase_calls[0][2].get_start_method(), "spawn")
+        self.assertIs(phase_calls[0][2], phase_calls[1][2])
         optimizer = RecordingPDRatioOptimizer.instances[0]
         self.assertEqual(optimizer.output_length, self.args.output_length)
         self.assertEqual(optimizer.p_df.iloc[0]["p_qps"], 24.0)
@@ -594,6 +597,66 @@ class TestParallelRunnerPDMode(unittest.TestCase):
         self.assertEqual(result_df.attrs["memory_info"]["device_memory_available_gb"], 4.0)
         self.assertTrue(task_runner.disagg_modes)
         self.assertTrue(all(task_runner.disagg_modes))
+
+    def test_get_df_list_passes_pd_process_context_to_process_pool(self):
+        """PD ratio sub-phases must construct process pools with the spawn context."""
+        import multiprocessing as mp
+
+        class ProcessContextRecordingExecutor(ProcessPoolExecutor):
+            init_kwargs = None
+
+            def __init__(self, **kwargs):
+                type(self).init_kwargs = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def map(self, fn, *iterables, timeout=None, chunksize=1):
+                return []
+
+        task_runner = ParallelRunner(self.args, executor_class=ProcessContextRecordingExecutor)
+        process_context = mp.get_context("spawn")
+
+        result = task_runner._get_df_list(
+            task_runner.optimizer_data,
+            user_configs=[],
+            process_context=process_context,
+        )
+
+        self.assertEqual(result, [])
+        self.assertIs(ProcessContextRecordingExecutor.init_kwargs["mp_context"], process_context)
+
+    def test_get_df_list_ignores_pd_process_context_for_injected_executor(self):
+        """Injected non-process executors must not receive unsupported mp_context."""
+        import multiprocessing as mp
+
+        class ContextRecordingExecutor:
+            init_kwargs = None
+
+            def __init__(self, **kwargs):
+                type(self).init_kwargs = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def map(self, fn, *iterables, timeout=None, chunksize=1):
+                return []
+
+        task_runner = ParallelRunner(self.args, executor_class=ContextRecordingExecutor)
+        result = task_runner._get_df_list(
+            task_runner.optimizer_data,
+            user_configs=[],
+            process_context=mp.get_context("spawn"),
+        )
+
+        self.assertEqual(result, [])
+        self.assertNotIn("mp_context", ContextRecordingExecutor.init_kwargs)
 
 
 if __name__ == "__main__":

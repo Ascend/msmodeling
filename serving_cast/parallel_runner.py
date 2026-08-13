@@ -4,6 +4,8 @@ import logging
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from functools import partial
+import multiprocessing as mp
+from multiprocessing.context import BaseContext
 import os
 from typing import Callable, Iterator, Optional, Type
 
@@ -152,19 +154,24 @@ class ParallelRunner:
         d_devices = self.args.decode_devices_per_instance
 
         # Phase 1 & 2: Prefill & Decode optimization
-        # Use ThreadPoolExecutor to avoid nested process pool issue
-        # (_run_pd_phase internally uses ProcessPoolExecutor)
+        # Each phase uses its own process pool. On Linux, forking one from a
+        # worker thread is unsafe when libraries such as filelock are managing
+        # descriptors, so use spawn for these nested pools. This preserves
+        # Prefill/Decode parallelism and the per-phase --jobs concurrency.
         logger.info("Phase 1 & 2: Running Prefill and Decode optimization in parallel...")
+        process_context = mp.get_context("spawn")
         with ThreadPoolExecutor(max_workers=2) as executor:
             p_future = executor.submit(
                 self._run_pd_phase,
                 devices_per_instance=p_devices,
                 is_prefill=True,
+                process_context=process_context,
             )
             d_future = executor.submit(
                 self._run_pd_phase,
                 devices_per_instance=d_devices,
                 is_prefill=False,
+                process_context=process_context,
             )
             p_df = p_future.result()
             d_df = d_future.result()
@@ -305,6 +312,7 @@ class ParallelRunner:
         user_configs: Optional[list] = None,
         disagg_mode: Optional[bool] = None,
         is_prefill: bool = False,
+        process_context: Optional[BaseContext] = None,
     ) -> list[OptimizerSummary]:
         """Execute optimization tasks in parallel and return list of OptimizerSummary.
 
@@ -317,13 +325,22 @@ class ParallelRunner:
             disagg_mode: Optional override for strategy selection.
             is_prefill: When generating configs internally, force dcp=1 for the Prefill
                 phase (DCP is decode-only). Ignored when ``user_configs`` is provided.
+            process_context: Multiprocessing context for the executor. PD ratio
+                sub-phases pass a spawn context to avoid forking from threads.
 
         Returns:
             List of OptimizerSummary (non-None results only).
         """
         configs = list(user_configs) if user_configs is not None else list(self._get_user_config(is_prefill=is_prefill))
 
-        with self._executor_class(max_workers=self.args.jobs, initializer=self._worker_initializer) as executor:
+        executor_kwargs = {
+            "max_workers": self.args.jobs,
+            "initializer": self._worker_initializer,
+        }
+        if process_context is not None and issubclass(self._executor_class, ProcessPoolExecutor):
+            executor_kwargs["mp_context"] = process_context
+
+        with self._executor_class(**executor_kwargs) as executor:
             results = executor.map(
                 partial(
                     self._submit_task,
@@ -462,6 +479,7 @@ class ParallelRunner:
         self,
         devices_per_instance: int,
         is_prefill: bool,
+        process_context: Optional[BaseContext] = None,
     ) -> pd.DataFrame:
         """Run optimization phase for either Prefill or Decode.
 
@@ -500,6 +518,7 @@ class ParallelRunner:
             overwrite_optimizer_data=overwrite_optimizer_data,
             user_configs=user_configs,
             disagg_mode=True,
+            process_context=process_context,
         )
 
         # Concatenate all DataFrames from OptimizerSummary results
