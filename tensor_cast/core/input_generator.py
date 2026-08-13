@@ -201,6 +201,7 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
         "attention_meta": attn_meta,
         "kv_cache_by_layers": kv_cache_by_layers,
         "kv_cache_per_token": kv_cache_per_token,
+        "kv_cache_excluded_layer_indices": kv_cache_excluded_layer_indices(model),
         "sampling_metadata": sampling_metadata,
     }
 
@@ -677,6 +678,33 @@ def _resolve_indexer_cache_dtype(model, layer_idx: int) -> torch.dtype:
     return cache_dtype
 
 
+def kv_cache_excluded_layer_indices(model) -> set[int]:
+    """Return layer indices whose kv_cache placeholder must be excluded from
+    KV-cache byte/per-token accounting.
+
+    Qwen3.5 hybrid attention keeps ``linear_attention`` layers in
+    ``kv_cache_by_layers`` (the placeholders are still required by pipeline
+    parallel stage validation and layer-indexed forward), but these layers do
+    not own a real paged KV cache. Counting their placeholders inflates both
+    ``kv_cache_bytes`` and ``kv_cache_per_token`` and is the root cause of
+    ``device_memory_available_gb == 0`` (see
+    docs/RFC/fix_memory_available_zero_port_zh.md). Centralising the judgement
+    here keeps every consumer (``_get_kv_cache_info`` and ``ModelRunner``) on a
+    single, consistent accounting scope.
+    """
+    model_type = getattr(
+        getattr(getattr(model, "model_config", None), "hf_config", None),
+        "model_type",
+        None,
+    )
+    if model_type not in ("qwen3_5", "qwen3_5_moe"):
+        return set()
+    layer_types = getattr(getattr(model, "text_config", None), "layer_types", None)
+    if not isinstance(layer_types, list):
+        return set()
+    return {idx for idx, layer_type in enumerate(layer_types) if layer_type == "linear_attention"}
+
+
 def _get_kv_cache_info(
     model,
     num_blocks: int,
@@ -694,6 +722,7 @@ def _get_kv_cache_info(
             decoder_layers = None
     # Initialize the KV cache structure (also on 'meta' device).
     is_v4_model = _is_v4_model(model)
+    excluded_layers = kv_cache_excluded_layer_indices(model)
     kv_cache_per_token = 0
     kv_cache_by_layers = {}
     for i in range(model.num_hidden_layers):
@@ -756,7 +785,10 @@ def _get_kv_cache_info(
                 dtype=kvcache_dtype,
                 device="meta",
             )
-        kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (num_blocks * block_size)
+        # linear_attention layers keep a placeholder for PP/forward indexing but
+        # do not own a real paged KV cache, so they must not inflate per-token cost.
+        if i not in excluded_layers:
+            kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (num_blocks * block_size)
 
     # Decode Context Parallel slices the KV cache along the token (sequence)
     # dimension: each device stores only ``1 / dcp_size`` of every sequence's
@@ -1099,6 +1131,7 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
         "position_ids": position_ids,
         "attention_meta": attn_meta,
         "kv_cache_by_layers": kv_cache_by_layers,
+        "kv_cache_excluded_layer_indices": kv_cache_excluded_layer_indices(model),
         "sampling_metadata": sampling_meta,
         "kv_cache_per_token": kv_cache_per_token,
     }

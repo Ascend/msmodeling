@@ -25,6 +25,7 @@ from ..pipeline_parallel import PipelineModel, PipelineRunResult, PipelineRunner
 from ..runtime import Runtime
 from ..transformers.custom_model_registry import get_visual
 from .input_generator import dcp_kv_token_capacity_factor
+from .input_generator import kv_cache_excluded_layer_indices
 from .input_generator import (
     generate_inputs_varlen,
     get_inputs_num_bytes,
@@ -249,7 +250,14 @@ class ModelRunner:
 
         peak_memory_usage_gb = runtime.memory_tracker.peak_mem_usage() / 1024**3
 
-        kv_cache_bytes = sum(bytes_of_tensor(kv_cache) for kv_cache in input_kwargs["kv_cache_by_layers"].values())
+        # linear_attention 层占位张量不计入 KV cache 字节（判定集中维护于
+        # kv_cache_excluded_layer_indices，确保 kv_cache_bytes 与 kv_cache_per_token 口径一致）。
+        excluded_layers = kv_cache_excluded_layer_indices(self.model)
+        kv_cache_bytes = sum(
+            bytes_of_tensor(kv_cache)
+            for layer_idx, kv_cache in input_kwargs["kv_cache_by_layers"].items()
+            if layer_idx not in excluded_layers
+        )
         indexer_cache_bytes = sum(
             bytes_of_tensor(kv_cache) for kv_cache in input_kwargs.get("indexer_cache_by_layers", {}).values()
         )

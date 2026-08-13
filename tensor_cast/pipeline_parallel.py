@@ -644,16 +644,21 @@ def build_pipeline_stage_kwargs(
         if key in input_kwargs:
             stage_kwargs[key] = input_kwargs[key]
 
+    # Qwen3.5 linear_attention placeholders are excluded from KV cache byte
+    # accounting only (kept in local_cache for forward). Indexer cache is unaffected.
+    kv_excluded_layers = input_kwargs.get("kv_cache_excluded_layer_indices", frozenset())
     cache_stats: dict[str, tuple[int, float]] = {}
     for cache_key, metric_key in (
         ("kv_cache_by_layers", "kv_cache_per_token"),
         ("indexer_cache_by_layers", "indexer_cache_per_token"),
     ):
+        excluded_layers = kv_excluded_layers if cache_key == "kv_cache_by_layers" else frozenset()
         cache_by_layers, cache_bytes, cache_per_token = _slice_layer_cache(
             input_kwargs,
             stage_spec,
             cache_key=cache_key,
             metric_key=metric_key,
+            excluded_layers=excluded_layers,
         )
         cache_stats[cache_key] = (cache_bytes, cache_per_token)
         if cache_key in input_kwargs:
@@ -679,8 +684,17 @@ def _slice_layer_cache(
     *,
     cache_key: str,
     metric_key: str,
+    excluded_layers: frozenset[int] = frozenset(),
 ) -> tuple[dict[int, torch.Tensor], int, float]:
-    """Slice global layer-indexed cache into stage-local layer indices."""
+    """Slice global layer-indexed cache into stage-local layer indices.
+
+    ``excluded_layers`` are layer indices whose placeholder must stay in
+    ``local_cache`` (forward/stage validation still indexes them) but must not
+    inflate ``total_bytes`` / ``selected_bytes``. This keeps the PP-stage KV
+    cache accounting consistent with ``_get_kv_cache_info`` and
+    ``ModelRunner.run_inference`` for models such as Qwen3.5 whose
+    ``linear_attention`` layers carry a placeholder but no real paged KV cache.
+    """
     if cache_key not in input_kwargs:
         return {}, 0, 0.0
 
@@ -701,6 +715,8 @@ def _slice_layer_cache(
 
     total_bytes = 0
     for layer_idx, cache in cache_by_layers.items():
+        if layer_idx in excluded_layers:
+            continue
         total_bytes += int(bytes_of_tensor(cache))
 
     local_cache = {}
@@ -709,8 +725,11 @@ def _slice_layer_cache(
         if allow_sparse_layers and layer_idx not in cache_by_layers:
             continue
         cache = cache_by_layers[layer_idx]
+        # The placeholder stays in local_cache for layer-indexed forward, but
+        # is excluded from the stage's KV cache byte accounting.
         local_cache[layer_idx - stage_spec.layer_start] = cache
-        selected_bytes += int(bytes_of_tensor(cache))
+        if layer_idx not in excluded_layers:
+            selected_bytes += int(bytes_of_tensor(cache))
     global_per_token_bytes = input_kwargs.get(metric_key, 0.0)
     if total_bytes <= 0 or global_per_token_bytes <= 0:
         return local_cache, selected_bytes, 0.0

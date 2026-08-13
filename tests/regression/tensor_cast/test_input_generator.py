@@ -19,6 +19,7 @@ from tensor_cast.core.input_generator import (
     generate_inputs,
     generate_inputs_varlen,
     get_sparse_attention_indexer_cache_info,
+    kv_cache_excluded_layer_indices,
     resize_image,
 )
 from tensor_cast.layers.deepseek_v4 import DeepseekV4SparseAttention
@@ -28,6 +29,7 @@ from tensor_cast.model_config import MtpConfig
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.utils import bytes_of_tensor
+from tensor_cast.pipeline_parallel import PipelineStageSpec, _slice_layer_cache
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.model import TransformerModel
 
@@ -273,6 +275,92 @@ def test_qwen3_5_decode_mtp_cache_position_metadata(_mock_kv_cache, _mock_sparse
     assert cache_position.tensor_cast_base_decode_query_len == 1
     assert cache_position.tensor_cast_num_mtp_tokens == 3
     assert cache_position.tensor_cast_effective_decode_steps == 4
+
+
+def test_kv_cache_excluded_layer_indices_qwen3_5():
+    """Qwen3.5 returns the indices of linear_attention placeholder layers."""
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5")),
+        text_config=SimpleNamespace(
+            layer_types=["attention", "linear_attention", "attention", "linear_attention"],
+        ),
+    )
+    assert kv_cache_excluded_layer_indices(model) == {1, 3}
+
+
+def test_kv_cache_excluded_layer_indices_qwen3_5_moe():
+    """qwen3_5_moe is covered by the same exclusion rule."""
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5_moe")),
+        text_config=SimpleNamespace(layer_types=["linear_attention", "attention"]),
+    )
+    assert kv_cache_excluded_layer_indices(model) == {0}
+
+
+def test_kv_cache_excluded_layer_indices_non_qwen3_5_returns_empty():
+    """Non-Qwen3.5 models keep the full accounting scope (empty exclusion set)."""
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_next")),
+        text_config=SimpleNamespace(layer_types=["attention", "linear_attention"]),
+    )
+    assert kv_cache_excluded_layer_indices(model) == set()
+
+
+def test_kv_cache_excluded_layer_indices_missing_layer_types_returns_empty():
+    """Defensive branch: missing or non-list layer_types yields an empty set."""
+    model_missing = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5")),
+        text_config=SimpleNamespace(),
+    )
+    assert kv_cache_excluded_layer_indices(model_missing) == set()
+    model_non_list = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5")),
+        text_config=SimpleNamespace(layer_types="attention"),
+    )
+    assert kv_cache_excluded_layer_indices(model_non_list) == set()
+
+
+def test_slice_layer_cache_excludes_linear_attention_placeholders():
+    """PP-stage KV cache accounting excludes linear_attention placeholders.
+
+    Regression for Qwen3.5 + PP: ``selected_bytes`` / ``total_bytes`` must use
+    the same scope as the (already excluded) global ``kv_cache_per_token``;
+    otherwise the stage's ``kv_cache_bytes`` is inflated and
+    ``device_memory_available_gb`` collapses to 0. The placeholder still stays
+    in ``local_cache`` for layer-indexed forward.
+    """
+    real = torch.empty([2, 2], dtype=torch.float32)  # 16 bytes
+    placeholder = torch.empty([2, 2], dtype=torch.float32)  # 16 bytes, excluded
+    per_layer = bytes_of_tensor(real)
+    input_kwargs = {
+        "kv_cache_by_layers": {0: real, 1: placeholder, 2: real, 3: real},
+        # global per-token already excludes the placeholder (see _get_kv_cache_info)
+        "kv_cache_per_token": 6.0,
+    }
+    stage_spec = PipelineStageSpec(stage_id=0, pp_size=1, layer_start=0, layer_end=2, is_first=True, is_last=False)
+
+    # With exclusion: stage [0, 2) covers layer 0 (real) + layer 1 (placeholder).
+    local_cache, selected_bytes, per_token = _slice_layer_cache(
+        input_kwargs,
+        stage_spec,
+        cache_key="kv_cache_by_layers",
+        metric_key="kv_cache_per_token",
+        excluded_layers=frozenset({1}),
+    )
+    assert set(local_cache.keys()) == {0, 1}  # placeholder kept for forward
+    assert selected_bytes == per_layer  # only layer 0 counts
+    assert per_token == pytest.approx(6.0 * per_layer / (3 * per_layer))
+
+    # Without exclusion (legacy scope): both bytes and per-token are inflated.
+    _, selected_bytes_full, per_token_full = _slice_layer_cache(
+        input_kwargs,
+        stage_spec,
+        cache_key="kv_cache_by_layers",
+        metric_key="kv_cache_per_token",
+        excluded_layers=frozenset(),
+    )
+    assert selected_bytes_full == 2 * per_layer
+    assert per_token_full == pytest.approx(6.0 * (2 * per_layer) / (4 * per_layer))
 
 
 @patch("tensor_cast.core.input_generator.get_sparse_attention_indexer_cache_info", return_value={})
