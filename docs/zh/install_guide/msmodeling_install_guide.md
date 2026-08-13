@@ -83,6 +83,10 @@ cd ~/msmodeling
 python3 build.py
 ```
 
+> [!CAUTION]注意
+>
+> 执行 `python3 build.py` 会自动触发 `uv sync --frozen --group build`，按 `pyproject.toml` / `uv.lock` 安装全部依赖（包括 torch、transformers 等），**不要**参考 `requirements.txt` 或其他配置文件手动预装任何依赖；如遇依赖问题，仍以 `pyproject.toml` 和 `uv.lock` 为准排查。
+
 构建成功后，安装包将生成在 `artifacts/` 目录下。
 
 #### 2.3.3 执行单元测试（可选）
