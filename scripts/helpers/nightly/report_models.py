@@ -1,12 +1,18 @@
-"""Report domain models for nightly pipeline.
-
-CoverageSummary, MapCoverageSummary, EnvInfo, PhaseBreakdownEntry, FeishuReportInput.
-All frozen dataclasses.
-"""
+"""Report domain models for nightly pipeline."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+
+
+class AttributionConclusion(str, Enum):
+    """Per-failure conclusion for Feishu + exit-code policy."""
+
+    FIRST_BAD = "first_bad"
+    NEED_HUMAN = "need_human"
+    CANNOT_REPRODUCE = "cannot_reproduce"
+    UNCOLLECTIBLE = "uncollectible"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,13 +39,24 @@ class CoverageSummary:
 
 
 @dataclass(frozen=True, slots=True)
-class PhaseBreakdownEntry:
-    label: str
-    passed: int
-    failed: int
-    duration_sec: float
-    exit_code: int = 0
-    infra_failure: bool = False
+class FailureBlame:
+    node_id: str
+    commit_id: str
+    author: str
+    subject: str
+    conclusion: AttributionConclusion
+    last_reason: str = ""
+
+    @property
+    def attributed(self) -> bool:
+        return self.conclusion == AttributionConclusion.FIRST_BAD
+
+    @property
+    def needs_human(self) -> bool:
+        return self.conclusion in {
+            AttributionConclusion.NEED_HUMAN,
+            AttributionConclusion.UNCOLLECTIBLE,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,14 +74,9 @@ class FeishuReportInput:
     coverage_line_threshold: float | None
     coverage_branch_threshold: float | None
     coverage_gate_passed: bool | None
-    test_map_test_nodes: int
-    test_map_symbol_refs: int
-    test_map_written: bool
-    failed_cases: tuple[str, ...]
-    first_error: str
-    weak_coverage_symbols: tuple[str, ...] = ()
-    redundancy_warnings: tuple[dict[str, object], ...] = ()
-    expired_exemption_section: str = ""
-    phase_breakdown: tuple[PhaseBreakdownEntry, ...] = ()
-    slowest_tests: tuple[tuple[str, float], ...] = ()
+    failure_blames: tuple[FailureBlame, ...] = ()
     drift_warnings: tuple[str, ...] = ()
+    pipeline_log_url: str = ""
+    infra_message: str = ""
+    timed_out: bool = False
+    status_note: str = ""

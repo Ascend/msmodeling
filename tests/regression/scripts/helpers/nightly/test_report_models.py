@@ -1,18 +1,14 @@
-"""Tests for nightly.report_models — CoverageSummary, MapCoverageSummary, EnvInfo."""
+"""Tests for nightly.report_models — CoverageSummary, EnvInfo, FailureBlame."""
 
 from __future__ import annotations
 
 from scripts.helpers.nightly.report_models import (
+    AttributionConclusion,
     CoverageSummary,
     EnvInfo,
+    FailureBlame,
     FeishuReportInput,
-    MapCoverageSummary,
-    PhaseBreakdownEntry,
 )
-
-# ---------------------------------------------------------------------------
-# EnvInfo
-# ---------------------------------------------------------------------------
 
 
 def test_env_info_fields() -> None:
@@ -20,22 +16,6 @@ def test_env_info_fields() -> None:
     assert e.commit == "abc123"
     assert e.branch == "main"
     assert e.timestamp == "2026-01-01T00:00:00Z"
-
-
-# ---------------------------------------------------------------------------
-# MapCoverageSummary
-# ---------------------------------------------------------------------------
-
-
-def test_map_coverage_summary() -> None:
-    m = MapCoverageSummary(test_nodes=10, symbol_refs=42)
-    assert m.test_nodes == 10
-    assert m.symbol_refs == 42
-
-
-# ---------------------------------------------------------------------------
-# CoverageSummary
-# ---------------------------------------------------------------------------
 
 
 def test_coverage_summary() -> None:
@@ -51,41 +31,59 @@ def test_coverage_summary() -> None:
     assert c.gate_passed is True
 
 
-def test_phase_breakdown_entry_defaults() -> None:
-    entry = PhaseBreakdownEntry(label="phase1", passed=1, failed=0, duration_sec=1.0)
-    assert entry.exit_code == 0
-    assert entry.infra_failure is False
+def test_failure_blame_fields_and_conclusion_helpers() -> None:
+    assert AttributionConclusion.FIRST_BAD == "first_bad"
+    assert isinstance(AttributionConclusion.FIRST_BAD, str)
+    blame = FailureBlame(
+        node_id="tests/a.py::test_x",
+        commit_id="abc1234",
+        author="alice",
+        subject="add test",
+        conclusion=AttributionConclusion.FIRST_BAD,
+        last_reason="AssertionError: x",
+    )
+    assert blame.node_id == "tests/a.py::test_x"
+    assert blame.attributed is True
+    assert blame.needs_human is False
+
+    need_human = FailureBlame(
+        node_id="tests/b.py::test_y",
+        commit_id="unknown",
+        author="unknown",
+        subject="Still failing after 7-day lookback; needs human follow-up",
+        conclusion=AttributionConclusion.NEED_HUMAN,
+    )
+    assert need_human.needs_human is True
+    assert need_human.attributed is False
 
 
-def test_feishu_report_input_accepts_phase_breakdown() -> None:
+def test_feishu_report_input_accepts_failure_blames() -> None:
     report = FeishuReportInput(
         timestamp="2026-01-01T00:00:00Z",
         branch="main",
         commit="abc",
         passed=0,
-        failed=0,
+        failed=1,
         errors=0,
-        duration_sec=-1.0,
+        duration_sec=1.0,
         overall_exit=1,
         coverage_line_percent=None,
         coverage_branch_percent=None,
         coverage_line_threshold=None,
         coverage_branch_threshold=None,
         coverage_gate_passed=None,
-        test_map_test_nodes=0,
-        test_map_symbol_refs=0,
-        test_map_written=False,
-        failed_cases=(),
-        first_error="",
-        phase_breakdown=(
-            PhaseBreakdownEntry(
-                label="phase1",
-                passed=0,
-                failed=0,
-                duration_sec=-1.0,
-                exit_code=1,
-                infra_failure=True,
+        failure_blames=(
+            FailureBlame(
+                node_id="tests/a.py::test_x",
+                commit_id="deadbeef",
+                author="bob",
+                subject="fix test",
+                conclusion=AttributionConclusion.FIRST_BAD,
             ),
         ),
+        pipeline_log_url="https://ci.example/log/1",
+        timed_out=False,
+        status_note="",
     )
-    assert report.phase_breakdown[0].infra_failure is True
+    assert report.failure_blames[0].commit_id == "deadbeef"
+    assert report.pipeline_log_url.startswith("https://")

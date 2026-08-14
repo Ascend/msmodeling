@@ -101,7 +101,7 @@ If OBS is unreachable, set `MSMODELING_TEST_MAP_PATH` to a local map, or use `--
 | `run_regression.sh` | Full `tests/regression/` |
 | `run_benchmark.sh` | Full `tests/benchmark/` |
 | `run_ci_gate.sh` | PR incremental gate (also: `python build.py test --suite ci_gate`) |
-| `run_nightly.sh` | Scheduled: multi-phase pytest; phase1 pass → writes `test_map` |
+| `run_nightly.sh` | Scheduled: parallel pytest waves, attribution, optional Feishu |
 | `run_test_map_sync.sh` | Incremental/full `test_map` update (`--once`/`--watch`) |
 | `build.sh` | Build `msmodeling` wheel via `uv build --wheel` |
 
@@ -138,9 +138,14 @@ MSMODELING_WHEEL_OUTPUT_DIR=/tmp/wheels bash scripts/build.sh
 
 ## nightly (`run_nightly.sh`)
 
-- Phase1: smoke+regression with coverage → writes full `test_map`.
-- Phases 2a–2c: nightly/benchmark/network markers; optional Feishu report.
-- Exit non-zero if any pytest phase (1,2a,2b,2c) fails.
+**Not recommended locally.** Nightly targets CI: parallel `tests/` waves, shared self-timeout, failure attribution, and optional Feishu. For local runs use `build.py test` / smoke / regression.
+
+- **Parallel waves** (shared `MSMODELING_NIGHTLY_TIMEOUT_SECONDS` budget):
+  - Non-benchmark / non-network: `pytest tests/ -m "not npu and not benchmark and not network"` with xdist (`-n auto --dist worksteal`) + coverage + `-vv --tb=line`.
+  - Benchmark or network: `pytest tests/ -m "not npu and (benchmark or network)"` serially (no xdist; Hub cache-safe); separate coverage data files are combined after both waves finish.
+- **Attribution**: Asia/Shanghai calendar day-walk (up to 7 days) to find good; linear oldest→newest when `good..bad` ≤16 commits, else bisect; shares the same process deadline; per-node conclusion; lookback miss / incomplete attribution → exit 3.
+- **Self-timeout**: default 3000s via `MSMODELING_NIGHTLY_TIMEOUT_SECONDS`; skip Hub drift when already timed out; partial Feishu report on timeout.
+- Optional Feishu (`FEISHU_WEBHOOK_URL`); pipeline log URL via `MSMODELING_PIPELINE_LOG_URL` (not PR links).
 
 ## Environment variables
 
@@ -161,6 +166,8 @@ Defaults below come from [`scripts/defaults.env`](defaults.env) (not shipped in 
 | `MSMODELING_CACHE` | Optional | `.msmodeling_cache` | all | Repo-local Hub cache + test_map download root |
 | `MSMODELING_OFFLINE` | Optional | `0` | all `run_*.sh` | Hub offline mode |
 | `FEISHU_WEBHOOK_URL` | Optional | — | nightly | Feishu notification webhook |
+| `MSMODELING_PIPELINE_LOG_URL` | Optional | — | nightly | CI pipeline log URL shown in Feishu (not PR links) |
+| `MSMODELING_NIGHTLY_TIMEOUT_SECONDS` | Optional | `3000` | nightly | Self-timeout seconds; on timeout kill pytest then Feishu partial results |
 | `GITCODE_OWNER` | Optional | — | ci_gate | GitCode repo owner (PR comments) |
 | `GITCODE_REPO` | Optional | — | ci_gate | GitCode repo name |
 | `GITCODE_PR_NUMBER` | Optional | — | ci_gate | PR number for comment API |
