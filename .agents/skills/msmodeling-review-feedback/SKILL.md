@@ -2,8 +2,8 @@
 name: msmodeling-review-feedback
 description: 拉取 MindStudio-Modeling PR 的行内和总体检视意见，分类、修复、验证并通过 GitCode CLI 回复和解决讨论。
 metadata:
-  version: 1.2.0
-  source: issue-25-ai-native
+  version: 1.3.0
+  source: review-feedback-mergetrack-handoff
 ---
 
 # PR 检视意见处理
@@ -78,14 +78,14 @@ gitcode pr reply <PR编号> -R <TARGET_REPO> --discussion <discussion_id> --body
 
 ### 5. 解决讨论（resolve）
 
-对已修复的 diff_comment，回复后在同一步骤中通过 CLI 标记为「已解决」，无需用户手动操作网页：
+对每条 diff_comment（无论采纳、拒绝还是延期），回复后在同一步骤中通过 CLI 标记为「已解决」，无需用户手动操作网页：
 
 ```bash
 gitcode pr comment resolve <PR编号> <discussion_id> -R <TARGET_REPO>
 ```
 
 - **已修复的意见**：回复处理结果后立即 resolve。
-- **延期/拒绝的意见**：回复说明原因，**不 resolve**，保持「未解决」状态让 reviewer 可见。
+- **延期/拒绝的意见**：回复说明原因后**也 resolve**（已解决的评论 reviewer 仍可展开查阅，不影响其审阅）。
 - **幂等**：resolve 前检查评论的 `resolved` 字段，已解决的不重复操作。
 - **discussion_id 获取**：从第 1 步 `gitcode pr comments --json` 返回的 `discussion_id` 字段获取。
 
@@ -119,8 +119,7 @@ gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/feedback-sum
 - 拒绝：N 条（原因）
 - 验证：受影响测试已通过
 - CI：<状态>
-- 已通过 CLI resolve：N 条
-- 未 resolve（延期/拒绝）：N 条
+- 已通过 CLI resolve：N 条（含采纳、拒绝、延期，均回复后 resolve）
 ```
 
 ## 安全规则
@@ -134,6 +133,6 @@ gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/feedback-sum
 
 所有意见有明确状态和回复；接受项已验证；CI 已闭环或记录阻塞；汇总已提交；已修复的意见已通过 CLI resolve。
 
-## `/govern` 治理集成
+## 后台服务与通知
 
-检视意见处理后的责任移交时（退回作者、检视通过、转交等），在 PR 评论写一行 `/next <login> <verb>` 触发通知 + 看板。协议见 `spec/governance/next-comment-protocol.md`。
+PR 检视意见处理后的流转通知（退回作者、检视通过、转交等）由常驻服务 后台合入管理服务 统一驱动（基于 diff_comment 解决状态、`/merge`、`/lgtm` 等），agent 不在 PR 评论写 `/next` 治理评论，避免双重通知。协议见 `spec/governance/next-comment-protocol.md`。

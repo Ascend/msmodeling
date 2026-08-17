@@ -50,7 +50,7 @@ GitCode 配置：
 | 指定 PR 做深度检视、行内评论和风险评估 | `sig-review` |
 | 查看、分析或修复 PR 流水线 | `msmodeling-ci-recovery` |
 | 处理 PR 检视意见 | `msmodeling-review-feedback` |
-| 请求 SIG 路由或专项检视 | `sig-review` |
+| 请求检视或启动合入流程 | `sig-review` |
 
 | Skill | 触发词 | 用途 |
 |-------|--------|------|
@@ -66,14 +66,17 @@ GitCode 配置：
 | `optix-deploy` | "部署 optix"、"安装服务化自动寻优工具" | 安装并验证 msmodeling optix 服务化自动寻优工具 |
 | `optix-config` | "配置 config.toml"、"设置 MindIE/vLLM 寻优字段" | 自动修改 optix `config.toml` 的寻优参数、target 和 benchmark 配置 |
 | `optix-param-recommend` | "推荐 optix 参数"、"生成寻优范围" | 根据硬件、模型、负载和目标推荐 MindIE/vLLM 寻优参数与配置片段 |
-| `sig-review` | "请求检视"、"检视PR {number}"、"review PR {number}"、"分析PR {number}的检视意见" | GitCode PR 分配检视（SIG 路由 + 指派 chair）、代码检视、检视意见分析，支持 cursor/claude code/opencode/codex 等各类 agent |
+| `sig-review` | "请求检视"、"启动合入"、"检视PR {number}"、"review PR {number}"、"分析PR {number}的检视意见" | 评论 /merge 启动合入流程（后台 MergeTrack 工具跟踪后续状态）、代码检视、检视意见分析，不指派 assignee，支持 cursor/claude code/opencode/codex 等各类 agent |
 
 完整工作流负责组合能力；Issue、PR、Pipeline 和领域 Skills 仍可被独立触发。
 
 ## 4. 执行模式
 
-默认模式为 `guided`：在 Issue 最终提交、需求结论、设计方案、远端写操作、push、PR 创建、CI 修复和 Ready
-等关键阶段确认。
+默认模式为 `guided`：在 Issue 最终提交、需求结论、设计方案、远端写操作、source branch 首次 push、PR 创建和 Ready
+等关键阶段确认。**CI 修复循环为默认自动例外**：PR 创建后默认立即触发 CI 并持续监控，失败后自动诊断、修复、
+commit、push、重新触发，循环直到全绿或 blocked，不逐次确认 push；CI 全绿后报告本轮新增修复 commit 数；只有
+blocked（证据充分的责任/基础设施问题、无法自动定位根因）才停下交用户。CI 自动修复不得绕过质量门禁或以强制
+测试通过代替根因修复。
 
 用户可以明确授权 `autonomous`。授权必须绑定当前仓库、Issue、分支和目标，并记录在 Issue/PR 评论。
 
@@ -134,7 +137,7 @@ python scripts/ai/resolve_repository_context.py --json
 | `msmodeling-issue-draft` | 模糊需求澄清、代码分析、Issue 草稿、确认和 CLI 创建 |
 | `msmodeling-my-issues-review` | 查询并评审当前用户负责的开放 Issue |
 | `msmodeling-issue-delivery` | Issue 到 ready-for-review 的完整开发闭环 |
-| `sig-review` | SIG 路由、深度检视、inline comment、风险评级和合入建议 |
+| `sig-review` | 评论 /merge 启动合入、深度检视、inline comment、风险评级和合入建议 |
 | `msmodeling-ci-recovery` | openLiBing 流水线监控与修复循环 |
 | `msmodeling-review-feedback` | 检视意见分析、修复、回复和解决 |
 

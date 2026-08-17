@@ -1,38 +1,38 @@
 ---
 name: sig-review
-description: msmodeling SIG 化代码检视技能，覆盖从"请求检视"到"完成移交"的全流程。PR 作者说"请求检视"自动路由 SIG 并指派 chair；检视者说"检视PR {number}"自动分析 diff 并提交意见；说"分析PR {number}的检视意见"自动拉取 diff_comment 评论并逐条分析合理性、给出修改建议；还支持查看待检视列表、查看状态、责任传递、完成移交。适用于 cursor/claude code/opencode/codex 等各类 agent。
+description: msmodeling SIG 化代码检视技能。PR 作者说"请求检视"或"启动合入"即在 PR 评论区评论 /merge，由常驻服务 后台合入管理服务 自动路由 SIG、分配 reviewer、监控 CI/lgtm/approve 和催审；检视者说"检视PR {number}"自动分析 diff 并提交意见，通过时评论 /lgtm；说"分析PR {number}的检视意见"自动拉取 diff_comment 评论并逐条分析合理性、给出修改建议；还支持查看待检视列表、查看状态、转交、完成检视。不手动指派 assignee，SIG 路由由后台服务完成。适用于 cursor/claude code/opencode/codex 等各类 agent。
 metadata:
-  version: 2.1.0
-  source: sig-workflow+cli-migration
+  version: 3.0.0
+  source: mergetrack-handoff
 ---
 
 # SIG PR 代码检视
 
 ## 技能概述
 
-本技能是 msmodeling 项目 **SIG 化代码检视工具**，让 PR 作者和检视者通过自然语言与 AI agent 交互，完成从"请求检视"到"检视完成移交"的全流程，无需手动操作 GitCode 网页。
+本技能是 msmodeling 项目 **SIG 化代码检视工具**，让 PR 作者和检视者通过自然语言与 AI agent 交互完成检视全流程，无需手动操作 GitCode 网页。
 
-msmodeling 按目录划分为 10 个子 SIG，每个 SIG 有明确的 chair（负责人）、reviewer（备审）、approver（评审）。本技能自动将 PR 路由到正确的 SIG 并指派检视人员，确保每个 PR 有人及时审查、责任传递不断链。
+msmodeling 按目录划分为 10 个子 SIG，每个 SIG 有明确的 chair（负责人）、reviewer（备审）、approver（评审）。**合入流程的启动（SIG 路由、reviewer 分配、CI/lgtm/approve 标签监控、催审）由后台运行的合入管理工具 MergeTrack 驱动**：只要在 PR 评论区评论 `/merge`，后台合入管理服务即自动接手。本技能不再手动指派 assignee 或打 `sig:XXX` 标签——SIG 路由由后台服务完成，agent 不获取变更文件、不计算 SIG 归属。本技能聚焦三件事：①评论 `/merge` 启动合入；②reviewer 实际检视并提交意见、通过时评论 `/lgtm`；③分析已有检视意见并给出修改建议。
 
 **核心能力：**
 
 | 能力 | 说明 | 谁用 | 怎么触发 |
 |------|------|------|---------|
-| 请求检视 | 自动分析 PR 变更文件归属哪个 SIG，指派对应 chair | PR 作者 | "请求检视" |
+| 启动合入 | 评论 `/merge`，后台合入管理服务 自动路由 SIG、分配 reviewer、监控 CI/lgtm/approve 和催审 | PR 作者或任何成员 | "请求检视" / "启动合入" |
 | 查看待检视 | 列出当前分配给自己的所有待检视 PR | 检视者 | "我有哪些待检视PR" |
 | 代码检视 | 获取 PR 代码变更，分析问题，提交结构化检视意见 | 检视者 | "检视PR 123" |
 | 查看状态 | 快速查看 PR 的审查人、标签、状态 | 任何人 | "PR 123 状态" |
-| 转交检视 | 将检视责任转给其他人 | 当前检视者 | "转给 XXX" |
-| 完成移交 | 提交检视结论。通过则移交给 approver，有意见则转回作者修改 | 检视者 | "完成检视" |
+| 转交检视 | 通知其他 reviewer 接手（不改 assignee，assignee 由 后台合入管理服务 管理） | 当前检视者 | "转给 XXX" |
+| 完成检视 | 提交检视结论。通过则评论 `/lgtm`（后台合入管理服务 自动通知 approver），有意见则提交行内意见后等作者修改重评 | 检视者 | "完成检视" |
 | 分析检视意见 | 拉取 PR 的 diff_comment 评论，逐条分析合理性并给出修改建议 | PR 作者 / 检视者 | "分析PR 123的检视意见" |
 
 **当用户询问"你能做什么"或"这个技能是干什么的"时，按以下方式回答：**
 
-> 这是 msmodeling 项目的 SIG 化代码检视工具。msmodeling 分为 10 个子 SIG，每个 SIG 有明确的负责人和评审人。这个工具能帮你完成检视全流程：
+> 这是 msmodeling 项目的 SIG 化代码检视工具。msmodeling 分为 10 个子 SIG，每个 SIG 有明确的负责人和评审人。合入流程的启动由常驻服务 后台合入管理服务 驱动——评论 `/merge` 即自动路由 SIG、分配 reviewer、监控 CI/lgtm/approve 和催审。这个工具能帮你完成检视全流程：
 >
-> - **你是 PR 作者**：推送代码后说"请求检视"，自动分析你的变更文件属于哪个 SIG，指派对应负责人审查
-> - **你是检视者**：说"我有哪些待检视PR"查看任务，说"检视PR 123"开始检视。检视完如果没问题说"完成检视，移交给 approver XXX"；如果有修改意见，提交意见后 PR 会自动转回作者，作者改完会再次请求检视
-> - **想转给别人**：说"转给 XXX"即可
+> - **你是 PR 作者**：推送代码后说"请求检视"或"启动合入"，我在 PR 评论区评论 `/merge`，后台合入管理服务 自动分配 reviewer 并飞书通知
+> - **你是检视者**：说"我有哪些待检视PR"查看任务，说"检视PR 123"开始检视。检视完如果没问题说"完成检视"，我评论 `/lgtm`，后台合入管理服务 自动通知 approver；如果有修改意见，提交行内意见后等作者修改重评
+> - **想转给别人**：说"转给 XXX"，我通知对方接手（不改 assignee，由 后台合入管理服务 管理）
 > - **想看状态**：说"PR 123 状态"即可
 > - **收到检视意见想分析**：说"分析PR 123的检视意见"，自动拉取所有 diff_comment 评论，逐条分析是否合理、该怎么改
 >
@@ -44,22 +44,22 @@ msmodeling 按目录划分为 10 个子 SIG，每个 SIG 有明确的 chair（�
 
 | 工作流 | 触发者 | 触发词 | 命令 |
 |--------|--------|--------|------|
-| **分配检视** | PR 作者 | "请求检视" | `gitcode pr view` → `gitcode api` |
+| **启动合入** | PR 作者或任何成员 | "请求检视" / "启动合入" | `gitcode pr comment "/merge"` |
 | **查看待检视** | reviewer / chair | "我有哪些待检视PR" | `gitcode pr list` |
 | **查看状态** | 任何人 | "PR 123 状态" | `gitcode pr view --json` |
 | **代码检视** | reviewer / chair | "检视PR {number}" | `gitcode pr diff` → `gitcode pr comment` |
-| **责任传递** | 当前 assignee | "转给 XXX" | `gitcode api` |
-| **完成移交** | reviewer（非 PR 作者） | "完成检视" | `gitcode pr comment "/lgtm"` |
+| **转交检视** | 当前检视者 | "转给 XXX" | 通知目标 reviewer（不改 assignee） |
+| **完成检视** | reviewer（非 PR 作者） | "完成检视" | `gitcode pr comment "/lgtm"` |
 | **分析检视意见** | PR 作者 / 检视者 | "分析PR {number}的检视意见" | `gitcode pr comments` → 分析 |
 
 **典型流程：**
 
-1. PR 作者推送代码后对 agent 说"请求检视" → 自动分析文件并指派 chair
-2. chair 收到 GitCode 站内信通知 → 对 agent 说"我有哪些待检视PR" → 列出任务
-3. chair 对 agent 说"检视PR {number}" → 自动分析 diff 并提交检视意见 → **PR 自动转回作者修改**
-4. 作者修改后再次"请求检视" → 重新指派 chair → 循环 2-3 直到无问题
-5. chair 检视通过 → "完成检视，移交给 approver {用户名}" → 提交结论 + 指派 approver
-6. （可选）chair 忙不过来 → "转给 {reviewer 用户名}" → 责任传递
+1. PR 作者推送代码后对 agent 说"请求检视" → 评论 `/merge`，后台合入管理服务 自动路由 SIG、分配 reviewer、飞书通知
+2. reviewer 收到飞书通知 → 对 agent 说"我有哪些待检视PR" → 列出任务
+3. reviewer 对 agent 说"检视PR {number}" → 自动分析 diff 并提交检视意见 → 有修改意见则等作者修改后重评
+4. 作者修改后再次"请求检视" → 重评 `/merge`，后台合入管理服务 重新通知 reviewer → 循环 2-3 直到无问题
+5. reviewer 检视通过 → "完成检视" → 评论 `/lgtm`，后台合入管理服务 自动通知 approver
+6. （可选）reviewer 忙不过来 → "转给 {reviewer 用户名}" → 通知对方接手
 
 ## 前置条件
 
@@ -98,81 +98,43 @@ gitcode auth status
 - 忽略纯格式问题（由 pre-commit 负责）
 - 评论措辞委婉，使用"请考虑"、"建议"等表达
 
-## 分配检视（请求检视）
+## 启动合入流程（请求检视）
 
-当 PR 作者推送代码后说"请求检视"，agent 执行 SIG 路由和 assignee 指派。
+当 PR 作者推送代码后说"请求检视"或"启动合入"，agent 在 PR 评论区评论 `/merge` 启动后台合入管理服务。SIG 路由、reviewer 分配、催审等均由后台服务完成，**agent 不需要获取变更文件、不计算 SIG 归属、不展示 SIG 信息**。
+
+> **`/merge` 由用户主动请求触发，agent 不自动发起**。若 agent 所处工作流（如 issue-delivery）需要推进合入，必须**先确保 CI 全绿**再评论 `/merge`——CI 未通过时先走 `msmodeling-ci-recovery` 修复至全绿，然后再评论 `/merge`。
 
 ### 命令
 
 ```bash
-# 先用 --dry-run 预览分析结果（不实际指派）
-gitcode pr view <PR编号> -R <TARGET_REPO> --json  # 预览分析结果，不实际指派
+# 1. 前置检查：确认当前 head CI 已全绿（ci-pipeline-passed / docs-ci-pipeline-success label）
+gitcode pr view <PR编号> -R <TARGET_REPO> --json
 
-# 确认后实际指派
-gitcode api PATCH "/repos/<TARGET_REPO>/pulls/<PR编号>" -f assignee=<chair用户名> && gitcode pr label <PR编号> -R <TARGET_REPO> --add sig:XXX
+# 2. 在 PR 评论区评论 /merge 启动合入流程
+#    /merge 必须单独成行（后台工具按行精确匹配整行 == "/merge"）
+gitcode pr comment <PR编号> -R <TARGET_REPO> --body "/merge"
 ```
+
+> **不执行** `gitcode api PATCH .../pulls/<PR> -f assignee=...` 指派 chair，**不打** `sig:XXX` 标签——assignee 分配和标签由后台合入管理服务统一完成。agent 只做一件事：评论 `/merge`。
 
 ### 做的事
 
-1. 获取 PR 变更文件列表
-2. 逐文件匹配 SIG 目录归属表（最长前缀匹配 + fallback 兜底）
-3. 特例处理：
-   - **chair == PR 作者** → 改指派 reviewer
-   - **跨 SIG**（文件分属多个 SIG）→ 指派多个 chair，打 `cross-sig` 标签
-   - **根目录未匹配文件**（如 `new_root_tool.py`）→ 标记需架构 SIG 共审
-4. 指派 chair（GitCode 自动发站内信通知）
-5. 打 `sig:XXX` 标签
+1. **前置检查 CI 已通过**（`ci-pipeline-passed`/`docs-ci-pipeline-success` label）；未通过则先走 `msmodeling-ci-recovery` 修复至全绿
+2. 在 PR 评论区评论 `/merge`
+3. 后台合入管理服务检测到 `/merge` 后自动：路由 SIG、分配 reviewer、飞书通知 reviewer、监控 CI/lgtm/approve、催审
 
 ### 幂等
 
-若 PR 已有 assignee，提示而不重复指派。
+若 PR 评论区已存在 `/merge` 评论且 后台合入管理服务 已启动（PR 已有 reviewer 分配迹象），提示而不重复评论。
 
 ### Agent 输出要求
 
-执行 `assign` 后，向用户报告：
+评论 `/merge` 后，向用户报告：
 
 ```
-PR #123 分析结果：
-- 变更文件：5 个
-- 匹配 SIG：模型适配（chair: ChenHuiwen）
-- 已指派：ChenHuiwen
-- 已添加标签：sig:模型适配
-- ChenHuiwen 将收到 GitCode 站内信通知
+PR #123 已评论 /merge，启动合入流程：
+- 后台合入管理服务将自动路由 SIG、分配 reviewer 并飞书通知，无需手动指派
 ```
-
-跨 SIG 时：
-
-```
-PR #123 分析结果：
-- 变更文件：8 个
-- 匹配 SIG：ServingCast（chair: yuyinkai1）、Throughput寻优（chair: jia_ya_nan）
-- 跨 SIG 双签，已指派：yuyinkai1, jia_ya_nan
-- 已添加标签：sig:ServingCast, sig:Throughput寻优, cross-sig
-```
-
-有未匹配文件时，agent 会自动尝试 fallback 归类（按顶层目录推断 SIG）。fallback 匹配的文件追加：
-
-```
-ℹ️ 有 1 个文件未在 SIG 归属表中，已自动归类：
-  tensor_cast/new_module/foo.py → 模型适配（fallback 推断）
-  建议：将 tensor_cast/new_module/ 目录归属到模型适配 SIG
-```
-
-仅当文件连 fallback 都无法匹配时（如根目录的全新文件），才追加：
-
-```
-⚠️ 有 1 个文件无法归类：totally_new_file.py
-根目录文件需架构 SIG 共审
-```
-
-### 未匹配文件的处理策略
-
-| 情况 | 处理 | 说明 |
-|------|------|------|
-| 文件在已知 SIG 的子目录下但未显式登记 | **自动归类**（fallback 推断）+ 建议补录 | 按顶层目录推断 SIG，出争议再调整 |
-| 文件不在任何顶层目录下 | 标记需架构 SIG 共审 | 无法自动推断，需人工判断 |
-
-**原则：优先自动化，出争议再找 SIG。** fallback 匹配的文件会正常指派，chair 如认为不属于自己 SIG 可用 `handoff` 转交。
 
 ## 检视流程
 
@@ -352,7 +314,7 @@ rm -f "$TMPDIR/review_123.md"
 
 > **重要**：agent 在 `--body` / `--body-file` 的评论正文中手动添加 `【review】【类别】` 前缀。
 
-> **自动移交**：提交行内评论后，可通过 `gitcode api` 将 PR 责任人移回 PR 作者。作者收到 GitCode 站内信通知"有新的检视意见需要处理"。SLA 24h 计时清零，等作者修改后再次"请求检视"时重新计时。
+> **后台合入管理服务 自动流转**：提交行内评论（未解决的 diff_comment）后，后台合入管理服务 检测到开放意见会自动将状态切回 author_rework 并飞书通知作者处理。作者修改后重评 `/merge`，后台合入管理服务 重新通知 reviewer。agent 不手动改 assignee。
 
 **撤回评论（如果发现误报）：**
 
@@ -378,7 +340,7 @@ EOF
 # 2. 提交检视摘要
 gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/verdict.md"
 
-# 3. 评论 /lgtm，ascend-robot 自动打 lgtm 标签
+# 3. 评论 /lgtm，后台合入管理服务 检测后自动通知 approver
 gitcode pr comment <PR编号> -R <TARGET_REPO> --body "/lgtm"
 ```
 
@@ -390,7 +352,7 @@ gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/verdict.md"
 
 不评论 `/lgtm`，PR 保持待修改状态。作者看到行内意见后修改，修改完成后再次请求检视。
 
-> **`/lgtm` 机制**：reviewer 评论 `/lgtm` → ascend-robot 自动打 `lgtm` 标签。approver 评论 `/approve` → robot 打 `approved` 标签。两个标签齐了 PR 才允许合入。只有 SIG 授权的 chair/reviewer 有权评论 `/lgtm`，approver 有权评论 `/approve`。
+> **`/lgtm` 与 `/approve` 机制**：reviewer 评论 `/lgtm` → 后台合入管理服务 检测后自动通知 approver 并跟踪 `lgtm` 标签；approver 评论 `/approve` → 后台合入管理服务 检测后标记可合入。两个标签齐了 PR 才允许合入。分配 reviewer/approver 由 后台合入管理服务 基于 `/merge` 自动完成，agent 不手动指派 assignee。
 
 > **注意**：评论 `/lgtm` 是 reviewer 的动作，不是 PR 作者的动作。PR 作者只负责请求检视，reviewer 负责检视和评论 `/lgtm`。
 
@@ -408,13 +370,9 @@ gitcode pr comment <PR编号> -R <TARGET_REPO> --body-file "$TMPDIR/verdict.md"
 gitcode pr comment <PR编号> -R <TARGET_REPO> --body "阶段性意见：..."
 ```
 
-**如果需要转给其他 reviewer（责任传递）：**
+**如果需要转给其他 reviewer（转交）：**
 
-```bash
-gitcode api PATCH "/repos/<TARGET_REPO>/pulls/<PR编号>" -f assignee=<reviewer用户名>
-```
-
-修改 assignee 移除自己并指派新人，GitCode 自动通知新人。
+不改 assignee（由 后台合入管理服务 管理）。通过飞书或 PR 评论通知目标 reviewer 接手即可，对方检视后评论 `/lgtm` 即完成。
 
 ## 分析检视意见
 
@@ -535,14 +493,14 @@ Step 1 通过 `gitcode pr comments` 获取的评论列表 包含该 PR 已有的
 
 触发词："检视PR {number}"、"review PR {number}"
 
-AI 自动完成全流程（获取 diff → 分析 → 提交意见 → 完成移交），**无需用户等待**。提交前 AI 会显示分析结果摘要（发现了几个问题、分别是什么类别），然后立即提交。用户回来后看到结果，可以撤回、补充或完成移交。
+AI 自动完成全流程（获取 diff → 分析 → 提交意见 → 完成检视），**无需用户等待**。提交前 AI 会显示分析结果摘要（发现了几个问题、分别是什么类别），然后立即提交。用户回来后看到结果，可以撤回、补充或完成检视。
 
 **关键原则：检视永远自动完成，不依赖用户响应。** 即使用户说完"检视PR 123"就去做别的事，检视也会完成。
 
 提交后 AI 告知用户：
-> 检视完成，已提交 N 条意见，PR 已转回给作者修改。
+> 检视完成，已提交 N 条意见。若有修改意见，后台合入管理服务 会自动通知作者处理。
 > 如需调整：说"撤回第 2 条"或"补充一条意见"。
-> 如需完成：说"完成检视，移交给 approver XXX"。
+> 如需完成：说"完成检视"，我评论 `/lgtm`，后台合入管理服务 自动通知 approver。
 > 下次如想自己引导检视方向，可以说"交互检视PR {number}"。
 
 ### 交互检视（可选）
@@ -585,16 +543,15 @@ PR#123: 优化推理引擎的批处理逻辑，主要变更在 tensor_cast/layer
 5. 临时文件写入系统临时目录，提交后立即删除
 6. 提交评论前确认内容无误（Step 4 二次检查）
 7. 不盲从 PR 作者的设计声明和描述；以 diff 为事实，与 spec 冲突时以 spec 为准并说明。
-8. **向用户报告时使用自然语言，不要暴露命令名、参数名、JSON 字段名、API 端点等技术细节**。用户只需知道"已分析文件并指派了 chair"，不需要知道"运行了 `gitcode pr view`"
+8. **向用户报告时使用自然语言，不要暴露命令名、参数名、JSON 字段名、API 端点等技术细节**。用户只需知道"已评论 /merge 启动合入流程"，不需要知道"运行了 `gitcode pr comment`"
 
 ## 完成标准
 
-### 分配检视模式
+### 启动合入模式
 
-- [ ] 已执行 `gitcode pr view` 预览分析结果
-- [ ] 已确认路由结果合理（SIG 匹配正确、assignee 正确）
-- [ ] 已通过 `gitcode api` 指派 chair 并通过 `gitcode pr label` 打标签
-- [ ] 已向用户报告分析结果和指派状态
+- [ ] 已前置检查当前 head CI 全绿（`ci-pipeline-passed`/`docs-ci-pipeline-success`）
+- [ ] 已在 PR 评论区评论 `/merge`（不执行 `gitcode api` 指派、不打 `sig:XXX` 标签、不获取变更文件计算 SIG 归属）
+- [ ] 已向用户报告已评论 `/merge` 启动合入
 
 ### 代码检视模式
 
@@ -603,8 +560,8 @@ PR#123: 优化推理引擎的批处理逻辑，主要变更在 tensor_cast/layer
 - [ ] 已理解 PR 变更内容和目的
 - [ ] 检视意见数量符合数量控制表
 - [ ] 每条意见经过二次检查
-- [ ] 检视意见已提交（`gitcode pr comment`），每条意见提交后可通过 `gitcode api` 将 PR 转回作者
-- [ ] 已评论 `/lgtm`（通过时）或已提交检视摘要但不评论 `/lgtm`（有修改意见时），或通过 `gitcode api` 转给其他 reviewer
+- [ ] 检视意见已提交（`gitcode pr comment`），有修改意见时不评论 `/lgtm`，等作者修改后重评 `/merge`
+- [ ] 已评论 `/lgtm`（通过时）或已提交检视摘要但不评论 `/lgtm`（有修改意见时），或通过飞书/评论转给其他 reviewer
 - [ ] 输出检视摘要：检视了哪些文件，提出了几个意见，关键发现是什么
 
 ### 分析检视意见模式
@@ -616,6 +573,6 @@ PR#123: 优化推理引擎的批处理逻辑，主要变更在 tensor_cast/layer
 - [ ] 改法具体可操作（指明文件、函数、行号）
 - [ ] 已输出汇总表（含优先级和涉及文件）
 
-## `/govern` 治理集成
+## 后台服务与通知
 
-检视责任移交时（请求检视、确认接手、检视通过、转交等），在 PR 评论写一行 `/next <login> <verb>` 触发通知 + 看板。协议见 `spec/governance/next-comment-protocol.md`。
+合入流程的流转通知（分配 reviewer、CI 通过后通知 approver、催审、返工通知作者等）由 后台合入管理服务 统一驱动，agent 不写 `/next` 治理评论，避免与 后台合入管理服务 双重通知。

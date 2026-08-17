@@ -30,7 +30,7 @@
 | `msmodeling-issue-draft` | 从模糊描述补齐事实、生成 Issue 草稿，并在确认后通过 CLI 提交 |
 | `msmodeling-my-issues-review` | 查询当前用户负责的开放 Issue，输出接受、拒绝或需补充信息的完整结论 |
 | `msmodeling-issue-delivery` | 将指定 Issue 编排至需求分析、设计、开发、Draft PR、CI 和 ready-for-review |
-| `sig-review` | SIG 路由、深度检视、CLI 行内评论、风险评级和合入建议 |
+| `sig-review` | 评论 /merge 启动合入、深度检视、CLI 行内评论、风险评级和合入建议 |
 | `msmodeling-ci-recovery` | 读取 openLiBing 结果、定位日志、修复、复验并循环至通过或明确阻塞 |
 | `msmodeling-review-feedback` | 分析和处理 PR 检视意见，验证修改并通过 CLI 回复 |
 

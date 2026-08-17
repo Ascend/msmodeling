@@ -62,7 +62,7 @@ Commit 使用 Conventional Commits 并 sign-off。push 面向 source repository�
 
 ### 8. CI 和自检
 
-按 `ci-recovery-workflow.md` 监控至闭环。作者自检必须包含本地证据、CI、风险、文档同步和未覆盖项。
+PR 创建后**默认立即**按 `ci-recovery-workflow.md` 触发 CI 并监控至闭环：触发、监控、失败诊断和修复（含 commit、push、重新触发）全程默认自动，直到全绿或 blocked，无需用户逐次催促或确认 push。CI 全绿后向用户报告本轮新增的修复 commit 数。作者自检必须包含本地证据、CI、风险、文档同步和未覆盖项。
 
 ## 完成标准
 

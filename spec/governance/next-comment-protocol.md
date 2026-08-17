@@ -2,6 +2,8 @@
 
 成员在 PR/Issue 评论中写一行 `/next` 声明责任移交 + 请求动作。仓外本地工具（不上库）扫描这些行并用飞书群 @ 通知责任人 + 发布看板。
 
+> **PR 侧 vs Issue 侧**：PR 合入流程的责任移交通知（分配 reviewer、CI 通过后通知 approver、催审、返工通知作者等）已由后台合入管理服务基于 `/merge`、CI label 和 diff_comment 统一接管，agent 不在 PR 评论写 `/next`，避免双重通知。`/next` 协议在 **Issue 侧**（Issue 评审、分类、退回、转交）仍由 agent 主动写入。
+
 ## 语法
 
 ```

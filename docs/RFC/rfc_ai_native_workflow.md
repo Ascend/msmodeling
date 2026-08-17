@@ -60,7 +60,7 @@ Issue 到 PR/CI 的编排层。部分能力直接调用 GitCode API，导致认�
 | `spec/workflows/` | 各场景状态机、输入、门禁和完成条件 |
 | `.agents/skills/msmodeling-*` | 组合原子能力，维护阶段推进 |
 | `.agents/skills/gitcode-*` | GitCode CLI 底座原子操作 |
-| `.agents/skills/sig-review` | SIG 路由和项目专项检查 |
+| `.agents/skills/sig-review` | 评论 /merge 启动合入和项目专项检查（SIG 路由由 后台合入管理服务 驱动） |
 | `.agents/repository-contract.json` | canonical、source 发现和 operation target 规则 |
 | `scripts/ai/` | 静态边界、Skills 元数据和 CLI 能力校验 |
 | `.agents/gitcode-skills.lock.json` | 上游 Skills 来源、版本和本仓适配 |
