@@ -42,8 +42,8 @@ from scripts.ai.validate_remote_boundary import (
     validate_repository_identity,
 )
 from scripts.ai.validate_skills import (
+    SEMVER_PATTERN,
     main as validate_skills_main,
-    parse_frontmatter,
     validate_skills,
 )
 
@@ -71,9 +71,13 @@ def test_all_skills_have_required_frontmatter() -> None:
     findings = validate_skills(REPO_ROOT)
     errors = [f for f in findings if f.severity == "error"]
     assert errors == [], errors
-    workflow = REPO_ROOT / ".agents" / "skills" / "msmodeling-issue-delivery" / "SKILL.md"
-    data = parse_frontmatter(workflow)
-    assert data["metadata.version"] == "1.0.0"
+
+
+def test_skill_metadata_version_uses_semver() -> None:
+    assert SEMVER_PATTERN.fullmatch("1.2.3")
+    assert SEMVER_PATTERN.fullmatch("0.1.0-beta.1+build.7")
+    assert not SEMVER_PATTERN.fullmatch("1.2")
+    assert not SEMVER_PATTERN.fullmatch("v1.2.3")
 
 
 def test_skills_do_not_bypass_gitcode_cli() -> None:

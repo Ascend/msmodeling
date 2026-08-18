@@ -19,6 +19,11 @@ from itertools import combinations
 from pathlib import Path
 
 SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+SEMVER_PATTERN = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 SKILL_ROOTS = ((".agents", "skills"), (".claude", "skills"))
 
@@ -200,6 +205,10 @@ def collect_skills(repo_root: Path) -> tuple[list[SkillRecord], list[Finding]]:
             for key in ("name", "description", "metadata.version", "metadata.source"):
                 if not data.get(key):
                     findings.append(Finding(relative, f"missing frontmatter field: {key}"))
+
+            version = data.get("metadata.version", "").strip().strip('"').strip("'")
+            if version and not SEMVER_PATTERN.fullmatch(version):
+                findings.append(Finding(relative, f"invalid metadata.version (expected SemVer): {version}"))
 
             name = data.get("name", "").strip().strip('"').strip("'")
             if name and not SKILL_NAME_PATTERN.fullmatch(name):

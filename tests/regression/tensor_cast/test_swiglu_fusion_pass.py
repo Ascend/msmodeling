@@ -68,6 +68,39 @@ def test_grouped_matmul_swiglu_pass_rejects_unsafe_shapes_and_users():
     assert not any(node.target == torch.ops.tensor_cast.swiglu.default for node in split_sizes.graph.nodes)
 
 
+def test_grouped_mxfp4_swiglu_pass_fuses_post_activation_quantization():
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    w = graph.placeholder("w")
+    w_scale = graph.placeholder("w_scale")
+    x_scale = graph.placeholder("x_scale")
+    bias = graph.placeholder("bias")
+    gmm = graph.call_function(
+        torch.ops.tensor_cast.grouped_matmul_mxfp4.default,
+        args=([x], [w], [w_scale], [x_scale], [bias], torch.bfloat16),
+    )
+    split = graph.call_function(torch.ops.aten.split.Tensor, args=(gmm, 2, -1))
+    gate = graph.call_function(operator.getitem, args=(split, 0))
+    up = graph.call_function(operator.getitem, args=(split, 1))
+    swiglu = graph.call_function(torch.ops.tensor_cast.swiglu.default, args=(gate, up))
+    quant = graph.call_function(
+        torch.ops.tensor_cast.dynamic_quantize_mxfp4.default,
+        args=(swiglu,),
+        kwargs={"group_size": 32},
+    )
+    payload = graph.call_function(operator.getitem, args=(quant, 0))
+    scale = graph.call_function(operator.getitem, args=(quant, 1))
+    graph.output((payload, scale))
+    graph_module = fx.GraphModule({}, graph)
+
+    result = GroupedMatmulSwigluPass()(graph_module)
+
+    targets = [node.target for node in result.graph.nodes if node.op == "call_function"]
+    assert torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default in targets
+    assert torch.ops.tensor_cast.dynamic_quantize_mxfp4.default not in targets
+    assert torch.ops.tensor_cast.swiglu.default not in targets
+
+
 class SwiGLUFusionPassTestMixin:
     """Unified, parameterized test verifying SwiGLU fusion presence.
 

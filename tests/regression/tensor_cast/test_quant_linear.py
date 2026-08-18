@@ -611,6 +611,21 @@ class TestQuantLinear(QuantLinearTestMixin, unittest.TestCase):
         self.assertIn("tensor_cast.dynamic_quantize_symmetric.default", result)
         self.assertIn("tensor_cast.fp8_linear.default", result)
 
+    def test_mxfp4_weight_scales_are_per_output_channel_and_block(self):
+        linear = torch.nn.Linear(65, 4, device="meta", dtype=torch.bfloat16)
+        config = LinearQuantConfig(
+            quant_type=LinearQuantType.MXFP4,
+            weight_group_size=32,
+            weight_quant_granularity=QuantGranularity.PER_GROUP,
+            weight_quant_scheme=QuantScheme.SYMMETRIC,
+        )
+
+        quant_linear = TensorCastQuantLinear(linear, config)
+
+        self.assertEqual(quant_linear.weight_scale.shape, (4, 3))
+        self.assertEqual(quant_linear.weight_scale.dtype, torch.float8_e8m0fnu)
+        self.assertEqual(quant_linear.group_size, 32)
+
     @parameterized.expand(
         [
             ["Qwen/Qwen3-32B"],

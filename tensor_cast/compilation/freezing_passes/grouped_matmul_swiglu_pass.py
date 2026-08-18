@@ -52,11 +52,16 @@ class GroupedMatmulSwigluPass(TensorCastGraphModulePass):
 
             # --- Perform Fusion ---
             fused_target = self._op_map[matmul_node.target]
+            post_quant_match = self._get_post_swiglu_mxfp4_quant(node, matmul_node)
 
             # Construct new node arguments by reusing matmul inputs.
             # Assumes grouped_matmul signature is (input, weight, bias?, ...)
             # and the fused op has the same signature, handling swiglu internally.
             new_args = tuple(matmul_node.args)
+            if post_quant_match is not None:
+                post_quant_node, group_size = post_quant_match
+                fused_target = torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default
+                new_args = (*new_args, group_size)
 
             with graph.inserting_before(node):
                 fused_node = graph.create_node(
@@ -66,8 +71,15 @@ class GroupedMatmulSwigluPass(TensorCastGraphModulePass):
                     kwargs=matmul_node.kwargs,  # Preserve kwargs if any
                 )
 
-            # Replace all uses of the swiglu node with the new fused node
-            node.replace_all_uses_with(fused_node)
+            if post_quant_match is not None:
+                # The native MXFP4 kernel already produces the payload/scale
+                # pair that the following dynamic quantization would create.
+                # Replacing the tuple preserves existing getitem users for
+                # payload and scale without materializing a BF16 intermediate.
+                post_quant_node.replace_all_uses_with(fused_node)
+            else:
+                # Replace all uses of the SwiGLU node with the fused node.
+                node.replace_all_uses_with(fused_node)
             modified = True
 
         if modified:
@@ -192,3 +204,29 @@ class GroupedMatmulSwigluPass(TensorCastGraphModulePass):
         if len(gate_node.users) != 1 or len(up_node.users) != 1:
             return False
         return True
+
+    @staticmethod
+    def _get_post_swiglu_mxfp4_quant(
+        swiglu_node: fx.Node,
+        matmul_node: fx.Node,
+    ) -> tuple[fx.Node, int] | None:
+        """Return the directly-following MXFP4 quant node when it is fusible."""
+        if matmul_node.target != torch.ops.tensor_cast.grouped_matmul_mxfp4.default:
+            return None
+        users = list(swiglu_node.users)
+        if len(users) != 1:
+            return None
+        quant_node = users[0]
+        if (
+            quant_node.op != "call_function"
+            or quant_node.target != torch.ops.tensor_cast.dynamic_quantize_mxfp4.default
+            or not quant_node.args
+            or quant_node.args[0] is not swiglu_node
+        ):
+            return None
+        group_size = quant_node.kwargs.get("group_size")
+        if group_size is None and len(quant_node.args) > 1:
+            group_size = quant_node.args[1]
+        if not isinstance(group_size, int) or group_size <= 0:
+            return None
+        return quant_node, group_size

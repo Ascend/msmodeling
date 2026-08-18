@@ -7,6 +7,7 @@ import torch.fx as fx
 from ... import ops  # noqa: F401
 from ..pass_base import TensorCastGraphModulePass
 from ..topo_sort import stable_topo_sort
+from ..utils import get_node_shape
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default,
         torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default,
         torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default,
+        torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default,
     }
 
     _LINEAR_FFN_OPS = {
@@ -67,6 +69,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default,
         torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default,
         torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default,
+        torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default,
     }
 
     # Map from grouped_matmul_*_swiglu target → DFC fused op target
@@ -79,7 +82,7 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
             torch.ops.tensor_cast.dispatch_ffn_combine_quant_int4.default
         ),
         torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default: torch.ops.tensor_cast.dispatch_ffn_combine_fp8.default,
-        torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default: (
+        torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default: (
             torch.ops.tensor_cast.dispatch_ffn_combine_mxfp4.default
         ),
     }
@@ -310,7 +313,35 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         gmm1_w_args = self._collect_linear_args_as_lists(gate_up_linears)
         gmm2_w_args = self._collect_linear_args_as_lists(down_linears)
 
+        if dfc_target == torch.ops.tensor_cast.dispatch_ffn_combine_mxfp4.default:
+            group_size = self._infer_mxfp4_group_size(gate_up_linears[0])
+            if group_size is None:
+                logger.debug("DFC: cannot infer MXFP4 group size from unfused linear nodes")
+                return None
+            gmm1_w_args = (*gmm1_w_args, group_size)
+
         return (dfc_target, gmm1_w_args, gmm2_w_args, rank_node, rank_group_node)
+
+    @staticmethod
+    def _infer_mxfp4_group_size(linear_node: fx.Node) -> int | None:
+        """Infer an exact MXFP4 input block size for an unfused DFC region.
+
+        Unfused ``mxfp4_linear`` nodes do not carry group size explicitly.
+        The common model shapes have a K dimension exactly divisible by the
+        number of input-scale blocks; for partial tail blocks we conservatively
+        skip DFC fusion instead of inventing a scale layout.
+        """
+        if len(linear_node.args) < 3:
+            return None
+        x_shape = get_node_shape(linear_node.args[0])
+        x_scale_shape = get_node_shape(linear_node.args[2])
+        if not x_shape or not x_scale_shape:
+            return None
+        k = x_shape[-1]
+        k_groups = x_scale_shape[-1]
+        if not isinstance(k, int) or not isinstance(k_groups, int) or k_groups <= 0 or k % k_groups != 0:
+            return None
+        return k // k_groups
 
     @staticmethod
     def _collect_linear_args_as_lists(linear_nodes: list) -> tuple:

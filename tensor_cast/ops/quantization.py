@@ -94,11 +94,14 @@ def _(
     Returns:
         A tuple containing:
         - The quantized tensor.
-        - The quantization scale tensor of shape (K_group,).
+        - The E8M0 scale tensor of shape ``(*x.shape[:-1], K_group)``. Every
+          logical row receives independent block scales along K.
     """
+    if group_size <= 0:
+        raise ValueError(f"group_size must be positive, got {group_size}")
     K = x.shape[-1]
     K_group = (K + group_size - 1) // group_size
     return (
         torch.empty_like(x, dtype=torch.int4),
-        torch.empty((K_group,), dtype=torch.float8_e8m0fnu, device="meta"),
+        torch.empty((*x.shape[:-1], K_group), dtype=torch.float8_e8m0fnu, device="meta"),
     )

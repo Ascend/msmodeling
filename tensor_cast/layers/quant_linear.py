@@ -57,10 +57,24 @@ class QuantLinearBase(torch.nn.Module):
 
         # Store group_size for MXFP4
         if quant_config.quant_type == LinearQuantType.MXFP4:
-            # Calculate group_size from weight_scale shape
-            # weight_scale shape is (K_group,)
-            K_group = self.weight_scale.shape[0]
-            self.group_size = (self.in_features + K_group - 1) // K_group
+            # MXFP4 stores one E8M0 scale per output channel and K block.
+            # The int4 tensor is only a payload carrier; the scale shape keeps
+            # the MX block semantics explicit.
+            if self.weight_scale.ndim != 2 or self.weight_scale.shape[0] != self.out_features:
+                raise ValueError(
+                    f"MXFP4 weight_scale must have shape (out_features, K_group), got {tuple(self.weight_scale.shape)}"
+                )
+            if quant_config.weight_group_size is None or quant_config.weight_group_size <= 0:
+                raise ValueError("MXFP4 requires a positive weight_group_size")
+            expected_k_groups = (
+                self.in_features + quant_config.weight_group_size - 1
+            ) // quant_config.weight_group_size
+            if self.weight_scale.shape[-1] != expected_k_groups:
+                raise ValueError(
+                    "MXFP4 weight_scale K-group dimension does not match weight_group_size: "
+                    f"expected {expected_k_groups}, got {self.weight_scale.shape[-1]}"
+                )
+            self.group_size = quant_config.weight_group_size
         else:
             self.group_size = None
 
@@ -131,10 +145,10 @@ class QuantLinearBase(torch.nn.Module):
 
                 tensor_grouped = tensor.reshape(out_features, num_groups, self.group_size)
 
-                if scale.ndim == 1:
-                    scale = scale.reshape(1, -1, 1)
-                else:
-                    raise ValueError(f"Unsupported scale shape for MXFP4: {scale.shape}")
+                expected_shape = (out_features, num_groups)
+                if tuple(scale.shape) != expected_shape:
+                    raise ValueError(f"MXFP4 weight_scale must have shape {expected_shape}, got {tuple(scale.shape)}")
+                scale = scale.reshape(out_features, num_groups, 1)
 
                 quantized_grouped = tensor_grouped / scale
                 tensor = quantized_grouped.reshape(out_features, padded_in_features)
@@ -246,8 +260,13 @@ class QuantLinearBase(torch.nn.Module):
             # Reshape to expose groups
             x_grouped = x.reshape(*x.shape[:-1], num_groups, group_size)
 
-            # reduction dim is all dims except for num_groups
-            reduce_dim = tuple(range(0, x_grouped.ndim - 2)) + (x_grouped.ndim - 1,)
+            # MXFP4 weights use an independent scale for every output channel
+            # and K block.  Other group-wise schemes retain their historical
+            # shared-scale behavior.
+            if self.quant_config.quant_type == LinearQuantType.MXFP4:
+                reduce_dim = (x_grouped.ndim - 1,)
+            else:
+                reduce_dim = tuple(range(0, x_grouped.ndim - 2)) + (x_grouped.ndim - 1,)
             min_val = torch.amin(x_grouped, dim=reduce_dim)
             max_val = torch.amax(x_grouped, dim=reduce_dim)
         else:
@@ -265,6 +284,9 @@ class QuantLinearBase(torch.nn.Module):
             raise ValueError(f"Unknown scheme: {quant_scheme}")
 
         scale = torch.where(scale == 0, 1.0, scale)  # Avoid division by zero
+        if self.quant_config.quant_type == LinearQuantType.MXFP4:
+            # OCP MXFP4 block scales use E8M0 (8-bit exponent, no mantissa).
+            scale = scale.to(torch.float8_e8m0fnu)
         return scale, offset
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

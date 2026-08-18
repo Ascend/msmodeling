@@ -1,5 +1,6 @@
 import logging
 import math
+from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -121,14 +122,20 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
 
 
 def _static_quant_linear_properties_helper(
-    op_invoke_info: OpInvokeInfo, x, w, w_offset, bias, is_int4: bool
+    op_invoke_info: OpInvokeInfo,
+    x,
+    w,
+    w_offset,
+    bias,
+    weight_is_packed_4bit: bool,
+    requires_explicit_dequant: bool,
 ) -> OpInvokeInfo.PerformanceProperties:
     # Get the logical dimensions of the operation.
     # x is (M, K).
     m = x.size(0)
     k = x.size(1)
 
-    if is_int4:
+    if weight_is_packed_4bit:
         # The new Grouped MatMul + SwiGLU fusion pass uses
         # optimized/tilled weight layouts that break
         # the old hardcoded 'K/2' assumption. We must infer dimensions dynamically.
@@ -151,11 +158,13 @@ def _static_quant_linear_properties_helper(
     else:
         n = w.size(1)
 
-    # Dequantization of weights: dequant(w) if w is int4
-    # Here, we suppose HW supports int8 @ int8 but not int8 @ int4 directly.
-    # The operation is semantically `(w - w_offset) * w_scale`.
+    # W4A8 is modeled as an explicit lowered dequantization path because its
+    # packed payload cannot be consumed directly by the modeled MMA.  MXFP4
+    # deliberately does not use this branch: its block scale work is modeled
+    # by _mxfp4_linear_properties_helper without materializing high-precision
+    # weights.
     dequant_ops = 0
-    if is_int4:
+    if requires_explicit_dequant:
         if w_offset is not None:
             # K * N subtractions (offset) + K * N multiplications (scale)
             dequant_ops = k * n * 2
@@ -179,7 +188,7 @@ def _static_quant_linear_properties_helper(
     properties = op_invoke_info.get_memory_access_properties()
     properties.compute_ops[x.dtype] = OpInvokeInfo.ComputeOps()
     properties.compute_ops[x.dtype].mma_ops = matmul_ops
-    if is_int4:
+    if requires_explicit_dequant:
         # TODO(jgong5): use fp32 flops for int4->int8, should use something more accurate
         compute_ops = properties.compute_ops.setdefault(torch.float32, OpInvokeInfo.ComputeOps())
         compute_ops.gp_ops = dequant_ops
@@ -188,6 +197,38 @@ def _static_quant_linear_properties_helper(
         compute_ops.gp_ops += bias_ops
         properties.compute_ops[bias.dtype] = compute_ops
 
+    return properties
+
+
+def _mxfp4_linear_properties_helper(
+    op_invoke_info: OpInvokeInfo,
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scale: torch.Tensor,
+    w_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+) -> OpInvokeInfo.PerformanceProperties:
+    """Model a native fused MXFP4 matmul.
+
+    ``torch.int4`` is an MXFP4 payload carrier, not a request for the W4A8
+    unpack/dequant path.  The native kernel consumes the microscale tensors
+    inside its FP4 MMA pipeline and writes ``out_dtype`` directly.  Scale
+    tensors therefore contribute their normal HBM reads through
+    ``get_memory_access_properties()``, but do not imply a separate FP32 GP
+    kernel or a materialized high-precision intermediate.
+    """
+    m = x.size(0)
+    k = x.size(1)
+    n = w.size(1)
+    matmul_ops = m * n * k * 2
+    if matmul_ops == 0:
+        return OpInvokeInfo.PerformanceProperties()
+
+    properties = op_invoke_info.get_memory_access_properties()
+    properties.compute_ops[x.dtype] = OpInvokeInfo.ComputeOps(mma_ops=matmul_ops)
+
+    if bias is not None:
+        _accumulate_compute_ops(properties, bias.dtype, gp_ops=m * n)
     return properties
 
 
@@ -200,7 +241,15 @@ def _(
     w = op_invoke_info.args[1]
     w_offset = op_invoke_info.args[3] if len(op_invoke_info.args) > 3 else None
     bias = op_invoke_info.args[6] if len(op_invoke_info.args) > 6 else None
-    return _static_quant_linear_properties_helper(op_invoke_info, x, w, w_offset, bias, is_int4=True)
+    return _static_quant_linear_properties_helper(
+        op_invoke_info,
+        x,
+        w,
+        w_offset,
+        bias,
+        weight_is_packed_4bit=True,
+        requires_explicit_dequant=True,
+    )
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.static_quant_linear.default)
@@ -212,11 +261,18 @@ def _(
     w = op_invoke_info.args[1]
     w_offset = op_invoke_info.args[3] if len(op_invoke_info.args) > 3 else None
     bias = op_invoke_info.args[6] if len(op_invoke_info.args) > 6 else None
-    return _static_quant_linear_properties_helper(op_invoke_info, x, w, w_offset, bias, is_int4=False)
+    return _static_quant_linear_properties_helper(
+        op_invoke_info,
+        x,
+        w,
+        w_offset,
+        bias,
+        weight_is_packed_4bit=False,
+        requires_explicit_dequant=False,
+    )
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.fp8_linear.default)
-@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mxfp4_linear.default)
 def _(
     op_invoke_info: OpInvokeInfo,
 ) -> OpInvokeInfo.PerformanceProperties:
@@ -224,7 +280,40 @@ def _(
     x = op_invoke_info.args[0]
     w = op_invoke_info.args[1]
     bias = op_invoke_info.args[4] if len(op_invoke_info.args) > 4 else None
-    return _static_quant_linear_properties_helper(op_invoke_info, x, w, None, bias, is_int4=False)
+    return _static_quant_linear_properties_helper(
+        op_invoke_info,
+        x,
+        w,
+        None,
+        bias,
+        weight_is_packed_4bit=False,
+        requires_explicit_dequant=False,
+    )
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mxfp4_linear.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    assert len(op_invoke_info.args) >= 5
+    return _mxfp4_linear_properties_helper(
+        op_invoke_info,
+        x=op_invoke_info.args[0],
+        w=op_invoke_info.args[1],
+        x_scale=op_invoke_info.args[2],
+        w_scale=op_invoke_info.args[3],
+        bias=op_invoke_info.args[4],
+    )
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dynamic_quantize_mxfp4.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    x = op_invoke_info.args[0]
+    _, scale = op_invoke_info.out
+    properties = op_invoke_info.get_memory_access_properties()
+    # Every payload element participates in block reduction and is converted
+    # to MXFP4.  A scale is then constructed for each block.  This remains a
+    # format-level estimate and deliberately avoids hardware-specific tiling.
+    _accumulate_compute_ops(properties, x.dtype, gp_ops=2 * x.numel() + scale.numel())
+    return properties
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.aten.embedding.default)
@@ -2085,7 +2174,15 @@ def _(
 
     properties = op_invoke_info.get_memory_access_properties()
     for xi, wi, w_offseti, biasi in zip(x, w, w_offset, bias):
-        properties_i = _static_quant_linear_properties_helper(op_invoke_info, xi, wi, w_offseti, biasi, is_int4=False)
+        properties_i = _static_quant_linear_properties_helper(
+            op_invoke_info,
+            xi,
+            wi,
+            w_offseti,
+            biasi,
+            weight_is_packed_4bit=False,
+            requires_explicit_dequant=False,
+        )
         properties.combine(properties_i, compute_only=True)
     return properties
 
@@ -2103,7 +2200,15 @@ def _(
 
     properties = op_invoke_info.get_memory_access_properties()
     for xi, wi, w_offseti, biasi in zip(x, w, w_offset, bias):
-        properties_i = _static_quant_linear_properties_helper(op_invoke_info, xi, wi, w_offseti, biasi, is_int4=True)
+        properties_i = _static_quant_linear_properties_helper(
+            op_invoke_info,
+            xi,
+            wi,
+            w_offseti,
+            biasi,
+            weight_is_packed_4bit=True,
+            requires_explicit_dequant=True,
+        )
         properties.combine(properties_i, compute_only=True)
     return properties
 
@@ -2119,7 +2224,15 @@ def _(
     assert len(x) == len(w) == len(bias)
     properties = op_invoke_info.get_memory_access_properties()
     for xi, wi, biasi in zip(x, w, bias):
-        properties_i = _static_quant_linear_properties_helper(op_invoke_info, xi, wi, None, biasi, is_int4=False)
+        properties_i = _static_quant_linear_properties_helper(
+            op_invoke_info,
+            xi,
+            wi,
+            None,
+            biasi,
+            weight_is_packed_4bit=False,
+            requires_explicit_dequant=False,
+        )
         properties.combine(properties_i, compute_only=True)
     return properties
 
@@ -2131,30 +2244,101 @@ def _(
     assert len(op_invoke_info.args) == 6
     x = op_invoke_info.args[0]
     w = op_invoke_info.args[1]
+    w_scale = op_invoke_info.args[2]
+    x_scale = op_invoke_info.args[3]
     bias = op_invoke_info.args[4]
-    assert len(x) == len(w) == len(bias)
+    assert len(x) == len(w) == len(w_scale) == len(x_scale) == len(bias)
     properties = op_invoke_info.get_memory_access_properties()
-    for xi, wi, biasi in zip(x, w, bias):
-        properties_i = _static_quant_linear_properties_helper(op_invoke_info, xi, wi, None, biasi, is_int4=True)
+    for xi, wi, w_scalei, x_scalei, biasi in zip(x, w, w_scale, x_scale, bias):
+        properties_i = _mxfp4_linear_properties_helper(op_invoke_info, xi, wi, x_scalei, w_scalei, biasi)
         properties.combine(properties_i, compute_only=True)
     return properties
+
+
+def _swiglu_epilogue_dtype(op_invoke_info: OpInvokeInfo, out_dtype_arg_index: int) -> torch.dtype:
+    """Return the vector compute dtype for a grouped SwiGLU epilogue.
+
+    FX preserves keyword arguments while direct custom-op calls may pass them
+    positionally.  In either case an omitted out_dtype means the performance
+    model uses the common BF16 epilogue rather than the quantized MMA payload.
+    """
+    out_dtype = op_invoke_info.kwargs.get("out_dtype")
+    if out_dtype is None and len(op_invoke_info.args) > out_dtype_arg_index:
+        out_dtype = op_invoke_info.args[out_dtype_arg_index]
+    return out_dtype or torch.bfloat16
+
+
+@dataclass
+class _GroupedMatmulContext:
+    x: torch.Tensor
+    w: torch.Tensor
+    bias: Optional[torch.Tensor]
+    w_offset: Optional[torch.Tensor]
+    w_scale: Optional[torch.Tensor]
+    x_scale: Optional[torch.Tensor]
+    is_int4_weight: bool
+
+
+def _grouped_matmul_properties_helper(
+    op_invoke_info: OpInvokeInfo,
+    context: _GroupedMatmulContext,
+) -> OpInvokeInfo.PerformanceProperties:
+    return _mm_properties_helper(op_invoke_info, context.x, context.w, context.bias)
+
+
+def _grouped_static_quant_matmul_properties_helper(
+    op_invoke_info: OpInvokeInfo,
+    context: _GroupedMatmulContext,
+) -> OpInvokeInfo.PerformanceProperties:
+    return _static_quant_linear_properties_helper(
+        op_invoke_info,
+        context.x,
+        context.w,
+        context.w_offset,
+        context.bias,
+        weight_is_packed_4bit=context.is_int4_weight,
+        requires_explicit_dequant=context.is_int4_weight,
+    )
+
+
+def _grouped_mxfp4_matmul_properties_helper(
+    op_invoke_info: OpInvokeInfo,
+    context: _GroupedMatmulContext,
+) -> OpInvokeInfo.PerformanceProperties:
+    assert context.w_scale is not None and context.x_scale is not None
+    return _mxfp4_linear_properties_helper(
+        op_invoke_info,
+        context.x,
+        context.w,
+        context.x_scale,
+        context.w_scale,
+        context.bias,
+    )
+
+
+@dataclass
+class _SwiGLUFusionConfig:
+    bias: List[Optional[torch.Tensor]]
+    matmul_helper: Callable[[OpInvokeInfo, _GroupedMatmulContext], OpInvokeInfo.PerformanceProperties]
+    is_int4_weight: bool
+    w_offset: Optional[List[Optional[torch.Tensor]]] = None
+    w_scale: Optional[List[torch.Tensor]] = None
+    x_scale: Optional[List[torch.Tensor]] = None
+    epilogue_dtype: Optional[torch.dtype] = None
+    post_quant_group_size: Optional[int] = None
 
 
 def _swiglu_fusion_properties_helper(
     op_invoke_info: OpInvokeInfo,
     x: List[torch.Tensor],
     w: List[torch.Tensor],
-    bias: List[Optional[torch.Tensor]],
-    w_offset: Optional[List[Optional[torch.Tensor]]],
-    mm_helper: Callable,
-    is_int4_weight: bool,
+    config: _SwiGLUFusionConfig,
 ) -> OpInvokeInfo.PerformanceProperties:
     """
     Common performance modeling logic for all grouped_matmul_*_swiglu variants.
 
     Args:
-        w_offset: If provided, uses quantized helper signature (info, x, w, offset, bias).
-                  If None, uses standard helper signature (info, x, w, bias).
+        config: Quantization and epilogue settings shared by all grouped matmuls.
     """
     if not x:
         dtype = torch.float32
@@ -2162,8 +2346,13 @@ def _swiglu_fusion_properties_helper(
         properties.compute_ops[dtype] = OpInvokeInfo.ComputeOps()
         return properties
 
-    dtype = x[0].dtype if x else torch.float32
+    # Quantized grouped matmul inputs carry the MMA payload dtype (FP8/INT4),
+    # while SwiGLU is evaluated on the GEMM epilogue/output values.  Keep the
+    # latter in a GP bucket with a device peak (normally BF16/FP16), rather
+    # than silently dropping it when the device has no FP8/INT4 vector peak.
+    dtype = config.epilogue_dtype if config.epilogue_dtype is not None else x[0].dtype
     total_swiglu_ops = 0
+    total_post_quant_ops = 0
     properties = op_invoke_info.get_memory_access_properties()
 
     count = len(x)
@@ -2171,14 +2360,24 @@ def _swiglu_fusion_properties_helper(
     for i in range(count):
         xi = x[i]
         wi = w[i]
-        biasi = bias[i] if (bias and i < len(bias)) else None
-        w_offseti = w_offset[i] if (w_offset and i < len(w_offset)) else None
+        biasi = config.bias[i] if (config.bias and i < len(config.bias)) else None
+        w_offseti = config.w_offset[i] if (config.w_offset and i < len(config.w_offset)) else None
+        w_scalei = config.w_scale[i] if (config.w_scale and i < len(config.w_scale)) else None
+        x_scalei = config.x_scale[i] if (config.x_scale and i < len(config.x_scale)) else None
 
         # 1. Calculate MatMul Costs
-        if mm_helper.__name__ == "_static_quant_linear_properties_helper":
-            props_i = mm_helper(op_invoke_info, xi, wi, w_offseti, biasi, is_int4_weight)
-        else:
-            props_i = mm_helper(op_invoke_info, xi, wi, biasi)
+        props_i = config.matmul_helper(
+            op_invoke_info,
+            _GroupedMatmulContext(
+                x=xi,
+                w=wi,
+                bias=biasi,
+                w_offset=w_offseti,
+                w_scale=w_scalei,
+                x_scale=x_scalei,
+                is_int4_weight=config.is_int4_weight,
+            ),
+        )
 
         properties.combine(props_i, compute_only=True)
 
@@ -2188,7 +2387,7 @@ def _swiglu_fusion_properties_helper(
 
         if k > 0 and wi.numel() > 0:
             n_total = 0
-            if is_int4_weight:
+            if config.is_int4_weight:
                 # Quantized (Int4/MXFP4): Infer logical N from packed storage
                 pack_factor = (wi.element_size() * 8) // 4
                 logical_total = wi.numel() * pack_factor
@@ -2209,9 +2408,12 @@ def _swiglu_fusion_properties_helper(
                 n_gate = n_total // 2
                 # SiLU (~6 FLOPs) + Gate Mul (1 FLOP) = 7 FLOPs
                 total_swiglu_ops += M * n_gate * 7
+                if config.post_quant_group_size is not None:
+                    group_size = config.post_quant_group_size
+                    total_post_quant_ops += 2 * M * n_gate + M * math.ceil(n_gate / group_size)
 
-    # 3. Accumulate SwiGLU ops into gp_ops
-    _accumulate_compute_ops(properties, dtype, gp_ops=total_swiglu_ops)
+    # 3. Accumulate SwiGLU and native post-SwiGLU MX quant epilogue work.
+    _accumulate_compute_ops(properties, dtype, gp_ops=total_swiglu_ops + total_post_quant_ops)
 
     return properties
 
@@ -2274,68 +2476,100 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     # Args: (x, w, bias)
     return _swiglu_fusion_properties_helper(
         op_invoke_info,
-        x=op_invoke_info.args[0],
-        w=op_invoke_info.args[1],
-        bias=op_invoke_info.args[2],
-        w_offset=None,
-        mm_helper=_mm_properties_helper,
-        is_int4_weight=False,
+        op_invoke_info.args[0],
+        op_invoke_info.args[1],
+        _SwiGLUFusionConfig(
+            bias=op_invoke_info.args[2],
+            matmul_helper=_grouped_matmul_properties_helper,
+            is_int4_weight=False,
+        ),
     )
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
-    # Args: (x, w, w_scale, w_offset, x_scale, x_offset, bias, ...) -> offset=3, bias=6
+    # Args: (x, w, w_scale, w_offset, x_scale, x_offset, bias, out_dtype)
     return _swiglu_fusion_properties_helper(
         op_invoke_info,
-        x=op_invoke_info.args[0],
-        w=op_invoke_info.args[1],
-        bias=op_invoke_info.args[6],
-        w_offset=op_invoke_info.args[3],
-        mm_helper=_static_quant_linear_properties_helper,
-        is_int4_weight=False,
+        op_invoke_info.args[0],
+        op_invoke_info.args[1],
+        _SwiGLUFusionConfig(
+            bias=op_invoke_info.args[6],
+            matmul_helper=_grouped_static_quant_matmul_properties_helper,
+            is_int4_weight=False,
+            w_offset=op_invoke_info.args[3],
+            epilogue_dtype=_swiglu_epilogue_dtype(op_invoke_info, 7),
+        ),
     )
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
-    # Args: offset=3, bias=6
+    # Args: offset=3, bias=6, out_dtype=7
     return _swiglu_fusion_properties_helper(
         op_invoke_info,
-        x=op_invoke_info.args[0],
-        w=op_invoke_info.args[1],
-        bias=op_invoke_info.args[6],
-        w_offset=op_invoke_info.args[3],
-        mm_helper=_static_quant_linear_properties_helper,
-        is_int4_weight=True,
+        op_invoke_info.args[0],
+        op_invoke_info.args[1],
+        _SwiGLUFusionConfig(
+            bias=op_invoke_info.args[6],
+            matmul_helper=_grouped_static_quant_matmul_properties_helper,
+            is_int4_weight=True,
+            w_offset=op_invoke_info.args[3],
+            epilogue_dtype=_swiglu_epilogue_dtype(op_invoke_info, 7),
+        ),
     )
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
-    # Args: (x, w, w_scale, x_scale, bias, ...) -> bias=4, no offset
+    # Args: (x, w, w_scale, x_scale, bias, out_dtype)
     return _swiglu_fusion_properties_helper(
         op_invoke_info,
-        x=op_invoke_info.args[0],
-        w=op_invoke_info.args[1],
-        bias=op_invoke_info.args[4],
-        w_offset=None,
-        mm_helper=_static_quant_linear_properties_helper,
-        is_int4_weight=False,
+        op_invoke_info.args[0],
+        op_invoke_info.args[1],
+        _SwiGLUFusionConfig(
+            bias=op_invoke_info.args[4],
+            matmul_helper=_grouped_static_quant_matmul_properties_helper,
+            is_int4_weight=False,
+            epilogue_dtype=_swiglu_epilogue_dtype(op_invoke_info, 5),
+        ),
     )
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
-    # Args: bias=4, no offset
+    # Args: bias=4, out_dtype=5, no offset
     return _swiglu_fusion_properties_helper(
         op_invoke_info,
-        x=op_invoke_info.args[0],
-        w=op_invoke_info.args[1],
-        bias=op_invoke_info.args[4],
-        w_offset=None,
-        mm_helper=_static_quant_linear_properties_helper,
-        is_int4_weight=True,
+        op_invoke_info.args[0],
+        op_invoke_info.args[1],
+        _SwiGLUFusionConfig(
+            bias=op_invoke_info.args[4],
+            matmul_helper=_grouped_mxfp4_matmul_properties_helper,
+            is_int4_weight=False,
+            w_scale=op_invoke_info.args[2],
+            x_scale=op_invoke_info.args[3],
+            epilogue_dtype=_swiglu_epilogue_dtype(op_invoke_info, 5),
+        ),
+    )
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    # Args: (x, w, w_scale, x_scale, bias, out_dtype, group_size)
+    return _swiglu_fusion_properties_helper(
+        op_invoke_info,
+        op_invoke_info.args[0],
+        op_invoke_info.args[1],
+        _SwiGLUFusionConfig(
+            bias=op_invoke_info.args[4],
+            matmul_helper=_grouped_mxfp4_matmul_properties_helper,
+            is_int4_weight=False,
+            w_scale=op_invoke_info.args[2],
+            x_scale=op_invoke_info.args[3],
+            epilogue_dtype=_swiglu_epilogue_dtype(op_invoke_info, 5),
+            post_quant_group_size=op_invoke_info.args[6],
+        ),
     )
 
 
@@ -3208,6 +3442,7 @@ def _estimate_dfc_mxfp4(op_invoke_info: OpInvokeInfo, device_profile: DeviceProf
         gmm1_xs,
         gmm1_bias,
         gmm1_dt,
+        gmm1_group_size,
         gmm2_w,
         gmm2_ws,
         gmm2_xs,
@@ -3221,8 +3456,8 @@ def _estimate_dfc_mxfp4(op_invoke_info: OpInvokeInfo, device_profile: DeviceProf
         device_profile,
         x,
         ei,
-        gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default,
-        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_xs, gmm1_bias, gmm1_dt),
+        gmm1_swiglu_target=torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default,
+        gmm1_w_args=(gmm1_w, gmm1_ws, gmm1_xs, gmm1_bias, gmm1_dt, gmm1_group_size),
         gmm2_target=torch.ops.tensor_cast.grouped_matmul_mxfp4.default,
         gmm2_w_args=(gmm2_w, gmm2_ws, gmm2_xs, gmm2_bias, gmm2_dt),
         rank=rank,
@@ -3498,12 +3733,19 @@ def _(
     )
 
     # The core q/k scoring kernel is bucketed separately: in bf16 mode it stays in the
-    # activation dtype bucket, while in fp8 mode it moves to the cache/score dtype.
+    # activation dtype bucket, while in fp8 mode only its MMA moves to the cache/score dtype.
     score_dtype = indexer_cache.dtype if fp8_mode else hidden_states.dtype
     _accumulate_compute_ops(
         properties,
         score_dtype,
         mma_ops=breakdown["qk_index_mma"],
+    )
+    # FP8 is the score MMA payload, not the vector execution dtype of score
+    # shaping.  Attribute its ReLU and scale operations to the activation dtype
+    # so profiles that only expose FP32/BF16/FP16 GP peaks retain this work.
+    _accumulate_compute_ops(
+        properties,
+        hidden_states.dtype,
         gp_ops=(breakdown["head_relu_gp"] + breakdown["head_q_scale_mul_gp"] + breakdown["head_k_scale_mul_gp"]),
     )
 

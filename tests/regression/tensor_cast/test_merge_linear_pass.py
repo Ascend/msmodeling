@@ -119,5 +119,8 @@ class MergeLinearPassTestCase(unittest.TestCase):
             expected_op = torch.ops.tensor_cast.fp8_linear.default
         elif quant_type == LinearQuantType.MXFP4:
             expected_op = torch.ops.tensor_cast.mxfp4_linear.default
-        self.assertEqual(count_events(runtime, expected_op), 4)
+        # MXFP4 microscale is shaped as (N, K_group), so Q/K projections have
+        # incompatible per-output-channel scale shapes and remain separate.
+        expected_linear_count = 5 if quant_type == LinearQuantType.MXFP4 else 4
+        self.assertEqual(count_events(runtime, expected_op), expected_linear_count)
         self.assertEqual(count_events(runtime, torch.ops.aten.split_with_sizes.default), 2)

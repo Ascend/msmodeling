@@ -14,7 +14,8 @@ from transformers.utils.quantization_config import (
 
 # placeholder for FP8, don't hard-code specific fp8 format
 DTYPE_FP8 = torch.float8_e5m2
-# use int4 placeholder for FP4
+# MXFP4 payload carrier.  This is not a numerical FP4 dtype: MXFP4 semantics
+# (FP4 payload plus E8M0 block scales) are supplied by the MX-specific ops.
 DTYPE_FP4 = torch.int4
 
 

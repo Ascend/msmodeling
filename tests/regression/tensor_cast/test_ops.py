@@ -23,6 +23,8 @@ from tensor_cast.performance_model.op_estimator_registry import (
     get_op_estimator,
     register_op_estimator,
 )
+from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
+from tensor_cast.performance_model.bound_analyzer import StatsKey
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
 from tensor_cast.quantize_utils import AttentionQuantType
 
@@ -76,6 +78,148 @@ def test_rms_norm_non_default_eps_path_consistency():
 def _semantic_op_properties(op, *args):
     out = op(*args)
     return out, OpInvokeInfo(op, args, {}, out).get_perf_properties()
+
+
+def test_dynamic_quantize_mxfp4_uses_per_row_block_scales_and_costs():
+    x = torch.empty((2, 3, 65), device="meta", dtype=torch.bfloat16)
+    out = torch.ops.tensor_cast.dynamic_quantize_mxfp4.default(x, 32)
+    payload, scale = out
+
+    assert payload.shape == x.shape
+    assert payload.dtype == torch.int4
+    assert scale.shape == (2, 3, 3)
+    assert scale.dtype == torch.float8_e8m0fnu
+
+    properties = OpInvokeInfo(
+        torch.ops.tensor_cast.dynamic_quantize_mxfp4.default,
+        (x, 32),
+        {},
+        out,
+    ).get_perf_properties()
+    assert properties.compute_ops[torch.bfloat16].gp_ops == 2 * x.numel() + scale.numel()
+
+
+def test_mxfp4_linear_uses_native_mma_without_int4_dequant():
+    m, k, n, group_size = 4, 64, 8, 32
+    k_groups = k // group_size
+    x_mxfp4 = torch.empty((m, k), device="meta", dtype=torch.int4)
+    w_mxfp4 = torch.empty((k, n), device="meta", dtype=torch.int4)
+    x_scale = torch.empty((m, k_groups), device="meta", dtype=torch.float8_e8m0fnu)
+    w_scale = torch.empty((n, k_groups), device="meta", dtype=torch.float8_e8m0fnu)
+    mx_args = (x_mxfp4, w_mxfp4, x_scale, w_scale, None, None)
+    mx_out = torch.ops.tensor_cast.mxfp4_linear.default(*mx_args)
+    mx_info = OpInvokeInfo(torch.ops.tensor_cast.mxfp4_linear.default, mx_args, {}, mx_out)
+    mx_properties = mx_info.get_perf_properties()
+
+    # MXFP4 microscale tensors are read by the fused kernel.  They do not
+    # create a separate FP32 dequant/scale GP path.
+    assert torch.float32 not in mx_properties.compute_ops
+    assert mx_properties.compute_ops[torch.int4].mma_ops == m * n * k * 2
+
+    x_fp8 = torch.empty((m, k), device="meta", dtype=torch.float8_e5m2)
+    w_fp8 = torch.empty((k, n), device="meta", dtype=torch.float8_e5m2)
+    fp_args = (x_fp8, w_fp8, x_scale, w_scale, None, None)
+    fp_out = torch.ops.tensor_cast.fp8_linear.default(*fp_args)
+    fp_properties = OpInvokeInfo(torch.ops.tensor_cast.fp8_linear.default, fp_args, {}, fp_out).get_perf_properties()
+    assert torch.float32 not in fp_properties.compute_ops
+
+
+def test_grouped_mxfp4_uses_the_same_native_mma_model_as_dense_linear():
+    m, k, n, k_groups = 3, 64, 6, 2
+    x = [torch.empty((m, k), device="meta", dtype=torch.int4)]
+    w = [torch.empty((k, n), device="meta", dtype=torch.int4)]
+    x_scale = [torch.empty((m, k_groups), device="meta", dtype=torch.float8_e8m0fnu)]
+    w_scale = [torch.empty((n, k_groups), device="meta", dtype=torch.float8_e8m0fnu)]
+    bias = [None]
+    args = (x, w, w_scale, x_scale, bias, None)
+    out = torch.ops.tensor_cast.grouped_matmul_mxfp4.default(*args)
+    properties = OpInvokeInfo(torch.ops.tensor_cast.grouped_matmul_mxfp4.default, args, {}, out).get_perf_properties()
+
+    assert torch.float32 not in properties.compute_ops
+    assert properties.compute_ops[torch.int4].mma_ops == m * n * k * 2
+
+
+@pytest.mark.parametrize(
+    ("op", "payload_dtype"),
+    (
+        (torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default, torch.int4),
+        (torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default, torch.float8_e5m2),
+    ),
+)
+def test_grouped_quant_swiglu_bills_epilogue_gp_at_output_dtype(op, payload_dtype):
+    m, k, n, k_groups = 4, 64, 16, 2
+    x = [torch.empty((m, k), device="meta", dtype=payload_dtype)]
+    w = [torch.empty((k, n), device="meta", dtype=payload_dtype)]
+    x_scale = [torch.empty((m, k_groups), device="meta", dtype=torch.float8_e8m0fnu)]
+    w_scale = [torch.empty((n, k_groups), device="meta", dtype=torch.float8_e8m0fnu)]
+    args = (x, w, w_scale, x_scale, [None], torch.bfloat16)
+    out = op(*args)
+    info = OpInvokeInfo(op, args, {}, out)
+    properties = info.get_perf_properties()
+
+    expected_swiglu_gp_ops = m * (n // 2) * 7
+    assert properties.compute_ops[torch.bfloat16].gp_ops == expected_swiglu_gp_ops
+    assert properties.compute_ops[payload_dtype].gp_ops == 0
+    assert AnalyticPerformanceModel(TEST_DEVICE).process_op(info).statistics[StatsKey.GP_OPS] > 0
+
+
+def test_grouped_mxfp4_swiglu_quant_returns_payload_scale_and_bills_post_quant():
+    m, k, n, group_size = 4, 64, 16, 32
+    x = [torch.empty((m, k), device="meta", dtype=torch.int4)]
+    w = [torch.empty((k, n), device="meta", dtype=torch.int4)]
+    x_scale = [torch.empty((m, k // group_size), device="meta", dtype=torch.float8_e8m0fnu)]
+    w_scale = [torch.empty((n, k // group_size), device="meta", dtype=torch.float8_e8m0fnu)]
+    args = (x, w, w_scale, x_scale, [None], torch.bfloat16, group_size)
+    op = torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default
+    payload, scale = op(*args)
+
+    assert payload.shape == (m, n // 2)
+    assert payload.dtype == torch.int4
+    assert scale.shape == (m, 1)
+    assert scale.dtype == torch.float8_e8m0fnu
+
+    properties = OpInvokeInfo(op, args, {}, (payload, scale)).get_perf_properties()
+    expected_swiglu_ops = m * (n // 2) * 7
+    expected_post_quant_ops = 2 * m * (n // 2) + scale.numel()
+    assert properties.compute_ops[torch.int4].mma_ops == m * n * k * 2
+    assert properties.compute_ops[torch.bfloat16].gp_ops == expected_swiglu_ops + expected_post_quant_ops
+
+
+def test_dsa_indexer_fp8_bills_score_shaping_gp_at_activation_dtype():
+    hidden_states = torch.empty((1, 2, 16), device="meta", dtype=torch.bfloat16)
+    qa_normed = torch.empty((1, 2, 4), device="meta", dtype=torch.bfloat16)
+    cos = torch.empty((2, 4), device="meta", dtype=torch.bfloat16)
+    indexer_cache = torch.empty((1, 8, 8), device="meta", dtype=torch.float8_e4m3fn)
+    weights = [
+        torch.empty((4, 16), device="meta", dtype=torch.bfloat16),
+        torch.empty((8, 16), device="meta", dtype=torch.bfloat16),
+        torch.empty((2, 16), device="meta", dtype=torch.bfloat16),
+        torch.empty((8,), device="meta", dtype=torch.bfloat16),
+    ]
+    args = (
+        hidden_states,
+        qa_normed,
+        cos,
+        cos,
+        indexer_cache,
+        torch.empty((2,), device="meta", dtype=torch.long),
+        torch.empty((1, 1), device="meta", dtype=torch.long),
+        torch.tensor([8]),
+        *weights,
+        2,
+        8,
+        4,
+        4,
+    )
+    op = torch.ops.tensor_cast.dsa_indexer.default
+    out = op(*args)
+    info = OpInvokeInfo(op, args, {}, out)
+    properties = info.get_perf_properties()
+
+    # ReLU + q-scale + k-scale = 32 + 32 + 16 for this shape.
+    assert properties.compute_ops[torch.bfloat16].gp_ops == 328
+    assert properties.compute_ops[torch.float8_e4m3fn].gp_ops == 0
+    assert AnalyticPerformanceModel(TEST_DEVICE).process_op(info).statistics[StatsKey.GP_OPS] > 0
 
 
 @pytest.mark.parametrize(

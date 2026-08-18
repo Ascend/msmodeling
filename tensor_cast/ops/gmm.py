@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -99,7 +99,6 @@ def _(
 
 
 @register_tensor_cast_op("grouped_matmul_fp8_swiglu")
-@register_tensor_cast_op("grouped_matmul_mxfp4_swiglu")
 def _(
     x: List[torch.Tensor],
     w: List[torch.Tensor],
@@ -117,3 +116,55 @@ def _(
 
     swiglu_out_shape = gmm_out_shape
     return torch.empty(swiglu_out_shape, dtype=out_dtype, device="meta")
+
+
+@register_tensor_cast_op("grouped_matmul_mxfp4_swiglu")
+def _(
+    x: List[torch.Tensor],
+    w: List[torch.Tensor],
+    w_scale: List[torch.Tensor],
+    x_scale: List[torch.Tensor],
+    bias: List[Optional[torch.Tensor]],
+    out_dtype: Optional[torch.dtype],
+) -> torch.Tensor:
+    """MXFP4 grouped GMM followed by a high-precision SwiGLU epilogue.
+
+    This fallback represents the unfused post-SwiGLU quantization path.  The
+    GMM output contains concatenated gate and up channels, whereas SwiGLU
+    reduces that last dimension by half.
+    """
+    if out_dtype is None:
+        out_dtype = x[0].dtype if x else torch.float32
+
+    M = sum(xi.shape[0] for xi in x)
+    N = w[0].shape[1] if w else 0
+    return torch.empty((M, N // 2), dtype=out_dtype, device="meta")
+
+
+@register_tensor_cast_op("grouped_matmul_mxfp4_swiglu_quant")
+def _(
+    x: List[torch.Tensor],
+    w: List[torch.Tensor],
+    w_scale: List[torch.Tensor],
+    x_scale: List[torch.Tensor],
+    bias: List[Optional[torch.Tensor]],
+    out_dtype: Optional[torch.dtype],
+    group_size: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Native MXFP4 GMM1 fusion: GMM + SwiGLU + post-activation MX quant.
+
+    The payload/scale pair is directly consumable by the following MXFP4
+    grouped matmul.  ``out_dtype`` describes the high-precision epilogue
+    computation before quantization; it is retained for performance modeling.
+    """
+    if group_size <= 0:
+        raise ValueError(f"group_size must be positive, got {group_size}")
+
+    M = sum(xi.shape[0] for xi in x)
+    N = w[0].shape[1] if w else 0
+    swiglu_width = N // 2
+    scale_width = (swiglu_width + group_size - 1) // group_size
+    return (
+        torch.empty((M, swiglu_width), dtype=torch.int4, device="meta"),
+        torch.empty((M, scale_width), dtype=torch.float8_e8m0fnu, device="meta"),
+    )

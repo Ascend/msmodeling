@@ -83,8 +83,8 @@ def _(
     Args:
         x: (M, K) in MXFP4 format
         w: (K, N) in MXFP4 format
-        x_scale: (Kg,) for activation scale in torch.float8_e8m0fnu
-        w_scale: (Kg,) for weight scale in torch.float8_e8m0fnu
+        x_scale: (M, Kg) for activation scale in torch.float8_e8m0fnu
+        w_scale: (N, Kg) for weight scale in torch.float8_e8m0fnu
         bias: Optional[(N,)] bias tensor
         out_dtype: output data type
     """

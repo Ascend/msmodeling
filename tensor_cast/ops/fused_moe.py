@@ -90,7 +90,6 @@ def _(
 
 
 @register_tensor_cast_op("dispatch_ffn_combine_fp8")
-@register_tensor_cast_op("dispatch_ffn_combine_mxfp4")
 def _(
     x: torch.Tensor,
     expert_indices: torch.Tensor,
@@ -107,8 +106,35 @@ def _(
     rank: int,
     rank_group: List[int],
 ) -> torch.Tensor:
-    """Fused MoE FFN: FP8/MXFP4 quant variant.
+    """Fused MoE FFN: FP8 quant variant.
     GMM weight/scale args mirror grouped_matmul_fp8[_swiglu] sans x.
+    """
+    hidden_size = x.shape[-1]
+    return torch.empty((*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device)
+
+
+@register_tensor_cast_op("dispatch_ffn_combine_mxfp4")
+def _(
+    x: torch.Tensor,
+    expert_indices: torch.Tensor,
+    gmm1_w: List[torch.Tensor],
+    gmm1_w_scale: List[torch.Tensor],
+    gmm1_x_scale: List[torch.Tensor],
+    gmm1_bias: List[Optional[torch.Tensor]],
+    gmm1_out_dtype: Optional[torch.dtype],
+    gmm1_group_size: int,
+    gmm2_w: List[torch.Tensor],
+    gmm2_w_scale: List[torch.Tensor],
+    gmm2_x_scale: List[torch.Tensor],
+    gmm2_bias: List[Optional[torch.Tensor]],
+    gmm2_out_dtype: Optional[torch.dtype],
+    rank: int,
+    rank_group: List[int],
+) -> torch.Tensor:
+    """Fused MXFP4 MoE FFN with native GMM1+SwiGLU+MX quant.
+
+    ``gmm1_group_size`` defines the post-SwiGLU E8M0 scale layout.  GMM2
+    consumes that payload/scale pair inside the fused kernel.
     """
     hidden_size = x.shape[-1]
     return torch.empty((*expert_indices.shape, hidden_size), dtype=x.dtype, device=x.device)
