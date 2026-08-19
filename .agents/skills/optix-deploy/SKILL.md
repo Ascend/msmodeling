@@ -13,24 +13,10 @@ metadata:
 本 skill 负责将工具装好并验证能用。
 
 其他内容由对应 skill 负责：
+
 - 运行环境检查：`ms-serviceparam-optimizer-env-check`
 - 首次参数范围推荐：`optix-param-recommend`
 - 生成或修改 `config.toml`：`optix-config`
-
-## 支持的硬件产品
-
-寻优工具仅支持以下昇腾推理产品：
-
-|产品类型| 是否支持 |
-|--|:----:|
-|Atlas A3 训练系列产品/Atlas A3 推理系列产品|  √   |
-|Atlas A2 训练系列产品/Atlas A2 推理系列产品|  √   |
-|Atlas 200I/500 A2 推理产品|  √   |
-|Atlas 推理系列产品|  √   |
-|Atlas 训练系列产品|  x   |
-
-> - 目标运行环境不支持 Windows
-> - Atlas 训练系列产品不支持，请确认使用的是推理系列产品
 
 ## 安装流程
 
@@ -74,7 +60,7 @@ cd msmodeling
 
 msmodeling 仓库结构：
 
-```
+```text
 msmodeling/                  ← 仓库根目录
 ├── pyproject.toml           ← msmodeling 安装入口（含 optix CLI）
 └── optix/                   ← 寻优工具源码（含 config.toml、optimizer 代码）

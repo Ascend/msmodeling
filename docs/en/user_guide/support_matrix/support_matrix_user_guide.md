@@ -9,10 +9,10 @@ This document summarizes the currently supported model types and simulation feat
 - For detailed module usage, read this together with the following user guides:
   - [TensorCast User Guide](../msmodeling_tensor_cast_user_guide.md)
   - [Throughput Optimizer Guide](../msmodeling_throughput_optimizer_user_guide.md)
-  - [Service Parameter Optimizer](../optix_user_guide.md)
+  - [Service Parameter Optimizer](../msmodeling_optix_user_guide.md)
   - [Web UI User Guide](../msmodeling_web_ui_user_guide.md)
   - [TensorCast New Model Adaptation Guide](../msmodeling_tensor_cast_new_model_adaptation_user_guide.md)
-  - [Custom Plugin Developer Guide](../optix_plugin_user_guide.md)
+  - [Custom Plugin Developer Guide](../msmodeling_optix_plugin_user_guide.md)
 - For the experimental serving simulation capability, read this together with the [ServingCast Simulation Guide](../msmodeling_serving_cast_simulation_user_guide.md).
 
 ## Currently Supported Models
