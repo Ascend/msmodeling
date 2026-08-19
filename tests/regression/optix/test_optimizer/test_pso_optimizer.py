@@ -87,10 +87,30 @@ class TestPSOOptimizer:
         assert opt.iters == 10
         assert opt._iteration == 0
 
+    def test_init_shares_fitness_evaluator_with_scheduler(self):
+        opt = self._create_optimizer()
+
+        assert opt.scheduler.early_exit_fitness_evaluator is opt
+
+        opt.gen_speed_target = 1234
+        assert opt.scheduler.early_exit_fitness_evaluator.gen_speed_target == 1234
+
     def test_init_caps_at_max_iter_num(self):
         opt = self._create_optimizer(n_particles=500, iters=500)
         assert opt.n_particles == 200
         assert opt.iters == 200
+
+    def test_run_complete_evaluation_disables_early_exit(self):
+        opt = self._create_optimizer()
+        params = np.array([20.0, 2000.0])
+        expected = PerformanceIndex(generate_speed=100.0)
+        opt.scheduler.run.return_value = expected
+
+        result = opt._run_complete_evaluation(params)
+
+        assert result is expected
+        opt.scheduler.disable_early_exit.assert_called_once_with()
+        opt.scheduler.run.assert_called_once_with(params, opt.target_field)
 
     def test_is_within_boundary_true(self):
         assert PSOOptimizer.is_within_boundary([5, 50], (0, 0), (10, 100))
@@ -613,6 +633,7 @@ class TestRefineOptimizationCandidates:
         assert res_list[1].generate_speed == perf.generate_speed
 
         opt.scheduler.run.assert_called()
+        opt.scheduler.disable_early_exit.assert_called_once()
 
     def test_refine_handles_runtime_exception(self):
         opt = self._create_optimizer()

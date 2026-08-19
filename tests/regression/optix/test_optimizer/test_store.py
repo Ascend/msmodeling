@@ -88,6 +88,30 @@ class TestDataStorage(unittest.TestCase):
         assert "foo--bar" not in content
         assert "foobar" in content
 
+    def test_save_metrics_sample_creates_joinable_trace_csv(self):
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock()
+        config.store_dir = tmp_dir
+        storage = DataStorage(config)
+        case_id = storage.next_case_id()
+
+        storage.save_metrics_sample(
+            {"timestamp": 10.0, "running_requests": 52, "warmup_end_reason": "load_ready"},
+            case_id=case_id,
+            benchmark_phase="evaluation",
+            benchmark_pass=1,
+        )
+
+        with storage.metrics_save_file.open(encoding="utf-8") as file:
+            rows = list(csv.DictReader(file))
+        self.assertEqual(case_id, "case_000001")
+        self.assertEqual(rows[0]["case_id"], case_id)
+        self.assertEqual(rows[0]["running_requests"], "52")
+        self.assertEqual(rows[0]["warmup_end_reason"], "load_ready")
+
     @patch("optix.optimizer.store.Path")
     def test_load_history_position_dir_not_exist(self, mock_path):
         mock_path.exists.return_value = False
@@ -205,6 +229,26 @@ class TestDataStorage(unittest.TestCase):
         lines = [line for line in storage.save_file.read_text().splitlines() if line]
         # Header + 2 data rows
         assert len(lines) == 3
+
+    @patch("optix.optimizer.store.logger")
+    def test_save_logs_csv_path_for_every_case(self, mock_logger):
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock()
+        config.store_dir = tmp_dir
+        storage = DataStorage(config)
+        performance_index = PerformanceIndex()
+        params = (OptimizerConfigField(name="p1", value=1),)
+
+        storage.save(performance_index, params)
+        storage.save(performance_index, params)
+
+        assert mock_logger.info.call_count == 2
+        mock_logger.info.assert_called_with(
+            "Save result with DataStorage. File path: {!r}",
+            storage.save_file,
+        )
 
     def test_filter_data_with_bool_values(self):
         data_rows = [
@@ -326,3 +370,119 @@ class TestDataStorage(unittest.TestCase):
             mock_settings.return_value.tpot_penalty = 0
             result = storage.get_best_result()
         assert len(result) > 0
+
+    def test_get_best_result_excludes_early_exit_and_unusable_rows(self):
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock()
+        config.store_dir = tmp_dir
+        config.pso_top_k = 3
+        storage = DataStorage(config, benchmark=None)
+
+        save_file = tmp_dir / "data.csv"
+        storage.save_file = save_file
+        with open(save_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "fitness",
+                    "generate_speed",
+                    "time_to_first_token",
+                    "time_per_output_token",
+                    "success_rate",
+                    "throughput",
+                    "early_exit",
+                    "usable_as_best",
+                    "candidate_id",
+                ]
+            )
+            writer.writerow([0.1, 3000, 0.2, 0.02, 1.0, 6.0, True, False, "early"])
+            writer.writerow([0.2, 2500, 0.3, 0.03, 1.0, 5.0, False, False, "unusable"])
+            writer.writerow([0.5, 2000, 0.4, 0.04, 1.0, 4.0, False, True, "complete"])
+
+        with patch("optix.optimizer.store.get_settings") as mock_settings:
+            mock_settings.return_value.ttft_penalty = 0
+            mock_settings.return_value.tpot_penalty = 0
+            result = storage.get_best_result()
+
+        assert result["candidate_id"].tolist() == ["complete"]
+
+    def test_get_reference_performance_index_is_independent_of_pso_top_k(self):
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock()
+        config.store_dir = tmp_dir
+        config.pso_top_k = 0
+        storage = DataStorage(config, benchmark=None)
+
+        save_file = tmp_dir / "data.csv"
+        storage.save_file = save_file
+        with open(save_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "fitness",
+                    "generate_speed",
+                    "time_to_first_token",
+                    "time_per_output_token",
+                    "success_rate",
+                    "throughput",
+                    "early_exit",
+                    "usable_as_best",
+                    "metrics_window_generate_speed",
+                    "metrics_window_time_to_first_token",
+                    "metrics_window_time_per_output_token",
+                    "metrics_window_success_rate",
+                ]
+            )
+            writer.writerow([0.1, 3000, 0.2, 0.02, 1.0, 6.0, True, False, 2900, 0.21, 0.021, 1.0])
+            writer.writerow([0.8, 1500, 0.5, 0.05, 1.0, 3.0, False, True, 1400, 0.55, 0.055, 0.97])
+            writer.writerow([0.5, 2000, 0.4, 0.04, 1.0, 4.0, False, True, 1800, 0.45, 0.045, 0.98])
+
+        with patch("optix.optimizer.store.get_settings") as mock_settings:
+            mock_settings.return_value.ttft_penalty = 0
+            mock_settings.return_value.tpot_penalty = 0
+            reference = storage.get_reference_performance_index()
+
+        assert reference is not None
+        assert reference.generate_speed == 1800
+        assert reference.time_to_first_token == 0.45
+        assert reference.time_per_output_token == 0.045
+        assert reference.success_rate == 0.98
+
+    def test_get_reference_performance_index_does_not_fallback_to_benchmark_metrics(self):
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock()
+        config.store_dir = tmp_dir
+        config.pso_top_k = 3
+        storage = DataStorage(config, benchmark=None)
+        storage.save_file = tmp_dir / "data.csv"
+        with open(storage.save_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "fitness",
+                    "generate_speed",
+                    "time_to_first_token",
+                    "time_per_output_token",
+                    "success_rate",
+                    "throughput",
+                    "early_exit",
+                    "usable_as_best",
+                ]
+            )
+            writer.writerow([0.5, 2000, 0.4, 0.04, 1.0, 4.0, False, True])
+
+        with patch("optix.optimizer.store.get_settings") as mock_settings:
+            mock_settings.return_value.ttft_penalty = 0
+            mock_settings.return_value.tpot_penalty = 0
+            reference = storage.get_reference_performance_index()
+
+        assert reference is None

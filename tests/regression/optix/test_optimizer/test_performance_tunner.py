@@ -68,6 +68,15 @@ class TestPerformanceTuner:
         perf.success_rate = None
         assert self.tuner.minimum_algorithm(perf) == inf
 
+    def test_calculate_cost_allows_missing_success_rate_for_partial_metrics(self):
+        perf = self._make_perf()
+        perf.success_rate = None
+
+        result = self.tuner.calculate_cost(perf, require_success_rate=False)
+
+        assert result > 0
+        assert result < inf
+
     def test_ttft_overflow(self):
         perf = self._make_perf(ttft=99999)
         assert self.tuner.minimum_algorithm(perf) == inf

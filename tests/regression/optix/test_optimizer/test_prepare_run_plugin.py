@@ -70,6 +70,7 @@ class TestPreparePlugin(unittest.TestCase):
         self.assertEqual(opt.default_res.generate_speed, 100.0)
         scheduler = opt.scheduler
         scheduler.run.assert_called_once()
+        scheduler.disable_early_exit.assert_called_once()
         scheduler.save_result.assert_called_once()
 
     @patch("optix.optimizer.optimizer.is_mindie", return_value=False)

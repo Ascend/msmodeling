@@ -20,6 +20,7 @@ import numpy as np
 
 from optix.config.base_config import FOLDER_LIMIT_SIZE
 from optix.config.config import (
+    BenchmarkEarlyExitConfig,
     ErrorSeverity,
     ErrorType,
     OptimizerConfigField,
@@ -32,6 +33,12 @@ from optix.optimizer.health_check import (
     FatalError,
     RetryableError,
     ServiceHookPoint,
+)
+from optix.optimizer.early_exit import (
+    EarlyExitDecision,
+    EarlyExitPhase,
+    EarlyExitTriggered,
+    MetricsUnavailableError,
 )
 from optix.optimizer.scheduler import Scheduler
 
@@ -202,6 +209,224 @@ class TestScheduler(unittest.TestCase):
         self.scheduler.run_target_server(np.array([1, 2, 3]), ("field1", "field2", "field3"))
         self.assertEqual(mock_wait.call_count, 3)
 
+    @patch("time.sleep", return_value=None)
+    def test_run_target_server_early_exit_propagates_without_retry(self, _):
+        performance = PerformanceIndex(
+            generate_speed=80,
+            time_to_first_token=1.0,
+            time_per_output_token=0.1,
+            success_rate=1,
+        )
+        decision = EarlyExitDecision(
+            would_early_exit=True,
+            early_exit=True,
+            reason="score exceeded threshold",
+            performance=performance,
+        )
+        controller = MagicMock()
+        controller.check.return_value = decision
+        self.scheduler.early_exit_controller = controller
+        self.scheduler.run_simulate = MagicMock()
+        self.scheduler.benchmark.run = MagicMock()
+        self.scheduler.benchmark.check_success.return_value = False
+        self.scheduler.simulator.process.poll.return_value = None
+        self.scheduler.stop_target_server = MagicMock()
+
+        with self.assertRaises(EarlyExitTriggered):
+            self.scheduler.run_target_server(np.array([1, 2, 3]), ("field1", "field2", "field3"))
+
+        self.scheduler.run_simulate.assert_called_once()
+        self.scheduler.stop_target_server.assert_not_called()
+        self.assertEqual(controller.check.call_count, 1)
+        self.assertTrue(self.scheduler.performance_index.early_exit)
+        self.assertEqual(self.scheduler.early_exit_info.reason, "score exceeded threshold")
+
+    @patch("time.sleep", return_value=None)
+    def test_disable_early_exit_collects_metrics_without_deciding_and_restores_after_nested_scope(self, _):
+        performance = PerformanceIndex(
+            generate_speed=80,
+            time_to_first_token=1.0,
+            time_per_output_token=0.1,
+            success_rate=1,
+        )
+        decision = EarlyExitDecision(
+            would_early_exit=True,
+            early_exit=True,
+            reason="score exceeded threshold",
+            performance=performance,
+        )
+        controller = MagicMock()
+        controller.check.return_value = decision
+        self.scheduler.early_exit_controller = controller
+        self.scheduler.run_simulate = MagicMock()
+        self.scheduler.benchmark.run = MagicMock()
+        self.scheduler.benchmark.check_success.return_value = True
+        self.scheduler.simulator.check_success = MagicMock()
+        self.scheduler.simulator.process.poll.return_value = None
+        self.scheduler.stop_target_server = MagicMock()
+
+        with self.scheduler.disable_early_exit():
+            with self.scheduler.disable_early_exit():
+                self.scheduler.run_target_server(np.array([1, 2, 3]), ("field1", "field2", "field3"))
+
+        controller.check.assert_not_called()
+        controller.observe.assert_called_once()
+        self.scheduler.stop_target_server.assert_not_called()
+        self.scheduler.benchmark.check_success.return_value = False
+
+        with self.assertRaises(EarlyExitTriggered):
+            self.scheduler.run_target_server(np.array([1, 2, 3]), ("field1", "field2", "field3"))
+
+        self.assertEqual(controller.check.call_count, 1)
+
+    def test_attach_metrics_window_reference_uses_one_coherent_window(self):
+        reference_window = PerformanceIndex(
+            generate_speed=48.0,
+            time_to_first_token=1.2,
+            time_per_output_token=0.03,
+            success_rate=0.99,
+        )
+        controller = MagicMock()
+        controller.representative_window.return_value = (reference_window, 5)
+        self.scheduler.early_exit_controller = controller
+        benchmark_result = PerformanceIndex(
+            generate_speed=50.0,
+            time_to_first_token=1.0,
+            time_per_output_token=0.02,
+            success_rate=1.0,
+        )
+
+        result = self.scheduler._attach_metrics_window_reference(benchmark_result)
+
+        self.assertIs(result, benchmark_result)
+        self.assertEqual(result.metrics_window_generate_speed, 48.0)
+        self.assertEqual(result.metrics_window_time_to_first_token, 1.2)
+        self.assertEqual(result.metrics_window_time_per_output_token, 0.03)
+        self.assertEqual(result.metrics_window_success_rate, 0.99)
+        self.assertEqual(result.metrics_window_sample_count, 5)
+
+    @patch("optix.optimizer.scheduler.time.time", side_effect=[130.0, 180.0])
+    def test_report_only_early_exit_records_first_decision_elapsed(self, _):
+        self.scheduler.run_start_timestamp = 100.0
+        first_decision = EarlyExitDecision(
+            would_early_exit=True,
+            early_exit=False,
+            reason="first bad window",
+            performance=PerformanceIndex(generate_speed=10),
+        )
+        later_decision = EarlyExitDecision(
+            would_early_exit=True,
+            early_exit=False,
+            reason="later bad window",
+            performance=PerformanceIndex(generate_speed=5),
+        )
+
+        self.scheduler._apply_early_exit_decision(first_decision)
+        self.scheduler._apply_early_exit_decision(later_decision)
+
+        self.assertEqual(self.scheduler.early_exit_info.reason, "first bad window")
+        self.assertEqual(
+            self.scheduler.performance_index.early_exit_decision_elapsed_seconds,
+            30.0,
+        )
+
+    @patch("time.sleep", return_value=None)
+    def test_early_exit_metrics_error_is_skipped(self, _):
+        controller = MagicMock()
+        controller.check.side_effect = MetricsUnavailableError("metrics unavailable")
+        self.scheduler.early_exit_controller = controller
+        self.scheduler.run_simulate = MagicMock()
+        self.scheduler.benchmark.run = MagicMock()
+        self.scheduler.benchmark.check_success.return_value = True
+        self.scheduler.simulator.check_success = MagicMock()
+        self.scheduler.simulator.process.poll.return_value = None
+
+        self.scheduler.run_target_server(np.array([1, 2, 3]), ("field1", "field2", "field3"))
+
+        controller.check.assert_called_once()
+
+    @patch("optix.optimizer.scheduler.logger")
+    def test_early_exit_metrics_error_warns_once_until_recovery(self, mock_logger):
+        controller = MagicMock()
+        controller.check.side_effect = [
+            MetricsUnavailableError("metrics unavailable"),
+            MetricsUnavailableError("metrics unavailable"),
+            None,
+            MetricsUnavailableError("metrics unavailable again"),
+        ]
+        self.scheduler.early_exit_controller = controller
+
+        for _ in range(4):
+            self.scheduler._check_early_exit()
+
+        self.assertEqual(mock_logger.warning.call_count, 2)
+        mock_logger.debug.assert_called_once()
+
+    def test_reset_early_exit_window_resets_metrics_warning(self):
+        controller = MagicMock()
+        self.scheduler.early_exit_controller = controller
+        self.scheduler._metrics_unavailable_warned = True
+
+        self.scheduler._reset_early_exit_window()
+
+        self.assertFalse(self.scheduler._metrics_unavailable_warned)
+        controller.reset.assert_called_once()
+
+    def test_early_exit_programming_error_is_not_skipped(self):
+        controller = MagicMock()
+        controller.check.side_effect = TypeError("invalid controller state")
+        self.scheduler.early_exit_controller = controller
+
+        with self.assertRaises(TypeError):
+            self.scheduler._check_early_exit()
+
+    @patch("optix.optimizer.scheduler.is_vllm", return_value=False)
+    @patch("optix.optimizer.scheduler.get_settings")
+    def test_configure_early_exit_controller_uses_selected_engine_not_importable_package(
+        self, mock_get_settings, mock_is_vllm
+    ):
+        mock_get_settings.return_value.benchmark_early_exit = BenchmarkEarlyExitConfig(enabled=True)
+        fitness_evaluator = MagicMock()
+        self.scheduler.early_exit_fitness_evaluator = fitness_evaluator
+        self.scheduler.engine = "vllm"
+
+        self.scheduler._configure_early_exit_controller()
+
+        mock_is_vllm.assert_not_called()
+        self.assertIs(self.scheduler.early_exit_controller.fitness_evaluator, fitness_evaluator)
+        self.assertIsNone(self.scheduler.early_exit_controller.sample_sink)
+
+    @patch("optix.optimizer.scheduler.get_settings")
+    def test_configure_early_exit_controller_records_metrics_trace_only_in_report_mode(self, mock_get_settings):
+        mock_get_settings.return_value.benchmark_early_exit = BenchmarkEarlyExitConfig(
+            enabled=True,
+            action="report",
+        )
+        self.scheduler.early_exit_fitness_evaluator = MagicMock()
+        self.scheduler.engine = "vllm"
+
+        self.scheduler._configure_early_exit_controller()
+
+        sample = MagicMock()
+        self.scheduler.early_exit_controller.sample_sink(sample)
+        self.data_storage.save_metrics_sample.assert_called_once_with(
+            sample,
+            case_id=None,
+            optimization_phase="default",
+            optimization_iteration=0,
+            benchmark_phase="evaluation",
+            benchmark_pass=1,
+        )
+
+    @patch("optix.optimizer.scheduler.get_settings")
+    def test_configure_early_exit_controller_skips_non_vllm_engine(self, mock_get_settings):
+        mock_get_settings.return_value.benchmark_early_exit = BenchmarkEarlyExitConfig(enabled=True)
+        self.scheduler.engine = "mindie"
+
+        self.scheduler._configure_early_exit_controller()
+
+        self.assertIsNone(self.scheduler.early_exit_controller)
+
 
 class TestSchedulerRunMethods(unittest.TestCase):
     def setUp(self):
@@ -237,6 +462,101 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.assertEqual(req_rate_field.value, 50.0)
         self.assertEqual(req_rate_field.min, 50.0)
         self.assertEqual(req_rate_field.max, 50.0)
+
+    @patch("time.sleep", return_value=None)
+    @patch("time.time", return_value=1000.0)
+    def test_run_with_fixed_request_rate_uses_evaluation_phase_for_early_exit(self, *_):
+        phases = []
+        decision = EarlyExitDecision(
+            would_early_exit=True,
+            early_exit=True,
+            reason="fixed request rate evaluation",
+            performance=PerformanceIndex(
+                generate_speed=80,
+                time_to_first_token=1.0,
+                time_per_output_token=0.1,
+                success_rate=1,
+            ),
+        )
+
+        class PhaseController:
+            def reset(self):
+                pass
+
+            def check(self, phase):
+                phases.append(phase)
+                if phase == EarlyExitPhase.EVALUATION:
+                    return decision
+                return None
+
+        req_rate_field = OptimizerConfigField(name="REQUESTRATE", value=50.0, min=50.0, max=50.0)
+        params_field_with_fixed_req_rate = self.params_field + (req_rate_field,)
+        self.scheduler.early_exit_controller = PhaseController()
+        self.scheduler.run_simulate = MagicMock()
+        self.scheduler.benchmark.run = MagicMock()
+        self.scheduler.benchmark.check_success.return_value = False
+        self.scheduler.simulator.process.poll.return_value = None
+        self.scheduler.stop_target_server = MagicMock()
+
+        result = self.scheduler.run_with_request_rate(self.params, params_field_with_fixed_req_rate)
+
+        self.assertEqual(phases, [EarlyExitPhase.EVALUATION])
+        self.assertTrue(result.early_exit)
+        self.assertEqual(result.early_exit_reason, "fixed request rate evaluation")
+        self.scheduler.stop_target_server.assert_called_once_with(False)
+
+    @patch("time.sleep", return_value=None)
+    @patch("time.time", return_value=1000.0)
+    def test_run_with_request_rate_uses_calibration_then_evaluation_for_early_exit(self, *_):
+        phases = []
+        decision = EarlyExitDecision(
+            would_early_exit=True,
+            early_exit=True,
+            reason="score exceeded threshold",
+            performance=PerformanceIndex(
+                generate_speed=80,
+                time_to_first_token=1.0,
+                time_per_output_token=0.1,
+                success_rate=1,
+            ),
+        )
+
+        class PhaseController:
+            def reset(self):
+                pass
+
+            def check(self, phase):
+                phases.append(phase)
+                if phase == EarlyExitPhase.EVALUATION:
+                    return decision
+                return None
+
+        req_rate_field = OptimizerConfigField(name="REQUESTRATE", value=50.0, min=1.0, max=1000.0)
+        params_field_with_variable_req_rate = self.params_field + (req_rate_field,)
+        params = np.array([1.0, 2.0, 3.0, 50.0])
+        self.scheduler.early_exit_controller = PhaseController()
+        self.scheduler.run_simulate = MagicMock()
+        self.scheduler.benchmark.run = MagicMock()
+        self.scheduler.benchmark.stop = MagicMock()
+        self.scheduler.benchmark.update_command = MagicMock()
+        self.scheduler.benchmark.check_success.side_effect = [True, False]
+        self.scheduler.simulator.check_success = MagicMock()
+        self.scheduler.simulator.process.poll.return_value = None
+        self.scheduler.stop_target_server = MagicMock()
+        self.benchmark.get_performance_index.return_value = PerformanceIndex(
+            generate_speed=100,
+            time_to_first_token=0.4,
+            time_per_output_token=0.04,
+            success_rate=1,
+            throughput=10,
+        )
+
+        result = self.scheduler.run_with_request_rate(params, params_field_with_variable_req_rate)
+
+        self.assertEqual(phases, [EarlyExitPhase.CALIBRATION, EarlyExitPhase.EVALUATION])
+        self.assertTrue(result.early_exit)
+        self.assertEqual(result.early_exit_reason, "score exceeded threshold")
+        self.scheduler.stop_target_server.assert_called_once_with(False)
 
     @patch("time.time")
     @patch("optix.optimizer.scheduler.logger")
@@ -297,6 +617,41 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.scheduler.current_back_path = None
         self.scheduler.save_result()
         assert self.scheduler.first_duration is not None
+
+    @patch("time.time")
+    def test_save_result_calculates_report_only_time_saving(self, mock_time):
+        mock_time.return_value = 1000.0
+        self.scheduler.run_start_timestamp = 100.0
+        self.scheduler.performance_index = PerformanceIndex(
+            would_early_exit=True,
+            early_exit=False,
+            early_exit_decision_elapsed_seconds=300.0,
+        )
+        self.scheduler.simulate_run_info = self.params_field
+
+        self.scheduler.save_result()
+
+        self.assertEqual(self.scheduler.performance_index.estimated_time_saved_seconds, 600.0)
+        self.assertAlmostEqual(
+            self.scheduler.performance_index.estimated_time_saved_ratio,
+            2 / 3,
+        )
+
+    @patch("time.time")
+    def test_save_result_does_not_estimate_saving_for_terminated_case(self, mock_time):
+        mock_time.return_value = 1000.0
+        self.scheduler.run_start_timestamp = 100.0
+        self.scheduler.performance_index = PerformanceIndex(
+            would_early_exit=True,
+            early_exit=True,
+            early_exit_decision_elapsed_seconds=300.0,
+        )
+        self.scheduler.simulate_run_info = self.params_field
+
+        self.scheduler.save_result()
+
+        self.assertIsNone(self.scheduler.performance_index.estimated_time_saved_seconds)
+        self.assertIsNone(self.scheduler.performance_index.estimated_time_saved_ratio)
 
     def test_stop_target_server(self):
         """Test stop_target_server delegates to simulator and benchmark"""

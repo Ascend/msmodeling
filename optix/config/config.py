@@ -23,7 +23,7 @@ from enum import Enum
 from inspect import isfunction  # pylint: disable=no-name-in-module
 from math import isclose, isinf, isnan
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import numpy as np
 from loguru import logger
@@ -809,11 +809,77 @@ def field_to_param(params_field: tuple[OptimizerConfigField, ...]):
 
 
 class PerformanceIndex(BaseModel):
+    case_id: Optional[str] = Field(default=None, description="Stable identifier joining result and metrics rows")
     generate_speed: Optional[float] = None
     time_to_first_token: Optional[float] = None
     time_per_output_token: Optional[float] = None
     success_rate: Optional[float] = None
     throughput: Optional[float] = None
+    early_exit: bool = Field(
+        default=False,
+        description="Whether the benchmark was actually terminated by the early exit mechanism",
+    )
+    would_early_exit: bool = Field(
+        default=False,
+        description="Whether the early exit condition was met, including report-only mode",
+    )
+    early_exit_reason: Optional[str] = Field(
+        default=None,
+        description="Reason why the early exit condition was met",
+    )
+    early_exit_decision_elapsed_seconds: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Elapsed case time when the early exit condition was first met",
+    )
+    estimated_time_saved_seconds: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Estimated time saved if a report-only early exit decision had terminated the case",
+    )
+    estimated_time_saved_ratio: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Estimated report-only time saving divided by the completed case duration",
+    )
+    result_source: Optional[str] = None
+    usable_as_best: bool = True
+    reference_generate_speed: Optional[float] = None
+    observed_generate_speed: Optional[float] = None
+    reference_score: Optional[float] = None
+    observed_score: Optional[float] = None
+    slo_violations: dict[str, bool] = Field(default_factory=dict)
+    metrics_window_generate_speed: Optional[float] = Field(
+        default=None,
+        description="Generate speed from the representative completed-run vLLM metrics window",
+    )
+    metrics_window_time_to_first_token: Optional[float] = Field(
+        default=None,
+        description="TTFT from the same representative vLLM metrics window",
+    )
+    metrics_window_time_per_output_token: Optional[float] = Field(
+        default=None,
+        description="TPOT from the same representative vLLM metrics window",
+    )
+    metrics_window_success_rate: Optional[float] = Field(
+        default=None,
+        description="Success rate from the same representative vLLM metrics window",
+    )
+    metrics_window_sample_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of eligible vLLM metrics windows collected for this completed run",
+    )
+    warmup_end_elapsed_seconds: Optional[float] = Field(default=None, ge=0)
+    warmup_end_reason: Optional[str] = None
+    warmup_sample_count: int = Field(default=0, ge=0)
+    warmup_effective_target: Optional[int] = Field(default=None, ge=1)
+    warmup_load_threshold: Optional[int] = Field(default=None, ge=1)
+    warmup_running_requests: Optional[float] = Field(default=None, ge=0)
+    warmup_waiting_requests: Optional[float] = Field(default=None, ge=0)
+    warmup_load_ratio: Optional[float] = Field(default=None, ge=0)
+    warmup_forced: bool = False
 
 
 class DataStorageConfig(BaseModel):
@@ -922,6 +988,35 @@ class PsoStrategy(BaseModel):
     c2: str = "exp_decay"
 
 
+class BenchmarkEarlyExitConfig(BaseModel):
+    """Configure early-exit evaluation for vLLM benchmark trials.
+
+    Warm-up ends when the fixed internal load-readiness policy is met or after
+    its 90-second upper bound. Performance metrics are then evaluated in fixed
+    windows once the minimum sample requirements are met. Early exit is
+    triggered when the relative score or generation-speed threshold is
+    violated for the configured number of consecutive windows. The action
+    determines whether the decision is only reported or terminates the trial.
+    """
+
+    enabled: bool = False
+    action: Literal["report", "terminate"] = Field(
+        default="terminate",
+        description="Whether to report or terminate when early exit is triggered",
+    )
+    metrics_url: str = "http://127.0.0.1:8000/metrics"
+    # Internal policy defaults. Keep these fields on the model for backward
+    # compatibility with existing config files, but users do not need to set
+    # them in new configurations.
+    window_seconds: int = Field(default=30, ge=1)
+    min_output_tokens: int = Field(default=128, ge=0)
+    min_completed_requests: int = Field(default=1, ge=0)
+    relative_generate_speed_threshold: float = Field(default=0.5, gt=0, le=1.0)
+    relative_score_threshold: float = Field(default=3.0, ge=1.0)
+    consecutive_bad_windows: int = Field(default=3, ge=1)
+    timeout_seconds: float = Field(default=1.0, gt=0)
+
+
 class ErrorPatternConfig(BaseModel):
     """Error pattern configuration - 3-tier design: ErrorType -> patterns -> severity"""
 
@@ -1016,6 +1111,8 @@ class Settings(BaseSettings):
         default_factory=lambda data: DataStorageConfig(store_dir=data["output"].joinpath("store")),
         validate_default=True,
     )
+
+    benchmark_early_exit: BenchmarkEarlyExitConfig = Field(default_factory=BenchmarkEarlyExitConfig)
 
     health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
 

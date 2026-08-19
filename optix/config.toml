@@ -171,3 +171,16 @@ min = 0
 max = 0
 dtype = "float"
 value = 0
+
+# ------------------------- Benchmark Early Exit ------------------------------------------------
+# Only intermediate search trials should be terminated early. Baseline, best
+# validation, and fine-tuning runs are protected by the optimizer, but still
+# collect eligible vLLM metrics windows. The historical best complete benchmark
+# supplies its representative metrics window as the reference for later trials.
+# Warm-up is controlled internally: metrics are sampled every 5 seconds, load
+# readiness can end warm-up after 15 seconds, and 90 seconds is the hard cap.
+# Set action to "report" only when a metrics_samples trace is needed for debugging.
+[benchmark_early_exit]
+enabled = false
+action = "terminate"
+metrics_url = "http://127.0.0.1:8000/metrics"

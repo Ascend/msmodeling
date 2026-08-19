@@ -15,6 +15,7 @@
 # -------------------------------------------------------------------------
 import subprocess  # nosec B404
 import time
+from contextlib import contextmanager
 from math import isclose
 from pathlib import Path
 from typing import Optional
@@ -23,7 +24,7 @@ import numpy as np
 from loguru import logger
 
 from ..common import get_train_sub_path, is_mindie, is_vllm
-from ..config.base_config import FOLDER_LIMIT_SIZE, REAL_EVALUATION, REQUESTRATES
+from ..config.base_config import CONCURRENCYS, FOLDER_LIMIT_SIZE, REAL_EVALUATION, REQUESTRATES
 from ..config.config import (
     DecodeContext,
     ErrorSeverity,
@@ -47,7 +48,15 @@ from ..optimizer.health_check import (
     benchmark_health_checks_hooks,
     service_health_checks_hooks,
 )
+from ..optimizer.early_exit import (
+    EarlyExitController,
+    EarlyExitPhase,
+    EarlyExitTriggered,
+    MetricsUnavailableError,
+    VllmMetricsClient,
+)
 from ..optimizer.outcome import RunOutcome, RunStatus
+from ..optimizer.performance_tunner import PerformanceTuner
 from ..optimizer.plugins.simulate import Simulator
 from ..optimizer.protocols import (
     SupportsCheckSuccess,
@@ -68,10 +77,12 @@ class Scheduler:
         bak_path: Optional[Path] = None,
         retry_number: int = 3,
         wait_start_time: Optional[int] = None,
+        engine: Optional[str] = None,
     ):
         self.simulator = simulator
         self.benchmark = benchmark
         self.data_storage = data_storage
+        self.engine = engine
         self.bak_path = bak_path
         self.retry_number = retry_number
         self.wait_time = wait_start_time or get_settings().wait_start_time
@@ -87,6 +98,16 @@ class Scheduler:
         self.run_start_timestamp = None
         self.first_duration = None
         self.del_log = None
+        self.current_phase = EarlyExitPhase.EVALUATION
+        self.early_exit_controller = None
+        self.early_exit_fitness_evaluator: Optional[PerformanceTuner] = None
+        self._auto_early_exit_controller = False
+        self._early_exit_disabled_depth = 0
+        self._metrics_unavailable_warned = False
+        self.early_exit_info = None
+        self.current_case_id: Optional[str] = None
+        self.benchmark_pass = 1
+        self._case_sequence = 0
         self.service_checks = ServiceHealthCheckHook()
         self.benchmark_checks = BenchmarkHealthCheckHook()
         self._register_default_checks()
@@ -123,6 +144,256 @@ class Scheduler:
         if error_context.severity == ErrorSeverity.FATAL:
             raise FatalError(error_context.message)
         raise RetryableError(error_context.message)
+
+    @contextmanager
+    def disable_early_exit(self):
+        self._early_exit_disabled_depth += 1
+        try:
+            yield
+        finally:
+            self._early_exit_disabled_depth -= 1
+
+    @property
+    def early_exit_disabled(self) -> bool:
+        return self._early_exit_disabled_depth > 0
+
+    @staticmethod
+    def _has_fixed_request_rate(params_field: tuple[OptimizerConfigField, ...]) -> bool:
+        request_rate_fields = [field for field in params_field or () if field.name in REQUESTRATES]
+        if not request_rate_fields:
+            return False
+        for field in request_rate_fields:
+            if field.constant is not None:
+                continue
+            try:
+                if isclose(float(field.min), float(field.max)):
+                    continue
+            except (TypeError, ValueError):
+                return False
+            return False
+        return True
+
+    def _configure_early_exit_controller(self):
+        if self.early_exit_controller is not None and not self._auto_early_exit_controller:
+            return
+        settings = get_settings()
+        config = settings.benchmark_early_exit
+        if not config.enabled:
+            if self._auto_early_exit_controller:
+                self.early_exit_controller = None
+                self._auto_early_exit_controller = False
+            return
+        if self.engine != "vllm":
+            if self._auto_early_exit_controller:
+                self.early_exit_controller = None
+                self._auto_early_exit_controller = False
+            logger.warning(
+                "Benchmark early exit is enabled but unsupported for engine '{}'; "
+                "only the vllm engine exposes the required metrics.",
+                self.engine,
+            )
+            return
+        reference = None
+        if hasattr(self.data_storage, "get_reference_performance_index"):
+            reference = self.data_storage.get_reference_performance_index()
+        fitness_evaluator = self.early_exit_fitness_evaluator
+        if fitness_evaluator is None:
+            fitness_evaluator = PerformanceTuner(
+                ttft_penalty=settings.ttft_penalty,
+                tpot_penalty=settings.tpot_penalty,
+                success_rate_penalty=settings.success_rate_penalty,
+                ttft_slo=settings.ttft_slo,
+                tpot_slo=settings.tpot_slo,
+                success_rate_slo=settings.success_rate_slo,
+                generate_speed_target=settings.generate_speed_target,
+            )
+        max_num_seqs = self._run_parameter_value("MAX_NUM_SEQS")
+        max_concurrency = self._run_parameter_value(*CONCURRENCYS)
+        sample_sink = self._record_metrics_sample if config.action == "report" else None
+        if self.early_exit_controller is not None:
+            self.early_exit_controller.reference = reference
+            self.early_exit_controller.fitness_evaluator = fitness_evaluator
+            update_context = getattr(self.early_exit_controller, "update_runtime_context", None)
+            if callable(update_context):
+                update_context(max_num_seqs, max_concurrency, sample_sink)
+            return
+        self.early_exit_controller = EarlyExitController(
+            config=config,
+            metrics_client=VllmMetricsClient(
+                metrics_url=config.metrics_url,
+                timeout_seconds=config.timeout_seconds,
+            ),
+            reference=reference,
+            fitness_evaluator=fitness_evaluator,
+            max_num_seqs=max_num_seqs,
+            max_concurrency=max_concurrency,
+            sample_sink=sample_sink,
+        )
+        self._auto_early_exit_controller = True
+        logger.info(
+            "Benchmark early exit enabled for engine vllm; action={}, metrics_url={}, metrics_trace={}",
+            config.action,
+            config.metrics_url,
+            "enabled" if sample_sink is not None else "disabled",
+        )
+
+    def _run_parameter_value(self, *names: str):
+        for field in self.simulate_run_info or ():
+            if field.name in names:
+                return field.value
+        return None
+
+    def _new_case_id(self) -> str:
+        allocator = getattr(self.data_storage, "next_case_id", None)
+        if callable(allocator):
+            case_id = allocator()
+            if isinstance(case_id, str):
+                return case_id
+        self._case_sequence += 1
+        return f"case_{self._case_sequence:06d}"
+
+    def _record_metrics_sample(self, sample) -> None:
+        saver = getattr(self.data_storage, "save_metrics_sample", None)
+        if not callable(saver):
+            return
+        saver(
+            sample,
+            case_id=self.current_case_id,
+            optimization_phase=self.backup_phase or "default",
+            optimization_iteration=self.backup_iter,
+            benchmark_phase=self.current_phase.value,
+            benchmark_pass=self.benchmark_pass,
+        )
+
+    def _reset_early_exit_window(self):
+        self._metrics_unavailable_warned = False
+        if self.early_exit_controller is not None:
+            self.early_exit_controller.reset()
+
+    def _apply_early_exit_decision(self, decision):
+        if self.early_exit_info is not None:
+            return
+        performance_index = decision.performance
+        decision_elapsed = None
+        if self.run_start_timestamp is not None:
+            decision_elapsed = max(0.0, time.time() - self.run_start_timestamp)
+        performance_index.would_early_exit = decision.would_early_exit
+        performance_index.early_exit = decision.early_exit
+        performance_index.early_exit_reason = decision.reason
+        performance_index.early_exit_decision_elapsed_seconds = decision_elapsed
+        performance_index.result_source = performance_index.result_source or "early_exit_metrics"
+        performance_index.usable_as_best = False
+        performance_index.reference_generate_speed = decision.reference_generate_speed
+        performance_index.observed_generate_speed = decision.observed_generate_speed
+        performance_index.reference_score = decision.reference_score
+        performance_index.observed_score = decision.observed_score
+        performance_index.slo_violations = dict(decision.slo_violations)
+        self._attach_warmup_summary(performance_index, finalize=False)
+        self.early_exit_info = decision
+        self.performance_index = performance_index
+        logger.info(
+            "Benchmark early exit condition first met at {:.2f}s; action={}",
+            decision_elapsed or 0.0,
+            "terminate" if decision.early_exit else "report",
+        )
+
+    def _check_early_exit(self):
+        if self.early_exit_controller is None:
+            return
+        try:
+            if self.early_exit_disabled:
+                observer = getattr(self.early_exit_controller, "observe", None)
+                if callable(observer):
+                    observer(self.current_phase)
+                decision = None
+            else:
+                decision = self.early_exit_controller.check(self.current_phase)
+        except MetricsUnavailableError as error:
+            if not self._metrics_unavailable_warned:
+                logger.warning(
+                    "Benchmark early exit is temporarily disabled because metrics are unavailable: {}",
+                    error,
+                )
+                self._metrics_unavailable_warned = True
+            else:
+                logger.debug("Skip benchmark early exit check because metrics are unavailable: {}", error)
+            return
+        self._metrics_unavailable_warned = False
+        if decision is None:
+            return
+        self._apply_early_exit_decision(decision)
+        if decision.early_exit:
+            raise EarlyExitTriggered(decision)
+
+    def _attach_warmup_summary(
+        self,
+        performance_index: PerformanceIndex,
+        *,
+        finalize: bool = True,
+    ) -> PerformanceIndex:
+        performance_index.case_id = self.current_case_id
+        if self.early_exit_controller is None or self.current_phase != EarlyExitPhase.EVALUATION:
+            return performance_index
+        if finalize:
+            finalizer = getattr(self.early_exit_controller, "finalize_warmup_on_case_end", None)
+            if callable(finalizer):
+                finalizer()
+        result = getattr(self.early_exit_controller, "warmup_result", None)
+        if result is None:
+            return performance_index
+        performance_index.warmup_end_elapsed_seconds = result.elapsed_seconds
+        performance_index.warmup_end_reason = result.reason
+        performance_index.warmup_sample_count = result.sample_count
+        performance_index.warmup_effective_target = result.effective_target
+        performance_index.warmup_load_threshold = result.load_threshold
+        performance_index.warmup_running_requests = result.running_requests
+        performance_index.warmup_waiting_requests = result.waiting_requests
+        performance_index.warmup_load_ratio = result.load_ratio
+        performance_index.warmup_forced = result.forced
+        return performance_index
+
+    def _attach_metrics_window_reference(self, performance_index: PerformanceIndex) -> PerformanceIndex:
+        self._attach_warmup_summary(performance_index)
+        if self.early_exit_controller is None:
+            return performance_index
+        reference_provider = getattr(self.early_exit_controller, "representative_window", None)
+        if not callable(reference_provider):
+            return performance_index
+        reference_window, sample_count = reference_provider()
+        if reference_window is None:
+            return performance_index
+        performance_index.metrics_window_generate_speed = reference_window.generate_speed
+        performance_index.metrics_window_time_to_first_token = reference_window.time_to_first_token
+        performance_index.metrics_window_time_per_output_token = reference_window.time_per_output_token
+        performance_index.metrics_window_success_rate = reference_window.success_rate
+        performance_index.metrics_window_sample_count = sample_count
+        return performance_index
+
+    def _merge_report_only_early_exit(self, performance_index: PerformanceIndex) -> PerformanceIndex:
+        if self.early_exit_info is None or self.early_exit_info.early_exit:
+            return performance_index
+        performance_index.would_early_exit = self.early_exit_info.would_early_exit
+        performance_index.early_exit_reason = self.early_exit_info.reason
+        performance_index.early_exit_decision_elapsed_seconds = (
+            self.early_exit_info.performance.early_exit_decision_elapsed_seconds
+        )
+        performance_index.reference_generate_speed = self.early_exit_info.reference_generate_speed
+        performance_index.observed_generate_speed = self.early_exit_info.observed_generate_speed
+        performance_index.reference_score = self.early_exit_info.reference_score
+        performance_index.observed_score = self.early_exit_info.observed_score
+        performance_index.slo_violations = dict(self.early_exit_info.slo_violations)
+        return performance_index
+
+    @staticmethod
+    def _finalize_report_only_time_saving(performance_index: PerformanceIndex, duration: Optional[float]) -> None:
+        if not performance_index.would_early_exit or performance_index.early_exit:
+            return
+        decision_elapsed = performance_index.early_exit_decision_elapsed_seconds
+        if duration is None or duration <= 0 or decision_elapsed is None:
+            return
+        estimated_saved = max(0.0, duration - decision_elapsed)
+        performance_index.estimated_time_saved_seconds = estimated_saved
+        performance_index.estimated_time_saved_ratio = estimated_saved / duration
 
     def _simulator_failure_message(self, return_code: int | None = None) -> str:
         command = list(getattr(self.simulator, "command", None) or [])
@@ -235,6 +506,7 @@ class Scheduler:
             benchmark_result = self.benchmark_checks.run(BenchmarkHookPoint.RUNTIME_MONITOR, context)
             if not benchmark_result.is_healthy:
                 self._handle_error(benchmark_result.error_context)
+            self._check_early_exit()
             if isinstance(self.simulator, SupportsCheckSuccess):
                 if is_mindie() or is_vllm():
                     if self.simulator.process.poll() is not None:
@@ -279,8 +551,12 @@ class Scheduler:
                 self.benchmark.run(tuple(self.simulate_run_info))
                 logger.debug("benchmark subprocess started")
                 time.sleep(1)
+                self._reset_early_exit_window()
                 self.monitoring_status()
                 return
+            except EarlyExitTriggered as e:
+                logger.warning(f"Early exit in run_target_server: {e}")
+                raise
             except FatalError as e:
                 logger.debug(
                     "Fatal error in run_target_server (attempt {}/{}): {}, simulator log: {}, tail: {}",
@@ -319,6 +595,7 @@ class Scheduler:
             duration = time.time() - self.run_start_timestamp
             if not self.first_duration:
                 self.first_duration = duration
+        self._finalize_report_only_time_saving(self.performance_index, duration)
         real_evaluation = True
         if REAL_EVALUATION in kwargs:
             real_evaluation = kwargs.pop(REAL_EVALUATION)
@@ -368,10 +645,14 @@ class Scheduler:
         self.benchmark.update_command()
         if isinstance(self.benchmark, SupportsPrepare):
             self.benchmark.prepare()
+        self.benchmark_pass += 1
         self.benchmark.run(tuple(self.simulate_run_info))
+        self.current_phase = EarlyExitPhase.EVALUATION
+        self._reset_early_exit_window()
         self.monitoring_status()
         time.sleep(1)
-        self.performance_index = self.benchmark.get_performance_index()
+        performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
+        self.performance_index = self._merge_report_only_early_exit(performance_index)
 
     def _run_evaluation(
         self,
@@ -386,23 +667,39 @@ class Scheduler:
             logger.debug("evaluation start param_count={} values={}", len(params), params.tolist())
             self.set_back_up_path()
             self.simulate_run_info = map_param_with_value(params, params_field, decode_context)
+            self.current_case_id = self._new_case_id()
+            self.benchmark_pass = 1
             logger.opt(lazy=True).trace("run param info {}", lambda: {v.name: v.value for v in self.simulate_run_info})
             self._error_info = None
             self.last_outcome = None
             self.del_log = True
-            self.performance_index = PerformanceIndex()
+            self.performance_index = PerformanceIndex(case_id=self.current_case_id)
+            self.early_exit_info = None
+            self._configure_early_exit_controller()
             try:
                 self.update_data_field(self.simulate_run_info)
+                fixed_request_rate = with_request_rate and self._has_fixed_request_rate(tuple(self.simulate_run_info))
+                if with_request_rate and not fixed_request_rate:
+                    self.current_phase = EarlyExitPhase.CALIBRATION
+                else:
+                    self.current_phase = EarlyExitPhase.EVALUATION
                 self.run_target_server(params, params_field)
                 time.sleep(1)
-                self.performance_index = self.benchmark.get_performance_index()
+                performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
+                self.performance_index = self._merge_report_only_early_exit(performance_index)
                 if with_request_rate:
                     self._apply_request_rate_second_run(params_field)
+            except EarlyExitTriggered as e:
+                self._error_info = None
+                self.del_log = False
+                self.performance_index = e.decision.performance
+                self.stop_target_server(False)
             except OptimizerError:
                 raise
             except Exception as e:
                 self._error_info = e
                 self.del_log = False
+            self._attach_warmup_summary(self.performance_index)
             status = RunStatus.FAILED if self._error_info else RunStatus.SUCCESS
             duration = time.time() - self.run_start_timestamp if self.run_start_timestamp else None
             error_type = type(self._error_info).__name__ if self._error_info else "-"
@@ -463,6 +760,8 @@ class Scheduler:
             self.run_start_timestamp = time.time()
             self.set_back_up_path()
             self.simulate_run_info = map_param_with_value(params, params_field, decode_context)
+            self.current_case_id = self._new_case_id()
+            self.benchmark_pass = 1
             logger.debug(
                 "rerun benchmark start (reuse running simulator) param info {}",
                 {v.name: v.value for v in self.simulate_run_info},
@@ -470,7 +769,9 @@ class Scheduler:
             self._error_info = None
             self.last_outcome = None
             self.del_log = True
-            self.performance_index = PerformanceIndex()
+            self.performance_index = PerformanceIndex(case_id=self.current_case_id)
+            self.early_exit_info = None
+            self._configure_early_exit_controller()
             try:
                 # Stop any lingering benchmark process, then re-run it against the live simulator.
                 self.benchmark.stop()
@@ -482,10 +783,13 @@ class Scheduler:
                     self.benchmark.prepare()
                 self.benchmark.run(tuple(self.simulate_run_info))
                 time.sleep(1)
+                self.current_phase = EarlyExitPhase.EVALUATION
+                self._reset_early_exit_window()
                 # monitoring_status runs health-check hooks on both the live simulator and benchmark.
                 self.monitoring_status()
                 time.sleep(1)
-                self.performance_index = self.benchmark.get_performance_index()
+                performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
+                self.performance_index = self._merge_report_only_early_exit(performance_index)
                 if with_request_rate:
                     self._apply_request_rate_second_run(params_field)
             except OptimizerError:
@@ -503,10 +807,13 @@ class Scheduler:
                 # The benchmark may have produced results before the server errored; try to fetch
                 # the performance index to avoid losing valid data.
                 try:
-                    self.performance_index = self.benchmark.get_performance_index()
+                    self.performance_index = self._attach_metrics_window_reference(
+                        self.benchmark.get_performance_index()
+                    )
                     logger.info("Successfully retrieved performance index despite server error.")
                 except Exception as perf_err:
                     logger.warning("Failed to get performance index after server error: {}", perf_err)
+            self._attach_warmup_summary(self.performance_index)
             status = RunStatus.FAILED if self._error_info else RunStatus.SUCCESS
             duration = time.time() - self.run_start_timestamp if self.run_start_timestamp else None
             error_type = type(self._error_info).__name__ if self._error_info else "-"

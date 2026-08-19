@@ -44,10 +44,8 @@ class PerformanceTuner:
         self.tpot_penalty = tpot_penalty
         self.success_rate_penalty = success_rate_penalty
 
-    def minimum_algorithm(self, performance_index) -> float:
-        """
-        Minimize fitness value (cost)
-        """
+    def calculate_cost(self, performance_index, require_success_rate: bool = True) -> float:
+        """Calculate fitness cost, optionally allowing a missing success rate."""
         total_cost = 0.0
 
         if performance_index.generate_speed is not None and performance_index.generate_speed > 0:
@@ -78,7 +76,11 @@ class PerformanceTuner:
                 total_cost += self.w_succ * cost_succ
             except (OverflowError, ZeroDivisionError):
                 return inf
-        else:
+        elif require_success_rate:
             return inf
 
         return total_cost
+
+    def minimum_algorithm(self, performance_index) -> float:
+        """Minimize fitness value (cost) using complete benchmark metrics."""
+        return self.calculate_cost(performance_index, require_success_rate=True)

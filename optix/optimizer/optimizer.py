@@ -70,6 +70,7 @@ class PSOOptimizer(PerformanceTuner):
 
         super().__init__(**kwargs)
         self.scheduler = scheduler
+        self.scheduler.early_exit_fitness_evaluator = self
         self.n_particles = min(n_particles, MAX_ITER_NUM)
         self.iters = min(iters, MAX_ITER_NUM)
         self.target_field = target_field or default_support_field
@@ -92,6 +93,16 @@ class PSOOptimizer(PerformanceTuner):
         self._iteration = 0  # op_func call count, used for balanced strategy inter-iteration direction alternation
         self._refine_iter = 0  # +1 per refine candidate group, so backup dirs look like back_up/refine_1
         self._seen_params = {}
+
+    def _run_complete_evaluation(self, params: np.ndarray, target_field=None):
+        """Run a baseline or refinement trial to completion.
+
+        Early exit is disabled because these runs require complete benchmark
+        metrics for reliable fitness evaluation and candidate selection.
+        """
+        evaluation_target_field = self.target_field if target_field is None else target_field
+        with self.scheduler.disable_early_exit():
+            return self.scheduler.run(params, evaluation_target_field)
 
     @staticmethod
     def is_within_boundary(target_pos, min_bound, max_bound):
@@ -285,7 +296,7 @@ class PSOOptimizer(PerformanceTuner):
             stop_simulator = not reuse
             # First run the search params in full (start simulator + benchmark)
             try:
-                _res = self.scheduler.run(params, self.target_field)
+                _res = self._run_complete_evaluation(params)
                 if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
                     logger.error(
                         "Runtime exception. error: {}, please check.",
@@ -325,14 +336,15 @@ class PSOOptimizer(PerformanceTuner):
                     try:
                         if reuse:
                             # Only concurrency/request rate changed: reuse the running simulator, rerun benchmark only
-                            _res = self.scheduler.rerun_benchmark_only(
-                                params,
-                                self.target_field,
-                                with_request_rate=self.use_request_rate_calibration,
-                            )
+                            with self.scheduler.disable_early_exit():
+                                _res = self.scheduler.rerun_benchmark_only(
+                                    params,
+                                    self.target_field,
+                                    with_request_rate=self.use_request_rate_calibration,
+                                )
                         else:
                             # Restart simulator + benchmark
-                            _res = self.scheduler.run(params, self.target_field)
+                            _res = self._run_complete_evaluation(params)
                         if self.scheduler.last_outcome and self.scheduler.last_outcome.status == RunStatus.FAILED:
                             logger.error(
                                 "Runtime exception. error: {}, please check.",
@@ -533,7 +545,7 @@ class PSOOptimizer(PerformanceTuner):
         baseline_target_field = tuple(deepcopy(self.target_field))
         self.default_run_param = field_to_param(baseline_target_field)
         try:
-            return self.scheduler.run(self.default_run_param, baseline_target_field)
+            return self._run_complete_evaluation(self.default_run_param, baseline_target_field)
         finally:
             self._restore_search_data_field(search_target_field, simulator_names, benchmark_names)
 
@@ -833,7 +845,7 @@ def _run_optimizer() -> None:
         if len(_target_field) < 1:
             raise ValueError("No optimization fields were found. ")
         data_storage = DataStorage(settings.data_storage, _simu, _bench)
-        scheduler = Scheduler(_simu, _bench, data_storage, bak_path=bak_path)
+        scheduler = Scheduler(_simu, _bench, data_storage, bak_path=bak_path, engine=args.engine)
         fine_tune = FineTune(
             ttft_penalty=settings.ttft_penalty,
             tpot_penalty=settings.tpot_penalty,

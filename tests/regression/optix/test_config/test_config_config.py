@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from optix.config.config import (
+    BenchmarkEarlyExitConfig,
     DecodeContext,
     ErrorPatternConfig,
     ErrorType,
@@ -271,6 +272,52 @@ def test_health_check_config_defaults_and_overrides():
     assert custom.service_errors.fatal_patterns[ErrorType.DEVICE_ERROR] == ["device fault"]
     assert custom.benchmark_errors.retryable_patterns[ErrorType.IO_ERROR] == ["disk full"]
     assert custom.log_snippet_length == 300
+
+
+@pytest.mark.parametrize("action", ["report", "terminate"])
+def test_benchmark_early_exit_config_accepts_supported_actions(action):
+    assert BenchmarkEarlyExitConfig(action=action).action == action
+
+
+def test_benchmark_early_exit_config_uses_internal_policy_defaults():
+    config = BenchmarkEarlyExitConfig()
+
+    assert config.action == "terminate"
+    assert config.window_seconds == 30
+    assert config.min_output_tokens == 128
+    assert config.min_completed_requests == 1
+    assert config.relative_generate_speed_threshold == 0.5
+    assert config.relative_score_threshold == 3.0
+    assert config.consecutive_bad_windows == 3
+    assert config.timeout_seconds == 1.0
+
+
+@pytest.mark.parametrize("action", ["REPORT", "stop", ""])
+def test_benchmark_early_exit_config_rejects_unsupported_actions(action):
+    with pytest.raises(ValueError):
+        BenchmarkEarlyExitConfig(action=action)
+
+
+@pytest.mark.parametrize("threshold", [1.01, 1.5])
+def test_benchmark_early_exit_config_rejects_generate_speed_threshold_above_one(threshold):
+    with pytest.raises(ValueError):
+        BenchmarkEarlyExitConfig(relative_generate_speed_threshold=threshold)
+
+
+@pytest.mark.parametrize("threshold", [0.1, 0.5, 0.99])
+def test_benchmark_early_exit_config_rejects_score_threshold_below_one(threshold):
+    with pytest.raises(ValueError):
+        BenchmarkEarlyExitConfig(relative_score_threshold=threshold)
+
+
+def test_benchmark_early_exit_config_accepts_relative_threshold_boundaries():
+    config = BenchmarkEarlyExitConfig(
+        relative_generate_speed_threshold=1.0,
+        relative_score_threshold=1.0,
+    )
+
+    assert config.relative_generate_speed_threshold == 1.0
+    assert config.relative_score_threshold == 1.0
 
 
 @patch.object(Path, "is_file")
