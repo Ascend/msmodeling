@@ -12,6 +12,7 @@ GetBlocksWithSetters = Callable[[Any], Sequence[Tuple[Any, BlockSetter]]]
 
 @dataclass(frozen=True)
 class DiTBlockCacheSpec:
+    class_name: str
     model_type: str
     get_blocks_with_setters: GetBlocksWithSetters
     make_wrapped_forward: MakeWrappedForward
@@ -23,6 +24,8 @@ _DIT_BLOCK_CACHE_SPECS: Dict[str, DiTBlockCacheSpec] = {}
 def register_dit_block_cache_spec(class_name: str, spec: DiTBlockCacheSpec) -> None:
     if not class_name:
         raise ValueError("'class_name' must be a non-empty string.")
+    if spec.class_name != class_name:
+        raise ValueError(f"spec.class_name {spec.class_name!r} does not match registry key {class_name!r}.")
     _DIT_BLOCK_CACHE_SPECS[class_name] = spec
 
 
@@ -183,6 +186,7 @@ def _hunyuanvideo15_make_wrapped_forward(agent: Any) -> WrappedForwardFactory:
 register_dit_block_cache_spec(
     "WanTransformer3DModel",
     DiTBlockCacheSpec(
+        class_name="WanTransformer3DModel",
         model_type="Wan",
         get_blocks_with_setters=_get_wan_blocks_with_setters,
         make_wrapped_forward=_wan_make_wrapped_forward,
@@ -191,6 +195,7 @@ register_dit_block_cache_spec(
 register_dit_block_cache_spec(
     "HunyuanVideoTransformer3DModel",
     DiTBlockCacheSpec(
+        class_name="HunyuanVideoTransformer3DModel",
         model_type="HunyuanVideo",
         get_blocks_with_setters=_get_hunyuanvideo_blocks_with_setters,
         make_wrapped_forward=_hunyuanvideo_make_wrapped_forward,
@@ -199,6 +204,7 @@ register_dit_block_cache_spec(
 register_dit_block_cache_spec(
     "HunyuanVideo15Transformer3DModel",
     DiTBlockCacheSpec(
+        class_name="HunyuanVideo15Transformer3DModel",
         model_type="HunyuanVideo15",
         get_blocks_with_setters=_get_hunyuanvideo15_blocks_with_setters,
         make_wrapped_forward=_hunyuanvideo15_make_wrapped_forward,

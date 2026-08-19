@@ -21,7 +21,7 @@ from cli.inference.video_generate import (
 from parameterized import parameterized
 from tensor_cast.core.quantization.config import create_attention_quant_config
 from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
-from tensor_cast.diffusers.cache_agent.cache import CacheState
+from tensor_cast.diffusers.cache_agent.cache import CacheConfig, CacheState
 from tensor_cast.diffusers.cache_agent.dit_block_cache import DiTBlockCache
 from tensor_cast.diffusers.diffusers_attention import (
     _attention,
@@ -1466,6 +1466,107 @@ def test_dit_block_cache_validates_error_paths():
         block(hidden_states=torch.ones(1))
 
 
+def test_explicit_dit_cache_spec_rejects_class_mismatch():
+    from tensor_cast.diffusers.diffusers_model import DiffusersTransformerModel
+
+    model = object.__new__(DiffusersTransformerModel)
+    model.model_config = types.SimpleNamespace(model_config={"_class_name": "ActualTransformer"})
+    spec = DiTBlockCacheSpec(
+        class_name="OtherTransformer",
+        model_type="Example",
+        get_blocks_with_setters=lambda inner: [(torch.nn.Identity(), lambda block: None)],
+        make_wrapped_forward=lambda agent: lambda forward: forward,
+    )
+
+    with pytest.raises(ValueError, match="class identity"):
+        model.enable_dit_block_cache(CacheConfig(), spec=spec)
+
+
+def test_explicit_dit_cache_spec_rejects_empty_clamped_range():
+    from tensor_cast.diffusers.diffusers_model import DiffusersTransformerModel
+
+    model = object.__new__(DiffusersTransformerModel)
+    model.model_config = types.SimpleNamespace(model_config={"_class_name": "ExampleTransformer"})
+    model._inner = types.SimpleNamespace()
+    spec = DiTBlockCacheSpec(
+        class_name="ExampleTransformer",
+        model_type="Example",
+        get_blocks_with_setters=lambda inner: [(torch.nn.Identity(), lambda block: None)],
+        make_wrapped_forward=lambda agent: lambda forward: forward,
+    )
+
+    with pytest.raises(ValueError, match="nonempty after clamp"):
+        model.enable_dit_block_cache(CacheConfig(block_start=4, block_end=8), spec=spec)
+
+
+@pytest.mark.parametrize(
+    "cache_config",
+    (
+        CacheConfig(block_start=-1, block_end=1),
+        CacheConfig(block_start=0, block_end=-1),
+    ),
+)
+def test_explicit_dit_cache_spec_rejects_negative_range(cache_config: CacheConfig):
+    from tensor_cast.diffusers.diffusers_model import DiffusersTransformerModel
+
+    model = object.__new__(DiffusersTransformerModel)
+    model.model_config = types.SimpleNamespace(model_config={"_class_name": "ExampleTransformer"})
+    model._inner = types.SimpleNamespace()
+    spec = DiTBlockCacheSpec(
+        class_name="ExampleTransformer",
+        model_type="Example",
+        get_blocks_with_setters=lambda inner: [(torch.nn.Identity(), lambda block: None)],
+        make_wrapped_forward=lambda agent: lambda forward: forward,
+    )
+
+    with pytest.raises(ValueError, match="non-negative"):
+        model.enable_dit_block_cache(cache_config, spec=spec)
+
+
+def test_explicit_dit_cache_spec_rejects_no_blocks():
+    from tensor_cast.diffusers.diffusers_model import DiffusersTransformerModel
+
+    model = object.__new__(DiffusersTransformerModel)
+    model.model_config = types.SimpleNamespace(model_config={"_class_name": "ExampleTransformer"})
+    model._inner = types.SimpleNamespace()
+    spec = DiTBlockCacheSpec(
+        class_name="ExampleTransformer",
+        model_type="Example",
+        get_blocks_with_setters=lambda inner: [],
+        make_wrapped_forward=lambda agent: lambda forward: forward,
+    )
+
+    with pytest.raises(ValueError, match="resolved no blocks"):
+        model.enable_dit_block_cache(CacheConfig(), spec=spec)
+
+
+def test_explicit_dit_cache_spec_rejects_zero_replacements():
+    from tensor_cast.diffusers.diffusers_model import DiffusersTransformerModel
+
+    model = object.__new__(DiffusersTransformerModel)
+    model.model_config = types.SimpleNamespace(model_config={"_class_name": "ExampleTransformer"})
+    model._inner = types.SimpleNamespace()
+    block = object.__new__(DiTBlockCache)
+    spec = DiTBlockCacheSpec(
+        class_name="ExampleTransformer",
+        model_type="Example",
+        get_blocks_with_setters=lambda inner: [(block, lambda new_block: None)],
+        make_wrapped_forward=lambda agent: lambda forward: forward,
+    )
+
+    with pytest.raises(ValueError, match="replaced no blocks"):
+        model.enable_dit_block_cache(CacheConfig(), spec=spec)
+
+
+def test_dit_cache_spec_none_keeps_unknown_video_fallback():
+    from tensor_cast.diffusers.diffusers_model import DiffusersTransformerModel
+
+    model = object.__new__(DiffusersTransformerModel)
+    model.model_config = types.SimpleNamespace(model_config={"_class_name": "UnknownTransformer"})
+
+    assert model.enable_dit_block_cache(CacheConfig()) is None
+
+
 def test_dit_cache_registry_helpers_replace_and_select_blocks():
     blocks = [torch.nn.Identity(), torch.nn.ReLU(), torch.nn.Sigmoid()]
     pairs = _module_list_blocks_with_setters(blocks)
@@ -1477,7 +1578,12 @@ def test_dit_cache_registry_helpers_replace_and_select_blocks():
     assert blocks[1][0] == 1
     assert blocks[2][0] == 2
 
-    spec = DiTBlockCacheSpec("Example", lambda inner: [], lambda agent: lambda forward: forward)
+    spec = DiTBlockCacheSpec(
+        class_name="ExampleTransformer",
+        model_type="Example",
+        get_blocks_with_setters=lambda inner: [],
+        make_wrapped_forward=lambda agent: lambda forward: forward,
+    )
     register_dit_block_cache_spec("ExampleTransformer", spec)
     assert get_dit_block_cache_spec("ExampleTransformer") is spec
     assert get_dit_block_cache_spec("") is None

@@ -9,7 +9,8 @@ For the complete model list and feature details, see [Model Support and Feature 
 | 1. Quickly run an LLM text generation simulation | [2.1 Quick Start: Text Generation](#21-quick-start-text-generation) |
 | 2. Understand timing, call count, and memory metrics in the output | [2.2 Result (Text Generation)](#22-result-text-generation) |
 | 3. Run video generation model simulation | [2.3 Quick Start: Video Generation](#23-quick-start-video-generation) |
-| 4. View or customize hardware device profiles | [3 Supported Devices and Custom Devices](#3-supported-devices-and-custom-devices) |
+| 4. Run image generation model simulation | [2.5 Quick Start: Image Generation](#25-quick-start-image-generation) |
+| 5. View or customize hardware device profiles | [3 Supported Devices and Custom Devices](#3-supported-devices-and-custom-devices) |
 
 ## 1 Introduction
 
@@ -166,6 +167,40 @@ Metric descriptions:
 - `analytic avg`: Average time per operator call.
 - `# of Calls`: Number of times the operator is invoked.
 - `Total time for analytic`: Sum of analytic operator time.
+
+### 2.5 Quick Start: Image Generation
+
+**What it does:** Simulate the diffusion transformer denoising workload for image generation models. The first version only simulates the Transformer denoising stage; prompt encoding, VAE, scheduler, and image I/O are excluded, and no real image is produced. The following example uses the FLUX.1-dev remote model ID; on first run, the required model configuration files are downloaded according to the configured model source.
+
+**Command:**
+
+```bash
+python -m cli.inference.image_generate black-forest-labs/FLUX.1-dev \
+  --device ATLAS_800_A2_280T_32G_PCIE \
+  --batch-size 1 \
+  --output-image-size 512 512 \
+  --text-seq-len 512 \
+  --sample-step 50 \
+  --dtype float16 \
+  --quantize-linear-action W8A8_DYNAMIC
+```
+
+**Key flags:** `model_id`, `--device`, `--batch-size`, `--output-image-size`, `--text-seq-len`, `--source-image-size`, `--sample-step`, `--use-cfg`, `--world-size`, `--ulysses-size`, `--cfg-parallel`, `--dit-cache`, `--chrome-trace`
+
+**Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace` is set.
+
+### 2.6 Result (Image Generation)
+
+`image_generate` reports the critical path and logical measured work of the Transformer denoising stage, and only outputs a performance summary table and an optional Chrome trace. The output metrics are the same as for video generation:
+
+- `analytic total`: Estimated total time spent by the operator.
+- `analytic avg`: Average time per operator call.
+- `# of Calls`: Number of times the operator is invoked.
+- `Total time for analytic`: Sum of analytic operator time.
+- `Model compilation and execution time`: The simulator's runtime on the host, not the real model compile or execution time on hardware.
+
+Actual values vary by device profile, model configuration, and input shape.
+
 
 ## 3 Supported Devices and Custom Devices
 
@@ -373,3 +408,73 @@ BSA behavior and limits:
 > **Note:** When simulating HunyuanVideo1.5 from the official raw Tencent repository, use `tencent/HunyuanVideo-1.5/transformer/<t2v_variant>` on Hugging Face or `Tencent-Hunyuan/HunyuanVideo-1.5/transformer/<t2v_variant>` on ModelScope. Supported T2V selectors are `480p_t2v`, `480p_t2v_distilled`, and `720p_t2v`. Raw repository roots, local raw layouts, I2V variants, and SR variants are not supported. TensorCast validates the downloaded JSON configuration and maps it to the built-in Diffusers simulation model; it does not execute the Tencent `hyvideo` package or convert checkpoint weights.
 
 Run `python -m cli.inference.video_generate --help` for details.
+
+### 4.3 Run image generation inference for diffusion models
+
+We provide an `image_generate.py` command line interface to simulate the diffusion transformer denoising workload and performance of image generation models. The script supports simulating the transformer denoising inference process of image generation models (e.g., FLUX, Qwen-Image-Edit) with configurable batch size, output image size, text condition length, and parallelism settings. A detailed table summary of operator performance breakdown is provided by default. An option is also provided to dump the performance timeline as a Chrome Trace file.
+
+The first version only simulates the Transformer denoising stage that enters the simulated device; prompt encoding, VAE, scheduler, and image I/O are excluded, and no real image is produced.
+
+Its general usage is shown below:
+
+```text
+usage: image_generate.py [-h]
+                         [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
+                         --batch-size BATCH_SIZE
+                         --output-image-size HEIGHT WIDTH
+                         --text-seq-len TEXT_SEQ_LEN
+                         [--source-image-size HEIGHT WIDTH]
+                         [--sample-step SAMPLE_STEP]
+                         [--use-cfg]
+                         [--dtype {float16,float32,bfloat16}]
+                         [--remote-source {huggingface,modelscope}]
+                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
+                         [--mxfp4-group-size MXFP4_GROUP_SIZE]
+                         [--quantize-attention-action {DISABLED,INT8,FP8}]
+                         [--compile]
+                         [--compile-allow-graph-break]
+                         [--world-size WORLD_SIZE]
+                         [--ulysses-size ULYSSES_SIZE]
+                         [--cfg-parallel] [--dit-cache]
+                         [--cache-step-range CACHE_STEP_RANGE]
+                         [--cache-step-interval CACHE_STEP_INTERVAL]
+                         [--cache-block-range CACHE_BLOCK_RANGE]
+                         [--chrome-trace CHROME_TRACE]
+                         model_id
+
+Simulate image Transformer denoising workloads and report their critical path
+and logical measured work only. Prompt encoding, VAE, scheduler, and image I/O
+are excluded.
+```
+
+Main parameters:
+
+| Parameter | Category | Required/Optional | Description |
+| --- | --- | --- | --- |
+| `model_id` | positional arguments | Required | Image generation model ID or local model path.<br>1. Type: Str.<br>2. Reference values: Diffusers model directory or an exactly allowed remote repo ID, such as `black-forest-labs/FLUX.1-dev`, `Qwen/Qwen-Image-Edit`.<br>3. Default: none.<br>4. A reviewed local absolute path is recommended; remote model IDs are not security-guaranteed. |
+| `--device` | options | Optional | Specifies the device profile for simulation.<br>1. Type: Str.<br>2. Reference values: registered `DeviceProfile` names, including `TEST_DEVICE`, `ATLAS_800_A2_376T_64G`, `ATLAS_800_A2_313T_64G`, `ATLAS_800_A2_280T_64G`, `ATLAS_800_A2_280T_64G_PCIE`, `ATLAS_800_A2_280T_32G_PCIE`, `ATLAS_800_A3_752T_128G_DIE`, `ATLAS_800_A3_560T_128G_DIE`, `ATLAS_800_A3_560T_128G_DIE_ROCE`, `ATLAS_350_425T_112G`, `ATLAS_350_425T_84G`.<br>3. Default: `TEST_DEVICE`. |
+| `--batch-size` | options | Required | Specifies the base batch size of the workload, not the prompt count or source image count.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: none. |
+| `--output-image-size` | options | Required | Specifies the output image size, provided exactly once; used only to derive the shape, does not output an image.<br>1. Type: Tuple[Int, Int] (`HEIGHT WIDTH`).<br>2. Valid range: two positive integers.<br>3. Default: none. |
+| `--text-seq-len` | options | Required | The effective text condition length entering the Transformer.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: none.<br>4. Not a character count, tokenizer input length, or template length; text encoding is not performed in this first version. |
+| `--source-image-size` | options | Optional | Specifies the source image size, repeatable per source; accepts sizes only, not paths or pixels. Available only for editing kinds.<br>1. Type: Tuple[Int, Int] (`HEIGHT WIDTH`).<br>2. Valid range: two positive integers.<br>3. Default: none. |
+| `--sample-step` | options | Optional | Specifies the number of identical Transformer workload iterations to run.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
+| `--use-cfg` | options | Optional | Enables the video-style classifier-free guidance workload approximation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
+| `--dtype` | options | Optional | Specifies model compute data type.<br>1. Type: Str.<br>2. Reference values: `float16`, `float32`, `bfloat16`.<br>3. Default: `float16`. |
+| `--remote-source` | options | Optional | Specifies the remote model source; participates in exact pair matching.<br>1. Type: Str.<br>2. Reference values: `huggingface`, `modelscope`.<br>3. Default: `huggingface`. |
+| `--quantize-linear-action` | Quantization Options | Optional | Specifies linear layer quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `DISABLED`. |
+| `--mxfp4-group-size` | Quantization Options | Optional | Specifies the group size for MXFP4 quantization.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `32`. |
+| `--quantize-attention-action` | Quantization Options | Optional | Specifies attention computation quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`.<br>3. Default: `DISABLED`. |
+| `--compile` | Optimization Options | Optional | Compiles the primary transformer before simulation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Uses `dynamic=False, fullgraph=True`; when DiT cache is active, the cache transformer uses the same policy. |
+| `--compile-allow-graph-break` | Optimization Options | Optional | Allows graph breaks during compilation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Changes compilation to `fullgraph=False` for both the primary and DiT cache transformers. |
+| `--world-size` | Parallel Options | Optional | Specifies the total number of devices participating in distributed simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`.<br>4. Must equal `--ulysses-size` (`2 * --ulysses-size` when `--cfg-parallel` is enabled). |
+| `--ulysses-size` | Parallel Options | Optional | Specifies Ulysses parallel size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
+| `--cfg-parallel` | Parallel Options | Optional | Enables CFG parallel strategy.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Only enabled with `--use-cfg`; then `world-size` must equal `2 * --ulysses-size`. |
+| `--dit-cache` | Cache Options | Optional | Enables DiT block cache.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
+| `--cache-step-range` | Cache Options | Optional | Specifies sampling step range for cache.<br>1. Type: Str.<br>2. Format: `start,end`, inclusive interval.<br>3. Default: `None`.<br>4. Required when `--dit-cache` is set and `--cache-step-interval > 1`. |
+| `--cache-step-interval` | Cache Options | Optional | Specifies cache update step interval.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`, which disables cache update reuse. |
+| `--cache-block-range` | Cache Options | Optional | Specifies block range for cache.<br>1. Type: Str.<br>2. Format: `start,end`, start inclusive and end exclusive.<br>3. Default: `None`. |
+| `--chrome-trace` | options | Optional | Specifies the Chrome trace JSON output path for exporting the performance timeline.<br>1. Type: Str.<br>2. Valid range: file path.<br>3. Default: `None`.<br>4. Generated only after a successful Runtime run. |
+
+> **Note:** The Core currently registers no production image model kind; support for models such as `black-forest-labs/FLUX.1-dev` and `Qwen/Qwen-Image-Edit` is provided by the corresponding model-extension PRs. Until then, passing a real model ID fails explicitly (fail-closed).
+
+Run `python -m cli.inference.image_generate --help` for details.

@@ -9,6 +9,23 @@ from tensor_cast.diffusers import model_resolver, pipeline_metadata
 from tensor_cast.model_config import RemoteSource
 
 
+def test_resolve_diffusers_model_config_returns_config_only_selection_without_remote_weights(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_model = tmp_path / "local_model"
+    local_model.mkdir()
+
+    def fail_snapshot(_model_id: str) -> str:
+        raise AssertionError("config-only local resolution must not contact remote")
+
+    monkeypatch.setattr(model_resolver, "snapshot_huggingface_config_only", fail_snapshot)
+    selection = model_resolver.resolve_diffusers_model_config(str(local_model), "huggingface")
+
+    assert selection.variant_path == str(local_model)
+    assert selection.is_remote is False
+
+
 def test_resolve_diffusers_model_path_returns_local_directory_without_remote_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -532,6 +532,7 @@ class DiffusersConfig:
     text_config: Optional[Type["DiffusersTextConfig"]] = None
     transformer_config: Optional[Type["DiffusersTransformerConfig"]] = None
     vae_config: Optional[Type["DiffusersVaeConfig"]] = None
+    image_dispatch_validated: bool = False
 
 
 @dataclasses.dataclass

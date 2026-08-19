@@ -39,6 +39,10 @@ def _handle_inference_command(
         from cli.inference.video_generate import main as video_generate_main
 
         return _dispatch(video_generate_main, remaining)
+    if args.inference_command == "image-generate":
+        from cli.inference.image_generate import main as image_generate_main
+
+        return _dispatch(image_generate_main, remaining)
     if args.inference_command is None:
         inference_parser.print_help()
         return 0
@@ -58,6 +62,7 @@ def main() -> int:
             "  msmodeling inference throughput-optimizer MODEL --device DEV --num-devices 8 ...\n"
             "  msmodeling inference model-adapter doctor --model-id MODEL\n"
             "  msmodeling inference video-generate MODEL --batch-size 1 ...\n"
+            "  msmodeling inference image-generate MODEL --batch-size 1 ...\n"
             "  msmodeling optix -e vllm -b ais_bench\n"
         ),
     )
@@ -71,6 +76,13 @@ def main() -> int:
     inference_sub.add_parser("throughput-optimizer", help="Search serving throughput strategies")
     inference_sub.add_parser("model-adapter", help="Model adaptation doctor, verify, and export-evidence")
     inference_sub.add_parser("video-generate", help="Run a simulated video generation pass")
+    inference_sub.add_parser(
+        "image-generate",
+        help="Run a simulated image generation pass",
+        # Defer --help to cli.inference.image_generate's own parser so the full
+        # image-specific flag list is rendered instead of just this help line.
+        add_help=False,
+    )
 
     args, remaining = parser.parse_known_args()
 

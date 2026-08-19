@@ -1559,6 +1559,41 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         self.assertEqual(len(tracked_events), 3)
         self.assertEqual([event.stream_id for event in tracked_events], [0, 1, 0])
 
+    def test_multistream_anchor_pair_binds_all_enclosed_ops(self):
+        durations_s = {
+            torch.ops.aten.relu.default: 3.0,
+            torch.ops.aten.sigmoid.default: 5.0,
+        }
+        perf_model = Mock(spec=PerformanceModel)
+        perf_model.name = "fixed"
+        perf_model.device_profile = TEST_DEVICE
+        perf_model.get_classifiers.return_value = []
+        perf_model.process_op.side_effect = lambda op: PerformanceModel.Result(execution_time_s=durations_s[op.func])
+        x = torch.randn([8, 8], device="meta")
+
+        with Runtime(perf_model, TEST_DEVICE) as runtime, torch.no_grad():
+            positive = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 0, [])
+            positive = torch.ops.aten.relu.default(positive)
+            positive = torch.ops.aten.relu.default(positive)
+            positive = torch.ops.aten.relu.default(positive)
+            _ = torch.ops.tensor_cast._internal_record.default(positive, 0)
+
+            negative = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 1, [])
+            negative = torch.ops.aten.sigmoid.default(negative)
+            negative = torch.ops.aten.sigmoid.default(negative)
+            negative = torch.ops.aten.sigmoid.default(negative)
+            _ = torch.ops.tensor_cast._internal_record.default(negative, 1)
+
+        self.assertEqual(
+            [event.stream_id for event in runtime.event_list],
+            [0, 0, 0, 1, 1, 1],
+        )
+        assert_close(
+            self,
+            runtime.total_execution_time_s()[perf_model.name],
+            15.0,
+        )
+
     def test_multistream_chrome_trace_exports_stream_ids(self):
         def func(x):
             c0 = torch.ops.tensor_cast._internal_wait_and_bind.default(x, 0, [])

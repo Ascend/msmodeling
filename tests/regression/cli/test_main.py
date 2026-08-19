@@ -55,6 +55,7 @@ def test_handle_inference_command_rejects_unknown_subcommand(
         ("throughput-optimizer", "cli.inference.throughput_optimizer.main", ["MODEL", "--help"]),
         ("model-adapter", "cli.inference.model_adapter.main", ["--help"]),
         ("video-generate", "cli.inference.video_generate.main", ["MODEL", "--help"]),
+        ("image-generate", "cli.inference.image_generate.main", ["MODEL", "--help"]),
     ],
 )
 def test_handle_inference_command_dispatches_registered_subcommands(
@@ -76,6 +77,7 @@ def test_main_prints_top_level_help_without_subcommand() -> None:
     assert result.returncode == 0
     assert "MindStudio Modeling CLI" in result.stdout
     assert "msmodeling inference" in result.stdout
+    assert "msmodeling inference image-generate MODEL" in result.stdout
 
 
 def test_main_dispatches_optix_subcommand() -> None:
@@ -96,3 +98,34 @@ def test_main_dispatches_inference_subcommand() -> None:
 
     assert result.returncode == 0
     text_generate_main.assert_called_once()
+
+
+def test_main_dispatches_nested_image_generate_subcommand() -> None:
+    with patch("cli.inference.image_generate.main", return_value=0) as image_generate_main:
+        result = run_cli_main(
+            main,
+            ["inference", "image-generate", "org/fake", "--batch-size", "1"],
+            prog="msmodeling",
+        )
+
+    assert result.returncode == 0
+    image_generate_main.assert_called_once()
+
+
+def test_nested_image_generate_help_uses_module_parser() -> None:
+    result = run_cli_main(
+        main,
+        ["inference", "image-generate", "--help"],
+        prog="msmodeling",
+    )
+
+    assert result.returncode == 0
+    assert "--output-image-size HEIGHT WIDTH" in result.stdout
+    assert "Transformer denoising" in result.stdout
+
+
+def test_main_does_not_register_top_level_image_generate_alias() -> None:
+    result = run_cli_main(main, ["image-generate", "org/fake"], prog="msmodeling")
+
+    assert result.returncode == 2
+    assert "invalid choice: 'image-generate'" in result.stderr

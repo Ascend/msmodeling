@@ -43,10 +43,11 @@ Modeling 是一个面向模型推理性能分析的仿真工具，核心能力�
 仓库中与用户最相关的入口如下：
 
 | 入口 | 作用 | 推荐使用场景 |
-|---|---|---|
+| --- | --- | --- |
 | `python web_ui/main.py` | 启动 Vue 3 + FastAPI Web UI（单命令同时启动前后端） | 交互式配置、结果可视化、非开发用户使用 |
 | `python -m cli.inference.text_generate` | LLM / VL 前向推理仿真 | 单次或脚本化 LLM/VL 性能分析 |
 | `python -m cli.inference.video_generate` | 视频生成模型仿真 | Diffusion Transformer / Wan / HunyuanVideo 等场景 |
+| `python -m cli.inference.image_generate` | 图像生成模型仿真（Transformer 去噪阶段） | Diffusion Transformer / FLUX / Qwen-Image-Edit 等场景 |
 | `python -m cli.inference.throughput_optimizer` | 服务吞吐寻优 | 在 TTFT/TPOT/SLO 约束下寻找最优并行和 batch |
 
 ---
@@ -119,7 +120,7 @@ http://127.0.0.1:5173
 Web UI 为单页应用（SPA），顶部导航栏提供以下功能：
 
 | 导航按钮 | 说明 |
-|---|---|
+| --- | --- |
 | 主页 | 返回工作台（Console） |
 | 使用文档 | 内嵌本文档 |
 | 历史记录 | 查看已提交任务的历史列表、状态和结果 |
@@ -129,7 +130,7 @@ Web UI 为单页应用（SPA），顶部导航栏提供以下功能：
 主工作区 **Console（工作台）** 采用 **Tab + 上下分屏** 布局，三个模块共享同一页面：
 
 | Tab | 能力 |
-|---|---|
+| --- | --- |
 | 文本生成 (Text Generation) | LLM / VL 前向推理仿真，支持并发列表、TP 列表、量化、MTP、Prefix Cache、并行细分、算子和显存分析 |
 | 视频生成 (Video Generation) | 视频生成模型推理仿真，支持 Ulysses、CFG、DiT Cache、Chrome Trace 等参数 |
 | 吞吐优化 (Throughput Optimizer) | 服务吞吐寻优，支持 `PD 混部`、`PD 分离`、`PD 配比` 三种部署模式 |
@@ -169,7 +170,7 @@ python -m cli.inference.text_generate <model_id> [options]
 ### 4.1 关键概念
 
 | 概念 | 说明 |
-|---|---|
+| --- | --- |
 | `num-queries` | 并发请求数，影响 batch、KV Cache、显存和吞吐 |
 | `query-length` | 本次新增 token 数。prefill 通常较大，decode 通常为 1 或较小值 |
 | `context-length` | 已有上下文长度，影响 KV Cache 和 attention 成本 |
@@ -280,7 +281,7 @@ TP 列表: [1,2]
 工具会按照每个 TP 遍历并发，并输出每个 TP 下的并发曲线。结果可理解为：
 
 | TP | 会运行的 case |
-|---|---|
+| --- | --- |
 | 1 | 并发 16、32、64 |
 | 2 | 并发 16、32、64 |
 
@@ -364,7 +365,7 @@ python -m cli.inference.video_generate <model_id> [options]
 ### 5.1 关键参数
 
 | 参数 | 说明 |
-|---|---|
+| --- | --- |
 | `--batch-size` | 视频生成 batch |
 | `--seq-len` | 文本 prompt token 长度 |
 | `--height / --width` | 视频分辨率 |
@@ -496,7 +497,7 @@ Optimizer 不是只跑一个固定并行配置，而是在给定模型、设备�
 Web UI 中部署模式名称为：
 
 | Web UI 名称 | CLI 参数 | 适用场景 |
-|---|---|---|
+| --- | --- | --- |
 | `PD 混部` | 默认，不加 `--disagg`，不加 `--enable-optimize-prefill-decode-ratio` | Prefill 和 Decode 在同一类实例中混合部署，先做基线和多芯片横向对比 |
 | `PD 分离` | 加 `--disagg` | Prefill 和 Decode 分离分析，分别评估 TTFT 或 TPOT 约束下的能力 |
 | `PD 配比` | 加 `--enable-optimize-prefill-decode-ratio`，并指定 P/D 单实例卡数 | 在 PD 分离架构下，寻找 Prefill 与 Decode 实例配比 |
@@ -569,7 +570,7 @@ Web UI 中 `TP并行大小列表` 可填写：
 `batch-range` 支持两种含义：
 
 | 写法 | 含义 |
-|---|---|
+| --- | --- |
 | `--batch-range 256` | min 默认为 1，max 为 256 |
 | `--batch-range 1 256` | min 为 1，max 为 256 |
 
@@ -644,7 +645,7 @@ Balanced QPS = min(Prefill QPS, Decode QPS)
 典型输出包含：
 
 | 字段 | 说明 |
-|---|---|
+| --- | --- |
 | `Best Throughput` | 当前约束下最优 token/s |
 | `TTFT` | Time To First Token，首 token 延迟 |
 | `TPOT` | Time Per Output Token，单输出 token 延迟 |
@@ -735,7 +736,7 @@ Optimizer 的结果根据部署模式不同展示不同视图：
 在工作区或任务状态页点击”日志”按钮，可打开日志抽屉（JobLogDrawer）：
 
 | 功能 | 说明 |
-|---|---|
+| --- | --- |
 | 全量日志 | 任务主日志（banner + 所有 case 交织输出） |
 | Per-case 日志 | 按 case 过滤的独立日志（radio 切换） |
 | 日志搜索 | 大小写不敏感行过滤（显示匹配行数 / 总行数） |
@@ -746,7 +747,7 @@ Optimizer 的结果根据部署模式不同展示不同视图：
 顶部导航点击 **历史记录** 进入 History 页：
 
 | 功能 | 说明 |
-|---|---|
+| --- | --- |
 | 任务列表 | 表格展示：Job ID / 模块 / 标签 / 状态 / 创建时间 / 完成时间 |
 | 状态标签 | 颜色编码：成功(绿) / 失败(红) / 运行中(蓝) / 取消(黄) |
 | 过滤 | 按模块 / 状态筛选，按 Job ID / 标签搜索 |
@@ -821,7 +822,7 @@ jobs: 8
 ### 8.4 量化怎么选
 
 | 场景 | 建议 |
-|---|---|
+| --- | --- |
 | 快速基线 | `W8A8_DYNAMIC` |
 | 不希望引入量化影响 | `DISABLED` |
 | 显存压力明显 | 尝试 `INT8` attention 或 `FP8` |

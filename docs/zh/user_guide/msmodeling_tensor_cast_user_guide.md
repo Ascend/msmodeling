@@ -9,7 +9,8 @@
 | 1. 快速跑通 LLM 文本生成仿真 | [2.1 快速入门：文本生成](#21-快速入门文本生成) |
 | 2. 理解输出中的耗时、调用次数和显存指标 | [2.2 结果（文本生成）](#22-结果文本生成) |
 | 3. 运行视频生成模型仿真 | [2.3 快速入门：视频生成](#23-快速入门视频生成) |
-| 4. 查看或自定义硬件设备画像 | [3 支持的设备与自定义设备](#3-支持的设备与自定义设备) |
+| 4. 运行图像生成模型仿真 | [2.5 快速入门：图像生成](#25-快速入门图像生成) |
+| 5. 查看或自定义硬件设备画像 | [3 支持的设备与自定义设备](#3-支持的设备与自定义设备) |
 
 ## 1 简介
 
@@ -166,6 +167,40 @@ Total time for analytic: 2145.882s
 - `analytic avg`：算子每次调用的平均耗时。
 - `# of Calls`：算子被调用的次数。
 - `Total time for analytic`：解析算子耗时的总和。
+
+### 2.5 快速入门：图像生成
+
+**功能说明：** 仿真图像生成模型的 diffusion transformer 去噪工作负载。首版只模拟 Transformer 去噪阶段的 workload，不执行 prompt 编码、VAE、scheduler 或真实图片生成。以下示例使用 FLUX.1-dev 远程模型 ID；首次运行时会按配置拉取所需模型配置文件。
+
+**命令：**
+
+```bash
+python -m cli.inference.image_generate black-forest-labs/FLUX.1-dev \
+  --device ATLAS_800_A2_280T_32G_PCIE \
+  --batch-size 1 \
+  --output-image-size 512 512 \
+  --text-seq-len 512 \
+  --sample-step 50 \
+  --dtype float16 \
+  --quantize-linear-action W8A8_DYNAMIC
+```
+
+**关键参数：** `model_id`、`--device`、`--batch-size`、`--output-image-size`、`--text-seq-len`、`--source-image-size`、`--sample-step`、`--use-cfg`、`--world-size`、`--ulysses-size`、`--cfg-parallel`、`--dit-cache`、`--chrome-trace`
+
+**输出：** 性能汇总表；若设置了 `--chrome-trace`，还可选输出 Chrome trace 文件。
+
+### 2.6 结果（图像生成）
+
+`image_generate` 报告 Transformer 去噪阶段的 critical path 与逻辑测量工作量，只输出性能汇总表和可选的 Chrome trace。输出指标与视频生成一致：
+
+- `analytic total`：算子估算总耗时。
+- `analytic avg`：算子每次调用的平均耗时。
+- `# of Calls`：算子被调用的次数。
+- `Total time for analytic`：解析算子耗时的总和。
+- `Model compilation execution time`：仿真器在宿主机上的运行时间，而非模型在硬件上的真实编译或执行时间。
+
+具体数值会随设备配置、模型配置和输入尺寸变化。
+
 
 ## 3 支持的设备与自定义设备
 
@@ -367,3 +402,73 @@ BSA 行为与限制：
 > **说明：** 如果需要仿真官方原始 Tencent HunyuanVideo1.5 模型，Hugging Face 应使用 `tencent/HunyuanVideo-1.5/transformer/<t2v_variant>`，ModelScope 应使用 `Tencent-Hunyuan/HunyuanVideo-1.5/transformer/<t2v_variant>`。支持的 T2V variant 为 `480p_t2v`、`480p_t2v_distilled` 和 `720p_t2v`。
 
 运行 `python -m cli.inference.video_generate --help` 查看详情。
+
+### 4.3 图像生成
+
+我们提供 `image_generate.py` 命令行接口来仿真图像生成模型的 diffusion transformer 去噪工作负载与性能。该脚本支持仿真图像生成模型（例如 FLUX、Qwen-Image-Edit 等）的 Transformer 去噪推理过程，可配置 batch、输出图像尺寸、文本条件长度及并行设置。默认提供详细的算子性能分解表格汇总。也可选择将性能时间线导出为 Chrome Trace 文件。
+
+首版只模拟进入仿真设备的 Transformer 去噪阶段；prompt 编码、VAE、scheduler 和图片 I/O 均被排除，不产生真实图片。
+
+其一般用法如下：
+
+```text
+usage: image_generate.py [-h]
+                         [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
+                         --batch-size BATCH_SIZE
+                         --output-image-size HEIGHT WIDTH
+                         --text-seq-len TEXT_SEQ_LEN
+                         [--source-image-size HEIGHT WIDTH]
+                         [--sample-step SAMPLE_STEP]
+                         [--use-cfg]
+                         [--dtype {float16,float32,bfloat16}]
+                         [--remote-source {huggingface,modelscope}]
+                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
+                         [--mxfp4-group-size MXFP4_GROUP_SIZE]
+                         [--quantize-attention-action {DISABLED,INT8,FP8}]
+                         [--compile]
+                         [--compile-allow-graph-break]
+                         [--world-size WORLD_SIZE]
+                         [--ulysses-size ULYSSES_SIZE]
+                         [--cfg-parallel] [--dit-cache]
+                         [--cache-step-range CACHE_STEP_RANGE]
+                         [--cache-step-interval CACHE_STEP_INTERVAL]
+                         [--cache-block-range CACHE_BLOCK_RANGE]
+                         [--chrome-trace CHROME_TRACE]
+                         model_id
+
+Simulate image Transformer denoising workloads and report their critical path
+and logical measured work only. Prompt encoding, VAE, scheduler, and image I/O
+are excluded.
+```
+
+主要参数说明如下：
+
+| 参数名称 | 分类 | 可选/必选 | 参数说明 |
+| --- | --- | --- | --- |
+| `model_id` | positional arguments | 必选 | 图像生成模型 ID 或本地模型路径。<br>1. 类型：Str。<br>2. 参考值：Diffusers 模型目录或精确允许的远端 repo ID，例如 `black-forest-labs/FLUX.1-dev`、`Qwen/Qwen-Image-Edit`。<br>3. 默认值：无。<br>4. 推荐使用已审核的本地绝对路径；远端模型 ID 不提供安全保证。 |
+| `--device` | options | 可选 | 指定用于仿真的设备配置。<br>1. 类型：Str。<br>2. 参考值：已注册 `DeviceProfile` 名称，包括 `TEST_DEVICE`、`ATLAS_800_A2_376T_64G`、`ATLAS_800_A2_313T_64G`、`ATLAS_800_A2_280T_64G`、`ATLAS_800_A2_280T_64G_PCIE`、`ATLAS_800_A2_280T_32G_PCIE`、`ATLAS_800_A3_752T_128G_DIE`、`ATLAS_800_A3_560T_128G_DIE`、`ATLAS_800_A3_560T_128G_DIE_ROCE`、`ATLAS_350_425T_112G`、`ATLAS_350_425T_84G`。<br>3. 默认值：`TEST_DEVICE`。 |
+| `--batch-size` | options | 必选 | 指定基础 workload 的 batch 大小，不是 prompt 数或源图数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。 |
+| `--output-image-size` | options | 必选 | 指定输出图像尺寸，恰好出现一次；只用于推导 shape，不输出图片。<br>1. 类型：Tuple[Int, Int]（`HEIGHT WIDTH`）。<br>2. 取值范围：两个正整数。<br>3. 默认值：无。 |
+| `--text-seq-len` | options | 必选 | 实际进入 Transformer 的文本条件长度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。<br>4. 不是字符数、tokenizer 输入长度或模板长度；本首版不执行文本编码。 |
+| `--source-image-size` | options | 可选 | 指定源图尺寸，可按 source 重复传入；只接受尺寸，不接受路径或像素。仅 editing kind 可用。<br>1. 类型：Tuple[Int, Int]（`HEIGHT WIDTH`）。<br>2. 取值范围：两个正整数。<br>3. 默认值：无。 |
+| `--sample-step` | options | 可选 | 指定执行 N 次相同 Transformer workload iteration 的数量。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
+| `--use-cfg` | options | 可选 | 启用 video-style 的 classifier-free guidance workload 近似。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--dtype` | options | 可选 | 指定模型计算数据类型。<br>1. 类型：Str。<br>2. 参考值：`float16`、`float32`、`bfloat16`。<br>3. 默认值：`float16`。 |
+| `--remote-source` | options | 可选 | 指定远端模型来源；参与 exact pair 匹配。<br>1. 类型：Str。<br>2. 参考值：`huggingface`、`modelscope`。<br>3. 默认值：`huggingface`。 |
+| `--quantize-linear-action` | Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`DISABLED`。 |
+| `--mxfp4-group-size` | Quantization Options | 可选 | 指定 MXFP4 量化的 group size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`32`。 |
+| `--quantize-attention-action` | Quantization Options | 可选 | 指定 attention 计算量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`。<br>3. 默认值：`DISABLED`。 |
+| `--compile` | Optimization Options | 可选 | 在仿真前编译主 transformer。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 使用 `dynamic=False, fullgraph=True`；启用 DiT cache 时，cache transformer 使用相同策略。 |
+| `--compile-allow-graph-break` | Optimization Options | 可选 | 允许编译期间发生 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 会将主 transformer 和 DiT cache transformer 的编译方式改为 `fullgraph=False`。 |
+| `--world-size` | Parallel Options | 可选 | 指定参与分布式仿真的总设备数。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。<br>4. 必须等于 `--ulysses-size`（启用 `--cfg-parallel` 时为 `2 * --ulysses-size`）。 |
+| `--ulysses-size` | Parallel Options | 可选 | 指定 Ulysses 并行规模。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`。 |
+| `--cfg-parallel` | Parallel Options | 可选 | 启用 CFG 并行策略。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 仅在 `--use-cfg` 下启用，此时 `world-size` 必须等于 `2 * --ulysses-size`。 |
+| `--dit-cache` | Cache Options | 可选 | 启用 DiT block cache。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--cache-step-range` | Cache Options | 可选 | 指定启用 cache 的采样步范围。<br>1. 类型：Str。<br>2. 格式：`start,end`，闭区间。<br>3. 默认值：`None`。<br>4. 设置 `--dit-cache` 且 `--cache-step-interval > 1` 时必填。 |
+| `--cache-step-interval` | Cache Options | 可选 | 指定 cache 更新步间隔。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`1`，表示不启用 cache 更新复用。 |
+| `--cache-block-range` | Cache Options | 可选 | 指定启用 cache 的 block 范围。<br>1. 类型：Str。<br>2. 格式：`start,end`，左闭右开。<br>3. 默认值：`None`。 |
+| `--chrome-trace` | options | 可选 | 指定 Chrome trace JSON 输出路径，用于导出性能时间线。<br>1. 类型：Str。<br>2. 取值范围：文件路径。<br>3. 默认值：`None`。<br>4. 仅在 Runtime 成功后生成。 |
+
+> **说明：** 当前 Core 未注册任何生产图像模型 kind；`black-forest-labs/FLUX.1-dev` 与 `Qwen/Qwen-Image-Edit` 等模型的支持由对应模型扩展 PR 提供。在此之前传入真实模型 ID 会明确报错（fail-closed）。
+
+运行 `python -m cli.inference.image_generate --help` 查看详情。

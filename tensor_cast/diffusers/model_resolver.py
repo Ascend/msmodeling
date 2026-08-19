@@ -139,9 +139,17 @@ def resolve_diffusers_pipeline_manifest(selection: DiffusersModelSelection) -> D
     )
 
 
+def resolve_diffusers_model_config(
+    model_id: str,
+    remote_source: str = RemoteSource.huggingface,
+) -> DiffusersModelSelection:
+    """Resolve only Diffusers metadata/configuration; never download model weights."""
+    return resolve_diffusers_model_selection(model_id, remote_source)
+
+
 def resolve_diffusers_model_path(model_id: str, remote_source: str = RemoteSource.huggingface) -> str:
     """Resolve a local Diffusers directory or remote repo id to a local directory path."""
-    return resolve_diffusers_model_selection(model_id, remote_source).variant_path
+    return resolve_diffusers_model_config(model_id, remote_source).variant_path
 
 
 def _validate_hunyuanvideo15_repository(

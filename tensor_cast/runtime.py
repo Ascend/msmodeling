@@ -243,7 +243,6 @@ class Runtime(TorchDispatchMode):
         stream_id = self._pending_wait_stream_id
         dependency_token_ids = self._dedup_token_ids(self._pending_wait_dependency_token_ids)
         memory_aliases = self._pending_wait_memory_aliases
-        self._pending_wait_stream_id = None
         self._pending_wait_dependency_token_ids.clear()
         self._pending_wait_memory_aliases = []
         return stream_id, dependency_token_ids, memory_aliases
@@ -255,7 +254,16 @@ class Runtime(TorchDispatchMode):
         deps = op_invoke_info.args[2] if len(op_invoke_info.args) > 2 else []
         dep_token_ids = self._extract_tensor_token_ids(deps)
         if self._pending_wait_stream_id is not None and stream_id != self._pending_wait_stream_id:
-            raise RuntimeError(f"Conflicting wait_and_bind stream ids ({self._pending_wait_stream_id} vs. {stream_id})")
+            # The previous stream segment's record was elided by DCE (its control
+            # token had no consumer), leaving a dangling pending context. Drop it
+            # and bind the new wait to its own stream instead of raising.
+            logger.debug(
+                "Rebinding dangling wait_and_bind stream %s to %s.",
+                self._pending_wait_stream_id,
+                stream_id,
+            )
+            self._pending_wait_dependency_token_ids.clear()
+            self._pending_wait_memory_aliases = []
         self._pending_wait_stream_id = stream_id
         self._pending_wait_dependency_token_ids.extend(dep_token_ids)
         if (
@@ -266,16 +274,21 @@ class Runtime(TorchDispatchMode):
             self._pending_wait_memory_aliases.append((op_invoke_info.args[0], op_invoke_info.out))
 
     def _handle_record(self, op_invoke_info: OpInvokeInfo) -> None:
-        if not self.event_list:
-            logger.warning("Ignoring _internal_record because no preceding runtime event exists.")
-            return
-        event = self.event_list[-1]
-        if len(op_invoke_info.args) > 1:
-            event.stream_id = int(op_invoke_info.args[1])
-        token_ids = self._extract_tensor_token_ids(op_invoke_info.out)
-        if not token_ids:
-            return
-        event.produced_token_ids = list(self._dedup_token_ids(event.produced_token_ids + token_ids))
+        try:
+            if not self.event_list:
+                logger.warning("Ignoring _internal_record because no preceding runtime event exists.")
+                return
+            event = self.event_list[-1]
+            if len(op_invoke_info.args) > 1:
+                event.stream_id = int(op_invoke_info.args[1])
+            token_ids = self._extract_tensor_token_ids(op_invoke_info.out)
+            if not token_ids:
+                return
+            event.produced_token_ids = list(self._dedup_token_ids(event.produced_token_ids + token_ids))
+        finally:
+            self._pending_wait_stream_id = None
+            self._pending_wait_dependency_token_ids.clear()
+            self._pending_wait_memory_aliases = []
 
     def _replay_single_op(self, op_invoke_info):
         if op_invoke_info.func == self._INTERNAL_WAIT_AND_BIND:

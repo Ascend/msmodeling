@@ -6,7 +6,9 @@ import pytest
 import torch
 
 from tensor_cast.compilation.constant_folding import fold_meta_constants
-from tensor_cast.compilation.passes.static_boolean_index_pass import StaticBooleanIndexPass
+from tensor_cast.compilation.passes.static_boolean_index_pass import (
+    StaticBooleanIndexPass,
+)
 from tensor_cast.diffusers import diffusers_model, diffusers_utils
 from tensor_cast.model_config import DiffusersPipelineMetadata
 
@@ -131,7 +133,10 @@ def test_build_diffusers_transformer_model_passes_remote_source_to_resolver(
     assert calls["selection"] is selection
     assert calls["validate_local_path"] is False
     assert calls["dtype"] is torch.float16
-    assert calls["model"] == ("Wan-AI/Wan2.2-T2V-A14B-Diffusers", fake_transformer_config)
+    assert calls["model"] == (
+        "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+        fake_transformer_config,
+    )
 
 
 def test_build_diffusers_transformer_model_validates_supplied_local_selection(
@@ -313,7 +318,9 @@ def test_load_config_from_file_rejects_unsupported_raw_tencent_hunyuanvideo15_co
         )
 
 
-def test_load_config_from_file_rejects_hunyuan_pipeline_with_non_hunyuan_transformer(tmp_path: Path) -> None:
+def test_load_config_from_file_rejects_hunyuan_pipeline_with_non_hunyuan_transformer(
+    tmp_path: Path,
+) -> None:
     transformer_dir = tmp_path / "transformer"
     transformer_dir.mkdir()
     (transformer_dir / "config.json").write_text(
@@ -484,7 +491,9 @@ def test_safe_meta_tensor_boolean_indexing_returns_base_meta_tensor() -> None:
     assert unselected.shape == (2, 729, 32)
 
 
-def test_load_config_from_file_prefers_and_normalizes_wan_high_noise_model(tmp_path: Path) -> None:
+def test_load_config_from_file_prefers_and_normalizes_wan_high_noise_model(
+    tmp_path: Path,
+) -> None:
     high_noise_dir = tmp_path / "high_noise_model"
     low_noise_dir = tmp_path / "low_noise_model"
     high_noise_dir.mkdir()
@@ -534,7 +543,14 @@ def test_load_config_from_file_prefers_and_normalizes_wan_high_noise_model(tmp_p
     assert transformer_config["image_dim"] is None
     assert transformer_config["added_kv_proj_dim"] is None
     assert transformer_config["pos_embed_seq_len"] is None
-    for legacy_key in ("dim", "in_dim", "model_type", "num_heads", "out_dim", "text_len"):
+    for legacy_key in (
+        "dim",
+        "in_dim",
+        "model_type",
+        "num_heads",
+        "out_dim",
+        "text_len",
+    ):
         assert legacy_key not in transformer_config
 
 

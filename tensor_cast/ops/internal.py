@@ -38,13 +38,13 @@ def _(
     stream_id: int,
     deps: List[torch.Tensor],
 ) -> torch.Tensor:
-    """Bind the next real op on ``x`` to ``stream_id`` after waiting on ``deps``.
+    """Bind real ops through the paired record to ``stream_id`` after waiting on ``deps``.
 
     This is a control-flow anchor used by multistream lowering. It does not modify
     the data carried by ``x``. Instead, the runtime interprets it as:
 
-    1. the next real op consuming ``x`` should execute on ``stream_id``;
-    2. that real op must wait until all dependency tokens in ``deps`` are ready.
+    1. real ops through the paired ``_internal_record`` execute on ``stream_id``;
+    2. the first real op waits until all dependency tokens in ``deps`` are ready.
 
     Example:
         y = _internal_wait_and_bind(x, 1, [token0])
@@ -62,7 +62,7 @@ def _(
     x: torch.Tensor,
     stream_id: int,
 ) -> torch.Tensor:
-    """Create a control token marking completion of the preceding real op.
+    """Create a control token marking completion of the paired stream region.
 
     This op is paired with ``_internal_wait_and_bind`` during multistream lowering.
     The returned scalar tensor is a runtime control token, not a model activation.

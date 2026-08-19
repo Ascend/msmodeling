@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -16,23 +15,30 @@ from ..model_config import (
     DiffusersVaeConfig,
     RemoteSource,
 )
+from ..ops.static_mask import static_false_mask
 from ..parallel_group import ParallelGroup
 from ..transformers.model import ModelWrapperBase
 from ..transformers.transformations import quantize_linear, quantize_model, wrap_model
 from ..transformers.utils import init_on_device_without_buffers
+from . import diffusers_attention  # noqa: F401
 from .cache_agent import CacheConfig, CacheState
 from .cache_agent.dit_block_cache import DiTBlockCache
-from . import diffusers_attention  # noqa: F401
 from .diffusers_utils import get_diffusers_transformer_module
-from ..ops.static_mask import static_false_mask
-from .dit_cache_registry import get_dit_block_cache_spec, replace_blocks_in_range
+from .dit_cache_registry import (
+    DiTBlockCacheSpec,
+    get_dit_block_cache_spec,
+    replace_blocks_in_range,
+)
 from .model_resolver import (
     DiffusersModelSelection,
     resolve_diffusers_model_selection,
     resolve_diffusers_pipeline_manifest,
     try_resolve_diffusers_pipeline_manifest,
 )
-from .pipeline_metadata import adapt_tencent_hunyuanvideo15_t2v_config, resolve_hunyuanvideo15_pipeline_metadata
+from .pipeline_metadata import (
+    adapt_tencent_hunyuanvideo15_t2v_config,
+    resolve_hunyuanvideo15_pipeline_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +79,7 @@ def build_diffusers_transformer_model(
     return model, model_config
 
 
-def _normalize_diffusers_transformer_config(config: Dict) -> Dict:
+def _normalize_diffusers_transformer_config(config: dict) -> dict:
     config = dict(config)
     if config.get("_class_name") == "WanModel":
         config["_class_name"] = "WanTransformer3DModel"
@@ -94,7 +100,14 @@ def _normalize_diffusers_transformer_config(config: Dict) -> Dict:
         config.setdefault("image_dim", None)
         config.setdefault("added_kv_proj_dim", None)
         config.setdefault("pos_embed_seq_len", None)
-        for legacy_key in ("dim", "in_dim", "model_type", "num_heads", "out_dim", "text_len"):
+        for legacy_key in (
+            "dim",
+            "in_dim",
+            "model_type",
+            "num_heads",
+            "out_dim",
+            "text_len",
+        ):
             config.pop(legacy_key, None)
     return config
 
@@ -119,7 +132,7 @@ def load_config_from_file(
     if not source_info.is_local_path or not os.path.isdir(resolved_model_path):
         raise ValueError(f"Input args.model_id should be dir, but got {resolved_model_path}")
 
-    config_path_dict: Dict[str, str] = {}
+    config_path_dict: dict[str, str] = {}
     for root, _, files in os.walk(resolved_model_path):
         if "config.json" in files:
             folder_name = os.path.basename(root)
@@ -127,7 +140,7 @@ def load_config_from_file(
             config_path = os.path.abspath(config_path)
             config_path_dict[folder_name] = config_path
 
-    def _load_config(config_path: str) -> Dict:
+    def _load_config(config_path: str) -> dict:
         with open(config_path, encoding="utf-8") as f:
             return json.load(f)
 
@@ -137,11 +150,11 @@ def load_config_from_file(
         transformer_config = _load_config(transformer_config_json_path)
     else:
 
-        def _looks_like_transformer_config(cfg: Dict) -> bool:
+        def _looks_like_transformer_config(cfg: dict) -> bool:
             class_name = cfg.get("_class_name")
             return isinstance(class_name, str) and ("Transformer" in class_name or class_name == "WanModel")
 
-        transformer_candidates: Dict[str, tuple[str, Dict]] = {}
+        transformer_candidates: dict[str, tuple[str, dict]] = {}
         for folder_name, config_path in config_path_dict.items():
             config = _load_config(config_path)
             if _looks_like_transformer_config(config):
@@ -243,7 +256,10 @@ class DiffusersTransformerModel(ModelWrapperBase):
             raise ValueError("transformer model_config should not be None.")
         self._static_boolean_mask_names = ()
         if hf_config.get("_class_name") == "HunyuanVideo15Transformer3DModel" and hf_config.get("task_type") == "t2v":
-            self._static_boolean_mask_names = ("encoder_attention_mask", "encoder_attention_mask_2")
+            self._static_boolean_mask_names = (
+                "encoder_attention_mask",
+                "encoder_attention_mask_2",
+            )
         model_class = get_diffusers_transformer_module(hf_config)
 
         with init_on_device_without_buffers("meta"), no_init_weights():
@@ -258,7 +274,7 @@ class DiffusersTransformerModel(ModelWrapperBase):
         hidden_states: torch.Tensor,
         timestep: torch.LongTensor,
         encoder_hidden_states: torch.Tensor,
-        encoder_hidden_states_images: Optional[torch.Tensor] = None,
+        encoder_hidden_states_images: torch.Tensor | None = None,
         return_dict=False,
         **kwargs: object,
     ):
@@ -277,7 +293,11 @@ class DiffusersTransformerModel(ModelWrapperBase):
         )[0]
         return hidden_states
 
-    def enable_dit_block_cache(self, cache_config: CacheConfig) -> Optional[CacheState]:
+    def enable_dit_block_cache(
+        self,
+        cache_config: CacheConfig,
+        spec: DiTBlockCacheSpec | None = None,
+    ) -> CacheState | None:
         """
         Enable DiT block cache (dit_block_cache).
 
@@ -286,28 +306,45 @@ class DiffusersTransformerModel(ModelWrapperBase):
         """
         model_config = self.model_config.model_config or {}
         class_name = model_config.get("_class_name")
-        spec = get_dit_block_cache_spec(class_name)
+        explicit_spec = spec is not None
+        if spec is None:
+            spec = get_dit_block_cache_spec(class_name)
         if spec is None:
             logger.warning("dit_block_cache is not implemented for model %r.", class_name)
             return None
+        if explicit_spec and spec.class_name != class_name:
+            raise ValueError(
+                f"DiT cache spec class identity mismatch: expected {class_name!r}, got {spec.class_name!r}."
+            )
 
         blocks_with_setters = list(spec.get_blocks_with_setters(self._inner))
         if not blocks_with_setters:
+            if explicit_spec:
+                raise ValueError(f"DiT cache spec {spec.class_name!r} resolved no blocks.")
             return None
         blocks_count = len(blocks_with_setters)
 
+        if explicit_spec and (cache_config.block_start < 0 or cache_config.block_end < 0):
+            raise ValueError("DiT cache block range must be non-negative.")
+        bounded_block_start = cache_config.block_start
+        # end is clamped to the actual block count; start is intentionally not
+        # clamped (start < end is validated after clamping for explicit specs).
         bounded_block_end = min(cache_config.block_end, blocks_count)
+        if explicit_spec and bounded_block_start >= bounded_block_end:
+            raise ValueError(
+                f"DiT cache range must be nonempty after clamp: [{bounded_block_start}, {bounded_block_end})."
+            )
 
         cache_state = CacheState()
         replaced = replace_blocks_in_range(
             blocks_with_setters,
-            cache_config.block_start,
+            bounded_block_start,
             bounded_block_end,
             lambda block, flat_idx: DiTBlockCache(
                 block=block,
                 state=cache_state,
                 block_index=flat_idx,
-                block_start=cache_config.block_start,
+                block_start=bounded_block_start,
                 block_end=bounded_block_end,
                 make_wrapped_forward=spec.make_wrapped_forward,
             ),
@@ -317,10 +354,12 @@ class DiffusersTransformerModel(ModelWrapperBase):
             "Enabled dit_block_cache for %s: replaced %d blocks in range [%d, %d) out of %d.",
             spec.model_type,
             replaced,
-            cache_config.block_start,
+            bounded_block_start,
             bounded_block_end,
             blocks_count,
         )
+        if explicit_spec and replaced == 0:
+            raise ValueError("DiT cache spec replaced no blocks.")
         return cache_state if replaced > 0 else None
 
 
