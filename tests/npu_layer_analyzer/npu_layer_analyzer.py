@@ -14,11 +14,8 @@
   # 完整流程：切 forward + 提取层 + 标注子结构
   python npu_layer_analyzer.py -i kernel_details.csv
 
-  # 指定层号
-  python npu_layer_analyzer.py -i kernel_details.csv --layer-index 5
-
-  # 只导出第一个 prefill forward 的层分析
-  python npu_layer_analyzer.py -i kernel_details.csv --export-policy first-valid-by-kind
+  # 按 task-id 定位特定 forward
+  python npu_layer_analyzer.py -i kernel_details.csv --task-id 41500
 
 输出：
   forward_segments/
@@ -998,14 +995,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         )
     )
     # ── Forward 切分参数 ──
-    parser.add_argument("--input", default="kernel_details.csv", help="输入 kernel_details.csv")
+    parser.add_argument("--input", "-i", default="kernel_details.csv", help="输入 kernel_details.csv")
     parser.add_argument("--output-dir", default="forward_segments", help="输出目录")
-    parser.add_argument(
-        "--expected-attention",
-        type=int,
-        default=0,
-        help="预期每 forward 的 attention 数（<=0 禁用检查，默认禁用）",
-    )
     parser.add_argument("--attention-tolerance", type=int, default=0, help="attention 数允许偏差")
     parser.add_argument(
         "--attention-pattern",
@@ -1027,34 +1018,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default="time-window",
     )
     parser.add_argument(
-        "--export-policy",
-        choices=("first-valid-by-kind", "all", "indexes", "task-id"),
-        default="first-valid-by-kind",
-        help="导出策略：first-valid-by-kind=仅导第一个指定类型 forward（默认）；all=全部；indexes=指定序号；task-id=按 task_id 定位",
-    )
-    parser.add_argument(
-        "--forward-kind",
-        choices=("prefill", "decode", "all"),
-        default="all",
-        help="导出哪种 forward 类型（默认 all=不限类型；prefill=仅 prefill；decode=仅 decode）",
-    )
-    parser.add_argument("--export-indexes", default="", help="指定导出的 forward 索引（逗号分隔）")
-    parser.add_argument(
         "--task-id",
         type=int,
         default=None,
         help="算子 Task ID，自动定位所在 forward segment 并导出",
     )
-    parser.add_argument("--max-per-kind", type=int, default=1)
     parser.add_argument("--summary-name", default=f"{OUTPUT_PREFIX}summary.csv")
 
     # ── 层提取参数 ──
-    parser.add_argument(
-        "--layer-index",
-        type=int,
-        default=None,
-        help="指定 Dense 层号（默认自动选取前 1/3）",
-    )
     parser.add_argument("--norm-pattern", default=None, help="自定义 NORM 匹配正则")
     parser.add_argument(
         "--no-layer-export",
@@ -1112,7 +1083,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         gap_threshold_us=gap_threshold,
         include_related_streams=include_related,
         related_stream_policy=related_policy,
-        expected_attention=args.expected_attention,
+        expected_attention=0,
         attention_tolerance=args.attention_tolerance,
     )
 
@@ -1122,18 +1093,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ── 2. 导出 Forward CSV ──
-    # 如果指定了 --task-id，自动切换到 task-id 策略
-    effective_export_policy = args.export_policy
-    if args.task_id is not None and args.export_policy == "first-valid-by-kind":
-        effective_export_policy = "task-id"
+    # 默认 first-valid-by-kind 策略；指定 --task-id 时自动切换到 task-id 策略
+    effective_export_policy = "task-id" if args.task_id is not None else "first-valid-by-kind"
 
     exported_segments = select_segments_for_export(
         segments,
         export_policy=effective_export_policy,
-        export_indexes=args.export_indexes,
-        max_per_kind=args.max_per_kind,
+        export_indexes="",
+        max_per_kind=1,
         task_id=args.task_id,
-        forward_kind=args.forward_kind,
+        forward_kind="all",
     )
 
     output_files_by_index: dict[int, Path] = {}
@@ -1163,8 +1132,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if row.is_attention:
                     att_layers.add(li)
 
-            # 选取代表层（优先选含 ATT 的层）
-            picks = pick_representative_layer(layer_indices, moe_layers, args.layer_index, att_layers)
+            # 选取代表层（优先选含 ATT 的层，自动选取前 1/3）
+            picks = pick_representative_layer(layer_indices, moe_layers, None, att_layers)
 
             print(f"\n--- Forward {segment.index:03d} 层分析 ---")
             att_count = sum(1 for row in segment.main_rows if row.is_attention)
@@ -1210,7 +1179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     write_summary_csv(
         summary_path,
         segments,
-        expected_attention=args.expected_attention,
+        expected_attention=0,
         attention_tolerance=args.attention_tolerance,
         output_files_by_index=output_files_by_index,
         layer_files_by_index=layer_files_by_index,
@@ -1223,7 +1192,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows=rows,
         main_stream=main_stream,
         segments=segments,
-        expected_attention=args.expected_attention,
+        expected_attention=0,
         attention_tolerance=args.attention_tolerance,
         gap_threshold=gap_threshold,
     )

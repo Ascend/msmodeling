@@ -3,7 +3,7 @@
 状态 (Status): Draft
 作者 (Authors): @yuyinkai
 创建日期 (Created): 2026-08-01
-更新日期 (Updated): 2026-08-05
+更新日期 (Updated): 2026-08-18
 
 ---
 
@@ -220,7 +220,7 @@ aten.rsqrt.default → aten.mul.Tensor → aten.mul.Tensor
 - 优先从含 Attention 的 Dense 层中选，取前 1/3 位置（避免首尾边界层）
 - 若无含 ATT 的 Dense 层，从所有 Dense 层中取前 1/3
 - MoE 层取中间位置
-- 支持 `--layer-index` 指定 Dense 层号
+- `layer_analyzer.py` 支持 `--layer-index` 指定 Dense 层号；`npu_layer_analyzer.py` 自动选取
 
 #### 2.3.6 通信算子排除
 
@@ -256,7 +256,6 @@ forward_segments/
 
 ```markdown
 <base_stem>_layered.csv                # 全局标注（所有行 + Layer/Marker/Structure/Is_Key 列）
-<base_stem>_layered.html               # 全局标注 HTML（带颜色高亮）
 <base_stem>_layerN.csv                 # Dense 代表层 + Stage 标注（纯 Dense 模型，N 为层号）
 <base_stem>_layerN_dense.csv           # Dense 代表层（Dense + MoE 模型，N 为层号）
 <base_stem>_layerN_moe.csv             # MoE 代表层（仅 MoE 模型，N 为层号）
@@ -301,7 +300,7 @@ npu_layer_analyzer/
 ├── trace_json_to_csv.py         ← JSON → CSV 转换（去重 + 字段映射）
 ├── layer_common.py              ← 共享工具模块（正则 / refine_sub_blocks / extract_substructure / 未融合 RMSNorm / 代表层选取 / write_layer_csv）
 ├── npu_layer_analyzer.py        ← Forward 切分 + 层提取 + 子结构标注
-├── layer_analyzer.py            ← 全局标注 + 层提取 + 子结构标注 + HTML 输出
+├── layer_analyzer.py            ← 全局标注 + 层提取 + 子结构标注
 ├── layer_compare.py             ← 双工具层对比 → xlsx（2 或 4 Sheet）
 └── npu_layer_compare.py         ← 统一入口（子进程调度 + CSV→xlsx 合并）
 ```
@@ -427,29 +426,26 @@ class Segment:
 | `--json` | - | 输入 JSON 或 CSV（给 layer_analyzer） |
 | `-o` / `--output-dir` | `compare_test` | 输出目录 |
 | `--task-id` | - | 算子 Task ID，定位特定 Forward |
-| `--expected-attention` | 0 | 预期每 Forward 的 Attention 数（≤0 禁用检查） |
 | `--npu-only` | - | 只跑 npu_layer_analyzer |
 | `--layer-only` | - | 只跑 layer_analyzer |
 | `--no-compare` | - | 不跑对比 |
-| `--layer-index` | - | 指定 Dense 层号 |
+| `--layer-index` | - | 指定 Dense 层号（传给 layer_analyzer） |
 
 #### 3.3.2 npu_layer_analyzer.py
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--input` | `kernel_details.csv` | 输入 CSV |
+| `--input` / `-i` | `kernel_details.csv` | 输入 CSV |
 | `--output-dir` | `forward_segments` | 输出目录 |
 | `--task-id` | - | 算子 Task ID，定位 Forward |
-| `--forward-kind` | `all` | 限定导出的 forward 类型（prefill/decode/all），默认不限 |
-| `--expected-attention` | 0 | 预期每 Forward 的 Attention 数（≤0 禁用检查） |
 | `--attention-tolerance` | 0 | Attention 数允许偏差 |
 | `--attention-pattern` | `attention` | Attention 匹配正则 |
 | `--embedding-pattern` | `embed` | Embedding 匹配正则 |
 | `--main-stream` | 自动 | 主 stream ID |
 | `--gap-us` | 自动 | 手动 gap 阈值（us） |
-| `--export-policy` | `first-valid-by-kind` | 导出策略（first-valid-by-kind/all/indexes/task-id） |
-| `--layer-index` | - | 指定 Dense 层号 |
 | `--no-layer-export` | - | 不导出层分析 CSV（只切 forward） |
+
+> 导出策略内部固定为 `first-valid-by-kind`（导出每种类型第一个有效 forward）；指定 `--task-id` 时自动切换到 `task-id` 策略。`expected_attention` 固定为 0（禁用检查），`forward_kind` 固定为 `all`（导出所有类型），`layer_index` 固定为自动选取。
 
 #### 3.3.3 layer_analyzer.py
 
@@ -458,12 +454,10 @@ class Segment:
 | `--input` / `-i` | - | 输入 CSV（必填） |
 | `--output` / `-o` | 自动 | 输出路径前缀 |
 | `--delimiter` | `attention` | 层边界锚点（attention / norm） |
-| `--forward-kind` | `all` | 限定导出的 forward 类型（prefill/decode/all），默认不限 |
 | `--layer-index` | - | 指定 Dense 层号 |
-| `--no-html` | - | 不输出 HTML |
-| `--no-global` | - | 不输出全局标注 |
-| `--no-layer` | - | 不输出层提取 |
 | `--attention-pattern` / `--norm-pattern` | - | 自定义匹配正则 |
+
+> 全局标注和层提取固定启用（无 `--no-global` / `--no-layer` 开关）；HTML 输出已移除。
 
 #### 3.3.4 layer_compare.py
 
@@ -587,3 +581,4 @@ class Segment:
 |------|------|---------|------|
 | v1.0 | 2026-08-01 | 初始版本：NPU Layer Analyzer 工具集设计文档 | @yuyinkai |
 | v1.1 | 2026-08-05 | Stage 标注由 4 段（Attention/RSN/上下采样/RSN）改为 2 段（Attention/FFN 或 MOE），由 `is_moe` 控制第二段；主 stream 评分改为 attention 优先 `(attention, embedding, not_na, rows)`；`--forward-kind` 默认值由 `prefill` 改为 `all` 并新增到两个工具参数表；`--expected-attention` 默认值由 64 改为 0（≤0 禁用检查）；文件命名加入层号 `N`（`forward_XXX_layerN.csv` / `forward_XXX_layerN_dense.csv` / `forward_XXX_layerN_moe.csv`）；embedding 检查改为在 `output_rows`（所有 stream）上进行，避免误判 decode；`extract_layer_rows` 仅保留主 Stream 算子；MoE 检测改为同时检查 `main_rows` 和 `all_rows`，正则新增 `GroupedMatmul`/`DispatchFFNCombine`/`MoeGatingTopK`；CSV 输出移除 `Structure` 列（仅内部打印摘要使用）；`compare_result.xlsx` 在 Dense+MoE 模型下输出 4 Sheet（`Dense_总比较`/`Dense_算子明细`/`MoE_总比较`/`MoE_算子明细`），单一类型仍为 2 Sheet；新增 `layer_common.py` 共享工具模块 | @yuyinkai |
+| v1.2 | 2026-08-18 | CLI 精简：`npu_layer_analyzer.py` 移除 `--expected-attention`/`--forward-kind`/`--layer-index`/`--export-policy`（内部固定为禁用检查/导出所有类型/自动选取层号/first-valid-by-kind 策略），新增 `-i` 短选项；`layer_analyzer.py` 移除 `--no-html`/`--no-global`/`--no-layer`（全局标注和层提取固定启用，HTML 输出移除）；`npu_layer_compare.py` 移除 `--expected-attention`/`--forward-kind`（`--layer-index` 仅传给 layer_analyzer）；`write_annotated_html` 及相关 HTML 代码删除 | @yuyinkai |

@@ -243,22 +243,10 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="算子 Task ID，定位特定 forward segment",
     )
-    parser.add_argument(
-        "--expected-attention",
-        type=int,
-        default=0,
-        help="预期每 forward 的 attention 数（<=0 禁用检查）",
-    )
     parser.add_argument("--npu-only", action="store_true", help="只跑 npu_layer_analyzer")
     parser.add_argument("--layer-only", action="store_true", help="只跑 layer_analyzer")
     parser.add_argument("--no-compare", action="store_true", help="不跑 layer_compare")
     parser.add_argument("--layer-index", type=int, default=None, help="指定 Dense 层号")
-    parser.add_argument(
-        "--forward-kind",
-        choices=["prefill", "decode", "all"],
-        default="all",
-        help="导出哪种 forward 类型（默认 all=不限类型）",
-    )
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
 
     output_dir = Path(args.output_dir)
@@ -282,17 +270,9 @@ def main(argv: list[str] | None = None) -> int:
             str(csv_path),
             "--output-dir",
             str(npu_out),
-            "--expected-attention",
-            str(args.expected_attention),
-            "--export-policy",
-            "task-id" if args.task_id else "first-valid-by-kind",
-            "--forward-kind",
-            args.forward_kind,
         ]
         if args.task_id is not None:
             npu_cmd.extend(["--task-id", str(args.task_id)])
-        if args.layer_index is not None:
-            npu_cmd.extend(["--layer-index", str(args.layer_index)])
 
         rc = run_cmd(npu_cmd, "npu_layer_analyzer (CSV → Forward 切分 + 层提取)")
         if rc != 0:
@@ -342,7 +322,6 @@ def main(argv: list[str] | None = None) -> int:
             str(output_prefix),
             "--delimiter",
             "attention",
-            "--no-html",
         ]
         if args.layer_index is not None:
             layer_cmd.extend(["--layer-index", str(args.layer_index)])

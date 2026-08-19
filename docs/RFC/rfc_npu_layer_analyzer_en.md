@@ -3,7 +3,7 @@
 Status: Draft
 Authors: @yuyinkai
 Created: 2026-08-01
-Updated: 2026-08-05
+Updated: 2026-08-18
 
 ---
 
@@ -203,7 +203,7 @@ This allows `refine_sub_blocks` and `extract_substructure` to recognize them as 
 - Prioritize Dense layers containing Attention, take the top 1/3 position (avoiding boundary layers at start/end)
 - If no Dense layer with ATT, take top 1/3 of all Dense layers
 - For MoE layers, take the middle position
-- Supports `--layer-index` to specify Dense layer number
+- `layer_analyzer.py` supports `--layer-index` to specify Dense layer number; `npu_layer_analyzer.py` auto-selects
 
 #### 2.3.6 Communication Operator Exclusion
 
@@ -235,7 +235,6 @@ Filename rule: when the model has both Dense and MoE layers, both `_dense` and `
 
 ```
 <base_stem>_layered.csv                # Global annotation (all rows + Layer/Marker/Structure/Is_Key columns)
-<base_stem>_layered.html               # Global annotation HTML (with color highlighting)
 <base_stem>_layerN.csv                 # Dense representative layer + Stage annotation (pure Dense model, N = layer number)
 <base_stem>_layerN_dense.csv           # Dense representative layer (MoE models)
 <base_stem>_layerN_moe.csv             # MoE representative layer (MoE models only)
@@ -279,7 +278,7 @@ npu_layer_analyzer/
 ├── trace_json_to_csv.py         ← JSON → CSV conversion (dedup + field mapping)
 ├── layer_common.py              ← Shared utilities (regexes, refine_sub_blocks, extract_substructure, unfused RMSNorm, pick_representative_layer, write_layer_csv)
 ├── npu_layer_analyzer.py        ← Forward segmentation + layer extraction + substructure annotation
-├── layer_analyzer.py            ← Global annotation + layer extraction + substructure annotation + HTML output
+├── layer_analyzer.py            ← Global annotation + layer extraction + substructure annotation
 ├── layer_compare.py             ← Dual-tool layer comparison → xlsx (2 Sheets)
 └── npu_layer_compare.py         ← Unified entry (subprocess scheduling + CSV→xlsx merge)
 ```
@@ -397,30 +396,26 @@ Layer extraction CSV column order (priority columns first):
 | `--json` | - | Input JSON or CSV (for layer_analyzer) |
 | `-o` / `--output-dir` | `compare_test` | Output directory |
 | `--task-id` | - | Operator Task ID, locates specific Forward |
-| `--expected-attention` | 0 | Expected Attention count per Forward (`<=0` disables the check) |
-| `--forward-kind` | `all` | Which forward type to export: `prefill` / `decode` / `all` (default exports all forward types, not just prefill) |
 | `--npu-only` | - | Only run npu_layer_analyzer |
 | `--layer-only` | - | Only run layer_analyzer |
 | `--no-compare` | - | Skip comparison |
-| `--layer-index` | - | Specify Dense layer number |
+| `--layer-index` | - | Specify Dense layer number (passed to layer_analyzer) |
 
 #### 3.3.2 npu_layer_analyzer.py
 
 | Parameter | Default | Description |
 |------|--------|------|
-| `--input` | `kernel_details.csv` | Input CSV |
+| `--input` / `-i` | `kernel_details.csv` | Input CSV |
 | `--output-dir` | `forward_segments` | Output directory |
 | `--task-id` | - | Operator Task ID, locates Forward |
-| `--expected-attention` | 0 | Expected Attention count per Forward (`<=0` disables the check) |
 | `--attention-tolerance` | 0 | Attention count tolerance |
 | `--attention-pattern` | `attention` | Attention match regex |
 | `--embedding-pattern` | `embed` | Embedding match regex |
 | `--main-stream` | auto | Main stream ID |
 | `--gap-us` | auto | Manual gap threshold (us) |
-| `--export-policy` | `first-valid-by-kind` | Export policy (first-valid-by-kind/all/indexes/task-id) |
-| `--forward-kind` | `all` | Which forward type to export: `prefill` / `decode` / `all` (default exports all forward types, not just prefill) |
-| `--layer-index` | - | Specify Dense layer number |
 | `--no-layer-export` | - | Skip layer analysis CSV (only segment forward) |
+
+> Export policy is internally fixed to `first-valid-by-kind` (export the first valid forward of each kind); switches to `task-id` policy when `--task-id` is specified. `expected_attention` is fixed to 0 (check disabled), `forward_kind` is fixed to `all` (export all types), `layer_index` is fixed to auto-selection.
 
 #### 3.3.3 layer_analyzer.py
 
@@ -430,10 +425,9 @@ Layer extraction CSV column order (priority columns first):
 | `--output` / `-o` | auto | Output path prefix |
 | `--delimiter` | `attention` | Layer boundary anchor (attention / norm) |
 | `--layer-index` | - | Specify Dense layer number |
-| `--no-html` | - | Skip HTML output |
-| `--no-global` | - | Skip global annotation |
-| `--no-layer` | - | Skip layer extraction |
 | `--attention-pattern` / `--norm-pattern` | - | Custom match regex |
+
+> Global annotation and layer extraction are always enabled (no `--no-global` / `--no-layer` switches); HTML output has been removed.
 
 #### 3.3.4 layer_compare.py
 
@@ -561,3 +555,4 @@ The following are validation results using sample data from the `samples/` direc
 |------|------|---------|------|
 | v1.0 | 2026-08-01 | Initial version: NPU Layer Analyzer toolset design document | @yuyinkai |
 | v1.1 | 2026-08-05 | Stage annotation 4→2 (Attention / FFN or MOE, controlled by `is_moe`); main stream selection changed to attention-first `(attention, embedding, not_na, rows)`; `--forward-kind` default changed to `all` (export all forward types); `--expected-attention` default changed to 0 (check disabled); layer CSV filename now includes layer number (`_layerN` / `_layerN_dense` / `_layerN_moe`); `embedding_main` now checks `output_rows` to avoid misclassifying decode; `extract_layer_rows` keeps only main-Stream operators; MoE detection now checks both `main_rows` and `all_rows` (non-main-stream ops assigned by time overlap), `MOE_RE` extended to GroupedMatmul / DispatchFFNCombine / MoeGatingTopK; `Structure` column removed from CSV output (internal only); `compare_result.xlsx` supports up to 4 Sheets with Chinese names (Dense_总比较 / Dense_算子明细 / MoE_总比较 / MoE_算子明细); shared `layer_common.py` module added; `--forward-kind` parameter added to `npu_layer_compare.py` and `npu_layer_analyzer.py` parameter tables | @yuyinkai |
+| v1.2 | 2026-08-18 | CLI simplification: `npu_layer_analyzer.py` removed `--expected-attention`/`--forward-kind`/`--layer-index`/`--export-policy` (internally fixed to check-disabled/all-types/auto-select/first-valid-by-kind policy), added `-i` short option; `layer_analyzer.py` removed `--no-html`/`--no-global`/`--no-layer` (global annotation and layer extraction always enabled, HTML output removed); `npu_layer_compare.py` removed `--expected-attention`/`--forward-kind` (`--layer-index` only passed to layer_analyzer); `write_annotated_html` and related HTML code deleted | @yuyinkai |

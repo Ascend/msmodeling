@@ -112,9 +112,6 @@ python npu_layer_analyzer.py -i kernel_details.csv
 
 # 按 task-id 定位
 python npu_layer_analyzer.py -i kernel_details.csv --task-id 41500
-
-# 指定层号
-python npu_layer_analyzer.py -i kernel_details.csv --layer-index 21
 ```
 
 #### 3. layer_analyzer（全局标注 + 层提取）
@@ -123,8 +120,8 @@ python npu_layer_analyzer.py -i kernel_details.csv --layer-index 21
 # 全局标注 + 层提取（默认行为）
 python layer_analyzer.py -i kernel_details.csv --delimiter attention
 
-# 只提取代表层（不做全局标注和 HTML）
-python layer_analyzer.py -i kernel_details.csv --no-global --no-html
+# 指定层号
+python layer_analyzer.py -i kernel_details.csv --layer-index 5
 ```
 
 #### 4. layer_compare（层对比）
@@ -225,8 +222,6 @@ aten.rsqrt.default → aten.mul.Tensor → aten.mul.Tensor
 | `--json` | - | 输入 JSON 或 CSV（给 layer_analyzer） |
 | `-o` | `compare_test` | 输出目录 |
 | `--task-id` | - | 算子 Task ID，定位特定 Forward |
-| `--expected-attention` | 0 | 预期每 Forward 的 Attention 数（<=0 禁用检查） |
-| `--forward-kind` | `all` | 导出哪种 forward 类型（all/prefill/decode） |
 | `--npu-only` | - | 只跑 npu_layer_analyzer |
 | `--layer-only` | - | 只跑 layer_analyzer |
 | `--no-compare` | - | 不跑对比 |
@@ -239,10 +234,6 @@ aten.rsqrt.default → aten.mul.Tensor → aten.mul.Tensor
 | `--input` / `-i` | kernel_details.csv | 输入 CSV |
 | `--output-dir` | forward_segments | 输出目录 |
 | `--task-id` | - | 算子 Task ID，定位 Forward |
-| `--expected-attention` | 0 | 预期每 Forward 的 Attention 数（<=0 禁用） |
-| `--forward-kind` | `all` | 导出哪种 forward 类型（all/prefill/decode） |
-| `--layer-index` | - | 指定 Dense 层号 |
-| `--export-policy` | first-valid-by-kind | 导出策略 |
 
 ### layer_analyzer.py
 
@@ -252,9 +243,6 @@ aten.rsqrt.default → aten.mul.Tensor → aten.mul.Tensor
 | `--output` / `-o` | 自动 | 输出路径前缀 |
 | `--delimiter` | attention | 层边界锚点（attention / norm） |
 | `--layer-index` | - | 指定 Dense 层号 |
-| `--no-html` | - | 不输出 HTML |
-| `--no-global` | - | 不输出全局标注 |
-| `--no-layer` | - | 不输出层提取 |
 
 ### trace_json_to_csv.py
 
@@ -273,8 +261,101 @@ aten.rsqrt.default → aten.mul.Tensor → aten.mul.Tensor
 
 ---
 
+## 输出文件列说明
+
+### npu_out.xlsx（npu_layer_analyzer 输出）
+
+| Sheet | 说明 |
+|-------|------|
+| `summary` | Forward 切分汇总（每行一个 forward） |
+| `forward_XXX` | 指定 Forward 全部算子 |
+| `forward_XXX_layerN` | 层提取 + Stage 标注（N 为层号） |
+
+**summary Sheet 列说明**：
+
+| 列 | 说明 |
+|----|------|
+| `forward_index` | Forward 序号 |
+| `segment_kind` | Forward 类型（prefill / decode / unknown） |
+| `is_valid` | 是否通过校验（true / false） |
+| `validity_reason` | 校验失败原因（通过时为 ok） |
+| `method` | 切分方法（embedding-to-embedding / embedding-to-gap / gap） |
+| `main_stream` | 主 Stream ID |
+| `start_time_us` / `end_time_us` | Forward 起止时间（us） |
+| `duration_us` | Forward 持续时间（us） |
+| `start_task_id` / `end_task_id` | 起止算子 Task ID |
+| `main_row_count` | 主 Stream 算子数 |
+| `output_row_count` | 输出算子数（含相关 Stream） |
+| `attention_count_main` / `attention_count_output` | Attention 数（主 Stream / 全部） |
+| `embedding_count_main` | Embedding 数（主 Stream） |
+| `stream_counts_output` | 各 Stream 算子数统计 |
+| `max_internal_gap_us` | Forward 内最大 gap（us） |
+| `max_internal_gap_before_task` / `max_internal_gap_after_task` | 最大 gap 前后 Task ID |
+| `boundary_gap_us` | 边界 gap（us） |
+| `boundary_gap_before_task` / `boundary_gap_after_task` | 边界 gap 前后 Task ID |
+| `attention_status` | Attention 校验状态（ok / mismatch / not checked） |
+| `split_reason` | 切分原因说明 |
+| `output_file` | Forward 全部算子 CSV 文件名 |
+| `layer_dense_file` | Dense 代表层 CSV 文件名 |
+| `layer_moe_file` | MoE 代表层 CSV 文件名（无 MoE 时为空） |
+
+### layer_out.xlsx（layer_analyzer 输出）
+
+| Sheet | 说明 |
+|-------|------|
+| `<stem>_kernel_details` | JSON 转换后的 CSV（仅 JSON 输入时存在） |
+| `<stem>_layered` | 全局标注（所有行 + Layer / Marker / Is_Key 列） |
+| `<stem>_layerN` | 层提取 + Stage 标注（N 为层号） |
+
+### 层提取 CSV 列说明
+
+层提取 CSV（`forward_XXX_layerN` / `<stem>_layerN`）的列顺序（优先列在前）：
+
+| 列 | 说明 |
+|----|------|
+| `Layer` | 层号 |
+| `Stage` | 2 段 Stage 标注（Attention / FFN 或 MOE） |
+| `Is_Key` | `★` 标记关键边界算子（NORM / ATT / MLP） |
+| `Stream ID` | Stream ID（原始字段） |
+| `Task ID` | 算子 Task ID（原始字段） |
+| `Name` | 算子名（原始字段） |
+| `Type` | 算子类型（原始字段） |
+| `Start Time(us)` | 起始时间（us） |
+| `Duration(us)` | 持续时间（us） |
+| `Input Shapes` | 输入 Shape（原始字段） |
+| `Output Shapes` | 输出 Shape（原始字段） |
+| `Full Name` | 完整算子名 |
+| `Marker` | 全局算子类型标记（EMBED / ATT / NORM / MLP / MATMUL / LINEAR / COMM / SAMPLE） |
+
+> 注：`Structure` 列仅用于内部打印摘要（`refine_sub_blocks` 状态机标注），CSV 输出不含该列。
+
+### compare_result.xlsx（对比结果）
+
+| Sheet | 说明 |
+|-------|------|
+| `Dense_总比较` | Dense 层按 Stage 汇总时间对比（仅 Dense+MoE 模型） |
+| `Dense_算子明细` | Dense 层逐算子并排对比（仅 Dense+MoE 模型） |
+| `MoE_总比较` | MoE 层按 Stage 汇总时间对比（仅 Dense+MoE 模型） |
+| `MoE_算子明细` | MoE 层逐算子并排对比（仅 Dense+MoE 模型） |
+| `总比较` | 按 Stage 汇总时间对比（纯 Dense / 纯 MoE 模型） |
+| `算子明细` | 逐算子并排对比（纯 Dense / 纯 MoE 模型） |
+
+**总比较 Sheet 列说明**：
+
+| 列 | 说明 |
+|----|------|
+| `Stage` | 阶段名（Attention / FFN 或 MOE / TOTAL） |
+| `文件A_Duration(us)` | npu_layer_analyzer 该 Stage 累加时间（排除通信） |
+| `文件B_Duration(us)` | layer_analyzer 该 Stage 累加时间（排除通信） |
+| `Diff(us)` | A - B |
+| `Diff(%)` | 差异百分比 |
+
+**算子明细 Sheet**：逐算子并排对比，按 Stage 分组，每段末尾有小计行。
+
+---
+
 ## 版本信息
 
-- **版本**：v1.0
-- **最后更新**：2026-08-06
-- **适配工具版本**：npu_layer_analyzer v1.0+
+- **版本**：v1.1
+- **最后更新**：2026-08-18
+- **适配工具版本**：npu_layer_analyzer v1.1+

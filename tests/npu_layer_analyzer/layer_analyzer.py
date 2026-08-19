@@ -27,11 +27,8 @@ Stage 标注（Stage 列）：
   # 全局标注 + 层提取（默认行为）
   python layer_analyzer.py -i kernel_details.csv --delimiter attention
 
-  # 只提取代表层（不做全局标注和 HTML）
-  python layer_analyzer.py -i kernel_details.csv --no-global --no-html
-
   # 指定层号
-  python layer_analyzer.py -i kernel_details.csv --layer-index 5 --no-global --no-html
+  python layer_analyzer.py -i kernel_details.csv --layer-index 5
 
 输出文件名带"仿真"前缀：
   仿真<base>_layered.csv   # 全局标注
@@ -42,7 +39,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import html
 import re
 import sys
 from collections import defaultdict
@@ -50,7 +46,6 @@ from pathlib import Path
 
 import layer_common as lc
 from layer_common import (
-    MARKER_COLORS,
     MOE_RE,
     detect_marker,
     extract_substructure,
@@ -64,14 +59,6 @@ from layer_common import (
 # ═══════════════════════════════════════════════════════════════════════════
 # 常量与正则
 # ═══════════════════════════════════════════════════════════════════════════
-
-# HTML 样式（本文件独有，layer_common 不需要）
-LAYER_BORDER_BG = "#D5D5D5"
-LAYER_BG_EVEN = "#FFFFFF"
-LAYER_BG_ODD = "#F5F5F5"
-
-# HTML 输出中每列值的最大显示长度
-HTML_CELL_MAX_LEN = 80
 
 # 输出文件名前缀：仿真侧为 tensor_cast 仿真数据
 OUTPUT_PREFIX = "仿真"
@@ -274,136 +261,6 @@ def write_annotated_csv(output_path: Path, rows: list[dict]) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 输出：HTML（来自 layer_marker.py）
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-def write_annotated_html(output_path: Path, rows: list[dict]) -> None:
-    if not rows:
-        return
-
-    fieldnames = list(rows[0].keys())
-    display_fields = [
-        "Layer",
-        "Marker",
-        "Is_Key",
-        "Stream ID",
-        "Task ID",
-        "Name",
-        "Type",
-        "Start Time(us)",
-        "Duration(us)",
-        "Output Shapes",
-        "Full Name",
-    ]
-    display_fields = [f for f in display_fields if f in fieldnames]
-    for f in fieldnames:
-        if f not in display_fields:
-            display_fields.append(f)
-
-    html_rows = []
-    prev_layer = None
-
-    for r in rows:
-        layer_idx = r.get("Layer", "-1")
-        marker = r.get("Marker", "")
-
-        # 层分隔行
-        if layer_idx != prev_layer and prev_layer is not None:
-            label = f"Layer {layer_idx}" if layer_idx != "-1" else "前处理"
-            border_cells = ""
-            for col in display_fields:
-                if col == "Layer":
-                    border_cells += (
-                        f'<td style="background:{LAYER_BORDER_BG};font-weight:bold;'
-                        f'color:#333;border:1px solid #999;padding:6px 8px;font-size:13px;">'
-                        f"{label}</td>"
-                    )
-                else:
-                    border_cells += (
-                        f'<td style="background:{LAYER_BORDER_BG};border:1px solid #999;padding:6px 8px;"></td>'
-                    )
-            html_rows.append(f"<tr>{border_cells}</tr>")
-
-        prev_layer = layer_idx
-
-        # 行背景色
-        if marker and marker in MARKER_COLORS:
-            bg_color = MARKER_COLORS[marker]
-        elif layer_idx != "-1" and layer_idx.isdigit():
-            bg_color = LAYER_BG_ODD if int(layer_idx) % 2 == 1 else LAYER_BG_EVEN
-        else:
-            bg_color = LAYER_BG_EVEN
-
-        cells = []
-        for col in display_fields:
-            val = r.get(col, "")
-            if len(val) > HTML_CELL_MAX_LEN:
-                val = val[:HTML_CELL_MAX_LEN] + "..."
-            style = f"background:{bg_color};border:1px solid #ddd;padding:3px 6px;"
-            if col == "Marker" and marker:
-                marker_color = MARKER_COLORS.get(marker, "#333")
-                style += f"font-weight:bold;color:{marker_color};"
-            if col in ("Layer", "Is_Key") and layer_idx != "-1":
-                style += "font-weight:bold;"
-            cells.append(f'<td style="{style}">{html.escape(val)}</td>')
-
-        html_rows.append(f"<tr>{''.join(cells)}</tr>")
-
-    # 图例
-    legend_items = []
-    for mk, color in MARKER_COLORS.items():
-        if mk == "OTHER":
-            continue
-        legend_items.append(
-            f'<span style="display:inline-block;width:16px;height:16px;'
-            f"background:{color};border:1px solid #999;margin-right:3px;"
-            f'vertical-align:middle;border-radius:2px;"></span>'
-            f"<b>{mk}</b>&nbsp;&nbsp;"
-        )
-    legend_items.append(
-        f'<span style="display:inline-block;width:16px;height:16px;'
-        f"background:{LAYER_BORDER_BG};border:1px solid #999;margin-right:3px;"
-        f'vertical-align:middle;border-radius:2px;"></span>'
-        f"<b>层分隔</b>"
-    )
-
-    page_title = html.escape(output_path.stem)
-    html_content = f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Layer Analyzer - {page_title}</title>
-<style>
-body {{ margin:0; padding:16px; background:#f0f0f0; font-family:"Segoe UI",Arial,sans-serif; }}
-h1 {{ font-size:22px; margin:0 0 6px; }}
-.legend {{ margin:6px 0 12px; font-size:12px; line-height:2.2; }}
-.table-wrap {{ overflow:auto; max-height:88vh; border:2px solid #555; border-radius:6px; }}
-table {{ border-collapse:collapse; width:100%; font-size:11px; }}
-th {{ background:#37474F; color:#fff; font-weight:650; padding:5px 6px;
-     text-align:left; position:sticky; top:0; z-index:2; white-space:nowrap; }}
-</style>
-</head>
-<body>
-<h1>Layer Analyzer - {page_title}</h1>
-<div class="legend">{"".join(legend_items)}</div>
-<div class="table-wrap">
-<table><thead><tr>
-{"".join(f"<th>{html.escape(f)}</th>" for f in display_fields)}
-</tr></thead>
-<tbody>
-{"".join(html_rows)}
-</tbody></table>
-</div>
-</body>
-</html>"""
-
-    with output_path.open("w", encoding="utf-8") as f:
-        f.write(html_content)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # 打印摘要
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -475,19 +332,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attention-pattern", default=None, help="自定义 ATT 匹配正则")
     parser.add_argument("--norm-pattern", default=None, help="自定义 NORM 匹配正则")
     parser.add_argument("--lookahead", type=int, default=30, help="判断 pre-attention NORM 前瞻行数")
-
-    # 模式选择
-    parser.add_argument(
-        "--no-layer",
-        action="store_true",
-        help="不输出层提取 CSV（默认会自动输出 1~2 个层 CSV）",
-    )
-    parser.add_argument(
-        "--no-global",
-        action="store_true",
-        help="不输出全局标注文件（只输出层提取 CSV）",
-    )
-    parser.add_argument("--no-html", action="store_true", help="不输出 HTML 文件")
 
     # 层提取参数
     parser.add_argument(
@@ -566,63 +410,56 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── 3. 全局标注输出 ──
     output_dir = output_prefix.parent if args.output else input_path.parent
-    if not args.no_global:
-        csv_output = output_dir / f"{OUTPUT_PREFIX}{base_stem}_layered.csv"
-        write_annotated_csv(csv_output, rows)
-        print(f"CSV: {csv_output}")
+    csv_output = output_dir / f"{OUTPUT_PREFIX}{base_stem}_layered.csv"
+    write_annotated_csv(csv_output, rows)
+    print(f"CSV: {csv_output}")
 
-        if not args.no_html:
-            html_output = output_dir / f"{OUTPUT_PREFIX}{base_stem}_layered.html"
-            write_annotated_html(html_output, rows)
-            print(f"HTML: {html_output}")
+    print_layer_summary(rows, delimiter_name)
 
-        print_layer_summary(rows, delimiter_name)
+    marker_count = sum(1 for r in rows if r.get("Marker"))
+    print(f"\n标记行: {marker_count} / {len(rows)}")
 
-        marker_count = sum(1 for r in rows if r.get("Marker"))
-        print(f"\n标记行: {marker_count} / {len(rows)}")
+    # ── 4. 层提取 + 子结构标注 ──
+    # MoE 检测
+    moe_layers = detect_moe_layers(rows, layer_indices, main_stream)
+    has_moe = bool(moe_layers)
+    if has_moe:
+        print(f"\n检测到 MoE 层: {sorted(moe_layers)}")
+    else:
+        print("\n纯 Dense 模型")
 
-    # ── 4. 层提取 + 子结构标注（默认执行） ──
-    if not args.no_layer:
-        # MoE 检测
-        moe_layers = detect_moe_layers(rows, layer_indices, main_stream)
-        has_moe = bool(moe_layers)
+    # 检测含 ATT 的层（与 npu_layer_analyzer.py 一致）
+    att_layers = {layer_indices[i] for i in range(len(rows)) if layer_indices[i] >= 0 and lc.is_attention(rows[i])}
+    picks = pick_representative_layer(layer_indices, moe_layers, args.layer_index, att_layers)
+    print(f"选取代表层: Dense={picks['dense']}" + (f", MoE={picks['moe']}" if picks["moe"] is not None else ""))
+
+    for kind, layer_idx in [("dense", picks["dense"]), ("moe", picks["moe"])]:
+        if layer_idx is None:
+            continue
+
+        # 按 layer_idx 裁剪到目标层范围
+        layer_rows = _trim_to_target_layer(rows, layer_idx, layer_indices)
+
+        # 标注子结构
+        layer_rows = refine_sub_blocks(layer_rows)
+        # 裁剪：从上下采样到上下采样，标注 Stage
+        layer_rows = extract_substructure(layer_rows, is_moe=(kind == "moe"))
+
+        # 输出文件名：与 npu_layer_analyzer.py 一致
         if has_moe:
-            print(f"\n检测到 MoE 层: {sorted(moe_layers)}")
+            fname = f"{OUTPUT_PREFIX}{base_stem}_layer{layer_idx}_{kind}.csv"
         else:
-            print("\n纯 Dense 模型")
+            fname = f"{OUTPUT_PREFIX}{base_stem}_layer{layer_idx}.csv"
+        output_path = output_dir / fname
+        write_layer_csv(output_path, layer_rows)
+        print(f"\n层 CSV: {output_path}")
 
-        # 检测含 ATT 的层（与 npu_layer_analyzer.py 一致）
-        att_layers = {layer_indices[i] for i in range(len(rows)) if layer_indices[i] >= 0 and lc.is_attention(rows[i])}
-        picks = pick_representative_layer(layer_indices, moe_layers, args.layer_index, att_layers)
-        print(f"选取代表层: Dense={picks['dense']}" + (f", MoE={picks['moe']}" if picks["moe"] is not None else ""))
+        print_structure_summary(layer_rows, layer_idx, kind.upper())
 
-        for kind, layer_idx in [("dense", picks["dense"]), ("moe", picks["moe"])]:
-            if layer_idx is None:
-                continue
-
-            # 按 layer_idx 裁剪到目标层范围
-            layer_rows = _trim_to_target_layer(rows, layer_idx, layer_indices)
-
-            # 标注子结构
-            layer_rows = refine_sub_blocks(layer_rows)
-            # 裁剪：从上下采样到上下采样，标注 Stage
-            layer_rows = extract_substructure(layer_rows, is_moe=(kind == "moe"))
-
-            # 输出文件名：与 npu_layer_analyzer.py 一致
-            if has_moe:
-                fname = f"{OUTPUT_PREFIX}{base_stem}_layer{layer_idx}_{kind}.csv"
-            else:
-                fname = f"{OUTPUT_PREFIX}{base_stem}_layer{layer_idx}.csv"
-            output_path = output_dir / fname
-            write_layer_csv(output_path, layer_rows)
-            print(f"\n层 CSV: {output_path}")
-
-            print_structure_summary(layer_rows, layer_idx, kind.upper())
-
-        # 使用提示
-        print("\n--- CSV 查看提示 ---")
-        print("1. 筛选 Is_Key = ★ → 只看关键边界算子（RMSNorm / Attention / MLP）")
-        print("2. 按 Stage 列筛选 → 查看各阶段（Attention / FFN 或 MOE）")
+    # 使用提示
+    print("\n--- CSV 查看提示 ---")
+    print("1. 筛选 Is_Key = ★ → 只看关键边界算子（RMSNorm / Attention / MLP）")
+    print("2. 按 Stage 列筛选 → 查看各阶段（Attention / FFN 或 MOE）")
 
     return 0
 
