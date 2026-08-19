@@ -1,0 +1,33 @@
+{
+  "canonical_model_id": "black-forest-labs/FLUX.1-dev",
+  "remote_source": "huggingface",
+  "fixture_source_revision": "3de623fc3c33e44ffbe2bad470d0f45bccf2eb21",
+  "diffusers_baseline": "0.38.0",
+  "captured_component_paths": [
+    "model_index.json",
+    "transformer/config.json",
+    "vae/config.json",
+    "text_encoder/config.json",
+    "text_encoder_2/config.json"
+  ],
+  "redaction_policy": {
+    "included": "Minimum public config facts required for exact profile validation and meta Transformer construction.",
+    "excluded": [
+      "model weights",
+      "tokenizer vocabulary and merges",
+      "prompts, images, and generated outputs",
+      "tokens, usernames, and credential paths",
+      "scheduler config",
+      "Runtime trace and trace-derived fingerprints"
+    ],
+    "access_boundary": "Sanitized config-only fixture; no network access, no credential access, and no license acceptance."
+  },
+  "component_sha256": {
+    "model_index.json": "24946df21ff25e210486b5f6b14208983a90c9c73f8d48cfa724c0e4e03f7201",
+    "transformer/config.json": "2ff263cb105fb4ac49646d51be7484c82a01f9aab641a069735eaa0eb5957079",
+    "vae/config.json": "5a88b9abc5f80ad5fd7ec92805750f7873671b7da2bb91fd2fe53547fd1cf6c0",
+    "text_encoder/config.json": "1f29d1e371807b2c9e24a71d345bdeda18c208471bcefa1a2a8d34bf2358bdcf",
+    "text_encoder_2/config.json": "07a1d7554c1768316440328e0d1024bcab7ad1af3cf15ab4107901f9a521d19a"
+  },
+  "scheduler_excluded": true
+}

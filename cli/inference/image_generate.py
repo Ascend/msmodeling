@@ -6,6 +6,8 @@ import argparse
 import time
 
 import torch
+
+from cli.logo import print_logo
 from tensor_cast import device_profiles as _device_profiles  # noqa: F401
 from tensor_cast.compilation import get_backend
 from tensor_cast.core.quantization.config import create_quant_config
@@ -123,8 +125,7 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("cfg_parallel requires use_cfg")
     expected_world = args.ulysses_size * (2 if args.cfg_parallel else 1)
     if args.world_size != expected_world:
-        suffix = "2U" if args.cfg_parallel else "U"
-        parser.error(f"world_size must equal {suffix}")
+        parser.error(f"world_size must equal {expected_world}")
     if args.compile_allow_graph_break and not args.compile:
         parser.error("--compile-allow-graph-break requires --compile")
     if args.cache_step_interval > 1 and not args.dit_cache:
@@ -295,7 +296,7 @@ def run_inference(
         set_sp_group(None)
     run_end = time.perf_counter()
     runtime_result = runtime.table_averages(group_by_input_shapes=False)
-    print(f"Model compilation execution time: {run_end - run_start}s")
+    print(f"Runtime execution time: {run_end - run_start}s")
     print(runtime_result)
     if chrome_trace:
         runtime.export_chrome_trace(chrome_trace)
@@ -305,6 +306,7 @@ def run_inference(
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+    print_logo()
     try:
         _validate_args(parser, args)
         run_inference(

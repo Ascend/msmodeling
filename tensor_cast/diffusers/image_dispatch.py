@@ -1,9 +1,8 @@
 """Image model dispatch seam for the TensorCast image generation core.
 
-Every public function here is a fail-closed stub: the Core registers no
-production image model, so each entry point raises unless a model extension
-provides the real implementation. Model extensions override these functions
-to add FLUX / Qwen / ... support.
+Every public function here is fail-closed: unhandled model kinds raise unless a
+model extension provides the real implementation. The FLUX.1-dev model
+extension fills these entry points; unsupported kinds still raise.
 
 Call order in ``cli.inference.image_generate.run_inference``:
 resolve_image_model_kind -> validate_image_config -> prepare_image_inputs
@@ -19,6 +18,8 @@ from ..model_config import DiffusersConfig
 from .diffusers_model import DiffusersTransformerModel
 from .dit_cache_registry import DiTBlockCacheSpec
 from .model_resolver import DiffusersModelSelection
+
+_FLUX_KIND = "flux1-dev"
 
 
 def _unsupported(kind: str, *, entity: str = "Image model kind") -> NoReturn:
@@ -37,9 +38,14 @@ def resolve_image_model_kind(
 
     The returned value is passed as ``kind`` to every other function in this
     module. Raises on unsupported model ids.
-
-    TODO: implemented by a model extension.
     """
+    transformer_config = model_config.transformer_config
+    transformer = getattr(transformer_config, "model_config", None)
+    is_flux_config = isinstance(transformer, dict) and transformer.get("_class_name") == "FluxTransformer2DModel"
+    if model_selection.is_remote or is_flux_config:
+        from . import flux_image
+
+        return flux_image.resolve_model_kind(model_id, remote_source, model_selection, model_config)
     _unsupported(model_id, entity="Image model id")
 
 
@@ -52,9 +58,12 @@ def validate_image_config(
 
     Called after model construction; raise here to reject unsupported
     configurations before any simulation work begins.
-
-    TODO: implemented by a model extension.
     """
+    if kind == _FLUX_KIND:
+        from . import flux_image
+
+        flux_image.validate_config(model_selection, model_config)
+        return
     _unsupported(kind)
 
 
@@ -71,9 +80,17 @@ def prepare_image_inputs(
 
     Returns ``(inputs, generated_token_count)``; the count is forwarded to
     ``forward_image_model`` as ``generated_token_count``.
-
-    TODO: implemented by a model extension.
     """
+    if kind == _FLUX_KIND:
+        from . import flux_image
+
+        return flux_image.prepare_inputs(
+            model_config,
+            batch_size=batch_size,
+            output_image_size=output_image_size,
+            text_seq_len=text_seq_len,
+            source_image_sizes=source_image_sizes,
+        )
     _unsupported(kind)
 
 
@@ -89,9 +106,16 @@ def apply_image_cfg(
     dimension when ``use_cfg`` is set, optionally sharded for ``cfg_parallel``.
 
     Returns the (possibly duplicated) input dict.
-
-    TODO: implemented by a model extension.
     """
+    if kind == _FLUX_KIND:
+        from . import flux_image
+
+        return flux_image.apply_cfg(
+            inputs,
+            batch_size=batch_size,
+            use_cfg=use_cfg,
+            cfg_parallel=cfg_parallel,
+        )
     _unsupported(kind)
 
 
@@ -106,9 +130,11 @@ def shard_image_inputs(
 
     Returns ``(inputs, split_dim)``; ``split_dim`` is the tensor dim along
     which the forward output must be all-gathered (None when no sharding).
-
-    TODO: implemented by a model extension.
     """
+    if kind == _FLUX_KIND:
+        from . import flux_image
+
+        return flux_image.shard_inputs(model_config, inputs, ulysses_size=ulysses_size)
     _unsupported(kind)
 
 
@@ -120,9 +146,11 @@ def prepare_image_model(
     """Prepare the transformer model for simulation (e.g. replace layers).
 
     Returns the prepared model used for forward passes.
-
-    TODO: implemented by a model extension.
     """
+    if kind == _FLUX_KIND:
+        from . import flux_image
+
+        return flux_image.prepare_model(model, model_config)
     _unsupported(kind)
 
 
@@ -137,9 +165,15 @@ def forward_image_model(
 
     Returns the output hidden-states tensor, all-gathered over the sequence
     parallel group when the model is sharded.
-
-    TODO: implemented by a model extension.
     """
+    if kind == _FLUX_KIND:
+        from . import flux_image
+
+        return flux_image.forward_model(
+            model,
+            inputs,
+            generated_token_count=generated_token_count,
+        )
     _unsupported(kind)
 
 
@@ -151,7 +185,9 @@ def image_cache_spec(
 
     The spec's ``class_name`` must match the transformer config's
     ``_class_name``; see ``register_dit_block_cache_spec``.
-
-    TODO: implemented by a model extension.
     """
+    if kind == _FLUX_KIND:
+        from . import flux_image
+
+        return flux_image.cache_spec(model_config)
     _unsupported(kind)

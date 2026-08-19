@@ -14,6 +14,7 @@ _LOGO_SLOGAN = "THE END-TO-END TOOLCHAIN TO UNLEASH HUAWEI ASCEND COMPUTE"
 _HELP_MODULES = (
     "cli.inference.text_generate",
     "cli.inference.video_generate",
+    "cli.inference.image_generate",
     "cli.inference.throughput_optimizer",
     "cli.inference.model_adapter",
     "optix",
