@@ -8,6 +8,19 @@ import time
 import torch
 
 from cli.logo import print_logo
+from cli.spec_cli import (
+    METAVAR_FILE,
+    METAVAR_N,
+    METAVAR_NAME,
+    METAVAR_RANGE,
+    SpecArgumentParser,
+    add_log_options,
+    add_option,
+    add_version_option,
+    configure_std_logging,
+    make_enum_type,
+    parse_args as spec_parse_args,
+)
 from tensor_cast import device_profiles as _device_profiles  # noqa: F401
 from tensor_cast.compilation import get_backend
 from tensor_cast.core.quantization.config import create_quant_config
@@ -41,7 +54,7 @@ from tensor_cast.quantize_utils import QuantGranularity
 from tensor_cast.runtime import Runtime
 from tensor_cast.utils import str_to_dtype
 
-from ..utils import check_positive_integer, parse_int_range
+from ..utils import add_model_id_source, check_positive_integer, parse_int_range, require_model_id
 
 # Sentinel end index for an unbounded DiT cache block range; the real bound is
 # clamped to the model's actual block count in enable_dit_block_cache.
@@ -49,24 +62,47 @@ _UNBOUNDED_BLOCK_END = 10**9
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = SpecArgumentParser(
+        prog="msmodeling inference image-generate",
         description=(
             "Simulate image Transformer denoising workloads and report their critical path "
             "and logical measured work only. Prompt encoding, VAE, scheduler, and image I/O "
             "are excluded."
         ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        examples=(
+            "# Single-device image generate\n"
+            "msmodeling inference image-generate black-forest-labs/FLUX.1-dev "
+            "--batch-size 1 --output-image-size 512 512 --text-seq-len 512 --device TEST_DEVICE"
+        ),
+        output_help="Perf stats on stdout. Optional chrome trace via --chrome-trace-file.",
     )
-    parser.add_argument(
-        "model_id",
-        help="Reviewed local Diffusers config directory or exact remote model ID.",
-    )
+    add_version_option(parser)
+    parse_linear, linear_meta = make_enum_type(QuantizeLinearAction, "--quantize-linear-action")
+    parse_attn, attn_meta = make_enum_type(QuantizeAttentionAction, "--quantize-attention-action")
     parser.add_argument(
         "--device",
+        type=str,
         choices=list(DeviceProfile.all_device_profiles.keys()),
         default="TEST_DEVICE",
+        metavar=METAVAR_NAME,
+        help="Device profile used for simulation.",
     )
-    parser.add_argument("--batch-size", type=check_positive_integer, required=True)
+    add_model_id_source(
+        parser,
+        positional_help=(
+            "Reviewed local Diffusers config directory or exact remote model ID. "
+            "Equivalent to --model-id. Remote model ids are not security-guaranteed."
+        ),
+        option_help="Image model source. Equivalent to the positional model id.",
+        value_type=str,
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=check_positive_integer,
+        required=True,
+        metavar=METAVAR_N,
+        help="Base workload batch size, not prompt or source-image count.",
+    )
     parser.add_argument(
         "--output-image-size",
         type=check_positive_integer,
@@ -74,8 +110,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         required=True,
         metavar=("HEIGHT", "WIDTH"),
+        help="Output image size HEIGHT WIDTH. Provide exactly once. Used only to derive shapes.",
     )
-    parser.add_argument("--text-seq-len", type=check_positive_integer, required=True)
+    parser.add_argument(
+        "--text-seq-len",
+        type=check_positive_integer,
+        required=True,
+        metavar=METAVAR_N,
+        help="Text condition length that enters the Transformer. Encoding is not executed.",
+    )
     parser.add_argument(
         "--source-image-size",
         type=check_positive_integer,
@@ -83,38 +126,111 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar=("HEIGHT", "WIDTH"),
+        help="Source image size HEIGHT WIDTH. Repeatable. Editing kinds only.",
     )
-    parser.add_argument("--sample-step", type=check_positive_integer, default=1)
-    parser.add_argument("--use-cfg", action="store_true")
-    parser.add_argument("--dtype", choices=["float16", "float32", "bfloat16"], default="float16")
+    parser.add_argument(
+        "--sample-step",
+        type=check_positive_integer,
+        default=1,
+        metavar=METAVAR_N,
+        help="Number of identical Transformer workload iterations.",
+    )
+    parser.add_argument(
+        "--use-cfg", action="store_true", help="Enable classifier-free guidance workload approximation."
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=["float16", "float32", "bfloat16"],
+        default="float16",
+        metavar="{float16,float32,bfloat16}",
+        help="Activation dtype.",
+    )
     parser.add_argument(
         "--remote-source",
         choices=[source.value for source in RemoteSource],
         default=RemoteSource.huggingface.value,
+        metavar="{huggingface,modelscope}",
+        help="Remote source for non-local Diffusers repo ids.",
     )
     parser.add_argument(
         "--quantize-linear-action",
-        type=QuantizeLinearAction,
-        choices=list(QuantizeLinearAction),
+        type=parse_linear,
         default=QuantizeLinearAction.DISABLED,
+        metavar=linear_meta,
+        help="Quantize linear layers.",
     )
-    parser.add_argument("--mxfp4-group-size", type=check_positive_integer, default=32)
+    parser.add_argument(
+        "--mxfp4-group-size",
+        type=check_positive_integer,
+        default=32,
+        metavar=METAVAR_N,
+        help="Group size for MXFP4 quantization.",
+    )
     parser.add_argument(
         "--quantize-attention-action",
-        type=QuantizeAttentionAction,
-        choices=list(QuantizeAttentionAction),
+        type=parse_attn,
         default=QuantizeAttentionAction.DISABLED,
+        metavar=attn_meta,
+        help="Quantize attention computation.",
     )
-    parser.add_argument("--compile", action="store_true")
-    parser.add_argument("--compile-allow-graph-break", action="store_true")
-    parser.add_argument("--world-size", type=check_positive_integer, default=1)
-    parser.add_argument("--ulysses-size", type=check_positive_integer, default=1)
-    parser.add_argument("--cfg-parallel", action="store_true")
-    parser.add_argument("--dit-cache", action="store_true")
-    parser.add_argument("--cache-step-range", type=str)
-    parser.add_argument("--cache-step-interval", type=check_positive_integer, default=1)
-    parser.add_argument("--cache-block-range", type=str)
-    parser.add_argument("--chrome-trace")
+    parser.add_argument("--compile", action="store_true", help="Compile the transformer before simulation.")
+    parser.add_argument(
+        "--compile-allow-graph-break",
+        action="store_true",
+        help="Allow graph breaks during torch.compile().",
+    )
+    add_log_options(parser)
+    add_option(
+        parser,
+        "--num-devices",
+        dest="world_size",
+        type=check_positive_integer,
+        default=1,
+        metavar=METAVAR_N,
+        help="Number of devices. Must equal --ulysses-size, or 2 * --ulysses-size with --cfg-parallel.",
+        aliases=("--world-size",),
+    )
+    parser.add_argument(
+        "--ulysses-size",
+        dest="ulysses_size",
+        type=check_positive_integer,
+        default=1,
+        metavar=METAVAR_N,
+        help="Ulysses sequence-parallel size.",
+    )
+    parser.add_argument("--cfg-parallel", action="store_true", help="Enable CFG parallelism. Requires --use-cfg.")
+    parser.add_argument("--dit-cache", action="store_true", help="Enable DiT block cache.")
+    parser.add_argument(
+        "--cache-step-range",
+        type=str,
+        default=None,
+        metavar=METAVAR_RANGE,
+        help="Cache step range 'start,end' (inclusive). Required with --dit-cache when interval > 1.",
+    )
+    parser.add_argument(
+        "--cache-step-interval",
+        type=check_positive_integer,
+        default=1,
+        metavar=METAVAR_N,
+        help="Update cache every N steps (1 disables reuse).",
+    )
+    parser.add_argument(
+        "--cache-block-range",
+        type=str,
+        default=None,
+        metavar=METAVAR_RANGE,
+        help="Cache block range 'start,end' (start inclusive, end exclusive).",
+    )
+    add_option(
+        parser,
+        "--chrome-trace-file",
+        dest="chrome_trace",
+        type=str,
+        default=None,
+        metavar=METAVAR_FILE,
+        help="Write chrome trace JSON.",
+        aliases=("--chrome-trace",),
+    )
     return parser
 
 
@@ -305,10 +421,12 @@ def run_inference(
 
 def main() -> int:
     parser = _build_parser()
-    args = parser.parse_args()
+    args = spec_parse_args(parser)
+    require_model_id(parser, args)
     print_logo()
     try:
         _validate_args(parser, args)
+        configure_std_logging(args)
         run_inference(
             args.model_id,
             device=args.device,

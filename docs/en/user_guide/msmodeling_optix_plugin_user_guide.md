@@ -160,14 +160,13 @@ Example:
 
     ```text
     options:
-    -h, --help show this help message and exit
-    -lb, --load_breakpoint
-    Continue from where the last optimization was aborted.
-    --backup Whether to back up data.
-    -e {vllm, vllm_infer}, --engine {vllm, vllm_infer}
-    Specifies the engine to be used.
-    -b {vllm_benchmark, vllm_infer_benchmark}, --benchmark {vllm_benchmark, vllm_infer_benchmark}
-    Specified benchmark to be used.
+    -h, --help            show this help message and exit
+    --load-breakpoint     Continue from where the last optimization was aborted.
+    --backup              Back up optimizer data.
+    -e {vllm,vllm_infer}, --engine {vllm,vllm_infer}
+                          Engine used for model evaluation.
+    -b {vllm_benchmark,vllm_infer_benchmark,ais_bench}, --benchmark-policy {vllm_benchmark,vllm_infer_benchmark,ais_bench}
+                          Benchmark used for custom performance indicators.
     ```
 
     Run optimization using the specified plugin module:

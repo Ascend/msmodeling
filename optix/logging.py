@@ -202,14 +202,11 @@ def format_evaluation_failure(scheduler: object, error: object) -> str:
     return str(error)
 
 
-@cache
-def configure_logger() -> None:
-    """Configure optix loguru handler without clearing unrelated handlers."""
-    level = resolve_log_level()
-    with suppress(ValueError):
-        logger.remove(0)
-    logger.configure(extra=DEFAULT_LOG_EXTRA.copy())
-    logger.add(
+_stderr_handler_id: int | None = None
+
+
+def _add_stderr_handler(level: str) -> int:
+    return logger.add(
         sys.stderr,
         level=level,
         format=resolve_log_format(level),
@@ -217,3 +214,28 @@ def configure_logger() -> None:
         diagnose=level == "DEBUG",
         backtrace=level == "DEBUG",
     )
+
+
+def _replace_stderr_handler(level: str) -> None:
+    global _stderr_handler_id
+    if _stderr_handler_id is not None:
+        with suppress(ValueError):
+            logger.remove(_stderr_handler_id)
+        _stderr_handler_id = None
+    else:
+        with suppress(ValueError):
+            logger.remove(0)
+    logger.configure(extra=DEFAULT_LOG_EXTRA.copy())
+    _stderr_handler_id = _add_stderr_handler(level)
+
+
+@cache
+def configure_logger() -> None:
+    """Configure optix loguru handler without clearing unrelated handlers."""
+    _replace_stderr_handler(resolve_log_level())
+
+
+def set_log_level(level: str) -> None:
+    """Replace the optix stderr handler after CLI log options are parsed."""
+    configure_logger.cache_clear()
+    _replace_stderr_handler(level.upper())

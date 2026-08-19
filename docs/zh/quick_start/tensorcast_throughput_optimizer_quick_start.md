@@ -60,7 +60,7 @@ python -m cli.inference.throughput_optimizer --help
 TensorCast（模型推理性能仿真）面向 PyTorch 程序进行性能建模。它不会在真实加速器上执行模型，而是拦截计算图，并基于目标设备画像估算算子耗时、显存占用和整体推理性能。
 
 > [!NOTE]知识点：模型推理性能仿真输出
-> TensorCast 默认输出算子级性能汇总、总执行时间、TPS/Device 与显存占用。若指定 `--chrome-trace`，还可以生成 Chrome Trace 文件用于可视化分析。
+> TensorCast 默认输出算子级性能汇总、总执行时间、TPS/Device 与显存占用。若指定 `--chrome-trace-file`，还可以生成 Chrome Trace 文件用于可视化分析。
 
 #### 2.2.1 执行 LLM 文本生成仿真
 
@@ -104,14 +104,14 @@ Total device memory: 64.000 GB
 
 #### 2.2.3 生成 Chrome Trace（可选）
 
-如需查看更细粒度的时间线，可增加 `--chrome-trace` 参数：
+如需查看更细粒度的时间线，可增加 `--chrome-trace-file` 参数：
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B \
     --num-queries 2 \
     --query-length 3500 \
     --device TEST_DEVICE \
-    --chrome-trace ./tensorcast_trace.json
+    --chrome-trace-file ./tensorcast_trace.json
 ```
 
 生成后，可通过 `chrome://tracing` 或 MindStudio Insight 打开 trace 文件。
@@ -134,8 +134,8 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --input-length 3500 \
     --output-length 1500 \
     --quantize-linear-action W8A8_DYNAMIC \
-    --quantize-attention-action DISABLED \
-    --tpot-limits 50
+    --quantize-attention-action disabled \
+    --tpot-limit 50
 ```
 
 #### 2.3.2 查看优化结果

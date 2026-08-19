@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -220,3 +221,87 @@ class TestOptimizerMainCli(unittest.TestCase):
             result = run_cli_main(optix_main, argv[1:], prog="optix")
         self.assertEqual(result.returncode, 1)
         mock_pso.return_value.run_plugin.assert_called_once()
+
+
+class TestOptimizerCliBindings(unittest.TestCase):
+    def test_module_still_exports_is_root_and_json_helper(self):
+        from optix.optimizer.optimizer import get_required_field_from_json, is_root
+
+        self.assertTrue(callable(is_root))
+        self.assertTrue(callable(get_required_field_from_json))
+
+    @patch("optix.optimizer.optimizer.PSOOptimizer")
+    @patch("optix.optimizer.scheduler.Scheduler")
+    @patch("optix.optimizer.store.DataStorage")
+    @patch("optix.optimizer.experience_fine_tunning.FineTune")
+    @patch("optix.config.config.get_settings")
+    @patch("optix.optimizer.register.register_ori_functions")
+    @patch("optix.plugins.load_general_plugins")
+    @patch("optix.optimizer.optimizer.is_root", return_value=False)
+    @patch("cli.logo.print_logo", lambda: None)
+    @patch("optix.optimizer.optimizer.set_log_level")
+    def test_env_log_level_used_when_cli_omits_log_level(
+        self,
+        mock_set_log_level,
+        mock_is_root,
+        mock_load_plugins,
+        mock_register,
+        mock_get_settings,
+        mock_fine_tune,
+        mock_ds,
+        mock_scheduler,
+        mock_pso,
+    ):
+        from optix.optimizer.optimizer import main as optix_main
+
+        mock_get_settings.return_value = _settings_mock()
+        mock_simu, mock_bench = _registry_mocks()
+        missing = "/tmp/optix-does-not-exist-config.toml"
+        argv = ["optix", "-c", missing, "-e", "vllm", "-b", "ais_bench"]
+        with (
+            patch.dict("optix.optimizer.register.simulates", {"vllm": lambda **kw: mock_simu}),
+            patch.dict("optix.optimizer.register.benchmarks", {"ais_bench": lambda **kw: mock_bench}),
+            patch.object(sys, "argv", argv),
+            patch.dict(os.environ, {"OPTIX_LOG_LEVEL": "DEBUG"}, clear=False),
+            self.assertRaises(SystemExit),
+        ):
+            optix_main()
+        mock_set_log_level.assert_called_once_with("DEBUG")
+
+    @patch("optix.optimizer.optimizer.PSOOptimizer")
+    @patch("optix.optimizer.scheduler.Scheduler")
+    @patch("optix.optimizer.store.DataStorage")
+    @patch("optix.optimizer.experience_fine_tunning.FineTune")
+    @patch("optix.config.config.get_settings")
+    @patch("optix.optimizer.register.register_ori_functions")
+    @patch("optix.plugins.load_general_plugins")
+    @patch("optix.optimizer.optimizer.is_root", return_value=False)
+    @patch("cli.logo.print_logo", lambda: None)
+    @patch("optix.optimizer.optimizer.set_log_level")
+    def test_cli_log_level_overrides_env(
+        self,
+        mock_set_log_level,
+        mock_is_root,
+        mock_load_plugins,
+        mock_register,
+        mock_get_settings,
+        mock_fine_tune,
+        mock_ds,
+        mock_scheduler,
+        mock_pso,
+    ):
+        from optix.optimizer.optimizer import main as optix_main
+
+        mock_get_settings.return_value = _settings_mock()
+        mock_simu, mock_bench = _registry_mocks()
+        missing = "/tmp/optix-does-not-exist-config.toml"
+        argv = ["optix", "--log-level", "warning", "-c", missing, "-e", "vllm", "-b", "ais_bench"]
+        with (
+            patch.dict("optix.optimizer.register.simulates", {"vllm": lambda **kw: mock_simu}),
+            patch.dict("optix.optimizer.register.benchmarks", {"ais_bench": lambda **kw: mock_bench}),
+            patch.object(sys, "argv", argv),
+            patch.dict(os.environ, {"OPTIX_LOG_LEVEL": "DEBUG"}, clear=False),
+            self.assertRaises(SystemExit),
+        ):
+            optix_main()
+        mock_set_log_level.assert_called_once_with("warning")

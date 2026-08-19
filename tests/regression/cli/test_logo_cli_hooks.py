@@ -37,6 +37,11 @@ def _assert_logo_on_stderr(stderr: str) -> None:
 
 def test_help_suppresses_logo_on_cli_modules() -> None:
     for module_name in _HELP_MODULES:
+        if module_name == "optix":
+            try:
+                import pydantic_settings  # noqa: F401
+            except ImportError:
+                continue
         result = run_module_main(module_name, ["--help"])
         assert result.returncode == 0, module_name
         assert not _streams_contain_logo(result), module_name

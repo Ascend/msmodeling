@@ -448,10 +448,10 @@ msmodeling optix [options]
 | Parameter | Optional/required | Description |
 |---|---|---|
 |-e or --engine|Optional|Inference framework: <br>&#8226;`vllm`: use vLLM as the inference framework<br>&#8226;`mindie`: use MindIE as the inference framework<br/>Default: `vllm`.|
-|-b or --benchmark_policy|Optional|Benchmark tool: <br>&#8226;`vllm_benchmark`: use vllm_benchmark as the test tool <br/>&#8226;`ais_bench`: use AISBench as the test tool<br/>Default: `ais_bench`. Select the appropriate inference framework and test framework.|
+|-b or --benchmark-policy|Optional|Benchmark tool: <br>&#8226;`vllm_benchmark`: use vllm_benchmark as the test tool <br/>&#8226;`ais_bench`: use AISBench as the test tool<br/>Default: `ais_bench`. Select the appropriate inference framework and test framework.|
 |-c or --config|Optional|Custom configuration file path (TOML). Three forms are supported: <br>&#8226;Absolute path: use the specified path directly;<br>&#8226;Relative path (with a directory separator): resolved relative to the current working directory;<br>&#8226;Filename only: looked up in the current working directory.<br/>If not specified, the tool searches the configuration file in the preset path order. The specified file must be valid TOML and has the highest configuration priority.|
-|-lb or --load_breakpoint|Optional|Controls whether to resume the optimization from a breakpoint; configuring this parameter enables it, not configuring it disables it by default.|
-|--backup|Optional|Decides whether to back up data during optimization; configuring this parameter enables backup. Values: <br>&#8226;True: enable backup<br>&#8226;False: disable backup.<br/>Default: `False`.|
+|--load-breakpoint|Optional|Controls whether to resume the optimization from a breakpoint; configuring this parameter enables it, not configuring it disables it by default.|
+|--backup|Optional|Backs up optimizer data when this flag is set. Default: off.|
 
 ### Usage Examples
 

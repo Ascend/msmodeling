@@ -1,7 +1,20 @@
-import argparse
 import logging
 
 from cli.logo import print_logo
+from cli.spec_cli import (
+    METAVAR_DIR,
+    METAVAR_FILE,
+    METAVAR_FLOAT,
+    METAVAR_N,
+    SpecArgumentParser,
+    add_option,
+    configure_std_logging,
+    inherit_deprecated,
+    kebab_choice_metavar,
+    make_enum_type,
+    make_token_type,
+    parse_args as spec_parse_args,
+)
 from tensor_cast import config, device_profiles  # noqa: F401
 from tensor_cast.core.compilation_config import (
     COMPILATION_CONFIG_OPTIONS,
@@ -13,11 +26,11 @@ from tensor_cast.core.quantization.datatypes import (
 )
 from tensor_cast.model_config import WordEmbeddingTPMode
 from ..utils import (
+    LOG_FORMAT,
     check_positive_integer,
     check_prefix_cache_hit_rate,
     get_common_argparser,
-    LOG_FORMAT,
-    LOG_LEVELS,
+    require_model_id,
 )
 
 # Supported performance model types
@@ -29,30 +42,47 @@ def main():
     Main function to parse arguments and run the inference simulation.
     """
     common_parser = get_common_argparser()
-    parser = argparse.ArgumentParser(
+    parser = SpecArgumentParser(
+        prog="msmodeling inference text-generate",
         description="Run a simulated LLM inference pass and dump the perf result.",
         parents=[common_parser],
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        examples=(
+            "# Prefill one query of 128 tokens\n"
+            "msmodeling inference text-generate Qwen/Qwen3-32B "
+            "--num-queries 1 --query-length 128 --device TEST_DEVICE\n"
+            "# Decode with tensor parallel\n"
+            "msmodeling inference text-generate Qwen/Qwen3-32B "
+            "--num-queries 8 --query-length 1 --context-length 4096 --decode "
+            "--tp-size 8"
+        ),
+        output_help="Metrics table on stdout. Optional chrome trace via --chrome-trace-file.",
     )
+    inherit_deprecated(parser, common_parser)
+    parse_linear, linear_meta = make_enum_type(QuantizeLinearAction, "--quantize-linear-action")
+    parse_attn, attn_meta = make_enum_type(QuantizeAttentionAction, "--quantize-attention-action")
+    parse_cc, cc_meta = make_token_type(COMPILATION_CONFIG_OPTIONS, "--compilation-config", store_canonical="snake")
 
     llm_group = parser.add_argument_group("LLM Options")
     llm_group.add_argument(
         "--num-queries",
         type=check_positive_integer,
         required=True,
+        metavar=METAVAR_N,
         help="Number of parallel inference queries to execute in a single batch.",
     )
     llm_group.add_argument(
         "--query-length",
         type=check_positive_integer,
         required=True,
+        metavar=METAVAR_N,
         help="Length (in tokens) of new input sequence for each query.",
     )
     llm_group.add_argument(
         "--context-length",
         type=int,
         default=0,
-        help="Length (in tokens) of existing context for each query. Default: 0.",
+        metavar=METAVAR_N,
+        help="Length (in tokens) of existing context for each query.",
     )
     llm_group.add_argument(
         "--decode",
@@ -63,20 +93,25 @@ def main():
         "--prefix-cache-hit-rate",
         type=check_prefix_cache_hit_rate,
         default=0.0,
-        help="Prefix cache hit rate for prefill token reuse. This is a token-level approximation in [0, 1).",
+        metavar=METAVAR_FLOAT,
+        help="Prefix cache hit rate for prefill token reuse in [0, 1).",
     )
     llm_group.add_argument(
         "--num-mtp-tokens",
         type=int,
         default=0,
+        metavar=METAVAR_N,
         help="Number of Multi-Token Prediction (MTP) tokens. 0 = disabled. "
         "Only supports models with MTP capability (e.g., DeepSeek).",
     )
-    llm_group.add_argument(
-        "--disable-repetition",
+    add_option(
+        llm_group,
+        "--no-repetition",
+        dest="disable_repetition",
         action="store_true",
-        help="Preserve the original behavior of the transformer models. Do not leverage the repetition "
-        "pattern of the transformer models to save runtime cost",
+        default=False,
+        help="Do not reuse repeated transformer layers to save runtime cost.",
+        aliases=("--disable-repetition",),
     )
 
     optim_group = parser.add_argument_group("Optimization Options")
@@ -94,10 +129,9 @@ def main():
         "--compilation-config",
         nargs="*",
         default=None,
-        choices=COMPILATION_CONFIG_OPTIONS,
-        help="Enable specific compilation features dynamically. "
-        f"Options: {', '.join(COMPILATION_CONFIG_OPTIONS)}. "
-        "If omitted, all compilation features remain at their defaults (disabled).",
+        type=parse_cc,
+        metavar=cc_meta,
+        help="Enable specific compilation features. If omitted, all compilation features stay disabled.",
     )
     optim_group.add_argument(
         "--fusion-plugin",
@@ -112,166 +146,198 @@ def main():
     quant_group = parser.add_argument_group("Quantization Options")
     quant_group.add_argument(
         "--quantize-linear-action",
-        type=QuantizeLinearAction,
-        choices=list(QuantizeLinearAction),
+        type=parse_linear,
         default=QuantizeLinearAction.W8A8_DYNAMIC,
-        help="Quantize all linear layers in the model from choices (currently only support symmetric quant)",
+        metavar=linear_meta,
+        help="Quantize all linear layers (symmetric quant).",
     )
     quant_group.add_argument(
         "--quantize-non-expert-linear-action",
-        type=QuantizeLinearAction,
-        choices=list(QuantizeLinearAction),
+        type=parse_linear,
         default=QuantizeLinearAction.DISABLED,
+        metavar=linear_meta,
         help=(
-            "Set a separate quantization type for non-expert linear layers, such as attention projections, "
-            "dense MLP layers, and shared experts, while routed MoE experts keep the broad "
-            "--quantize-linear-action setting. In MoE models, routed experts often benefit from different "
-            "quantization settings than attention, dense MLP, and shared-expert layers; for example, "
-            "--quantize-linear-action MXFP4 "
-            "--quantize-non-expert-linear-action FP8. For non-MoE models, this parameter does not create a "
-            "separate expert/non-expert split beyond --quantize-linear-action."
+            "Separate quantization type for non-expert linear layers. Routed MoE experts keep --quantize-linear-action."
         ),
     )
     quant_group.add_argument(
         "--quantize-lmhead",
         action="store_true",
-        help="Whether to quantize LM Head, off by default since quantizing LM Head usually impact accuracy a lot",
+        help="Quantize the LM Head. Off by default because it usually hurts accuracy.",
     )
     quant_group.add_argument(
         "--mxfp4-group-size",
         type=check_positive_integer,
         default=32,
-        help="Group size for MXFP4 quantization",
+        metavar=METAVAR_N,
+        help="Group size for MXFP4 quantization.",
     )
     quant_group.add_argument(
         "--quantize-attention-action",
-        type=QuantizeAttentionAction,
-        choices=list(QuantizeAttentionAction),
+        type=parse_attn,
         default=QuantizeAttentionAction.DISABLED,
-        help="Quantize the KV cache with the given action",
+        metavar=attn_meta,
+        help="Quantize the KV cache with the given action.",
     )
 
     debug_group = parser.add_argument_group("Debugging Options")
-    debug_group.add_argument(
-        "--graph-log-url",
-        help="For debug: the path for dumping the compiled graphs if compile is on",
+    add_option(
+        debug_group,
+        "--graph-log-path",
+        dest="graph_log_url",
+        metavar=METAVAR_DIR,
+        help=(
+            "Directory for dumping compiled graphs when --compile is on. "
+            "Each compile pass writes files under this directory."
+        ),
+        aliases=("--graph-log-url", "--graph-log-file"),
     )
     debug_group.add_argument(
         "--dump-input-shapes",
         action="store_true",
-        help="If set, group the table average by input shapes",
+        help="Group the result table average by input shapes.",
     )
     debug_group.add_argument(
         "--dump-op-bound-results",
         action="store_true",
-        help="If set, dump per-operator memory/communication/MMA/GP bound ratios in the result table.",
+        help="Dump per-operator memory/communication/MMA/GP bound ratios.",
     )
-    debug_group.add_argument(
-        "--chrome-trace",
-        help="Generate chrome trace file",
+    add_option(
+        debug_group,
+        "--chrome-trace-file",
+        dest="chrome_trace",
+        metavar=METAVAR_FILE,
+        help="Write a chrome trace JSON file.",
+        aliases=("--chrome-trace",),
     )
     debug_group.add_argument(
         "--num-hidden-layers-override",
         type=int,
         default=0,
-        help="Override the number of hidden layers, for debugging only",
+        metavar=METAVAR_N,
+        help="Override the number of hidden layers, for debugging only.",
     )
 
     par_group = parser.add_argument_group("Parallelism Options")
     par_group.add_argument(
         "--tp-size",
+        dest="tp_size",
         type=check_positive_integer,
         default=1,
-        help="The tp size for the whole model",
+        metavar=METAVAR_N,
+        help="Tensor parallel size for the whole model.",
     )
     par_group.add_argument(
         "--pp-size",
+        dest="pp_size",
         type=check_positive_integer,
         default=1,
-        help="The pipeline parallel size for the whole model",
+        metavar=METAVAR_N,
+        help="Pipeline parallel size for the whole model.",
     )
     par_group.add_argument(
         "--dcp-size",
+        dest="dcp_size",
         type=check_positive_integer,
         default=1,
-        help="The Decode Context Parallel (DCP) size. Reuses TP devices, so it must divide tp-size "
-        "(does not expand world-size). Slices the KV cache along the sequence dimension during decode.",
+        metavar=METAVAR_N,
+        help="Decode Context Parallel size. Reuses TP devices and must divide --tp-size.",
     )
     par_group.add_argument(
         "--dp-size",
+        dest="dp_size",
         type=check_positive_integer,
         default=None,
-        help="The dp size for the whole model",
+        metavar=METAVAR_N,
+        help="Data parallel size for the whole model.",
     )
     par_group.add_argument(
         "--ep-size",
+        dest="ep_size",
         type=check_positive_integer,
         default=1,
-        help="The ep size for experts",
+        metavar=METAVAR_N,
+        help="Expert parallel size.",
     )
     par_group.add_argument(
         "--o-proj-tp-size",
+        dest="o_proj_tp_size",
         type=check_positive_integer,
         default=None,
-        help="The tp size for attn o_proj layer",
+        metavar=METAVAR_N,
+        help="Tensor parallel size for attn o_proj.",
     )
     par_group.add_argument(
         "--o-proj-dp-size",
+        dest="o_proj_dp_size",
         type=check_positive_integer,
         default=None,
-        help="The dp size for attn o_proj layer",
+        metavar=METAVAR_N,
+        help="Data parallel size for attn o_proj.",
     )
     par_group.add_argument(
         "--mlp-tp-size",
+        dest="mlp_tp_size",
         type=check_positive_integer,
         default=None,
-        help="The tp size for mlp layer, can override tp-size for mlp layer",
+        metavar=METAVAR_N,
+        help="Tensor parallel size for MLP layers.",
     )
     par_group.add_argument(
         "--mlp-dp-size",
+        dest="mlp_dp_size",
         type=check_positive_integer,
         default=None,
-        help="The dp size for mlp layer, can override dp-size for mlp layer",
+        metavar=METAVAR_N,
+        help="Data parallel size for MLP layers.",
     )
     par_group.add_argument(
         "--lmhead-tp-size",
+        dest="lmhead_tp_size",
         type=check_positive_integer,
         default=None,
-        help="The tp size for lm head, can override tp-size for lm head",
+        metavar=METAVAR_N,
+        help="Tensor parallel size for the LM head.",
     )
     par_group.add_argument(
         "--lmhead-dp-size",
+        dest="lmhead_dp_size",
         type=check_positive_integer,
         default=None,
-        help="The dp size for lm head, can override dp-size for lm head",
+        metavar=METAVAR_N,
+        help="Data parallel size for the LM head.",
     )
     par_group.add_argument(
         "--moe-tp-size",
+        dest="moe_tp_size",
         type=check_positive_integer,
         default=None,
-        help="The tp size for experts, can override tp-size for experts",
+        metavar=METAVAR_N,
+        help="Tensor parallel size for experts.",
     )
     par_group.add_argument(
         "--moe-dp-size",
+        dest="moe_dp_size",
         type=check_positive_integer,
         default=1,
-        help="The dp size for experts, can override dp-size for experts",
+        metavar=METAVAR_N,
+        help="Data parallel size for experts.",
     )
     par_group.add_argument(
         "--word-embedding-tp",
+        dest="word_embedding_tp",
         type=str,
         choices=[mode.value for mode in WordEmbeddingTPMode],
         default=None,
-        help="Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled.",
+        metavar="{col,row}",
+        help="Word embedding tensor parallel mode. Omitted disables embedding TP.",
     )
     par_group.add_argument(
         "--enable-redundant-experts",
         action="store_true",
-        help="Whether or not to use redundant experts. When this flag is True: "
-        "if the externalization of shared experts is not enabled at this time, "
-        "each device will add one redundant expert. If the externalization of shared experts is enabled "
-        "and the number of routing experts on each device is the same, "
-        "then each device hosting the routing experts will also add one redundant expert.",
+        help="Use redundant experts. If shared-expert externalization is off, each device adds one "
+        "redundant expert. If it is on and every device has the same number of routing experts, "
+        "each device hosting routing experts also adds one redundant expert.",
     )
     par_group.add_argument(
         "--enable-shared-expert-tp",
@@ -291,8 +357,10 @@ def main():
     )
     par_group.add_argument(
         "--vision-tp-size",
+        dest="vision_tp_size",
         type=check_positive_integer,
         default=1,
+        metavar=METAVAR_N,
         help="Vision tensor parallel degree. Default 1 keeps vision modules unsharded.",
     )
 
@@ -301,66 +369,72 @@ def main():
         "--image-batch-size",
         type=check_positive_integer,
         default=None,
-        help="Batch size for image processing",
+        metavar=METAVAR_N,
+        help="Batch size for image processing.",
     )
     multimodal_group.add_argument(
         "--image-height",
         type=check_positive_integer,
         default=None,
-        help="Height of the input images",
+        metavar=METAVAR_N,
+        help="Height of the input images.",
     )
     multimodal_group.add_argument(
         "--image-width",
         type=check_positive_integer,
         default=None,
-        help="Width of the input images",
+        metavar=METAVAR_N,
+        help="Width of the input images.",
     )
 
     parser.add_argument(
         "--remote-source",
         choices=["huggingface", "modelscope"],
         default="huggingface",
-        help="The remote source for the model",
+        metavar="{huggingface,modelscope}",
+        help="The remote source for the model.",
     )
     parser.add_argument(
         "--performance-model",
         action="append",
         default=None,
         choices=SUPPORTED_PERFORMANCE_MODELS,
-        help="Performance model type(s). Can specify one or more models. "
-        "'analytic': Roofline model (default, no data required). "
-        "'profiling': EmpiricalPerformanceModel backed by Profiling CSV database "
-        "with optional interpolation; use --disable-profiling-interpolation for exact and partial "
-        "profiling matches only (requires --profiling-database). "
-        "Example: --performance-model analytic --performance-model profiling",
+        metavar=kebab_choice_metavar(SUPPORTED_PERFORMANCE_MODELS),
+        help="Performance model type(s). Repeat the option to select more than one. "
+        "'analytic': Roofline model. 'profiling': empirical model (requires --profiling-database-path).",
     )
-    parser.add_argument(
-        "--profiling-database",
+    add_option(
+        parser,
+        "--profiling-database-path",
+        dest="profiling_database",
         type=str,
         default=None,
-        help="Path to the performance database directory for 'profiling' mode. "
-        "The directory must contain op_mapping.yaml and per-kernel-type CSV files, "
-        "e.g. tensor_cast/performance_model/profiling_database/data/atlas_a3_752t_128g/vllm_ascend/v0.13.0/",
+        metavar=METAVAR_DIR,
+        help="Directory of the profiling database for 'profiling' mode.",
+        aliases=("--profiling-database",),
     )
-    parser.add_argument(
+    add_option(
+        parser,
         "--disable-profiling-interpolation",
+        dest="disable_profiling_interpolation",
         action="store_true",
-        help="Use exact and partial profiling database matches only when using --performance-model profiling.",
+        help="Use exact and partial profiling matches only with --performance-model profiling.",
     )
-    parser.add_argument(
-        "--export-empirical-metrics",
+    add_option(
+        parser,
+        "--export-empirical-metrics-file",
+        dest="export_empirical_metrics",
         type=str,
         default=None,
-        help="(developer only) Export M1-M5 metrics report as JSON for offline M6 computation. "
-        "Requires --performance-model profiling",
+        metavar=METAVAR_FILE,
+        help="(developer only) Export M1-M5 metrics report as JSON. Requires --performance-model profiling.",
+        aliases=("--export-empirical-metrics",),
     )
 
-    args = parser.parse_args()
+    args = spec_parse_args(parser)
+    require_model_id(parser, args)
     print_logo()
-    logging.basicConfig(
-        level=LOG_LEVELS[args.log_level.lower()],
-        format=LOG_FORMAT,
-    )
+    configure_std_logging(args, log_format=LOG_FORMAT)
     logger = logging.getLogger(__name__)
 
     if args.graph_log_url:

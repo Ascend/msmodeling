@@ -6,6 +6,8 @@ import argparse
 import sys
 from typing import TYPE_CHECKING
 
+from cli.spec_cli import SpecArgumentParser, add_version_option
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -52,26 +54,46 @@ def _handle_inference_command(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
+    parser = SpecArgumentParser(
         prog="msmodeling",
         description="MindStudio Modeling CLI",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  msmodeling inference text-generate MODEL --num-queries 1 --query-length 128 --device DEV\n"
-            "  msmodeling inference throughput-optimizer MODEL --device DEV --num-devices 8 ...\n"
-            "  msmodeling inference model-adapter doctor --model-id MODEL\n"
-            "  msmodeling inference video-generate MODEL --batch-size 1 ...\n"
-            "  msmodeling inference image-generate MODEL --batch-size 1 ...\n"
-            "  msmodeling optix -e vllm -b ais_bench\n"
+        examples=(
+            "# Simulated LLM inference\n"
+            "msmodeling inference text-generate MODEL --num-queries 1 --query-length 128 --device DEV\n"
+            "# Throughput search\n"
+            "msmodeling inference throughput-optimizer MODEL --device DEV --num-devices 8 "
+            "--input-length 1024 --output-length 512\n"
+            "# Model adapter doctor\n"
+            "msmodeling inference model-adapter doctor --model-id MODEL\n"
+            "# Video generate\n"
+            "msmodeling inference video-generate MODEL --batch-size 1 --seq-len 512\n"
+            "# Image generate\n"
+            "msmodeling inference image-generate MODEL --batch-size 1\n"
+            "# OptiX service parameter optimizer\n"
+            "msmodeling optix -e vllm -b ais_bench"
         ),
     )
-    subparsers = parser.add_subparsers(dest="command")
+    add_version_option(parser)
+    subparsers = parser.add_subparsers(dest="command", parser_class=SpecArgumentParser)
 
     subparsers.add_parser("optix", help="Service parameter optimizer", add_help=False)
 
-    inference_parser = subparsers.add_parser("inference", help="Inference simulation commands")
-    inference_sub = inference_parser.add_subparsers(dest="inference_command")
+    inference_parser = subparsers.add_parser(
+        "inference",
+        help="Inference simulation commands",
+        description="Inference simulation commands.",
+        examples=(
+            "# Simulated LLM inference\n"
+            "msmodeling inference text-generate MODEL --num-queries 1 --query-length 128 --device DEV\n"
+            "# Throughput search\n"
+            "msmodeling inference throughput-optimizer MODEL --device DEV --num-devices 8 "
+            "--input-length 1024 --output-length 512\n"
+            "# Image generate\n"
+            "msmodeling inference image-generate MODEL --batch-size 1"
+        ),
+    )
+    add_version_option(inference_parser)
+    inference_sub = inference_parser.add_subparsers(dest="inference_command", parser_class=SpecArgumentParser)
     inference_sub.add_parser("text-generate", help="Run a simulated LLM inference pass")
     inference_sub.add_parser("throughput-optimizer", help="Search serving throughput strategies")
     inference_sub.add_parser("model-adapter", help="Model adaptation doctor, verify, and export-evidence")

@@ -14,12 +14,25 @@
 
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 import time
 
 from cli.logo import print_logo
+from cli.spec_cli import (
+    METAVAR_DIR,
+    METAVAR_FILE,
+    METAVAR_FLOAT,
+    METAVAR_N,
+    METAVAR_NAME,
+    SpecArgumentParser,
+    add_option,
+    configure_std_logging,
+    inherit_deprecated,
+    make_enum_type,
+    make_token_type,
+    parse_args as spec_parse_args,
+)
 from serving_cast.service.optimizer_curve_plots import (
     render_cross_hardware_summary,
     run_multi_device_loop,
@@ -48,41 +61,64 @@ from tensor_cast.model_config import WordEmbeddingTPMode
 
 from ..utils import (
     LOG_FORMAT,
-    LOG_LEVELS,
     check_device_targets,
     check_non_negative_integer,
     check_prefix_cache_hit_rate,
     get_common_argparser,
+    require_model_id,
 )
 
 
 def arg_parse():
-    parser = argparse.ArgumentParser(
-        description="Get Best Throughput for given input/output sequence length and SLO limitations "
+    common_parser = get_common_argparser(reserved_memory_gb_default=10.0)
+    parser = SpecArgumentParser(
+        prog="msmodeling inference throughput-optimizer",
+        description="Get best throughput for given input/output sequence length and SLO limits "
         "in aggregation mode or disaggregation mode.",
-        parents=[get_common_argparser(reserved_memory_gb_default=10.0)],
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        parents=[common_parser],
         conflict_handler="resolve",
+        examples=(
+            "# Search TP on 8 devices\n"
+            "msmodeling inference throughput-optimizer Qwen/Qwen3-32B "
+            "--device TEST_DEVICE --num-devices 8 --input-length 1024 --output-length 512\n"
+            "# Disaggregated prefill/decode search\n"
+            "msmodeling inference throughput-optimizer Qwen/Qwen3-32B "
+            "--num-devices 16 --input-length 1024 --output-length 512 --disagg"
+        ),
+        output_help="Best-strategy tables on stdout. Optional chrome trace via --chrome-trace-file.",
+    )
+    inherit_deprecated(parser, common_parser)
+    parse_linear, linear_meta = make_enum_type(QuantizeLinearAction, "--quantize-linear-action")
+    parse_attn, attn_meta = make_enum_type(QuantizeAttentionAction, "--quantize-attention-action")
+    parse_cc, cc_meta = make_token_type(COMPILATION_CONFIG_OPTIONS, "--compilation-config", store_canonical="snake")
+    parse_strategy, strategy_meta = make_token_type(
+        ("exponential", "linear_exponential"),
+        "--concurrency-search-strategy",
+        store_canonical="snake",
     )
     parser.add_argument(
         "--device",
+        "--devices",
+        dest="device",
         type=str,
         nargs="+",
         default=None,
-        metavar="DEVICE",
+        metavar=METAVAR_NAME,
         help="Device profile(s) to evaluate. Multiple values enable cross-hardware summaries.",
     )
     parser.add_argument(
         "--input-length",
         type=check_positive_integer_and_string,
         required=True,
-        help="The input length of the prompt, or a YAML file describing a variable-length input distribution.",
+        metavar=METAVAR_N,
+        help="Prompt length in tokens, or a YAML file describing a variable-length input distribution.",
     )
     parser.add_argument(
         "--output-length",
         type=check_positive_integer,
         required=True,
-        help="The expected output length.",
+        metavar=METAVAR_N,
+        help="Expected output length in tokens.",
     )
     model_group = parser.add_argument_group("Model & Quantization Options")
     model_group.add_argument(
@@ -101,95 +137,97 @@ def arg_parse():
         choices=range(0, 10),
         nargs="+",
         default=None,
-        help="MTP token count candidate(s). Pass one value for a fixed configuration, "
+        metavar=METAVAR_N,
+        help="MTP token count candidate(s) in 0-9. Pass one value for a fixed configuration, "
         "or multiple values to sweep during throughput optimization. "
         "0 means disabled and only models with MTP support will benefit from non-zero values. "
         "When combined with TP/EP/MOE-DP search, total combinations grow as TP x EP x MOE-DP x MTP.",
     )
-    parser.add_argument(
-        "--mtp-acceptance-rate",
+    add_option(
+        parser,
+        "--mtp-acceptance-rates",
+        dest="mtp_acceptance_rate",
         type=float,
         default=[0.9, 0.6, 0.4, 0.2],
         nargs="+",
-        help="Acceptance rate list for MTP",
+        metavar=METAVAR_FLOAT,
+        help="Acceptance rates for MTP.",
+        aliases=("--mtp-acceptance-rate",),
     )
     parser.add_argument(
         "--prefix-cache-hit-rate",
         type=check_prefix_cache_hit_rate,
         default=0.0,
+        metavar=METAVAR_FLOAT,
         help="Prefix cache hit rate for prefill token reuse. This is a token-level approximation in [0, 1).",
     )
     model_group.add_argument(
         "--quantize-linear-action",
-        type=QuantizeLinearAction,
-        choices=list(QuantizeLinearAction),
+        type=parse_linear,
         default=QuantizeLinearAction.W8A8_DYNAMIC,
-        help="Quantize all linear layers in the model from choices (currently only support symmetric quant)",
+        metavar=linear_meta,
+        help="Quantize all linear layers (symmetric quant).",
     )
     model_group.add_argument(
         "--quantize-non-expert-linear-action",
-        type=QuantizeLinearAction,
-        choices=list(QuantizeLinearAction),
+        type=parse_linear,
         default=QuantizeLinearAction.DISABLED,
-        help=(
-            "Set a separate quantization type for non-expert linear layers, such as attention projections, "
-            "dense MLP layers, and shared experts, while routed MoE experts keep the broad "
-            "--quantize-linear-action setting. In MoE models, routed experts often benefit from different "
-            "quantization settings than attention, dense MLP, and shared-expert layers; for example, "
-            "--quantize-linear-action MXFP4 "
-            "--quantize-non-expert-linear-action FP8. For non-MoE models, this parameter does not create a "
-            "separate expert/non-expert split beyond --quantize-linear-action."
-        ),
+        metavar=linear_meta,
+        help="Separate quantization type for non-expert linear layers.",
     )
     model_group.add_argument(
         "--mxfp4-group-size",
         type=check_positive_integer,
         default=32,
-        help="Group size for MXFP4 quantization",
+        metavar=METAVAR_N,
+        help="Group size for MXFP4 quantization.",
     )
     model_group.add_argument(
         "--quantize-attention-action",
-        type=QuantizeAttentionAction,
-        choices=list(QuantizeAttentionAction),
+        type=parse_attn,
         default=QuantizeAttentionAction.DISABLED,
-        help="Quantize the KV cache with the given action",
+        metavar=attn_meta,
+        help="Quantize the KV cache with the given action.",
     )
-    model_group.add_argument(
+    add_option(
+        model_group,
         "--tp-sizes",
+        dest="tp_sizes",
         type=check_positive_integer,
         nargs="*",
         default=None,
-        help="Enable TP search. Optional explicit TP sizes. "
-        "If no value is provided, defaults to powers of 2 up to world_size. "
-        "Combined TP/EP/MOE-DP/MTP candidates are evaluated as a Cartesian product.",
+        metavar=METAVAR_N,
+        help="Enable TP search. Optional explicit sizes; default is powers of 2 up to world size.",
     )
-    model_group.add_argument(
+    add_option(
+        model_group,
         "--ep-sizes",
+        dest="ep_sizes",
         type=check_positive_integer,
         nargs="*",
         default=None,
-        help="Enable EP search. Optional explicit EP sizes. "
-        "If no value is provided, defaults to powers of 2 up to world_size. "
-        "Combined TP/EP/MOE-DP/MTP candidates are evaluated as a Cartesian product.",
+        metavar=METAVAR_N,
+        help="Enable EP search. Optional explicit sizes; default is powers of 2 up to world size.",
     )
-    model_group.add_argument(
+    add_option(
+        model_group,
         "--moe-dp-sizes",
+        dest="moe_dp_sizes",
         type=check_positive_integer,
         nargs="*",
         default=None,
-        help="Enable MOE-DP search. Optional explicit MOE-DP sizes. "
-        "If no value is provided, defaults to powers of 2 up to world_size. "
-        "Combined TP/EP/MOE-DP/MTP candidates are evaluated as a Cartesian product.",
+        metavar=METAVAR_N,
+        help="Enable MOE-DP search. Optional explicit sizes; default is powers of 2 up to world size.",
     )
-    model_group.add_argument(
+    add_option(
+        model_group,
         "--dcp-sizes",
+        dest="dcp_sizes",
         type=check_positive_integer,
         nargs="*",
         default=None,
-        help="Enable Decode Context Parallel (DCP) search. Optional explicit DCP sizes. "
-        "If no value is provided, defaults to powers of 2 up to world_size. DCP reuses TP "
-        "devices (each candidate must divide the TP size, so it does not expand world_size) "
-        "and applies to the Decode phase only; Prefill is always searched with dcp=1.",
+        metavar=METAVAR_N,
+        help="Enable DCP search. Optional explicit sizes; default is powers of 2 up to world size.",
     )
     model_group.add_argument(
         "--enable-shared-expert-tp",
@@ -201,17 +239,18 @@ def arg_parse():
         "--compilation-config",
         nargs="*",
         default=None,
-        choices=COMPILATION_CONFIG_OPTIONS,
-        help="Enable specific compilation features dynamically. "
-        f"Options: {', '.join(COMPILATION_CONFIG_OPTIONS)}. "
-        "If omitted, all compilation features remain at their defaults (disabled).",
+        type=parse_cc,
+        metavar=cc_meta,
+        help="Enable specific compilation features. If omitted, all compilation features stay disabled.",
     )
     model_group.add_argument(
         "--word-embedding-tp",
+        dest="word_embedding_tp",
         type=str,
         choices=[mode.value for mode in WordEmbeddingTPMode],
         default=None,
-        help="Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled.",
+        metavar="{col,row}",
+        help="Word embedding tensor parallel mode. Omitted disables embedding TP.",
     )
     perf_group = parser.add_argument_group("Performance Model Options")
     perf_group.add_argument(
@@ -220,47 +259,58 @@ def arg_parse():
         default="analytic",
         dest="performance_model",
         choices=["analytic", "profiling"],
-        help="Performance model type. 'analytic': Roofline model (default). "
-        "'profiling': empirical model backed by measured CSV data "
-        "(requires --profiling-database).",
+        metavar="{analytic,profiling}",
+        help="Performance model type.",
     )
-    perf_group.add_argument(
-        "--profiling-database",
+    add_option(
+        perf_group,
+        "--profiling-database-path",
+        dest="profiling_database",
         type=str,
         default=None,
-        dest="profiling_database",
-        help="Path to the profiling CSV database directory for 'profiling' mode. "
-        "e.g. tensor_cast/performance_model/profiling_database/data/"
-        "ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/",
+        metavar=METAVAR_DIR,
+        help="Profiling CSV database directory for 'profiling' mode.",
+        aliases=("--profiling-database",),
     )
     debug_group = parser.add_argument_group("Debug Options")
-    debug_group.add_argument(
-        "--chrome-trace",
+    add_option(
+        debug_group,
+        "--chrome-trace-file",
+        dest="chrome_trace",
         type=str,
         default=None,
-        help="Generate chrome trace file for visualization (e.g., trace.json). "
-        "Useful for analyzing operator-level performance in detail.",
+        metavar=METAVAR_FILE,
+        help="Write a chrome trace JSON file.",
+        aliases=("--chrome-trace",),
     )
 
     service_group = parser.add_argument_group("Service Options")
-    service_group.add_argument(
-        "--ttft-limits",
+    add_option(
+        service_group,
+        "--ttft-limit",
+        dest="ttft_limits",
         type=check_positive_float,
         default=None,
-        help="TTFT constraints under which to search for the best throughput. None means no constraint.",
+        metavar=METAVAR_FLOAT,
+        help="TTFT constraint under which to search for the best throughput.",
+        aliases=("--ttft-limits",),
     )
-    service_group.add_argument(
-        "--tpot-limits",
+    add_option(
+        service_group,
+        "--tpot-limit",
+        dest="tpot_limits",
         type=check_positive_float,
         default=None,
-        help="TPOT constraints under which to search for the best throughput. None means no constraint.",
+        metavar=METAVAR_FLOAT,
+        help="TPOT constraint under which to search for the best throughput.",
+        aliases=("--tpot-limits",),
     )
     service_group.add_argument(
         "--max-batched-tokens",
         type=check_positive_integer,
         default=None,
-        help="Max batched tokens for one prefill or mixed prefill/decode step. "
-        "If omitted, starts from a multiple of input_length and falls back on Prefill OOM.",
+        metavar=METAVAR_N,
+        help="Max batched tokens for one prefill or mixed prefill/decode step.",
     )
     service_group.add_argument(
         "--batch-range",
@@ -268,36 +318,44 @@ def arg_parse():
         nargs="+",
         action=BatchRangeAction,
         default=None,
-        help="Batch size range: [min max] or [max] (default: 1 for min, no limit for max)",
+        metavar=METAVAR_N,
+        help="Batch size range: min max, or a single max (min defaults to 1).",
     )
     service_group.add_argument(
         "--serving-cost",
         type=float,
         default=0,
-        help="Serving cost represents the cost of service delivery",
+        metavar=METAVAR_FLOAT,
+        help="Serving cost of service delivery.",
     )
-    service_group.add_argument(
+    add_option(
+        service_group,
         "--disagg",
+        dest="disagg",
         action="store_true",
-        help="If set, run disaggregation mode. disagg means disaggregation mode.",
+        help="Run disaggregation mode.",
     )
     service_group.add_argument(
         "--jobs",
+        "-j",
         type=check_positive_integer,
         default=8,
-        help="Number of parallel jobs.",
+        metavar=METAVAR_N,
+        help="Number of parallel jobs. Must be a positive integer.",
     )
     service_group.add_argument(
         "--max-search-combinations",
         type=check_non_negative_integer,
         default=DEFAULT_MAX_SEARCH_COMBINATIONS,
+        metavar=METAVAR_N,
         help="Warn when TP/EP/MOE-DP/MTP search combinations exceed this value. Set 0 to disable the warning.",
     )
     service_group.add_argument(
         "--concurrency-search-strategy",
-        choices=["exponential", "linear_exponential"],
+        type=parse_strategy,
         default="exponential",
-        help="Concurrency search strategy. The default is exponential.",
+        metavar=strategy_meta,
+        help="Concurrency search strategy.",
     )
     parser.add_argument(
         "--dump-original-results",
@@ -309,39 +367,45 @@ def arg_parse():
         "--image-batch-size",
         type=check_positive_integer,
         default=None,
+        metavar=METAVAR_N,
         help="Number of images per request. If omitted, reuse batch_size for backward compatibility.",
     )
     multimodal_group.add_argument(
         "--image-height",
         type=check_positive_integer,
         default=None,
-        help="Height of the input images",
+        metavar=METAVAR_N,
+        help="Height of the input images.",
     )
     multimodal_group.add_argument(
         "--image-width",
         type=check_positive_integer,
         default=None,
-        help="Width of the input images",
+        metavar=METAVAR_N,
+        help="Width of the input images.",
     )
     pd_ratio_group = parser.add_argument_group("PD Ratio Optimization Options")
     pd_ratio_group.add_argument(
         "--prefill-devices-per-instance",
         type=check_positive_integer,
         default=None,
-        help="Number of devices per Prefill instance for PD ratio optimization",
+        metavar=METAVAR_N,
+        help="Number of devices per Prefill instance for PD ratio optimization.",
     )
     pd_ratio_group.add_argument(
         "--decode-devices-per-instance",
         type=check_positive_integer,
         default=None,
-        help="Number of devices per Decode instance for PD ratio optimization",
+        metavar=METAVAR_N,
+        help="Number of devices per Decode instance for PD ratio optimization.",
     )
     pd_ratio_group.add_argument(
         "--enable-optimize-prefill-decode-ratio",
         action="store_true",
         help="Enable PD ratio optimization mode",
     )
-    args = parser.parse_args()
+    args = spec_parse_args(parser)
+    require_model_id(parser, args)
 
     if all(x is None for x in (args.tp_sizes, args.ep_sizes, args.moe_dp_sizes)):
         # Backward-compatible default: search TP only with default range.
@@ -362,7 +426,7 @@ def arg_parse():
         return normalized[0], normalized
 
     if args.performance_model == "profiling" and not args.profiling_database:
-        parser.error("--profiling-database is required when using --performance-model profiling")
+        parser.error("--profiling-database-path is required when using --performance-model profiling")
 
     def _normalize_and_validate(values: list[int] | None, arg_name: str, num_devices: int) -> list[int] | None:
         if values is None:
@@ -424,7 +488,8 @@ def arg_parse():
             f"({total_combinations} = TP:{len(tp_candidates)} x EP:{len(ep_candidates)} "
             f"x MOE-DP:{len(moe_dp_candidates)} x MTP:{len(mtp_candidates)} x DCP:{len(dcp_candidates)}). "
             "Optimization may take a long time. Consider narrowing --tp-sizes, --ep-sizes, "
-            "--moe-dp-sizes, --num-mtp-tokens, or --dcp-sizes; or increase --max-search-combinations.",
+            "--moe-dp-sizes, --num-mtp-tokens, or --dcp-sizes; "
+            "or increase --max-search-combinations.",
             file=sys.stderr,
             flush=True,
         )
@@ -436,10 +501,7 @@ def main():
     start_time = time.time()
     args = arg_parse()
     print_logo()
-    logging.basicConfig(
-        level=LOG_LEVELS[args.log_level.lower()],
-        format=LOG_FORMAT,
-    )
+    configure_std_logging(args, log_format=LOG_FORMAT)
     logger = logging.getLogger(__name__)
 
     apply_compilation_config(args.compilation_config)
@@ -454,7 +516,7 @@ def main():
     ):
         logger.warning(
             "--input-length FILE currently supports aggregation runs or disaggregation "
-            "prefill-only runs with --ttft-limits and without --tpot-limits."
+            "prefill-only runs with --ttft-limit and without --tpot-limit."
         )
         return 1
 

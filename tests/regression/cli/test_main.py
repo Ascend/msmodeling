@@ -81,6 +81,7 @@ def test_main_prints_top_level_help_without_subcommand() -> None:
 
 
 def test_main_dispatches_optix_subcommand() -> None:
+    pytest.importorskip("pydantic_settings")
     with patch("optix.optimizer.optimizer.main", return_value=0) as optix_main:
         result = run_cli_main(main, ["optix", "--help"], prog="msmodeling")
 
@@ -120,8 +121,12 @@ def test_nested_image_generate_help_uses_module_parser() -> None:
     )
 
     assert result.returncode == 0
-    assert "--output-image-size HEIGHT WIDTH" in result.stdout
+    assert "--output-image-size" in result.stdout
+    assert "HEIGHT WIDTH" in result.stdout
     assert "Transformer denoising" in result.stdout
+    assert "--num-devices" in result.stdout
+    assert "--model-id" in result.stdout
+    assert "--chrome-trace-file" in result.stdout
 
 
 def test_main_does_not_register_top_level_image_generate_alias() -> None:

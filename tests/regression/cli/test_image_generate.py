@@ -31,6 +31,7 @@ def test_help_exposes_public_contract_without_legacy_flags() -> None:
     result = run_module_main("cli.inference.image_generate", ["--help"])
     assert result.returncode == 0
     help_text = " ".join(result.stdout.split())
+    assert "Description:" in result.stdout
     assert "Prompt encoding, VAE, scheduler, and image I/O are excluded." in help_text
     for option in (
         "--batch-size",
@@ -40,18 +41,30 @@ def test_help_exposes_public_contract_without_legacy_flags() -> None:
         "--mxfp4-group-size",
         "--use-cfg",
         "--source-image-size",
-        "--world-size",
+        "--num-devices",
         "--ulysses-size",
         "--cfg-parallel",
         "--dit-cache",
         "--cache-step-range",
         "--cache-step-interval",
         "--cache-block-range",
-        "--chrome-trace",
+        "--chrome-trace-file",
+        "--model-id",
+        "--log-level",
     ):
         assert option in result.stdout
-    for forbidden in ("--negative-text-seq-len", "--prompt", "--seed", "--frame-num"):
+    for forbidden in (
+        "--negative-text-seq-len",
+        "--prompt",
+        "--seed",
+        "--frame-num",
+        "--world-size",
+        "--model_id",
+        "--debug",
+        "--log-file",
+    ):
         assert forbidden not in result.stdout
+    assert "--chrome-trace" not in result.stdout.replace("--chrome-trace-file", "")
 
 
 def test_startup_prints_mindstudio_logo() -> None:

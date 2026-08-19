@@ -123,7 +123,7 @@ Qwen 只使用公共参数：
 - `--text-seq-len`；
 - `--sample-step N`；
 - `--use-cfg`、`--cfg-parallel`；
-- 公共 device、dtype、量化、compile、`--world-size`、`--ulysses-size` 和 `--chrome-trace`。
+- 公共 device、dtype、量化、compile、`--num-devices`（别名 `--world-size`）、`--ulysses-size` 和 `--chrome-trace-file`（别名 `--chrome-trace`）。
 
 不增加 `--negative-text-seq-len`；不提供独立正/负 shape 参数，不提供 embedded guidance 数值参数、source timestep 参数或 Qwen 专属公共开关。`--output-image-size` 缺失、重复、格式非法或非正值必须失败，不能从 source size 推断。original 必须恰好一个 source size；2509/2511 必须一至三个。source size 是同一组 CLI 几何条件，不能使用嵌套 per-batch 语法。
 
@@ -319,7 +319,7 @@ cache hit、miss、update、reuse 的 shape、dtype、layout、batch、source co
 | operator/call breakdown | Runtime 实际记录的 operator 和调用事件 |
 | cache | update/reuse 命中路径和 block range 事件 |
 
-可选 `--chrome-trace` 成功时必须导出可解析 Chrome trace；trace 是 Runtime 的实际输出，不是结果 schema 的替代。失败或未请求 trace 时不得伪造路径或成功状态。
+可选 `--chrome-trace-file`（别名 `--chrome-trace`）成功时必须导出可解析 Chrome trace；trace 是 Runtime 的实际输出，不是结果 schema 的替代。失败或未请求 trace 时不得伪造路径或成功状态。
 
 输出只报告公共 output contract 所允许的 Runtime 时间、operator/call、通信和必要 shape audit 信息。Qwen 内部必须可审计 generated/source token counts、`img_shapes`、text mask、effective batch、forward count、固定 timestep shape/dtype、source immutability、`zero_cond_t` 和 cache state；不得建立独立结构化 JSON/result schema，不得把 shape-only 作为 measured 时间，不得报告 prompt/VAE/image I/O、质量、权重显存或端到端编辑结论。
 

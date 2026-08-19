@@ -8,6 +8,7 @@ from unittest import TestCase
 import pytest
 
 from cli.utils import (
+    add_model_id_source,
     check_device_targets,
     check_non_negative_integer,
     check_prefix_cache_hit_rate,
@@ -15,6 +16,7 @@ from cli.utils import (
     check_string_valid,
     get_common_argparser,
     parse_int_range,
+    require_model_id,
 )
 from tensor_cast.device import DeviceProfile
 
@@ -197,3 +199,57 @@ def test_check_device_targets_rejects_undersized_comm_grid(device_profiles: dict
     args = argparse.Namespace(device=["TEST_DEVICE"], num_devices=8)
 
     assert check_device_targets(args, logging.getLogger("cli.utils.test")) is None
+
+
+def test_require_model_id_positional_only_error_does_not_mention_option(capsys: pytest.CaptureFixture[str]) -> None:
+    parser = argparse.ArgumentParser(prog="text-generate")
+    parser.add_argument("model_id", nargs="?")
+    args = parser.parse_args([])
+
+    with pytest.raises(SystemExit):
+        require_model_id(parser, args)
+
+    err = capsys.readouterr().err
+    assert "model_id is required; pass a positional model id." in err
+    assert "--model-id" not in err
+
+
+def test_require_model_id_error_lists_option_when_registered(capsys: pytest.CaptureFixture[str]) -> None:
+    parser = argparse.ArgumentParser(prog="model-adapter")
+    parser.add_argument("model_id_positional", nargs="?")
+    parser.add_argument("--model-id", dest="model_id", default=None)
+    args = parser.parse_args([])
+
+    with pytest.raises(SystemExit):
+        require_model_id(parser, args)
+
+    err = capsys.readouterr().err
+    assert "model_id is required; pass a positional model id or use --model-id <MODEL_ID>." in err
+
+
+def test_require_model_id_rejects_positional_and_option_together(capsys: pytest.CaptureFixture[str]) -> None:
+    parser = argparse.ArgumentParser(prog="text-generate")
+    add_model_id_source(parser, positional_help="Model source.")
+    args = parser.parse_args(["Qwen/Qwen3-32B", "--model-id", "Qwen/Other"])
+
+    with pytest.raises(SystemExit):
+        require_model_id(parser, args)
+
+    err = capsys.readouterr().err
+    assert "pass either a positional model id or --model-id, not both" in err
+
+
+def test_add_model_id_source_option_only_merges_into_model_id() -> None:
+    parser = argparse.ArgumentParser()
+    add_model_id_source(parser, positional_help="Model source.")
+    args = parser.parse_args(["--model-id", "Qwen/Qwen3-32B"])
+    require_model_id(parser, args)
+    assert args.model_id == "Qwen/Qwen3-32B"
+    assert not hasattr(args, "model_id_positional")
+
+
+def test_common_argparser_accepts_model_id_option() -> None:
+    parser = get_common_argparser()
+    args = parser.parse_args(["--model-id", "Qwen/Qwen3-32B"])
+    require_model_id(parser, args)
+    assert args.model_id == "Qwen/Qwen3-32B"

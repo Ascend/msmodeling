@@ -24,6 +24,7 @@ from optix.logging import (
     read_log_tail,
     resolve_log_format,
     resolve_log_level,
+    set_log_level,
 )
 from optix.optimizer.health_check import ErrorContext, FatalError
 from optix.optimizer.scheduler import Scheduler
@@ -111,6 +112,18 @@ def test_configure_logger_preserves_custom_sink(monkeypatch: pytest.MonkeyPatch)
 
     logger.remove(custom_id)
     assert "custom sink still receives logs" in custom_output
+
+
+def test_set_log_level_preserves_custom_sink(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPTIX_LOG_LEVEL", "INFO")
+    configure_logger()
+
+    custom_buffer = StringIO()
+    custom_id = logger.add(custom_buffer, format="{message}", level="INFO")
+    set_log_level("WARNING")
+    logger.warning("custom sink survives set_log_level")
+    logger.remove(custom_id)
+    assert "custom sink survives set_log_level" in custom_buffer.getvalue()
 
 
 def test_handle_error_raises_without_logging() -> None:

@@ -69,7 +69,7 @@ msmodeling inference image-generate MODEL_ID [OPTIONS]
 
 | 参数 | 规范语义 |
 | :--- | :--- |
-| `MODEL_ID` | 本地 Diffusers 目录，或精确允许的 `(remote_source, model_id)`。 |
+| `MODEL_ID` / `--model-id` | 本地 Diffusers 目录，或精确允许的 `(remote_source, model_id)`。位置参数与 `--model-id` 二选一；`--model_id` 为隐藏别名。 |
 | `--batch-size B` | 正整数。普通 workload 的基础 batch，不是 prompt 数或源图数。 |
 | `--output-image-size HEIGHT WIDTH` | 恰好一次，两个正整数；只用于推导 shape，不输出图片。 |
 | `--text-seq-len N` | 正整数，实际进入 Transformer 的文本条件长度。 |
@@ -77,7 +77,8 @@ msmodeling inference image-generate MODEL_ID [OPTIONS]
 | `--sample-step N` | 正整数，执行 N 次相同 Transformer workload iteration。 |
 | `--use-cfg` | 启用 video-style CFG workload approximation。 |
 | `--cfg-parallel` | 仅在 `--use-cfg` 下启用 CFG group 拓扑。 |
-| `--world-size`、`--ulysses-size` | 复用既有并行参数。 |
+| `--num-devices`、`--ulysses-size` | 正式并行参数；`--world-size` 为隐藏兼容别名。 |
+| `--chrome-trace-file` | 仅在 Runtime 成功后生成 Chrome trace；`--chrome-trace` 为隐藏兼容别名。 |
 | `--device`、`--dtype` | 复用既有 device/dtype 语义。 |
 | `--remote-source` | 远端来源；必须参与 exact pair 匹配。 |
 | `--quantize-linear-action`、`--quantize-attention-action` | 复用既有量化参数。 |
@@ -86,7 +87,6 @@ msmodeling inference image-generate MODEL_ID [OPTIONS]
 | `--cache-step-range START,END` | genuine cache request 所需的 inclusive step range。 |
 | `--cache-step-interval N` | cache interval；大于 1 才构成 genuine request。 |
 | `--cache-block-range START,END` | block range，start-inclusive/end-exclusive。 |
-| `--chrome-trace` | 仅在 Runtime 成功后生成 Chrome trace。 |
 
 完全删除 `--negative-text-seq-len`。负向分支使用与正向相同的 `--text-seq-len` shape；本模拟不暴露 CFG scale，不做数值 CFG combine。
 

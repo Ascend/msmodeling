@@ -61,7 +61,7 @@ The decode scenario is similar; only adjust the input length `--query-length` an
 python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 10 --query-length 1 --context-length 4500 --decode --device TEST_DEVICE --quantize-linear-action W8A8_STATIC --compile
 ```
 
-**Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace` is set.
+**Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace-file` is set.
 
 ### 2.2 Result (Text Generation)
 
@@ -131,9 +131,9 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --attention-sparsity 0.5
 ```
 
-**Key flags:** `model_id`, `--device`, `--batch-size`, `--seq-len`, `--height`, `--width`, `--frame-num`, `--sample-step`, `--dtype`, `--quantize-linear-action`, `--chrome-trace`, `--attention-backend`, `--attention-block-size`, `--attention-sparsity`
+**Key flags:** `model_id`, `--device`, `--batch-size`, `--seq-len`, `--height`, `--width`, `--frame-num`, `--sample-step`, `--dtype`, `--quantize-linear-action`, `--chrome-trace-file`, `--attention-backend`, `--attention-block-size`, `--attention-sparsity`
 
-**Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace` is set.
+**Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace-file` is set.
 
 ### 2.4 Result (Video Generation)
 
@@ -185,9 +185,9 @@ python -m cli.inference.image_generate black-forest-labs/FLUX.1-dev \
   --quantize-linear-action W8A8_DYNAMIC
 ```
 
-**Key flags:** `model_id`, `--device`, `--batch-size`, `--output-image-size`, `--text-seq-len`, `--source-image-size`, `--sample-step`, `--use-cfg`, `--world-size`, `--ulysses-size`, `--cfg-parallel`, `--dit-cache`, `--chrome-trace`
+**Key flags:** `model_id` / `--model-id`, `--device`, `--batch-size`, `--output-image-size`, `--text-seq-len`, `--source-image-size`, `--sample-step`, `--use-cfg`, `--num-devices`, `--ulysses-size`, `--cfg-parallel`, `--dit-cache`, `--chrome-trace-file`
 
-**Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace` is set.
+**Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace-file` is set.
 
 ### 2.6 Result (Image Generation)
 
@@ -251,13 +251,13 @@ usage: text_generate.py [-h]
                         [--log-level {debug,info,warning,error,critical}] --num-queries NUM_QUERIES
                         --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--decode]
                         [--prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE] [--num-mtp-tokens NUM_MTP_TOKENS]
-                        [--disable-repetition] [--compile] [--compile-allow-graph-break]
+                        [--no-repetition] [--compile] [--compile-allow-graph-break]
                         [--compilation-config [{enable_multistream,enable_sequence_parallel,enable_matmul_allreduce,enable_dispatch_ffn_combine} ...]]
                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                         [--quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
-                        [--quantize-lmhead] [--mxfp4-group-size MXFP4_GROUP_SIZE]
-                        [--quantize-attention-action {DISABLED,INT8,FP8}] [--graph-log-url GRAPH_LOG_URL]
-                        [--dump-input-shapes] [--dump-op-bound-results] [--chrome-trace CHROME_TRACE]
+                        [--quantize-lmhead] [--mxfp4-group-size mxfp4_GROUP_SIZE]
+                        [--quantize-attention-action {DISABLED,INT8,FP8}] [--graph-log-path GRAPH_LOG_DIR]
+                        [--dump-input-shapes] [--dump-op-bound-results] [--chrome-trace-file CHROME_TRACE]
                         [--num-hidden-layers-override NUM_HIDDEN_LAYERS_OVERRIDE] [--tp-size TP_SIZE]
                         [--dp-size DP_SIZE] [--ep-size EP_SIZE] [--o-proj-tp-size O_PROJ_TP_SIZE]
                         [--o-proj-dp-size O_PROJ_DP_SIZE] [--mlp-tp-size MLP_TP_SIZE] [--mlp-dp-size MLP_DP_SIZE]
@@ -268,7 +268,7 @@ usage: text_generate.py [-h]
                         [--image-batch-size IMAGE_BATCH_SIZE] [--image-height IMAGE_HEIGHT]
                         [--image-width IMAGE_WIDTH]
                         [--remote-source {huggingface,modelscope}] [--performance-model {analytic,profiling}]
-                        [--profiling-database PROFILING_DATABASE]
+                        [--profiling-database-path PROFILING_DATABASE]
                         [--export-empirical-metrics EXPORT_EMPIRICAL_METRICS]
                         model_id
 
@@ -290,19 +290,19 @@ Main parameters:
 | `--decode` | LLM Options | Optional | Enables autoregressive decode mode; omit it for prefill mode.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--prefix-cache-hit-rate` | LLM Options | Optional | Specifies the prefix cache hit rate for prefill token reuse approximation.<br>1. Type: Float.<br>2. Valid range: `[0, 1)`.<br>3. Default: `0.0`. |
 | `--num-mtp-tokens` | LLM Options | Optional | Specifies the number of Multi-Token Prediction (MTP) tokens. `0` means disabled.<br>1. Type: Int.<br>2. Valid range: non-negative integer.<br>3. Default: `0`.<br>4. Only models with MTP capability are supported, such as DeepSeek. |
-| `--disable-repetition` | LLM Options | Optional | Disables transformer repetition-pattern optimization and preserves the original model behavior.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
+| `--no-repetition` | LLM Options | Optional | Disables transformer repetition-pattern optimization and preserves the original model behavior.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compile` | Optimization Options | Optional | Invokes `torch.compile()` on the model before inference.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compile-allow-graph-break` | Optimization Options | Optional | Allows graph breaks during `torch.compile()`.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compilation-config` | Optimization Options | Optional | Dynamically enable specified compilation features. Multiple options can be provided at once.<br>1. Type: List[Str] (`nargs="*"`).<br>2. Choices: `enable_multistream` (enable multi-stream scheduling), `enable_sequence_parallel` (enable sequence parallel graph rewrite pass), `enable_matmul_allreduce` (enable matmul-allreduce fusion), `enable_dispatch_ffn_combine` (enable dispatch_ffn_combine fusion).<br>3. Default: when omitted, all compilation features remain disabled (`False`).<br>4. Example: `--compilation-config enable_multistream enable_sequence_parallel`. |
 | `--quantize-linear-action` | Quantization Options | Optional | Specifies the linear layer quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`. |
 | `--quantize-non-expert-linear-action` | Quantization Options | Optional | Specifies a separate quantization mode for non-expert linear layers, such as attention projections, dense MLP, and shared experts.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `DISABLED`. |
 | `--quantize-lmhead` | Quantization Options | Optional | Enables quantization for lm head.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
-| `--mxfp4-group-size` | Quantization Options | Optional | Specifies the group size for MXFP4 quantization.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `32`. |
+| `--mxfp4-group-size` | Quantization Options | Optional | Specifies the group size for mxfp4 quantization.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `32`. |
 | `--quantize-attention-action` | Quantization Options | Optional | Specifies KV cache quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`.<br>3. Default: `DISABLED`. |
-| `--graph-log-url` | Debugging Options | Optional | Specifies the compiled graph log output path for debugging the compile path.<br>1. Type: Str.<br>2. Valid range: file or directory path.<br>3. Default: `None`. |
+| `--graph-log-path` | Debugging Options | Optional | Directory for compiled graph dumps when debugging the compile path. Each pass writes files under this directory.<br>1. Type: Str.<br>2. Valid range: directory path.<br>3. Default: `None`. |
 | `--dump-input-shapes` | Debugging Options | Optional | Dumps input shape information for troubleshooting model input configuration.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--dump-op-bound-results` | Debugging Options | Optional | Dumps per-operator memory, communication, MMA, and GP bound ratios in the result table.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
-| `--chrome-trace` | Debugging Options | Optional | Specifies the Chrome trace output path for exporting the performance timeline.<br>1. Type: Str.<br>2. Valid range: file path.<br>3. Default: `None`. |
+| `--chrome-trace-file` | Debugging Options | Optional | Specifies the Chrome trace output path for exporting the performance timeline.<br>1. Type: Str.<br>2. Valid range: file path.<br>3. Default: `None`. |
 | `--num-hidden-layers-override` | Debugging Options | Optional | Overrides the number of hidden layers for debugging only.<br>1. Type: Int.<br>2. Valid range: non-negative integer.<br>3. Default: `0`. |
 | `--tp-size` | Parallelism Options | Optional | Specifies the tensor parallel size for the whole model.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
 | `--dp-size` | Parallelism Options | Optional | Specifies the data parallel size for the whole model.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`. |
@@ -325,8 +325,8 @@ Main parameters:
 | `--image-height` | MultiModal Options | Optional | Specifies input image height.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`. |
 | `--image-width` | MultiModal Options | Optional | Specifies input image width.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`. |
 | `--remote-source` | Options | Optional | Specifies the remote model source.<br>1. Type: Str.<br>2. Reference values: `huggingface`, `modelscope`.<br>3. Default: `huggingface`. |
-| `--performance-model` | Options | Optional | Specifies one or more performance models. This parameter can be repeated.<br>1. Type: List[Str].<br>2. Reference values: `analytic`, `profiling`.<br>3. Default: `analytic` when omitted.<br>4. `analytic` is a roofline model and does not require profiling data; `profiling` is an empirical performance model backed by profiling CSV data and requires `--profiling-database`. |
-| `--profiling-database` | Options | Optional | Specifies the profiling database path for the `profiling` performance model.<br>1. Type: Str.<br>2. Valid range: directory path containing `op_mapping.yaml` and CSV files for each kernel type.<br>3. Default: `None`. |
+| `--performance-model` | Options | Optional | Specifies one or more performance models. This parameter can be repeated.<br>1. Type: List[Str].<br>2. Reference values: `analytic`, `profiling`.<br>3. Default: `analytic` when omitted.<br>4. `analytic` is a roofline model and does not require profiling data; `profiling` is an empirical performance model backed by profiling CSV data and requires `--profiling-database-path`. |
+| `--profiling-database-path` | Options | Optional | Specifies the profiling database path for the `profiling` performance model.<br>1. Type: Str.<br>2. Valid range: directory path containing `op_mapping.yaml` and CSV files for each kernel type.<br>3. Default: `None`. |
 | `--export-empirical-metrics` | Options | Optional | Exports M1-M5 metrics as JSON for offline M6 computation.<br>1. Type: Str.<br>2. Valid range: JSON file path.<br>3. Default: `None`.<br>4. Developer-only option; requires `--performance-model profiling`. |
 
 For VL models, use `--image-batch-size`, `--image-height`, and `--image-width` together to describe the number and resolution of input images. Omit them for text-only models.
@@ -340,16 +340,16 @@ We provide a `video_generate.py` command line interface to simulate the forward 
 Its general usage is shown below:
 
 ```text
-usage: video_generate.py [-h]
-                         [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
-                         --batch-size BATCH_SIZE --seq-len SEQ_LEN [--chrome-trace CHROME_TRACE]
+usage: video_generate.py [-h] [-V] [-v] [-q]
+                         [--device {TEST_DEVICE,...}]
+                         --batch-size BATCH_SIZE --seq-len SEQ_LEN [--chrome-trace-file CHROME_TRACE]
                          [--height HEIGHT] [--width WIDTH] [--frame-num FRAME_NUM] [--sample-step SAMPLE_STEP]
                          [--log-level {debug,info,warning,error,critical}] [--dtype {float16,float32,bfloat16}]
                          [--remote-source {huggingface,modelscope}]
                          [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                          [--quantize-attention-action {DISABLED,INT8,FP8}] [--use-cfg]
                          [--attention-backend {dense,block_sparse_attention}] [--attention-block-size ATTENTION_BLOCK_SIZE]
-                         [--attention-sparsity ATTENTION_SPARSITY] [--world-size WORLD_SIZE]
+                         [--attention-sparsity ATTENTION_SPARSITY] [--num-devices WORLD_SIZE]
                          [--ulysses-size ULYSSES_SIZE] [--cfg-parallel] [--compile]
                          [--compile-allow-graph-break] [--dit-cache]
                          [--cache-step-range CACHE_STEP_RANGE] [--cache-step-interval CACHE_STEP_INTERVAL]
@@ -359,6 +359,8 @@ usage: video_generate.py [-h]
 Run a simulated diffusion transformer forward and dump perf stats.
 ```
 
+Full `--help` also includes `--version/-V`, `--verbose/-v`, and `--quiet/-q`. Default `--log-level` is `error`. This command does not provide `--debug` or `--log-file`. The model source is the positional `model_id` or `--model-id`.
+
 Main parameters:
 
 | Parameter | Category | Required/Optional | Description |
@@ -367,12 +369,12 @@ Main parameters:
 | `--device` | options | Optional | Specifies the device profile for simulation.<br>1. Type: Str.<br>2. Reference values: registered `DeviceProfile` names, including `TEST_DEVICE`, `ATLAS_800_A2_376T_64G`, `ATLAS_800_A2_313T_64G`, `ATLAS_800_A2_280T_64G`, `ATLAS_800_A2_280T_64G_PCIE`, `ATLAS_800_A2_280T_32G_PCIE`, `ATLAS_800_A3_752T_128G_DIE`, `ATLAS_800_A3_560T_128G_DIE`, `ATLAS_800_A3_560T_128G_DIE_ROCE`, `ATLAS_350_425T_112G`, `ATLAS_350_425T_84G`.<br>3. Default: `TEST_DEVICE`. |
 | `--batch-size` | options | Required | Specifies the input batch size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: none. |
 | `--seq-len` | options | Required | Specifies text sequence length.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: none. |
-| `--chrome-trace` | options | Optional | Specifies the Chrome trace JSON output path for exporting the performance timeline.<br>1. Type: Str.<br>2. Valid range: file path.<br>3. Default: `None`. |
+| `--chrome-trace-file` | options | Optional | Specifies the Chrome trace JSON output path for exporting the performance timeline.<br>1. Type: Str.<br>2. Valid range: file path.<br>3. Default: `None`. |
 | `--height` | options | Optional | Specifies input video or image frame height.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `400`. |
 | `--width` | options | Optional | Specifies input video or image frame width.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `832`. |
 | `--frame-num` | options | Optional | Specifies the number of video frames.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `81`. |
 | `--sample-step` | options | Optional | Specifies the number of diffusion sampling steps.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
-| `--log-level` | options | Optional | Specifies the log level.<br>1. Type: Str.<br>2. Reference values: `debug`, `info`, `warning`, `error`, `critical`.<br>3. Default: `info`. |
+| `--log-level` | options | Optional | Specifies the log level.<br>1. Type: Str.<br>2. Reference values: `debug`, `info`, `warning`, `error`, `critical`.<br>3. Default: `error`. |
 | `--dtype` | options | Optional | Specifies model compute data type.<br>1. Type: Str.<br>2. Reference values: `float16`, `float32`, `bfloat16`.<br>3. Default: `float16`. |
 | `--remote-source` | options | Optional | Specifies the remote source for non-local Diffusers repo IDs.<br>1. Type: Str.<br>2. Reference values: `huggingface`, `modelscope`.<br>3. Default: `huggingface`. |
 | `--quantize-linear-action` | options | Optional | Specifies linear layer quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`. |
@@ -381,7 +383,7 @@ Main parameters:
 | `--attention-backend` | Attention Options | Optional | Selects the attention backend.<br>1. Type: Str.<br>2. Reference values: `dense`, `block_sparse_attention`.<br>3. Default: `dense`. |
 | `--attention-block-size` | Attention Options | Optional | Sets the BSA block size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `128`. |
 | `--attention-sparsity` | Attention Options | Optional | Sets the ratio of KV blocks skipped by BSA.<br>1. Type: Float.<br>2. Valid range: `[0.0, 1.0)`.<br>3. Default: `0.0`. |
-| `--world-size` | Parallel Options | Optional | Specifies the total number of devices participating in distributed simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
+| `--num-devices` | Parallel Options | Optional | Specifies the total number of devices participating in distributed simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
 | `--ulysses-size` | Parallel Options | Optional | Specifies Ulysses parallel size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
 | `--cfg-parallel` | Parallel Options | Optional | Enables CFG parallel strategy.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compile` | Optimization Options | Optional | Compiles the primary transformer before simulation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Uses `dynamic=False, fullgraph=True`; when DiT cache is active, the cache transformer uses the same policy. |
@@ -398,7 +400,7 @@ BSA behavior and limits:
 - BSA cannot be combined with attention quantization. The following complete command is invalid and fails before execution:
 
   ```bash
-  python -m cli.inference.video_generate example-model --batch-size 1 --seq-len 128 --attention-backend block_sparse_attention --quantize-attention-action INT8
+  python -m cli.inference.video_generate example-model --batch-size 1 --seq-len 128 --attention-backend block_sparse_attention --quantize-attention-action int8
   ```
 
   Linear quantization remains independent and is not disallowed by this rule.
@@ -418,40 +420,16 @@ The first version only simulates the Transformer denoising stage that enters the
 Its general usage is shown below:
 
 ```text
-usage: image_generate.py [-h]
-                         [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
-                         --batch-size BATCH_SIZE
-                         --output-image-size HEIGHT WIDTH
-                         --text-seq-len TEXT_SEQ_LEN
-                         [--source-image-size HEIGHT WIDTH]
-                         [--sample-step SAMPLE_STEP]
-                         [--use-cfg]
-                         [--dtype {float16,float32,bfloat16}]
-                         [--remote-source {huggingface,modelscope}]
-                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
-                         [--mxfp4-group-size MXFP4_GROUP_SIZE]
-                         [--quantize-attention-action {DISABLED,INT8,FP8}]
-                         [--compile]
-                         [--compile-allow-graph-break]
-                         [--world-size WORLD_SIZE]
-                         [--ulysses-size ULYSSES_SIZE]
-                         [--cfg-parallel] [--dit-cache]
-                         [--cache-step-range CACHE_STEP_RANGE]
-                         [--cache-step-interval CACHE_STEP_INTERVAL]
-                         [--cache-block-range CACHE_BLOCK_RANGE]
-                         [--chrome-trace CHROME_TRACE]
-                         model_id
-
-Simulate image Transformer denoising workloads and report their critical path
-and logical measured work only. Prompt encoding, VAE, scheduler, and image I/O
-are excluded.
+msmodeling inference image-generate MODEL --batch-size <N> --output-image-size HEIGHT WIDTH --text-seq-len <N>
 ```
+
+Full `--help` also includes `--version/-V`, `--verbose/-v`, and `--quiet/-q`. Default `--log-level` is `error`. This command does not provide `--debug` or `--log-file`. The model source is the positional `model_id` or `--model-id`. `--num-devices` is the official parallel-size flag; `--world-size` and `--chrome-trace` remain hidden compatibility aliases.
 
 Main parameters:
 
 | Parameter | Category | Required/Optional | Description |
 | --- | --- | --- | --- |
-| `model_id` | positional arguments | Required | Image generation model ID or local model path.<br>1. Type: Str.<br>2. Reference values: Diffusers model directory or an exactly allowed remote repo ID, such as `black-forest-labs/FLUX.1-dev`, `Qwen/Qwen-Image-Edit`.<br>3. Default: none.<br>4. A reviewed local absolute path is recommended; remote model IDs are not security-guaranteed. |
+| `model_id` / `--model-id` | positional / options | Required (either) | Image generation model ID or local model path. Positional or `--model-id`.<br>1. Type: Str.<br>2. Reference values: Diffusers model directory or an exactly allowed remote repo ID, such as `black-forest-labs/FLUX.1-dev`, `Qwen/Qwen-Image-Edit`.<br>3. Default: none.<br>4. A reviewed local absolute path is recommended; remote model IDs are not security-guaranteed. |
 | `--device` | options | Optional | Specifies the device profile for simulation.<br>1. Type: Str.<br>2. Reference values: registered `DeviceProfile` names, including `TEST_DEVICE`, `ATLAS_800_A2_376T_64G`, `ATLAS_800_A2_313T_64G`, `ATLAS_800_A2_280T_64G`, `ATLAS_800_A2_280T_64G_PCIE`, `ATLAS_800_A2_280T_32G_PCIE`, `ATLAS_800_A3_752T_128G_DIE`, `ATLAS_800_A3_560T_128G_DIE`, `ATLAS_800_A3_560T_128G_DIE_ROCE`, `ATLAS_350_425T_112G`, `ATLAS_350_425T_84G`.<br>3. Default: `TEST_DEVICE`. |
 | `--batch-size` | options | Required | Specifies the base batch size of the workload, not the prompt count or source image count.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: none. |
 | `--output-image-size` | options | Required | Specifies the output image size, provided exactly once; used only to derive the shape, does not output an image.<br>1. Type: Tuple[Int, Int] (`HEIGHT WIDTH`).<br>2. Valid range: two positive integers.<br>3. Default: none. |
@@ -466,14 +444,14 @@ Main parameters:
 | `--quantize-attention-action` | Quantization Options | Optional | Specifies attention computation quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`.<br>3. Default: `DISABLED`. |
 | `--compile` | Optimization Options | Optional | Compiles the primary transformer before simulation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Uses `dynamic=False, fullgraph=True`; when DiT cache is active, the cache transformer uses the same policy. |
 | `--compile-allow-graph-break` | Optimization Options | Optional | Allows graph breaks during compilation.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Changes compilation to `fullgraph=False` for both the primary and DiT cache transformers. |
-| `--world-size` | Parallel Options | Optional | Specifies the total number of devices participating in distributed simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`.<br>4. Must equal `--ulysses-size` (`2 * --ulysses-size` when `--cfg-parallel` is enabled). |
+| `--num-devices` | Parallel Options | Optional | Specifies the total number of devices participating in distributed simulation.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`.<br>4. Must equal `--ulysses-size` (`2 * --ulysses-size` when `--cfg-parallel` is enabled). Legacy `--world-size` is still accepted. |
 | `--ulysses-size` | Parallel Options | Optional | Specifies Ulysses parallel size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`. |
-| `--cfg-parallel` | Parallel Options | Optional | Enables CFG parallel strategy.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Only enabled with `--use-cfg`; then `world-size` must equal `2 * --ulysses-size`. |
+| `--cfg-parallel` | Parallel Options | Optional | Enables CFG parallel strategy.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Only enabled with `--use-cfg`; then `--num-devices` must equal `2 * --ulysses-size`. |
 | `--dit-cache` | Cache Options | Optional | Enables DiT block cache.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--cache-step-range` | Cache Options | Optional | Specifies sampling step range for cache.<br>1. Type: Str.<br>2. Format: `start,end`, inclusive interval.<br>3. Default: `None`.<br>4. Required when `--dit-cache` is set and `--cache-step-interval > 1`. |
 | `--cache-step-interval` | Cache Options | Optional | Specifies cache update step interval.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `1`, which disables cache update reuse. |
 | `--cache-block-range` | Cache Options | Optional | Specifies block range for cache.<br>1. Type: Str.<br>2. Format: `start,end`, start inclusive and end exclusive.<br>3. Default: `None`. |
-| `--chrome-trace` | options | Optional | Specifies the Chrome trace JSON output path for exporting the performance timeline.<br>1. Type: Str.<br>2. Valid range: file path.<br>3. Default: `None`.<br>4. Generated only after a successful Runtime run. |
+| `--chrome-trace-file` | options | Optional | Specifies the Chrome trace JSON output path for exporting the performance timeline.<br>1. Type: Str.<br>2. Valid range: file path.<br>3. Default: `None`.<br>4. Generated only after a successful Runtime run. Legacy `--chrome-trace` is still accepted. |
 
 > **Note:** The Core currently registers no production image model kind; support for models such as `black-forest-labs/FLUX.1-dev` and `Qwen/Qwen-Image-Edit` is provided by the corresponding model-extension PRs. Until then, passing a real model ID fails explicitly (fail-closed).
 
