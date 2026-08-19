@@ -76,6 +76,10 @@ class ModelConfig:
     interpolation_seed: int = 1234
     enable_preprocessing_modeling: bool = False
     enable_kv_transfer_modeling: bool = False
+    # Fusion plugin .py paths loaded before the TensorCast ModelRunner is built
+    # (RFC manual_fusion_eval §7.2). Same load_plugin() hook as the CLI / Python
+    # API; effective only with do_compile=True.
+    fusion_plugins: Optional[List[str]] = None
 
 
 @dataclass

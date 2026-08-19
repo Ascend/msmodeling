@@ -26,6 +26,7 @@ class ServingTestCase(unittest.TestCase):
         self.mock_cfg.common_config.model_config.enable_interpolate = False
         self.mock_cfg.common_config.model_config.enable_preprocessing_modeling = False
         self.mock_cfg.common_config.model_config.enable_kv_transfer_modeling = False
+        self.mock_cfg.common_config.model_config.fusion_plugins = None
 
         self.patch_get_instance = patch.object(Config, "get_instance")
         mock_get_instance = self.patch_get_instance.start()

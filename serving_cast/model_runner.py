@@ -69,6 +69,41 @@ class ModelRunner:
 
     @staticmethod
     def init_tensor_cast_model_runner(common_config, parallel_config, device_type):
+        # Load fusion plugin(s) into the global tables before the TensorCast
+        # ModelRunner is built, so Phase 3 picks them up at compile time. Same
+        # additive load_plugin() hook as the CLI / Python API (RFC §7.2);
+        # effective only when do_compile=True.
+        fusion_plugins = common_config.model_config.fusion_plugins
+        if fusion_plugins:
+            do_compile = getattr(common_config.model_config, "do_compile", False)
+            if not do_compile:
+                logger.warning(
+                    "fusion_plugins is set but do_compile=False — "
+                    "patterns will never fire because torch.compile is not enabled; "
+                    "plugins are skipped; estimate equals no-plugin baseline. "
+                    "Set do_compile=True to enable fusion evaluation."
+                )
+            else:
+                from tensor_cast.plugins.loader import load_plugin
+                from tensor_cast.plugins.validator import validate_plugin
+
+                for plugin_path in fusion_plugins:
+                    if not load_plugin(plugin_path):
+                        logger.error(
+                            "fusion_plugins: failed to load plugin %s — "
+                            "plugin will not fire; check path and register_all_patterns()",
+                            plugin_path,
+                        )
+                        continue
+                    result = validate_plugin(plugin_path)
+                    if not result:
+                        logger.error(
+                            "fusion_plugins: plugin %s failed validation at %s: %s — plugin will not fire",
+                            plugin_path,
+                            result.layer,
+                            result.detail,
+                        )
+
         tensor_cast_model_runner = TensorCastModelRunner(
             UserInputConfig(
                 device=device_type,

@@ -99,6 +99,15 @@ def main():
         f"Options: {', '.join(COMPILATION_CONFIG_OPTIONS)}. "
         "If omitted, all compilation features remain at their defaults (disabled).",
     )
+    optim_group.add_argument(
+        "--fusion-plugin",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="Path to a fusion plugin .py to load before model construction "
+        "(see RFC manual_fusion_eval §3.3a). May be repeated to load several. "
+        "Requires --compile; without it the pattern registers but never fires.",
+    )
 
     quant_group = parser.add_argument_group("Quantization Options")
     quant_group.add_argument(
@@ -366,6 +375,12 @@ def main():
     if args.export_empirical_metrics and "profiling" not in args.performance_model:
         parser.error("--export-empirical-metrics requires --performance-model profiling")
 
+    # Fusion plugin requires compilation: the fusion is a compile-time fx graph
+    # rewrite (Phase 3); without --compile the pattern registers but never fires
+    # and the estimate silently equals the no-plugin baseline (RFC §3.3a).
+    if args.fusion_plugin and not args.compile:
+        parser.error("--fusion-plugin requires --compile (else the fusion never fires)")
+
     # import here to make sure the logger level is set
     logger.info("Importing core modules...")
     from tensor_cast.core.input_generator import generate_inputs
@@ -377,6 +392,23 @@ def main():
     logger.info("Initializing user configuration...")
     user_input = UserInputConfig.from_args(args)
     logger.debug("User configuration initialized: %s", user_input)
+
+    # Load fusion plugin(s) into the global tables before ModelRunner is built,
+    # so Phase 3 picks them up at compile time. Additive hook (RFC §3.3a):
+    # shares validate_plugin+load_plugin with the Python API; validate first so
+    # an invalid plugin is caught before ModelRunner construction rather than
+    # silently falling back to the no-plugin baseline.
+    if args.fusion_plugin:
+        from tensor_cast.plugins.loader import load_plugin
+        from tensor_cast.plugins.validator import validate_plugin
+
+        for plugin_path in args.fusion_plugin:
+            result = validate_plugin(plugin_path)
+            if not result:
+                parser.error(f"--fusion-plugin {plugin_path}: validation failed at {result.layer}: {result.detail}")
+            # validate_plugin's L2 already imported+registered the plugin;
+            # load_plugin is an idempotent no-op here, kept for consistency.
+            load_plugin(plugin_path)
 
     logger.info("Initializing ModelRunner")
     model_runner = ModelRunner(user_input)
