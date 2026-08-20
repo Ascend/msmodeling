@@ -392,6 +392,36 @@ def _is_moe_p3_tail(getitem_node):
     return comm is not None and _is_comm_shardable(comm) and _find_moe_norm_after_add(tail_node) is not None
 
 
+def _is_moe_residual_add(getitem_node):
+    """True when getitem[1] feeds a residual add whose other operand derives
+    from the SP-local MoE output.
+
+    ``MoeLocalTokenRewriter`` keeps the routed result on the local token shard,
+    so the residual operand of ``residual + moe_output`` must stay local too;
+    otherwise P2 gathers it back to the full-token domain and the add mixes
+    1000/2000-token tensors (issue #322).
+    """
+    users = list(getitem_node.users)
+    if len(users) != 1:
+        return False
+    tail_node = users[0]
+    if tail_node.op != "call_function" or tail_node.target not in _ADD_OPS:
+        return False
+    other = next(
+        (arg for arg in tail_node.args if isinstance(arg, Node) and arg is not getitem_node),
+        None,
+    )
+    if not isinstance(other, Node):
+        return False
+    return (
+        _first_ancestor(
+            other,
+            lambda n: n.op == "call_function" and n.target in {_UNPERMUTE_TOKENS, _MOE_TOPK},
+        )
+        is not None
+    )
+
+
 def _is_p2_chain_tail(getitem_node):
     """True if *getitem_node* feeds the residual input of a downstream P2 node."""
     users = list(getitem_node.users)
@@ -660,12 +690,23 @@ class Pattern2Rewriter:
         if not comm_input_local:
             rs = _insert_reduce_scatter(graph, comm, rank, rg)
             norm2.replace_input_with(comm, rs)
+            # ``add_rms_norm2`` derives its output shapes from its first input
+            # (``torch.empty_like(x)``).  When the reduce-scattered attention
+            # output lands in the residual slot, promote it to the
+            # shape-defining ``x`` slot so the norm output truly becomes local;
+            # the previous ``x`` moves to the residual slot and is restored to
+            # the full-token domain by the selective all_gathers below.  This
+            # keeps gate/topk and the MoE dispatch/combine token counts
+            # consistent (issue #322).
+            if norm2.args[0] is not rs:
+                prev_x = norm2.args[0]
+                norm2.args = (rs, prev_x, *norm2.args[2:])
         norm2.meta["tensor_cast_sp_local"] = True
         ag_dim = _shard_dim(norm2)
         for user in list(norm2.users):
             if user.op != "call_function" or user.target is not operator.getitem:
                 continue
-            if user.args[1] == 1 and (_is_moe_p3_tail(user) or _is_p2_chain_tail(user)):
+            if user.args[1] == 1 and (_is_moe_p3_tail(user) or _is_p2_chain_tail(user) or _is_moe_residual_add(user)):
                 continue
             _insert_all_gather(graph, user, ag_dim, rank, rg)
 

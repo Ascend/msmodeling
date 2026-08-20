@@ -707,6 +707,80 @@ class Pattern2RewriterTestCase(unittest.TestCase):
         self.assertTrue(_has_user(residual, torch.ops.tensor_cast.all_gather.default))
 
 
+class Pattern2MoERewriterTestCase(unittest.TestCase):
+    """Issue #322: SP P2 rewrite must keep the fused norm truly local.
+
+    ``add_rms_norm2`` derives its output shapes from its first input
+    (``torch.empty_like(x)``).  When the reduce-scattered attention output
+    lands in the residual slot, P2 must promote it to the shape-defining
+    ``x`` slot; otherwise the norm output stays on the full-token domain while
+    P2 gathers the residual, and the MoE residual add mixes 1000/2000-token
+    tensors.
+    """
+
+    def _build_p2_moe_graph(self, *, with_moe_residual_add=False):
+        """Build an add_rms_norm2(all_reduce in residual slot) MoE graph.
+
+        The all_reduce sits in the residual slot (args[1]) while args[0] is the
+        full-token hidden state, matching the traced DeepSeek V3.1 layout.
+        """
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        res = graph.placeholder("res")
+        w = graph.placeholder("w")
+        all_reduce = graph.call_function(torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
+        norm2 = graph.call_function(torch.ops.tensor_cast.add_rms_norm2.default, (res, all_reduce, w, EPS))
+        out = graph.call_function(operator.getitem, (norm2, 0))
+        residual = graph.call_function(operator.getitem, (norm2, 1))
+        topk = graph.call_function(torch.ops.tensor_cast.moe_gating_top_k_softmax.default, (out, 8))
+        topk_out = graph.call_function(operator.getitem, (topk, 0))
+        outputs = [topk_out]
+        if with_moe_residual_add:
+            idx = graph.placeholder("idx")
+            h = graph.placeholder("h")
+            moe_out = graph.call_function(torch.ops.tensor_cast.unpermute_tokens.default, (h, idx))
+            hidden = graph.call_function(torch.ops.aten.add.Tensor, (residual, moe_out))
+            outputs.append(hidden)
+        graph.output(tuple(outputs))
+
+        for node in (x, res, all_reduce):
+            node.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        norm2.meta["val"] = (_meta_tensor(INPUT_SHAPE), _meta_tensor(INPUT_SHAPE))
+        return graph, norm2, residual
+
+    def test_p2_moe_promotes_reduce_scatter_to_shape_defining_x(self):
+        graph, norm2, _ = self._build_p2_moe_graph()
+
+        rewritten = Pattern2Rewriter().apply(graph)
+
+        self.assertEqual(rewritten, 1)
+        reduce_scatter_nodes = [
+            node
+            for node in graph.nodes
+            if node.op == "call_function" and node.target is torch.ops.tensor_cast.reduce_scatter.default
+        ]
+        self.assertEqual(len(reduce_scatter_nodes), 1)
+        rs = reduce_scatter_nodes[0]
+        # The shape-defining first input must be the reduce_scatter result so
+        # the norm output becomes truly local (issue #322).
+        self.assertIs(norm2.args[0], rs)
+        res_placeholder = next(node for node in graph.nodes if node.name == "res")
+        self.assertIs(norm2.args[1], res_placeholder)
+
+    def test_p2_moe_keeps_residual_local_for_moe_output_add(self):
+        graph, norm2, residual = self._build_p2_moe_graph(with_moe_residual_add=True)
+
+        rewritten = Pattern2Rewriter().apply(graph)
+
+        self.assertEqual(rewritten, 1)
+        # The residual feeds ``residual + moe_output``; the MoE output is kept
+        # SP-local by MoeLocalTokenRewriter, so P2 must NOT gather the residual.
+        self.assertFalse(_has_user(residual, torch.ops.tensor_cast.all_gather.default))
+        # The norm output (getitem[0]) is still gathered back for the gate path.
+        norm_getitem0 = next(user for user in norm2.users if user.args[1] == 0)
+        self.assertTrue(_has_user(norm_getitem0, torch.ops.tensor_cast.all_gather.default))
+
+
 class Pattern3RewriterTestCase(unittest.TestCase):
     def _assert_p3_base(self, graph_module):
         self.assertEqual(
