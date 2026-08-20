@@ -57,6 +57,7 @@ GitCode 配置：
 | `device_config` | `/device_config` 或"我要导入新的设备拓扑" | 通过自然语言将硬件规格转换为 TensorCast `DeviceProfile` |
 | `op-mapping` | `/op_mapping` 或"生成 op_mapping.yaml" | 将 TensorCast 仿真算子映射到 NPU profiling 内核类型 |
 | `microbench` | `/microbench` 或"生成 xxx_run.py" | 从 profiling CSV 生成可在 NPU 上重放的 run script |
+| `profiling-database-axis-density` | "新增采集轴"、"修改轴密度"、"检查数据库轴密度" | 定标 profiling database 轴范围、密度和 exact 锚点 |
 | `msmodeling-env-installer` | "安装 msmodeling 环境"、"uv sync" | 安装并验证当前仓库开发环境、依赖和必要环境变量 |
 | `gitcode-cli-installer` | "安装 gitcode-cli"、"gitcode 认证"、"gc auth login" | 安装和认证 gitcode CLI（npm + auth login + lark），一次性配置 |
 | `model-adaptation` | "接入新模型"、"生成 ModelProfile"、"处理 doctor report" | 从仿真命令和 raw profiling 出发，完成 TensorCast 新模型适配流程 |
@@ -153,6 +154,7 @@ python scripts/ai/resolve_repository_context.py --json
 | `device_config` | 新增或转换设备画像 |
 | `op-mapping` | 生成或更新 `op_mapping.yaml` |
 | `microbench` | 从 profiling 数据生成 NPU 重放脚本 |
+| `profiling-database-axis-density` | 新增或调整 profiling database 采集轴和密度 |
 | `msmodeling-env-installer` | 安装和验证开发环境 |
 | `gitcode-cli-installer` | 安装和认证 gitcode CLI |
 | `model-adaptation` | 接入新模型和生成 ModelProfile |

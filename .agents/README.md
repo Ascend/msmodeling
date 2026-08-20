@@ -15,6 +15,7 @@
 - [device_config](#device_config)
 - [op_mapping](#op_mapping)
 - [microbench](#microbench)
+- [profiling-database-axis-density](#profiling-database-axis-density)
 - [text-generate-executor](#text-generate-executor)
 - [throughput-optimizer-executor](#throughput-optimizer-executor)
 - [throughput-optimizer-explainer](#throughput-optimizer-explainer)
@@ -225,6 +226,34 @@ Microbench Run Script 生成器——从 profiling CSV 生成可在 NPU 上重�
 - repo 缺失时按 `SKILL.md` 中提供的 clone 命令获取。
 
 - 生成的 run script 由 `run_all_op.py` / `profile_and_update_db.py` 调用。
+
+---
+
+## profiling-database-axis-density
+
+实测算子数据库轴密度定标 Skill。用于新增采集轴、修改轴范围或密度，以及检查采集代码和生成 Shape 是否满足 V1 最低基线。
+
+### What it does
+
+从生产采集与查询代码确认轴语义，冻结关键 query，比较密度候选，并检查 YAML、生成点集、最终 CSV 和生产查询回放的一致性。
+
+### File layout
+
+| File | Purpose |
+| ---- | ------- |
+| `profiling_database_axis_density/SKILL.md` | 新轴和密度变更的定标、验收流程 |
+| `profiling_database_axis_density/axis_collection_density.yaml` | 可机读的 V1 最低轴密度数值 |
+| `profiling_database_axis_density/profiling_database_axis_collection_density_standard_zh.md` | 门禁、证据和证明边界 |
+
+### Quick start
+
+在新增 profiling database 轴、调整轴范围或间隔、审计生成 Shape 是否符合轴密度标准时使用该 Skill。
+
+### Key constraints
+
+- 不根据算子名猜轴，轴定义以生产采集和查询代码为准。
+- YAML 是规范数值，不是运行时配置；门禁以标准文档第 3 节为准。
+- 缺少连续密度证据时只登记 exact 锚点，不补造范围或间隔。
 
 ---
 

@@ -1,0 +1,140 @@
+schema_version: 1
+standard_version: v1
+policy: minimum
+
+# required_values are exact anchors. Range and spacing fields constrain the
+# remaining point set; neither representation replaces the other.
+grids:
+  M_GRID:
+    range: {min: 1, max: 32768}
+    segments:
+      - {min: 1, max: 8, max_gap: 1}
+      - {min: 9, max: 16, max_gap: 2}
+      - {min: 17, max: 32, max_gap: 4}
+      - {min: 33, max: 64, max_gap: 8}
+      - {min: 65, max: 128, max_gap: 16}
+      - {min: 129, max: 256, max_gap: 64}
+      - {min: 257, max: 1024, max_gap: 256}
+      - {min: 1025, max: 32768, max_ratio: 2}
+
+  ELEM_TOKENS_GRID:
+    range: {min: 1, max: 32768}
+    segments:
+      - {min: 1, max: 64, max_ratio: 4}
+      - {min: 65, max: 32768, max_ratio: 2}
+
+  MOE_TOKENS_GRID:
+    range: {min: 1, max: 65536}
+    segments:
+      - {min: 1, max: 65536, max_ratio: 2}
+
+  ATTN_SEQ_GRID:
+    range: {min: 1, max: 131072}
+    segments:
+      - {min: 1, max: 64, max_ratio: 4}
+      - {min: 65, max: 131072, max_ratio: 2}
+
+  PAD_TOKENS_GRID:
+    required_values: [
+      1, 2, 3, 4, 5, 6, 7, 9, 15, 31, 63, 127, 129,
+      255, 257, 511, 513, 1023, 1025, 2047, 2049, 4095, 4097, 8191, 8193,
+    ]
+
+  NK_GRID:
+    range: {min: 128, max: 55296}
+    segments:
+      - {min: 128, max: 1024, max_gap: 128}
+      - {min: 1025, max: 4096, max_gap: 512}
+      - {min: 4097, max: 8192, max_gap: 1024}
+      - {min: 8193, max: 18432, max_ratio: 1.25}
+      - {min: 18433, max: 55296, max_ratio: 2}
+    required_values: [
+      128, 192, 256, 320, 384, 448, 512, 640, 768, 896, 1024,
+      1280, 1536, 1728, 1792, 2048, 2304, 2560, 3072, 3456, 3584, 4096,
+      4608, 5120, 6144, 6912, 7168, 8192, 10240, 12288, 13824, 14336,
+      16384, 18432, 27648, 28672, 55296,
+    ]
+
+  HEADS_GRID:
+    range: {min: 1, max: 128}
+    max_ratio: 2
+    required_values: [1, 2, 3, 4, 5, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 128]
+
+  KV_HEADS_GRID:
+    range: {min: 1, max: 32}
+    max_ratio: 2
+    required_values: [1, 2, 4, 8, 16, 32]
+
+  HEAD_DIM_GRID:
+    range: {min: 64, max: 256}
+    max_ratio: 2
+    required_values: [64, 128, 256]
+
+  ATTN_BATCH_GRID:
+    range: {min: 1, max: 128}
+    max_ratio: 2
+    required_values: [1, 2, 4, 8, 16, 32, 48, 64, 128]
+
+# Alias means that both public axis names use the same density rule and point set.
+aliases:
+  ELEM_HIDDEN_GRID: NK_GRID
+
+template_axes:
+  # `use` means that this template axis follows the named public grid.
+  # Complex generators declare the same mapping here even when
+  # tools/perf_data_collection/grid_generator/config.yaml has no iterators.
+  fused_attention:
+    batch: {use: ATTN_BATCH_GRID}
+    seq: {use: ATTN_SEQ_GRID}
+    avg_seq_len: {use: ATTN_SEQ_GRID}
+
+  transpose_batch_matmul:
+    batch: {use: HEADS_GRID}
+    K: {range: {min: 64, max: 512}, max_ratio: 2, required_values: [64, 128, 256, 512]}
+    N: {range: {min: 64, max: 1024}, max_ratio: 2, required_values: [64, 128, 256, 512, 1024]}
+
+  batch_matmul_nd:
+    batch: {range: {min: 1, max: 32}, max_ratio: 2, required_values: [1, 2, 4, 8, 16, 32]}
+    K: {range: {min: 64, max: 1024}, max_ratio: 2, required_values: [64, 128, 256, 512, 1024]}
+    N: {range: {min: 64, max: 1024}, max_ratio: 2, required_values: [64, 128, 256, 512, 1024]}
+
+  as_strided:
+    batch: {range: {min: 1, max: 64}, max_ratio: 2, required_values: [1, 2, 4, 8, 16, 32, 64]}
+    heads: {range: {min: 1, max: 128}, max_ratio: 4, required_values: [1, 4, 8, 16, 32, 64, 128]}
+    dim: {use: HEAD_DIM_GRID}
+
+  kv_rmsnorm_rope_cache:
+    # Existing workloads establish 512 as an exact anchor, not as the full supported range.
+    d: {required_values: [512]}
+
+  sort_op:
+    D: {range: {min: 64, max: 8192}, max_ratio: 2}
+
+  tile:
+    D: {range: {min: 64, max: 2048}, max_ratio: 2}
+
+  concat:
+    D: {range: {min: 64, max: 4096}, max_ratio: 2}
+
+  argmax:
+    batch: {range: {min: 1, max: 128}, max_ratio: 2}
+    vocab: {range: {min: 1024, max: 151936}, max_ratio: 4}
+
+  apply_topk_top_p:
+    batch: {range: {min: 1, max: 128}, max_ratio: 2}
+    vocab: {range: {min: 1024, max: 151936}, max_ratio: 4}
+
+  gather:
+    vocab: {range: {min: 1024, max: 152064}, max_ratio: 4}
+
+  paged_cache_load:
+    batch: {range: {min: 1, max: 64}, max_ratio: 2, required_values: [1, 2, 4, 8, 16, 32, 64]}
+
+  moe_gating_topk:
+    experts: {required_values: [64, 128, 256]}
+    topk: {required_values: [2, 4, 8]}
+
+communication_axes:
+  message_bytes:
+    range: {min: 128, max: 536870912}
+    max_ratio: 2
