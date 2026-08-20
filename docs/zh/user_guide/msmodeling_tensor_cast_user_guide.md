@@ -201,7 +201,6 @@ python -m cli.inference.image_generate black-forest-labs/FLUX.1-dev \
 
 具体数值会随设备配置、模型配置和输入尺寸变化。
 
-
 ## 3 支持的设备与自定义设备
 
 我们为以下设备配置提供内置支持（定义于 `tensor_cast/device.py`）：
@@ -447,6 +446,8 @@ msmodeling inference image-generate MODEL --batch-size <N> --output-image-size H
 | `--cache-block-range` | Cache Options | 可选 | 指定启用 cache 的 block 范围。<br>1. 类型：Str。<br>2. 格式：`start,end`，左闭右开。<br>3. 默认值：`None`。 |
 | `--chrome-trace-file` | options | 可选 | 指定 Chrome trace JSON 输出路径，用于导出性能时间线。<br>1. 类型：Str。<br>2. 取值范围：文件路径。<br>3. 默认值：`None`。<br>4. 仅在 Runtime 成功后生成。旧名 `--chrome-trace` 仍可解析。 |
 
-> **说明：** 当前 Core 未注册任何生产图像模型 kind；`black-forest-labs/FLUX.1-dev` 与 `Qwen/Qwen-Image-Edit` 等模型的支持由对应模型扩展 PR 提供。在此之前传入真实模型 ID 会明确报错（fail-closed）。
+> **说明：** 当前已支持 FLUX.1-dev 与 Qwen-Image-Edit（`Qwen/Qwen-Image-Edit`、`Qwen/Qwen-Image-Edit-2509`、`Qwen/Qwen-Image-Edit-2511` 三个子版本）的去噪 workload 仿真。
+
+> **限制：** Qwen-Image-Edit 当前不支持 Ulysses 序列并行（`--ulysses-size > 1`），对应输入 sharding 尚未实现；传入 `--ulysses-size` 大于 `1` 时仿真会在 Runtime 前以 Qwen-specific 错误失败，不会回退到非并行路径。
 
 运行 `python -m cli.inference.image_generate --help` 查看详情。

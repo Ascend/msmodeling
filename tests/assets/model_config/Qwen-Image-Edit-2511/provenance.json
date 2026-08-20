@@ -1,0 +1,32 @@
+{
+  "canonical_model_id": "Qwen/Qwen-Image-Edit-2511",
+  "remote_source": "huggingface",
+  "fixture_source_revision": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+  "kind": "qwen-image-edit-2511",
+  "diffusers_baseline": "0.38.0",
+  "captured_component_paths": [
+    "model_index.json",
+    "transformer/config.json",
+    "vae/config.json",
+    "text_encoder/config.json"
+  ],
+  "redaction_policy": {
+    "included": "Minimum public config facts required for exact Qwen identity validation and meta Transformer construction.",
+    "excluded": [
+      "model weights",
+      "scheduler config",
+      "tokenizer and processor payloads",
+      "prompts, images, and generated outputs",
+      "Runtime trace and trace-derived fingerprints",
+      "tokens, usernames, and credential paths"
+    ],
+    "access_boundary": "Sanitized config-only fixture; no network access, no credential access, and no license acceptance."
+  },
+  "component_sha256": {
+    "model_index.json": "5ba11ceee68457ad6a48b899b8c9493e347f4685e11e5eeca952a13f16549e35",
+    "transformer/config.json": "43c02875ed3e0d4c1b3a1007b34505d0bd2c1607fc90b2107c5e39c53d187113",
+    "vae/config.json": "c448160dba5ce79c965cb075ee02e18d1c42eb6424f787e5869790d577b56a65",
+    "text_encoder/config.json": "4a49f14a1594fd988ab301e491ac522cd9b0e8fd1c9232b806c54568f348c1fb"
+  },
+  "scheduler_excluded": true
+}

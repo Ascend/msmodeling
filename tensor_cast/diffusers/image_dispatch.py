@@ -15,6 +15,7 @@ from typing import NoReturn
 import torch
 
 from ..model_config import DiffusersConfig
+from . import qwen_image_edit
 from .diffusers_model import DiffusersTransformerModel
 from .dit_cache_registry import DiTBlockCacheSpec
 from .model_resolver import DiffusersModelSelection
@@ -39,6 +40,8 @@ def resolve_image_model_kind(
     The returned value is passed as ``kind`` to every other function in this
     module. Raises on unsupported model ids.
     """
+    if qwen_image_edit.is_candidate_model(model_id, model_selection):
+        return qwen_image_edit.resolve_model_kind(model_id, remote_source, model_selection, model_config)
     transformer_config = model_config.transformer_config
     transformer = getattr(transformer_config, "model_config", None)
     is_flux_config = isinstance(transformer, dict) and transformer.get("_class_name") == "FluxTransformer2DModel"
@@ -59,6 +62,9 @@ def validate_image_config(
     Called after model construction; raise here to reject unsupported
     configurations before any simulation work begins.
     """
+    if qwen_image_edit.is_candidate_kind(kind):
+        qwen_image_edit.validate_config(kind, model_selection, model_config)
+        return
     if kind == _FLUX_KIND:
         from . import flux_image
 
@@ -81,6 +87,15 @@ def prepare_image_inputs(
     Returns ``(inputs, generated_token_count)``; the count is forwarded to
     ``forward_image_model`` as ``generated_token_count``.
     """
+    if qwen_image_edit.is_candidate_kind(kind):
+        return qwen_image_edit.prepare_inputs(
+            kind,
+            model_config,
+            batch_size=batch_size,
+            output_image_size=output_image_size,
+            text_seq_len=text_seq_len,
+            source_image_sizes=source_image_sizes,
+        )
     if kind == _FLUX_KIND:
         from . import flux_image
 
@@ -107,6 +122,13 @@ def apply_image_cfg(
 
     Returns the (possibly duplicated) input dict.
     """
+    if qwen_image_edit.is_candidate_kind(kind):
+        return qwen_image_edit.apply_cfg(
+            inputs,
+            batch_size=batch_size,
+            use_cfg=use_cfg,
+            cfg_parallel=cfg_parallel,
+        )
     if kind == _FLUX_KIND:
         from . import flux_image
 
@@ -131,6 +153,8 @@ def shard_image_inputs(
     Returns ``(inputs, split_dim)``; ``split_dim`` is the tensor dim along
     which the forward output must be all-gathered (None when no sharding).
     """
+    if qwen_image_edit.is_candidate_kind(kind):
+        return qwen_image_edit.shard_inputs(model_config, inputs, ulysses_size=ulysses_size)
     if kind == _FLUX_KIND:
         from . import flux_image
 
@@ -147,6 +171,8 @@ def prepare_image_model(
 
     Returns the prepared model used for forward passes.
     """
+    if qwen_image_edit.is_candidate_kind(kind):
+        return qwen_image_edit.prepare_model(model, model_config)
     if kind == _FLUX_KIND:
         from . import flux_image
 
@@ -166,6 +192,8 @@ def forward_image_model(
     Returns the output hidden-states tensor, all-gathered over the sequence
     parallel group when the model is sharded.
     """
+    if qwen_image_edit.is_candidate_kind(kind):
+        return qwen_image_edit.forward_model(model, inputs, generated_token_count=generated_token_count)
     if kind == _FLUX_KIND:
         from . import flux_image
 
@@ -186,6 +214,8 @@ def image_cache_spec(
     The spec's ``class_name`` must match the transformer config's
     ``_class_name``; see ``register_dit_block_cache_spec``.
     """
+    if qwen_image_edit.is_candidate_kind(kind):
+        return qwen_image_edit.cache_spec(kind, model_config)
     if kind == _FLUX_KIND:
         from . import flux_image
 

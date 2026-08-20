@@ -151,6 +151,20 @@ class SinkSplitPass(TensorCastGraphModulePass):
             bias_list = [source_op.args[0] for source_op in source_op_group]
             return (x_list, w_list, bias_list), {}
 
+        def _normalized_dim(dim: int, input_node: Node) -> int:
+            """Resolve a split dimension against the input tensor's rank.
+
+            Negative dims (e.g. -1) and their positive equivalents (e.g. 1 on a
+            rank-2 tensor) refer to the same axis. Without normalization the raw
+            comparison below treats ``1 != -1`` as different dims and wrongly
+            allows sinking a split through a child split that is actually on the
+            SAME axis, producing an invalid re-split with mismatched sizes.
+            """
+            shape = get_node_shape(input_node)
+            if shape is not None and len(shape) > 0:
+                return dim % len(shape)
+            return dim
+
         def split_with_sizes_extra_check(split_node, source_op_group, split_args, uniform_args, template_kwargs):
             """Extra check for split_with_sizes op to be sunk. Only allow
             different split dim from the split node.
@@ -162,6 +176,8 @@ class SinkSplitPass(TensorCastGraphModulePass):
             )
             split_dim = split_node.args[2] if len(split_node.args) > 2 else 0
             source_op_split_dim = source_op.args[2] if len(source_op.args) > 2 else 0
+            split_dim = _normalized_dim(split_dim, split_node.args[0])
+            source_op_split_dim = _normalized_dim(source_op_split_dim, source_op.args[0])
             return split_dim != source_op_split_dim
 
         # Helper to safely add ops to the config map

@@ -1,13 +1,13 @@
-# RFC：增加 Qwen-Image-Edit 图像编辑仿真支持
+# RFC：Qwen-Image-Edit Transformer workload simulation
 
 ## 元数据
 
 | 项目 | 内容 |
 | :--- | :--- |
-| **状态** | Draft（草案） |
+| **状态** | 已实现并合入 |
 | **作者** | minghang_c |
 | **创建日期** | 2026-08-06 |
-| **更新日期** | 2026-08-13 |
+| **更新日期** | 2026-08-19 |
 | **相关 Issue/PR** | [Issue #314](https://gitcode.com/Ascend/msmodeling/issues/314) |
 | **规范依赖** | [图像生成推理性能仿真架构 RFC](./rfc_image_generation_inference_performance_simulation_zh.md#image-generation-public-contract-index) |
 
@@ -15,7 +15,7 @@
 
 ## 1. 概述
 
-本 RFC 为既有图像生成公共架构增加 Qwen-Image-Edit 的固定形状 Transformer 仿真支持。首版不是图片编辑器，也不是端到端推理器；它只在 config-only、meta-device 和 Runtime 边界内重现 Qwen 去噪 Transformer 的输入布局、调用次数、并行通信、缓存路径和设备执行时间。
+本 RFC 为既有图像生成公共架构增加 Qwen-Image-Edit Transformer workload simulation。首版不是图片编辑器，也不执行完整图像处理流程；它只在 config-only、meta-device 和 Runtime 边界内重现 Qwen 去噪 Transformer 的输入布局、调用次数、并行通信、缓存路径和设备执行时间。
 
 支持范围严格限定为三个 canonical model ID：
 
@@ -397,7 +397,95 @@ Qwen original、2509 和 2511 共享 Transformer，但 pipeline class、source c
 
 ---
 
-## 14. 参考资料
+## 14. U1-U6 实施边界与验收证据
+
+### 14.1 已实现的公共路径
+
+U1-U6 已在同一条 Qwen 适配边界内完成，三个 canonical kind 不拆分交付：
+
+- `Qwen/Qwen-Image-Edit`、`Qwen/Qwen-Image-Edit-2509` 和 `Qwen/Qwen-Image-Edit-2511` 均通过真实 `run_inference` 公共入口、静态 dispatch、root manifest/config 校验、meta Transformer 构建、输入准备和 Runtime 循环。
+- 测试将每个 exact canonical ID 映射到对应的独立 config-only fixture root；解析、校验和 `build_diffusers_transformer_model` 保持真实实现，网络、Hub 快照和权重边界由失败哨兵锁定。
+- 每个模型只构造 meta 参数；公共测试替换实际昂贵的 60-block 数值执行为一个记录完整 Qwen kwargs 的 meta 观察 Transformer，因此不会加载权重，也不会执行 scheduler、VAE、tokenizer/processor、图片编解码或真实文件图片输入。
+- `sample-step=N` 的 public forward 观察计数严格为 `N`。每次调用都验证 generated-prefix shape、`return_dict=False`、文本 mask、timestep、nested `img_shapes` 和 source metadata 未被修改。
+- U6 未修改 `cli/inference/image_generate.py`、Core/public API、generic cache agent 或视频路径；新增 public acceptance 文件为 `tests/regression/tensor_cast/test_image_generation_qwen_image_edit_e2e.py`。
+
+### 14.2 Source、batch、CFG 和生命周期矩阵
+
+| 场景 | public acceptance | 关键证据 |
+| :--- | :--- | :--- |
+| Original | `B=2`、恰好 1 source、无 CFG、cache off、compile off/on smoke、`N=1/2` | generated-first packing、source descriptor、mask、meta build、恰好 N 次 forward |
+| 2509 | `B=2`、3 sources（unit contract 覆盖 1–3）、ordinary CFG、cache off/on、update/reuse | effective batch `2B`、四份独立 nested `img_shapes`、Plus 的 384² condition 与 1024² VAE/token geometry、prefix shape parity |
+| 2511 | `B=2`、1 source（unit contract 覆盖 1–3）、CFG-parallel `U=1`、cache on、compile seam、trace | representative batch `B`、CFG group `all_gather(dim=0)` 顺序、内部 `[t,0]` shape `2E`、generated/source `modulate_index` |
+| Failure | Original source=0、Qwen `U>1`、Runtime forward failure | 在 model build/Runtime 前失败；失败运行不产生 trace |
+
+精确 source cardinality 是产品 contract，而不是依赖上游 Plus pipeline 的隐式行为：Original 必须恰好一个 source；2509/2511 必须一至三个 source。`--batch-size=B` 代表相同 source/text 条件的重复 simulator batch；它不是 source 数量。普通 CFG 显式复制所有 batch-first tensor 和 nested metadata 到 `2B`，每步仍只有一次 Transformer forward。CFG-parallel 仅接受 `U=1、world_size=2`，本地 representative forward 保持 `B`，随后对 generated prefix 执行 CFG group `all_gather(dim=0)`。
+
+生命周期证据保持公共 contract 的严格顺序：
+
+```text
+baseline build -> baseline prepare
+cache build -> cache prepare -> cache spec/replacement
+baseline compile -> cache compile
+Runtime step selection -> generated-prefix -> optional CFG collective
+```
+
+cache off/interval=1 路径不解析 range、不调用 cache spec、不构造第二模型。cache on 路径验证 per-run state 的 `update -> reuse -> baseline` 选择、半开 block range 和 replacement-before-compile。现有 Qwen model-contract tests 继续提供真实 `DiTBlockCache` 双流 update/reuse 与 `(encoder, hidden)` stream-order evidence；public test 负责证明这些 seam 穿过 `run_inference`。
+
+### 14.3 Cache 和 fusion evidence
+
+- Qwen cache 只绑定 `QwenImageTransformer2DModel` 的一个 `transformer_blocks` 集合，严格要求 60 个 `QwenImageTransformerBlock` 和完整七参数 block signature。Qwen adapter 在 generic cache agent 边界将 Diffusers `(encoder, hidden)` 转为 generic `(hidden, encoder)`，再恢复外部顺序；不改 generic cache agent。
+- Original、2509 和 2511 共用同一 cache spec；ordinary CFG 的 state 是 effective `2B`，2511 的 internal zero-condition expansion 仍独立发生。public 2509/2511 cases 记录 cache update/reuse，unit cases 验证 unequal stream lengths、metadata 保留、range clamp、fresh state 和 strict failure。
+- 唯一声明 applicable 的 fusion 是现有 `tensor_cast.rms_norm.default` 对匹配低精度 Q/K RMSNorm 的路径。U5 tests 验证 BF16/FP16 output dtype、shape、contiguity、non-aliasing、Runtime event、performance properties 和 profiling mapping `RmsNorm`。
+- Qwen complex multi-axis RoPE、dense joint attention、AddRMSNorm、SwiGLU、modulation、gated residual 和 GELU 保持 native/deferred evidence；没有新增或宣称 `fused_rope`、Qwen fused kernel 或 target performance 支持。
+
+### 14.4 Runtime、target backend 和 hermetic boundary
+
+当前环境的 public evidence 使用 meta tensors、实际 Runtime event replay 和 deterministic constant performance model；成功运行要求 event 非空、`total_execution_time_s()`（当前 Runtime critical-path 口径）大于零，并验证成功后才可解析 Chrome trace。compile-on cases 验证 `get_backend(device)`、baseline/cache compile 调用和 replacement-before-compile 顺序，但不是 Ascend compiler 执行证明。
+
+CFG collective 在 public test 中使用 hermetic group spy 验证 `forward -> all_gather(dim=0)` 顺序。以下边界保持未证明并明确不作为支持声明：
+
+- 真实多进程/多 rank collective 的设备执行、通信性能和跨 rank 数据正确性；
+- Ascend/NPU target backend 的 graph lowering、fused kernel 执行、graph-break 结果和真实性能；
+- 60-layer full-weight Qwen 数值推理、图片质量、scheduler/VAE/tokenizer/processor 运行和图片输入输出；
+- Qwen `U>1` context/Ulysses `_cp_plan`，包括 sequence split、RoPE gather、modulation split 和 projection gather；
+- Hub 远端 immutable revision 在公共 resolver 中的持久锁定。fixture revision、component SHA256 和禁止 payload 已在三个独立 roots 中锁定，但不扩大 Core/public selection API。
+
+### 14.5 可复现验证命令与结果
+
+以下命令使用已验证的项目环境；`<repo>` 表示当前 worktree，`<venv>` 表示项目 `.venv`。结果是 U6 durable evidence，仓库级全量门禁由编排流程继续执行：
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 <venv>/bin/pytest \\
+  tests/regression/tensor_cast/test_image_generation_qwen_image_edit.py -q
+# U1-U5 baseline: 53 passed, 1 warning
+
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 <venv>/bin/pytest \\
+  tests/regression/tensor_cast/test_image_generation_qwen_image_edit_e2e.py -q
+# U6 public lifecycle: 8 passed
+
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 <venv>/bin/pytest \\
+  tests/regression/cli/test_image_generate.py \\
+  tests/regression/tensor_cast/test_image_dispatch.py \\
+  tests/regression/tensor_cast/test_diffusers_model_resolver.py -q
+# Core focused gate: 72 passed
+
+<venv>/bin/python -m py_compile \\
+  cli/inference/image_generate.py \\
+  tensor_cast/diffusers/qwen_image_edit.py \\
+  tests/regression/tensor_cast/test_image_generation_qwen_image_edit_e2e.py
+# PASS
+
+<venv>/bin/pre-commit run --files \\
+  tests/regression/tensor_cast/test_image_generation_qwen_image_edit_e2e.py \\
+  docs/RFC/rfc_add_qwen_image_edit_support_zh.md
+# PASS with validated Python 3.14 environment and gitleaks 8.21.2
+
+# Combined command over all listed focused files: 133 passed, 1 known PyTorch FX dtype warning.
+```
+
+The U6 acceptance file contains no model weights, image bytes, scheduler config, tokenizer/processor payload, trace fixture, credential, or network dependency. It must remain a regression test for Qwen-Image-Edit Transformer workload simulation, not a full image processing test.
+
+## 15. 参考资料
 
 1. [Qwen-Image-Edit 官方介绍](https://github.com/QwenLM/Qwen-Image/blob/main/Qwen-Image-Edit.md)
 2. [Qwen-Image-Edit-2509 官方说明](https://github.com/QwenLM/Qwen-Image/blob/main/Qwen-Image-Edit-2509.md)
