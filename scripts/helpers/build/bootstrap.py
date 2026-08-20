@@ -15,7 +15,7 @@ from typing import Final, Literal, NoReturn
 
 from scripts.helpers._paths import REPO_ROOT
 
-Mode = Literal["build", "test"]
+Mode = Literal["build", "test", "development"]
 
 _MIN_PYTHON: Final = (3, 10)
 _SYNC_TIMEOUT_SECONDS: Final = 3600
@@ -139,9 +139,15 @@ def ensure_uv() -> str:
 
 
 def ensure_deps(mode: Mode, *, uv_path: str) -> None:
-    """``uv sync --frozen --group build|ci`` for the requested mode."""
-    group = "build" if mode == "build" else "ci"
-    cmd = [uv_path, "sync", "--frozen", "--group", group]
+    """Synchronize the locked dependency groups required by ``mode``."""
+    groups = {
+        "build": ("build",),
+        "test": ("ci",),
+        "development": ("build", "ci", "lint"),
+    }[mode]
+    cmd = [uv_path, "sync", "--frozen"]
+    for group in groups:
+        cmd.extend(("--group", group))
     env = _noninteractive_env()
     try:
         completed = subprocess.run(
@@ -156,11 +162,11 @@ def ensure_deps(mode: Mode, *, uv_path: str) -> None:
     except OSError as exc:
         _fail(f"uv sync failed (OS error): {exc}")
     except subprocess.TimeoutExpired:
-        _fail(f"uv sync --group {group} timed out")
+        _fail(f"uv sync for {mode} dependencies timed out")
 
     if completed.returncode != 0:
         _fail(
-            f"uv sync --frozen --group {group} failed (exit {completed.returncode}); "
+            f"uv sync for {mode} dependencies failed (exit {completed.returncode}); "
             "fix network/lockfile and retry. No secondary fallback.",
             code=completed.returncode or 1,
         )

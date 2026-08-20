@@ -170,6 +170,10 @@ msModeling 提供模型推理性能仿真、服务化性能仿真和服务化实
 
 欢迎参与项目贡献！详细的贡献流程、代码规范、Commit 规范、测试要求等，请参见《[msModeling 贡献指南](CONTRIBUTING.md)》。如有疑问，请提交 [Issues](https://gitcode.com/Ascend/msmodeling/issues)。
 
+### Dev Container 开发环境
+
+仓库提供基于 Python 3.11 的 VS Code Dev Container。启动方式、自动初始化内容和统一构建/UT 入口见 [Dev Container 指南](.devcontainer/README.md)。
+
 ### AI Native 开发
 
 本仓支持由 AI 辅助完成 Issue 草拟与评审、Issue 到 PR/CI 的端到端交付、PR 多角色与行内检视，以及

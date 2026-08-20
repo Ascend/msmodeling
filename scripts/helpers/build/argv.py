@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 _VALID_TOKENS = frozenset({"local", "test"})
 _TEST_EXTRA_KEYS = frozenset({"test_map_path", "base_branch", "offline", "weights_prune"})
+_BUILD_EXTRA_KEYS = frozenset({"only_down_deps"})
 _SUITE_VALUES = ("ci_gate", "full", "smoke", "regression", "benchmark")
 
 
@@ -33,6 +34,7 @@ class BuildOptions:
     version_explicit: bool
     extras: Mapping[str, str]
     suite: BuildSuite
+    only_down_deps: bool = False
 
 
 def _parse_extras(raw_extras: Sequence[str], parser: argparse.ArgumentParser) -> dict[str, str]:
@@ -56,12 +58,13 @@ def _validate_extras(
 ) -> None:
     if not extras:
         return
-    if not is_test:
-        parser.error("--extra is only supported with the test command")
-    unknown = sorted(set(extras) - _TEST_EXTRA_KEYS)
+    allowed = _TEST_EXTRA_KEYS if is_test else _BUILD_EXTRA_KEYS
+    unknown = sorted(set(extras) - allowed)
     if unknown:
-        allowed = ", ".join(sorted(_TEST_EXTRA_KEYS))
-        parser.error(f"unknown --extra key(s): {', '.join(unknown)}; allowed: {allowed}")
+        formatted = ", ".join(sorted(allowed))
+        parser.error(f"unknown --extra key(s): {', '.join(unknown)}; allowed: {formatted}")
+    if not is_test and "only_down_deps" in extras and extras["only_down_deps"] not in {"true", "false"}:
+        parser.error(f"--extra only_down_deps must be 'true' or 'false', got: {extras['only_down_deps']!r}")
 
 
 def _parse_tokens(tokens: Sequence[str], parser: argparse.ArgumentParser) -> tuple[bool, bool]:
@@ -99,7 +102,8 @@ def parse_argv(argv: Sequence[str] | None = None) -> BuildOptions:
         default=[],
         metavar="KEY=VALUE",
         help=(
-            "test-only key/value pair (repeatable); allowed keys: test_map_path, base_branch, offline, weights_prune"
+            "key/value pair (repeatable); test keys: test_map_path, base_branch, offline, "
+            "weights_prune; build keys: only_down_deps"
         ),
     )
     parser.add_argument(
@@ -121,6 +125,7 @@ def parse_argv(argv: Sequence[str] | None = None) -> BuildOptions:
     if args.suite is not None and not is_test:
         parser.error("--suite is only supported with the test command")
     suite = BuildSuite(args.suite) if args.suite is not None else BuildSuite.FULL
+    only_down_deps = extras.get("only_down_deps") == "true" if not is_test else False
     return BuildOptions(
         is_test=is_test,
         is_local=is_local,
@@ -128,4 +133,5 @@ def parse_argv(argv: Sequence[str] | None = None) -> BuildOptions:
         version_explicit=args.version is not None,
         extras=extras,
         suite=suite,
+        only_down_deps=only_down_deps,
     )

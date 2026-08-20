@@ -1,0 +1,16 @@
+{
+    "files.watcherExclude": {
+        "{artifacts,dist}/**": true,
+        "**/*.egg-info/**": true,
+        "**/{.venv,__pycache__,.pytest_cache,.ruff_cache,.mypy_cache}/**": true
+    },
+    "search.exclude": {
+        "{artifacts,dist}/**": true,
+        "**/*.egg-info/**": true,
+        "**/{.venv,__pycache__,.pytest_cache,.ruff_cache,.mypy_cache}/**": true
+    },
+    "files.exclude": {
+        "**/*.egg-info": true,
+        "**/{__pycache__,.pytest_cache,.ruff_cache,.mypy_cache}": true
+    }
+}

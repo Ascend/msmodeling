@@ -1,0 +1,46 @@
+{
+  "name": "msmodeling",
+  "image": "swr.cn-north-4.myhuaweicloud.com/mindstudio-image/mindstudio-build:26.2.0-0801",
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+  "initializeCommand": "bash \"${localWorkspaceFolder}/.devcontainer/initialize.sh\"",
+  "remoteUser": "mindstudio",
+  "updateRemoteUserUID": true,
+  "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer/.host-gitconfig,target=/tmp/host-gitconfig,type=bind,readonly",
+    "source=${localEnv:HOME}/.cache/uv,target=/home/mindstudio/.cache/uv,type=bind",
+    "source=${localEnv:HOME}/.cache/pre-commit,target=/home/mindstudio/.cache/pre-commit,type=bind"
+  ],
+  "containerEnv": {
+    "NPM_CONFIG_PREFIX": "/home/mindstudio/.local",
+    "UV_CACHE_DIR": "/home/mindstudio/.cache/uv",
+    "PRE_COMMIT_HOME": "/home/mindstudio/.cache/pre-commit"
+  },
+  "remoteEnv": {
+    "PATH": "/home/mindstudio/.local/bin:${containerEnv:PATH}"
+  },
+  "postCreateCommand": "bash -lc '/workspace/.devcontainer/post-create.sh'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash-login",
+        "terminal.integrated.profiles.linux": {
+          "bash-login": {
+            "path": "/bin/bash",
+            "args": [
+              "-l"
+            ]
+          }
+        },
+        "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+        "python.analysis.extraPaths": [
+          "/workspace"
+        ]
+      }
+    }
+  }
+}

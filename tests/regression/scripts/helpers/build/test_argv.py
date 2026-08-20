@@ -19,6 +19,18 @@ def test_parse_argv_defaults() -> None:
     )
 
 
+def test_parse_argv_build_only_down_deps_true() -> None:
+    options = parse_argv(["-e", "only_down_deps=true"])
+    assert options.is_test is False
+    assert options.only_down_deps is True
+
+
+def test_parse_argv_build_only_down_deps_false() -> None:
+    options = parse_argv(["-e", "only_down_deps=false"])
+    assert options.is_test is False
+    assert options.only_down_deps is False
+
+
 def test_parse_argv_test_token() -> None:
     options = parse_argv(["test"])
     assert options.is_test is True
@@ -54,9 +66,28 @@ def test_parse_argv_extra_key_value() -> None:
     assert options.extras == {"test_map_path": "/tmp/map.json"}
 
 
-def test_parse_argv_build_rejects_any_extra() -> None:
+def test_parse_argv_build_rejects_unknown_extra() -> None:
     with pytest.raises(SystemExit) as exc_info:
         parse_argv(["-e", "foo=1"])
+    assert exc_info.value.code == 2
+
+
+def test_parse_argv_build_rejects_test_extra() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_argv(["-e", "test_map_path=x"])
+    assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("value", ["yes", "1", "TRUE", "False", ""])
+def test_parse_argv_build_rejects_invalid_only_down_deps(value: str) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_argv(["-e", f"only_down_deps={value}"])
+    assert exc_info.value.code == 2
+
+
+def test_parse_argv_test_rejects_build_extra() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_argv(["test", "-e", "only_down_deps=true"])
     assert exc_info.value.code == 2
 
 
@@ -86,12 +117,6 @@ def test_parse_argv_test_allows_whitelist_extras() -> None:
         "offline": "1",
         "weights_prune": "0",
     }
-
-
-def test_parse_argv_build_rejects_test_extra_without_test_token() -> None:
-    with pytest.raises(SystemExit) as exc_info:
-        parse_argv(["-e", "test_map_path=x"])
-    assert exc_info.value.code == 2
 
 
 def test_parse_argv_unknown_token_exits_2() -> None:

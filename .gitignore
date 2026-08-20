@@ -1,6 +1,25 @@
-.vscode
+# Share intended .vscode config; ignore user-local overrides.
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Dev Container host-only Git identity snapshot.
+.devcontainer/.host-gitconfig
+
 **/__pycache__
 .idea
+
+# Python build/test artifacts ---------------------------------------------------
+dist/
+*.egg-info/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# .so native extensions (keep out of the repo)
+*.so
 
 # macOS
 .DS_Store

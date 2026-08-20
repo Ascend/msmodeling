@@ -1,0 +1,62 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build: Release Mode",
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "${workspaceFolder}/build.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Build: Download Dependencies",
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "${workspaceFolder}/build.py",
+        "-e",
+        "only_down_deps=true"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": "build"
+    },
+    {
+      "label": "Test: Run Unit Tests",
+      "type": "process",
+      "command": "python3",
+      "args": [
+        "${workspaceFolder}/build.py",
+        "test"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Clean: Python Workspace",
+      "type": "shell",
+      "command": "rm -rf artifacts dist .pytest_cache .mypy_cache .ruff_cache .coverage .coverage.* ./*.egg-info && find . -path './.venv' -prune -o -type d -name __pycache__ -exec rm -rf {} +",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

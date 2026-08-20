@@ -157,12 +157,20 @@ def _run_with_version_staging(
 
 
 def run_build(options: BuildOptions) -> int:
-    """Build msmodeling wheel via scripts/build.sh."""
-    if not _BUILD_SCRIPT.is_file():
+    """Build msmodeling wheel via scripts/build.sh.
+
+    When ``options.only_down_deps`` is set, prepare all build, test, and lint
+    dependencies required by IDE development, then skip the wheel build.
+    """
+    if not options.only_down_deps and not _BUILD_SCRIPT.is_file():
         logger.error("missing script: %s", _BUILD_SCRIPT)
         return 1
 
-    uv_path = bootstrap("build")
+    uv_path = bootstrap("development" if options.only_down_deps else "build")
+
+    if options.only_down_deps:
+        logger.info("only_down_deps=true: dependencies synced, skipping wheel build")
+        return 0
 
     try:
         pyproject_version = read_project_version(repo_root=REPO_ROOT)

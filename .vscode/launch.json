@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: Debug Active File",
+      "type": "debugpy",
+      "request": "launch",
+      "preLaunchTask": "Build: Download Dependencies",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "${command:python.interpreterPath}"
+    },
+    {
+      "name": "Python: Pytest Case Debugging",
+      "type": "debugpy",
+      "request": "launch",
+      "preLaunchTask": "Build: Download Dependencies",
+      "module": "pytest",
+      "args": ["${file}"],
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "cwd": "${workspaceFolder}",
+      "python": "${command:python.interpreterPath}"
+    }
+  ]
+}

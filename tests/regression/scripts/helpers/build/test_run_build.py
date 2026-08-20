@@ -83,6 +83,58 @@ def test_run_build_propagates_subprocess_exit_code_without_staging(
     assert run_build(build_options()) == 5
 
 
+def test_run_build_only_down_deps_prepares_development_environment(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dependency-only mode prepares IDE dependencies and skips wheel build."""
+    bootstrap_modes: list[str] = []
+
+    def record_bootstrap(mode: str) -> str:
+        bootstrap_modes.append(mode)
+        return "/fake/uv"
+
+    monkeypatch.setattr(run_build_mod, "bootstrap", record_bootstrap)
+
+    assert run_build(build_options(only_down_deps=True)) == 0
+    assert bootstrap_modes == ["development"]
+    assert subprocess_capture.shell_calls == []
+    assert not (repo_root / "artifacts" / "build-manifest.json").exists()
+
+
+def test_run_build_only_down_deps_does_not_require_build_script(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dependency preparation is independent of the wheel build script."""
+    bootstrap_modes: list[str] = []
+
+    def record_bootstrap(mode: str) -> str:
+        bootstrap_modes.append(mode)
+        return "/fake/uv"
+
+    monkeypatch.setattr(run_build_mod, "_BUILD_SCRIPT", tmp_path / "missing-build.sh")
+    monkeypatch.setattr(run_build_mod, "bootstrap", record_bootstrap)
+
+    assert run_build(build_options(only_down_deps=True)) == 0
+    assert bootstrap_modes == ["development"]
+
+
+def test_run_build_only_down_deps_preserves_existing_manifest(
+    repo_root: Path,
+    subprocess_capture: SubprocessRunCapture,
+) -> None:
+    """Boundary: dependency-only mode must not overwrite the last build record."""
+    manifest_path = repo_root / "artifacts" / "build-manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text('{"wheel_path": "previous.whl"}\n', encoding="utf-8")
+
+    assert run_build(build_options(only_down_deps=True)) == 0
+    assert subprocess_capture.shell_calls == []
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {"wheel_path": "previous.whl"}
+
+
 def test_run_build_without_uv_install_failure_returns_1(
     repo_root: Path,
     monkeypatch: pytest.MonkeyPatch,

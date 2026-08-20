@@ -179,6 +179,33 @@ def test_ensure_deps_test_syncs_ci_group_only(monkeypatch: pytest.MonkeyPatch) -
     assert "build" not in calls[0][group_idx:]
 
 
+def test_ensure_deps_development_syncs_all_development_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IDE preparation installs build, test, and lint dependencies together."""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(f"{_BOOTSTRAP}.subprocess.run", fake_run)
+    bootstrap_mod.ensure_deps("development", uv_path="/fake/uv")
+    assert calls == [
+        [
+            "/fake/uv",
+            "sync",
+            "--frozen",
+            "--group",
+            "build",
+            "--group",
+            "ci",
+            "--group",
+            "lint",
+        ],
+    ]
+
+
 def test_ensure_deps_sync_failure_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
