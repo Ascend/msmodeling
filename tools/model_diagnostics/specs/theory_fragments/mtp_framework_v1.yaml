@@ -1,8 +1,8 @@
 fragment_id: mtp_framework_v1
 fragment_kind: mtp_framework
-# Common TensorCast speculative-decode framework. Theory follows the semantic rows
-# in text_generate_shape_dtype_alignment.md; Runtime options are overridable defaults
-# for the shared MtpWrapper/MultiTokenPredictor implementation.
+# Common TensorCast speculative-decode framework. Theory describes the shared
+# MTP request/proposal stages; Runtime options are overridable defaults for the
+# shared MtpWrapper/MultiTokenPredictor implementation.
 # Stage definitions follow stage_groups order: request, then proposal_prefix/suffix.
 stage_groups:
   request: [target_selection, target_lm_head, verification_sampler, mtp_output]

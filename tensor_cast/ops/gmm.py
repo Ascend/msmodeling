@@ -60,22 +60,61 @@ def _(
     return torch.empty((M, N), dtype=out_dtype, device="meta")
 
 
+def _grouped_matmul_swiglu_out(
+    x: List[torch.Tensor],
+    w: List[torch.Tensor],
+    dtype: torch.dtype,
+    *,
+    packed_4bit_weight: bool,
+) -> torch.Tensor:
+    M = sum(xi.shape[0] for xi in x)
+    if not w:
+        return torch.empty((M, 0), dtype=dtype, device="meta")
+
+    weight = w[0]
+    if packed_4bit_weight:
+        if not x or x[0].shape[-1] <= 0:
+            raise ValueError("packed 4-bit GMM+SwiGLU requires a positive input feature dimension")
+        input_features = x[0].shape[-1]
+        pack_factor = (weight.element_size() * 8) // 4
+        logical_weight_elements = weight.numel() * pack_factor
+        if logical_weight_elements % input_features != 0:
+            raise ValueError("packed 4-bit weight elements must be divisible by the input feature dimension")
+        gate_up_features = logical_weight_elements // input_features
+    else:
+        gate_up_features = weight.shape[1]
+
+    if gate_up_features % 2 != 0:
+        raise ValueError("GMM+SwiGLU gate/up feature dimension must be even")
+    return torch.empty((M, gate_up_features // 2), dtype=dtype, device="meta")
+
+
 @register_tensor_cast_op("grouped_matmul_swiglu")
 def _(
     x: List[torch.Tensor],
     w: List[torch.Tensor],
     bias: List[Optional[torch.Tensor]],
 ) -> torch.Tensor:
-    M = sum(xi.shape[0] for xi in x)
-    N = w[0].shape[1] if w else 0
-    gmm_out_shape = (M, N)
     dtype = x[0].dtype if x else torch.float32
-
-    swiglu_out_shape = gmm_out_shape
-    return torch.empty(swiglu_out_shape, dtype=dtype, device="meta")
+    return _grouped_matmul_swiglu_out(x, w, dtype, packed_4bit_weight=False)
 
 
 @register_tensor_cast_op("grouped_matmul_quant_swiglu")
+def _(
+    x: List[torch.Tensor],
+    w: List[torch.Tensor],
+    w_scale: List[torch.Tensor],
+    w_offset: List[Optional[torch.Tensor]],
+    x_scale: List[torch.Tensor],
+    x_offset: List[Optional[torch.Tensor]],
+    bias: List[Optional[torch.Tensor]],
+    out_dtype: Optional[torch.dtype],
+) -> torch.Tensor:
+    if out_dtype is None:
+        out_dtype = x[0].dtype if x else torch.float32
+    return _grouped_matmul_swiglu_out(x, w, out_dtype, packed_4bit_weight=False)
+
+
 @register_tensor_cast_op("grouped_matmul_quant_int4_swiglu")
 def _(
     x: List[torch.Tensor],
@@ -89,13 +128,7 @@ def _(
 ) -> torch.Tensor:
     if out_dtype is None:
         out_dtype = x[0].dtype if x else torch.float32
-
-    M = sum(xi.shape[0] for xi in x)
-    N = w[0].shape[1] if w else 0
-    gmm_out_shape = (M, N)
-
-    swiglu_out_shape = gmm_out_shape
-    return torch.empty(swiglu_out_shape, dtype=out_dtype, device="meta")
+    return _grouped_matmul_swiglu_out(x, w, out_dtype, packed_4bit_weight=True)
 
 
 @register_tensor_cast_op("grouped_matmul_fp8_swiglu")
@@ -109,13 +142,7 @@ def _(
 ) -> torch.Tensor:
     if out_dtype is None:
         out_dtype = x[0].dtype if x else torch.float32
-
-    M = sum(xi.shape[0] for xi in x)
-    N = w[0].shape[1] if w else 0
-    gmm_out_shape = (M, N)
-
-    swiglu_out_shape = gmm_out_shape
-    return torch.empty(swiglu_out_shape, dtype=out_dtype, device="meta")
+    return _grouped_matmul_swiglu_out(x, w, out_dtype, packed_4bit_weight=False)
 
 
 @register_tensor_cast_op("grouped_matmul_mxfp4_swiglu")
@@ -127,18 +154,9 @@ def _(
     bias: List[Optional[torch.Tensor]],
     out_dtype: Optional[torch.dtype],
 ) -> torch.Tensor:
-    """MXFP4 grouped GMM followed by a high-precision SwiGLU epilogue.
-
-    This fallback represents the unfused post-SwiGLU quantization path.  The
-    GMM output contains concatenated gate and up channels, whereas SwiGLU
-    reduces that last dimension by half.
-    """
     if out_dtype is None:
         out_dtype = x[0].dtype if x else torch.float32
-
-    M = sum(xi.shape[0] for xi in x)
-    N = w[0].shape[1] if w else 0
-    return torch.empty((M, N // 2), dtype=out_dtype, device="meta")
+    return _grouped_matmul_swiglu_out(x, w, out_dtype, packed_4bit_weight=True)
 
 
 @register_tensor_cast_op("grouped_matmul_mxfp4_swiglu_quant")

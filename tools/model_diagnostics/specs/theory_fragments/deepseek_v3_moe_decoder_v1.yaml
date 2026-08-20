@@ -1,0 +1,122 @@
+# DeepSeek-V3 family decoder: MLA attention, optional DSA, followed by Dense or MoE FFN.
+fragment_id: deepseek_v3_moe_decoder_v1
+fragment_kind: model_decoder
+
+stages:
+  - id: mla_projection
+    modules:
+      - name: mlapo
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Lh, Hmla]", dtype: ACT}
+          OUTPUT[1]: {shape: "[T, KVlora]", dtype: ACT}
+          OUTPUT[2]: {shape: "[T, QKrope]", dtype: ACT}
+          OUTPUT[3]: {shape: "[T, Qlora]", dtype: ACT}
+    runtime:
+      boundary_operators: [rms_norm]
+      ignored_operators: [rms_norm, view, index]
+
+  - id: dsa_indexer
+    modules:
+      - name: dsa_indexer
+        activation: dsa_enabled
+        tensors:
+          INPUT[0]: {shape: "[B, Q, H]", dtype: ACT}
+          INPUT[1]: {shape: "[B, Q, Qlora]", dtype: ACT}
+          OUTPUT[0]: {shape: "[B, Q, Dsa_k]", dtype: int64}
+    runtime:
+      boundary_operators: [dsa_indexer]
+      ignored_operators: [view]
+
+  - id: sparse_attention
+    modules:
+      - name: mla_sparse_attention
+        tensors:
+          INPUT[0]: {shape: "[T, Lh, Hmla]", dtype: ACT}
+          # MLA reads one compressed latent cache instead of separate K/V caches.
+          INPUT[1]: {shape: "[Nblk, Bs, KVlora + QKrope]", dtype: ACT}
+          INPUT[2]: {shape: "[B, Mb]", dtype: int64}
+          INPUT[3]: {shape: "[B + 1]", dtype: int64}
+          INPUT[4]: {shape: "[B]", dtype: int64}
+          INPUT[5]: {shape: "[B]", dtype: int64}
+          OUTPUT[0]: {shape: "[T, Lh, Vh]", dtype: ACT}
+      - name: o_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Lh * Vh]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [concat_and_cache_mla]
+      ignored_operators: [concat_and_cache_mla, view, dynamic_quantize_symmetric, all_reduce, add_rms_norm2, all_gather, all_to_all, constant_pad_nd, slice]
+
+  - id: moe_gate
+    modules:
+      - name: mm
+        # Most DeepSeek-family runtimes expose a standalone gate mm; kimi_k2
+        # patches MoE inference so routing is fused without a gate call, and
+        # this stage is omitted for that model_type (explicit_moe_gate=False).
+        activation: explicit_moe_gate
+        tensors:
+          # MOE_GATE_TOKENS is T when the raw-logits EP path gates on the full
+          # token sequence before the expert exchange, else Tmoe (post-transform
+          # domain). See context_env._moe_input_token_count / MOE_GATE_TOKENS.
+          INPUT[0]: {shape: "[MOE_GATE_TOKENS, H]", dtype: float32}
+          OUTPUT[0]: {shape: "[MOE_GATE_TOKENS, E]", dtype: float32}
+    runtime:
+      boundary_operators: [add_rms_norm2]
+      ignored_operators: [add_rms_norm2, view, dynamic_quantize_symmetric, convert_element_type, sigmoid, add, topk, sum, scatter, unsqueeze, expand, clone, bitwise_not, where, gather, div, mul, constant_pad_nd, slice, all_gather, moe_gating_top_k_softmax]
+
+  - id: moe_dispatch
+    modules:
+      - name: init_routing_v2
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [init_routing_v2]
+      ignored_operators: [view, split_with_sizes, all_to_all, dynamic_quantize_symmetric, cat]
+
+  - id: moe_experts
+    modules:
+      - name: grouped_matmul_swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[Te, Fe]", dtype: OUT}
+      - name: grouped_matmul
+        tensors:
+          OUTPUT[0]: {shape: "[Te, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [grouped_matmul_swiglu, grouped_matmul_quant_swiglu, grouped_matmul_quant_int4_swiglu, grouped_matmul_fp8_swiglu, grouped_matmul_mxfp4_swiglu]
+      ignored_operators: [split_with_sizes, slice, cat, all_to_all, dynamic_quantize_symmetric]
+
+  - id: moe_combine
+    modules:
+      - name: unpermute_tokens
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: mul
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: MOE_COMBINE_DTYPE}
+      - name: sum
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: MOE_COMBINE_DTYPE}
+    runtime:
+      boundary_operators: [unpermute_tokens]
+      ignored_operators: [unsqueeze, view, split_with_sizes, slice, cat, dynamic_quantize_symmetric, all_gather]
+
+  - id: shared_ffn
+    modules:
+      - name: mm
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[Tmoe, 2 * Fshared]", dtype: OUT}
+      - name: swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Fshared]", dtype: ACT}
+      - name: mm
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, Fshared]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: OUT}
+    runtime:
+      # The in-model shared expert has no dedicated Runtime wrapper. Its first
+      # observable operation is the gate/up linear, so a linear boundary is the
+      # narrowest boundary that preserves the complete shared FFN contract.
+      boundary_operators: [mm, static_quant_linear, static_quant_linear_int4, fp8_linear, mxfp4_linear]
+      ignored_operators: [view, split_with_sizes, add, copy_, convert_element_type, dynamic_quantize_symmetric, rms_norm, device_put, select, all_reduce, all_gather, slice]

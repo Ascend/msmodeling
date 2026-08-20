@@ -22,6 +22,8 @@ from tools.model_diagnostics.domain import (
     TheoryOperatorSpec,
 )
 from tools.model_diagnostics.specification.builtin_activation import (
+    DsaEnabledActivation,
+    ExplicitMoeGateActivation,
     LmHeadTokenSelectionActivation,
     MtpEnabledActivation,
     NonMtpLmHeadActivation,
@@ -39,6 +41,7 @@ def _request(
     phase: ExecutionPhase,
     query_length: int,
     num_mtp_tokens: object,
+    model_config: dict[str, object] | None = None,
 ) -> OperatorActivationRequest:
     context = ModelRunContext(
         model_name="test",
@@ -48,7 +51,7 @@ def _request(
         query_length=query_length,
         context_length=None,
         parallel=ParallelContext(),
-        model_config={"num_mtp_tokens": num_mtp_tokens},
+        model_config={"num_mtp_tokens": num_mtp_tokens, **(model_config or {})},
         quantization_config={},
     )
     return OperatorActivationRequest(
@@ -139,6 +142,30 @@ def test_non_mtp_lm_head_activation(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize(("index_topk", "expected"), ((None, False), (2048, True)))
+def test_dsa_enabled_activation(index_topk: int | None, expected: bool) -> None:
+    request = _request(
+        phase=ExecutionPhase.PREFILL,
+        query_length=2,
+        num_mtp_tokens=0,
+        model_config={} if index_topk is None else {"index_topk": index_topk},
+    )
+
+    assert DsaEnabledActivation().is_active(request) is expected
+
+
+@pytest.mark.parametrize(("model_type", "expected"), (("kimi_k2", False), ("deepseek_v3", True)))
+def test_explicit_moe_gate_activation(model_type: str, expected: bool) -> None:
+    request = _request(
+        phase=ExecutionPhase.PREFILL,
+        query_length=2,
+        num_mtp_tokens=0,
+        model_config={"model_type": model_type},
+    )
+
+    assert ExplicitMoeGateActivation().is_active(request) is expected
 
 
 @pytest.mark.parametrize("invalid", (-1, True, "2"))

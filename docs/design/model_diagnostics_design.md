@@ -7,6 +7,10 @@ Status: Initial Release Review
 | Date (日期) | Version (修订版本) | Change Description (修改描述) | Author (作者) | RFC Document (RFC文档) |
 | --- | --- | --- | --- | --- |
 | 2026-07-27 | 1.0 | 首次上库版本：交付 Theory→Runtime 算子结构及 Tensor shape/dtype 诊断模块、Runtime Artifact 边界、YAML Theory Spec、Run Profile 样例、CLI 与回归测试 | ChenHuiwen | N/A |
+| 2026-08-12 | 1.1 | 增加 DeepSeek V3 Dense-prefix/MoE 混合层、MLA/DSA/MoE Theory、W8A8/W4A8 与 MTP 纵向覆盖 | ChenHuiwen | N/A |
+| 2026-08-14 | 1.2 | 分类 3 扩展为 DeepSeek V3/V3.2、GLM-5/5.1、Kimi K2/K2.5/K2.6 文本兼容矩阵，并增加代表性 TP/EP、DP/MDP 覆盖 | ChenHuiwen | N/A |
+| 2026-08-15 | 1.3 | 分类 3 并行覆盖改为逐型号（每型号 TP=2/EP=2、DP=2/MDP=2 组合）；新增 `MOE_GATE_TOKENS` 契约并补充 sparse_attention 机械算子忽略 | ChenHuiwen | N/A |
+| 2026-08-15 | 1.4 | 评审修复：lm_head TP 默认值单测、`explicit_moe_gate` 语义说明、config 一致性注释；E2E 按例行代表集 + nightly 全矩阵分层 | ChenHuiwen | N/A |
 
 ---
 
@@ -430,6 +434,12 @@ Context 将其展开为领域 `RegionSpec.layer_layout: tuple[str, ...]`，其�
 `run_context` 同一字段关联；`num_hidden_layers` 仅表示模型结构深度，不直接驱动 layout
 展开。Theory 仍只构建请求选中的物理层；Runtime 按展开后的 layout 顺序扫描。
 
+除单一 kind 的 `repeat` 外，Loader 支持 `prefix_then_repeat`：总层数取
+`count_from`，前缀长度取 `prefix_count_from`，前缀与后续分别引用
+`prefix_layer_kind` 和 `repeated_layer_kind`。DeepSeek V3 使用捕获后的
+`effective_num_hidden_layers` 与 HF config 的 `first_k_dense_replace`，展开为 Dense 前缀和
+MoE 后缀；两种 kind 分别整包引用 decoder fragment，不通过 stage group 选择层类型。
+
 YAML 示例（节选）：
 
 ```yaml
@@ -580,6 +590,13 @@ common framework including input_fusion (mtp_framework_v1)
 + optional model-specific predictor adapter
 + decoder Theory + Runtime defaults (qwen3_dense_decoder_v1)  ← language 与 MTP 共用
 ```
+
+DeepSeek V3 使用相同组合规则，但 language layer 由 `prefix_then_repeat` 在
+`deepseek_v3_dense_decoder_v1` 与 `deepseek_v3_moe_decoder_v1` 间选择；MTP predictor
+复用 MoE decoder fragment，公共 request/proposal wrapper 仍来自 `mtp_framework_v1`。
+MLA、DSA、routed/shared expert 参数均在模型加载后从 HF/model config 捕获到 Context，Theory
+环境据此派生 `Qlora/KVlora/QKnope/QKrope/Vh/Hmla`、`Dsa_*`、`E/Te` 和
+`Nshared/Fshared`，不由 Profile 重复配置。
 
 ```python
 class ModelDiagnosticsSpecResolver(Protocol):
@@ -788,6 +805,12 @@ Theory 使用业务语义名称 `lm_head_select` 描述 LM Head 前的隐藏状�
 
 Q/K/V 融合成单算子时，用 `COMPOSITE` TensorMapping 表达沿 axis 组合，禁止无语义逐项相加
 整个 shape tuple。
+
+逐 Tensor shape 的内置相等规则先执行严格 tuple 比较。若不相等且 rank 恰好相差 1，
+允许将较长 shape 的前两维相乘：乘积须等于较短 shape 的第一维，且双方剩余维度必须
+逐维相等。因此 `[T, ...]` 与 `[B, Q, ...]` 可在 `T == B * Q` 时全局等价；其他
+rank/shape 差异仍为 `FAIL`，dtype 始终严格比较。使用该规则的 PASS 必须以
+`comparison.leading_product_equivalent` 公开，不得伪装成原始 shape 完全相等。
 
 ```python
 class TensorMappingMode(Enum):
@@ -1294,6 +1317,25 @@ W8A8_DYNAMIC 还覆盖公开 CLI；量化 decode 必须验证跳过 `lm_head_sel
 路径执行 FP16，则 `torch_dtype=float16` 且 `declared_torch_dtype=bfloat16`（用户
 2026-07-24 授权）。比较策略中的显式别名/忽略列表属于 Spec 声明规则。
 
+分类 3 共用 DeepSeek V3-family 的 Dense 前缀、MoE/shared-expert、MLA/DSA sparse MLA
+组合契约，正式 E2E 覆盖 DeepSeek V3/V3.2、GLM-5/5.1 与 Kimi K2/K2.5/K2.6 文本路径。
+每个型号至少包含 prefill、decode、W8A8_DYNAMIC 与 MTP decode；DeepSeek V3.2 额外覆盖
+W4A8_DYNAMIC。并行 shape 逐型号覆盖 `TP=2/EP=2` 与 `DP=2/MDP=2` 两个组合布局。量化 E2E
+除最终诊断 PASS 外，还断言对应 int8/int4 linear 和 grouped-MoE kernels 确实出现在
+Runtime Artifact，防止只改变 Theory dtype 而没有执行真实量化路径。
+
+MoE gate 的 token 域由 `MOE_GATE_TOKENS` 表达：raw-logits 门控族（DeepSeek
+V3/V3.1、GLM-5/5.1、Kimi-K2-Base）在 EP>1 时 gate 运行于全量序列 `T`，其余布局/型号
+运行于交换后域 `Tmoe`（DeepSeek V3.2、Kimi K2.5/K2.6）。sparse_attention 阶段忽略
+MoE 域机械算子（`all_gather`/`all_to_all`/`constant_pad_nd`/`slice`），避免
+`moe_gate` 因 `explicit_moe_gate` 关闭时这些调用被计入注意力阶段。Kimi K2.5/K2.6
+（`kimi_k2`）的 Runtime patch 将 routing 融合进 MoE 内核、无独立 gate 调用，因此
+`explicit_moe_gate=False` 省略其 gate 阶段；其余 DeepSeek 族型号暴露独立 gate mm。
+若带视觉输入还需叠加分类 6，该视觉路径不由分类 3 文本 E2E 代替。
+
+例行门禁只保留每个 `model_type` 的 prefill/decode 代表用例与 DeepSeek V3.2 完整
+纵向（量化/MTP/并行）；其余量化变体、MTP 与并行组合标记 nightly 全量执行，场景不删除。
+
 ### 3.2 Configuration (配置)
 
 | Item | Description | Constraint |
@@ -1376,6 +1418,7 @@ Runtime 观察结果反向拟合：
 | Export observer | 禁用零影响；启用失败不留部分文件；region/copy 展开后顺序稳定；mock 只用于单测 |
 | Synthetic artifact | 测试代码在内存中构造；仓库不保存或重放 Artifact JSON |
 | Category 1 live path | Qwen3 Dense 单层样例：每次采集+比较；禁止缓存 Qwen3 Artifact 文件 |
+| Classification 3 live path | DeepSeek V3/V3.2、GLM-5/5.1、Kimi K2/K2.5/K2.6 文本路径逐型号覆盖 prefill/decode、量化与 MTP，以及 `TP=2/EP=2`、`DP=2/MDP=2` 两个并行组合；每次真实采集并要求全部 finding PASS |
 | Defect injection | 缺失算子、错误 shape、错误 dtype → FAIL/INCOMPLETE 可定位 |
 | Dependency boundary | 仅 `sources/runtime_capture.py` 可 import/读取 Runtime；包级 `sources`、domain 与 Artifact 后链路可在无 Runtime import 下加载、组织和比较 |
 | Result adapters | `assert_diagnostics_passed()` 摘要简洁；Console 与两类 HTML 验证转义、完整性和原子写入 |

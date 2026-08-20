@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import torch
@@ -26,15 +27,64 @@ from tools.model_diagnostics.domain import (
     OUTPUT,
     ModelRunContext,
     OperatorCallRecord,
+    ParallelContext,
     ProducerInfo,
     SimulationExecutionArtifact,
     TensorInfo,
+    validate_expert_parallel_features,
 )
 from tools.model_diagnostics.errors import SourceLoadError
 from tensor_cast.runtime import Runtime
 
 _CAPTURE_BACKEND = "tensor_cast.runtime_observer"
 _SCHEMA_VERSION = "1"
+
+
+def _is_moe_config(config: object) -> bool:
+    """Return whether the loaded HF config exposes routed-MoE fields."""
+
+    has_routed_experts = any(
+        getattr(config, key, None) is not None for key in ("num_experts", "n_routed_experts")
+    )
+    return has_routed_experts and getattr(config, "num_experts_per_tok", None) is not None
+
+
+@lru_cache(maxsize=32)
+def _model_is_moe(model_name: str) -> bool:
+    """Classify a model once without retaining its mutable HF config object.
+
+    Assumes the config loaded here matches what ModelRunner loads for the same
+    model id. If a runner applies config patches before building the model,
+    keep this classification and the runner's MoE execution flags in sync.
+    """
+
+    from tensor_cast.transformers.utils import AutoModelConfigLoader
+
+    loaded_config = AutoModelConfigLoader().load_config(model_name)
+    if loaded_config is None:
+        raise SourceLoadError("failed to load model config before Runtime capture")
+    return _is_moe_config(loaded_config)
+
+
+def _validate_moe_capture_parallel(parallel: ParallelContext) -> None:
+    """Validate the diagnostics MoE layout with MoE tensor parallel fixed at 1."""
+
+    tp = parallel.tensor_parallel_size
+    pp = parallel.pipeline_parallel_size
+    dp = parallel.data_parallel_size
+    ep = parallel.expert_parallel_size
+    mdp = parallel.moe_data_parallel_size
+    world_size = tp * dp * pp
+    moe_world_size = world_size // pp
+    if mdp * ep != moe_world_size:
+        raise SourceLoadError(
+            f"moe_data_parallel_size ({mdp}) * expert_parallel_size ({ep}) must equal "
+            f"pipeline stage world_size ({moe_world_size}) "
+            f"derived from world_size ({world_size}) / pipeline_parallel_size ({pp}). "
+            f"Fix parallel.data_parallel_size / expert_parallel_size / moe_data_parallel_size "
+            f"in the diagnostics profile (diagnostics does not auto-adjust). "
+            f"MoE tensor parallel is fixed at 1 by this module."
+        )
 
 
 @dataclass
@@ -230,6 +280,10 @@ def capture_artifact_for_profile(profile: object) -> SimulationExecutionArtifact
         quant_action = QuantizeLinearAction(profile.quantize_linear_action)
     except ValueError as error:
         raise SourceLoadError(f"unsupported quantize_linear_action {profile.quantize_linear_action!r}") from error
+    parallel = profile.parallel
+    is_moe = _model_is_moe(profile.model_name)
+    if is_moe:
+        _validate_moe_capture_parallel(parallel)
     user_input = UserInputConfig(
         device=profile.device,
         model_id=profile.model_name,
@@ -240,16 +294,31 @@ def capture_artifact_for_profile(profile: object) -> SimulationExecutionArtifact
         decode=profile.phase is ExecutionPhase.DECODE,
         num_mtp_tokens=profile.num_mtp_tokens,
         num_hidden_layers_override=profile.num_hidden_layers_override,
-        world_size=profile.parallel.tensor_parallel_size
-        * profile.parallel.pipeline_parallel_size
-        * profile.parallel.data_parallel_size,
-        tp_size=profile.parallel.tensor_parallel_size,
-        pp_size=profile.parallel.pipeline_parallel_size,
-        ep_size=profile.parallel.expert_parallel_size,
+        world_size=(
+            parallel.tensor_parallel_size * parallel.pipeline_parallel_size * parallel.data_parallel_size
+        ),
+        tp_size=parallel.tensor_parallel_size,
+        pp_size=parallel.pipeline_parallel_size,
+        dp_size=parallel.data_parallel_size,
+        ep_size=parallel.expert_parallel_size,
+        # Dense keeps the core-derived default; only a confirmed MoE model uses
+        # diagnostics' fixed MTPt=1 contract.
+        moe_tp_size=1 if is_moe else None,
+        moe_dp_size=parallel.moe_data_parallel_size,
         quantize_linear_action=quant_action,
         word_embedding_tp=profile.word_embedding_tp,
+        enable_redundant_experts=profile.enable_redundant_experts,
+        enable_external_shared_experts=profile.enable_external_shared_experts,
         performance_model=["analytic"],
     )
+    try:
+        validate_expert_parallel_features(
+            profile.parallel.expert_parallel_size,
+            enable_external_shared_experts=profile.enable_external_shared_experts,
+            enable_redundant_experts=profile.enable_redundant_experts,
+        )
+    except ValueError as error:
+        raise SourceLoadError(str(error)) from error
     model_runner = ModelRunner(user_input)
     run_context = _run_context_after_model_load(profile, model_runner)
     return capture_model_runner_artifact(
@@ -269,7 +338,14 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
 
     assert isinstance(profile, DiagnosticsRunProfile)
     model_config: dict[str, object] = {}
-    hf_config = getattr(getattr(model_runner, "model", None), "config", None)
+    model = getattr(model_runner, "model", None)
+    hf_config = getattr(model, "text_config", None)
+    if hf_config is None:
+        root_config = getattr(model, "hf_config", None)
+        get_text_config = getattr(root_config, "get_text_config", None)
+        hf_config = get_text_config() if callable(get_text_config) else root_config
+    if hf_config is None:
+        hf_config = getattr(model, "config", None)
     if hf_config is None:
         raise SourceLoadError("loaded model does not expose config for ModelRunContext")
     for key in (
@@ -281,10 +357,34 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         "vocab_size",
         "head_dim",
         "model_type",
+        # MoE (category 2): routed expert count / top-k / MoE FFN width.
+        "num_experts",
+        "num_experts_per_tok",
+        "moe_intermediate_size",
+        "n_routed_experts",
+        "n_shared_experts",
+        "first_k_dense_replace",
+        "q_lora_rank",
+        "kv_lora_rank",
+        "qk_nope_head_dim",
+        "qk_rope_head_dim",
+        "v_head_dim",
+        "index_topk",
     ):
         value = getattr(hf_config, key, None)
         if value is not None:
             model_config[key] = value
+    if "index_topk" not in model_config:
+        topk_limit = getattr(hf_config, "topk_limit", None)
+        if topk_limit is not None:
+            model_config["index_topk"] = topk_limit
+    if _is_moe_config(hf_config):
+        # Keep the captured Context consistent with UserInputConfig: these are
+        # diagnostics MoE execution settings, not generic model metadata.
+        model_config["moe_tp_size"] = 1  # MoE TP is fixed at 1 (MTPt>1 unsupported).
+        model_config["moe_dp_size"] = profile.parallel.moe_data_parallel_size
+        model_config["enable_redundant_experts"] = profile.enable_redundant_experts
+        model_config["enable_external_shared_experts"] = profile.enable_external_shared_experts
     torch_dtype = getattr(hf_config, "torch_dtype", None)
     if torch_dtype is not None:
         declared = str(torch_dtype).removeprefix("torch.")
@@ -319,7 +419,12 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         "enabled": profile.quantize_linear_action != "DISABLED",
         "action": profile.quantize_linear_action,
     }
-    if profile.quantize_linear_action in {"W8A8_DYNAMIC", "W8A8_STATIC"}:
+    if profile.quantize_linear_action in {
+        "W8A8_DYNAMIC",
+        "W8A8_STATIC",
+        "W4A8_DYNAMIC",
+        "W4A8_STATIC",
+    }:
         quantization_config["linear_input_dtype"] = "int8"
     return ModelRunContext(
         model_name=profile.model_name,

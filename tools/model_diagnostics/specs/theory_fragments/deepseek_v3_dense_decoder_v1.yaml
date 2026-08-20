@@ -1,0 +1,65 @@
+# DeepSeek-V3 family Dense decoder layer: MLA attention, optional DSA, and dense FFN.
+fragment_id: deepseek_v3_dense_decoder_v1
+fragment_kind: model_decoder
+stages:
+  - id: mla_projection
+    modules:
+      - name: mlapo
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Lh, Hmla]", dtype: ACT}
+          OUTPUT[1]: {shape: "[T, KVlora]", dtype: ACT}
+          OUTPUT[2]: {shape: "[T, QKrope]", dtype: ACT}
+          OUTPUT[3]: {shape: "[T, Qlora]", dtype: ACT}
+    runtime:
+      boundary_operators: [rms_norm]
+      ignored_operators: [rms_norm, view, index]
+
+  - id: dsa_indexer
+    modules:
+      - name: dsa_indexer
+        activation: dsa_enabled
+        tensors:
+          INPUT[0]: {shape: "[B, Q, H]", dtype: ACT}
+          INPUT[1]: {shape: "[B, Q, Qlora]", dtype: ACT}
+          OUTPUT[0]: {shape: "[B, Q, Dsa_k]", dtype: int64}
+    runtime:
+      boundary_operators: [dsa_indexer]
+      ignored_operators: [view]
+
+  - id: sparse_attention
+    modules:
+      - name: mla_sparse_attention
+        tensors:
+          INPUT[0]: {shape: "[T, Lh, Hmla]", dtype: ACT}
+          # MLA reads one compressed latent cache instead of separate K/V caches.
+          INPUT[1]: {shape: "[Nblk, Bs, KVlora + QKrope]", dtype: ACT}
+          INPUT[2]: {shape: "[B, Mb]", dtype: int64}
+          INPUT[3]: {shape: "[B + 1]", dtype: int64}
+          INPUT[4]: {shape: "[B]", dtype: int64}
+          INPUT[5]: {shape: "[B]", dtype: int64}
+          OUTPUT[0]: {shape: "[T, Lh, Vh]", dtype: ACT}
+      - name: o_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Lh * Vh]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [concat_and_cache_mla]
+      ignored_operators: [concat_and_cache_mla, view, dynamic_quantize_symmetric, all_reduce]
+
+  - id: dense_ffn
+    modules:
+      - name: gate_up_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, 2 * Ftp]", dtype: OUT}
+      - name: swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[B, Q, Ftp]", dtype: ACT}
+      - name: down_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Ftp]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2]
+      ignored_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2, view, split_with_sizes, add, copy_, dynamic_quantize_symmetric, all_reduce]

@@ -72,6 +72,8 @@ def extend_glm5_indexer_types_for_mtp(indexer_types: list[str], num_mtp_layers: 
 
 
 class Glm5SparseAttention(DeepseekSparseAttention):
+    next_skip_topk = False
+
     def _run_sparse_attention_indexer(
         self, hidden_states, qa_normed, position_embeddings, attention_meta=None, **kwargs
     ):
@@ -93,13 +95,7 @@ class Glm5SparseAttention(DeepseekSparseAttention):
         return prev_topk_indices
 
     def _format_forward_output(self, attn_output, attn_weights, pre_attn_out) -> tuple:
-        attrs = vars(self)
-        inner = attrs.get("_inner")
-        modules = attrs.get("_modules")
-        if inner is None and isinstance(modules, dict):
-            inner = modules.get("_inner")
-        next_skip_topk = attrs.get("next_skip_topk", False) or getattr(inner, "next_skip_topk", False)
-        next_topk = pre_attn_out if next_skip_topk else None
+        next_topk = pre_attn_out if self.next_skip_topk else None
         return attn_output, attn_weights, next_topk
 
     def forward(self, *args, **kwargs):

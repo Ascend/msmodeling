@@ -41,8 +41,6 @@ from tools.model_diagnostics.specification import (
     load_diagnostics_run_profile,
 )
 
-_PROFILES_DIR = Path(__file__).resolve().parents[4] / "tools" / "model_diagnostics" / "profiles"
-
 
 def test_help_text_is_printable_on_windows_default_console() -> None:
     _build_parser().format_help().encode("gbk")
@@ -104,24 +102,40 @@ def test_default_runtime_output_keeps_selection_warning(capsys) -> None:
 
 
 @pytest.mark.parametrize(
-    ("filename", "phase", "query_length", "context_length"),
+    ("phase", "query_length", "context_length", "extra_lines"),
     (
-        ("prefill_example.yaml", ExecutionPhase.PREFILL, 2, None),
-        ("decode_example.yaml", ExecutionPhase.DECODE, 1, 128),
+        (ExecutionPhase.PREFILL, 2, None, ()),
+        (ExecutionPhase.DECODE, 1, 128, ("context_length: 128",)),
     ),
 )
-def test_load_category_1_run_profile(
-    filename: str,
+def test_load_minimal_run_profile_to_request(
+    tmp_path: Path,
     phase: ExecutionPhase,
     query_length: int,
     context_length: int | None,
+    extra_lines: tuple[str, ...],
 ) -> None:
-    profile = load_diagnostics_run_profile(_PROFILES_DIR / filename)
+    # Intentionally does not read tools/model_diagnostics/profiles/* examples;
+    # those files are user-editable samples, not test fixtures.
+    path = tmp_path / f"{phase.value}.yaml"
+    path.write_text(
+        "\n".join(
+            (
+                "model_name: Qwen/Qwen3-8B",
+                f"phase: {phase.value}",
+                "batch_size: 1",
+                f"query_length: {query_length}",
+                *extra_lines,
+                "num_hidden_layers_override: 1",
+                "quantize_linear_action: W8A8_DYNAMIC",
+            )
+        ),
+        encoding="utf-8",
+    )
+    profile = load_diagnostics_run_profile(path)
 
     assert profile.model_name == "Qwen/Qwen3-8B"
     assert profile.entrypoint == "text_generate"
-    # Omitted in the profile YAML: derived from the Spec at to_request() time,
-    # not hardcoded to a particular model's region ids.
     assert profile.selected_language_layers is None
     assert profile.selected_stage_regions == ()
     assert profile.num_hidden_layers_override == 1
@@ -292,6 +306,56 @@ def test_run_profile_accepts_word_embedding_tp_modes(
     )
 
     assert load_diagnostics_run_profile(path).word_embedding_tp == mode
+
+
+def test_run_profile_accepts_moe_dp_and_expert_flags(tmp_path: Path) -> None:
+    path = tmp_path / "moe_parallel_flags.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "model_name: Qwen/Qwen3-30B-A3B",
+                "phase: prefill",
+                "batch_size: 1",
+                "query_length: 2",
+                "parallel:",
+                "  data_parallel_size: 2",
+                "  expert_parallel_size: 2",
+                "  moe_dp_size: 1",
+                "enable_redundant_experts: true",
+                "enable_external_shared_experts: false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profile = load_diagnostics_run_profile(path)
+    assert profile.parallel.moe_data_parallel_size == 1
+    assert profile.enable_redundant_experts is True
+    assert profile.enable_external_shared_experts is False
+
+
+def test_run_profile_rejects_moe_tp_field(tmp_path: Path) -> None:
+    """MoE tensor parallel is fixed at 1: any moe_tp_size field must fail fast."""
+
+    path = tmp_path / "reject_moe_tp.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "model_name: Qwen/Qwen3-30B-A3B",
+                "phase: prefill",
+                "batch_size: 1",
+                "query_length: 2",
+                "parallel:",
+                "  moe_tp_size: 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        SpecificationLoadError,
+        match="MoE tensor parallel is fixed at 1 by this module; sizes greater than 1 are unsupported",
+    ):
+        load_diagnostics_run_profile(path)
 
 
 def test_run_profile_rejects_unknown_word_embedding_tp_mode(tmp_path: Path) -> None:

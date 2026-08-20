@@ -30,9 +30,10 @@ from tools.model_diagnostics.domain import (
     TensorDirection,
     TensorInfo,
     TensorSlot,
+    validate_expert_parallel_features,
 )
-from tools.model_diagnostics.errors import InvalidDiagnosticsRequest
 from tools.model_diagnostics.domain.models import _TensorSlots
+from tools.model_diagnostics.errors import InvalidDiagnosticsRequest
 
 
 def _context() -> ModelRunContext:
@@ -49,6 +50,29 @@ def _context() -> ModelRunContext:
     )
 
 
+@pytest.mark.parametrize("external,redundant", [(True, False), (False, True), (True, True)])
+def test_expert_features_require_expert_parallel(external: bool, redundant: bool) -> None:
+    with pytest.raises(ValueError, match="require expert_parallel_size > 1"):
+        validate_expert_parallel_features(
+            1,
+            enable_external_shared_experts=external,
+            enable_redundant_experts=redundant,
+        )
+
+
+def test_expert_feature_validation_accepts_disabled_features_or_ep() -> None:
+    validate_expert_parallel_features(
+        1,
+        enable_external_shared_experts=False,
+        enable_redundant_experts=False,
+    )
+    validate_expert_parallel_features(
+        2,
+        enable_external_shared_experts=True,
+        enable_redundant_experts=True,
+    )
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -56,6 +80,7 @@ def _context() -> ModelRunContext:
         "pipeline_parallel_size",
         "data_parallel_size",
         "expert_parallel_size",
+        "moe_data_parallel_size",
     ],
 )
 def test_parallel_context_rejects_non_positive_sizes(field: str) -> None:

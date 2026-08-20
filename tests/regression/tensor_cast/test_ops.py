@@ -606,6 +606,37 @@ def test_grouped_matmul_meta_ops_preserve_shapes_and_dtype():
     assert torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default([], [], [], [], [], None).shape == (0, 0)
 
 
+def test_grouped_matmul_swiglu_meta_ops_halve_gate_up_features():
+    x = [torch.empty((2, 4), device="meta"), torch.empty((1, 4), device="meta")]
+    w = [torch.empty((4, 12), device="meta"), torch.empty((4, 12), device="meta")]
+    packed_w = [
+        torch.empty((2, 12), dtype=torch.uint8, device="meta"),
+        torch.empty((2, 12), dtype=torch.uint8, device="meta"),
+    ]
+    mxfp4_w = [
+        torch.empty((2, 12), dtype=torch.int4, device="meta"),
+        torch.empty((2, 12), dtype=torch.int4, device="meta"),
+    ]
+    bias = [None, torch.empty((12,), device="meta")]
+    scales = [torch.empty((1,), device="meta"), torch.empty((1,), device="meta")]
+
+    assert torch.ops.tensor_cast.grouped_matmul_swiglu.default(x, w, bias).shape == (3, 6)
+    assert torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default(
+        x, w, scales, [None, None], scales, [None, None], bias, None
+    ).shape == (3, 6)
+    assert torch.ops.tensor_cast.grouped_matmul_quant_int4_swiglu.default(
+        x, packed_w, scales, [None, None], scales, [None, None], bias, torch.float16
+    ).shape == (3, 6)
+    assert torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default(x, w, scales, scales, bias, None).shape == (3, 6)
+    assert torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default(x, mxfp4_w, scales, scales, bias, None).shape == (
+        3,
+        6,
+    )
+
+    with pytest.raises(ValueError, match="must be even"):
+        torch.ops.tensor_cast.grouped_matmul_swiglu.default(x, [torch.empty((4, 11), device="meta")], [None])
+
+
 def test_communication_meta_ops_compute_collective_shapes(monkeypatch):
     x = torch.empty((4, 3), device="meta")
 

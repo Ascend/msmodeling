@@ -1,16 +1,32 @@
-# Example run profile for category 1: Dense + standard attention.
-# Qwen3-8B W8A8_DYNAMIC prefill is one representative sample.
-#   python -m tools.model_diagnostics tools/model_diagnostics/profiles/prefill_example.yaml
-model_name: Qwen/Qwen3-8B
-phase: prefill
-batch_size: 1
-query_length: 2
-num_hidden_layers_override: 1
-# Optional validation subset. Indices are zero-based and must be smaller than
-# num_hidden_layers_override. Omit to validate every executed layer.
-# selected_language_layers: [0]
-quantize_linear_action: W8A8_DYNAMIC
+# ============================================================
+# Sample reference profile: Qwen3 MoE prefill
+# ============================================================
+# Sample/reference profile listing every configurable field
+# (including defaults), using Qwen/Qwen3-30B-A3B as the example.
+# Keep only the fields you want to override for local use.
 
-# Optional embedding tensor parallelism: col (hidden dimension) or row
-# (vocabulary dimension). Omit this field to keep embedding TP disabled.
-# word_embedding_tp: col
+schema_version: "1"   # optional, default "1"
+model_name: Qwen/Qwen3-30B-A3B   # required; model id passed to the ModelRunner
+entrypoint: text_generate   # optional, default text_generate
+phase: prefill   # required; prefill | decode
+batch_size: 1   # required; positive integer
+query_length: 2   # required; positive integer
+context_length: null   # optional, default null (0 in Theory)
+num_mtp_tokens: 0   # optional, default 0
+
+parallel:   # optional, dimensions default to 1
+  tensor_parallel_size: 1   # optional, default 1; TP (--tensor-parallel-size)
+  pipeline_parallel_size: 1   # optional, default 1; PP (--pipeline-parallel-size)
+  data_parallel_size: 1   # optional, default 1; DP (--data-parallel-size)
+  expert_parallel_size: 1   # optional, default 1; EP (--expert-parallel-size)
+  moe_data_parallel_size: 1   # optional, default 1; MoE DP (--moe-dp-size / MDP)
+
+selected_language_layers: null   # optional, default all executed layers
+selected_stage_regions: []   # optional, default all non-layered regions
+num_hidden_layers_override: 1   # optional, default 0; 0 = all model layers
+do_compile: true   # optional, default true
+device: TEST_DEVICE   # optional, default TEST_DEVICE
+quantize_linear_action: DISABLED   # optional, default DISABLED
+word_embedding_tp: null   # optional, default null
+enable_redundant_experts: false   # optional, default false; requires EP > 1
+enable_external_shared_experts: false   # optional, default false; requires EP > 1

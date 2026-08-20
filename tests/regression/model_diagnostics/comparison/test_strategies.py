@@ -84,6 +84,43 @@ def test_one_to_one_positional_reports_pass_for_equal_stage() -> None:
     assert findings[0].actual == findings[0].expected
 
 
+@pytest.mark.parametrize(
+    ("flat", "expanded"),
+    [
+        ((2, 8), (1, 2, 8)),
+        ((6, 8), (2, 3, 8)),
+        ((6, 8, 64), (2, 3, 8, 64)),
+    ],
+)
+def test_one_to_one_accepts_product_equivalent_leading_dimensions(flat, expanded) -> None:
+    options = OneToOneOptions(TensorMapping(TensorMappingMode.POSITIONAL))
+    request = _request([_call(10, "mm", flat)], [_call(20, "mm", expanded)], options, "one_to_one")
+
+    findings = OneToOneEqualStrategy().execute(request)
+
+    assert findings
+    assert all(finding.status is FindingStatus.PASS for finding in findings)
+    assert all(finding.message_code == "comparison.leading_product_equivalent" for finding in findings)
+
+
+@pytest.mark.parametrize(
+    ("flat", "expanded"),
+    [
+        ((6, 8), (2, 4, 8)),
+        ((6, 8), (2, 3, 9)),
+        ((6, 8), (1, 2, 3, 8)),
+        ((), (1,)),
+    ],
+)
+def test_one_to_one_rejects_non_equivalent_leading_dimensions(flat, expanded) -> None:
+    options = OneToOneOptions(TensorMapping(TensorMappingMode.POSITIONAL))
+    request = _request([_call(10, "mm", flat)], [_call(20, "mm", expanded)], options, "one_to_one")
+
+    findings = OneToOneEqualStrategy().execute(request)
+
+    assert any(finding.message_code == "tensor.shape_mismatch" for finding in findings)
+
+
 def test_operator_name_normalization_is_limited_to_known_namespaces() -> None:
     options = OneToOneOptions(TensorMapping(TensorMappingMode.POSITIONAL))
     known = _request([_call(10, "aten.mm.default")], [_call(20, "mm")], options, "one_to_one")

@@ -15,10 +15,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import pytest
 
 from tools.model_diagnostics import create_model_diagnostics_application
-from tools.model_diagnostics.cli import main
 from tools.model_diagnostics.domain import (
     ExecutionOrganizationRequest,
     FindingStatus,
@@ -28,11 +27,8 @@ from tools.model_diagnostics.integrations import assert_diagnostics_passed
 from tools.model_diagnostics.organization import RuntimeArtifactOrganizer
 from tools.model_diagnostics.sources import SimulationArtifactSource
 
-_DECODE_EXAMPLE = (
-    Path(__file__).resolve().parents[4] / "tools" / "model_diagnostics" / "profiles" / "decode_example.yaml"
-)
 
-
+@pytest.mark.nightly
 def test_qwen3_dense_capture_organize_and_compare(qwen3_dense_case) -> None:
     """Validate every Qwen3 Dense size through capture and comparison."""
 
@@ -102,6 +98,7 @@ def test_qwen3_dense_capture_organize_and_compare(qwen3_dense_case) -> None:
             assert output_operators == ["aten.index.Tensor", "aten.mm.default"]
 
 
+@pytest.mark.nightly
 def test_qwen3_dense_mtp_decode_passes_diagnostics(qwen3_dense_mtp_case) -> None:
     """Cover every Qwen3 Dense size, including quantized MTP Runtime."""
 
@@ -126,19 +123,3 @@ def test_qwen3_dense_mtp_decode_passes_diagnostics(qwen3_dense_mtp_case) -> None
     result = application.run_against_artifact(request, artifact)
     assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)
-
-
-def test_qwen3_8b_w8a8_dynamic_cli(capsys) -> None:
-    """Keep one public CLI smoke test on the runnable category example."""
-
-    code = main([str(_DECODE_EXAMPLE), "--theory-compare"])
-    captured = capsys.readouterr()
-    assert code == 0
-    assert "Model diagnostics: PASS" in captured.out
-    assert "Failure list:" not in captured.out
-    assert "Qwen/Qwen3-8B | decode | batch=1 query=1 context=128 | TP=1" in captured.out
-    assert "Summary: 8 pass, 0 fail" in captured.out
-    assert "tensor_cast.static_quant_linear.default" in captured.out
-    assert "PASS  layer[0]/attention" in captured.out
-    assert "  Expected:" in captured.out
-    assert "  Actual:" in captured.out

@@ -145,41 +145,46 @@ outputs/model_diagnostics/<profile-stem>-<timestamp>/
 
 ## 3. Run Profile YAML 编写说明
 
-`tools/model_diagnostics/profiles/` 提供两份可直接运行的样例：
+`tools/model_diagnostics/profiles/` 只保留两份可直接运行的样例，并随时覆盖为**当前
+正在适配类别**的代表配置（不要在此目录另增 example YAML）。这两份文件供用户本地修改与
+试跑，**不是**测试夹具；回归测试不得依赖其内容。
 
-- [prefill_example.yaml](profiles/prefill_example.yaml)：Qwen3-8B、单层、
-  `W8A8_DYNAMIC` prefill；
-- [decode_example.yaml](profiles/decode_example.yaml)：Qwen3-8B、单层、
-  `W8A8_DYNAMIC` 单 token decode。
+- [prefill_example.yaml](profiles/prefill_example.yaml)：当前为 Qwen3 MoE prefill；
+- [decode_example.yaml](profiles/decode_example.yaml)：当前为 Qwen3 MoE decode，
+  **默认开启 MTP**（`num_mtp_tokens>0` 且合法 window）。
 
-这两份文件用于展示常用的精简写法：只填写本次运行真正需要覆盖的字段，其余字段走稳定
-默认值。理解全部字段时，以以下完整、可运行的 decode Profile 为基准：
+这两份文件是**完整字段参考版**：列出 run profile 的全部可配字段，每个字段上方注释
+是否可缺省及其默认值。实际使用时复制一份，只保留本次需要覆盖的字段即可。以下亦为一份
+完整、可运行的 decode Profile 基准：
 
 ```yaml
 schema_version: "1"
-model_name: Qwen/Qwen3-8B
+model_name: Qwen/Qwen3-30B-A3B
 entrypoint: text_generate
 phase: decode
 batch_size: 1
-query_length: 1
+query_length: 3
 context_length: 128
-num_mtp_tokens: 0
+num_mtp_tokens: 2
 parallel:
   tensor_parallel_size: 1
   pipeline_parallel_size: 1
   data_parallel_size: 1
   expert_parallel_size: 1
+  moe_data_parallel_size: 1
 selected_language_layers: [0]
 selected_stage_regions: [input, output]
 num_hidden_layers_override: 1
 do_compile: true
 device: TEST_DEVICE
-quantize_linear_action: W8A8_DYNAMIC
+quantize_linear_action: DISABLED
 word_embedding_tp: null
+enable_redundant_experts: false
+enable_external_shared_experts: false
 ```
 
-实际使用时建议从两个仓库样例中选择与 phase 对应的一份复制，再只增加本次确实需要的字段；
-不要为了“完整”而在每个本地 Profile 中重复所有默认值。
+实际使用时建议从两个仓库样例中选择与 phase 对应的一份复制，再只保留本次确实需要的
+字段；不要为了“完整”而在每个本地 Profile 中重复所有默认值。
 
 ### 3.1 字段约束
 
@@ -201,8 +206,10 @@ word_embedding_tp: null
 | `device` | 否 | `TEST_DEVICE` | 非空字符串 |
 | `quantize_linear_action` | 否 | `DISABLED` | 见量化枚举 |
 | `word_embedding_tp` | 否 | `null` | `col`、`row` 或省略；分别按 hidden/vocab 维切分 embedding |
+| `enable_redundant_experts` | 否 | `false` | 按 msmodeling EP shard 规则增加冗余专家副本；要求 `expert_parallel_size > 1` |
+| `enable_external_shared_experts` | 否 | `false` | 分配独立 rank 运行 shared experts；要求 `expert_parallel_size > 1` 且模型含 shared experts |
 
-`parallel` 支持以下正整数：
+`parallel` 支持以下正整数（均为可缺省、默认 `1`）：
 
 ```yaml
 parallel:
@@ -210,7 +217,11 @@ parallel:
   pipeline_parallel_size: 1
   data_parallel_size: 1
   expert_parallel_size: 1
+  moe_data_parallel_size: 1    # --moe-dp-size；别名 moe_dp_size
 ```
+
+> MoE 张量并行 `--moe-tp-size`（MTPt）**本模块固定为 1**，不支持配置。
+> profile 中写入 `moe_tensor_parallel_size` / `moe_tp_size` 会直接报错。
 
 量化枚举为：
 
@@ -405,14 +416,36 @@ language:
       include_fragment: new_model_decoder_v1
 ```
 
-`layer_layout_rule` 必须同时包含 `strategy/layer_kind/count_from`：
+`layer_layout_rule` 支持两种严格结构：
 
-- 当前只支持 `strategy: repeat`；
-- `layer_kind` 必须存在于 `layer_specs`；
+- `strategy: repeat`：使用 `layer_kind` 将同一种 layer 重复 `count_from` 次；
+- `strategy: prefix_then_repeat`：前 `prefix_count_from` 层使用
+  `prefix_layer_kind`，其余层使用 `repeated_layer_kind`，适用于“Dense 前缀 + MoE 后缀”；
+- 规则引用的每个 layer kind 都必须存在于 `layer_specs`；
 - `count_from` 是点分 Context 路径，根只能是 `model_config` 或
   `quantization_config`，最终值必须是非负整数；
 - language 通常使用 `model_config.effective_num_hidden_layers`；
 - MTP 使用 materialize 阶段派生的 `model_config.effective_num_mtp_layers`。
+
+DeepSeek V3 的完整示例直接整包导入两种 decoder fragment，不使用 stage group：
+
+```yaml
+layer_layout_rule:
+  strategy: prefix_then_repeat
+  count_from: model_config.effective_num_hidden_layers
+  prefix_layer_kind: dense
+  repeated_layer_kind: moe
+  prefix_count_from: model_config.first_k_dense_replace
+layer_specs:
+  dense:
+    include_fragment: deepseek_v3_dense_decoder_v1
+  moe:
+    include_fragment: deepseek_v3_moe_decoder_v1
+```
+
+`effective_num_hidden_layers` 是本次 Profile 实际捕获的层数；
+`first_k_dense_replace` 来自捕获后的 HF/model config。TensorCast 的 DeepSeek V3.2
+实现同样以 `layer_idx < first_k_dense_replace` 选择 Dense 层，之后选择 MoE 层。
 
 一个 `layer_specs.<kind>` 必须且只能选择一种定义方式：
 
@@ -458,7 +491,9 @@ Runtime 约束：
 - `boundary_operators` 必填，可以有多个候选规范名；
 - `ignored_operators` 可省略，空列表也应省略；
 - ignored 只用于 stage 组织，Artifact 始终保留原始完整调用；
-- `boundary_operators` 太普通时容易误切分，应先捕获 Runtime HTML，确认有稳定边界；
+- `boundary_operators` 太普通时容易误切分，应先捕获 Runtime HTML，优先选择稳定的语义
+  wrapper。只有 Runtime 没有更具体的可观测边界时才使用 `mm` 等通用线性算子；DeepSeek V3
+  shared expert 的首个 gate/up linear 就属于这一例外，并同时列出各量化形态；
 - operator 名会进行统一规范化，例如 `aten.mm.default -> mm`。模型 Spec 只在必要时用
   `operator_aliases` 覆盖内置映射。
 
@@ -510,7 +545,84 @@ shape: "[B, max(MTP + 1 - LAYER * MTP, 1)]"
 | `MTP` | `num_mtp_tokens` |
 | `LAYER` | 当前重复 layer index；在 layer Theory 物化时注入 |
 
-### 6.2 `Rtgt` 与 `Rprop`
+DeepSeek V3 还使用以下由 HF/model config 派生的符号：
+
+| 符号 | 定义 |
+| --- | --- |
+| `Qlora` / `KVlora` | query / KV LoRA rank |
+| `QKnope` / `QKrope` / `Vh` / `Hmla` | MLA 的 non-RoPE、RoPE、value head 维度及本地输出宽度 |
+| `Dsa_k` | Runtime 已稳定暴露的 DSA 有效 top-k；`Dsa_k=min(index_topk,S)` |
+| `Nshared` / `Fshared` | shared expert 数及总中间宽度；`Fshared=moe_intermediate_size*Nshared` |
+| `MOE_COMBINE_DTYPE` | routed expert 加权归并的 dtype；DeepSeek V3.2 为 `float32`，DeepSeek V3/GLM5/Kimi K2 跟随激活 dtype |
+| `MOE_GATE_TOKENS` | routed gate 观测的 token 数；raw-logits 族（DeepSeek V3/V3.1、GLM-5/5.1、Kimi-K2-Base）EP>1 时为 `T`，其余布局/型号为 `Tmoe` |
+
+这些值由 Runtime 模型加载完成后从其 text config 捕获；实现兼容模型直接暴露的
+`text_config`、根 `hf_config` 的 text config，以及旧版 `config` 入口。
+`ModelRunContext.model_config`，Profile 不重复声明，也不从算子列表反推。
+
+### 6.2 通用 MoE shape 符号
+
+MoE Spec 可以使用以下符号。配置字段来自捕获后的 HF/model config；并行度来自 Profile
+的 `parallel`，但所有公式均在 `context_env.py` 中统一求值，YAML 不应重复实现。
+
+| 符号 | 来源或公式 | 含义 |
+| --- | --- | --- |
+| `E` | `num_experts` 或 `n_routed_experts` | routed expert 总数 |
+| `Ktop` | `num_experts_per_tok` | 每个 token 选择的 routed expert 数 |
+| `Fmoe` | `moe_intermediate_size` | 单个 routed expert 的全局 intermediate size；不能用 Dense 的 `F` 代替 |
+| `MTPt` | 固定为 `1` | MoE tensor-parallel size；本模块明确拒绝 `--moe-tp-size>1` |
+| `MDP` | `parallel.moe_data_parallel_size` | MoE data-parallel size，用于并行布局校验 |
+| `Fe` | `Fmoe / MTPt`；当前即 `Fmoe` | 当前 rank 上单个 expert 的 intermediate size |
+| `Tmoe` | 见下方分段公式 | 进入 MoE dispatch 前的 token 行数 |
+| `Te` | 见下方 dispatch 公式 | dispatch 后当前 EP rank 执行的 expert-token 行数 |
+
+`Tmoe` 与 TensorCast `ParallelMoELayer._dp_transform_enter` 的 token-domain 转换保持一致。
+设 `T=B*Q`：
+
+```text
+EP > 1 且 DP != EP:  Tmoe = ceil(T / TP)
+EP = 1 且 DP != 1:   Tmoe = T * DP
+其他情况:            Tmoe = T
+```
+
+第一种情况使用 MoE EP 路径，需要把普通 TP/DP token domain 转为 EP dispatch 输入；第二种
+情况没有跨 EP dispatch，但普通 DP group 会先 all-gather；其余布局不做 token-domain 转换。
+`MDP` 参与 `MTPt * MDP * EP == TP * DP` 的 MoE 并行布局校验，但不直接替代 Runtime 上述
+转换公式，因此不能把 `Tmoe` 简化为 `T*MDP`。
+
+令 routed expert-token 总数为：
+
+```text
+R = Tmoe * Ktop
+```
+
+当 `EP=1` 时没有跨 rank dispatch：
+
+```text
+Te = R = Tmoe * Ktop
+```
+
+当 `EP>1` 时，`Te` 必须复现 TensorCast `FusedMoETensorCast.get_split_sizes`，不能简单写成
+`R/EP`。当前 Theory 按以下整数分配算法计算：
+
+```text
+per_expert = R // Eglobal
+remainder  = R % Eglobal
+tokens(expert[i]) = per_expert + (1 if i < remainder else 0)
+
+local_share = sum(tokens(e) for e in experts_owned_by_current_ep_rank)
+Te = local_share * EP
+```
+
+其中 `Eglobal` 包括启用的 redundant routed experts；expert ownership 使用与 Runtime 相同的
+`assign_experts` 规则。启用 external shared experts 时，还要先为 external ranks 分配 shared
+token，再在剩余 routing ranks 间分配 routed experts。乘以 `EP` 表示 Runtime 的解析模型
+假设各发送 rank 具有同样的 split，并汇总对称 all-to-all 后当前 rank 收到的 token 数。
+
+因此，即使 `R < EP` 或 `R` 不能被 expert 数整除，公式仍通过整数商和余数得到确定结果；
+不要用浮点平均、向上取整或 `Tmoe*Ktop/EP` 替代它。
+
+### 6.3 `Rtgt` 与 `Rprop`
 
 这两个符号描述 MTP 中两个不同语义窗口：
 
@@ -528,7 +640,7 @@ Rprop = B
 - MTP decode 的合法窗口要求 `phase=decode`、`MTP>0` 且 `Q >= MTP + 1`；否则 MTP
   region 不启用或 Profile 被拒绝。
 
-### 6.3 dtype 符号
+### 6.4 dtype 符号
 
 | 符号 | 来源/含义 |
 | --- | --- |
@@ -557,6 +669,12 @@ comparisons:
 若 stage 未配置 comparison，Runner 默认使用 `one_to_one`。因此普通逐调用、逐声明 slot
 比较应完全省略 `comparisons`；不要显式写空 mapping，也不要为了形式统一改成
 `boundary_equal`。
+
+所有内置逐 Tensor shape 比较先检查 tuple 完全相等；不相等且 rank 恰好相差 1 时，
+允许把较长 shape 的前两维相乘后再比较。例如 `[T, ...]` 与 `[B, Q, ...]` 在
+`T == B * Q` 且剩余维度逐维相等时视为等价。其他 rank/shape 差异仍为 `FAIL`，
+dtype 始终严格比较。报告会用 `comparison.leading_product_equivalent` 显式标记该
+PASS，而不是声称原始 shape 完全相等。
 
 | strategy | 何时使用 | options |
 | --- | --- | --- |
@@ -771,6 +889,8 @@ python -m tools.model_diagnostics work/new_model_decode.yaml \
 - decoder 与已有模型相同：直接 `include_fragment` 现有 decoder；
 - decoder stage 相同、仅 Runtime kernel 名不同：复用 fragment 并按 stage override；
 - decoder 结构不同：新增一个 `model_decoder` fragment；
+- Dense/MoE 混合布局：用 `prefix_then_repeat` 展开物理层，并为两种 layer kind 分别
+  `include_fragment`；不要为选取 fragment 引入 stage group；
 - MTP 使用公共 wrapper：复用 `mtp_framework_v1`；
 - predictor 前后有额外语义 stage：新增专属 `mtp_predictor_adapter`；
 - 不要为每个模型复制公共 target/sampler/output/proposal 框架。
@@ -800,6 +920,28 @@ stage override。未知调用不得静默丢弃。
 
 ### 步骤 8：验证
 
+分类 `3` 的正式 E2E 复用同一份 `deepseek_v3_v1` 组合契约，并逐型号验证：
+
+| 兼容入口 | 必测场景 |
+| --- | --- |
+| `deepseek-ai/DeepSeek-V3`、`deepseek-ai/DeepSeek-V3.2` | prefill、decode、W8A8_DYNAMIC、MTP；V3.2 额外覆盖 W4A8_DYNAMIC |
+| `zai-org/GLM-5`、`zai-org/GLM-5.1` | prefill、decode、W8A8_DYNAMIC、MTP |
+| `moonshotai/Kimi-K2-Base`、`moonshotai/Kimi-K2.5`、`moonshotai/Kimi-K2.6` | 文本路径的 prefill、decode、W8A8_DYNAMIC、MTP |
+
+Kimi K2.5/K2.6 的顶层 VL config 均暴露 `text_config.model_type: kimi_k2`，因此文本诊断
+共享分类 `3` 契约；带视觉输入时还需叠加分类 `6`，不由本节文本 E2E 代替。TensorCast 的
+公开运行方式是一进程一模型；参数化测试在同一 pytest worker 中覆盖多个 Kimi 型号时，只在
+测试侧重置远端类 patch guard，以模拟彼此独立的 CLI 运行，不扩展产品生命周期契约。
+
+并行 shape 逐型号覆盖 `TP=2/EP=2` 与 `DP=2/MDP=2` 两个组合布局（DeepSeek V3/V3.1/V3.2、
+GLM-5/5.1、Kimi K2/K2.5/K2.6）。所有场景均执行真实 Runtime capture，最终
+Theory↔Runtime findings 必须全部 PASS；量化场景还必须断言对应量化 kernel 实际出现。
+
+例行门禁保留**最小代表集**：每个 `model_type`（`deepseek_v32`/`deepseek_v3`/
+`glm_moe_dsa`/`kimi_k2`）至少覆盖 prefill 与 decode，DeepSeek V3.2 作为旗舰型号
+完整覆盖量化/MTP/并行；其余量化变体、MTP 与并行组合标记 `@pytest.mark.nightly`，
+保留在仓库 nightly 层完整执行，不删除任何场景。
+
 ```bash
 # 快速基础 guard
 python -m pytest tests/smoke/test_model_diagnostics.py -q
@@ -826,6 +968,16 @@ python -m tools.model_diagnostics work/new_model_decode.yaml --theory-compare
 
 新增模型前建议先完整阅读当前
 [Qwen3 Dense Spec](specs/qwen3_dense_v1.yaml)、
-[decoder fragment](specs/theory_fragments/qwen3_dense_decoder_v1.yaml) 和
+[decoder fragment](specs/theory_fragments/qwen3_dense_decoder_v1.yaml)、
+[Qwen3 MoE Spec](specs/qwen3_moe_v1.yaml)、
+[MoE decoder fragment](specs/theory_fragments/qwen3_moe_decoder_v1.yaml) 和
+[DeepSeek V3 Spec](specs/deepseek_v3_v1.yaml)、
+[DeepSeek Dense decoder](specs/theory_fragments/deepseek_v3_dense_decoder_v1.yaml)、
+[DeepSeek MoE decoder](specs/theory_fragments/deepseek_v3_moe_decoder_v1.yaml) 以及
 [MTP framework](specs/theory_fragments/mtp_framework_v1.yaml)，重点理解“模型 Spec 负责组合，
 fragment 负责可复用权威定义，override 只表达真实差异”的边界。
+
+分类 `2`（MoE）的 Theory 符号和公式见 6.2 节。Profile 可配：
+`parallel.moe_data_parallel_size`（或 `moe_dp_size`）、
+`enable_redundant_experts`、`enable_external_shared_experts`
+（后两者需 `expert_parallel_size>1`；external 还要求模型有 shared experts）。

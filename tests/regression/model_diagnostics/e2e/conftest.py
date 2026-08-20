@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 
@@ -22,13 +24,28 @@ from tools.model_diagnostics.domain import ExecutionPhase, ParallelContext
 from tools.model_diagnostics.specification import DiagnosticsRunProfile
 from tools.model_diagnostics.sources.runtime_capture import capture_artifact_for_profile
 
+
+def assert_parallel_contract(env: dict[str, object], parallel: ParallelContext, *, raw_logits_gate: bool) -> None:
+    """Validate rank-local heads and MoE token domains for a parallel layout."""
+
+    assert env["Lh"] == env["Nh"] // parallel.tensor_parallel_size
+    if parallel.expert_parallel_size > 1:
+        assert env["Tmoe"] == math.ceil(env["T"] / parallel.tensor_parallel_size)
+    else:
+        assert env["Tmoe"] == env["T"] * parallel.data_parallel_size
+    if raw_logits_gate and parallel.expert_parallel_size > 1:
+        assert env["MOE_GATE_TOKENS"] == env["T"]
+    else:
+        assert env["MOE_GATE_TOKENS"] == env["Tmoe"]
+
+
 _QWEN3_DENSE_MODELS = (
-    "Qwen/Qwen3-0.6B",
-    "Qwen/Qwen3-1.7B",
-    "Qwen/Qwen3-4B",
-    "Qwen/Qwen3-8B",
-    "Qwen/Qwen3-14B",
-    "Qwen/Qwen3-32B",
+    "tests/assets/model_config/qwen3_dense_0_6b",
+    "tests/assets/model_config/qwen3_dense_1_7b",
+    "tests/assets/model_config/qwen3_dense_4b",
+    "tests/assets/model_config/qwen3_dense_8b",
+    "tests/assets/model_config/qwen3_dense_14b",
+    "tests/assets/model_config/qwen3_dense_32b",
 )
 _REQUIRED_CASES = (
     (ExecutionPhase.PREFILL, "DISABLED", 2, None),
@@ -36,8 +53,8 @@ _REQUIRED_CASES = (
     (ExecutionPhase.PREFILL, "W8A8_DYNAMIC", 2, None),
 )
 _ADDITIONAL_CASES = (
-    ("Qwen/Qwen3-8B", ExecutionPhase.PREFILL, "W8A8_STATIC", 2, None),
-    ("Qwen/Qwen3-8B", ExecutionPhase.DECODE, "W8A8_DYNAMIC", 1, 128),
+    ("tests/assets/model_config/qwen3_dense_8b", ExecutionPhase.PREFILL, "W8A8_STATIC", 2, None),
+    ("tests/assets/model_config/qwen3_dense_8b", ExecutionPhase.DECODE, "W8A8_DYNAMIC", 1, 128),
 )
 _QWEN3_DENSE_CASES = (
     tuple(
@@ -48,24 +65,24 @@ _QWEN3_DENSE_CASES = (
     + _ADDITIONAL_CASES
 )
 _QWEN3_DENSE_MTP_CASES = (
-    ("Qwen/Qwen3-0.6B", "DISABLED"),
-    ("Qwen/Qwen3-1.7B", "W8A8_DYNAMIC"),
-    ("Qwen/Qwen3-4B", "DISABLED"),
-    ("Qwen/Qwen3-8B", "W8A8_DYNAMIC"),
-    ("Qwen/Qwen3-14B", "DISABLED"),
-    ("Qwen/Qwen3-32B", "W8A8_DYNAMIC"),
+    ("tests/assets/model_config/qwen3_dense_0_6b", "DISABLED"),
+    ("tests/assets/model_config/qwen3_dense_1_7b", "W8A8_DYNAMIC"),
+    ("tests/assets/model_config/qwen3_dense_4b", "DISABLED"),
+    ("tests/assets/model_config/qwen3_dense_8b", "W8A8_DYNAMIC"),
+    ("tests/assets/model_config/qwen3_dense_14b", "DISABLED"),
+    ("tests/assets/model_config/qwen3_dense_32b", "W8A8_DYNAMIC"),
 )
 
 
 def _case_id(case: tuple[str, ExecutionPhase, str, int, int | None]) -> str:
     model_name, phase, quantization, _, _ = case
-    model_size = model_name.rsplit("-", maxsplit=1)[-1].lower()
+    model_size = model_name.rsplit("/", maxsplit=1)[-1].lower()
     return f"{model_size}_{phase.value}_{quantization.lower()}"
 
 
 def _mtp_case_id(case: tuple[str, str]) -> str:
     model_name, quantization = case
-    model_size = model_name.rsplit("-", maxsplit=1)[-1].lower()
+    model_size = model_name.rsplit("/", maxsplit=1)[-1].lower()
     return f"{model_size}_mtp_{quantization.lower()}"
 
 

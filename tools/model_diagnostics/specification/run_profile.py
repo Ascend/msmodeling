@@ -50,6 +50,8 @@ _ALLOWED_KEYS = frozenset(
         "device",
         "quantize_linear_action",
         "word_embedding_tp",
+        "enable_redundant_experts",
+        "enable_external_shared_experts",
     }
 )
 _FORBIDDEN_KEYS = frozenset(
@@ -97,6 +99,8 @@ class DiagnosticsRunProfile:
     device: str
     quantize_linear_action: str
     word_embedding_tp: str | None
+    enable_redundant_experts: bool = False
+    enable_external_shared_experts: bool = False
     selected_language_layers: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
@@ -246,6 +250,15 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
         parallel_raw = {}
     if not isinstance(parallel_raw, Mapping):
         raise SpecificationLoadError("parallel must be a mapping")
+    unsupported_parallel = sorted(
+        set(parallel_raw) & {"moe_tensor_parallel_size", "moe_tp_size"}
+    )
+    if unsupported_parallel:
+        raise SpecificationLoadError(
+            "parallel field(s) not supported: "
+            + ", ".join(unsupported_parallel)
+            + ". MoE tensor parallel is fixed at 1 by this module; sizes greater than 1 are unsupported."
+        )
     stage_regions = raw.get("selected_stage_regions")
     if stage_regions is None:
         selected_stage_regions: tuple[str, ...] = ()
@@ -292,6 +305,10 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
             expert_parallel_size=_positive_int_value(
                 parallel_raw.get("expert_parallel_size", 1), "parallel.expert_parallel_size"
             ),
+            moe_data_parallel_size=_positive_int_value(
+                parallel_raw.get("moe_data_parallel_size", parallel_raw.get("moe_dp_size", 1)),
+                "parallel.moe_data_parallel_size",
+            ),
         ),
         selected_language_layers=_optional_layer_indices(
             raw.get("selected_language_layers"),
@@ -310,6 +327,16 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
             raw.get("word_embedding_tp"),
             choices=frozenset({"col", "row"}),
             field_name="word_embedding_tp",
+        ),
+        enable_redundant_experts=_optional_bool(
+            raw.get("enable_redundant_experts"),
+            default=False,
+            field_name="enable_redundant_experts",
+        ),
+        enable_external_shared_experts=_optional_bool(
+            raw.get("enable_external_shared_experts"),
+            default=False,
+            field_name="enable_external_shared_experts",
         ),
     )
 

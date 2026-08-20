@@ -197,14 +197,26 @@ def _compare_positional_calls(request: StageComparisonRequest) -> list[Finding]:
         if call_findings:
             findings.extend(call_findings)
             continue
+        uses_leading_product = any(
+            _uses_leading_product_equivalence(left.tensor.shape, right.tensor.shape)
+            for left, right in zip(matched_left, matched_right)
+        )
         findings.append(
             _finding(
                 request,
                 rule_id=f"call[{call_position}]",
                 comparison_kind="one_to_one",
                 status=FindingStatus.PASS,
-                message_code="comparison.pass",
-                message="call tensors match",
+                message_code=(
+                    "comparison.leading_product_equivalent"
+                    if uses_leading_product
+                    else "comparison.pass"
+                ),
+                message=(
+                    "call tensors match after multiplying two leading dimensions"
+                    if uses_leading_product
+                    else "call tensors match"
+                ),
                 expected=_format_tensor_bundle(matched_left),
                 actual=_format_tensor_bundle(matched_right),
                 left_evidence=tuple(item.evidence for item in matched_left),
@@ -233,14 +245,25 @@ def _compare_explicit_pairs(
             continue
         if left is None or right is None:
             continue
+        uses_leading_product = _uses_leading_product_equivalence(
+            left.tensor.shape, right.tensor.shape
+        )
         findings.append(
             _finding(
                 request,
                 rule_id=f"pair[{pair_index}]",
                 comparison_kind="boundary_equal",
                 status=FindingStatus.PASS,
-                message_code="comparison.pass",
-                message="mapped Tensor slots match",
+                message_code=(
+                    "comparison.leading_product_equivalent"
+                    if uses_leading_product
+                    else "comparison.pass"
+                ),
+                message=(
+                    "mapped Tensor slots match after multiplying two leading dimensions"
+                    if uses_leading_product
+                    else "mapped Tensor slots match"
+                ),
                 expected=_format_shape_dtype(left.tensor),
                 actual=_format_shape_dtype(right.tensor),
                 left_evidence=(left.evidence,),
@@ -432,6 +455,21 @@ def _compare_optional_tensors(
                     **evidence,
                 )
             )
+        elif field_name == "shape" and _shapes_equivalent(expected, actual):
+            if expected != actual:
+                findings.append(
+                    _finding(
+                        request,
+                        rule_id=f"{rule_id}.{field_name}",
+                        comparison_kind=field_name,
+                        status=FindingStatus.PASS,
+                        message_code="comparison.leading_product_equivalent",
+                        message="Tensor shape equivalent after multiplying two leading dimensions",
+                        expected=expected,
+                        actual=actual,
+                        **evidence,
+                    )
+                )
         elif expected != actual:
             findings.append(
                 _finding(
@@ -447,6 +485,27 @@ def _compare_optional_tensors(
                 )
             )
     return findings
+
+
+def _shapes_equivalent(expected: tuple[int, ...], actual: tuple[int, ...]) -> bool:
+    """Accept exact shapes or one flattened pair of leading dimensions."""
+
+    if expected == actual:
+        return True
+    if abs(len(expected) - len(actual)) != 1:
+        return False
+    flat, expanded = (
+        (expected, actual) if len(expected) < len(actual) else (actual, expected)
+    )
+    if not flat or len(expanded) < 2:
+        return False
+    return expanded[0] * expanded[1] == flat[0] and expanded[2:] == flat[1:]
+
+
+def _uses_leading_product_equivalence(
+    expected: tuple[int, ...], actual: tuple[int, ...]
+) -> bool:
+    return expected != actual and _shapes_equivalent(expected, actual)
 
 
 def _format_shape_dtype(tensor: TensorInfo) -> str:

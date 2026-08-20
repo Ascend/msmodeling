@@ -217,7 +217,7 @@ def test_glm5_mtp_patch_skips_copy_layers_and_unwraps_representatives():
 
 def test_glm5_returns_topk_when_next_layer_skips_topk():
     sparse_attention = object.__new__(Glm5SparseAttention)
-    object.__setattr__(sparse_attention, "_inner", SimpleNamespace(next_skip_topk=True))
+    object.__setattr__(sparse_attention, "next_skip_topk", True)
 
     assert sparse_attention._format_forward_output("hidden", None, "topk") == ("hidden", None, "topk")
 

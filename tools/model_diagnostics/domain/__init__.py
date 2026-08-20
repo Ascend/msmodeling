@@ -27,6 +27,7 @@ from tools.model_diagnostics.domain.models import (
     TensorDirection,
     TensorInfo,
     TensorSlot,
+    validate_expert_parallel_features,
 )
 from tools.model_diagnostics.domain.organization import (
     ExecutionOrganizationRequest,
@@ -87,6 +88,7 @@ __all__ = [
     "TensorDirection",
     "TensorInfo",
     "TensorSlot",
+    "validate_expert_parallel_features",
     "ExecutionOrganizationRequest",
     "LayerExecutionRecord",
     "RegionExecutionRecord",

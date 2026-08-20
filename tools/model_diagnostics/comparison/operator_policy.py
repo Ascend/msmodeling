@@ -37,6 +37,27 @@ DEFAULT_OPERATOR_ALIASES: Mapping[str, str] = MappingProxyType(
         "q_projection": "mm",
         "k_projection": "mm",
         "v_projection": "mm",
+        # Category-2 MoE gate linear (HF/aten mm inside gate when raw-logits=False).
+        "moe_gate_linear": "mm",
+        # Quantized routed-expert kernels share Theory semantic GMM names.
+        # Unqualified entries normalize theory-side/declared names; the
+        # tensor_cast.*.default entries below cover Runtime-captured names.
+        "grouped_matmul_quant_swiglu": "grouped_matmul_swiglu",
+        "grouped_matmul_quant_int4_swiglu": "grouped_matmul_swiglu",
+        "grouped_matmul_fp8_swiglu": "grouped_matmul_swiglu",
+        "grouped_matmul_mxfp4_swiglu": "grouped_matmul_swiglu",
+        "grouped_matmul_quant": "grouped_matmul",
+        "grouped_matmul_quant_int4": "grouped_matmul",
+        "grouped_matmul_fp8": "grouped_matmul",
+        "grouped_matmul_mxfp4": "grouped_matmul",
+        "tensor_cast.grouped_matmul_quant_swiglu.default": "grouped_matmul_swiglu",
+        "tensor_cast.grouped_matmul_quant_int4_swiglu.default": "grouped_matmul_swiglu",
+        "tensor_cast.grouped_matmul_fp8_swiglu.default": "grouped_matmul_swiglu",
+        "tensor_cast.grouped_matmul_mxfp4_swiglu.default": "grouped_matmul_swiglu",
+        "tensor_cast.grouped_matmul_quant.default": "grouped_matmul",
+        "tensor_cast.grouped_matmul_quant_int4.default": "grouped_matmul",
+        "tensor_cast.grouped_matmul_fp8.default": "grouped_matmul",
+        "tensor_cast.grouped_matmul_mxfp4.default": "grouped_matmul",
         "lm_head": "mm",
         "lm_head_select": "index",
         "mtp_target_select": "index",

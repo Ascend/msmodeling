@@ -44,7 +44,11 @@ from tools.model_diagnostics.specification.errors import (
     SpecificationLoadError,
     UnsupportedModelSpec,
 )
-from tools.model_diagnostics.specification.loader import YamlModelDiagnosticsSpecLoader
+from tools.model_diagnostics.specification.loader import (
+    LoadedSpecDocument,
+    YamlModelDiagnosticsSpecLoader,
+    _LayerLayoutRule,
+)
 from tools.model_diagnostics.specification.provider import ResolvingSpecProvider
 from tools.model_diagnostics.specification.resolver import LoadedSpecCatalogResolver, matches_context
 from tools.model_diagnostics.specification.source_options import (
@@ -171,6 +175,34 @@ def test_qwen3_dense_yaml_loads_and_expands_layers() -> None:
     embedding_runtime = spec.regions[0].stages[0].source_options[SourceKind.RUNTIME]
     assert {"alias", "where", "all_gather", "all_reduce"}.issubset(embedding_runtime.ignored_operators)
     assert attention.comparisons == {}
+
+
+def test_loader_expands_prefix_then_repeat_layer_layout() -> None:
+    loader = _loader()
+    context = _qwen3_context(layers=8)
+    context = replace(
+        context,
+        model_config={
+            **context.model_config,
+            "first_k_dense_replace": 3,
+        },
+    )
+    specs_dir = Path(__file__).resolve().parents[4] / "tools" / "model_diagnostics" / "specs"
+    raw = yaml.safe_load((specs_dir / "qwen3_dense_v1.yaml").read_text(encoding="utf-8"))
+    language = raw["regions"]["language"]
+    language["layer_specs"]["moe"] = language["layer_specs"]["dense"]
+    language["layer_layout_rule"] = {
+        "strategy": "prefix_then_repeat",
+        "count_from": "model_config.effective_num_hidden_layers",
+        "prefix_layer_kind": "dense",
+        "repeated_layer_kind": "moe",
+        "prefix_count_from": "model_config.first_k_dense_replace",
+    }
+
+    spec = loader.materialize(loader.load_mapping(raw), context)
+    materialized = next(region for region in spec.regions if region.region_id == "language")
+
+    assert materialized.layer_layout == ("dense", "dense", "dense", "moe", "moe", "moe", "moe", "moe")
 
 
 def test_qwen3_dense_yaml_leaves_operator_naming_to_comparison_defaults() -> None:
@@ -342,6 +374,42 @@ def test_materialize_rejects_a_bare_spec() -> None:
 
     with pytest.raises(TypeError, match="LoadedSpecDocument"):
         loader.materialize(loaded.spec, _qwen3_context(layers=2))
+
+
+@pytest.mark.parametrize(
+    "rule,expected_message",
+    [
+        (
+            _LayerLayoutRule(
+                strategy="repeat",
+                count_from="model_config.effective_num_hidden_layers",
+            ),
+            "layer_kind is required for repeat strategy",
+        ),
+        (
+            _LayerLayoutRule(
+                strategy="prefix_then_repeat",
+                count_from="model_config.effective_num_hidden_layers",
+            ),
+            "field\\(s\\) required for prefix_then_repeat strategy: "
+            "prefix_layer_kind, repeated_layer_kind, prefix_count_from",
+        ),
+    ],
+)
+def test_materialize_rejects_incomplete_internal_layout_rule(
+    rule: _LayerLayoutRule,
+    expected_message: str,
+) -> None:
+    loader = _loader()
+    loaded = loader.load("qwen3_dense_v1")
+    invalid = LoadedSpecDocument(
+        spec=loaded.spec,
+        layout_rules={"language": rule},
+        region_activations=loaded.region_activations,
+    )
+
+    with pytest.raises(SpecificationLoadError, match=expected_message):
+        loader.materialize(invalid, _qwen3_context(layers=2))
 
 
 def test_materialize_activates_lm_head_selection_from_run_context() -> None:

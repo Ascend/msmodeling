@@ -228,6 +228,60 @@ def test_capture_session_requires_runtime_invocations_at_begin() -> None:
         RuntimeArtifactCapture.begin(SimpleNamespace(event_list=[]), run_context=_context())
 
 
+def test_validate_moe_capture_parallel_rejects_illegal_layout() -> None:
+    from tools.model_diagnostics.errors import SourceLoadError
+    from tools.model_diagnostics.sources.runtime_capture import _validate_moe_capture_parallel
+
+    with pytest.raises(SourceLoadError, match="must equal pipeline stage world_size"):
+        _validate_moe_capture_parallel(ParallelContext(tensor_parallel_size=2))
+
+
+def test_validate_moe_capture_parallel_accepts_compatible_layout() -> None:
+    from tools.model_diagnostics.sources.runtime_capture import _validate_moe_capture_parallel
+
+    _validate_moe_capture_parallel(
+        ParallelContext(tensor_parallel_size=2, expert_parallel_size=2, moe_data_parallel_size=1)
+    )
+
+
+@pytest.mark.parametrize("expert_field", ["num_experts", "n_routed_experts"])
+def test_moe_config_detection_accepts_both_routed_expert_names(expert_field: str) -> None:
+    from tools.model_diagnostics.sources.runtime_capture import _is_moe_config
+
+    config = SimpleNamespace(num_experts_per_tok=8, **{expert_field: 128})
+
+    assert _is_moe_config(config) is True
+
+
+def test_moe_config_detection_requires_top_k() -> None:
+    from tools.model_diagnostics.sources.runtime_capture import _is_moe_config
+
+    assert _is_moe_config(SimpleNamespace(n_routed_experts=256)) is False
+
+
+def test_model_moe_classification_caches_only_the_boolean(monkeypatch) -> None:
+    from tools.model_diagnostics.sources.runtime_capture import _model_is_moe
+
+    calls: list[str] = []
+
+    def _load_config(_loader, model_name: str):
+        calls.append(model_name)
+        return SimpleNamespace(num_experts=128, num_experts_per_tok=8)
+
+    monkeypatch.setattr(
+        "tensor_cast.transformers.utils.AutoModelConfigLoader.load_config",
+        _load_config,
+    )
+    _model_is_moe.cache_clear()
+    try:
+        assert _model_is_moe("test/moe-cache-model") is True
+        assert _model_is_moe("test/moe-cache-model") is True
+        assert calls == ["test/moe-cache-model"]
+        assert _model_is_moe.cache_parameters() == {"maxsize": 32, "typed": False}
+    finally:
+        _model_is_moe.cache_clear()
+
+
 def _producer(*, package_version: str = "0.2.0", git_revision: str | None = "abc1234") -> ProducerInfo:
     return ProducerInfo(
         package_version=package_version,

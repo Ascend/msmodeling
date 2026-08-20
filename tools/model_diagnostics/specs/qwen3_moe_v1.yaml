@@ -1,0 +1,89 @@
+schema_version: "1"
+spec_id: qwen3_moe_v1
+spec_version: 1.0.0
+model_category: qwen3_moe
+matches:
+  entrypoints: [text_generate]
+  model_types: [qwen3_moe]
+
+# MoE + ordinary attention (qwen3_moe).
+# Decoder Theory/Runtime defaults live in qwen3_moe_decoder_v1.
+regions:
+  input:
+    stages:
+      - id: embedding
+        source_options:
+          theory:
+            modules:
+              - name: embedding
+                tensors:
+                  INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[B, Q]", dtype: int64}
+                  OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
+          runtime:
+            boundary_operators: [embedding]
+            ignored_operators:
+              - view
+              - index
+              - alias
+              - slice
+              - unsqueeze
+              - bitwise_not
+              - where
+              - masked_fill_
+              - all_gather
+              - all_reduce
+
+  language:
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: moe
+      count_from: model_config.effective_num_hidden_layers
+    layer_specs:
+      moe:
+        include_fragment: qwen3_moe_decoder_v1
+
+  output:
+    stages:
+      - id: lm_head
+        source_options:
+          theory:
+            modules:
+              - name: lm_head_select
+                activation: lm_head_token_selection
+                tensors:
+                  INPUT[0]: {shape: "[B, Q, H]", dtype: ACT}
+                  INPUT[1]: {shape: "[B]", dtype: int64}
+                  OUTPUT[0]: {shape: "[B, 1, H]", dtype: ACT}
+              - name: lm_head
+                activation: non_mtp_lm_head
+                tensors:
+                  INPUT[0]: {shape: "[Rout, H]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
+          runtime:
+            boundary_operators: [rms_norm]
+            ignored_operators:
+              - rms_norm
+              - view
+              - slice
+              - alias
+              - copy_
+              - dynamic_quantize_symmetric
+              - device_put
+              - select
+              - argmax
+              # TP lm-head gathers local vocabulary shards after the local mm.
+              - all_gather
+
+  # Category-0 MTP general path: active only when num_mtp_tokens > 0
+  # (activation: mtp_enabled). Framework owns request/proposal scaffolding;
+  # this model contributes the MoE decoder as predictor.
+  mtp:
+    activation: mtp_enabled
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: moe_mtp
+      count_from: model_config.effective_num_mtp_layers
+    compose:
+      framework: mtp_framework_v1
+      predictor: qwen3_moe_decoder_v1

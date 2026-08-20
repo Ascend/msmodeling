@@ -82,8 +82,11 @@ class _ComparisonRegistry(Protocol):
 @dataclass(frozen=True)
 class _LayerLayoutRule:
     strategy: str
-    layer_kind: str
     count_from: str
+    layer_kind: str | None = None
+    prefix_layer_kind: str | None = None
+    repeated_layer_kind: str | None = None
+    prefix_count_from: str | None = None
 
 
 @dataclass(frozen=True)
@@ -368,14 +371,35 @@ class YamlModelDiagnosticsSpecLoader:
             rule = rules.get(region.region_id)
             layer_layout = region.layer_layout
             if rule is not None:
-                if rule.strategy != "repeat":
-                    raise SpecificationLoadError(f"unsupported layer_layout_rule.strategy: {rule.strategy}")
-                if rule.layer_kind not in region.layer_specs:
-                    raise SpecificationLoadError(
-                        f"layer_layout_rule.layer_kind {rule.layer_kind!r} missing from layer_specs"
-                    )
                 count = _resolve_count_from(materialize_context, rule.count_from)
-                layer_layout = tuple(rule.layer_kind for _ in range(count))
+                if rule.strategy == "repeat":
+                    if rule.layer_kind is None:
+                        raise SpecificationLoadError(
+                            "layer_layout_rule.layer_kind is required for repeat strategy"
+                        )
+                    layer_layout = tuple(rule.layer_kind for _ in range(count))
+                elif rule.strategy == "prefix_then_repeat":
+                    missing_fields = [
+                        field_name
+                        for field_name, value in (
+                            ("prefix_layer_kind", rule.prefix_layer_kind),
+                            ("repeated_layer_kind", rule.repeated_layer_kind),
+                            ("prefix_count_from", rule.prefix_count_from),
+                        )
+                        if value is None
+                    ]
+                    if missing_fields:
+                        raise SpecificationLoadError(
+                            "layer_layout_rule field(s) required for prefix_then_repeat strategy: "
+                            + ", ".join(missing_fields)
+                        )
+                    prefix_count = _resolve_count_from(materialize_context, rule.prefix_count_from)
+                    layer_layout = tuple(
+                        rule.prefix_layer_kind if index < prefix_count else rule.repeated_layer_kind
+                        for index in range(count)
+                    )
+                else:
+                    raise SpecificationLoadError(f"unsupported layer_layout_rule.strategy: {rule.strategy}")
             materialized_stages = tuple(
                 stage
                 for stage in (
@@ -593,19 +617,38 @@ class YamlModelDiagnosticsSpecLoader:
         rule: _LayerLayoutRule | None = None
         if "layer_layout_rule" in region:
             raw_rule = _require_mapping(region.get("layer_layout_rule"), "layer_layout_rule")
-            _exact_keys(
-                raw_rule,
-                required={"strategy", "layer_kind", "count_from"},
-                label="layer_layout_rule",
-            )
-            rule = _LayerLayoutRule(
-                strategy=_as_str(raw_rule.get("strategy"), "layer_layout_rule.strategy"),
-                layer_kind=_as_str(raw_rule.get("layer_kind"), "layer_layout_rule.layer_kind"),
-                count_from=_as_str(raw_rule.get("count_from"), "layer_layout_rule.count_from"),
-            )
-            if rule.layer_kind not in layer_specs:
+            strategy = _as_str(raw_rule.get("strategy"), "layer_layout_rule.strategy")
+            if strategy == "repeat":
+                _exact_keys(raw_rule, required={"strategy", "layer_kind", "count_from"}, label="layer_layout_rule")
+                rule = _LayerLayoutRule(
+                    strategy=strategy,
+                    count_from=_as_str(raw_rule.get("count_from"), "layer_layout_rule.count_from"),
+                    layer_kind=_as_str(raw_rule.get("layer_kind"), "layer_layout_rule.layer_kind"),
+                )
+                required_kinds = (rule.layer_kind,)
+            elif strategy == "prefix_then_repeat":
+                _exact_keys(
+                    raw_rule,
+                    required={
+                        "strategy", "count_from", "prefix_layer_kind", "repeated_layer_kind",
+                        "prefix_count_from",
+                    },
+                    label="layer_layout_rule",
+                )
+                rule = _LayerLayoutRule(
+                    strategy=strategy,
+                    count_from=_as_str(raw_rule.get("count_from"), "layer_layout_rule.count_from"),
+                    prefix_layer_kind=_as_str(raw_rule.get("prefix_layer_kind"), "layer_layout_rule.prefix_layer_kind"),
+                    repeated_layer_kind=_as_str(raw_rule.get("repeated_layer_kind"), "layer_layout_rule.repeated_layer_kind"),
+                    prefix_count_from=_as_str(raw_rule.get("prefix_count_from"), "layer_layout_rule.prefix_count_from"),
+                )
+                required_kinds = (rule.prefix_layer_kind, rule.repeated_layer_kind)
+            else:
+                raise SpecificationLoadError(f"unsupported layer_layout_rule.strategy: {strategy}")
+            missing_kinds = set(required_kinds).difference(layer_specs)
+            if missing_kinds:
                 raise SpecificationLoadError(
-                    f"layer_layout_rule.layer_kind {rule.layer_kind!r} missing from layer_specs"
+                    f"layer_layout_rule layer kind(s) missing from layer_specs: {sorted(missing_kinds)}"
                 )
 
         activation = None

@@ -41,6 +41,20 @@ def _require_positive_integer(value: int, field_name: str) -> None:
         raise ValueError(f"{field_name} must be positive")
 
 
+def validate_expert_parallel_features(
+    expert_parallel_size: int,
+    *,
+    enable_external_shared_experts: bool,
+    enable_redundant_experts: bool,
+) -> None:
+    """Require expert-parallel execution for features that shard expert ownership."""
+
+    if expert_parallel_size <= 1 and (enable_external_shared_experts or enable_redundant_experts):
+        raise ValueError(
+            "enable_external_shared_experts / enable_redundant_experts require expert_parallel_size > 1"
+        )
+
+
 class ExecutionPhase(Enum):
     """Simulation phase that affects expected tensor relationships."""
 
@@ -50,12 +64,19 @@ class ExecutionPhase(Enum):
 
 @dataclass(frozen=True)
 class ParallelContext:
-    """Parallel degrees used to resolve model specifications."""
+    """Parallel degrees used to resolve model specifications.
+
+    MoE tensor parallel (--moe-tp-size / MTPt) is not supported by this module:
+    it is fixed at 1 internally. Do not re-add a configurable MTPt field unless
+    the MTPt>1 Runtime structure difference is modeled.
+    """
 
     tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     data_parallel_size: int = 1
     expert_parallel_size: int = 1
+    # MoE data parallel (--moe-dp-size / MDP). Defaults to 1 when omitted.
+    moe_data_parallel_size: int = 1
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -63,6 +84,7 @@ class ParallelContext:
             "pipeline_parallel_size",
             "data_parallel_size",
             "expert_parallel_size",
+            "moe_data_parallel_size",
         ):
             _require_positive_integer(getattr(self, field_name), field_name)
 

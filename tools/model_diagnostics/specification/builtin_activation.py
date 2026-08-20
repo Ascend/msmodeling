@@ -54,9 +54,36 @@ class NonMtpLmHeadActivation:
         return not is_mtp_enabled(request.context)
 
 
+class DsaEnabledActivation:
+    """Enable DSA semantics when the loaded model config exposes DSA top-k."""
+
+    policy_id = "dsa_enabled"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return "index_topk" in request.context.model_config
+
+
+class ExplicitMoeGateActivation:
+    """Activate the standalone gate only when Runtime emits it as a call.
+
+    Most DeepSeek-family runtimes execute the router as a dedicated gate mm.
+    Kimi K2.5/K2.6 (``kimi_k2``) patch the MoE inference so routing is computed
+    inside the fused kernels without a standalone gate call, so their gate stage
+    is omitted. Keep this allowlist in sync with the Runtime patch in
+    ``tensor_cast.transformers.builtin_model.kimi_k25``.
+    """
+
+    policy_id = "explicit_moe_gate"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return request.context.model_config.get("model_type") != "kimi_k2"
+
+
 def create_builtin_operator_activation_registry() -> OperatorActivationRegistry:
     registry = OperatorActivationRegistry()
     registry.register(LmHeadTokenSelectionActivation())
     registry.register(MtpEnabledActivation())
     registry.register(NonMtpLmHeadActivation())
+    registry.register(DsaEnabledActivation())
+    registry.register(ExplicitMoeGateActivation())
     return registry

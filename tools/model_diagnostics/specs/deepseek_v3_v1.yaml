@@ -1,0 +1,68 @@
+schema_version: "1"
+spec_id: deepseek_v3_v1
+spec_version: 1.0.0
+model_category: deepseek_v3
+matches:
+  entrypoints: [text_generate]
+  model_types: [deepseek_v3, deepseek_v32, glm_moe_dsa, kimi_k2]
+
+operator_aliases:
+  tensor_cast.mlapo_quant.default: mlapo
+  tensor_cast.multihead_latent_attention.default: mla_sparse_attention
+
+regions:
+  input:
+    stages:
+      - id: embedding
+        source_options:
+          theory:
+            modules:
+              - name: embedding
+                tensors:
+                  INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[B, Q]", dtype: int64}
+                  OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
+          runtime:
+            boundary_operators: [embedding]
+            ignored_operators: [view, index, alias, slice, all_gather, all_reduce]
+
+  language:
+    layer_layout_rule:
+      strategy: prefix_then_repeat
+      count_from: model_config.effective_num_hidden_layers
+      prefix_layer_kind: dense
+      repeated_layer_kind: moe
+      prefix_count_from: model_config.first_k_dense_replace
+    layer_specs:
+      dense:
+        include_fragment: deepseek_v3_dense_decoder_v1
+      moe:
+        include_fragment: deepseek_v3_moe_decoder_v1
+
+  output:
+    stages:
+      - id: lm_head
+        source_options:
+          theory:
+            modules:
+              - name: lm_head_select
+                activation: lm_head_token_selection
+                tensors:
+                  OUTPUT[0]: {shape: "[B, 1, H]", dtype: ACT}
+              - name: lm_head
+                activation: non_mtp_lm_head
+                tensors:
+                  OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
+          runtime:
+            boundary_operators: [rms_norm]
+            ignored_operators: [rms_norm, view, slice, copy_, convert_element_type, all_gather, all_reduce, alias]
+
+  mtp:
+    activation: mtp_enabled
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: moe_mtp
+      count_from: model_config.effective_num_mtp_layers
+    compose:
+      framework: mtp_framework_v1
+      predictor: deepseek_v3_moe_decoder_v1
