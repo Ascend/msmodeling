@@ -155,7 +155,7 @@ Overall Best Configuration:
 
 Top 4 PD Aggregated Configurations:
 | Top | Throughput (token/s) | TTFT (ms) | TPOT (ms) | concurrency | num_devices | parallel           | batch_size |
-|  1  | 2161.56              | 13848.08  | 49.98     | 128         | 8           | TP=4 | PP=1 | DP=2 | 64         |
+|  1  | 2161.56              | 13848.08  | 49.98     | 128         | 8           | TP=4 , PP=1 , DP=2 | 64         |
 ```
 
 重点关注以下字段：

@@ -20,7 +20,7 @@ msModeling provides single-model performance simulation and service-level throug
 
 ### 1.2 Environment Preparation
 
-👉 **Important: Complete the environment installation and configuration in the [msModeling Install Guide](../install_guide/msmodeling_install_guide.md) first.**
+👉 **Important: Complete the environment installation and configuration in the [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md) first.**
 
 > [!CAUTION]
 > This guide assumes commands are run from the msModeling repository root. If you run them from another directory, set `PYTHONPATH` first. Otherwise, errors such as `No module named cli` or `No module named tensor_cast` may occur.
@@ -32,7 +32,7 @@ msModeling provides single-model performance simulation and service-level throug
 
 ### 2.1 Environment: Confirm Runtime Setup
 
-Before starting, complete the environment setup in the [msModeling Install Guide](../install_guide/msmodeling_install_guide.md), including repository cloning, virtual environment creation, dependency installation, and `PYTHONPATH` configuration.
+Before starting, complete the environment setup in the [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md), including repository cloning, virtual environment creation, dependency installation, and `PYTHONPATH` configuration.
 
 The following commands assume you are in the msModeling repository root. If not, set:
 
@@ -155,7 +155,7 @@ Overall Best Configuration:
 
 Top 4 PD Aggregated Configurations:
 | Top | Throughput (token/s) | TTFT (ms) | TPOT (ms) | concurrency | num_devices | parallel           | batch_size |
-|  1  | 2161.56              | 13848.08  | 49.98     | 128         | 8           | TP=4 | PP=1 | DP=2 | 64         |
+|  1  | 2161.56              | 13848.08  | 49.98     | 128         | 8           | TP=4 , PP=1 , DP=2 | 64         |
 ```
 
 Focus on the following fields:

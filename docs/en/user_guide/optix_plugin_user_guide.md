@@ -1,13 +1,36 @@
-# Custom Plugin Developer Guide
+# OptiX Plugin Developer Guide
 
 ## Overview
 
-Service Parameter Optimizer supports custom plugins. You can develop your own plugins to customize search parameters, service frameworks, and performance benchmark tools.
+OptiX supports custom plugins. You can develop your own plugins to customize search parameters, service frameworks, and performance benchmark tools.
+
+## Applicable Users and Prerequisites
+
+This document applies to developers who need to extend the OptiX optimization capabilities. Before you start, confirm the following:
+
+- You have installed msModeling and OptiX, and `msmodeling optix -h` runs properly.
+- You are familiar with Python package structures, `pyproject.toml`, and the entry points mechanism.
+- You have identified what needs to be extended: search parameter configuration, service frameworks, or performance benchmark tools.
+
+> [!NOTE]
+> If the plugin starts the deployment stack by creating a `subprocess` on its own, use `optix.deploy_env.build_deploy_env` to build the subprocess environment instead of passing `os.environ` directly. If the first element of the command is an executable name, call `materialize_command(self.command, self.env, ctx)` to resolve it to an absolute path before starting the subprocess. For the API description, see [`optix/deploy_env.py`](../../../optix/deploy_env.py).
+> [!NOTE]
+> In the following examples, the `optix.*` module paths depend on the installed OptiX version. If the current repository branch does not contain the OptiX source code, switch to a release branch that contains the OptiX code or install the corresponding release package.
 
 The process of developing a custom plugin is as follows:
 
 1. Create a Python project as a plugin.
 2. Develop the custom plugin.
+
+## Plugin Integration Process Overview
+
+| Step | Objective | Key Operation |
+| --- | --- | --- |
+| 1 | Create the plugin project | Create an independent Python project and prepare `pyproject.toml`. |
+| 2 | Implement extension classes | Inherit from `Settings`, `SimulatorInterface`, or `BenchmarkInterface` as needed. |
+| 3 | Register the extension | Implement `register()` in the plugin package and call the OptiX registration function. |
+| 4 | Declare the entry point | Add `[project.entry-points.'optix.plugins']` to `pyproject.toml`. |
+| 5 | Install and verify | Run `pip install -e .` and confirm that the extension is loaded by running `msmodeling optix -h`. |
 
 ## Procedure for Developing the Custom Plugin
 
@@ -50,23 +73,23 @@ The process of developing a custom plugin is as follows:
     ```python
     class optix.optimizer.simulator.SimulatorInterface()
         Bases: ABC
-        #Operations on the service framework. This class manages service-related functions.
+        # Operations on the service framework. This class manages service-related functions
         abstract property data_field: Tuple[OptimizerConfigField] | None
-            #Obtain the data field attribute.
+            # Obtain the data field attribute
             Returns: Optional[Tuple[OptimizerConfigField]]
         abstract property setter data_field: Tuple[OptimizerConfigField] | None
-            #Set the data field attribute.
+            # Set the data field attribute
             Returns: None
         abstract update_command() → None
-            #Update the service startup command based on data_field before service startup. Update the self.command attribute.
+            # Update the service startup command based on data_field before service startup. Update the self.command attribute
             Returns: None
         update_config(params: Tuple[OptimizerConfigField] | None = None) → bool
-            #Update the service configuration file or other configurations based on the input parameter values, to apply new parameter values to the configuration.
+            # Update the service configuration file or other configurations based on the input parameter values, to apply new parameter values to the configuration
             Args:
-                #params: Tuple of tuning parameters, each defined by its value and config_position.
-            Returns: bool, indicating update success or failure.
+                #params: Tuple of tuning parameters, each defined by its value and config_position
+            Returns: bool, indicating whether the update succeeds or fails.
         abstract stop()
-            #Perform any other necessary preparation during runtime.
+            # Perform any other necessary preparation during runtime
             Returns: None
     ```
 
@@ -79,38 +102,38 @@ The process of developing a custom plugin is as follows:
 
 ### Customizing a Performance Benchmark Tool
 
-1. Inherit from `optix.optimizer.benchmark.BenchmarkInterface` and implement the `data_field property` and `get_performance_index` methods.
+1. Inherit from `optix.optimizer.benchmark.BenchmarkInterface` and implement the `data_field` property and `get_performance_index` methods.
 Example:
 
     ```python
     class optix.optimizer.benchmark.BenchmarkInterface():
         Bases: ABC
         property num_prompts: Tuple[OptimizerConfigField] | None
-            #Obtain the number of data retrieval requests.
+            # Obtain the number of data retrieval requests
             Returns: Optional[Tuple[OptimizerConfigField]]
-            
+
         property setter num_prompts: Tuple[OptimizerConfigField] | None
-            #Set the number of data retrieval requests.
+            # Set the number of data retrieval requests
             Returns: None
-            
+
         property data_field: Tuple[OptimizerConfigField] | None
-            #Obtain the data field attribute.
+            # Obtain the data field attribute
             Returns: Optional[Tuple[OptimizerConfigField]]
-            
+
         abstract property setter data_field: Tuple[OptimizerConfigField] | None
-            #Set the data field attribute.
+            # Set the data field attribute
             Returns: None
-        
+
         abstract get_performance_index() → PerformanceIndex
-            #Retrieve performance metrics.
+            # Retrieve performance metrics
             #Returns: metric data
-        
+
         abstract stop()
-            #Perform any other necessary preparation during runtime.
+            # Perform any other necessary preparation during runtime
             Returns: None
-        
+
         abstract update_command() → None
-            #Update the service startup command based on data_field before service startup. Update the self.command attribute.
+            # Update the service startup command based on data_field before service startup. Update the self.command attribute
             Returns: None
     ```
 
@@ -131,7 +154,7 @@ Example:
     vllm_inference_optimization = "vllm_inference_optimization:register"
     ```
 
-4. Installing the Plugin
+4. Install the plugin.
     Set the entry point to `optix.plugins`. Example:
 
     ```toml
@@ -147,8 +170,8 @@ Example:
 
 5. Use the plugin.
 
-    You can specify which plugin modules to use via the Service Parameter Optimizer's command-line arguments.
-    For example, after registering the service framework `service framework vllm_infer` and the benchmark tool `vllm_infer_benchmark`, check whether they appear in the supported services and benchmark tools: Example:
+    You can specify which plugin modules to use via the CLI arguments of OptiX.
+    For example, after registering the service framework `vllm_infer` and the benchmark tool `vllm_infer_benchmark`, check whether they appear in the supported services and benchmark tools.
 
     ```bash
     msmodeling optix -h

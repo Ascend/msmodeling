@@ -1,38 +1,38 @@
-# ServingCast Simulation Guide
+# Fine-Grained Serving Simulation User Guide
 
-> **Experimental feature**: The service-level fine-grained simulation capability described in this guide is still evolving. Interfaces and behavior may change, and simulation results are for evaluation reference only.
+> **Experimental feature**: The fine-grained serving simulation capability described in this guide is still under continuous iteration. Interfaces and behavior may change, and the simulation results are for evaluation reference only.
 
 ## 1 Introduction
 
-ServingCast simulation uses YAML configuration to simulate end-to-end serving scenarios with multiple instances and requests, and outputs system-level metrics such as throughput and latency (TTFT, TPOT). It describes instance groups, model structure, request workloads, and serving limits through YAML files, and outputs performance metrics such as TTFT, TPOT, throughput, and request count to help users analyze serving capacity and configuration bottlenecks before actual deployment.
+The ServingCast simulation is based on YAML configuration. It simulates end-to-end serving scenarios with multiple instances and requests, and outputs system-level metrics such as throughput and latency (TTFT, TPOT). It describes instance groups, model architecture, request workload, and serving limits through YAML configuration, and outputs performance metrics such as TTFT, TPOT, throughput, and request count, helping you analyze service capacity and configuration bottlenecks before actual deployment.
 
-**Use Cases:**
+**Applicable Scenarios:**
 
-- **System Behavior Validation**: Validate the expected performance of a serving configuration before actual deployment
-- **Multi-Instance Benchmarking**: Simulate complex serving topologies, such as separate Prefill and Decode clusters
-- **Workload Analysis**: Evaluate system performance under specific request patterns and load characteristics
-- **Resource Planning**: Determine the required number of instances and their configurations to meet target throughput
+- **System behavior validation**: Verify the expected performance of a service configuration before actual deployment.
+- **Multi-instance benchmarking**: Simulate complex service topologies, such as independent prefill and decode clusters.
+- **Load analysis**: Evaluate system performance under specific request patterns and load characteristics.
+- **Resource planning**: Determine the number of instances and their configuration required to meet the target throughput.
 
 **Key Features:**
 
-- YAML-driven configuration for instances and workload
+- YAML-based instance and workload configuration
 - Support for heterogeneous instance groups
-- Comprehensive metrics: E2E latency, TTFT, TPOT, token throughput
+- Comprehensive metrics: end-to-end latency, TTFT, TPOT, and token throughput
 
 ## 2 Environment Requirements
 
-Before running ServingCast simulation, complete environment setup first. Python 3.10+ is recommended. For details, see [Quick Start: Environment Setup and First Simulation](../install_guide/msmodeling_install_guide.md).
+Before running a ServingCast simulation, complete the environment setup (Python 3.10+ recommended). For details, see [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md).
 
 ## 3 Input Configuration
 
-Service simulation depends on two YAML configuration files:
+The service simulation relies on two YAML configuration files:
 
-| Configuration File | Purpose |
-| --- | --- |
-| `instance_config_path` | Describes one or more instance groups, such as role, instance count, and TP/DP parallelism. |
-| `common_config_path` | Describes global settings, such as model structure, request workload, serving limits, and simulation parameters. |
+| Configuration File    | Description |
+| --------------------  | --- |
+| instance_config_path  | Describes one or more instance groups, for example, role, number of instances, and TP/DP modes. |
+| common_config_path    | Describes global configuration, for example, model architecture, request workload, serving limits, and simulation parameters. |
 
-## 4 Run Simulation
+## 4 Running Simulation
 
 Its general usage is shown below:
 
@@ -44,7 +44,7 @@ Run a service inference simulation driven by YAML configuration files.
 required arguments:
   --instance_config_path INSTANCE_CONFIG_PATH [INSTANCE_CONFIG_PATH ...]
                         Path to a YAML file that declares one or more instance groups.
-                        Each group defines a homogeneous pool of nodes (role, count, TP/DP parallelism)
+                        Each group defines a homogeneous pool of nodes (role, count, TP/DP modes)
                         and can be mixed-and-matched in a single benchmark run.
   --common_config_path COMMON_CONFIG_PATH
                         Path to a YAML file with global settings: model architecture,
@@ -57,14 +57,14 @@ optional arguments:
                         Path to directory where profiling results will be saved (default: ./profiling_results)
 ```
 
-Parameter descriptions:
+Parameters:
 
-| Parameter | Required/Optional | Description |
-| --- | --- | --- |
-| `--instance_config_path` | Required | Path to one or more instance configuration files. Format: YAML file path list. Each file declares one or more instance groups, such as role, instance count, and TP/DP parallelism. Default: none. |
-| `--common_config_path` | Required | Path to the global configuration file. Format: YAML file path. It describes model structure, request workload, serving limits, and simulation parameters. Default: none. |
-| `--enable_profiling` | Optional | Enables profiling and outputs more fine-grained system performance information. Valid range: flag option. Default: `False`. |
-| `--profiling_output_path` | Optional | Specifies profiling result directory. Format: directory path. Default: `./profiling_results`. |
+| Parameter                | Optional/Required | Description |
+| -----------------------  | --- | --- |
+| --instance_config_path   | Required | Paths to one or more instance configuration files. Format: list of YAML file paths. Each file declares one or more instance groups, such as role, number of instances, and TP/DP modes. Default: none. |
+| --common_config_path     | Required | Path to the global configuration file. Format: YAML file path. Used to describe model architecture, request workload, serving limits, and simulation parameters. Default: none. |
+| --enable_profiling       | Optional | Enables profiling to output more fine-grained system performance information. Value range: switch parameter. Default: `False`. |
+| --profiling_output_path  | Optional | Specifies the profiling result directory. Format: directory path. Default: `./profiling_results`. |
 
 Example:
 
@@ -76,7 +76,7 @@ python -m serving_cast.main --instance_config_path=./serving_cast/example/instan
 
 ### 4.1 Result
 
-After the simulation finishes, the console prints a performance summary similar to:
+After the simulation finishes, the console prints a performance summary similar to the following:
 
 ```text
          E2E_TIME(s)  TTFT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
@@ -99,9 +99,9 @@ output_token_throughput(tok/s) 285.598
 
 Metric descriptions:
 
-- E2E_TIME: End-to-end latency for a single request (request issued → last token)
-- TTFT: Time-to-first-token
-- TPOT: Time-per-output-token after the first token
-- OUTPUT_TOKEN_THROUGHPUT: Per-request output-token rate
-- request_throughput: System-level request rate
-- `input_token_throughput` / `output_token_throughput`: Aggregate token throughput
+- `E2E_TIME`: end-to-end latency per request (issue → last token)
+- `TTFT`: time-to-first-token
+- `TPOT`: time-per-output-token after the first token
+- `OUTPUT_TOKEN_THROUGHPUT`: per-request output-token rate
+- `request_throughput`: system-wide request rate
+- `input_token_throughput`/`output_token_throughput`: aggregate token throughput
