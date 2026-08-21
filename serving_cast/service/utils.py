@@ -97,6 +97,11 @@ class OptimizerData:
     serving_cost: Optional[float] = None
     num_mtp_tokens: Optional[int] = None
     mtp_acceptance_rate: Optional[list] = None
+    dflash_block_size: Optional[int] = None
+    dflash_acceptance_length: Optional[float] = None
+    dspark_block_size: Optional[int] = None
+    dspark_acceptance_length: Optional[float] = None
+    dspark_markov_rank: Optional[int] = None
     prefill_devices_per_instance: Optional[int] = None
     decode_devices_per_instance: Optional[int] = None
     prefix_cache_hit_rate: float = 0.0
@@ -504,6 +509,11 @@ def format_parallel_label(
     parallel_config: ParallelConfig,
     is_moe_model: bool,
     num_mtp_tokens: Optional[int] = None,
+    dflash_block_size: Optional[int] = None,
+    dflash_acceptance_length: Optional[float] = None,
+    dspark_block_size: Optional[int] = None,
+    dspark_acceptance_length: Optional[float] = None,
+    dspark_markov_rank: Optional[int] = None,
 ) -> str:
     parts = [
         f"TP={parallel_config.tensor_parallel_size}",
@@ -523,4 +533,16 @@ def format_parallel_label(
     # Only surface DCP when it is actually enabled, so non-DCP runs keep their label.
     if getattr(parallel_config, "decode_context_parallel_size", 1) > 1:
         parts.append(f"DCP={parallel_config.decode_context_parallel_size}")
+    dspark_block = dspark_block_size or 0
+    if dspark_block >= 2:
+        accept = 5.0 if dspark_acceptance_length is None else float(dspark_acceptance_length)
+        accept_label = int(accept) if accept == int(accept) else accept
+        markov = 256 if dspark_markov_rank is None else int(dspark_markov_rank)
+        parts.append(f"DSpark={dspark_block}/acc={accept_label}/markov={markov}")
+    else:
+        dflash_block = dflash_block_size or 0
+        if dflash_block >= 2:
+            accept = 5.0 if dflash_acceptance_length is None else float(dflash_acceptance_length)
+            accept_label = int(accept) if accept == int(accept) else accept
+            parts.append(f"DFlash={dflash_block}/acc={accept_label}")
     return " | ".join(parts)

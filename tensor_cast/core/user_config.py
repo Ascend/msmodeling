@@ -52,6 +52,16 @@ class UserInputConfig:
     decode: bool = False
     num_mtp_tokens: int = 0
     mtp_acceptance_rate: List[float] = field(default_factory=lambda: [0.9, 0.6, 0.4, 0.2])
+    speculative_method: Optional[str] = None
+    """Draft speculative method: ``dflash``, ``dspark``, or None (disabled)."""
+    num_speculative_tokens: int = 0
+    """Speculative tokens excluding anchor; internal block_size = n + 1 when n > 0."""
+    acceptance_length: float = 5.0
+    """Decode fold scalar (throughput_optimizer); clamped by speculative_method after resolve."""
+    num_draft_layers: int = 0
+    draft_model_config_path: Optional[str] = None
+    dspark_markov_rank: int = 256
+    dspark_markov_head: str = "vanilla"
     num_hidden_layers_override: int = 0
     disable_repetition: bool = False
     reserved_memory_gb: float = 0
@@ -112,6 +122,33 @@ class UserInputConfig:
         self._validate_vision_parallelism()
         self._normalize_performance_model()
         self._normalize_word_embedding_tp()
+        self._normalize_draft_method()
+
+    def _normalize_draft_method(self):
+        if self.speculative_method is None or self.speculative_method == "":
+            self.speculative_method = None
+            return
+        method = str(self.speculative_method).lower()
+        if method not in ("dflash", "dspark"):
+            raise ValueError(f"speculative_method must be 'dflash', 'dspark', or None, got {self.speculative_method!r}")
+        self.speculative_method = method
+
+    @property
+    def dflash(self) -> bool:
+        return self.speculative_method == "dflash"
+
+    @property
+    def dspark(self) -> bool:
+        return self.speculative_method == "dspark"
+
+    def draft_block_size(self) -> int:
+        """Draft block length including anchor; 0 when disabled or unresolved."""
+        if self.speculative_method is None:
+            return 0
+        n = int(self.num_speculative_tokens or 0)
+        if n <= 0:
+            return 0
+        return n + 1
 
     def _normalize_model_source(self):
         source_info = normalize_model_source(self.model_id, self.remote_source)
@@ -165,6 +202,26 @@ class UserInputConfig:
         print(f"Enable repetition: {not self.disable_repetition}")
         if self.num_mtp_tokens > 0:
             print(f"Number of MTP layers: {self.num_mtp_tokens}")
+        if self.speculative_method == "dflash":
+            block = self.draft_block_size() or "builtin"
+            print(
+                f"Dflash: enabled=True, "
+                f"num_speculative_tokens={self.num_speculative_tokens or 'builtin'}, "
+                f"block_size={block}, "
+                f"num_draft_layers={self.num_draft_layers or 'builtin'}, "
+                f"acceptance_length={self.acceptance_length}"
+            )
+        if self.speculative_method == "dspark":
+            block = self.draft_block_size() or "builtin"
+            print(
+                f"DSpark: enabled=True, "
+                f"num_speculative_tokens={self.num_speculative_tokens or 'builtin'}, "
+                f"block_size={block}, "
+                f"num_draft_layers={self.num_draft_layers or 'builtin'}, "
+                f"acceptance_length={self.acceptance_length}, "
+                f"markov_rank={self.dspark_markov_rank}, "
+                f"markov_head={self.dspark_markov_head}"
+            )
         if self.quantize_linear_action != QuantizeLinearAction.DISABLED:
             print(f"Quantization Linear: {self.quantize_linear_action}, quantize LM Head: {self.quantize_lmhead}")
             if self.quantize_linear_action == QuantizeLinearAction.MXFP4:

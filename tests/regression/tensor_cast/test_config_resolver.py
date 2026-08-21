@@ -78,5 +78,53 @@ class DsaCpStructureTestCase(unittest.TestCase):
         self.assertIs(resolver.model_config.mla_config.mla_cls, mla_cls.return_value)
 
 
+class DraftSpecRepetitionTestCase(unittest.TestCase):
+    def _resolve_with(self, user_input):
+        from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
+
+        resolver = object.__new__(ConfigResolver)
+        resolver.user_input = user_input
+        resolver.model_config = ModelConfig(ParallelConfig(), QuantConfig())
+        resolver.hf_config = MagicMock()
+        resolver.hf_config.model_type = "qwen3"
+        captured = {}
+
+        def capture(**kwargs):
+            captured.update(kwargs)
+
+        resolver.update_hf_config = capture
+        resolver.update_moe_config = MagicMock()
+        resolver.update_mla_config = MagicMock()
+        resolver.update_mtp_config = MagicMock()
+        resolver.update_dspark_config = MagicMock()
+        resolver.update_dflash_config = MagicMock()
+        resolver.update_parallel_config = MagicMock()
+        resolver.validate_moe_parallel_config = MagicMock()
+        resolver.resolve()
+        return captured
+
+    def test_dspark_keeps_representative_layer_reuse(self):
+        from tensor_cast.core.user_config import UserInputConfig
+
+        captured = self._resolve_with(
+            UserInputConfig(speculative_method="dspark", num_speculative_tokens=7, disable_repetition=False)
+        )
+        self.assertTrue(captured["enable_repetition"])
+
+    def test_dflash_keeps_representative_layer_reuse(self):
+        from tensor_cast.core.user_config import UserInputConfig
+
+        captured = self._resolve_with(
+            UserInputConfig(speculative_method="dflash", num_speculative_tokens=7, disable_repetition=False)
+        )
+        self.assertTrue(captured["enable_repetition"])
+
+    def test_baseline_keeps_repetition_when_not_disabled(self):
+        from tensor_cast.core.user_config import UserInputConfig
+
+        captured = self._resolve_with(UserInputConfig(disable_repetition=False))
+        self.assertTrue(captured["enable_repetition"])
+
+
 if __name__ == "__main__":
     unittest.main()

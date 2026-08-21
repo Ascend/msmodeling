@@ -9,6 +9,8 @@ from ..core.user_config import UserInputConfig
 from ..layers.attention import AttentionTensorCast
 from ..layers.quant_linear import TensorCastQuantLinear
 from ..model_config import (
+    DflashConfig,
+    DsparkConfig,
     MlaConfig,
     ModelConfig,
     MtpConfig,
@@ -93,8 +95,11 @@ class ConfigResolver:
         Returns:
             ModelConfig: The fully resolved model configuration.
         """
+        # Modeling aux is synthesized from last_hidden (see DflashWrapper), so
+        # representative layer reuse stays enabled under Dflash/DSpark + --compile.
+        enable_repetition = not self.user_input.disable_repetition
         self.update_hf_config(
-            enable_repetition=not self.user_input.disable_repetition,
+            enable_repetition=enable_repetition,
             num_hidden_layers_override=self.user_input.num_hidden_layers_override,
         )
         self.update_moe_config(
@@ -107,6 +112,27 @@ class ConfigResolver:
             enable_dsa_cp=self.user_input.enable_sequence_parallel and self._has_dsa_structure(),
         )
         self.update_mtp_config(num_mtp_tokens=self.user_input.num_mtp_tokens)
+        draft_block = self.user_input.draft_block_size()
+        if self.user_input.speculative_method == "dspark":
+            self.update_dspark_config(
+                dspark=True,
+                dspark_block_size=draft_block,
+                num_draft_layers=self.user_input.num_draft_layers,
+                dspark_acceptance_length=self.user_input.acceptance_length,
+                draft_model_config_path=self.user_input.draft_model_config_path,
+                context_length=self.user_input.context_length,
+                markov_rank=int(self.user_input.dspark_markov_rank),
+                markov_head_type=str(self.user_input.dspark_markov_head or "vanilla"),
+            )
+        elif self.user_input.speculative_method == "dflash":
+            self.update_dflash_config(
+                dflash=True,
+                dflash_block_size=draft_block,
+                num_draft_layers=self.user_input.num_draft_layers,
+                dflash_acceptance_length=self.user_input.acceptance_length,
+                draft_model_config_path=self.user_input.draft_model_config_path,
+                context_length=self.user_input.context_length,
+            )
         self.update_parallel_config()
         self.validate_moe_parallel_config()
         # Apply remote source configuration
@@ -221,11 +247,87 @@ class ConfigResolver:
         config = text_config or self.hf_config
         return hasattr(config, "index_topk") or (hasattr(config, "topk_limit") and hasattr(config, "index_n_heads"))
 
-    def update_hf_config(
+    def update_dflash_config(
         self,
-        enable_repetition: bool = False,
-        num_hidden_layers_override: int = 0,
+        dflash: bool = False,
+        dflash_block_size: int = 0,
+        num_draft_layers: int = 0,
+        dflash_acceptance_length: float = 5.0,
+        draft_model_config_path=None,
+        context_length: int = 0,
     ):
+        """Enable unified Dflash only when ``dflash`` is True; block/layers are overrides."""
+        if not dflash:
+            return
+        cli_block_size = int(dflash_block_size) if int(dflash_block_size or 0) >= 2 else None
+        if self.model_config.mtp_config is not None:
+            raise ValueError("Dflash and MTP are mutually exclusive")
+
+        from tensor_cast.layers.dflash import apply_cli_overrides_to_source_and_dcfg
+
+        # Placeholder >=2 for DflashConfig validation; builtin/path wins when CLI omits block size.
+        initial_block = cli_block_size if cli_block_size is not None else 8
+        dcfg = DflashConfig(
+            dflash_block_size=initial_block,
+            num_draft_layers=int(num_draft_layers) if int(num_draft_layers or 0) > 0 else 6,
+            dflash_acceptance_length=float(dflash_acceptance_length),
+            draft_model_config_path=draft_model_config_path,
+            context_length=int(context_length or 0),
+        )
+        apply_cli_overrides_to_source_and_dcfg(
+            dcfg,
+            cli_block_size=cli_block_size,
+            cli_num_draft_layers=int(num_draft_layers) if int(num_draft_layers or 0) > 0 else None,
+        )
+        self.model_config.dflash_config = dcfg
+
+    def update_dspark_config(
+        self,
+        dspark: bool = False,
+        dspark_block_size: int = 0,
+        num_draft_layers: int = 0,
+        dspark_acceptance_length: float = 5.0,
+        draft_model_config_path=None,
+        context_length: int = 0,
+        markov_rank: int = 256,
+        markov_head_type: str = "vanilla",
+        enable_confidence_head: bool = True,
+        confidence_head_with_markov: bool = True,
+    ):
+        """Enable DSpark only when ``dspark`` is True (mutually exclusive with Dflash/MTP)."""
+        if not dspark:
+            return
+        if self.model_config.mtp_config is not None:
+            raise ValueError("DSpark and MTP are mutually exclusive")
+        if self.model_config.dflash_config is not None:
+            raise ValueError("DSpark and Dflash are mutually exclusive")
+        head_type = str(markov_head_type or "vanilla")
+        if head_type not in ("vanilla", "gated", "rnn"):
+            raise ValueError(f"markov_head_type must be one of vanilla/gated/rnn, got {head_type!r}")
+
+        from tensor_cast.layers.dspark import apply_cli_overrides_to_dspark_config
+
+        cli_block_size = int(dspark_block_size) if int(dspark_block_size or 0) >= 2 else None
+        initial_block = cli_block_size if cli_block_size is not None else 8
+        scfg = DsparkConfig(
+            dspark_block_size=initial_block,
+            num_draft_layers=int(num_draft_layers) if int(num_draft_layers or 0) > 0 else 6,
+            dspark_acceptance_length=float(dspark_acceptance_length),
+            draft_model_config_path=draft_model_config_path,
+            context_length=int(context_length or 0),
+            markov_rank=int(markov_rank),
+            markov_head_type=head_type,
+            enable_confidence_head=bool(enable_confidence_head),
+            confidence_head_with_markov=bool(confidence_head_with_markov),
+        )
+        apply_cli_overrides_to_dspark_config(
+            scfg,
+            cli_block_size=cli_block_size,
+            cli_num_draft_layers=int(num_draft_layers) if int(num_draft_layers or 0) > 0 else None,
+        )
+        self.model_config.dspark_config = scfg
+
+    def update_hf_config(self, enable_repetition: bool = False, num_hidden_layers_override: int = 0):
         """
         Update the HuggingFace configuration settings.
 

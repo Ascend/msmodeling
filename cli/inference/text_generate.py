@@ -1,3 +1,4 @@
+import argparse
 import logging
 
 from cli.logo import print_logo
@@ -27,20 +28,22 @@ from tensor_cast.core.quantization.datatypes import (
 from tensor_cast.model_config import WordEmbeddingTPMode
 from ..utils import (
     LOG_FORMAT,
+    add_draft_spec_arguments,
     check_positive_integer,
     check_prefix_cache_hit_rate,
+    draft_method,
     get_common_argparser,
     require_model_id,
+    resolve_draft_block_and_acceptance,
+    validate_draft_spec_cli_args,
 )
 
 # Supported performance model types
 SUPPORTED_PERFORMANCE_MODELS = ["analytic", "profiling"]
 
 
-def main():
-    """
-    Main function to parse arguments and run the inference simulation.
-    """
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the text_generate CLI parser (shared by ``arg_parse`` / tests)."""
     common_parser = get_common_argparser()
     parser = SpecArgumentParser(
         prog="msmodeling inference text-generate",
@@ -104,6 +107,7 @@ def main():
         help="Number of Multi-Token Prediction (MTP) tokens. 0 = disabled. "
         "Only supports models with MTP capability (e.g., DeepSeek).",
     )
+    add_draft_spec_arguments(llm_group, include_acceptance=False)
     add_option(
         llm_group,
         "--no-repetition",
@@ -430,9 +434,30 @@ def main():
         help="(developer only) Export M1-M5 metrics report as JSON. Requires --performance-model profiling.",
         aliases=("--export-empirical-metrics",),
     )
+    return parser
 
-    args = spec_parse_args(parser)
+
+def arg_parse(argv=None):
+    """Parse CLI args and apply draft-spec validation / block resolution."""
+    parser = build_arg_parser()
+    args = spec_parse_args(parser, argv)
     require_model_id(parser, args)
+    validate_draft_spec_cli_args(parser, args, argv=argv)
+    resolve_draft_block_and_acceptance(args)
+    if args.performance_model is None:
+        args.performance_model = ["analytic"]
+    if args.export_empirical_metrics and "profiling" not in args.performance_model:
+        parser.error("--export-empirical-metrics requires --performance-model profiling")
+    if args.fusion_plugin and not args.compile:
+        parser.error("--fusion-plugin requires --compile (else the fusion never fires)")
+    return args
+
+
+def main():
+    """
+    Main function to parse arguments and run the inference simulation.
+    """
+    args = arg_parse()
     print_logo()
     configure_std_logging(args, log_format=LOG_FORMAT)
     logger = logging.getLogger(__name__)
@@ -441,19 +466,21 @@ def main():
         config.compilation.debug.graph_log_url = args.graph_log_url
     apply_compilation_config(args.compilation_config)
 
-    # Set default performance_model if not specified
-    if args.performance_model is None:
-        args.performance_model = ["analytic"]
-
-    # Validate developer-only options
-    if args.export_empirical_metrics and "profiling" not in args.performance_model:
-        parser.error("--export-empirical-metrics requires --performance-model profiling")
-
-    # Fusion plugin requires compilation: the fusion is a compile-time fx graph
-    # rewrite (Phase 3); without --compile the pattern registers but never fires
-    # and the estimate silently equals the no-plugin baseline (RFC §3.3a).
-    if args.fusion_plugin and not args.compile:
-        parser.error("--fusion-plugin requires --compile (else the fusion never fires)")
+    # Prefill keeps user --query-length. Decode + DFlash/DSpark aligns to
+    # num_speculative_tokens + 1 (anchor included; equals resolved draft block).
+    method = draft_method(args)
+    if args.decode and method is not None:
+        n = int(getattr(args, "num_speculative_tokens", 0) or 0)
+        decode_query_len = n + 1
+        if decode_query_len >= 2 and int(args.query_length) != decode_query_len:
+            label = "DSpark" if method == "dspark" else "Dflash"
+            logger.warning(
+                "%s decode sets --query-length to num_speculative_tokens+1 (%d); was %d",
+                label,
+                decode_query_len,
+                args.query_length,
+            )
+            args.query_length = decode_query_len
 
     # import here to make sure the logger level is set
     logger.info("Importing core modules...")
@@ -479,7 +506,9 @@ def main():
         for plugin_path in args.fusion_plugin:
             result = validate_plugin(plugin_path)
             if not result:
-                parser.error(f"--fusion-plugin {plugin_path}: validation failed at {result.layer}: {result.detail}")
+                build_arg_parser().error(
+                    f"--fusion-plugin {plugin_path}: validation failed at {result.layer}: {result.detail}"
+                )
             # validate_plugin's L2 already imported+registered the plugin;
             # load_plugin is an idempotent no-op here, kept for consistency.
             load_plugin(plugin_path)

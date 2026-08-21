@@ -728,8 +728,9 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                     )
 
         # ----------------------------------------------------------------
-        # Patch 13: ModelWrapper — add output_intermediate_hidden_states for MTP
-        #           and apply selected_token_indices for prefill token pruning
+        # Patch 13: ModelWrapper — add output_intermediate_hidden_states for MTP,
+        #           output_aux_hidden_state_layer_ids for Dflash, and apply
+        #           selected_token_indices for prefill token pruning
         # ----------------------------------------------------------------
         # WHY:   (a) The generic ``ModelWrapper`` only returns a single tensor
         #        from ``forward()``, but ``MtpWrapper`` expects
@@ -750,7 +751,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #          (b) 42000×7168×163840 lm_head matmul instead of
         #          12×7168×163840 during prefill, inflating compute cost
         #          ~3500×.
-        from tensor_cast.transformers.model import ModelWrapper
+        from tensor_cast.transformers.model import ModelWrapper, resolve_decoder_num_layers, select_aux_hidden_states
         from tensor_cast.layers.sampler import _has_explicit_selected_token_indices, select_lm_head_hidden_states
 
         if not hasattr(ModelWrapper, "_patched_for_mtp"):
@@ -762,10 +763,73 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
                 position_ids: torch.Tensor,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 output_intermediate_hidden_states: bool = False,
+                output_aux_hidden_state_layer_ids=None,
                 **kwargs: object,
             ):
                 # Extract sampling_metadata from generate_inputs(); spec decode uses it for target row selection.
                 sampling_metadata = kwargs.get("sampling_metadata")
+
+                if output_aux_hidden_state_layer_ids is not None:
+                    has_image_input = kwargs.get("pixel_values") is not None or kwargs.get("image_grid_thw") is not None
+                    if not has_image_input and inputs_embeds is None and hasattr(self._inner, "language_model"):
+                        from tensor_cast.transformers.model import _EXTRA_TC_KWARGS_KEYS
+
+                        lm = self._inner.language_model
+                        _tc_extra = {
+                            k: kwargs[k] for k in _EXTRA_TC_KWARGS_KEYS if k in kwargs and kwargs[k] is not None
+                        }
+                        if _tc_extra:
+                            for layer in lm.model.layers:
+                                if hasattr(layer, "self_attn"):
+                                    layer.self_attn._extra_forward_kwargs = _tc_extra
+
+                        body_outputs = lm.model(
+                            input_ids=input_ids,
+                            position_ids=position_ids,
+                            use_cache=False,
+                            return_dict=True,
+                            output_hidden_states=True,
+                        )
+                        aux_hiddens = select_aux_hidden_states(
+                            body_outputs.hidden_states,
+                            output_aux_hidden_state_layer_ids,
+                            num_layers=resolve_decoder_num_layers(getattr(lm, "config", None)),
+                        )
+                        hidden_states = select_lm_head_hidden_states(
+                            body_outputs.last_hidden_state,
+                            sampling_metadata,
+                            mode="target",
+                        )
+                        logits = lm.lm_head(hidden_states)
+                        if output_intermediate_hidden_states:
+                            return logits, body_outputs.last_hidden_state, aux_hiddens
+                        return logits, aux_hiddens
+
+                    kwargs_with_hidden = {**kwargs, "output_hidden_states": True}
+                    outputs = self._inner(
+                        input_ids=input_ids,
+                        use_cache=False,
+                        position_ids=position_ids,
+                        inputs_embeds=inputs_embeds,
+                        return_dict=True,
+                        **kwargs_with_hidden,
+                    )
+                    logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+                    all_hidden = getattr(outputs, "hidden_states", None)
+                    if all_hidden is None and isinstance(outputs, (tuple, list)) and len(outputs) > 1:
+                        all_hidden = outputs[1]
+                    if all_hidden is None:
+                        raise RuntimeError("Kimi ModelWrapper aux path missing hidden_states")
+                    aux_hiddens = select_aux_hidden_states(
+                        all_hidden,
+                        output_aux_hidden_state_layer_ids,
+                        num_layers=resolve_decoder_num_layers(getattr(self._inner, "config", None)),
+                    )
+                    logits = select_lm_head_hidden_states(logits, sampling_metadata, mode="target")
+                    if output_intermediate_hidden_states:
+                        last_h = all_hidden[-1]
+                        return logits, last_h, aux_hiddens
+                    return logits, aux_hiddens
 
                 if output_intermediate_hidden_states:
                     has_image_input = kwargs.get("pixel_values") is not None or kwargs.get("image_grid_thw") is not None

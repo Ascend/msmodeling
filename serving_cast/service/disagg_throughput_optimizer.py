@@ -213,8 +213,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
 
         ttft = tpot = None
         if decode_flag:
-            average_tokens = sum(optimizer_data.mtp_acceptance_rate[: optimizer_data.num_mtp_tokens]) + 1
-            latency_ms /= average_tokens
+            latency_ms = self._fold_decode_latency_ms(latency_ms, optimizer_data)
             tpot = latency_ms
             output_throughput = concurrency / tpot * 1000 if tpot > 0 else 0
         else:
@@ -243,6 +242,11 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             self.model_runner.model.model_config.parallel_config,
             self.is_moe_model,
             optimizer_data.num_mtp_tokens,
+            dflash_block_size=optimizer_data.dflash_block_size,
+            dflash_acceptance_length=optimizer_data.dflash_acceptance_length,
+            dspark_block_size=optimizer_data.dspark_block_size,
+            dspark_acceptance_length=optimizer_data.dspark_acceptance_length,
+            dspark_markov_rank=optimizer_data.dspark_markov_rank,
         )
 
         logger.info(

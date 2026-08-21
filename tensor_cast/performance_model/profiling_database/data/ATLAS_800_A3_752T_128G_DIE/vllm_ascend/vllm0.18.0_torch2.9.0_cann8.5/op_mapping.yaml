@@ -891,6 +891,16 @@ operator_mappings:
         split_qkv_rmsnorm_rope_kernel_0(8442x), InterleaveRope(549x).
       TC has (Q, K, cos, sin); NPU _triton_rope has (K, Q, cos) — tc_input_count=2 for safe match.
 
+  "tensor_cast.apply_rope_single.default":
+    kernel_type: _triton_rope
+    alternate_kernel_types: [_triton_rope_1, split_qkv_rmsnorm_rope_kernel, split_qkv_rmsnorm_rope_kernel_0, InterleaveRope, ApplyRotaryPosEmb]
+    tc_input_count: 1
+    notes: >
+      [HIGH] Same NPU kernels as apply_rope; TC signature is K-only (x, cos, sin).
+      Context-stage DFlash fused RoPE has no Q. tc_input_count=1 matches the data
+      tensor against NPU K. Do not copy apply_rope's tc_input_count=2, which would
+      compare (x, cos) against (K, Q).
+
 
   # ========== 16. Communication ==========
 

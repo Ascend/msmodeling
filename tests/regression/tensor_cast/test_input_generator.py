@@ -812,6 +812,36 @@ class TestDeepseekV4KvCacheHelpers:
         assert info["indexer_cache_per_token"] == 2 * 128 * torch.bfloat16.itemsize
 
     @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_glm5_indexshare_skips_draft_layers(self, _mock_attn_quant):
+        model = MagicMock()
+        model.num_hidden_layers = 9
+        model.model_config = SimpleNamespace(
+            mla_config=SimpleNamespace(mla_cls=Glm5SparseAttention),
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(
+                model_type="glm_moe_dsa",
+                indexer_types=["full", "shared", "shared", "shared", "full", "shared"],
+            ),
+            has_draft_spec=lambda: True,
+            draft_num_layers=lambda: 3,
+        )
+        model.text_config = None
+        model.unwrap.return_value = SimpleNamespace(
+            layers=[
+                SimpleNamespace(self_attn=MagicMock(use_indexer=True, _index_head_dim=128, indexer=None))
+                for _ in range(6)
+            ]
+        )
+
+        info = get_sparse_attention_indexer_cache_info(model, num_blocks=4, block_size=16)
+
+        assert set(info["indexer_cache_by_layers"]) == {0, 4}
+        assert 6 not in info["indexer_cache_by_layers"]
+        assert 7 not in info["indexer_cache_by_layers"]
+        assert 8 not in info["indexer_cache_by_layers"]
+        assert info["indexer_cache_per_token"] == 2 * 128 * torch.bfloat16.itemsize
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
     def test_glm5_without_indexshare_preserves_per_layer_cache_allocation(self, _mock_attn_quant):
         model = MagicMock()
         model.num_hidden_layers = 3

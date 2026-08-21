@@ -63,6 +63,35 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 10 --query-le
 
 **Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace-file` is set.
 
+#### Speculative Decoding (Dflash / DSpark)
+
+TensorCast supports Dflash or DSpark draft speculative decoding simulation via `--speculative-method {dflash,dspark}`, which is mutually exclusive with MTP (`--num-mtp-tokens`). When enabled, each forward includes a full target forward and a draft block forward. Draft linear layers are not quantized by `--quantize-linear-action`.
+
+**Example (Decode, Dflash):**
+
+```bash
+python -m cli.inference.text_generate Qwen/Qwen3-32B \
+  --num-queries 8 \
+  --query-length 8 \
+  --context-length 4500 \
+  --decode \
+  --device TEST_DEVICE \
+  --speculative-method dflash \
+  --num-speculative-tokens 7 \
+  --num-draft-layers 6 \
+  --compile
+```
+
+Notes:
+
+- `--speculative-method` must be set explicitly; setting only dependent flags such as `--num-speculative-tokens` does not enable it.
+- `--query-length` must be at least the draft block length (`block_size = --num-speculative-tokens + 1`; if omitted, the built-in default is used).
+- For `dspark`, add `--dspark-markov-rank` and `--dspark-markov-head` to the command above (defaults `256` / `vanilla`).
+- `--acceptance-length` is used only for Decode throughput conversion in `throughput_optimizer`; `text_generate` does not support this flag.
+- The default draft configuration is `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`. Field descriptions and customization are in [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md).
+
+**Output:** A performance summary table; optionally a Chrome trace file if `--chrome-trace-file` is set.
+
 ### 2.2 Result (Text Generation)
 
 Example output (truncated):
@@ -252,6 +281,11 @@ usage: text_generate.py [-h]
                         --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--decode]
                         [--prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE] [--num-mtp-tokens NUM_MTP_TOKENS]
                         [--no-repetition] [--compile] [--compile-allow-graph-break]
+                        [--speculative-method {dflash,dspark}] [--num-speculative-tokens NUM_SPECULATIVE_TOKENS]
+                        [--dspark-markov-rank DSPARK_MARKOV_RANK]
+                        [--dspark-markov-head {vanilla,gated,rnn}]
+                        [--num-draft-layers NUM_DRAFT_LAYERS]
+                        [--draft-model-config-path DRAFT_MODEL_CONFIG_PATH]
                         [--compilation-config [{enable_multistream,enable_sequence_parallel,enable_matmul_allreduce,enable_dispatch_ffn_combine} ...]]
                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                         [--quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
@@ -289,8 +323,14 @@ Main parameters:
 | `--context-length` | LLM Options | Optional | Existing context token length for each query.<br>1. Type: Int.<br>2. Valid range: non-negative integer.<br>3. Default: `0`. |
 | `--decode` | LLM Options | Optional | Enables autoregressive decode mode; omit it for prefill mode.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--prefix-cache-hit-rate` | LLM Options | Optional | Specifies the prefix cache hit rate for prefill token reuse approximation.<br>1. Type: Float.<br>2. Valid range: `[0, 1)`.<br>3. Default: `0.0`. |
-| `--num-mtp-tokens` | LLM Options | Optional | Specifies the number of Multi-Token Prediction (MTP) tokens. `0` means disabled.<br>1. Type: Int.<br>2. Valid range: non-negative integer.<br>3. Default: `0`.<br>4. Only models with MTP capability are supported, such as DeepSeek. |
+| `--num-mtp-tokens` | LLM Options | Optional | Specifies the number of Multi-Token Prediction (MTP) tokens. `0` means disabled.<br>1. Type: Int.<br>2. Valid range: non-negative integer.<br>3. Default: `0`.<br>4. Only models with MTP capability are supported, such as DeepSeek.<br>5. Mutually exclusive with `--speculative-method`. |
 | `--no-repetition` | LLM Options | Optional | Disables transformer repetition-pattern optimization and preserves the original model behavior.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
+| `--speculative-method` | LLM Options | Optional | Specifies the speculative decoding method.<br>1. Type: Str.<br>2. Values: `dflash` or `dspark`.<br>3. Default: unset (disabled).<br>4. Mutually exclusive with `--num-mtp-tokens`; this is the prerequisite switch for the remaining draft flags. |
+| `--num-speculative-tokens` | LLM Options | Optional | Number of speculative tokens (excluding anchor/bonus).<br>1. Type: Int.<br>2. Valid range: `>= 1` overrides the config, with internal `block_size = n + 1`; `0` uses `block_size` from the builtin profile or `--draft-model-config-path`.<br>3. Default: `0`.<br>4. Requires `--speculative-method` first. |
+| `--dspark-markov-rank` | LLM Options | Optional | Markov embedding dimension.<br>1. Type: Int.<br>2. Valid range: non-negative integer; `0` disables MarkovHead.<br>3. Default: `256`.<br>4. Requires `--speculative-method dspark`. |
+| `--dspark-markov-head` | LLM Options | Optional | Markov head type.<br>1. Type: Str.<br>2. Reference values: `vanilla`, `gated`, `rnn`.<br>3. Default: `vanilla`.<br>4. Requires `--speculative-method dspark`. |
+| `--num-draft-layers` | LLM Options | Optional | Overrides draft `num_hidden_layers`.<br>1. Type: Int.<br>2. Valid range: positive integer; `0` uses the config default.<br>3. Default: `0`.<br>4. Requires `--speculative-method` first. |
+| `--draft-model-config-path` | LLM Options | Optional | Specifies an external draft `config.json` (or a directory that contains it), overriding the builtin draft profile.<br>1. Type: Str.<br>2. Valid range: file path or directory path.<br>3. Default: `None` (uses `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`).<br>4. Requires `--speculative-method` first. Default configuration and field descriptions are in [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md). |
 | `--compile` | Optimization Options | Optional | Invokes `torch.compile()` on the model before inference.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compile-allow-graph-break` | Optimization Options | Optional | Allows graph breaks during `torch.compile()`.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compilation-config` | Optimization Options | Optional | Dynamically enable specified compilation features. Multiple options can be provided at once.<br>1. Type: List[Str] (`nargs="*"`).<br>2. Choices: `enable_multistream` (enable multi-stream scheduling), `enable_sequence_parallel` (enable sequence parallel graph rewrite pass), `enable_matmul_allreduce` (enable matmul-allreduce fusion), `enable_dispatch_ffn_combine` (enable dispatch_ffn_combine fusion).<br>3. Default: when omitted, all compilation features remain disabled (`False`).<br>4. Example: `--compilation-config enable_multistream enable_sequence_parallel`. |

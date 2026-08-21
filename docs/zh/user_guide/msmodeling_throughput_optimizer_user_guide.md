@@ -15,6 +15,8 @@
 | PD 分离 | Prefill 与 Decode 分开部署，需要分别评估阶段能力 | `--disagg`、`--ttft-limit` 或 `--tpot-limit` |
 | PD 配比 | 需要规划 Prefill 与 Decode 实例数量比例 | `--enable-optimize-prefill-decode-ratio`、`--prefill-devices-per-instance`、`--decode-devices-per-instance` |
 
+上述任一场景均可叠加 `--speculative-method {dflash,dspark}` 启用投机解码，详见 [2.2 叠加投机解码](#叠加投机解码dflash--dspark)。
+
 ### 2.1 PD 混部场景
 
 PD 混部针对 Prefill-Decode 合一的服务架构优化吞吐量，两个阶段运行在同一实例上。优化器会在所有可行的 TP（Tensor Parallelism，张量并行）与 DP（Data Parallelism，数据并行）配置中搜索，在 SLO 约束下找到最佳吞吐量。
@@ -97,6 +99,34 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --disagg \
     --tpot-limit 50
 ```
+
+#### 叠加投机解码（Dflash / DSpark）
+
+在 PD 混部、PD 分离或 PD 配比场景下，可通过 `--speculative-method {dflash,dspark}` 叠加草稿投机解码建模，评估其对 Decode 吞吐与 TPOT 的影响。与 MTP（`--num-mtp-tokens` 非 0）互斥；`--num-speculative-tokens`、`--acceptance-length`、`--num-draft-layers`、`--draft-model-config-path` 需先设置 `--speculative-method`；DSpark 另需 `--dspark-markov-rank` / `--dspark-markov-head`。
+
+以下在 PD 分离 Decode 示例基础上追加投机解码参数：
+
+```bash
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device TEST_DEVICE \
+    --num-devices 8 \
+    --input-length 3500 \
+    --output-length 1500 \
+    --compile \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --quantize-attention-action DISABLED \
+    --disagg \
+    --tpot-limits 50 \
+    --speculative-method dflash \
+    --num-speculative-tokens 7 \
+    --acceptance-length 5 \
+    --num-draft-layers 6
+```
+
+说明：
+
+- 选用 `dspark` 时将 `--speculative-method` 改为 `dspark`；Markov 参数默认 `--dspark-markov-rank 256`、`--dspark-markov-head vanilla`（可选 `gated`、`rnn`；rank 设为 `0` 时禁用 MarkovHead）。
+- 默认 draft 配置见 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`；字段说明与自定义方法见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。
 
 ### 2.3 PD 配比场景
 
@@ -316,7 +346,23 @@ Model & Quantization Options:
                         MTP token count candidate(s). Pass one value for a fixed configuration, or multiple values to
                         sweep during throughput optimization. 0 means disabled and only models with MTP support will
                         benefit from non-zero values. When combined with TP/EP/MOE-DP search, total combinations grow as
-                        TP x EP x MOE-DP x MTP. (default: None)
+                        TP x EP x MOE-DP x MTP. Mutually exclusive with --speculative-method. (default: None)
+  --speculative-method {dflash,dspark}
+                        Enable draft speculative decoding: dflash or dspark. Mutually exclusive with MTP. (default: None)
+  --num-speculative-tokens NUM_SPECULATIVE_TOKENS
+                        Requires --speculative-method. Speculative tokens excluding anchor; block_size = n + 1 when n >= 1;
+                        0 uses builtin/config default. (default: 0)
+  --acceptance-length ACCEPTANCE_LENGTH
+                        Requires --speculative-method. Decode fold scalar; clamped to block_size-1 (dflash) or block_size (dspark).
+                        (default: 5.0)
+  --num-draft-layers NUM_DRAFT_LAYERS
+                        Requires --speculative-method. Override draft num_hidden_layers; 0 = config default. (default: 0)
+  --draft-model-config-path DRAFT_MODEL_CONFIG_PATH
+                        Requires --speculative-method. Optional path to override builtin draft config.json. (default: None)
+  --dspark-markov-rank DSPARK_MARKOV_RANK
+                        Requires --speculative-method dspark. Markov embedding rank; 0 disables MarkovHead. (default: 256)
+  --dspark-markov-head {vanilla,gated,rnn}
+                        Requires --speculative-method dspark. Markov head type. (default: vanilla)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
                         Quantize all linear layers in the model from choices (currently only support symmetric quant) (default: W8A8_DYNAMIC)
   --quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -407,8 +453,15 @@ PD Ratio Optimization Options:
 | `--log-level` | General Options | 可选 | 指定日志级别。<br>1. 类型：Str。<br>2. 参考值：`debug`、`info`、`warning`、`error`、`critical`。<br>3. 默认值：`error`。 |
 | `--compile` | Model & Quantization Options | 可选 | 在推理前对模型调用 `torch.compile()`。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--compile-allow-graph-break` | Model & Quantization Options | 可选 | 允许 `torch.compile()` 过程中出现 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
-| `--num-mtp-tokens` | Model & Quantization Options | 可选 | 指定 MTP token 数量候选，支持传入一个或多个值进行搜索；`0` 表示不启用。<br>1. 类型：List[Int]（`nargs="+"`）。<br>2. 取值范围：每个候选为 `0` 到 `9`；可一次传入多个值，例如 `--num-mtp-tokens 0 1 2`。<br>3. 默认值：未指定时等价于 `0`（不启用 MTP）。<br>4. 传入单个值时固定该 MTP 配置；传入多个值时在吞吐寻优中对候选组合进行搜索，并与 TP / EP / MOE-DP 搜索组合相乘。<br>5. 仅支持具备 MTP 能力的模型；每个候选值不能超过 `len(--mtp-acceptance-rates) + 1`（默认接受率列表长度为 `4`，故上限为 `5`；超过时运行时提示 `exceed the supported mtp_acceptance_rate length`）。 |
-| `--quantize-linear-action` | Model & Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`W8A8_DYNAMIC`。 |
+| `--num-mtp-tokens` | Model & Quantization Options | 可选 | 指定 MTP token 数量候选，支持传入一个或多个值进行搜索；`0` 表示不启用。<br>1. 类型：List[Int]（`nargs="+"`）。<br>2. 取值范围：每个候选为 `0` 到 `9`；可一次传入多个值，例如 `--num-mtp-tokens 0 1 2`。<br>3. 默认值：未指定时等价于 `0`（不启用 MTP）。<br>4. 传入单个值时固定该 MTP 配置；传入多个值时在吞吐寻优中对候选组合进行搜索，并与 TP / EP / MOE-DP 搜索组合相乘。<br>5. 仅支持具备 MTP 能力的模型；每个候选值不能超过 `len(--mtp-acceptance-rates) + 1`（默认接受率列表长度为 `4`，故上限为 `5`；超过时运行时提示 `exceed the supported mtp_acceptance_rate length`）。<br>6. 与 `--speculative-method` 互斥。 |
+| `--speculative-method` | Model & Quantization Options | 可选 | 指定投机解码方法。<br>1. 类型：Str。<br>2. 取值：`dflash` 或 `dspark`。<br>3. 默认值：未指定（关闭）。<br>4. 与 MTP 互斥；是其余 draft 从属参数的前置开关。 |
+| `--num-speculative-tokens` | Model & Quantization Options | 可选 | 投机 token 数（不含 anchor/bonus）。<br>1. 类型：Int。<br>2. 取值范围：`>= 1` 覆盖 config（内部 `block_size = n + 1`）；`0` 使用 builtin / 外部 config。<br>3. 默认值：`0`。<br>4. 需要 `--speculative-method`。 |
+| `--acceptance-length` | Model & Quantization Options | 可选 | Decode 吞吐折算用接受长度。<br>1. 类型：Float。<br>2. 取值范围：非负；dflash 上界 clamp 到 `block_size - 1`，dspark 上界 clamp 到 `block_size`。<br>3. 默认值：`5.0`。<br>4. 需要 `--speculative-method`；不参与构图，仅影响 Decode 延迟折算。 |
+| `--dspark-markov-rank` | Model & Quantization Options | 可选 | Markov embedding 维度。<br>1. 类型：Int。<br>2. 取值范围：非负整数；`0` 禁用 MarkovHead。<br>3. 默认值：`256`。<br>4. 需要 `--speculative-method dspark`。 |
+| `--dspark-markov-head` | Model & Quantization Options | 可选 | Markov head 类型。<br>1. 类型：Str。<br>2. 参考值：`vanilla`、`gated`、`rnn`。<br>3. 默认值：`vanilla`。<br>4. 需要 `--speculative-method dspark`。 |
+| `--num-draft-layers` | Model & Quantization Options | 可选 | 覆盖 draft `num_hidden_layers`。<br>1. 类型：Int。<br>2. 取值范围：正整数；`0` 表示使用 config 默认。<br>3. 默认值：`0`。<br>4. 需要 `--speculative-method`。 |
+| `--draft-model-config-path` | Model & Quantization Options | 可选 | 外部 draft `config.json` 路径（或含该文件的目录）。<br>1. 类型：Str。<br>2. 默认值：`None`（使用 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`）。<br>3. 需要 `--speculative-method`。<br>4. 字段说明见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。 |
+| `--quantize-linear-action` | Model & Quantization Options | 可选 | 指定线性层量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`W8A8_DYNAMIC`。<br>4. draft 自有 Linear 不量化。 |
 | `--quantize-non-expert-linear-action` | Model & Quantization Options | 可选 | 为 attention 投影、dense MLP、shared experts 等非 expert 线性层指定独立量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`W8A16_STATIC`、`W8A8_STATIC`、`W4A8_STATIC`、`W8A16_DYNAMIC`、`W8A8_DYNAMIC`、`W4A8_DYNAMIC`、`FP8`、`MXFP4`。<br>3. 默认值：`DISABLED`。<br>4. 主要用于 DeepSeek V4 风格 MoE 模型；路由 MoE experts 仍使用 `--quantize-linear-action`。 |
 | `--mxfp4-group-size` | Model & Quantization Options | 可选 | 指定 mxfp4 量化的 group size。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`32`。 |
 | `--quantize-attention-action` | Model & Quantization Options | 可选 | 指定 KV cache 量化方式。<br>1. 类型：Str。<br>2. 参考值：`DISABLED`、`INT8`、`FP8`。<br>3. 默认值：`DISABLED`。 |
@@ -519,6 +572,8 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-30B-A3B --device ATLAS_8
   TPOT 计算不考虑 bubble 时间。
 
   `tpot = (ttft + decode_latency * output_length) / output_length`
+
+  启用 `--speculative-method` 时，Decode 延迟按 `--acceptance-length` 折算后再参与 TPOT 计算；Prefill 延迟不受 acceptance 折算影响。
 
 - 输出吞吐量
   `output_throughput = 1000 * (output_length * concurrency) / (ttft + tpot * output_length)`

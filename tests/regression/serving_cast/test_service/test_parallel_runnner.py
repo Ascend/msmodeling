@@ -70,6 +70,69 @@ class TestTaskRunner(unittest.TestCase):
         self.assertIsNone(task_runner.optimizer_data.input_length)
         self.assertIsNotNone(task_runner.optimizer_data.length_distribution)
 
+    def test_optimizer_data_omits_dflash_fields_when_disabled(self):
+        task_runner = ParallelRunner(self.args)
+
+        self.assertIsNone(task_runner.optimizer_data.dflash_block_size)
+        self.assertIsNone(task_runner.optimizer_data.dflash_acceptance_length)
+        self.assertIsNone(task_runner.optimizer_data.dspark_block_size)
+        self.assertIsNone(task_runner.optimizer_data.dspark_acceptance_length)
+        configs = list(task_runner._get_user_config())
+        self.assertTrue(configs)
+        self.assertIsNone(configs[0].speculative_method)
+        self.assertFalse(configs[0].dflash)
+        self.assertFalse(configs[0].dspark)
+
+    def test_optimizer_data_fills_dflash_fields_when_enabled(self):
+        self.args.speculative_method = "dflash"
+        self.args.num_speculative_tokens = 15
+        self.args.acceptance_length = 5.0
+        self.args.num_draft_layers = 0
+        self.args.draft_model_config_path = None
+        self.args.num_mtp_tokens = 0
+        self.args.num_mtp_token_sizes = [0]
+        self.args.chrome_trace = "trace.json"
+
+        task_runner = ParallelRunner(self.args)
+
+        self.assertEqual(task_runner.optimizer_data.dflash_block_size, 16)
+        self.assertEqual(task_runner.optimizer_data.dflash_acceptance_length, 5.0)
+        self.assertIsNone(task_runner.optimizer_data.dspark_block_size)
+        configs = list(task_runner._get_user_config())
+        self.assertTrue(configs)
+        self.assertEqual(configs[0].speculative_method, "dflash")
+        self.assertTrue(configs[0].dflash)
+        self.assertFalse(configs[0].dspark)
+        self.assertEqual(configs[0].num_mtp_tokens, 0)
+        self.assertEqual(configs[0].draft_block_size(), 16)
+        self.assertIn("dflash16", configs[0].chrome_trace)
+
+    def test_optimizer_data_fills_dspark_fields_when_enabled(self):
+        self.args.speculative_method = "dspark"
+        self.args.num_speculative_tokens = 7
+        self.args.acceptance_length = 5.0
+        self.args.dspark_markov_rank = 256
+        self.args.dspark_markov_head = "vanilla"
+        self.args.num_draft_layers = 0
+        self.args.draft_model_config_path = None
+        self.args.num_mtp_tokens = 0
+        self.args.num_mtp_token_sizes = [0]
+        self.args.chrome_trace = "trace.json"
+
+        task_runner = ParallelRunner(self.args)
+
+        self.assertEqual(task_runner.optimizer_data.dspark_block_size, 8)
+        self.assertEqual(task_runner.optimizer_data.dspark_acceptance_length, 5.0)
+        self.assertEqual(task_runner.optimizer_data.dspark_markov_rank, 256)
+        self.assertIsNone(task_runner.optimizer_data.dflash_block_size)
+        configs = list(task_runner._get_user_config())
+        self.assertTrue(configs)
+        self.assertEqual(configs[0].speculative_method, "dspark")
+        self.assertTrue(configs[0].dspark)
+        self.assertFalse(configs[0].dflash)
+        self.assertEqual(configs[0].num_mtp_tokens, 0)
+        self.assertIn("dspark8", configs[0].chrome_trace)
+
     def test_get_user_config_default_tps(self):
         """Test _get_user_config with default TP values"""
         self.args.tp_sizes = []

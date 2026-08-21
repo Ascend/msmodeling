@@ -126,6 +126,11 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             self.model_runner.model.model_config.parallel_config,
             self.is_moe_model,
             optimizer_data.num_mtp_tokens,
+            dflash_block_size=optimizer_data.dflash_block_size,
+            dflash_acceptance_length=optimizer_data.dflash_acceptance_length,
+            dspark_block_size=optimizer_data.dspark_block_size,
+            dspark_acceptance_length=optimizer_data.dspark_acceptance_length,
+            dspark_markov_rank=optimizer_data.dspark_markov_rank,
         )
 
         logger.info(

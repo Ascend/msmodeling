@@ -30,3 +30,22 @@ class SimpleArgs:
         self.enable_optimize_prefill_decode_ratio = False
         self.prefix_cache_hit_rate = 0.0
         self.concurrency_search_strategy = "exponential"
+        # Draft-spec defaults (G1: disabled unless tests enable them).
+        self.speculative_method = None
+        self.num_speculative_tokens = 0
+        self.acceptance_length = 5.0
+        self.draft_block_size = 0
+        self.dspark_markov_rank = 256
+        self.dspark_markov_head = "vanilla"
+        self.num_draft_layers = 0
+        self.draft_model_config_path = None
+        self.chrome_trace = None
+        self.num_mtp_token_sizes = []
+        self.max_search_combinations = 0
+        self.search_combination_warning_emitted = False
+        self.compilation_config = None
+        self.performance_model = "analytic"
+        self.profiling_database = None
+        self.word_embedding_tp = None
+        self.enable_shared_expert_tp = False
+        self.quantize_non_expert_linear_action = "DISABLED"

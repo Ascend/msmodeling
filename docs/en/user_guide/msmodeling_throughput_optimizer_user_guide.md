@@ -16,6 +16,8 @@ The throughput optimizer supports hardware planning, SLO-constrained throughput 
 | PD Disaggregation | Prefill and Decode are deployed separately. Useful when phase-specific capacity needs to be evaluated. | `--disagg`, `--ttft-limit` or `--tpot-limit` |
 | PD Ratio | Plan the instance ratio between Prefill and Decode. | `--enable-optimize-prefill-decode-ratio`, `--prefill-devices-per-instance`, `--decode-devices-per-instance` |
 
+Any of the scenarios above can overlay `--speculative-method {dflash,dspark}` to enable speculative decoding. See [Overlay Speculative Decoding](#overlay-speculative-decoding-dflash--dspark).
+
 ### 2.1 PD Aggregation Scenario
 
 Aggregation mode optimizes throughput for a combined Prefill-Decode serving architecture where both phases run on the same instance. The optimizer searches across all possible TP (Tensor Parallelism) and DP (Data Parallelism) configurations to find the best throughput under SLO (Service Level Objective) constraints.
@@ -98,6 +100,34 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --disagg \
     --tpot-limit 50
 ```
+
+#### Overlay Speculative Decoding (Dflash / DSpark)
+
+In PD Aggregation, PD Disaggregation, or PD Ratio scenarios, you can overlay draft speculative-decoding modeling with `--speculative-method {dflash,dspark}` to evaluate its impact on Decode throughput and TPOT. This is mutually exclusive with MTP (`--num-mtp-tokens` not 0). `--num-speculative-tokens`, `--acceptance-length`, `--num-draft-layers`, and `--draft-model-config-path` require `--speculative-method` first. DSpark additionally requires `--dspark-markov-rank` / `--dspark-markov-head`.
+
+The following example adds speculative-decoding parameters on top of the PD Disaggregation Decode example:
+
+```bash
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device TEST_DEVICE \
+    --num-devices 8 \
+    --input-length 3500 \
+    --output-length 1500 \
+    --compile \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --quantize-attention-action DISABLED \
+    --disagg \
+    --tpot-limits 50 \
+    --speculative-method dflash \
+    --num-speculative-tokens 7 \
+    --acceptance-length 5 \
+    --num-draft-layers 6
+```
+
+Notes:
+
+- For `dspark`, change `--speculative-method` to `dspark`. Markov defaults are `--dspark-markov-rank 256` and `--dspark-markov-head vanilla` (optional `gated`, `rnn`; set rank to `0` to disable MarkovHead).
+- The default draft config is `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`. Field descriptions and customization are in [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md).
 
 ### 2.3 PD Ratio Scenario
 
@@ -270,7 +300,23 @@ Model & Quantization Options:
                         MTP token count candidate(s). Pass one value for a fixed configuration, or multiple values to
                         sweep during throughput optimization. 0 means disabled and only models with MTP support will
                         benefit from non-zero values. When combined with TP/EP/MOE-DP search, total combinations grow as
-                        TP x EP x MOE-DP x MTP. (default: None)
+                        TP x EP x MOE-DP x MTP. Mutually exclusive with --speculative-method. (default: None)
+  --speculative-method {dflash,dspark}
+                        Enable draft speculative decoding: dflash or dspark. Mutually exclusive with MTP. (default: None)
+  --num-speculative-tokens NUM_SPECULATIVE_TOKENS
+                        Requires --speculative-method. Speculative tokens excluding anchor; block_size = n + 1 when n >= 1;
+                        0 uses builtin/config default. (default: 0)
+  --acceptance-length ACCEPTANCE_LENGTH
+                        Requires --speculative-method. Decode fold scalar; clamped to block_size-1 (dflash) or block_size (dspark).
+                        (default: 5.0)
+  --num-draft-layers NUM_DRAFT_LAYERS
+                        Requires --speculative-method. Override draft num_hidden_layers; 0 = config default. (default: 0)
+  --draft-model-config-path DRAFT_MODEL_CONFIG_PATH
+                        Requires --speculative-method. Optional path to override builtin draft config.json. (default: None)
+  --dspark-markov-rank DSPARK_MARKOV_RANK
+                        Requires --speculative-method dspark. Markov embedding rank; 0 disables MarkovHead. (default: 256)
+  --dspark-markov-head {vanilla,gated,rnn}
+                        Requires --speculative-method dspark. Markov head type. (default: vanilla)
   --quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
                         Quantize all linear layers in the model from choices (currently only support symmetric quant) (default: W8A8_DYNAMIC)
   --quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}
@@ -285,6 +331,18 @@ Model & Quantization Options:
                         Enable EP search. Optional explicit EP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
   --moe-dp-sizes [MOE_DP_SIZES ...]
                         Enable MOE-DP search. Optional explicit MOE-DP sizes. If no value is provided, defaults to powers of 2 up to world_size. (default: None)
+  --enable-shared-expert-tp
+                        Enable vLLM-style tensor parallel for shared experts. (default: False)
+  --compilation-config [{enable_multistream,enable_sequence_parallel,enable_matmul_allreduce,enable_dispatch_ffn_combine} ...]
+                        Enable selected compilation features as needed. Separate multiple features with spaces, for example
+                        `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`.
+                        When omitted, all compilation features remain disabled. (default: None)
+  --word-embedding-tp {col,row}
+                        Enable word embedding tensor parallel with mode {'col','row'}. If omitted, embedding TP is disabled. (default: None)
+
+Debug Options:
+  --chrome-trace-file CHROME_TRACE
+                        Generate chrome trace file for visualization, for example trace.json. (default: None)
 
 Performance Model Options:
   --performance-model {analytic,profiling}
@@ -349,8 +407,15 @@ Main parameters:
 | `--log-level` | General Options | Optional | Log level.<br>1. Type: Str.<br>2. Reference values: `debug`, `info`, `warning`, `error`, `critical`.<br>3. Default: `error`. |
 | `--compile` | Model & Quantization Options | Optional | Invokes `torch.compile()` before inference.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
 | `--compile-allow-graph-break` | Model & Quantization Options | Optional | Allows graph breaks during `torch.compile()`.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`. |
-| `--num-mtp-tokens` | Model & Quantization Options | Optional | MTP token count candidates. Pass one or more values to search; `0` means disabled.<br>1. Type: List[Int] (`nargs="+"`).<br>2. Valid range: each candidate is an integer from `0` to `9`; multiple values are allowed, for example `--num-mtp-tokens 0 1 2`.<br>3. Default: if omitted, equivalent to `0` (MTP disabled).<br>4. A single value fixes the MTP configuration; multiple values are swept during throughput optimization and multiply with TP / EP / MOE-DP search combinations.<br>5. Only models with MTP support benefit from non-zero values; each candidate value must not exceed `len(--mtp-acceptance-rates) + 1` (default acceptance-rate list length is `4`, so the limit is `5`; exceeding it triggers a runtime error: `exceed the supported mtp_acceptance_rate length`). |
-| `--quantize-linear-action` | Model & Quantization Options | Optional | Linear layer quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`. |
+| `--num-mtp-tokens` | Model & Quantization Options | Optional | MTP token count candidates. Pass one or more values to search; `0` means disabled.<br>1. Type: List[Int] (`nargs="+"`).<br>2. Valid range: each candidate is an integer from `0` to `9`; multiple values are allowed, for example `--num-mtp-tokens 0 1 2`.<br>3. Default: if omitted, equivalent to `0` (MTP disabled).<br>4. A single value fixes the MTP configuration; multiple values are swept during throughput optimization and multiply with TP / EP / MOE-DP search combinations.<br>5. Only models with MTP support benefit from non-zero values; each candidate value must not exceed `len(--mtp-acceptance-rates) + 1` (default acceptance-rate list length is `4`, so the limit is `5`; exceeding it triggers a runtime error: `exceed the supported mtp_acceptance_rate length`).<br>6. Mutually exclusive with `--speculative-method`. |
+| `--speculative-method` | Model & Quantization Options | Optional | Speculative decoding method.<br>1. Type: Str.<br>2. Values: `dflash` or `dspark`.<br>3. Default: omitted (disabled).<br>4. Mutually exclusive with MTP; this is the prerequisite switch for the remaining draft-dependent parameters. |
+| `--num-speculative-tokens` | Model & Quantization Options | Optional | Number of speculative tokens (excluding anchor/bonus).<br>1. Type: Int.<br>2. Valid range: `>= 1` overrides config (internally `block_size = n + 1`); `0` uses builtin / external config.<br>3. Default: `0`.<br>4. Requires `--speculative-method`. |
+| `--acceptance-length` | Model & Quantization Options | Optional | Acceptance length used to fold Decode throughput.<br>1. Type: Float.<br>2. Valid range: non-negative; clamped to `block_size - 1` for dflash and to `block_size` for dspark.<br>3. Default: `5.0`.<br>4. Requires `--speculative-method`; does not affect graph construction, only Decode latency folding. |
+| `--dspark-markov-rank` | Model & Quantization Options | Optional | Markov embedding rank.<br>1. Type: Int.<br>2. Valid range: non-negative integer; `0` disables MarkovHead.<br>3. Default: `256`.<br>4. Requires `--speculative-method dspark`. |
+| `--dspark-markov-head` | Model & Quantization Options | Optional | Markov head type.<br>1. Type: Str.<br>2. Reference values: `vanilla`, `gated`, `rnn`.<br>3. Default: `vanilla`.<br>4. Requires `--speculative-method dspark`. |
+| `--num-draft-layers` | Model & Quantization Options | Optional | Override draft `num_hidden_layers`.<br>1. Type: Int.<br>2. Valid range: positive integer; `0` uses the config default.<br>3. Default: `0`.<br>4. Requires `--speculative-method`. |
+| `--draft-model-config-path` | Model & Quantization Options | Optional | Path to an external draft `config.json` (or a directory that contains it).<br>1. Type: Str.<br>2. Default: `None` (uses `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`).<br>3. Requires `--speculative-method`.<br>4. Field descriptions are in [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md). |
+| `--quantize-linear-action` | Model & Quantization Options | Optional | Linear layer quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`.<br>4. Draft-owned Linear layers are not quantized. |
 | `--quantize-non-expert-linear-action` | Model & Quantization Options | Optional | Separate quantization mode for non-expert linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `DISABLED`.<br>4. Mainly intended for DeepSeek V4-style MoE models. Routed MoE experts still use `--quantize-linear-action`. |
 | `--mxfp4-group-size` | Model & Quantization Options | Optional | mxfp4 quantization group size.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `32`. |
 | `--quantize-attention-action` | Model & Quantization Options | Optional | KV cache quantization mode.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `INT8`, `FP8`.<br>3. Default: `DISABLED`. |
@@ -358,11 +423,11 @@ Main parameters:
 | `--ep-sizes` | Model & Quantization Options | Optional | Enables EP search and optionally specifies EP candidates.<br>1. Type: List[Int].<br>2. Valid range: positive integer list.<br>3. Default: `None`; when provided without values, searches powers of 2 up to `world_size`. |
 | `--moe-dp-sizes` | Model & Quantization Options | Optional | Enables MOE-DP search and optionally specifies MOE-DP candidates.<br>1. Type: List[Int].<br>2. Valid range: positive integer list.<br>3. Default: `None`; when provided without values, searches powers of 2 up to `world_size`. |
 | `--enable-shared-expert-tp` | Model & Quantization Options | Optional | Enables vLLM-style tensor parallel for shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Shared experts use dense MLP TP with delayed `down_proj` reduction. |
-| `--compilation-config` | Model & Quantization Options | Optional | Enables specific compilation features dynamically.<br>1. Type: List[Str].<br>2. Valid range: `enable_multistream`, `enable_sequence_parallel`, `enable_matmul_allreduce`, `enable_dispatch_ffn_combine`.<br>3. Default: `None`; when omitted, all compilation features remain at their defaults (disabled).<br>4. Multiple values can be passed, e.g. `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`. |
+| `--compilation-config` | Model & Quantization Options | Optional | Enables specific compilation features dynamically.<br>1. Type: List[Str].<br>2. Valid range: `enable_multistream`, `enable_sequence_parallel`, `enable_matmul_allreduce`, `enable_dispatch_ffn_combine`.<br>3. Default: `None`; when omitted, all compilation features remain at their defaults (disabled).<br>4. Multiple values can be passed, e.g. `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`.<br>5. Since PR #573, this option replaces the former scattered flags such as `--enable_sequence_parallel` / `--enable_dispatch_ffn_combine`. |
 | `--word-embedding-tp` | Model & Quantization Options | Optional | Enables word embedding tensor parallel and specifies mode.<br>1. Type: Str.<br>2. Reference values: `col`, `row`.<br>3. Default: `None`, meaning embedding TP is disabled. |
 | `--performance-model` | Performance Model Options | Optional | Performance model type.<br>1. Type: Str.<br>2. Reference values: `analytic`, `profiling`.<br>3. Default: `analytic`.<br>4. `profiling` mode requires `--profiling-database-path`. |
 | `--profiling-database-path` | Performance Model Options | Conditional | Directory of the measured operator CSV database used by profiling mode.<br>1. Type: Str.<br>2. Value: database directory path, such as `tensor_cast/performance_model/profiling_database/data/ATLAS_800_A3_752T_128G_DIE/vllm_ascend/vllm0.18.0_torch2.9.0_cann8.5/`.<br>3. Default: `None`; required when `--performance-model profiling` is used. |
-| `--chrome-trace-file` | Debug Options | Optional | Generates a Chrome Trace file for operator-level performance visualization.<br>1. Type: Str.<br>2. Reference value: trace file path, such as `trace.json`.<br>3. Default: `None`. |
+| `--chrome-trace-file` | Debug Options | Optional | Generates a Chrome Trace file for operator-level performance visualization.<br>1. Type: Str.<br>2. Reference value: trace file path, such as `trace.json`.<br>3. Default: `None`, meaning no Chrome Trace file is generated. |
 | `--ttft-limit` | Service Options | Optional | TTFT constraint for throughput search.<br>1. Type: Float.<br>2. Valid range: positive number, in ms.<br>3. Default: `None`, meaning no TTFT constraint. |
 | `--tpot-limit` | Service Options | Optional | TPOT constraint for throughput search.<br>1. Type: Float.<br>2. Valid range: positive number, in ms.<br>3. Default: `None`, meaning no TPOT constraint. |
 | `--max-batched-tokens` | Service Options | Optional | Maximum batched tokens per data-parallel replica for one prefill or mixed prefill/decode step.<br>1. Type: Int.<br>2. Valid range: positive integer.<br>3. Default: `None`; auto mode starts from `4 * input_length` and falls back to `2 * input_length` then `1 * input_length` on Prefill OOM. |
@@ -411,6 +476,8 @@ Main parameters:
   We don't consider the bubble time in TPOT calculation.
 
   `tpot = (ttft + decode_latency * output_length) / output_length`
+
+  When `--speculative-method` is enabled, Decode latency is folded by `--acceptance-length` before TPOT calculation; Prefill latency is not affected by acceptance folding.
 
 - Output Throughput
   `output_throughput = 1000 * (output_length * concurrency) / (ttft + tpot * output_length)`
@@ -463,7 +530,6 @@ PD ratio mode uses QPS (Queries Per Second) as the primary metric for matching P
      - Matches the PD ratio as closely as possible
      - Fits within the total device budget
      - Maximizes overall system throughput
-
 ## Compare multiple hardware profiles
 
 One or more `--device` values can be passed in a single run to benchmark multiple `DeviceProfile` targets and compare their best configurations under the same model, workload, and SLO settings.
@@ -560,3 +626,4 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --tpot-limit 50 \
     --batch-range 1 256
 ```
+

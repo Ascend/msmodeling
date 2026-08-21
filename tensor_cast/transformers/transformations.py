@@ -3,8 +3,9 @@ import dataclasses
 import fnmatch
 import logging
 import math
+import operator
 import typing
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -30,6 +31,7 @@ from ..layers.mla import MultiheadLatentAttentionBase, tp_plan_module_path, tp_p
 from ..layers.moe_layer import MoELayer, ParallelMoELayer
 from ..layers.quant_linear import QuantLinearBase
 from ..layers.rotary_embedding import CachingRotaryEmb
+from ..model_config import config_has_draft_spec
 from ..quantize_utils import quantize_linear_modules
 from .custom_model_registry import (
     get_language_layers,
@@ -83,12 +85,41 @@ def wrap_model(model: "ModelWrapperBase") -> "ModelWrapperBase":
     return model
 
 
+def _resolve_target_decoder_layers(model: "ModelWrapperBase") -> Optional[torch.nn.ModuleList]:
+    """Locate target text decoder ModuleList (CausalLM / VL nested layouts)."""
+    unwrapped = model.unwrap()
+    candidates = []
+    if hasattr(unwrapped, "layers"):
+        candidates.append(unwrapped.layers)
+    nested = getattr(unwrapped, "model", None)
+    if nested is not None and hasattr(nested, "layers"):
+        candidates.append(nested.layers)
+    language_model = get_vl_language_model(model)
+    if language_model is not None:
+        if hasattr(language_model, "layers"):
+            candidates.append(language_model.layers)
+        lm_nested = getattr(language_model, "model", None)
+        if lm_nested is not None and hasattr(lm_nested, "layers"):
+            candidates.append(lm_nested.layers)
+    model_type = getattr(getattr(model, "hf_config", None), "model_type", None)
+    if model_type:
+        try:
+            path = get_language_layers(model_type)
+            if path:
+                candidates.append(operator.attrgetter(path)(unwrapped))
+        except (AttributeError, TypeError, ValueError):
+            pass
+    for layers in candidates:
+        if layers is not None and len(layers) > 0:
+            return layers
+    return None
+
+
 def maybe_enable_mtp(model: "ModelWrapperBase") -> "ModelWrapperBase":
     if not model.model_config.mtp_config:
         return model
 
     mtp_config = copy.deepcopy(model.model_config.mtp_config)
-    unwrapped = model.unwrap()
     if model.is_vl_model:
         hf_config_source = model.text_config
         if hf_config_source is None:
@@ -98,17 +129,9 @@ def maybe_enable_mtp(model: "ModelWrapperBase") -> "ModelWrapperBase":
     hf_config = copy.deepcopy(hf_config_source)
 
     if mtp_config.mtp_block_module_name is None:
-        layer_owner = None
-        if hasattr(unwrapped, "layers"):
-            layer_owner = unwrapped
-        else:
-            language_model = get_vl_language_model(model)
-            if hasattr(language_model, "layers"):
-                layer_owner = language_model
-
-        if layer_owner is not None:
-            decoder_cls_name = type(layer_owner.layers[-1]).__name__
-            mtp_config.mtp_block_module_name = decoder_cls_name
+        layers = _resolve_target_decoder_layers(model)
+        if layers is not None:
+            mtp_config.mtp_block_module_name = type(layers[-1]).__name__
 
     if hasattr(hf_config, "layer_types") and isinstance(hf_config.layer_types, list) and hf_config.layer_types:
         hf_config.layer_types.extend([hf_config.layer_types[-1]] * mtp_config.num_mtp_layers)
@@ -126,10 +149,110 @@ def maybe_enable_mtp(model: "ModelWrapperBase") -> "ModelWrapperBase":
 
     orig_dtype = torch.get_default_dtype()
     torch.set_default_dtype(model.model_config.dtype)
-    from tensor_cast.layers.mtp import MtpWrapper
+    try:
+        from tensor_cast.layers.mtp import MtpWrapper
 
-    model._inner = MtpWrapper(mtp_config, hf_config, model._inner)
-    torch.set_default_dtype(orig_dtype)
+        model._inner = MtpWrapper(mtp_config, hf_config, model._inner)
+    finally:
+        torch.set_default_dtype(orig_dtype)
+    return model
+
+
+def maybe_enable_dflash(model: "ModelWrapperBase") -> "ModelWrapperBase":
+    """Attach unified DflashWrapper (Qwen3 draft + TC attention + KV injection)."""
+    if not model.model_config.dflash_config:
+        return model
+    if model.model_config.mtp_config:
+        raise ValueError("Dflash and MTP are mutually exclusive")
+    if model.model_config.dspark_config:
+        raise ValueError("DSpark and Dflash are mutually exclusive")
+
+    dcfg = copy.deepcopy(model.model_config.dflash_config)
+    if model.is_vl_model:
+        hf_config_source = model.text_config
+        if hf_config_source is None:
+            raise ValueError("VL model detected but text_config is None; cannot enable Dflash")
+    else:
+        hf_config_source = model.hf_config
+    hf_config = copy.deepcopy(hf_config_source)
+
+    layers = _resolve_target_decoder_layers(model)
+    if layers is None:
+        raise ValueError(f"Unable to resolve decoder layers for Dflash from {model}")
+
+    num_hidden_layers = int(getattr(hf_config, "num_hidden_layers", len(layers)))
+    target_hidden_size = int(getattr(hf_config, "hidden_size"))
+    target_vocab_size = int(getattr(hf_config, "vocab_size"))
+    target_max_pos = getattr(hf_config, "max_position_embeddings", None)
+
+    orig_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(model.model_config.dtype)
+    try:
+        from tensor_cast.layers.dflash import build_dflash_draft_and_wrapper
+
+        model._inner = build_dflash_draft_and_wrapper(
+            model,
+            dcfg,
+            hf_config,
+            num_target_hidden_layers=num_hidden_layers,
+            target_hidden_size=target_hidden_size,
+            target_vocab_size=target_vocab_size,
+            target_max_position_embeddings=int(target_max_pos) if target_max_pos is not None else None,
+            dtype=model.model_config.dtype,
+            target_layers=layers,
+        )
+        model.model_config.dflash_config = dcfg
+    finally:
+        torch.set_default_dtype(orig_dtype)
+    return model
+
+
+def maybe_enable_dspark(model: "ModelWrapperBase") -> "ModelWrapperBase":
+    """Attach DsparkWrapper (DFlash backbone + Markov/Confidence) from dspark.py."""
+    if not model.model_config.dspark_config:
+        return model
+    if model.model_config.mtp_config:
+        raise ValueError("DSpark and MTP are mutually exclusive")
+    if model.model_config.dflash_config:
+        raise ValueError("DSpark and Dflash are mutually exclusive")
+
+    scfg = copy.deepcopy(model.model_config.dspark_config)
+    if model.is_vl_model:
+        hf_config_source = model.text_config
+        if hf_config_source is None:
+            raise ValueError("VL model detected but text_config is None; cannot enable DSpark")
+    else:
+        hf_config_source = model.hf_config
+    hf_config = copy.deepcopy(hf_config_source)
+
+    layers = _resolve_target_decoder_layers(model)
+    if layers is None:
+        raise ValueError(f"Unable to resolve decoder layers for DSpark from {model}")
+
+    num_hidden_layers = int(getattr(hf_config, "num_hidden_layers", len(layers)))
+    target_hidden_size = int(getattr(hf_config, "hidden_size"))
+    target_vocab_size = int(getattr(hf_config, "vocab_size"))
+    target_max_pos = getattr(hf_config, "max_position_embeddings", None)
+
+    orig_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(model.model_config.dtype)
+    try:
+        from tensor_cast.layers.dspark import build_dspark_draft_and_wrapper
+
+        model._inner = build_dspark_draft_and_wrapper(
+            model,
+            scfg,
+            hf_config,
+            num_target_hidden_layers=num_hidden_layers,
+            target_hidden_size=target_hidden_size,
+            target_vocab_size=target_vocab_size,
+            target_max_position_embeddings=int(target_max_pos) if target_max_pos is not None else None,
+            dtype=model.model_config.dtype,
+            target_layers=layers,
+        )
+        model.model_config.dspark_config = scfg
+    finally:
+        torch.set_default_dtype(orig_dtype)
     return model
 
 
@@ -239,7 +362,11 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
 
     if isinstance(model._inner, MtpWrapper):
         reuse_layers(model._inner.mtp.layers)
-
+    # DFlash/DSpark draft: do NOT wrap with RegionMarker/CopyLayer.
+    # Under torch.compile, draft mark_region_begin / copy_region are frequently DCE'd
+    # (identity custom ops) while mark_region_end remains — breaking Runtime pairing and
+    # silently dropping draft-layer FLOPs. Draft depth is small (typically ≤6); run real
+    # layers. Target-side enable_repetition is unchanged.
     return model
 
 
@@ -261,6 +388,28 @@ def patch_rotary_emb(model: "ModelWrapperBase") -> "ModelWrapperBase":
             max_position_embeddings=model.text_config.max_position_embeddings,
             expand_to_3d_position_ids=vl_language_model is not None,
         )
+
+    # Cache draft-owned rotary for Dflash/DSpark (never share target RoPE).
+    inner = getattr(model, "_inner", None)
+    if (
+        config_has_draft_spec(model.model_config)
+        and model.model_config.cache_rotary_embedding
+        and inner is not None
+        and hasattr(inner, "rotary_emb")
+        and getattr(inner, "rotary_emb", None) is not None
+    ):
+        from tensor_cast.layers.dflash import DflashWrapper
+
+        if isinstance(inner, DflashWrapper):
+            inner.rotary_emb = CachingRotaryEmb(
+                inner.rotary_emb,
+                act_dtype=model.model_config.dtype,
+                max_position_embeddings=getattr(
+                    inner.draft_hf_config, "max_position_embeddings", model.text_config.max_position_embeddings
+                ),
+                expand_to_3d_position_ids=False,
+            )
+            inner.draft.rotary_emb = inner.rotary_emb
     return model
 
 
@@ -390,7 +539,13 @@ def _candidate_aliases(module: torch.nn.Module, missing_fields: tuple[str, ...])
 
 
 def _expected_replacements_from_layers(model: "ModelWrapperBase") -> int | None:
-    return getattr(model, "num_hidden_layers", None)
+    num_layers = getattr(model, "num_hidden_layers", None)
+    if num_layers is None:
+        return None
+    # Draft layers are Qwen3 GQA and are skipped by MLA/MoE patches.
+    if config_has_draft_spec(model.model_config):
+        num_layers = num_layers - int(model.model_config.draft_num_layers())
+    return num_layers
 
 
 def patch_mla(
@@ -418,6 +573,9 @@ def patch_mla(
 
     named_modules = list(model._inner.named_modules())
     for name, module in named_modules:
+        # Dflash/DSpark draft is Qwen3 GQA; never apply target MLA patches under draft.*.
+        if config_has_draft_spec(model.model_config) and (name == "draft" or name.startswith("draft.")):
+            continue
         if type(module).__name__ == mla_config.module_name:
             report.matched_modules.append(name)
             missing_fields = _missing_required_fields(module, mla_config.field_names)
@@ -520,6 +678,9 @@ def patch_moe(
     )
     reset_moe_metadata = False
     for name, module in model._inner.named_modules():
+        # Dflash/DSpark draft is dense Qwen3; skip MoE patches under draft.*.
+        if config_has_draft_spec(model.model_config) and (name == "draft" or name.startswith("draft.")):
+            continue
         if type(module).__name__ == moe_config.module_name:
             if not reset_moe_metadata:
                 model.top_k = None
@@ -618,6 +779,7 @@ def shard_model_by_tp(
             layer_prefixes = [f"{language_layers}"]
             if self.model_config.mtp_config is not None:
                 layer_prefixes.append("mtp.layers.*.mtp_block")
+            # Dflash/DSpark draft uses a separate Qwen3 GQA plan (never MLA prefixes).
             if self.model_config.mla_config:
                 params.update({"head_num": config_info.num_attention_heads})
                 mla_cls = self.model_config.mla_config.mla_cls
@@ -875,6 +1037,54 @@ def shard_model_by_tp(
             tp_plan.update({"lm_head": (COLWISE_LINEAR, params)})
             if self.model_config.mtp_config is not None:
                 tp_plan.update({"mtp.lm_head": (COLWISE_LINEAR, params)})
+
+            # Dflash/DSpark draft: Qwen3 GQA shard; shared lm_head/embed follow target plan only.
+            # DSparkWrapper subclasses DflashWrapper, so isinstance covers both.
+            draft_enabled = config_has_draft_spec(self.model_config)
+            if draft_enabled:
+                from tensor_cast.layers.dflash import DflashWrapper
+
+                draft_hf = self._inner.draft_hf_config if isinstance(self._inner, DflashWrapper) else None
+                if draft_hf is not None:
+                    draft_prefix = "draft.layers.*.dflash_block"
+                    q_params = {
+                        "tp_group": tp_group,
+                        "global_tp_group": tp_group,
+                        "head_num": draft_hf.num_attention_heads,
+                    }
+                    kv_params = {
+                        "tp_group": tp_group,
+                        "global_tp_group": tp_group,
+                        "head_num": draft_hf.num_key_value_heads,
+                        "is_replicable": True,
+                    }
+                    o_params = {
+                        "tp_group": o_proj_tp_group,
+                        "global_tp_group": tp_group,
+                        "head_num": draft_hf.num_attention_heads,
+                    }
+                    mlp_params = {"tp_group": mlp_tp_group, "global_tp_group": tp_group}
+                    tp_plan.update(
+                        {
+                            # Head-major fused context KV; same head_num as k/v_proj.
+                            "draft.context_kv_proj": (COLWISE_LINEAR, kv_params),
+                            f"{draft_prefix}.self_attn.q_proj": (COLWISE_LINEAR, q_params),
+                            f"{draft_prefix}.self_attn.k_proj": (COLWISE_LINEAR, kv_params),
+                            f"{draft_prefix}.self_attn.v_proj": (COLWISE_LINEAR, kv_params),
+                            f"{draft_prefix}.self_attn.o_proj": (ROWWISE_LINEAR, o_params),
+                            f"{draft_prefix}.mlp.gate_proj": (COLWISE_LINEAR, mlp_params),
+                            f"{draft_prefix}.mlp.up_proj": (COLWISE_LINEAR, mlp_params),
+                            f"{draft_prefix}.mlp.down_proj": (ROWWISE_LINEAR, mlp_params),
+                        }
+                    )
+                    # DSpark: markov_bias must use the same ColumnParallel policy as lm_head
+                    # (same tp_group / gather_output). Do not give it a divergent vocab layout.
+                    if getattr(getattr(self._inner, "draft", None), "markov_head", None) is not None:
+                        tp_plan.update(
+                            {
+                                "draft.markov_head.markov_bias": (COLWISE_LINEAR, params),
+                            }
+                        )
             return tp_plan
 
         return {"tp_plan": get_tp_plan()}
@@ -904,6 +1114,124 @@ def shard_model_by_tp(
     _shard_model_visual_by_tp_helper(model)
     attach_patch_report(model, report)
     return model
+
+
+def _find_dflash_wrapper(model: "ModelWrapperBase"):
+    """Return nested ``DflashWrapper`` / ``DsparkWrapper`` if present."""
+    from tensor_cast.layers.dflash import DflashWrapper
+
+    node = getattr(model, "_inner", model)
+    seen: set[int] = set()
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        if isinstance(node, DflashWrapper):
+            return node
+        node = getattr(node, "_inner", None)
+    return None
+
+
+def _resync_dflash_shared_vocab(model: "ModelWrapperBase") -> None:
+    """Rebind draft shared embed/lm_head after TP replaces target modules.
+
+    ``draft.set_shared`` runs before ``shard_model``. Replacing ``embed_tokens`` /
+    ``lm_head`` with ParallelEmbedding / ColumnParallelLinear leaves draft aliases
+    on the raw modules: draft ``lm_head`` then emits local ``V/TP`` logits (no
+    gather) while ``markov_bias`` may still be full ``V``, breaking
+    ``logits + bias`` under DSpark.
+    """
+    from tensor_cast.layers.dflash import resolve_target_embed_and_lm_head
+    from tensor_cast.layers.utils import ModelWrapperBase
+
+    wrapper = _find_dflash_wrapper(model)
+    if wrapper is None or not getattr(wrapper.draft, "_shared_vocab", False):
+        return
+
+    embed = None
+    lm_head = None
+    if isinstance(model, ModelWrapperBase):
+        try:
+            embed, lm_head = resolve_target_embed_and_lm_head(model)
+        except ValueError:
+            embed, lm_head = None, None
+    if embed is None or lm_head is None:
+        unwrapped = model.unwrap() if callable(getattr(model, "unwrap", None)) else None
+        if unwrapped is None:
+            _unify_dspark_markov_tp_with_lm_head(model)
+            return
+        embed = getattr(unwrapped, "embed_tokens", None)
+        if embed is None and hasattr(unwrapped, "get_input_embeddings"):
+            embed = unwrapped.get_input_embeddings()
+        lm_head = getattr(unwrapped, "lm_head", None)
+        if lm_head is None and hasattr(unwrapped, "get_output_embeddings"):
+            lm_head = unwrapped.get_output_embeddings()
+    if embed is not None and lm_head is not None:
+        wrapper.draft.set_shared(embed, lm_head)
+    # After rebind (or if rebind skipped), force Markov vocab TP == lm_head TP.
+    _unify_dspark_markov_tp_with_lm_head(model)
+
+
+def _unify_dspark_markov_tp_with_lm_head(model: "ModelWrapperBase") -> None:
+    """Align DSpark ``markov_bias`` ColumnParallel policy with draft ``lm_head``.
+
+    Main/DFlash ``lm_head`` is ColumnParallel (``gather_output=True`` → full V).
+    If draft still aliases the sharded inner Linear (local ``V/TP``), Markov must
+    also emit local logits — not full-V bias — so ``logits + bias`` is valid.
+    """
+    from tensor_cast.layers.parallel_linear import ColumnParallelLinear
+
+    wrapper = _find_dflash_wrapper(model)
+    if wrapper is None:
+        return
+    draft = getattr(wrapper, "draft", None)
+    markov = getattr(draft, "markov_head", None) if draft is not None else None
+    if markov is None:
+        return
+
+    lm_head = draft.lm_head
+    markov_bias = markov.markov_bias
+
+    if isinstance(lm_head, ColumnParallelLinear):
+        gather = bool(lm_head.gather_output)
+        if isinstance(markov_bias, ColumnParallelLinear):
+            markov_bias.gather_output = gather
+            return
+        if isinstance(markov_bias, (torch.nn.Linear, QuantLinearBase)):
+            markov.markov_bias = ColumnParallelLinear(
+                markov_bias,
+                tp_group=lm_head.tp_group,
+                global_tp_group=lm_head.global_tp_group,
+                gather_output=gather,
+            )
+        return
+
+    # draft.lm_head is not the parallel wrapper (local V/TP weights). Keep Markov local.
+    if isinstance(markov_bias, ColumnParallelLinear):
+        markov_bias.gather_output = False
+        return
+    if not isinstance(markov_bias, (torch.nn.Linear, QuantLinearBase)):
+        return
+    local_v = int(getattr(lm_head, "out_features", 0) or 0)
+    full_v = int(getattr(markov_bias, "out_features", 0) or 0)
+    if local_v <= 0 or full_v <= local_v or full_v % local_v != 0:
+        return
+    pgm = getattr(model, "parallel_group_manager", None)
+    tp_group = getattr(pgm, "tp_group", None) if pgm is not None else None
+    lmhead_tp = getattr(pgm, "lmhead_tp_group", None) if pgm is not None else None
+    shard_group = lmhead_tp if lmhead_tp is not None else tp_group
+    if shard_group is None or int(shard_group.world_size) <= 1:
+        return
+    if int(shard_group.world_size) != full_v // local_v:
+        # Prefer lmhead TP group size when it matches V/(V/TP).
+        if tp_group is not None and int(tp_group.world_size) == full_v // local_v:
+            shard_group = tp_group
+        else:
+            return
+    markov.markov_bias = ColumnParallelLinear(
+        markov_bias,
+        tp_group=shard_group,
+        global_tp_group=tp_group if tp_group is not None else shard_group,
+        gather_output=False,
+    )
 
 
 def shard_model_by_ep(model: "ModelWrapperBase") -> "ModelWrapperBase":
@@ -968,6 +1296,8 @@ def shard_model_by_ep(model: "ModelWrapperBase") -> "ModelWrapperBase":
 def shard_model(model: "ModelWrapperBase") -> "ModelWrapperBase":
     shard_model_by_ep(model)
     shard_model_by_tp(model)
+    # shard_model_by_tp already resyncs; keep a second call cheap/no-op if missing.
+    _resync_dflash_shared_vocab(model)
     return model
 
 
@@ -984,6 +1314,35 @@ def _exclude_unquantized_dsa_linears(model_config) -> None:
     ):
         if pattern not in modules_to_not_convert:
             modules_to_not_convert.append(pattern)
+
+
+def _ensure_draft_excluded_from_linear_quant(model: "ModelWrapperBase") -> None:
+    """RFC: draft-owned Linear must not share target ``--quantize-linear-action``.
+
+    ``create_quant_config`` patterns like ``*.layers.*`` / ``*.mlp.*`` otherwise match
+    ``draft.layers.*.dflash_block.mlp.*`` and quantize draft FFN/Attn projections.
+    """
+    if not config_has_draft_spec(model.model_config):
+        return
+    quant_config = getattr(model.model_config, "quant_config", None)
+    if quant_config is None:
+        return
+    exclude = list(quant_config.modules_to_not_convert or [])
+    if "draft" not in exclude:
+        exclude.append("draft")
+    quant_config.modules_to_not_convert = exclude
+
+
+def _draft_attention_layer_indices(model: "ModelWrapperBase") -> set[int]:
+    """Attention registry indices owned by DFlash/DSpark draft (skip attention quant)."""
+    inner = getattr(model, "_inner", None)
+    draft = getattr(inner, "draft", None)
+    if draft is None:
+        return set()
+    idxs = getattr(draft, "_draft_attn_layer_indices", None)
+    if idxs:
+        return {int(i) for i in idxs}
+    return set()
 
 
 def quantize_linear(
@@ -1027,6 +1386,7 @@ def quantize_linear(
         mla_config = model.model_config.mla_config
         if mla_config is not None and mla_config.enable_dsa_cp:
             _exclude_unquantized_dsa_linears(model.model_config)
+        _ensure_draft_excluded_from_linear_quant(model)
         before = {
             name: type(module).__name__
             for name, module in model._inner.named_modules()
@@ -1057,9 +1417,13 @@ def quantize_attention(
 
     attention_configs = model.model_config.quant_config.attention_configs
     default_attention_config = attention_configs.get(-1)
+    draft_attn_idxs = _draft_attention_layer_indices(model)
 
     if model.model_config.mla_config:
         for name, module in model._inner.named_modules():
+            # Draft is Qwen3 GQA — never apply target MLA attention quant under draft.*.
+            if name == "draft" or name.startswith("draft."):
+                continue
             if isinstance(module, MultiheadLatentAttentionBase):
                 if hasattr(module, "layer_idx") and module.layer_idx in attention_configs:
                     module.quant_config = attention_configs[module.layer_idx]
@@ -1077,6 +1441,11 @@ def quantize_attention(
 
     if hasattr(model, "attention_by_layers"):
         for i in range(model.num_hidden_layers):
+            if i in draft_attn_idxs:
+                # Keep draft attention unquantized (does not share target quant strategy).
+                continue
+            if i not in model.attention_by_layers:
+                continue
             model.attention_by_layers[i].quant_config = attention_configs.get(i, default_attention_config)
             if report is not None and model.attention_by_layers[i].quant_config is not None:
                 report.add_replacement(

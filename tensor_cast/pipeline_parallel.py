@@ -19,6 +19,13 @@ from .performance_model.utils import bytes_of_tensor
 from .runtime import Runtime
 
 
+def _primary_model_output(output: object) -> object:
+    """Unwrap ``(primary, side...)`` compile-residency returns; see model_runner."""
+    if isinstance(output, (tuple, list)) and output:
+        return output[0]
+    return output
+
+
 @dataclass(frozen=True)
 class PipelineStageSpec:
     """Global layer range and boundary role for one PP stage."""
@@ -813,7 +820,7 @@ class StageRunner:
             ) as runtime,
             torch.no_grad(),
         ):
-            output = self.stage(**stage_kwargs)
+            output = _primary_model_output(self.stage(**stage_kwargs))
             if with_sampler:
                 _ = sampler(output, stage_kwargs["sampling_metadata"])
 

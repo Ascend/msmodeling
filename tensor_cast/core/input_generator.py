@@ -17,6 +17,7 @@ import torch
 from ..layers.attention import AttentionMetadataTensorCast
 from ..layers.glm5 import get_glm5_indexer_types, glm5_uses_indexshare, resolve_glm5_indexer_source_layer
 from ..layers.sampler import SamplingMetadata, SpecDecodeMetadata
+from ..model_config import config_has_draft_spec
 from ..performance_model import bytes_of_tensor
 from ..transformers.utils import get_attention_quant_config, logger
 from ..utils import exact_division
@@ -43,10 +44,15 @@ class RequestInfo:
 def _build_spec_decode_metadata(
     query_start_loc: torch.Tensor,
     query_lens: torch.Tensor | list[int],
-    num_mtp_tokens: int,
+    num_speculative_tokens: int,
 ) -> SpecDecodeMetadata:
-    if num_mtp_tokens <= 0:
-        raise ValueError("num_mtp_tokens must be positive for spec decode metadata")
+    """Build verify-window metadata for MTP / Dflash speculative decode.
+
+    ``num_speculative_tokens`` is the number of draft/spec positions (excludes bonus).
+    Window length is ``num_speculative_tokens + 1`` (specs + one bonus/anchor slot).
+    """
+    if num_speculative_tokens <= 0:
+        raise ValueError("num_speculative_tokens must be positive for spec decode metadata")
 
     if isinstance(query_lens, torch.Tensor):
         if query_lens.device.type == "meta":
@@ -54,7 +60,7 @@ def _build_spec_decode_metadata(
         query_lens_list = query_lens.tolist()
     else:
         query_lens_list = query_lens
-    spec_window = num_mtp_tokens + 1
+    spec_window = num_speculative_tokens + 1
     # Spec decode metadata covers the per-request tail target+bonus verification window.
     # Longer decode query windows may carry earlier rows, but only the tail window participates
     # in lm-head verification/proposal selection.
@@ -65,7 +71,7 @@ def _build_spec_decode_metadata(
         query_len = int(query_len)
         if query_len < spec_window:
             raise ValueError(
-                f"MTP decode query length must be at least num_mtp_tokens + 1 ({spec_window}), got {query_len}"
+                f"Spec decode query length must be at least num_speculative_tokens + 1 ({spec_window}), got {query_len}"
             )
         tail_start = query_start + query_len - spec_window
         tail_rows = list(range(tail_start, tail_start + spec_window))
@@ -77,7 +83,7 @@ def _build_spec_decode_metadata(
     return SpecDecodeMetadata(
         logits_indices=torch.tensor(logits_indices, dtype=torch.long, device=metadata_device),
         num_active_requests=len(query_lens_list),
-        num_speculative_tokens=num_mtp_tokens,
+        num_speculative_tokens=num_speculative_tokens,
     )
 
 
@@ -111,10 +117,16 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
             logger.warning("For non-VL models, the parameter input of the image is ignored")
     model_config = model.model_config
     num_mtp_tokens = model_config.mtp_config.num_mtp_layers if model_config.mtp_config else 0
+    draft_block = int(model_config.draft_block_size()) if config_has_draft_spec(model_config) else 0
+    # SpecDecodeMetadata uses specs+bonus window aligned with existing Sampler.
+    # DSpark sample_from_anchor=True semantically proposes B tokens, but verify window
+    # remains query_len=B; keep B-1 speculative slots as the DFlash-compatible engineering
+    # approximation (RFC 3.4.5). Fold still clamps acceptance to B for DSpark.
+    dflash_spec_tokens = max(draft_block - 1, 0)
     parallel_config = model_config.parallel_config
     batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
 
-    max_context_length = seq_len + num_mtp_tokens + 1
+    max_context_length = seq_len + max(num_mtp_tokens, dflash_spec_tokens) + 1
 
     # Paged attention parameters (can be adjusted)
     num_blocks = (
@@ -181,11 +193,19 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     # Short decode windows cannot form the target+bonus verification window; omit spec metadata
     # so downstream lm-head and sampler logic uses ordinary decode selection for that step.
     # Fixed-shape generation uses one request template expanded by concurrency, so query_len is uniform.
+    # MTP and Dflash both use SpecDecodeMetadata so Sampler emits verify ArgMax as
+    # [1,V]→[1] (bonus) + [S,V]→[S] (speculative), matching NPU DFlash / MTP traces.
     if is_decode and num_mtp_tokens > 0 and query_len >= num_mtp_tokens + 1:
         sampling_metadata.spec_decode_metadata = _build_spec_decode_metadata(
             attn_meta.query_start_loc,
             [query_len] * batch_size,
             num_mtp_tokens,
+        )
+    elif is_decode and dflash_spec_tokens > 0 and query_len >= draft_block:
+        sampling_metadata.spec_decode_metadata = _build_spec_decode_metadata(
+            attn_meta.query_start_loc,
+            [query_len] * batch_size,
+            dflash_spec_tokens,
         )
     if is_decode:
         # do not prune logits
@@ -546,6 +566,23 @@ def _glm5_indexshare_layer_owns_indexer_cache(indexer_types: list[str] | None, l
     return indexer_types is None or resolve_glm5_indexer_source_layer(indexer_types, layer_idx) == layer_idx
 
 
+def _draft_layer_count(model_config) -> int:
+    """Return DFlash/DSpark draft depth; 0 for mocks / configs without a real count.
+
+    ``MagicMock`` implements ``__int__`` (returns 1) and a callable
+    ``has_draft_spec``, so only accept a real ``Integral`` from ``draft_num_layers()``.
+    """
+    if not config_has_draft_spec(model_config):
+        return 0
+    getter = getattr(model_config, "draft_num_layers", None)
+    if not callable(getter):
+        return 0
+    value = getter()
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        return 0
+    return max(int(value), 0)
+
+
 def _resolve_sparse_attention_indexer_num_blocks(
     is_v4_model: bool,
     attention_layer,
@@ -725,10 +762,40 @@ def _get_kv_cache_info(
     excluded_layers = kv_cache_excluded_layer_indices(model)
     kv_cache_per_token = 0
     kv_cache_by_layers = {}
+    draft_enabled = config_has_draft_spec(model_config)
+    num_draft_layers = int(model_config.draft_num_layers()) if draft_enabled else 0
+    num_target_layers = max(int(model.num_hidden_layers) - num_draft_layers, 0)
+    draft_hf = None
+    if draft_enabled:
+        inner = getattr(model, "_inner", None)
+        draft_hf = getattr(inner, "draft_hf_config", None)
+
     for i in range(model.num_hidden_layers):
         kvcache_dtype = _resolve_main_kv_cache_dtype(model, i)
+        is_draft_layer = draft_enabled and i >= num_target_layers
 
-        if model_config.mla_config is not None:
+        if is_draft_layer:
+            # Draft is always Qwen3 GQA; allocate [2, blocks, block_size, kv_heads, head_dim]
+            # even when the target model uses MLA caches.
+            if draft_hf is not None:
+                draft_kv_heads = int(draft_hf.num_key_value_heads)
+                draft_head_dim = int(
+                    getattr(draft_hf, "head_dim", draft_hf.hidden_size // draft_hf.num_attention_heads)
+                )
+            else:
+                draft_kv_heads = int(model.text_config.num_key_value_heads)
+                draft_head_dim = int(model.head_dim)
+            if draft_kv_heads >= parallel_config.tensor_parallel_size:
+                kv_heads = exact_division(draft_kv_heads, parallel_config.tensor_parallel_size)
+            else:
+                assert parallel_config.tensor_parallel_size % draft_kv_heads == 0
+                kv_heads = 1
+            kv_cache_by_layers[i] = torch.empty(
+                [2, num_blocks, block_size, kv_heads, draft_head_dim],
+                dtype=kvcache_dtype,
+                device="meta",
+            )
+        elif model_config.mla_config is not None:
             # decoder_layers may be None if _resolve_decoder_layers raises
             # AttributeError (e.g., model not fully wrapped). In that case
             # attention_layer stays None and the fallback formula below is used.
@@ -952,7 +1019,9 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     layers carry a distinct learned indexer.
 
     GLM-5.2 IndexShare decides whether a layer owns cache; V4 compression
-    decides how many blocks each allocated cache needs.
+    decides how many blocks each allocated cache needs. DFlash/DSpark draft
+    layers are Qwen3 GQA and are skipped: they are not part of the target
+    sparse-indexer stack.
 
     For V4 the indexer cache is purely compressed (no sliding window): the
     reference allocates ``[max_batch_size, max_seq_len // compress_ratio,
@@ -985,9 +1054,14 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
     is_v4_model = _is_v4_model(model)
     # GLM-5.2 IndexShare is a layer-selection rule: shared layers reuse top-k and own no cache.
     glm5_indexer_types = _get_glm5_indexshare_indexer_types(model)
+    num_draft_layers = _draft_layer_count(model_config)
+    num_target_layers = max(int(model.num_hidden_layers) - num_draft_layers, 0)
     indexer_cache_by_layers = {}
     indexer_cache_per_token = 0
     for i in range(model.num_hidden_layers):
+        # Qwen3 GQA draft is not part of the target GLM5/DSA indexer stack.
+        if num_draft_layers and i >= num_target_layers:
+            continue
         try:
             owns_indexer_cache = _glm5_indexshare_layer_owns_indexer_cache(glm5_indexer_types, i)
         except ValueError as err:
@@ -1047,6 +1121,8 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     model_config = model.model_config
     mtp = getattr(model_config, "mtp_config", None)
     num_mtp_tokens = mtp.num_mtp_layers if mtp else 0
+    draft_block = int(model_config.draft_block_size()) if config_has_draft_spec(model_config) else 0
+    dflash_spec_tokens = max(draft_block - 1, 0)
 
     batch_size = len(requests)
     if batch_size == 0:
@@ -1066,7 +1142,7 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     query_len_t = torch.tensor(query_lens, dtype=torch.long)
 
     max_total_seq_len = int(max(seq_lens))
-    total_kv_tokens = sum(seq_lens) + batch_size * (num_mtp_tokens + 1)
+    total_kv_tokens = sum(seq_lens) + batch_size * (max(num_mtp_tokens, dflash_spec_tokens) + 1)
     num_blocks = (total_kv_tokens + block_size - 1) // block_size
     # Decode Context Parallel stores only ``1 / dcp`` of each sequence's tokens on
     # a card, so where that shard is a real per-card saving the physical KV footprint
@@ -1102,14 +1178,24 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     # Spec metadata is only valid when every active decode request has a full target+bonus window;
     # mixed or short-window batches intentionally fall back to ordinary per-request selection.
     # When enabled, pass the per-request query_lens list so packed offsets honor varlen batches.
-    use_spec_decode_metadata = (
+    use_mtp_spec_decode = (
         num_mtp_tokens > 0 and all(is_decode_list) and all(query_len >= num_mtp_tokens + 1 for query_len in query_lens)
     )
-    if use_spec_decode_metadata:
+    use_dflash_spec_decode = (
+        dflash_spec_tokens > 0 and all(is_decode_list) and all(query_len >= draft_block for query_len in query_lens)
+    )
+    if use_mtp_spec_decode:
         sampling_meta.spec_decode_metadata = _build_spec_decode_metadata(
             query_start_loc,
             query_lens,
             num_mtp_tokens,
+        )
+        sampling_meta.selected_token_indices = None
+    elif use_dflash_spec_decode:
+        sampling_meta.spec_decode_metadata = _build_spec_decode_metadata(
+            query_start_loc,
+            query_lens,
+            dflash_spec_tokens,
         )
         sampling_meta.selected_token_indices = None
     elif num_mtp_tokens > 0 and all(is_decode_list):

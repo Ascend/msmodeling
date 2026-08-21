@@ -63,6 +63,35 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 10 --query-le
 
 **输出：** 性能汇总表；若设置了 `--chrome-trace-file`，还可选输出 Chrome trace 文件。
 
+#### 投机解码（Dflash / DSpark）
+
+TensorCast 支持通过 `--speculative-method {dflash,dspark}` 启用 Dflash 或 DSpark 草稿投机解码仿真，与 MTP（`--num-mtp-tokens`）互斥。启用后每次前向包含 target 完整前向与 draft block 前向；draft 线性层不参与 `--quantize-linear-action` 量化。
+
+**示例（Decode，Dflash）：**
+
+```bash
+python -m cli.inference.text_generate Qwen/Qwen3-32B \
+  --num-queries 8 \
+  --query-length 8 \
+  --context-length 4500 \
+  --decode \
+  --device TEST_DEVICE \
+  --speculative-method dflash \
+  --num-speculative-tokens 7 \
+  --num-draft-layers 6 \
+  --compile
+```
+
+说明：
+
+- 必须显式传入 `--speculative-method`；仅设置 `--num-speculative-tokens` 等从属参数不会启用。
+- `--query-length` 应不小于 draft block 长度（`block_size = --num-speculative-tokens + 1`；未指定时使用内置默认值）。
+- 选用 `dspark` 时，在以上命令基础上追加 `--dspark-markov-rank` 与 `--dspark-markov-head`（默认 `256` / `vanilla`）。
+- `--acceptance-length` 仅用于 `throughput_optimizer` 的 Decode 吞吐折算，`text_generate` 不支持该参数。
+- 默认 draft 配置见 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`；字段说明与自定义方法见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。
+
+**输出：** 性能汇总表；若设置了 `--chrome-trace-file`，还可选输出 Chrome trace 文件。
+
 ### 2.2 结果（文本生成）
 
 示例输出（已截断）：
@@ -245,6 +274,11 @@ usage: text_generate.py [-h]
                         --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--decode]
                         [--prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE] [--num-mtp-tokens NUM_MTP_TOKENS]
                         [--no-repetition] [--compile] [--compile-allow-graph-break]
+                        [--speculative-method {dflash,dspark}] [--num-speculative-tokens NUM_SPECULATIVE_TOKENS]
+                        [--dspark-markov-rank DSPARK_MARKOV_RANK]
+                        [--dspark-markov-head {vanilla,gated,rnn}]
+                        [--num-draft-layers NUM_DRAFT_LAYERS]
+                        [--draft-model-config-path DRAFT_MODEL_CONFIG_PATH]
                         [--compilation-config [{enable_multistream,enable_sequence_parallel,enable_matmul_allreduce,enable_dispatch_ffn_combine} ...]]
                         [--quantize-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
                         [--quantize-non-expert-linear-action {DISABLED,W8A16_STATIC,W8A8_STATIC,W4A8_STATIC,W8A16_DYNAMIC,W8A8_DYNAMIC,W4A8_DYNAMIC,FP8,MXFP4}]
@@ -282,8 +316,14 @@ Run a simulated LLM inference pass and dump the perf result.
 | `--context-length` | LLM Options | 可选 | 每个 query 的已有上下文 token 长度。<br>1. 类型：Int。<br>2. 取值范围：非负整数。<br>3. 默认值：`0`。 |
 | `--decode` | LLM Options | 可选 | 启用自回归 decode 模式；不设置时按 prefill 模式运行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--prefix-cache-hit-rate` | LLM Options | 可选 | 指定 prefix cache 命中率，用于 prefill token 复用近似。<br>1. 类型：Float。<br>2. 取值范围：`[0, 1)`。<br>3. 默认值：`0.0`。 |
-| `--num-mtp-tokens` | LLM Options | 可选 | 指定 Multi-Token Prediction（MTP）token 数量，`0` 表示不启用。<br>1. 类型：Int。<br>2. 取值范围：非负整数。<br>3. 默认值：`0`。<br>4. 仅支持具备 MTP 能力的模型，例如 DeepSeek。 |
+| `--num-mtp-tokens` | LLM Options | 可选 | 指定 Multi-Token Prediction（MTP）token 数量，`0` 表示不启用。<br>1. 类型：Int。<br>2. 取值范围：非负整数。<br>3. 默认值：`0`。<br>4. 仅支持具备 MTP 能力的模型，例如 DeepSeek。<br>5. 与 `--speculative-method` 互斥。|
 | `--no-repetition` | LLM Options | 可选 | 禁用 transformer 重复模式优化，保留原始模型行为。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--speculative-method` | LLM Options | 可选 | 指定投机解码方法。<br>1. 类型：Str。<br>2. 取值：`dflash` 或 `dspark`。<br>3. 默认值：未指定（关闭）。<br>4. 与 `--num-mtp-tokens` 互斥；是其余 draft 从属参数的前置开关。 |
+| `--num-speculative-tokens` | LLM Options | 可选 | 投机 token 数（不含 anchor/bonus）。<br>1. 类型：Int。<br>2. 取值范围：`>= 1` 时覆盖 config，内部 `block_size = n + 1`；`0` 表示使用 builtin / `--draft-model-config-path` 中的 `block_size`。<br>3. 默认值：`0`。<br>4. 需要先设置 `--speculative-method`。 |
+| `--dspark-markov-rank` | LLM Options | 可选 | Markov embedding 维度。<br>1. 类型：Int。<br>2. 取值范围：非负整数；`0` 表示禁用 MarkovHead。<br>3. 默认值：`256`。<br>4. 需要 `--speculative-method dspark`。 |
+| `--dspark-markov-head` | LLM Options | 可选 | Markov head 类型。<br>1. 类型：Str。<br>2. 参考值：`vanilla`、`gated`、`rnn`。<br>3. 默认值：`vanilla`。<br>4. 需要 `--speculative-method dspark`。 |
+| `--num-draft-layers` | LLM Options | 可选 | 覆盖 draft 的 `num_hidden_layers`。<br>1. 类型：Int。<br>2. 取值范围：正整数；`0` 表示使用 config 默认值。<br>3. 默认值：`0`。<br>4. 需要先设置 `--speculative-method`。 |
+| `--draft-model-config-path` | LLM Options | 可选 | 指定外部 draft `config.json`（或包含该文件的目录），覆盖内置 draft profile。<br>1. 类型：Str。<br>2. 取值范围：文件路径或目录路径。<br>3. 默认值：`None`（使用 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`）。<br>4. 需要先设置 `--speculative-method`。默认配置与字段说明见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。 |
 | `--compile` | Optimization Options | 可选 | 在推理前对模型调用 `torch.compile()`。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--compile-allow-graph-break` | Optimization Options | 可选 | 允许 `torch.compile()` 过程中出现 graph break。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
 | `--compilation-config` | Optimization Options | 可选 | 动态启用指定的编译特性，可一次指定多个选项。<br>1. 类型：List[Str]（`nargs="*"`）。<br>2. 可选值：`enable_multistream`（启用多 stream 调度）、`enable_sequence_parallel`（启用 sequence parallel 图改写 pass）、`enable_matmul_allreduce`（启用 matmul-allreduce 融合）、`enable_dispatch_ffn_combine`（启用 dispatch_ffn_combine 融合）。<br>3. 默认值：不指定时所有编译特性均保持关闭（`False`）。<br>4. 示例：`--compilation-config enable_multistream enable_sequence_parallel`。 |

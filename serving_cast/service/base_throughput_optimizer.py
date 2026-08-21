@@ -410,10 +410,39 @@ class BaseThroughputOptimizer(ABC):
     ) -> float:
         if not key.is_decode:
             return record.latency_ms
+        return self._fold_decode_latency_ms(record.latency_ms, optimizer_data)
+
+    @staticmethod
+    def _fold_decode_latency_ms(latency_ms: float, optimizer_data: OptimizerData) -> float:
+        """Apply DSpark / Dflash / MTP decode fold (mutually exclusive; never combine)."""
+        dspark_block_size = optimizer_data.dspark_block_size or 0
+        if dspark_block_size >= 2:
+            accept = optimizer_data.dspark_acceptance_length
+            if accept is None:
+                accept = 5.0
+            max_accept = float(dspark_block_size)
+            if accept > max_accept:
+                accept = max_accept
+            if accept < 0:
+                accept = 0.0
+            average_tokens = float(accept) + 1.0
+            return latency_ms / average_tokens
+        dflash_block_size = optimizer_data.dflash_block_size or 0
+        if dflash_block_size >= 2:
+            accept = optimizer_data.dflash_acceptance_length
+            if accept is None:
+                accept = 5.0
+            max_accept = float(dflash_block_size - 1)
+            if accept > max_accept:
+                accept = max_accept
+            if accept < 0:
+                accept = 0.0
+            average_tokens = float(accept) + 1.0
+            return latency_ms / average_tokens
         num_mtp_tokens = optimizer_data.num_mtp_tokens or 0
         mtp_acceptance_rate = optimizer_data.mtp_acceptance_rate or []
         average_tokens = sum(mtp_acceptance_rate[:num_mtp_tokens]) + 1
-        return record.latency_ms / average_tokens
+        return latency_ms / average_tokens
 
     def _get_or_compute_latency(
         self,
@@ -526,8 +555,16 @@ class BaseThroughputOptimizer(ABC):
         plan, while decode continues to use the original prompt length.
         """
         if is_decode:
-            # Decode computes one normal token plus any MTP speculative tokens.
-            resolved_query_len = query_len or self.num_mtp_tokens + 1
+            # Decode: DSpark/Dflash use full block as query_len; otherwise one token + MTP.
+            dspark_block = optimizer_data.dspark_block_size or 0
+            dflash_block = optimizer_data.dflash_block_size or 0
+            if dspark_block >= 2:
+                resolved_query_len = query_len or dspark_block
+            elif dflash_block >= 2:
+                resolved_query_len = query_len or dflash_block
+            else:
+                # Existing MTP / baseline path — keep expression unchanged for G1.
+                resolved_query_len = query_len or self.num_mtp_tokens + 1
             resolved_seq_len = seq_len or (
                 optimizer_data.output_length // 2 + optimizer_data.input_length + resolved_query_len
             )

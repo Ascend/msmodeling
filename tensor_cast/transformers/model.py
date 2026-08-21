@@ -1,7 +1,7 @@
 import contextlib
 import logging
 import typing
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Sequence, Union
 
 import torch
 from transformers import PreTrainedModel
@@ -9,6 +9,8 @@ from transformers.initialization import no_init_weights
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from tensor_cast.transformers.transformations import (
+    maybe_enable_dflash,
+    maybe_enable_dspark,
     maybe_enable_mtp,
     maybe_reuse_layers,
     patch_attention,
@@ -22,7 +24,7 @@ from tensor_cast.transformers.transformations import (
 from ..layers.attention import flash_attention_forward
 from ..layers.sampler import select_lm_head_hidden_states
 from ..layers.utils import ModelWrapperBase
-from ..model_config import ModelConfig
+from ..model_config import ModelConfig, config_has_draft_spec
 from ..parallel_group import ParallelGroupManager
 from ..performance_model.utils import bytes_of_tensor
 from .custom_model_registry import get_custom_model
@@ -53,6 +55,82 @@ _EXTRA_TC_KWARGS_KEYS = (
 )
 
 
+def resolve_decoder_num_layers(hf_config: object) -> int:
+    """Return decoder ``num_hidden_layers`` from HF / text config."""
+    if hf_config is None:
+        raise ValueError("hf_config is required to resolve decoder num_layers")
+    text_cfg = hf_config
+    getter = getattr(hf_config, "get_text_config", None)
+    if callable(getter):
+        text_cfg = getter()
+    elif getattr(hf_config, "text_config", None) is not None:
+        text_cfg = hf_config.text_config
+    n = getattr(text_cfg, "num_hidden_layers", None)
+    if n is None:
+        raise ValueError(f"config has no num_hidden_layers: {type(hf_config)!r}")
+    return int(n)
+
+
+def select_aux_hidden_states(
+    all_hidden_states: Sequence[torch.Tensor],
+    layer_ids: Sequence[int],
+    *,
+    num_layers: int,
+) -> list[torch.Tensor]:
+    """Pick decoder-layer outputs from HF ``output_hidden_states`` tuple.
+
+    Layout is determined only by ``num_layers``:
+
+    - ``len == num_layers + 1`` → ``(embed_out, layer0, …, layerN-1)``, offset 1
+    - ``len == num_layers`` → layers only, offset 0
+    - otherwise → error (do not guess from max layer id)
+    """
+    if not layer_ids:
+        raise ValueError("layer_ids must be non-empty")
+    if not all_hidden_states:
+        raise ValueError("all_hidden_states must be non-empty")
+    num_layers = int(num_layers)
+    if num_layers < 1:
+        raise ValueError(f"num_layers must be >= 1, got {num_layers}")
+    n = len(all_hidden_states)
+    if n == num_layers + 1:
+        offset = 1
+    elif n == num_layers:
+        offset = 0
+    else:
+        raise ValueError(
+            f"hidden_states length={n} does not match num_layers={num_layers} "
+            f"or num_layers+1 (embed+layers); cannot determine layout "
+            f"(layer_ids={list(layer_ids)})"
+        )
+    max_id = max(int(i) for i in layer_ids)
+    if max_id < 0:
+        raise ValueError(f"layer_ids must be non-negative, got {layer_ids}")
+    if max_id >= num_layers:
+        raise ValueError(
+            f"aux layer id {max_id} out of range for num_layers={num_layers} (layer_ids={list(layer_ids)})"
+        )
+    return [all_hidden_states[int(i) + offset] for i in layer_ids]
+
+
+def _unpack_model_hidden_outputs(outputs: object) -> tuple[torch.Tensor, Sequence[torch.Tensor]]:
+    """Normalize HF return_dict / tuple outputs to ``(last_hidden, all_hidden)``."""
+    if hasattr(outputs, "last_hidden_state") and getattr(outputs, "hidden_states", None) is not None:
+        return outputs.last_hidden_state, outputs.hidden_states
+    if isinstance(outputs, (tuple, list)):
+        # Common: (last_hidden, ..., all_hidden_states) with all_hidden near the end.
+        last = outputs[0]
+        all_hidden = None
+        for item in reversed(outputs[1:]):
+            if isinstance(item, (tuple, list)) and item and isinstance(item[0], torch.Tensor):
+                all_hidden = item
+                break
+        if all_hidden is None:
+            raise RuntimeError(f"Unable to locate hidden_states in model outputs: {type(outputs)}")
+        return last, all_hidden
+    raise RuntimeError(f"Unexpected model output type for aux collection: {type(outputs)}")
+
+
 class TensorDict:
     def __init__(self, tensors: Dict[str, torch.Tensor]):
         self.tensors = tensors
@@ -74,8 +152,33 @@ class CausalLmWrapper(ModelWrapperBase):
         position_ids: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
         output_intermediate_hidden_states: bool = False,  # output hidden_states before lm_head
+        output_aux_hidden_state_layer_ids: Optional[Sequence[int]] = None,
         **kwargs: object,  # NOTE: extra args should be torch.compile compatible
-    ) -> Union[torch.Tensor, TensorDict, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, TensorDict, tuple]:
+        want_aux = output_aux_hidden_state_layer_ids is not None
+        if want_aux:
+            outputs = self._inner(
+                input_ids=input_ids,
+                use_cache=False,
+                position_ids=position_ids,
+                inputs_embeds=inputs_embeds,
+                output_hidden_states=True,
+                return_dict=True,
+                **kwargs,
+            )
+            last_hidden, all_hidden = _unpack_model_hidden_outputs(outputs)
+            aux_hiddens = select_aux_hidden_states(
+                all_hidden,
+                output_aux_hidden_state_layer_ids,
+                num_layers=resolve_decoder_num_layers(self.hf_config),
+            )
+            intermediate_hidden_states = last_hidden
+            sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
+            logits = self.lm_head(select_lm_head_hidden_states(last_hidden, sampling_metadata, mode="target"))
+            if output_intermediate_hidden_states:
+                return logits, intermediate_hidden_states, aux_hiddens
+            return logits, aux_hiddens
+
         hidden_states = self._inner(
             input_ids=input_ids,
             use_cache=False,
@@ -112,20 +215,35 @@ class VLModelWrapper(ModelWrapperBase):
         position_ids: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
         output_intermediate_hidden_states: bool = False,
+        output_aux_hidden_state_layer_ids: Optional[Sequence[int]] = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, TensorDict, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Union[torch.Tensor, TensorDict, tuple]:
+        want_aux = output_aux_hidden_state_layer_ids is not None
         outputs = self._inner(
             input_ids=input_ids,
             use_cache=False,
             position_ids=position_ids,
             inputs_embeds=inputs_embeds,
+            output_hidden_states=want_aux,
             **kwargs,
         )
 
         hidden_states = outputs.last_hidden_state
         sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
-        hidden_states = select_lm_head_hidden_states(hidden_states, sampling_metadata, mode="target")
-        logits = self.lm_head(hidden_states)
+        logits = self.lm_head(select_lm_head_hidden_states(hidden_states, sampling_metadata, mode="target"))
+
+        if want_aux:
+            all_hidden = getattr(outputs, "hidden_states", None)
+            if all_hidden is None:
+                raise RuntimeError("VL model did not return hidden_states for Dflash aux")
+            aux_hiddens = select_aux_hidden_states(
+                all_hidden,
+                output_aux_hidden_state_layer_ids,
+                num_layers=resolve_decoder_num_layers(self.hf_config),
+            )
+            if output_intermediate_hidden_states:
+                return logits, outputs.last_hidden_state, aux_hiddens
+            return logits, aux_hiddens
 
         if output_intermediate_hidden_states:
             return logits, outputs.last_hidden_state
@@ -141,8 +259,43 @@ class ModelWrapper(ModelWrapperBase):
         input_ids: Optional[torch.Tensor],
         position_ids: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
+        output_intermediate_hidden_states: bool = False,
+        output_aux_hidden_state_layer_ids: Optional[Sequence[int]] = None,
         **kwargs: object,  # NOTE: extra args should be torch.compile compatible
-    ) -> Union[torch.Tensor, TensorDict]:
+    ) -> Union[torch.Tensor, TensorDict, tuple]:
+        if output_aux_hidden_state_layer_ids is not None:
+            outputs = self._inner(
+                input_ids=input_ids,
+                use_cache=False,
+                position_ids=position_ids,
+                inputs_embeds=inputs_embeds,
+                output_hidden_states=True,
+                return_dict=True,
+                **kwargs,
+            )
+            sampling_metadata: Optional[SamplingMetadata] = kwargs.get("sampling_metadata")
+            if hasattr(outputs, "logits"):
+                logits = outputs.logits
+                all_hidden = outputs.hidden_states
+                last_hidden = all_hidden[-1] if all_hidden is not None else getattr(outputs, "last_hidden_state", None)
+            else:
+                last_hidden, all_hidden = _unpack_model_hidden_outputs(outputs)
+                logits = last_hidden
+            if all_hidden is None:
+                raise RuntimeError("Model did not return hidden_states for Dflash aux")
+            cfg = getattr(self._inner, "config", None)
+            aux_hiddens = select_aux_hidden_states(
+                all_hidden,
+                output_aux_hidden_state_layer_ids,
+                num_layers=resolve_decoder_num_layers(cfg),
+            )
+            logits = select_lm_head_hidden_states(logits, sampling_metadata, mode="target")
+            if output_intermediate_hidden_states:
+                if last_hidden is None:
+                    last_hidden = all_hidden[-1]
+                return logits, last_hidden, aux_hiddens
+            return logits, aux_hiddens
+
         hidden_states = self._inner(
             input_ids=input_ids,
             use_cache=False,
@@ -151,6 +304,8 @@ class ModelWrapper(ModelWrapperBase):
             return_dict=False,
             **kwargs,
         )[0]
+        if output_intermediate_hidden_states:
+            return hidden_states, hidden_states
         return hidden_states
 
 
@@ -225,6 +380,8 @@ class TransformerModel(ModelWrapperBase):
                 else:
                     wrap_model(self)
                     maybe_enable_mtp(self)
+                    maybe_enable_dflash(self)
+                    maybe_enable_dspark(self)
                     maybe_reuse_layers(self)
                     patch_model(self)
                     patch_rotary_emb(self)
@@ -292,6 +449,8 @@ class TransformerModel(ModelWrapperBase):
         num_hidden_layers = self.text_config.num_hidden_layers
         if self.model_config.mtp_config:
             num_hidden_layers += self.model_config.mtp_config.num_mtp_layers
+        if config_has_draft_spec(self.model_config):
+            num_hidden_layers += self.model_config.draft_num_layers()
         return num_hidden_layers
 
     @property

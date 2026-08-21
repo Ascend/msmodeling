@@ -52,6 +52,7 @@ packages = ["tensor_cast", "serving_cast", "cli", "optix", "web_ui"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "optix/config.toml" = "optix/config.toml"
+"tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json" = "tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json"
 
 # Test tools ###################################################################
 

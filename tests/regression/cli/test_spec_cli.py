@@ -74,6 +74,8 @@ def test_text_generate_help_hides_legacy_parallel_flags() -> None:
     assert "--graph-log-file" not in help_text
     assert "--graph-log-url" not in help_text
     assert "--log-level" in help_text
+    assert "--no-repetition" in help_text
+    assert "--disable-repetition" not in help_text
     assert "--model-id" in help_text
     assert "--model_id" not in help_text
     assert "-v" in help_text
@@ -112,6 +114,36 @@ def test_text_generate_tp_size_parses_without_deprecation(capsys: pytest.Capture
     )
     assert ns.tp_size == 2
     assert "deprecated" not in capsys.readouterr().err
+
+
+def test_text_generate_no_repetition_and_legacy_alias(capsys: pytest.CaptureFixture[str]) -> None:
+    ns = _capture_text_generate_args(
+        [
+            "text_generate",
+            "Qwen/Qwen3-32B",
+            "--num-queries",
+            "1",
+            "--query-length",
+            "8",
+            "--no-repetition",
+        ]
+    )
+    assert ns.disable_repetition is True
+    assert "deprecated" not in capsys.readouterr().err
+
+    ns = _capture_text_generate_args(
+        [
+            "text_generate",
+            "Qwen/Qwen3-32B",
+            "--num-queries",
+            "1",
+            "--query-length",
+            "8",
+            "--disable-repetition",
+        ]
+    )
+    assert ns.disable_repetition is True
+    assert "WARNING: --disable-repetition is deprecated; use --no-repetition instead." in capsys.readouterr().err
 
 
 def test_text_generate_accepts_native_and_kebab_quant_choice() -> None:
@@ -441,6 +473,8 @@ def test_model_adapter_subcommand_help_meets_spec() -> None:
         if argv[0] in ("doctor", "verify"):
             assert "--model-id" in result.stdout
             assert "--model_id" in result.stdout
+            assert "--no-repetition" in result.stdout
+            assert "--disable-repetition" not in result.stdout
 
 
 def test_top_level_help_lists_commands() -> None:

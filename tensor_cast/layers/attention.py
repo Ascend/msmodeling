@@ -5,13 +5,18 @@ import torch
 
 from .. import ops  # noqa: F401
 from ..parallel_group import _DEFAULT_PG, ParallelGroup
-from ..performance_model import _PREDICTIVE_DECODING_THRESHOLD
+from ..performance_model import _PREDICTIVE_DECODING_THRESHOLD, _tensor_value_unavailable
 
 if TYPE_CHECKING:
     from ..model_config import AttentionQuantConfig
 
 
-def is_dcp_decode_batch(seq_lens: Optional[torch.Tensor], query_lens: Optional[torch.Tensor]) -> bool:
+def is_dcp_decode_batch(
+    seq_lens: Optional[torch.Tensor],
+    query_lens: Optional[torch.Tensor],
+    seq_lens_values: Optional[list[int]] = None,
+    query_lens_values: Optional[list[int]] = None,
+) -> bool:
     """Return True when this batch is a genuine DCP-eligible decode step.
 
     Decode Context Parallel is a decode-only optimization, so it must fire on
@@ -22,6 +27,9 @@ def is_dcp_decode_batch(seq_lens: Optional[torch.Tensor], query_lens: Optional[t
     hold KV context (``seq_len > query_len``) so a short *prefill*
     (``seq_len == query_len``) is never mistaken for decode and never gets its
     ``seq_lens`` floored toward zero.
+
+    Prefer materialized ``*_values`` (see ``input_generator``) so meta/FakeTensor
+    paths never call ``.item()`` via ``bool(tensor.all())``.
 
     Scheduling assumption -- **DCP is enabled only for whole-batch decode steps.**
     The ``.all()`` reductions mean a *mixed* prefill+decode batch (a prefill chunk
@@ -35,7 +43,13 @@ def is_dcp_decode_batch(seq_lens: Optional[torch.Tensor], query_lens: Optional[t
     Refining this to a request-granular mask is a deferred non-goal
     (rfc_context_parallel_dcp §1.3 #8).
     """
+    if seq_lens_values is not None and query_lens_values is not None:
+        return all(q < _PREDICTIVE_DECODING_THRESHOLD for q in query_lens_values) and all(
+            s > q for s, q in zip(seq_lens_values, query_lens_values)
+        )
     if seq_lens is None or query_lens is None:
+        return False
+    if _tensor_value_unavailable(seq_lens) or _tensor_value_unavailable(query_lens):
         return False
     return bool((query_lens < _PREDICTIVE_DECODING_THRESHOLD).all() and (seq_lens > query_lens).all())
 
@@ -86,10 +100,15 @@ class AttentionMetadataBase:
     Dynamo cannot trace."""
 
     def __post_init__(self):
-        # Metadata is always built outside the compiled region (see
-        # ``core.input_generator``), so this reduction is safe to evaluate eagerly
-        # and the result rides into the graph as a traceable constant.
-        self.is_dcp_decode = is_dcp_decode_batch(self.seq_lens, self.query_lens)
+        # Prefer materialized ``*_values`` (input_generator / draft metadata) so
+        # meta and FakeTensor lens never require ``.item()``. The result rides into
+        # the compiled graph as a host-side Python bool constant.
+        self.is_dcp_decode = is_dcp_decode_batch(
+            self.seq_lens,
+            self.query_lens,
+            self.seq_lens_values,
+            self.query_lens_values,
+        )
 
 
 class AttentionBase(torch.nn.Module):

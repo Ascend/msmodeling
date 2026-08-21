@@ -61,11 +61,15 @@ from tensor_cast.model_config import WordEmbeddingTPMode
 
 from ..utils import (
     LOG_FORMAT,
+    add_draft_spec_arguments,
     check_device_targets,
     check_non_negative_integer,
     check_prefix_cache_hit_rate,
+    draft_method,
     get_common_argparser,
     require_model_id,
+    resolve_draft_block_and_acceptance,
+    validate_draft_spec_cli_args,
 )
 
 
@@ -154,6 +158,7 @@ def arg_parse():
         help="Acceptance rates for MTP.",
         aliases=("--mtp-acceptance-rate",),
     )
+    add_draft_spec_arguments(model_group, include_acceptance=True)
     parser.add_argument(
         "--prefix-cache-hit-rate",
         type=check_prefix_cache_hit_rate,
@@ -442,6 +447,14 @@ def arg_parse():
         return normalized
 
     args.num_mtp_tokens, args.num_mtp_token_sizes = _normalize_mtp_token_values(args.num_mtp_tokens)
+    # G3 / G2: dependents + three-way mutual exclusion before search / worker build.
+    validate_draft_spec_cli_args(parser, args, check_mtp_candidates=True)
+    if draft_method(args) is not None:
+        # RFC: draft path MUST keep MTP disabled for search combinations.
+        args.num_mtp_tokens = 0
+        args.num_mtp_token_sizes = []
+        resolve_draft_block_and_acceptance(args)
+
     args.tp_sizes = _normalize_and_validate(args.tp_sizes, "tp-sizes", args.num_devices)
     args.ep_sizes = _normalize_and_validate(args.ep_sizes, "ep-sizes", args.num_devices)
     args.moe_dp_sizes = _normalize_and_validate(args.moe_dp_sizes, "moe-dp-sizes", args.num_devices)

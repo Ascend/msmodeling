@@ -84,6 +84,44 @@ class ParallelRunner:
             length_distribution = load_length_distribution(input_length)
             input_length = None
 
+        # G1: only populate Dflash/DSpark OptimizerData fields when --speculative-method is set.
+        method = getattr(self.args, "speculative_method", None)
+        dflash_block_size = None
+        dflash_acceptance_length = None
+        dspark_block_size = None
+        dspark_acceptance_length = None
+        dspark_markov_rank = None
+        if method in ("dflash", "dspark"):
+            from cli.utils import (
+                clamp_acceptance_length,
+                resolve_num_speculative_tokens_to_block,
+            )
+
+            n, block = resolve_num_speculative_tokens_to_block(
+                int(getattr(self.args, "num_speculative_tokens", 0) or 0),
+                draft_model_config_path=getattr(self.args, "draft_model_config_path", None),
+            )
+            # Prefer CLI-resolved draft_block_size when already filled.
+            resolved_block = int(getattr(self.args, "draft_block_size", 0) or 0)
+            if resolved_block >= 2:
+                block = resolved_block
+                n = block - 1
+            accept = clamp_acceptance_length(
+                float(getattr(self.args, "acceptance_length", 5.0)),
+                block,
+                method,
+            )
+            self.args.num_speculative_tokens = n
+            self.args.draft_block_size = block
+            self.args.acceptance_length = accept
+            if method == "dspark":
+                dspark_block_size = block
+                dspark_acceptance_length = accept
+                dspark_markov_rank = int(getattr(self.args, "dspark_markov_rank", 256))
+            else:
+                dflash_block_size = block
+                dflash_acceptance_length = accept
+
         self.optimizer_data = OptimizerData(
             input_length=input_length,
             length_distribution=length_distribution,
@@ -97,6 +135,11 @@ class ParallelRunner:
             serving_cost=self.args.serving_cost,
             num_mtp_tokens=fixed_num_mtp_tokens,
             mtp_acceptance_rate=self.args.mtp_acceptance_rate,
+            dflash_block_size=dflash_block_size,
+            dflash_acceptance_length=dflash_acceptance_length,
+            dspark_block_size=dspark_block_size,
+            dspark_acceptance_length=dspark_acceptance_length,
+            dspark_markov_rank=dspark_markov_rank,
             prefill_devices_per_instance=self.args.prefill_devices_per_instance,
             decode_devices_per_instance=self.args.decode_devices_per_instance,
             prefix_cache_hit_rate=self.args.prefix_cache_hit_rate,
@@ -245,13 +288,29 @@ class ParallelRunner:
             tmp_user_input.ep_size = ep
             tmp_user_input.moe_dp_size = moe_dp
             tmp_user_input.moe_tp_size = target_devices // (ep * moe_dp)
-            tmp_user_input.num_mtp_tokens = num_mtp_tokens
+            # G2: never enable MTP when Dflash/DSpark is on (CLI already forces MTP candidates to 0).
+            method = getattr(self.args, "speculative_method", None)
+            if method in ("dflash", "dspark"):
+                tmp_user_input.num_mtp_tokens = 0
+                tmp_user_input.speculative_method = method
+                tmp_user_input.num_speculative_tokens = int(getattr(self.args, "num_speculative_tokens", 0) or 0)
+                tmp_user_input.acceptance_length = float(getattr(self.args, "acceptance_length", 5.0))
+            else:
+                tmp_user_input.num_mtp_tokens = num_mtp_tokens
+                tmp_user_input.speculative_method = None
             tmp_user_input.dynamic_shapes = not tmp_user_input.enable_sequence_parallel
             tmp_user_input.dcp_size = dcp
             if base_chrome_trace:
                 name, ext = os.path.splitext(base_chrome_trace)
+                draft_suffix = ""
+                draft_block = int(getattr(self.args, "draft_block_size", 0) or 0)
+                if method == "dspark" and draft_block >= 2:
+                    draft_suffix = f"dspark{draft_block}"
+                elif method == "dflash" and draft_block >= 2:
+                    draft_suffix = f"dflash{draft_block}"
                 tmp_user_input.chrome_trace = (
-                    f"{name}_tp{tmp_user_input.tp_size}dp{tmp_user_input.dp_size}mtp{num_mtp_tokens}{ext}"
+                    f"{name}_tp{tmp_user_input.tp_size}dp{tmp_user_input.dp_size}"
+                    f"mtp{tmp_user_input.num_mtp_tokens}{draft_suffix}{ext}"
                 )
             return tmp_user_input
 
@@ -430,50 +489,77 @@ class ParallelRunner:
 
         logger.info("Start processing TP size: %d", user_input.tp_size)
 
-        if self._workload_cache is None:
-            model_runner = self._get_model_runnner(user_input)
-            if model_runner is None:
-                return None
-        else:
-            model_key = self._workload_cache.make_model_key(user_input)
-            capture_runner = None
-            if self._workload_cache.get_template(model_key) is None:
-                capture_runner = self._get_model_runnner(user_input)
-                if capture_runner is None:
+        try:
+            if self._workload_cache is None:
+                model_runner = self._get_model_runnner(user_input)
+                if model_runner is None:
                     return None
-            model_runner = WorkloadReuseModelRunner(
-                user_input=user_input,
-                workload_cache=self._workload_cache,
-                model_key=model_key,
-                capture_runner=capture_runner,
+            else:
+                model_key = self._workload_cache.make_model_key(user_input)
+                capture_runner = None
+                if self._workload_cache.get_template(model_key) is None:
+                    capture_runner = self._get_model_runnner(user_input)
+                    if capture_runner is None:
+                        return None
+                model_runner = WorkloadReuseModelRunner(
+                    user_input=user_input,
+                    workload_cache=self._workload_cache,
+                    model_key=model_key,
+                    capture_runner=capture_runner,
+                )
+
+            task_optimizer_data = copy.deepcopy(overwrite_optimizer_data)
+            task_optimizer_data.num_mtp_tokens = user_input.num_mtp_tokens
+            draft_block = user_input.draft_block_size()
+            if user_input.speculative_method == "dspark":
+                task_optimizer_data.dspark_block_size = draft_block
+                task_optimizer_data.dspark_acceptance_length = user_input.acceptance_length
+                task_optimizer_data.dspark_markov_rank = user_input.dspark_markov_rank
+                task_optimizer_data.dflash_block_size = None
+                task_optimizer_data.dflash_acceptance_length = None
+            elif user_input.speculative_method == "dflash":
+                task_optimizer_data.dflash_block_size = draft_block
+                task_optimizer_data.dflash_acceptance_length = user_input.acceptance_length
+                task_optimizer_data.dspark_block_size = None
+                task_optimizer_data.dspark_acceptance_length = None
+                task_optimizer_data.dspark_markov_rank = None
+            else:
+                # G1: keep fold/shape on the non-draft path when speculative_method is unset.
+                task_optimizer_data.dflash_block_size = None
+                task_optimizer_data.dflash_acceptance_length = None
+                task_optimizer_data.dspark_block_size = None
+                task_optimizer_data.dspark_acceptance_length = None
+                task_optimizer_data.dspark_markov_rank = None
+
+            # 2. get strategy result
+            strategy = OptimizerFactory.create_strategy(
+                model_runner,
+                self.args.disagg if disagg_mode is None else disagg_mode,
             )
+            result = strategy.run(task_optimizer_data, self.args.batch_range)
 
-        task_optimizer_data = copy.deepcopy(overwrite_optimizer_data)
-        task_optimizer_data.num_mtp_tokens = user_input.num_mtp_tokens
+            if not isinstance(result, OptimizerSummary) or len(result.get_summary_df()) == 0:
+                logger.warning(
+                    "No result found with TP %d and num_mtp_tokens %d for ttft %s ms, tpot %s ms",
+                    model_runner.model.model_config.parallel_config.tensor_parallel_size,
+                    user_input.num_mtp_tokens,
+                    task_optimizer_data.ttft_limits,
+                    task_optimizer_data.tpot_limits,
+                )
+                return None
 
-        # 2. get strategy result
-        strategy = OptimizerFactory.create_strategy(
-            model_runner,
-            self.args.disagg if disagg_mode is None else disagg_mode,
-        )
-        result = strategy.run(task_optimizer_data, self.args.batch_range)
-
-        if not isinstance(result, OptimizerSummary) or len(result.get_summary_df()) == 0:
-            logger.warning(
-                "No result found with TP %d and num_mtp_tokens %d for ttft %s ms, tpot %s ms",
+            logger.info(
+                "Finish processing TP size: %d",
                 model_runner.model.model_config.parallel_config.tensor_parallel_size,
-                user_input.num_mtp_tokens,
-                task_optimizer_data.ttft_limits,
-                task_optimizer_data.tpot_limits,
             )
-            return None
 
-        logger.info(
-            "Finish processing TP size: %d",
-            model_runner.model.model_config.parallel_config.tensor_parallel_size,
-        )
-
-        return result
+            return result
+        except Exception as exc:
+            # ProcessPool cannot pickle many torch.compile exceptions (e.g. module
+            # objects inside BackendCompilerFailed). Re-raise a plain RuntimeError.
+            raise RuntimeError(
+                f"Optimizer worker failed (TP={user_input.tp_size}): {type(exc).__name__}: {exc}"
+            ) from None
 
     def _run_pd_phase(
         self,

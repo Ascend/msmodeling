@@ -2800,6 +2800,7 @@ register_op_estimator(None, None)(_estimate_default)
 
 @register_op_estimator(torch.ops.tensor_cast._internal_wait_and_bind.default, None)
 @register_op_estimator(torch.ops.tensor_cast._internal_record.default, None)
+@register_op_estimator(torch.ops.tensor_cast._internal_order_barrier.default, None)
 def _estimate_internal_multistream_anchor(
     op_invoke_info: OpInvokeInfo, device_profile: DeviceProfile
 ) -> PerformanceModel.Result:

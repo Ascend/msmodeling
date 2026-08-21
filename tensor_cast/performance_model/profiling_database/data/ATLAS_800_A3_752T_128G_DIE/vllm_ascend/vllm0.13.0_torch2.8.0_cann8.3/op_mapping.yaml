@@ -732,6 +732,15 @@ operator_mappings:
       neox mode kernel_type: ApplyRotaryPosEmb (op-plugin: YAML:5643).
       alternate_kernel_types supports two modes of automatic fallback matching.
 
+  "tensor_cast.apply_rope_single.default":
+    kernel_type: InterleaveRope
+    alternate_kernel_types: [ApplyRotaryPosEmb]
+    tc_input_count: 1
+    notes: >
+      [HIGH] Same NPU kernels as apply_rope; TC signature is K-only (x, cos, sin).
+      Context-stage DFlash fused RoPE has no Q. tc_input_count=1 matches the data
+      tensor against NPU K.
+
 
   # ========== 16. Communication ==========
   # HCCL collectives, without going through op-plugin aclnn, go directly to torch.distributed → HCCL

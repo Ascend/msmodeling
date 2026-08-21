@@ -132,16 +132,16 @@ class Sampler(torch.nn.Module):
             spec_window = _spec_window_size(spec_metadata)
             verification_rows = num_active_requests * spec_window
             if logits.size(0) == verification_rows:
-                # Verification rows contain target speculative positions followed by one bonus position per request.
+                # Layout: [spec_0 .. spec_{S-1}, bonus] per request (MTP / Dflash verify window).
                 verification_logits = logits.reshape(num_active_requests, spec_window, logits.size(-1))
                 target_logits = verification_logits[:, :num_speculative_tokens, :]
                 bonus_logits = verification_logits[:, num_speculative_tokens, :]
-                # TensorCast models the spec-decode dependency/shape path here, not a full
-                # probability-acceptance rejection sampler; target and bonus tokens use greedy argmax.
-                target_tokens = torch.argmax(target_logits, dim=-1)
+                # NPU DFlash / MTP traces: ArgMax bonus [1,V]→[1] then specs [S,V]→[S]
+                # (not one fused [S+1,V] ArgMax). Call order matches chrome-trace residency.
                 bonus_tokens = torch.argmax(bonus_logits, dim=-1, keepdim=True)
+                target_tokens = torch.argmax(target_logits, dim=-1)
                 # Output shape: (num_active_requests, num_speculative_tokens + 1);
-                # target tokens followed by one bonus token per request.
+                # speculative tokens followed by one bonus token per request.
                 return torch.cat([target_tokens, bonus_tokens], dim=-1)
             if logits.size(0) == num_active_requests:
                 return torch.argmax(logits, dim=-1, keepdim=True)

@@ -42,6 +42,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _primary_model_output(output: object) -> object:
+    """Unwrap ``(primary, side_outputs...)`` used to keep compile residency edges.
+
+    Dflash Prefill returns ``(target_logits, draft_logits)`` so the draft subgraph
+    remains a formal graph output under ``torch.compile``. Dflash/DSpark Decode may
+    return ``(draft_tokens, next_tokens[, confidence])`` so verify / ConfidenceHead
+    paths are not DCE'd. Callers only consume the primary tensor — Decode primary is
+    token ids, not sampler logits (see ``_spec_decode_skips_runner_sampler``).
+    """
+    if isinstance(output, (tuple, list)) and output:
+        return output[0]
+    return output
+
+
+def _spec_decode_skips_runner_sampler(model: object, input_kwargs: dict) -> bool:
+    """True when DFlash/DSpark Decode already sampled inside the wrapper.
+
+    Decode primary is ``draft_tokens``, not vocab logits — do not feed it to sampler.
+    """
+    from ..layers.dflash import DflashWrapper
+
+    # Start at ``model`` itself: DflashWrapper may be the top node or nested under
+    # ``TransformerModel._inner``. Skipping straight to ``_inner`` would miss a
+    # bare DflashWrapper and incorrectly keep the runner sampler on Decode.
+    node = model
+    seen: set[int] = set()
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        if isinstance(node, DflashWrapper):
+            return DflashWrapper._is_decode_step(input_kwargs)
+        node = getattr(node, "_inner", None)
+    return False
+
+
 class ModelRunner:
     """
     corresponding to one data-parallel partition ('dp_rank')
@@ -223,9 +257,9 @@ class ModelRunner:
             ) as runtime,
             torch.no_grad(),
         ):
-            logits = self.model.forward(**input_kwargs)
-            if with_sampler:
-                _ = self.sampler(logits, input_kwargs["sampling_metadata"])
+            primary = _primary_model_output(self.model.forward(**input_kwargs))
+            if with_sampler and not _spec_decode_skips_runner_sampler(self.model, input_kwargs):
+                _ = self.sampler(primary, input_kwargs["sampling_metadata"])
         run_end = time.perf_counter()
 
         # Log empirical model stats if using profiling mode

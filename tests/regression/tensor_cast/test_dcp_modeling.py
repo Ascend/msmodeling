@@ -766,6 +766,50 @@ class TestIsDcpDecodeBatch:
 
         assert is_dcp_decode_batch(None, None) is False
 
+    def test_materialized_values_prefer_over_tensors(self):
+        from tensor_cast.layers.attention import is_dcp_decode_batch
+
+        # Meta tensors would fail bool(.all()); values must drive the predicate.
+        seq_lens = torch.full((4,), 2048, dtype=torch.long, device="meta")
+        query_lens = torch.ones(4, dtype=torch.long, device="meta")
+        assert (
+            is_dcp_decode_batch(
+                seq_lens,
+                query_lens,
+                seq_lens_values=[2048] * 4,
+                query_lens_values=[1] * 4,
+            )
+            is True
+        )
+        assert (
+            is_dcp_decode_batch(
+                seq_lens,
+                query_lens,
+                seq_lens_values=[1] * 4,
+                query_lens_values=[1] * 4,
+            )
+            is False
+        )
+
+    def test_meta_tensors_without_values_are_rejected(self):
+        from tensor_cast.layers.attention import is_dcp_decode_batch
+
+        seq_lens = torch.full((4,), 2048, dtype=torch.long, device="meta")
+        query_lens = torch.ones(4, dtype=torch.long, device="meta")
+        assert is_dcp_decode_batch(seq_lens, query_lens) is False
+
+    def test_post_init_uses_materialized_values_on_meta(self):
+        seq_lens = torch.full((4,), 2048, dtype=torch.long, device="meta")
+        query_lens = torch.ones(4, dtype=torch.long, device="meta")
+        meta = AttentionMetadataTensorCast(
+            query_start_loc=torch.arange(0, 5, dtype=torch.long, device="meta"),
+            seq_lens=seq_lens,
+            query_lens=query_lens,
+            seq_lens_values=[2048] * 4,
+            query_lens_values=[1] * 4,
+        )
+        assert meta.is_dcp_decode is True
+
     def test_mla_and_gqa_share_the_same_detector(self):
         # Single source of truth: both the GQA and MLA decode gates branch on the
         # host-resolved ``AttentionMetadataBase.is_dcp_decode`` (see attention.py and

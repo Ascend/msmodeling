@@ -414,6 +414,32 @@ class TestBaseBackend(unittest.TestCase):
 
         self.assertEqual((query_len, seq_len), (3, 235))
 
+    def test_resolve_forward_shape_uses_dflash_block_for_decode(self):
+        self.backend.num_mtp_tokens = 0
+        optimizer_data = OptimizerData(
+            input_length=200,
+            output_length=64,
+            dflash_block_size=16,
+            dflash_acceptance_length=5.0,
+        )
+
+        query_len, seq_len = self.backend._resolve_forward_shape(optimizer_data, is_decode=True)
+
+        self.assertEqual((query_len, seq_len), (16, 248))
+
+    def test_resolve_forward_shape_uses_dspark_block_for_decode(self):
+        self.backend.num_mtp_tokens = 0
+        optimizer_data = OptimizerData(
+            input_length=200,
+            output_length=64,
+            dspark_block_size=8,
+            dspark_acceptance_length=5.0,
+        )
+
+        query_len, seq_len = self.backend._resolve_forward_shape(optimizer_data, is_decode=True)
+
+        self.assertEqual((query_len, seq_len), (8, 240))
+
     def test_resolve_forward_shape_accepts_decode_overrides(self):
         self.backend.num_mtp_tokens = 2
         optimizer_data = OptimizerData(input_length=200, output_length=64, prefix_cache_hit_rate=0.5)
@@ -520,6 +546,34 @@ class TestBaseBackend(unittest.TestCase):
 
         self.assertEqual(prefill_latency, 140.0)
         self.assertAlmostEqual(decode_latency, 80.0)
+
+    def test_fold_decode_latency_uses_dflash_accept_clamp_b_minus_1(self):
+        # raw=160, accept clamped to 15 for B=16 → 160/(15+1)=10
+        optimizer_data = OptimizerData(dflash_block_size=16, dflash_acceptance_length=99.0)
+        folded = self.backend._fold_decode_latency_ms(160.0, optimizer_data)
+        self.assertAlmostEqual(folded, 10.0)
+
+    def test_fold_decode_latency_clamps_dflash_negative_accept_to_zero(self):
+        # raw=20, accept=-1 → 0 → 20/(0+1)=20 (no ZeroDivisionError)
+        optimizer_data = OptimizerData(dflash_block_size=8, dflash_acceptance_length=-1.0)
+        folded = self.backend._fold_decode_latency_ms(20.0, optimizer_data)
+        self.assertAlmostEqual(folded, 20.0)
+
+    def test_fold_decode_latency_uses_dspark_accept_clamp_to_block(self):
+        # raw=90, accept clamped to 8 for B=8 → 90/(8+1)=10
+        optimizer_data = OptimizerData(dspark_block_size=8, dspark_acceptance_length=99.0)
+        folded = self.backend._fold_decode_latency_ms(90.0, optimizer_data)
+        self.assertAlmostEqual(folded, 10.0)
+
+    def test_fold_prefers_dspark_over_dflash_when_both_set(self):
+        optimizer_data = OptimizerData(
+            dspark_block_size=8,
+            dspark_acceptance_length=3.0,
+            dflash_block_size=16,
+            dflash_acceptance_length=5.0,
+        )
+        folded = self.backend._fold_decode_latency_ms(40.0, optimizer_data)
+        self.assertAlmostEqual(folded, 10.0)  # 40/(3+1)
 
     def test_get_forward_info_uses_explicit_image_batch_size_when_provided(self):
         self.backend.model_runner = Mock()

@@ -456,6 +456,105 @@ class MtpConfig:
     mtp_block_module_name: Optional[str] = None
 
 
+@dataclasses.dataclass
+class DflashConfig:
+    """Unified Dflash draft modeling config (see docs/RFC/rfc_dflash_unified_modeling_zh.md)."""
+
+    dflash_block_size: int = 8
+    num_draft_layers: int = 6
+    dflash_acceptance_length: float = 5.0
+    sliding_window: Optional[int] = 2048
+    aux_hidden_state_layer_ids: Optional[List[int]] = None
+    draft_model_config_path: Optional[str] = None
+    # Filled at enable time for modeling shapes / shard.
+    context_length: int = 0
+    layer_types: Optional[List[str]] = None
+
+    def __post_init__(self):
+        if self.dflash_block_size < 2:
+            raise ValueError(f"dflash_block_size must be >= 2, got {self.dflash_block_size}")
+        if self.num_draft_layers <= 0:
+            raise ValueError(f"num_draft_layers must be positive, got {self.num_draft_layers}")
+        if self.dflash_acceptance_length is None:
+            self.dflash_acceptance_length = 5.0
+        max_accept = float(self.dflash_block_size - 1)
+        if self.dflash_acceptance_length > max_accept:
+            self.dflash_acceptance_length = max_accept
+        if self.dflash_acceptance_length < 0:
+            raise ValueError(f"dflash_acceptance_length must be non-negative, got {self.dflash_acceptance_length}")
+        if self.aux_hidden_state_layer_ids is not None and not self.aux_hidden_state_layer_ids:
+            raise ValueError("aux_hidden_state_layer_ids must be non-empty when provided")
+
+    @property
+    def num_selected_layers(self) -> int:
+        if self.aux_hidden_state_layer_ids:
+            return len(self.aux_hidden_state_layer_ids)
+        raise ValueError("aux_hidden_state_layer_ids is not set")
+
+
+@dataclasses.dataclass
+class DsparkConfig:
+    """DSpark modeling config (see docs/RFC/rfc_dspark_tensorcast_modeling_zh.md).
+
+    Structural draft fields mirror Dflash; Markov/Confidence are DSpark-only.
+    """
+
+    dspark_block_size: int = 8
+    num_draft_layers: int = 6
+    dspark_acceptance_length: float = 5.0
+    sliding_window: Optional[int] = 2048
+    aux_hidden_state_layer_ids: Optional[List[int]] = None
+    draft_model_config_path: Optional[str] = None
+    context_length: int = 0
+    layer_types: Optional[List[str]] = None
+    sample_from_anchor: bool = True
+    markov_rank: int = 256
+    markov_head_type: str = "vanilla"
+    enable_confidence_head: bool = True
+    confidence_head_with_markov: bool = True
+
+    def __post_init__(self):
+        if self.dspark_block_size < 2:
+            raise ValueError(f"dspark_block_size must be >= 2, got {self.dspark_block_size}")
+        if self.num_draft_layers <= 0:
+            raise ValueError(f"num_draft_layers must be positive, got {self.num_draft_layers}")
+        if self.dspark_acceptance_length is None:
+            self.dspark_acceptance_length = 5.0
+        if self.markov_rank < 0:
+            raise ValueError(f"markov_rank must be non-negative, got {self.markov_rank}")
+        if self.markov_head_type not in ("vanilla", "gated", "rnn"):
+            raise ValueError(f"markov_head_type must be one of vanilla/gated/rnn, got {self.markov_head_type!r}")
+        max_accept = float(self.dspark_block_size)
+        if self.dspark_acceptance_length > max_accept:
+            self.dspark_acceptance_length = max_accept
+        if self.dspark_acceptance_length < 0:
+            raise ValueError(f"dspark_acceptance_length must be non-negative, got {self.dspark_acceptance_length}")
+        if self.aux_hidden_state_layer_ids is not None and not self.aux_hidden_state_layer_ids:
+            raise ValueError("aux_hidden_state_layer_ids must be non-empty when provided")
+
+    @property
+    def num_selected_layers(self) -> int:
+        if self.aux_hidden_state_layer_ids:
+            return len(self.aux_hidden_state_layer_ids)
+        raise ValueError("aux_hidden_state_layer_ids is not set")
+
+    def to_dflash_config(self) -> DflashConfig:
+        """Structural DflashConfig for backbone build (acceptance clamped to B-1 for DflashConfig)."""
+        accept = min(float(self.dspark_acceptance_length), float(self.dspark_block_size - 1))
+        return DflashConfig(
+            dflash_block_size=int(self.dspark_block_size),
+            num_draft_layers=int(self.num_draft_layers),
+            dflash_acceptance_length=accept,
+            sliding_window=self.sliding_window,
+            aux_hidden_state_layer_ids=(
+                list(self.aux_hidden_state_layer_ids) if self.aux_hidden_state_layer_ids else None
+            ),
+            draft_model_config_path=self.draft_model_config_path,
+            context_length=int(self.context_length or 0),
+            layer_types=list(self.layer_types) if self.layer_types else None,
+        )
+
+
 class RemoteSource(StrEnum):
     huggingface = "huggingface"
     modelscope = "modelscope"
@@ -497,6 +596,8 @@ class ModelConfig:
     moe_config: Optional[MoEConfig] = None
     mla_config: Optional[MlaConfig] = None
     mtp_config: Optional[MtpConfig] = None
+    dflash_config: Optional[DflashConfig] = None
+    dspark_config: Optional[DsparkConfig] = None
     attention_cls: Optional[Type["AttentionBase"]] = None  # noqa: F821
     quant_linear_cls: Optional[Type["QuantLinearBase"]] = None  # noqa: F821
     hf_config: Optional[PretrainedConfig] = None
@@ -515,6 +616,40 @@ class ModelConfig:
         # TODO: Use Pydantic to add data validation.
         if self.num_hidden_layers_override < 0:
             self.num_hidden_layers_override = 0
+        if self.mtp_config is not None and self.dflash_config is not None:
+            raise ValueError("Dflash and MTP are mutually exclusive")
+        if self.mtp_config is not None and self.dspark_config is not None:
+            raise ValueError("DSpark and MTP are mutually exclusive")
+        if self.dflash_config is not None and self.dspark_config is not None:
+            raise ValueError("DSpark and Dflash are mutually exclusive")
+
+    def has_draft_spec(self) -> bool:
+        return self.dflash_config is not None or self.dspark_config is not None
+
+    def draft_num_layers(self) -> int:
+        if self.dspark_config is not None:
+            return int(self.dspark_config.num_draft_layers)
+        if self.dflash_config is not None:
+            return int(self.dflash_config.num_draft_layers)
+        return 0
+
+    def draft_block_size(self) -> int:
+        if self.dspark_config is not None:
+            return int(self.dspark_config.dspark_block_size)
+        if self.dflash_config is not None:
+            return int(self.dflash_config.dflash_block_size)
+        return 0
+
+
+def config_has_draft_spec(model_config) -> bool:
+    """True when DFlash/DSpark is enabled. Safe for ModelConfig and test doubles."""
+    checker = getattr(model_config, "has_draft_spec", None)
+    if callable(checker):
+        return bool(checker())
+    return (
+        getattr(model_config, "dflash_config", None) is not None
+        or getattr(model_config, "dspark_config", None) is not None
+    )
 
 
 @dataclasses.dataclass(frozen=True)

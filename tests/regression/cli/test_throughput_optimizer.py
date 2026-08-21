@@ -805,3 +805,98 @@ class TestThroughputOptimizerNightly(TestCase):
         local_columns = SHOW_COLUMNS.copy()
         table_start_pattern = AGG_TABLE_TITLE_RE
         self._validate_table_structure(full_output, local_columns, table_start_pattern)
+
+
+class TestThroughputOptimizerDraftSpecCli(TestCase):
+    """RFC G2/G3: Dflash / DSpark CLI wiring for throughput_optimizer."""
+
+    def _parse(self, extra: list[str]):
+        from cli.inference import throughput_optimizer as mod
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            "Qwen/Qwen3-32B",
+            "--device=TEST_DEVICE",
+            "--num-devices=8",
+            *extra,
+        ]
+        with patch.object(sys, "argv", argv):
+            return mod.arg_parse()
+
+    def test_defaults_keep_draft_disabled(self):
+        args = self._parse([])
+        self.assertIsNone(args.speculative_method)
+        self.assertEqual(args.num_speculative_tokens, 0)
+        self.assertEqual(args.num_mtp_tokens, 0)
+
+    def test_dflash_resolves_block_and_clamps_acceptance(self):
+        args = self._parse(
+            [
+                "--speculative-method=dflash",
+                "--num-speculative-tokens=15",
+                "--acceptance-length=99",
+                "--num-draft-layers=2",
+            ]
+        )
+        self.assertEqual(args.speculative_method, "dflash")
+        self.assertEqual(args.num_speculative_tokens, 15)
+        self.assertEqual(args.draft_block_size, 16)
+        self.assertEqual(args.acceptance_length, 15.0)  # clamp to B-1
+        self.assertEqual(args.num_draft_layers, 2)
+        self.assertEqual(args.num_mtp_tokens, 0)
+        self.assertEqual(args.num_mtp_token_sizes, [])
+
+    def test_dspark_resolves_block_and_clamps_acceptance_to_block(self):
+        args = self._parse(
+            [
+                "--speculative-method=dspark",
+                "--num-speculative-tokens=7",
+                "--acceptance-length=99",
+                "--dspark-markov-rank=128",
+                "--dspark-markov-head=gated",
+            ]
+        )
+        self.assertEqual(args.speculative_method, "dspark")
+        self.assertEqual(args.num_speculative_tokens, 7)
+        self.assertEqual(args.draft_block_size, 8)
+        self.assertEqual(args.acceptance_length, 8.0)  # clamp to B
+        self.assertEqual(args.dspark_markov_rank, 128)
+        self.assertEqual(args.dspark_markov_head, "gated")
+        self.assertEqual(args.num_mtp_tokens, 0)
+
+    def test_g3_dependent_without_method_fails(self):
+        with self.assertRaises(SystemExit):
+            self._parse(["--num-speculative-tokens=15"])
+
+    def test_g3_acceptance_without_method_fails(self):
+        with self.assertRaises(SystemExit):
+            self._parse(["--acceptance-length=3"])
+
+    def test_g3_shared_draft_without_method_fails(self):
+        with self.assertRaises(SystemExit):
+            self._parse(["--num-draft-layers=4"])
+
+    def test_g3_markov_requires_dspark_method(self):
+        with self.assertRaises(SystemExit):
+            self._parse(["--speculative-method=dflash", "--dspark-markov-rank=128"])
+
+    def test_g2_dflash_and_mtp_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            self._parse(["--speculative-method=dflash", "--num-mtp-tokens", "2"])
+
+    def test_g2_dspark_and_mtp_candidate_mutually_exclusive(self):
+        with self.assertRaises(SystemExit):
+            self._parse(["--speculative-method=dspark", "--num-mtp-tokens", "0", "2"])
+
+    def test_dspark_with_explicit_mtp_zero_ok(self):
+        args = self._parse(["--speculative-method=dspark", "--num-speculative-tokens=7", "--num-mtp-tokens", "0"])
+        self.assertEqual(args.speculative_method, "dspark")
+        self.assertEqual(args.num_mtp_tokens, 0)
+        self.assertEqual(args.num_mtp_token_sizes, [])
+
+    def test_builtin_num_speculative_tokens_maps_to_block_eight(self):
+        args = self._parse(["--speculative-method=dflash"])
+        self.assertEqual(args.num_speculative_tokens, 7)
+        self.assertEqual(args.draft_block_size, 8)

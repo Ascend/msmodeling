@@ -1,7 +1,8 @@
 import argparse
 import logging
 import re
-from typing import Any
+import sys
+from typing import Any, Optional
 
 from cli.spec_cli import (
     METAVAR_FLOAT,
@@ -12,6 +13,19 @@ from cli.spec_cli import (
     add_version_option,
 )
 from tensor_cast.device import DeviceProfile
+
+DRAFT_METHODS = ("dflash", "dspark")
+
+_METHOD_DEPENDENT_OPTIONS = (
+    "--num-speculative-tokens",
+    "--acceptance-length",
+    "--num-draft-layers",
+    "--draft-model-config-path",
+)
+_DSPARK_ONLY_OPTIONS = (
+    "--dspark-markov-rank",
+    "--dspark-markov-head",
+)
 
 LOG_LEVELS = {
     "debug": logging.DEBUG,
@@ -260,3 +274,170 @@ def require_model_id(parser: argparse.ArgumentParser, args: argparse.Namespace) 
     args.model_id = model_id
     if hasattr(args, "model_id_positional"):
         delattr(args, "model_id_positional")
+
+
+def argv_has_option(argv, *option_names: str) -> bool:
+    """Return True if any option name appears in argv (supports ``--opt=value``)."""
+    names = set(option_names)
+    for arg in argv:
+        if arg.split("=", 1)[0] in names:
+            return True
+    return False
+
+
+def draft_method(args) -> Optional[str]:
+    """Return ``dflash`` / ``dspark`` / None from ``--speculative-method``."""
+    method = getattr(args, "speculative_method", None)
+    if method in DRAFT_METHODS:
+        return str(method)
+    return None
+
+
+def add_draft_spec_arguments(
+    group: argparse._ActionsContainer,
+    *,
+    include_acceptance: bool = False,
+) -> None:
+    """Register unified draft-spec CLI flags on an argument group/parser."""
+    group.add_argument(
+        "--speculative-method",
+        type=str,
+        default=None,
+        choices=list(DRAFT_METHODS),
+        help="Enable draft speculative decoding: dflash or dspark. "
+        "Mutually exclusive with MTP. Required before draft-dependent options.",
+    )
+    group.add_argument(
+        "--num-speculative-tokens",
+        type=int,
+        default=0,
+        help="Requires --speculative-method. Number of speculative tokens excluding anchor/bonus "
+        "(vLLM-aligned). When >= 1, internal block_size = n + 1. "
+        "0 = use builtin/config block_size.",
+    )
+    if include_acceptance:
+        group.add_argument(
+            "--acceptance-length",
+            type=float,
+            default=5.0,
+            help="Requires --speculative-method. Decode fold scalar. "
+            "Clamped to block_size-1 for dflash, block_size for dspark.",
+        )
+    group.add_argument(
+        "--num-draft-layers",
+        type=int,
+        default=0,
+        help="Requires --speculative-method. Override draft num_hidden_layers from builtin/config. "
+        "0 = use config default.",
+    )
+    group.add_argument(
+        "--draft-model-config-path",
+        type=str,
+        default=None,
+        help="Requires --speculative-method. Optional path to override builtin draft config.json.",
+    )
+    group.add_argument(
+        "--dspark-markov-rank",
+        type=int,
+        default=256,
+        help="Requires --speculative-method dspark. Markov embedding rank (0 disables MarkovHead). Default: 256.",
+    )
+    group.add_argument(
+        "--dspark-markov-head",
+        type=str,
+        default="vanilla",
+        choices=["vanilla", "gated", "rnn"],
+        help="Requires --speculative-method dspark. Markov head type: vanilla (default), gated, or rnn.",
+    )
+
+
+def mtp_active(args) -> bool:
+    """True when MTP is enabled via fixed value or any search candidate > 0 (RFC G2)."""
+    if int(getattr(args, "num_mtp_tokens", 0) or 0) > 0:
+        return True
+    candidates = getattr(args, "num_mtp_token_sizes", None) or []
+    return any(int(c) > 0 for c in candidates)
+
+
+def validate_draft_spec_cli_args(
+    parser: argparse.ArgumentParser,
+    args,
+    argv=None,
+    *,
+    check_mtp_candidates: bool = False,
+) -> None:
+    """Validate draft-spec G2/G3: dependents require --speculative-method; vs MTP exclusive."""
+    argv = sys.argv[1:] if argv is None else argv
+    method = draft_method(args)
+
+    if method is None and argv_has_option(argv, *_METHOD_DEPENDENT_OPTIONS):
+        parser.error(
+            "--num-speculative-tokens / --acceptance-length / "
+            "--num-draft-layers / --draft-model-config-path require --speculative-method"
+        )
+    if method != "dspark" and argv_has_option(argv, *_DSPARK_ONLY_OPTIONS):
+        parser.error("--dspark-markov-rank / --dspark-markov-head require --speculative-method dspark")
+
+    if method is not None:
+        mtp_on = mtp_active(args) if check_mtp_candidates else int(getattr(args, "num_mtp_tokens", 0) or 0) > 0
+        if mtp_on:
+            label = "DSpark" if method == "dspark" else "Dflash"
+            parser.error(f"{label} and MTP are mutually exclusive")
+
+
+def resolve_num_speculative_tokens_to_block(
+    num_speculative_tokens: int,
+    *,
+    draft_model_config_path: Optional[str] = None,
+) -> tuple[int, int]:
+    """Map CLI n to (n, block_size). ``n<=0`` loads builtin/config ``block_size``."""
+    from tensor_cast.layers.dflash import load_dflash_draft_config_dict
+
+    source = load_dflash_draft_config_dict(draft_model_config_path)
+    builtin_block = int(source.get("block_size") or 8)
+    if builtin_block < 2:
+        builtin_block = 8
+
+    n = int(num_speculative_tokens or 0)
+    if n <= 0:
+        block = builtin_block
+        n = block - 1
+    else:
+        block = n + 1
+    return n, block
+
+
+def clamp_acceptance_length(accept: float, block: int, method: str) -> float:
+    """Clamp acceptance by method: dflash → B-1, dspark → B."""
+    accept = float(accept)
+    if accept < 0:
+        accept = 0.0
+    if method == "dspark":
+        max_accept = float(block)
+    else:
+        max_accept = float(block - 1)
+    if accept > max_accept:
+        accept = max_accept
+    return accept
+
+
+def resolve_draft_block_and_acceptance(args) -> None:
+    """Resolve ``num_speculative_tokens`` → block; clamp ``acceptance_length`` when present."""
+    method = draft_method(args)
+    if method is None:
+        return
+
+    n, block = resolve_num_speculative_tokens_to_block(
+        int(getattr(args, "num_speculative_tokens", 0) or 0),
+        draft_model_config_path=getattr(args, "draft_model_config_path", None),
+    )
+    args.num_speculative_tokens = n
+    # Bridge fields for OptimizerData / labels (block includes anchor).
+    args.draft_block_size = block
+
+    if hasattr(args, "acceptance_length"):
+        args.acceptance_length = clamp_acceptance_length(
+            float(getattr(args, "acceptance_length", 5.0)),
+            block,
+            method,
+        )
