@@ -195,6 +195,40 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["ttft"], 5.0)
         self.assertEqual(row["token/s"], 8000.0)
 
+    def test_chunked_prefill_passes_prefill_phase_to_every_forward(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=8192,
+            output_length=1,
+            max_batched_tokens=4096,
+            serving_cost=0,
+        )
+        captured_requests = []
+
+        def fake_run_inference(requests, generate_inputs_func=None):
+            captured_requests.extend(requests)
+            return Mock(
+                execution_time_s={"analytic": 0.001},
+                device_memory_available_gb=1.0,
+                breakdowns={},
+            )
+
+        with patch.object(self.strategy.model_runner, "run_inference", side_effect=fake_run_inference):
+            self.strategy.get_inference_info(optimizer_data)
+
+        self.assertEqual(
+            [
+                (request.query_len, request.seq_len, request.is_decode, request.concurrency)
+                for request in captured_requests
+            ],
+            [
+                (4096, 4096, False, 4),
+                (4096, 8192, False, 4),
+            ],
+        )
+
     def test_single_chunk_prefill_uses_the_token_budget_on_every_dp_replica(self):
         optimizer_data = OptimizerData(
             ttft_limits=1000,

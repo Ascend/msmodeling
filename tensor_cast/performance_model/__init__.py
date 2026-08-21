@@ -1569,9 +1569,30 @@ _SPARSE_MLA_PAGED_KV_READ_EFFICIENCY_PREFILL = 0.92
 _SPARSE_MLA_SPARSE_INDEX_DTYPE_BYTES = 4
 
 
-def _sparse_mla_decode_mask(query_lens: torch.Tensor) -> torch.Tensor:
-    """Return which requests use decode-like sparse MLA accounting. The predictive decode threshold is set one token above the largest observed decode/MTP target bundle, so query_len < threshold covers both single-token decode and small MTP decode without checking active context length or block span."""
-    return query_lens < _PREDICTIVE_DECODING_THRESHOLD
+def _sparse_mla_decode_mask(
+    query_lens: torch.Tensor,
+    is_decode_values: Optional[List[bool]] = None,
+) -> torch.Tensor:
+    """Return the per-request phase used by sparse MLA analytic accounting.
+
+    Request metadata is authoritative when available because a final chunked-
+    prefill block can contain fewer tokens than the predictive decode threshold.
+    Older callers without phase metadata retain the query-length heuristic.
+    """
+    if is_decode_values is None:
+        return query_lens < _PREDICTIVE_DECODING_THRESHOLD
+
+    if (
+        not isinstance(is_decode_values, (list, tuple))
+        or len(is_decode_values) != query_lens.numel()
+        or not all(isinstance(value, bool) for value in is_decode_values)
+    ):
+        raise ValueError(
+            "is_decode_values must contain one boolean per sparse MLA request "
+            f"(got {is_decode_values!r} for {query_lens.numel()} requests)"
+        )
+
+    return torch.tensor(is_decode_values, dtype=torch.bool, device=query_lens.device).reshape(query_lens.shape)
 
 
 def _sparse_mla_query_tile_count(query_lens: torch.Tensor) -> torch.Tensor:
@@ -1608,6 +1629,7 @@ def _estimate_sparse_mla_paged_kv_read_breakdown(
     query_lens: torch.Tensor,
     sparse_topk: Optional[int],
     topk_indices: Optional[torch.Tensor] = None,
+    decode_mask: Optional[torch.Tensor] = None,
 ):
     """Break down sparse MLA cache traffic for roofline memory bytes. The helper first caps each request's attention length with sparse_topk, then converts selected KV entries into physical bytes, applies decode/prefill efficiencies separately, and returns effective bytes = physical_bytes / eta so random sparse gathers reduce usable bandwidth without hard-coding a cache level."""
     block_size = kv_cache.size(1)
@@ -1650,7 +1672,7 @@ def _estimate_sparse_mla_paged_kv_read_breakdown(
     raw_selected_cache_entries = int(torch.sum(raw_sparse_cache_entries).item())
     raw_selected_kv_physical_read_bytes = raw_selected_cache_entries * cache_entry_size
 
-    is_decode = _sparse_mla_decode_mask(query_lens)
+    is_decode = _sparse_mla_decode_mask(query_lens) if decode_mask is None else decode_mask
     # Decode kernels stage sparse KV per S1 tile, so multiple adjacent query tokens can
     # reuse the same selected pages.  Prefill keeps per-token accounting because its
     # query dimension is already large enough to expose mostly sequential access.
@@ -1772,7 +1794,10 @@ def _multihead_latent_attention_properties_helper(
     # 2. Separate Prefill and Decode Sequences.
     # q_len == 5 with a long active context is the MTP target decode shape in SFA traces.
     num_tokens_per_seq = query_lens
-    is_decode = _sparse_mla_decode_mask(num_tokens_per_seq)
+    is_decode = _sparse_mla_decode_mask(
+        num_tokens_per_seq,
+        op_invoke_info.kwargs.get("is_decode_values"),
+    )
     is_prefill = ~is_decode
 
     total_fma_ops = 0
@@ -1873,6 +1898,7 @@ def _multihead_latent_attention_properties_helper(
         query_lens,
         sparse_topk,
         topk_indices,
+        is_decode,
     )
     if enable_sparse_mla_paged_kv_efficiency:
         properties.memory_read_bytes += (
@@ -1922,7 +1948,10 @@ def _calculate_mla_quant_ops(
     """
     # Separate prefill and decode sequences.
     num_tokens_per_seq = query_lens
-    is_decode = _sparse_mla_decode_mask(num_tokens_per_seq)
+    is_decode = _sparse_mla_decode_mask(
+        num_tokens_per_seq,
+        op_invoke_info.kwargs.get("is_decode_values"),
+    )
     is_prefill = ~is_decode
 
     total_quant_dequant_ops = 0
@@ -3484,17 +3513,6 @@ _DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_PREFILL = 0.90
 _DSA_INDEXER_PREFILL_CACHE_READ_QUERY_SCALE = 0.25
 
 
-def _sum_request_cache_blocks(request_total_seq_lens: torch.Tensor, block_size: int) -> int:
-    """Estimate total active cache blocks as sum(ceil(seq_len_i / block_size)). dsa_indexer receives active request lengths from the op invocation, so the roofline model can use those lengths directly instead of falling back to shape-only block-table estimates."""
-    cache_blocks = torch.div(request_total_seq_lens + block_size - 1, block_size, rounding_mode="floor")
-    return int(cache_blocks.sum().item())
-
-
-def _is_dsa_indexer_decode_mode(query_len: int) -> bool:
-    """Classify dsa_indexer decode mode with the same threshold rule as sparse MLA. Reusing _sparse_mla_decode_mask keeps single-token decode and small MTP decode classification consistent across the two sparse-attention-related operators."""
-    return bool(_sparse_mla_decode_mask(torch.tensor(query_len)).item())
-
-
 def _dsa_indexer_metadata_cache_len(indexer_cache: torch.Tensor, block_tables: Optional[torch.Tensor]) -> int:
     block_size = int(indexer_cache.size(1))
     if block_tables is not None:
@@ -3517,57 +3535,105 @@ def _estimate_dsa_indexer_decode_page_efficiency(logical_cache_block_count: int)
     return max(_DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_DECODE_FLOOR, min(eta, 1.0))
 
 
+def _dsa_indexer_request_accounting(
+    hidden_states: torch.Tensor,
+    indexer_cache: torch.Tensor,
+    request_total_seq_lens: Optional[torch.Tensor],
+    request_query_lens: Optional[torch.Tensor],
+    is_decode_values: Optional[List[bool]],
+    block_tables: Optional[torch.Tensor],
+) -> List[Tuple[int, int, bool]]:
+    """Return concrete ``(query_len, seq_len, is_decode)`` values per request."""
+    batch, query_len, _ = hidden_states.shape
+    total_query_tokens = int(batch * query_len)
+
+    query_values = None
+    if isinstance(request_query_lens, torch.Tensor) and not _tensor_value_unavailable(request_query_lens):
+        query_values = [int(value) for value in request_query_lens.reshape(-1).tolist()]
+
+    seq_values = None
+    if isinstance(request_total_seq_lens, torch.Tensor) and not _tensor_value_unavailable(request_total_seq_lens):
+        seq_values = [int(value) for value in request_total_seq_lens.reshape(-1).tolist()]
+
+    if query_values is not None:
+        request_count = len(query_values)
+    elif seq_values is not None:
+        request_count = len(seq_values)
+    elif isinstance(request_query_lens, torch.Tensor):
+        request_count = int(request_query_lens.numel())
+    elif isinstance(request_total_seq_lens, torch.Tensor):
+        request_count = int(request_total_seq_lens.numel())
+    elif is_decode_values is not None:
+        request_count = len(is_decode_values)
+    else:
+        request_count = int(batch)
+
+    if request_count <= 0:
+        raise ValueError("dsa_indexer request metadata must describe at least one request")
+
+    if query_values is None:
+        tokens_per_request, remainder = divmod(total_query_tokens, request_count)
+        query_values = [tokens_per_request + int(index < remainder) for index in range(request_count)]
+    elif len(query_values) != request_count or sum(query_values) != total_query_tokens:
+        raise ValueError(
+            "dsa_indexer query_lens must contain one packed boundary per request "
+            f"and sum to {total_query_tokens} tokens (got {query_values!r})"
+        )
+
+    if seq_values is None:
+        active_cache_len = _dsa_indexer_metadata_cache_len(indexer_cache, block_tables)
+        seq_values = [active_cache_len] * request_count
+    elif len(seq_values) != request_count:
+        raise ValueError(
+            "dsa_indexer seq_lens and query_lens must describe the same number of requests "
+            f"(got {len(seq_values)} and {request_count})"
+        )
+
+    decode_values = _sparse_mla_decode_mask(
+        torch.tensor(query_values, dtype=torch.int64),
+        is_decode_values,
+    ).tolist()
+    return list(zip(query_values, seq_values, decode_values))
+
+
 def _estimate_dsa_indexer_paged_cache_read_breakdown(
     hidden_states: torch.Tensor,
     indexer_cache: torch.Tensor,
     head_dim: int,
     request_total_seq_lens: Optional[torch.Tensor],
+    request_query_lens: Optional[torch.Tensor] = None,
+    is_decode_values: Optional[List[bool]] = None,
     block_tables: Optional[torch.Tensor] = None,
     fp8_mode: bool = False,
 ):
-    """Break down dsa_indexer cache bytes into penalized historical reads and physical append writes. It computes context_work = query_units * sum(seq_lens), historical_physical_bytes from cache element width plus fp8 scale bytes, then historical_effective_bytes = historical_physical_bytes / eta because only historical random reads lose bandwidth; appends remain linear writes."""
+    """Break down DSA cache traffic while preserving each request's explicit phase."""
     batch, query_len, _ = hidden_states.shape
     index_head_dim = indexer_cache.size(-1)
     block_size = indexer_cache.size(1)
     dtype_size = indexer_cache.element_size()
-    is_decode = _is_dsa_indexer_decode_mode(query_len)
-    if request_total_seq_lens is None or _tensor_value_unavailable(request_total_seq_lens):
-        active_cache_len = _dsa_indexer_metadata_cache_len(indexer_cache, block_tables)
-        if block_tables is not None:
-            logical_cache_block_count = batch * int(block_tables.size(1))
-        else:
-            logical_cache_block_count = max(int(indexer_cache.size(0)), 1)
-        summed_seq_lens = batch * active_cache_len
-    else:
-        logical_cache_block_count = _sum_request_cache_blocks(request_total_seq_lens, block_size)
-        summed_seq_lens = int(request_total_seq_lens.sum().item())
-    # Decode touches a small number of query tokens, so efficiency is dominated by
-    # random page traversal and improves slowly as more cache blocks amortize overhead.
-    # Formula: eta_decode = max(floor, min(base + scale * log2(block_count / reference_block_count), 1)).
-    if is_decode:
-        eta = _estimate_dsa_indexer_decode_page_efficiency(logical_cache_block_count)
-    else:
-        # Prefill sees adjacent-query reuse and longer contiguous cache walks.  The
-        # current paged-cache block size is fixed, so use the calibrated constant directly.
-        eta = _DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_PREFILL
-    # Decode has little query-side reuse, so every query token probes the historical
-    # cache.  Prefill amortizes repeated historical-cache reads across neighboring
-    # query tokens with the generic query scale above.  Formula:
-    # context_work = query_units * sum(request_total_seq_lens).
-    if is_decode:
-        query_units = query_len
-    else:
-        query_units = math.ceil(query_len * _DSA_INDEXER_PREFILL_CACHE_READ_QUERY_SCALE)
-    context_work = query_units * summed_seq_lens
-    # Historical reads are the only traffic penalized by sparse/random access.  The
-    # append path writes the current query tokens into cache linearly and remains
-    # physical byte traffic.  Formula:
-    # historical_physical_read_bytes = context_work * (index_head_dim * dtype_size + fp8_scale_bytes_per_token).
-    historical_cache_read_bytes = context_work * index_head_dim * dtype_size
     scale_bytes_per_token = ((head_dim + 127) // 128) * 4 if fp8_mode else 0
-    historical_scale_read_bytes = context_work * scale_bytes_per_token
-    historical_physical_read_bytes = historical_cache_read_bytes + historical_scale_read_bytes
-    historical_effective_read_bytes = historical_physical_read_bytes / eta if historical_physical_read_bytes != 0 else 0
+    bytes_per_historical_token = index_head_dim * dtype_size + scale_bytes_per_token
+    historical_effective_read_bytes = 0.0
+
+    for request_query_len, request_seq_len, is_decode in _dsa_indexer_request_accounting(
+        hidden_states,
+        indexer_cache,
+        request_total_seq_lens,
+        request_query_lens,
+        is_decode_values,
+        block_tables,
+    ):
+        logical_cache_block_count = math.ceil(request_seq_len / block_size)
+        if is_decode:
+            eta = _estimate_dsa_indexer_decode_page_efficiency(logical_cache_block_count)
+            query_units = request_query_len
+        else:
+            eta = _DSA_INDEXER_PAGED_CACHE_READ_EFFICIENCY_PREFILL
+            query_units = math.ceil(request_query_len * _DSA_INDEXER_PREFILL_CACHE_READ_QUERY_SCALE)
+        historical_physical_read_bytes = query_units * request_seq_len * bytes_per_historical_token
+        if historical_physical_read_bytes != 0:
+            historical_effective_read_bytes += historical_physical_read_bytes / eta
+
     append_cache_write_bytes = batch * query_len * index_head_dim * dtype_size
     append_scale_write_bytes = batch * query_len * scale_bytes_per_token
 
@@ -3587,6 +3653,8 @@ def _estimate_dsa_indexer_breakdown(
     qk_rope_head_dim: int,
     topk_limit: int,
     request_total_seq_lens: torch.Tensor,
+    request_query_lens: Optional[torch.Tensor] = None,
+    is_decode_values: Optional[List[bool]] = None,
     block_tables: Optional[torch.Tensor] = None,
     fp8_mode: bool = False,
 ):
@@ -3648,6 +3716,8 @@ def _estimate_dsa_indexer_breakdown(
         indexer_cache,
         head_dim,
         request_total_seq_lens=request_total_seq_lens,
+        request_query_lens=request_query_lens,
+        is_decode_values=is_decode_values,
         block_tables=block_tables,
         fp8_mode=fp8_mode,
     )
@@ -3698,6 +3768,8 @@ def _(
     head_dim = op_invoke_info.args[13]
     qk_rope_head_dim = op_invoke_info.args[14]
     topk_limit = op_invoke_info.args[15]
+    query_lens = op_invoke_info.args[16] if len(op_invoke_info.args) > 16 else op_invoke_info.kwargs.get("query_lens")
+    is_decode_values = op_invoke_info.kwargs.get("is_decode_values")
 
     # The cache dtype is already chosen by the upstream attention quant config,
     # so the roofline model only needs to read it, not re-decide fp8 policy here.
@@ -3712,6 +3784,8 @@ def _(
         qk_rope_head_dim,
         topk_limit,
         request_total_seq_lens=seq_lens,
+        request_query_lens=query_lens,
+        is_decode_values=is_decode_values,
         block_tables=block_tables,
         fp8_mode=fp8_mode,
     )

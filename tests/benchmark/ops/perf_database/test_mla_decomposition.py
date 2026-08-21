@@ -1972,6 +1972,54 @@ class TestDecomposeMlaSparse:
 class TestMlaSparseAnalyticProperties:
     """A1–A3: sparse ops are registered in analytic performance model."""
 
+    @staticmethod
+    def _tiny_sparse_op(func, query_len, is_decode_values=None):
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        args = _make_mla_prefill_args(
+            num_tokens=query_len,
+            batch_size=1,
+            avg_seq_len=8192,
+        )
+        args[5] = torch.tensor([query_len], dtype=torch.int64)
+        num_heads = args[0].size(1)
+        qk_nope_head_dim = 128
+        kv_lora_rank = 512
+        v_head_dim = args[9]
+        args[6] = torch.empty(
+            num_heads,
+            qk_nope_head_dim,
+            kv_lora_rank,
+            device="meta",
+            dtype=torch.bfloat16,
+        )
+        args[7] = torch.empty(
+            num_heads,
+            kv_lora_rank,
+            v_head_dim,
+            device="meta",
+            dtype=torch.bfloat16,
+        )
+        args.append(2048)
+
+        op = _make_op_info(func, args)
+        if is_decode_values is not None:
+            op.kwargs = {"is_decode_values": is_decode_values}
+        op.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
+        return op
+
+    @staticmethod
+    def _run_analytic(func, query_len, is_decode_values=None):
+        from tensor_cast.performance_model import OpInvokeInfo
+
+        op = TestMlaSparseAnalyticProperties._tiny_sparse_op(func, query_len, is_decode_values)
+        properties = OpInvokeInfo._op_properties_functors[func](op)
+        return properties, op
+
+    @staticmethod
+    def _gp_total(properties):
+        return sum(compute_ops.gp_ops for compute_ops in properties.compute_ops.values())
+
     def test_sparse_op_in_properties_registry(self):
         """A1: mla_sparse_attention.default has registered op_properties."""
         from tensor_cast.performance_model import OpInvokeInfo
@@ -1987,6 +2035,62 @@ class TestMlaSparseAnalyticProperties:
         assert torch.ops.tensor_cast.mla_sparse_attention_quant.default in OpInvokeInfo._op_properties_functors, (
             "mla_sparse_attention_quant.default not found in _op_properties_functors"
         )
+
+    @pytest.mark.parametrize("query_len", [1, 5])
+    def test_tiny_explicit_prefill_uses_prefill_analytic_accounting(self, query_len):
+        prefill_properties, prefill_op = self._run_analytic(
+            torch.ops.tensor_cast.mla_sparse_attention.default,
+            query_len,
+            [False],
+        )
+        decode_properties, _ = self._run_analytic(
+            torch.ops.tensor_cast.mla_sparse_attention.default,
+            query_len,
+            [True],
+        )
+
+        assert prefill_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {1, 2, 6, 7}
+        assert prefill_properties.memory_read_bytes < decode_properties.memory_read_bytes
+
+    def test_tiny_explicit_decode_and_missing_metadata_keep_decode_accounting(self):
+        explicit_properties, explicit_op = self._run_analytic(
+            torch.ops.tensor_cast.mla_sparse_attention.default,
+            1,
+            [True],
+        )
+        legacy_properties, legacy_op = self._run_analytic(
+            torch.ops.tensor_cast.mla_sparse_attention.default,
+            1,
+        )
+
+        assert explicit_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {1, 2, 8}
+        assert legacy_op.get_memory_access_properties.call_args.kwargs["exclude_input_ids"] == {1, 2, 8}
+        assert explicit_properties.memory_read_bytes == legacy_properties.memory_read_bytes
+
+    def test_tiny_explicit_phase_controls_quant_analytic_ops(self):
+        bf16_prefill, _ = self._run_analytic(
+            torch.ops.tensor_cast.mla_sparse_attention.default,
+            1,
+            [False],
+        )
+        bf16_decode, _ = self._run_analytic(
+            torch.ops.tensor_cast.mla_sparse_attention.default,
+            1,
+            [True],
+        )
+        quant_prefill, _ = self._run_analytic(
+            torch.ops.tensor_cast.mla_sparse_attention_quant.default,
+            1,
+            [False],
+        )
+        quant_decode, _ = self._run_analytic(
+            torch.ops.tensor_cast.mla_sparse_attention_quant.default,
+            1,
+            [True],
+        )
+
+        assert self._gp_total(quant_prefill) - self._gp_total(bf16_prefill) == 270336
+        assert self._gp_total(quant_decode) - self._gp_total(bf16_decode) == 294912
 
     def test_sparse_bf16_prefill_only_no_crash(self):
         """H1 regression: mla_sparse_attention.default with W_UK_T=None must not crash.

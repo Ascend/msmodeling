@@ -3593,18 +3593,29 @@ def test_accepted_miss_does_not_affect_normal_ops(accepted_miss_data_dir):
 # --- GLM5 measured lookup regression tests ---
 
 
-def _make_glm5_dsa_op():
+def _make_glm5_dsa_op(
+    *,
+    query_len=4096,
+    seq_len=4096,
+    is_decode=False,
+    query_lens_values=None,
+    seq_lens_values=None,
+    is_decode_values=None,
+):
+    seq_lens_values = [seq_len] if seq_lens_values is None else seq_lens_values
+    query_lens_values = [query_len] if query_lens_values is None else query_lens_values
+    is_decode_values = [is_decode] * len(seq_lens_values) if is_decode_values is None else is_decode_values
     op = _make_op_info(
         _FakeTorchOp("tensor_cast.dsa_indexer.default"),
         [
-            torch.empty(1, 4096, 6144, device="meta", dtype=torch.bfloat16),
-            torch.empty(1, 4096, 2048, device="meta", dtype=torch.bfloat16),
-            torch.empty(1, 4096, 64, device="meta", dtype=torch.bfloat16),
-            torch.empty(1, 4096, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, query_len, 6144, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, query_len, 2048, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, query_len, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, query_len, 64, device="meta", dtype=torch.bfloat16),
             torch.empty(33, 128, 128, device="meta", dtype=torch.bfloat16),
-            torch.empty(4096, device="meta", dtype=torch.int64),
+            torch.empty(query_len, device="meta", dtype=torch.int64),
             torch.empty(1, 33, device="meta", dtype=torch.int64),
-            torch.tensor([4096], dtype=torch.int64),
+            torch.tensor(seq_lens_values, dtype=torch.int64),
             torch.empty(4096, 2048, device="meta", dtype=torch.int8),
             torch.empty(128, 6144, device="meta", dtype=torch.bfloat16),
             torch.empty(32, 6144, device="meta", dtype=torch.bfloat16),
@@ -3614,8 +3625,11 @@ def _make_glm5_dsa_op():
             64,
             2048,
         ],
+        kwargs={
+            "query_lens": torch.tensor(query_lens_values, dtype=torch.int64),
+            "is_decode_values": is_decode_values,
+        },
     )
-    op.kwargs = {"phase": "prefill"}
     return op
 
 
@@ -3664,22 +3678,34 @@ def _make_glm5_bf16_mlapo_op():
     )
 
 
-def _make_glm5_sparse_mla_op():
+def _make_glm5_sparse_mla_op(
+    *,
+    query_len=4096,
+    seq_len=4096,
+    is_decode=False,
+    query_lens_values=None,
+    seq_lens_values=None,
+    is_decode_values=None,
+):
+    seq_lens_values = [seq_len] if seq_lens_values is None else seq_lens_values
+    query_lens_values = [query_len] if query_lens_values is None else query_lens_values
+    is_decode_values = [is_decode] * len(seq_lens_values) if is_decode_values is None else is_decode_values
     return _make_op_info(
-        torch.ops.tensor_cast.multihead_latent_attention.default,
+        _FakeTorchOp("tensor_cast.mla_sparse_attention.default"),
         [
-            torch.empty(4096, 2, 192, device="meta", dtype=torch.bfloat16),
+            torch.empty(query_len, 2, 192, device="meta", dtype=torch.bfloat16),
             torch.empty(64, 128, 576, device="meta", dtype=torch.bfloat16),
             None,
             None,
-            torch.tensor([4096], dtype=torch.int64),
-            torch.tensor([4096], dtype=torch.int64),
+            torch.tensor(seq_lens_values, dtype=torch.int64),
+            torch.tensor(query_lens_values, dtype=torch.int64),
             torch.empty(2, 128, 512, device="meta", dtype=torch.bfloat16),
             torch.empty(2, 512, 128, device="meta", dtype=torch.bfloat16),
             None,
             None,
             2048,
         ],
+        kwargs={"is_decode_values": is_decode_values},
     )
 
 
@@ -3800,7 +3826,194 @@ def test_glm5_sparse_mla_projects_sequence_parallel_shapes():
     assert specs[-1].input_shapes == [(256, 16, 256), (3,)]
 
 
-def test_glm5_sparse_mla_dsa_cp_does_not_reconstruct_global_heads_twice():
+def test_glm5_sparse_mla_chunked_prefill_keeps_sequence_parallel_shapes():
+    specs = _decompose_mla_common(
+        _make_glm5_sparse_mla_op(seq_len=8192, is_decode=False),
+        {
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+            "decomposer_options": {
+                "prefill_tail_transpose": {
+                    "requires_sequence_parallel": True,
+                    "kernel_type": "Transpose",
+                }
+            },
+        },
+        "BatchMatMulV2",
+        attention_kernel_type="SparseFlashAttention",
+    )
+
+    assert specs is not None
+    assert specs[0].input_shapes == [(32, 256, 128), (32, 128, 512)]
+    assert specs[1].attention_params["q_shape_3d"] == (256, 32, 512)
+    assert specs[-1].input_shapes == [(256, 16, 256), (3,)]
+
+
+def test_glm5_sparse_mla_interpolation_keeps_runtime_sequence_parallel_shapes(monkeypatch):
+    """An exact composite miss must not lose TP/SP context while falling back
+    to interpolation for a later chunked-prefill forward.
+    """
+    from tensor_cast.performance_model.profiling_database.data_source import QueryResult
+    from tensor_cast.performance_model.profiling_database.interpolating_data_source import (
+        InterpolatingDataSource,
+    )
+    from tensor_cast.performance_model.profiling_database import profiling_data_source
+
+    base = ProfilingDataSource(
+        _glm5_a3_data_dir(),
+        parallel_config=_make_parallel_config(ep_size=32, world_size=32, tp_size=16),
+    )
+    interpolating = InterpolatingDataSource(base)
+    op = _make_glm5_sparse_mla_op(seq_len=8192, is_decode=False)
+    mapping = base._op_mapping["operator_mappings"]["tensor_cast.mla_sparse_attention.default"]
+    exact_compute_hit = MagicMock(latency_us=1.0, kernel_type="mock_compute")
+    captured_attention_params = []
+    captured_compute_inputs = []
+
+    monkeypatch.setattr(profiling_data_source.config.compilation.passes, "enable_sequence_parallel", True)
+
+    def _capture_compute_inputs(_kernel_types, tc_inputs, *_args, **_kwargs):
+        captured_compute_inputs.append(tc_inputs)
+        return exact_compute_hit
+
+    monkeypatch.setattr(base, "_find_compute_match", _capture_compute_inputs)
+    monkeypatch.setattr(base, "_query_by_attn_params", lambda *_args, **_kwargs: None)
+
+    def _capture_attention_params(kernel_types, params, dtype):
+        captured_attention_params.append(dict(params))
+        return QueryResult(
+            latency_us=1.0,
+            confidence=0.7,
+            source=QuerySource.INTERPOLATED,
+            details={"kernel_type": kernel_types[0], "method": "test"},
+        )
+
+    monkeypatch.setattr(interpolating, "_interpolate_attention_by_params", _capture_attention_params)
+
+    result = interpolating._interpolate_composite(
+        op,
+        mapping,
+        "tensor_cast.mla_sparse_attention.default",
+    )
+
+    assert result is not None
+    assert captured_attention_params[0]["q_shape_3d"] == (256, 2, 512)
+    assert any(
+        [dtype for _shape, dtype in tc_inputs] == [torch.bfloat16, torch.int64] for tc_inputs in captured_compute_inputs
+    )
+
+
+def test_glm5_dsa_chunked_prefill_interpolation_uses_specialized_scatter_lookup(monkeypatch):
+    """DSA interpolation must preserve the exact path's pool-agnostic cache-write lookup."""
+    from tensor_cast.performance_model.profiling_database.interpolating_data_source import (
+        InterpolatingDataSource,
+    )
+    from tensor_cast.performance_model.profiling_database import profiling_data_source
+
+    base = ProfilingDataSource(
+        _glm5_a3_data_dir(),
+        parallel_config=_make_parallel_config(ep_size=32, world_size=32, tp_size=16),
+    )
+    monkeypatch.setattr(profiling_data_source.config.compilation.passes, "enable_sequence_parallel", True)
+
+    result = InterpolatingDataSource(base).lookup(_make_glm5_dsa_op(seq_len=8192, is_decode=False))
+
+    assert result is not None
+    assert result.source == QuerySource.INTERPOLATED
+    sub_kernels = {detail["kernel_type"]: detail for detail in result.details["sub_kernels"]}
+    assert sub_kernels["ScatterNdUpdate"]["method"] == "exact_scatter_cache_write"
+    assert sub_kernels["LightningIndexer"]["details"]["target"] == {
+        "q_tokens": 256.0,
+        "effective_kv_len": 4352.0,
+    }
+
+
+def test_glm5_sparse_mla_decode_does_not_apply_sequence_parallel():
+    specs = _decompose_mla_common(
+        _make_glm5_sparse_mla_op(query_len=1, seq_len=8192, is_decode=True),
+        {
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+            "decomposer_options": {
+                "prefill_tail_transpose": {
+                    "requires_sequence_parallel": True,
+                    "kernel_type": "Transpose",
+                }
+            },
+        },
+        "BatchMatMulV2",
+        attention_kernel_type="SparseFlashAttention",
+    )
+
+    assert specs is not None
+    assert specs[0].input_shapes == [(2, 1, 128), (2, 128, 512)]
+    assert specs[1].attention_params["q_shape_3d"] == (1, 2, 512)
+    assert len(specs) == 3
+
+
+def test_glm5_sparse_mla_mixed_phase_falls_back_from_composite_decomposition(caplog):
+    op = _make_glm5_sparse_mla_op(
+        query_lens_values=[2048, 2048],
+        seq_lens_values=[4096, 8192],
+        is_decode_values=[False, True],
+    )
+    caplog.set_level("DEBUG")
+
+    specs = _decompose_mla_common(
+        op,
+        {
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+        },
+        "BatchMatMulV2",
+        attention_kernel_type="SparseFlashAttention",
+    )
+
+    assert specs is None
+    assert "mixed prefill/decode requests" in caplog.text
+
+
+def test_glm5_sparse_mla_malformed_phase_fails_closed(caplog):
+    op = _make_glm5_sparse_mla_op()
+    op.kwargs = {"is_decode_values": []}
+    caplog.set_level("WARNING")
+
+    specs = _decompose_mla_common(
+        op,
+        {
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+        },
+        "BatchMatMulV2",
+        attention_kernel_type="SparseFlashAttention",
+    )
+
+    assert specs is None
+    assert "refusing shape inference" in caplog.text
+
+
+def test_glm5_sparse_mla_explicit_prefill_rejects_decode_shaped_query_lens(caplog):
+    op = _make_glm5_sparse_mla_op(seq_len=8192, is_decode=False)
+    args = list(op.args)
+    args[5] = None
+    op.args = tuple(args)
+    caplog.set_level("WARNING")
+
+    specs = _decompose_mla_common(
+        op,
+        {
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+        },
+        "BatchMatMulV2",
+        attention_kernel_type="SparseFlashAttention",
+    )
+
+    assert specs is None
+    assert "explicit prefill phase but decode-shaped query_lens" in caplog.text
+
+
+def test_glm5_sparse_mla_chunked_prefill_dsa_cp_does_not_reconstruct_global_heads_twice():
     op = _make_op_info(
         _FakeTorchOp("tensor_cast.mla_sparse_attention.default"),
         [
@@ -3808,7 +4021,7 @@ def test_glm5_sparse_mla_dsa_cp_does_not_reconstruct_global_heads_twice():
             torch.empty(64, 128, 576, device="meta", dtype=torch.bfloat16),
             None,
             None,
-            torch.tensor([4096], dtype=torch.int64),
+            torch.tensor([8192], dtype=torch.int64),
             torch.tensor([4096], dtype=torch.int64),
             torch.empty(64, 192, 512, device="meta", dtype=torch.bfloat16),
             torch.empty(64, 512, 256, device="meta", dtype=torch.bfloat16),
@@ -3816,6 +4029,7 @@ def test_glm5_sparse_mla_dsa_cp_does_not_reconstruct_global_heads_twice():
             None,
             2048,
         ],
+        kwargs={"is_decode_values": [False]},
     )
     specs = _decompose_mla_common(
         op,
@@ -4127,6 +4341,79 @@ def test_glm5_lightning_indexer_uses_rank_zero_sp_context():
     assert specs[-1].attention_params["q_shape_3d"] == (256, 32, 128)
     assert specs[-1].attention_params["actual_seq_lengths_values"] == [256]
     assert specs[-1].attention_params["actual_seq_lengths_kv_values"] == [256]
+
+
+def test_glm5_lightning_indexer_chunked_prefill_keeps_sequence_parallel_shapes():
+    specs = _decompose_dsa_indexer(
+        _make_glm5_dsa_op(seq_len=8192, is_decode=False),
+        {
+            "primary_kernel_type": "LightningIndexer",
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+        },
+    )
+
+    assert specs is not None
+    assert specs[0].input_shapes == [(256, 6144), (128, 6144)]
+    assert specs[-1].attention_params["q_shape_3d"] == (256, 32, 128)
+    assert specs[-1].attention_params["actual_seq_lengths_values"] == [256]
+    assert specs[-1].attention_params["actual_seq_lengths_kv_values"] == [4352]
+
+
+def test_glm5_lightning_indexer_preserves_heterogeneous_query_boundaries():
+    specs = _decompose_dsa_indexer(
+        _make_glm5_dsa_op(
+            query_lens_values=[128, 3968],
+            seq_lens_values=[4096, 8192],
+            is_decode_values=[False, False],
+        ),
+        {
+            "primary_kernel_type": "LightningIndexer",
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+        },
+    )
+
+    assert specs is not None
+    assert specs[-1].attention_params["actual_seq_lengths_values"] == [128, 256]
+    assert specs[-1].attention_params["actual_seq_lengths_kv_values"] == [4096, 4352]
+
+
+def test_glm5_lightning_indexer_multiple_requests_without_query_boundaries_fail_closed(caplog):
+    op = _make_glm5_dsa_op(
+        query_lens_values=[128, 3968],
+        seq_lens_values=[4096, 8192],
+        is_decode_values=[False, False],
+    )
+    op.kwargs["query_lens"] = None
+    caplog.set_level("WARNING")
+
+    specs = _decompose_dsa_indexer(
+        op,
+        {
+            "primary_kernel_type": "LightningIndexer",
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+        },
+    )
+
+    assert specs is None
+    assert "cannot recover per-request query boundaries" in caplog.text
+
+
+def test_glm5_lightning_indexer_decode_does_not_apply_sequence_parallel():
+    specs = _decompose_dsa_indexer(
+        _make_glm5_dsa_op(query_len=1, seq_len=8192, is_decode=True),
+        {
+            "primary_kernel_type": "LightningIndexer",
+            "_runtime_tp_size": 16,
+            "_runtime_sequence_parallel": True,
+        },
+    )
+
+    assert specs is not None
+    assert specs[0].input_shapes == [(1, 6144), (128, 6144)]
+    assert specs[-1].attention_params["q_shape_3d"] == (1, 32, 128)
 
 
 def test_glm5_sfa_selects_effective_sequence_context(tmp_path):

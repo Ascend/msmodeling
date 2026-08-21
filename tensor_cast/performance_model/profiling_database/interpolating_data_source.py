@@ -3206,7 +3206,8 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if decomposer is None:
             return None
 
-        specs = decomposer(op_invoke_info, mapping)
+        runtime_mapping = self.base._build_composite_runtime_mapping(mapping)
+        specs = decomposer(op_invoke_info, runtime_mapping)
         if not specs:
             return None
 
@@ -3238,15 +3239,53 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                             "matched_kernel_type": matched_kernel_type,
                         }
                     )
+            elif spec.query_mode == "mlapo_preprocess" and spec.runtime_params:
+                hit = self.base._query_mlapo_preprocess(kernel_types, spec.runtime_params, spec.dtype)
+                lat = hit.latency_us if hit is not None else None
+                if hit is not None:
+                    matched_kernel_type = hit.kernel_type
+                    sub_detail.update(
+                        {
+                            "source": QuerySource.MEASURED.name,
+                            "method": "exact_mlapo_preprocess",
+                            "matched_kernel_type": matched_kernel_type,
+                        }
+                    )
+            elif spec.query_mode == "scatter_cache_write" and spec.cache_params:
+                hit = self.base._query_scatter_cache_write(kernel_types, spec.cache_params, spec.dtype)
+                lat = hit.latency_us if hit is not None else None
+                if hit is not None:
+                    matched_kernel_type = hit.kernel_type
+                    sub_detail.update(
+                        {
+                            "source": QuerySource.MEASURED.name,
+                            "method": "exact_scatter_cache_write",
+                            "matched_kernel_type": matched_kernel_type,
+                        }
+                    )
+            elif spec.query_mode == "cache_postprocess" and spec.cache_params:
+                hit = self.base._query_cache_postprocess(kernel_types, spec.cache_params, spec.dtype)
+                lat = hit.latency_us if hit is not None else None
+                if hit is not None:
+                    matched_kernel_type = hit.kernel_type
+                    sub_detail.update(
+                        {
+                            "source": QuerySource.MEASURED.name,
+                            "method": "exact_cache_postprocess",
+                            "matched_kernel_type": matched_kernel_type,
+                        }
+                    )
             else:
-                torch_dtype = None
-                for k, v in DTYPE_MAP.items():
-                    if v == spec.dtype:
-                        torch_dtype = k
-                        break
-                if torch_dtype is not None:
-                    tc_inputs = [(shape, torch_dtype) for shape in spec.input_shapes]
-                    hit = self.base._find_compute_match(kernel_types, tc_inputs, spec.tc_input_count)
+                profile_dtypes = spec.input_dtypes or [spec.dtype] * len(spec.input_shapes)
+                torch_dtypes = [next((k for k, v in DTYPE_MAP.items() if v == dtype), None) for dtype in profile_dtypes]
+                if len(torch_dtypes) == len(spec.input_shapes) and all(dtype is not None for dtype in torch_dtypes):
+                    tc_inputs = list(zip(spec.input_shapes, torch_dtypes))
+                    hit = self.base._find_compute_match(
+                        kernel_types,
+                        tc_inputs,
+                        spec.tc_input_count,
+                        auto_truncate=True,
+                    )
                     lat = hit.latency_us if hit else None
                     if hit is not None:
                         matched_kernel_type = hit.kernel_type

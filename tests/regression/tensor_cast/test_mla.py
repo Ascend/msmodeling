@@ -24,6 +24,28 @@ class TestMlaIndexerCacheHooks(unittest.TestCase):
     def test_deepseek_sparse_requires_indexer_cache(self):
         self.assertTrue(DeepseekSparseAttention.requires_indexer_cache())
 
+    def test_sparse_backend_kwargs_keep_legacy_single_argument_hook(self):
+        topk_indices = torch.tensor([1, 2])
+        wrapper = SimpleNamespace(indexer=SimpleNamespace(topk_limit=2))
+
+        kwargs = DeepseekSparseAttention._get_backend_kwargs(
+            wrapper,
+            topk_indices,
+        )
+
+        self.assertEqual(kwargs["topk_limit"], 2)
+        self.assertIs(kwargs["topk_indices"], topk_indices)
+
+    def test_sparse_backend_metadata_kwargs_propagate_phase(self):
+        phase_values = [False, True]
+
+        kwargs = DeepseekSparseAttention._get_backend_metadata_kwargs(
+            SimpleNamespace(),
+            SimpleNamespace(is_decode_values=phase_values),
+        )
+
+        self.assertIs(kwargs["is_decode_values"], phase_values)
+
     def test_base_build_tp_plan_extras_empty(self):
         self.assertEqual(
             MultiheadLatentAttentionTensorCast.build_tp_plan_extras("layers", {}, SimpleNamespace()),
@@ -266,6 +288,37 @@ class TestDeepseekSparseAttentionIndexer(unittest.TestCase):
             )
 
         self.assertTrue(torch.equal(mock_dsa_indexer.call_args.args[7], attention_meta.seq_lens))
+        self.assertIsNone(mock_dsa_indexer.call_args.kwargs["query_lens"])
+        self.assertIsNone(mock_dsa_indexer.call_args.kwargs["is_decode_values"])
+
+    def test_forward_passes_decode_phase_to_op(self):
+        phase_values = [False, True]
+        query_lens = torch.tensor([3, 17], dtype=torch.long)
+        attention_meta = SimpleNamespace(
+            slot_mapping=None,
+            block_table_tensor=None,
+            seq_lens=torch.tensor([17, 19], dtype=torch.long),
+            query_lens=query_lens,
+            is_decode_values=phase_values,
+        )
+
+        with patch("torch.ops.tensor_cast.dsa_indexer") as mock_dsa_indexer:
+            mock_dsa_indexer.return_value = torch.randn(
+                self.batch_size,
+                self.seq_len,
+                self.indexer.topk_limit,
+            )
+
+            self.indexer.forward(
+                self.hidden_states,
+                self.qa_normed,
+                self.position_embeddings,
+                self.indexer_cache,
+                attention_meta,
+            )
+
+        self.assertIs(mock_dsa_indexer.call_args.kwargs["query_lens"], query_lens)
+        self.assertIs(mock_dsa_indexer.call_args.kwargs["is_decode_values"], phase_values)
 
     def test_dsa_indexer_op_returns_query_major_topk_shape(self):
         batch_size = 2

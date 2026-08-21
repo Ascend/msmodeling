@@ -662,6 +662,54 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         self.assertIsInstance(model._inner.mtp.lm_head, ColumnParallelLinear)
         self.assertEqual(model._inner.mtp.lm_head.tp_group.world_size, 2)
 
+    @staticmethod
+    def _dsa_indexer_breakdown_for_requests(query_lens, seq_lens, is_decode_values):
+        total_query_tokens = sum(query_lens)
+        hidden_states = torch.empty(1, total_query_tokens, 16, device="meta", dtype=torch.float16)
+        qa_normed = torch.empty(1, total_query_tokens, 4, device="meta", dtype=torch.float16)
+        max_cache_blocks = (max(seq_lens) + 127) // 128
+        indexer_cache = torch.empty(max_cache_blocks, 128, 7, device="meta", dtype=torch.float16)
+        return _estimate_dsa_indexer_breakdown(
+            hidden_states,
+            qa_normed,
+            indexer_cache,
+            num_heads=2,
+            head_dim=8,
+            qk_rope_head_dim=4,
+            topk_limit=5,
+            request_total_seq_lens=torch.tensor(seq_lens, dtype=torch.long),
+            request_query_lens=torch.tensor(query_lens, dtype=torch.long),
+            is_decode_values=is_decode_values,
+        )
+
+    @staticmethod
+    def _dsa_indexer_op_info(query_len, seq_len, is_decode):
+        cache_blocks = (seq_len + 127) // 128
+        args = (
+            torch.empty(1, query_len, 16, device="meta", dtype=torch.float16),
+            torch.empty(1, query_len, 4, device="meta", dtype=torch.float16),
+            torch.empty(1, query_len, 4, device="meta", dtype=torch.float16),
+            torch.empty(1, query_len, 4, device="meta", dtype=torch.float16),
+            torch.empty(cache_blocks, 128, 7, device="meta", dtype=torch.float16),
+            torch.empty(query_len, device="meta", dtype=torch.int64),
+            torch.empty(1, cache_blocks, device="meta", dtype=torch.int64),
+            torch.tensor([seq_len], dtype=torch.long),
+            torch.empty(16, 4, device="meta", dtype=torch.float16),
+            torch.empty(8, 16, device="meta", dtype=torch.float16),
+            torch.empty(2, 16, device="meta", dtype=torch.float16),
+            torch.empty(8, device="meta", dtype=torch.float16),
+            2,
+            8,
+            4,
+            5,
+        )
+        kwargs = {
+            "query_lens": torch.tensor([query_len], dtype=torch.long),
+            "is_decode_values": [is_decode],
+        }
+        out = torch.empty(1, query_len, 5, device="meta", dtype=torch.long)
+        return OpInvokeInfo(torch.ops.tensor_cast.dsa_indexer.default, args, kwargs, out)
+
     def test_dsa_indexer_breakdown_helper_bf16(self):
         hidden_states = torch.randn(2, 3, 16, device="meta", dtype=torch.float16)
         qa_normed = torch.randn(2, 3, 4, device="meta", dtype=torch.float16)
@@ -696,6 +744,50 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         self.assertEqual(breakdown["append_scale_write_bytes"], 0)
         self.assertNotIn("cache_rw_bytes", breakdown)
         self.assertNotIn("scale_cache_rw_bytes", breakdown)
+
+    @parameterized.expand([(1,), (5,)])
+    def test_dsa_indexer_tiny_prefill_uses_explicit_phase(self, query_len):
+        seq_len = 40960 + query_len
+
+        prefill = self._dsa_indexer_breakdown_for_requests([query_len], [seq_len], [False])
+        decode = self._dsa_indexer_breakdown_for_requests([query_len], [seq_len], [True])
+
+        prefill_query_units = (query_len + 3) // 4
+        expected_prefill_read_bytes = prefill_query_units * seq_len * 7 * 2 / 0.90
+        assert_close(self, prefill["historical_effective_read_bytes"], expected_prefill_read_bytes)
+        self.assertLess(prefill["historical_effective_read_bytes"], decode["historical_effective_read_bytes"])
+
+    def test_dsa_indexer_one_token_decode_uses_explicit_phase(self):
+        seq_len = 40961
+
+        decode = self._dsa_indexer_breakdown_for_requests([1], [seq_len], [True])
+        legacy = self._dsa_indexer_breakdown_for_requests([1], [seq_len], None)
+
+        assert_close(self, decode["historical_effective_read_bytes"], legacy["historical_effective_read_bytes"])
+
+    def test_dsa_indexer_mixed_phase_accounts_each_request(self):
+        mixed = self._dsa_indexer_breakdown_for_requests([5, 1], [40965, 8193], [False, True])
+        prefill = self._dsa_indexer_breakdown_for_requests([5], [40965], [False])
+        decode = self._dsa_indexer_breakdown_for_requests([1], [8193], [True])
+
+        assert_close(
+            self,
+            mixed["historical_effective_read_bytes"],
+            prefill["historical_effective_read_bytes"] + decode["historical_effective_read_bytes"],
+        )
+
+    def test_empirical_dsa_indexer_miss_preserves_explicit_prefill_phase(self):
+        data_source = Mock(spec=DataSourcePerformanceModel)
+        data_source.lookup.return_value = None
+        perf_model = EmpiricalPerformanceModel(TEST_DEVICE, data_source)
+
+        prefill = perf_model.process_op(self._dsa_indexer_op_info(5, 40965, False))
+        decode = perf_model.process_op(self._dsa_indexer_op_info(5, 40965, True))
+
+        self.assertEqual(prefill.statistics["shape_match_rule"], "analytic")
+        self.assertEqual(decode.statistics["shape_match_rule"], "analytic")
+        self.assertLess(prefill.statistics[StatsKey.MEMORY_ACCESS], decode.statistics[StatsKey.MEMORY_ACCESS])
+        self.assertTrue(all(record.lookup_result is None for record in perf_model.op_records))
 
     def test_dsa_indexer_breakdown_helper_uses_request_total_seq_lens_for_score_length(
         self,

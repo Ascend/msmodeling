@@ -16,6 +16,18 @@ from .quant_linear import TensorCastQuantLinear
 from .utils import get_partial_sharded, ModelWrapperBase
 
 
+def _get_request_phase_values(attention_meta: Optional[AttentionMetadataBase]) -> Optional[list[bool]]:
+    """Return per-request phase metadata (``True`` means decode), if present."""
+
+    return getattr(attention_meta, "is_decode_values", None)
+
+
+def _get_request_query_lens(attention_meta: Optional[AttentionMetadataBase]) -> Optional[torch.Tensor]:
+    """Return materialized per-request query lengths, if present."""
+
+    return getattr(attention_meta, "query_lens", None)
+
+
 def tp_plan_module_path(prefix: str, relative_path: str) -> str:
     """Return a TP-plan glob for a module under ``prefix``.
 
@@ -376,6 +388,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             "topk_limit": None,
             "topk_indices": None,
             **self._get_backend_kwargs(pre_attn_out),
+            **self._get_backend_metadata_kwargs(attention_meta),
         }
         if self.quant_config is not None:
             attention_backend = partial(
@@ -481,9 +494,20 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
 
     def _get_backend_kwargs(self, pre_attn_out) -> dict:
         """
-        Hook for subclasses to inject additional arguments into the attention backend.
+        Legacy hook for subclasses to inject arguments into the attention backend.
+
+        Keep the single-argument signature for out-of-tree subclasses. Metadata-aware
+        extensions belong in :meth:`_get_backend_metadata_kwargs`.
+        """
+        return {}
+
+    def _get_backend_metadata_kwargs(
+        self,
+        attention_meta: Optional[AttentionMetadataBase] = None,
+    ) -> dict:
+        """Hook for subclasses to inject attention-metadata-derived arguments.
+
         Default implementation returns an empty dict (standard dense attention).
-        Subclasses can override this to pass specific parameters (e.g., top-k, window size).
         """
         return {}
 
@@ -592,6 +616,12 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
             "topk_indices": pre_attn_out,
         }
 
+    def _get_backend_metadata_kwargs(
+        self,
+        attention_meta: Optional[AttentionMetadataBase] = None,
+    ) -> dict:
+        return {"is_decode_values": _get_request_phase_values(attention_meta)}
+
     def _get_attention_op(self, quant_enabled: bool):
         """Return the sparse-MLA (SFA) TC op for the DSA path.
 
@@ -683,4 +713,6 @@ class DeepseekSparseAttentionIndexer(ModelWrapperBase):
             self.head_dim,
             self.qk_rope_head_dim,
             self.topk_limit,
+            query_lens=_get_request_query_lens(attention_meta),
+            is_decode_values=_get_request_phase_values(attention_meta),
         )

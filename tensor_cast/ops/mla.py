@@ -317,6 +317,8 @@ def _(
     v_head_dim: int,
     topk_limit: Optional[int] = None,
     topk_indices: Optional[torch.Tensor] = None,
+    *,
+    is_decode_values: Optional[list[bool]] = None,
 ) -> torch.Tensor:
     """
     Sparse MLA attention (DSA path) for DeepSeek-V3.2 and GLM-5.1.
@@ -324,6 +326,9 @@ def _(
     Semantically identical to multihead_latent_attention; registered as a
     separate TC op so the profiling database maps it to SparseFlashAttention
     (SFA) instead of FusedInferAttentionScore (FIA).
+
+    ``is_decode_values`` carries the explicit per-request phase from attention
+    metadata so profiling does not infer decode from chunked-prefill shapes.
 
     vllm-ascend dispatch condition: hf_config has index_topk → AscendSFABackend
     → npu_sparse_flash_attention.
@@ -362,11 +367,14 @@ def _(
     out_scale: Optional[torch.Tensor],
     out_offset: Optional[torch.Tensor],
     out_dtype: Optional[torch.dtype],
+    *,
+    is_decode_values: Optional[list[bool]] = None,
 ) -> torch.Tensor:
     """
     Quantized sparse MLA attention (DSA path). SFA variant of
     multihead_latent_attention_quant. Used by DeepSeek-V3.2 and GLM-5.1
-    when quant config is enabled.
+    when quant config is enabled. ``is_decode_values`` has the same phase
+    semantics as the BF16 sparse MLA op.
     """
     if out_dtype is None:
         out_dtype = q.dtype
@@ -391,9 +399,16 @@ def _(
     head_dim: int,
     qk_rope_head_dim: int,
     topk_limit: int,
+    query_lens: Optional[torch.Tensor] = None,
+    *,
+    is_decode_values: Optional[list[bool]] = None,
 ) -> torch.Tensor:
     """
     Fused DSA indexer semantic block.
+
+    ``query_lens`` carries the per-request query boundaries used by the
+    sequence-parallel rank projection and analytic fallback. ``is_decode_values``
+    carries the explicit per-request phase for both performance-model paths.
 
     For the DeepSeek-V3.2-style fp8 path (non-strict math/code):
         q = rope(wq_b(qa_normed))

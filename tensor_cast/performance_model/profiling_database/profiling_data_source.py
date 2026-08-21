@@ -259,6 +259,7 @@ def _rank_zero_sparse_runtime_vectors(
     global_query_tokens: int,
     local_query_tokens: int,
     query_lens: Optional[torch.Tensor] = None,
+    require_query_lens_for_multiple_requests: bool = False,
 ) -> Optional[Tuple[List[int], List[int]]]:
     """Mirror vLLM-Ascend DSA context-parallel metadata for TP rank 0."""
 
@@ -266,7 +267,15 @@ def _rank_zero_sparse_runtime_vectors(
     if seq_values is None or not seq_values:
         return None
     query_values = _tensor_int_values(query_lens) if isinstance(query_lens, torch.Tensor) else None
-    if query_values is None or len(query_values) != len(seq_values) or sum(query_values) != global_query_tokens:
+    query_values_are_valid = (
+        query_values is not None
+        and len(query_values) == len(seq_values)
+        and all(value >= 0 for value in query_values)
+        and sum(query_values) == global_query_tokens
+    )
+    if not query_values_are_valid:
+        if require_query_lens_for_multiple_requests and len(seq_values) > 1:
+            return None
         if sum(seq_values) == global_query_tokens:
             # This equality is the full-prefill case: the query covers every
             # token in each sequence. Decode includes historical KV context,
@@ -795,6 +804,74 @@ def _is_decode_mla(args: tuple) -> bool:
     return True
 
 
+def _resolve_batch_phase(
+    op_invoke_info: "OpInvokeInfo",
+    expected_requests: Optional[int] = None,
+) -> Optional[str]:
+    """Resolve an explicit whole-batch prefill/decode phase when available.
+
+    ``is_decode_values`` originates from ``RequestInfo.is_decode`` and remains
+    reliable for chunked prefill, where query length is smaller than the total
+    sequence length. The legacy ``phase`` kwarg takes precedence when both are
+    present; contradictory homogeneous values are logged. Mixed batches return
+    ``"mixed"`` and malformed metadata returns ``"invalid"`` so callers can
+    fail closed instead of reintroducing shape-based phase misclassification.
+    """
+
+    phase = op_invoke_info.kwargs.get("phase")
+    is_decode_values = op_invoke_info.kwargs.get("is_decode_values")
+    if phase in ("prefill", "decode"):
+        request_phase = None
+        if (
+            isinstance(is_decode_values, (list, tuple))
+            and is_decode_values
+            and (expected_requests is None or len(is_decode_values) == expected_requests)
+            and all(isinstance(value, bool) for value in is_decode_values)
+        ):
+            if all(is_decode_values):
+                request_phase = "decode"
+            elif not any(is_decode_values):
+                request_phase = "prefill"
+        if request_phase is not None and request_phase != phase:
+            logger.warning(
+                "Legacy phase=%s contradicts is_decode_values=%s for %s; legacy phase takes precedence",
+                phase,
+                is_decode_values,
+                op_invoke_info.func,
+            )
+        return phase
+
+    if is_decode_values is None:
+        return None
+    if not isinstance(is_decode_values, (list, tuple)) or not is_decode_values:
+        logger.warning(
+            "Invalid is_decode_values=%r for %s; refusing shape inference",
+            is_decode_values,
+            op_invoke_info.func,
+        )
+        return "invalid"
+    if expected_requests is not None and len(is_decode_values) != expected_requests:
+        logger.warning(
+            "is_decode_values length %d does not match %d requests for %s; refusing shape inference",
+            len(is_decode_values),
+            expected_requests,
+            op_invoke_info.func,
+        )
+        return "invalid"
+    if not all(isinstance(value, bool) for value in is_decode_values):
+        logger.warning(
+            "Non-boolean is_decode_values=%r for %s; refusing shape inference",
+            is_decode_values,
+            op_invoke_info.func,
+        )
+        return "invalid"
+    if all(is_decode_values):
+        return "decode"
+    if not any(is_decode_values):
+        return "prefill"
+    return "mixed"
+
+
 def _decompose_mla_common(
     op_invoke_info: "OpInvokeInfo",
     mapping: dict,
@@ -841,15 +918,33 @@ def _decompose_mla_common(
     except (RuntimeError, ValueError):
         avg_seq_len = 0
 
-    sparse_phase = "prefill" if avg_seq_len and num_tokens >= avg_seq_len else "decode"
+    sparse_phase = _resolve_batch_phase(op_invoke_info, batch_size)
+    if sparse_phase == "mixed":
+        logger.debug(
+            "MLA op %s has mixed prefill/decode requests; falling back to analytic model (is_decode_values=%s)",
+            op_invoke_info.func,
+            op_invoke_info.kwargs.get("is_decode_values"),
+        )
+        return None
+    if sparse_phase == "invalid":
+        return None
+    if sparse_phase is None:
+        sparse_phase = "prefill" if avg_seq_len and num_tokens >= avg_seq_len else "decode"
     has_sparse_absorption_weights = (
         is_sparse_attention
         and len(args) > 7
         and isinstance(args[6], torch.Tensor)
         and isinstance(args[7], torch.Tensor)
     )
+    shape_is_decode = _is_decode_mla(args)
+    if is_sparse_attention and sparse_phase == "prefill" and shape_is_decode:
+        logger.warning(
+            "Sparse MLA op %s has explicit prefill phase but decode-shaped query_lens; falling back to analytic model",
+            op_invoke_info.func,
+        )
+        return None
 
-    if _is_decode_mla(args) or has_sparse_absorption_weights:
+    if shape_is_decode or has_sparse_absorption_weights:
         W_UK_T = args[6]  # (num_heads, qk_nope_head_dim, kv_lora_rank)
         W_UV = args[7]  # (num_heads, kv_lora_rank, v_head_dim)
         if W_UK_T is None or W_UV is None:
@@ -1388,6 +1483,7 @@ def _decompose_dsa_indexer(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Opt
 
     hidden_states, qa_normed = args[0], args[1]
     indexer_cache, block_tables, seq_lens = args[4], args[6], args[7]
+    query_lens = op_invoke_info.kwargs.get("query_lens")
     wq_b_weight, wk_weight = args[8], args[9]
     weights_proj_weight, k_norm_weight = args[10], args[11]
     num_heads, head_dim, topk_limit = args[12], args[13], args[15]
@@ -1421,12 +1517,21 @@ def _decompose_dsa_indexer(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Opt
     except (RuntimeError, ValueError):
         effective_seq_len = None
 
-    phase = op_invoke_info.kwargs.get("phase")
-    if phase not in ("prefill", "decode"):
-        # dsa_indexer does not currently carry phase explicitly.  seq_lens is
-        # already the effective length (do not add query tokens again), so a
-        # forward whose local query work covers that length is prefill; a much
-        # smaller query is decode.
+    phase = _resolve_batch_phase(op_invoke_info, int(seq_lens.shape[0]))
+    if phase == "mixed":
+        logger.debug(
+            "DSA indexer op %s has mixed prefill/decode requests; falling back to analytic model (is_decode_values=%s)",
+            op_invoke_info.func,
+            op_invoke_info.kwargs.get("is_decode_values"),
+        )
+        return None
+    if phase == "invalid":
+        return None
+    if phase is None:
+        # Compatibility fallback for older call sites without explicit phase.
+        # seq_lens is already the effective length (do not add query tokens
+        # again), so a forward whose local query work covers that length is
+        # prefill; a much smaller query is decode.
         phase = (
             "prefill"
             if effective_seq_len is not None and num_tokens >= effective_seq_len
@@ -1444,7 +1549,16 @@ def _decompose_dsa_indexer(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Opt
             seq_lens=seq_lens,
             global_query_tokens=num_tokens,
             local_query_tokens=indexer_tokens,
+            query_lens=query_lens if isinstance(query_lens, torch.Tensor) else None,
+            require_query_lens_for_multiple_requests=True,
         )
+        if runtime_vectors is None:
+            logger.warning(
+                "DSA indexer op %s cannot recover per-request query boundaries for sequence-parallel profiling; "
+                "falling back to analytic model",
+                op_invoke_info.func,
+            )
+            return None
 
     block_size = indexer_cache.shape[-2] if indexer_cache.ndim >= 3 else None
     runtime_kv_lengths = runtime_vectors[1] if runtime_vectors is not None else None
@@ -2353,6 +2467,20 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             sub_kernel_shapes=sub_kernel_shapes_info,
         )
 
+    def _build_composite_runtime_mapping(self, mapping: dict) -> dict:
+        """Inject the runtime TP/SP context required by composite decomposers.
+
+        Exact lookup and interpolation fallback must decompose the same
+        ``OpInvokeInfo`` with the same runtime mapping. Otherwise a later
+        chunked-prefill forward can use TP/SP-projected shapes for exact lookup
+        and then silently fall back to unprojected global shapes while
+        interpolating the same composite operator.
+        """
+        runtime_mapping = dict(mapping)
+        runtime_mapping["_runtime_tp_size"] = self.tp_size
+        runtime_mapping["_runtime_sequence_parallel"] = bool(config.compilation.passes.enable_sequence_parallel)
+        return runtime_mapping
+
     def _lookup_composite_decomposed(
         self,
         op_invoke_info: "OpInvokeInfo",
@@ -2373,9 +2501,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             attention latency as a full hit.
           - None if all sub-kernels miss.
         """
-        runtime_mapping = dict(mapping)
-        runtime_mapping["_runtime_tp_size"] = self.tp_size
-        runtime_mapping["_runtime_sequence_parallel"] = bool(config.compilation.passes.enable_sequence_parallel)
+        runtime_mapping = self._build_composite_runtime_mapping(mapping)
         specs = decomposer(op_invoke_info, runtime_mapping)
         if not specs:
             visible_regime = mapping.get("decomposer_options", {}).get("visible_kernel_regime", {})
