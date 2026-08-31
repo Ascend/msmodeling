@@ -36,6 +36,49 @@ from .test_common import (
 # Core runtime quantization zero-size assertions were moved to the unified entry in test_dtype.py.
 
 
+def test_runtime_region_v2_tracks_distinct_real_input_and_output():
+    region_id = 11
+    representative_input = torch.empty(1, 8, 16, device="meta")
+    begin_output = torch.ops.tensor_cast._internal_mark_region_begin(representative_input, region_id)
+    representative_output = begin_output[:, :4]
+    end_output = torch.ops.tensor_cast._internal_mark_region_end(representative_output, region_id)
+    copied_input = torch.empty(1, 12, 16, device="meta")
+    copied_output = torch.ops.tensor_cast._internal_copy_region_v2(copied_input, end_output, region_id)
+
+    runtime = Runtime(AnalyticPerformanceModel(TEST_DEVICE), TEST_DEVICE)
+    runtime.op_invoke_infos = [
+        OpInvokeInfo(
+            torch.ops.tensor_cast._internal_mark_region_begin.default,
+            (representative_input, region_id),
+            {},
+            begin_output,
+        ),
+        OpInvokeInfo(torch.ops.aten.slice.Tensor, (begin_output, 1, 0, 4), {}, representative_output),
+        OpInvokeInfo(
+            torch.ops.tensor_cast._internal_mark_region_end.default,
+            (representative_output, region_id),
+            {},
+            end_output,
+        ),
+        OpInvokeInfo(
+            torch.ops.tensor_cast._internal_copy_region_v2.default,
+            (copied_input, end_output, region_id),
+            {},
+            copied_output,
+        ),
+    ]
+
+    runtime.repeat_op_invoke_infos()
+
+    representative, copied = runtime.op_info_group
+    assert representative.real_input_tensor is representative_input
+    assert representative.real_output_tensor is end_output
+    assert copied.real_input_tensor is copied_input
+    assert copied.real_output_tensor is copied_output
+    assert copied.real_input_tensor.shape == (1, 12, 16)
+    assert copied.real_output_tensor.shape == (1, 4, 16)
+
+
 class PerfAnalysisTestMixin:
     @classmethod
     def setUpClass(cls):

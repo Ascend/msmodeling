@@ -209,6 +209,13 @@ class Runtime(TorchDispatchMode):
                 self.op_info_group.append(
                     region_id_to_op_invoke_infos[copy_id].shallow_copy(op_invoke_info.args[0], op_invoke_info.out)
                 )
+            elif op_invoke_info.func == torch.ops.tensor_cast._internal_copy_region_v2.default:
+                assert current_id is None, f"Already in region {current_id}, we do not support nested regions"
+                copy_id = op_invoke_info.args[2]
+                assert copy_id in region_id_to_op_invoke_infos, f"Region {copy_id} not marked before copy"
+                self.op_info_group.append(
+                    region_id_to_op_invoke_infos[copy_id].shallow_copy(op_invoke_info.args[0], op_invoke_info.out)
+                )
             else:
                 if current_id is not None:
                     region_id_to_op_invoke_infos[current_id].op_invoke_infos.append(op_invoke_info)

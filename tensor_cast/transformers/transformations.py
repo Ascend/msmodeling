@@ -12,6 +12,7 @@ import torch
 if TYPE_CHECKING:
     from .model import ModelWrapperBase
 
+from .. import config
 from ..layers import (
     COLWISE_LINEAR,
     PARALLEL_EMBEDDING,
@@ -266,6 +267,10 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         if effective_hf_config is not None and glm5_uses_indexshare(effective_hf_config)
         else None
     )
+    is_glm5_dsa = getattr(effective_hf_config, "model_type", None) == "glm_moe_dsa"
+    reuse_glm5_mlp_only = glm5_indexer_types is not None or (
+        is_glm5_dsa and config.compilation.passes.enable_sequence_parallel
+    )
 
     def get_submodule_structure_key(module: torch.nn.Module) -> str:
         submodule_types = []
@@ -311,12 +316,13 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         reuse_modules(layers)
 
     def reuse_glm5_stateless_submodules(layers):
-        """Reuse GLM-5.2 MLPs while keeping IndexShare decoder data flow real.
+        """Reuse GLM MLPs while keeping decoder-level data flow real.
 
-        A complete decoder-layer copy would also need to copy the auxiliary
-        ``topk_indices`` output used by shared Indexer layers. The current
-        region-copy primitive only replays the first tensor output, so limit
-        this pass to MLPs, which have no cross-layer state.
+        IndexShare models need the real decoder chain to propagate auxiliary
+        ``topk_indices``. All GLM DSA models also need it while sequence
+        parallel is enabled so local-token residual state can flow between
+        layers; copying a complete decoder would collapse that chain into a
+        representative full-token graph. MLPs remain safe replay boundaries.
         """
         mlps = []
         for layer in layers:
@@ -334,7 +340,7 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
 
     unwrapped = model.unwrap()
     if hasattr(unwrapped, "layers"):
-        if glm5_indexer_types is not None:
+        if reuse_glm5_mlp_only:
             reuse_glm5_stateless_submodules(unwrapped.layers)
         else:
             reuse_layers(unwrapped.layers)

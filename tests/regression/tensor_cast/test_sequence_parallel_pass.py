@@ -195,6 +195,19 @@ class SequenceParallelPassRegressionTestCase(unittest.TestCase):
             "Optimizer should produce an overall best configuration",
         )
 
+    def test_moe_entry_gather_is_found_through_region_boundary(self):
+        graph = Graph()
+        local = graph.placeholder("local")
+        gathered = graph.call_function(torch.ops.tensor_cast.all_gather.default, (local, 0, 0, [0, 1]))
+        region_begin = graph.call_function(
+            torch.ops.tensor_cast._internal_mark_region_begin.default,
+            (gathered, 7),
+        )
+        full_view = graph.call_function(torch.ops.aten.view.default, (region_begin, [-1, 16]))
+        graph.output(full_view)
+
+        self.assertIs(MoeLocalTokenRewriter._entry_gather_from_view(full_view), gathered)
+
     def test_moe_sp_rewrite_keeps_gate_local_and_hidden_transform_full(self):
         """Keep gate local while preserving MoE DP enter/exit transforms."""
         graph = Graph()

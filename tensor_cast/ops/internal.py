@@ -41,6 +41,25 @@ def _(
     return x
 
 
+@register_tensor_cast_op("_internal_copy_region_v2")
+def _(
+    current_input: torch.Tensor,
+    output_template: torch.Tensor,
+    id: int,
+) -> torch.Tensor:
+    """Copy a region whose input and output tensor specifications may differ.
+
+    ``current_input`` keeps the replay connected to the current layer and is
+    used by Runtime as the copied Region's real input. ``output_template`` is
+    the representative Region's marked output after graph passes have run; it
+    determines the replay output shape and dtype. Keeping these roles separate
+    is required when a pass changes a Region from full-token input to
+    sequence-local output (for example all-reduce -> reduce-scatter).
+    """
+    del current_input, id
+    return output_template.clone()
+
+
 @register_tensor_cast_op("_internal_wait_and_bind")
 def _(
     x: torch.Tensor,

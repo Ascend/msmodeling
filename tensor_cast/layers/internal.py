@@ -25,6 +25,10 @@ class RegionMarkerWrapper(ModelWrapperBase):
         self.repeat_count = repeat_count
         self.returns_tuple = True
         self.return_length = 1
+        # Runtime-only output template for later CopyLayerWrapper instances.
+        # Bypass nn.Module.__setattr__ so a Tensor is never registered as
+        # persistent module state.
+        object.__setattr__(self, "_region_output_template", None)
 
     def forward(self, *args, **kwargs):
         hidden_states = args[0]
@@ -47,6 +51,7 @@ class RegionMarkerWrapper(ModelWrapperBase):
                 hidden_states,
                 self.region_id,
             )
+            object.__setattr__(self, "_region_output_template", hidden_states)
             # Return tuple with marked hidden_states and other elements
             return (hidden_states,) + result[1:]
         else:
@@ -57,6 +62,7 @@ class RegionMarkerWrapper(ModelWrapperBase):
                 hidden_states,
                 self.region_id,
             )
+            object.__setattr__(self, "_region_output_template", hidden_states)
             return hidden_states
 
 
@@ -85,8 +91,12 @@ class CopyLayerWrapper(torch.nn.Module):
         hidden_states = args[0]
         # The following copy operation would be equivalent to:
         # result = self._inner.forward(*args, **kwargs)
-        hidden_states = torch.ops.tensor_cast._internal_copy_region(
+        output_template = self.representative._region_output_template
+        if output_template is None:
+            raise RuntimeError(f"Region {self.region_id} must execute before it can be copied")
+        hidden_states = torch.ops.tensor_cast._internal_copy_region_v2(
             hidden_states,
+            output_template,
             self.region_id,
         )
 

@@ -247,6 +247,70 @@ class Pattern1RewriterTestCase(unittest.TestCase):
 
 
 class Pattern2RewriterTestCase(unittest.TestCase):
+    def test_rewrites_representative_and_all_region_v2_copies(self):
+        graph = fx.Graph()
+        rank_group = RANK_GROUP
+        weight = graph.placeholder("weight")
+
+        representative_input = graph.placeholder("representative_input")
+        representative_input.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        region_begin = graph.call_function(
+            torch.ops.tensor_cast._internal_mark_region_begin.default,
+            (representative_input, 7),
+        )
+        region_begin.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        all_reduce = graph.call_function(
+            torch.ops.tensor_cast.all_reduce.default,
+            (region_begin, 0, rank_group),
+        )
+        all_reduce.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        region_end = graph.call_function(
+            torch.ops.tensor_cast._internal_mark_region_end.default,
+            (all_reduce, 7),
+        )
+        region_end.meta["val"] = _meta_tensor(INPUT_SHAPE)
+
+        boundaries = [region_end]
+        for index in range(2):
+            current_input = graph.placeholder(f"copy_input_{index}")
+            current_input.meta["val"] = _meta_tensor(INPUT_SHAPE)
+            copied = graph.call_function(
+                torch.ops.tensor_cast._internal_copy_region_v2.default,
+                (current_input, region_end, 7),
+            )
+            copied.meta["val"] = _meta_tensor(INPUT_SHAPE)
+            boundaries.append(copied)
+
+        norm_nodes = []
+        for index, boundary in enumerate(boundaries):
+            residual = graph.placeholder(f"residual_{index}")
+            residual.meta["val"] = _meta_tensor(LOCAL_INPUT_SHAPE)
+            residual.meta["tensor_cast_sp_local"] = True
+            norm2 = graph.call_function(
+                torch.ops.tensor_cast.add_rms_norm2.default,
+                (boundary, residual, weight, EPS),
+            )
+            norm2.meta["val"] = (
+                _meta_tensor(LOCAL_INPUT_SHAPE),
+                _meta_tensor(LOCAL_INPUT_SHAPE),
+            )
+            norm_nodes.append(norm2)
+        graph.output(tuple(norm_nodes))
+
+        self.assertEqual(Pattern2Rewriter().apply(graph), 3)
+        self.assertEqual(
+            sum(
+                node.op == "call_function" and node.target is torch.ops.tensor_cast.reduce_scatter.default
+                for node in graph.nodes
+            ),
+            1,
+        )
+        for boundary, norm2 in zip(boundaries, norm_nodes):
+            self.assertIs(norm2.args[0], boundary)
+            self.assertEqual(tuple(boundary.meta["val"].shape), LOCAL_INPUT_SHAPE)
+            self.assertTrue(boundary.meta["tensor_cast_sp_local"])
+            self.assertTrue(norm2.meta["tensor_cast_sp_local"])
+
     def test_pattern2_rewriter_apply(self):
         class Program(torch.nn.Module):
             def forward(self, x, res, w):

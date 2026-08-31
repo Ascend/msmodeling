@@ -68,6 +68,7 @@ class MultiStreamSchedulePass(TensorCastGraphModulePass):
         torch.ops.tensor_cast._internal_mark_region_begin.default,
         torch.ops.tensor_cast._internal_mark_region_end.default,
         torch.ops.tensor_cast._internal_copy_region.default,
+        torch.ops.tensor_cast._internal_copy_region_v2.default,
     }
     RESOURCE_COMPUTE = "compute"
     RESOURCE_COMM = "comm"

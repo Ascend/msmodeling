@@ -41,6 +41,7 @@ _ALL_GATHER = torch.ops.tensor_cast.all_gather.default
 _REGION_BEGIN = torch.ops.tensor_cast._internal_mark_region_begin.default
 _REGION_END = torch.ops.tensor_cast._internal_mark_region_end.default
 _COPY_REGION = torch.ops.tensor_cast._internal_copy_region.default
+_COPY_REGION_V2 = torch.ops.tensor_cast._internal_copy_region_v2.default
 _ADD_RMS_NORM2 = torch.ops.tensor_cast.add_rms_norm2.default
 _ADD_RMS_NORM = torch.ops.tensor_cast.add_rms_norm.default
 _ADD_OPS = {torch.ops.aten.add.Tensor}
@@ -243,6 +244,11 @@ def _is_sp_local_value(node, expected_shape=None, visited=None) -> bool:
 
     if node.op == "call_function" and node.target is _ALL_GATHER:
         return False
+    if node.op == "call_function" and node.target is _COPY_REGION_V2:
+        # V2 deliberately allows the current Region input (arg 0) and replay
+        # output template (arg 1) to have different token layouts. The output
+        # layout follows the representative output template.
+        return len(node.args) > 1 and _is_sp_local_value(node.args[1], expected_shape, visited)
     if node.op == "call_function" and node.target in _TRANSPARENT_OPS:
         return bool(node.args) and _is_sp_local_value(node.args[0], expected_shape, visited)
     if _is_sp_local_shape(_meta_shape(node), expected_shape):
@@ -274,42 +280,126 @@ def _is_moe_sp_local_value(node, expected_shape=None, visited=None) -> bool:
     return _is_sp_local_value(node, expected_shape, visited)
 
 
+def _resolve_replayed_comm(node):
+    """Resolve an all-reduce carried through a Region replay output.
+
+    Returns ``(comm, comm_output, boundary)``. ``boundary`` is the value used
+    by the current decoder layer, while ``comm_output`` is either the
+    all-reduce itself or its immediately following view/reshape. V2 copies
+    follow their output-template edge, never their current-input edge.
+    """
+    if not isinstance(node, Node):
+        return None, None, None
+    boundary = node
+    current = node
+    visited = set()
+    while isinstance(current, Node) and current not in visited:
+        visited.add(current)
+        if current.op != "call_function":
+            break
+        if current.target is _ALL_REDUCE:
+            return current, current, boundary
+        if current.target is _REDUCE_SCATTER:
+            source_comm = current.meta.get("tensor_cast_sp_source_all_reduce")
+            if isinstance(source_comm, Node):
+                return source_comm, source_comm, boundary
+            break
+        if current.target in _VIEW_OPS:
+            source = current.args[0] if current.args else None
+            if isinstance(source, Node) and source.target is _ALL_REDUCE:
+                return source, current, boundary
+            current = source
+            continue
+        if current.target is _COPY_REGION_V2:
+            current = current.args[1] if len(current.args) > 1 else None
+            continue
+        if current.target in {_REGION_END, _COPY_REGION}:
+            current = current.args[0] if current.args else None
+            continue
+        break
+    return None, None, None
+
+
+def _mark_replayed_value_local(node, full_tokens, local_tokens):
+    """Mark a Region output path local without following a V2 current input."""
+    current = node
+    visited = set()
+    while isinstance(current, Node) and current not in visited:
+        visited.add(current)
+        current.meta["tensor_cast_sp_local"] = True
+        if "val" in current.meta:
+            _set_local_token_meta(current, full_tokens, local_tokens)
+        if current.op != "call_function":
+            break
+        if current.target is _COPY_REGION_V2:
+            current = current.args[1] if len(current.args) > 1 else None
+        elif current.target in _VIEW_OPS | {_REGION_END, _COPY_REGION}:
+            current = current.args[0] if current.args else None
+        else:
+            break
+
+
+def _replace_replayed_comm(graph, comm, comm_output, boundary, rank, rank_group, rewritten):
+    """Rewrite one representative all-reduce and return this instance's local value."""
+    rs = rewritten.get(comm)
+    if rs is None:
+        rs = _insert_reduce_scatter(graph, comm, rank, rank_group)
+        rs.meta["tensor_cast_sp_source_all_reduce"] = comm
+        rewritten[comm] = rs
+        rs_users = [rs]
+        if comm_output is comm:
+            for user in list(comm.users):
+                if user is not rs:
+                    user.replace_input_with(comm, rs)
+        else:
+            comm_output.replace_input_with(comm, rs)
+            rs_users.append(comm_output)
+        for user in rs_users:
+            user.meta["tensor_cast_sp_local"] = True
+
+    local_value = rs if boundary is comm else boundary
+    full_shape = _meta_shape(comm_output)
+    local_shape = _infer_rs_shape(comm, _world_size(rank_group))
+    if full_shape is not None and local_shape is not None:
+        seq_dim = _shard_dim(comm_output)
+        full_tokens = full_shape[seq_dim]
+        local_tokens = local_shape[seq_dim]
+        _mark_replayed_value_local(local_value, full_tokens, local_tokens)
+    else:
+        local_value.meta["tensor_cast_sp_local"] = True
+    return local_value
+
+
 def _p2_match(node):
     if node.op != "call_function" or node.target is not _ADD_RMS_NORM2:
         return None
-    ar_inputs = [
-        arg
-        for arg in node.args[:2]
-        if isinstance(arg, Node) and arg.op == "call_function" and arg.target is _ALL_REDUCE
-    ]
-    if len(ar_inputs) != 1:
+    comm_inputs = [(*_resolve_replayed_comm(arg), arg) for arg in node.args[:2] if isinstance(arg, Node)]
+    comm_inputs = [candidate for candidate in comm_inputs if candidate[0] is not None]
+    if len(comm_inputs) != 1:
         return None
-    comm = ar_inputs[0]
-    other = node.args[1] if node.args[0] is comm else node.args[0]
+    comm, comm_output, boundary, _ = comm_inputs[0]
+    other = node.args[1] if node.args[0] is boundary else node.args[0]
     expected_shape = _infer_comm_rs_shape(comm)
     if expected_shape is None:
         return None
     if not _is_sp_local_value(other, expected_shape):
         return None
-    return comm, node
+    return comm, comm_output, boundary, node
 
 
 def _p2_moe_match(node):
     """Match P2 structurally for MoE graphs before earlier layers are rewritten."""
     if node.op != "call_function" or node.target is not _ADD_RMS_NORM2:
         return None
-    ar_inputs = [
-        arg
-        for arg in node.args[:2]
-        if isinstance(arg, Node) and arg.op == "call_function" and arg.target is _ALL_REDUCE
-    ]
-    if len(ar_inputs) != 1:
+    comm_inputs = [(*_resolve_replayed_comm(arg), arg) for arg in node.args[:2] if isinstance(arg, Node)]
+    comm_inputs = [candidate for candidate in comm_inputs if candidate[0] is not None]
+    if len(comm_inputs) != 1:
         return None
-    comm = ar_inputs[0]
+    comm, comm_output, boundary, _ = comm_inputs[0]
     comm_input_local = _is_moe_sp_local_value(comm.args[0])
     if not comm_input_local and _infer_comm_rs_shape(comm) is None:
         return None
-    return comm, node, comm_input_local
+    return comm, comm_output, boundary, node, comm_input_local
 
 
 def _insert_all_gather(graph, node, dim, rank, rank_group):
@@ -760,22 +850,23 @@ class Pattern2Rewriter:
             return self._apply_moe(graph)
 
         count = 0
+        rewritten = {}
         for node in list(graph.nodes):
             match = _p2_match(node)
             if match is None:
                 continue
-            comm, norm2 = match
+            comm, comm_output, boundary, norm2 = match
             # Keep find+rewrite inline: downstream P2/P3 candidates may rely on
             # tensor_cast_sp_local metadata set by an earlier P2 in this walk.
-            self._rewrite(graph, comm, norm2)
+            self._rewrite(graph, comm, comm_output, boundary, norm2, rewritten)
             count += 1
         return count
 
     @staticmethod
-    def _rewrite(graph, comm, norm2):
+    def _rewrite(graph, comm, comm_output, boundary, norm2, rewritten):
         rank, rg = comm.args[1], comm.args[2]
-        rs = _insert_reduce_scatter(graph, comm, rank, rg)
-        norm2.replace_input_with(comm, rs)
+        local_value = _replace_replayed_comm(graph, comm, comm_output, boundary, rank, rg, rewritten)
+        norm2.replace_input_with(boundary, local_value)
         norm2.meta["tensor_cast_sp_local"] = True
         ag_dim = _shard_dim(norm2)
         for u in list(norm2.users):
@@ -791,16 +882,17 @@ class Pattern2Rewriter:
     def _apply_moe(self, graph):
         """Batch-rewrite all P2 patterns in a MoE graph from one snapshot."""
         matches = [match for node in graph.nodes if (match := _p2_moe_match(node)) is not None]
-        for comm, norm2, comm_input_local in matches:
-            self._rewrite_moe(graph, comm, norm2, comm_input_local)
+        rewritten = {}
+        for comm, comm_output, boundary, norm2, comm_input_local in matches:
+            self._rewrite_moe(graph, comm, comm_output, boundary, norm2, comm_input_local, rewritten)
         return len(matches)
 
     @staticmethod
-    def _rewrite_moe(graph, comm, norm2, comm_input_local):
+    def _rewrite_moe(graph, comm, comm_output, boundary, norm2, comm_input_local, rewritten):
         rank, rg = comm.args[1], comm.args[2]
         if not comm_input_local:
-            rs = _insert_reduce_scatter(graph, comm, rank, rg)
-            norm2.replace_input_with(comm, rs)
+            local_value = _replace_replayed_comm(graph, comm, comm_output, boundary, rank, rg, rewritten)
+            norm2.replace_input_with(boundary, local_value)
             # ``add_rms_norm2`` derives its output shapes from its first input
             # (``torch.empty_like(x)``).  When the reduce-scattered attention
             # output lands in the residual slot, promote it to the
@@ -809,9 +901,9 @@ class Pattern2Rewriter:
             # the full-token domain by the selective all_gathers below.  This
             # keeps gate/topk and the MoE dispatch/combine token counts
             # consistent (issue #322).
-            if norm2.args[0] is not rs:
+            if norm2.args[0] is not local_value:
                 prev_x = norm2.args[0]
-                norm2.args = (rs, prev_x, *norm2.args[2:])
+                norm2.args = (local_value, prev_x, *norm2.args[2:])
         norm2.meta["tensor_cast_sp_local"] = True
         ag_dim = _shard_dim(norm2)
         for user in list(norm2.users):
@@ -885,6 +977,27 @@ class MoeLocalTokenRewriter:
         return matches
 
     @staticmethod
+    def _entry_gather_from_view(view_node):
+        if not isinstance(view_node, Node) or not view_node.args:
+            return None
+        source = view_node.args[0]
+        visited = set()
+        while isinstance(source, Node) and source not in visited:
+            visited.add(source)
+            if source.op != "call_function":
+                return None
+            if source.target is _ALL_GATHER:
+                return source
+            if source.target in {_REGION_BEGIN, _REGION_END, _COPY_REGION}:
+                source = source.args[0] if source.args else None
+                continue
+            if source.target is _COPY_REGION_V2:
+                source = source.args[1] if len(source.args) > 1 else None
+                continue
+            return None
+        return None
+
+    @staticmethod
     def _find_one(topk):
         if topk.op != "call_function" or topk.target is not _MOE_TOPK or not topk.args:
             return None
@@ -899,17 +1012,15 @@ class MoeLocalTokenRewriter:
             gate_logits,
             lambda n: n.op == "call_function"
             and n.target in _VIEW_OPS
-            and n.args
-            and isinstance(n.args[0], Node)
-            and n.args[0].target is _ALL_GATHER,
+            and MoeLocalTokenRewriter._entry_gather_from_view(n) is not None,
         )
         if full_view is None:
             return None
         view_shape = full_view.args[1] if len(full_view.args) > 1 else None
         if not isinstance(view_shape, (list, tuple)) or -1 not in view_shape:
             return None
-        gather_in = full_view.args[0]
-        local_value = gather_in.args[0]
+        entry_gather = MoeLocalTokenRewriter._entry_gather_from_view(full_view)
+        local_value = entry_gather.args[0]
         if not isinstance(local_value, Node) or not _is_moe_sp_local_value(local_value):
             return None
 
@@ -950,11 +1061,10 @@ class MoeLocalTokenRewriter:
         if any(_meta_shape(node) is None for node in (full_view, gate_logits, exit_gather)):
             logger.warning("Skipping SP MoE local-token rewrite because required shape metadata is missing")
             return None
-        return full_view, local_value, gate_logits, hidden_slices[0], exit_gather
+        return full_view, entry_gather, local_value, gate_logits, hidden_slices[0], exit_gather
 
     @staticmethod
-    def _rewrite(graph, full_view, local_value, gate_logits, hidden_slice, exit_gather):
-        entry_gather = full_view.args[0]
+    def _rewrite(graph, full_view, entry_gather, local_value, gate_logits, hidden_slice, exit_gather):
         rank, rank_group = entry_gather.args[2], entry_gather.args[3]
 
         # Gate runs on local tokens. Keep the original gathered full-token view
