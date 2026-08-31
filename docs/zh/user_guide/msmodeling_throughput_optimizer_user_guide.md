@@ -54,7 +54,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### 约束
 
-- `--max-batched-tokens` 设置单个数据并行（DP）副本在一次 Prefill 或混合 Prefill/Decode 步骤中的 token 预算。多个 DP 副本时，优化器会让每个副本独立使用该预算。未传入时，优化器先使用 `4 * input_length`，如果 Prefill 阶段 OOM，则依次降级为 `2 * input_length` 和 `1 * input_length`。如果 `effective_input_length` 大于当前生效的 `max_batched_tokens`，优化器会自动将 Prefill 拆分为多个分块（chunk）。如需匹配服务引擎单副本调度预算，请显式设置 `--max-batched-tokens`。
+- `--max-batched-tokens` 设置单个数据并行（DP）副本在一次 Prefill 或混合 Prefill/Decode 步骤中的 token 预算。多个 DP 副本时，优化器会让每个副本独立使用该预算。仅 PD 混部模式未传入时，优化器先使用 `4 * input_length`，如果 Prefill 阶段 OOM，则依次降级为 `2 * input_length` 和 `1 * input_length`。固定长度的 PD 分离和 PD-ratio Prefill 未传入时不设置调度预算，而是按结果行的完整并发建模，以便直接映射到 `text_generate`；为这些服务模拟指定 budget 时，请显式传入该参数。设置预算后，如果 `effective_input_length` 大于当前生效的 `max_batched_tokens`，优化器会自动将 Prefill 拆分为多个分块（chunk）。
 
 ### 2.2 PD 分离场景
 

@@ -139,6 +139,81 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["output_length"], 50)
         self.assertIsNone(row["tpot"])
 
+    def test_unbounded_prefill_models_full_concurrency_without_waves(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            tpot_limits=None,
+            batch_size=8,
+            input_length=1024,
+            output_length=16,
+            max_batched_tokens=None,
+            serving_cost=0,
+        )
+        captured_calls = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode, *, query_len=None, seq_len=None):
+            captured_calls.append((concurrency, is_decode, query_len, seq_len))
+            return Mock(
+                execution_time_s={"analytic": 0.001},
+                device_memory_available_gb=1.0,
+                breakdowns={},
+                total_device_memory_gb=64.0,
+                model_weight_size_gb=20.0,
+                kv_cache_size_gb=4.0,
+                model_activation_size_gb=1.0,
+                reserved_memory_gb=10.0,
+            )
+
+        with patch.object(self.strategy, "_get_forward_info", side_effect=fake_forward):
+            result = self.strategy.get_inference_info(optimizer_data)
+
+        self.assertEqual(captured_calls, [(32, False, None, None)])
+        self.assertEqual(result.get_summary_df().iloc[0]["prefill_num_chunks"], 1)
+
+    def test_run_skips_automatic_budget_when_disagg_budget_is_omitted(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=1000,
+            input_length=1024,
+            output_length=16,
+            max_batched_tokens=None,
+        )
+
+        with (
+            patch.object(self.strategy, "_run_once", return_value="full-forward") as run_once,
+            patch.object(
+                self.strategy,
+                "_run_with_auto_max_batched_tokens",
+            ) as auto_budget,
+        ):
+            result = self.strategy.run(optimizer_data, [1, 8])
+
+        self.assertEqual(result, "full-forward")
+        run_once.assert_called_once_with(optimizer_data, [1, 8])
+        auto_budget.assert_not_called()
+
+    def test_run_keeps_automatic_budget_for_decode_without_budget(self):
+        optimizer_data = OptimizerData(
+            ttft_limits=None,
+            tpot_limits=50,
+            input_length=1024,
+            output_length=16,
+            max_batched_tokens=None,
+        )
+
+        with (
+            patch.object(self.strategy, "_run_once") as run_once,
+            patch.object(
+                self.strategy,
+                "_run_with_auto_max_batched_tokens",
+                return_value="auto-budget",
+            ) as auto_budget,
+        ):
+            result = self.strategy.run(optimizer_data, [1, 8])
+
+        self.assertEqual(result, "auto-budget")
+        run_once.assert_not_called()
+        auto_budget.assert_called_once_with(optimizer_data, [1, 8])
+
     def test_chunked_prefill_splits_each_chunk_into_per_dp_token_budget_waves(self):
         optimizer_data = OptimizerData(
             ttft_limits=1000,

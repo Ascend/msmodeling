@@ -55,7 +55,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 
 #### Constraints
 
-- `--max-batched-tokens` sets the token budget for one data-parallel (DP) replica in one prefill or mixed prefill/decode step. With multiple DP replicas, the optimizer schedules up to this budget independently on every replica. If omitted, the optimizer starts from `4 * input_length`, then falls back to `2 * input_length` and `1 * input_length` when the Prefill phase OOMs. If `effective_input_length` is greater than the active `max_batched_tokens`, the optimizer automatically splits Prefill into chunks. Set `--max-batched-tokens` explicitly to match the serving engine's per-replica scheduling budget.
+- `--max-batched-tokens` sets the token budget for one data-parallel (DP) replica in one prefill or mixed prefill/decode step. With multiple DP replicas, the optimizer schedules up to this budget independently on every replica. Only PD mixed mode starts from `4 * input_length` when this option is omitted, then falls back to `2 * input_length` and `1 * input_length` when the Prefill phase OOMs. Fixed-length PD-disaggregated and PD-ratio Prefill without this option have no scheduling budget and model the result row's full concurrency, so they can be mapped directly to `text_generate`; pass the option explicitly to model a serving budget. Once a budget is active, the optimizer automatically splits Prefill into chunks when `effective_input_length` is greater than `max_batched_tokens`.
 
 ### 2.2 PD Disaggregation Scenario
 

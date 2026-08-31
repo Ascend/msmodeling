@@ -24,6 +24,36 @@ logger = logging.getLogger(__name__)
 class DisaggThroughputOptimizer(BaseThroughputOptimizer):
     name = "disaggregation"
 
+    @staticmethod
+    def _is_unbounded_prefill(optimizer_data: OptimizerData) -> bool:
+        """Whether Prefill should model one full-concurrency forward."""
+        return (
+            optimizer_data.ttft_limits is not None
+            and optimizer_data.length_distribution is None
+            and optimizer_data.max_batched_tokens is None
+        )
+
+    def run(self, optimizer_data: OptimizerData, batch_range: list[int]) -> OptimizerSummary | None:
+        """Run an unbounded Prefill when no serving token budget was requested.
+
+        Disaggregated Prefill results, including the Prefill side of PD ratio,
+        are convertible to one ``text_generate`` forward. An omitted
+        ``max_batched_tokens`` therefore must not acquire the base optimizer's
+        automatic serving budget: that budget would turn one reported
+        concurrency into several Prefill waves and understate the corresponding
+        single-forward peak memory. Explicit budgets retain the existing
+        chunk/wave model through the base implementation. Length-distribution
+        Prefill also retains the base path because it needs an effective token
+        budget to construct its representative chunk plan.
+
+        An unbounded run can still search for a smaller valid concurrency after
+        an OOM, but it never retries the same concurrency with a smaller token
+        budget: each reported row continues to represent one full forward.
+        """
+        if self._is_unbounded_prefill(optimizer_data):
+            return self._run_once(optimizer_data, batch_range)
+        return super().run(optimizer_data, batch_range)
+
     def initialize(self, model_runner: ModelRunner):
         self.model_runner = model_runner
         self.num_mtp_tokens = (
@@ -50,7 +80,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         input_length = optimizer_data.input_length
         effective_input_length = optimizer_data.get_effective_input_length()
         concurrency = batch_size * self.dp * self.pp
-        if decode_flag:
+        unbounded_prefill = self._is_unbounded_prefill(optimizer_data)
+        if decode_flag or unbounded_prefill:
             chunk_plan = []
             global_batched_token_limit = None
         else:
@@ -59,7 +90,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             )
             global_batched_token_limit = self._get_global_batched_token_limit(optimizer_data)
 
-        prefill_num_chunks = optimizer_data.get_prefill_num_chunks(chunk_plan)
+        prefill_num_chunks = 1 if unbounded_prefill else optimizer_data.get_prefill_num_chunks(chunk_plan)
         output_length = optimizer_data.output_length
         prefill_ttft_sum_ms = None
         prefill_ttft_request_count = 0
@@ -70,7 +101,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             and concurrency * chunk_plan[0].query_len <= global_batched_token_limit
         )
 
-        if decode_flag or variable_input_mode or single_prefill_fits_budget:
+        if decode_flag or variable_input_mode or unbounded_prefill or single_prefill_fits_budget:
             if variable_input_mode:
                 chunk_results, composition_rows = self._get_batched_forward_info(
                     concurrency,
