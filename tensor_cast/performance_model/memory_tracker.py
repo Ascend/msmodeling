@@ -409,14 +409,8 @@ class MemoryTracker:
             all_use_op_indices = info.use_op_indices + info.use_op_indices_by_alias
             if not all_use_op_indices:
                 if tensor_id in self.alias_info:
-                    # we treat the aliased tensor as output, not the aliasing ones
-                    source_id = self.alias_info[tensor_id]
-                    source_info = self.tensor_infos.get(source_id)
-                    source_use_op_indices = (
-                        [] if source_info is None else source_info.use_op_indices + source_info.use_op_indices_by_alias
-                    )
-                    if not source_use_op_indices or info.def_op_idx >= max(source_use_op_indices):
-                        self.model_output_tensors.add(source_id)
+                    # An output alias keeps its root buffer alive until model completion.
+                    self.model_output_tensors.add(self.alias_info[tensor_id])
                 else:
                     self.model_output_tensors.add(tensor_id)
             else:
@@ -434,6 +428,7 @@ class MemoryTracker:
         # Step 2: Simulate memory usage over the sequence of operations.
         # Start with memory consumed by model inputs, which are pre-allocated.
         current_memory_usage = sum(self.tensor_infos[t_id].size_bytes for t_id in self.model_input_tensors)
+        freed_roots: Set[TensorKey] = set()
 
         for op_idx, (op_info, _) in enumerate(self.op_invoke_infos_with_repeat_id):
             usage_before_call = current_memory_usage
@@ -458,16 +453,19 @@ class MemoryTracker:
             # Free tensors whose lifecycle ends after this operation.
             input_tensor_ids = self.op_input_tensor_ids[op_idx]
             mem_freed = 0
-            for t_id in input_tensor_ids:
-                info = self.tensor_infos[t_id]
-                # A tensor is freed if this op is its last use and it's not a model input/output.
-                t_id = self.alias_info[t_id] if t_id in self.alias_info else t_id
+            input_root_ids = {self.alias_info.get(t_id, t_id) for t_id in input_tensor_ids}
+            for root_id in input_root_ids:
+                if root_id in freed_roots:
+                    continue
+                root_info = self.tensor_infos[root_id]
+                # A root buffer is freed once, after the last use of the root or any of its aliases.
                 if (
-                    info.last_use_op_idx == op_idx
-                    and t_id not in self.model_input_tensors
-                    and t_id not in self.model_output_tensors
+                    root_info.last_use_op_idx == op_idx
+                    and root_id not in self.model_input_tensors
+                    and root_id not in self.model_output_tensors
                 ):
-                    mem_freed += info.size_bytes
+                    mem_freed += root_info.size_bytes
+                    freed_roots.add(root_id)
 
             # Note: we do not count in the memory fragmentation here.
             current_memory_usage -= mem_freed

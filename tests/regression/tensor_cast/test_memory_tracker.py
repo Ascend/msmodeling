@@ -178,6 +178,75 @@ class TestMemoryTracker(unittest.TestCase):
         ]
         self._run_and_check(func, [x, y, z], expected_profile)
 
+    def test_subview_frees_root_storage_size(self):
+        """Ensures a smaller alias frees the complete root buffer."""
+
+        def func(x):
+            root = x + 1.0
+            subview = root[:10]
+            return subview * 2.0
+
+        x = torch.randn(100)  # 400 bytes
+        # The 40-byte subview aliases a 400-byte root. The final profile retains
+        # only the 400-byte model input and the 40-byte model output.
+        expected_profile = [(400, 800), (800, 800), (800, 840), (440, 440)]
+        self._run_and_check(func, [x], expected_profile)
+
+    def test_alias_use_before_root_direct_last_use(self):
+        """Ensures an alias use cannot free a root that is used directly later."""
+
+        def func(x):
+            root = x + 1.0
+            alias = root.view(-1)
+            alias_result = alias * 2.0
+            return root + alias_result
+
+        x = torch.randn(100)  # 400 bytes
+        # The root remains live through the final add even though its alias was
+        # consumed by the preceding multiply.
+        expected_profile = [(400, 800), (800, 800), (800, 1200), (1200, 1600), (800, 800)]
+        self._run_and_check(func, [x], expected_profile)
+
+    def test_root_and_alias_same_consumer_are_freed_once(self):
+        """Ensures a root and its alias are deduplicated within one consumer."""
+
+        def func(x):
+            root = x + 1.0
+            alias = root.view(-1)
+            return root + alias
+
+        x = torch.randn(100)  # 400 bytes
+        expected_profile = [(400, 800), (800, 800), (800, 1200), (800, 800)]
+        self._run_and_check(func, [x], expected_profile)
+
+    def test_distinct_aliases_used_across_consumers_free_root_once(self):
+        """Ensures aliases used by different consumers release their shared root once."""
+
+        def func(x):
+            root = x + 1.0
+            first_alias = root.view(-1)
+            second_alias = root.view(-1)
+            first_result = first_alias * 2.0
+            return second_alias * first_result
+
+        x = torch.randn(100)  # 400 bytes
+        expected_profile = [(400, 800), (800, 800), (800, 800), (800, 1200), (1200, 1600), (800, 800)]
+        self._run_and_check(func, [x], expected_profile)
+
+    def test_expand_alias_frees_root_storage_size(self):
+        """Ensures a logically larger expanded alias frees only its root buffer."""
+
+        def func(x):
+            root = x + 1.0
+            alias = root.unsqueeze(0).expand(4, -1)
+            return alias * 2.0
+
+        x = torch.randn(100)  # 400 bytes
+        # The expanded alias has 1600 logical bytes but still owns no storage.
+        # Only the 400-byte root is released after the multiply.
+        expected_profile = [(400, 800), (800, 800), (800, 800), (800, 2400), (2000, 2000)]
+        self._run_and_check(func, [x], expected_profile)
+
     def test_model_output_alias(self):
         """Ensures that an aliased tensor that is a model output is not freed."""
 
@@ -191,38 +260,18 @@ class TestMemoryTracker(unittest.TestCase):
         expected_profile = [(400, 400), (400, 400)]
         self._run_and_check(func, [x], expected_profile)
 
-    def test_unused_alias_is_not_model_output_when_source_is_used_later(self):
-        """Ensures dead alias outputs do not keep their source alive."""
+    def test_model_output_alias_keeps_root_alive_after_direct_use(self):
+        """Ensures an output alias keeps its root alive after a later direct use."""
+
+        def func(x):
+            root = x + 1.0
+            output_alias = root.view(-1)
+            _ = root * 2.0
+            return output_alias
+
         x = torch.randn(100)  # 400 bytes
-        a = x + 1.0
-        view_out = a.view(-1)
-        mul_out = a * 2.0
-
-        add_info = OpInvokeInfo(torch.ops.aten.add.Tensor, (x, 1.0), {}, a)
-        view_info = OpInvokeInfo(torch.ops.aten.view.default, (a, [-1]), {}, view_out)
-        mul_info = OpInvokeInfo(torch.ops.aten.mul.Tensor, (a, 2.0), {}, mul_out)
-
-        mt = MemoryTracker(TEST_DEVICE)
-        mt.record_single_op_invocation(add_info)
-        mt.record_single_op_invocation(view_info)
-        mt.record_single_op_invocation(mul_info)
-        mt.analyze()
-        profile = mt.get_profile()
-
-        # Initial memory: 400 (x)
-        # Op 0 (add): Before=400. Allocates 400 for a. After=800.
-        # Op 1 (view): Before=800. No allocation. After=800.
-        # Op 2 (mul): Before=800. Allocates 400, then a can be freed.
-        expected_profile = [(400, 800), (800, 800), (800, 1200), (800, 800)]
-        self.assertEqual(len(profile), len(expected_profile))
-        for op_profile, expected in zip(profile, expected_profile):
-            self.assertEqual(
-                (
-                    op_profile.usage_before_call_bytes,
-                    op_profile.usage_after_call_bytes,
-                ),
-                expected,
-            )
+        expected_profile = [(400, 800), (800, 800), (800, 1200), (1200, 1200)]
+        self._run_and_check(func, [x], expected_profile)
 
     def test_alias_from_kwargs_input(self):
         """Ensures alias tracking works when tensor inputs are passed by kwargs."""
