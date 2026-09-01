@@ -18,6 +18,7 @@ import {
   QUANTIZE_ATTENTION_OPTIONS,
   REMOTE_SOURCE_OPTIONS,
   CLI_LOG_LEVEL_OPTIONS,
+  MODEL_ID_OPTIONS,
 } from "./_validators"
 
 export default {
@@ -25,7 +26,7 @@ export default {
   "moduleId": "text_generate",
   "title": { "zh": "文本生成", "en": "Text Generation" },
   "runner": "ModelRunner",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "optionSourceRegistry": {
     "devices": { "endpoint": "/api/options/devices", "cache": "session" }
   },
@@ -46,10 +47,11 @@ export default {
     {
       "id": "model_id",
       "label": { "zh": "模型 ID", "en": "Model ID" },
-      "control": "text",
+      "control": "combobox",
       "dataType": "string",
       "default": "Qwen/Qwen3-32B",
       "group": { "zh": "通用", "en": "General" },
+      "optionSource": { "type": "inline", "values": MODEL_ID_OPTIONS },
       "tooltip": { "zh": "待仿真模型的标准 HuggingFace 名称（组织/模型，如 Qwen/Qwen3-32B）或本地路径。", "en": "Standard HuggingFace model name (org/model, e.g. Qwen/Qwen3-32B) or local path." },
       "placeholder": { "zh": "如 Qwen/Qwen3-32B", "en": "e.g. Qwen/Qwen3-32B" },
       "validation": [

@@ -163,7 +163,7 @@ class FieldSchema:
 
     id: str
     label: str | LocalizedText  # zh primary; {zh,en} when bilingual
-    control: str = "text"  # text|number|select|multi-select|switch|slider
+    control: str = "text"  # text|number|select|multi-select|switch|combobox
     data_type: str = "string"  # string|integer|number|boolean|string[]|integer[]
     default: Any = None
     group: str | None = None

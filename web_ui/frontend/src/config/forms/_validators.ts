@@ -47,6 +47,78 @@ export const SERVING_LOG_LEVEL_OPTIONS = [
   v('debug'), v('info'), v('warning'), v('error'), v('critical'), v('fatal'),
 ]
 
+/** Supported model IDs for the model_id combobox, derived from the
+ *  TensorCast builtin model registry and repo docs/tests. Users may still type
+ *  arbitrary HuggingFace names or local paths; the combobox is filterable +
+ *  allow-create. HuggingFace standard format (org/model). */
+export const MODEL_ID_OPTIONS = [
+  // --- DeepSeek ---
+  v('deepseek-ai/DeepSeek-R1'),
+  v('deepseek-ai/DeepSeek-V3'),
+  v('deepseek-ai/DeepSeek-V3.1'),
+  v('deepseek-ai/DeepSeek-V3.2'),
+  v('deepseek-ai/DeepSeek-V4-Pro'),
+  v('deepseek-ai/DeepSeek-V4-Pro-0813'),
+  v('deepseek-ai/DeepSeek-V4-Flash'),
+  v('deepseek-ai/DeepSeek-V4-Flash-0731'),
+  // --- Kimi (Moonshot) ---
+  v('moonshotai/Kimi-K2-Base'),
+  v('moonshotai/Kimi-K2-Thinking'),
+  v('moonshotai/Kimi-K2.5'),
+  // --- Qwen3 (Dense) ---
+  v('Qwen/Qwen3-0.6B'),
+  v('Qwen/Qwen3-1.7B'),
+  v('Qwen/Qwen3-4B'),
+  v('Qwen/Qwen3-8B'),
+  v('Qwen/Qwen3-14B'),
+  v('Qwen/Qwen3-32B'),
+  // --- Qwen3 (MoE) ---
+  v('Qwen/Qwen3-30B-A3B'),
+  v('Qwen/Qwen3-235B-A22B'),
+  // --- Qwen3-Next ---
+  v('Qwen/Qwen3-Next-80B-A3B-Instruct'),
+  // --- Qwen3.5 ---
+  v('Qwen/Qwen3.5-27B'),
+  v('Qwen/Qwen3.5-35B-A3B'),
+  v('Qwen/Qwen3.5-397B-A17B'),
+  // --- Qwen3-VL ---
+  v('Qwen/Qwen3-VL-8B-Instruct'),
+  v('Qwen/Qwen3-VL-30B-A3B-Instruct'),
+  v('Qwen/Qwen3-VL-32B-Instruct'),
+  v('Qwen/Qwen3-VL-235B-A22B-Instruct'),
+  // --- Qwen2.x (native HF transformers) ---
+  v('Qwen/Qwen2.5-7B'),
+  v('Qwen/Qwen2-VL-7B'),
+  // --- GLM ---
+  v('THUDM/GLM-4-9B'),
+  v('zai-org/GLM-4.5'),
+  v('zai-org/GLM-4.5V'),
+  v('zai-org/GLM-4.6'),
+  v('zai-org/GLM-4.7'),
+  v('zai-org/GLM-5.1'),
+  v('zai-org/GLM-5.2'),
+  // --- MiniMax ---
+  v('MiniMaxAI/MiniMax-M2'),
+  v('MiniMaxAI/MiniMax-M2.7'),
+  v('MiniMaxAI/MiniMax-M3'),
+  // --- ERNIE ---
+  v('baidu/ERNIE-4.5-300B-A47B-PT'),
+  // --- Ling ---
+  v('inclusionAI/Ling-1T'),
+  v('inclusionAI/Ling-flash-2.0'),
+  // --- MiMo ---
+  v('XiaomiMiMo/MiMo-V2-Flash'),
+  // --- Llama (native HF transformers) ---
+  v('meta-llama/Meta-Llama-3-8B'),
+  v('meta-llama/Meta-Llama-3-70B'),
+]
+
+/** Supported video/DiT model IDs for the video_generate model_id combobox. */
+export const VIDEO_MODEL_ID_OPTIONS = [
+  v('Wan-AI/Wan2.1-T2V-1.3B'),
+  v('Wan-AI/Wan2.2-T2V-A14B'),
+  v('Wan-AI/Wan2.2-T2V-A14B-Diffusers'),
+]
 // === Field-level validators ===================================================
 
 /** /^[a-zA-Z0-9_/.-]+$/ and length ≤ 256 (model_id). */
