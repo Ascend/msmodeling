@@ -54,6 +54,28 @@ class TestMemoryTracker(unittest.TestCase):
         expected_profile = [(800, 1200), (1200, 1200)]
         self._run_and_check(func, [x, y], expected_profile)
 
+    def test_peak_mem_usage_uses_after_call_and_initial_offset(self):
+        """Peak is max(before, after) with optional initial_mem_usage_bytes."""
+
+        def func(x, y, z):
+            a = x + y
+            b = a.view(-1)
+            c = b * 2.0
+            return c + z
+
+        x = torch.randn(100)
+        y = torch.randn(100)
+        z = torch.randn(100)
+        with Runtime([], TEST_DEVICE, MemoryTracker(TEST_DEVICE)) as runtime, torch.no_grad():
+            _ = func(x, y, z)
+        tracker = runtime.memory_tracker
+        # The old implementation only sampled usage_before_call_bytes and
+        # returned 1600. The true high-water mark is 2000 after allocating c
+        # and before releasing its last-use input.
+        self.assertEqual(max(profile.usage_before_call_bytes for profile in tracker.get_profile()), 1600)
+        self.assertEqual(tracker.peak_mem_usage(), 2000)
+        self.assertEqual(tracker.peak_mem_usage(initial_mem_usage_bytes=100), 2100)
+
     def test_inplace_mutation(self):
         """Tests an in-place op that does not allocate memory."""
 

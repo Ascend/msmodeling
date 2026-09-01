@@ -17,6 +17,7 @@ from tensor_cast.layers.dflash import (
     sync_target_layer_ids,
 )
 from tensor_cast.layers.dflash_qwen3 import Qwen3DFlashAttention, Qwen3DFlashDecoderLayer
+from tensor_cast.layers.sampler import SamplingMetadata
 from tensor_cast.model_config import DflashConfig
 
 
@@ -699,11 +700,136 @@ class TestDflashDraftInputUsesBlockSize(unittest.TestCase):
         self.assertEqual(tokens[:, 0].tolist(), [3, 5])
         self.assertTrue(torch.all(tokens[:, 1:] == mask_id))
 
+    def test_draft_token_ids_use_per_request_row_from_2d_anchor(self):
+        """Decode sampler [B, S+1] uses each request's bonus/anchor (last) column."""
+        batch, block, mask_id = 4, 3, 99
+        anchor = torch.tensor(
+            [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]],
+            dtype=torch.long,
+        )
+        tokens = DflashWrapper._draft_token_ids(
+            batch,
+            block,
+            device=torch.device("cpu"),
+            dtype=torch.long,
+            anchor_tokens=anchor,
+            mask_token_id=mask_id,
+        )
+        self.assertEqual(tuple(tokens.shape), (batch, block))
+        self.assertEqual(tokens[:, 0].tolist(), [2, 5, 8, 11])
+        self.assertTrue(torch.all(tokens[:, 1:] == mask_id))
+
+    def test_draft_token_ids_mixed_packed_rows_use_last_token_per_request(self):
+        """Mixed decode+prefill sampler rows are not B-rectangular; use packed spans."""
+        batch, block, mask_id = 2, 4, 99
+        # Request 0 decode ql=3 → selected 0,1,2; request 1 prefill ql=2 → selected 4.
+        selected = torch.tensor([0, 1, 2, 4], dtype=torch.long)
+        query_start_loc = torch.tensor([0, 3, 5], dtype=torch.long)
+        # Sampler emits one row per selected index, not one row per packed token.
+        sampler_out = torch.tensor([[10], [11], [12], [20]], dtype=torch.long)
+        meta = SamplingMetadata(query_start_loc=query_start_loc, selected_token_indices=selected)
+        tokens = DflashWrapper._draft_token_ids(
+            batch,
+            block,
+            device=torch.device("cpu"),
+            dtype=torch.long,
+            anchor_tokens=sampler_out,
+            mask_token_id=mask_id,
+            sampling_metadata=meta,
+        )
+        self.assertEqual(tokens[:, 0].tolist(), [12, 20])
+        self.assertTrue(torch.all(tokens[:, 1:] == mask_id))
+
+    def test_draft_token_ids_all_decode_packed_rows_stay_within_request(self):
+        """All-decode batches select every packed position, so span ends collide."""
+        batch, block, mask_id = 2, 4, 99
+        # Request 0 decode ql=3 → selected 0,1,2; request 1 decode ql=2 → selected 3,4.
+        # Value 3 is both request 0's exclusive end and request 1's first row.
+        selected = torch.tensor([0, 1, 2, 3, 4], dtype=torch.long)
+        query_start_loc = torch.tensor([0, 3, 5], dtype=torch.long)
+        sampler_out = torch.tensor([[10], [11], [12], [20], [21]], dtype=torch.long)
+        meta = SamplingMetadata(query_start_loc=query_start_loc, selected_token_indices=selected)
+        tokens = DflashWrapper._draft_token_ids(
+            batch,
+            block,
+            device=torch.device("cpu"),
+            dtype=torch.long,
+            anchor_tokens=sampler_out,
+            mask_token_id=mask_id,
+            sampling_metadata=meta,
+        )
+        self.assertEqual(tokens[:, 0].tolist(), [12, 21])
+        self.assertTrue(torch.all(tokens[:, 1:] == mask_id))
+
+    def test_draft_token_ids_mixed_packed_rows_support_meta_tensors(self):
+        """Mixed packed anchor selection must remain shape-computable on meta."""
+        meta = SamplingMetadata(
+            query_start_loc=torch.tensor([0, 3, 5], dtype=torch.long, device="meta"),
+            selected_token_indices=torch.tensor([0, 1, 2, 4], dtype=torch.long, device="meta"),
+        )
+        tokens = DflashWrapper._draft_token_ids(
+            2,
+            4,
+            device=torch.device("meta"),
+            dtype=torch.long,
+            anchor_tokens=torch.empty((4, 1), dtype=torch.long, device="meta"),
+            mask_token_id=99,
+            sampling_metadata=meta,
+        )
+        self.assertEqual(tuple(tokens.shape), (2, 4))
+        self.assertEqual(tokens.device.type, "meta")
+
+    def test_draft_token_ids_compile_with_varlen_generator_devices(self):
+        """Varlen generator keeps query boundaries on CPU and sampler rows on meta."""
+        meta = SamplingMetadata(
+            query_start_loc=torch.tensor([0, 3, 5], dtype=torch.long),
+            selected_token_indices=torch.tensor([0, 1, 2, 4], dtype=torch.long, device="meta"),
+        )
+        compiled = torch.compile(DflashWrapper._draft_token_ids, backend="eager", fullgraph=True)
+        tokens = compiled(
+            2,
+            4,
+            device=torch.device("meta"),
+            dtype=torch.long,
+            anchor_tokens=torch.empty((4, 1), dtype=torch.long, device="meta"),
+            mask_token_id=99,
+            sampling_metadata=meta,
+        )
+        self.assertEqual(tuple(tokens.shape), (2, 4))
+        self.assertEqual(tokens.device.type, "meta")
+
+    def test_draft_token_ids_rejects_unaligned_anchor_without_metadata(self):
+        with self.assertRaisesRegex(ValueError, "one bonus token per request"):
+            DflashWrapper._draft_token_ids(
+                2,
+                4,
+                device=torch.device("cpu"),
+                dtype=torch.long,
+                anchor_tokens=torch.arange(5),
+            )
+
+    def test_draft_token_ids_rejects_ambiguous_divisible_anchor_without_metadata(self):
+        """Divisibility alone does not establish per-request row boundaries."""
+        with self.assertRaisesRegex(ValueError, "one bonus token per request"):
+            DflashWrapper._draft_token_ids(
+                2,
+                4,
+                device=torch.device("cpu"),
+                dtype=torch.long,
+                anchor_tokens=torch.arange(4).reshape(1, 4),
+            )
+
     def test_as_bsh_normalizes_packed_target_once(self):
         batch, block, hidden = 3, 16, 64
         packed = torch.randn(1, batch * block, hidden)
         out = DflashWrapper.as_bsh(packed, batch, block)
         self.assertEqual(tuple(out.shape), (batch, block, hidden))
+
+    def test_as_varlen_bsh_right_aligns_each_request(self):
+        packed = torch.arange(1, 6, dtype=torch.float32).view(1, 5, 1)
+        out = DflashWrapper.as_varlen_bsh(packed, [3, 2])
+        self.assertEqual(tuple(out.shape), (2, 3, 1))
+        self.assertEqual(out.squeeze(-1).tolist(), [[1.0, 2.0, 3.0], [0.0, 4.0, 5.0]])
 
     def test_draft_forward_q_len_equals_block_not_query_len(self):
         """End-to-end draft stack: attention Q length follows block_size."""
@@ -1366,6 +1492,53 @@ class TestDflashAuxFromTargetLayers(unittest.TestCase):
         _resync_dflash_shared_vocab(model)
         self.assertIs(wrapper.draft.embed_tokens, parallel_embed)
         self.assertEqual(wrapper.draft.embed_tokens._inner.weight.shape[0], 16)
+
+
+class TestDflashVarlenEndToEnd(unittest.TestCase):
+    @staticmethod
+    def _run_mixed_varlen(do_compile: bool):
+        from tensor_cast.core.input_generator import RequestInfo, generate_inputs_varlen
+        from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
+        from tensor_cast.core.user_config import UserInputConfig
+
+        config = UserInputConfig(
+            model_id="tests/assets/model_config/qwen3_dense_0_6b",
+            device="TEST_DEVICE",
+            num_queries=2,
+            query_len=3,
+            context_length=16,
+            do_compile=do_compile,
+            num_hidden_layers_override=1,
+            speculative_method="dflash",
+            num_speculative_tokens=2,
+            num_draft_layers=1,
+        )
+        runner = ModelRunner(config)
+        requests = [
+            RequestInfo(query_len=3, seq_len=16, is_decode=True),
+            RequestInfo(query_len=2, seq_len=8, is_decode=False),
+        ]
+        inputs = generate_inputs_varlen(runner.model, requests, config.block_size)
+        sampling_metadata = inputs["sampling_metadata"]
+        assert sampling_metadata.query_start_loc.device.type == "cpu"
+        assert sampling_metadata.selected_token_indices.device.type == "meta"
+
+        result = runner.run_inference(
+            requests,
+            generate_inputs_func=generate_inputs_varlen,
+            with_sampler=True,
+        )
+        assert isinstance(result, ModelRunnerMetrics)
+        op_names = {event["name"] for event in result.runtime_event_list}
+        assert any("searchsorted" in name for name in op_names)
+        return op_names
+
+    def test_mixed_varlen_forward(self):
+        self._run_mixed_varlen(do_compile=False)
+
+    def test_mixed_varlen_forward_with_compile(self):
+        op_names = self._run_mixed_varlen(do_compile=True)
+        self.assertTrue(any("device_put" in name for name in op_names))
 
 
 class TestSpecDecodeSkipsRunnerSampler(unittest.TestCase):

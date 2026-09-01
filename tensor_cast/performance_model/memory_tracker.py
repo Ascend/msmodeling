@@ -501,4 +501,11 @@ class MemoryTracker:
             ]
 
     def peak_mem_usage(self, initial_mem_usage_bytes: float = 0.0):
-        return max([mem_profile.usage_before_call_bytes for mem_profile in self.get_profile()])
+        """Return the high-water mark of device memory during execution.
+
+        ``analyze()`` records ``usage_after_call`` after allocating this op's
+        outputs and before freeing last-use inputs. The peak is therefore
+        ``max_i max(U_i, P_i)``, not ``max_i U_i``.
+        """
+        profiles = self.get_profile(initial_mem_usage_bytes)
+        return max(max(p.usage_before_call_bytes, p.usage_after_call_bytes) for p in profiles)

@@ -845,12 +845,20 @@ class DflashWrapper(ModelWrapperBase):
         block = self.dflash_block_size
         # Target hiddens follow packed [1, B*query_len]; decode query_len == block.
         tokens_per_req = block if is_decode else self._resolve_tokens_per_request(input_ids, kwargs, batch_size)
+        attn_meta = kwargs.get("attention_meta")
+        query_lens_values = getattr(attn_meta, "query_lens_values", None) if attn_meta is not None else None
+        varlen_query_lens = None
+        if query_lens_values is not None and len(query_lens_values) == batch_size:
+            normalized_query_lens = [int(query_len) for query_len in query_lens_values]
+            if len(set(normalized_query_lens)) > 1:
+                varlen_query_lens = normalized_query_lens
         target_out, aux_hiddens = self._run_target_collect_aux(
             input_ids,
             position_ids,
             inputs_embeds,
             batch_size=batch_size,
             tokens_per_req=tokens_per_req,
+            query_lens=varlen_query_lens,
             **kwargs,
         )
 
@@ -889,6 +897,7 @@ class DflashWrapper(ModelWrapperBase):
             dtype=torch.long,
             anchor_tokens=next_tokens if isinstance(next_tokens, torch.Tensor) else None,
             mask_token_id=int(getattr(self.draft_hf_config, "mask_token_id", 0) or 0),
+            sampling_metadata=sampling_metadata,
         )
         # Preferred Python order: ConcatD → embed → context KV → decoder.
         # No order_barrier: under --compile these subgraphs may still be reordered.
@@ -971,6 +980,26 @@ class DflashWrapper(ModelWrapperBase):
         """
         return tensor.reshape(batch, seq, tensor.shape[-1])
 
+    @staticmethod
+    def as_varlen_bsh(tensor: torch.Tensor, query_lens: Sequence[int]) -> torch.Tensor:
+        """Unpack ``[1,sum(Q_i),H]`` into right-aligned ``[B,max(Q_i),H]``.
+
+        ``AttentionMetadata.query_lens_values`` supplies concrete per-request
+        lengths even when tensors are meta/FakeTensor. Right alignment preserves
+        each request's latest target tokens before the prefill path expands them
+        to the configured DFlash context length.
+        """
+        flat = tensor.reshape(-1, tensor.shape[-1])
+        max_query_len = max(query_lens)
+        rows = []
+        offset = 0
+        for query_len in query_lens:
+            row = flat.narrow(0, offset, query_len).unsqueeze(0)
+            pad = row.new_zeros(1, max_query_len - query_len, row.shape[-1])
+            rows.append(torch.cat([pad, row], dim=1))
+            offset += query_len
+        return torch.cat(rows, dim=0)
+
     # Back-compat alias used by older tests / callers.
     _unpack_target_hidden_for_draft = as_bsh
 
@@ -980,6 +1009,7 @@ class DflashWrapper(ModelWrapperBase):
         *,
         batch_size: int,
         tokens_per_req: int,
+        query_lens: Optional[Sequence[int]] = None,
     ) -> list[torch.Tensor]:
         """Build ``L_aux`` buffers: ``[as_bsh(last).clone() for _ in aux_ids]``.
 
@@ -992,7 +1022,11 @@ class DflashWrapper(ModelWrapperBase):
             raise RuntimeError("Dflash aux_hidden_state_layer_ids must be non-empty")
         if not isinstance(last_hidden, torch.Tensor):
             raise RuntimeError(f"Dflash expected target intermediate hidden Tensor, got {type(last_hidden)}")
-        ref = self.as_bsh(last_hidden, batch_size, tokens_per_req)
+        ref = (
+            self.as_varlen_bsh(last_hidden, query_lens)
+            if query_lens is not None
+            else self.as_bsh(last_hidden, batch_size, tokens_per_req)
+        )
         # ids participate in length only — not real per-layer gather.
         return [ref.clone() for _ in self._aux_layer_ids]
 
@@ -1004,6 +1038,7 @@ class DflashWrapper(ModelWrapperBase):
         *,
         batch_size: int,
         tokens_per_req: int,
+        query_lens: Optional[Sequence[int]] = None,
         **kwargs: object,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Target forward + modeling aux (MTP intermediate, not full hidden_states).
@@ -1036,7 +1071,12 @@ class DflashWrapper(ModelWrapperBase):
                     f"layers {self._aux_layer_ids}, got {len(aux_list)}"
                 )
             # One-time layout gate; values already distinct from formal path.
-            return [self.as_bsh(h, batch_size, tokens_per_req) for h in aux_list]
+            return [
+                self.as_varlen_bsh(h, query_lens)
+                if query_lens is not None
+                else self.as_bsh(h, batch_size, tokens_per_req)
+                for h in aux_list
+            ]
 
         # Legacy formal path: (logits, aux_list) or (logits, hidden, aux_list).
         if isinstance(second, (list, tuple)) and second and isinstance(second[0], torch.Tensor):
@@ -1044,7 +1084,10 @@ class DflashWrapper(ModelWrapperBase):
         if len(result) >= 3 and isinstance(result[2], (list, tuple)):
             return target_out, _normalize_aux_list(list(result[2]))
         return target_out, self._synthesize_modeling_aux_hiddens(
-            second, batch_size=batch_size, tokens_per_req=tokens_per_req
+            second,
+            batch_size=batch_size,
+            tokens_per_req=tokens_per_req,
+            query_lens=query_lens,
         )
 
     @staticmethod
@@ -1059,6 +1102,56 @@ class DflashWrapper(ModelWrapperBase):
         return torch.arange(block, device=device, dtype=dtype).view(1, block).expand(batch_size, block)
 
     @staticmethod
+    def _per_request_anchor_tokens(
+        anchor_tokens: torch.Tensor,
+        batch_size: int,
+        *,
+        sampling_metadata: Optional[SamplingMetadata] = None,
+    ) -> torch.Tensor:
+        """Return ``[B]`` bonus/anchor ids, one live token per request.
+
+        Spec-decode Sampler output is ``[B, S+1] = [spec_0 .. spec_{S-1}, bonus]``.
+        DFlash draft ids are ``[anchor | MASK*(block-1)]``; the live slot is the
+        bonus/anchor (last column), matching MTP ``next_tokens[:, -1]`` and RFC
+        block layout. Packed mixed prefill/decode sampler rows are not rectangular;
+        split them with ``query_start_loc`` + ``selected_token_indices``.
+        """
+        anchor = anchor_tokens
+        if anchor.dim() >= 1 and anchor.size(0) == batch_size:
+            if anchor.dim() == 1:
+                return anchor
+            return anchor.reshape(batch_size, -1)[:, -1]
+        flat = anchor.reshape(-1)
+        if flat.numel() == batch_size:
+            return flat
+        query_start_loc = None if sampling_metadata is None else sampling_metadata.query_start_loc
+        selected = None if sampling_metadata is None else sampling_metadata.selected_token_indices
+        if (
+            query_start_loc is not None
+            and query_start_loc.numel() == batch_size + 1
+            and selected is not None
+            and selected.ndim > 0
+            and selected.numel() == flat.numel()
+        ):
+            # ``selected`` is ordered by packed request spans. Search each span's
+            # exclusive end to find its final sampled row without data-dependent
+            # ``nonzero`` shapes, which are unsupported for meta tensors. Left-side
+            # search is required: an all-decode batch selects every packed position,
+            # so a span end equals the next request's first row and ``right=True``
+            # would anchor a request on its successor's token.
+            # ``generate_inputs_varlen`` keeps request boundaries on CPU while
+            # sampler rows and the live anchor are meta tensors. Dynamo requires
+            # both searchsorted operands to follow the anchor device.
+            selected = selected.to(device=flat.device)
+            request_ends = query_start_loc[1:].to(device=flat.device)
+            row_indices = torch.searchsorted(selected, request_ends, right=False) - 1
+            return flat.index_select(0, row_indices)
+        raise ValueError(
+            "DFlash draft anchors must provide one bonus token per request: "
+            f"got {flat.numel()} sampler tokens for batch_size={batch_size}."
+        )
+
+    @staticmethod
     def _draft_token_ids(
         batch_size: int,
         block: int,
@@ -1067,6 +1160,7 @@ class DflashWrapper(ModelWrapperBase):
         dtype=torch.long,
         anchor_tokens: Optional[torch.Tensor] = None,
         mask_token_id: int = 0,
+        sampling_metadata: Optional[SamplingMetadata] = None,
     ) -> torch.Tensor:
         """Build ``[B, block]`` draft token ids ``[anchor | MASK*(block-1)]``.
 
@@ -1082,12 +1176,12 @@ class DflashWrapper(ModelWrapperBase):
             device=device,
             dtype=dtype,
         )
-        anchor = anchor_tokens.reshape(-1).to(device=device, dtype=dtype)
+        anchor = anchor_tokens.to(device=device, dtype=dtype)
         if anchor.numel() <= 0:
             return tokens
-        batch_index = torch.arange(batch_size, device=device) % anchor.numel()
+        per_request = DflashWrapper._per_request_anchor_tokens(anchor, batch_size, sampling_metadata=sampling_metadata)
         tokens = tokens.clone()
-        tokens[:, 0] = anchor[batch_index]
+        tokens[:, 0] = per_request
         return tokens
 
     @staticmethod
