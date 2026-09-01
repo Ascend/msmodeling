@@ -287,6 +287,39 @@ class ServingTestCase(unittest.TestCase):
         for request in requests.values():
             self.assertEqual(request.num_decoded_tokens, num_output_tokens)
 
+    def test_exceed_concurrency_limit_counts_requests_not_tokens(self):
+        # issue #337: max_concurrency is a request-count budget. The gate must
+        # compare in-flight request count, not the token-weighted work load,
+        # otherwise a single long prefill (input tokens > max_concurrency)
+        # trips the gate and serializes high-concurrency prefill.
+        mock_instance = Mock()
+        mock_instance.get_work_load.return_value = 200
+        mock_instance.get_in_flight_request_count.return_value = 1
+
+        serving = PdAggregationServing([mock_instance])
+        self.assertFalse(serving.exceed_concurrency_limit())
+
+        max_concurrency = self.mock_cfg.common_config.serving_config.max_concurrency
+        mock_instance.get_in_flight_request_count.return_value = max_concurrency - 1
+        self.assertFalse(serving.exceed_concurrency_limit())
+
+        mock_instance.get_in_flight_request_count.return_value = max_concurrency
+        self.assertTrue(serving.exceed_concurrency_limit())
+
+    def test_exceed_concurrency_limit_aggregates_pd_instances(self):
+        # issue #337: P/D disaggregation gate aggregates in-flight requests
+        # across prefill and decode instances.
+        prefill_instance = Mock()
+        decode_instance = Mock()
+        prefill_instance.get_in_flight_request_count.return_value = 60
+        decode_instance.get_in_flight_request_count.return_value = 39
+
+        serving = PdDisaggregationServing([prefill_instance], [decode_instance])
+        self.assertFalse(serving.exceed_concurrency_limit())
+
+        decode_instance.get_in_flight_request_count.return_value = 40
+        self.assertTrue(serving.exceed_concurrency_limit())
+
 
 if __name__ == "__main__":
     unittest.main()

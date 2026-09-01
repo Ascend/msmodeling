@@ -41,11 +41,26 @@ class Serving(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def get_in_flight_request_count(self) -> int:
+        """
+        Returns the number of requests currently in flight (admitted but not
+        finished) across all engines. Used for concurrency admission control.
+        """
+        raise NotImplementedError
+
     def exceed_concurrency_limit(self) -> bool:
         """
         check whether the concurrency limit is exceeded
+
+        Concurrency is measured by the number of in-flight requests, NOT the
+        token-weighted work load. `max_concurrency` is a request-count budget;
+        comparing it against `get_work_load()` (whose unit is tokens for
+        PREFILLING and 1 for DECODING) caused a single long PREFILL to
+        saturate the admission gate and serialize high-concurrency prefill
+        (see issue #337).
         """
-        return self.get_work_load() >= self.max_concurrency
+        return self.get_in_flight_request_count() >= self.max_concurrency
 
     def _before_serve(self, request: Request):
         """
@@ -97,6 +112,11 @@ class PdDisaggregationServing(Serving):
 
         return work_load
 
+    def get_in_flight_request_count(self):
+        return sum(instance.get_in_flight_request_count() for instance in self.prefill_instances) + sum(
+            instance.get_in_flight_request_count() for instance in self.decode_instances
+        )
+
     def _continue_serve_callback(self, request: Request):
         """Continue serving"""
         logger.debug("Continue serving %s", request)
@@ -135,3 +155,6 @@ class PdAggregationServing(Serving):
     def get_work_load(self):
         """Get the work load of the instance group"""
         return sum(instance.get_work_load() for instance in self.prefill_decode_instances)
+
+    def get_in_flight_request_count(self):
+        return sum(instance.get_in_flight_request_count() for instance in self.prefill_decode_instances)

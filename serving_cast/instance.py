@@ -54,6 +54,9 @@ class Instance:
     def get_work_load(self):
         return sum(engine.get_work_load() for engine in self.engines)
 
+    def get_in_flight_request_count(self):
+        return sum(engine.get_in_flight_request_count() for engine in self.engines)
+
     def shutdown(self):
         for engine in self.engines:
             engine.shutdown()

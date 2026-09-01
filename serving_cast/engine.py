@@ -64,6 +64,17 @@ class BatchScheduler(stime.Task):
                 res += 1
         return res
 
+    def get_in_flight_request_count(self) -> int:
+        """Number of requests currently in flight (admitted but not finished).
+
+        `self.requests` retains a request from `add()` until it is fully
+        finished or handed off via KV transfer (see `_postprocess_batch` and
+        `_send_kvs_from_remote`, both of which pop the id). Therefore
+        `len(self.requests)` equals the count of waiting/running requests,
+        which is the unit `max_concurrency` (a request count) compares against.
+        """
+        return len(self.requests)
+
     def _schedule(self):
         req_index = 0
         token_budget = self.max_tokens_budget
@@ -345,6 +356,9 @@ class Engine:
         work_load is an abstract score using to measure the inference work of engine
         """
         return self.batch_scheduler.get_work_load()
+
+    def get_in_flight_request_count(self) -> int:
+        return self.batch_scheduler.get_in_flight_request_count()
 
     def shutdown(self):
         self.model_runner.shutdown()
