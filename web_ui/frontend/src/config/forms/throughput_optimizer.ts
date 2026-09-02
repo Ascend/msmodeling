@@ -3,7 +3,7 @@
 // validators). A build step regenerates the data-only .json for the backend
 // (validators are stripped by JSON.stringify). Do not edit the .json by hand.
 import { stringValid, prefixCacheRate, lteNumDevices, batchRange, validParallelCombo, positiveOrInf, effectiveLenGe1, pdRatioMutexDisagg, mtpAcceptanceRatesPositive, mtpTokensVsAcceptanceRate } from "./_validators"
-import { QUANTIZE_LINEAR_OPTIONS, QUANTIZE_ATTENTION_OPTIONS, SERVING_LOG_LEVEL_OPTIONS, MODEL_ID_OPTIONS } from "./_validators"
+import { QUANTIZE_LINEAR_OPTIONS, QUANTIZE_ATTENTION_OPTIONS, SERVING_LOG_LEVEL_OPTIONS, MODEL_ID_OPTIONS, makeModelIdField } from "./_options"
 
 export default {
 "$schema": "form-schema/v1",
@@ -64,19 +64,7 @@ export default {
   ],
   "fields": [
     {
-      "id": "model_id",
-      "label": { "zh": "模型 ID", "en": "Model ID" },
-      "control": "combobox",
-      "dataType": "string",
-      "default": "Qwen/Qwen3-32B",
-      "group": { "zh": "通用", "en": "General" },
-      "optionSource": { "type": "inline", "values": MODEL_ID_OPTIONS },
-      "tooltip": { "zh": "待仿真模型的标准 HuggingFace 名称（组织/模型，如 Qwen/Qwen3-32B）或本地路径。", "en": "Standard HuggingFace model name (org/model, e.g. Qwen/Qwen3-32B) or local path." },
-      "placeholder": { "zh": "如 Qwen/Qwen3-32B", "en": "e.g. Qwen/Qwen3-32B" },
-      "validation": [
-        { "rule": "required", "message": { "zh": "模型 ID 为必填项", "en": "Model ID is required" }, "trigger": ["change", "blur"] },
-        { "rule": "validator", "value": "stringValid", "message": { "zh": "模型 ID 含非法字符或过长", "en": "Model ID has invalid characters or is too long" }, "trigger": ["blur"] }
-      ]
+      ...makeModelIdField(MODEL_ID_OPTIONS, "Qwen/Qwen3-32B", "Qwen/Qwen3-32B"),
     },
     {
       "id": "device",
