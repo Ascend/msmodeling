@@ -611,20 +611,19 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 ### 6.7 PD 配比：Prefill / Decode 实例比例寻优
 
 ```bash
-python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
-  --device ATLAS_800_A2_280T_32G_PCIE \
-  --num-devices 16 \
-  --input-length 3500 \
-  --output-length 1500 \
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+  --device ATLAS_850_486T_112G_FM16 \
+  --num-devices 8 \
+  --input-length 500 \
+  --output-length 100 \
   --compile \
   --quantize-linear-action W8A8_DYNAMIC \
   --quantize-attention-action disabled \
   --enable-optimize-prefill-decode-ratio \
   --prefill-devices-per-instance 4 \
-  --decode-devices-per-instance 2 \
-  --ttft-limit 2000 \
-  --tpot-limit 50 \
-  --log-level info
+  --decode-devices-per-instance 4 \
+  --ttft-limit 10000 \
+  --tpot-limit 3000 \
 ```
 
 PD 配比的核心思想是分别计算 Prefill QPS 和 Decode QPS，再寻找更平衡的 Prefill / Decode 实例配比。
