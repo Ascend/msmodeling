@@ -13,13 +13,21 @@
 # limitations under the License.
 
 import logging
+from decimal import Decimal
+import math
 from typing import Optional
 
 import pandas as pd
 from prettytable import PrettyTable
 
 from serving_cast.service.utils import MEMORY_COLUMNS, MemoryInfo
-from serving_cast.utils import best_pd_row_per_group, rank_pd_ratio_rows, sort_pd_ratio_dict_rows
+from serving_cast.service.pipeline_schedule import PipelineScheduleEstimate
+from serving_cast.service.utils import ParallelSearchCandidate
+from serving_cast.utils import (
+    best_pd_row_per_group,
+    rank_pd_ratio_rows,
+    sort_pd_ratio_dict_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +70,24 @@ def _compute_disagg_request_qps(row: pd.Series, output_length: Optional[int]) ->
 
 TTFT_COLUMN = "TTFT (ms)"
 TPOT_COLUMN = "TPOT (ms)"
+THROUGHPUT_TIE_TOLERANCE = 1e-3
+THROUGHPUT_TIE_TOLERANCE_DECIMAL = Decimal("0.001")
+PP_RESULT_COLUMNS = (
+    "tp_size",
+    "pp_size",
+    "dp_size",
+    "ep_size",
+    "moe_dp_size",
+    "pp_layer_partition",
+    "pp_schedule",
+    "pp_makespan_ms",
+    "pp_warmup_ms",
+    "pp_steady_ms",
+    "pp_cooldown_ms",
+    "pp_bubble_ratio",
+    "pp_bottleneck_stage",
+    "pp_mixed_pd_overlap_approx",
+)
 SHOW_COLUMNS = [
     "Top",
     "\033[1mThroughput\033[0m (token/s)",
@@ -72,6 +98,95 @@ SHOW_COLUMNS = [
     "parallel",
     "batch_size",
 ] + MEMORY_COLUMNS
+
+
+def _numeric_result_column(df: pd.DataFrame, column: str, default: float) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series(default, index=df.index, dtype=float)
+    return pd.to_numeric(df[column], errors="coerce").fillna(default)
+
+
+def rank_optimizer_result_rows(df: pd.DataFrame, data_config) -> pd.DataFrame:
+    """Deterministically rank final rows using anchored throughput groups."""
+    if df.empty:
+        return df.copy()
+
+    work = df.copy()
+    work["_throughput"] = _numeric_result_column(work, "token/s", float("-inf"))
+    parallel = work.get("parallel", pd.Series("", index=work.index))
+    work["_parallel_sort"] = parallel.fillna("").astype(str)
+    work["_row_stable_id"] = work.apply(
+        lambda row: "|".join(f"{column}={row[column]!r}" for column in df.columns),
+        axis=1,
+    )
+    ordered = work.sort_values(
+        ["_throughput", "_parallel_sort", "_row_stable_id"],
+        ascending=[False, True, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    slo_metrics = []
+    for column, limit in (
+        ("ttft", getattr(data_config, "ttft_limits", None)),
+        ("tpot", getattr(data_config, "tpot_limits", None)),
+    ):
+        if column not in ordered.columns:
+            continue
+        metric = _numeric_result_column(ordered, column, float("nan"))
+        slo_metrics.append(metric / limit if limit and limit > 0 else metric)
+    ordered["_slo_metric"] = pd.concat(slo_metrics, axis=1).max(axis=1).fillna(0.0) if slo_metrics else 0.0
+    ordered["_bubble_sort"] = _numeric_result_column(ordered, "pp_bubble_ratio", float("inf"))
+    memory = pd.Series(float("nan"), index=ordered.index, dtype=float)
+    for column in ("avail_GB", "device_memory_available_gb", "memory_left_gb"):
+        memory = memory.combine_first(_numeric_result_column(ordered, column, float("nan")))
+    ordered["_memory_sort"] = memory.fillna(float("-inf"))
+    ordered["_pp_size_sort"] = _numeric_result_column(ordered, "pp_size", 1.0)
+    ordered["_batch_size_sort"] = _numeric_result_column(ordered, "batch_size", float("inf"))
+    ordered["_concurrency_sort"] = _numeric_result_column(ordered, "concurrency", float("inf"))
+
+    ranked_groups = []
+    start = 0
+    while start < len(ordered):
+        anchor = ordered.iloc[start]["_throughput"]
+        end = start + 1
+        while end < len(ordered):
+            candidate = ordered.iloc[end]["_throughput"]
+            if math.isfinite(anchor) and math.isfinite(candidate):
+                same_group = Decimal(str(anchor)) - Decimal(str(candidate)) <= THROUGHPUT_TIE_TOLERANCE_DECIMAL
+            else:
+                same_group = anchor == candidate
+            if not same_group:
+                break
+            end += 1
+        ranked_groups.append(
+            ordered.iloc[start:end].sort_values(
+                [
+                    "_slo_metric",
+                    "_bubble_sort",
+                    "_memory_sort",
+                    "_pp_size_sort",
+                    "_batch_size_sort",
+                    "_concurrency_sort",
+                    "_parallel_sort",
+                    "_row_stable_id",
+                ],
+                ascending=[True, True, False, True, True, True, True, True],
+                kind="mergesort",
+            )
+        )
+        start = end
+
+    return pd.concat(ranked_groups, ignore_index=True)[df.columns]
+
+
+def select_parallel_result_rows(df: pd.DataFrame, data_config) -> pd.DataFrame:
+    """Select one independently ranked representative for every parallel label."""
+    if df.empty:
+        return df.copy()
+    representatives = []
+    for _, parallel_df in df.groupby("parallel", sort=False, dropna=False):
+        representatives.append(rank_optimizer_result_rows(parallel_df, data_config).head(1))
+    return pd.concat(representatives, ignore_index=True)
 
 
 def _fmt_optional(value, fmt: str = "{:.2f}") -> str:
@@ -97,9 +212,83 @@ class OptimizerSummary:
         self._memory_info: MemoryInfo | None = None
         self.data_config = data_config
         self._search_info = None
+        # PP>1 aggregation uses a coarse prefill/decode overlap approximation;
+        # Task 5 surfaces this as a result column. Task 4 stores the flag here.
+        self._pp_mixed_pd_overlap_approx = False
+
+    def set_pp_mixed_pd_overlap_approx(self, value: bool) -> None:
+        """Mark that this aggregation result used the coarse P/D overlap approx."""
+        self._pp_mixed_pd_overlap_approx = bool(value)
+
+    def get_pp_mixed_pd_overlap_approx(self) -> bool:
+        return self._pp_mixed_pd_overlap_approx
 
     def set_summary_df(self, summary_df):
-        self._summary_df = summary_df
+        self._summary_df = self._add_pp_result_columns(summary_df)
+
+    def _add_pp_result_columns(self, summary_df):
+        """Attach typed PP metadata while a result row still has its context."""
+        if summary_df is None or set(PP_RESULT_COLUMNS).issubset(summary_df.columns):
+            return summary_df
+
+        candidate = getattr(self.data_config, "parallel_search_candidate", None)
+        if not isinstance(candidate, ParallelSearchCandidate):
+            # PP=1 legacy path: attach default PP columns only when the DataFrame
+            # looks like an optimizer result (has "parallel" column), so that
+            # simple unit tests using arbitrary DataFrames are not modified.
+            if "parallel" not in summary_df.columns:
+                return summary_df
+            result_df = summary_df.copy()
+            defaults = {
+                "tp_size": getattr(self.data_config, "tp_size", None),
+                "pp_size": 1,
+                "dp_size": getattr(self.data_config, "dp_size", None),
+                "ep_size": getattr(self.data_config, "ep_size", None),
+                "moe_dp_size": getattr(self.data_config, "moe_dp_size", None),
+                "pp_layer_partition": None,
+                "pp_schedule": "forward",
+                "pp_makespan_ms": None,
+                "pp_warmup_ms": None,
+                "pp_steady_ms": None,
+                "pp_cooldown_ms": None,
+                "pp_bubble_ratio": 0.0,
+                "pp_bottleneck_stage": None,
+                "pp_mixed_pd_overlap_approx": self._pp_mixed_pd_overlap_approx,
+            }
+            for column, value in defaults.items():
+                if column == "pp_layer_partition":
+                    result_df[column] = [value] * len(result_df)
+                else:
+                    result_df[column] = value
+            return result_df
+
+        result_df = summary_df.copy()
+        estimate = getattr(self.data_config, "pipeline_schedule_estimate", None)
+        schedule = estimate if isinstance(estimate, PipelineScheduleEstimate) else None
+        values = {
+            "tp_size": candidate.tp_size,
+            "pp_size": candidate.pp_size,
+            "dp_size": candidate.dp_size,
+            "ep_size": candidate.ep_size,
+            "moe_dp_size": candidate.moe_dp_size,
+            "pp_layer_partition": candidate.layer_partition,
+            "pp_schedule": candidate.schedule,
+            "pp_makespan_ms": schedule.makespan_s * 1000.0 if schedule else None,
+            "pp_warmup_ms": schedule.warmup_s * 1000.0 if schedule else None,
+            "pp_steady_ms": schedule.steady_s * 1000.0 if schedule else None,
+            "pp_cooldown_ms": schedule.cooldown_s * 1000.0 if schedule else None,
+            "pp_bubble_ratio": (
+                schedule.bubble_ratio if schedule is not None else 0.0 if candidate.pp_size == 1 else None
+            ),
+            "pp_bottleneck_stage": (schedule.bottleneck_stage_id if schedule is not None else None),
+            "pp_mixed_pd_overlap_approx": self._pp_mixed_pd_overlap_approx,
+        }
+        for column, value in values.items():
+            if column == "pp_layer_partition":
+                result_df[column] = [value] * len(result_df)
+            else:
+                result_df[column] = value
+        return result_df
 
     def get_summary_df(self):
         return self._summary_df
@@ -186,15 +375,19 @@ class OptimizerSummary:
             pd.to_numeric(self._summary_df["ttft"], errors="coerce").fillna(float("inf")) <= ttft_limit
         )
 
-        return (
-            self._summary_df[mask]
-            .sort_values(by="token/s", ascending=False)
-            .groupby("parallel")
-            .first()
-            .reset_index()
-            .sort_values(by="token/s", ascending=False)
-            .reset_index(drop=True)
-        )
+        representatives = select_parallel_result_rows(self._summary_df[mask], self.data_config)
+        return self._rank_agg_disagg_rows(representatives).reset_index(drop=True)
+
+    def _rank_agg_disagg_rows(self, df: pd.DataFrame) -> pd.DataFrame:
+        return rank_optimizer_result_rows(df, self.data_config)
+
+    def get_best_result_row(self) -> Optional[pd.Series]:
+        """Return the raw best row after mode-specific filtering and ranking."""
+        if self._summary_df is None or self._summary_df.empty:
+            return None
+
+        prepared = self._prepare_pd_ratio_results() if self._is_pd_ratio_mode() else self._prepare_agg_disagg_results()
+        return None if prepared.empty else prepared.iloc[0]
 
     def _get_agg_disagg_final_out(self, args):
         if isinstance(args.input_length, str):
@@ -203,7 +396,11 @@ class OptimizerSummary:
         sorted_summary_df = self._prepare_agg_disagg_results()
         if sorted_summary_df.empty:
             logger.warning("No optimizer rows passed TTFT/TPOT filters; cannot pick best configuration.")
-            return ["*" * 80, "No configurations satisfy the current TTFT/TPOT filters.", "*" * 80]
+            return [
+                "*" * 80,
+                "No configurations satisfy the current TTFT/TPOT filters.",
+                "*" * 80,
+            ]
 
         best_result = sorted_summary_df.loc[0]
 
@@ -263,23 +460,20 @@ class OptimizerSummary:
         return self._best_agg_disagg_row(device_label)
 
     def _best_agg_disagg_row(self, device_label: str) -> Optional[dict]:
-        if self._summary_df is None or self._summary_df.empty or self._is_pd_ratio_mode():
+        if self._is_pd_ratio_mode():
             return None
-        filtered = self._prepare_agg_disagg_results()
-        if filtered.empty:
+        best_row = self.get_best_result_row()
+        if best_row is None:
             return None
-        return self._row_dict_from_filtered_best(device_label, filtered.iloc[0])
+        return self._row_dict_from_filtered_best(device_label, best_row)
 
     def collect_pd_ratio_comparison_row(self, device_label: str) -> Optional[dict]:
         """Pick the best PD-ratio row (max ``balanced_qps`` after filtering) for cross-hardware."""
-        if self._summary_df is None or self._summary_df.empty:
-            return None
         if not self._is_pd_ratio_mode():
             return None
-        filtered = self._prepare_pd_ratio_results()
-        if filtered.empty:
+        r = self.get_best_result_row()
+        if r is None:
             return None
-        r = filtered.iloc[0]
         p_inst = None
         d_inst = None
         nd = self.data_config.num_devices
@@ -360,7 +554,11 @@ class OptimizerSummary:
         sorted_summary_df = self._prepare_agg_disagg_results()
         if sorted_summary_df.empty:
             logger.warning("No optimizer rows passed TTFT/TPOT filters; cannot pick best configuration.")
-            return ["*" * 80, "No configurations satisfy the current TTFT/TPOT filters.", "*" * 80]
+            return [
+                "*" * 80,
+                "No configurations satisfy the current TTFT/TPOT filters.",
+                "*" * 80,
+            ]
         best_result = sorted_summary_df.loc[0]
         final_df = self._expand_composition_rows(sorted_summary_df)
 

@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from serving_cast.service.optimizer_summary import SHOW_COLUMNS
+from serving_cast.service.utils import build_pp_search_candidates
 from tests.helpers.cli_runner import run_module_main
 
 THROUGHPUT_OPTIMIZER_MODULE = "cli.inference.throughput_optimizer"
@@ -963,3 +964,213 @@ class TestThroughputOptimizerDraftSpecCli(TestCase):
     def test_legacy_mtp_cannot_mix_acceptance_length(self):
         with self.assertRaises(SystemExit):
             self._parse(["--num-mtp-tokens", "2", "--acceptance-length=1.5"])
+
+
+class TestPPCandidateGeneration:
+    """Unit tests for stage-local PP candidate generation (Task 3)."""
+
+    @staticmethod
+    def _candidates(**overrides):
+        kwargs = {
+            "num_devices": 32,
+            "tp_sizes": [1],
+            "pp_sizes": [2],
+            "num_hidden_layers": 80,
+            "ep_sizes": [1],
+            "moe_dp_sizes": [1],
+        }
+        kwargs.update(overrides)
+        return build_pp_search_candidates(**kwargs)
+
+    def test_pp_search_defaults_to_one(self):
+        from cli.inference import throughput_optimizer as module
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            "Qwen/Qwen3-32B",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = module.arg_parse()
+        assert args.pp_sizes is None
+
+    def test_pp_candidates_derive_data_parallel_size_from_tp_and_pp(self):
+        configs = self._candidates(
+            tp_sizes=[8],
+            pp_sizes=[1, 2, 4],
+        )
+        assert [c.dp_size for c in configs] == [4, 2, 1]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        (
+            {"num_devices": 8, "tp_sizes": [4], "pp_sizes": [3]},
+            {
+                "num_devices": 8,
+                "tp_sizes": [1],
+                "pp_sizes": [100],
+                "num_hidden_layers": 4,
+            },
+            {
+                "num_devices": 8,
+                "tp_sizes": None,
+                "pp_sizes": [16],
+                "ep_sizes": None,
+            },
+        ),
+    )
+    def test_invalid_pp_candidates_are_filtered(self, overrides):
+        assert self._candidates(**overrides) == []
+
+    def test_moe_tp_uses_stage_local_devices(self):
+        configs = self._candidates(
+            num_devices=16,
+            tp_sizes=[2],
+            pp_sizes=[2],
+            ep_sizes=[2],
+        )
+        assert len(configs) == 1
+        assert configs[0].moe_tp_size == 4
+        assert configs[0].dp_size == 4
+
+    @pytest.mark.parametrize(
+        ("pp_size", "partition"),
+        ((4, "20,20,20"), (2, "10,10")),
+    )
+    def test_invalid_partition_raises(self, pp_size, partition):
+        with pytest.raises(ValueError, match="partition"):
+            self._candidates(
+                pp_sizes=[pp_size],
+                pp_layer_partitions=[partition],
+            )
+
+    def test_valid_partition_produces_candidate(self):
+        configs = self._candidates(
+            pp_sizes=[2],
+            pp_layer_partitions=["40,40"],
+        )
+        assert len(configs) == 1
+        assert configs[0].layer_partition == (40, 40)
+
+    def test_pp1_preserves_no_partition_field(self):
+        configs = build_pp_search_candidates(num_devices=8, tp_sizes=[2], pp_sizes=[1], num_hidden_layers=80)
+        assert len(configs) == 1
+        assert configs[0].pp_size == 1
+        assert configs[0].layer_partition is None
+
+    def test_ep_default_matches_legacy_num_devices(self):
+        """PP=1 without --ep-sizes must default EP to num_devices (legacy), not 1."""
+        configs = build_pp_search_candidates(num_devices=8, tp_sizes=[1], pp_sizes=None, num_hidden_layers=80)
+        ep_sizes_used = {c.ep_size for c in configs}
+        assert 8 in ep_sizes_used
+
+    def test_multiple_pp_sizes_with_matching_partitions(self):
+        configs = build_pp_search_candidates(
+            num_devices=32,
+            tp_sizes=[1],
+            pp_sizes=[2, 4],
+            pp_layer_partitions=["40,40", "20,20,20,20"],
+            num_hidden_layers=80,
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+        )
+        pp2 = [c for c in configs if c.pp_size == 2]
+        pp4 = [c for c in configs if c.pp_size == 4]
+        assert len(pp2) == 1
+        assert pp2[0].layer_partition == (40, 40)
+        assert len(pp4) == 1
+        assert pp4[0].layer_partition == (20, 20, 20, 20)
+
+    def test_pp1_and_pp2_with_pp2_partition(self):
+        configs = build_pp_search_candidates(
+            num_devices=32,
+            tp_sizes=[1],
+            pp_sizes=[1, 2],
+            pp_layer_partitions=["40,40"],
+            num_hidden_layers=80,
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+        )
+        pp1 = [c for c in configs if c.pp_size == 1]
+        pp2 = [c for c in configs if c.pp_size == 2]
+        assert len(pp1) == 1
+        assert pp1[0].layer_partition is None
+        assert len(pp2) == 1
+        assert pp2[0].layer_partition == (40, 40)
+
+    def test_pp_gt1_with_mtp_raises(self):
+        with pytest.raises(ValueError, match="num_mtp_tokens=0"):
+            build_pp_search_candidates(
+                num_devices=32,
+                tp_sizes=[1],
+                pp_sizes=[2],
+                num_hidden_layers=80,
+                ep_sizes=[1],
+                moe_dp_sizes=[1],
+                num_mtp_tokens=4,
+            )
+
+    def test_mixed_pp1_pp2_with_mtp_keeps_pp1(self):
+        configs = build_pp_search_candidates(
+            num_devices=32,
+            tp_sizes=[1],
+            pp_sizes=[1, 2],
+            num_hidden_layers=80,
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+            num_mtp_tokens=4,
+        )
+        assert len(configs) > 0
+        assert all(c.pp_size == 1 for c in configs)
+
+    def test_pp2_with_mtp_zero_and_nonzero_keeps_zero(self):
+        configs = build_pp_search_candidates(
+            num_devices=32,
+            tp_sizes=[1],
+            pp_sizes=[2],
+            num_hidden_layers=80,
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+            num_mtp_token_sizes=[0, 4],
+        )
+        assert len(configs) > 0
+        assert all(c.num_mtp_tokens == 0 for c in configs)
+
+    def test_mtp_not_misattributed_when_base_divisibility_fails(self):
+        configs = build_pp_search_candidates(
+            num_devices=32,
+            tp_sizes=[4],
+            pp_sizes=[3, 4],
+            num_hidden_layers=80,
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+            num_mtp_tokens=4,
+        )
+        assert configs == []
+
+    def test_pp_gt1_with_mtp_zero_allowed(self):
+        configs = build_pp_search_candidates(
+            num_devices=32,
+            tp_sizes=[1],
+            pp_sizes=[2],
+            num_hidden_layers=80,
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+            num_mtp_tokens=0,
+        )
+        assert len(configs) == 1
+        assert configs[0].num_mtp_tokens == 0
+
+    def test_pp_only_search_uses_stage_local_tp_ep_defaults(self):
+        configs = build_pp_search_candidates(
+            num_devices=32,
+            tp_sizes=None,
+            pp_sizes=[2],
+            ep_sizes=None,
+            num_hidden_layers=80,
+            moe_dp_sizes=[1],
+        )
+        assert len(configs) >= 1
+        assert all(c.pp_size == 2 for c in configs)
+        assert all(c.dp_size == 1 for c in configs)

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import time
@@ -228,6 +229,28 @@ def arg_parse():
         default=None,
         metavar=METAVAR_N,
         help="Enable MOE-DP search. Optional explicit sizes; default is powers of 2 up to world size.",
+    )
+    add_option(
+        model_group,
+        "--pp-sizes",
+        type=check_positive_integer,
+        nargs="*",
+        default=None,
+        metavar=METAVAR_N,
+        help="Enable pipeline-parallel (PP) size search. Optional explicit PP sizes. "
+        "If no value is provided, defaults to powers of 2 up to num_devices. "
+        "When absent, only PP=1 is searched (legacy behavior).",
+    )
+    add_option(
+        model_group,
+        "--pp-layer-partitions",
+        type=str,
+        default=None,
+        metavar=METAVAR_FILE,
+        help="Explicit PP layer partitions as a JSON list of lists. "
+        "Example: --pp-layer-partitions '[[31,30],[16,15,15,15]]' "
+        "Each inner list's length must equal its pp_size and sum to num_hidden_layers. "
+        "When absent, the default balanced partition is used for each PP size.",
     )
     add_option(
         model_group,
@@ -509,6 +532,16 @@ def arg_parse():
     # DCP reuses TP devices, so its candidates are bounded by TP (hence num_devices), not
     # by a separate device budget; the per-combination tp % dcp == 0 check happens below.
     args.dcp_sizes = _normalize_and_validate(args.dcp_sizes, "dcp-sizes", args.num_devices)
+
+    # Parse pp_layer_partitions from JSON string to list[list[int]]
+    if args.pp_layer_partitions is not None:
+        try:
+            parsed = json.loads(args.pp_layer_partitions)
+        except json.JSONDecodeError as exc:
+            parser.error(f"--pp-layer-partitions must be valid JSON: {exc}")
+        if not isinstance(parsed, list) or not all(isinstance(p, list) for p in parsed):
+            parser.error("--pp-layer-partitions must be a JSON list of lists, e.g. '[[31,30],[16,15,15,15]]'")
+        args.pp_layer_partitions = [list(p) for p in parsed]
 
     tp_candidates, ep_candidates, moe_dp_candidates, mtp_candidates = resolve_parallel_search_candidates(
         args.tp_sizes,

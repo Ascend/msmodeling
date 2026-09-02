@@ -19,6 +19,17 @@ from .performance_model.utils import bytes_of_tensor
 from .runtime import Runtime
 
 
+class UnsupportedPPConfigurationError(ValueError):
+    """A PP>1 candidate uses a configuration the PP evaluator does not support.
+
+    Raised (not silently ignored) when PP>1 is combined with an unsupported
+    model architecture, variable-length input, or a prefill batch that cannot
+    fit the token budget as a single wave.  Callers in ``parallel_runner``
+    catch ONLY this exception to skip the candidate, so unrelated
+    ``ValueError``s still propagate and fail the run loudly.
+    """
+
+
 def _primary_model_output(output: object) -> object:
     """Unwrap ``(primary, side...)`` compile-residency returns; see model_runner."""
     if isinstance(output, (tuple, list)) and output:
@@ -79,6 +90,59 @@ class PipelineTransferStats:
     time_s_by_model: dict[str, float] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PipelineStageProfile:
+    """Structured per-stage profile consumed by the ServingCast scheduler.
+
+    All fields come from a single stage-local run, so the entry is a
+    self-consistent per-rank snapshot. ``runtime_peak_bytes`` and
+    ``outgoing_payload_bytes`` are carried here (not just in the memory
+    breakdown dict) because the Task-4 stage memory formula needs them as
+    first-class typed fields rather than parsed-from-dict values.
+    """
+
+    stage_id: int
+    layer_start: int
+    layer_end: int
+    compute_time_s_by_model: dict[str, float]
+    outgoing_comm_time_s_by_model: dict[str, float]
+    weight_bytes: int
+    activation_bytes: int
+    kv_cache_bytes: int
+    kv_cache_per_token_bytes: float
+    indexer_cache_bytes: int
+    indexer_cache_per_token_bytes: float
+    runtime_peak_bytes: int
+    outgoing_payload_bytes: int
+
+
+@dataclass(frozen=True)
+class PipelineTransferProfile:
+    """Structured per-boundary transfer profile consumed by the scheduler."""
+
+    source_stage_id: int
+    target_stage_id: int
+    payload_bytes: int
+    time_s_by_model: dict[str, float]
+    bandwidth_bytes_ps: float
+    latency_s: float
+
+
+@dataclass(frozen=True)
+class PipelineProfile:
+    """Structured PP profile: partition plus per-stage and per-transfer views.
+
+    Built in ``PipelineRunner._build_run_result`` from the same
+    ``stage_results`` / ``transfers`` used by the existing latency and memory
+    breakdowns, so it never drifts from them. ``None`` for a non-PP run.
+    """
+
+    pp_size: int
+    layer_partition: tuple[int, ...]
+    stages: tuple[PipelineStageProfile, ...]
+    transfers: tuple[PipelineTransferProfile, ...]
+
+
 @dataclass
 class PipelineRunResult:
     """Aggregated output and profiling data for a full PP forward pass."""
@@ -98,6 +162,7 @@ class PipelineRunResult:
     stage_latency_breakdown: list[dict] = field(default_factory=list)
     stage_memory_breakdown: list[dict] = field(default_factory=list)
     trace_events: list[dict] = field(default_factory=list)
+    pipeline_profile: Optional[PipelineProfile] = None
 
 
 def _exact_division(numerator: int, denominator: int, field_name: str) -> int:
@@ -1121,6 +1186,7 @@ class PipelineRunner:
             _stage_memory_breakdown_entry(result, effective_peak.get(result.stage_spec.stage_id, 0.0))
             for result in stage_results
         ]
+        pipeline_profile = _build_pipeline_profile(stage_results, transfers)
         perf_model_name = self.perf_models[0].name if self.perf_models else None
         return PipelineRunResult(
             logits=logits,
@@ -1148,6 +1214,7 @@ class PipelineRunner:
             model_activation_size_bytes=summary_activation_bytes,
             stage_latency_breakdown=stage_latency_breakdown,
             stage_memory_breakdown=stage_memory_breakdown,
+            pipeline_profile=pipeline_profile,
             trace_events=_pipeline_global_trace_events(stage_results, transfer_results),
         )
 
@@ -1329,6 +1396,94 @@ def _stage_outgoing_transfer_peak(transfer_results: list[Any]) -> dict[int, floa
     return outgoing
 
 
+def _build_pipeline_profile(
+    stage_results: list[_PipelineStageRunResult],
+    transfers: list[PipelineTransferStats],
+) -> Optional[PipelineProfile]:
+    """Build the structured ``PipelineProfile`` from stage/transfer results.
+
+    Returns ``None`` for an empty stage set so a degenerate run does not
+    synthesize a profile. All per-stage fields come from the same stage-local
+    result, and outgoing comm/payload are attributed to the source stage,
+    matching the existing latency and memory breakdown conventions.
+    """
+    if not stage_results:
+        return None
+
+    pp_size = stage_results[0].stage_spec.pp_size
+    layer_partition = tuple(spec.num_layers for spec in (r.stage_spec for r in stage_results))
+
+    # Collect the union of performance-model names across stages, preserving
+    # first-seen order so the profile is deterministic.
+    model_names: list[str] = []
+    for result in stage_results:
+        for model_name in result.execution_time_s:
+            if model_name not in model_names:
+                model_names.append(model_name)
+
+    num_stages = max(result.stage_spec.stage_id for result in stage_results) + 1
+    outgoing_comm_by_model = {
+        model_name: _stage_outgoing_comm_times(num_stages, transfers, model_name=model_name)
+        for model_name in model_names
+    }
+    # Outgoing payload bytes per source stage. Under the blocking contract each
+    # stage has at most one outgoing boundary, so sum == max in practice; sum is
+    # used to stay well-defined if a stage ever originates multiple transfers.
+    outgoing_payload_bytes: dict[int, int] = {}
+    for transfer in transfers:
+        source_stage_id = transfer.source_stage_id
+        outgoing_payload_bytes[source_stage_id] = outgoing_payload_bytes.get(source_stage_id, 0) + int(
+            transfer.payload_bytes
+        )
+
+    stage_profiles: list[PipelineStageProfile] = []
+    for result in stage_results:
+        spec = result.stage_spec
+        cache_stats = result.cache_stats
+        compute_by_model = {
+            model_name: float(result.execution_time_s.get(model_name, 0.0)) for model_name in model_names
+        }
+        outgoing_by_model = {
+            model_name: float(outgoing_comm_by_model[model_name][spec.stage_id]) for model_name in model_names
+        }
+        stage_profiles.append(
+            PipelineStageProfile(
+                stage_id=spec.stage_id,
+                layer_start=spec.layer_start,
+                layer_end=spec.layer_end,
+                compute_time_s_by_model=compute_by_model,
+                outgoing_comm_time_s_by_model=outgoing_by_model,
+                weight_bytes=int(result.weight_size_bytes),
+                activation_bytes=int(_stage_activation_memory_bytes(result)),
+                kv_cache_bytes=int(cache_stats.kv_cache_bytes),
+                kv_cache_per_token_bytes=float(cache_stats.kv_cache_per_token_bytes),
+                indexer_cache_bytes=int(cache_stats.indexer_cache_bytes),
+                indexer_cache_per_token_bytes=float(cache_stats.indexer_cache_per_token_bytes),
+                runtime_peak_bytes=int(result.peak_memory_usage_bytes),
+                outgoing_payload_bytes=int(outgoing_payload_bytes.get(spec.stage_id, 0)),
+            )
+        )
+
+    transfer_profiles = tuple(
+        PipelineTransferProfile(
+            source_stage_id=transfer.source_stage_id,
+            target_stage_id=transfer.target_stage_id,
+            payload_bytes=int(transfer.payload_bytes),
+            time_s_by_model=dict(transfer.time_s_by_model),
+            bandwidth_bytes_ps=float(transfer.bandwidth_bytes_ps),
+            latency_s=float(transfer.latency_s),
+        )
+        for transfer in transfers
+    )
+
+    return PipelineProfile(
+        pp_size=pp_size,
+        layer_partition=layer_partition,
+        stages=tuple(stage_profiles),
+        transfers=transfer_profiles,
+    )
+
+
 def _validate_pipeline_device_grid(model_config: ModelConfig, device_profile: DeviceProfile) -> None:
     parallel_config = model_config.parallel_config
     world_size = int(parallel_config.world_size)
@@ -1486,6 +1641,9 @@ def _safe_peak_memory_usage(memory_tracker: MemoryTracker) -> float:
 __all__ = [
     "PipelineCommunicator",
     "PipelineModel",
+    "PipelineProfile",
+    "PipelineStageProfile",
+    "PipelineTransferProfile",
     "PPMissingLayer",
     "PipelinePlan",
     "PipelineRunResult",
@@ -1500,4 +1658,5 @@ __all__ = [
     "build_pipeline_stage_kwargs",
     "build_stage_model_config",
     "build_stage_parallel_config",
+    "UnsupportedPPConfigurationError",
 ]

@@ -21,7 +21,11 @@ import pandas as pd
 from tensor_cast.core.model_runner import ModelRunner
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable, ForwardShapeKey
-from .optimizer_summary import EARLY_STOP_DECODE_OOM, EARLY_STOP_PREFILL_OOM, OptimizerSummary
+from .optimizer_summary import (
+    EARLY_STOP_DECODE_OOM,
+    EARLY_STOP_PREFILL_OOM,
+    OptimizerSummary,
+)
 from .scheduler import DecodeFirstWithSlack, Scheduler, SchedulerState
 from .utils import (
     AGG_COLUMNS,
@@ -71,27 +75,16 @@ class _ChunkedAggMetrics:
     decode_latency: float
     prefill_breakdowns: str
     decode_breakdowns: str
+    decode_memory_left_gb: float = 0.0
     memory_info: MemoryInfo | None = None
+    pp_mixed_pd_overlap_approx: bool = False
 
 
 class AggThroughputOptimizer(BaseThroughputOptimizer):
     name = "aggregation"
 
     def initialize(self, model_runner: ModelRunner):
-        self.model_runner = model_runner
-        self.num_mtp_tokens = (
-            self.model_runner.model.model_config.mtp_config.num_mtp_layers
-            if self.model_runner.model.model_config.mtp_config is not None
-            else 0
-        )
-        self.dp = self.model_runner.model.model_config.parallel_config.data_parallel_size
-        self.tp = self.model_runner.model.model_config.parallel_config.tensor_parallel_size
-        self.pp = self.model_runner.model.model_config.parallel_config.pipeline_parallel_size
-        self.ep = self.model_runner.model.model_config.parallel_config.expert_parallel_size
-        self.moe_tp = self.model_runner.model.model_config.parallel_config.moe_tensor_parallel_size
-        self.moe_dp = self.model_runner.model.model_config.parallel_config.moe_data_parallel_size
-        self.is_moe_model = self.model_runner.model.model_config.moe_config is not None
-        self._forward_record_cache.clear()
+        super().initialize(model_runner)
         self.scheduler = DecodeFirstWithSlack()
 
     def get_inference_info(self, optimizer_data: OptimizerData) -> OptimizerSummary:
@@ -100,7 +93,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         input_length = optimizer_data.input_length
         effective_input_length = optimizer_data.get_effective_input_length()
         output_length = optimizer_data.output_length
-        concurrency = batch_size * self.dp * self.pp
+        # global_concurrency = batch_size * DP (PP does not add replicas).
+        concurrency = batch_size * self.dp
         variable_input_mode = optimizer_data.length_distribution is not None
         chunk_plan = optimizer_data.get_prefill_chunk_plan(
             (concurrency + self.dp - 1) // self.dp if variable_input_mode else None
@@ -109,7 +103,9 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
 
         # Single-chunk prompts keep the historical formula so existing short-prompt results stay stable.
         composition_rows = []
-        if variable_input_mode:
+        if self.pp > 1:
+            metrics = self._get_pp_metrics(optimizer_data, concurrency=concurrency, chunk_plan=chunk_plan)
+        elif variable_input_mode:
             metrics, composition_rows = self._get_batched_full_prefill_metrics(
                 optimizer_data,
                 concurrency,
@@ -163,6 +159,8 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
         memory_info = getattr(metrics, "memory_info", None)
         if memory_info:
             summary.set_memory_info(memory_info)
+        if getattr(metrics, "pp_mixed_pd_overlap_approx", False):
+            summary.set_pp_mixed_pd_overlap_approx(True)
         columns = AGG_COLUMNS.copy()
         data = [
             self.model_runner.user_input.device,
@@ -816,3 +814,99 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             selected -= take
 
         return tpot_sum, finished, max_finish_time
+
+    def _get_pp_metrics(
+        self,
+        optimizer_data: OptimizerData,
+        *,
+        concurrency: int,
+        chunk_plan: list,
+    ) -> _ChunkedAggMetrics:
+        """Evaluate PP aggregation while retaining aggregation-only formulas."""
+        batch_size = optimizer_data.batch_size
+        effective_input_length = optimizer_data.get_effective_input_length()
+        output_length = optimizer_data.output_length
+        remaining_decode_tokens = max(output_length - 1, 0)
+
+        early_stop_reason = self._validate_pp_prefill_wave(
+            optimizer_data,
+            chunk_plan,
+            phase_label="aggregation prefill",
+        )
+        if early_stop_reason is not None:
+            return _ChunkedAggMetrics(
+                ttft=float("inf"),
+                tpot=float("inf"),
+                output_throughput=0,
+                memory_left_gb=-1.0,
+                prefill_latency=0.0,
+                prefill_last_latency=0.0,
+                prefill_memory_left_gb=-1.0,
+                decode_latency=0.0,
+                prefill_breakdowns="",
+                decode_breakdowns="",
+            )
+        prefill_wave = self._evaluate_pp_wave(
+            batch_size,
+            optimizer_data,
+            is_decode=False,
+            query_len=effective_input_length,
+            seq_len=effective_input_length,
+            resident_policy=("inflight" if remaining_decode_tokens == 0 else "full"),
+            chunk_shapes=[(c.query_len, c.seq_len) for c in chunk_plan] if len(chunk_plan) > 1 else None,
+        )
+        prefill_makespan_ms = prefill_wave.schedule.makespan_s * 1000.0
+        ttft = prefill_makespan_ms
+
+        if remaining_decode_tokens == 0:
+            tpot = 0.0
+            decode_latency = 0.0
+            memory_left_gb = prefill_wave.memory_left_gb
+            output_throughput = 1000 * output_length * concurrency / ttft if ttft > 0 else 0.0
+        else:
+            decode_wave = self._evaluate_pp_wave(
+                batch_size,
+                optimizer_data,
+                is_decode=True,
+                repeat=True,
+                resident_policy="full",
+                mixed_prefill=prefill_wave,
+                publish_schedule=False,
+            )
+            repeated = decode_wave.repeated
+            if repeated is None:
+                raise RuntimeError("decode_wave.repeated must not be None when repeat=True")
+            decode_latency = repeated.worst_tpot_s * 1000.0
+            decode_interval_ms = repeated.measured_interval_s * 1000.0
+            tpot = decode_latency
+            e2el = ttft + decode_interval_ms * remaining_decode_tokens
+            output_throughput = 1000 * output_length * concurrency / e2el if e2el > 0 else 0.0
+            memory_left_gb = min(
+                prefill_wave.memory_left_gb,
+                decode_wave.memory_left_gb,
+            )
+
+        # PP wave evaluation does not track individual memory components;
+        # only total/available/reserved are known at this level.
+        memory_info = {
+            "total_device_memory_gb": self.model_runner.total_device_memory_gb,
+            "model_weight_size_gb": float("nan"),
+            "kv_cache_size_gb": float("nan"),
+            "model_activation_size_gb": float("nan"),
+            "reserved_memory_gb": float(self.model_runner.user_input.reserved_memory_gb or 0.0),
+            "device_memory_available_gb": memory_left_gb,
+        }
+        return _ChunkedAggMetrics(
+            ttft=ttft,
+            tpot=tpot,
+            output_throughput=output_throughput,
+            memory_left_gb=memory_left_gb,
+            prefill_latency=prefill_makespan_ms,
+            prefill_last_latency=prefill_makespan_ms,
+            prefill_memory_left_gb=prefill_wave.memory_left_gb,
+            decode_latency=decode_latency,
+            prefill_breakdowns="",
+            decode_breakdowns="",
+            memory_info=memory_info,
+            pp_mixed_pd_overlap_approx=remaining_decode_tokens > 0,
+        )

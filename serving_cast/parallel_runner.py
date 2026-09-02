@@ -31,6 +31,9 @@ from .service.utils import (
     DEFAULT_MAX_SEARCH_COMBINATIONS,
     LIMIT_COUNT,
     OptimizerData,
+    ParallelSearchCandidate,
+    UnsupportedPPConfigurationError,
+    build_pp_search_candidates,
     count_search_combinations,
     load_length_distribution,
     resolve_parallel_search_candidates,
@@ -263,15 +266,38 @@ class ParallelRunner:
         mem = select_tightest_memory_info(source_summary.get_memory_info() for source_summary in summary_list)
         if mem:
             summary.set_memory_info(mem)
+        # Propagate the PP aggregation overlap-approx flag: if any candidate's
+        # result used the coarse P/D overlap approximation, the merged result is
+        # approximated too. (Task 5 surfaces this as a per-row column.)
+        if any(s.get_pp_mixed_pd_overlap_approx() for s in summary_list):
+            summary.set_pp_mixed_pd_overlap_approx(True)
         self.summary_result.append(summary)
 
     def _get_model_runnner(self, user_input: UserInputConfig) -> ModelRunner:
         model_runner = None
         try:
             model_runner = ModelRunner(user_input)
-        except Exception:
-            logger.error("Failed to build model %r", self.args.model_id)
-
+        except UnsupportedPPConfigurationError as exc:
+            pp_size = getattr(user_input, "pp_size", 1)
+            if pp_size > 1:
+                logger.warning(
+                    "Skipping PP=%d candidate for model %r: %s",
+                    pp_size,
+                    self.args.model_id,
+                    exc,
+                )
+            else:
+                logger.error("Failed to build model %r", self.args.model_id)
+        except Exception as exc:
+            pp_size = getattr(user_input, "pp_size", 1)
+            if pp_size > 1:
+                # PP>1 candidates must fail loud on non-PP errors (review P1-3).
+                logger.error("Failed to build model %r: %s", self.args.model_id, exc)
+                raise
+            else:
+                # PP=1 legacy path preserves the original tolerant behavior:
+                # log the error and return None so the caller skips this candidate.
+                logger.error("Failed to build model %r: %s", self.args.model_id, exc)
         return model_runner
 
     def _build_model_runner(self, user_input: UserInputConfig) -> ModelRunner | None:
@@ -522,6 +548,88 @@ class ParallelRunner:
         base_user_input = UserInputConfig.from_args(base_args)
         base_chrome_trace = getattr(base_args, "chrome_trace", None)
 
+        pp_sizes_raw = getattr(self.args, "pp_sizes", None)
+        # Use "is not None" so that an explicit --pp-sizes with no values
+        # (nargs="*" → []) enters the PP search path instead of silently
+        # falling back to legacy PP=1.  build_pp_search_candidates treats []
+        # as "search all powers of 2 up to num_devices".
+        pp_search_enabled = pp_sizes_raw is not None
+        partition_enabled = getattr(self.args, "pp_layer_partitions", None) is not None
+
+        # When PP search is not enabled, or when all requested PP sizes are 1
+        # (no actual pipeline parallelism), use the legacy path with full DCP
+        # support to preserve upstream DCP functionality.
+        pp_all_one = pp_sizes_raw is not None and len(pp_sizes_raw) > 0 and all(pp == 1 for pp in pp_sizes_raw)
+        if (not pp_search_enabled or pp_all_one) and not partition_enabled:
+            yield from self._get_user_config_legacy(target_devices, base_user_input, base_chrome_trace, is_prefill)
+            return
+
+        num_hidden_layers = self._resolve_num_hidden_layers(base_user_input)
+
+        def _build_user_input(candidate: ParallelSearchCandidate) -> UserInputConfig:
+            tmp_user_input = copy.copy(base_user_input)
+            tmp_user_input.tp_size = candidate.tp_size
+            tmp_user_input.pp_size = candidate.pp_size
+            tmp_user_input.dp_size = candidate.dp_size
+            # if the moe_config is None, ep will be set False in update_parallel_config
+            # so set it True here, moe models can enable ep parallel correctly
+            tmp_user_input.ep_size = candidate.ep_size
+            tmp_user_input.moe_dp_size = candidate.moe_dp_size
+            tmp_user_input.moe_tp_size = candidate.moe_tp_size
+            tmp_user_input.num_mtp_tokens = candidate.num_mtp_tokens
+            tmp_user_input.pp_layer_partition = candidate.layer_partition
+            tmp_user_input.parallel_search_candidate = candidate
+            tmp_user_input.dcp_size = candidate.dcp_size
+            tmp_user_input.dynamic_shapes = not tmp_user_input.enable_sequence_parallel
+            if base_chrome_trace:
+                name, ext = os.path.splitext(base_chrome_trace)
+                trace_suffix = f"tp{tmp_user_input.tp_size}pp{tmp_user_input.pp_size}dp{tmp_user_input.dp_size}"
+                if candidate.layer_partition is not None:
+                    trace_suffix += f"part{'-'.join(str(p) for p in candidate.layer_partition)}"
+                trace_suffix += f"mtp{candidate.num_mtp_tokens}"
+                tmp_user_input.chrome_trace = f"{name}_{trace_suffix}{ext}"
+            return tmp_user_input
+
+        candidates = build_pp_search_candidates(
+            num_devices=target_devices,
+            tp_sizes=self.args.tp_sizes,
+            pp_sizes=getattr(self.args, "pp_sizes", None),
+            num_hidden_layers=num_hidden_layers,
+            ep_sizes=self.args.ep_sizes,
+            moe_dp_sizes=self.args.moe_dp_sizes,
+            num_mtp_token_sizes=getattr(self.args, "num_mtp_token_sizes", None),
+            num_mtp_tokens=self.args.num_mtp_tokens,
+            pp_layer_partitions=getattr(self.args, "pp_layer_partitions", None),
+            # DCP is decode-only; prefill forces dcp_sizes=None (→ [1]).
+            dcp_sizes=None if is_prefill else getattr(self.args, "dcp_sizes", None),
+        )
+
+        total_combinations = len(candidates)
+        max_search_combinations = getattr(
+            self.args,
+            "max_search_combinations",
+            DEFAULT_MAX_SEARCH_COMBINATIONS,
+        )
+        if (
+            max_search_combinations
+            and total_combinations > max_search_combinations
+            and not getattr(self.args, "search_combination_warning_emitted", False)
+        ):
+            logger.warning(
+                "Large number of parallel search combinations (%d), "
+                "optimization may take a long time. Consider narrowing --tp-sizes, --pp-sizes, "
+                "--ep-sizes, --moe-dp-sizes, or --num-mtp-tokens; or increase --max-search-combinations.",
+                total_combinations,
+            )
+
+        for candidate in candidates:
+            yield _build_user_input(candidate)
+
+    def _get_user_config_legacy(
+        self, target_devices: int, base_user_input: UserInputConfig, base_chrome_trace, is_prefill: bool
+    ) -> Iterator[UserInputConfig]:
+        """Legacy candidate generation without PP search (preserves DCP support)."""
+
         def _build_user_input(tp: int, ep: int, moe_dp: int, num_mtp_tokens: int, dcp: int) -> UserInputConfig:
             tmp_user_input = copy.copy(base_user_input)
             tmp_user_input.tp_size = tp
@@ -611,7 +719,6 @@ class ParallelRunner:
                 len(mtp_list),
                 len(dcp_list),
             )
-
         for tp in tp_list:
             if target_devices % tp != 0:
                 continue
@@ -626,6 +733,27 @@ class ParallelRunner:
                             if tp % dcp != 0:
                                 continue
                             yield _build_user_input(tp=tp, ep=ep, moe_dp=moe_dp, num_mtp_tokens=num_mtp_tokens, dcp=dcp)
+
+    @staticmethod
+    def _resolve_num_hidden_layers(base_user_input: UserInputConfig) -> int:
+        """Resolve num_hidden_layers for PP validation without loading weights.
+
+        Use override if set; otherwise read the HF config (config-only, no
+        weights). Raise on failure — a silent large fallback would let invalid
+        partitions through and break build_pipeline_plan later.
+        """
+        override = getattr(base_user_input, "num_hidden_layers_override", 0) or 0
+        if override > 0:
+            return override
+        from tensor_cast.core.config_resolver import ConfigResolver
+
+        resolver = ConfigResolver(user_input=base_user_input)
+        resolver.update_hf_config(
+            enable_repetition=not base_user_input.disable_repetition,
+            num_hidden_layers_override=0,
+        )
+        text_config = resolver.model_config.hf_config.get_text_config()
+        return int(text_config.num_hidden_layers)
 
     def _get_df_list(
         self,
@@ -762,6 +890,7 @@ class ParallelRunner:
         try:
             task_optimizer_data = copy.deepcopy(overwrite_optimizer_data)
             task_optimizer_data.num_mtp_tokens = user_input.num_mtp_tokens
+            task_optimizer_data.parallel_search_candidate = getattr(user_input, "parallel_search_candidate", None)
             draft_block = user_input.draft_block_size()
             # Always persist the (already per-candidate clamped) acceptance for labels/fold.
             clamped_accept = float(user_input.acceptance_length)
@@ -827,6 +956,14 @@ class ParallelRunner:
             )
 
             return result
+        except UnsupportedPPConfigurationError as exc:
+            logger.warning(
+                "Skipping candidate TP %d PP %d: %s",
+                user_input.tp_size,
+                getattr(user_input, "pp_size", 1),
+                exc,
+            )
+            return None
         except Exception as exc:
             # ProcessPool cannot pickle many torch.compile exceptions (e.g. module
             # objects inside BackendCompilerFailed). Re-raise a plain RuntimeError.

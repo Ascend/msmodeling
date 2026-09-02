@@ -4,9 +4,11 @@ from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from unittest.mock import MagicMock, Mock, patch
 
+import pandas as pd
+
 from serving_cast.parallel_runner import ParallelRunner
 from serving_cast.service.optimizer_summary import OptimizerSummary
-from serving_cast.service.utils import OptimizerData
+from serving_cast.service.utils import OptimizerData, UnsupportedPPConfigurationError
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
 
@@ -44,6 +46,12 @@ class TestTaskRunner(unittest.TestCase):
         self.args.serving_cost = 0
         self.args.jobs = 4
         self.device_profile = DeviceProfile.all_device_profiles[self.args.device]
+
+    def _assert_pp_schedule_schema(self, row, expected_pp_size):
+        self.assertEqual(row["pp_size"], expected_pp_size)
+        self.assertGreater(row["pp_makespan_ms"], 0.0)
+        self.assertGreater(row["pp_bubble_ratio"], 0.0)
+        self.assertIn(row["pp_bottleneck_stage"], (0, 1))
 
     def test_get_user_config_multiple_tp(self):
         """Test _get_user_config with multiple TP values"""
@@ -334,6 +342,46 @@ class TestTaskRunner(unittest.TestCase):
         summary_df = result[0].get_summary_df()
         row = summary_df.iloc[0]
         self.assertEqual(row["concurrency"], 2)
+        self.assertEqual(row["pp_size"], 1)
+        self.assertEqual(row["pp_bubble_ratio"], 0.0)
+        self.assertEqual(
+            result[0].get_best_result_row()["parallel"],
+            row["parallel"],
+        )
+
+    def test_run_pp2_agg_and_disagg_preserve_real_schedule_metrics(self):
+        self.args.num_devices = 2
+        self.args.tp_sizes = [1]
+        self.args.ep_sizes = [1]
+        self.args.pp_sizes = [2]
+        self.args.num_hidden_layers_override = 2
+        self.args.batch_range = [2, 2]
+        self.args.ttft_limits = 1000
+        self.args.tpot_limits = 50
+        self.args.compile = False
+
+        agg_result = ParallelRunner(self.args).run_agg()
+        agg_row = agg_result[0].get_summary_df().iloc[0]
+        self._assert_pp_schedule_schema(agg_row, expected_pp_size=2)
+
+        self.args.disagg = True
+        disagg_result = ParallelRunner(self.args).run_disagg()
+        self.assertEqual(len(disagg_result), 2)
+        prefill_summaries = [
+            summary
+            for summary in disagg_result
+            if summary.data_config.ttft_limits is not None and summary.data_config.tpot_limits is None
+        ]
+        decode_summaries = [
+            summary
+            for summary in disagg_result
+            if summary.data_config.ttft_limits is None and summary.data_config.tpot_limits is not None
+        ]
+        self.assertEqual(len(prefill_summaries), 1)
+        self.assertEqual(len(decode_summaries), 1)
+        for summary in [*prefill_summaries, *decode_summaries]:
+            row = summary.get_summary_df().iloc[0]
+            self._assert_pp_schedule_schema(row, expected_pp_size=2)
 
     def test_given_mocked_executor_when_called_then_returns_empty_list_and_verifies_executor_initialization(
         self,
@@ -465,6 +513,57 @@ class TestTaskRunner(unittest.TestCase):
         self.assertEqual(row["model_id"], self.args.model_id)
         self.assertEqual(row["parallel"], "TP=1 | PP=1 | DP=1")
 
+    def test_submit_task_skips_candidate_on_unsupported_pp_configuration(self):
+        # Finding 1: _submit_task must catch ONLY UnsupportedPPConfigurationError
+        # (skip the candidate) and let unrelated ValueError propagate (fail loud).
+        user_config = UserInputConfig.from_args(self.args)
+        optimizer_data = OptimizerData(
+            input_length=self.args.input_length,
+            output_length=self.args.output_length,
+            max_batched_tokens=self.args.max_batched_tokens,
+            num_devices=self.args.num_devices,
+        )
+        task_runner = ParallelRunner(self.args)
+
+        class _RaisingStrategy:
+            def __init__(self, exc):
+                self._exc = exc
+
+            def run(self, *args, **kwargs):
+                raise self._exc
+
+        with patch(
+            "serving_cast.parallel_runner.OptimizerFactory.create_strategy",
+            return_value=_RaisingStrategy(UnsupportedPPConfigurationError("unsupported PP config")),
+        ):
+            result = task_runner._submit_task(user_config, optimizer_data)
+        # UnsupportedPPConfigurationError -> candidate skipped (None).
+        self.assertIsNone(result)
+
+    def test_submit_task_propagates_unrelated_value_error(self):
+        # A generic ValueError (e.g. profile missing, stage inconsistency) must
+        # NOT be swallowed by the PP-config catch; it should propagate.
+        user_config = UserInputConfig.from_args(self.args)
+        optimizer_data = OptimizerData(
+            input_length=self.args.input_length,
+            output_length=self.args.output_length,
+            max_batched_tokens=self.args.max_batched_tokens,
+            num_devices=self.args.num_devices,
+        )
+        task_runner = ParallelRunner(self.args)
+
+        class _RaisingStrategy:
+            def run(self, *args, **kwargs):
+                raise ValueError("unrelated error: profile missing")
+
+        with patch(
+            "serving_cast.parallel_runner.OptimizerFactory.create_strategy",
+            return_value=_RaisingStrategy(),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                task_runner._submit_task(user_config, optimizer_data)
+        self.assertIn("profile missing", str(ctx.exception))
+
 
 class TestParallelRunnerPDMode(unittest.TestCase):
     """Test cases for ParallelRunner PD ratio mode."""
@@ -484,59 +583,53 @@ class TestParallelRunnerPDMode(unittest.TestCase):
         self.args.num_devices = 8
         self.args.batch_range = [1, 16]
 
-    def test_add_summary_result_with_empty_list(self):
-        """Test _add_summary_result with empty df_list."""
-        task_runner = ParallelRunner(self.args)
-        optimizer_data = OptimizerData(
+    def _optimizer_data(self):
+        return OptimizerData(
             input_length=1024,
             output_length=1024,
             ttft_limits=100,
             tpot_limits=10,
         )
+
+    @staticmethod
+    def _summary(optimizer_data, rows, memory_info=None):
+        summary = OptimizerSummary(optimizer_data)
+        summary.set_summary_df(pd.DataFrame(rows))
+        if memory_info is not None:
+            summary.set_memory_info(memory_info)
+        return summary
+
+    def test_add_summary_result_with_empty_list(self):
+        """Test _add_summary_result with empty df_list."""
+        task_runner = ParallelRunner(self.args)
+        optimizer_data = self._optimizer_data()
 
         task_runner._add_summary_result([], optimizer_data)
         self.assertEqual(len(task_runner.summary_result), 0)
 
     def test_add_summary_result_with_valid_df(self):
         """Test _add_summary_result with valid DataFrame."""
-        import pandas as pd
-
         task_runner = ParallelRunner(self.args)
-        optimizer_data = OptimizerData(
-            input_length=1024,
-            output_length=1024,
-            ttft_limits=100,
-            tpot_limits=10,
-        )
-
-        df = pd.DataFrame(
+        optimizer_data = self._optimizer_data()
+        summary = self._summary(
+            optimizer_data,
             {
                 "ttft": [100.0],
                 "tpot": [10.0],
                 "concurrency": [10],
                 "parallel": ["tp4pp1dp1"],
                 "batch_size": [4],
-            }
+            },
         )
-
-        summary = OptimizerSummary(optimizer_data)
-        summary.set_summary_df(df)
 
         task_runner._add_summary_result([summary], optimizer_data)
         self.assertEqual(len(task_runner.summary_result), 1)
 
     def test_add_summary_result_selects_tightest_memory_info(self):
         """Merged multi-TP summaries should keep the most constrained memory info."""
-        import pandas as pd
-
         task_runner = ParallelRunner(self.args)
-        optimizer_data = OptimizerData(
-            input_length=1024,
-            output_length=1024,
-            ttft_limits=100,
-            tpot_limits=10,
-        )
-        df = pd.DataFrame({"ttft": [100.0], "tpot": [10.0], "token/s": [1.0]})
+        optimizer_data = self._optimizer_data()
+        rows = {"ttft": [100.0], "tpot": [10.0], "token/s": [1.0]}
         loose_memory_info = {
             "total_device_memory_gb": 64.0,
             "reserved_memory_gb": 4.0,
@@ -548,14 +641,9 @@ class TestParallelRunnerPDMode(unittest.TestCase):
             "device_memory_available_gb": 4.0,
         }
 
-        first = OptimizerSummary(optimizer_data)
-        first.set_summary_df(df)
-        second = OptimizerSummary(optimizer_data)
-        second.set_summary_df(df)
-        second.set_memory_info(loose_memory_info)
-        third = OptimizerSummary(optimizer_data)
-        third.set_summary_df(df)
-        third.set_memory_info(tight_memory_info)
+        first = self._summary(optimizer_data, rows)
+        second = self._summary(optimizer_data, rows, loose_memory_info)
+        third = self._summary(optimizer_data, rows, tight_memory_info)
 
         task_runner._add_summary_result([first, second, third], optimizer_data)
 
@@ -563,7 +651,6 @@ class TestParallelRunnerPDMode(unittest.TestCase):
 
     def test_run_pd_ratio_combines_prefill_and_decode_results(self):
         """_run_pd_ratio should submit both phases and wrap the optimized result."""
-        import pandas as pd
 
         class ImmediateFuture:
             def __init__(self, result):
@@ -635,7 +722,10 @@ class TestParallelRunnerPDMode(unittest.TestCase):
 
         with (
             patch("serving_cast.parallel_runner.ThreadPoolExecutor", ImmediateThreadPool),
-            patch("serving_cast.parallel_runner.PDRatioThroughputOptimizer", RecordingPDRatioOptimizer),
+            patch(
+                "serving_cast.parallel_runner.PDRatioThroughputOptimizer",
+                RecordingPDRatioOptimizer,
+            ),
         ):
             result = task_runner._run_pd_ratio()
 
@@ -659,7 +749,6 @@ class TestParallelRunnerPDMode(unittest.TestCase):
 
     def test_pd_phase_forces_disaggregation_strategy(self):
         """PD ratio sub-phases should use disaggregated optimizer semantics."""
-        import pandas as pd
 
         class InlineExecutor:
             def __init__(self, max_workers=None, initializer=None):

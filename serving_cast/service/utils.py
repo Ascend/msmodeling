@@ -11,6 +11,9 @@ from typing import Dict, Iterable, Optional, TypedDict
 import yaml
 
 from tensor_cast.model_config import ParallelConfig
+from tensor_cast.pipeline_parallel import UnsupportedPPConfigurationError as UnsupportedPPConfigurationError
+
+logger = logging.getLogger(__name__)
 
 
 LOG_LEVELS = {
@@ -71,6 +74,10 @@ MEMORY_COLUMNS = list(MEMORY_KEY_TO_COLUMN.values())
 
 AGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns(p)", "percentage_breakdowns(d)"] + MEMORY_COLUMNS
 DISAGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns"] + MEMORY_COLUMNS
+
+
+# UnsupportedPPConfigurationError is imported from tensor_cast.pipeline_parallel
+# and re-exported here for backward compatibility with existing callers.
 
 
 @dataclass
@@ -420,9 +427,15 @@ def format_breakdowns(breakdowns: Dict[str, Dict[str, float]]):
     # format the breakdowns to a string
     expected_keys = ["Mem", "Comm", "Cube", "Vec"]
     all_values = []
-    for sub_dict in breakdowns.values():
+    pp_values = []
+    for sub_dict_name, sub_dict in breakdowns.items():
         total = sum(sub_dict.values())
         if total == 0:
+            continue
+        if sub_dict_name.endswith("_pipeline_parallel"):
+            for value in sub_dict.values():
+                if isinstance(value, float):
+                    pp_values.append(value / total * 100)
             continue
         for value in sub_dict.values():
             if isinstance(value, float):
@@ -435,10 +448,18 @@ def format_breakdowns(breakdowns: Dict[str, Dict[str, float]]):
         else:
             formatted_parts.append(f"{key} 0.00")
 
+    if pp_values:
+        pp_keys = ["PP Compute", "PP Comm", "PP Bubble"]
+        for i, key in enumerate(pp_keys):
+            if i < len(pp_values):
+                formatted_parts.append(f"{key} {pp_values[i]:.2f}")
+
     return " | ".join(formatted_parts)
 
 
-def select_tightest_memory_info(memory_infos: Iterable[MemoryInfo | None]) -> MemoryInfo | None:
+def select_tightest_memory_info(
+    memory_infos: Iterable[MemoryInfo | None],
+) -> MemoryInfo | None:
     """Select the memory info with the smallest available device memory."""
     candidates = [memory_info for memory_info in memory_infos if memory_info]
     if not candidates:
@@ -585,3 +606,211 @@ def format_parallel_label(
             accept_label = int(accept) if accept == int(accept) else accept
             parts.append(f"DFlash={dflash_block}/acc={accept_label}")
     return " | ".join(parts)
+
+
+@dataclass(frozen=True)
+class ParallelSearchCandidate:
+    """A fixed parallel-structure candidate for throughput optimization.
+
+    Carries all resolved parallel dimensions plus the PP partition.
+    ``dp_size`` and ``moe_tp_size`` are derived from the
+    stage-local arithmetic (``dp = num_devices/(tp*pp)``,
+    ``moe_tp = (num_devices/pp)/(ep*moe_dp)``).
+    """
+
+    tp_size: int
+    pp_size: int
+    ep_size: int
+    moe_dp_size: int
+    moe_tp_size: int
+    dp_size: int
+    num_mtp_tokens: int
+    layer_partition: Optional[tuple[int, ...]]
+    dcp_size: int = 1
+    schedule: str = "forward"
+
+
+def _parse_partition_list(partition_values) -> tuple[int, ...]:
+    """Validate a list of positive ints and return as tuple.
+
+    Accepts either a list of ints (e.g. ``[40, 40]``) or a comma-separated
+    string (e.g. ``"40,40"``) for flexibility across CLI and direct call sites.
+    """
+    if isinstance(partition_values, str):
+        partition_values = [int(x.strip()) for x in partition_values.split(",")]
+    if not partition_values:
+        raise ValueError("partition has no entries")
+    counts = tuple(int(c) for c in partition_values)
+    if any(c <= 0 for c in counts):
+        raise ValueError(f"partition {partition_values!r} has non-positive entries")
+    return counts
+
+
+def build_pp_search_candidates(
+    num_devices: int,
+    tp_sizes: list[int] | None,
+    pp_sizes: list[int] | None,
+    num_hidden_layers: int,
+    ep_sizes: list[int] | None = None,
+    moe_dp_sizes: list[int] | None = None,
+    num_mtp_token_sizes: list[int] | None = None,
+    num_mtp_tokens: int = 0,
+    pp_layer_partitions: list[list[int]] | None = None,
+    dcp_sizes: list[int] | None = None,
+) -> list[ParallelSearchCandidate]:
+    """Enumerate PP-aware parallel search candidates with stage-local arithmetic.
+
+    Uses ``dp = num_devices // (tp * pp)`` and
+    ``moe_tp = (num_devices // pp) // (ep * moe_dp)`` so EP stays in the
+    stage-local MoE sub-world. Returns candidates that satisfy all divisibility
+    and partition constraints; invalid ones are silently filtered (except
+    partition format errors, which raise ``ValueError``).
+
+    PP=1 compatibility: when ``pp_sizes`` is None, only PP=1 is searched and
+    the TP/EP/MOE-DP defaults match the legacy ``resolve_parallel_search_candidates``
+    (TP/EP default to ``num_devices``, MOE-DP to 1). PP=1 forces
+    ``layer_partition=None``. For PP>1, TP/EP defaults
+    resolve to ``stage_devices = num_devices // pp`` so that adding
+    ``--pp-sizes`` alone produces valid candidates.
+    """
+    # When pp_sizes is None, only search PP=1 (legacy behavior).
+    if pp_sizes is None:
+        pp_list = [1]
+    elif len(pp_sizes) == 0:
+        pp_list = [1 << i for i in range(num_devices.bit_length())]
+    else:
+        pp_list = [p for p in pp_sizes if p > 0]
+    moe_dp_list = resolve_search_sizes(moe_dp_sizes, num_devices, 1)
+    mtp_list = num_mtp_token_sizes or [num_mtp_tokens]
+
+    # Parse partition strings eagerly so format errors raise immediately. Group
+    # partitions by length so each partition is paired only with matching pp_size,
+    # not cartesian-producted across all PP sizes.
+    partitions_by_length: dict[int, list[tuple[int, ...]]] = {}
+    if pp_layer_partitions is not None:
+        for pv in pp_layer_partitions:
+            counts = _parse_partition_list(pv)
+            partitions_by_length.setdefault(len(counts), []).append(counts)
+
+    candidates: list[ParallelSearchCandidate] = []
+    mtp_blocked_pp_sizes: list[int] = []
+    base_failed_pp_sizes: list[int] = []
+    for pp in pp_list:
+        # Filter pp_size that can't divide num_devices before computing
+        # stage_devices, so stage_devices is always > 0 and resolve_search_sizes
+        # never gets a zero default. This also rejects pp > num_devices.
+        # Record such pp as base-failed so the final MTP error attribution
+        # knows not every empty pp was blocked by MTP.
+        if pp > num_hidden_layers:
+            continue
+        if num_devices % pp != 0:
+            base_failed_pp_sizes.append(pp)
+            continue
+        stage_devices = num_devices // pp
+
+        # Resolve TP/EP defaults per-pp using stage_devices, so PP>1 with no
+        # explicit --tp-sizes/--ep-sizes still produces valid candidates.
+        # PP=1: stage_devices == num_devices, matching legacy defaults.
+        tp_list_pp = resolve_search_sizes(tp_sizes, stage_devices, stage_devices)
+        ep_list_pp = resolve_search_sizes(ep_sizes, stage_devices, stage_devices)
+        # DCP reuses TP devices (constraint: tp % dcp == 0), decoded later in
+        # the inner loop.  Prefill callers pass dcp_sizes=None so this resolves
+        # to [1] (DCP is decode-only).
+        dcp_list_pp = resolve_search_sizes(dcp_sizes, stage_devices, 1)
+
+        # PP>1 does not support MTP yet (model_builder rejects it). We do NOT
+        # skip the pp_size here — instead we defer the MTP decision until after
+        # the base (TP/EP/MoE-DP) divisibility check, so that the MTP error is
+        # only attributed when the pp_size would otherwise have produced a
+        # valid base candidate. This avoids misattributing an empty result to
+        # MTP when the real cause was e.g. TP not dividing num_devices.
+        if pp > 1:
+            effective_mtp_list = [m for m in mtp_list if m == 0]
+        else:
+            effective_mtp_list = mtp_list
+
+        # Partitions for this pp_size. PP=1 always uses default (None), even
+        # when explicit partitions are provided for other PP sizes. PP>1
+        # requires a matching-length partition when explicit partitions were
+        # requested (no silent fallback to default balanced).
+        if pp == 1:
+            partition_options: list[tuple[int, ...] | None] = [None]
+        elif pp_layer_partitions is not None:
+            partition_options = list(partitions_by_length.get(pp, []))
+            if not partition_options:
+                raise ValueError(
+                    f"no partition of length {pp} found for pp_size={pp}; "
+                    f"provided partitions have lengths {sorted(partitions_by_length)}"
+                )
+            for p_opt in partition_options:
+                if p_opt is not None and sum(p_opt) != num_hidden_layers:
+                    raise ValueError(
+                        f"partition {p_opt} sum ({sum(p_opt)}) must equal num_hidden_layers ({num_hidden_layers})"
+                    )
+        else:
+            partition_options = [None]
+
+        pp_had_valid_base = False
+        pp_blocked_by_mtp = False
+        candidates_added_this_pp = False
+        for tp in tp_list_pp:
+            if num_devices % (tp * pp) != 0:
+                continue
+            dp = num_devices // (tp * pp)
+            for dcp in dcp_list_pp:
+                if tp % dcp != 0:
+                    continue
+                for ep in ep_list_pp:
+                    for moe_dp in moe_dp_list:
+                        if stage_devices % (ep * moe_dp) != 0:
+                            continue
+                        moe_tp = stage_devices // (ep * moe_dp)
+                        # Base combination (TP/EP/MoE-DP) is valid for this pp_size.
+                        pp_had_valid_base = True
+                        if pp > 1 and not effective_mtp_list:
+                            # PP>1 requires MTP=0 but none was requested; this
+                            # pp_size is blocked by MTP, not by base divisibility.
+                            pp_blocked_by_mtp = True
+                            continue
+                        for num_mtp in effective_mtp_list:
+                            for partition in partition_options:
+                                candidates.append(
+                                    ParallelSearchCandidate(
+                                        tp_size=tp,
+                                        pp_size=pp,
+                                        ep_size=ep,
+                                        moe_dp_size=moe_dp,
+                                        moe_tp_size=moe_tp,
+                                        dp_size=dp,
+                                        num_mtp_tokens=num_mtp,
+                                        layer_partition=partition,
+                                        dcp_size=dcp,
+                                    )
+                                )
+                                candidates_added_this_pp = True
+        # Classify this pp_size's emptiness cause for final error attribution.
+        if not candidates_added_this_pp:
+            if pp_blocked_by_mtp and pp_had_valid_base:
+                mtp_blocked_pp_sizes.append(pp)
+            elif not pp_had_valid_base:
+                base_failed_pp_sizes.append(pp)
+
+    # Raise an MTP-specific error only when EVERY empty pp_size was blocked
+    # solely by MTP (had a valid base but no MTP=0 fallback). If any pp_size
+    # failed base divisibility, the emptiness is not purely MTP's fault, so do
+    # not misattribute.
+    if not candidates and mtp_blocked_pp_sizes and not base_failed_pp_sizes:
+        raise ValueError(
+            "PP>1 currently requires num_mtp_tokens=0; "
+            f"pp sizes {mtp_blocked_pp_sizes} with mtp={mtp_list} are incompatible"
+        )
+    if not candidates and pp_sizes is not None and len(pp_sizes) > 0:
+        logger.warning(
+            "No valid PP parallel combination found for the given "
+            "--tp-sizes/--pp-sizes/--ep-sizes/--moe-dp-sizes under "
+            "--num-devices=%d. Check stage-local divisibility "
+            "(dp = num_devices / (tp * pp), "
+            "moe_tp = (num_devices / pp) / (ep * moe_dp)).",
+            num_devices,
+        )
+    return candidates

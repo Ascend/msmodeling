@@ -173,6 +173,7 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 - `--tp-sizes`: enable TP search
 - `--ep-sizes`: enable EP search
 - `--moe-dp-sizes`: enable MOE-DP search
+- `--pp-sizes`: enable Pipeline Parallel (PP) search; when omitted, PP is fixed to 1 (backward compatible). For PP>1, DP/MoE-TP are derived via stage-local arithmetic and a forward blocking scheduler evaluates makespan/bubble/throughput. PP and DCP can be searched jointly (explicit `--dcp-sizes` is not dropped). Use `--pp-layer-partitions` to specify explicit per-stage layer counts.
 
 Rules:
 
@@ -181,6 +182,7 @@ Rules:
   - `tp = num_devices`
   - `ep = num_devices`
   - `moe-dp = 1`
+  - `pp = 1`
 - If a search argument is provided without values, that dimension uses default range:
   `powers of 2 up to world_size`
   (for example, when `num_devices=8`, default range is `[1, 2, 4, 8]`).
@@ -431,6 +433,8 @@ Main parameters:
 | `--tp-sizes` | Model & Quantization Options | Optional | Enables TP search and optionally specifies TP candidates.<br>1. Type: List[Int].<br>2. Valid range: positive integer list.<br>3. Default: `None`; when provided without values, searches powers of 2 up to `world_size`. |
 | `--ep-sizes` | Model & Quantization Options | Optional | Enables EP search and optionally specifies EP candidates.<br>1. Type: List[Int].<br>2. Valid range: positive integer list.<br>3. Default: `None`; when provided without values, searches powers of 2 up to `world_size`. |
 | `--moe-dp-sizes` | Model & Quantization Options | Optional | Enables MOE-DP search and optionally specifies MOE-DP candidates.<br>1. Type: List[Int].<br>2. Valid range: positive integer list.<br>3. Default: `None`; when provided without values, searches powers of 2 up to `world_size`. |
+| `--pp-sizes` | Model & Quantization Options | Optional | Enables Pipeline Parallel (PP) search and optionally specifies PP candidates.<br>1. Type: List[Int] (`nargs="*"`).<br>2. Valid range: positive integers, each not exceeding `num_devices` and the model's `num_hidden_layers`.<br>3. Default: `None`; when omitted, PP is fixed to 1 (backward compatible, using the legacy TP/EP/DCP search path). When provided without values, searches powers of 2 up to `num_devices` (`1, 2, 4, ...`).<br>4. When set, enters the PP-aware search path: derives `dp = num_devices // (tp * pp)` and `moe_tp = (num_devices // pp) // (ep * moe_dp)` via stage-local arithmetic, and uses a forward blocking pipeline scheduler to compute makespan, bubble ratio, and schedule-aware throughput for PP>1 candidates. PP and DCP can be searched jointly (explicit `--dcp-sizes` is not dropped).<br>5. Unsupported for PP>1: VL/multimodal models and variable-length input distribution (`length_distribution`) — such candidates are skipped with a warning. |
+| `--pp-layer-partitions` | Model & Quantization Options | Optional | Explicitly specifies per-stage layer partitions for PP.<br>1. Type: Str (JSON list of lists).<br>2. Format: e.g. `'[[31,30],[16,15,15,15]]'`; each inner list length must equal its `pp_size`, and the sum of all inner-list elements must equal the model's `num_hidden_layers` (DeepSeek-V3.1 has 61 layers: 31+30=61, 16+15+15+15=61). Inner lists are auto-matched to their `pp_size` by length.<br>3. Default: `None`; uses balanced partitioning (remainder placed on earlier stages, avoiding the last stage carrying both norm + lm_head).<br>4. Only effective for PP>1. |
 | `--enable-shared-expert-tp` | Model & Quantization Options | Optional | Enables vLLM-style tensor parallel for shared experts.<br>1. Type: Bool.<br>2. Valid range: flag option.<br>3. Default: `False`.<br>4. Shared experts use dense MLP TP with delayed `down_proj` reduction. |
 | `--compilation-config` | Model & Quantization Options | Optional | Enables specific compilation features dynamically.<br>1. Type: List[Str].<br>2. Valid range: `enable_multistream`, `enable_sequence_parallel`, `enable_matmul_allreduce`, `enable_dispatch_ffn_combine`.<br>3. Default: `None`; when omitted, all compilation features remain at their defaults (disabled).<br>4. Multiple values can be passed, e.g. `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`.<br>5. Since PR #573, this option replaces the former scattered flags such as `--enable_sequence_parallel` / `--enable_dispatch_ffn_combine`.<br>6. Mixed case and underscore/hyphen spellings are accepted, for example `enable_multistream` and `enable-multistream`. |
 | `--word-embedding-tp` | Model & Quantization Options | Optional | Enables word embedding tensor parallel and specifies mode.<br>1. Type: Str.<br>2. Reference values: `col`, `row`.<br>3. Default: `None`, meaning embedding TP is disabled. |

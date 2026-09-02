@@ -4,7 +4,7 @@
 import unittest
 
 import pandas as pd
-from serving_cast.service.optimizer_summary import OptimizerSummary
+from serving_cast.service.optimizer_summary import OptimizerSummary, PP_RESULT_COLUMNS
 from serving_cast.service.pd_ratio_throughput_optimizer import (
     PDRatioThroughputOptimizer,
 )
@@ -35,6 +35,32 @@ class TestArgs:
         self.image_height = None
         self.image_width = None
         self.compile = False
+
+
+def _prefill_df(**overrides):
+    columns = {
+        "ttft": [100.0],
+        "tpot": [0.0],
+        "concurrency": [10],
+        "parallel": ["tp4pp1dp1"],
+        "batch_size": [4],
+        "num_devices": [4],
+    }
+    columns.update(overrides)
+    return pd.DataFrame(columns)
+
+
+def _decode_df(**overrides):
+    columns = {
+        "ttft": [0.0],
+        "tpot": [10.0],
+        "concurrency": [8],
+        "parallel": ["tp2pp1dp1"],
+        "batch_size": [8],
+        "num_devices": [2],
+    }
+    columns.update(overrides)
+    return pd.DataFrame(columns)
 
 
 class TestPDRatioThroughputOptimizer(unittest.TestCase):
@@ -80,29 +106,11 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
     def test_optimize(self):
         """Test the optimization process."""
         # Set prefill results (with tpot=0 since it's prefill phase)
-        p_df = pd.DataFrame(
-            {
-                "ttft": [100.0],
-                "tpot": [0.0],
-                "concurrency": [10],
-                "parallel": ["tp4pp1dp1"],
-                "batch_size": [4],
-                "num_devices": [4],
-            }
-        )
+        p_df = _prefill_df()
         self.optimizer.set_p_results(p_df)
 
         # Set decode results (with ttft=0 since it's decode phase)
-        d_df = pd.DataFrame(
-            {
-                "ttft": [0.0],
-                "tpot": [10.0],
-                "concurrency": [8],
-                "parallel": ["tp2pp1dp1"],
-                "batch_size": [8],
-                "num_devices": [2],
-            }
-        )
+        d_df = _decode_df()
         self.optimizer.set_d_results(d_df)
 
         # Run optimization
@@ -160,6 +168,43 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
         for i in range(len(result_df) - 1):
             self.assertGreaterEqual(result_df.iloc[i]["balanced_qps"], result_df.iloc[i + 1]["balanced_qps"])
 
+    def test_optimize_preserves_pp_schema_for_both_phases(self):
+        p_df = pd.DataFrame(
+            [
+                {
+                    "ttft": 100.0,
+                    "tpot": 0.0,
+                    "concurrency": 10,
+                    "parallel": "P display",
+                    "batch_size": 4,
+                    "num_devices": 4,
+                    **{column: f"p-{column}" for column in PP_RESULT_COLUMNS},
+                }
+            ]
+        )
+        d_df = pd.DataFrame(
+            [
+                {
+                    "tpot": 10.0,
+                    "ttft": 0.0,
+                    "concurrency": 8,
+                    "parallel": "D display",
+                    "batch_size": 8,
+                    "num_devices": 2,
+                    **{column: f"d-{column}" for column in PP_RESULT_COLUMNS},
+                }
+            ]
+        )
+        self.optimizer.set_p_results(p_df)
+        self.optimizer.set_d_results(d_df)
+
+        result = self.optimizer.optimize().iloc[0]
+        for column in PP_RESULT_COLUMNS:
+            self.assertIn(f"{column}_p", result.index)
+            self.assertIn(f"{column}_d", result.index)
+            self.assertEqual(result[f"{column}_p"], f"p-{column}")
+            self.assertEqual(result[f"{column}_d"], f"d-{column}")
+
     def test_optimize_empty_p_results(self):
         """Test optimization with empty prefill results."""
         self.optimizer.set_p_results(pd.DataFrame())
@@ -198,29 +243,11 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
     def test_format_output_with_results(self):
         """Test format output with results using OptimizerSummary in PD ratio mode."""
         # Set prefill results (with tpot=0)
-        p_df = pd.DataFrame(
-            {
-                "ttft": [100.0],
-                "tpot": [0.0],
-                "concurrency": [10],
-                "parallel": ["tp4pp1dp1"],
-                "batch_size": [4],
-                "num_devices": [4],
-            }
-        )
+        p_df = _prefill_df()
         self.optimizer.set_p_results(p_df)
 
         # Set decode results (with ttft=0)
-        d_df = pd.DataFrame(
-            {
-                "ttft": [0.0],
-                "tpot": [10.0],
-                "concurrency": [8],
-                "parallel": ["tp2pp1dp1"],
-                "batch_size": [8],
-                "num_devices": [2],
-            }
-        )
+        d_df = _decode_df()
         self.optimizer.set_d_results(d_df)
 
         self.optimizer.optimize()

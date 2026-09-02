@@ -16,6 +16,7 @@ import logging
 
 import pandas as pd
 
+from serving_cast.service.optimizer_summary import PP_RESULT_COLUMNS
 from serving_cast.utils import rank_pd_ratio_rows
 
 
@@ -74,6 +75,9 @@ class PDRatioThroughputOptimizer:
         # P QPS = p_concurrency / ttft * 1000 (req/s)
         # Filter out zero ttft to avoid ZeroDivisionError
         p_df = self._p_df.copy()
+        for column in PP_RESULT_COLUMNS:
+            if column not in p_df.columns:
+                p_df[column] = None
         p_df = p_df[p_df["ttft"] > 0]
         p_df["p_qps"] = p_df["concurrency"] / p_df["ttft"] * 1000
         p_df = p_df[p_df["p_qps"] > 0]
@@ -81,6 +85,9 @@ class PDRatioThroughputOptimizer:
         # D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000 (req/s)
         # Filter out zero tpot to avoid ZeroDivisionError
         d_df = self._d_df.copy()
+        for column in PP_RESULT_COLUMNS:
+            if column not in d_df.columns:
+                d_df[column] = None
         d_df = d_df[d_df["tpot"] > 0]
         d_df["d_qps"] = d_df["concurrency"] / (d_df["tpot"] * max(self.output_length - 1, 1)) * 1000
         d_df = d_df[d_df["d_qps"] > 0]
@@ -113,6 +120,8 @@ class PDRatioThroughputOptimizer:
             "batch_size_d",
             "concurrency_p",
             "concurrency_d",
+            *[f"{column}_p" for column in PP_RESULT_COLUMNS],
+            *[f"{column}_d" for column in PP_RESULT_COLUMNS],
         ]
         self._result_df = rank_pd_ratio_rows(merged[result_cols]).reset_index(drop=True)
 

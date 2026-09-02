@@ -16,6 +16,7 @@ class SimpleArgs:
         self.tpot_limits = 100
         self.disagg = False
         self.tp_sizes = []
+        self.pp_sizes = None
         self.ep_sizes = None
         self.moe_dp_sizes = None
         self.dcp_sizes = None

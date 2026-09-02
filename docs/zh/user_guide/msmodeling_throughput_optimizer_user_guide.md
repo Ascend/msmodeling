@@ -477,6 +477,8 @@ PD Ratio Optimization Options:
 | `--tp-sizes` | Model & Quantization Options | 可选 | 启用 TP 搜索，并可显式指定 TP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
 | `--ep-sizes` | Model & Quantization Options | 可选 | 启用 EP 搜索，并可显式指定 EP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
 | `--moe-dp-sizes` | Model & Quantization Options | 可选 | 启用 MOE-DP 搜索，并可显式指定 MOE-DP 取值范围。<br>1. 类型：List[Int]。<br>2. 取值范围：正整数列表。<br>3. 默认值：`None`；仅传入参数但不指定取值时，默认搜索不超过 `world_size` 的 2 的幂。 |
+| `--pp-sizes` | Model & Quantization Options | 可选 | 启用流水线并行（Pipeline Parallel, PP）搜索，并可显式指定 PP 取值范围。<br>1. 类型：List[Int]（`nargs="*"`）。<br>2. 取值范围：正整数列表，每个值需为正整数且不超过 `num_devices`，且不超过模型 `num_hidden_layers`。<br>3. 默认值：`None`；未指定时 PP 固定为 1（向后兼容，走原有 TP/EP/DCP 搜索路径）。仅传入参数但不指定取值时，默认搜索不超过 `num_devices` 的 2 的幂（`1, 2, 4, ...`）。<br>4. 指定后进入 PP-aware 搜索路径：按 stage-local 算术推导 `dp = num_devices // (tp * pp)`、`moe_tp = (num_devices // pp) // (ep * moe_dp)`，并使用前向阻塞式流水线调度器计算 PP>1 候选的 makespan、bubble ratio 与 schedule-aware 吞吐量。PP 与 DCP 可联合搜索（显式 `--dcp-sizes` 不会被丢弃）。<br>5. 暂不支持 PP>1 的场景：VL/多模态模型、变长输入分布（`length_distribution`）——命中时跳过候选并记录 warning。 |
+| `--pp-layer-partitions` | Model & Quantization Options | 可选 | 显式指定 PP 各 stage 的层划分。<br>1. 类型：Str（JSON list of lists）。<br>2. 格式：如 `'[[31,30],[16,15,15,15]]'`；每个内层 list 长度必须等于对应的 `pp_size`，所有内层 list 元素之和必须等于模型 `num_hidden_layers`（DeepSeek-V3.1 有 61 层，31+30=61，16+15+15+15=61）。内层 list 按长度自动匹配对应的 `pp_size`。<br>3. 默认值：`None`；未指定时使用均匀切分（余数放在前面的 stage，避免最后 stage 同时背 norm + lm_head）。<br>4. 仅 PP>1 时生效。 |
 | `--enable-shared-expert-tp` | Model & Quantization Options | 可选 | 启用 vLLM 风格的 shared experts 张量并行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. shared experts 使用 dense MLP TP，并延迟执行 `down_proj` 规约。 |
 | `--compilation-config` | Model & Quantization Options | 可选 | 按需启用指定的编译特性。<br>1. 类型：List[Str]。<br>2. 取值范围：`enable_multistream`、`enable_sequence_parallel`、`enable_matmul_allreduce`、`enable_dispatch_ffn_combine`，可同时传入多个，以空格分隔，例如 `--compilation-config enable_sequence_parallel enable_dispatch_ffn_combine`。<br>3. 默认值：`None`，未指定时所有编译特性保持关闭。<br>4. 该参数自 PR #573 起统一替代原 `--enable_sequence_parallel` / `--enable_dispatch_ffn_combine` 等分散开关。<br>5. 取值大小写及下划线/连字符写法均可，例如 `enable_multistream` 与 `enable-multistream`。 |
 | `--word-embedding-tp` | Model & Quantization Options | 可选 | 启用 word embedding 张量并行并指定并行模式。<br>1. 类型：Str。<br>2. 参考值：`col`、`row`。<br>3. 默认值：`None`，表示不启用 embedding TP。 |
@@ -506,6 +508,7 @@ PD Ratio Optimization Options:
 - `--tp-sizes`：启用 TP 搜索
 - `--ep-sizes`：启用 EP 搜索
 - `--moe-dp-sizes`：启用 MOE-DP 搜索
+- `--pp-sizes`：启用流水线并行（PP）搜索；未指定时 PP 固定为 1（向后兼容）。PP>1 时按 stage-local 算术推导 DP/MoE-TP，并用前向阻塞式调度器评估 makespan/bubble/吞吐。PP 可与 DCP 联合搜索（显式 `--dcp-sizes` 不被丢弃）。可用 `--pp-layer-partitions` 指定显式层划分。
 
 规则：
 
@@ -514,6 +517,7 @@ PD Ratio Optimization Options:
   - `tp = num_devices`
   - `ep = num_devices`
   - `moe-dp = 1`
+  - `pp = 1`
 - 若提供搜索参数，需要显式给出取值。常用范围为：
   `powers of 2 up to world_size`
   （例如当 `num_devices=8` 时，可设置为 `[1, 2, 4, 8]`）。

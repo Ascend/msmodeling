@@ -107,6 +107,13 @@ class UserInputConfig:
     tp_size: int = 1
     pp_size: int = 1
     dp_size: Optional[int] = None
+    pp_layer_partition: Optional[tuple[int, ...]] = None
+    """Explicit per-stage layer counts for pipeline parallelism. None uses the
+    default balanced partition. Length must equal pp_size and sum to
+    num_hidden_layers when set."""
+    microbatch_size: int = 1
+    """Microbatch size for PP forward pipeline scheduling (Task 4). Ignored when
+    pp_size == 1."""
     o_proj_tp_size: Optional[int] = None
     o_proj_dp_size: Optional[int] = None
     mlp_tp_size: Optional[int] = None
@@ -154,6 +161,7 @@ class UserInputConfig:
         self._validate_vision_parallelism()
         self._normalize_performance_model()
         self._normalize_word_embedding_tp()
+        self._validate_pipeline_parallelism()
         self._normalize_draft_method()
 
     def _normalize_draft_method(self):
@@ -256,6 +264,15 @@ class UserInputConfig:
             raise ValueError(
                 f"word_embedding_tp must be one of {{'col', 'row'}} or None, got {self.word_embedding_tp!r}."
             ) from err
+
+    def _validate_pipeline_parallelism(self):
+        if self.pp_layer_partition is not None:
+            if len(self.pp_layer_partition) != self.pp_size:
+                raise ValueError(
+                    f"pp_layer_partition length ({len(self.pp_layer_partition)}) must equal pp_size ({self.pp_size})"
+                )
+            if any(x < 0 for x in self.pp_layer_partition):
+                raise ValueError("pp_layer_partition elements must be non-negative")
 
     def _print_info(self):
         print("--- Configuration ---")

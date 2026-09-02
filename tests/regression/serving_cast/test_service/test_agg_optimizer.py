@@ -1,6 +1,7 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import unittest
 from collections import deque
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,13 +13,29 @@ from serving_cast.service.agg_throughput_optimizer import (
     _ScheduleStep,
 )
 from serving_cast.service.latency_table import ForwardLatencyRecord, ForwardShapeKey
-from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData, PrefillChunk
+from serving_cast.service.scheduler import DecodeFirstWithSlack
+from serving_cast.service.utils import BYTES_TO_GB, LengthBin, LengthDistribution, OptimizerData, PrefillChunk
 from tensor_cast.core.input_generator import generate_inputs_varlen
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
 
 from .test_common import SimpleArgs
+from .test_disagg_optimizer import (
+    _make_pp_strategy,
+    _pp_prefill_validation_cases,
+    _pp_profile,
+    _run_pp_scaling_case,
+    _pp_schedule_estimates,
+    _PPMetrics,
+)
+
+# Agg optimizer uses concurrency = batch_size * dp (without pp),
+# so it needs its own scaling matrix with different expected values.
+_AGG_PP_SCALING_MATRIX = (
+    ("single-replica", 1, 2, 1, 2, 2),
+    ("dp-replicated", 2, 2, 2, 2, 4),
+)
 
 
 class TestAggThroughputOptimizer(unittest.TestCase):
@@ -38,6 +55,9 @@ class TestAggThroughputOptimizer(unittest.TestCase):
     def test_name_attribute(self):
         """Test that name attribute is set correctly"""
         self.assertEqual(self.strategy.name, "aggregation")
+
+    def test_initialize_sets_aggregation_scheduler(self):
+        self.assertIsInstance(self.strategy.scheduler, DecodeFirstWithSlack)
 
     def test_count_front_prefill_group_counts_only_front_chunk_shape(self):
         pending_prefill = deque(
@@ -81,7 +101,10 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(max_finish_time, 7.0)
         self.assertEqual(
             list(pending_prefill),
-            [_PrefillGroup(count=1, chunk_index=1), _PrefillGroup(count=3, chunk_index=1)],
+            [
+                _PrefillGroup(count=1, chunk_index=1),
+                _PrefillGroup(count=3, chunk_index=1),
+            ],
         )
         self.assertEqual(
             list(ready_decode),
@@ -205,7 +228,9 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(metrics.tpot, 4.0)
         self.assertEqual(metrics.output_throughput, 2000.0)
 
-    def test_get_full_prefill_metrics_stops_before_decode_when_prefill_memory_is_negative(self):
+    def test_get_full_prefill_metrics_stops_before_decode_when_prefill_memory_is_negative(
+        self,
+    ):
         optimizer_data = OptimizerData(
             input_length=10,
             output_length=5,
@@ -233,7 +258,9 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(metrics.decode_latency, 0)
         self.assertEqual(metrics.decode_breakdowns, "")
 
-    def test_get_full_prefill_metrics_stops_before_decode_when_remainder_memory_is_negative(self):
+    def test_get_full_prefill_metrics_stops_before_decode_when_remainder_memory_is_negative(
+        self,
+    ):
         optimizer_data = OptimizerData(
             input_length=10,
             output_length=5,
@@ -583,7 +610,9 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(latency, 10.0)
         self.assertEqual(memory_left, 2.0)
 
-    def test_get_or_compute_decode_latency_applies_current_mtp_rate_to_cached_raw_record(self):
+    def test_get_or_compute_decode_latency_applies_current_mtp_rate_to_cached_raw_record(
+        self,
+    ):
         optimizer_data_a = OptimizerData(
             input_length=10,
             output_length=10,
@@ -862,6 +891,210 @@ class TestAggThroughputOptimizer(unittest.TestCase):
         self.assertEqual(row["ttft"], 3.5)
         self.assertEqual(row["tpot"], 1.0)
         self.assertEqual(row["token/s"], 800.0)
+
+
+_agg_pp_profile = partial(_pp_profile, include_transfers=False)
+_AggPPMetrics = _PPMetrics
+_make_pp_agg_strategy = partial(_make_pp_strategy, AggThroughputOptimizer)
+
+
+class TestAggPipelineParallel(unittest.TestCase):
+    def test_scaling_and_overlap_flag_use_shared_matrix(self):
+        for name, dp, pp, tp, batch_size, expected_concurrency in _AGG_PP_SCALING_MATRIX:
+            with self.subTest(name=name):
+                summary, row = _run_pp_scaling_case(
+                    AggThroughputOptimizer,
+                    dp=dp,
+                    pp=pp,
+                    tp=tp,
+                    batch_size=batch_size,
+                )
+
+                self.assertEqual(row["concurrency"], expected_concurrency)
+                self.assertLessEqual(
+                    abs(row["token/s/device"] - row["token/s"] / (dp * pp * tp)),
+                    0.001 + 1e-12,
+                )
+                self.assertTrue(summary.get_pp_mixed_pd_overlap_approx())
+                self.assertFalse(summary.check_early_stop_flag())
+
+    def test_overlap_flag_survives_run_summary_rebuild(self):
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        profile = _agg_pp_profile((2.0, 2.0))
+        optimizer_data = OptimizerData(
+            input_length=4,
+            output_length=8,
+            max_batched_tokens=2048,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+            summary = strategy.run(optimizer_data, batch_range=[1, 2])
+
+        self.assertIsNotNone(summary)
+        self.assertTrue(summary.get_pp_mixed_pd_overlap_approx())
+
+    def test_formula_keeps_prefill_ttft_worst_tpot_and_decode_interval_separate(self):
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        profile = _agg_pp_profile((2.0, 2.0))
+        first_wave, repeated = _pp_schedule_estimates(
+            makespan_s=0.06,
+            interval_s=0.05,
+            worst_tpot_s=0.08,
+        )
+        optimizer_data = OptimizerData(
+            input_length=4,
+            output_length=4,
+            batch_size=2,
+            max_batched_tokens=2048,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with (
+            patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
+            patch(
+                "serving_cast.service.base_throughput_optimizer.estimate_forward_pipeline",
+                return_value=first_wave,
+            ),
+            patch(
+                "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
+                return_value=repeated,
+            ),
+        ):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        expected_e2el = 60.0 + 50.0 * (4 - 1)
+        self.assertEqual(row["ttft"], 60.0)
+        self.assertEqual(row["tpot"], 80.0)
+        self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
+
+    def test_single_token_skips_decode_profile_schedule_and_oom(self):
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        prefill_profile = _agg_pp_profile((2.0, 2.0))
+        decode_oom_profile = _pp_profile(
+            (2.0, 2.0),
+            runtime_peak_bytes=10_000_000_000_000,
+            include_transfers=False,
+        )
+        decode_calls = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode, **kwargs):
+            if is_decode:
+                decode_calls.append(concurrency)
+                return _AggPPMetrics(decode_oom_profile)
+            return _AggPPMetrics(prefill_profile)
+
+        optimizer_data = OptimizerData(
+            input_length=4,
+            output_length=1,
+            batch_size=2,
+            max_batched_tokens=2048,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with (
+            patch.object(strategy, "_get_forward_info", side_effect=fake_forward),
+            patch(
+                "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
+                side_effect=AssertionError("single-token aggregation must not decode"),
+            ),
+        ):
+            summary = strategy.get_inference_info(optimizer_data)
+
+        row = summary.get_summary_df().iloc[0]
+        self.assertEqual(decode_calls, [])
+        self.assertEqual(row["tpot"], 0.0)
+        self.assertAlmostEqual(row["token/s"], 1000.0 * 2 / 6000.0, places=3)
+        self.assertFalse(summary.check_early_stop_flag())
+        self.assertFalse(summary.get_pp_mixed_pd_overlap_approx())
+
+    def test_mixed_lifecycle_evicts_only_cross_phase_peak(self):
+        from serving_cast.service.optimizer_summary import EARLY_STOP_DECODE_OOM
+        from serving_cast.service.pipeline_schedule import (
+            estimate_pipeline_stage_memory_across_profiles,
+        )
+
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        strategy.model_runner.total_device_memory_gb = 3500.0 / BYTES_TO_GB
+        prefill_profile = _pp_profile((2.0, 2.0), runtime_peak_bytes=2000, include_transfers=False)
+        decode_profile = _pp_profile(
+            (2.0, 2.0),
+            runtime_peak_bytes=2000,
+            kv_cache_bytes=1000,
+            include_transfers=False,
+        )
+        decode_only = estimate_pipeline_stage_memory_across_profiles(
+            (decode_profile, decode_profile),
+            num_microbatches=2,
+            resident_microbatches=2,
+            device_memory_bytes=3500,
+            reserved_memory_bytes=0,
+        )
+        self.assertFalse(decode_only.exceeds_budget)
+
+        def fake_forward(concurrency, optimizer_data, is_decode, **kwargs):
+            return _AggPPMetrics(decode_profile if is_decode else prefill_profile)
+
+        optimizer_data = OptimizerData(
+            input_length=4,
+            output_length=2,
+            batch_size=2,
+            max_batched_tokens=2048,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
+            summary = strategy.get_inference_info(optimizer_data)
+
+        self.assertTrue(summary.check_early_stop_flag())
+        self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_DECODE_OOM)
+
+    def test_prefill_validation_matrix(self):
+        from serving_cast.service.utils import UnsupportedPPConfigurationError
+
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        profile = _agg_pp_profile((2.0, 2.0))
+        for name, optimizer_data, expected in _pp_prefill_validation_cases(disaggregated=False):
+            with self.subTest(name=name):
+                with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+                    with self.assertRaises(UnsupportedPPConfigurationError) as ctx:
+                        strategy.get_inference_info(optimizer_data)
+                self.assertIn(expected, str(ctx.exception))
+
+    def test_chunked_prefill_is_supported_for_pp(self):
+        """PP>1 + chunked prefill is supported: each chunk is a pipeline microbatch."""
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        profile = _agg_pp_profile((2.0, 2.0))
+        optimizer_data = OptimizerData(
+            input_length=10,
+            output_length=8,
+            batch_size=1,
+            max_batched_tokens=4,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+            summary = strategy.get_inference_info(optimizer_data)
+        self.assertFalse(summary.check_early_stop_flag())
+
+    def test_batch_budget_returns_early_stop_not_exception(self):
+        """Batch exceeding token budget returns early-stop, not UnsupportedPPConfigurationError."""
+        from serving_cast.service.optimizer_summary import EARLY_STOP_PREFILL_OOM
+
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        profile = _agg_pp_profile((2.0, 2.0))
+        optimizer_data = OptimizerData(
+            input_length=1024,
+            output_length=8,
+            batch_size=4,
+            max_batched_tokens=2048,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)):
+            summary = strategy.get_inference_info(optimizer_data)
+        self.assertTrue(summary.check_early_stop_flag())
+        self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_PREFILL_OOM)
 
 
 if __name__ == "__main__":

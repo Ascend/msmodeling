@@ -21,7 +21,7 @@ from ..performance_model.empirical import EmpiricalPerformanceModel
 from ..performance_model.memory_tracker import MemoryTracker
 from ..performance_model.profiling_database import InterpolatingDataSource, ProfilingDataSource
 from ..performance_model.utils import bytes_of_tensor
-from ..pipeline_parallel import PipelineModel, PipelineRunResult, PipelineRunner
+from ..pipeline_parallel import PipelineModel, PipelineProfile, PipelineRunResult, PipelineRunner
 from ..runtime import Runtime
 from ..transformers.custom_model_registry import get_visual
 from .input_generator import dcp_kv_token_capacity_factor
@@ -433,6 +433,7 @@ class ModelRunner:
             perf_model_name=perf_model_name,
             stage_latency_breakdown=pipeline_result.stage_latency_breakdown,
             stage_memory_breakdown=pipeline_result.stage_memory_breakdown,
+            pipeline_profile=pipeline_result.pipeline_profile,
         )
 
     def _log_empirical_model_stats(self) -> None:
@@ -507,6 +508,7 @@ class ModelRunnerMetrics:
     perf_model_name: Optional[str] = None
     stage_latency_breakdown: List[Dict] = field(default_factory=list)
     stage_memory_breakdown: List[Dict] = field(default_factory=list)
+    pipeline_profile: Optional[PipelineProfile] = None
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")

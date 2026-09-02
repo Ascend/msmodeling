@@ -8,12 +8,14 @@ from serving_cast.service.optimizer_summary import (
     EARLY_STOP_TPOT_LIMIT,
     EARLY_STOP_TTFT_LIMIT,
     OptimizerSummary,
+    PP_RESULT_COLUMNS,
     _fmt_memory,
     _fmt_memory_info,
     _get_agg_disagg_table_buf_batched,
     _get_agg_table_buf,
 )
-from serving_cast.service.utils import OptimizerData
+from serving_cast.service.pipeline_schedule import PipelineScheduleEstimate
+from serving_cast.service.utils import OptimizerData, ParallelSearchCandidate
 
 
 class TestSummary(unittest.TestCase):
@@ -37,6 +39,83 @@ class TestSummary(unittest.TestCase):
 
         retrieved_df = self.summary.get_summary_df()
         pd.testing.assert_frame_equal(retrieved_df, test_df)
+
+    def test_pp_result_columns_use_typed_context_not_parallel_display(self):
+        candidate = ParallelSearchCandidate(
+            tp_size=2,
+            pp_size=2,
+            ep_size=1,
+            moe_dp_size=1,
+            moe_tp_size=2,
+            dp_size=2,
+            num_mtp_tokens=0,
+            layer_partition=(3, 5),
+        )
+        schedule = PipelineScheduleEstimate(
+            makespan_s=0.012,
+            first_completion_s=0.006,
+            warmup_s=0.002,
+            steady_s=0.008,
+            cooldown_s=0.002,
+            aggregate_bubble_s=0.003,
+            bubble_ratio=0.125,
+            bottleneck_stage_id=1,
+            stage_busy_s=(0.011, 0.012),
+            stage_idle_s=(0.001, 0.0),
+            microbatch_completion_s=(0.006, 0.012),
+            stage_compute_intervals_s=((), ()),
+            stage_outgoing_transfer_intervals_s=((), ()),
+            stage_incoming_transfer_intervals_s=((), ()),
+            stage_incoming_payload_bytes_s=(0, 0),
+            stage_outgoing_payload_bytes_s=(0, 0),
+            stage_communication_buffer_bytes_s=(0, 0),
+        )
+        self.data_config.parallel_search_candidate = candidate
+        self.data_config.pipeline_schedule_estimate = schedule
+        self.summary.set_pp_mixed_pd_overlap_approx(True)
+        self.summary.set_summary_df(
+            pd.DataFrame(
+                [
+                    {
+                        "parallel": "legacy display text must not be parsed",
+                        "batch_size": 8,
+                    }
+                ]
+            )
+        )
+
+        row = self.summary.get_summary_df().iloc[0]
+        self.assertTrue(set(PP_RESULT_COLUMNS).issubset(row.index))
+        self.assertEqual(row["parallel"], "legacy display text must not be parsed")
+        self.assertEqual(row["tp_size"], 2)
+        self.assertEqual(row["pp_size"], 2)
+        self.assertEqual(row["dp_size"], 2)
+        self.assertEqual(row["ep_size"], 1)
+        self.assertEqual(row["moe_dp_size"], 1)
+        self.assertEqual(row["pp_layer_partition"], (3, 5))
+        self.assertEqual(row["pp_schedule"], "forward")
+        self.assertEqual(row["pp_makespan_ms"], 12.0)
+        self.assertEqual(row["pp_warmup_ms"], 2.0)
+        self.assertEqual(row["pp_steady_ms"], 8.0)
+        self.assertEqual(row["pp_cooldown_ms"], 2.0)
+        self.assertEqual(row["pp_bubble_ratio"], 0.125)
+        self.assertEqual(row["pp_bottleneck_stage"], 1)
+        self.assertTrue(row["pp_mixed_pd_overlap_approx"])
+
+    def test_pp1_without_schedule_has_zero_bubble_ratio(self):
+        self.data_config.parallel_search_candidate = ParallelSearchCandidate(
+            tp_size=1,
+            pp_size=1,
+            ep_size=1,
+            moe_dp_size=1,
+            moe_tp_size=1,
+            dp_size=1,
+            num_mtp_tokens=0,
+            layer_partition=None,
+        )
+        self.summary.set_summary_df(pd.DataFrame([{"parallel": "legacy", "batch_size": 1}]))
+
+        self.assertEqual(self.summary.get_summary_df().iloc[0]["pp_bubble_ratio"], 0.0)
 
     def test_set_stop_flag_memory_negative(self):
         """Test set_stop_flag when memory_left is negative"""
@@ -201,7 +280,11 @@ class TestFormatMemory(unittest.TestCase):
         self.assertEqual(_fmt_memory(row, "missing_GB"), "-")
 
     def test_fmt_memory_info_formats_values_and_missing_entries(self):
-        memory_info = {"total_device_memory_gb": "64", "reserved_memory_gb": None, "bad": "not-a-number"}
+        memory_info = {
+            "total_device_memory_gb": "64",
+            "reserved_memory_gb": None,
+            "bad": "not-a-number",
+        }
 
         self.assertEqual(_fmt_memory_info(memory_info, "total_device_memory_gb"), "64.000 GB")
         self.assertEqual(_fmt_memory_info(memory_info, "reserved_memory_gb"), "-")
@@ -236,20 +319,21 @@ class TestSummaryPDMode(unittest.TestCase):
         )
         self.summary = OptimizerSummary(self.pd_data_config)
 
-    def test_is_pd_ratio_mode_true(self):
-        """Test _is_pd_ratio_mode returns True for PD config."""
-        self.assertTrue(self.summary._is_pd_ratio_mode())
-
-    def test_is_pd_ratio_mode_false(self):
-        """Test _is_pd_ratio_mode returns False for non-PD config."""
+    def test_is_pd_ratio_mode(self):
+        """Test PD mode detection for PD and regular configs."""
         non_pd_config = OptimizerData(
             input_length=1024,
             output_length=1024,
             ttft_limits=100,
             tpot_limits=10,
         )
-        summary = OptimizerSummary(non_pd_config)
-        self.assertFalse(summary._is_pd_ratio_mode())
+        cases = (
+            (self.summary, True),
+            (OptimizerSummary(non_pd_config), False),
+        )
+        for summary, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(summary._is_pd_ratio_mode(), expected)
 
     def test_prepare_pd_ratio_results_deduplication(self):
         """Test _prepare_pd_ratio_results deduplicates by parallel combination."""
@@ -488,7 +572,9 @@ class TestMixedBatchOptimizerSummary(unittest.TestCase):
         self.assertIn("1000", result_str)
         self.assertIn("-", result_str)
 
-    def test_get_agg_disagg_final_out_batched_returns_message_when_all_rows_filtered(self):
+    def test_get_agg_disagg_final_out_batched_returns_message_when_all_rows_filtered(
+        self,
+    ):
         test_df = pd.DataFrame(
             [
                 {
@@ -528,7 +614,11 @@ class TestMixedBatchOptimizerSummary(unittest.TestCase):
         result = self.summary._get_agg_disagg_final_out(Args())
         self.assertEqual(
             result,
-            ["*" * 80, "No configurations satisfy the current TTFT/TPOT filters.", "*" * 80],
+            [
+                "*" * 80,
+                "No configurations satisfy the current TTFT/TPOT filters.",
+                "*" * 80,
+            ],
         )
 
     def test_report_final_result_renders_batched_aggregation_rows(self):

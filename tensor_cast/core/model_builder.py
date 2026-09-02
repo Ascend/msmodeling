@@ -20,6 +20,7 @@ from ..pipeline_parallel import (
     build_stage_model_config,
     PipelineModel,
     PipelineStageModel,
+    UnsupportedPPConfigurationError,
 )
 from ..transformers.custom_model_registry import (
     get_model_profile,
@@ -111,12 +112,13 @@ def _narrow_pipeline_vl_stage_to_language_model(
 
 def _build_pipeline_model(user_input: UserInputConfig, model_config) -> PipelineModel:
     if not _supports_pipeline_text_path(model_config):
-        raise ValueError(
+        raise UnsupportedPPConfigurationError(
             "Pipeline parallel model construction only supports text-only decoder models "
             "or VL profiles with an explicit language module path for now."
         )
     pp_size = model_config.parallel_config.pipeline_parallel_size
-    plan = build_pipeline_plan(model_config, pp_size)
+    layer_partition = user_input.pp_layer_partition
+    plan = build_pipeline_plan(model_config, pp_size, layer_partition=layer_partition)
     logger.info("Building pipeline model with %d stages", pp_size)
     stages = []
     for stage_index, stage_spec in enumerate(plan.stages, start=1):

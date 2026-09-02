@@ -5,9 +5,14 @@ import logging
 import pandas as pd
 
 from tensor_cast.core.model_runner import ModelRunner
+
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable
-from .optimizer_summary import EARLY_STOP_DECODE_OOM, EARLY_STOP_PREFILL_OOM, OptimizerSummary
+from .optimizer_summary import (
+    EARLY_STOP_DECODE_OOM,
+    EARLY_STOP_PREFILL_OOM,
+    OptimizerSummary,
+)
 from .utils import (
     DISAGG_COLUMNS,
     build_memory_info,
@@ -15,6 +20,7 @@ from .utils import (
     format_parallel_label,
     OptimizerData,
     select_tightest_memory_info,
+    UnsupportedPPConfigurationError,
 )
 
 
@@ -79,7 +85,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         batch_size = optimizer_data.batch_size
         input_length = optimizer_data.input_length
         effective_input_length = optimizer_data.get_effective_input_length()
-        concurrency = batch_size * self.dp * self.pp
+        # Pipeline parallel only splits a single request's model execution
+        # across stages — it does not create request replicas.  Global request
+        # concurrency is batch_size * dp, matching the aggregation optimizer.
+        concurrency = batch_size * self.dp
         unbounded_prefill = self._is_unbounded_prefill(optimizer_data)
         if decode_flag or unbounded_prefill:
             chunk_plan = []
@@ -100,6 +109,14 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             and len(chunk_plan) == 1
             and concurrency * chunk_plan[0].query_len <= global_batched_token_limit
         )
+
+        if self.pp > 1:
+            return self._get_pp_inference_info(
+                optimizer_data,
+                concurrency=concurrency,
+                decode_flag=decode_flag,
+                chunk_plan=chunk_plan,
+            )
 
         if decode_flag or variable_input_mode or unbounded_prefill or single_prefill_fits_budget:
             if variable_input_mode:
@@ -170,7 +187,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             wave_specs = []
             prefill_ttft_sum_ms = 0.0
             # Keep disaggregated prefill modeling simple and deterministic: each wave contains
-            # only one chunk shape and is capped by the combined DP token budget. We do not aggregate
+            # only one chunk shape and is capped by max_batched_tokens. We do not aggregate
             # different chunk positions across queries into one wave, so this may be conservative
             # compared with engines that do cross-query chunk packing.
             # serving_cost is treated as one fixed phase overhead, while breakdowns are averaged
@@ -357,4 +374,140 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
 
         self._maybe_set_search_info(optimizer_data, device_memory_available_gb, batch_size, ttft, tpot, summary)
 
+        return summary
+
+    def _get_pp_inference_info(
+        self,
+        optimizer_data: OptimizerData,
+        *,
+        concurrency: int,
+        decode_flag: bool,
+        chunk_plan: list,
+    ) -> OptimizerSummary:
+        """Evaluate one disaggregated PP phase with phase-specific formulas."""
+        batch_size = optimizer_data.batch_size
+        input_length = optimizer_data.input_length
+        effective_input_length = optimizer_data.get_effective_input_length()
+        max_batched_tokens = optimizer_data.max_batched_tokens
+        output_length = optimizer_data.output_length
+        serving_cost_ms = optimizer_data.serving_cost or 0.0
+
+        if decode_flag:
+            if optimizer_data.length_distribution is not None:
+                raise UnsupportedPPConfigurationError(
+                    "PP>1 decode does not support variable-length input distribution; "
+                    "use a fixed input_length or disable PP."
+                )
+            wave = self._evaluate_pp_wave(
+                batch_size,
+                optimizer_data,
+                is_decode=True,
+                repeat=True,
+                resident_policy="full",
+            )
+            repeated = wave.repeated
+            assert repeated is not None
+            tpot = repeated.worst_tpot_s * 1000.0 + serving_cost_ms
+            ttft = None
+            throughput_interval_s = repeated.measured_interval_s + serving_cost_ms / 1000.0
+            output_throughput = batch_size * self.dp / throughput_interval_s if throughput_interval_s > 0 else 0.0
+        else:
+            early_stop_reason = self._validate_pp_prefill_wave(optimizer_data, chunk_plan)
+            if early_stop_reason is not None:
+                summary = OptimizerSummary(optimizer_data)
+                summary.set_early_stop_flag(-1.0, None, None, reason=early_stop_reason)
+                return summary
+            wave = self._evaluate_pp_wave(
+                batch_size,
+                optimizer_data,
+                is_decode=False,
+                query_len=effective_input_length,
+                seq_len=effective_input_length,
+                resident_policy="inflight",
+                chunk_shapes=[(c.query_len, c.seq_len) for c in chunk_plan] if len(chunk_plan) > 1 else None,
+            )
+            ttft = wave.schedule.makespan_s * 1000.0 + serving_cost_ms
+            tpot = None
+            completed_tokens = batch_size * effective_input_length
+            output_throughput = completed_tokens * self.dp * 1000.0 / ttft if ttft > 0 else 0.0
+
+        device_memory_available_gb = wave.memory_left_gb
+        token_s_device = output_throughput / self.dp / self.pp / self.tp
+        parallel = format_parallel_label(
+            self.model_runner.model.model_config.parallel_config,
+            self.is_moe_model,
+            optimizer_data.num_mtp_tokens,
+            dflash_block_size=optimizer_data.dflash_block_size,
+            dflash_acceptance_length=optimizer_data.dflash_acceptance_length,
+            dspark_block_size=optimizer_data.dspark_block_size,
+            dspark_acceptance_length=optimizer_data.dspark_acceptance_length,
+            dspark_markov_rank=optimizer_data.dspark_markov_rank,
+            mtp_acceptance_length=(
+                optimizer_data.acceptance_length
+                if getattr(optimizer_data, "speculative_method", None) == "mtp"
+                else None
+            ),
+        )
+        logger.info(
+            "PP>1 %s: TTFT=%r ms, TPOT=%r ms, Throughput=%.2f token/s, "
+            "Concurrency=%d, makespan=%.4f s, bottleneck_stage=%d, Memory Left=%.2f GB",
+            "decode" if decode_flag else "prefill",
+            ttft,
+            tpot,
+            output_throughput,
+            concurrency,
+            wave.schedule.makespan_s,
+            wave.bottleneck_stage_id,
+            device_memory_available_gb,
+        )
+
+        memory_info = {
+            "total_device_memory_gb": self.model_runner.total_device_memory_gb,
+            "model_weight_size_gb": float("nan"),
+            "kv_cache_size_gb": float("nan"),
+            "model_activation_size_gb": float("nan"),
+            "reserved_memory_gb": float(self.model_runner.user_input.reserved_memory_gb or 0.0),
+            "device_memory_available_gb": device_memory_available_gb,
+        }
+        summary = OptimizerSummary(optimizer_data)
+        summary.set_memory_info(memory_info)
+        data = [
+            self.model_runner.user_input.device,
+            optimizer_data.num_devices,
+            self.model_runner.user_input.model_id,
+            self.model_runner.user_input.quantize_linear_action,
+            self.model_runner.user_input.quantize_attention_action,
+            input_length,
+            output_length,
+            effective_input_length,
+            max_batched_tokens,
+            len(chunk_plan),
+            concurrency,
+            ttft,
+            tpot,
+            output_throughput,
+            token_s_device,
+            parallel,
+            batch_size,
+            "",
+            memory_info["model_weight_size_gb"],
+            memory_info["kv_cache_size_gb"],
+            memory_info["model_activation_size_gb"],
+            memory_info["device_memory_available_gb"],
+        ]
+        result_df = pd.DataFrame(columns=DISAGG_COLUMNS, data=[data]).round(3)
+        summary.set_summary_df(result_df)
+
+        early_stop_reason = None
+        if wave.memory_exceeded:
+            early_stop_reason = EARLY_STOP_DECODE_OOM if decode_flag else EARLY_STOP_PREFILL_OOM
+        summary.set_early_stop_flag(device_memory_available_gb, tpot, ttft, reason=early_stop_reason)
+        self._maybe_set_search_info(
+            optimizer_data,
+            device_memory_available_gb,
+            batch_size,
+            ttft,
+            tpot,
+            summary,
+        )
         return summary

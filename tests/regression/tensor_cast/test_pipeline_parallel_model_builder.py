@@ -19,7 +19,7 @@ from tensor_cast.core.input_generator import (
     get_sparse_attention_indexer_cache_info,
     RequestInfo,
 )
-from tensor_cast.core.model_runner import ModelRunner
+from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
 from tensor_cast.model_config import (
@@ -1898,3 +1898,161 @@ def test_stage_latency_breakdown_warns_when_transfer_model_time_is_missing(caplo
 
     assert breakdown[0]["outgoing_comm_time_s"] == {"empirical": 0.0}
     assert "Pipeline transfer 0->1 has no time estimate for perf model 'empirical'" in caplog.text
+
+
+def _make_profile_stage_result(stage_spec, *, execution_time_s, peak, weight, kv, indexer):
+    """Build a synthetic _PipelineStageRunResult for profile contract tests."""
+    return SimpleNamespace(
+        stage_spec=stage_spec,
+        output=torch.empty(0),
+        execution_time_s=execution_time_s,
+        table_result="stage table",
+        breakdowns={"constant": {}},
+        runtime_events=[],
+        trace_events=[],
+        peak_memory_usage_bytes=peak,
+        cache_stats=PipelineStageCacheStats(
+            kv_cache_bytes=kv,
+            kv_cache_per_token_bytes=32.5,
+            indexer_cache_bytes=indexer,
+            indexer_cache_per_token_bytes=8.25,
+        ),
+        weight_size_bytes=weight,
+    )
+
+
+def _make_profile_transfer_result(source_stage_id, target_stage_id, *, payload_bytes, time_s, time_s_by_model):
+    return SimpleNamespace(
+        stats=PipelineTransferStats(
+            source_stage_id=source_stage_id,
+            target_stage_id=target_stage_id,
+            payload_bytes=payload_bytes,
+            time_s=time_s,
+            bandwidth_bytes_ps=1.0e9,
+            latency_s=0.0,
+            time_s_by_model=time_s_by_model,
+        ),
+        output=torch.empty(0),
+        table_result="transfer table",
+        runtime_events=[],
+        trace_events=[],
+        peak_memory_usage_bytes=payload_bytes,
+    )
+
+
+def test_pipeline_run_result_exposes_structured_profile():
+    # Two stages, one boundary transfer. The typed PipelineProfile must carry
+    # every field the ServingCast scheduler and the Task-4 memory formula need,
+    # sourced from the same stage_results / transfers used by existing breakdowns.
+    model = _make_pipeline_model(num_layers=4, pp_size=2, world_size=4)
+    runner = PipelineRunner(
+        model=model,
+        perf_models=[_ConstantPerformanceModel()],
+        device_profile=DeviceProfile.all_device_profiles["TEST_DEVICE"],
+    )
+    stage_results = [
+        _make_profile_stage_result(
+            model.plan.stages[0],
+            execution_time_s={"analytic": 0.2},
+            peak=104,
+            weight=48,
+            kv=4,
+            indexer=2,
+        ),
+        _make_profile_stage_result(
+            model.plan.stages[1],
+            execution_time_s={"analytic": 0.3},
+            peak=90,
+            weight=40,
+            kv=4,
+            indexer=2,
+        ),
+    ]
+    transfer_results = [
+        _make_profile_transfer_result(
+            0,
+            1,
+            payload_bytes=4096,
+            time_s=0.05,
+            time_s_by_model={"analytic": 0.05},
+        )
+    ]
+    result = runner._build_run_result(
+        logits=torch.ones(1, 1, 16),
+        stage_results=stage_results,
+        transfer_results=transfer_results,
+    )
+
+    profile = result.pipeline_profile
+    assert profile is not None
+    assert profile.pp_size == 2
+    assert profile.layer_partition == (2, 2)
+
+    assert len(profile.stages) == 2
+    stage0 = profile.stages[0]
+    assert stage0.stage_id == 0
+    assert stage0.layer_start == 0
+    assert stage0.layer_end == 2
+    assert stage0.compute_time_s_by_model == {"analytic": 0.2}
+    # outgoing comm for stage 0 is the single transfer's per-model time
+    assert stage0.outgoing_comm_time_s_by_model == {"analytic": 0.05}
+    assert stage0.weight_bytes == 48
+    assert stage0.kv_cache_bytes == 4
+    assert stage0.kv_cache_per_token_bytes == 32.5  # float preserved, not int-truncated
+    assert stage0.indexer_cache_bytes == 2
+    assert stage0.indexer_cache_per_token_bytes == 8.25  # float preserved
+    assert stage0.runtime_peak_bytes == 104
+    assert stage0.outgoing_payload_bytes == 4096
+    # activation = peak - weight - kv - indexer = 104 - 48 - 4 - 2 = 50
+    assert stage0.activation_bytes == 50
+
+    # last stage has no outgoing transfer
+    stage1 = profile.stages[1]
+    assert stage1.outgoing_comm_time_s_by_model == {"analytic": 0.0}
+    assert stage1.outgoing_payload_bytes == 0
+    assert stage1.runtime_peak_bytes == 90
+
+    assert len(profile.transfers) == 1
+    transfer0 = profile.transfers[0]
+    assert transfer0.source_stage_id == 0
+    assert transfer0.target_stage_id == 1
+    assert transfer0.payload_bytes == 4096
+    assert transfer0.time_s_by_model == {"analytic": 0.05}
+    assert transfer0.bandwidth_bytes_ps == 1.0e9
+    assert transfer0.latency_s == 0.0
+
+
+def test_pipeline_profile_is_none_when_no_stages():
+    # An empty PP run must not synthesize a profile.
+    model = _make_pipeline_model(num_layers=4, pp_size=2, world_size=4)
+    runner = PipelineRunner(
+        model=model,
+        perf_models=[_ConstantPerformanceModel()],
+        device_profile=DeviceProfile.all_device_profiles["TEST_DEVICE"],
+    )
+    result = runner._build_run_result(
+        logits=torch.ones(1, 1, 16),
+        stage_results=[],
+        transfer_results=[],
+    )
+    assert result.pipeline_profile is None
+
+
+def test_non_pipeline_metrics_keep_pipeline_profile_none():
+    # ModelRunnerMetrics for an ordinary (non-PP) TransformerModel run must not
+    # carry a pipeline_profile. Constructed directly, the default must be None.
+    metrics = ModelRunnerMetrics(
+        total_device_memory_gb=16.0,
+        model_weight_size_gb=1.0,
+        peak_memory_usage_gb=2.0,
+        kv_cache_size_gb=0.1,
+        kv_cache_per_token_gb=0.0,
+        model_activation_size_gb=0.5,
+        reserved_memory_gb=0.0,
+        device_memory_available_gb=13.0,
+        execution_time_s={"analytic": 1.0},
+        tps_per_model={"analytic": 10.0},
+        run_time_s=1.0,
+        batch_size=1,
+    )
+    assert metrics.pipeline_profile is None

@@ -1,15 +1,26 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import unittest
+from functools import partial
 from unittest.mock import Mock, patch
 
 import pandas as pd
 from serving_cast.service.disagg_throughput_optimizer import DisaggThroughputOptimizer
 from serving_cast.service.optimizer_summary import OptimizerSummary
-from serving_cast.service.utils import LengthBin, LengthDistribution, OptimizerData
+from serving_cast.service.utils import (
+    BYTES_TO_GB,
+    LengthBin,
+    LengthDistribution,
+    OptimizerData,
+)
 
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
+from tensor_cast.pipeline_parallel import (
+    PipelineProfile,
+    PipelineStageProfile,
+    PipelineTransferProfile,
+)
 
 from .test_common import SimpleArgs
 
@@ -260,15 +271,16 @@ class TestDisaggStrategy(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                ((concurrency + self.strategy.dp - 1) // self.strategy.dp) * query_len
-                <= optimizer_data.max_batched_tokens
+                concurrency * query_len <= optimizer_data.max_batched_tokens * self.strategy.dp
                 for concurrency, query_len, _ in captured_calls
             )
         )
         self.assertEqual(row["prefill_num_chunks"], 3)
-        # All four requests occupy one wave on four DP replicas for every chunk.
+        # Each chunk fits in a single wave (concurrency=4, wave_size=4),
+        # so TTFT equals the final chunk's completion time.
         self.assertEqual(row["ttft"], 5.0)
         self.assertEqual(row["token/s"], 8000.0)
+        self.assertEqual(row["percentage_breakdowns"], "Mem 20.00 | Comm 80.00 | Cube 0.00 | Vec 0.00")
 
     def test_chunked_prefill_passes_prefill_phase_to_every_forward(self):
         optimizer_data = OptimizerData(
@@ -337,6 +349,8 @@ class TestDisaggStrategy(unittest.TestCase):
         row = result.get_summary_df().iloc[0]
         self.assertEqual(captured_calls, [(4, None, None)])
         self.assertEqual(row["prefill_num_chunks"], 1)
+        # Restore the TTFT assertion: the single forward's latency is
+        # _select_latency_s({"analytic": 0.001}) * 1000 + serving_cost(0) = 1.0 ms.
         self.assertEqual(row["ttft"], 1.0)
 
     def test_chunked_prefill_stops_when_any_record_memory_is_negative(self):
@@ -669,7 +683,9 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
         mock_forward.assert_not_called()
         self.assertFalse(result.check_early_stop_flag())
 
-    def test_distribution_prefill_throughput_uses_global_tokens_instead_of_per_rank_tokens(self):
+    def test_distribution_prefill_throughput_uses_global_tokens_instead_of_per_rank_tokens(
+        self,
+    ):
         strategy = DisaggThroughputOptimizer()
         strategy.dp = 4
         strategy.tp = 1
@@ -796,6 +812,420 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
         self.assertEqual(row["ttft"], 25.0)
         self.assertAlmostEqual(row["token/s"], 11000 / 0.037, places=3)
         self.assertEqual(row["avail_GB"], 2.0)
+
+
+def _pp_stage_profile(
+    stage_id: int,
+    *,
+    compute_s: float,
+    comm_s: float,
+    payload_bytes: int = 4096,
+    weight_bytes: int = 1_000,
+    runtime_peak_bytes: int = 2_000,
+    kv_cache_bytes: int = 0,
+) -> PipelineStageProfile:
+    return PipelineStageProfile(
+        stage_id=stage_id,
+        layer_start=stage_id,
+        layer_end=stage_id + 1,
+        compute_time_s_by_model={"analytic": compute_s},
+        outgoing_comm_time_s_by_model={"analytic": comm_s},
+        weight_bytes=weight_bytes,
+        activation_bytes=0,
+        kv_cache_bytes=kv_cache_bytes,
+        kv_cache_per_token_bytes=0.0,
+        indexer_cache_bytes=0,
+        indexer_cache_per_token_bytes=0.0,
+        runtime_peak_bytes=runtime_peak_bytes,
+        outgoing_payload_bytes=payload_bytes if comm_s > 0 else 0,
+    )
+
+
+def _pp_profile(
+    compute_times: tuple[float, ...],
+    *,
+    comm_times: tuple[float, ...] | None = None,
+    payload_bytes: int = 4096,
+    weight_bytes: int = 1_000,
+    runtime_peak_bytes: int = 2_000,
+    kv_cache_bytes: int = 0,
+    include_transfers: bool = True,
+) -> PipelineProfile:
+    if comm_times is None:
+        comm_times = (0.0,) * (len(compute_times) - 1)
+    stages = tuple(
+        _pp_stage_profile(
+            stage_id,
+            compute_s=compute,
+            comm_s=comm_times[stage_id] if stage_id < len(comm_times) else 0.0,
+            payload_bytes=payload_bytes,
+            weight_bytes=weight_bytes,
+            runtime_peak_bytes=runtime_peak_bytes,
+            kv_cache_bytes=kv_cache_bytes,
+        )
+        for stage_id, compute in enumerate(compute_times)
+    )
+    transfers = (
+        tuple(
+            PipelineTransferProfile(
+                source_stage_id=i,
+                target_stage_id=i + 1,
+                payload_bytes=payload_bytes,
+                time_s_by_model={"analytic": comm_times[i]},
+                bandwidth_bytes_ps=1.0e9,
+                latency_s=0.0,
+            )
+            for i in range(len(comm_times))
+        )
+        if include_transfers
+        else ()
+    )
+    return PipelineProfile(
+        pp_size=len(compute_times),
+        layer_partition=tuple(1 for _ in compute_times),
+        stages=stages,
+        transfers=transfers,
+    )
+
+
+class _PPMetrics:
+    def __init__(
+        self,
+        profile: PipelineProfile,
+        *,
+        execution_time_s=None,
+        device_memory_available_gb=10.0,
+    ):
+        self.pipeline_profile = profile
+        self.execution_time_s = execution_time_s or {"analytic": 0.0}
+        self.device_memory_available_gb = device_memory_available_gb
+        self.breakdowns = {}
+
+
+def _make_pp_strategy(
+    strategy_type,
+    *,
+    dp: int,
+    pp: int,
+    tp: int,
+    microbatch_size: int = 1,
+):
+    from types import SimpleNamespace
+
+    strategy = strategy_type()
+    strategy.dp = dp
+    strategy.tp = tp
+    strategy.pp = pp
+    strategy.is_moe_model = False
+    strategy.num_mtp_tokens = 0
+    strategy.model_runner = Mock()
+    strategy.model_runner.perf_models = [SimpleNamespace(name="analytic")]
+    strategy.model_runner.user_input.device = "TEST_DEVICE"
+    strategy.model_runner.user_input.model_id = "test-model"
+    strategy.model_runner.user_input.quantize_linear_action = "DISABLED"
+    strategy.model_runner.user_input.quantize_attention_action = "DISABLED"
+    strategy.model_runner.user_input.microbatch_size = microbatch_size
+    strategy.model_runner.user_input.reserved_memory_gb = 0.0
+    strategy.model_runner.total_device_memory_gb = 64.0
+    strategy.model_runner.model_weight_size_gb = 0.0
+    strategy.model_runner.model.model_config.parallel_config = Mock(
+        tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
+        data_parallel_size=dp,
+        decode_context_parallel_size=1,
+        expert_parallel_size=1,
+        moe_tensor_parallel_size=1,
+        moe_data_parallel_size=1,
+    )
+    return strategy
+
+
+_PP_SCALING_MATRIX = (
+    # concurrency = batch_size * dp (PP does not add request replicas)
+    ("single-replica", 1, 2, 1, 2, 2),
+    ("dp-replicated", 2, 2, 2, 2, 4),
+)
+
+
+def _pp_prefill_validation_cases(*, disaggregated: bool):
+    """Cases that must still raise UnsupportedPPConfigurationError."""
+    phase_kwargs = {"ttft_limits": 1000, "tpot_limits": None} if disaggregated else {}
+    case_specs = (
+        (
+            "variable",
+            {
+                "batch_size": 2,
+                "input_length": None,
+                "length_distribution": _simple_length_distribution(),
+                "max_batched_tokens": 2048,
+            },
+            "variable-length",
+        ),
+    )
+    return tuple(
+        (
+            name,
+            OptimizerData(output_length=8, **phase_kwargs, **optimizer_kwargs),
+            expected,
+        )
+        for name, optimizer_kwargs, expected in case_specs
+    )
+
+
+def _run_pp_scaling_case(
+    strategy_type,
+    *,
+    dp: int,
+    pp: int,
+    tp: int,
+    batch_size: int,
+):
+    strategy = _make_pp_strategy(strategy_type, dp=dp, pp=pp, tp=tp)
+    optimizer_kwargs = {
+        "input_length": 4,
+        "output_length": 8,
+        "batch_size": batch_size,
+        "max_batched_tokens": batch_size * 4,
+        "serving_cost": 0,
+        "num_mtp_tokens": 0,
+        "mtp_acceptance_rate": [],
+    }
+    if strategy_type is DisaggThroughputOptimizer:
+        optimizer_kwargs.update(ttft_limits=100000, tpot_limits=None)
+    optimizer_data = OptimizerData(**optimizer_kwargs)
+    profile = _pp_profile((2.0, 2.0), include_transfers=False)
+    with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+        summary = strategy.get_inference_info(optimizer_data)
+    return summary, summary.get_summary_df().iloc[0]
+
+
+def _pp_schedule_estimates(*, makespan_s: float, interval_s: float, worst_tpot_s: float):
+    from serving_cast.service.pipeline_schedule import (
+        PipelineScheduleEstimate,
+        RepeatedPipelineEstimate,
+    )
+
+    first_wave = PipelineScheduleEstimate(
+        makespan_s=makespan_s,
+        first_completion_s=makespan_s / 2,
+        warmup_s=0.0,
+        steady_s=makespan_s,
+        cooldown_s=0.0,
+        aggregate_bubble_s=0.0,
+        bubble_ratio=0.0,
+        bottleneck_stage_id=0,
+        stage_busy_s=(makespan_s, makespan_s),
+        stage_idle_s=(0.0, 0.0),
+        microbatch_completion_s=(makespan_s / 2, makespan_s),
+        stage_compute_intervals_s=((), ()),
+        stage_outgoing_transfer_intervals_s=((), ()),
+        stage_incoming_transfer_intervals_s=((), ()),
+        stage_incoming_payload_bytes_s=(0, 0),
+        stage_outgoing_payload_bytes_s=(0, 0),
+        stage_communication_buffer_bytes_s=(0, 0),
+    )
+    repeated = RepeatedPipelineEstimate(
+        first_wave=first_wave,
+        repeated_makespan_s=makespan_s + interval_s,
+        same_slot_period_s=(worst_tpot_s, worst_tpot_s),
+        worst_tpot_s=worst_tpot_s,
+        completed_tokens=2,
+        measured_interval_s=interval_s,
+    )
+    return first_wave, repeated
+
+
+_make_pp_disagg_strategy = partial(_make_pp_strategy, DisaggThroughputOptimizer)
+
+
+class TestDisaggPipelineParallel(unittest.TestCase):
+    def test_prefill_formula_uses_wave_makespan_and_serving_cost(self):
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=2,
+            input_length=4,
+            output_length=8,
+            max_batched_tokens=8,
+            serving_cost=5,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        self.assertEqual(row["ttft"], 6005.0)
+        self.assertIsNone(row["tpot"])
+        self.assertAlmostEqual(row["token/s"], 2 * 4 * 1000.0 / 6005.0, places=3)
+
+    def test_decode_formula_separates_worst_tpot_and_measured_interval(self):
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        _, repeated = _pp_schedule_estimates(
+            makespan_s=10.0,
+            interval_s=6.0,
+            worst_tpot_s=8.0,
+        )
+        optimizer_data = OptimizerData(
+            ttft_limits=None,
+            tpot_limits=10000,
+            batch_size=2,
+            input_length=512,
+            output_length=128,
+            max_batched_tokens=2048,
+            serving_cost=2,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with (
+            patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)),
+            patch(
+                "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
+                return_value=repeated,
+            ),
+        ):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        self.assertIsNone(row["ttft"])
+        self.assertEqual(row["tpot"], 8002.0)
+        self.assertAlmostEqual(row["token/s"], 2.0 / 6.002, places=3)
+
+    def test_dp_scaling_uses_shared_matrix(self):
+        for name, dp, pp, tp, batch_size, expected_concurrency in _PP_SCALING_MATRIX:
+            with self.subTest(name=name):
+                summary, row = _run_pp_scaling_case(
+                    DisaggThroughputOptimizer,
+                    dp=dp,
+                    pp=pp,
+                    tp=tp,
+                    batch_size=batch_size,
+                )
+
+                self.assertEqual(row["concurrency"], expected_concurrency)
+                self.assertLessEqual(
+                    abs(row["token/s/device"] - row["token/s"] / (dp * pp * tp)),
+                    0.001 + 1e-12,
+                )
+                self.assertFalse(summary.check_early_stop_flag())
+
+    def test_microbatch_profile_scales_concurrency_by_dp(self):
+        strategy = _make_pp_disagg_strategy(dp=4, pp=2, tp=1, microbatch_size=2)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        captured = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode, **kwargs):
+            captured.append(concurrency)
+            return _PPMetrics(profile)
+
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=2,
+            input_length=4,
+            output_length=8,
+            max_batched_tokens=8,
+            serving_cost=0,
+        )
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
+            strategy.get_inference_info(optimizer_data)
+
+        self.assertEqual(captured, [2 * 4])
+
+    def test_memory_gate_preserves_exact_oom_threshold(self):
+        profile = _pp_profile((2.0, 2.0), runtime_peak_bytes=2000, include_transfers=False)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=4,
+            output_length=8,
+            max_batched_tokens=4,
+            serving_cost=0,
+        )
+        for budget_bytes, expected_oom in ((2000, False), (1999, True)):
+            with self.subTest(budget_bytes=budget_bytes):
+                strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+                strategy.model_runner.total_device_memory_gb = budget_bytes / BYTES_TO_GB
+                with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+                    summary = strategy.get_inference_info(optimizer_data)
+                self.assertEqual(summary.check_early_stop_flag(), expected_oom)
+
+    def test_prefill_validation_matrix(self):
+        from serving_cast.service.utils import UnsupportedPPConfigurationError
+
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        for name, optimizer_data, expected in _pp_prefill_validation_cases(disaggregated=True):
+            with self.subTest(name=name):
+                with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+                    with self.assertRaises(UnsupportedPPConfigurationError) as ctx:
+                        strategy.get_inference_info(optimizer_data)
+                self.assertIn(expected, str(ctx.exception))
+
+    def test_prefill_budget_is_scoped_per_dp_replica(self):
+        strategy = _make_pp_disagg_strategy(dp=2, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=2,
+            input_length=1024,
+            output_length=8,
+            max_batched_tokens=2048,
+            serving_cost=0,
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+            summary = strategy.get_inference_info(optimizer_data)
+
+        self.assertFalse(summary.check_early_stop_flag())
+        # concurrency = batch_size * dp (PP does not add request replicas)
+        self.assertEqual(summary.get_summary_df().iloc[0]["concurrency"], 4)
+
+    def test_chunked_prefill_is_supported_for_pp(self):
+        """PP>1 + chunked prefill is supported: each chunk is a pipeline microbatch."""
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        # input_length=10 > max_batched_tokens=4 → 3 chunks (4,4,2)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=10,
+            output_length=8,
+            max_batched_tokens=4,
+            serving_cost=0,
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+            summary = strategy.get_inference_info(optimizer_data)
+        # Should not raise; chunked prefill is now supported
+        self.assertFalse(summary.check_early_stop_flag())
+        # Confirm each chunk actually participated in the pipeline schedule:
+        # input_length=10 split by max_batched_tokens=4 yields 3 microbatches.
+        self.assertEqual(summary.get_summary_df().iloc[0]["prefill_num_chunks"], 3)
+
+    def test_batch_budget_returns_early_stop_not_exception(self):
+        """Batch exceeding token budget returns early-stop, not UnsupportedPPConfigurationError."""
+        from serving_cast.service.optimizer_summary import EARLY_STOP_PREFILL_OOM
+
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        # batch_size=4 * input_length=1024 = 4096 > max_batched_tokens=2048
+        # but max_batch_by_tokens = 2048//1024 = 2 >= 1, so early-stop (shrink search)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=4,
+            input_length=1024,
+            output_length=8,
+            max_batched_tokens=2048,
+            serving_cost=0,
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+            summary = strategy.get_inference_info(optimizer_data)
+        self.assertTrue(summary.check_early_stop_flag())
+        self.assertEqual(summary.get_early_stop_reason(), EARLY_STOP_PREFILL_OOM)
 
 
 if __name__ == "__main__":

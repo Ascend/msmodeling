@@ -4,6 +4,7 @@
 Complements ``test_optimizer_summary.py`` in this directory with helper/render/branch coverage.
 """
 
+import itertools
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest import TestCase
@@ -22,6 +23,7 @@ from serving_cast.service.optimizer_summary import (
     _get_pd_ratio_table_buf,
     _positive_float,
     _sorted_rows,
+    select_parallel_result_rows,
     render_cross_device_comparison,
     render_cross_hardware_disagg_decode,
     render_cross_hardware_disagg_prefill,
@@ -377,7 +379,341 @@ class TestOptimizerSummaryEarlyStopHelpers(TestCase):
         self.assertFalse(s2.check_early_stop_flag())
 
 
+_TIE_CONFIG = SimpleNamespace(
+    ttft_limits=100.0,
+    tpot_limits=100.0,
+    output_length=8,
+)
+
+
+def _best_agg_row(rows):
+    summary = OptimizerSummary(_TIE_CONFIG)
+    summary.set_summary_df(pd.DataFrame(rows))
+    return summary.get_best_result_row()
+
+
+def _rank_row(
+    *,
+    parallel,
+    throughput,
+    tpot=10.0,
+    ttft=10.0,
+    bubble=0.1,
+    memory=8.0,
+    pp_size=2,
+    **updates,
+):
+    row = _baseline_agg_row(
+        {
+            "parallel": parallel,
+            "token/s": throughput,
+            "ttft": ttft,
+            "tpot": tpot,
+            "pp_bubble_ratio": bubble,
+            "avail_GB": memory,
+            "pp_size": pp_size,
+        }
+    )
+    row.update(updates)
+    return row
+
+
 class TestOptimizerSummaryReportAndCollect(TestCase):
+    def test_parallel_representatives_do_not_depend_on_other_parallel_anchor(self):
+        rows = pd.DataFrame(
+            [
+                _rank_row(
+                    parallel="A",
+                    throughput=100.0016,
+                    tpot=20.0,
+                ),
+                _rank_row(
+                    parallel="A",
+                    throughput=100.0008,
+                    tpot=10.0,
+                ),
+                _rank_row(
+                    parallel="B",
+                    throughput=100.0024,
+                    tpot=1.0,
+                ),
+            ]
+        )
+
+        representatives = select_parallel_result_rows(rows, _TIE_CONFIG)
+        self.assertEqual(
+            representatives.loc[representatives["parallel"] == "A", "tpot"].iloc[0],
+            10.0,
+        )
+
+    def test_full_rank_key_shuffle_uses_stable_row_identifier(self):
+        rows = [
+            _rank_row(
+                parallel="same",
+                throughput=100.0,
+                batch_size=2,
+                concurrency=4,
+                source_row_id="b",
+            ),
+            _rank_row(
+                parallel="same",
+                throughput=100.0,
+                batch_size=2,
+                concurrency=4,
+                source_row_id="a",
+            ),
+        ]
+        for permutation in itertools.permutations(rows):
+            self.assertEqual(_best_agg_row(permutation)["source_row_id"], "a")
+
+    def test_agg_tie_groups_are_order_independent_and_anchor_based(self):
+        rows = [
+            _rank_row(
+                parallel="lower-separate-group",
+                throughput=100.0,
+                tpot=1.0,
+                bubble=0.0,
+                memory=99.0,
+                pp_size=1,
+            ),
+            _rank_row(
+                parallel="best-in-anchor-group",
+                throughput=100.0008,
+                tpot=10.0,
+            ),
+            _rank_row(
+                parallel="higher-throughput-worse-slo",
+                throughput=100.0016,
+                tpot=20.0,
+                bubble=0.0,
+                memory=99.0,
+                pp_size=1,
+            ),
+        ]
+
+        for permutation in itertools.permutations(rows):
+            self.assertEqual(
+                _best_agg_row(permutation)["parallel"],
+                "best-in-anchor-group",
+            )
+
+    def test_agg_throughput_tolerance_boundary_is_stable(self):
+        rows = [
+            _rank_row(
+                parallel="boundary-winner",
+                throughput=100.0,
+                tpot=10.0,
+            ),
+            _rank_row(
+                parallel="boundary-higher-throughput",
+                throughput=100.001,
+                tpot=20.0,
+                bubble=0.0,
+                memory=99.0,
+                pp_size=1,
+            ),
+        ]
+        for permutation in itertools.permutations(rows):
+            self.assertEqual(
+                _best_agg_row(permutation)["parallel"],
+                "boundary-winner",
+            )
+
+    def test_agg_high_throughput_tolerance_boundary_is_decimal_exact(self):
+        rows = [
+            _rank_row(
+                parallel="high-boundary-winner",
+                throughput=1_000_000.0,
+                tpot=10.0,
+            ),
+            _rank_row(
+                parallel="high-boundary-higher-throughput",
+                throughput=1_000_000.001,
+                tpot=20.0,
+                bubble=0.0,
+                memory=99.0,
+                pp_size=1,
+            ),
+        ]
+        for permutation in itertools.permutations(rows):
+            self.assertEqual(
+                _best_agg_row(permutation)["parallel"],
+                "high-boundary-winner",
+            )
+
+    def test_agg_nonfinite_throughput_rows_are_stable_and_do_not_raise(self):
+        rows = [
+            _rank_row(
+                parallel="positive-infinity-winner",
+                throughput=float("inf"),
+                tpot=10.0,
+            ),
+            _rank_row(
+                parallel="positive-infinity-worse-slo",
+                throughput=float("inf"),
+                tpot=20.0,
+            ),
+            _rank_row(
+                parallel="negative-infinity-one",
+                throughput=float("-inf"),
+                tpot=10.0,
+            ),
+            _rank_row(
+                parallel="negative-infinity-two",
+                throughput=float("-inf"),
+                tpot=20.0,
+            ),
+            _rank_row(
+                parallel="nan-one",
+                throughput=float("nan"),
+                tpot=10.0,
+            ),
+            _rank_row(
+                parallel="nan-two",
+                throughput=float("nan"),
+                tpot=20.0,
+            ),
+        ]
+        for permutation in (rows, list(reversed(rows)), rows[2:] + rows[:2]):
+            self.assertEqual(
+                _best_agg_row(permutation)["parallel"],
+                "positive-infinity-winner",
+            )
+
+    def test_agg_tie_break_prefers_slo_bubble_memory_then_lower_pp(self):
+        cfg = SimpleNamespace(ttft_limits=100.0, tpot_limits=100.0, output_length=8)
+        s = OptimizerSummary(cfg)
+        target = _baseline_agg_row(
+            {
+                "parallel": "target",
+                "token/s": 100.0005,
+                "ttft": 10.0,
+                "tpot": 20.0,
+                "pp_bubble_ratio": 0.1,
+                "avail_GB": 8.0,
+                "pp_size": 2,
+            }
+        )
+        s.set_summary_df(
+            pd.DataFrame(
+                [
+                    _baseline_agg_row(
+                        {
+                            "parallel": "worse-slo",
+                            "token/s": 100.0,
+                            "tpot": 30.0,
+                            "pp_bubble_ratio": 0.0,
+                            "avail_GB": 99.0,
+                            "pp_size": 1,
+                        }
+                    ),
+                    _baseline_agg_row(
+                        {
+                            "parallel": "worse-bubble",
+                            "token/s": 100.0,
+                            "tpot": 20.0,
+                            "pp_bubble_ratio": 0.2,
+                            "avail_GB": 99.0,
+                            "pp_size": 1,
+                        }
+                    ),
+                    _baseline_agg_row(
+                        {
+                            "parallel": "worse-memory",
+                            "token/s": 100.0,
+                            "tpot": 20.0,
+                            "pp_bubble_ratio": 0.1,
+                            "avail_GB": 2.0,
+                            "pp_size": 1,
+                        }
+                    ),
+                    _baseline_agg_row(
+                        {
+                            "parallel": "worse-pp",
+                            "token/s": 100.0,
+                            "tpot": 20.0,
+                            "pp_bubble_ratio": 0.1,
+                            "avail_GB": 8.0,
+                            "pp_size": 4,
+                        }
+                    ),
+                    target,
+                ]
+            )
+        )
+
+        self.assertEqual(s._prepare_agg_disagg_results().iloc[0]["parallel"], "target")
+
+    def test_pp1_ranking_matches_legacy_sort_for_clear_throughput_winner(self):
+        """When throughput values differ by more than the tie tolerance, the new
+        ranking engine must select the same best row as the legacy sort
+        (token/s desc → groupby parallel → first).
+
+        This is the PP=1 compatibility guarantee: the new ranking engine
+        does not change the best-row outcome for non-tie cases.
+        """
+        rows = [
+            _baseline_agg_row({"parallel": "tp1", "token/s": 50.0, "ttft": 50.0, "tpot": 10.0}),
+            _baseline_agg_row({"parallel": "tp2", "token/s": 100.0, "ttft": 80.0, "tpot": 20.0}),
+            _baseline_agg_row({"parallel": "tp4", "token/s": 80.0, "ttft": 60.0, "tpot": 15.0}),
+        ]
+        df = pd.DataFrame(rows)
+
+        # Legacy: sort by token/s desc, take overall first.
+        legacy_best = df.sort_values("token/s", ascending=False).iloc[0]["parallel"]
+
+        # New engine: select_parallel_result_rows + rank_optimizer_result_rows.
+        new_ranked = select_parallel_result_rows(df, _TIE_CONFIG)
+        new_best = new_ranked.sort_values("token/s", ascending=False).iloc[0]["parallel"]
+
+        # Both must pick tp2 (highest throughput, no tie).
+        self.assertEqual(legacy_best, "tp2")
+        self.assertEqual(new_best, "tp2")
+
+        # Also verify via OptimizerSummary.get_best_result_row (full pipeline).
+        summary = OptimizerSummary(_TIE_CONFIG)
+        summary.set_summary_df(df)
+        summary_best = summary.get_best_result_row()["parallel"]
+        self.assertEqual(summary_best, "tp2")
+
+    def test_pp1_ranking_matches_legacy_sort_per_parallel_representative(self):
+        """Each parallel label's representative must be the same under both
+        old and new sorting when there is no throughput tie within the label.
+        """
+        rows = [
+            _baseline_agg_row({"parallel": "tp1", "token/s": 50.0, "ttft": 50.0, "tpot": 10.0, "batch_size": 1}),
+            _baseline_agg_row({"parallel": "tp1", "token/s": 40.0, "ttft": 60.0, "tpot": 8.0, "batch_size": 2}),
+            _baseline_agg_row({"parallel": "tp2", "token/s": 100.0, "ttft": 80.0, "tpot": 20.0, "batch_size": 1}),
+            _baseline_agg_row({"parallel": "tp2", "token/s": 90.0, "ttft": 70.0, "tpot": 18.0, "batch_size": 2}),
+        ]
+        df = pd.DataFrame(rows)
+
+        # Legacy: per parallel, sort by token/s desc, take first.
+        legacy_reps = (
+            df.sort_values("token/s", ascending=False)
+            .groupby("parallel", sort=False)
+            .first()
+            .reset_index()
+            .sort_values("token/s", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        # New engine.
+        new_reps = select_parallel_result_rows(df, _TIE_CONFIG)
+        new_reps = new_reps.sort_values("token/s", ascending=False).reset_index(drop=True)
+
+        # Same number of representatives.
+        self.assertEqual(len(legacy_reps), len(new_reps))
+        # Same parallel labels in same order.
+        self.assertEqual(list(legacy_reps["parallel"]), list(new_reps["parallel"]))
+        # Same token/s for each representative.
+        for i in range(len(legacy_reps)):
+            self.assertAlmostEqual(
+                legacy_reps.iloc[i]["token/s"],
+                new_reps.iloc[i]["token/s"],
+                places=6,
+            )
+
     def test_best_agg_disabled_in_pd_ratio_mode(self):
         cfg = SimpleNamespace(
             ttft_limits=1000.0,
