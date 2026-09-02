@@ -48,6 +48,7 @@ export const MODEL_ID_OPTIONS = [
   // --- Kimi (Moonshot) ---
   v('moonshotai/Kimi-K2.5'),
   v('moonshotai/Kimi-K2.6'),
+  v('moonshotai/Kimi-K3'),
   // --- Qwen3 (Dense) ---
   v('Qwen/Qwen3-0.6B'),
   v('Qwen/Qwen3-1.7B'),
@@ -55,6 +56,7 @@ export const MODEL_ID_OPTIONS = [
   v('Qwen/Qwen3-8B'),
   v('Qwen/Qwen3-14B'),
   v('Qwen/Qwen3-32B'),
+  v('Qwen/Qwen3.8'),
   // --- Qwen3 (MoE) ---
   v('Qwen/Qwen3-30B-A3B'),
   v('Qwen/Qwen3-235B-A22B'),
@@ -86,6 +88,7 @@ export const MODEL_ID_OPTIONS = [
   v('MiniMaxAI/MiniMax-M2'),
   v('MiniMaxAI/MiniMax-M2.5'),
   v('MiniMaxAI/MiniMax-M2.7'),
+  v('MiniMaxAI/MiniMax-M3'),
   // --- Qwen3-VL (Dense) ---
   v('Qwen/Qwen3-VL-2B-Instruct'),
   v('Qwen/Qwen3-VL-4B-Instruct'),
@@ -134,14 +137,10 @@ export const VIDEO_MODEL_ID_OPTIONS = [
   // --- Wan ---
   v('Wan-AI/Wan2.1-T2V-1.3B-Diffusers'),
   v('Wan-AI/Wan2.1-T2V-14B-Diffusers'),
-  v('Wan-AI/Wan2.1-I2V-14B-480P-Diffusers'),
-  v('Wan-AI/Wan2.1-I2V-14B-720P-Diffusers'),
   v('Wan-AI/Wan2.2-TI2V-5B-Diffusers'),
   v('Wan-AI/Wan2.2-T2V-A14B-Diffusers'),
-  v('Wan-AI/Wan2.2-I2V-A14B-Diffusers'),
   // --- HunyuanVideo ---
   v('tencent/HunyuanVideo'),
-  v('tencent/HunyuanVideo-I2V'),
   v('tencent/HunyuanVideo-1.5'),
 ]
 
