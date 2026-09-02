@@ -23,6 +23,13 @@ import serving_cast.stime as stime
 
 logger = stime.get_logger(__name__)
 
+# Safety-net timeout (seconds) for the multi-process init barrier. The
+# deterministic fix is barrier.abort() in a failing worker, which releases all
+# parties immediately on init-exception. This timeout only guards the rarer
+# silent-worker-death case (e.g. OOM-kill / segfault) where abort() cannot run.
+# Generous to avoid false positives on legitimate slow model init.
+_BARRIER_INIT_TIMEOUT_S = 600
+
 
 @dataclass
 class InterpolationPoint:
@@ -532,8 +539,22 @@ def _run_async_task_worker(
             common_config, parallel_config, device_type
         )
         barrier.wait()  # ensure all processes have built the model
+    except threading.BrokenBarrierError:
+        # Another worker aborted the init barrier (its init failed). Exit
+        # cleanly instead of entering the task loop on a half-initialized group.
+        logger.error("Worker exiting: init barrier broken by another worker's failure")
+        return
     except Exception:
         logger.exception("Worker initialization failed")
+        # Abort the barrier so healthy workers and the main process are released;
+        # otherwise they wait forever for a party that has already left. Signal
+        # stop_event so any worker that already passed the barrier exits its
+        # task loop instead of running on a half-initialized process group.
+        stop_event.set()
+        try:
+            barrier.abort()
+        except Exception:
+            logger.exception("Worker barrier abort failed")
         return
 
     while not stop_event.is_set():
@@ -635,4 +656,25 @@ class AsyncTaskManager:
             )
             p.start()
             self.workers.append(p)
-        barrier.wait()
+        try:
+            barrier.wait(timeout=_BARRIER_INIT_TIMEOUT_S)
+        except threading.BrokenBarrierError as exc:
+            # A worker failed to reach the barrier: it either raised during init
+            # and aborted the barrier, or it died silently / exceeded the init
+            # timeout. Tear everything down and surface a clear error instead of
+            # hanging forever (the original bug: bare barrier.wait() deadlocked
+            # the whole process group with no error surfaced and no recovery).
+            self.stop_event.set()
+            try:
+                barrier.abort()
+            except Exception:
+                logger.debug("barrier.abort() raised during init cleanup", exc_info=True)
+            try:
+                self.shutdown()
+            except Exception:
+                logger.exception("AsyncTaskManager: cleanup after init failure raised")
+            raise RuntimeError(
+                f"AsyncTaskManager init failed: multi-process init barrier did not "
+                f"complete within {_BARRIER_INIT_TIMEOUT_S}s — a worker crashed or "
+                f"failed to initialize. See worker logs for the root cause."
+            ) from exc
