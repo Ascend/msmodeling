@@ -9,7 +9,7 @@ export default {
   "moduleId": "video_generate",
   "title": { "zh": "视频生成", "en": "Video Generation" },
   "runner": "VideoGenerateRunner",
-  "version": "1.4.6",
+  "version": "1.4.7",
   "optionSourceRegistry": {
     "devices": { "endpoint": "/api/options/devices", "cache": "session" }
   },

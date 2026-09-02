@@ -26,7 +26,7 @@ export default {
   "moduleId": "text_generate",
   "title": { "zh": "文本生成", "en": "Text Generation" },
   "runner": "ModelRunner",
-  "version": "1.10.1",
+  "version": "1.10.2",
   "optionSourceRegistry": {
     "devices": { "endpoint": "/api/options/devices", "cache": "session" }
   },

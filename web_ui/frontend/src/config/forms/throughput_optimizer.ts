@@ -10,7 +10,7 @@ export default {
   "moduleId": "throughput_optimizer",
   "title": { "zh": "吞吐优化", "en": "Throughput Optimizer" },
   "runner": "ParallelRunner",
-  "version": "1.10.1",
+  "version": "1.10.2",
   "optionSourceRegistry": {
     "devices": { "endpoint": "/api/options/devices", "cache": "session" }
   },
