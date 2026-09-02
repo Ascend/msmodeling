@@ -48,6 +48,7 @@ _QWEN_TRANSFORMER_CLASS = "QwenImageTransformer2DModel"
 _QWEN_BLOCK_CLASS = "QwenImageTransformerBlock"
 _QWEN_BLOCK_COUNT = 60
 _QWEN_TEXT_SEQ_LEN_PATCHED = False
+_QWEN_MODULATE_INDEX_PATCHED = False
 _QWEN_BLOCK_PARAMETERS = (
     "hidden_states",
     "encoder_hidden_states",
@@ -441,7 +442,10 @@ def prepare_inputs(
     variant = _variant_for_kind(kind)
     source_count = len(source_image_sizes)
     if variant.kind == KIND and source_count != 1:
-        raise ValueError(f"Qwen-Image-Edit source cardinality: expected exactly 1 source image; actual {source_count}.")
+        raise ValueError(
+            "Qwen-Image-Edit source cardinality: "
+            f"model {MODEL_ID!r} supports single-source input only; actual source image count is {source_count}."
+        )
     if variant.kind != KIND and not 1 <= source_count <= 3:
         raise ValueError(f"Qwen-Image-Edit source cardinality: expected 1 to 3 source images; actual {source_count}.")
     if batch_size <= 0 or text_seq_len <= 0:
@@ -1068,12 +1072,40 @@ def _patch_qwen_compute_text_seq_len() -> None:
     _QWEN_TEXT_SEQ_LEN_PATCHED = True
 
 
+def _patch_qwen_modulate_index() -> None:
+    """Keep 2511's internally-created modulation index fake during tracing.
+
+    ``zero_cond_t`` in upstream Diffusers creates ``modulate_index`` with
+    ``torch.tensor``. Under FakeTensorMode that produces a regular meta tensor,
+    which cannot be combined with fake activations in ``_modulate``. The index
+    values do not affect TensorCast's shape-based performance modeling, so only
+    while tracing replace that non-fake index with a same-shape fake tensor.
+    """
+    global _QWEN_MODULATE_INDEX_PATCHED
+    if _QWEN_MODULATE_INDEX_PATCHED:
+        return
+    import importlib
+
+    transformer_qwenimage = importlib.import_module("diffusers.models.transformers.transformer_qwenimage")
+    block_class = transformer_qwenimage.QwenImageTransformerBlock
+    original_modulate = block_class._modulate
+
+    def _patched_modulate(self, x, mod_params, index=None):
+        if index is not None and torch.compiler.is_compiling():
+            index = torch.zeros(index.shape, dtype=index.dtype, device=x.device)
+        return original_modulate(self, x, mod_params, index)
+
+    block_class._modulate = _patched_modulate
+    _QWEN_MODULATE_INDEX_PATCHED = True
+
+
 def prepare_model(
     model: Any,
     model_config: DiffusersConfig,
 ) -> Any:
     del model_config
     _patch_qwen_compute_text_seq_len()
+    _patch_qwen_modulate_index()
     return model
 
 

@@ -34,6 +34,7 @@ from diffusers.models.transformers.transformer_qwenimage import (
 from diffusers.models.transformers.transformer_qwenimage import (
     apply_rotary_emb_qwen,
 )
+from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 
 from tensor_cast.compilation import get_backend
 from tensor_cast.device import TEST_DEVICE
@@ -322,8 +323,12 @@ def test_qwen_prepare_inputs_matches_geometry_masks_and_nested_shapes(
 @pytest.mark.parametrize(
     ("kind", "source_image_sizes", "expected_actual"),
     (
-        ("qwen-image-edit", (), "expected exactly 1 source image; actual 0"),
-        ("qwen-image-edit", ((512, 512), (512, 512)), "expected exactly 1 source image; actual 2"),
+        ("qwen-image-edit", (), "supports single-source input only; actual source image count is 0"),
+        (
+            "qwen-image-edit",
+            ((512, 512), (512, 512)),
+            "supports single-source input only; actual source image count is 2",
+        ),
         ("qwen-image-edit-2509", (), "expected 1 to 3 source images; actual 0"),
         (
             "qwen-image-edit-2511",
@@ -346,6 +351,24 @@ def test_qwen_prepare_inputs_rejects_source_cardinality(
             text_seq_len=8,
             source_image_sizes=source_image_sizes,
         )
+
+
+def test_qwen_modulate_index_patch_converts_non_fake_meta_index_during_tracing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qwen_image_edit._patch_qwen_modulate_index()
+    monkeypatch.setattr(qwen_image_edit.torch.compiler, "is_compiling", lambda: True)
+    non_fake_index = torch.zeros((1, 1), dtype=torch.int32, device="meta")
+    with FakeTensorMode():
+        hidden_states = torch.empty((2, 2, 4), dtype=torch.float16, device="meta")
+        mod_params = torch.empty((4, 12), dtype=torch.float16, device="meta")
+        modulated, gate = DiffusersQwenImageTransformerBlock._modulate(
+            object(), hidden_states, mod_params, non_fake_index
+        )
+    assert isinstance(modulated, FakeTensor)
+    assert isinstance(gate, FakeTensor)
+    assert tuple(modulated.shape) == (2, 2, 4)
+    assert tuple(gate.shape) == (2, 1, 4)
 
 
 class _ForwardSpy:

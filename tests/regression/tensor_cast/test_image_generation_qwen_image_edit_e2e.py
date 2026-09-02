@@ -567,7 +567,7 @@ def test_public_qwen_validation_failures_happen_before_runtime(
     harness = _patched_cli(monkeypatch)
     model_id = CASES[0][0]
 
-    with pytest.raises(ValueError, match="expected exactly 1 source image"):
+    with pytest.raises(ValueError, match="supports single-source input only"):
         harness.module.run_inference(model_id, **_run_inference_kwargs(source_image_sizes=()))
     assert harness.runtimes == []
 
