@@ -151,6 +151,16 @@ class TestValidateFormSchemaShape:
         errors = validate_form_schema_shape(schema)
         assert any("control" in e for e in errors)
 
+    def test_validate_field_combobox_control(self):
+        """combobox control type is accepted (added for model_id combobox)."""
+        schema = {
+            "moduleId": "test",
+            "version": "1.0.0",
+            "fields": [{"id": "model_id", "control": "combobox", "label": "Model"}],
+        }
+        errors = validate_form_schema_shape(schema)
+        assert errors == []
+
     def test_validate_label_localization_map(self):
         """Label can be localization map."""
         schema = {
