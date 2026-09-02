@@ -137,6 +137,48 @@ def test_add_omitted_scalar_keeps_integral_literal():
     assert isinstance(calls[0][1], int)
 
 
+def test_cast_replay_builds_scalar_input_from_bracket_shape(monkeypatch):
+    module = import_op_replay_script("Cast_run.py")
+    replay_framework = importlib.import_module("replay_framework")
+    built_shapes = []
+    scalar_tensor = object()
+
+    monkeypatch.setattr(replay_framework, "init_runtime", lambda: None)
+    monkeypatch.setattr(
+        replay_framework,
+        "build_input_tensor",
+        lambda **kwargs: built_shapes.append(kwargs["shape"]) or scalar_tensor,
+    )
+    monkeypatch.setattr(module, "resolve_runtime_dtype", lambda _dtype: torch.int64)
+
+    case = module.op.build_case(
+        {
+            "Input Shapes": "[]",
+            "Input Data Types": "DT_FLOAT",
+            "Input Formats": "ND",
+            "Output Data Types": "DT_INT64",
+        }
+    )
+
+    assert built_shapes == [()]
+    assert case["inputs"] == [scalar_tensor]
+
+
+@pytest.mark.parametrize("script", ["ArgMaxV2_run.py", "Sort_run.py"])
+def test_replay_output_is_not_cast_inside_timed_run_case(script):
+    module = import_op_replay_script(script)
+
+    class Output:
+        def int(self):
+            raise AssertionError("run_case must not insert an output Cast")
+
+    output = Output()
+    api_result = (output, output) if script == "Sort_run.py" else output
+    case = {"api": lambda *args, **kwargs: api_result, "inputs": [object()], "kwargs": {}}
+
+    assert module.op.run_case(case) is api_result
+
+
 def test_mul_replay_dispatches_scalar_broadcast_and_degenerate_bmm():
     module = import_op_replay_script("Mul_run.py")
 

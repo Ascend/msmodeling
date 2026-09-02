@@ -9,6 +9,11 @@
 3. `start_microbench.py`：运行 compute replay，通过 `msprof` 聚合并回写耗时。
 4. `comm_bench/generate_comm_microbench.py`：采集 HCCL 通信微基准，生成 `hcom_*.csv`。
 
+此外，`run_op_microbench.py` 提供与数据库回填解耦的单算子性能测试接口，覆盖当前 35 个单卡
+`op_replay` 算子（排除多卡 `DispatchFFNCombine`），支持真实 NPU/msprof 采集和 JSON/CSV 结果；
+无 NPU 环境也可只读已有 Profiling 数据进行模拟。详见
+[独立单算子性能测试工具](README_op_microbench.md)。
+
 ## 适用范围
 
 本目录用于生成和刷新 TensorCast 性能数据库中的算子 CSV 数据，主要覆盖三类工作：
@@ -77,7 +82,9 @@ tools/perf_data_collection/
   fia_common.py            # FIA shape 与 metadata 共享工具
   generate_shape_grid.py   # theory shape 生成入口
   memory_estimator.py      # HBM 内存估算
+  run_op_microbench.py     # 独立单算子性能测试入口，不参与数据库回填
   start_microbench.py      # msprof 编排、聚合与回写入口
+  README_op_microbench.md  # 独立单算子性能测试说明
   readme.md                # 中文说明
   readme_en.md             # 英文说明
 ```
@@ -136,6 +143,7 @@ bash tools/perf_data_collection/comm_bench/run_comm_bench.sh ./hccl_bench_data
 | 回写 | `start_microbench.py` | 数据库 CSV、算子 replay 脚本 | 回写耗时后的 CSV、报告文件 | 在 NPU 上重新测量算子耗时并刷新数据库。 |
 | 通信采集 | `comm_bench/generate_comm_microbench.py` | HCCL 通信配置、消息大小网格 | `hcom_*.csv` | 采集通信算子的性能数据库数据。 |
 | 批量通信采集 | `comm_bench/run_comm_bench.sh` | `ATLAS_800_A3_752T_128G_DIE` 硬件网格（`48 8 2`）和输出目录 | 一组标准 `hcom_*.csv` | 按 752T DIE 推荐配置批量采集通信数据。 |
+| 独立测试 | `run_op_microbench.py` | 单算子请求 JSON | 独立 JSON/CSV 结果 | 测试指定算子和 shape；不写回数据库。 |
 
 ### 1. Profiling 解析入口：`parsers/parse_kernel_details.py`
 

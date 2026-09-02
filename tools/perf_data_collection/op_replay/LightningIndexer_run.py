@@ -369,8 +369,8 @@ def run_case(case):
         **kwargs,
     )
     # torch_npu.npu_lightning_indexer returns (topk_indices, topk_weights).
-    # Unwrap the first element.
-    return result[0] if isinstance(result, (tuple, list)) else result
+    # Return the full tuple to match the profiling database's 2-output recording.
+    return result
 
 
 def format_success(csv_path, row_index: int, row: dict[str, str], case, _result) -> str:

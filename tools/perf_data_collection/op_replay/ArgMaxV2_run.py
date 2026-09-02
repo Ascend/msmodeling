@@ -15,7 +15,6 @@ try:
 except ImportError:
     from replay_framework import OpReplay
 
-
 op = OpReplay(
     kernel_type="ArgMaxV2",
     api_path="torch.argmax",

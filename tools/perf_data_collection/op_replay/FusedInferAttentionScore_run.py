@@ -56,11 +56,14 @@ except ImportError:
 
 CURRENT_DIR = Path(__file__).resolve().parent
 PARENT_DIR = CURRENT_DIR.parent
-if str(PARENT_DIR) not in sys.path:
-    sys.path.insert(0, str(PARENT_DIR))
-
-from fia_common import parse_runtime_int, parse_runtime_int_list, shape_numel, split_metadata_field
-from signature_utils import get_runtime_signature_context
+try:
+    from ..fia_common import parse_runtime_int, parse_runtime_int_list, shape_numel, split_metadata_field
+    from ..signature_utils import get_runtime_signature_context
+except ImportError:
+    if str(PARENT_DIR) not in sys.path:
+        sys.path.insert(0, str(PARENT_DIR))
+    from fia_common import parse_runtime_int, parse_runtime_int_list, shape_numel, split_metadata_field
+    from signature_utils import get_runtime_signature_context
 
 
 QUERY_INDEX = 0

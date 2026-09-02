@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "kernel_type": "MatMulV2",
+  "replay_row": {
+    "Input Shapes": "1,7168;256,7168",
+    "Input Data Types": "DT_BF16;DT_BF16",
+    "Input Formats": "ND;ND",
+    "Output Shapes": "1,256",
+    "Output Data Types": "DT_BF16",
+    "Output Formats": "ND"
+  },
+  "profiling": {
+    "device_id": 0,
+    "warmup_count": 5,
+    "repeat_count": 30,
+    "timeout_seconds": 300,
+    "include_raw_records": true,
+    "keep_artifacts": "on_failure"
+  }
+}

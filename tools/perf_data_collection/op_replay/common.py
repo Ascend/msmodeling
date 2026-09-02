@@ -25,13 +25,7 @@ if TYPE_CHECKING:
 
 FRACTAL_NZ_FORMAT_ID = 29
 # common.py ?op_replay/ [0] ?perf_data_collection/ [1] ?tools/ [2] ?repo_root [3]
-DATA_DIR = (
-    Path(__file__).resolve().parents[3]
-    / "tensor_cast"
-    / "performance_model"
-    / "profiling_database"
-    / "data"
-)
+DATA_DIR = Path(__file__).resolve().parents[3] / "tensor_cast" / "performance_model" / "profiling_database" / "data"
 SUPPORTED_DEVICES = [
     "TEST_DEVICE",
     "ATLAS_800_A2_376T_64G",
@@ -72,6 +66,7 @@ def init_runtime() -> None:
 
     try:
         from vllm_ascend.utils import enable_custom_op
+
         enable_custom_op()
     except Exception as exc:
         print(f"Warning: custom op dependencies are unavailable ({exc}). Replay may fail for custom operators.")
@@ -120,7 +115,7 @@ def _normalize_stack_component(prefix: str, version: str) -> str:
     normalized = version.strip()
     lowered = normalized.lower()
     if lowered.startswith(prefix):
-        normalized = normalized[len(prefix):]
+        normalized = normalized[len(prefix) :]
     elif prefix == "vllm" and lowered.startswith("v"):
         normalized = normalized[1:]
     if prefix == "torch":
@@ -369,6 +364,8 @@ def split_metadata_field(raw_value: str) -> list[str]:
 
 
 def parse_shape(raw_shape: str) -> tuple[int, ...]:
+    if raw_shape.strip() == "[]":
+        return ()
     return tuple(int(part.strip()) for part in raw_shape.split(",") if part.strip())
 
 
@@ -445,8 +442,7 @@ def build_input_tensor(
         )
     if any(dim is None for dim in shape):
         raise ValueError(
-            f"build_input_tensor received shape with None elements: {shape} "
-            f"(dtype={dtype_name}, format={input_format})"
+            f"build_input_tensor received shape with None elements: {shape} (dtype={dtype_name}, format={input_format})"
         )
     dtype = resolve_runtime_dtype(dtype_name)
 
@@ -511,12 +507,7 @@ def get_target_data_dir(
         torch_version=torch_version,
         cann_version=cann_version,
     )
-    return (
-        DATA_DIR
-        / resolved_device
-        / "vllm_ascend"
-        / resolved_version_dir
-    )
+    return DATA_DIR / resolved_device / "vllm_ascend" / resolved_version_dir
 
 
 def build_database_cli_args(
@@ -686,12 +677,8 @@ def record_runtime_replay_case(
         and _RUNTIME_REPLAY_CASES[-1]["csv_path"] == str(csv_path)
         and _RUNTIME_REPLAY_CASES[-1]["row_index"] == row_index
     ):
-        _RUNTIME_REPLAY_CASES[-1]["warmup_count"] = int(
-            _RUNTIME_REPLAY_CASES[-1]["warmup_count"]
-        ) + warmup_count
-        _RUNTIME_REPLAY_CASES[-1]["repeat_count"] = int(
-            _RUNTIME_REPLAY_CASES[-1]["repeat_count"]
-        ) + repeat_count
+        _RUNTIME_REPLAY_CASES[-1]["warmup_count"] = int(_RUNTIME_REPLAY_CASES[-1]["warmup_count"]) + warmup_count
+        _RUNTIME_REPLAY_CASES[-1]["repeat_count"] = int(_RUNTIME_REPLAY_CASES[-1]["repeat_count"]) + repeat_count
         return
     _RUNTIME_REPLAY_CASES.append(
         {
@@ -746,10 +733,7 @@ def process_replay_csvs(
 
         if update_mode == "missing-only" and csv_has_complete_microbench(rows):
             skipped_rows += len(rows)
-            print(
-                f"[SKIP] {csv_path} all {len(rows)} row(s) already have "
-                f"usable Average/Profiling durations."
-            )
+            print(f"[SKIP] {csv_path} all {len(rows)} row(s) already have usable Average/Profiling durations.")
             continue
 
         for row_index, row in enumerate(rows, start=2):
@@ -908,10 +892,7 @@ def build_standard_argparser(
         "--device",
         default=DEFAULT_DEVICE,
         choices=SUPPORTED_DEVICES,
-        help=(
-            "Target device folder under "
-            "tensor_cast/performance_model/profiling_database/data/{device}/"
-        ),
+        help=("Target device folder under tensor_cast/performance_model/profiling_database/data/{device}/"),
     )
     parser.add_argument(
         "--vllm-version",
@@ -932,10 +913,7 @@ def build_standard_argparser(
     parser.add_argument(
         "--repeat-count",
         type=int,
-        help=(
-            "Repeat each replay row this many times. Defaults to "
-            f"{DEFAULT_REPLAY_REPEAT_COUNT}."
-        ),
+        help=(f"Repeat each replay row this many times. Defaults to {DEFAULT_REPLAY_REPEAT_COUNT}."),
     )
     parser.add_argument(
         "--update-mode",

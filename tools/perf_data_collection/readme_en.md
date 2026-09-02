@@ -9,6 +9,12 @@ Main tools in recommended order:
 3. `start_microbench.py`: run compute replay under `msprof`, aggregate results, and write durations back.
 4. `comm_bench/generate_comm_microbench.py`: collect HCCL communication microbench data into `hcom_*.csv`.
 
+`run_op_microbench.py` additionally provides a standalone operator performance interface for all 35 current
+single-card `op_replay` operators (excluding multi-card `DispatchFFNCombine`). It does not join the database writeback
+workflow. It runs allow-listed adapters under msprof and emits JSON or CSV; a no-NPU environment can
+also read existing Profiling data in simulation mode. See the
+[standalone operator microbenchmark guide](README_op_microbench.md).
+
 ## Scope
 
 This directory generates and refreshes operator CSV data in the TensorCast performance database:
@@ -77,7 +83,9 @@ tools/perf_data_collection/
   fia_common.py            # shared FIA shape/metadata helpers
   generate_shape_grid.py   # theory shape generation entry point
   memory_estimator.py      # HBM memory estimation
+  run_op_microbench.py     # standalone operator benchmark; no database writeback
   start_microbench.py      # msprof orchestration, aggregation, and writeback
+  README_op_microbench.md  # standalone operator benchmark guide (Chinese)
   readme.md                # Chinese guide
   readme_en.md             # English guide
 ```
@@ -134,6 +142,7 @@ This script targets **`ATLAS_800_A3_752T_128G_DIE`** (default `grid-shape 48 8 2
 | Writeback | `start_microbench.py` | database CSV, operator replay scripts | updated CSV, report files | Re-measure operator durations on NPU and refresh the database. |
 | Comm collect | `comm_bench/generate_comm_microbench.py` | HCCL comm config, message-size grid | `hcom_*.csv` | Collect communication operator performance data. |
 | Batch comm | `comm_bench/run_comm_bench.sh` | `ATLAS_800_A3_752T_128G_DIE` grid (`48 8 2`) and output dir | standard `hcom_*.csv` set | Batch collect comm data with 752T DIE defaults. |
+| Standalone benchmark | `run_op_microbench.py` | one operator request JSON | standalone JSON/CSV result | Test a requested operator and shape without database writeback. |
 
 ### 1. Profiling parse: `parsers/parse_kernel_details.py`
 

@@ -99,7 +99,10 @@ def build_case(row: dict[str, str]):
 
 
 def run_case(case):
-    return case["api"](**case["kwargs"])
+    # npu_grouped_matmul_swiglu_quant returns (result, scale, pertoken_scale).
+    # The profiling database records only the first two outputs.
+    result = case["api"](**case["kwargs"])
+    return result[:2]
 
 
 op = OpReplay(

@@ -168,6 +168,9 @@ class TestParseShape(unittest.TestCase):
     def test_single_dim(self):
         self.assertEqual(parse_shape("4096"), (4096,))
 
+    def test_scalar_marker(self):
+        self.assertEqual(parse_shape("[]"), ())
+
 
 class TestParseShapeOrNone(unittest.TestCase):
     def test_valid(self):
