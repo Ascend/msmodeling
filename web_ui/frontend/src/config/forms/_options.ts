@@ -56,7 +56,7 @@ export const MODEL_ID_OPTIONS = [
   v('Qwen/Qwen3-8B'),
   v('Qwen/Qwen3-14B'),
   v('Qwen/Qwen3-32B'),
-  v('Qwen/Qwen3.8'),
+  v('Qwen/Qwen3.8-2.4T-A95B'),
   // --- Qwen3 (MoE) ---
   v('Qwen/Qwen3-30B-A3B'),
   v('Qwen/Qwen3-235B-A22B'),
