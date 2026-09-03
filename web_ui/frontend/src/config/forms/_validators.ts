@@ -21,31 +21,8 @@ export interface ValidatorContext {
 
 export type ValidatorFn = (ctx: ValidatorContext) => boolean | string | Promise<boolean | string>
 
-// === Shared option/enum constants (DRY — authoritative per the CLI doc) =======
-
-const v = (s: string) => ({ value: s, label: s })
-
-/** quantize-{linear,backbone-linear}-action — 9 values (doc §2.1.3 / §5.2). */
-export const QUANTIZE_LINEAR_OPTIONS = [
-  v('DISABLED'), v('W8A16_STATIC'), v('W8A8_STATIC'), v('W4A8_STATIC'),
-  v('W8A16_DYNAMIC'), v('W8A8_DYNAMIC'), v('W4A8_DYNAMIC'), v('FP8'), v('MXFP4'),
-]
-
-/** quantize-attention-action — 3 values (doc §2.1.3). */
-export const QUANTIZE_ATTENTION_OPTIONS = [v('DISABLED'), v('INT8'), v('FP8')]
-
-/** remote-source (doc §2.1.7). */
-export const REMOTE_SOURCE_OPTIONS = [v('huggingface'), v('modelscope')]
-
-/** log-level: cli/utils.py LOG_LEVELS = 5 levels (doc §5.4). */
-export const CLI_LOG_LEVEL_OPTIONS = [
-  v('debug'), v('info'), v('warning'), v('error'), v('critical'),
-]
-
-/** log-level: serving_cast LOG_LEVELS = 6 levels (adds 'fatal') (doc §5.4). */
-export const SERVING_LOG_LEVEL_OPTIONS = [
-  v('debug'), v('info'), v('warning'), v('error'), v('critical'), v('fatal'),
-]
+// Option/enum constants have been migrated to _options.ts.
+// This file retains only function-level validators.
 
 // === Field-level validators ===================================================
 

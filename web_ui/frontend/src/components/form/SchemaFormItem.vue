@@ -182,6 +182,28 @@ defineExpose({ formItemRef })
       />
     </el-select>
 
+    <!-- Combobox: filterable select that also accepts free-form text input
+         (e.g. model_id with preset mainstream models + local paths). -->
+    <el-select
+      v-else-if="field.control === 'combobox'"
+      v-model="internalValue"
+      filterable
+      allow-create
+      default-first-option
+      :placeholder="fieldPlaceholder"
+      :disabled="isDisabled || !!optionsError"
+      :loading="loading"
+      @blur="onBlur"
+      @change="onChange"
+    >
+      <el-option
+        v-for="opt in options"
+        :key="opt.value"
+        :label="typeof opt.label === 'string' ? opt.label : t(opt.label)"
+        :value="opt.value"
+      />
+    </el-select>
+
     <!-- Multi-select dropdown (el-select multiple) -->
     <el-select
       v-else-if="field.control === 'multi-select'"

@@ -58,7 +58,7 @@ def validate_form_schema_shape(envelope: dict) -> list[str]:
 
     Enforces: required ``moduleId``/``version``/``fields``; ``moduleId`` pattern
     ``^[a-z_]+$``; semver ``version``; and per-field ``id``/``control``/``label``
-    where ``control`` is a known type (text/number/select/multi-select/switch —
+    where ``control`` is a known type (text/number/select/multi-select/switch/combobox —
     the set observed in bundled configs) and ``label`` is a string or a
     ``{zh, en}`` localization map.
 
@@ -72,7 +72,7 @@ def validate_form_schema_shape(envelope: dict) -> list[str]:
     import re
 
     errors: list[str] = []
-    control_types = {"text", "number", "select", "multi-select", "switch"}
+    control_types = {"text", "number", "select", "multi-select", "switch", "combobox"}
 
     # --- top-level required keys ---
     for key in ("moduleId", "version", "fields"):

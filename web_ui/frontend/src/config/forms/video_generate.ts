@@ -2,14 +2,15 @@
 // AUTO-CONVERTED from JSON. This .ts is the source of truth (data + inlined
 // validators). A build step regenerates the data-only .json for the backend
 // (validators are stripped by JSON.stringify). Do not edit the .json by hand.
-import { intRangeOrdered, divisibleBy, cfgParallelRequiresWorldSize2, QUANTIZE_LINEAR_OPTIONS, CLI_LOG_LEVEL_OPTIONS } from "./_validators"
+import { intRangeOrdered, divisibleBy, cfgParallelRequiresWorldSize2 } from "./_validators"
+import { QUANTIZE_LINEAR_OPTIONS, CLI_LOG_LEVEL_OPTIONS, VIDEO_MODEL_ID_OPTIONS, makeModelIdField } from "./_options"
 
 export default {
 "$schema": "form-schema/v1",
   "moduleId": "video_generate",
   "title": { "zh": "视频生成", "en": "Video Generation" },
   "runner": "VideoGenerateRunner",
-  "version": "1.4.5",
+  "version": "1.4.7",
   "optionSourceRegistry": {
     "devices": { "endpoint": "/api/options/devices", "cache": "session" }
   },
@@ -42,17 +43,7 @@ export default {
       ]
     },
     {
-      "id": "model_id",
-      "label": { "zh": "模型 ID", "en": "Model ID" },
-      "control": "text",
-      "dataType": "string",
-      "default": "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers",
-      "group": { "zh": "通用", "en": "General" },
-      "tooltip": { "zh": "待仿真模型的标准 HuggingFace 名称（组织/模型，如 Qwen/Qwen3-32B）或本地路径。", "en": "Standard HuggingFace model name (org/model, e.g. Qwen/Qwen3-32B) or local path." },
-      "placeholder": { "zh": "如 Qwen/Qwen3-32B", "en": "e.g. Qwen/Qwen3-32B" },
-      "validation": [
-        { "rule": "required", "message": { "zh": "模型 ID 为必填项", "en": "Model ID is required" }, "trigger": ["change", "blur"] }
-      ]
+      ...makeModelIdField(VIDEO_MODEL_ID_OPTIONS, "tests/assets/model_config/Wan2.2-T2V-A14B-Diffusers", "Wan-AI/Wan2.2-T2V-A14B-Diffusers", false),
     },
     {
       "id": "dtype",
