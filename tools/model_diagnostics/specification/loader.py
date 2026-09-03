@@ -775,7 +775,12 @@ class YamlModelDiagnosticsSpecLoader:
         _exact_keys(
             compose,
             required={"framework"},
-            optional={"predictor", "predictors", "predictor_adapter"},
+            optional={
+                "predictor",
+                "predictors",
+                "predictor_adapter",
+                "predictor_stage_group",
+            },
             label=f"region {region_id}.compose",
         )
         if "predictor" in compose and "predictors" in compose:
@@ -794,6 +799,18 @@ class YamlModelDiagnosticsSpecLoader:
                 f"region {region_id}.compose.predictor",
             )
         )
+        predictor_stage_group = (
+            None
+            if "predictor_stage_group" not in compose
+            else _as_str(
+                compose.get("predictor_stage_group"),
+                f"region {region_id}.compose.predictor_stage_group",
+            )
+        )
+        if predictor_stage_group is not None and predictor_id is None:
+            raise SpecificationLoadError(
+                f"region {region_id} compose.predictor_stage_group requires compose.predictor"
+            )
         predictors = (
             {}
             if "predictors" not in compose
@@ -830,6 +847,7 @@ class YamlModelDiagnosticsSpecLoader:
                     framework_id=framework_id,
                     predictor_id=predictor_id,
                     predictor_adapter_id=adapter_id,
+                    predictor_stage_group=predictor_stage_group,
                 )
             )
         else:
@@ -997,7 +1015,7 @@ class YamlModelDiagnosticsSpecLoader:
         _exact_keys(
             compose,
             required={"framework", "predictor"},
-            optional={"predictor_adapter"},
+            optional={"predictor_adapter", "predictor_stage_group"},
             label=label,
         )
         composed = compose_mtp_layer_stages(
@@ -1012,6 +1030,14 @@ class YamlModelDiagnosticsSpecLoader:
                     f"{label}.predictor_adapter",
                 )
             ),
+            predictor_stage_group=(
+                None
+                if "predictor_stage_group" not in compose
+                else _as_str(
+                    compose.get("predictor_stage_group"),
+                    f"{label}.predictor_stage_group",
+                )
+            ),
         )
         return tuple(
             self._fragment_stage_to_stage_spec(fragment_stage)
@@ -1024,9 +1050,14 @@ class YamlModelDiagnosticsSpecLoader:
         *,
         label: str,
     ) -> tuple[StageSpec, ...]:
-        refs: tuple[tuple[str, str | None], ...] = ()
+        refs: tuple[tuple[str, str | None, str | None], ...] = ()
         if "include_fragment" in layer_map:
-            refs = ((_as_str(layer_map.get("include_fragment"), f"{label}.include_fragment"), None),)
+            refs = (
+                self._parse_include_fragment_item(
+                    layer_map.get("include_fragment"),
+                    label=f"{label}.include_fragment",
+                ),
+            )
         elif "include_fragments" in layer_map:
             refs = tuple(
                 self._parse_include_fragment_item(item, label=f"{label}.include_fragments[{index}]")
@@ -1036,18 +1067,23 @@ class YamlModelDiagnosticsSpecLoader:
             )
             if not refs:
                 raise SpecificationLoadError(f"{label}.include_fragments must not be empty")
-            fragment_ids = tuple(fragment_id for fragment_id, _activation in refs)
+            fragment_ids = tuple(fragment_id for fragment_id, _activation, _stage_group in refs)
             if len(fragment_ids) != len(set(fragment_ids)):
                 raise SpecificationLoadError(f"{label}.include_fragments contains duplicates")
         stages: list[StageSpec] = []
         seen: set[str] = set()
-        for fragment_id, fragment_activation in refs:
+        for fragment_id, fragment_activation, stage_group in refs:
             fragment = self._fragment_registry.get(fragment_id)
             if not fragment.stages:
                 raise SpecificationLoadError(
                     f"included fragment {fragment_id!r} must declare stages"
                 )
-            for fragment_stage in fragment.stages:
+            fragment_stages = (
+                fragment.stages
+                if stage_group is None
+                else fragment.stage_group(stage_group)
+            )
+            for fragment_stage in fragment_stages:
                 if fragment_stage.stage_id in seen:
                     raise SpecificationLoadError(
                         f"{label} include_fragments repeats stage id {fragment_stage.stage_id!r}"
@@ -1062,18 +1098,32 @@ class YamlModelDiagnosticsSpecLoader:
         return tuple(stages)
 
     @staticmethod
-    def _parse_include_fragment_item(raw: object, *, label: str) -> tuple[str, str | None]:
+    def _parse_include_fragment_item(
+        raw: object,
+        *,
+        label: str,
+    ) -> tuple[str, str | None, str | None]:
         if isinstance(raw, str):
-            return _as_str(raw, label), None
+            return _as_str(raw, label), None, None
         payload = _require_mapping(raw, label)
-        _exact_keys(payload, required={"fragment"}, optional={"activation"}, label=label)
+        _exact_keys(
+            payload,
+            required={"fragment"},
+            optional={"activation", "stage_group"},
+            label=label,
+        )
         fragment_id = _as_str(payload.get("fragment"), f"{label}.fragment")
         activation = (
             None
             if "activation" not in payload
             else _as_str(payload.get("activation"), f"{label}.activation")
         )
-        return fragment_id, activation
+        stage_group = (
+            None
+            if "stage_group" not in payload
+            else _as_str(payload.get("stage_group"), f"{label}.stage_group")
+        )
+        return fragment_id, activation, stage_group
 
     def _fragment_stage_to_stage_spec(
         self,

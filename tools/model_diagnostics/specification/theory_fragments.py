@@ -463,6 +463,7 @@ def compose_mtp_layer_stages(
     framework_id: str,
     predictor_id: str,
     predictor_adapter_id: str | None = None,
+    predictor_stage_group: str | None = None,
 ) -> tuple[TheoryFragmentStage, ...]:
     """Return ordered reusable stages for one MTP predictor layer."""
 
@@ -484,7 +485,12 @@ def compose_mtp_layer_stages(
     composed = list(framework.stage_group("proposal_prefix"))
     if adapter is not None:
         composed.extend(adapter.stage_group("before_predictor"))
-    composed.extend(predictor.stages)
+    predictor_stages = (
+        predictor.stages
+        if predictor_stage_group is None
+        else predictor.stage_group(predictor_stage_group)
+    )
+    composed.extend(predictor_stages)
     if adapter is not None:
         composed.extend(adapter.stage_group("after_predictor"))
     composed.extend(framework.stage_group("proposal_suffix"))

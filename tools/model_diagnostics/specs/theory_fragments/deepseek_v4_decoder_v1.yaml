@@ -1,0 +1,634 @@
+# DeepSeek V4 decoder fragment.
+#
+# Theory symbols added for V4:
+#   Qr  = q_lora_rank, used by wq_a -> q_norm -> wq_b
+#   Or  = local grouped-O width = (o_groups / o_proj_tp) * o_lora_rank
+#   Log = local O groups
+#
+# V4 attention policy differs by compress_ratio:
+#   ratio 0:   sliding-window sparse attention only
+#   ratio 4:   indexer-local compressor + quant_lightning_indexer + main compressor
+#   ratio 128: arange-based compressed indices + main compressor
+# Stage groups below select the source-accurate attention path for each layer.
+fragment_id: deepseek_v4_decoder_v1
+fragment_kind: model_decoder
+stages:
+  - id: hc_pre_attention
+    modules:
+      - name: hc_pre_inv_rms
+        tensors:
+          INPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, 1]", dtype: float32}
+      - name: hc_pre_projection
+        tensors:
+          INPUT[0]: {shape: "[T, HCh]", dtype: float32}
+          OUTPUT[0]: {shape: "[1, T, HCm * (HCm + 2)]", dtype: float32}
+      - name: hc_pre_sinkhorn
+        tensors:
+          INPUT[0]: {shape: "[1, T, HCm * (HCm + 2)]", dtype: float32}
+          INPUT[1]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [hc_pre_inv_rms]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - unsqueeze
+        - squeeze
+        - permute
+        - to
+        - _to_copy
+        - convert_element_type
+        - mul
+
+  - id: attention_preproj
+    modules:
+      - name: q_a_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Qr]", dtype: OUT}
+      - name: q_b_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Qr]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: kv_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Dh]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+      ignored_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice_scatter
+        - slice
+        - select
+        - permute
+        - unsqueeze
+        - squeeze
+        - pow
+        - mean
+        - square
+        - add
+        - sub
+        - rsqrt
+        - mul
+        - to
+        - _to_copy
+        - prims.convert_element_type.default
+        - apply_rope
+        - apply_rope_inplace
+        - dynamic_quantize_symmetric
+        - scatter_nd_update_mla
+        - clamp
+        - where
+        - cat
+
+  - id: ratio4_compression
+    modules:
+      - name: indexer_compressor
+        tensors:
+          INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Nidxblk, Bs, IdxDh]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, C4Tok, IdxDh]", dtype: ACT}
+          OUTPUT[1]: {shape: "[Nidxblk, Bs, IdxDh]", dtype: ACT}
+      - name: quant_lightning_indexer
+        tensors:
+          INPUT[0]: {shape: "[1, T, Lh, IdxDh]", dtype: ACT}
+          INPUT[1]: {shape: "[1, T, Lh]", dtype: ACT}
+          INPUT[2]: {shape: "[Nidxblk, Bs, IdxDh]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, Kidx]", dtype: int64}
+      - name: kv_compressor
+        tensors:
+          INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Nblk, Bs, Dh]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, C4Tok, Dh]", dtype: ACT}
+          OUTPUT[1]: {shape: "[Nblk, Bs, Dh]", dtype: ACT}
+    runtime:
+      boundary_operators: [compressor, quant_lightning_indexer]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - slice
+        - slice_scatter
+        - copy
+        - copy_
+        - mul
+        - add
+        - mm
+        - rms_norm
+        - apply_rope
+        - apply_rope_inplace
+        - dynamic_quantize_symmetric
+        - convert_element_type
+        - prims.convert_element_type.default
+        - cat
+        - scatter_nd_update_mla
+
+  - id: attention_preproj_ratio4
+    modules:
+      - name: q_a_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Qr]", dtype: OUT}
+      - name: q_b_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Qr]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: kv_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Dh]", dtype: OUT}
+      - name: indexer_q_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Qr]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lh * IdxDh]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+      ignored_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice_scatter
+        - slice
+        - select
+        - permute
+        - unsqueeze
+        - squeeze
+        - pow
+        - mean
+        - square
+        - add
+        - sub
+        - rsqrt
+        - mul
+        - to
+        - _to_copy
+        - prims.convert_element_type.default
+        - apply_rope
+        - apply_rope_inplace
+        - dynamic_quantize_symmetric
+        - scatter_nd_update_mla
+        - clamp
+        - where
+        - cat
+
+  - id: ratio128_compression
+    modules:
+      - name: kv_compressor
+        tensors:
+          INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Nblk, Bs, Dh]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, C128Tok, Dh]", dtype: ACT}
+          OUTPUT[1]: {shape: "[Nblk, Bs, Dh]", dtype: ACT}
+    runtime:
+      # torch.compile folds the source arange-based index construction into
+      # the integer index tensor. The main compressor remains observable.
+      boundary_operators: [compressor]
+      ignored_operators:
+        - arange
+        - view
+        - reshape
+        - slice
+        - slice_scatter
+        - copy
+        - copy_
+        - convert_element_type
+        - prims.convert_element_type.default
+        - scatter_nd_update_mla
+
+  - id: sparse_attention
+    modules:
+      - name: sparse_attn_sharedkv
+        tensors:
+          INPUT[0]: {shape: "[1, T, Lh, Dh]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, Lh, Dh]", dtype: ACT}
+    runtime:
+      boundary_operators: [sparse_attn_sharedkv]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice_scatter
+        - slice
+        - select
+        - permute
+        - unsqueeze
+        - squeeze
+        - apply_rope
+        - apply_rope_inplace
+        - dynamic_quantize_symmetric
+
+  - id: attention_o
+    modules:
+      - name: o_group_projection
+        tensors:
+          INPUT[0]: {shape: "[Log, T, Lh * Dh / Log]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Log, T, Or / Log]", dtype: ACT}
+      - name: o_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Or]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [bmm]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice_scatter
+        - slice
+        - select
+        - permute
+        - unsqueeze
+        - squeeze
+        - to
+        - _to_copy
+        - all_reduce
+        - dynamic_quantize_symmetric
+
+  - id: hc_post_attention
+    modules:
+      - name: hc_post
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: ACT}
+          INPUT[1]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [hc_post]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice
+        - select
+        - to
+        - _to_copy
+        - convert_element_type
+
+  - id: hc_pre_moe
+    modules:
+      - name: hc_pre_inv_rms
+        tensors:
+          INPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, 1]", dtype: float32}
+      - name: hc_pre_projection
+        tensors:
+          INPUT[0]: {shape: "[T, HCh]", dtype: float32}
+          OUTPUT[0]: {shape: "[1, T, HCm * (HCm + 2)]", dtype: float32}
+      - name: hc_pre_sinkhorn
+        tensors:
+          INPUT[0]: {shape: "[1, T, HCm * (HCm + 2)]", dtype: float32}
+          INPUT[1]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [hc_pre_inv_rms]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - unsqueeze
+        - squeeze
+        - permute
+        - to
+        - _to_copy
+        - convert_element_type
+        - mul
+
+  - id: moe_gate
+    modules:
+      - name: moe_gate_linear
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, H]", dtype: float32}
+          OUTPUT[0]: {shape: "[Tmoe, E]", dtype: float32}
+      - name: moe_topk
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, E]", dtype: float32}
+          OUTPUT[0]: {shape: "[Tmoe, Ktop]", dtype: float32}
+          OUTPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+    runtime:
+      boundary_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+      ignored_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+        - add_rms_norm2
+        - add_rms_norm_dynamic_quant2_symmetric
+        - add_rms_norm_quant2
+        - add
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice_scatter
+        - slice
+        - select
+        - to
+        - _to_copy
+        - convert_element_type
+        - softplus
+        - log1p
+        - gt
+        - constant_pad_nd
+        - sqrt
+        - sigmoid
+        - exp
+        - where
+        - softmax
+        - mul
+        - div
+        - sum
+        - gather
+        - all_gather
+        - dynamic_quantize_symmetric
+        - device_put
+
+  - id: moe_dispatch
+    modules:
+      - name: init_routing_v2
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+          OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [init_routing_v2]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice_scatter
+        - cat
+        - split
+        - split_with_sizes
+        - slice
+        - select
+        - pad
+        - permute
+        - transpose
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_to_all
+
+  - id: moe_experts
+    modules:
+      - name: grouped_matmul_swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[Te, Fe]", dtype: OUT}
+      - name: grouped_matmul
+        tensors:
+          OUTPUT[0]: {shape: "[Te, H]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - grouped_matmul_swiglu
+        - grouped_matmul_quant_swiglu
+        - grouped_matmul_quant_int4_swiglu
+        - grouped_matmul_fp8_swiglu
+        - grouped_matmul_mxfp4_swiglu
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice_scatter
+        - cat
+        - split
+        - split_with_sizes
+        - slice
+        - select
+        - pad
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_to_all
+
+  - id: moe_combine
+    modules:
+      - name: unpermute_tokens
+        tensors:
+          INPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: mul
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Tmoe, Ktop, 1]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: sum
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [unpermute_tokens]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice_scatter
+        - unsqueeze
+        - squeeze
+        - slice
+        - select
+        - to
+        - _to_copy
+        - all_to_all
+        - all_gather
+        - add
+        - silu
+        - v4_clamped_swiglu
+        - sigmoid
+        - all_reduce
+        - dynamic_quantize_symmetric
+        - rms_norm
+        - device_put
+
+  - id: shared_expert
+    modules:
+      - name: gate_up_projection
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[Tmoe, 2 * Fshared]", dtype: OUT}
+      - name: v4_clamped_swiglu
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, Fshared]", dtype: ACT}
+          INPUT[1]: {shape: "[Tmoe, Fshared]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Tmoe, Fshared]", dtype: ACT}
+      - name: down_projection
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, Fshared]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - static_quant_linear
+        - mm
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - split
+        - split_with_sizes
+        - slice
+        - select
+        - unsqueeze
+        - squeeze
+        - cat
+        - add
+        - all_gather
+        - to
+        - _to_copy
+        - dynamic_quantize_symmetric
+        - quantize
+
+  - id: hc_post_moe
+    modules:
+      - name: hc_post
+        tensors:
+          INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          INPUT[1]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [hc_post]
+      ignored_operators:
+        - view
+        - reshape
+        - as_strided
+        - expand
+        - repeat
+        - alias
+        - copy_
+        - copy
+        - clone
+        - slice
+        - select
+        - add
+        - to
+        - _to_copy
+        - convert_element_type
+
+stage_groups:
+  sliding_attention:
+    - hc_pre_attention
+    - attention_preproj
+    - sparse_attention
+    - attention_o
+    - hc_post_attention
+    - hc_pre_moe
+    - moe_gate
+    - moe_dispatch
+    - moe_experts
+    - moe_combine
+    - shared_expert
+    - hc_post_moe
+  compressed_sparse_attention:
+    - hc_pre_attention
+    - attention_preproj_ratio4
+    - ratio4_compression
+    - sparse_attention
+    - attention_o
+    - hc_post_attention
+    - hc_pre_moe
+    - moe_gate
+    - moe_dispatch
+    - moe_experts
+    - moe_combine
+    - shared_expert
+    - hc_post_moe
+  heavily_compressed_attention:
+    - hc_pre_attention
+    - attention_preproj
+    - ratio128_compression
+    - sparse_attention
+    - attention_o
+    - hc_post_attention
+    - hc_pre_moe
+    - moe_gate
+    - moe_dispatch
+    - moe_experts
+    - moe_combine
+    - shared_expert
+    - hc_post_moe

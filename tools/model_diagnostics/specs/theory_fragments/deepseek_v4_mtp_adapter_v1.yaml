@@ -1,0 +1,35 @@
+# DeepSeek V4 MTP predictor adapter.
+#
+# The shared MTP framework produces a standard hidden state [1,T,H], while a
+# V4 decoder block consumes and returns an HC-expanded state [1,T,HCm,H]. The
+# TensorCast HyperConnectedMultiTokenPredictorLayer performs these two shape
+# bridges around every predictor decoder block.
+fragment_id: deepseek_v4_mtp_adapter_v1
+fragment_kind: mtp_predictor_adapter
+stage_groups:
+  before_predictor: [hc_expand]
+  after_predictor: [hc_reduce]
+stages:
+  - id: hc_expand
+    modules:
+      - name: unsqueeze
+        tensors:
+          INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, 1, H]", dtype: ACT}
+      - name: repeat
+        tensors:
+          INPUT[0]: {shape: "[1, T, 1, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [unsqueeze]
+      ignored_operators: [convert_element_type, view]
+
+  - id: hc_reduce
+    modules:
+      - name: hc_head
+        tensors:
+          INPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [hc_head]
+      ignored_operators: [view, select, device_put]

@@ -988,6 +988,7 @@ class HyperConnectedMultiTokenPredictorLayer(MultiTokenPredictorLayer):
         position_ids: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         position_embeddings: Optional[torch.Tensor] = None,
+        mtp_input_ids: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         inputs_embeds = self.emb_norm(inputs_embeds)
@@ -1004,6 +1005,7 @@ class HyperConnectedMultiTokenPredictorLayer(MultiTokenPredictorLayer):
             hidden_states,
             position_ids=position_ids,
             position_embeddings=position_embeddings,
+            input_ids=mtp_input_ids,
             **kwargs,
         )
 

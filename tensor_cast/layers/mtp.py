@@ -24,8 +24,10 @@ class MultiTokenPredictorLayer(torch.nn.Module):
         position_ids: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         position_embeddings: Optional[torch.Tensor] = None,
+        mtp_input_ids: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        del mtp_input_ids
         inputs_embeds = self.emb_norm(inputs_embeds)
         previous_hidden_states = self.hidden_norm(previous_hidden_states)
 
@@ -55,8 +57,10 @@ class BailingV3MultiTokenPredictorLayer(torch.nn.Module):
         position_ids: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         position_embeddings: Optional[torch.Tensor] = None,
+        mtp_input_ids: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        del mtp_input_ids
         hidden_states = self.mtp_block(
             inputs_embeds,
             previous_hidden_states,
@@ -203,6 +207,7 @@ class MultiTokenPredictor(torch.nn.Module):
             positions,
             previous_hidden_states,
             position_embeddings=position_embeddings,
+            mtp_input_ids=input_ids,
             **kwargs,
         )
         intermediate_hidden_states = hidden_states

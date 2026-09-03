@@ -370,6 +370,41 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
     num_blocks = (max_context_length * local_batch + block_size - 1) // block_size
     max_blocks_per_seq = (seq + block_size - 1) // block_size
 
+    v4_env: dict[str, object] = {}
+    if config.get("model_type") == "deepseek_v4":
+        o_lora_rank = _config_int(config, "o_lora_rank")
+        o_groups = _config_int(config, "o_groups")
+        if o_proj_tp > o_groups:
+            raise SpecificationLoadError("o_proj_tp_size must not exceed o_groups")
+        if o_groups % o_proj_tp != 0:
+            raise SpecificationLoadError("o_groups must be divisible by o_proj_tp_size")
+        o_group_local = o_groups // o_proj_tp
+        hc_mult = _config_int(config, "hc_mult")
+        index_head_dim = _config_int(config, "index_head_dim")
+        index_topk = _config_int(config, "index_topk")
+        indexer_blocks = (
+            max_context_length * local_batch + block_size * 4 - 1
+        ) // (block_size * 4)
+
+        def _compressed_query_tokens(ratio: int) -> int:
+            if context.phase is ExecutionPhase.DECODE and context.query_length == 1:
+                return 1
+            return tokens // ratio if tokens >= ratio else 0
+
+        v4_env = {
+            "Qr": _config_int(config, "q_lora_rank"),
+            "Og": o_groups,
+            "Log": o_group_local,
+            "Or": o_group_local * o_lora_rank,
+            "HCm": hc_mult,
+            "HCh": hc_mult * hidden,
+            "IdxDh": index_head_dim,
+            "Kidx": min(index_topk, max(seq // 4, 1)),
+            "Nidxblk": indexer_blocks,
+            "C4Tok": _compressed_query_tokens(4),
+            "C128Tok": _compressed_query_tokens(128),
+        }
+
     # MoE Theory symbols. Bound only when HF/config exposes MoE fields so Dense
     # Specs remain unchanged.
     # E: routed expert count (num_experts / n_routed_experts)
@@ -449,7 +484,7 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
             moe_env["MOE_COMBINE_DTYPE"] = moe_combine_dtype
 
     mla_env: dict[str, object] = {}
-    if "q_lora_rank" in config or "kv_lora_rank" in config:
+    if "kv_lora_rank" in config:
         qk_nope = _config_int(config, "qk_nope_head_dim")
         qk_rope = _config_int(config, "qk_rope_head_dim")
         mla_env = {
@@ -553,4 +588,5 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         **dsa_env,
         **linear_env,
         **shared_env,
+        **v4_env,
     }

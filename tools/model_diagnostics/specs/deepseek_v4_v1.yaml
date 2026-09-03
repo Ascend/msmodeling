@@ -1,0 +1,128 @@
+schema_version: "1"
+spec_id: deepseek_v4_v1
+spec_version: 1.0.0
+model_category: deepseek_v4
+matches:
+  entrypoints: [text_generate]
+  model_types: [deepseek_v4]
+
+operator_aliases:
+  hc_pre_projection: mm
+  o_group_projection: bmm
+  q_a_projection: mm
+  q_b_projection: mm
+  kv_projection: mm
+  indexer_q_projection: mm
+  moe_topk: moe_gating_top_k
+  moe_gating_top_k_hash: moe_gating_top_k
+  tensor_cast.moe_gating_top_k_hash.default: moe_gating_top_k
+  indexer_compressor: compressor
+  kv_compressor: compressor
+
+# DeepSeek V4 (Flash/Pro) uses V4 sparse shared-KV attention plus routed MoE in
+# every decoder block. The materialized layer kind selects the source-accurate
+# ratio-0, ratio-4, or ratio-128 attention stage group.
+regions:
+  input:
+    stages:
+      - id: embedding
+        source_options:
+          theory:
+            modules:
+              - name: embedding
+                tensors:
+                  INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[1, T]", dtype: int64}
+                  OUTPUT[0]: {shape: "[1, T, EO]", dtype: ACT}
+          runtime:
+            boundary_operators: [embedding]
+            ignored_operators:
+              - view
+              - index
+              - repeat
+              - as_strided
+              - expand
+              - convert_element_type
+              - alias
+              - slice
+              - unsqueeze
+              - bitwise_not
+              - where
+              - masked_fill_
+              - all_gather
+              - all_reduce
+
+  language:
+    layer_layout_rule:
+      strategy: sequence
+      count_from: model_config.effective_num_hidden_layers
+      kinds_from: model_config.layer_types
+    layer_specs:
+      sliding_attention:
+        include_fragment:
+          fragment: deepseek_v4_decoder_v1
+          stage_group: sliding_attention
+        runtime_options:
+          # In MTP mode the ordinary output Region is inactive, so the main
+          # model's post-decoder HC reduction remains inside this final
+          # language-stage window. It is not part of the decoder fragment.
+          hc_post_moe:
+            ignored_operators: [hc_head, rms_norm, device_put]
+      compressed_sparse_attention:
+        include_fragment:
+          fragment: deepseek_v4_decoder_v1
+          stage_group: compressed_sparse_attention
+        runtime_options:
+          hc_post_moe:
+            ignored_operators: [hc_head, rms_norm, device_put]
+      heavily_compressed_attention:
+        include_fragment:
+          fragment: deepseek_v4_decoder_v1
+          stage_group: heavily_compressed_attention
+        runtime_options:
+          hc_post_moe:
+            ignored_operators: [hc_head, rms_norm, device_put]
+
+  output:
+    stages:
+      - id: lm_head
+        source_options:
+          theory:
+            modules:
+              - name: lm_head_select
+                activation: lm_head_token_selection
+                tensors:
+                  INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+                  INPUT[1]: {shape: "[B]", dtype: int64}
+                  OUTPUT[0]: {shape: "[1, Rout, H]", dtype: ACT}
+              - name: lm_head
+                activation: non_mtp_lm_head
+                tensors:
+                  INPUT[0]: {shape: "[Rout, H]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
+          runtime:
+            boundary_operators: [hc_head]
+            ignored_operators:
+              - hc_head
+              - rms_norm
+              - view
+              - slice
+              - alias
+              - copy_
+              - dynamic_quantize_symmetric
+              - device_put
+              - select
+              - argmax
+              - all_gather
+
+  mtp:
+    activation: mtp_enabled
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: deepseek_v4_mtp
+      count_from: model_config.effective_num_mtp_layers
+    compose:
+      framework: mtp_framework_v1
+      predictor: deepseek_v4_decoder_v1
+      predictor_stage_group: sliding_attention
+      predictor_adapter: deepseek_v4_mtp_adapter_v1
