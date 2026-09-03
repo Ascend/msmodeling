@@ -132,6 +132,32 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
 - 选用 `dspark` 时将 `--speculative-method` 改为 `dspark`；Markov 参数默认 `--dspark-markov-rank 256`、`--dspark-markov-head vanilla`（可选 `gated`、`rnn`；rank 设为 `0` 时禁用 MarkovHead）。
 - 默认 draft 配置见 `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`；字段说明与自定义方法见 [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md)。
 
+以下示例在 PD 分离基础上启用流水线并行（PP）搜索，评估不同 PP 配置的 TTFT/TPOT/吞吐：
+
+```bash
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
+    --device ATLAS_800_A3_560T_128G_DIE \
+    --num-devices 32 \
+    --input-length 2048 \
+    --output-length 512 \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --disagg \
+    --tpot-limit 50 --ttft-limit 10000 \
+    --tp-sizes 8 \
+    --pp-sizes 1 2 4 \
+    --ep-sizes 8 \
+    --moe-dp-sizes 1
+```
+
+说明：
+
+- 未指定 `--pp-sizes` 时 PP 固定为 1，走原有 TP/EP/DCP 搜索路径，行为与结果完全兼容；指定后进入 PP-aware 搜索路径。
+- PP>1 按 stage-local 算术推导 `dp = num_devices // (tp * pp)`、`moe_tp = (num_devices // pp) // (ep * moe_dp)`，并用前向阻塞式调度器计算 makespan / bubble ratio / bottleneck stage，结果表追加 `pp_size` / `pp_bubble_ratio` / `pp_bottleneck_stage` / `pp_makespan_ms` 等列。
+- 可用 `--pp-layer-partitions '[[31,30],[16,15,15,15]]'` 显式指定层划分（每个内层 list 长度等于对应 pp_size，元素之和等于 num_hidden_layers）；不指定时使用均匀切分。
+- PP 与 DCP 可联合搜索（显式 `--dcp-sizes` 不会被丢弃）。
+- 暂不支持 PP>1 的场景：VL/多模态模型、变长输入分布（`length_distribution`），命中时跳过候选并记录 warning。
+- 前向阻塞式（no-overlap）调度给出的是 PP>1 吞吐的保守下界（系统性高估 bubble），不应据此断定 PP 一定更差；后续 1F1B / interleaved 演进会改善。
+
 ### 2.3 PD 配比场景
 
 PD 配比模式可独立优化 Prefill 与 Decode 阶段，再合并结果以找到使系统吞吐量最大的最优 Prefill / Decode 实例配比。该模式尤其适用于 Prefill 与 Decode 实例可独立扩缩的 PD 分离服务架构。

@@ -62,7 +62,8 @@
 | PD 混部 | 在同一实例中联合评估 Prefill 与 Decode，快速获得整体服务吞吐与并行配置建议。 |
 | PD 分离 | 分别搜索 Prefill 与 Decode 实例的最优配置，适用于 PD 分离部署场景评估。 |
 | PD 配比寻优 | 在固定硬件规模下搜索最优 Prefill / Decode 实例配比，平衡两类实例的资源投入与服务能力。 |
-| 并行策略搜索 | 在 TP、EP、MOE-DP 等维度上进行组合搜索。 |
+| 并行策略搜索 | 在 TP、EP、MOE-DP、PP 等维度上进行组合搜索。 |
+| 流水线并行（PP）搜索 | 通过 `--pp-sizes` 启用 PP 搜索，按 stage-local 算术推导 DP/MoE-TP，并用前向阻塞式调度器计算 PP>1 候选的 makespan、bubble ratio、bottleneck stage 与 schedule-aware 吞吐；支持 `--pp-layer-partitions` 显式层划分，可与 DCP 联合搜索；PP=1 走原有路径完全向后兼容。 |
 | MTP 配置搜索 | 搜索 MTP token 数量、接受率等配置，评估投机解码对服务吞吐的影响。 |
 | Batch 与并发搜索 | 自动搜索满足 SLO 的 batch 大小与请求并发组合，并考虑单步最大 batched tokens 等服务约束。 |
 | Chunked Prefill 仿真 | 当有效输入长度超过单步 prefill token 预算时，自动将长 prompt 拆分为多个 prefill chunk 分步建模，更准确评估 TTFT、P 阶段吞吐、混部调度行为与显存占用；可与 Prefix Cache 组合分析。 |
