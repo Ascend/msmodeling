@@ -36,6 +36,9 @@ export MSMODELING_TEST_WEIGHTS_PRUNE="${MSMODELING_TEST_WEIGHTS_PRUNE:-0}"
 export MSMODELING_OFFLINE="${MSMODELING_OFFLINE:-0}"
 export MSMODELING_TEST_BASE_BRANCH="${MSMODELING_TEST_BASE_BRANCH:-master}"
 
+# CI pre-installs all deps; force offline to avoid download.pytorch.org timeout
+export UV_OFFLINE="${UV_OFFLINE:-1}"
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
