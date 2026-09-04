@@ -222,7 +222,7 @@ KimiDecoderLayer (93 层)
 
 | 算子类别 | 现有算子（复用） | 新增算子 | 来源参考 |
 |----------|-----------------|----------|----------|
-| 激活 | `swiglu`、`v4_clamped_swiglu` | **`situ`**、`grouped_matmul_situ`、`grouped_matmul_quant_int4_situ` | 参考 `v4_clamped_swiglu` 模式 |
+| 激活 | `swiglu`、`v4_clamped_swiglu` | **`situ`** | 参考 `v4_clamped_swiglu` 模式 |
 | 线性注意力 | `linear_attn_chunk_gated_delta_rule`、`linear_attn_recurrent_gated_delta_rule`、`linear_attn_fused_gdn_gating`、`linear_attn_causal_conv`、`linear_attn_gated_rmsnorm` | 无（补 KDA 标志位参数） | `qwen3_next.py` |
 | MLA | `multihead_latent_attention`、`apply_rope`、`kv_rmsnorm_rope_cache` | 无（output gate 在 patch 层处理） | `kimi_k25.py` |
 | MoE | `grouped_matmul`、`dispatch_ffn_combine`、`init_routing_v2`、`moe_gating_top_k_softmax` | 无（Latent MoE 的 down/up proj 走标准 grouped_matmul） | — |
@@ -245,7 +245,7 @@ KimiDecoderLayer (93 层)
 
 适配拆为四个层次，全部集中在 `kimi_k3.py`（约 2522 行）：
 
-1. **新算子层**：新增 `situ` 激活算子（+ `grouped_matmul_situ` 变体）及对应性能模型，参考 `v4_clamped_swiglu` 实现模式。
+1. **新算子层**：新增 `situ` 激活算子及对应性能模型，参考 `v4_clamped_swiglu` 实现模式。
 2. **配置修补层（Phase 1，`_patch_hf_config_for_kimi_k3` + 各 `_install_*`）**：模型加载前修改 HF config 和全局 import 状态——fla-core stub、`is_torch_fx_available` 恢复、`flash_attention_2` 降级、vision config 字段桥接、专家计数字段复制、Latent MoE 投影保留、KDA TP plan、SiTU 融合链、VL 嵌套 TP、视觉 RMSNorm 融合等。
 3. **类 Monkey-Patch 层（Phase 2，`_patch_model_classes_for_kimi_k3`）**：动态导入远端模型类后注入修补方法——VL forward、视觉 backend、KDA → linear_attention 路由、MoE stub、MLA output gate、AttnRes、DynamicCache stub、SituAndMul 直连。
 4. **ModelProfile 注册层（Phase 3）**：在模块底部注册 `ModelProfile`，声明 MoE/MLA 模块名、专家计数字段、视觉路径等元数据。
@@ -295,7 +295,7 @@ K3 独有适配项（无现成可复用）：fla-core import stub、Latent MoE �
 | **P1.7** | `_install_latent_moe_patch` | 236–386 | `patch_moe` 丢弃 Latent MoE 投影/归一化 | monkey-patch `MoELayer.__init__`/`ParallelMoELayer.__init__`/`FusedMoETensorCast.forward`，捕获并应用 `routed_expert_down_proj`/`norm`/`up_proj` | K3 独有 | 已验证 |
 | **P1.8** | `_install_copy_layer_attr_patch` | 426–484 | `CopyLayerWrapper` 丢失 `is_linear_attn`/`block_residual` | monkey-patch `__init__`/`forward` 传递 K3 属性与跨层残差 | K3 独有 | 已验证 |
 | **P1.9** | `_install_kda_tp_plan_patch` | 511–576 | KDA `k_proj`/`v_proj`/`g_proj` 未 TP 切分 | monkey-patch `build_tp_plan_extras` 添加 COLWISE 分片 | K3 独有 | 已验证 |
-| **P1.10** | `_install_situ_pattern_patch` | 598–706 | SiTU 分解为大量 elementwise aten op | 注册 4 个 pattern（±linear_beta × bf16/fp16）→ `tensor_cast.situ` | K3 独有 | 已验证 |
+| **P1.10** | `_install_situ_pattern_patch` | 598–706 | SiTU 分解为大量 elementwise aten op | 注册 4 个 pattern（±linear_beta × bf16/fp16）→ `tensor_cast.situ.default` | K3 独有 | 已验证 |
 | **P1.11** | `_install_situ_sink_split_patch` | 716–749 | `situ` 未注册到 SinkSplitPass | 添加到 `_sink_config_registry`（与 swiglu 一致） | K3 独有 | 已验证 |
 | **P1.12** | `_install_situ_gmm_pass_patch` + `GroupedMatmulSituPass` | 759–1017 | GMM + situ 未融合 | FX pass 支持三种 pattern（split+getitem / slice.Tensor / cat→split→slice），monkey-patch `apply_freezing_passes` | K3 独有 | 已验证 |
 | **P1.13** | `_install_lm_head_tp_patch` | 1041–1115 | VL 嵌套 `lm_head`/`embed_tokens` 不命中 TP pattern | monkey-patch `shard_model_by_tp` 手动替换为 `ColumnParallelLinear`/`ParallelEmbedding` | K3 独有 | 已验证 |
@@ -341,9 +341,12 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --context-length 0 \
   --compile \
   --quantize-linear-action W4A8_DYNAMIC \
+  --quantize-non-expert-linear-action W4A8_DYNAMIC \
   --tp-size 16 \
   --dp-size 4 \
-  --ep-size 64 
+  --ep-size 64 \
+  --compilation-config enable_multistream \
+  --enable-shared-expert-tp 
 ```
 
 decode阶段：
@@ -357,9 +360,12 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --context-length 4250 \
   --compile \
   --quantize-linear-action W4A8_DYNAMIC \
+  --quantize-non-expert-linear-action W4A8_DYNAMIC \
   --tp-size 16 \
   --dp-size 4 \
-  --ep-size 64 
+  --ep-size 64 \
+  --compilation-config enable_multistream \
+  --enable-shared-expert-tp 
 ```
 
 **多模态推理仿真**（W4A8_DYNAMIC 量化 + DP4/TP16/EP64）：：
@@ -370,6 +376,7 @@ prefill阶段：
 python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --device ATLAS_800_A3_560T_128G_DIE \
   --num-queries 4 \
+  --num-devices 64 \
   --query-length 30 \
   --context-length 0 \
   --image-batch-size 1 \
@@ -377,10 +384,12 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --image-width 1920 \
   --compile \
   --quantize-linear-action W4A8_DYNAMIC \
-  --num-devices 64 \
+  --quantize-non-expert-linear-action W4A8_DYNAMIC \
   --tp-size 16 \
   --dp-size 4 \
-  --ep-size 64 
+  --ep-size 64 \
+  --compilation-config enable_multistream \
+  --enable-shared-expert-tp 
 ```
 
 decode阶段：
@@ -389,14 +398,17 @@ decode阶段：
 python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --device ATLAS_800_A3_560T_128G_DIE \
   --num-queries 64 \
+  --num-devices 64 \
   --query-length 1 \
   --context-length 2851 \
   --compile \
   --quantize-linear-action W4A8_DYNAMIC \
-  --num-devices 64 \
+  --quantize-non-expert-linear-action W4A8_DYNAMIC \
   --tp-size 16 \
   --dp-size 4 \
-  --ep-size 64 
+  --ep-size 64 \
+  --compilation-config enable_multistream \
+  --enable-shared-expert-tp 
 ```
 
 ---
@@ -405,10 +417,9 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
 
 SiTU 融合链（P1.10 + P1.11 + P1.12 + P17）将分解的 elementwise aten op 融合为两个算子：
 
-| 融合算子 | 次数 | 含义 |
-|----------|------|------|
-| `grouped_matmul_quant_int4_situ` | 92 | MoE 路由专家 down_proj GEMM + SiTU 激活融合（层 1..92） |
-| `tensor_cast.situ` | 93 | 共享专家 SiTU 激活（92 MoE 层共享专家 + 1 层 0 dense MLP） |
+| 融合算子                  | 次数  | 含义                                               |
+|-----------------------|-----|--------------------------------------------------|
+| `tensor_cast.situ.default` | 185 | 共享专家 SiTU 激活（92 MoE 层共享专家 * 2 + 1 层 0 dense MLP） |
 
 ---
 
@@ -445,30 +456,18 @@ SiTU 融合链（P1.10 + P1.11 + P1.12 + P17）将分解的 elementwise aten op 
 
 ## 8. 测试设计
 
-### 8.1 单元测试
-
-针对 `tensor_cast.situ`、 `grouped_matmul_situ`、 `grouped_matmul_quant_int4_situ` 三个新算子，在 `tests/regression/tensor_cast/test_kimi_k3.py` 中补充纯单元测试用例：
-
-| 测试类 | 覆盖内容 | 验收标准 |
-|--------|----------|----------|
-| `TestSituOpMeta` | `situ` meta op 的 shape/dtype 推理 | 输出 shape 与 `gate` 一致；`beta`/`linear_beta` 标量参数不影响 shape；dtype 随 `gate` 传播 |
-| `TestGroupedMatmulSituMeta` | `grouped_matmul_situ` meta op 的 shape/dtype 推理 | 单组/多专家分组输出 `M=sum(xi.shape[0])`、`N=w[0].shape[1]`；空输入回退 `(0,0)`+`float32` |
-| `TestGroupedMatmulQuantInt4SituMeta` | `grouped_matmul_quant_int4_situ` meta op 的 shape/dtype 推理 | `out_dtype` 覆盖默认 dtype；多组 M 累加；空输入回退 `float32` |
-| `TestSituPerformanceModel` | 性能模型 FLOP 累计（`mma_ops`/`gp_ops`） | `situ` 仅计 `gp_ops=numel*18`、`mma_ops=0`；GMM-SiTU 同时计 GEMM `mma_ops=M*N*K*2` 与 SiTU `gp_ops=M*(N//2)*18`；packed Int4 权重经 `pack_factor` 推导逻辑 N 后 FLOP 一致；空输入计零 |
-
-> 说明：单元测试直接构造 `OpInvokeInfo` 调用算子性能 functor，断言 `compute_ops` 中 GEMM（`mma_ops`）与 SiTU 激活（`gp_ops`）累计值，覆盖空输入、多专家分组与 packed Int4 权重三类场景，确保后续调整算子 schema、权重布局或性能模型时能自动发现 shape 或算子计数回归。
-
-### 8.2 集成测试
-
 | 测试项 | 覆盖内容 | 验收标准                             |
 |--------|----------|----------------------------------|
 | text-only 仿真 | 无图像输入的 prefill/decode | 纯文本链路跑通，关键算子计数合理 |
 | VL 仿真 | 含图像输入的 prefill/decode | 视觉链路跑通，关键算子计数合理    |
 
-### 8.3 回归测试
+### 新增算子
 
-确认不影响已有模型，例如： Kimi K2.5 、 DeepSeek V4-Flash 、 Qwen3-Next
-
-验收标准：Kimi K2.5 、 DeepSeek V4-Flash 、 Qwen3-Next 等已有模型仿真结果与基线一致，不受 K3 接入影响。
+- `tensor_cast.situ.default`
+- `tensor_cast.apply_attn_res.default`
+- `tensor_cast.linear_attn_causal_conv.default`
+- `tensor_cast.linear_attn_gated_rmsnorm.default`
+- `tensor_cast.linear_attn_recurrent_gated_delta_rule.default` - 只有decode阶段会出现
+- `tensor_cast.linear_attn_chunk_gated_delta_rule.default` - 只有prefill阶段会出现
 
 ---

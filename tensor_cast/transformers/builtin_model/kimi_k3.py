@@ -19,9 +19,11 @@ Patch numbering follows the design doc  scheme:
   class-level:  ``_patch_model_classes_for_kimi_k3``
 """
 
+import contextlib
 import importlib.util
 import logging
 import sys
+import threading
 import types
 from typing import Optional, Tuple
 
@@ -2350,6 +2352,27 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             except TypeError:
                 return False
 
+        def _k3_infer_decode_from_request_lengths(attention_meta) -> bool:
+            """Recover decode intent for runs launched without ``--decode``.
+
+            Requests are packed into ``[1, num_tokens, d]``, so with more than
+            one request per DP rank the packed ``seq_len`` (= batch of decode
+            steps) exceeds 1 and the ``seq_len == 1`` fallback misroutes KDA to
+            the prefill (chunk) kernel. When every request contributes exactly
+            one new token on top of a non-empty context, the batch is
+            unambiguously decode regardless of the ``--decode`` flag.
+            """
+            if attention_meta is None:
+                return False
+            query_lens = getattr(attention_meta, "query_lens_values", None) or []
+            seq_lens = getattr(attention_meta, "seq_lens_values", None) or []
+            if not query_lens or not seq_lens or len(query_lens) != len(seq_lens):
+                return False
+            try:
+                return all(int(q) == 1 for q in query_lens) and any(int(s) > 1 for s in seq_lens)
+            except (TypeError, ValueError):
+                return False
+
         def _patched_kda_forward(
             self,
             hidden_states: torch.Tensor,
@@ -2378,11 +2401,19 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             # cache_position is normally None. Decode is detected from
             # attention_meta.is_decode_values (set by --decode). When that is
             # also unavailable (symbolic tracing), fall back to seq_len==1.
+            # ``--decode``-less decode runs: requests are packed into
+            # [1, num_tokens, d] so seq_len == num_tokens != 1 and the
+            # seq_len fallback misses; recover the decode intent from
+            # per-request lengths (every request contributes exactly 1 new
+            # token on top of a non-empty context).
             has_previous_state = _k3_kda_has_previous_state(cache_position)
             _cp_absent = cache_position is None
             _cp_is_meta = bool(getattr(cache_position, "is_meta", False))
             _is_decode = _k3_is_decode_batch(attention_meta)
-            use_recurrent = _is_decode or (seq_len == 1 and (has_previous_state or _cp_absent or _cp_is_meta))
+            _inferred_decode = not _is_decode and _k3_infer_decode_from_request_lengths(attention_meta)
+            use_recurrent = (
+                _is_decode or _inferred_decode or (seq_len == 1 and (has_previous_state or _cp_absent or _cp_is_meta))
+            )
             # When decoding with MTP (seq_len > 1), flatten batch*seq_len into
             # the batch dim so the recurrent kernel sees seq_len==1 per item.
             flatten_decode_batch = use_recurrent and seq_len != 1
@@ -3629,7 +3660,13 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
                 metrics.device_memory_available_gb -= kda_gb
 
             def _patched_run_inference_k3(self, *args, **kwargs):
-                metrics = _orig_run_inference_k3(self, *args, **kwargs)
+                # Scope the MetaConstantFolder guard to this run so dynamo
+                # compilation (which happens inside run_inference) never
+                # folds K3's region markers / torch.empty stub allocations,
+                # while later simulations in the same process keep the
+                # pristine folding behavior.
+                with _k3_constant_folder_guard(getattr(self, "model", None)):
+                    metrics = _orig_run_inference_k3(self, *args, **kwargs)
                 _k3_inject_kda_state(metrics, _k3_kda_state_size_gb(self.model))
                 return metrics
 
@@ -3708,6 +3745,100 @@ def _hf_config_patch_for_kimi_k3(config, model_id=None):
 # ============================================================
 
 
+def _k3_is_k3_model(model) -> bool:
+    """Return whether ``model`` is a Kimi K3 model."""
+    try:
+        model_config = getattr(model, "model_config", None)
+        if model_config is None:
+            return False
+        hf_config = getattr(model_config, "hf_config", None)
+        return getattr(hf_config, "model_type", None) == "kimi_k3"
+    except Exception:
+        return False
+
+
+# Reference-counted scope guard for the constant-folder patch below.
+# The lock serialises install/restore; the counter ensures only the last
+# concurrent K3 inference restores the original ``MetaConstantFolder.run_node``.
+# ``_K3_CONSTANT_FOLDER_ORIG_RUN_NODE`` stores the true original method,
+# captured only when depth transitions 0→1 (inside the lock), so concurrent
+# entries never re-capture the already-installed guard as "original".
+_K3_CONSTANT_FOLDER_GUARD_LOCK = threading.Lock()
+_K3_CONSTANT_FOLDER_GUARD_DEPTH = 0
+_K3_CONSTANT_FOLDER_ORIG_RUN_NODE = None
+
+
+def _guarded_run_node(self, node):
+    """Skip folding for ``_internal_*`` markers and ``aten.empty*`` allocs."""
+    if node.op == "call_function":
+        target_str = str(node.target)
+        if "_internal_" in target_str or (target_str.startswith("aten.") and "empty" in target_str):
+            return self.unknown_value
+    return _K3_CONSTANT_FOLDER_ORIG_RUN_NODE(self, node)
+
+
+@contextlib.contextmanager
+def _k3_constant_folder_guard(model):
+    """Scope the ``MetaConstantFolder`` guard to a single K3 run.
+
+    K3's meta-device stub builds ``inputs_embeds`` via ``torch.empty``. The
+    shared ``MetaConstantFolder`` folds that ``aten.empty`` and propagates
+    constants through the layer group, so DCE drops the layer's
+    ``region_begin`` marker while ``region_end`` survives — tripping the
+    ``Runtime.repeat_op_invoke_infos`` pairing assertion.
+
+    Instead of modifying the shared ``constant_folding`` module (which could
+    change folding behavior for other models) or replacing its class method
+    permanently, install the guarded ``run_node`` only while K3's
+    ``run_inference`` (which contains dynamo compilation and graph
+    execution) is on the stack, and restore the original method afterwards.
+    Non-K3 models and any later simulation in the same process see the
+    pristine ``MetaConstantFolder``.
+
+    The guard is thread-safe: a lock serialises install/restore, and a
+    reference counter ensures only the first concurrent K3 inference
+    installs the patch and only the last one restores the original method.
+    The true original ``run_node`` is stored in a module-level variable
+    captured only on the 0→1 transition, so concurrent entries never
+    re-capture the already-installed guard as "original".
+
+    Guarded ops (never folded, even when all inputs are constants):
+
+    - ``tensor_cast._internal_*`` marker/control ops (region begin/end,
+      copy, wait/record) carry runtime replay semantics.
+    - ``aten.empty*`` allocations produce uninitialized memory, which is not
+      a compile-time constant; folding them can erase whole op chains from
+      the simulation graph.
+    """
+    global _K3_CONSTANT_FOLDER_GUARD_DEPTH, _K3_CONSTANT_FOLDER_ORIG_RUN_NODE
+
+    if not _k3_is_k3_model(model):
+        yield
+        return
+
+    from ...compilation.constant_folding import MetaConstantFolder
+
+    with _K3_CONSTANT_FOLDER_GUARD_LOCK:
+        if _K3_CONSTANT_FOLDER_GUARD_DEPTH == 0:
+            _K3_CONSTANT_FOLDER_ORIG_RUN_NODE = MetaConstantFolder.run_node
+            MetaConstantFolder.run_node = _guarded_run_node
+            logger.info(
+                "[Kimi-K3] installed scoped MetaConstantFolder guard: skip folding "
+                "tensor_cast._internal_* marker ops and aten.empty* allocations"
+            )
+        _K3_CONSTANT_FOLDER_GUARD_DEPTH += 1
+
+    try:
+        yield
+    finally:
+        with _K3_CONSTANT_FOLDER_GUARD_LOCK:
+            _K3_CONSTANT_FOLDER_GUARD_DEPTH -= 1
+            if _K3_CONSTANT_FOLDER_GUARD_DEPTH == 0:
+                MetaConstantFolder.run_node = _K3_CONSTANT_FOLDER_ORIG_RUN_NODE
+                _K3_CONSTANT_FOLDER_ORIG_RUN_NODE = None
+                logger.info("[Kimi-K3] restored original MetaConstantFolder.run_node")
+
+
 def _patch_model_for_kimi_k3(model) -> None:
     """Resolve region-marker pairing failures in multimodal compile mode.
 
@@ -3735,6 +3866,11 @@ def _patch_model_for_kimi_k3(model) -> None:
        ``torch.where`` anchoring (tuned for single-graph) doesn't fully
        protect region markers.
 
+    4. **MetaConstantFolder folding region markers** — The meta-device stub
+       builds ``inputs_embeds`` via ``torch.empty``; ``fold_meta_constants``
+       folds that allocation and propagates constants through the layer,
+       causing DCE to drop ``region_begin`` while ``region_end`` survives.
+
     Fixes applied:
       - Restore all vision tower wrappers to original layers.
       - Monkey-patch ``_prepare_vl_compile`` to skip
@@ -3742,10 +3878,20 @@ def _patch_model_for_kimi_k3(model) -> None:
       - Unwrap singleton (``repeat_count==1``) language-layer
         ``RegionMarkerWrapper`` instances — no replay copies reference them, so this
         is safe and only loses region grouping for one layer out of 93.
+      - Scope a K3-local ``MetaConstantFolder`` guard (never folds
+        ``tensor_cast._internal_*`` marker ops or ``aten.empty*`` allocations)
+        to K3's ``run_inference`` window — keeps the shared
+        ``constant_folding`` module untouched and leaves no process-wide
+        side effects for other models.
     """
     import operator as _operator
 
     from ..custom_model_registry import get_language_layers as _get_lang_layers
+
+    # NOTE: the MetaConstantFolder guard is NOT installed here anymore; it
+    # is scoped to K3's run_inference window (see _k3_constant_folder_guard,
+    # installed by _patched_run_inference_k3) so other models simulated in
+    # the same process keep the pristine constant-folding behavior.
 
     # ----------------------------------------------------------------
     # Restore vision tower layers from region wrappers

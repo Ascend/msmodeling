@@ -16,8 +16,10 @@ class TestKimiK3(unittest.TestCase):
     """Unit tests for Kimi K3 model simulation.
 
     Test conditions based on §5.3 of ``docs/design/kimi_k3_adaptation_design.md``:
-      - W4A8_DYNAMIC quantization
+      - W4A8_DYNAMIC quantization (expert + non-expert linear)
       - DP4 / TP16 / EP64 with 64 devices
+      - ``enable_multistream`` compilation config
+      - ``enable_shared_expert_tp`` for shared expert tensor parallelism
       - K3 has no MTP; decode uses ``--decode`` flag (not ``--num-mtp-tokens``)
       - K3 uses SiTU activation (``tensor_cast.situ``) instead of SwiGLU
     """
@@ -120,11 +122,19 @@ class TestKimiK3(unittest.TestCase):
             f"{test_name}: EP communication (all_to_all) should be present with ep_size=64",
         )
 
-        # MLA quantization
+        # MLA attention operators. With non-expert linear quantization ENABLED,
+        # attention is excluded from quantization (DISABLED → BF16), so
+        # ``mlapo_quant`` does NOT appear; instead ``mla_prolog`` and
+        # ``multihead_latent_attention`` run in BF16.
         self.assertIn(
-            "tensor_cast.mlapo_quant",
+            "tensor_cast.mla_prolog",
             table,
-            f"{test_name}: MLA quantization (mlapo_quant) should be present in the operation trace",
+            f"{test_name}: MLA prolog (mla_prolog) should be present in the operation trace",
+        )
+        self.assertIn(
+            "tensor_cast.multihead_latent_attention",
+            table,
+            f"{test_name}: MLA attention (multihead_latent_attention) should be present in the operation trace",
         )
 
         # MoE expert computation via grouped_matmul
@@ -151,6 +161,9 @@ class TestKimiK3(unittest.TestCase):
             do_compile=True,
             allow_graph_break=False,
             quantize_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            quantize_non_expert_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            enable_multistream=True,
+            enable_shared_expert_tp=True,
             world_size=64,
             dp_size=4,
             tp_size=16,
@@ -186,6 +199,9 @@ class TestKimiK3(unittest.TestCase):
             do_compile=True,
             allow_graph_break=False,
             quantize_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            quantize_non_expert_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            enable_multistream=True,
+            enable_shared_expert_tp=True,
             world_size=64,
             dp_size=4,
             tp_size=16,
@@ -239,6 +255,9 @@ class TestKimiK3(unittest.TestCase):
             do_compile=True,
             allow_graph_break=False,
             quantize_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            quantize_non_expert_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            enable_multistream=True,
+            enable_shared_expert_tp=True,
             world_size=64,
             dp_size=4,
             tp_size=16,
@@ -332,6 +351,9 @@ class TestKimiK3(unittest.TestCase):
             do_compile=True,
             allow_graph_break=False,
             quantize_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            quantize_non_expert_linear_action=QuantizeLinearAction.W4A8_DYNAMIC,
+            enable_multistream=True,
+            enable_shared_expert_tp=True,
             world_size=64,
             dp_size=4,
             tp_size=16,
