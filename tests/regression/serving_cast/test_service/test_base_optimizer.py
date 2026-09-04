@@ -369,7 +369,7 @@ class TestBaseBackend(unittest.TestCase):
 
         requests = self.backend.model_runner.run_inference.call_args.args[0]
         self.assertEqual(requests[0].query_len, 100)
-        self.assertEqual(requests[0].seq_len, 100)
+        self.assertEqual(requests[0].seq_len, 200)
 
     def test_get_forward_info_keeps_original_input_length_for_decode(self):
         self.backend.model_runner = Mock()
@@ -392,7 +392,14 @@ class TestBaseBackend(unittest.TestCase):
 
         query_len, seq_len = self.backend._resolve_forward_shape(optimizer_data, is_decode=False)
 
-        self.assertEqual((query_len, seq_len), (100, 100))
+        self.assertEqual((query_len, seq_len), (100, 200))
+
+    def test_resolve_forward_shape_keeps_long_cached_prefix_as_kv_context(self):
+        optimizer_data = OptimizerData(input_length=64000, output_length=64, prefix_cache_hit_rate=0.9)
+
+        query_len, seq_len = self.backend._resolve_forward_shape(optimizer_data, is_decode=False)
+
+        self.assertEqual((query_len, seq_len), (6400, 64000))
 
     def test_resolve_forward_shape_accepts_prefill_chunk_overrides(self):
         optimizer_data = OptimizerData(input_length=200, output_length=64, prefix_cache_hit_rate=0.5)
@@ -485,7 +492,7 @@ class TestBaseBackend(unittest.TestCase):
         prefill_key = self.backend._make_forward_shape_key(4, optimizer_data, is_decode=False)
         decode_key = self.backend._make_forward_shape_key(4, optimizer_data, is_decode=True)
 
-        self.assertEqual(prefill_key, ForwardShapeKey(False, 4, 100, 100, 1, 1080, 1920))
+        self.assertEqual(prefill_key, ForwardShapeKey(False, 4, 100, 200, 1, 1080, 1920))
         self.assertEqual(decode_key, ForwardShapeKey(True, 4, 3, 235, 1, 1080, 1920))
 
     def test_compute_forward_latency_record_caches_raw_forward_metrics(self):
@@ -847,10 +854,11 @@ class TestBaseBackend(unittest.TestCase):
 
         requests = self.backend.model_runner.run_inference.call_args.args[0]
         self.assertEqual(requests[0].query_len, 300)
-        self.assertEqual(requests[0].seq_len, 300)
+        self.assertEqual(requests[0].seq_len, 400)
         self.assertEqual(requests[0].num_input_tokens, 400)
         self.assertEqual(requests[0].num_output_tokens, 32)
         self.assertEqual(requests[1].query_len, 80)
+        self.assertEqual(requests[1].seq_len, 100)
         self.assertEqual(requests[1].num_input_tokens, 100)
         self.assertEqual(len(requests), 4)
 

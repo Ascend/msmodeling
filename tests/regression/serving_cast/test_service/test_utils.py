@@ -113,6 +113,27 @@ class TestServiceUtils(unittest.TestCase):
 
         self.assertEqual(config.get_decode_context_length(), 200)
 
+    def test_optimizer_data_prefill_cached_prefix_length(self):
+        config = OptimizerData(input_length=200, prefix_cache_hit_rate=0.5)
+
+        self.assertEqual(config.get_prefill_cached_prefix_length(), 100)
+
+    def test_optimizer_data_prefill_cached_prefix_and_effective_length_preserve_input_length(self):
+        config = OptimizerData(input_length=1000, prefix_cache_hit_rate=0.999)
+
+        effective_length = config.get_effective_input_length()
+        cached_prefix_length = config.get_prefill_cached_prefix_length()
+
+        self.assertEqual(effective_length, 1)
+        self.assertEqual(cached_prefix_length, 999)
+        self.assertEqual(effective_length + cached_prefix_length, config.input_length)
+
+    def test_optimizer_data_prefill_cached_prefix_rejects_full_hit_rate(self):
+        config = OptimizerData(input_length=1000, prefix_cache_hit_rate=1.0)
+
+        with self.assertRaisesRegex(ValueError, "Effective input length must be at least 1"):
+            config.get_prefill_cached_prefix_length()
+
     def test_optimizer_data_prefill_chunk_plan_single_chunk(self):
         config = OptimizerData(input_length=4096, max_batched_tokens=8192)
         self.assertEqual(
@@ -137,8 +158,8 @@ class TestServiceUtils(unittest.TestCase):
         self.assertEqual(
             config.get_prefill_chunk_plan(),
             [
-                PrefillChunk(index=0, query_len=3, seq_len=3),
-                PrefillChunk(index=1, query_len=2, seq_len=5, is_last_chunk=True),
+                PrefillChunk(index=0, query_len=3, seq_len=8),
+                PrefillChunk(index=1, query_len=2, seq_len=10, is_last_chunk=True),
             ],
         )
 
@@ -165,6 +186,21 @@ class TestServiceUtils(unittest.TestCase):
         )
         chunk_plan = config.get_prefill_chunk_plan(concurrency=4)
         self.assertEqual(config.get_prefill_num_chunks(chunk_plan), 2)
+
+    def test_optimizer_data_variable_prefill_chunk_plan_keeps_cached_prefix_in_seq_len(self):
+        config = OptimizerData(
+            length_distribution=LengthDistribution(bins=[LengthBin(min_tokens=100, max_tokens=200, weight=1.0)]),
+            max_batched_tokens=50,
+            prefix_cache_hit_rate=0.5,
+        )
+
+        self.assertEqual(
+            config.get_prefill_chunk_plan(concurrency=1),
+            [
+                PrefillChunk(index=0, query_len=50, seq_len=125),
+                PrefillChunk(index=1, query_len=25, seq_len=150, is_last_chunk=True),
+            ],
+        )
 
     def test_optimizer_data_variable_prefill_chunk_plan_requires_concurrency(self):
         config = OptimizerData(
@@ -235,6 +271,14 @@ class TestServiceUtils(unittest.TestCase):
         )
 
         self.assertEqual(config.get_decode_context_length(), 550)
+
+    def test_optimizer_data_prefill_cached_prefix_length_uses_distribution(self):
+        config = OptimizerData(
+            length_distribution=_simple_length_distribution(),
+            prefix_cache_hit_rate=0.5,
+        )
+
+        self.assertEqual(config.get_prefill_cached_prefix_length(), 275)
 
     def test_optimizer_data_effective_input_length_distribution_has_minimum_one(self):
         config = OptimizerData(

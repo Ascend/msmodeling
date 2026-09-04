@@ -189,6 +189,17 @@ class OptimizerData:
             return self._weighted_representative_length("num_input_tokens")
         return self.input_length
 
+    def get_prefill_cached_prefix_length(self) -> Optional[int]:
+        """Return the cached prefix represented as existing Prefill KV context."""
+        if self.length_distribution is not None:
+            raw_length = self._weighted_representative_length("num_input_tokens")
+            effective_length = self._weighted_representative_length("query_len")
+            return max(0, raw_length - effective_length)
+        if self.input_length is None:
+            return None
+        effective_length = self.get_effective_input_length()
+        return max(0, self.input_length - effective_length)
+
     def get_prefill_chunk_plan(self, concurrency: Optional[int] = None) -> list[PrefillChunk]:
         """Split the effective prefill prompt into chunks bounded by max_batched_tokens."""
         if self.length_distribution is not None:
@@ -203,6 +214,7 @@ class OptimizerData:
             for row in self.build_concurrency_samples(concurrency):
                 for _ in range(row["samples"]):
                     request_query_len = row["query_len"]
+                    cached_prefix_tokens = row["num_input_tokens"] - request_query_len
                     consumed_query_len = 0
                     while consumed_query_len < request_query_len:
                         if remaining_token_budget == 0:
@@ -219,7 +231,7 @@ class OptimizerData:
                             PrefillChunk(
                                 index=chunk_index,
                                 query_len=query_len,
-                                seq_len=consumed_query_len,
+                                seq_len=cached_prefix_tokens + consumed_query_len,
                                 is_last_chunk=consumed_query_len == request_query_len,
                             )
                         )
@@ -234,15 +246,16 @@ class OptimizerData:
         chunks = []
         consumed = 0
         index = 0
+        cached_prefix_tokens = self.get_prefill_cached_prefix_length() or 0
         while consumed < effective_input_length:
             query_len = min(self.max_batched_tokens, effective_input_length - consumed)
-            seq_len = consumed + query_len
+            seq_len = cached_prefix_tokens + consumed + query_len
             chunks.append(
                 PrefillChunk(
                     index=index,
                     query_len=query_len,
                     seq_len=seq_len,
-                    is_last_chunk=seq_len == effective_input_length,
+                    is_last_chunk=consumed + query_len == effective_input_length,
                 )
             )
             consumed += query_len

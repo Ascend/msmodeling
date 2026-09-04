@@ -75,7 +75,8 @@ Internally introduce:
 
 Policy:
 
-- all prefill-related paths use `effective_input_length`
+- all prefill-related paths use `effective_input_length` as `query_len`
+- Prefill keeps the original input length as `seq_len`, so new tokens can still attend to cached prefix KV
 - all decode-related paths keep the original logic
 
 ## 4. Design
@@ -116,7 +117,7 @@ Here, `prefill_batch_size = max_prefill_tokens // effective_input_length` means 
 
 For disaggregation mode:
 
-- `disaggregation-prefill` uses `effective_input_length`
+- `disaggregation-prefill` uses `query_len = effective_input_length` and `seq_len = input_length`
 - `disaggregation-decode` ignores prefix cache
 
 ### 4.4 `max_prefill_tokens`
@@ -156,6 +157,7 @@ Otherwise, the scenario is unsupported in this version.
 This scheme only approximates reduced compute for the current request:
 
 - `text_generate` keeps total `seq_len` unchanged
+- `throughput_optimizer` also keeps total `seq_len` unchanged and reduces only the current `query_len`
 - no standalone resident prefix-cache memory is modeled
 
 So reported memory numbers should not be interpreted as total cache residency of a real serving system.

@@ -670,10 +670,11 @@ class BaseThroughputOptimizer(ABC):
     ) -> tuple[int, int]:
         """Resolve the RequestInfo shape, allowing chunked prefill callers to override it.
 
-        Without overrides, prefill uses the effective input length after prefix-cache reduction,
-        while decode keeps the original prompt length and only computes the next decode/MTP tokens.
-        Chunked prefill passes explicit query_len/seq_len so each chunk can be modeled with its
-        own newly computed token count and accumulated context length.
+        Without overrides, prefill computes only the effective input tokens after prefix-cache
+        reduction while retaining the cached prefix in the total KV sequence length. Decode keeps
+        the original prompt length and only computes the next decode/MTP tokens. Chunked prefill
+        passes explicit query_len/seq_len so each chunk can be modeled with its own newly computed
+        token count and accumulated context length, including the cached prefix.
 
         Prefix-cache hit rate is intentionally represented through the resolved shape instead of
         being added to ForwardShapeKey separately: prefill changes query_len/seq_len or the chunk
@@ -694,10 +695,12 @@ class BaseThroughputOptimizer(ABC):
                 optimizer_data.output_length // 2 + optimizer_data.get_decode_context_length() + resolved_query_len
             )
         else:
-            # Full prefill defaults to the effective prompt; chunked prefill provides explicit shapes.
+            # Full prefill computes only cache-miss tokens, but those queries still attend to the
+            # cached prefix. Chunked prefill provides both lengths explicitly.
             effective_input_length = optimizer_data.get_effective_input_length()
+            cached_prefix_length = optimizer_data.get_prefill_cached_prefix_length() or 0
             resolved_query_len = query_len or effective_input_length
-            resolved_seq_len = seq_len or resolved_query_len
+            resolved_seq_len = seq_len or cached_prefix_length + resolved_query_len
 
         return resolved_query_len, resolved_seq_len
 
@@ -748,7 +751,7 @@ class BaseThroughputOptimizer(ABC):
                 requests.append(
                     RequestInfo(
                         query_len=row["query_len"],
-                        seq_len=row["query_len"],
+                        seq_len=row["num_input_tokens"],
                         is_decode=False,
                         num_input_tokens=row["num_input_tokens"],
                         num_output_tokens=optimizer_data.output_length,

@@ -12,8 +12,9 @@ python -m cli.inference.text_generate <model> \
   --device <device> \
   --num-devices <num_devices> \
   --num-queries <concurrency> \
-  --query-length <effective_input_length> \
+  --query-length <input_length> \
   --context-length 0 \
+  --prefix-cache-hit-rate <prefix_cache_hit_rate> \
   --tp-size <TP> \
   --dp-size <DP> \
   --ep-size <EP> \

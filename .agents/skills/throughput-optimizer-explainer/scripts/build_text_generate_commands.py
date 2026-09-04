@@ -80,6 +80,27 @@ def get_effective_input_length(data: dict) -> int:
     return max(1, input_length - math.floor(input_length * hit_rate))
 
 
+def add_prefill_shape(cmd: list[str], data: dict, effective_input_length: int) -> None:
+    """Add a Prefill shape that preserves cached prefix tokens as KV context."""
+    input_length = data.get("input_length")
+    hit_rate = float(data.get("prefix_cache_hit_rate", 0.0))
+    if input_length is None:
+        input_length = data.get("decode_context_length")
+    if input_length is None or hit_rate <= 0:
+        cmd.extend(["--query-length", str(effective_input_length), "--context-length", "0"])
+        return
+    cmd.extend(
+        [
+            "--query-length",
+            str(int(input_length)),
+            "--context-length",
+            "0",
+            "--prefix-cache-hit-rate",
+            str(hit_rate),
+        ]
+    )
+
+
 def build_aggregation(data: dict, include_op_bound: bool = False) -> dict:
     output_length = int(data["output_length"])
     max_batched_tokens = int(data.get("max_batched_tokens", 8192))
@@ -93,16 +114,8 @@ def build_aggregation(data: dict, include_op_bound: bool = False) -> dict:
     parallel = parse_parallel(data.get("parallel"))
 
     prefill = base_cmd(data, parallel, include_op_bound=include_op_bound)
-    prefill.extend(
-        [
-            "--num-queries",
-            str(prefill_batch_size),
-            "--query-length",
-            str(effective_input_length),
-            "--context-length",
-            "0",
-        ]
-    )
+    prefill.extend(["--num-queries", str(prefill_batch_size)])
+    add_prefill_shape(prefill, data, effective_input_length)
 
     decode = base_cmd(data, parallel, include_op_bound=include_op_bound)
     decode.extend(
@@ -140,7 +153,7 @@ def build_disaggregation(data: dict, include_op_bound: bool = False) -> dict:
     cmd.extend(["--num-queries", str(concurrency)])
     if phase == "prefill":
         effective_input_length = get_effective_input_length(data)
-        cmd.extend(["--query-length", str(effective_input_length), "--context-length", "0"])
+        add_prefill_shape(cmd, data, effective_input_length)
         return {"mode": "disaggregation", "phase": phase, "command": shell_join(cmd)}
     cmd.extend(
         [

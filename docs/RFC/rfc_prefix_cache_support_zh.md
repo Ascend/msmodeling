@@ -75,7 +75,8 @@
 
 策略如下：
 
-- 所有 prefill 相关路径使用 `effective_input_length`
+- 所有 prefill 相关路径使用 `effective_input_length` 作为 `query_len`
+- prefill 的 `seq_len` 保留原始输入长度，使新增 token 仍能访问命中的 prefix KV
 - 所有 decode 相关路径保持原逻辑
 
 ## 4. 方案设计
@@ -116,7 +117,7 @@ prefix cache 的 effective 长度语义应在共享的 forward-shape 构造层�
 
 对 PD 分离模式：
 
-- `disaggregation-prefill` 使用 `effective_input_length`
+- `disaggregation-prefill` 使用 `query_len = effective_input_length`、`seq_len = input_length`
 - `disaggregation-decode` 忽略 prefix cache
 
 ### 4.4 `max_prefill_tokens`
@@ -156,6 +157,7 @@ prefix cache 的 effective 长度语义应在共享的 forward-shape 构造层�
 当前方案只近似评估本次请求的计算开销下降：
 
 - `text_generate` 保持总 `seq_len` 不变
+- `throughput_optimizer` 同样保持总 `seq_len` 不变，仅减少本轮计算的 `query_len`
 - 不额外建模独立的 prefix cache 常驻内存
 
 因此输出中的内存指标不应解释为真实 serving 系统的总缓存驻留成本。

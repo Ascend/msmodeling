@@ -111,7 +111,7 @@ msmodeling/cli/inference/throughput_optimizer.py
 
 - `OptimizerData.get_effective_input_length()` 已支持 prefix cache。
 - 混部模式通过 `prefill_batch_size = max_batched_tokens // effective_input_length` 估算一个 prefill wave 可容纳的请求数。
-- `_get_forward_info(is_decode=False)` 使用 `query_len = seq_len = effective_input_length` 跑一次完整 prefill。
+- `_get_forward_info(is_decode=False)` 使用 `query_len = effective_input_length`、`seq_len = input_length` 跑一次完整 prefill。
 - 当 `max_batched_tokens < effective_input_length` 且非 disagg / PD ratio 模式时，CLI 直接返回错误。
 
 因此当前 `throughput_optimizer` 的服务化性能估算仍停留在完整 prefill 建模，尚未将 chunked prefill 暴露为可配置、可分析的建模能力。
@@ -140,7 +140,7 @@ CLI / Web UI
 默认兼容策略：
 
 - `effective_input_length <= max_batched_tokens`
-  - chunk plan 只有 1 个 chunk，`query_len = seq_len = effective_input_length`
+  - chunk plan 只有 1 个 chunk，`query_len = effective_input_length`、`seq_len = input_length`
   - 结果与现有完整 prefill 逻辑一致
 - `effective_input_length > max_batched_tokens`
   - 自动使用 `max_batched_tokens` 作为 chunk size 切分 prefill
@@ -167,7 +167,7 @@ def get_prefill_chunk_plan(self) -> list[PrefillChunk]:
     index = 0
     while consumed < effective_input_length:
         query_len = min(chunk_size, effective_input_length - consumed)
-        seq_len = consumed + query_len
+        seq_len = cached_prefix_tokens + consumed + query_len
         chunks.append(PrefillChunk(index=index, query_len=query_len, seq_len=seq_len))
         consumed += query_len
         index += 1
@@ -177,8 +177,8 @@ def get_prefill_chunk_plan(self) -> list[PrefillChunk]:
 说明：
 
 - `query_len` 表示本次 prefill chunk 新计算的 token 数。
-- `seq_len` 表示当前 chunk 完成后的有效上下文长度。
-- 首版沿用当前 prefix cache 近似，即 chunk plan 基于 `effective_input_length` 生成，不额外把 cached prefix token 加回 `seq_len`。
+- `seq_len` 表示当前 chunk 完成后的完整上下文长度，包括命中的 cached prefix。
+- chunk plan 仍基于 `effective_input_length` 生成，但每个 chunk 的 `seq_len` 会加回 cached prefix token。
 
 ### 3.1.4 混部模式 TTFT 语义
 
