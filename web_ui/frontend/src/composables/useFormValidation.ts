@@ -38,6 +38,7 @@ export interface ValidationRule {
 export interface FieldSchema {
   id: string
   dataType?: string
+  multiValues?: boolean
   validation?: ValidationRule[]
   conditions?: {
     visible?: any
@@ -59,11 +60,13 @@ function resolveMessage(message: LocalizedText | undefined): string {
  * Convert validation rule to async-validator RuleItem format.
  */
 function convertValidationRule(
-  fieldId: string,
+  field: Record<string, any>,
   validation: ValidationRule,
   formModel: Ref<Record<string, any>>,
   validators: Record<string, ValidatorFn> | undefined,
 ): RuleItem {
+  const fieldId = field.id as string
+  const isMultiValue = field.multiValues === true || validation.type === 'array'
   const rule: RuleItem = {
     // Use the rule's own declared type. Do NOT force `type:'string'` for
     // `required` rules — that makes async-validator reject a NUMBER value (e.g.
@@ -110,7 +113,141 @@ function convertValidationRule(
                 callback(err instanceof Error ? err.message : 'Validation error')
               })
           }
-        : undefined,
+        : validation.rule === 'gt'
+          ? (_rule, value, callback) => {
+              // RFC §3.5 exclusive minimum: value > threshold
+              if (value === null || value === undefined || value === '') {
+                callback()
+                return
+              }
+              const threshold = Number(validation.value)
+              const numValue = Number(value)
+              if (!Number.isFinite(numValue)) {
+                // NaN / Infinity — invalid numeric input
+                callback(resolveMessage(validation.message) || 'Must be a valid number')
+              } else if (numValue > threshold) {
+                callback()
+              } else {
+                callback(resolveMessage(validation.message))
+              }
+            }
+          : validation.rule === 'lt'
+            ? (_rule, value, callback) => {
+                // RFC §3.5 exclusive maximum: value < threshold
+                if (value === null || value === undefined || value === '') {
+                  callback()
+                  return
+                }
+                const threshold = Number(validation.value)
+                const numValue = Number(value)
+                if (!Number.isFinite(numValue)) {
+                  callback(resolveMessage(validation.message) || 'Must be a valid number')
+                } else if (numValue < threshold) {
+                  callback()
+                } else {
+                  callback(resolveMessage(validation.message))
+                }
+              }
+            : validation.rule === 'min'
+              ? (_rule, value, callback) => {
+                  // Inclusive minimum.
+                  // type:'string' → check string LENGTH (min字符数).
+                  // multiValues / array → split comma-separated, validate EACH element.
+                  // Otherwise → numeric comparison with string-to-number conversion
+                  // for text inputs (e.g. tp-size entered as "4").
+                  if (value === null || value === undefined || value === '') {
+                    callback()
+                    return
+                  }
+                  const threshold = Number(validation.value)
+                  if (validation.type === 'string') {
+                    if (String(value).length >= threshold) {
+                      callback()
+                    } else {
+                      callback(resolveMessage(validation.message))
+                    }
+                    return
+                  }
+                  if (isMultiValue) {
+                    const items = String(value).split(',').map((s: string) => s.trim()).filter(Boolean)
+                    if (items.length === 0) { callback(); return }
+                    for (const item of items) {
+                      const numValue = Number(item)
+                      if (!Number.isFinite(numValue)) {
+                        callback(resolveMessage(validation.message) || 'Must be a valid number')
+                        return
+                      }
+                      if (validation.type === 'integer' && !Number.isInteger(numValue)) {
+                        callback(resolveMessage(validation.message) || 'Must be an integer')
+                        return
+                      }
+                      if (numValue < threshold) {
+                        callback(resolveMessage(validation.message))
+                        return
+                      }
+                    }
+                    callback()
+                    return
+                  }
+                  const numValue = Number(value)
+                  if (!Number.isFinite(numValue)) {
+                    callback(resolveMessage(validation.message) || 'Must be a valid number')
+                  } else if (numValue >= threshold) {
+                    callback()
+                  } else {
+                    callback(resolveMessage(validation.message))
+                  }
+                }
+              : validation.rule === 'max'
+                ? (_rule, value, callback) => {
+                    // Inclusive maximum.
+                    // type:'string' → check string LENGTH (max字符数).
+                    // multiValues / array → split comma-separated, validate EACH element.
+                    // Otherwise → numeric comparison with string-to-number conversion.
+                    if (value === null || value === undefined || value === '') {
+                      callback()
+                      return
+                    }
+                    const threshold = Number(validation.value)
+                    if (validation.type === 'string') {
+                      if (String(value).length <= threshold) {
+                        callback()
+                      } else {
+                        callback(resolveMessage(validation.message))
+                      }
+                      return
+                    }
+                    if (isMultiValue) {
+                      const items = String(value).split(',').map((s: string) => s.trim()).filter(Boolean)
+                      if (items.length === 0) { callback(); return }
+                      for (const item of items) {
+                        const numValue = Number(item)
+                        if (!Number.isFinite(numValue)) {
+                          callback(resolveMessage(validation.message) || 'Must be a valid number')
+                          return
+                        }
+                        if (validation.type === 'integer' && !Number.isInteger(numValue)) {
+                          callback(resolveMessage(validation.message) || 'Must be an integer')
+                          return
+                        }
+                        if (numValue > threshold) {
+                          callback(resolveMessage(validation.message))
+                          return
+                        }
+                      }
+                      callback()
+                      return
+                    }
+                    const numValue = Number(value)
+                    if (!Number.isFinite(numValue)) {
+                      callback(resolveMessage(validation.message) || 'Must be a valid number')
+                    } else if (numValue <= threshold) {
+                      callback()
+                    } else {
+                      callback(resolveMessage(validation.message))
+                    }
+                  }
+                : undefined,
   }
 
   // Remove undefined properties
@@ -171,7 +308,7 @@ export function useFormValidation(
       if (!field.validation || field.validation.length === 0) continue
 
       const rules: RuleItem[] = field.validation.map((v: any) =>
-        convertValidationRule(field.id, v, formModel, envelope.validators)
+        convertValidationRule(field, v, formModel, envelope.validators)
       )
 
       if (rules.length > 0) {
@@ -246,7 +383,7 @@ export function useFormValidation(
       if (!activeFields.has(field.id)) continue
       if (!field.validation || field.validation.length === 0) continue
       descriptor[field.id] = field.validation.map((v: any) =>
-        convertValidationRule(field.id, v, formModel, envelope.validators),
+        convertValidationRule(field, v, formModel, envelope.validators),
       )
     }
 

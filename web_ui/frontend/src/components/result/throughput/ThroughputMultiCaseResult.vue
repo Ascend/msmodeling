@@ -38,22 +38,22 @@ const casesWithSeq = computed(() =>
   cases.value.map((c: any, i: number) => ({
     ...c,
     seq: i,
-    config: c.case_config || c.config || {},
-    chrome_trace: c.chrome_trace || { available: false }
+    config: c["case_config"] || c.config || {},
+    "chrome_trace": c["chrome_trace"] || { available: false }
   }))
 )
 
 // Filter raw records for the selected case (per-case curves). Uses case_hash
-// when available; falls back to matching by device from case_config when
+// when available; falls back to matching by device from case-config when
 // case_hash is null (e.g. form_schema_version was not set).
 const selectedCaseRecords = computed(() => {
   if (!props.records?.length || !selectedCase.value) return []
-  const ch = selectedCase.value.case_hash
+  const ch = selectedCase.value["case_hash"]
   if (ch) {
-    return props.records.filter((r: any) => r.case_hash === ch)
+    return props.records.filter((r: any) => r["case_hash"] === ch)
   }
-  // Fallback: match by device from case_config
-  const device = selectedCase.value.case_config?.device
+  // Fallback: match by device from case-config
+  const device = selectedCase.value["case_config"]?.device
   if (device) {
     return props.records.filter((r: any) => {
       const d = r.config?.device
@@ -71,7 +71,7 @@ const fmt = (v: any, digits = 2) =>
 // best_config and would wrongly collapse to plain aggregation, hiding the
 // PD-Ratio / P-D QPS results. Mirrors isDisagg's .some() below.
 const isPdRatio = computed(() =>
-  cases.value.some((c: any) => c.best_config?.balanced_qps != null),
+  cases.value.some((c: any) => c["best_config"]?.["balanced_qps"] != null),
 )
 
 // Detect disaggregated mode: cases carry disagg_prefill / disagg_decode arrays.
@@ -79,44 +79,44 @@ const isDisagg = computed(
   () =>
     !isPdRatio.value &&
     cases.value.some(
-      (c: any) => (c.disagg_prefill?.length || 0) + (c.disagg_decode?.length || 0) > 0,
+      (c: any) => (c["disagg_prefill"]?.length || 0) + (c["disagg_decode"]?.length || 0) > 0,
     ),
 )
 
 const summaryRows = computed(() =>
   cases.value.map((c: any, i: number) => {
-    const cc = c.case_config || {}
-    const best = c.best_config || {}
+    const cc = c["case_config"] || {}
+    const best = c["best_config"] || {}
     if (isPdRatio.value) {
       return {
         idx: i,
         device: cc.device,
-        tpot: cc.tpot_limits,
-        ttft: cc.ttft_limits,
-        quant: cc.quantize_linear_action,
-        att: cc.quantize_attention_action,
-        primary: best.balanced_qps ?? null,
+        tpot: cc["tpot_limit"],
+        ttft: cc["ttft_limit"],
+        quant: cc["quantize_linear_action"],
+        att: cc["quantize_attention_action"],
+        primary: best["balanced_qps"] ?? null,
         primaryLabel: 'Balanced QPS',
-        pd_ratio: best.pd_ratio ?? null,
-        p_qps: best.p_qps ?? null,
-        d_qps: best.d_qps ?? null,
-        bestParallel: `P:${best.parallel_p || '-'} D:${best.parallel_d || '-'}`,
-        error: c.best_config ? '' : 'no result',
+        pd_ratio: best["pd_ratio"] ?? null,
+        p_qps: best["p_qps"] ?? null,
+        d_qps: best["d_qps"] ?? null,
+        bestParallel: `P:${best["parallel_p"] || '-'} D:${best["parallel_d"] || '-'}`,
+        error: c["best_config"] ? '' : 'no result',
       }
     }
     return {
       idx: i,
       device: cc.device,
-      tpot: cc.tpot_limits,
-      ttft: cc.ttft_limits,
-      quant: cc.quantize_linear_action,
-      att: cc.quantize_attention_action,
-      primary: best.throughput_token_s ?? null,
+      tpot: cc["tpot_limit"],
+      ttft: cc["ttft_limit"],
+      quant: cc["quantize_linear_action"],
+      att: cc["quantize_attention_action"],
+      primary: best["throughput_token_s"] ?? null,
       primaryLabel: 'Throughput',
-      ttft_ms: best.ttft_ms ?? null,
-      tpot_ms: best.tpot_ms ?? null,
+      ttft_ms: best["ttft_ms"] ?? null,
+      tpot_ms: best["tpot_ms"] ?? null,
       bestParallel: best.parallel || '-',
-      error: c.best_config ? '' : 'no result',
+      error: c["best_config"] ? '' : 'no result',
     }
   }),
 )
@@ -167,22 +167,22 @@ function caseTags(cc: any, i: number) {
   return {
     idx: i,
     device: cc.device,
-    tpot: cc.tpot_limits,
-    ttft: cc.ttft_limits,
-    quant: cc.quantize_linear_action,
-    att: cc.quantize_attention_action,
+    tpot: cc["tpot_limit"],
+    ttft: cc["ttft_limit"],
+    quant: cc["quantize_linear_action"],
+    att: cc["quantize_attention_action"],
   }
 }
 const prefillSummary = computed(() =>
   cases.value.map((c: any, i: number) => {
     const p = phaseBest(c, 'disagg_prefill')
-    return { ...caseTags(c.case_config || {}, i), ...(p || {}), error: p ? '' : 'no prefill' }
+    return { ...caseTags(c["case_config"] || {}, i), ...(p || {}), error: p ? '' : 'no prefill' }
   }),
 )
 const decodeSummary = computed(() =>
   cases.value.map((c: any, i: number) => {
     const d = phaseBest(c, 'disagg_decode')
-    return { ...caseTags(c.case_config || {}, i), ...(d || {}), error: d ? '' : 'no decode' }
+    return { ...caseTags(c["case_config"] || {}, i), ...(d || {}), error: d ? '' : 'no decode' }
   }),
 )
 function phaseChart(rows: any[], title: string) {
@@ -214,7 +214,7 @@ function phaseChart(rows: any[], title: string) {
     series: [
       {
         type: 'bar',
-        data: rows.map((r: any) => r.throughput_token_s),
+        data: rows.map((r: any) => r["throughput_token_s"]),
         itemStyle: { color: category.value[1] },
       },
     ],
@@ -245,13 +245,13 @@ function selectRow(row: any) {
           <el-table-column label="#" width="48" type="index" />
           <el-table-column label="device" prop="device" min-width="150" show-overflow-tooltip />
           <el-table-column label="Throughput (token/s)" width="170">
-            <template #default="{ row }">{{ row.throughput_token_s != null ? fmt(row.throughput_token_s) : '-' }}</template>
+            <template #default="{ row }">{{ row["throughput_token_s"] != null ? fmt(row["throughput_token_s"]) : '-' }}</template>
           </el-table-column>
           <el-table-column label="QPS (req/s)" width="120">
             <template #default="{ row }">{{ row.qps != null ? fmt(row.qps) : '-' }}</template>
           </el-table-column>
           <el-table-column label="TTFT (ms)" width="110">
-            <template #default="{ row }">{{ row.ttft_ms != null ? fmt(row.ttft_ms) : '-' }}</template>
+            <template #default="{ row }">{{ row["ttft_ms"] != null ? fmt(row["ttft_ms"]) : '-' }}</template>
           </el-table-column>
           <el-table-column label="parallel" prop="parallel" min-width="160" show-overflow-tooltip />
           <el-table-column label="status" width="90">
@@ -275,13 +275,13 @@ function selectRow(row: any) {
           <el-table-column label="#" width="48" type="index" />
           <el-table-column label="device" prop="device" min-width="150" show-overflow-tooltip />
           <el-table-column label="Throughput (token/s)" width="170">
-            <template #default="{ row }">{{ row.throughput_token_s != null ? fmt(row.throughput_token_s) : '-' }}</template>
+            <template #default="{ row }">{{ row["throughput_token_s"] != null ? fmt(row["throughput_token_s"]) : '-' }}</template>
           </el-table-column>
           <el-table-column label="QPS (req/s)" width="120">
             <template #default="{ row }">{{ row.qps != null ? fmt(row.qps) : '-' }}</template>
           </el-table-column>
           <el-table-column label="TPOT (ms)" width="110">
-            <template #default="{ row }">{{ row.tpot_ms != null ? fmt(row.tpot_ms) : '-' }}</template>
+            <template #default="{ row }">{{ row["tpot_ms"] != null ? fmt(row["tpot_ms"]) : '-' }}</template>
           </el-table-column>
           <el-table-column label="parallel" prop="parallel" min-width="160" show-overflow-tooltip />
           <el-table-column label="status" width="90">
@@ -317,22 +317,22 @@ function selectRow(row: any) {
           <!-- PD-ratio specific columns -->
           <template v-if="isPdRatio">
             <el-table-column label="PD Ratio" width="100">
-              <template #default="{ row }">{{ row.pd_ratio === null ? '-' : fmt(row.pd_ratio) }}</template>
+              <template #default="{ row }">{{ row["pd_ratio"] === null ? '-' : fmt(row["pd_ratio"]) }}</template>
             </el-table-column>
             <el-table-column label="P QPS" width="100">
-              <template #default="{ row }">{{ row.p_qps === null ? '-' : fmt(row.p_qps, 2) }}</template>
+              <template #default="{ row }">{{ row["p_qps"] === null ? '-' : fmt(row["p_qps"], 2) }}</template>
             </el-table-column>
             <el-table-column label="D QPS" width="100">
-              <template #default="{ row }">{{ row.d_qps === null ? '-' : fmt(row.d_qps, 2) }}</template>
+              <template #default="{ row }">{{ row["d_qps"] === null ? '-' : fmt(row["d_qps"], 2) }}</template>
             </el-table-column>
           </template>
           <!-- Aggregation/disagg columns -->
           <template v-else>
             <el-table-column label="TTFT (ms)" width="110">
-              <template #default="{ row }">{{ row.ttft_ms === null ? '-' : fmt(row.ttft_ms) }}</template>
+              <template #default="{ row }">{{ row["ttft_ms"] === null ? '-' : fmt(row["ttft_ms"]) }}</template>
             </el-table-column>
             <el-table-column label="TPOT (ms)" width="110">
-              <template #default="{ row }">{{ row.tpot_ms === null ? '-' : fmt(row.tpot_ms) }}</template>
+              <template #default="{ row }">{{ row["tpot_ms"] === null ? '-' : fmt(row["tpot_ms"]) }}</template>
             </el-table-column>
           </template>
           <el-table-column label="best parallel" prop="bestParallel" min-width="200" show-overflow-tooltip />

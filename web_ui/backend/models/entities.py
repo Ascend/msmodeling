@@ -43,6 +43,7 @@ class Job:
     progress_text: str | None = None
     error: str | None = None
     error_detail: str | None = None
+    error_fields: list[str] | None = None  # Field IDs that failed validation
     created_at: str | None = None
     started_at: str | None = None
     completed_at: str | None = None
@@ -51,6 +52,9 @@ class Job:
     # so a cache hit reuses both the result and the log without re-running.
     params_hash: str | None = None
     log_text: str | None = None
+    # Transient: field IDs the user explicitly interacted with (for wants_provided
+    # validators). Not persisted to DB — only used at runtime during validation.
+    explicitly_touched: list[str] | None = None
 
     def transition(self, to_status: JobStatus) -> None:
         """Validate + apply a state-machine edge."""

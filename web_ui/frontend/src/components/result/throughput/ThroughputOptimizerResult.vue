@@ -2,12 +2,12 @@
 /**
  * Throughput optimizer result panel — mode-aware modular router.
  *
- * Routes to a mode-specific view based on result.mode:
+ * Routes to a mode-specific view based result["mode"]:
  * - aggregation → AggregatedView (sweep table + cross-hw chart)
  * - disagg_prefill / disagg_decode → DisaggregatedView (prefill + decode tables)
  * - pd_ratio → PDRatioView (PD table + best PD ratio)
  *
- * The router renders a mode badge + the best_config card, then delegates the
+ * The router renders a mode badge + the best-config card, then delegates the
  * mode-specific table(s)/chart(s) to the view component.
  */
 import { computed } from 'vue'
@@ -49,57 +49,57 @@ const modeLabel = computed(() => {
 
 // Chrome trace cases for download component
 const traceCases = computed(() => {
-  if (!props.jobId || !props.result.chrome_trace?.available) return []
+  if (!props.jobId || !props.result["chrome_trace"]?.available) return []
   // Single case: seq=0
   return [{
     seq: 0,
-    config: props.result.input_config || {},
-    chrome_trace: props.result.chrome_trace
+    config: props.result["input_config"] || {},
+    "chrome_trace": props.result["chrome_trace"]
   }]
 })
 
 // In disaggregated mode, extract best configs from each phase table (top row
 // per phase). Backend mode == "disagg_prefill" but both phases have data.
 const prefillBest = computed(() => {
-  const rows = props.result.disagg_prefill || []
+  const rows = props.result["disagg_prefill"] || []
   return rows.length ? rows[0] : null
 })
 const decodeBest = computed(() => {
-  const rows = props.result.disagg_decode || []
+  const rows = props.result["disagg_decode"] || []
   return rows.length ? rows[0] : null
 })
 
 // Best config summary metrics (mode-specific labels)
 const bestMetrics = computed(() => {
-  const bc = props.result.best_config || {}
+  const bc = props.result["best_config"] || {}
   if (mode.value === 'pd_ratio') {
     return [
-      { label: 'PD Ratio', value: bc.pd_ratio != null ? Number(bc.pd_ratio).toFixed(2) : '-' },
-      { label: 'Balanced QPS', value: bc.balanced_qps != null ? Number(bc.balanced_qps).toFixed(2) : '-' },
-      { label: 'P QPS', value: bc.p_qps != null ? Number(bc.p_qps).toFixed(2) : '-' },
-      { label: 'D QPS', value: bc.d_qps != null ? Number(bc.d_qps).toFixed(2) : '-' },
+      { label: 'PD Ratio', value: bc["pd_ratio"] != null ? Number(bc["pd_ratio"]).toFixed(2) : '-' },
+      { label: 'Balanced QPS', value: bc["balanced_qps"] != null ? Number(bc["balanced_qps"]).toFixed(2) : '-' },
+      { label: 'P QPS', value: bc["p_qps"] != null ? Number(bc["p_qps"]).toFixed(2) : '-' },
+      { label: 'D QPS', value: bc["d_qps"] != null ? Number(bc["d_qps"]).toFixed(2) : '-' },
     ]
   }
   if (isDisagg.value) {
     // Use prefillBest for the single-card fallback (see template — disagg
     // mode renders two per-phase cards below so this single card isn't used).
     return [
-      { label: t({ zh: '吞吐', en: 'Throughput' }), value: bc.throughput_token_s != null ? `${Number(bc.throughput_token_s).toFixed(2)} token/s` : '-' },
-      { label: 'TTFT', value: bc.ttft_ms != null ? `${Number(bc.ttft_ms).toFixed(2)} ms` : '-' },
-      { label: 'TPOT', value: bc.tpot_ms != null ? `${Number(bc.tpot_ms).toFixed(2)} ms` : '-' },
+      { label: t({ zh: '吞吐', en: 'Throughput' }), value: bc["throughput_token_s"] != null ? `${Number(bc["throughput_token_s"]).toFixed(2)} token/s` : '-' },
+      { label: 'TTFT', value: bc["ttft_ms"] != null ? `${Number(bc["ttft_ms"]).toFixed(2)} ms` : '-' },
+      { label: 'TPOT', value: bc["tpot_ms"] != null ? `${Number(bc["tpot_ms"]).toFixed(2)} ms` : '-' },
     ]
   }
   return [
-    { label: t({ zh: '吞吐', en: 'Throughput' }), value: bc.throughput_token_s != null ? `${Number(bc.throughput_token_s).toFixed(2)} token/s` : '-' },
-    { label: 'TTFT', value: bc.ttft_ms != null ? `${Number(bc.ttft_ms).toFixed(2)} ms` : '-' },
-    { label: 'TPOT', value: bc.tpot_ms != null ? `${Number(bc.tpot_ms).toFixed(2)} ms` : '-' },
+    { label: t({ zh: '吞吐', en: 'Throughput' }), value: bc["throughput_token_s"] != null ? `${Number(bc["throughput_token_s"]).toFixed(2)} token/s` : '-' },
+    { label: 'TTFT', value: bc["ttft_ms"] != null ? `${Number(bc["ttft_ms"]).toFixed(2)} ms` : '-' },
+    { label: 'TPOT', value: bc["tpot_ms"] != null ? `${Number(bc["tpot_ms"]).toFixed(2)} ms` : '-' },
   ]
 })
 
 const bestParallel = computed(() => {
-  const bc = props.result.best_config || {}
+  const bc = props.result["best_config"] || {}
   if (mode.value === 'pd_ratio') {
-    return `P: ${bc.parallel_p || '-'} | D: ${bc.parallel_d || '-'}`
+    return `P: ${bc["parallel_p"] || '-'} | D: ${bc["parallel_d"] || '-'}`
   }
   return bc.parallel || '-'
 })
@@ -120,11 +120,11 @@ const bestParallel = computed(() => {
           <div class="best-metrics">
             <div class="metric">
               <span class="metric-label">{{ t({ zh: '吞吐', en: 'Throughput' }) }}</span>
-              <span class="metric-value">{{ prefillBest.throughput_token_s != null ? Number(prefillBest.throughput_token_s).toFixed(2) + ' token/s' : '-' }}</span>
+              <span class="metric-value">{{ prefillBest["throughput_token_s"] != null ? Number(prefillBest["throughput_token_s"]).toFixed(2) + ' token/s' : '-' }}</span>
             </div>
             <div class="metric">
               <span class="metric-label">TTFT</span>
-              <span class="metric-value">{{ prefillBest.ttft_ms != null ? Number(prefillBest.ttft_ms).toFixed(2) + ' ms' : '-' }}</span>
+              <span class="metric-value">{{ prefillBest["ttft_ms"] != null ? Number(prefillBest["ttft_ms"]).toFixed(2) + ' ms' : '-' }}</span>
             </div>
             <div class="metric">
               <span class="metric-label">QPS</span>
@@ -138,11 +138,11 @@ const bestParallel = computed(() => {
           <div class="best-metrics">
             <div class="metric">
               <span class="metric-label">{{ t({ zh: '吞吐', en: 'Throughput' }) }}</span>
-              <span class="metric-value">{{ decodeBest.throughput_token_s != null ? Number(decodeBest.throughput_token_s).toFixed(2) + ' token/s' : '-' }}</span>
+              <span class="metric-value">{{ decodeBest["throughput_token_s"] != null ? Number(decodeBest["throughput_token_s"]).toFixed(2) + ' token/s' : '-' }}</span>
             </div>
             <div class="metric">
               <span class="metric-label">TPOT</span>
-              <span class="metric-value">{{ decodeBest.tpot_ms != null ? Number(decodeBest.tpot_ms).toFixed(2) + ' ms' : '-' }}</span>
+              <span class="metric-value">{{ decodeBest["tpot_ms"] != null ? Number(decodeBest["tpot_ms"]).toFixed(2) + ' ms' : '-' }}</span>
             </div>
             <div class="metric">
               <span class="metric-label">QPS</span>
@@ -155,7 +155,7 @@ const bestParallel = computed(() => {
     </template>
 
     <!-- Single best config card (aggregated / pd_ratio modes) -->
-    <el-card v-else-if="result.best_config" class="best-config-card">
+    <el-card v-else-if="result['best_config']" class="best-config-card">
       <div class="best-metrics">
         <div v-for="m in bestMetrics" :key="m.label" class="metric">
           <span class="metric-label">{{ m.label }}</span>
@@ -176,7 +176,7 @@ const bestParallel = computed(() => {
 
     <!-- Empty state -->
     <el-empty
-      v-if="!result.best_config && !result.sweep_rows?.length && !result.pd_ratio_rows?.length && !result.disagg_prefill?.length"
+      v-if="!result['best_config'] && !result['sweep_rows']?.length && !result['pd_ratio_rows']?.length && !result['disagg_prefill']?.length"
       :description="t({ zh: '暂无结果数据', en: 'No result data available' })"
     />
   </div>

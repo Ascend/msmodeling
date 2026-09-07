@@ -60,6 +60,10 @@ class JobStatusResponse(BaseModel):
     completed_at: str | None = None
     error: str | None = None
     error_detail: str | None = None
+    error_fields: list[str] | None = Field(
+        default=None,
+        description="Field IDs that failed validation (for frontend highlighting).",
+    )
     result_ready: bool = False
     cancel_requested: bool = False
     poll_interval_ms: int | None = Field(

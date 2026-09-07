@@ -28,6 +28,7 @@ from typing import Dict, List, Optional
 try:
     from loguru import logger
 except ImportError:  # loguru may be missing when used as a standalone script by the build_shell_scripts subprocess
+
     class _StderrLogger:
         @staticmethod
         def _emit(level, msg):
@@ -46,7 +47,7 @@ except ImportError:  # loguru may be missing when used as a standalone script by
 
 # The detection script (local path) and where it lands after being uploaded remotely
 _DETECT_SCRIPT = Path(__file__).resolve().parent / "detect_nic.py"
-_REMOTE_DETECT_SCRIPT = "/tmp/ms_optix_detect_nic.py"
+_REMOTE_DETECT_SCRIPT = "/tmp/ms_optix_detect_nic.py"  # nosec B108
 
 # Candidate remote interpreters: python3 and python do not both exist in every image
 _REMOTE_PYTHONS = ("python3", "python")
@@ -125,8 +126,9 @@ def _detect_remote(node, docker_use_sudo: bool = False) -> Optional[str]:
     except DockerCopyError as e:
         # The script is on the host, just not in the container: detection can still run on
         # the host side, so keep only that attempt instead of giving up.
-        logger.warning(f"[{host}] NIC detection script not copied into the container, "
-                       f"detecting on the host instead: {e}")
+        logger.warning(
+            f"[{host}] NIC detection script not copied into the container, detecting on the host instead: {e}"
+        )
         in_container = False
     except Exception as e:
         logger.warning(f"[{host}] failed to upload NIC detection script: {e}")
@@ -138,11 +140,9 @@ def _detect_remote(node, docker_use_sudo: bool = False) -> Optional[str]:
     try:
         for container_exec in in_container_first:
             for python_bin in _REMOTE_PYTHONS:
-                cmd = (f"{python_bin} {shlex.quote(_REMOTE_DETECT_SCRIPT)} "
-                       f"{shlex.quote(host)}")
+                cmd = f"{python_bin} {shlex.quote(_REMOTE_DETECT_SCRIPT)} {shlex.quote(host)}"
                 try:
-                    res = executor.run(cmd, container_exec=container_exec,
-                                       hide=True, warn=True, timeout=30)
+                    res = executor.run(cmd, container_exec=container_exec, hide=True, warn=True, timeout=30)
                 except Exception as e:
                     logger.warning(f"[{host}] NIC detection via {python_bin} failed: {e}")
                     continue
@@ -151,8 +151,8 @@ def _detect_remote(node, docker_use_sudo: bool = False) -> Optional[str]:
                     return ifname
                 stderr = (getattr(res, "stderr", "") or "").strip()
                 logger.warning(
-                    f"[{host}] {python_bin} (container_exec={container_exec}) "
-                    f"found no NIC. stderr: {stderr[-300:]}")
+                    f"[{host}] {python_bin} (container_exec={container_exec}) found no NIC. stderr: {stderr[-300:]}"
+                )
     finally:
         executor.close()
     return None
@@ -175,9 +175,7 @@ def resolve_node_nic(node, is_local: bool, docker_use_sudo: bool = False) -> str
 
     nic = _detect_local(host) if is_local else _detect_remote(node, docker_use_sudo)
     if not nic:
-        raise ValueError(
-            f"failed to detect nic_name for node {host}; "
-            f"please configure nic_name for it in config.toml")
+        raise ValueError(f"failed to detect nic_name for node {host}; please configure nic_name for it in config.toml")
 
     _NIC_CACHE[host] = nic
     logger.info(f"[{host}] detected nic_name={nic}")
@@ -204,8 +202,7 @@ def resolve_nic_names(config) -> Dict[str, str]:
 
     resolved: Dict[str, str] = {}
     for node, is_local in nodes:
-        resolved[node.host] = resolve_node_nic(
-            node, is_local=is_local, docker_use_sudo=config.docker_use_sudo)
+        resolved[node.host] = resolve_node_nic(node, is_local=is_local, docker_use_sudo=config.docker_use_sudo)
     return resolved
 
 

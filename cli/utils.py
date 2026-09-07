@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import sys
-from typing import Any, Optional
+from typing import Any
 
 from cli.spec_cli import (
     METAVAR_FLOAT,
@@ -303,7 +303,7 @@ def argv_has_option(argv, *option_names: str) -> bool:
     return False
 
 
-def draft_method(args) -> Optional[str]:
+def draft_method(args) -> str | None:
     """Return ``mtp`` / ``dflash`` / ``dspark`` / None from ``--speculative-method``."""
     method = getattr(args, "speculative_method", None)
     if method in SPECULATIVE_METHODS:
@@ -438,7 +438,7 @@ def validate_draft_spec_cli_args(
 def resolve_num_speculative_tokens_to_block(
     num_speculative_tokens: int,
     *,
-    draft_model_config_path: Optional[str] = None,
+    draft_model_config_path: str | None = None,
     explicit: bool = False,
 ) -> tuple[int, int]:
     n = int(num_speculative_tokens or 0)
@@ -469,8 +469,7 @@ def clamp_acceptance_length(accept: float, block: int, method: str) -> float:
     if block < 2:
         return accept
     max_accept = float(block - 1)
-    if accept > max_accept:
-        accept = max_accept
+    accept = min(accept, max_accept)
     return accept
 
 

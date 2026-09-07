@@ -144,12 +144,17 @@ class TestCreateJob:
         assert "9.9.9" in exc.value.detail
 
     def test_submits_job_and_returns_body(self):
-        submitted = _job(JobStatus.PENDING, params={"x": 1})
+        submitted = _job(JobStatus.PENDING, params={"model-id": "test-model", "num-queries": 1, "query-length": 128})
         job_manager = AsyncMock()
         job_manager.submit_async.return_value = submitted
         with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
             mock_reg.return_value.get_form_schema.return_value = {"fields": []}
-            req = JobSubmitRequest(module_id="text_generate", form_schema_version="1.0.0", params={"x": 1})
+            # Provide valid params including all required fields
+            req = JobSubmitRequest(
+                module_id="text_generate",
+                form_schema_version="1.0.0",
+                params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+            )
             result = _run(create_job(req, MagicMock(), job_manager, MagicMock()))
         job_manager.submit_async.assert_awaited_once()
         # Verify the Job entity that was passed to submit_async has the right fields.
@@ -157,10 +162,51 @@ class TestCreateJob:
         submitted_job = call_args.args[0] if call_args.args else call_args.kwargs.get("job")
         assert submitted_job.module_id == "text_generate"
         assert submitted_job.form_schema_version == "1.0.0"
-        assert submitted_job.params == {"x": 1}
+        assert submitted_job.params == {"model-id": "test-model", "num-queries": 1, "query-length": 128}
         assert submitted_job.status == JobStatus.PENDING
         assert result.job_id == "job-1"
         assert result.status == "pending"
+
+    def test_passes_explicitly_touched_to_job_entity(self):
+        """explicitly_touched from the API request must propagate to the Job entity.
+
+        Regression test: the runner reads ``job.explicitly_touched`` to compute the
+        ``provided`` set for wants_provided=True validators. If the API router
+        forgets to pass it through, the runner crashes with AttributeError at
+        execution time — even though the Job dataclass declares the field.
+        """
+        submitted = _job(JobStatus.PENDING, params={"model-id": "test-model"})
+        job_manager = AsyncMock()
+        job_manager.submit_async.return_value = submitted
+        with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
+            mock_reg.return_value.get_form_schema.return_value = {"fields": []}
+            req = JobSubmitRequest(
+                module_id="text_generate",
+                form_schema_version="1.0.0",
+                params={"model-id": "test-model"},
+                explicitly_touched=["model-id", "num-queries"],
+            )
+            _run(create_job(req, MagicMock(), job_manager, MagicMock()))
+        call_args = job_manager.submit_async.call_args
+        submitted_job = call_args.args[0] if call_args.args else call_args.kwargs.get("job")
+        assert submitted_job.explicitly_touched == ["model-id", "num-queries"]
+
+    def test_explicitly_touched_defaults_to_none_when_absent(self):
+        """When the frontend doesn't send explicitly_touched, Job gets None."""
+        submitted = _job(JobStatus.PENDING, params={"model-id": "test-model"})
+        job_manager = AsyncMock()
+        job_manager.submit_async.return_value = submitted
+        with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
+            mock_reg.return_value.get_form_schema.return_value = {"fields": []}
+            req = JobSubmitRequest(
+                module_id="text_generate",
+                form_schema_version="1.0.0",
+                params={"model-id": "test-model"},
+            )
+            _run(create_job(req, MagicMock(), job_manager, MagicMock()))
+        call_args = job_manager.submit_async.call_args
+        submitted_job = call_args.args[0] if call_args.args else call_args.kwargs.get("job")
+        assert submitted_job.explicitly_touched is None
 
     def test_raises_400_when_case_expansion_fails(self):
         """_expand_job_cases_strict ValueError → 400 (catches oversized/invalid
@@ -169,7 +215,11 @@ class TestCreateJob:
         with patch("api.routers.jobs._expand_job_cases_strict", side_effect=ValueError("too many cases")):
             with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
                 mock_reg.return_value.get_form_schema.return_value = {"fields": []}
-                req = JobSubmitRequest(module_id="text_generate", form_schema_version="1.0.0", params={"x": 1})
+                req = JobSubmitRequest(
+                    module_id="text_generate",
+                    form_schema_version="1.0.0",
+                    params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+                )
                 with pytest.raises(HTTPException) as exc:
                     _run(create_job(req, MagicMock(), AsyncMock(), MagicMock()))
         assert exc.value.status_code == 400
@@ -184,7 +234,12 @@ class TestCreateJob:
         job_manager.submit_async.side_effect = JobManager.InflightLimitExceeded("worker pool saturated")
         with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
             mock_reg.return_value.get_form_schema.return_value = {"fields": []}
-            req = JobSubmitRequest(module_id="text_generate", form_schema_version="1.0.0", params={"x": 1})
+            # Provide valid params including all required fields
+            req = JobSubmitRequest(
+                module_id="text_generate",
+                form_schema_version="1.0.0",
+                params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+            )
             with pytest.raises(HTTPException) as exc:
                 _run(create_job(req, MagicMock(), job_manager, MagicMock()))
         assert exc.value.status_code == 429
@@ -323,11 +378,11 @@ class TestGetJob:
         assert result.command == "video_generate:['A100', 'H100']"
 
     def test_chrome_trace_path_synthesized_when_enabled(self):
-        """When chrome_trace=True, the command shows the actual trace path, not <auto>."""
+        """When chrome-trace-file=True, the command shows the actual trace path, not <auto>."""
         repo = MagicMock()
         repo.get.return_value = _job(
             module_id="text_generate",
-            params={"model_id": "m", "chrome_trace": True},
+            params={"model_id": "m", "chrome-trace-file": True},
         )
         with patch("runners._cli_command.build_cli_command_string") as mock_cmd:
             mock_cmd.return_value = "python -m cli.inference.text_generate m --chrome-trace /path/to/trace.json"
@@ -339,24 +394,24 @@ class TestGetJob:
         assert call_args[0][0] == "text_generate"
         params_passed = call_args[0][1]
         # Path conversion may change slashes on Windows, so check the string representation
-        assert "trace.json" in str(params_passed["chrome_trace"])
+        assert "trace.json" in str(params_passed["chrome-trace-file"])
         assert result.command == "python -m cli.inference.text_generate m --chrome-trace /path/to/trace.json"
 
     def test_chrome_trace_not_synthesized_when_case_hash_is_none(self):
-        """When chrome_trace=True but case_hash is None, path stays True (not synthesized)."""
+        """When chrome-trace-file=True but case_hash is None, path stays True (not synthesized)."""
         repo = MagicMock()
         repo.get.return_value = _job(
             module_id="text_generate",
-            params={"model_id": "m", "chrome_trace": True},
+            params={"model_id": "m", "chrome-trace-file": True},
         )
         with patch("runners._cli_command.build_cli_command_string") as mock_cmd:
             mock_cmd.return_value = "cli"
             with patch("runners._multicase.compute_case_hash", return_value=None):
                 _run(get_job("job-1", repo, MagicMock()))
-        # Verify chrome_trace stays True (not synthesized to a path)
+        # Verify chrome-trace-file stays True (not synthesized to a path)
         call_args = mock_cmd.call_args
         params_passed = call_args[0][1]
-        assert params_passed["chrome_trace"] is True
+        assert params_passed["chrome-trace-file"] is True
 
 
 class TestExpandJobCases:
@@ -365,18 +420,18 @@ class TestExpandJobCases:
     """
 
     def test_video_generate_multi_device(self):
-        cases = _expand_job_cases("video_generate", {"device": ["A", "B"], "ulysses_size": "4"})
+        cases = _expand_job_cases("video_generate", {"device": ["A", "B"], "ulysses-size": "4"})
         assert len(cases) == 2
         assert cases[0]["device"] == "A"
         assert cases[1]["device"] == "B"
         # ulysses_size is parsed by _parse_int_list -> int.
-        assert cases[0]["ulysses_size"] == 4
-        assert cases[1]["ulysses_size"] == 4
+        assert cases[0]["ulysses-size"] == 4
+        assert cases[1]["ulysses-size"] == 4
 
     def test_text_generate_cartesian_product(self):
         cases = _expand_job_cases(
             "text_generate",
-            {"device": ["A", "B"], "num_queries": "2 3", "quantize_linear_action": "W8A8_DYNAMIC"},
+            {"device": ["A", "B"], "num-queries": "2 3", "quantize-linear-action": "W8A8_DYNAMIC"},
         )
         # 2 devices x 2 num_queries x 1 quantize = 4 cases
         assert len(cases) == 4
@@ -386,7 +441,7 @@ class TestExpandJobCases:
     def test_throughput_optimizer_multi_device(self):
         cases = _expand_job_cases(
             "throughput_optimizer",
-            {"device": ["A", "B"], "tpot_limits": "100", "tp_sizes": "1 2"},
+            {"device": ["A", "B"], "tpot-limit": "100", "tp-sizes": "1 2"},
         )
         # throughput_optimizer's _THROUGHPUT_MULTI_FIELDS includes device + tpot/tpot_limits
         # but not tp_sizes (that's parsed by argparser, not by expand_cases). So 2 devices.

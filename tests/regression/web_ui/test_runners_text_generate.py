@@ -72,12 +72,12 @@ class TestExpandCases:
     """Tests for _expand_cases."""
 
     def test_single_case_no_multi_fields(self):
-        cases = _expand_cases({"model_id": "m"})
+        cases = _expand_cases({"model-id": "m"})
         assert len(cases) == 1
-        assert cases[0]["model_id"] == "m"
+        assert cases[0]["model-id"] == "m"
 
     def test_cartesian_product_two_fields(self):
-        cases = _expand_cases({"device": ["A", "B"], "tp_size": [1, 2]})
+        cases = _expand_cases({"device": ["A", "B"], "tp-size": [1, 2]})
         # 2 devices × 2 tp_sizes = 4 cases.
         assert len(cases) == 4
 
@@ -93,9 +93,9 @@ class TestExpandCases:
         # 11 devices × 11 num_queries × 1 tp_size = 121 > max_search_combinations (100)
         params = {
             "device": [f"d{i}" for i in range(11)],
-            "num_queries": list(range(1, 12)),  # 11 values
-            "tp_size": 1,
-            "max_search_combinations": 100,
+            "num-queries": list(range(1, 12)),  # 11 values
+            "tp-size": 1,
+            "max-search-combinations": 100,
         }
         with pytest.raises(ValueError, match="too many cases.*> 100"):
             _expand_cases(params)
@@ -105,8 +105,8 @@ class TestExpandCases:
         # 11 devices × 11 num_queries × 1 tp_size = 121 cases — should succeed
         params = {
             "device": [f"d{i}" for i in range(11)],
-            "num_queries": list(range(1, 12)),
-            "tp_size": 1,
+            "num-queries": list(range(1, 12)),
+            "tp-size": 1,
         }
         cases = _expand_cases(params)
         assert len(cases) == 121
@@ -119,9 +119,9 @@ class TestExpandCases:
         """
         params = {
             "device": ["d1", "d2"],
-            "num_queries": [1, 2],
-            "tp_size": 1,
-            "max_search_combinations": 100,  # 2 × 2 × 1 = 4 cases < 100
+            "num-queries": [1, 2],
+            "tp-size": 1,
+            "max-search-combinations": 100,  # 2 × 2 × 1 = 4 cases < 100
         }
         cases = _expand_cases(params)
         assert len(cases) == 4
@@ -220,15 +220,15 @@ class TestTextGenerateRunnerAdapter:
 # quantize_* are set explicitly because execute() -> _expand_cases injects an
 # explicit None for unset multi-case fields, overriding UserInputConfig defaults.
 _TINY_TEXT_PARAMS = {
-    "model_id": "Qwen/Qwen3-32B",
+    "model-id": "Qwen/Qwen3-32B",
     "device": "TEST_DEVICE",
-    "num_devices": 1,
-    "query_length": 8,
-    "num_queries": 1,
-    "do_compile": False,
-    "quantize_linear_action": "DISABLED",
-    "quantize_attention_action": "DISABLED",
-    "tp_size": 1,
+    "num-devices": 1,
+    "query-length": 8,
+    "num-queries": 1,
+    "compile": False,
+    "quantize-linear-action": "DISABLED",
+    "quantize-attention-action": "DISABLED",
+    "tp-size": 1,
 }
 
 
@@ -238,11 +238,11 @@ class TestBuildUserInput:
     def test_constructs_user_input_config(self):
         ui = _build_user_input(
             {
-                "model_id": "Qwen/Qwen3-32B",
+                "model-id": "Qwen/Qwen3-32B",
                 "device": "TEST_DEVICE",
-                "num_devices": 2,
-                "query_length": 16,
-                "do_compile": False,
+                "num-devices": 2,
+                "query-length": 16,
+                "compile": False,
             }
         )
         assert ui.world_size == 2  # num_devices -> world_size
@@ -250,13 +250,13 @@ class TestBuildUserInput:
         assert ui.device == "TEST_DEVICE"
 
     def test_do_compile_name_map(self):
-        ui = _build_user_input({"model_id": "m", "device": "TEST_DEVICE", "compile": True})
+        ui = _build_user_input({"model-id": "m", "device": "TEST_DEVICE", "compile": True})
         assert ui.do_compile is True  # compile -> do_compile
 
     def test_unknown_keys_silently_dropped(self):
         ui = _build_user_input(
             {
-                "model_id": "m",
+                "model-id": "m",
                 "device": "TEST_DEVICE",
                 "export_empirical_metrics": "out.json",  # not a UIC field
             }
@@ -271,10 +271,10 @@ class TestBuildUserInput:
 
         ui = _build_user_input(
             {
-                "model_id": "m",
+                "model-id": "m",
                 "device": "TEST_DEVICE",
-                "quantize_linear_action": "FP8",
-                "quantize_attention_action": "FP8",
+                "quantize-linear-action": "FP8",
+                "quantize-attention-action": "FP8",
             }
         )
         assert isinstance(ui.quantize_linear_action, QuantizeLinearAction)
@@ -364,7 +364,7 @@ class TestRunOneCaseReal:
             mock_mr_cls.return_value = runner
 
             params = dict(_TINY_TEXT_PARAMS)
-            params["dump_op_bound_results"] = True
+            params["dump-op-bound-results"] = True
             rec = _run_one_case(params)
 
         assert len(rec["tables"]["op_breakdown"]) == 1
@@ -395,7 +395,7 @@ class TestExecuteReal:
         from runners.text_generate import _expand_cases, resolve_model_id_path
 
         params = dict(_TINY_TEXT_PARAMS)
-        resolved = {**params, "model_id": resolve_model_id_path(params["model_id"])}
+        resolved = {**params, "model-id": resolve_model_id_path(params["model-id"])}
         ch = compute_case_hash("text_generate", "1.0.0", _expand_cases(resolved)[0])
         records, skipped = execute(params, cached_hashes={ch}, form_schema_version="1.0.0")
         assert records == []
@@ -403,7 +403,7 @@ class TestExecuteReal:
 
     def test_multi_case_runs_each_case(self):
         """Two tp_sizes fan out to 2 distinct cases; each runs (real inference)."""
-        params = {**_TINY_TEXT_PARAMS, "tp_size": [1, 2]}
+        params = {**_TINY_TEXT_PARAMS, "tp-size": [1, 2]}
         records, skipped = execute(params, form_schema_version="1.0.0")
         assert len(records) == 2
         assert skipped == []
@@ -415,8 +415,8 @@ class TestExecuteReal:
         from runners._multicase import compute_case_hash
         from runners.text_generate import _expand_cases, resolve_model_id_path
 
-        params = {**_TINY_TEXT_PARAMS, "tp_size": [1, 2]}
-        resolved = {**params, "model_id": resolve_model_id_path(params["model_id"])}
+        params = {**_TINY_TEXT_PARAMS, "tp-size": [1, 2]}
+        resolved = {**params, "model-id": resolve_model_id_path(params["model-id"])}
         cases = _expand_cases(resolved)
         # Cache the first case's hash.
         first_hash = compute_case_hash("text_generate", "1.0.0", cases[0])
@@ -434,8 +434,9 @@ class TestExecuteReal:
                 RuntimeError("case 0 boom"),
                 {"config": {}, "summary": {}, "tables": {}},
             ]
+            # Use num-devices=2 so both tp-size values (1 and 2) pass validation
             records, _skipped = execute(
-                {**_TINY_TEXT_PARAMS, "tp_size": [1, 2]},
+                {**_TINY_TEXT_PARAMS, "num-devices": 2, "tp-size": [1, 2]},
                 form_schema_version="1.0.0",
             )
         assert len(records) == 2
@@ -452,7 +453,7 @@ class TestExecuteReal:
         original_run = _run_one_case
 
         def spy(cp):
-            captured["chrome_trace"] = cp.get("chrome_trace")
+            captured["chrome-trace-file"] = cp.get("chrome-trace-file")
             return original_run(cp)
 
         with (
@@ -460,8 +461,8 @@ class TestExecuteReal:
             patch("services.trace_store.legacy_hash_path", return_value=_Path("/tmp/t.json")),
         ):
             execute(
-                {**_TINY_TEXT_PARAMS, "chrome_trace": True},
+                {**_TINY_TEXT_PARAMS, "chrome-trace-file": True},
                 form_schema_version="1.0.0",
                 job_id="job-1",
             )
-        assert str(captured["chrome_trace"]).endswith("t.json")
+        assert str(captured["chrome-trace-file"]).endswith("t.json")

@@ -65,7 +65,7 @@ const opComparisonRows = computed(() => {
       return items.map((it) => ({
         name: it.name,
         caseIdx: ci,
-        val: compareMetric.value === 'total' ? it.perf_total ?? null : it.perf_avg ?? null,
+        val: compareMetric.value === 'total' ? it.total_s ?? it.perf_total ?? null : it.avg_s ?? it.perf_avg ?? null,
       }))
     })
     .flat()

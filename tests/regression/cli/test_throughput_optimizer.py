@@ -74,6 +74,10 @@ class TestThroughputOptimizer(TestCase):
         self.assertEqual(args.num_mtp_token_sizes, [])
 
     def test_num_mtp_token_candidates_validate_acceptance_rate_length(self):
+        # RFC §3.7 (gap #2.1): spec.validators now fires in parse_module_args()
+        # before main() runs. The error goes to stderr via parser.error()
+        # (argparse-style), not via logger.error(). The inline check in main()
+        # is preserved as fallback but never reached.
         args = [
             "--input-length=1",
             "--output-length=1",
@@ -85,11 +89,16 @@ class TestThroughputOptimizer(TestCase):
             "6",
         ]
 
-        with self.assertLogs("cli.inference.throughput_optimizer", "ERROR") as logs:
-            result = self._run_throughput_optimizer(args, check=False)
+        result = self._run_throughput_optimizer(args, check=False)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("num_mtp_tokens candidates [6] exceed", "\n".join(logs.output))
+        # Registry validator mtp_tokens_vs_acceptance_rate fires via
+        # parser.error() with a message of the form:
+        #   "num_mtp_tokens(6) must be ≤ len(mtp_acceptance_rate)+1 (5)"
+        # Assert on the concrete candidate value (6), the limit (5 = len(default rates)+1),
+        # and the relational operator — not just the field name.
+        self.assertIn("num_mtp_tokens(6)", result.stderr)
+        self.assertIn("len(mtp_acceptance_rate)+1 (5)", result.stderr)
 
     def test_pd_instance_device_arguments_require_pd_ratio_mode(self):
         args = [
@@ -344,7 +353,8 @@ class TestThroughputOptimizer(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("valid range [0, 1)", result.stderr)
+        # Registry-generated range message (argparse_adapter _float_type).
+        self.assertIn("out of range; must be < 1", result.stderr)
 
     def test_prefix_cache_hit_rate_aggregation_valid(self):
         args = [
@@ -480,7 +490,12 @@ class TestThroughputOptimizer(TestCase):
         with patch.object(sys, "argv", argv):
             args = throughput_optimizer_module.arg_parse()
 
-        self.assertEqual(args.input_length, LENGTH_DISTRIBUTION_PATH)
+        # Compare with forward slashes: resolve() normalizes to OS-native
+        # separators (backslash on Windows).
+        self.assertEqual(
+            str(args.input_length).replace("\\", "/"),
+            LENGTH_DISTRIBUTION_PATH.replace("\\", "/"),
+        )
         self.assertFalse(hasattr(args, "length_distribution"))
 
     def test_arg_parse_rejects_invalid_input_length(self):

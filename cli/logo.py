@@ -30,7 +30,12 @@ def _ensure_windows_console() -> None:
 
 def _build_logo_block(block_width: int = _LOGO_WIDTH) -> LogoBlock:
     border = "=" * block_width
-    return border, _BRAND_INNER.center(block_width), _SLOGAN_TEXT.center(block_width), border
+    return (
+        border,
+        _BRAND_INNER.center(block_width),
+        _SLOGAN_TEXT.center(block_width),
+        border,
+    )
 
 
 def _center_block_in_terminal(lines: LogoBlock, terminal_cols: int | None) -> LogoBlock:

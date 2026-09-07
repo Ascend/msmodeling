@@ -7,7 +7,7 @@ from multihost_inference_optimization.ssh_remote_tools import SshRemote
 from multihost_inference_optimization.cluster_config import NodeConfig, Config
 
 
-class VLLMWorkerManager():
+class VLLMWorkerManager:
     def __init__(self, config_path: Optional[str] = None):
         # Load the cluster configuration
         self.config = Config.from_file(config_path)
@@ -35,7 +35,7 @@ class VLLMWorkerManager():
           uploaded (the worker index idx starts at 0). The master script start_node.sh runs
           locally and is not uploaded here.
         """
-        remote_dir = "/tmp/vllm"
+        remote_dir = "/tmp/vllm"  # nosec B108
         template_dir = Path(self.get_scripts_dir())
         build_dir = self.get_build_scripts_dir()
         failures: List[str] = []
@@ -51,11 +51,15 @@ class VLLMWorkerManager():
                 # container or bare metal, that destination is the target itself; in docker
                 # mode the destination is the host, so the directory must also be created
                 # inside the container (the destination of docker cp).
-                executor.run(f"rm -rf {remote_dir} && mkdir -p {remote_dir}",
-                             container_exec=False, hide=True, warn=True, timeout=10)
+                executor.run(
+                    f"rm -rf {remote_dir} && mkdir -p {remote_dir}",
+                    container_exec=False,
+                    hide=True,
+                    warn=True,
+                    timeout=10,
+                )
                 if getattr(worker, "docker_container_id", None):
-                    executor.run(f"rm -rf {remote_dir} && mkdir -p {remote_dir}",
-                                 hide=True, warn=True, timeout=10)
+                    executor.run(f"rm -rf {remote_dir} && mkdir -p {remote_dir}", hide=True, warn=True, timeout=10)
 
                 # Upload every file under script_template
                 for f in template_dir.iterdir():
@@ -71,11 +75,9 @@ class VLLMWorkerManager():
                     logger.warning(f"[{key}] build script not found: {build_script}")
 
                 # Set the executable bit once for everything
-                executor.run(f"chmod +x {remote_dir}/*.sh",
-                             container_exec=False, hide=True, warn=True, timeout=10)
+                executor.run(f"chmod +x {remote_dir}/*.sh", container_exec=False, hide=True, warn=True, timeout=10)
                 if getattr(worker, "docker_container_id", None):
-                    executor.run(f"chmod +x {remote_dir}/*.sh",
-                                 hide=True, warn=True, timeout=10)
+                    executor.run(f"chmod +x {remote_dir}/*.sh", hide=True, warn=True, timeout=10)
 
                 logger.info(f"[{key}] scp done")
             except Exception as e:
@@ -85,8 +87,8 @@ class VLLMWorkerManager():
         if failures:
             raise RuntimeError(
                 "failed to upload startup scripts to "
-                f"{len(failures)}/{len(self._all_workers)} worker(s): "
-                + "; ".join(failures))
+                f"{len(failures)}/{len(self._all_workers)} worker(s): " + "; ".join(failures)
+            )
 
     def cleanup_all_workers(self):
         seen: set = set()
@@ -97,9 +99,7 @@ class VLLMWorkerManager():
             seen.add(key)
             try:
                 executor = self._get_executor(worker)
-                stop = executor.run(
-                    "bash /tmp/vllm/stop_vllm_process.sh vllm",
-                    hide=True, warn=True, timeout=10)
+                stop = executor.run("bash /tmp/vllm/stop_vllm_process.sh vllm", hide=True, warn=True, timeout=10)
                 logger.info(f"[{key}] cleanup:\n{stop.stdout.strip()}")
             except Exception as e:
                 logger.warning(f"[{key}] cleanup failed: {e}")
@@ -132,9 +132,7 @@ class VLLMWorkerManager():
         """Build the list of worker node info; each label matches the name of the uploaded build script."""
         worker_infos: list = []
         for idx, info in enumerate(self._all_workers):
-            worker_infos.append({
-                "label": f"start_work_{idx}", "pid": None, "log_file": None,
-                "_node_config": info})
+            worker_infos.append({"label": f"start_work_{idx}", "pid": None, "log_file": None, "_node_config": info})
         return worker_infos
 
     def start_workers(self, run_params=None, **kwargs):
@@ -185,6 +183,7 @@ class VLLMWorkerManager():
 
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             logger.error(f"Failed to start vLLM PD Sep: {e}")
             raise
@@ -192,15 +191,13 @@ class VLLMWorkerManager():
     def _exec_remote(self, node_config, node_label: str):
         """Run the main script already uploaded to the remote node and return (pid, log_file)."""
         executor = self._get_executor(node_config)
-        remote_script = f"/tmp/vllm/{node_label}.sh"
+        remote_script = f"/tmp/vllm/{node_label}.sh"  # nosec B108
 
         inner_cmd = f"bash -l {shlex.quote(remote_script)}"
 
-        return executor.background(inner_cmd, node_label,
-                                   self._remote_pids, self._remote_pid_workers, node_config)
+        return executor.background(inner_cmd, node_label, self._remote_pids, self._remote_pid_workers, node_config)
 
-    def _probe_worker_alive(self, node_config, node_label: str, pid, log_file: str,
-                            wait_seconds: float = 3.0) -> bool:
+    def _probe_worker_alive(self, node_config, node_label: str, pid, log_file: str, wait_seconds: float = 3.0) -> bool:
         """Fail-fast check after a worker starts: wait briefly, then probe whether the process is still alive.
 
         Returns True when alive; when it has exited, print the tail of the log and return
@@ -208,15 +205,12 @@ class VLLMWorkerManager():
         letting a worker that crashed at startup stay hidden until wait_simulate times out.
         """
         import time
+
         time.sleep(wait_seconds)
         executor = self._get_executor(node_config)
         if executor.is_process_alive(pid):
             logger.info(f"[{node_label}] still alive {wait_seconds}s after start (pid={pid})")
             return True
         tail = executor.tail_file(log_file) if log_file else ""
-        logger.error(
-            f"[{node_label}] exited within {wait_seconds}s after start (pid={pid}). "
-            f"log tail:\n{tail}")
+        logger.error(f"[{node_label}] exited within {wait_seconds}s after start (pid={pid}). log tail:\n{tail}")
         return False
-
-

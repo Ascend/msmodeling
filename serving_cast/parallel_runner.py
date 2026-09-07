@@ -296,8 +296,9 @@ class ParallelRunner:
                 raise
             else:
                 # PP=1 legacy path preserves the original tolerant behavior:
-                # log the error and return None so the caller skips this candidate.
-                logger.error("Failed to build model %r: %s", self.args.model_id, exc)
+                # log the error with full traceback and return None so the caller skips this candidate.
+                logger.exception("Failed to build model %r", self.args.model_id)
+
         return model_runner
 
     def _build_model_runner(self, user_input: UserInputConfig) -> ModelRunner | None:

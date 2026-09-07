@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * Aggregated mode view: sweep table (Top | Throughput | TTFT | TPOT |
- * concurrency | num_devices | parallel | batch_size) + cross-hardware chart.
+ * concurrency | num-devices | parallel | batch-size) + cross-hardware chart.
  */
 import { computed } from 'vue'
 import { useLocale } from '@/composables/useLocale'
@@ -14,8 +14,8 @@ const props = defineProps<Props>()
 const { t } = useLocale()
 const theme = useChartTheme()
 
-const sweepRows = computed(() => props.result.sweep_rows || [])
-const crossHardware = computed(() => props.result.cross_hardware || [])
+const sweepRows = computed(() => props.result["sweep_rows"] || [])
+const crossHardware = computed(() => props.result["cross_hardware"] || [])
 
 // CSV export columns (labels match the headers, already i18n'd).
 const csvColumns = computed<CsvColumn[]>(() => [
@@ -25,9 +25,9 @@ const csvColumns = computed<CsvColumn[]>(() => [
   { key: 'ttft_ms', label: 'TTFT (ms)' },
   { key: 'tpot_ms', label: 'TPOT (ms)' },
   { key: 'concurrency', label: 'concurrency' },
-  { key: 'num_devices', label: 'num_devices' },
+  { key: 'num_devices', label: 'num-devices' },
   { key: 'parallel', label: 'parallel' },
-  { key: 'batch_size', label: 'batch_size' },
+  { key: 'batch_size', label: 'batch-size' },
   { key: 'model_weight_size_gb', label: 'weight_GB' },
   { key: 'kv_cache_size_gb', label: 'kv_cache_GB' },
   { key: 'model_activation_size_gb', label: 'activation_GB' },
@@ -60,7 +60,7 @@ const crossChartOption = computed(() => {
     },
     series: [{
       type: 'bar',
-      data: crossHardware.value.map((r: any) => r.throughput_token_s),
+      data: crossHardware.value.map((r: any) => r["throughput_token_s"]),
       itemStyle: { color: theme.category.value[1] },
     }],
   }
@@ -89,29 +89,29 @@ const crossChartOption = computed(() => {
     >
       <el-table-column :label="t({ zh: 'Top', en: 'Top' })" prop="rank" width="60" sortable />
       <el-table-column :label="t({ zh: '吞吐 (token/s)', en: 'Throughput (token/s)' })" prop="throughput_token_s" width="170" sortable>
-        <template #default="{ row }">{{ row.throughput_token_s != null ? Number(row.throughput_token_s).toFixed(2) : '-' }}</template>
+        <template #default="{ row }">{{ row["throughput_token_s"] != null ? Number(row["throughput_token_s"]).toFixed(2) : '-' }}</template>
       </el-table-column>
       <el-table-column label="TTFT (ms)" prop="ttft_ms" width="110" sortable>
-        <template #default="{ row }">{{ row.ttft_ms != null ? Number(row.ttft_ms).toFixed(2) : '-' }}</template>
+        <template #default="{ row }">{{ row["ttft_ms"] != null ? Number(row["ttft_ms"]).toFixed(2) : '-' }}</template>
       </el-table-column>
       <el-table-column label="TPOT (ms)" prop="tpot_ms" width="110" sortable>
-        <template #default="{ row }">{{ row.tpot_ms != null ? Number(row.tpot_ms).toFixed(2) : '-' }}</template>
+        <template #default="{ row }">{{ row["tpot_ms"] != null ? Number(row["tpot_ms"]).toFixed(2) : '-' }}</template>
       </el-table-column>
       <el-table-column label="concurrency" prop="concurrency" width="110" sortable />
       <el-table-column label="num_devices" prop="num_devices" width="100" sortable />
       <el-table-column label="parallel" prop="parallel" min-width="160" show-overflow-tooltip />
       <el-table-column label="batch_size" prop="batch_size" width="100" sortable />
       <el-table-column label="weight_GB" prop="model_weight_size_gb" width="110" sortable>
-        <template #default="{ row }">{{ row.model_weight_size_gb != null ? Number(row.model_weight_size_gb).toFixed(2) : '-' }}</template>
+        <template #default="{ row }">{{ row["model_weight_size_gb"] != null ? Number(row["model_weight_size_gb"]).toFixed(2) : '-' }}</template>
       </el-table-column>
       <el-table-column label="kv_cache_GB" prop="kv_cache_size_gb" width="120" sortable>
-        <template #default="{ row }">{{ row.kv_cache_size_gb != null ? Number(row.kv_cache_size_gb).toFixed(2) : '-' }}</template>
+        <template #default="{ row }">{{ row["kv_cache_size_gb"] != null ? Number(row["kv_cache_size_gb"]).toFixed(2) : '-' }}</template>
       </el-table-column>
       <el-table-column label="activation_GB" prop="model_activation_size_gb" width="140" sortable>
-        <template #default="{ row }">{{ row.model_activation_size_gb != null ? Number(row.model_activation_size_gb).toFixed(2) : '-' }}</template>
+        <template #default="{ row }">{{ row["model_activation_size_gb"] != null ? Number(row["model_activation_size_gb"]).toFixed(2) : '-' }}</template>
       </el-table-column>
       <el-table-column label="avail_GB" prop="device_memory_available_gb" width="110" sortable>
-        <template #default="{ row }">{{ row.device_memory_available_gb != null ? Number(row.device_memory_available_gb).toFixed(2) : '-' }}</template>
+        <template #default="{ row }">{{ row["device_memory_available_gb"] != null ? Number(row["device_memory_available_gb"]).toFixed(2) : '-' }}</template>
       </el-table-column>
     </el-table>
     <el-card v-if="crossChartOption" class="chart-card">

@@ -2,9 +2,9 @@
 /**
  * Text multi-case comparison view (Phase D2).
  *
- * Shown when a text_generate job's result envelope has `multi_case: true`.
+ * Shown when a text_generate job's result envelope has `multi-case: true`.
  * Sections:
- * - case summary table (each case × run_time / tps / peak_mem / error)
+ * - case summary table (each case × run-time / tps / peak-mem / error)
  * - TPS-across-cases bar chart
  * - op comparison table (top ops × cases; toggle analytic total / avg)
  * - op detail table (the selected case's Name / total / avg / # of Calls)
@@ -32,7 +32,7 @@ const selectedCase = computed(() => cases.value[selectedIdx.value] ?? null)
 const selectedEnvelope = computed(() => {
   if (!selectedCase.value) return {}
   const { config, summary, ...env } = selectedCase.value
-  return { mode: 'text_generation', ...env }
+  return { mode: 'text-generation', ...env }
 })
 
 // Add seq to cases for ChromeTraceDownloads
@@ -50,13 +50,13 @@ const summaryRows = computed(() =>
   cases.value.map((c: any, i: number) => ({
     idx: i,
     device: c.config?.device,
-    num_queries: c.config?.num_queries,
-    quant: c.config?.quantize_linear_action,
-    att: c.config?.quantize_attention_action,
-    tp: c.config?.tp_size,
-    run_time: c.run_time_s,
-    tps: Object.values(c.tps_per_model || {})[0] ?? null,
-    peak_mem: c.memory_gb?.peak_usage ?? null,
+    num_queries: c.config?.["num_queries"],
+    quant: c.config?.["quantize_linear_action"],
+    att: c.config?.["quantize_attention_action"],
+    tp: c.config?.["tp_size"],
+    run_time: c["run_time_s"],
+    tps: Object.values(c["tps_per_model"] || {})[0] ?? null,
+    peak_mem: c["memory_gb"]?.["peak_usage"] ?? null,
     error: c.summary?.error || '',
     seq: i,
   })),
@@ -82,14 +82,14 @@ const opComparisonRows = computed(() => {
   const perCase: Map<string, number[]> = new Map()
   const n = cases.value.length
   cases.value.forEach((c: any) => {
-    const items: any[] = c.op_breakdown || []
+    const items: any[] = c["op_breakdown"] || []
     items.forEach((it) => {
       const name = it.name
       // New format uses total_s/avg_s; legacy uses perf_total/perf_avg
       const isNewFormat = 'total_s' in it || 'calls' in it
       const val = compareMetric.value === 'total'
-        ? (isNewFormat ? (Number(it.total_s) || 0) : (Number(it.perf_total) || 0))
-        : (isNewFormat ? (Number(it.avg_s) || 0) : (Number(it.perf_avg) || 0))
+        ? (isNewFormat ? (Number(it["total_s"]) || 0) : (Number(it["perf_total"]) || 0))
+        : (isNewFormat ? (Number(it["avg_s"]) || 0) : (Number(it["perf_avg"]) || 0))
       const arr = perCase.get(name) || new Array(n).fill(null)
       arr[selectedIdx.value === 0 ? cases.value.indexOf(c) : cases.value.indexOf(c)] = val
       perCase.set(name, arr)
@@ -100,7 +100,7 @@ const opComparisonRows = computed(() => {
   const rows = [...perCase.entries()].map(([name]) => {
     // rebuild a clean per-case array (perCase was built naively/sparse):
     const vals = cases.value.map((c: any) => {
-      const it = (c.op_breakdown || []).find((x: any) => x.name === name)
+      const it = (c["op_breakdown"] || []).find((x: any) => x.name === name)
       if (!it) return null
       const isNewFormat = 'total_s' in it || 'calls' in it
       // Number(x) ?? null is a no-op fallback (NaN isn't nullish) and would let
@@ -108,8 +108,8 @@ const opComparisonRows = computed(() => {
       // Coerce then keep only finite numbers; otherwise null so downstream
       // null-filters and sorts only ever see valid numbers.
       const raw = compareMetric.value === 'total'
-        ? (isNewFormat ? it.total_s : it.perf_total)
-        : (isNewFormat ? it.avg_s : it.perf_avg)
+        ? (isNewFormat ? it["total_s"] : it["perf_total"])
+        : (isNewFormat ? it["avg_s"] : it["perf_avg"])
       const v = Number(raw)
       return Number.isFinite(v) ? v : null
     })

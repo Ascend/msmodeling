@@ -109,37 +109,40 @@ class TestLoggingSetup:
         assert level == logging.INFO
 
     def test_respects_log_level_param(self):
-        """main() respects log_level from params."""
-        params = {"log_level": "DEBUG"}
-        level_name = str(params.get("log_level", "info")).upper()
+        """main() respects log-level from params (kebab-case, matches CLI)."""
+        params = {"log-level": "DEBUG"}
+        level_name = str(params.get("log-level", "error")).upper()
 
         import logging
 
-        level = getattr(logging, level_name, logging.INFO)
+        level = getattr(logging, level_name, logging.ERROR)
 
         assert level == logging.DEBUG
 
-    def test_defaults_to_info_level(self):
-        """main() defaults to INFO level when log_level not provided."""
+    def test_defaults_to_error_level(self):
+        """main() defaults to ERROR level when log-level not provided (matches CLI default)."""
         params = {}
-        level_name = str(params.get("log_level", "info")).upper()
+        level_name = str(params.get("log-level", "error")).upper()
 
         import logging
 
-        level = getattr(logging, level_name, logging.INFO)
+        level = getattr(logging, level_name, logging.ERROR)
 
-        assert level == logging.INFO
+        assert level == logging.ERROR
 
     def test_handles_invalid_log_level(self):
-        """main() falls back to INFO for invalid log_level."""
-        params = {"log_level": "INVALID"}
-        level_name = str(params.get("log_level", "info")).upper()
+        """main() falls back to ERROR for invalid log-level (matches CLI default)."""
+        params = {"log-level": "INVALID"}
+        level_name = str(params.get("log-level", "error")).upper()
 
         import logging
 
-        level = getattr(logging, level_name, logging.INFO)
+        # getattr with invalid level name falls back to default (ERROR)
+        level = getattr(logging, level_name, logging.ERROR)
 
-        assert level == logging.INFO
+        # Invalid level name "INVALID" doesn't exist in logging module,
+        # so getattr returns the default (logging.ERROR)
+        assert level == logging.ERROR
 
     def test_logs_to_stdout(self):
         """main() logs to stdout (stream=sys.stdout)."""

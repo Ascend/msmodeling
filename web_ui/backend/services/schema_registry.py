@@ -132,6 +132,9 @@ def copy_bundled_configs(src: Path | None = None, dst: Path | None = None) -> Pa
     """Copy ``web_ui/frontend/src/config/**`` -> ``web_ui/backend/var/config/``.
 
     Idempotent. The frontend build step calls this; the backend reads ``dst``.
+
+    .. deprecated::
+        Use :func:`generate_form_configs` instead.
     """
     src = src or _FRONTEND_CONFIG
     dst = dst or _DEFAULT_VAR_CONFIG
@@ -141,6 +144,43 @@ def copy_bundled_configs(src: Path | None = None, dst: Path | None = None) -> Pa
         shutil.copytree(src, dst)
     else:
         dst.mkdir(parents=True, exist_ok=True)
+    return dst
+
+
+def generate_form_configs(dst: Path | None = None) -> Path:
+    """Generate form JSONs from backend registry (ModuleSpec + UIProps).
+
+    Replaces the old flow: gen-form-schemas.mjs + copy_bundled_configs.
+    Backend registry is now the SSOT for form schemas.
+    """
+    dst = dst or _DEFAULT_VAR_CONFIG
+    forms_dir = dst / "forms"
+    forms_dir.mkdir(parents=True, exist_ok=True)
+
+    from services.ui_props.text_generate import (
+        export_form_json as tg_export,
+    )
+    from services.ui_props.throughput_optimizer import (
+        generate_form_json as to_generate,
+    )
+    from services.ui_props.video_generate import (
+        generate_form_json as vg_generate,
+    )
+
+    modules = [
+        ("text_generate", tg_export),
+        ("throughput_optimizer", to_generate),
+        ("video_generate", vg_generate),
+    ]
+
+    for module_id, generate_fn in modules:
+        form_json = generate_fn()
+        output_path = forms_dir / f"{module_id}.json"
+        with output_path.open("w", encoding="utf-8") as f:
+            json.dump(form_json, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        logger.info("Generated form schema: %s", output_path)
+
     return dst
 
 

@@ -50,11 +50,12 @@ export const api = {
   },
 
   /** Submit a new modeling job. */
-  async submitJob(moduleId: string, formSchemaVersion: string, params: Record<string, any>) {
+  async submitJob(moduleId: string, formSchemaVersion: string, params: Record<string, any>, explicitlyTouched?: string[]) {
     const res = await apiClient.post(endpoints.jobs, {
       module_id: moduleId,
       form_schema_version: formSchemaVersion,
       params,
+      explicitly_touched: explicitlyTouched,
     })
     return res.data
   },

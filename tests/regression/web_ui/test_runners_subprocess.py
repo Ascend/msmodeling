@@ -919,12 +919,12 @@ class TestRunModuleSubprocess:
             patch("runners._multicase.compute_case_hash", return_value="hash123"),
             patch("services.trace_store.legacy_hash_path", return_value=Path("/trace/path.json")),
         ):
-            run_module_subprocess("text_generate", {"chrome_trace": True}, job_id="j1")
+            run_module_subprocess("text_generate", {"chrome-trace-file": True}, job_id="j1")
         # Verify build_cli_command_string was called with the synthesized path
         call_args = mock_cmd.call_args
         params_passed = call_args[0][1]
         # Path conversion may change slashes on Windows, so check the string representation
-        chrome_trace_val = str(params_passed["chrome_trace"])
+        chrome_trace_val = str(params_passed["chrome-trace-file"])
         assert "path.json" in chrome_trace_val or "path" in chrome_trace_val
 
     def test_chrome_trace_not_synthesized_when_case_hash_is_none(self):
@@ -961,11 +961,11 @@ class TestRunModuleSubprocess:
             patch("os.remove"),
             patch("runners._multicase.compute_case_hash", return_value=None),
         ):
-            run_module_subprocess("text_generate", {"chrome_trace": True}, job_id="j1")
+            run_module_subprocess("text_generate", {"chrome-trace-file": True}, job_id="j1")
         # Verify chrome_trace stays True (not synthesized to a path)
         call_args = mock_cmd.call_args
         params_passed = call_args[0][1]
-        assert params_passed["chrome_trace"] is True
+        assert params_passed["chrome-trace-file"] is True
 
     def test_cancelled_returns_empty(self):
         """When _stream_and_watch reports cancel, returns empty + tree-kills."""

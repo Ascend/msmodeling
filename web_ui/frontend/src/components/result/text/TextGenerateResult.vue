@@ -32,7 +32,7 @@ const { baseOption, axisText, splitLine } = useChartTheme()
 
 // Computed chart options
 const tpsChartOption = computed(() => {
-  const tpsData = props.result.tps_per_model || {}
+  const tpsData = props.result["tps_per_model"] || {}
   const models = Object.keys(tpsData)
   const values = Object.values(tpsData)
 
@@ -68,11 +68,11 @@ const tpsChartOption = computed(() => {
 })
 
 const memoryChartOption = computed(() => {
-  const memory = props.result.memory_gb || {}
+  const memory = props.result["memory_gb"] || {}
   const data = [
-    { name: t({ zh: '模型权重', en: 'Model Weight' }), value: memory.model_weight || 0 },
-    { name: t({ zh: 'KV缓存', en: 'KV Cache' }), value: memory.kv_cache || 0 },
-    { name: t({ zh: '模型激活', en: 'Model Activation' }), value: memory.model_activation || 0 },
+    { name: t({ zh: '模型权重', en: 'Model Weight' }), value: memory["model_weight"] || 0 },
+    { name: t({ zh: 'KV缓存', en: 'KV Cache' }), value: memory["kv_cache"] || 0 },
+    { name: t({ zh: '模型激活', en: 'Model Activation' }), value: memory["model_activation"] || 0 },
     { name: t({ zh: '保留内存', en: 'Reserved' }), value: memory.reserved || 0 },
     { name: t({ zh: '可用内存', en: 'Available' }), value: memory.available || 0 }
   ].filter(d => d.value > 0)
@@ -119,7 +119,7 @@ const _OPBOUND_LABELS: Record<string, { zh: string; en: string }> = {
 
 // OpBound breakdown as a single compact sentence: "Memory 45% · Communication 30% · Compute(MMA) 20% · Compute(GP) 5%"
 const opBoundSummary = computed(() => {
-  const breakdowns = props.result.breakdowns_percent || {}
+  const breakdowns = props.result["breakdowns_percent"] || {}
   const parts: { label: string; pct: number }[] = []
   for (const cats of Object.values(breakdowns)) {
     if (!cats || typeof cats !== 'object') continue
@@ -135,39 +135,39 @@ const opBoundSummary = computed(() => {
 // Whether any result data is present — mirrors the el-empty guard so a
 // no-data result shows a clean empty state instead of all-dash metric cards.
 const hasResult = computed(() =>
-  !!props.result.tps_per_model
-  || !!props.result.memory_gb
-  || !!props.result.breakdowns_percent
-  || (props.result.op_breakdown || []).length > 0
+  !!props.result["tps_per_model"]
+  || !!props.result["memory_gb"]
+  || !!props.result["breakdowns_percent"]
+  || (props.result["op_breakdown"] || []).length > 0
 )
 
 // Summary metrics
 const summaryMetrics = computed(() => [
   {
     label: t({ zh: '批次大小', en: 'Batch Size' }),
-    value: props.result.batch_size ?? '-'
+    value: props.result["batch_size"] ?? '-'
   },
   {
     label: t({ zh: '执行时间', en: 'Execution Time' }),
-    value: props.result.execution_time_s?.analytic ? `${props.result.execution_time_s.analytic.toFixed(3)} s` : '-'
+    value: props.result["execution_time_s"]?.analytic ? `${props.result["execution_time_s"].analytic.toFixed(3)} s` : '-'
   },
   {
     label: t({ zh: '峰值内存', en: 'Peak Memory' }),
-    value: props.result.memory_gb?.peak_usage ? `${props.result.memory_gb.peak_usage.toFixed(2)} GB` : '-'
+    value: props.result["memory_gb"]?.["peak_usage"] ? `${props.result["memory_gb"]["peak_usage"].toFixed(2)} GB` : '-'
   },
   {
     label: t({ zh: '设备总内存', en: 'Total Device Memory' }),
-    value: props.result.memory_gb?.total_device ? `${props.result.memory_gb.total_device.toFixed(2)} GB` : '-'
+    value: props.result["memory_gb"]?.["total_device"] ? `${props.result["memory_gb"]["total_device"].toFixed(2)} GB` : '-'
   }
 ])
 
 // Chrome trace: wrap single case in array format for ChromeTraceDownloads
 const traceCases = computed(() => {
-  if (props.hideTraceDownloads || !props.result.chrome_trace?.available) return []
+  if (props.hideTraceDownloads || !props.result["chrome_trace"]?.available) return []
   return [{
     seq: 0,
-    config: props.result.input_config || {},
-    chrome_trace: props.result.chrome_trace
+    config: props.result["input_config"] || {},
+    "chrome_trace": props.result["chrome_trace"]
   }]
 })
 </script>
@@ -192,20 +192,20 @@ const traceCases = computed(() => {
     </el-row>
 
     <!-- Simulator run time (wall-clock, incl. compile; distinct from the model execution time above) -->
-    <div v-if="result.run_time_s != null" class="runtime-note">
+    <div v-if="result['run_time_s'] != null" class="runtime-note">
       <span class="rn-label">{{ t({ zh: '仿真程序耗时', en: 'Simulator run time' }) }}</span>
-      <span class="rn-value">{{ result.run_time_s.toFixed(3) }} s</span>
+      <span class="rn-value">{{ result["run_time_s"].toFixed(3) }} s</span>
       <span class="rn-hint">{{ t({ zh: '（含编译，非模型执行时间）', en: '(incl. compile; not model execution time)' }) }}</span>
     </div>
 
     <!-- Charts -->
     <el-row :gutter="16" class="charts-section">
-      <el-col :xs="24" :lg="12" v-if="result.tps_per_model">
+      <el-col :xs="24" :lg="12" v-if="result['tps_per_model']">
         <el-card>
           <ChartWrapper :option="tpsChartOption" height="350px" />
         </el-card>
       </el-col>
-      <el-col :xs="24" :lg="12" v-if="result.memory_gb">
+      <el-col :xs="24" :lg="12" v-if="result['memory_gb']">
         <el-card>
           <ChartWrapper :option="memoryChartOption" height="350px" />
         </el-card>
@@ -230,9 +230,9 @@ const traceCases = computed(() => {
 
     <!-- Operator timing table (shared component) -->
     <OperatorTimingTable
-      :op-breakdown="props.result.op_breakdown || []"
-      :dump-input-shapes="props.result.dump_input_shapes"
-      :dump-op-bound-results="props.result.dump_op_bound_results"
+      :op-breakdown="props.result['op_breakdown'] || []"
+      :dump-input-shapes="props.result['dump_input_shapes']"
+      :dump-op-bound-results="props.result['dump_op_bound_results']"
     />
 
     <!-- Chrome Trace Downloads -->

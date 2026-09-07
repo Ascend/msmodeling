@@ -197,9 +197,15 @@ class VersionAction(argparse.Action):
         option_strings: Sequence[str],
         dest: str = argparse.SUPPRESS,
         default: str = argparse.SUPPRESS,
-        help: str = "Show version information.",  # noqa: A002
+        help: str = "Show version information.",
     ) -> None:
-        super().__init__(option_strings=option_strings, dest=dest, default=default, nargs=0, help=help)
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            default=default,
+            nargs=0,
+            help=help,
+        )
 
     def __call__(
         self,
@@ -294,6 +300,8 @@ def make_enum_type(enum_cls: type[Enum], option_name: str):
     kebab_map = {to_kebab(member.value): member for member in members}
 
     def parser(value: str):
+        if value is argparse.SUPPRESS:  # nargs="?" default passthrough
+            return value
         if isinstance(value, enum_cls):
             return value
         kebab = to_kebab(value)
@@ -325,6 +333,8 @@ def make_token_type(
     display_values = list(canonical_values)
 
     def parser(value: str) -> str:
+        if value is argparse.SUPPRESS:  # nargs="?" default passthrough
+            return value
         kebab = to_kebab(value)
         if kebab not in kebab_values:
             allowed = ", ".join(display_values)
@@ -348,7 +358,12 @@ def _is_required(action: argparse.Action) -> bool:
         return bool(action.required)
     if action.option_strings:
         return bool(action.required)
-    return action.nargs not in (argparse.OPTIONAL, argparse.ZERO_OR_MORE, argparse.REMAINDER, "*")
+    return action.nargs not in (
+        argparse.OPTIONAL,
+        argparse.ZERO_OR_MORE,
+        argparse.REMAINDER,
+        "*",
+    )
 
 
 def _format_option_name(action: argparse.Action) -> str:

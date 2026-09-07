@@ -20,7 +20,6 @@ PUBLIC structured accessor as a follow-up).
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +28,7 @@ from runners._multicase import (
     aggregate_runtime_events,
     as_list as _as_list,
     parse_int_list as _parse_int_list,
+    resolve_model_id_path,
     run_cases,
 )
 
@@ -39,41 +39,63 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-# Multi-case expansion fields (Phase D2): device + quantize are multi-select
-# arrays, ulysses_size is a free-number comma-list.
-_VIDEO_MULTI_FIELDS = {
-    "device": _as_list,
-    "quantize_linear_action": _as_list,
-    "ulysses_size": _parse_int_list,
-}
+def _get_multi_case_fields() -> tuple[tuple[str, Callable], ...]:
+    """Collect multi-case fields from UIFieldProps.multi_values=True.
+
+    Returns tuple of (field_id, parse_fn) pairs. Parse function is inferred
+    from Param.data_type: string → _as_list, integer → _parse_int_list,
+    number → parse_float_list.
+    """
+    from cli.registry.modules import get_spec
+    from web_ui.backend.services.ui_props.video_generate import UI
+
+    spec = get_spec("video_generate")
+    fields = []
+    for p in spec.fields:
+        ui = UI.get(p.name)
+        if ui and ui.multi_values:
+            # Infer parse function from data_type
+            if p.data_type in ("integer",):
+                fields.append((p.name, _parse_int_list))
+            elif p.data_type in ("number",):
+                # Import parse_float_list if needed
+                from runners._multicase import parse_float_list
+
+                fields.append((p.name, parse_float_list))
+            else:  # string, string[], etc.
+                fields.append((p.name, _as_list))
+    return tuple(fields)
+
+
+_VIDEO_MULTI_FIELDS_WITH_PARSERS = _get_multi_case_fields()
+_VIDEO_MULTI_FIELDS = {fid: parser for fid, parser in _VIDEO_MULTI_FIELDS_WITH_PARSERS}
 
 
 def _run_one_video_case(params: dict[str, Any]) -> dict[str, Any]:
     """Run a single (already concrete) video-gen case; return its record dict."""
     from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
     from runners._video_generate_runner import VideoGenerateRunner
+    from services.enum_utils import coerce_enum
 
-    quant_action = params.get("quantize_linear_action", "W8A8_DYNAMIC")
+    quant_action = params.get("quantize-linear-action", "W8A8_DYNAMIC")
+    # Use coerce_enum for consistent kebab/UPPER_SNAKE handling (RFC §3.8.1)
     try:
-        quant_enum = QuantizeLinearAction(quant_action)
-    except (KeyError, ValueError):
+        quant_enum = coerce_enum(QuantizeLinearAction, quant_action)
+    except ValueError:
         quant_enum = QuantizeLinearAction.W8A8_DYNAMIC
 
-    # Resolve a relative model_id against the repo root (cwd is web/backend).
-    model_id = params.get("model_id")
-    if model_id and not os.path.isabs(model_id) and not os.path.isdir(model_id):
-        candidate = _REPO_ROOT / model_id
-        if candidate.is_dir():
-            model_id = str(candidate)
+    # Resolve a relative model_id: prefer tests/assets/model_config/<id>,
+    # then repo root, then fall back to remote id.
+    model_id = resolve_model_id_path(params.get("model-id"))
 
     runner = VideoGenerateRunner(
         device=params.get("device"),
         model_id=model_id,
         dtype=params.get("dtype", "float16"),
         quantize_linear_action=quant_enum,
-        mxfp4_group_size=int(params.get("mxfp4_group_size", 32) or 32),
-        world_size=int(params.get("world_size", 1) or 1),
-        ulysses_size=int(params.get("ulysses_size", 1) or 1),
+        mxfp4_group_size=int(params.get("mxfp4-group-size", 32) or 32),
+        world_size=int(params.get("num-devices", 1) or 1),
+        ulysses_size=int(params.get("ulysses-size", 1) or 1),
     )
 
     # VideoGenerateRunner.run_inference wraps cli/inference/video_generate.py
@@ -85,25 +107,25 @@ def _run_one_video_case(params: dict[str, Any]) -> dict[str, Any]:
     runtime = runner.run_inference(
         # Number fields arrive null/"" when cleared in the form; guard every int
         # (mirrors the height/width/... fields below) so int(None)/int("") can't crash.
-        batch_size=int(params.get("batch_size", 1) or 1),
-        seq_len=int(params.get("seq_len", 128) or 128),
+        batch_size=int(params.get("batch-size", 1) or 1),
+        seq_len=int(params.get("seq-len", 128) or 128),
         height=int(params.get("height", 832) or 832),
         width=int(params.get("width", 400) or 400),
-        frame_num=int(params.get("frame_num", 81) or 81),
-        sample_step=int(params.get("sample_step", 50) or 50),
-        use_cfg=bool(params.get("use_cfg", False)),
-        cfg_parallel=bool(params.get("cfg_parallel", False)),
-        dit_cache=bool(params.get("dit_cache", False)),
+        frame_num=int(params.get("frame-num", 81) or 81),
+        sample_step=int(params.get("sample-step", 50) or 50),
+        use_cfg=bool(params.get("use-cfg", False)),
+        cfg_parallel=bool(params.get("cfg-parallel", False)),
+        dit_cache=bool(params.get("dit-cache", False)),
         # Optional str range fields: the form sends "" when cleared, but
         # run_inference checks `cache_*_range is None` then splits on "," — a
         # stray "" bypasses the None check and crashes on int(""). Coerce "" -> None.
-        cache_step_range=(params.get("cache_step_range") or None),
-        cache_step_interval=int(params.get("cache_step_interval", 1) or 1),
-        cache_block_range=(params.get("cache_block_range") or None),
+        cache_step_range=(params.get("cache-step-range") or None),
+        cache_step_interval=int(params.get("cache-step-interval", 1) or 1),
+        cache_block_range=(params.get("cache-block-range") or None),
     )
     print(f"[video_generate] run_inference completed in {_time.time() - _t0:.1f}s", flush=True)
 
-    chrome_trace = params.get("chrome_trace")
+    chrome_trace = params.get("chrome-trace-file")
     if chrome_trace:
         try:
             runtime.export_chrome_trace(str(chrome_trace))
@@ -126,10 +148,10 @@ def _run_one_video_case(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "config": {
             "device": params.get("device"),
-            "model_id": params.get("model_id"),
-            "world_size": params.get("world_size", 1),
-            "quantize_linear_action": params.get("quantize_linear_action"),
-            "ulysses_size": params.get("ulysses_size", 1),
+            "model_id": params.get("model-id"),
+            "world_size": params.get("num-devices", 1),
+            "quantize_linear_action": params.get("quantize-linear-action"),
+            "ulysses_size": params.get("ulysses-size", 1),
         },
         "summary": {"execution_time_s": envelope.get("execution_time_s")},
         "tables": envelope,
@@ -142,6 +164,7 @@ def execute(
     cached_hashes: set[str] | None = None,
     form_schema_version: str | None = None,
     job_id: str | None = None,
+    provided: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Worker-side entry (runs in the ``runners._worker`` subprocess).
 
@@ -161,6 +184,7 @@ def execute(
         cached_hashes=cached_hashes,
         case_hash_ctx=("video_generate", form_schema_version),
         job_id=job_id,
+        provided=provided,
     )
 
 
@@ -179,6 +203,7 @@ class VideoGenerateRunnerAdapter:
         cancel_flag: Callable[[], bool] | None = None,
         cached_hashes: set[str] | None = None,
         form_schema_version: str | None = None,
+        provided: set[str] | None = None,
     ) -> tuple[list[ResultRecord], list[str]]:
         from runners._subprocess import run_module_subprocess
 
@@ -190,6 +215,7 @@ class VideoGenerateRunnerAdapter:
             cancel_flag=cancel_flag,
             cached_hashes=cached_hashes,
             form_schema_version=form_schema_version,
+            provided=provided,
         )
 
 

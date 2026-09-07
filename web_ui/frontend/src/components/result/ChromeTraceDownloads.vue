@@ -3,7 +3,7 @@
  * Chrome Trace Downloads component.
  *
  * Displays per-case Chrome trace download links for jobs that had
- * chrome_trace enabled. Shows a table with case configuration and
+ * chrome-trace-file enabled. Shows a table with case configuration and
  * download buttons. Only renders when at least one case has a trace
  * file available.
  *
@@ -21,7 +21,7 @@ import { useLocale } from '@/composables/useLocale'
 interface CaseWithTrace {
   seq: number
   config: Record<string, any>
-  chrome_trace: {
+  "chrome_trace": {
     available: boolean
   }
   [key: string]: any
@@ -37,7 +37,7 @@ const { t } = useLocale()
 
 // Filter cases that have chrome trace available
 const availableCases = computed(() => {
-  return props.cases.filter(c => c.chrome_trace?.available === true)
+  return props.cases.filter(c => c["chrome_trace"]?.available === true)
 })
 
 // No cases with traces → don't render
@@ -49,7 +49,9 @@ const formatConfig = (config: Record<string, any> | undefined | null): string =>
 
   const parts: string[] = []
 
-  // Common fields to show
+  // Common fields to show — keys match the underscore convention used by the
+  // result envelope (runners translate kebab-case form params to snake_case
+  // when building the per-case config; see text_generate.py _run_one_case).
   if (config.device) parts.push(config.device)
   if (config.model_id) {
     // Shorten model_id for display
@@ -63,9 +65,6 @@ const formatConfig = (config: Record<string, any> | undefined | null): string =>
   if (config.quantize_linear_action && config.quantize_linear_action !== 'W8A8_DYNAMIC') {
     parts.push(config.quantize_linear_action)
   }
-  if (config.batch_size && config.batch_size !== 1) {
-    parts.push(`batch=${config.batch_size}`)
-  }
 
   return parts.join(' · ') || t({ zh: '默认配置', en: 'Default' })
 }
@@ -76,7 +75,7 @@ const downloading = ref<number | null>(null)
 // setTimeout handle used to delay revoking the blob URL; must be cleaned up on
 // unmount (see frontend guide §5). The pending Blob URL is tracked alongside so
 // that a subsequent download (which clears the timer) ALSO revokes the prior URL
-// — clearing only the timer orphans the previous Blob, leaking one per download.
+// — clearing only its timer orphans the previous Blob, leaking one per download.
 let revokeTimer: ReturnType<typeof setTimeout> | null = null
 let pendingUrl: string | null = null
 

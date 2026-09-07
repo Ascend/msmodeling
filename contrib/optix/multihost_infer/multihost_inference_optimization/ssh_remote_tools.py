@@ -46,10 +46,15 @@ class SshRemote:
     is_process_alive() / tail_file() probe the host process and do not enter the container.
     """
 
-    def __init__(self, host: str, ssh_port: int = 22, ssh_user: str = "root",
-                 password: Optional[str] = None,
-                 docker_container_id: Optional[str] = None,
-                 docker_use_sudo: bool = False):
+    def __init__(
+        self,
+        host: str,
+        ssh_port: int = 22,
+        ssh_user: str = "root",
+        password: Optional[str] = None,
+        docker_container_id: Optional[str] = None,
+        docker_use_sudo: bool = False,
+    ):
         self.host = host
         self.ssh_port = ssh_port
         self.ssh_user = ssh_user
@@ -68,12 +73,14 @@ class SshRemote:
         if password:
             try:
                 password = base64.b64decode(password).decode('utf-8')
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             connect_kwargs["password"] = password
 
         self._conn = Connection(
-            host=self.host, port=self.ssh_port, user=self.ssh_user,
+            host=self.host,
+            port=self.ssh_port,
+            user=self.ssh_user,
             connect_kwargs=connect_kwargs,
             connect_timeout=30,
         )
@@ -83,7 +90,7 @@ class SshRemote:
         if self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             self._conn = None
 
@@ -99,6 +106,7 @@ class SshRemote:
     @staticmethod
     def _mask_password(cmd: str) -> str:
         import re
+
         return re.sub(r"printf\s+(?:'[^']*'\s+)+\|", r"printf '******' |", cmd)
 
     def _build_sudo_cmd(self, raw_cmd: str) -> str:
@@ -109,7 +117,7 @@ class SshRemote:
         password = self._password
         try:
             password = base64.b64decode(password).decode('utf-8')
-        except Exception:
+        except Exception:  # nosec B110
             pass
         return f"printf '%s\\n' {shlex.quote(password)} | sudo -S sh -c {shlex.quote(raw_cmd)}"
 
@@ -130,8 +138,8 @@ class SshRemote:
         except Exception as e:
             logger.error(f"[{self.machine_key}] docker cp {remote_path} failed: {e}")
             raise DockerCopyError(
-                f"[{self.machine_key}] docker cp {remote_path} into "
-                f"{self.docker_container_id} failed: {e}") from e
+                f"[{self.machine_key}] docker cp {remote_path} into {self.docker_container_id} failed: {e}"
+            ) from e
 
     def run(self, command: str, container_exec: bool = True, **kwargs):
         if self.docker_container_id and container_exec:
@@ -150,9 +158,8 @@ class SshRemote:
         self.conn.put(str(local_path), remote=remote_path)
         self.docker_cp(remote_path)
 
-    def background(self, inner_cmd: str, node_label: str,
-                   remote_pids: dict, remote_pid_nodes: dict, node=None):
-        log_file = f"/tmp/ms_serviceparam_optimizer_{os.urandom(4).hex()}.log"
+    def background(self, inner_cmd: str, node_label: str, remote_pids: dict, remote_pid_nodes: dict, node=None):
+        log_file = f"/tmp/ms_serviceparam_optimizer_{os.urandom(4).hex()}.log"  # nosec B108
         if self.docker_container_id:
             run_cmd = f"docker exec {shlex.quote(self.docker_container_id)} sh -c {shlex.quote(inner_cmd)}"
         else:
@@ -202,9 +209,7 @@ class SshRemote:
     def tail_file(self, path: str, lines: int = 30) -> str:
         """Read the tail of a log file on the host (startup logs are written on the host by nohup)."""
         try:
-            result = self.conn.run(
-                f"tail -n {int(lines)} {shlex.quote(path)}",
-                hide=True, warn=True, timeout=10)
+            result = self.conn.run(f"tail -n {int(lines)} {shlex.quote(path)}", hide=True, warn=True, timeout=10)
             return result.stdout.strip()
         except Exception as e:
             logger.warning(f"[{self.machine_key}] tail {path} failed: {e}")

@@ -74,6 +74,7 @@ def upgrade() -> None:
         sa.Column("label", sa.String, nullable=True),
         sa.Column("error", sa.String, nullable=True),
         sa.Column("error_detail", sa.String, nullable=True),
+        sa.Column("error_fields", sa.String, nullable=True),
         sa.Column("params_hash", sa.Text, nullable=True),
         sa.Column("log_text", sa.Text, nullable=True),
         sa.Column(

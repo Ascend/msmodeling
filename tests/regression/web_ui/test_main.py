@@ -72,10 +72,10 @@ class TestInitStorage:
 class TestUpsertSchemaSnapshots:
     """Tests for _upsert_schema_snapshots function."""
 
-    @patch("services.schema_registry.copy_bundled_configs")
+    @patch("services.schema_registry.generate_form_configs")
     @patch("main.SchemaRegistry")
-    def test_copies_bundled_configs(self, mock_registry_class, mock_copy):
-        """_upsert_schema_snapshots copies bundled configs and upserts."""
+    def test_generates_form_configs(self, mock_registry_class, mock_generate):
+        """_upsert_schema_snapshots generates form schemas from the registry and upserts."""
         mock_registry = MagicMock()
         mock_registry.upsert_all_from_bundle.return_value = [("kind", "mod", "ver")]
         mock_registry_class.return_value = mock_registry
@@ -84,21 +84,21 @@ class TestUpsertSchemaSnapshots:
 
         result = _upsert_schema_snapshots()
 
-        mock_copy.assert_called_once()
+        mock_generate.assert_called_once()
         mock_registry.upsert_all_from_bundle.assert_called_once()
         assert len(result) == 1
 
-    @patch("services.schema_registry.copy_bundled_configs", side_effect=OSError("Copy failed"))
+    @patch("services.schema_registry.generate_form_configs", side_effect=OSError("Generate failed"))
     @patch("main.SchemaRegistry")
-    def test_handles_copy_exception_gracefully(self, mock_registry_class, mock_copy):
-        """Handles exception when copying bundled configs."""
+    def test_handles_generation_exception_gracefully(self, mock_registry_class, mock_generate):
+        """Handles exception when generating form configs."""
         mock_registry = MagicMock()
         mock_registry.upsert_all_from_bundle.return_value = []
         mock_registry_class.return_value = mock_registry
 
         from main import _upsert_schema_snapshots
 
-        # Should not raise despite copy exception
+        # Should not raise despite generation exception
         result = _upsert_schema_snapshots()
 
         mock_registry.upsert_all_from_bundle.assert_called_once()

@@ -155,11 +155,11 @@ class TestJobRepositoryModules:
         assert JobRepository().seed_modules() == 0
 
     def test_seed_modules_inserts_when_empty(self, tmp_path):
-        """seed_modules seeds 3 modules when the table is empty.
+        """seed_modules seeds 4 modules when the table is empty.
 
         Alembic's 0001 migration already seeds the modules, so to exercise the
         empty-table insert path we init a fresh DB (creates tables + alembic
-        seed), wipe the module rows, then call seed_modules — it must re-insert 3.
+        seed), wipe the module rows, then call seed_modules — it must re-insert 4.
         """
         db.reset_engine()
         db.init_db(str(tmp_path / "empty.db"))
@@ -174,7 +174,7 @@ class TestJobRepositoryModules:
             session.commit()
         n = repo.seed_modules()
         db.reset_engine()
-        assert n == 3
+        assert n == 4
 
     def test_get_module_returns_entity(self, repo_db):
         mod = JobRepository().get_module("text_generate")
@@ -187,8 +187,8 @@ class TestJobRepositoryModules:
 
     def test_list_modules_returns_all(self, repo_db):
         mods = JobRepository().list_modules()
-        assert len(mods) == 3
-        assert {m.id for m in mods} == {"text_generate", "video_generate", "throughput_optimizer"}
+        assert len(mods) == 4
+        assert {m.id for m in mods} == {"text_generate", "video_generate", "throughput_optimizer", "image_generate"}
 
 
 class TestJobRepositoryJobs:

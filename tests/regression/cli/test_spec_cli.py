@@ -11,7 +11,12 @@ import pytest
 
 from cli.inference import text_generate, throughput_optimizer
 from cli.main import main
-from cli.spec_cli import SpecArgumentParser, parse_args, reset_deprecation_warnings, to_kebab
+from cli.spec_cli import (
+    SpecArgumentParser,
+    parse_args,
+    reset_deprecation_warnings,
+    to_kebab,
+)
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tests.helpers.cli_runner import run_cli_main, run_module_main
 
@@ -26,12 +31,12 @@ def _reset_deprecations() -> None:
 def _capture_text_generate_args(argv: list[str]):
     captured: dict[str, argparse.Namespace] = {}
 
-    def _capture(parser, args=None):
+    def _capture(spec, parser, args=None):
         captured["ns"] = parse_args(parser, args)
         raise SystemExit(0)
 
     with (
-        patch("cli.inference.text_generate.spec_parse_args", side_effect=_capture),
+        patch("cli.inference.text_generate.parse_module_args", side_effect=_capture),
         patch.object(sys, "argv", argv),
     ):
         try:
@@ -83,7 +88,9 @@ def test_text_generate_help_hides_legacy_parallel_flags() -> None:
     assert "(default: None)" not in help_text
 
 
-def test_text_generate_accepts_model_id_option(capsys: pytest.CaptureFixture[str]) -> None:
+def test_text_generate_accepts_model_id_option(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     ns = _capture_text_generate_args(
         [
             "text_generate",
@@ -99,7 +106,9 @@ def test_text_generate_accepts_model_id_option(capsys: pytest.CaptureFixture[str
     assert "deprecated" not in capsys.readouterr().err
 
 
-def test_text_generate_tp_size_parses_without_deprecation(capsys: pytest.CaptureFixture[str]) -> None:
+def test_text_generate_tp_size_parses_without_deprecation(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     ns = _capture_text_generate_args(
         [
             "text_generate",
@@ -116,7 +125,9 @@ def test_text_generate_tp_size_parses_without_deprecation(capsys: pytest.Capture
     assert "deprecated" not in capsys.readouterr().err
 
 
-def test_text_generate_no_repetition_and_legacy_alias(capsys: pytest.CaptureFixture[str]) -> None:
+def test_text_generate_no_repetition_and_legacy_alias(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     ns = _capture_text_generate_args(
         [
             "text_generate",
@@ -235,7 +246,9 @@ def test_optix_help_hides_snake_case_and_multichar_short() -> None:
     assert "Description:" in help_text
 
 
-def test_optix_legacy_load_breakpoint_still_accepted(capsys: pytest.CaptureFixture[str]) -> None:
+def test_optix_legacy_load_breakpoint_still_accepted(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     parser = argparse.ArgumentParser()
     from cli.spec_cli import add_option
 
@@ -305,7 +318,9 @@ def test_text_generate_help_uses_native_enum_defaults() -> None:
     assert "--graph-log-file" not in result.stdout
 
 
-def test_text_generate_graph_log_path_and_legacy_aliases(capsys: pytest.CaptureFixture[str]) -> None:
+def test_text_generate_graph_log_path_and_legacy_aliases(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     ns = _capture_text_generate_args(
         [
             "text_generate",
@@ -396,7 +411,15 @@ def test_image_generate_accepts_model_id_option() -> None:
 def test_image_generate_missing_model_id_mentions_option() -> None:
     result = run_module_main(
         "cli.inference.image_generate",
-        ["--batch-size", "1", "--output-image-size", "64", "64", "--text-seq-len", "32"],
+        [
+            "--batch-size",
+            "1",
+            "--output-image-size",
+            "64",
+            "64",
+            "--text-seq-len",
+            "32",
+        ],
     )
     assert result.returncode != 0
     assert "model_id is required; pass a positional model id or use --model-id <MODEL_ID>." in result.stderr
@@ -446,7 +469,15 @@ def test_video_generate_accepts_model_id_option() -> None:
 def test_video_generate_rejects_positional_and_model_id_together() -> None:
     result = run_module_main(
         "cli.inference.video_generate",
-        ["Wan-AI/Wan2.1-T2V-1.3B", "--model-id", "Wan-AI/Other", "--batch-size", "1", "--seq-len", "8"],
+        [
+            "Wan-AI/Wan2.1-T2V-1.3B",
+            "--model-id",
+            "Wan-AI/Other",
+            "--batch-size",
+            "1",
+            "--seq-len",
+            "8",
+        ],
     )
     assert result.returncode != 0
     assert "pass either a positional model id or --model-id, not both" in result.stderr
@@ -462,7 +493,12 @@ def test_video_generate_missing_model_id_mentions_option() -> None:
 
 
 def test_model_adapter_subcommand_help_meets_spec() -> None:
-    for argv in (["--help"], ["doctor", "--help"], ["verify", "--help"], ["export-evidence", "--help"]):
+    for argv in (
+        ["--help"],
+        ["doctor", "--help"],
+        ["verify", "--help"],
+        ["export-evidence", "--help"],
+    ):
         result = run_module_main("cli.inference.model_adapter", argv)
         assert result.returncode == 0, argv
         _assert_help_meets_spec(result.stdout)

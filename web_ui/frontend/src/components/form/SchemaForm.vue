@@ -22,7 +22,7 @@ interface Props {
 
 const props = defineProps<Props>()
 const emit = defineEmits<{
-  submit: [data: { moduleId: string; params: Record<string, any>; formSchemaVersion: string }]
+  submit: [data: { moduleId: string; params: Record<string, any>; formSchemaVersion: string; explicitlyTouched: string[] }]
 }>()
 
 const { t } = useLocale()
@@ -35,7 +35,7 @@ const formState = useFormStateStore()
 if (import.meta.env?.DEV) {
   ;(window as any).__formState = formState
 }
-const { getForm } = useFormConfigs()
+const { getForm, loadFormSchema, isLoading: isSchemaLoading, getLoadError } = useFormConfigs()
 const { revalidateDependents, validateForm, validateFormInvariants } =
   useFormValidation(computed(() => formState.schema), computed(() => formState.form), computed(() => formState.fieldStates))
 
@@ -153,9 +153,9 @@ async function retryOptions(fieldId: string) {
   }
 }
 
-// Initialize form with schema
+// Initialize form with schema (loaded from backend API)
 onMounted(async () => {
-  const schema = getForm(props.moduleId)
+  const schema = await loadFormSchema(props.moduleId)
   if (schema) {
     formState.initForm(schema)
     await fetchDynamicOptions()
@@ -226,6 +226,7 @@ async function handleSubmit() {
     moduleId: props.moduleId,
     params: activeParams,
     formSchemaVersion: formState.schema.version,
+    explicitlyTouched: formState.getTouchedFields(),
   })
 }
 
@@ -242,6 +243,7 @@ const groupedFields = computed(() => {
   const indexByKey = new Map<string, number>()
 
   for (const field of formState.schema.fields) {
+    if (field.hidden) continue // statically hidden (backend ui_props): not rendered at all
     const g = field.group
     const en = g && typeof g === 'object' ? g.en : typeof g === 'string' ? g : ''
     const key = en || '__ungrouped__'
@@ -322,8 +324,18 @@ defineExpose({ submit: handleSubmit })
 </script>
 
 <template>
+  <!-- Loading state while fetching schema from backend -->
+  <div v-if="isSchemaLoading(props.moduleId)" class="schema-form-loading">
+    <el-skeleton :rows="6" animated />
+  </div>
+
+  <!-- Error state if schema loading failed -->
+  <div v-else-if="getLoadError(props.moduleId)" class="schema-form-error">
+    <el-result icon="error" :title="t({ zh: '加载失败', en: 'Load Failed' })" :sub-title="getLoadError(props.moduleId)" />
+  </div>
+
   <el-form
-    v-if="formState.schema"
+    v-else-if="formState.schema"
     ref="formRef"
     :model="formState.form"
     label-width="128px"
@@ -389,13 +401,21 @@ defineExpose({ submit: handleSubmit })
       </section>
     </div>
   </el-form>
-
-  <div v-else class="form-loading">
-    <el-skeleton :rows="5" animated />
-  </div>
 </template>
 
 <style scoped>
+/* Loading state while fetching schema from backend */
+.schema-form-loading {
+  padding: 24px;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* Error state if schema loading failed */
+.schema-form-error {
+  padding: 24px;
+}
+
 /* Collapsible sections stack vertically; each holds its own 4-column grid. */
 .form-sections {
   display: flex;

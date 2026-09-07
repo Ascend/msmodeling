@@ -91,7 +91,11 @@ def load_cluster_config(path=None):
     function only turns exceptions into CLI-friendly errors and exits.
     """
     if path is None:
-        path = Path(os.environ.get("CLUSTER_CONFIG_PATH")) if os.environ.get("CLUSTER_CONFIG_PATH") else Path(__file__).resolve().parent / "config.toml"
+        path = (
+            Path(os.environ.get("CLUSTER_CONFIG_PATH"))
+            if os.environ.get("CLUSTER_CONFIG_PATH")
+            else Path(__file__).resolve().parent / "config.toml"
+        )
     if not os.path.isfile(path):
         print(f"Error: config file does not exist: {path}")
         sys.exit(1)
@@ -264,7 +268,7 @@ def build_shell(
     """
     Build the shell script content for a single node.
     """
-    is_master = (node_rank == 0)
+    is_master = node_rank == 0
     role = "master" if is_master else f"worker-{node_rank}"
 
     # Format the vLLM parameters as a multi-line string
@@ -305,58 +309,54 @@ def build_shell(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate multi-node DP startup scripts using an external template"
-    )
+    parser = argparse.ArgumentParser(description="Generate multi-node DP startup scripts using an external template")
 
     parser.add_argument(
-        "--num-nodes", type=int, default=None,
-        help="Total number of nodes (defaults to 1 node + the number of workers in config.toml)"
+        "--num-nodes",
+        type=int,
+        default=None,
+        help="Total number of nodes (defaults to 1 node + the number of workers in config.toml)",
     )
     parser.add_argument(
-        "--model-name", required=True,
-        help="Model name or path (e.g. Qwen/Qwen3-VL-235B-A22B-Instruct)"
+        "--model-name", required=True, help="Model name or path (e.g. Qwen/Qwen3-VL-235B-A22B-Instruct)"
+    )
+    parser.add_argument("--port", type=int, default=8000, help="Service port (default 8000)")
+    parser.add_argument(
+        "--api-server-count",
+        type=int,
+        default=1,
+        help="Number of API server processes on the master node (default 1, usually no need to change)",
     )
     parser.add_argument(
-        "--port", type=int, default=8000, help="Service port (default 8000)"
+        "--vllm-params",
+        default="",
+        help='All vLLM parameters as a string, e.g. "--seed 1024 --served-model-name qwen3 --tensor-parallel-size 8 ..."',
     )
+    parser.add_argument("--output-dir", default="./scripts", help="Output directory (default ./scripts)")
+    parser.add_argument("--template-file", default="template.sh", help="Template file path (default ./template.sh)")
+    parser.add_argument("--config-file", default=None, help="Cluster config file path (default ./config.toml)")
     parser.add_argument(
-        "--api-server-count", type=int, default=1,
-        help="Number of API server processes on the master node (default 1, usually no need to change)"
-    )
-    parser.add_argument(
-        "--vllm-params", default="",
-        help='All vLLM parameters as a string, e.g. "--seed 1024 --served-model-name qwen3 --tensor-parallel-size 8 ..."'
-    )
-    parser.add_argument(
-        "--output-dir", default="./scripts", help="Output directory (default ./scripts)"
-    )
-    parser.add_argument(
-        "--template-file", default="template.sh",
-        help="Template file path (default ./template.sh)"
-    )
-    parser.add_argument(
-        "--config-file", default=None,
-        help="Cluster config file path (default ./config.toml)"
-    )
-    parser.add_argument(
-        "--dp-rpc-port", type=int, default=None,
+        "--dp-rpc-port",
+        type=int,
+        default=None,
         help="DP handshake RPC port (--data-parallel-rpc-port). Overrides "
-             "[vllm_mix].data_parallel_rpc_port in config.toml. When neither is set, "
-             "a free port is picked automatically."
+        "[vllm_mix].data_parallel_rpc_port in config.toml. When neither is set, "
+        "a free port is picked automatically.",
     )
     parser.add_argument(
-        "--nic-names", default="",
+        "--nic-names",
+        default="",
         help='Pre-detected NIC names as a JSON object keyed by node host, '
-             'e.g. \'{"192.0.2.1": "eth0"}\'. '
-             'When omitted, NIC names are detected on the spot via detect_nic.py.'
+        'e.g. \'{"192.0.2.1": "eth0"}\'. '
+        'When omitted, NIC names are detected on the spot via detect_nic.py.',
     )
     parser.add_argument(
-        "--env-vars", default="",
+        "--env-vars",
+        default="",
         help='Environment variables to export in generated scripts, as a JSON object, '
-             'e.g. \'{"MAX_NUM_SEQS": "64", "COMPILATION_CONFIG": "{...}"}\'. '
-             'For backward compatibility, "KEY1=VAL1,KEY2=VAL2" is also accepted '
-             '(does not support values containing commas).'
+        'e.g. \'{"MAX_NUM_SEQS": "64", "COMPILATION_CONFIG": "{...}"}\'. '
+        'For backward compatibility, "KEY1=VAL1,KEY2=VAL2" is also accepted '
+        '(does not support values containing commas).',
     )
 
     args = parser.parse_args()
@@ -372,9 +372,7 @@ def main():
 
     num_nodes = args.num_nodes if args.num_nodes is not None else len(all_nodes)
     if num_nodes != len(all_nodes):
-        print(
-            f"Error: --num-nodes ({num_nodes}) does not match the number of nodes in config.toml ({len(all_nodes)})"
-        )
+        print(f"Error: --num-nodes ({num_nodes}) does not match the number of nodes in config.toml ({len(all_nodes)})")
         sys.exit(1)
 
     # Per-node NIC names: the template no longer detects them on the spot with the ip
@@ -395,10 +393,7 @@ def main():
             parsed = None
         else:
             if not isinstance(parsed, dict):
-                print(
-                    "Warning: --env-vars JSON must be an object; falling back to the"
-                    " comma-separated K=V format"
-                )
+                print("Warning: --env-vars JSON must be an object; falling back to the comma-separated K=V format")
                 parsed = None
         if parsed is not None:
             env_vars = {str(k): str(v) for k, v in parsed.items()}
@@ -424,8 +419,7 @@ def main():
         vllm_params = f"{args.vllm_params} --data-parallel-size {dp_size_global}".strip()
 
     if dp_size_global % num_nodes != 0:
-        print(f"Error: --data-parallel-size ({dp_size_global}) is not divisible "
-              f"by the number of nodes ({num_nodes})")
+        print(f"Error: --data-parallel-size ({dp_size_global}) is not divisible by the number of nodes ({num_nodes})")
         sys.exit(1)
     dp_size_local = dp_size_global // num_nodes
 
@@ -442,8 +436,10 @@ def main():
         # env values may be float strings like "4.0"
         tp_size = parse_size_or_exit(tp_size_str, tp_size_label)
         if dp_size_local * tp_size > chips_per_node:
-            print(f"Error: dp_size_local ({dp_size_local}) * tensor-parallel-size ({tp_size}) "
-                  f"exceeds chips_per_node ({chips_per_node})")
+            print(
+                f"Error: dp_size_local ({dp_size_local}) * tensor-parallel-size ({tp_size}) "
+                f"exceeds chips_per_node ({chips_per_node})"
+            )
             sys.exit(1)
 
     # Settle the NIC name for every node before writing anything to disk: an explicit
@@ -460,8 +456,10 @@ def main():
             missing.append(node["host"])
         resolved_nics.append(nic_name)
     if missing:
-        print(f"Error: no nic_name available for node(s) {', '.join(missing)}; "
-              f"please configure nic_name for them in config.toml")
+        print(
+            f"Error: no nic_name available for node(s) {', '.join(missing)}; "
+            f"please configure nic_name for them in config.toml"
+        )
         sys.exit(1)
 
     os.makedirs(args.output_dir, exist_ok=True)

@@ -13,6 +13,7 @@ from __future__ import annotations
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from unittest.mock import MagicMock, patch
 
+from models.entities import Job
 from models.enums import JobStatus
 from services.job_runner import _utcnow, build_run_job
 
@@ -50,12 +51,20 @@ def _make_manager(write_queue=None, cancel_return=False):
 
 
 def _make_job(module_id="text_generate", params=None, version="1.0.0"):
-    job = MagicMock()
-    job.id = "job-1"
-    job.module_id = module_id
-    job.form_schema_version = version
-    job.params = params if params is not None else {"model": "gpt2"}
-    return job
+    """Build a real Job dataclass (not MagicMock).
+
+    Using a real dataclass catches AttributeError for missing fields — MagicMock
+    silently auto-creates any attribute, hiding bugs like the ``explicitly_touched``
+    gap (the runner reads ``job.explicitly_touched`` but the Job dataclass once
+    lacked the field, and MagicMock never complained).
+    """
+    return Job(
+        id="job-1",
+        module_id=module_id,
+        form_schema_version=version,
+        params=params if params is not None else {"model": "gpt2"},
+        explicitly_touched=None,
+    )
 
 
 def _run_job_from(manager):
@@ -174,7 +183,7 @@ class TestRunJobSuccess:
     def test_cache_hit_copies_traces_when_chrome_trace_enabled(self):
         manager = _make_manager()
         run_job = _run_job_from(manager)
-        job = _make_job(params={"model": "gpt2", "chrome_trace": True})
+        job = _make_job(params={"model": "gpt2", "chrome-trace-file": True})
 
         cached = MagicMock()
         cached.id = "src-job"
@@ -764,7 +773,7 @@ class TestChromeTraceAndCaseLogs:
     def test_materializes_traces_when_chrome_trace_enabled(self):
         manager = _make_manager()
         run_job = _run_job_from(manager)
-        job = _make_job(params={"model": "gpt2", "chrome_trace": True})
+        job = _make_job(params={"model": "gpt2", "chrome-trace-file": True})
         rec = MagicMock()
         rec.case_hash = None
         rec.case_log = None

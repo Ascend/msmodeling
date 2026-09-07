@@ -207,7 +207,7 @@ class TestExpandCases:
         # 11 × 11 = 121 > max_search_combinations (100)
         with pytest.raises(ValueError, match="too many cases.*> 100"):
             expand_cases(
-                {"a": list(range(11)), "b": list(range(11)), "max_search_combinations": 100},
+                {"a": list(range(11)), "b": list(range(11)), "max-search-combinations": 100},
                 {"a": as_list, "b": as_list},
             )
 
@@ -275,7 +275,7 @@ class TestRunCases:
 
     def test_single_case_cached_skipped(self):
         """A single case whose hash is cached is skipped."""
-        ctx = ("text_generate", "1.0.0")
+        ctx = ("_test_fake_module_", "1.0.0")
         params = {"a": 1}
         cached_hash = compute_case_hash(ctx[0], ctx[1], params)
 
@@ -288,7 +288,7 @@ class TestRunCases:
 
     def test_multi_case_cached_skipped_and_run_mixed(self):
         """Some cases cached (skipped), others run."""
-        ctx = ("text_generate", "1.0.0")
+        ctx = ("_test_fake_module_", "1.0.0")
         run_one = MagicMock(side_effect=lambda cp: {"config": cp, "summary": {}, "tables": {}})
         # Cache the hash of case a=1 only.
         cached = {compute_case_hash(ctx[0], ctx[1], {"a": 1, "b": 3})}
@@ -304,7 +304,7 @@ class TestRunCases:
         assert run_one.call_count == 3
 
     def test_case_hash_attached_to_records(self):
-        ctx = ("text_generate", "1.0.0")
+        ctx = ("_test_fake_module_", "1.0.0")
 
         def run_one(cp):
             return {"config": cp, "summary": {}, "tables": {}}
@@ -315,22 +315,24 @@ class TestRunCases:
 
     def test_chrome_trace_path_synthesized(self):
         """When chrome_trace is True, the bool is replaced with a path."""
-        ctx = ("text_generate", "1.0.0")
+        ctx = ("_test_fake_module_", "1.0.0")
         captured = {}
 
         def run_one(cp):
-            captured["chrome_trace"] = cp.get("chrome_trace")
+            captured["chrome-trace-file"] = cp.get("chrome-trace-file")
             return {"config": cp, "summary": {}, "tables": {}}
 
         with patch("services.trace_store.legacy_hash_path", return_value=Path("/tmp/trace.json")):
-            run_cases({"a": 1, "chrome_trace": True}, {}, run_one, case_hash_ctx=ctx, job_id="job-1")
-        assert captured["chrome_trace"] == "/tmp/trace.json" or str(captured["chrome_trace"]).endswith("trace.json")
+            run_cases({"a": 1, "chrome-trace-file": True}, {}, run_one, case_hash_ctx=ctx, job_id="job-1")
+        assert captured["chrome-trace-file"] == "/tmp/trace.json" or str(captured["chrome-trace-file"]).endswith(
+            "trace.json"
+        )
 
     def test_single_case_failure_recorded(self):
         """Lines 244-250: when a single case's run_one raises, the error is
         recorded (not propagated) — mirrors the multi-case error path.
         """
-        ctx = ("text_generate", "1.0.0")
+        ctx = ("_test_fake_module_", "1.0.0")
 
         def run_one(cp):
             raise RuntimeError("single case boom")

@@ -23,8 +23,6 @@ from runners.throughput_optimizer import (
     _infer_mode,
     _pd_ratio_row,
     _run_throughput_sweep,
-    _split_floats,
-    _split_ints,
     _summary_to_rows,
     execute,
 )
@@ -32,14 +30,15 @@ from runners.throughput_optimizer import (
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 
 # Tiny analytic config for the real sweep (~15s on TEST_DEVICE).
+# Keys are kebab-case form field ids (the Web UI wire format).
 _TINY_THROUGHPUT_PARAMS = {
-    "model_id": "Qwen/Qwen3-32B",
+    "model-id": "Qwen/Qwen3-32B",
     "device": "TEST_DEVICE",
-    "num_devices": 1,
-    "query_length": 8,
-    "num_queries": 1,
-    "quantize_linear_action": "W8A8_DYNAMIC",
-    "quantize_attention_action": "DISABLED",
+    "num-devices": 1,
+    "input-length": "8",  # Must be string per spec (can be int or YAML path)
+    "output-length": "8",  # Must be string per spec
+    "quantize-linear-action": "W8A8_DYNAMIC",
+    "quantize-attention-action": "DISABLED",
 }
 
 
@@ -58,25 +57,23 @@ class TestEnumVal:
 
 
 class TestSplitInts:
-    def test_none_passthrough(self):
-        assert _split_ints(None) is None
+    """List-parsing is now handled by registry-driven _coerce_param (see
+    TestBuildNamespace); the standalone _split_ints/_split_floats helpers were
+    removed by the registry migration (adb90673). These tests exercise the
+    equivalent behavior through _build_namespace.
+    """
 
-    def test_list_coerced(self):
-        assert _split_ints(["1", "2"]) == [1, 2]
+    def test_int_list_field_parsed(self):
+        """num-mtp-tokens comma-list mirrors the CLI: first candidate becomes
+        the int num_mtp_tokens, the full deduped list num_mtp_token_sizes.
+        """
+        ns = _build_namespace({"model-id": "m", "num-mtp-tokens": "1, 2 4"})
+        assert ns.num_mtp_tokens == 1
+        assert ns.num_mtp_token_sizes == [1, 2, 4]
 
-    def test_string_parsed(self):
-        assert _split_ints("1, 2 4") == [1, 2, 4]
-
-
-class TestSplitFloats:
-    def test_none_empty(self):
-        assert _split_floats(None) == []
-
-    def test_list_coerced(self):
-        assert _split_floats(["1", "2.5"]) == [1.0, 2.5]
-
-    def test_string_parsed(self):
-        assert _split_floats("0.5, 1.0") == [0.5, 1.0]
+    def test_float_list_field_parsed(self):
+        ns = _build_namespace({"model_id": "m", "mtp-acceptance-rates": "0.5, 1.0"})
+        assert ns.mtp_acceptance_rate == [0.5, 1.0]
 
 
 class TestInferMode:
@@ -108,46 +105,65 @@ class TestBuildNamespace:
 
     def test_null_int_field_uses_default(self):
         """A present-but-null int field is coerced to its default."""
-        ns = _build_namespace({"model_id": "m", "num_devices": None})
+        ns = _build_namespace({"model-id": "m", "num-devices": None})
         assert ns.num_devices == 1
 
     def test_empty_string_int_field_uses_default(self):
-        ns = _build_namespace({"model_id": "m", "num_devices": ""})
+        ns = _build_namespace({"model-id": "m", "num-devices": ""})
         assert ns.num_devices == 1
 
     def test_non_numeric_int_field_uses_default(self):
         """A non-numeric int field hits the except -> default (covers _int except)."""
-        ns = _build_namespace({"model_id": "m", "num_devices": "abc"})
+        ns = _build_namespace({"model-id": "m", "num-devices": "abc"})
         assert ns.num_devices == 1
 
     def test_non_numeric_num_field_uses_default(self):
-        ns = _build_namespace({"model_id": "m", "reserved_memory_gb": "xyz"})
+        ns = _build_namespace({"model-id": "m", "reserved-memory-gb": "xyz"})
         assert ns.reserved_memory_gb == 10.0
 
     def test_empty_num_field_uses_default(self):
         """A None/'' float field (_num) is coerced to its default."""
-        ns = _build_namespace({"model_id": "m", "reserved_memory_gb": ""})
+        ns = _build_namespace({"model-id": "m", "reserved-memory-gb": ""})
         assert ns.reserved_memory_gb == 10.0
 
     def test_num_or_none_for_empty_limit(self):
-        ns = _build_namespace({"model_id": "m", "ttft_limits": ""})
+        ns = _build_namespace({"model-id": "m", "ttft-limit": ""})
         assert ns.ttft_limits is None
 
     def test_num_or_none_non_numeric_is_none(self):
-        ns = _build_namespace({"model_id": "m", "ttft_limits": "notanum"})
+        ns = _build_namespace({"model-id": "m", "ttft-limit": "notanum"})
         assert ns.ttft_limits is None
+
+    def test_cli_dest_plural_attrs(self):
+        """Params with cli_dest land on the legacy plural attributes that
+        ParallelRunner reads (args.ttft_limits / args.tpot_limits /
+        args.mtp_acceptance_rate) — NOT py_name.
+        """
+        ns = _build_namespace(
+            {
+                "model-id": "m",
+                "ttft-limit": 500,
+                "tpot-limit": 50,
+                "mtp-acceptance-rates": [0.8, 0.6],
+            }
+        )
+        assert ns.ttft_limits == 500
+        assert ns.tpot_limits == 50
+        assert ns.mtp_acceptance_rate == [0.8, 0.6]
+        assert not hasattr(ns, "ttft_limit")
+        assert not hasattr(ns, "mtp_acceptance_rates")
 
     def test_tp_sizes_default_when_all_unset(self):
         """When tp/ep/moe-dp sizes are all unset, tp_sizes defaults to [] (search)."""
-        ns = _build_namespace({"model_id": "m"})
+        ns = _build_namespace({"model-id": "m"})
         assert ns.tp_sizes == []
 
     def test_split_ints_fields_parsed(self):
         ns = _build_namespace(
             {
-                "model_id": "m",
-                "tp_sizes": "1,2,4",
-                "ep_sizes": ["1", "2"],
+                "model-id": "m",
+                "tp-sizes": "1,2,4",
+                "ep-sizes": ["1", "2"],
             }
         )
         assert ns.tp_sizes == [1, 2, 4]
@@ -392,7 +408,7 @@ class TestExecute:
         """PD ratio enabled without the required device counts raises ValueError."""
         with pytest.raises(ValueError, match="prefill-devices-per-instance"):
             execute(
-                {**_TINY_THROUGHPUT_PARAMS, "enable_optimize_prefill_decode_ratio": True},
+                {**_TINY_THROUGHPUT_PARAMS, "enable-optimize-prefill-decode-ratio": True},
                 form_schema_version="1.0.0",
             )
 
@@ -404,9 +420,9 @@ class TestExecute:
             records, _ = execute(
                 {
                     **_TINY_THROUGHPUT_PARAMS,
-                    "enable_optimize_prefill_decode_ratio": True,
-                    "prefill_devices_per_instance": 1,
-                    "decode_devices_per_instance": 1,
+                    "enable-optimize-prefill-decode-ratio": True,
+                    "prefill-devices-per-instance": 1,
+                    "decode-devices-per-instance": 1,
                 },
                 form_schema_version="1.0.0",
             )
@@ -420,7 +436,7 @@ class TestExecute:
                 [{"config": {}, "summary": {}, "tables": {}}],
             ]
             records, _ = execute(
-                {**_TINY_THROUGHPUT_PARAMS, "tpot_limits": [10.0, 20.0]},  # 2 cases
+                {**_TINY_THROUGHPUT_PARAMS, "tpot-limit": [10.0, 20.0]},  # 2 cases
                 form_schema_version="1.0.0",
             )
         assert len(records) == 2
@@ -436,7 +452,7 @@ class TestExecute:
             mock_sweep.return_value = [{"config": {}, "summary": {}, "tables": {}}]
             with patch("services.trace_store.legacy_hash_path", return_value=Path("/trace/path.json")) as mock_path:
                 records, _ = execute(
-                    {**_TINY_THROUGHPUT_PARAMS, "chrome_trace": True},
+                    {**_TINY_THROUGHPUT_PARAMS, "chrome-trace-file": True},
                     job_id="job-123",
                     form_schema_version="1.0.0",
                 )
@@ -453,9 +469,9 @@ class TestExecute:
 
         params = {
             **_TINY_THROUGHPUT_PARAMS,
-            "tp_sizes": [1, 2, 4],  # 3 options
-            "ep_sizes": [1, 2],  # 2 options
-            "max_search_combinations": 2,  # But allow only 2
+            "tp-sizes": [1, 2, 4],  # 3 options
+            "ep-sizes": [1, 2],  # 2 options
+            "max-search-combinations": 2,  # But allow only 2
         }
         # Mock the ParallelRunner to avoid actual execution
         with patch("serving_cast.parallel_runner.ParallelRunner") as mock_runner:

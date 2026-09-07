@@ -1,17 +1,8 @@
-"""Shared subprocess spawner for runner adapters (Phase B).
+"""Shared subprocess spawner for runner adapters.
 
-Each adapter's ``run()`` spawns ``runners._worker`` as a subprocess so the job
-runs OUT-OF-PROCESS: the worker's stdout/stderr (banner + tables + runner logs =
-the CLI-style output) is streamed into the job log, and the process can be
-hard-killed for prompt cancel (#4). The structured result comes from a JSON file
-the worker writes — NEVER parsed from the streamed logs (constraint 4).
-
-This module owns: building the equivalent CLI command string for the log
-(constraint 2), spawning, streaming into the job's capture sink, tree-killing on
-cancel, and reading the JSON result.
-
-Only ``/web`` files are involved; ``cli/``, ``tensor_cast/``, ``serving_cast/``
-are untouched (the worker merely *calls* them).
+Each adapter's run() spawns runners._worker as a subprocess. The worker's
+stdout is streamed into the job log, and the process can be killed for cancel.
+The structured result comes from a JSON file, never from parsing logs.
 """
 
 from __future__ import annotations
@@ -42,9 +33,7 @@ _WEB_BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
 def _tree_kill(pid: int) -> None:
-    """Kill the subprocess AND its children (throughput spawns a
-    ProcessPoolExecutor — plain kill() orphans those workers).
-    """
+    """Kill subprocess and its children (throughput spawns ProcessPoolExecutor)."""
     if os.name == "nt":
         # /T = whole tree, /F = force (same pattern as web/scripts/stop.sh)
         subprocess.run(
@@ -62,12 +51,14 @@ def _tree_kill(pid: int) -> None:
 
 
 def _open_stdout_at(stdout_path: str, offset: int):
-    """(Re)open the worker's stdout FILE for reading at ``offset``.
+    """Reopen worker's stdout file for reading at offset.
 
-    Returns an open binary handle seeked to ``offset``, or ``None`` if the file
-    can't be opened right now (the caller backs off and retries). Factored out so
-    ``_stream_and_watch`` can recover a FRESH handle after a transient read error
-    — the previous handle may be in a bad state, but the bytes are still on disk.
+    Args:
+        stdout_path: Path to stdout file.
+        offset: Byte offset to seek to.
+
+    Returns:
+        Open binary handle or None if file can't be opened.
     """
     try:
         fh = open(stdout_path, "rb")  # noqa: SIM115  # caller owns the handle
@@ -98,30 +89,18 @@ def _stream_and_watch(
     stdout_path: str,
     cancel_flag: Callable[[], bool] | None,
 ) -> bool:
-    """Tail the worker's stdout FILE, writing new data to ``sys.stdout`` (the
-    thread-local capture sink → job log).
+    """Tail worker's stdout file, writing to sys.stdout (job log).
 
-    A separate watcher thread polls ``cancel_flag`` every 0.3s and tree-kills
-    the subprocess the moment cancel is requested — independent of stdout
-    activity, so cancel is prompt (~0.3s) even during the worker's silent
-    phases (e.g. mid-compile). Returns True if cancel was requested.
+    A watcher thread polls cancel_flag and tree-kills on cancel. Uses a temp
+    file (not PIPE) to avoid deadlock with ProcessPoolExecutor children.
 
-    Uses a temp FILE (not ``subprocess.PIPE``) because the worker spawns
-    ``ProcessPoolExecutor`` child processes that inherit the stdout handle.
-    With a pipe, those children can fill the 64KB OS pipe buffer and deadlock
-    (writer blocks → worker waits for children → reader waits for data). A
-    regular file has no buffer limit, eliminating the deadlock entirely.
+    Args:
+        proc: Subprocess to watch.
+        stdout_path: Path to stdout file.
+        cancel_flag: Callable returning True if cancel requested.
 
-    The read loop is RESILIENT to transient ``[Errno 22] Invalid argument``
-    (OSError) — a Windows error that occurs intermittently while tailing a file
-    the worker and its inherited ProcessPoolExecutor children all write to. The
-    prior implementation wrapped the whole loop in one ``except (OSError,
-    IOError)`` and abandoned the stream on the first error, which TRUNCATED the
-    job log: everything after the error (Input Configuration, Memory Info, the
-    result tables, Overall Best Configuration) was lost even though the worker
-    wrote it. Now a transient error reopens a fresh handle at the last good
-    offset and continues; only after the worker has exited do repeated failures
-    give up (the file is then stable, so this never trips in practice).
+    Returns:
+        True if cancel was requested.
     """
     import threading
     import time
@@ -218,13 +197,13 @@ def _stream_and_watch(
 
 
 def _build_popen_kwargs(stdout_fd: int) -> dict[str, Any]:
-    """Build subprocess.Popen kwargs with platform-appropriate process-group setup.
+    """Build Popen kwargs with platform-appropriate process-group setup.
 
-    ``stdout_fd`` is an open file descriptor to a temp file — the worker's
-    stdout+stderr are redirected there (NOT a pipe). Windows uses
-    ``CREATE_NEW_PROCESS_GROUP`` (for ``taskkill /T``); POSIX uses
-    ``start_new_session`` (for ``killpg``). Extracted to a function so both
-    branches are unit-testable via ``monkeypatch.setattr(os, 'name', ...)``.
+    Args:
+        stdout_fd: File descriptor for stdout.
+
+    Returns:
+        Kwargs dict for Popen.
     """
     kwargs: dict[str, Any] = {
         "stdout": stdout_fd,
@@ -247,10 +226,22 @@ def run_module_subprocess(
     cancel_flag: Callable[[], bool] | None = None,
     cached_hashes: set[str] | None = None,
     form_schema_version: str | None = None,
+    provided: set[str] | None = None,
 ) -> tuple[list[ResultRecord], list[str]]:
-    """Spawn ``runners._worker`` for ``module_id``/``params``, stream its
-    CLI-style output into the job log, tree-kill on cancel, and return the
-    structured result records read from the worker's JSON file.
+    """Spawn runner subprocess, stream output, tree-kill on cancel.
+
+    Args:
+        module_id: Module identifier.
+        params: Form params.
+        job_id: Job ID.
+        on_progress: Progress callback.
+        cancel_flag: Cancel flag callable.
+        cached_hashes: Cached case hashes for dedup.
+        form_schema_version: Schema version.
+        provided: Set of explicitly provided field names (for wants_provided validators).
+
+    Returns:
+        Tuple of (records, skipped_hashes).
     """
     # Reference command for the job's ORIGINAL params (before any multi-case
     # expansion in the worker). For runners that split into per-case subprocess
@@ -259,13 +250,13 @@ def run_module_subprocess(
     # per-case "[case i/n] CLI:" lines.
     # Synthesize chrome_trace path if enabled (so the reference command shows the actual path, not <auto>)
     ref_params = dict(params)
-    if ref_params.get("chrome_trace") is True:
+    if ref_params.get("chrome-trace-file") is True:
         from runners._multicase import compute_case_hash
         from services.trace_store import legacy_hash_path
 
         case_hash = compute_case_hash(module_id, form_schema_version, ref_params)
         if case_hash and job_id:
-            ref_params["chrome_trace"] = str(legacy_hash_path(job_id, case_hash))
+            ref_params["chrome-trace-file"] = str(legacy_hash_path(job_id, case_hash))
     logger.info("CLI (reference, unexpanded): %s", build_cli_command_string(module_id, ref_params))
     logger.info(
         "case-dedup: passing cached_hashes=%d form_schema_version=%r to worker",
@@ -288,6 +279,7 @@ def run_module_subprocess(
             "_cached_case_hashes": sorted(cached_hashes or []),
             "_form_schema_version": form_schema_version,
             "_job_id": job_id,
+            "_provided": sorted(provided or []),
         }
         with open(params_path, "w", encoding="utf-8") as f:
             json.dump(params_with_meta, f, ensure_ascii=False)

@@ -443,6 +443,8 @@ class UserInputConfig:
             "compile_allow_graph_break": "allow_graph_break",
             "query_length": "query_len",
             "num_devices": "world_size",
+            "profiling_database_path": "profiling_database",
+            "chrome_trace_file": "chrome_trace",
         }
         logger.debug(
             "Using special input key mapping for backward compatibility: %s",

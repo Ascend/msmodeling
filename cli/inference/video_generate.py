@@ -1,29 +1,20 @@
 import argparse
 import logging
 import time
-from typing import Optional
 
 import torch
 
 from cli.logo import print_logo
-from cli.spec_cli import (
-    METAVAR_FILE,
-    METAVAR_FLOAT,
-    METAVAR_N,
-    METAVAR_NAME,
-    METAVAR_RANGE,
-    SpecArgumentParser,
-    add_log_options,
-    add_option,
-    add_version_option,
-    configure_std_logging,
-    make_enum_type,
-    parse_args as spec_parse_args,
-)
+from cli.registry.argparse_adapter import build_argparser, parse_module_args
+from cli.registry.modules import get_spec
+from cli.spec_cli import configure_std_logging
 from tensor_cast import device_profiles  # noqa: F401
 from tensor_cast.compilation import get_backend
 from tensor_cast.core.quantization.config import create_quant_config
-from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction, QuantizeLinearAction
+from tensor_cast.core.quantization.datatypes import (
+    QuantizeAttentionAction,
+    QuantizeLinearAction,
+)
 from tensor_cast.device import DeviceProfile
 from tensor_cast.diffusers.cache_agent import CacheConfig
 from tensor_cast.diffusers.diffusers_utils import (
@@ -33,9 +24,9 @@ from tensor_cast.diffusers.diffusers_utils import (
     use_hunyuanvideo15_t2v_static_branch,
 )
 from tensor_cast.model_config import (
+    DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE,
     AttentionBackend,
     AttentionRoutePlan,
-    DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE,
     ParallelConfig,
     RemoteSource,
 )
@@ -45,7 +36,8 @@ from tensor_cast.performance_model.memory_tracker import MemoryTracker
 from tensor_cast.quantize_utils import QuantGranularity
 from tensor_cast.runtime import Runtime
 from tensor_cast.utils import str_to_dtype
-from ..utils import add_model_id_source, check_positive_integer, parse_int_range, require_model_id
+
+from ..utils import parse_int_range
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +153,7 @@ def run_inference(
     model_id: str,
     batch_size: int,
     seq_len: int,
-    chrome_trace: Optional[str] = None,
+    chrome_trace: str | None = None,
     height: int = 832,
     width: int = 400,
     frame_num: int = 81,
@@ -181,11 +173,15 @@ def run_inference(
     ulysses_size: int = 1,
     cfg_parallel: bool = False,
     dit_cache: bool = False,
-    cache_step_range: Optional[str] = None,
+    cache_step_range: str | None = None,
     cache_step_interval: int = 1,
-    cache_block_range: Optional[str] = None,
+    cache_block_range: str | None = None,
 ):
-    from tensor_cast.diffusers.diffusers_attention import get_sp_group, set_sp_group, use_custom_sdpa
+    from tensor_cast.diffusers.diffusers_attention import (
+        get_sp_group,
+        set_sp_group,
+        use_custom_sdpa,
+    )
     from tensor_cast.diffusers.diffusers_model import build_diffusers_transformer_model
     from tensor_cast.diffusers.model_resolver import resolve_diffusers_model_selection
 
@@ -260,7 +256,7 @@ def run_inference(
                 cache_step_interval,
             )
         else:
-            cache_model, cache_model_config = build_diffusers_transformer_model(
+            cache_model, _cache_model_config = build_diffusers_transformer_model(
                 model_id,
                 parallel_config,
                 quant_config,
@@ -349,234 +345,26 @@ def run_inference(
 
 
 def main():
-    # TODO add parallel config
-    # TODO add quant config
-    parser = SpecArgumentParser(
-        prog="msmodeling inference video-generate",
-        description="Run a simulated diffusion transformer forward and dump perf stats.",
-        examples=(
-            "# Single-device video generate\n"
-            "msmodeling inference video-generate Wan-AI/Wan2.1-T2V-1.3B "
-            "--batch-size 1 --seq-len 512 --device TEST_DEVICE"
-        ),
-        output_help="Perf stats on stdout. Optional chrome trace via --chrome-trace-file.",
-    )
-    add_version_option(parser)
-    parse_linear, linear_meta = make_enum_type(QuantizeLinearAction, "--quantize-linear-action")
-    parse_attn, attn_meta = make_enum_type(QuantizeAttentionAction, "--quantize-attention-action")
-    parse_backend, backend_meta = make_enum_type(AttentionBackend, "--attention-backend")
+    """Parse args from the parameter registry and run the video simulation.
 
-    parser.add_argument(
-        "--device",
-        type=str,
-        choices=list(DeviceProfile.all_device_profiles.keys()),
-        default="TEST_DEVICE",
-        metavar=METAVAR_NAME,
-        help="Device profile used for simulation.",
-    )
-    add_model_id_source(
-        parser,
-        positional_help=(
-            "Diffusers model dir, remote repo id, or remote repo id plus subfolder "
-            "(needs transformer/config.json or a compatible transformer config). Recommended safe mode: "
-            "a reviewed absolute local directory; remote model ids are not security-guaranteed. "
-            "Equivalent to --model-id."
-        ),
-        option_help="Diffusers model source. Equivalent to the positional model id.",
-        value_type=str,
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=check_positive_integer,
-        required=True,
-        metavar=METAVAR_N,
-        help="Batch size.",
-    )
-    parser.add_argument(
-        "--seq-len",
-        type=check_positive_integer,
-        required=True,
-        metavar=METAVAR_N,
-        help="Text sequence length.",
-    )
-    add_option(
-        parser,
-        "--chrome-trace-file",
-        dest="chrome_trace",
-        type=str,
-        default=None,
-        metavar=METAVAR_FILE,
-        help="Write chrome trace JSON.",
-        aliases=("--chrome-trace",),
-    )
-    parser.add_argument(
-        "--height",
-        type=check_positive_integer,
-        default=400,
-        metavar=METAVAR_N,
-        help="Frame height.",
-    )
-    parser.add_argument(
-        "--width",
-        type=check_positive_integer,
-        default=832,
-        metavar=METAVAR_N,
-        help="Frame width.",
-    )
-    parser.add_argument(
-        "--frame-num",
-        type=check_positive_integer,
-        default=81,
-        metavar=METAVAR_N,
-        help="Number of frames.",
-    )
-    parser.add_argument(
-        "--sample-step",
-        type=check_positive_integer,
-        default=1,
-        metavar=METAVAR_N,
-        help="Number of sampling steps.",
-    )
-    add_log_options(parser)
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        choices=["float16", "float32", "bfloat16"],
-        default="float16",
-        metavar="{float16,float32,bfloat16}",
-        help="Activation dtype.",
-    )
-    parser.add_argument(
-        "--remote-source",
-        choices=[source.value for source in RemoteSource],
-        default=RemoteSource.huggingface.value,
-        metavar="{huggingface,modelscope}",
-        help="The remote source for non-local Diffusers repo ids.",
-    )
-    parser.add_argument(
-        "--quantize-linear-action",
-        type=parse_linear,
-        default=QuantizeLinearAction.W8A8_DYNAMIC,
-        metavar=linear_meta,
-        help="Quantize linear layers.",
-    )
-    parser.add_argument(
-        "--quantize-attention-action",
-        type=parse_attn,
-        default=QuantizeAttentionAction.DISABLED,
-        metavar=attn_meta,
-        help="Quantize attention computation.",
-    )
-    parser.add_argument(
-        "--use-cfg",
-        action="store_true",
-        default=False,
-        help="Enable classifier-free guidance.",
-    )
-
-    attention_group = parser.add_argument_group("Attention Options")
-    attention_group.add_argument(
-        "--attention-backend",
-        type=parse_backend,
-        default=AttentionBackend.dense,
-        metavar=backend_meta,
-        help="Attention backend semantics for simulation.",
-    )
-    attention_group.add_argument(
-        "--attention-block-size",
-        type=check_positive_integer,
-        default=DEFAULT_BLOCK_SPARSE_ATTENTION_BLOCK_SIZE,
-        metavar=METAVAR_N,
-        help="Block size for block sparse attention route planning.",
-    )
-    attention_group.add_argument(
-        "--attention-sparsity",
-        type=check_attention_sparsity,
-        default=0.0,
-        metavar=METAVAR_FLOAT,
-        help="Skipped KV-block ratio for block sparse attention in [0.0, 1.0).",
-    )
-
-    optim_group = parser.add_argument_group("Optimization Options")
-    optim_group.add_argument(
-        "--compile",
-        action="store_true",
-        help="If set, invoke torch.compile() on the model before inference.",
-    )
-    optim_group.add_argument(
-        "--compile-allow-graph-break",
-        action="store_true",
-        help="Allow graph breaks during torch.compile() for models with dynamic control flow.",
-    )
-
-    parallel_group = parser.add_argument_group("Parallel Options")
-    add_option(
-        parallel_group,
-        "--num-devices",
-        dest="world_size",
-        type=check_positive_integer,
-        default=1,
-        metavar=METAVAR_N,
-        help="Number of devices.",
-        aliases=("--world-size",),
-    )
-    parallel_group.add_argument(
-        "--ulysses-size",
-        dest="ulysses_size",
-        type=check_positive_integer,
-        default=1,
-        metavar=METAVAR_N,
-        help="Ulysses sequence-parallel size.",
-    )
-    parallel_group.add_argument(
-        "--cfg-parallel",
-        action="store_true",
-        default=False,
-        help="Enable classifier-free guidance parallelism.",
-    )
-
-    cache_group = parser.add_argument_group("Cache Options")
-    cache_group.add_argument(
-        "--dit-cache",
-        action="store_true",
-        help="Enable DiT block cache.",
-    )
-    cache_group.add_argument(
-        "--cache-step-range",
-        type=str,
-        default=None,
-        metavar=METAVAR_RANGE,
-        help="Cache step range 'start,end' (inclusive). Required with --dit-cache.",
-    )
-    cache_group.add_argument(
-        "--cache-step-interval",
-        type=check_positive_integer,
-        default=1,
-        metavar=METAVAR_N,
-        help="Update every N steps (1 disables).",
-    )
-    cache_group.add_argument(
-        "--cache-block-range",
-        type=str,
-        default=None,
-        metavar=METAVAR_RANGE,
-        help="Cache block range 'start,end' (start inclusive, end exclusive).",
-    )
-
-    args = spec_parse_args(parser)
-    require_model_id(parser, args)
+    Parser is generated from cli/registry/modules/video_generate.py via
+    build_argparser(); this function keeps only post-parse business logic.
+    """
+    spec = get_spec("video_generate")
+    parser = build_argparser(spec)
+    args = parse_module_args(spec, parser)
     print_logo()
     configure_std_logging(args)
 
-    if args.world_size % args.ulysses_size != 0:
-        raise ValueError(f"World size {args.world_size!r} must be divisible by ulysses size {args.ulysses_size!r}.")
+    if args.num_devices % args.ulysses_size != 0:
+        raise ValueError(f"World size {args.num_devices!r} must be divisible by ulysses size {args.ulysses_size!r}.")
 
     run_inference(
         device=args.device,
         model_id=args.model_id,
         batch_size=args.batch_size,
         seq_len=args.seq_len,
-        chrome_trace=args.chrome_trace,
+        chrome_trace=args.chrome_trace_file,
         height=args.height,
         width=args.width,
         frame_num=args.frame_num,
@@ -584,7 +372,7 @@ def main():
         dtype=args.dtype,
         remote_source=args.remote_source,
         use_cfg=args.use_cfg,
-        world_size=args.world_size,
+        world_size=args.num_devices,
         ulysses_size=args.ulysses_size,
         quantize_linear_action=args.quantize_linear_action,
         quantize_attention_action=args.quantize_attention_action,

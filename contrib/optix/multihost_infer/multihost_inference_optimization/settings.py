@@ -12,6 +12,7 @@ class MultiHostCommandConfig(BaseModel):
     served_model_name: str = ""
     others: str = ""
 
+
 class MultiHostConfig(BaseModel):
     output: Path = Path("vllm")
     process_name: str = "vllm"
@@ -22,5 +23,6 @@ class MultiHostConfig(BaseModel):
 
 class CusSettings(Settings):
     name: str = "multihost_inference_optimization"
-    multihost: MultiHostConfig = Field(default_factory=lambda data: MultiHostConfig(output=data["output"].joinpath("vllm")),
-                                 validate_default=True)
+    multihost: MultiHostConfig = Field(
+        default_factory=lambda data: MultiHostConfig(output=data["output"].joinpath("vllm")), validate_default=True
+    )

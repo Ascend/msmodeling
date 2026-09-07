@@ -8,7 +8,6 @@ from __future__ import annotations
 # Import the actual module directly
 from runners._cli_command import (
     _CLI_MODULE,
-    _FLAG_OVERRIDES,
     _SKIP_FIELDS,
     build_cli_command_string,
 )
@@ -41,22 +40,14 @@ class TestCliModuleMapping:
             assert mod in _CLI_MODULE
 
 
-class TestFlagOverrides:
-    """Tests for _FLAG_OVERRIDES mapping."""
+class TestKebabFlagNames:
+    """Params keys are already kebab-case flag names (registry form ids)."""
 
-    def test_overrides_dict_exists(self):
-        """_FLAG_OVERRIDES exists and is a dict."""
-        assert isinstance(_FLAG_OVERRIDES, dict)
-
-    def test_default_uses_snake_to_kebab(self):
-        """By default, flags use snake_case -> kebab-case conversion."""
-        cmd = build_cli_command_string("text_generate", {"some_param": "value"})
-        assert "--some-param" in cmd
-
-    def test_override_can_change_flag_name(self):
-        """_FLAG_OVERRIDES can override flag names if needed."""
-        # The dict exists for future overrides
-        assert isinstance(_FLAG_OVERRIDES, dict)
+    def test_kebab_key_used_verbatim_as_flag(self):
+        """A kebab-case param key becomes the flag directly."""
+        # Use a real field from text_generate registry
+        cmd = build_cli_command_string("text_generate", {"num-queries": "10"})
+        assert "--num-queries" in cmd
 
 
 class TestSkipFields:
@@ -84,7 +75,7 @@ class TestBasicCommandBuilding:
 
     def test_model_id_as_positional(self):
         """model_id is added as positional argument."""
-        cmd = build_cli_command_string("text_generate", {"model_id": "gpt2"})
+        cmd = build_cli_command_string("text_generate", {"model-id": "gpt2"})
         assert "gpt2" in cmd
         # model_id should not have --flag prefix
         assert "--model-id" not in cmd
@@ -97,29 +88,29 @@ class TestBasicCommandBuilding:
 
     def test_multiple_params(self):
         """Multiple params are all included."""
-        cmd = build_cli_command_string("text_generate", {"model_id": "gpt2", "device": "cpu", "batch_size": 32})
+        cmd = build_cli_command_string("text_generate", {"model-id": "gpt2", "device": "cpu", "num-queries": 10})
         assert "gpt2" in cmd
         assert "--device" in cmd
-        assert "--batch-size" in cmd
+        assert "--num-queries" in cmd
         assert "cpu" in cmd
-        assert "32" in cmd
+        assert "10" in cmd
 
     def test_snake_case_converts_to_kebab(self):
         """snake_case param names convert to kebab-case flags."""
-        cmd = build_cli_command_string("text_generate", {"batch_size": 32})
-        assert "--batch-size" in cmd
-        assert "--batch_size" not in cmd
+        cmd = build_cli_command_string("text_generate", {"num-queries": 32})
+        assert "--num-queries" in cmd
+        assert "--num_queries" not in cmd
 
     def test_boolean_true_becomes_flag_only(self):
         """Boolean True params become --flag without value."""
-        cmd = build_cli_command_string("text_generate", {"verbose": True})
-        assert "--verbose" in cmd
+        cmd = build_cli_command_string("text_generate", {"compile": True})
+        assert "--compile" in cmd
         # No value should follow
         parts = cmd.split()
-        verbose_idx = parts.index("--verbose")
+        compile_idx = parts.index("--compile")
         # Either end of list or next is another flag
-        if verbose_idx + 1 < len(parts):
-            assert parts[verbose_idx + 1].startswith("--")
+        if compile_idx + 1 < len(parts):
+            assert parts[compile_idx + 1].startswith("--")
 
 
 class TestSpecialCases:
@@ -132,8 +123,8 @@ class TestSpecialCases:
 
     def test_false_values_skipped(self):
         """False values are skipped."""
-        cmd = build_cli_command_string("text_generate", {"verbose": False})
-        assert "--verbose" not in cmd
+        cmd = build_cli_command_string("text_generate", {"compile": False})
+        assert "--compile" not in cmd
 
     def test_empty_string_skipped(self):
         """Empty strings are skipped."""
@@ -142,41 +133,41 @@ class TestSpecialCases:
 
     def test_list_values(self):
         """List values become --flag val1 val2."""
-        cmd = build_cli_command_string("text_generate", {"devices": ["cpu", "cuda"]})
-        assert "--devices" in cmd
-        assert "cpu" in cmd
-        assert "cuda" in cmd
+        cmd = build_cli_command_string("text_generate", {"quantize-linear-action": ["W8A8_DYNAMIC", "W8A16_STATIC"]})
+        assert "--quantize-linear-action" in cmd
+        assert "W8A8_DYNAMIC" in cmd
+        assert "W8A16_STATIC" in cmd
 
     def test_comma_separated_string_split(self):
         """Comma-separated strings are split on comma."""
-        cmd = build_cli_command_string("throughput_optimizer", {"mtp_acceptance_rate": "0.8,0.6,0.4"})
-        assert "--mtp-acceptance-rate" in cmd
+        cmd = build_cli_command_string("throughput_optimizer", {"mtp-acceptance-rates": "0.8,0.6,0.4"})
+        assert "--mtp-acceptance-rates" in cmd
         assert "0.8" in cmd
         assert "0.6" in cmd
         assert "0.4" in cmd
 
     def test_comma_separated_handles_empty_items(self):
         """Comma-separated strings handle empty items."""
-        cmd = build_cli_command_string("throughput_optimizer", {"mtp_acceptance_rate": "0.8,,0.6"})
+        cmd = build_cli_command_string("throughput_optimizer", {"mtp-acceptance-rates": "0.8,,0.6"})
         # Empty items after split should be filtered
         assert "0.8" in cmd
         assert "0.6" in cmd
         # Should not have empty strings as separate values
-        assert "--mtp-acceptance-rate" in cmd
+        assert "--mtp-acceptance-rates" in cmd
 
     def test_chrome_trace_true_placeholder(self):
         """chrome_trace=True adds --chrome-trace as a bare flag (no value)."""
-        cmd = build_cli_command_string("text_generate", {"chrome_trace": True})
-        assert "--chrome-trace" in cmd
+        cmd = build_cli_command_string("text_generate", {"chrome-trace-file": True})
+        assert "--chrome-trace-file" in cmd
         # Boolean True maps to a bare flag (store_true argparse semantics).
         # The command must NOT contain a following value token.
         parts = cmd.split()
-        idx = parts.index("--chrome-trace")
+        idx = parts.index("--chrome-trace-file")
         assert idx == len(parts) - 1 or parts[idx + 1].startswith("--")
 
     def test_chrome_trace_false_skipped(self):
         """chrome_trace=False is skipped like other boolean False."""
-        cmd = build_cli_command_string("text_generate", {"chrome_trace": False})
+        cmd = build_cli_command_string("text_generate", {"chrome-trace-file": False})
         assert "--chrome-trace" not in cmd
 
 
@@ -185,22 +176,22 @@ class TestModuleSpecificCommands:
 
     def test_text_generate_command(self):
         """text_generate produces expected command structure."""
-        cmd = build_cli_command_string("text_generate", {"model_id": "gpt2", "batch_size": 32, "device": "cpu"})
+        cmd = build_cli_command_string("text_generate", {"model-id": "gpt2", "num-queries": 32, "device": "cpu"})
         assert "python -m cli.inference.text_generate" in cmd
         assert "gpt2" in cmd
-        assert "--batch-size 32" in cmd or ("--batch-size" in cmd and "32" in cmd)
+        assert "--num-queries 32" in cmd or ("--num-queries" in cmd and "32" in cmd)
 
     def test_video_generate_command(self):
         """video_generate produces expected command structure."""
-        cmd = build_cli_command_string("video_generate", {"model_id": "video_model", "resolution": "1080p"})
+        cmd = build_cli_command_string("video_generate", {"model-id": "video_model", "height": 1080})
         assert "python -m cli.inference.video_generate" in cmd
         assert "video_model" in cmd
-        assert "--resolution" in cmd
+        assert "--height" in cmd
 
     def test_throughput_optimizer_command(self):
         """throughput_optimizer produces expected command structure."""
         cmd = build_cli_command_string(
-            "throughput_optimizer", {"model_id": "opt_model", "mtp_acceptance_rate": "0.8,0.6"}
+            "throughput_optimizer", {"model-id": "opt_model", "mtp-acceptance-rates": "0.8,0.6"}
         )
         assert "python -m cli.inference.throughput_optimizer" in cmd
         assert "opt_model" in cmd
@@ -211,30 +202,30 @@ class TestEdgeCases:
 
     def test_zero_is_included(self):
         """Zero values are included (not falsy)."""
-        cmd = build_cli_command_string("text_generate", {"batch_size": 0})
-        assert "--batch-size" in cmd
+        cmd = build_cli_command_string("text_generate", {"prefix-cache-hit-rate": 0})
+        assert "--prefix-cache-hit-rate" in cmd
         assert "0" in cmd
 
     def test_large_numbers(self):
         """Large numbers are handled correctly."""
-        cmd = build_cli_command_string("text_generate", {"batch_size": 999999})
+        cmd = build_cli_command_string("text_generate", {"num-queries": 999999})
         assert "999999" in cmd
 
     def test_negative_numbers(self):
         """Negative numbers are handled correctly."""
-        cmd = build_cli_command_string("text_generate", {"temperature": -0.5})
-        assert "--temperature" in cmd
+        cmd = build_cli_command_string("throughput_optimizer", {"reserved-memory-gb": -0.5})
+        assert "--reserved-memory-gb" in cmd
         assert "-0.5" in cmd
 
     def test_float_values(self):
         """Float values are stringified correctly."""
-        cmd = build_cli_command_string("text_generate", {"temperature": 0.7})
+        cmd = build_cli_command_string("text_generate", {"prefix-cache-hit-rate": 0.7})
         assert "0.7" in cmd
 
     def test_unicode_in_params(self):
         """Unicode characters in params are handled."""
-        cmd = build_cli_command_string("text_generate", {"prompt": "café"})
-        assert "café" in cmd
+        cmd = build_cli_command_string("text_generate", {"model-id": "café-model"})
+        assert "café-model" in cmd
 
     def test_special_characters(self):
         """Special characters are handled."""
@@ -243,32 +234,33 @@ class TestEdgeCases:
 
     def test_very_long_param_name(self):
         """Very long param names are converted correctly."""
-        cmd = build_cli_command_string("text_generate", {"very_long_parameter_name": "value"})
-        assert "--very-long-parameter-name" in cmd
+        cmd = build_cli_command_string("text_generate", {"compile-allow-graph-break": True})
+        assert "--compile-allow-graph-break" in cmd
 
     def test_very_long_param_value(self):
         """Very long param values are handled."""
         long_value = "x" * 1000
-        cmd = build_cli_command_string("text_generate", {"prompt": long_value})
+        cmd = build_cli_command_string("text_generate", {"model-id": long_value})
         assert long_value in cmd
 
     def test_empty_list(self):
         """Empty lists are handled."""
-        cmd = build_cli_command_string("text_generate", {"devices": []})
-        # Should not crash
-        assert "--devices" in cmd
+        cmd = build_cli_command_string("text_generate", {"quantize-linear-action": []})
+        # Should not crash; an empty list is skipped (nothing to pass)
+        assert "--quantize-linear-action" not in cmd
 
     def test_single_item_list(self):
         """Single-item lists are handled."""
-        cmd = build_cli_command_string("text_generate", {"devices": ["cpu"]})
-        assert "--devices" in cmd
-        assert "cpu" in cmd
+        cmd = build_cli_command_string("text_generate", {"quantize-linear-action": ["W8A8_DYNAMIC"]})
+        assert "--quantize-linear-action" in cmd
+        assert "W8A8_DYNAMIC" in cmd
 
     def test_large_list(self):
         """Large lists are handled."""
-        items = [f"item{i}" for i in range(100)]
-        cmd = build_cli_command_string("text_generate", {"items": items})
-        for item in items[:10]:  # Check first 10
+        # Use a real list field - tp-sizes for throughput_optimizer
+        items = [str(i) for i in range(1, 11)]  # ["1", "2", ..., "10"]
+        cmd = build_cli_command_string("throughput_optimizer", {"tp-sizes": items})
+        for item in items[:10]:  # Check all
             assert item in cmd
 
 
@@ -305,40 +297,40 @@ class TestIntegration:
         cmd = build_cli_command_string(
             "text_generate",
             {
-                "model_id": "gpt2",
-                "batch_size": 32,
+                "model-id": "gpt2",
+                "num-queries": 32,
                 "device": "cpu",
-                "verbose": True,
-                "chrome_trace": True,
+                "compile": True,
+                "chrome-trace-file": True,
             },
         )
         # Check structure
         assert "python -m cli.inference.text_generate" in cmd
         assert "gpt2" in cmd
-        assert "--batch-size" in cmd and "32" in cmd
+        assert "--num-queries" in cmd and "32" in cmd
         assert "--device" in cmd and "cpu" in cmd
-        assert "--verbose" in cmd
-        assert "--chrome-trace" in cmd
+        assert "--compile" in cmd
+        assert "--chrome-trace-file" in cmd
 
     def test_real_world_throughput_command(self):
         """Real-world throughput_optimizer command."""
         cmd = build_cli_command_string(
             "throughput_optimizer",
             {
-                "model_id": "llama-7b",
+                "model-id": "llama-7b",
                 "device": "a100",
-                "batch_size": 16,
-                "mtp_acceptance_rate": "0.8,0.6,0.4",
-                "chrome_trace": True,
+                "jobs": 16,
+                "mtp-acceptance-rates": "0.8,0.6,0.4",
+                "chrome-trace-file": True,
             },
         )
         assert "python -m cli.inference.throughput_optimizer" in cmd
         assert "llama-7b" in cmd
         assert "--device" in cmd and "a100" in cmd
-        assert "--batch-size" in cmd and "16" in cmd
-        assert "--mtp-acceptance-rate" in cmd
+        assert "--jobs" in cmd and "16" in cmd
+        assert "--mtp-acceptance-rates" in cmd
         assert "0.8" in cmd and "0.6" in cmd and "0.4" in cmd
-        assert "--chrome-trace" in cmd
+        assert "--chrome-trace-file" in cmd
 
 
 class TestConstants:
@@ -352,10 +344,6 @@ class TestConstants:
         """_SKIP_FIELDS is a set."""
         assert isinstance(_SKIP_FIELDS, set)
 
-    def test_flag_overrides_is_dict(self):
-        """_FLAG_OVERRIDES is a dictionary."""
-        assert isinstance(_FLAG_OVERRIDES, dict)
-
 
 class TestNoSplitFields:
     """Tests for single-value fields that may contain commas but should NOT be
@@ -365,21 +353,21 @@ class TestNoSplitFields:
 
     def test_cache_step_range_not_split(self):
         """cache_step_range='20,30' stays as one token, not split into '20 30'."""
-        cmd = build_cli_command_string("video_generate", {"model_id": "m", "cache_step_range": "20,30"})
+        cmd = build_cli_command_string("video_generate", {"model-id": "m", "cache-step-range": "20,30"})
         assert "--cache-step-range 20,30" in cmd
         assert "20 30" not in cmd  # must NOT be space-separated
 
     def test_cache_block_range_not_split(self):
         """cache_block_range='0,4' stays as one token."""
-        cmd = build_cli_command_string("video_generate", {"model_id": "m", "cache_block_range": "0,4"})
+        cmd = build_cli_command_string("video_generate", {"model-id": "m", "cache-block-range": "0,4"})
         assert "--cache-block-range 0,4" in cmd
 
     def test_nargs_plus_field_still_split(self):
         """mtp_acceptance_rate='0.8,0.6' IS split into space-separated tokens
         (it's a nargs='+' field, not in _NO_SPLIT_FIELDS).
         """
-        cmd = build_cli_command_string("throughput_optimizer", {"model_id": "m", "mtp_acceptance_rate": "0.8,0.6"})
-        assert "--mtp-acceptance-rate" in cmd
+        cmd = build_cli_command_string("throughput_optimizer", {"model-id": "m", "mtp-acceptance-rates": "0.8,0.6"})
+        assert "--mtp-acceptance-rates" in cmd
         assert "0.8" in cmd and "0.6" in cmd
         # Should be space-separated, not comma (nargs="+" expects separate tokens).
         assert "0.8,0.6" not in cmd

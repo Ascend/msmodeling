@@ -6,6 +6,7 @@ import { defineStore } from 'pinia'
 import { trackEvent } from '@/services/telemetrySink'
 import { ref, computed } from 'vue'
 import type { FormSchemaEnvelope } from '@/composables/useConfig'
+import { evalPredicate } from '@/composables/usePredicate'
 
 export interface FieldState {
   touched: boolean
@@ -53,15 +54,23 @@ export const useFormStateStore = defineStore('formState', () => {
 
   // Update a field value
   function setFieldValue(fieldId: string, value: any) {
-    if (form.value[fieldId] !== value) {
+    const changed = form.value[fieldId] !== value
+    if (changed) {
       form.value[fieldId] = value
-      if (fieldStates.value[fieldId]) {
+    }
+    if (fieldStates.value[fieldId]) {
+      // touched: user interacted with the field (mirrors CLI argv-present
+      // semantics — the flag was "passed" regardless of final value)
+      fieldStates.value[fieldId].touched = true
+      // dirty: value actually changed from its initial state
+      if (changed) {
         fieldStates.value[fieldId].dirty = true
-        fieldStates.value[fieldId].touched = true
       }
-      // Telemetry: record field interaction. Debounced because text/number
-      // inputs fire setFieldValue on every keystroke; 1s per (module,field)
-      // counts repeated typing as one interaction.
+    }
+    // Telemetry: record field interaction. Debounced because text/number
+    // inputs fire setFieldValue on every keystroke; 1s per (module,field)
+    // counts repeated typing as one interaction.
+    if (changed) {
       const moduleId = schema.value?.moduleId || 'unknown'
       trackEvent(moduleId, fieldId, 'change', true)
     }
@@ -109,9 +118,39 @@ export const useFormStateStore = defineStore('formState', () => {
     }
   }
 
-  // Get current form values (excluding hidden/disabled fields handled by renderer)
+  // Get current form values. Statically hidden fields (schema `hidden: true`
+  // from backend ui_props) are excluded so the submitted payload matches what
+  // the baseline form sent — the backend applies Param defaults for them.
+  // Conditionally-disabled fields (conditions.enabled evaluates to false) are
+  // also excluded to prevent invalid CLI commands (e.g., dspark params with dflash).
   function getFormValues(): FormModel {
-    return { ...form.value }
+    const hidden = new Set(
+      (schema.value?.fields ?? []).filter((f: any) => f.hidden).map((f: any) => f.id),
+    )
+    const out: FormModel = {}
+    for (const [k, v] of Object.entries(form.value)) {
+      if (hidden.has(k)) continue
+
+      // Check if field is disabled by conditions
+      const field = (schema.value?.fields ?? []).find((f: any) => f.id === k)
+      if (field?.conditions?.enabled) {
+        const isEnabled = evalPredicate(field.conditions.enabled, form.value)
+        if (!isEnabled) continue  // Skip disabled fields
+      }
+
+      out[k] = v
+    }
+    return out
+  }
+
+  // Get set of field IDs the user has explicitly interacted with (touched).
+  // Used at submit time to build the `provided` set for wants_provided=True
+  // validators — mirrors CLI semantics where argv-present flags are "provided"
+  // regardless of whether their value equals the default.
+  function getTouchedFields(): string[] {
+    return Object.entries(fieldStates.value)
+      .filter(([, state]) => state.touched)
+      .map(([id]) => id)
   }
 
   // Check if form is pristine (no changes)
@@ -131,5 +170,6 @@ export const useFormStateStore = defineStore('formState', () => {
     setValid,
     resetForm,
     getFormValues,
+    getTouchedFields,
   }
 })

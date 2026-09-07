@@ -49,18 +49,20 @@ def _init_storage() -> None:
 
 
 def _upsert_schema_snapshots() -> list[tuple[str, str, str]]:
-    """Copy the bundled config (if present) and upsert all snapshots.
+    """Generate form schemas from Python registry and upsert all snapshots.
 
     Returns the registered (kind, module, version) tuples. Raises on hash
     mismatch for a version (refuse-on-mismatch).
     """
-    from services.schema_registry import copy_bundled_configs
+    from services.schema_registry import generate_form_configs
 
     try:
-        copy_bundled_configs()
-    except OSError:
-        # No bundled config yet (e.g. before the first frontend build) — skip.
-        logger.warning("Bundled config copy skipped (frontend build not run yet?)")
+        # Generate form JSONs from backend registry (ModuleSpec + UIProps)
+        # This replaces the old flow: gen-form-schemas.mjs + copy_bundled_configs
+        generate_form_configs()
+    except Exception:
+        # Generation failed (e.g. missing ui_props module) — skip.
+        logger.warning("Form schema generation skipped (registry not ready?)", exc_info=True)
     registry = SchemaRegistry()
     return registry.upsert_all_from_bundle()
 

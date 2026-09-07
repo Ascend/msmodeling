@@ -30,7 +30,7 @@ const { baseOption } = useChartTheme()
 
 // Execution time chart (by perf model)
 const executionTimeChartOption = computed(() => {
-  const execTime = props.result.execution_time_s || {}
+  const execTime = props.result["execution_time_s"] || {}
   const models = Object.keys(execTime)
   const values = Object.values(execTime).map(v => typeof v === 'number' ? v : 0)
 
@@ -84,14 +84,14 @@ const breakdownSummary = computed(() => {
 // Whether any result data is present — mirrors the el-empty guard so a
 // no-data result shows a clean empty state instead of all-dash metric cards.
 const hasResult = computed(() =>
-  !!props.result.execution_time_s
+  !!props.result["execution_time_s"]
   || !!breakdownSummary.value
-  || (props.result.op_breakdown || []).length > 0
+  || (props.result["op_breakdown"] || []).length > 0
 )
 
 // Summary metrics
 const summaryMetrics = computed(() => {
-  const execTime = props.result.execution_time_s || {}
+  const execTime = props.result["execution_time_s"] || {}
   const totalTime = Object.values(execTime).reduce((sum: number, v) => sum + (typeof v === 'number' ? v : 0), 0)
 
   return [
@@ -109,18 +109,18 @@ const summaryMetrics = computed(() => {
     },
     {
       label: t({ zh: '算子种类', en: 'Operator Types' }),
-      value: (props.result.op_breakdown || []).length || '-'
+      value: (props.result["op_breakdown"] || []).length || '-'
     }
   ]
 })
 
 // Chrome trace: wrap single case in array format for ChromeTraceDownloads
 const traceCases = computed(() => {
-  if (props.hideTraceDownloads || !props.result.chrome_trace?.available) return []
+  if (props.hideTraceDownloads || !props.result["chrome_trace"]?.available) return []
   return [{
     seq: 0,
-    config: props.result.input_config || {},
-    chrome_trace: props.result.chrome_trace
+    config: props.result["input_config"] || {},
+    "chrome_trace": props.result["chrome_trace"]
   }]
 })
 </script>
@@ -144,7 +144,7 @@ const traceCases = computed(() => {
     </el-row>
 
     <!-- Execution Time Chart -->
-    <el-row :gutter="16" class="charts-section" v-if="result.execution_time_s">
+    <el-row :gutter="16" class="charts-section" v-if="result['execution_time_s']">
       <el-col :xs="24">
         <el-card>
           <ChartWrapper :option="executionTimeChartOption" height="350px" />
@@ -158,12 +158,12 @@ const traceCases = computed(() => {
       <span class="ob-text">{{ breakdownSummary }}</span>
     </div>
 
-    <!-- Operator timing table (shared component) -->
-    <OperatorTimingTable :op-breakdown="props.result.op_breakdown || []" />
+    <!-- Chrome trace: wrap single case in array format for ChromeTraceDownloads -->
+    <OperatorTimingTable :op-breakdown="props.result['op_breakdown'] || []" />
 
     <!-- No Result State -->
     <el-empty
-      v-if="!result.execution_time_s && !breakdownSummary && !(props.result.op_breakdown || []).length"
+      v-if="!result['execution_time_s'] && !breakdownSummary && !(props.result['op_breakdown'] || []).length"
       :description="t({ zh: '暂无结果数据', en: 'No result data available' })"
     />
 

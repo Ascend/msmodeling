@@ -45,12 +45,26 @@ class SchemaMismatchError(RuntimeError):
 class RunnerPort(Protocol):  # pragma: no cover - Protocol class; body is type signatures only, no runtime code
     """The interface every runner adapter implements."""
 
-    def run(self, params: dict[str, Any], *, on_progress=None, cancel_flag=None) -> list[ResultRecord]:
+    def run(
+        self,
+        params: dict[str, Any],
+        *,
+        on_progress=None,
+        cancel_flag=None,
+        cached_hashes: set[str] | None = None,
+        form_schema_version: str | None = None,
+        job_id: str | None = None,
+        provided: set[str] | None = None,
+    ) -> tuple[list[ResultRecord], list[str]]:
         """Run the simulation and return normalized result records.
 
         ``on_progress(progress: int | None, text: str | None)`` is called with
         optimizer percent or text/video milestone updates. ``cancel_flag`` is a
         callable returning ``True`` when cancel was requested (cooperative).
+        ``cached_hashes`` is a set of case hashes for dedup. ``form_schema_version``
+        is the schema version for hash computation. ``job_id`` is the job ID for
+        trace path synthesis. ``provided`` is the set of explicitly provided field
+        names (for wants_provided validators).
         """
 
 
@@ -82,6 +96,7 @@ def _row_to_job(row) -> Job:
         progress_text=row.progress_text,
         error=row.error,
         error_detail=row.error_detail,
+        error_fields=json.loads(row.error_fields) if getattr(row, "error_fields", None) else None,
         created_at=row.created_at,
         started_at=row.started_at,
         completed_at=row.completed_at,
@@ -121,43 +136,51 @@ class JobRepository:
             return [_row_to_module(r) for r in rows]
 
     def seed_modules(self) -> int:
-        """Idempotently seed the 3 capability modules if the table is empty.
+        """Idempotently seed capability modules, adding any that are missing.
 
-        Returns the number of modules inserted (0 if already seeded). The
-        ``form_schemas`` table has a FK to ``modules.id``, so modules MUST be
-        seeded before schema snapshots are upserted at startup.
+        Returns the number of modules inserted. The ``form_schemas`` table has
+        a FK to ``modules.id``, so modules MUST be seeded before schema
+        snapshots are upserted at startup.
         """
         from sqlmodel import select
 
         orm, session_scope = _imports()
+        seeds = [
+            orm.ModuleRow(
+                id="text_generate",
+                display_name="Text Generation",
+                runner_class="ModelRunner",
+                description="Estimate per-device TPS, memory, and operator breakdowns for text models.",
+            ),
+            orm.ModuleRow(
+                id="video_generate",
+                display_name="Video Generation",
+                runner_class="VideoGenerateRunner",
+                description="Profile execution time and per-operator cost for video generation models.",
+            ),
+            orm.ModuleRow(
+                id="throughput_optimizer",
+                display_name="Throughput Optimizer",
+                runner_class="ParallelRunner",
+                description="Sweep parallel/concurrency configs to find the best throughput per device.",
+            ),
+            orm.ModuleRow(
+                id="image_generate",
+                display_name="Image Generation",
+                runner_class="ImageGenerateRunner",
+                description="Estimate per-device TPS, memory, and operator breakdowns for image generation models.",
+            ),
+        ]
         with session_scope() as session:
-            existing = session.exec(select(orm.ModuleRow)).all()
-            if existing:
-                return 0
-            seeds = [
-                orm.ModuleRow(
-                    id="text_generate",
-                    display_name="Text Generation",
-                    runner_class="ModelRunner",
-                    description="Estimate per-device TPS, memory, and operator breakdowns for text models.",
-                ),
-                orm.ModuleRow(
-                    id="video_generate",
-                    display_name="Video Generation",
-                    runner_class="VideoGenerateRunner",
-                    description="Profile execution time and per-operator cost for video generation models.",
-                ),
-                orm.ModuleRow(
-                    id="throughput_optimizer",
-                    display_name="Throughput Optimizer",
-                    runner_class="ParallelRunner",
-                    description="Sweep parallel/concurrency configs to find the best throughput per device.",
-                ),
-            ]
+            existing_ids = {m.id for m in session.exec(select(orm.ModuleRow)).all()}
+            inserted = 0
             for row in seeds:
-                session.add(row)
-            session.commit()
-            return len(seeds)
+                if row.id not in existing_ids:
+                    session.add(row)
+                    inserted += 1
+            if inserted:
+                session.commit()
+            return inserted
 
     def get(self, job_id: str) -> Job | None:
         """Return a job by id, or ``None`` if no such row exists."""
@@ -276,6 +299,9 @@ class JobRepository:
                     # Unknown status string — let the DB CHECK constraint catch it.
                     pass
             for key, value in patch.items():
+                # Serialize list fields to JSON for storage
+                if key == "error_fields" and isinstance(value, list):
+                    value = json.dumps(value)
                 setattr(row, key, value)
             session.add(row)
             session.commit()

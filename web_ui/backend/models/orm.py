@@ -68,6 +68,7 @@ class JobRow(SQLModel, table=True):
     label: str | None = None
     error: str | None = None
     error_detail: str | None = None
+    error_fields: str | None = None  # JSON list of field IDs that failed validation
     created_at: str = Field(default_factory=_utcnow_iso, index=True)
     started_at: str | None = None
     completed_at: str | None = None

@@ -6,9 +6,8 @@
   "description": "msmodeling Web Console frontend — Vue 3 + Element Plus; forms data-driven, results module-componentized (Constitution Principle II v2.2.0).",
   "scripts": {
     "copy-plugins": "node scripts/copy-plugins.mjs",
-    "gen:schemas": "node scripts/gen-form-schemas.mjs",
-    "dev": "npm run copy-plugins && npm run gen:schemas && vite",
-    "build": "vue-tsc --noEmit && npm run copy-plugins && npm run gen:schemas && vite build",
+    "dev": "npm run copy-plugins && vite",
+    "build": "vue-tsc --noEmit && npm run copy-plugins && vite build",
     "preview": "vite preview",
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",

@@ -182,11 +182,11 @@ class TestRunOneVideoCase:
             mock_cls.return_value.run_inference.return_value = rt
             rec = _run_one_video_case(
                 {
-                    "model_id": "Wan-AI/Wan2.1-T2V-1.3B",
+                    "model-id": "Wan-AI/Wan2.1-T2V-1.3B",
                     "device": "TEST_DEVICE",
-                    "world_size": 2,
-                    "quantize_linear_action": "W8A8_DYNAMIC",
-                    "ulysses_size": 4,
+                    "num-devices": 2,
+                    "quantize-linear-action": "W8A8_DYNAMIC",
+                    "ulysses-size": 4,
                 }
             )
         # Assert ALL 5 config fields the production code populates.
@@ -212,9 +212,9 @@ class TestRunOneVideoCase:
             mock_cls.return_value.run_inference.return_value = rt
             _run_one_video_case(
                 {
-                    "model_id": "m",
+                    "model-id": "m",
                     "device": "TEST_DEVICE",
-                    "quantize_linear_action": "not-a-real-quant",
+                    "quantize-linear-action": "not-a-real-quant",
                 }
             )
             # The runner was constructed with the default quant enum.
@@ -231,9 +231,9 @@ class TestRunOneVideoCase:
             mock_cls.return_value.run_inference.return_value = rt
             _run_one_video_case(
                 {
-                    "model_id": "m",
+                    "model-id": "m",
                     "device": "TEST_DEVICE",
-                    "chrome_trace": "/tmp/trace.json",
+                    "chrome-trace-file": "/tmp/trace.json",
                 }
             )
             rt.export_chrome_trace.assert_called_once_with("/tmp/trace.json")
@@ -246,7 +246,7 @@ class TestRunOneVideoCase:
         rt = _runtime(event_list=[ev, ev])
         with self._patch_runner(rt) as mock_cls:
             mock_cls.return_value.run_inference.return_value = rt
-            rec = _run_one_video_case({"model_id": "m", "device": "TEST_DEVICE"})
+            rec = _run_one_video_case({"model-id": "m", "device": "TEST_DEVICE"})
         assert len(rec["tables"]["op_breakdown"]) == 1  # one distinct op
         assert rec["tables"]["op_breakdown"][0]["call_times"] == 2
 
@@ -256,7 +256,7 @@ class TestRunOneVideoCase:
         rt.table_averages.side_effect = RuntimeError("print failed")
         with self._patch_runner(rt) as mock_cls:
             mock_cls.return_value.run_inference.return_value = rt
-            rec = _run_one_video_case({"model_id": "m", "device": "TEST_DEVICE"})
+            rec = _run_one_video_case({"model-id": "m", "device": "TEST_DEVICE"})
         # Still produces a record (the envelope falls back to empty table text).
         assert "tables" in rec
 
@@ -267,15 +267,15 @@ class TestRunOneVideoCase:
             mock_cls.return_value.run_inference.return_value = rt
             _run_one_video_case(
                 {
-                    "model_id": "m",
+                    "model-id": "m",
                     "device": "TEST_DEVICE",
-                    "batch_size": "",
-                    "seq_len": "",
+                    "batch-size": "",
+                    "seq-len": "",
                     "height": "",
                     "width": "",
-                    "frame_num": "",
-                    "sample_step": "",
-                    "mxfp4_group_size": "",
+                    "frame-num": "",
+                    "sample-step": "",
+                    "mxfp4-group-size": "",
                 }
             )
             # run_inference called with coerced ints (no crash from int("")).
@@ -285,15 +285,15 @@ class TestRunOneVideoCase:
         """A repo-relative model_id that is an existing dir is resolved against
         _REPO_ROOT (covers the candidate.is_dir() True branch).
         """
-        import runners.video_generate as vg
+        import runners._multicase as mc
 
         fake_repo = tmp_path / "repo"
         (fake_repo / "assets" / "vid_model").mkdir(parents=True)
-        monkeypatch.setattr(vg, "_REPO_ROOT", fake_repo)
+        monkeypatch.setattr(mc, "_REPO_ROOT", fake_repo)
         rt = _runtime()
         with self._patch_runner(rt) as mock_cls:
             mock_cls.return_value.run_inference.return_value = rt
-            _run_one_video_case({"model_id": "assets/vid_model", "device": "TEST_DEVICE"})
+            _run_one_video_case({"model-id": "assets/vid_model", "device": "TEST_DEVICE"})
             # model_id resolved to the absolute repo-rooted path.
             assert mock_cls.call_args.kwargs["model_id"] == str(fake_repo / "assets" / "vid_model")
 
@@ -306,7 +306,7 @@ class TestRunOneVideoCase:
         rt = _runtime()
         with self._patch_runner(rt) as mock_cls:
             mock_cls.return_value.run_inference.return_value = rt
-            _run_one_video_case({"model_id": str(abs_model), "device": "TEST_DEVICE"})
+            _run_one_video_case({"model-id": str(abs_model), "device": "TEST_DEVICE"})
             assert mock_cls.call_args.kwargs["model_id"] == str(abs_model)
 
     def test_op_breakdown_falls_back_when_aggregate_raises(self):
@@ -320,7 +320,7 @@ class TestRunOneVideoCase:
             patch("runners.video_generate.aggregate_runtime_events", side_effect=RuntimeError("boom")),
         ):
             mock_cls.return_value.run_inference.return_value = rt
-            rec = _run_one_video_case({"model_id": "m", "device": "TEST_DEVICE"})
+            rec = _run_one_video_case({"model-id": "m", "device": "TEST_DEVICE"})
         assert rec["tables"]["op_breakdown"] == []
 
 
@@ -337,7 +337,7 @@ class TestExecute:
         with patch("runners.video_generate._run_one_video_case") as mock_run:
             mock_run.return_value = {"config": {}, "summary": {}, "tables": {}}
             records, _skipped = execute(
-                {"model_id": "m", "device": "TEST_DEVICE"},
+                {"model-id": "m", "device": "TEST_DEVICE", "batch-size": 1, "seq-len": 1},
                 form_schema_version="1.0.0",
             )
         assert len(records) == 1
@@ -348,7 +348,7 @@ class TestExecute:
         with patch("runners.video_generate._run_one_video_case") as mock_run:
             mock_run.return_value = {"config": {}, "summary": {}, "tables": {}}
             records, _skipped = execute(
-                {"model_id": "m", "device": "TEST_DEVICE", "ulysses_size": [1, 2]},
+                {"model-id": "m", "device": "TEST_DEVICE", "batch-size": 1, "seq-len": 1, "ulysses-size": [1, 2]},
                 form_schema_version="1.0.0",
             )
         assert len(records) == 2
@@ -360,11 +360,11 @@ class TestExecute:
         # with that hash cached -> the case is skipped.
         with patch("runners.video_generate._run_one_video_case") as mock_run:
             mock_run.return_value = {"config": {}, "summary": {}, "tables": {}}
-            recs1, _ = execute({"model_id": "m", "device": "TEST_DEVICE"}, form_schema_version="1.0.0")
+            recs1, _ = execute({"model-id": "m", "device": "TEST_DEVICE"}, form_schema_version="1.0.0")
             ch = recs1[0]["case_hash"]
             mock_run.reset_mock()
             recs2, skipped = execute(
-                {"model_id": "m", "device": "TEST_DEVICE"},
+                {"model-id": "m", "device": "TEST_DEVICE"},
                 cached_hashes={ch},
                 form_schema_version="1.0.0",
             )

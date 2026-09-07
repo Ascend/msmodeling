@@ -13,6 +13,8 @@ from cli.spec_cli import (
     add_version_option,
     configure_std_logging,
     make_enum_type,
+)
+from cli.spec_cli import (
     parse_args as spec_parse_args,
 )
 from tensor_cast import device_profiles  # noqa: F401

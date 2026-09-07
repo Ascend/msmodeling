@@ -77,8 +77,116 @@ const validationRules = computed(() => {
     // (the number control below also reads `.value` for its own min/max). Map
     // by rule type so Element Plus's min/max/len length/range checks actually
     // fire — the old `rule.min`/`rule.max`/`rule.len` reads were always undefined.
-    if (rule.rule === 'min' && rule.value !== undefined) elRule.min = rule.value
-    if (rule.rule === 'max' && rule.value !== undefined) elRule.max = rule.value
+    //
+    // IMPORTANT: For `min`/`max` on text controls (which store values as strings),
+    // we MUST supply a custom validator that does string→number conversion and
+    // NOT set `type: "number"` on the el-rule. Otherwise async-validator's built-in
+    // `type: 'number'` validator rejects the string value (e.g. "4") as a type
+    // mismatch, producing a spurious "must be ≥ N" error with the message's raw
+    // Chinese text (not the localized version). The custom validator mirrors the
+    // same logic as useFormValidation.ts so both validation paths agree.
+    if (rule.rule === 'min' && rule.value !== undefined) {
+      elRule.min = rule.value
+      const threshold = Number(rule.value)
+      const isIntegerRule = rule.type === 'integer'
+      const isStringRule = rule.type === 'string'
+      // Multi-value fields (multiValues flag OR array dataType) accept
+      // comma-separated input — validate EACH element individually.
+      const isMultiValue = props.field.multiValues === true || rule.type === 'array'
+      elRule.validator = (_r: any, value: any, callback: (e?: string) => void) => {
+        if (value === null || value === undefined || value === '') { callback(); return }
+        // type:'string' → check string LENGTH (min字符数).
+        if (isStringRule) {
+          if (String(value).length >= threshold) {
+            callback()
+          } else {
+            callback(resolveLabel(rule.message))
+          }
+          return
+        }
+        if (isMultiValue) {
+          const items = String(value).split(',').map((s: string) => s.trim()).filter(Boolean)
+          if (items.length === 0) { callback(); return }
+          for (const item of items) {
+            const numValue = Number(item)
+            if (!Number.isFinite(numValue)) {
+              callback(resolveLabel(rule.message) || 'Must be a valid number')
+              return
+            }
+            if (isIntegerRule && !Number.isInteger(numValue)) {
+              callback(resolveLabel(rule.message) || 'Must be an integer')
+              return
+            }
+            if (numValue < threshold) {
+              callback(resolveLabel(rule.message))
+              return
+            }
+          }
+          callback()
+          return
+        }
+        const numValue = Number(value)
+        if (!Number.isFinite(numValue)) {
+          callback(resolveLabel(rule.message) || 'Must be a valid number')
+        } else if (isIntegerRule && !Number.isInteger(numValue)) {
+          callback(resolveLabel(rule.message) || 'Must be an integer')
+        } else if (numValue >= threshold) {
+          callback()
+        } else {
+          callback(resolveLabel(rule.message))
+        }
+      }
+    }
+    if (rule.rule === 'max' && rule.value !== undefined) {
+      elRule.max = rule.value
+      const threshold = Number(rule.value)
+      const isIntegerRule = rule.type === 'integer'
+      const isStringRule = rule.type === 'string'
+      const isMultiValue = props.field.multiValues === true || rule.type === 'array'
+      elRule.validator = (_r: any, value: any, callback: (e?: string) => void) => {
+        if (value === null || value === undefined || value === '') { callback(); return }
+        // type:'string' → check string LENGTH (max字符数).
+        if (isStringRule) {
+          if (String(value).length <= threshold) {
+            callback()
+          } else {
+            callback(resolveLabel(rule.message))
+          }
+          return
+        }
+        if (isMultiValue) {
+          const items = String(value).split(',').map((s: string) => s.trim()).filter(Boolean)
+          if (items.length === 0) { callback(); return }
+          for (const item of items) {
+            const numValue = Number(item)
+            if (!Number.isFinite(numValue)) {
+              callback(resolveLabel(rule.message) || 'Must be a valid number')
+              return
+            }
+            if (isIntegerRule && !Number.isInteger(numValue)) {
+              callback(resolveLabel(rule.message) || 'Must be an integer')
+              return
+            }
+            if (numValue > threshold) {
+              callback(resolveLabel(rule.message))
+              return
+            }
+          }
+          callback()
+          return
+        }
+        const numValue = Number(value)
+        if (!Number.isFinite(numValue)) {
+          callback(resolveLabel(rule.message) || 'Must be a valid number')
+        } else if (isIntegerRule && !Number.isInteger(numValue)) {
+          callback(resolveLabel(rule.message) || 'Must be an integer')
+        } else if (numValue <= threshold) {
+          callback()
+        } else {
+          callback(resolveLabel(rule.message))
+        }
+      }
+    }
     if (rule.rule === 'len' && rule.value !== undefined) elRule.len = rule.value
 
     // Handle pattern
@@ -92,8 +200,12 @@ const validationRules = computed(() => {
       elRule.enum = rule.value
     }
 
-    // Type-specific rules
-    if (rule.type) {
+    // Type-specific rules.
+    // CRITICAL: skip setting `type` for min/max rules — the custom validator
+    // above handles string→number. Setting `type: "number"` would cause
+    // async-validator to replace our validator with its built-in type check,
+    // which rejects text-control string values.
+    if (rule.type && rule.rule !== 'min' && rule.rule !== 'max') {
       elRule.type = rule.type
     }
 

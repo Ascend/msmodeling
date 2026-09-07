@@ -21,7 +21,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:splitPercent': [v: number]
-  submit: [data: { moduleId: string; params: Record<string, any>; formSchemaVersion: string }]
+  submit: [data: { moduleId: string; params: Record<string, any>; formSchemaVersion: string; explicitlyTouched: string[] }]
 }>()
 
 const { t } = useLocale()
@@ -247,8 +247,8 @@ function triggerSubmit() {
   schemaFormRef.value?.submit()
 }
 
-async function handleSubmit(data: { moduleId: string; params: Record<string, any>; formSchemaVersion: string }) {
-  await props.runner.submit(data.params, data.formSchemaVersion)
+async function handleSubmit(data: { moduleId: string; params: Record<string, any>; formSchemaVersion: string; explicitlyTouched: string[] }) {
+  await props.runner.submit(data.params, data.formSchemaVersion, data.explicitlyTouched)
 }
 
 async function handleCancel() {

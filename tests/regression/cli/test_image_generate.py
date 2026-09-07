@@ -85,11 +85,11 @@ def test_startup_prints_mindstudio_logo() -> None:
             ["--output-image-size", "256", "256"],
             "--output-image-size must be provided exactly once",
         ),
-        (["--cfg-parallel"], "cfg_parallel requires use_cfg"),
-        (["--world-size", "2"], "world_size must equal 1"),
+        (["--cfg-parallel"], "cfg-parallel requires use-cfg to be enabled"),
+        (["--world-size", "2"], "num-devices (2) must equal ulysses-size (1)"),
         (
             ["--use-cfg", "--cfg-parallel", "--world-size", "4", "--ulysses-size", "3"],
-            "world_size must equal 6",
+            "num-devices (4) must equal 2 * ulysses-size (3) = 6 when cfg-parallel is enabled",
         ),
         (
             ["--dit-cache", "--cache-step-interval", "2"],

@@ -151,7 +151,7 @@ def build_run_job(job_manager: "JobManager") -> "JobManager | None":
                 # job's trace files too (seq is preserved by clone_records, so
                 # case_{seq}.json names line up 1:1) — otherwise the result page
                 # would hide the download table for a cache-hit job.
-                if job.params.get("chrome_trace") is True:
+                if job.params.get("chrome-trace-file") is True:
                     from services.trace_store import copy_all_traces
 
                     copy_all_traces(cached.id, job.id)
@@ -216,7 +216,19 @@ def build_run_job(job_manager: "JobManager") -> "JobManager | None":
 
                 ensure_sim_stack_warmed()
                 with capture_job(job.id) as ring:
+                    # Compute provided set (job-level, shared across all cases)
+                    # for wants_provided=True validators
+                    from cli.registry.modules import get_spec
+                    from services.case_validation import compute_provided_set
+
+                    try:
+                        spec = get_spec(job.module_id)
+                        provided = compute_provided_set(spec, job.params, job.explicitly_touched)
+                    except KeyError:
+                        provided = set()
+
                     logger.info(f"Job {job.id} params={job.params}")
+
                     records, skipped_hashes = runner.run(
                         job.params,
                         on_progress=on_progress,
@@ -224,6 +236,7 @@ def build_run_job(job_manager: "JobManager") -> "JobManager | None":
                         cached_hashes=cached_case_hashes,
                         form_schema_version=job.form_schema_version,
                         job_id=job.id,
+                        provided=provided,
                     )
                     logger.info(
                         f"Job {job.id}: case-dedup worker returned records={len(records)} skipped={len(skipped_hashes)}"
@@ -299,7 +312,7 @@ def build_run_job(job_manager: "JobManager") -> "JobManager | None":
 
             # Chrome trace file handling: rename fresh records' {case_hash}.json to
             # case_{seq}.json, copy cached records' traces from source job.
-            if job.params.get("chrome_trace") is True:
+            if job.params.get("chrome-trace-file") is True:
                 from services.trace_store import materialize_traces
 
                 materialize_traces(job.id, all_records, set(skipped_hashes))
@@ -332,19 +345,50 @@ def build_run_job(job_manager: "JobManager") -> "JobManager | None":
                 for ch, content in case_logs.items():
                     write_case_log_file(ch, content)
 
-            # 6. Success — persist params_hash + log_text so a future identical
+            # 6. Check for validation failures in records
+            # If ANY case failed validation, collect the error info.
+            # If ALL cases failed, mark job as FAILED; otherwise SUCCEEDED with partial errors.
+            validation_errors = []
+            validation_fields_set = set()
+            for r in all_records:
+                summary = r.summary if isinstance(r.summary, dict) else {}
+                if summary.get("validation_failed"):
+                    validation_errors.append(summary.get("error", "Validation failed"))
+                    fields = summary.get("error_fields")
+                    if fields:
+                        validation_fields_set.update(fields)
+
+            # 7. Success — persist params_hash + log_text so a future identical
             # submission reuses this run's results + CLI log (Phase C cache source).
             log_text = "\n".join(ring.get_all()) if ring else None
-            _w(
-                lambda: job_repo.update(
-                    job.id,
-                    status=JobStatus.SUCCEEDED,
-                    params_hash=params_hash,
-                    log_text=log_text,
-                    completed_at=_utcnow(),
+
+            if len(validation_errors) == len(all_records):
+                # ALL cases failed validation — mark job as FAILED
+                _w(
+                    lambda e=validation_errors[0], f=list(validation_fields_set): job_repo.update(
+                        job.id,
+                        status=JobStatus.FAILED,
+                        error="Validation failed",
+                        error_detail=e,
+                        error_fields=f if f else None,
+                        params_hash=params_hash,
+                        log_text=log_text,
+                        completed_at=_utcnow(),
+                    )
                 )
-            )
-            logger.info(f"Job {job.id}: succeeded with {len(records)} result record(s)")
+                logger.warning(f"Job {job.id}: all {len(all_records)} case(s) failed validation")
+            else:
+                # Some or no cases failed — mark as SUCCEEDED
+                _w(
+                    lambda: job_repo.update(
+                        job.id,
+                        status=JobStatus.SUCCEEDED,
+                        params_hash=params_hash,
+                        log_text=log_text,
+                        completed_at=_utcnow(),
+                    )
+                )
+                logger.info(f"Job {job.id}: succeeded with {len(records)} result record(s)")
 
         except Exception as e:
             # WriteQueue saturation (detected by _w after MAX_WRITE_TIMEOUTS):

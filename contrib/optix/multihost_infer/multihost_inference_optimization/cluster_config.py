@@ -10,6 +10,7 @@ This is a pure configuration module: it only depends on the standard library and
 not depend back on executor / simulator, so it can be imported both from inside the
 plugin package and by build_shell_scripts.py running as a standalone subprocess.
 """
+
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -24,6 +25,7 @@ except ModuleNotFoundError:  # Python < 3.11
 @dataclass
 class NodeConfig:
     """Configuration for a single node; the attributes match the fields SshRemote.from_node reads."""
+
     host: str
     ssh_port: int = 22
     ssh_user: str = "root"
@@ -41,6 +43,7 @@ class NodeConfig:
 @dataclass
 class Config:
     """Cluster configuration, loaded from config.toml."""
+
     node: Optional[NodeConfig] = None
     workers: List[NodeConfig] = field(default_factory=list)
     docker_use_sudo: bool = False
