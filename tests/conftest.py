@@ -19,10 +19,22 @@ import pytest
 
 logger = logging.getLogger(__name__)
 
-pytest_plugins = (
-    "tests.regression.tensor_cast.conftest",
-    "tests.regression.serving_cast.conftest",
-)
+def _torch_available() -> bool:
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+pytest_plugins: tuple[str, ...]
+if _torch_available():
+    pytest_plugins = (
+        "tests.regression.tensor_cast.conftest",
+        "tests.regression.serving_cast.conftest",
+    )
+else:
+    pytest_plugins = ()
 
 _REPO_CACHE = Path.cwd() / ".msmodeling_cache"
 
@@ -131,10 +143,13 @@ def _seed_rng():
     """Seed ``random`` and ``torch`` before every test for determinism."""
     import random
 
-    import torch
-
     random.seed(0)
-    torch.manual_seed(0)
+    try:
+        import torch
+
+        torch.manual_seed(0)
+    except ImportError:
+        pass
 
 
 @pytest.fixture(autouse=True)
