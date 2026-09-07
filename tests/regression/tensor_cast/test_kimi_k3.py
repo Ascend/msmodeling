@@ -475,6 +475,17 @@ class TestKimiK3Patches(unittest.TestCase):
         self._km = _km
         self._km._patched_kimi_k3 = False
 
+    def tearDown(self):
+        """Restore global state after each test to prevent test infection.
+
+        K3 patches install global monkey-patches (fla stubs in sys.modules,
+        quantize_linear replacement, create_causal_mask bridge, etc.) that
+        persist across tests and can corrupt non-K3 model tests (Issue 402:
+        Qwen3-MoE UT failures from modules_to_not_convert pollution).
+        """
+        self._km._restore_k3_global_state()
+        self._km._patched_kimi_k3 = False
+
     # ------------------------------------------------------------------
     # _hf_config_patch_for_kimi_k3 — top-level orchestrator guard
     # ------------------------------------------------------------------
@@ -741,6 +752,89 @@ class TestKimiK3Patches(unittest.TestCase):
             self.assertTrue(tc_patterns.situ._INSTALLED)
         finally:
             tc_patterns.situ._INSTALLED = _saved_flag
+
+    # ------------------------------------------------------------------
+    # install → restore → install: no wrapper stacking (Issue 402 review)
+    # ------------------------------------------------------------------
+
+    def test_install_restore_install_no_wrapper_stacking(self):
+        """Verify ``_restore_k3_global_state`` fully restores class-level methods.
+
+        If the restore function resets install flags but does NOT restore the
+        class-level callable, the next install wraps the already-wrapped
+        method, forming a callable chain.  For ``FusedMoETensorCast.forward``
+        this could double-execute ``routed_expert_down_proj`` and cause
+        dimension errors (PR review feedback on Issue 402 fix).
+
+        The test verifies that after restore, each class-level method is back
+        to the **original** (pre-K3) callable.  This ensures the next install
+        starts from the original, not from an already-wrapped method.
+        """
+        from tensor_cast.layers.internal import CopyLayerWrapper
+        from tensor_cast.layers.moe_layer import (
+            FusedMoETensorCast,
+            MoELayer,
+            ParallelMoELayer,
+        )
+        from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
+
+        # --- Phase 0: Save originals (before any K3 install) ---
+        self._km._restore_k3_global_state()  # start clean
+        orig_moe_init = MoELayer.__init__
+        orig_parallel_moe_init = ParallelMoELayer.__init__
+        orig_fused_moe_fwd = FusedMoETensorCast.forward
+        orig_copy_init = CopyLayerWrapper.__init__
+        orig_copy_fwd = CopyLayerWrapper.forward
+        orig_tp_plan = MultiheadLatentAttentionTensorCast.build_tp_plan_extras
+
+        # --- Phase 1: Install all patches ---
+        self._km._install_latent_moe_patch()
+        self._km._install_copy_layer_attr_patch()
+        self._km._install_kda_tp_plan_patch()
+
+        # After install, methods must be different from originals (wrapped)
+        self.assertIsNot(MoELayer.__init__, orig_moe_init)
+        self.assertIsNot(ParallelMoELayer.__init__, orig_parallel_moe_init)
+        self.assertIsNot(FusedMoETensorCast.forward, orig_fused_moe_fwd)
+        self.assertIsNot(CopyLayerWrapper.__init__, orig_copy_init)
+        self.assertIsNot(CopyLayerWrapper.forward, orig_copy_fwd)
+        self.assertIsNot(MultiheadLatentAttentionTensorCast.build_tp_plan_extras, orig_tp_plan)
+
+        # --- Phase 2: Restore global state ---
+        self._km._restore_k3_global_state()
+
+        # After restore, methods MUST be back to the originals.
+        # If they are NOT, the next install will stack a new wrapper on top
+        # of the Phase-1 wrapper, forming a callable chain.
+        self.assertIs(MoELayer.__init__, orig_moe_init)
+        self.assertIs(ParallelMoELayer.__init__, orig_parallel_moe_init)
+        self.assertIs(FusedMoETensorCast.forward, orig_fused_moe_fwd)
+        self.assertIs(CopyLayerWrapper.__init__, orig_copy_init)
+        self.assertIs(CopyLayerWrapper.forward, orig_copy_fwd)
+        # classmethod access creates a new bound method each time, so compare
+        # the underlying function (__func__) instead of the bound method object.
+        self.assertIs(
+            MultiheadLatentAttentionTensorCast.build_tp_plan_extras.__func__,
+            orig_tp_plan.__func__,
+        )
+
+        # --- Phase 3: Re-install all patches ---
+        self._km._install_latent_moe_patch()
+        self._km._install_copy_layer_attr_patch()
+        self._km._install_kda_tp_plan_patch()
+
+        # The re-installed methods should be different from originals (wrapped)
+        self.assertIsNot(MoELayer.__init__, orig_moe_init)
+        self.assertIsNot(FusedMoETensorCast.forward, orig_fused_moe_fwd)
+
+        # --- Phase 4: Restore again ---
+        self._km._restore_k3_global_state()
+        self.assertIs(MoELayer.__init__, orig_moe_init)
+        self.assertIs(FusedMoETensorCast.forward, orig_fused_moe_fwd)
+        self.assertIs(
+            MultiheadLatentAttentionTensorCast.build_tp_plan_extras.__func__,
+            orig_tp_plan.__func__,
+        )
 
 
 # ---------------------------------------------------------------------------

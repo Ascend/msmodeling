@@ -20,6 +20,7 @@ Patch numbering follows the design doc  scheme:
 """
 
 import contextlib
+import importlib.machinery
 import importlib.util
 import logging
 import sys
@@ -33,6 +34,27 @@ from ..custom_model_registry import ModelProfile, get_visual_layers, register_mo
 from ...layers.internal import CopyLayerWrapper, RegionMarkerWrapper
 
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# Global patch tracking — stores original references for test cleanup
+# ============================================================
+# Every ``_install_*`` function stores the original (pre-patch) reference
+# here with a unique key. ``_restore_k3_global_state()`` uses this dict to
+# undo all patches, ensuring tests don't leak global state into other test
+# suites (Issue 402: test infection caused Qwen3-MoE UT failures).
+_K3_PATCH_ORIGINALS: dict = {}
+
+# Module names injected into ``sys.modules`` by ``_install_fla_stub``.
+# Stored so cleanup can remove only our stubs, not a real ``fla`` package.
+_K3_FLA_STUB_NAMES = (
+    "fla",
+    "fla.modules",
+    "fla.ops",
+    "fla.ops.kda",
+    "fla.ops.utils",
+    "fla.ops.utils.index",
+    "fla.utils",
+)
 
 # ============================================================
 # fla-core stub modules
@@ -156,14 +178,21 @@ def _install_fla_stub() -> None:
 
     fla = types.ModuleType("fla")
     fla.__path__ = []  # mark as package
+    fla.__spec__ = importlib.machinery.ModuleSpec("fla", None, is_package=True)
     fla_modules = types.ModuleType("fla.modules")
+    fla_modules.__spec__ = importlib.machinery.ModuleSpec("fla.modules", None)
     fla_ops = types.ModuleType("fla.ops")
     fla_ops.__path__ = []
+    fla_ops.__spec__ = importlib.machinery.ModuleSpec("fla.ops", None, is_package=True)
     fla_ops_kda = types.ModuleType("fla.ops.kda")
+    fla_ops_kda.__spec__ = importlib.machinery.ModuleSpec("fla.ops.kda", None)
     fla_ops_utils = types.ModuleType("fla.ops.utils")
     fla_ops_utils.__path__ = []
+    fla_ops_utils.__spec__ = importlib.machinery.ModuleSpec("fla.ops.utils", None, is_package=True)
     fla_ops_utils_index = types.ModuleType("fla.ops.utils.index")
+    fla_ops_utils_index.__spec__ = importlib.machinery.ModuleSpec("fla.ops.utils.index", None)
     fla_utils = types.ModuleType("fla.utils")
+    fla_utils.__spec__ = importlib.machinery.ModuleSpec("fla.utils", None)
 
     fla_modules.ShortConvolution = _ShortConvolutionStub
     fla_modules.FusedRMSNormGated = _FusedRMSNormGatedStub
@@ -194,6 +223,12 @@ def _install_fla_stub() -> None:
     fla_ops_utils.index = fla_ops_utils_index
     fla.utils = fla_utils
     fla_ops.kda = fla_ops_kda
+
+    # Save original sys.modules entries for cleanup (only if not already saved).
+    for _name in _K3_FLA_STUB_NAMES:
+        _key = f"sys.modules.{_name}"
+        if _key not in _K3_PATCH_ORIGINALS:
+            _K3_PATCH_ORIGINALS[_key] = sys.modules.get(_name)
 
     sys.modules.update(
         {
@@ -262,6 +297,7 @@ def _install_latent_moe_patch() -> None:
     # KimiSparseMoeBlock module and attach them to self.fused_moe.
     # Non-K3 modules: getattr returns None → no attributes set → no impact.
     _orig_moe_layer_init = MoELayer.__init__
+    _K3_PATCH_ORIGINALS.setdefault("MoELayer.__init__", _orig_moe_layer_init)
 
     def _patched_moe_layer_init(self, moe_config, module):
         _orig_moe_layer_init(self, moe_config, module)
@@ -295,6 +331,7 @@ def _install_latent_moe_patch() -> None:
     # ``_orig_parallel_moe_init`` runs, then attach them to the NEW
     # ``self._inner.fused_moe`` AFTER it has been created.
     _orig_parallel_moe_init = ParallelMoELayer.__init__
+    _K3_PATCH_ORIGINALS.setdefault("ParallelMoELayer.__init__", _orig_parallel_moe_init)
 
     def _patched_parallel_moe_init(self, module, *args, **kwargs):
         # Capture projections from the ORIGINAL fused_moe BEFORE _orig init
@@ -327,6 +364,7 @@ def _install_latent_moe_patch() -> None:
     #   ③ norm → up_proj: 3584→7168 (after combine, before shared experts)
     #   ④ shared experts on original 7168-dim hidden_states
     _orig_fused_moe_forward = FusedMoETensorCast.forward
+    _K3_PATCH_ORIGINALS.setdefault("FusedMoETensorCast.forward", _orig_fused_moe_forward)
 
     def _patched_fused_moe_forward(
         self,
@@ -430,6 +468,7 @@ def _install_copy_layer_attr_patch() -> None:
 
     # --- Patch 1: __init__ — copy is_linear_attn -----------------------
     _orig_copy_layer_init = CopyLayerWrapper.__init__
+    _K3_PATCH_ORIGINALS.setdefault("CopyLayerWrapper.__init__", _orig_copy_layer_init)
 
     def _patched_copy_layer_init(self, region_id, layer, representative):
         _orig_copy_layer_init(self, region_id, layer, representative)
@@ -449,6 +488,7 @@ def _install_copy_layer_attr_patch() -> None:
     # meta path).  Without this fix, ``block_residual`` becomes ``None``,
     # causing ``TypeError`` in ``_apply_output_attn_res``.
     _orig_copy_layer_forward = CopyLayerWrapper.forward
+    _K3_PATCH_ORIGINALS.setdefault("CopyLayerWrapper.forward", _orig_copy_layer_forward)
 
     def _patched_copy_layer_forward(self, *args, **kwargs):
         result = _orig_copy_layer_forward(self, *args, **kwargs)
@@ -512,6 +552,9 @@ def _install_kda_tp_plan_patch() -> None:
     )
 
     _orig_build_tp_plan_extras = MultiheadLatentAttentionTensorCast.build_tp_plan_extras.__func__
+    _K3_PATCH_ORIGINALS.setdefault(
+        "MultiheadLatentAttentionTensorCast.build_tp_plan_extras", _orig_build_tp_plan_extras
+    )
 
     def _k3_build_tp_plan_extras(cls, prefix, params, config_info):
         extras = dict(_orig_build_tp_plan_extras(cls, prefix, params, config_info))
@@ -635,6 +678,7 @@ def _install_lm_head_tp_patch() -> None:
     from tensor_cast.transformers import transformations as _tfm
 
     _orig_shard_model_by_tp = _tfm.shard_model_by_tp
+    _K3_PATCH_ORIGINALS.setdefault("transformations.shard_model_by_tp", _orig_shard_model_by_tp)
 
     def _patched_shard_model_by_tp(model, report=None):
         model = _orig_shard_model_by_tp(model, report)
@@ -729,6 +773,7 @@ def _install_vision_rms_norm_patch() -> None:
     from tensor_cast.transformers import transformations as _tfm
 
     _orig_shard_model_by_tp = _tfm.shard_model_by_tp
+    _K3_PATCH_ORIGINALS.setdefault("transformations.shard_model_by_tp", _orig_shard_model_by_tp)
 
     def _patched_shard_model_by_tp(model, report=None):
         model = _orig_shard_model_by_tp(model, report)
@@ -896,113 +941,26 @@ def _install_non_expert_quant_exclusion_patch():
         return
 
     from tensor_cast.core.quantization import config as _quant_config_module
-    from tensor_cast.core.quantization.datatypes import (
-        QuantizeAttentionAction,
-        QuantizeLinearAction,
-    )
 
-    _orig_create_quant_config = _quant_config_module.create_quant_config
-
-    def _patched_create_quant_config(
-        quantize_linear_action=QuantizeLinearAction.DISABLED,
-        quantize_non_expert_linear_action=QuantizeLinearAction.DISABLED,
-        quantize_lmhead=False,
-        quantize_attention_action=QuantizeAttentionAction.DISABLED,
-        **kwargs,
-    ):
-        quant_config = _orig_create_quant_config(
-            quantize_linear_action,
-            quantize_non_expert_linear_action=quantize_non_expert_linear_action,
-            quantize_lmhead=quantize_lmhead,
-            quantize_attention_action=quantize_attention_action,
-            **kwargs,
-        )
-        # When non-expert is DISABLED but linear is enabled, exclude ALL
-        # non-expert layers (attention + shared experts + dense MLP + Latent)
-        # from quantization so they stay BF16 (intuitive DISABLED semantics).
-        if (
-            quantize_non_expert_linear_action == QuantizeLinearAction.DISABLED
-            and quantize_linear_action != QuantizeLinearAction.DISABLED
-        ):
-            # When attention quant is ENABLED, kv_b_proj MUST stay quantizable
-            # (mla.py:_quantize_kv_b_decomposition requires it). So filter out
-            # the broad attention wildcards from _NON_EXPERT_LINEAR_PATTERNS
-            # and replace them with the precise _K3_ATTN_EXCLUDE_KEEP_KV_B_PATTERNS
-            # (keeps kv_b_proj, excludes other MLA/KDA submodules → BF16).
-            _attn_enabled = quantize_attention_action != QuantizeAttentionAction.DISABLED
-            # Generic non-expert patterns (attention broad, dense MLP, standard
-            # shared-expert layouts) — filter attention broad wildcards if attn on.
-            for pattern in _quant_config_module._NON_EXPERT_LINEAR_PATTERNS:
-                if _attn_enabled and pattern in _K3_ATTN_BROAD_PATTERNS_IN_NON_EXPERT:
-                    continue
-                if pattern not in quant_config.modules_to_not_convert:
-                    quant_config.modules_to_not_convert.append(pattern)
-            # Precise attention patterns (keep kv_b_proj) when attention enabled.
-            if _attn_enabled:
-                for pattern in _K3_ATTN_EXCLUDE_KEEP_KV_B_PATTERNS:
-                    if pattern not in quant_config.modules_to_not_convert:
-                        quant_config.modules_to_not_convert.append(pattern)
-            # K3-specific patterns (block_sparse_moe naming + Latent MoE
-            # projections that are shared infra, not routed experts).
-            for pattern in _K3_NON_EXPERT_PATTERNS:
-                if pattern not in quant_config.modules_to_not_convert:
-                    quant_config.modules_to_not_convert.append(pattern)
-        elif (
-            quantize_non_expert_linear_action != QuantizeLinearAction.DISABLED
-            and quantize_linear_action != QuantizeLinearAction.DISABLED
-        ):
-            # Non-expert linear quant (W4A8/FP8/etc.) ENABLED. Choose attention
-            # exclusion patterns based on whether attention quantization itself
-            # is enabled:
-            #   - attention DISABLED → exclude ALL attention (incl. kv_b_proj) BF16;
-            #     safe because mla.py's _quantize_kv_b_decomposition is never called.
-            #   - attention ENABLED  → keep kv_b_proj quantizable (mla.py requires
-            #     it to be a TensorCastQuantLinear); exclude only other attention
-            #     submodules so they stay BF16 (profiling: MatMulV3 BF16).
-            if quantize_attention_action == QuantizeAttentionAction.DISABLED:
-                _attn_patterns = _K3_ATTENTION_ONLY_EXCLUSION_PATTERNS
-            else:
-                _attn_patterns = _K3_ATTN_EXCLUDE_KEEP_KV_B_PATTERNS
-            for pattern in _attn_patterns:
-                if pattern not in quant_config.modules_to_not_convert:
-                    quant_config.modules_to_not_convert.append(pattern)
-        return quant_config
-
-    _patched_create_quant_config.__wrapped__ = _orig_create_quant_config
-
-    # ── Bug fix: patch BOTH the module attr AND user_config's direct ref ──
-    # ``user_config.py`` imports ``create_quant_config`` via a direct
-    # ``from ..core.quantization.config import create_quant_config`` statement.
-    # In Python, ``from module import func`` binds a *local* name to the
-    # function object at import time; later reassigning
-    # ``module.create_quant_config = patched`` does NOT update that local
-    # reference.  Without patching ``user_config`` directly, the simulation
-    # calls the *original* function and the exclusion patterns are never
-    # applied — all non-expert layers silently fall through to the broad
-    # ``layers.*`` W4A8 pattern.
-    _quant_config_module.create_quant_config = _patched_create_quant_config
-
-    from tensor_cast.core import user_config as _user_config_module
-
-    _user_config_module.create_quant_config = _patched_create_quant_config
-
-    # ── Bug fix 2: patch transformations.quantize_linear ──
-    # Even with the ``create_quant_config`` patch above, the quant_config is
-    # created in ``ConfigResolver.__init__`` (line 71) BEFORE K3 patches are
-    # installed (patches run in ``TransformerModel.__init__`` via
-    # ``_apply_hf_config_patches``).  So the patched ``create_quant_config``
-    # is never called during simulation — the quant_config already exists
-    # without the K3 exclusion patterns.
+    # ── K3 quantization exclusion via transformations.quantize_linear ──
+    # The quant_config is created in ``ConfigResolver.__init__`` (line 71)
+    # BEFORE K3 patches are installed (patches run in
+    # ``TransformerModel.__init__`` via ``_apply_hf_config_patches``).
+    # Patching ``create_quant_config`` globally is therefore ineffective
+    # during normal simulation AND pollutes non-K3 models when the patch
+    # leaks into other test suites (Issue 402: Qwen3-MoE's
+    # modules_to_not_convert grew from 1→21 entries).
     #
-    # patch ``transformations.quantize_linear`` (the function that
+    # Instead, patch ``transformations.quantize_linear`` (the function that
     # actually calls ``quantize_linear_modules``) to inject K3 patterns into
     # ``model.model_config.quant_config.modules_to_not_convert`` right before
     # quantization happens.  This is guaranteed to run AFTER K3 patches are
-    # installed, because ``quantize_linear`` is called from the compilation
-    # pipeline which runs after model loading.
+    # installed, and is guarded by ``model_type == "kimi_k3"`` so non-K3
+    # models are completely unaffected.
     from tensor_cast.transformers import transformations as _transformations_module
 
     _orig_quantize_linear = _transformations_module.quantize_linear
+    _K3_PATCH_ORIGINALS["transformations.quantize_linear"] = _orig_quantize_linear
 
     def _patched_quantize_linear(model, report=None):
         try:
@@ -1128,9 +1086,9 @@ def _install_non_expert_quant_exclusion_patch():
         "ENABLED → exclude other MLA/KDA submodules to keep BF16 BUT keep kv_b_proj "
         "quantizable (mla.py _quantize_kv_b_decomposition requires it to be a "
         "TensorCastQuantLinear, supports any linear quant type: W4A8/W8A16/FP8/MXFP4). "
-        "Patches quantization.config.create_quant_config, user_config.create_quant_config "
-        "(direct import ref), AND transformations.quantize_linear (pre-quantization "
-        "injection, uses attention_configs.get(-1) is not None for detection)."
+        "Patches transformations.quantize_linear only (model_type-guarded); "
+        "create_quant_config is NOT patched (it runs before K3 patches install "
+        "and would pollute non-K3 models — Issue 402)."
     )
 
 
@@ -1160,6 +1118,117 @@ def _install_non_expert_quant_exclusion_patch():
 # Plus once at model level (after all layers): output_attn_res_proj / norm
 
 _ATTN_RES_OP_REGISTERED = False
+
+
+def _restore_k3_global_state() -> None:
+    """Undo all global patches installed by K3 adaptation.
+
+    Resets every ``_*_INSTALLED`` flag, removes fla stubs from
+    ``sys.modules``, and restores **both** module-level and class-level
+    patched callables from ``_K3_PATCH_ORIGINALS``.
+
+    Restoring class-level patches (MoELayer.__init__, FusedMoETensorCast.forward,
+    CopyLayerWrapper, build_tp_plan_extras) is critical: if the install flag
+    is reset to ``False`` but the method is NOT restored, the next install
+    saves the *already-wrapped* method as the "original" and installs a new
+    wrapper on top, forming a wrapper chain.  For ``FusedMoETensorCast.forward``
+    this could double-execute ``routed_expert_down_proj`` and cause dimension
+    errors (PR review feedback on Issue 402 fix).
+
+    Call this in test ``tearDown`` to prevent test infection (Issue 402).
+    """
+    global _FLA_STUB_INSTALLED, _LATENT_MOE_PATCH_INSTALLED
+    global _COPY_LAYER_ATTR_PATCH_INSTALLED, _KDA_TP_PLAN_PATCH_INSTALLED
+    global _LM_HEAD_TP_PATCH_INSTALLED, _VISION_RMS_NORM_PATCH_INSTALLED
+    global _NON_EXPERT_QUANT_EXCLUSION_PATCH_INSTALLED
+
+    # 1. Reset install flags so patches can be re-applied on next K3 run.
+    _FLA_STUB_INSTALLED = False
+    _LATENT_MOE_PATCH_INSTALLED = False
+    _COPY_LAYER_ATTR_PATCH_INSTALLED = False
+    _KDA_TP_PLAN_PATCH_INSTALLED = False
+    _LM_HEAD_TP_PATCH_INSTALLED = False
+    _VISION_RMS_NORM_PATCH_INSTALLED = False
+    _NON_EXPERT_QUANT_EXCLUSION_PATCH_INSTALLED = False
+
+    # 2. Remove fla stubs from sys.modules (only our injected ones).
+    for _name in _K3_FLA_STUB_NAMES:
+        _key = f"sys.modules.{_name}"
+        _orig = _K3_PATCH_ORIGINALS.get(_key, ...)
+        if _orig is ... or _orig is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _orig
+
+    # 3. Restore module-level patched functions.
+    from tensor_cast.transformers import transformations as _tfm
+
+    if "transformations.quantize_linear" in _K3_PATCH_ORIGINALS:
+        _tfm.quantize_linear = _K3_PATCH_ORIGINALS["transformations.quantize_linear"]
+    if "transformations.shard_model_by_tp" in _K3_PATCH_ORIGINALS:
+        _tfm.shard_model_by_tp = _K3_PATCH_ORIGINALS["transformations.shard_model_by_tp"]
+
+    import transformers.masking_utils as _mu
+
+    if "masking_utils.create_causal_mask" in _K3_PATCH_ORIGINALS:
+        _mu.create_causal_mask = _K3_PATCH_ORIGINALS["masking_utils.create_causal_mask"]
+
+    from transformers.utils import generic as _generic
+
+    if "generic.OutputRecorder" in _K3_PATCH_ORIGINALS:
+        _orig_or = _K3_PATCH_ORIGINALS["generic.OutputRecorder"]
+        if _orig_or is None:
+            if hasattr(_generic, "OutputRecorder"):
+                delattr(_generic, "OutputRecorder")
+        else:
+            _generic.OutputRecorder = _orig_or
+
+    import transformers.utils.import_utils as _iu
+
+    if "import_utils.is_torch_fx_available" in _K3_PATCH_ORIGINALS:
+        _orig_fx = _K3_PATCH_ORIGINALS["import_utils.is_torch_fx_available"]
+        if _orig_fx is None:
+            if hasattr(_iu, "is_torch_fx_available"):
+                delattr(_iu, "is_torch_fx_available")
+        else:
+            _iu.is_torch_fx_available = _orig_fx
+
+    # 4. Restore class-level patched methods.
+    #    These MUST be restored when the corresponding install flag is reset,
+    #    otherwise the next install wraps the already-wrapped method,
+    #    forming a callable chain that can double-execute side effects.
+    from tensor_cast.layers.moe_layer import (
+        FusedMoETensorCast,
+        MoELayer,
+        ParallelMoELayer,
+    )
+
+    if "MoELayer.__init__" in _K3_PATCH_ORIGINALS:
+        MoELayer.__init__ = _K3_PATCH_ORIGINALS["MoELayer.__init__"]
+    if "ParallelMoELayer.__init__" in _K3_PATCH_ORIGINALS:
+        ParallelMoELayer.__init__ = _K3_PATCH_ORIGINALS["ParallelMoELayer.__init__"]
+    if "FusedMoETensorCast.forward" in _K3_PATCH_ORIGINALS:
+        FusedMoETensorCast.forward = _K3_PATCH_ORIGINALS["FusedMoETensorCast.forward"]
+
+    from tensor_cast.layers.internal import CopyLayerWrapper
+
+    if "CopyLayerWrapper.__init__" in _K3_PATCH_ORIGINALS:
+        CopyLayerWrapper.__init__ = _K3_PATCH_ORIGINALS["CopyLayerWrapper.__init__"]
+    if "CopyLayerWrapper.forward" in _K3_PATCH_ORIGINALS:
+        CopyLayerWrapper.forward = _K3_PATCH_ORIGINALS["CopyLayerWrapper.forward"]
+
+    from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
+
+    if "MultiheadLatentAttentionTensorCast.build_tp_plan_extras" in _K3_PATCH_ORIGINALS:
+        # The original was saved as the bare function (via __func__);
+        # restore it as a classmethod to match the original descriptor type.
+        _orig_tp_plan = _K3_PATCH_ORIGINALS["MultiheadLatentAttentionTensorCast.build_tp_plan_extras"]
+        MultiheadLatentAttentionTensorCast.build_tp_plan_extras = classmethod(_orig_tp_plan)
+
+    # 5. Clear the originals dict so the next install cycle starts fresh.
+    _K3_PATCH_ORIGINALS.clear()
+
+    logger.info("Restored all K3 global patches to pre-installation state.")
 
 
 def _install_attn_res_op() -> None:
@@ -1437,6 +1506,7 @@ def _patch_hf_config_for_kimi_k3(config) -> bool:
     from transformers.utils import generic as _tc_generic
 
     if not hasattr(_tc_generic, "OutputRecorder"):
+        _K3_PATCH_ORIGINALS.setdefault("generic.OutputRecorder", getattr(_tc_generic, "OutputRecorder", None))
 
         class OutputRecorder:  # noqa: N801 — matches upstream symbol name
             """Stub for ``transformers.utils.generic.OutputRecorder``.
@@ -1479,6 +1549,7 @@ def _patch_hf_config_for_kimi_k3(config) -> bool:
     import transformers.masking_utils as _tc_masking_utils
 
     _orig_create_causal_mask = _tc_masking_utils.create_causal_mask
+    _K3_PATCH_ORIGINALS.setdefault("masking_utils.create_causal_mask", _orig_create_causal_mask)
     if not getattr(_orig_create_causal_mask, "_tensor_cast_k3_causal_mask_bridge", False):
 
         def _create_causal_mask_k3_bridge(*args, **kwargs):
@@ -1595,6 +1666,9 @@ def _patch_hf_config_for_kimi_k3(config) -> bool:
     import transformers.utils.import_utils as import_utils
 
     if not hasattr(import_utils, "is_torch_fx_available"):
+        _K3_PATCH_ORIGINALS.setdefault(
+            "import_utils.is_torch_fx_available", getattr(import_utils, "is_torch_fx_available", None)
+        )
 
         def is_torch_fx_available():
             return importlib.util.find_spec("torch.fx") is not None
