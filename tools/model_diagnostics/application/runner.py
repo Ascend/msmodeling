@@ -240,14 +240,19 @@ def _known_limitations(
 
     limitations: list[Limitation] = []
     declared_dtype = context.model_config.get("declared_torch_dtype")
-    if isinstance(declared_dtype, str) and declared_dtype in {"bfloat16", "bf16"}:
+    runtime_dtype = context.model_config.get("torch_dtype")
+    if (
+        isinstance(declared_dtype, str)
+        and declared_dtype in {"bfloat16", "bf16"}
+        and runtime_dtype not in {"bfloat16", "bf16"}
+    ):
         limitations.append(
             Limitation(
-                code="theory.dtype.runtime_fp16_binding",
+                code="theory.dtype.runtime_dtype_mismatch",
                 message=(
-                    f"model_config.declared_torch_dtype={declared_dtype!r} is bound to "
-                    "the Runtime-executed float16 dtype; Theory tensor dtype expectations "
-                    "compare against float16, not the HF-declared dtype."
+                    f"model_config.declared_torch_dtype={declared_dtype!r} differs from "
+                    f"the Runtime-executed {runtime_dtype!r} dtype; Theory tensor dtype "
+                    "expectations compare against the Runtime dtype."
                 ),
             )
         )

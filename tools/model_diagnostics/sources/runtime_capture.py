@@ -150,6 +150,25 @@ def _normalize_dtype(dtype: object) -> str:
     return str(dtype).removeprefix("torch.")
 
 
+def _config_dtype(config: object) -> str | None:
+    """Read a supported dtype declared by either generation of HF config schema."""
+    supported = {"float16", "fp16", "half", "bfloat16", "bf16", "float32", "fp32", "float"}
+    for field_name in ("torch_dtype", "dtype"):
+        value = getattr(config, field_name, None)
+        if value is not None:
+            dtype = _normalize_dtype(value).lower()
+            if dtype in supported:
+                return dtype
+    return None
+
+
+def _config_dtypes(configs: Iterable[object]) -> Iterable[str]:
+    """Yield supported dtype declarations in outer-config-first order."""
+    for config in configs:
+        if (dtype := _config_dtype(config)) is not None:
+            yield dtype
+
+
 def _tensor_info(tensor: object, *, is_output: bool, index: int) -> TensorInfo:
     try:
         shape = tuple(int(dimension) for dimension in tensor.shape)
@@ -339,13 +358,14 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
     assert isinstance(profile, DiagnosticsRunProfile)
     model_config: dict[str, object] = {}
     model = getattr(model_runner, "model", None)
-    hf_config = getattr(model, "text_config", None)
-    if hf_config is None:
-        root_config = getattr(model, "hf_config", None)
+    root_config = getattr(model, "hf_config", None)
+    if root_config is None:
+        root_config = getattr(model, "config", None)
+    text_config = getattr(model, "text_config", None)
+    if text_config is None:
         get_text_config = getattr(root_config, "get_text_config", None)
-        hf_config = get_text_config() if callable(get_text_config) else root_config
-    if hf_config is None:
-        hf_config = getattr(model, "config", None)
+        text_config = get_text_config() if callable(get_text_config) else None
+    hf_config = text_config or root_config
     if hf_config is None:
         raise SourceLoadError("loaded model does not expose config for ModelRunContext")
     for key in (
@@ -402,16 +422,21 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         model_config["moe_dp_size"] = profile.parallel.moe_data_parallel_size
         model_config["enable_redundant_experts"] = profile.enable_redundant_experts
         model_config["enable_external_shared_experts"] = profile.enable_external_shared_experts
-    torch_dtype = getattr(hf_config, "torch_dtype", None)
-    if torch_dtype is not None:
-        declared = str(torch_dtype).removeprefix("torch.")
-        # Theory binds to the Runtime-executed dtype. HF card dtype is preserved
-        # separately; Artifact tensor evidence is never rewritten.
-        if declared in {"bfloat16", "bf16"}:
-            model_config["declared_torch_dtype"] = declared
-            model_config["torch_dtype"] = "float16"
-        else:
-            model_config["torch_dtype"] = declared
+    declared_dtype = next(_config_dtypes((root_config, text_config)), None)
+    runtime_model_config = getattr(model, "model_config", None)
+    runtime_dtype = getattr(runtime_model_config, "dtype", None)
+    runtime_dtype_name = _normalize_dtype(runtime_dtype) if runtime_dtype is not None else None
+    if declared_dtype is not None:
+        model_config["declared_torch_dtype"] = declared_dtype
+    if runtime_dtype_name is not None:
+        # Theory must use the dtype that produced the captured Runtime tensors.
+        # Keep the HF declaration separately for diagnostics and auditability.
+        model_config["torch_dtype"] = runtime_dtype_name
+    elif declared_dtype is not None:
+        # Lightweight test doubles and legacy callers may not expose the
+        # resolved ModelConfig; in that case the declaration is the best
+        # available runtime dtype evidence.
+        model_config["torch_dtype"] = declared_dtype
     features: list[str] = []
     if profile.do_compile:
         features.append("compiled")

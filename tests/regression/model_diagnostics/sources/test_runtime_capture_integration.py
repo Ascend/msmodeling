@@ -14,6 +14,7 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from tools.model_diagnostics.domain import ExecutionPhase, ModelRunContext, ParallelContext, ProducerInfo
 from tools.model_diagnostics.sources.runtime_capture import capture_model_runner_artifact
@@ -109,7 +110,7 @@ def test_replay_preserves_op_invoke_info_identity_so_id_based_filtering_is_safe(
 
 
 @pytest.mark.parametrize("quantization", ("W8A8_DYNAMIC", "W4A8_DYNAMIC"))
-def test_run_context_binds_theory_dtype_to_runtime_fp16_when_hf_declares_bf16(quantization) -> None:
+def test_run_context_uses_resolved_runtime_dtype_when_hf_declares_bf16(quantization) -> None:
     from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
     from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load
 
@@ -143,7 +144,8 @@ def test_run_context_binds_theory_dtype_to_runtime_fp16_when_hf_declares_bf16(qu
                 head_dim=128,
                 model_type="qwen3",
                 torch_dtype="bfloat16",
-            )
+            ),
+            model_config=SimpleNamespace(dtype=torch.bfloat16),
         ),
         user_input=SimpleNamespace(num_mtp_tokens=2),
     )
@@ -151,7 +153,7 @@ def test_run_context_binds_theory_dtype_to_runtime_fp16_when_hf_declares_bf16(qu
     context = _run_context_after_model_load(profile, runner)
 
     assert context.model_config["declared_torch_dtype"] == "bfloat16"
-    assert context.model_config["torch_dtype"] == "float16"
+    assert context.model_config["torch_dtype"] == "bfloat16"
     assert context.model_config["word_embedding_tp"] == "row"
     assert context.model_config["num_mtp_tokens"] == 2
     assert context.quantization_config["enabled"] is True
@@ -177,6 +179,77 @@ def test_run_context_binds_theory_dtype_to_runtime_fp16_when_hf_declares_bf16(qu
             run_context=_context(),
             producer=_producer(),
         )
+
+
+def test_run_context_preserves_outer_dtype_when_text_config_is_missing_it() -> None:
+    from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
+    from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load
+
+    profile = DiagnosticsRunProfile(
+        schema_version="1",
+        model_name="Qwen/Qwen3-VL",
+        entrypoint="text_generate",
+        phase=ExecutionPhase.PREFILL,
+        batch_size=1,
+        query_length=1,
+        context_length=None,
+        num_mtp_tokens=0,
+        parallel=ParallelContext(),
+        selected_stage_regions=(),
+        num_hidden_layers_override=0,
+        do_compile=False,
+        device="TEST_DEVICE",
+        quantize_linear_action="DISABLED",
+        word_embedding_tp=None,
+    )
+    outer_config = SimpleNamespace(torch_dtype="bfloat16")
+    text_config = SimpleNamespace(model_type="qwen3_vl_text")
+    runner = SimpleNamespace(
+        model=SimpleNamespace(
+            hf_config=outer_config,
+            text_config=text_config,
+            model_config=SimpleNamespace(dtype=torch.bfloat16),
+        ),
+        user_input=SimpleNamespace(num_mtp_tokens=0),
+    )
+
+    context = _run_context_after_model_load(profile, runner)
+
+    assert context.model_config["declared_torch_dtype"] == "bfloat16"
+    assert context.model_config["torch_dtype"] == "bfloat16"
+
+
+def test_run_context_skips_unsupported_torch_dtype_and_uses_dtype() -> None:
+    from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
+    from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load
+
+    profile = DiagnosticsRunProfile(
+        schema_version="1",
+        model_name="Qwen/Qwen3-8B",
+        entrypoint="text_generate",
+        phase=ExecutionPhase.PREFILL,
+        batch_size=1,
+        query_length=1,
+        context_length=None,
+        num_mtp_tokens=0,
+        parallel=ParallelContext(),
+        selected_stage_regions=(),
+        num_hidden_layers_override=0,
+        do_compile=False,
+        device="TEST_DEVICE",
+        quantize_linear_action="DISABLED",
+        word_embedding_tp=None,
+    )
+    config = SimpleNamespace(torch_dtype="float64", dtype="bfloat16")
+    runner = SimpleNamespace(
+        model=SimpleNamespace(config=config, model_config=None),
+        user_input=SimpleNamespace(num_mtp_tokens=0),
+    )
+
+    context = _run_context_after_model_load(profile, runner)
+
+    assert context.model_config["declared_torch_dtype"] == "bfloat16"
+    assert context.model_config["torch_dtype"] == "bfloat16"
 
 
 def test_dense_profile_keeps_tp_layout_independent_of_moe_defaults(monkeypatch) -> None:

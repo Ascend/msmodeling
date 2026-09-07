@@ -1313,9 +1313,9 @@ W8A8_DYNAMIC 还覆盖公开 CLI；量化 decode 必须验证跳过 `lm_head_sel
 终端 `lm_head`。所有真实模型 case 均不得使用缓存 Artifact。
 
 **证据完整性**：不得改写已捕获 Artifact 的算子/张量证据。Theory 的
-`model_config.torch_dtype` 绑定 **Runtime 实际执行 dtype**；若 HF 声明 BF16 而当前
-路径执行 FP16，则 `torch_dtype=float16` 且 `declared_torch_dtype=bfloat16`（用户
-2026-07-24 授权）。比较策略中的显式别名/忽略列表属于 Spec 声明规则。
+`model_config.torch_dtype` 绑定 **Runtime 实际执行 dtype**；`declared_torch_dtype`
+单独保留 HF 配置声明，用于审计两者是否一致。比较策略中的显式别名/忽略列表属于
+Spec 声明规则。
 
 分类 3 共用 DeepSeek V3-family 的 Dense 前缀、MoE/shared-expert、MLA/DSA sparse MLA
 组合契约，正式 E2E 覆盖 DeepSeek V3/V3.2、GLM-5/5.1 与 Kimi K2/K2.5/K2.6 文本路径。

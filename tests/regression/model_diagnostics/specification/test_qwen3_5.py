@@ -51,7 +51,7 @@ _CONFIG: dict[str, object] = {
     "linear_key_head_dim": 128,
     "linear_value_head_dim": 128,
     "linear_conv_kernel_dim": 4,
-    "torch_dtype": "float16",
+    "torch_dtype": "bfloat16",
 }
 
 _NEXT_CONFIG: dict[str, object] = {

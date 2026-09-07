@@ -5,6 +5,8 @@ Resolves and configures model settings for tensor cast operations.
 
 import logging
 
+import torch
+
 from ..core.user_config import UserInputConfig
 from ..layers.attention import AttentionTensorCast
 from ..layers.quant_linear import TensorCastQuantLinear
@@ -27,6 +29,58 @@ from ..transformers.custom_model_registry import (
 from ..transformers.utils import AutoModelConfigLoader
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_model_dtype(hf_config) -> torch.dtype:
+    """Return the floating-point working dtype declared by a model config.
+
+    HuggingFace configurations use both the legacy ``torch_dtype`` field and
+    the newer ``dtype`` field.  For multimodal configurations the text model
+    can own that field, while the outer config does not.  TensorCast uses one
+    working dtype for the wrapped model, so prefer the outer declaration and
+    then the text declaration.  FP16 remains the backwards-compatible
+    fallback for absent or unsupported declarations.
+    """
+    configs = [hf_config]
+    get_text_config = getattr(hf_config, "get_text_config", None)
+    if callable(get_text_config):
+        text_config = get_text_config()
+        if text_config is not hf_config:
+            configs.append(text_config)
+    elif (text_config := getattr(hf_config, "text_config", None)) is not None:
+        configs.append(text_config)
+
+    aliases = {
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "half": torch.float16,
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+        "float": torch.float32,
+    }
+    supported_dtypes = set(aliases.values())
+    for config in configs:
+        for field_name in ("torch_dtype", "dtype"):
+            value = getattr(config, field_name, None)
+            if isinstance(value, torch.dtype):
+                if value in supported_dtypes:
+                    return value
+            elif isinstance(value, str):
+                dtype = aliases.get(value.lower().removeprefix("torch."))
+                if dtype is not None:
+                    return dtype
+            elif value is None:
+                continue
+
+            logger.warning(
+                "Ignoring unsupported model configuration %s=%r; trying the next dtype declaration.",
+                field_name,
+                value,
+            )
+
+    return torch.float16
 
 
 class ConfigResolver:
@@ -79,6 +133,7 @@ class ConfigResolver:
         self.model_config = ModelConfig(
             parallel_config,
             quant_config,
+            dtype=_resolve_model_dtype(self.hf_config),
             attention_cls=AttentionTensorCast,
             quant_linear_cls=TensorCastQuantLinear,
         )
