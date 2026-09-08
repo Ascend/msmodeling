@@ -1,3 +1,8 @@
+# Optimization strategy: "pso" (default) or "agent"
+# When set to "agent", the optimizer reads candidates from [agent_optimizer] run_dir
+# instead of running PSO internally.
+optimizer_strategy = "pso"
+
 # ------------------------- Optimization Parameter Configuration ------------------------------------------------
 n_particles = 8
 iters = 4
@@ -184,3 +189,15 @@ value = 0
 enabled = false
 action = "terminate"
 metrics_url = "http://127.0.0.1:8000/metrics"
+
+# ------------------------- Agent Optimizer Configuration ------------------------------------------------
+[agent_optimizer]
+run_id = "default"     # 模板占位：config_preflight --set-agent-mode 自动生成新 run-id（default 不再被沿用）
+max_rounds = 32
+candidates_per_round = 0     # 0 = dynamic; >0 = fixed count per round
+max_trials = 12
+time_limit_minutes = 1440    # 单轮 optix 运行的 trial 时间上限（分钟）；全局 24h 预算由 agent 跨轮累计
+run_dir = ""                    # empty = auto: .agent_optimizer/runs/{run_id}
+convergence_rounds = 6       # 趋势门：连续无显著改善(>1%)轮数阈值，触发后须过覆盖率门才收敛
+min_rounds = 4               # 覆盖率门：允许收敛前至少执行的最小轮次
+min_trials = 12              # 提前停止前至少完成的最小 trial 数

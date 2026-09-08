@@ -15,8 +15,7 @@ metadata:
 其他内容由对应 skill 负责：
 
 - 运行环境检查：`ms-serviceparam-optimizer-env-check`
-- 首次参数范围推荐：`optix-param-recommend`
-- 生成或修改 `config.toml`：`optix-config`
+- 参数推荐、config.toml 配置与参数寻优：`optix-assistant`（统一入口）
 
 ## 安装流程
 

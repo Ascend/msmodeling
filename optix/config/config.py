@@ -143,6 +143,29 @@ class OptimizerConfigField(BaseModel):
             return dtype_func.get(self.dtype, float)(self.min)
         return dtype_func.get(self.dtype, float)(self.max)
 
+    def apply_value(self, value):
+        """Set ``value`` honoring the declared dtype.
+
+        enum keeps the choice's original type (find_available_value);
+        everything else goes through convert_dtype. Container list/dict
+        params must be JSON-encoded to a string BEFORE calling this
+        (field.value is a single-value pipe to the CLI).
+        """
+        try:
+            if self.dtype == "enum":
+                self.value = self.find_available_value(value)
+            else:
+                self.value = self.convert_dtype(value)
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "apply_value: dtype={!r} conversion failed for value={!r} ({}); keeping raw value",
+                self.dtype,
+                value,
+                exc,
+            )
+            self.value = value
+        return self
+
 
 default_support_field = [
     # The minimum value of max batch size must be greater than the maximum value of max_prefill_batch_size.
@@ -471,8 +494,27 @@ def _get_field_candidates(field_def):
 def _update_ratio_field(field, i, params_field, simulate_run_info, decode_context=None):
     """Ratio type handler: value = int(self_ratio × target.value)"""
     _field = simulate_run_info[i]
-    _t_op = [_op for _op in simulate_run_info if _op.name == field.dtype_param][0]
-    _field.value = int(_field.value * _t_op.value)
+    target_name = field.dtype_param
+    _t_ops = [_op for _op in simulate_run_info if _op.name == target_name]
+    if not _t_ops:
+        if target_name:
+            # dtype_param declares a target field, but it is absent from the current
+            # field list (typo/case mismatch, or the engine field whitelist dropped it).
+            # Keeping the raw ratio would render an absolute value off by the missing
+            # target's scale — spell out the actual effect so misconfig is traceable.
+            logger.warning(
+                f"ratio field '{field.name}': target '{target_name}' not found in fields. "
+                f"Field keeps candidate ratio {_field.value} WITHOUT multiplying by "
+                f"'{target_name}' — check target name spelling/case or the engine field "
+                f"whitelist. Available fields: {[op.name for op in simulate_run_info]}"
+            )
+        else:
+            # Plain ratio without a target field (e.g. GPU_MEMORY_UTILIZATION as a
+            # free coefficient in [0,1]): keeping the value as-is is by design,
+            # so log at debug level instead of warning every candidate.
+            logger.debug(f"ratio field '{field.name}': no target declared, keeping plain value {_field.value}")
+        return
+    _field.value = int(_field.value * _t_ops[0].value)
 
 
 def _update_factories_field(field, i, params_field, simulate_run_info, decode_context=None):
@@ -1093,6 +1135,18 @@ class PsoStrategy(BaseModel):
     c2: str = "exp_decay"
 
 
+class AgentOptimizerConfig(BaseModel):
+    run_id: str = "default"
+    max_rounds: int = 32
+    candidates_per_round: int = 0  # 0 = dynamic; >0 = fixed
+    max_trials: int = 12
+    time_limit_minutes: int = 1440
+    run_dir: str = ""
+    convergence_rounds: int = 6  # consecutive no-improvement rounds before early stop
+    min_rounds: int = 4  # minimum executed rounds before early stop
+    min_trials: int = 12  # minimum completed trials before early stop
+
+
 class BenchmarkEarlyExitConfig(BaseModel):
     """Configure early-exit evaluation for vLLM benchmark trials.
 
@@ -1175,6 +1229,10 @@ class Settings(BaseSettings):
     simulator_output: Path = Field(default_factory=lambda data: data["output"].joinpath("simulator").resolve())
     pso_options: PsoOptions = PsoOptions()
     pso_strategy: PsoStrategy = PsoStrategy()
+    optimizer_strategy: Literal["pso", "agent"] = Field(
+        default="pso", description="Optimization strategy: pso or agent"
+    )
+    agent_optimizer: AgentOptimizerConfig = Field(default_factory=AgentOptimizerConfig)
     particles_time_out: int = 1 * 60 * 60
     wait_start_time: int = 1800
     n_particles: int = Field(default=5, gt=0, lt=1000)

@@ -66,8 +66,7 @@ GitCode 配置：
 | `throughput-optimizer-executor` | "搜索最佳 TP/EP"、"硬件对比"、"PD 配比优化" | 生成并执行 `python -m cli.inference.throughput_optimizer` 吞吐规划命令 |
 | `throughput-optimizer-explainer` | "结果是否合理"、"为什么硬件不同"、"Cube/Vec/Comm/Mem 瓶颈" | 解释 optimizer 结果，并将 best row 映射到 `text_generate` 验证命令 |
 | `optix-deploy` | "部署 optix"、"安装服务化自动寻优工具" | 安装并验证 msmodeling optix 服务化自动寻优工具 |
-| `optix-config` | "配置 config.toml"、"设置 MindIE/vLLM 寻优字段" | 自动修改 optix `config.toml` 的寻优参数、target 和 benchmark 配置 |
-| `optix-param-recommend` | "推荐 optix 参数"、"生成寻优范围" | 根据硬件、模型、负载和目标推荐 MindIE/vLLM 寻优参数与配置片段 |
+| `optix-assistant` | "optix 寻优"、"optix 调参"、"跑一轮参数优化"、"optix agent 模式"、配置 config.toml、推荐 optix 参数 | OptiX 服务化实测参数自动寻优完整闭环（PSO/agent 双模式）：config 预检、上下文采集、经验注入、候选生成、执行、收敛、判优、最佳配置导出。**入口先读 `SKILL.md` + `workflows/agent.md`**（执行流程）+ **`references/agent-mode.md`**（行为契约；agent 模式两文件均须完整阅读），含 `use_request_rate_calibration=false` 等 agent 模式专属约定，避免重新理解项目。旧 `optix-config`/`optix-param-recommend` 已删除并归并至此 |
 | `sig-review` | "请求检视"、"启动合入"、"检视PR {number}"、"review PR {number}"、"分析PR {number}的检视意见" | 评论 /merge 启动合入流程（后台 MergeTrack 工具跟踪后续状态）、代码检视、检视意见分析，不指派 assignee，支持 cursor/claude code/opencode/codex 等各类 agent |
 
 完整工作流负责组合能力；Issue、PR、Pipeline 和领域 Skills 仍可被独立触发。
@@ -164,8 +163,7 @@ python scripts/ai/resolve_repository_context.py --json
 | `throughput-optimizer-executor` | 搜索并行策略和吞吐配置 |
 | `throughput-optimizer-explainer` | 解释结果与瓶颈 |
 | `optix-deploy` | 部署 OptiX |
-| `optix-config` | 修改 OptiX 配置 |
-| `optix-param-recommend` | 推荐 OptiX 参数范围 |
+| `optix-assistant` | OptiX 服务化实测参数自动寻优闭环（PSO/agent） |
 
 Skill 开发要求：
 

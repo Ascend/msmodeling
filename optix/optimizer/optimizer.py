@@ -563,7 +563,11 @@ class PSOOptimizer(PerformanceTuner):
         with logger.contextualize(stage=LogStage.BASELINE.value):
             # The default-parameter baseline run is placed in the default phase, backup dir looks like back_up/default_1
             self.scheduler.set_backup_phase("default", 1)
-            if isinstance(self.scheduler.simulator, Simulator):
+
+            # Checkpoint: skip baseline run if results were loaded from a prior run
+            if getattr(self, "_baseline_from_checkpoint", False):
+                logger.info("Baseline restored from checkpoint — skipping evaluation run")
+            elif isinstance(self.scheduler.simulator, Simulator):
                 settings = get_settings()
                 mc = None
                 if is_mindie() and settings.theory_guided_enable:
@@ -659,7 +663,15 @@ class PSOOptimizer(PerformanceTuner):
 
 
 @contextmanager
-def adapter_target_field(pso_optimizer: PSOOptimizer):
+def adapter_target_field(pso_optimizer: PSOOptimizer, *, on_pin_concurrency=None):
+    """Temporarily install a mode-reduced deep copy of ``target_field`` for the ``with`` block.
+
+    Shared by the PSO run plugin and the agent orchestrator: PSO internals read
+    the search space from the instance attribute, so the reduced copy is
+    installed for the duration of the block and the original list is restored
+    afterwards (also on exception). ``on_pin_concurrency``, when given, is
+    invoked with the field whenever request-rate calibration pins it to max.
+    """
     _bak_target_field = pso_optimizer.target_field
     target_field = deepcopy(pso_optimizer.target_field)
     fix_concurrency = pso_optimizer.use_request_rate_calibration
@@ -667,17 +679,21 @@ def adapter_target_field(pso_optimizer: PSOOptimizer):
         if _field.name in CONCURRENCYS and _field.constant is None and fix_concurrency:
             # True mode fixes CONCURRENCY at max while run_with_request_rate calibrates the request rate.
             _field.constant = _field.value = _field.convert_dtype(_field.max)
+            if on_pin_concurrency is not None:
+                on_pin_concurrency(_field)
         elif _field.name in REQUESTRATES and _field.constant is None:
             # Both modes fix REQUESTRATE at max:
             #   true  -> run_with_request_rate needs the maximum rate as its upper bound.
             #   false -> scheduler.run benchmarks each concurrency candidate once at the maximum request rate.
             _field.constant = _field.convert_dtype(_field.max)
             _field.value = None
-        elif _field.constant and _field.constant != _field.value:
+        elif _field.constant is not None and _field.constant != _field.value:
             _field.value = _field.constant
     pso_optimizer.target_field = target_field
-    yield
-    pso_optimizer.target_field = _bak_target_field
+    try:
+        yield
+    finally:
+        pso_optimizer.target_field = _bak_target_field
 
 
 @contextmanager
@@ -917,10 +933,15 @@ def _run_optimizer() -> None:
             use_request_rate_calibration=settings.use_request_rate_calibration,
             pso_init_kwargs={"ftol": settings.ftol, "ftol_iter": settings.ftol_iter},
         )
-        with logger.contextualize(stage=LogStage.SEARCH.value):
-            pso.run_plugin()
-        with logger.contextualize(stage=LogStage.DONE.value):
-            logger.success("Optimizer finished")
+        if settings.optimizer_strategy == "agent":
+            from ..optimizer.agentic import AgentOptimizer
+
+            AgentOptimizer(pso=pso, agent_config=settings.agent_optimizer).run()
+        else:
+            with logger.contextualize(stage=LogStage.SEARCH.value):
+                pso.run_plugin()
+            with logger.contextualize(stage=LogStage.DONE.value):
+                logger.success("Optimizer finished")
 
 
 def _main() -> None:

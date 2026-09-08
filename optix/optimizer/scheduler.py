@@ -585,11 +585,35 @@ class Scheduler:
         self.simulator.stop(del_log)
         self.benchmark.stop(del_log)
 
+    def _persist_trial_log(self, candidate_id: str, run_dir):
+        """Copy per-trial service/benchmark logs before del_log cleanup (issue 2.8)."""
+        try:
+            import shutil
+
+            log_paths = []
+            for holder in (self.simulator, self.benchmark):
+                run_log = getattr(holder, "run_log", None)
+                if run_log and Path(run_log).exists():
+                    log_paths.append(Path(run_log))
+            if not log_paths:
+                return
+            target_dir = Path(run_dir) / "trial_logs"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for i, src in enumerate(log_paths):
+                suffix = "" if i == 0 else f".{i}"
+                shutil.copy2(src, target_dir / f"{candidate_id}{suffix}.log")
+        except OSError as exc:
+            logger.debug("trial log persist failed for {}: {}", candidate_id, exc)
+
     def save_result(self, stop_simulator: bool = True, **kwargs):
         """Save the result of this run and clean up processes.
         stop_simulator: when True, stop both simulator and benchmark (default behavior).
         When False, stop only the benchmark and keep the simulator running
         """
+        candidate_id = kwargs.pop("candidate_id", None)
+        run_dir = kwargs.pop("run_dir", None)
+        if candidate_id and run_dir:
+            self._persist_trial_log(candidate_id, run_dir)
         duration = None
         if self.run_start_timestamp:
             duration = time.time() - self.run_start_timestamp
@@ -620,6 +644,13 @@ class Scheduler:
     def update_data_field(self, params_field: tuple[OptimizerConfigField]):
         if isinstance(self.simulator, SupportsDataField):
             self.simulator.data_field = params_field
+            # Store env-type fields for dynamic CLI generation in VllmCommand
+            env_fields = tuple(f for f in params_field if getattr(f, "config_position", "") == "env")
+            set_resolved_field = getattr(self.simulator, "set_resolved_field", None)
+            if callable(set_resolved_field):
+                set_resolved_field(env_fields)
+            else:
+                self.simulator._resolved_field = env_fields
             self.simulator.update_command()
         if isinstance(self.benchmark, SupportsDataField):
             self.benchmark.data_field = params_field

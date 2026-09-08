@@ -30,7 +30,7 @@ from ...config.config import (
     get_settings,
 )
 from ...config.constant import Stage
-from ...config.custom_command import VllmCommand
+from ...config.custom_command import VLLM_SERVE_CAPACITY_ENV_FIELDS, VllmCommand
 from ...deploy_env import materialize_command, resolve_mindie_argv
 from ...io_utils import open_file
 from ..interfaces.simulator import SimulatorInterface
@@ -311,6 +311,7 @@ class VllmSimulator(SimulatorInterface):
             self.config = settings.vllm
         super().__init__(*args, process_name=self.config.process_name, **kwargs)
 
+        self._resolved_field = ()  # set later via set_resolved_field(); consumed by update_command
         self.update_command()
 
     @property
@@ -464,6 +465,36 @@ class VllmSimulator(SimulatorInterface):
         except subprocess.SubprocessError:
             pass
 
+    def set_resolved_field(self, fields) -> None:
+        """Set env-type candidate fields to render into the vLLM CLI.
+
+        Replaces ad-hoc attribute injection: ``update_command()`` passes these
+        to ``VllmCommand`` via its constructor, so the dependency between the
+        two classes is explicit at the type level.
+
+        Warns when injected fields miss a capacity field the serve command used
+        to render as a hardcoded flag — before dynamic rendering a config that
+        did not declare them still got ``--max-num-batched-tokens`` /
+        ``--max-num-seqs``; now the flag silently vanishes and vLLM falls back
+        to built-in defaults. The empty set (initial state) is exempt.
+        """
+        fields = tuple(fields) if fields else ()
+        self._resolved_field = fields
+        if fields:
+            declared = {getattr(f, "name", "").upper() for f in fields}
+            missing = [n for n in VLLM_SERVE_CAPACITY_ENV_FIELDS if n not in declared]
+            if missing:
+                logger.warning(
+                    "vLLM serve capacity flag(s) {} will NOT render: env field(s) "
+                    "absent from the field model. vLLM will fall back to built-in "
+                    "defaults for {}; declare them in vllm.target_field with "
+                    "config_position=\"env\" to keep explicit values.",
+                    ", ".join("--" + m.lower().replace("_", "-") for m in missing),
+                    ", ".join(missing),
+                )
+
     def update_command(self) -> None:
-        raw_command = VllmCommand(self.config.command).command
+        cmd = VllmCommand(self.config.command, self._resolved_field)
+        raw_command = cmd.command
         self.command = materialize_command(raw_command, self.env, self._runtime_ctx, cwd=self.work_path)
+        logger.info("vLLM launch command (final): {}", " ".join(self.command))

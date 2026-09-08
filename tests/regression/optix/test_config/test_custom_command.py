@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
@@ -80,6 +81,28 @@ class TestVllmCommand:
         cmd = cmd_obj.command
         assert cmd[0] == "vllm"
         assert "--gpu-memory-utilization" not in cmd
+
+    def test_resolved_field_renders_capacity_flags(self) -> None:
+        # Default PSO vLLM config declares MAX_NUM_BATCHED_TOKENS / MAX_NUM_SEQS
+        # as config_position="env" fields; they must render as serve flags.
+        config = VllmCommandConfig(host="localhost", port="8000", model="m", served_model_name="m", others="")
+        fields = [
+            SimpleNamespace(name="MAX_NUM_BATCHED_TOKENS", value=8192),
+            SimpleNamespace(name="MAX_NUM_SEQS", value=64),
+        ]
+        cmd = VllmCommand(config, fields).command
+        assert "--max-num-batched-tokens" in cmd
+        assert "8192" in cmd
+        assert "--max-num-seqs" in cmd
+        assert "64" in cmd
+
+    def test_resolved_field_empty_no_capacity_flags(self) -> None:
+        # Command is fully field-driven: no resolved_field means no dynamic flags.
+        # Guards against reintroducing hardcoded capacity flags (dual source).
+        config = VllmCommandConfig(host="localhost", port="8000", model="m", served_model_name="m", others="")
+        cmd = VllmCommand(config, []).command
+        assert "--max-num-batched-tokens" not in cmd
+        assert "--max-num-seqs" not in cmd
 
 
 class TestVllmBenchmarkCommand:

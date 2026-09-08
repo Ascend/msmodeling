@@ -87,13 +87,13 @@ def test_classify_changes_agents_skill_scripts_are_unscoped() -> None:
             entries=(
                 DiffEntry(
                     status="M",
-                    old_path=".agents/skills/optix-config/scripts/auto_config.py",
-                    new_path=".agents/skills/optix-config/scripts/auto_config.py",
+                    old_path=".agents/skills/optix-assistant/scripts/config_writer.py",
+                    new_path=".agents/skills/optix-assistant/scripts/config_writer.py",
                 ),
             ),
         ),
     )
-    assert result.unscoped_python == (".agents/skills/optix-config/scripts/auto_config.py",)
+    assert result.unscoped_python == (".agents/skills/optix-assistant/scripts/config_writer.py",)
     assert result.modified_source == ()
 
 

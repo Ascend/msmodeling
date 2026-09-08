@@ -1,0 +1,132 @@
+{
+  "version": 3,
+  "_meta": {
+    "updated": "2026-07-28",
+    "source": "DeepSeek-V3.1 w8a8 16-NPU production baseline"
+  },
+  "description": "Human-curated parameter patterns for vLLM Ascend / MindIE on Huawei NPU.",
+  "patterns": [
+    {
+      "matcher": {
+        "engine": "vllm",
+        "is_moe": true
+      },
+      "hints": [
+        {
+          "type": "search_direction",
+          "scope": "strong_suggest",
+          "params": {
+            "enable_expert_parallel": true,
+            "enable_shared_expert_dp": true,
+            "multistream_overlap_shared_expert": true
+          },
+          "rationale": "MoE models benefit from Expert Parallel: without EP, every card holds the same expert shard and MoE layers pay redundant allreduce cost. These flags should be enabled when EP is available."
+        },
+        {
+          "type": "search_direction",
+          "scope": "strong_suggest",
+          "params": {
+            "cudagraph_mode": "FULL_DECODE_ONLY"
+          },
+          "rationale": "Deep MoE models (60+ layers) benefit significantly from CUDA Graph. FULL_DECODE_ONLY captures decode-stage graph, avoiding recapture overhead from prefill dynamic shapes."
+        }
+      ]
+    },
+    {
+      "matcher": {
+        "engine": "vllm"
+      },
+      "hints": [
+        {
+          "type": "search_direction",
+          "scope": "explore",
+          "params": {
+            "num_speculative_tokens": {
+              "explore": [2, 3, 4, 5]
+            }
+          },
+          "rationale": "Multi-Token Prediction (MTP) speculative decoding: num_speculative_tokens=1 can produce negative speedup because verification overhead (~0.5 decode step) exceeds the gain from 1 guessed token. Search values >= 2."
+        },
+        {
+          "type": "search_direction",
+          "scope": "strong_suggest",
+          "params": {
+            "async_scheduling": true
+          },
+          "rationale": "async-scheduling pipelines scheduler dispatch with execution, reducing idle time between batches. Consistent 5-15% throughput improvement."
+        },
+        {
+          "type": "search_direction",
+          "scope": "explore",
+          "params": {
+            "MAX_NUM_BATCHED_TOKENS": {
+              "direction": "increase",
+              "max_multiplier": 4
+            },
+            "MAX_NUM_SEQS": {
+              "direction": "increase",
+              "max_multiplier": 4
+            }
+          },
+          "rationale": "Long-sequence workloads benefit from larger batch sizes. Increase gradually from baseline, watching for KV cache OOM."
+        },
+        {
+          "type": "search_direction",
+          "scope": "explore",
+          "params": {
+            "CONCURRENCY": {
+              "direction": "increase",
+              "max_multiplier": 2,
+              "step_ratio": 2
+            }
+          },
+          "rationale": "Higher concurrency can improve throughput but increases TTFT linearly. Start conservative, increase in 2x steps per round."
+        },
+        {
+          "type": "search_direction",
+          "scope": "explore",
+          "params": {
+            "api_server_count": {
+              "explore": [1, 2, 4, 8]
+            }
+          },
+          "rationale": "When TPOT is the binding hard constraint, raising api-server-count (multiple API server processes handling requests in parallel) cuts per-request queueing latency — a lever that reduces TPOT WITHOUT sacrificing throughput, unlike lowering CONCURRENCY which trades throughput for latency. If TPOT stalls at a floor while only CONCURRENCY is being tuned, explore this dimension first."
+        },
+        {
+          "type": "search_direction",
+          "scope": "explore",
+          "params": {
+            "cudagraph_capture_sizes": {
+              "explore": [
+                [1, 8, 16, 32, 64, 128, 256],
+                [1, 16, 32, 64, 96, 128, 192, 256],
+                [1, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78, 84, 90, 96, 102, 108, 114, 120, 126, 132, 138, 144, 150, 156, 162, 168, 174, 180, 186, 192]
+              ]
+            }
+          },
+          "rationale": "CUDA/ACL Graph capture sizes must cover the actual batch sizes seen at decode time; a batch size beyond the captured range triggers graph miss + recapture per step, inflating TPOT. For short-context workloads keep the range dense (step ~6) from 1 up to the expected max concurrent sequences; for long-context sparser coverage is acceptable. If TPOT is high and capture sizes are left at default, this is a likely contributor."
+        },
+        {
+          "type": "search_direction",
+          "scope": "explore",
+          "params": {
+            "MAX_MODEL_LEN": {
+              "explore": [8192, 16384, 18432, 32768, 65536]
+            }
+          },
+          "rationale": "For short-context workloads (input+output well under the model's max_position_embeddings), do not over-constrain max-model-len to just input+output length — give KV-cache scheduling headroom (a few x the working length). Over-tight max-model-len restricts batch scheduling and can cap throughput, while the true KV-cache footprint is governed by gpu-memory-utilization, not max-model-len."
+        },
+        {
+          "type": "search_direction",
+          "scope": "explore",
+          "params": {
+            "enforce_eager": {
+              "explore": [false, true]
+            }
+          },
+          "rationale": "enforce_eager is a workload-dependent tradeoff, not a universal on/off. false = enable CUDA/ACL Graph capture (helps short-context, decode-dominated, stable-shape workloads — lower TPOT and higher throughput); true = force eager (helps long-context, prefill-dominated, highly dynamic shapes where graph capture sizes cannot cover the batch range and every miss pays recapture). Decide by workload: short in/out + decode-dominated → prefer false; long-context / dynamic shapes → preset's true is correct. Preset scenarios (133k/262k) are long-context, hence their enforce_eager=true."
+        }
+      ]
+    }
+  ]
+}
