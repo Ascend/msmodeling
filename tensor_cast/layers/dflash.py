@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence
 
 import torch
 from transformers import Qwen3Config
@@ -312,6 +312,7 @@ def ensure_draft_kv_caches(
     *,
     layer_indices: Sequence[int],
     num_blocks: int,
+    num_blocks_by_layer: Optional[Mapping[int, int]] = None,
     page_block_size: int,
     num_kv_heads: int,
     head_dim: int,
@@ -324,12 +325,13 @@ def ensure_draft_kv_caches(
     head count). Only allocate when missing or clearly incompatible.
     """
     caches = dict(kv_cache_by_layers or {})
-    shape = (2, num_blocks, page_block_size, num_kv_heads, head_dim)
     for idx in layer_indices:
         cur = caches.get(idx)
         if cur is not None and cur.ndim == 5 and int(cur.shape[0]) == 2 and int(cur.shape[-1]) == int(head_dim):
             # Keep existing (usually TP-sharded) cache from input_generator.
             continue
+        layer_blocks = int(num_blocks_by_layer.get(idx, num_blocks)) if num_blocks_by_layer else num_blocks
+        shape = (2, layer_blocks, page_block_size, num_kv_heads, head_dim)
         caches[idx] = torch.empty(shape, dtype=dtype, device=device)
     return caches
 
@@ -685,11 +687,20 @@ class DflashDraftModel(torch.nn.Module):
             max_attn_ctx = max(self.max_l_ctx(), max_written_ctx)
 
         num_blocks = max((max_attn_ctx + block + page_block_size - 1) // page_block_size, 1) * max(batch, 1)
+        num_blocks_by_layer = {}
+        for i, (_layer_target, _raw_kv) in enumerate(context_kv_by_layer):
+            layer_ctx = int(_layer_target.shape[1])
+            if attn_use_configured_context:
+                layer_ctx = max(layer_ctx, resolve_l_ctx(self.context_length, self.layer_types[i], self.sliding_window))
+            num_blocks_by_layer[int(layer_indices[i])] = max(
+                (layer_ctx + block + page_block_size - 1) // page_block_size, 1
+            ) * max(batch, 1)
         kwargs = dict(kwargs)
         kwargs["kv_cache_by_layers"] = ensure_draft_kv_caches(
             kwargs.get("kv_cache_by_layers"),
             layer_indices=layer_indices,
             num_blocks=max(num_blocks, 1),
+            num_blocks_by_layer=num_blocks_by_layer,
             page_block_size=page_block_size,
             num_kv_heads=local_kv_heads,
             head_dim=self.head_dim,

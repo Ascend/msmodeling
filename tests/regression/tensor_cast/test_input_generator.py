@@ -11,6 +11,8 @@ from tensor_cast.core.input_generator import (
     _load_preprocessor_pixel_limits,
     _resolve_decoder_attention_layer,
     _resolve_decoder_layers,
+    _resolve_draft_kv_cache_num_blocks,
+    _resolve_dspark_kv_cache_num_blocks,
     _resolve_indexer_cache_dtype,
     _resolve_main_kv_cache_dtype,
     _resolve_sparse_attention_indexer_cache_width,
@@ -1004,3 +1006,195 @@ class TestDeepseekV4KvCacheHelpers:
         info = get_sparse_attention_indexer_cache_info(model, num_blocks=4, block_size=16)
 
         assert set(info["indexer_cache_by_layers"]) == {0, 4}
+
+
+class TestDsparkKvCacheHelpers:
+    def test_non_dspark_cache_keeps_original_block_count(self):
+        model = SimpleNamespace(model_config=SimpleNamespace(dspark_config=None))
+        assert _resolve_dspark_kv_cache_num_blocks(model, 32, 64, 2, 2000) == 32
+
+    def _make_model(self, sliding_window=128):
+        draft_config = SimpleNamespace(
+            sliding_window=sliding_window,
+            num_key_value_heads=8,
+            head_dim=64,
+            hidden_size=512,
+            num_attention_heads=8,
+        )
+        model_config = SimpleNamespace(
+            dtype=torch.float16,
+            mla_config=None,
+            hf_config=SimpleNamespace(model_type="qwen3"),
+            parallel_config=SimpleNamespace(tensor_parallel_size=8),
+            dspark_config=SimpleNamespace(sliding_window=sliding_window),
+            has_draft_spec=lambda: True,
+            draft_num_layers=lambda: 1,
+        )
+        return SimpleNamespace(
+            num_hidden_layers=1,
+            head_dim=64,
+            text_config=SimpleNamespace(num_key_value_heads=8),
+            model_config=model_config,
+            _inner=SimpleNamespace(draft_hf_config=draft_config),
+        )
+
+    def test_dspark_draft_cache_uses_sliding_window_blocks(self):
+        model = self._make_model(sliding_window=128)
+
+        blocks = _resolve_dspark_kv_cache_num_blocks(
+            model,
+            num_blocks=32,
+            block_size=64,
+            batch_size=2,
+            total_kv_tokens=2000,
+        )
+
+        assert blocks == 4  # ceil(2 requests * 128 tokens / 64)
+
+    def test_draft_window_blocks_round_each_request(self):
+        model = self._make_model(sliding_window=130)
+
+        blocks = _resolve_draft_kv_cache_num_blocks(
+            model,
+            draft_layer_idx=0,
+            num_blocks=3,
+            block_size=128,
+            batch_size=2,
+            total_kv_tokens=260,
+            request_seq_lens=[130, 130],
+        )
+
+        # Each request needs ceil(130 / 128) pages; pages cannot be shared.
+        assert blocks == 4
+
+    def test_draft_window_blocks_keep_tail_after_sliding_window(self):
+        model = self._make_model(sliding_window=2048)
+
+        blocks = _resolve_draft_kv_cache_num_blocks(
+            model,
+            draft_layer_idx=0,
+            num_blocks=32,
+            block_size=128,
+            batch_size=2,
+            total_kv_tokens=2 * (2048 + 8),
+            request_seq_lens=[2048, 2048],
+            draft_tail_tokens=8,
+        )
+
+        # The ring holds 2048 context slots plus 8 draft slots per request.
+        assert blocks == 34
+
+    def test_draft_config_can_use_slots(self):
+        class SlotConfig:
+            __slots__ = ("dspark_config", "dflash_config")
+
+            def __init__(self):
+                self.dspark_config = SimpleNamespace(sliding_window=128)
+                self.dflash_config = None
+
+        model = SimpleNamespace(model_config=SlotConfig())
+
+        assert _resolve_draft_kv_cache_num_blocks(model, 0, 32, 64, 2, 2000) == 4
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_dspark_cache_shape_and_per_token_cost_use_window(self, _mock_attn_quant):
+        model = self._make_model(sliding_window=128)
+
+        cache_by_layers, cache_per_token = get_kv_cache_info(
+            model,
+            num_blocks=32,
+            block_size=64,
+            batch_size=2,
+            total_kv_tokens=2000,
+        )
+
+        assert tuple(cache_by_layers[0].shape) == (2, 4, 64, 1, 64)
+        assert cache_per_token == 2 * 1 * 64 * 2
+
+    def test_dflash_mixed_layer_types_use_per_layer_blocks(self):
+        draft_hf = SimpleNamespace(num_key_value_heads=8, head_dim=64, hidden_size=512, num_attention_heads=8)
+        model_config = SimpleNamespace(
+            dtype=torch.float16,
+            mla_config=None,
+            hf_config=SimpleNamespace(model_type="qwen3"),
+            parallel_config=SimpleNamespace(tensor_parallel_size=8),
+            dflash_config=SimpleNamespace(sliding_window=128, layer_types=["sliding_attention", "full_attention"]),
+            has_draft_spec=lambda: True,
+            draft_num_layers=lambda: 2,
+        )
+        model = SimpleNamespace(
+            num_hidden_layers=2,
+            head_dim=64,
+            text_config=SimpleNamespace(num_key_value_heads=8),
+            model_config=model_config,
+            _inner=SimpleNamespace(draft_hf_config=draft_hf),
+        )
+
+        assert _resolve_draft_kv_cache_num_blocks(model, 0, 32, 64, 2, 2000) == 4
+        assert _resolve_draft_kv_cache_num_blocks(model, 1, 32, 64, 2, 2000) == 32
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_dflash_mixed_layer_cache_shapes(self, _mock_attn_quant):
+        draft_hf = SimpleNamespace(num_key_value_heads=8, head_dim=64, hidden_size=512, num_attention_heads=8)
+        model_config = SimpleNamespace(
+            dtype=torch.float16,
+            mla_config=None,
+            hf_config=SimpleNamespace(model_type="qwen3"),
+            parallel_config=SimpleNamespace(tensor_parallel_size=8),
+            dflash_config=SimpleNamespace(sliding_window=128, layer_types=["sliding_attention", "full_attention"]),
+            has_draft_spec=lambda: True,
+            draft_num_layers=lambda: 2,
+        )
+        model = SimpleNamespace(
+            num_hidden_layers=2,
+            head_dim=64,
+            text_config=SimpleNamespace(num_key_value_heads=8),
+            model_config=model_config,
+            _inner=SimpleNamespace(draft_hf_config=draft_hf),
+        )
+
+        cache_by_layers, _cache_per_token = get_kv_cache_info(
+            model, num_blocks=32, block_size=64, batch_size=2, total_kv_tokens=2000
+        )
+
+        assert tuple(cache_by_layers[0].shape) == (2, 4, 64, 1, 64)
+        assert tuple(cache_by_layers[1].shape) == (2, 32, 64, 1, 64)
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_dflash_mixed_layer_cache_keeps_tail_and_ignores_target_dcp_shard(self, _mock_attn_quant):
+        draft_hf = SimpleNamespace(num_key_value_heads=8, head_dim=64, hidden_size=512, num_attention_heads=8)
+        model_config = SimpleNamespace(
+            dtype=torch.float16,
+            mla_config=SimpleNamespace(),
+            hf_config=SimpleNamespace(model_type="qwen3"),
+            parallel_config=SimpleNamespace(tensor_parallel_size=8, decode_context_parallel_size=8),
+            dflash_config=SimpleNamespace(
+                sliding_window=2048,
+                layer_types=["sliding_attention", "full_attention"],
+            ),
+            has_draft_spec=lambda: True,
+            draft_num_layers=lambda: 2,
+        )
+        model = SimpleNamespace(
+            num_hidden_layers=2,
+            head_dim=64,
+            text_config=SimpleNamespace(num_key_value_heads=8),
+            model_config=model_config,
+            _inner=SimpleNamespace(draft_hf_config=draft_hf),
+        )
+
+        cache_by_layers, _cache_per_token = get_kv_cache_info(
+            model,
+            num_blocks=65,
+            block_size=128,
+            batch_size=1,
+            total_kv_tokens=65544,
+            request_seq_lens=[65536],
+            draft_tail_tokens=8,
+            unsharded_num_blocks=513,
+        )
+
+        # The sliding layer keeps its 2048-slot window plus draft block, while
+        # the full layer must not inherit the target MLA DCP=8 shard (65 pages).
+        assert tuple(cache_by_layers[0].shape) == (2, 17, 128, 1, 64)
+        assert tuple(cache_by_layers[1].shape) == (2, 513, 128, 1, 64)

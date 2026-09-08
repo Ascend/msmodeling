@@ -26,6 +26,7 @@ from ..utils import exact_division
 _QWEN_VL_DEFAULT_MIN_PIXELS = 65536
 _QWEN_VL_DEFAULT_MAX_PIXELS = 16777216
 _BAILING_V3_KDA_CONV_STATE_COUNT = 3
+_DEFAULT_DRAFT_SLIDING_WINDOW = 2048
 
 
 @dataclass
@@ -127,7 +128,8 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     parallel_config = model_config.parallel_config
     batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
 
-    max_context_length = seq_len + max(num_mtp_tokens, dflash_spec_tokens) + 1
+    speculative_tail = max(num_mtp_tokens, dflash_spec_tokens) + 1
+    max_context_length = seq_len + speculative_tail
 
     # Paged attention parameters (can be adjusted)
     num_blocks = (
@@ -186,7 +188,14 @@ def generate_inputs(model, requests: list[RequestInfo], block_size: int = 128):
     # ``dcp_kv_token_capacity_factor``.
     kv_num_blocks = dcp_sharded_num_blocks(model, num_blocks)
     kv_cache_by_layers, kv_cache_per_token = _get_kv_cache_info(
-        model, kv_num_blocks, block_size, batch_size, total_kv_tokens
+        model,
+        kv_num_blocks,
+        block_size,
+        batch_size,
+        total_kv_tokens,
+        [seq_len] * batch_size,
+        speculative_tail,
+        num_blocks,
     )
     sampling_metadata = SamplingMetadata(
         query_start_loc=attn_meta.query_start_loc,
@@ -606,6 +615,115 @@ def _resolve_sparse_attention_indexer_num_blocks(
     return max(1, (compressed_slots + block_size - 1) // block_size)
 
 
+def _resolve_draft_kv_cache_num_blocks(
+    model,
+    draft_layer_idx: int,
+    num_blocks: int,
+    block_size: int,
+    batch_size: Optional[int] = None,
+    total_kv_tokens: Optional[int] = None,
+    request_seq_lens: Optional[list[int]] = None,
+    draft_tail_tokens: int = 0,
+    unsharded_num_blocks: Optional[int] = None,
+) -> int:
+    """Return draft-cache blocks according to the draft layer's attention type.
+
+    ``request_seq_lens`` contains raw context lengths. ``draft_tail_tokens`` is
+    separately retained after any sliding-window cap because the draft block is
+    written after the context ring-buffer slots.
+    """
+    model_config = getattr(model, "model_config", None)
+    dspark_config = getattr(model_config, "dspark_config", None)
+    dflash_config = getattr(model_config, "dflash_config", None)
+    if dspark_config is not None:
+        draft_config = dspark_config
+        force_sliding_window = True
+    elif dflash_config is not None:
+        draft_config = dflash_config
+        force_sliding_window = False
+    else:
+        return num_blocks
+    if batch_size is None or total_kv_tokens is None or batch_size <= 0 or total_kv_tokens <= 0:
+        return num_blocks
+
+    layer_types = getattr(draft_config, "layer_types", None)
+    if not isinstance(layer_types, (list, tuple)):
+        inner = getattr(model, "_inner", None)
+        draft_hf = getattr(inner, "draft_hf_config", None)
+        layer_types = getattr(draft_hf, "layer_types", None)
+    layer_type = "sliding_attention" if force_sliding_window else "full_attention"
+    if isinstance(layer_types, (list, tuple)) and 0 <= int(draft_layer_idx) < len(layer_types):
+        layer_type = str(layer_types[int(draft_layer_idx)])
+
+    try:
+        draft_tail_tokens = max(int(draft_tail_tokens), 0)
+    except (TypeError, ValueError):
+        draft_tail_tokens = 0
+
+    sliding_window = getattr(draft_config, "sliding_window", None)
+    try:
+        sliding_window = int(sliding_window)
+    except (TypeError, ValueError):
+        sliding_window = _DEFAULT_DRAFT_SLIDING_WINDOW
+    if sliding_window <= 0:
+        sliding_window = _DEFAULT_DRAFT_SLIDING_WINDOW
+
+    if request_seq_lens is not None and len(request_seq_lens) == int(batch_size):
+        return sum(
+            max(
+                1,
+                (
+                    (
+                        min(max(int(seq_len), 0), sliding_window)
+                        if layer_type == "sliding_attention"
+                        else max(int(seq_len), 0)
+                    )
+                    + draft_tail_tokens
+                    + block_size
+                    - 1
+                )
+                // block_size,
+            )
+            for seq_len in request_seq_lens
+        )
+
+    if layer_type != "sliding_attention":
+        # Draft attention never participates in target DCP. When individual request
+        # lengths are unavailable, retain the target's unsharded capacity rather than
+        # reusing the DCP-sharded block count passed to the main KV allocator.
+        return max(int(unsharded_num_blocks or num_blocks), 1)
+
+    # Paged block tables are per-request. Without individual sequence lengths,
+    # reserve one window-sized allocation per active request rather than packing
+    # partially used pages from distinct requests into the same physical block.
+    per_request_slots = min(int(total_kv_tokens), sliding_window) + draft_tail_tokens
+    return int(batch_size) * max(1, (per_request_slots + block_size - 1) // block_size)
+
+
+# Backward-compatible wrapper for callers/tests that used the DSpark-specific name.
+def _resolve_dspark_kv_cache_num_blocks(
+    model,
+    num_blocks: int,
+    block_size: int,
+    batch_size: Optional[int] = None,
+    total_kv_tokens: Optional[int] = None,
+    request_seq_lens: Optional[list[int]] = None,
+    draft_tail_tokens: int = 0,
+    unsharded_num_blocks: Optional[int] = None,
+) -> int:
+    return _resolve_draft_kv_cache_num_blocks(
+        model,
+        0,
+        num_blocks,
+        block_size,
+        batch_size,
+        total_kv_tokens,
+        request_seq_lens,
+        draft_tail_tokens,
+        unsharded_num_blocks,
+    )
+
+
 def _is_mla_model(model) -> bool:
     """Return True when the model stores latent (MLA-style) KV instead of GQA heads."""
     return getattr(getattr(model, "model_config", None), "mla_config", None) is not None
@@ -832,6 +950,9 @@ def _get_kv_cache_info(
     block_size: int,
     batch_size: Optional[int] = None,
     total_kv_tokens: Optional[int] = None,
+    request_seq_lens: Optional[list[int]] = None,
+    draft_tail_tokens: int = 0,
+    unsharded_num_blocks: Optional[int] = None,
 ) -> tuple[dict[Any, Any], int]:
     model_config = model.model_config
     parallel_config = model.model_config.parallel_config
@@ -857,10 +978,23 @@ def _get_kv_cache_info(
     for i in range(model.num_hidden_layers):
         kvcache_dtype = _resolve_main_kv_cache_dtype(model, i)
         is_draft_layer = draft_enabled and i >= num_target_layers
+        layer_num_blocks = num_blocks
 
         if is_draft_layer:
             # Draft is always Qwen3 GQA; allocate [2, blocks, block_size, kv_heads, head_dim]
-            # even when the target model uses MLA caches.
+            # even when the target model uses MLA caches. Draft layers use their
+            # configured attention type to size the paged cache.
+            layer_num_blocks = _resolve_draft_kv_cache_num_blocks(
+                model,
+                i - num_target_layers,
+                num_blocks,
+                block_size,
+                batch_size,
+                total_kv_tokens,
+                request_seq_lens,
+                draft_tail_tokens,
+                unsharded_num_blocks,
+            )
             if draft_hf is not None:
                 draft_kv_heads = int(draft_hf.num_key_value_heads)
                 draft_head_dim = int(
@@ -875,7 +1009,7 @@ def _get_kv_cache_info(
                 assert parallel_config.tensor_parallel_size % draft_kv_heads == 0
                 kv_heads = 1
             kv_cache_by_layers[i] = torch.empty(
-                [2, num_blocks, block_size, kv_heads, draft_head_dim],
+                [2, layer_num_blocks, block_size, kv_heads, draft_head_dim],
                 dtype=kvcache_dtype,
                 device="meta",
             )
@@ -952,7 +1086,7 @@ def _get_kv_cache_info(
         # linear_attention layers keep a placeholder for PP/forward indexing but
         # do not own a real paged KV cache, so they must not inflate per-token cost.
         if i not in excluded_layers:
-            kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (num_blocks * block_size)
+            kv_cache_per_token += bytes_of_tensor(kv_cache_by_layers[i]) / (layer_num_blocks * block_size)
 
     # Decode Context Parallel slices the KV cache along the token (sequence)
     # dimension: each device stores only ``1 / dcp_size`` of every sequence's
@@ -1048,8 +1182,26 @@ def _resolve_v4_kv_cache_size(
     return [num_blocks, block_size, head_dim]
 
 
-def get_kv_cache_info(model, num_blocks, block_size, batch_size=None, total_kv_tokens=None):
-    return _get_kv_cache_info(model, num_blocks, block_size, batch_size, total_kv_tokens)
+def get_kv_cache_info(
+    model,
+    num_blocks,
+    block_size,
+    batch_size=None,
+    total_kv_tokens=None,
+    request_seq_lens=None,
+    draft_tail_tokens=0,
+    unsharded_num_blocks=None,
+):
+    return _get_kv_cache_info(
+        model,
+        num_blocks,
+        block_size,
+        batch_size,
+        total_kv_tokens,
+        request_seq_lens,
+        draft_tail_tokens,
+        unsharded_num_blocks,
+    )
 
 
 def _resolve_decoder_layers(model):
@@ -1239,7 +1391,8 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     query_len_t = torch.tensor(query_lens, dtype=torch.long)
 
     max_total_seq_len = int(max(seq_lens))
-    total_kv_tokens = sum(seq_lens) + batch_size * (max(num_mtp_tokens, dflash_spec_tokens) + 1)
+    speculative_tail = max(num_mtp_tokens, dflash_spec_tokens) + 1
+    total_kv_tokens = sum(seq_lens) + batch_size * speculative_tail
     num_blocks = (total_kv_tokens + block_size - 1) // block_size
     # Decode Context Parallel stores only ``1 / dcp`` of each sequence's tokens on
     # a card, so where that shard is a real per-card saving the physical KV footprint
@@ -1268,7 +1421,14 @@ def generate_inputs_varlen(model, requests: list[RequestInfo], block_size):
     position_ids = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
 
     kv_cache_by_layers, kv_cache_per_token = get_kv_cache_info(
-        model, kv_num_blocks, block_size, batch_size, total_kv_tokens
+        model,
+        kv_num_blocks,
+        block_size,
+        batch_size,
+        total_kv_tokens,
+        seq_lens,
+        speculative_tail,
+        num_blocks,
     )
 
     sampling_meta = SamplingMetadata(query_start_loc=query_start_loc)
