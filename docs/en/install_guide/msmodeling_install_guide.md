@@ -14,11 +14,11 @@ This guide applies to developers and testers who use msModeling for the first ti
 
 ### 2.1 Online Installation
 
-If your device has internet access, you can automatically download and install the tool with one command. See the MindStudio [Download](https://www.hiascend.com/developer/software/mindstudio/download?versionId=147&ids=45%2C89dda9ba9de741349efa03687a487678%2C91%2C49%2C) page on the Ascend Community, select the "Inference Development" scenario, the corresponding CANN version, and the corresponding tool, and then select "Online Installation" as the installation method. The system guides you through the remaining operations.
+If your device has internet access, you can automatically download and install the tool with one command. See the MindStudio [Download](https://www.hiascend.com/en/developer/software/mindstudio/download?versionId=152&ids=45%2Cb1e62037594d4e5c9a0fd797ff490006%2C205%2C49%2C) page on the Ascend Community, select the "Inference Development" scenario, the corresponding CANN version, and the corresponding tool, and then select "Online Installation" as the installation method. The system guides you through the remaining operations.
 
 ### 2.2 Offline Installation
 
-For devices in an environment without external network access, such as an enterprise intranet, download the complete offline installation package on a machine with internet access first, and then transfer it to the target device for installation. See the MindStudio [Download](https://www.hiascend.com/developer/software/mindstudio/download?versionId=147&ids=45%2C89dda9ba9de741349efa03687a487678%2C91%2C50%2C) page on the Ascend Community, select the "Inference Development" scenario, the corresponding CANN version, and the corresponding tool, and then select "Offline Installation" as the installation method to obtain the corresponding installation package and operation instructions.
+For devices in an environment without external network access, such as an enterprise intranet, download the complete offline installation package on a machine with internet access first, and then transfer it to the target device for installation. See the MindStudio [Download](https://www.hiascend.com/en/developer/software/mindstudio/download?versionId=152&ids=45%2Cb1e62037594d4e5c9a0fd797ff490006%2C205%2C50%2C) page on the Ascend Community, select the "Inference Development" scenario, the corresponding CANN version, and the corresponding tool, and then select "Offline Installation" as the installation method to obtain the corresponding installation package and operation instructions.
 
 ### 2.3 Source Installation
 
