@@ -52,7 +52,7 @@
   "tie_word_embeddings": false,
   "topk_group": 1,
   "topk_method": "noaux_tc",
-  "transformers_version": "5.0.2.dev0",
+  "transformers_version": "5.4.0",
   "use_cache": true,
   "v_head_dim": 256,
   "vocab_size": 154880

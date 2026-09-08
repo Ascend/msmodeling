@@ -487,6 +487,11 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
     if "kv_lora_rank" in config:
         qk_nope = _config_int(config, "qk_nope_head_dim")
         qk_rope = _config_int(config, "qk_rope_head_dim")
+        # Split MLA cores keep a 0-token placeholder on the unused phase.
+        if context.phase is ExecutionPhase.DECODE:
+            t_prefill, t_decode = 0, tokens
+        else:
+            t_prefill, t_decode = tokens, 0
         mla_env = {
             "Qlora": _config_int(config, "q_lora_rank"),
             "KVlora": _config_int(config, "kv_lora_rank"),
@@ -494,6 +499,8 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
             "QKrope": qk_rope,
             "Vh": _config_int(config, "v_head_dim"),
             "Hmla": qk_nope + qk_rope,
+            "Tprefill": t_prefill,
+            "Tdecode": t_decode,
         }
 
     dsa_env: dict[str, object] = {}

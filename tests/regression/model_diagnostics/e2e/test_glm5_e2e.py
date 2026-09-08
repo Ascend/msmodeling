@@ -105,6 +105,7 @@ def test_glm5_capture_organize_and_compare(
     assert result.summary.overall_status is FindingStatus.PASS
     stage_ids = {finding.stage_id for finding in result.findings}
     assert {"dsa_indexer", "sparse_attention", "moe_experts", "moe_combine"}.issubset(stage_ids)
+    assert ("mla_kv_projection" in stage_ids) is (phase is ExecutionPhase.PREFILL)
     if profile.quantize_linear_action == "W8A8_DYNAMIC":
         operator_names = {call.operator_name for call in artifact.operator_calls}
         assert "tensor_cast.mlapo_quant.default" in operator_names

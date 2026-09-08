@@ -28,6 +28,21 @@ def _get_request_query_lens(attention_meta: Optional[AttentionMetadataBase]) -> 
     return getattr(attention_meta, "query_lens", None)
 
 
+def _get_mla_phase_token_counts(
+    attention_meta: Optional[AttentionMetadataBase], total_tokens: int, decode_only: bool
+) -> tuple[int, int]:
+    """Return concrete Prefill/Decode token counts without tensor data control flow."""
+    phases = _get_request_phase_values(attention_meta)
+    query_lens = getattr(attention_meta, "query_lens_values", None) if attention_meta is not None else None
+    if phases is not None and query_lens is not None and len(phases) == len(query_lens):
+        prefill_tokens = sum(length for length, is_decode in zip(query_lens, phases) if not is_decode)
+        decode_tokens = sum(length for length, is_decode in zip(query_lens, phases) if is_decode)
+        return prefill_tokens, decode_tokens
+    if attention_meta is not None and attention_meta.is_dcp_decode:
+        return 0, total_tokens
+    return (0, total_tokens) if decode_only else (total_tokens, 0)
+
+
 def tp_plan_module_path(prefix: str, relative_path: str) -> str:
     """Return a TP-plan glob for a module under ``prefix``.
 
@@ -234,21 +249,13 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         """
         return None
 
-    def forward(
+    def _compute_mla_prolog(
         self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        kv_cache_unused: Optional[torch.Tensor] = None,
-        attention_meta: Optional[AttentionMetadataBase] = None,
-        **kwargs,
-    ) -> tuple[torch.Tensor, None]:
-        kv_cache_by_layers = kwargs.pop("kv_cache_by_layers", None)
-        kv_cache = kv_cache_by_layers[self.layer_idx] if kv_cache_by_layers else None
-        batch_size, seq_length = hidden_states.shape[:-1]
-        num_tokens = batch_size * seq_length
-        hidden_states_view = hidden_states.view(num_tokens, -1)
-        cos, sin = position_embeddings
+        hidden_states_view: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build MLA Q/KV states; model adapters may override only this boundary."""
         if self.q_lora_rank is None:
             self.q_a_proj_weight, self.q_a_proj_scale, self.q_a_proj_offset = self.extract_qparams(self.q_proj)
             self.q_a_layernorm_weight = None
@@ -269,7 +276,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             and getattr(self, "kv_a_proj_scale", None) is not None
         )
         if linear_quant_enabled:
-            q_states, kv_c_normed, k_rot, qa_normed = torch.ops.tensor_cast.mlapo_quant(
+            return torch.ops.tensor_cast.mlapo_quant(
                 hidden_states_view,
                 cos,
                 sin,
@@ -291,23 +298,43 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                 self.kv_a_proj_scale,
                 self.kv_a_proj_offset,
             )
-        else:
-            q_states, kv_c_normed, k_rot, qa_normed = torch.ops.tensor_cast.mlapo(
-                hidden_states_view,
-                cos,
-                sin,
-                self.q_a_proj_weight,
-                self.q_a_layernorm_weight,
-                self.q_b_proj_weight,
-                self.kv_a_proj_weight,
-                self.kv_a_layernorm_weight,
-                self._num_heads_per_rank,
-                self.qk_head_dim,
-                self.qk_nope_head_dim,
-                self.qk_rope_head_dim,
-                self.kv_lora_rank,
-                self.q_lora_rank,
-            )
+        return torch.ops.tensor_cast.mlapo(
+            hidden_states_view,
+            cos,
+            sin,
+            self.q_a_proj_weight,
+            self.q_a_layernorm_weight,
+            self.q_b_proj_weight,
+            self.kv_a_proj_weight,
+            self.kv_a_layernorm_weight,
+            self._num_heads_per_rank,
+            self.qk_head_dim,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.kv_lora_rank,
+            self.q_lora_rank,
+        )
+
+    def _postprocess_attention_output(self, attn_output: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Model-specific processing after MLA phase merge and before ``o_proj``."""
+        return attn_output
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        kv_cache_unused: Optional[torch.Tensor] = None,
+        attention_meta: Optional[AttentionMetadataBase] = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, None]:
+        kv_cache_by_layers = kwargs.pop("kv_cache_by_layers", None)
+        kv_cache = kv_cache_by_layers[self.layer_idx] if kv_cache_by_layers else None
+        batch_size, seq_length = hidden_states.shape[:-1]
+        num_tokens = batch_size * seq_length
+        hidden_states_view = hidden_states.view(num_tokens, -1)
+        cos, sin = position_embeddings
+        q_states, kv_c_normed, k_rot, qa_normed = self._compute_mla_prolog(hidden_states_view, cos, sin)
 
         if self.q_lora_rank is not None:
             qa_normed = qa_normed.view(batch_size, seq_length, -1)
@@ -324,6 +351,69 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         query_start_loc = attention_meta.query_start_loc if attention_meta else None
         seq_lens = attention_meta.seq_lens if attention_meta else None
         query_lens = attention_meta.query_lens if attention_meta else None
+
+        num_prefill_tokens, num_decode_tokens = _get_mla_phase_token_counts(
+            attention_meta, int(q_states.shape[0]), self.decode_only
+        )
+        kv_projection_op = (
+            torch.ops.tensor_cast.mla_kv_projection_quant
+            if self.quant_config is not None
+            else torch.ops.tensor_cast.mla_kv_projection
+        )
+        q_absorb_op = (
+            torch.ops.tensor_cast.mla_q_absorb_projection_quant
+            if self.quant_config is not None
+            else torch.ops.tensor_cast.mla_q_absorb_projection
+        )
+        projection_quant_args = ()
+        q_absorb_quant_args = ()
+        if self.quant_config is not None:
+            projection_quant_args = (
+                self.quant_config.kv_projected_scale,
+                self.quant_config.kv_projected_offset,
+                self.kv_b_proj_scale,
+                self.kv_b_proj_offset,
+            )
+            q_absorb_quant_args = (
+                self.quant_config.qk_scale,
+                self.quant_config.qk_offset,
+                self.kv_b_proj_scale,
+                self.kv_b_proj_offset,
+            )
+        if num_prefill_tokens > 0:
+            projected_kv = kv_projection_op(
+                kv_c_normed,
+                self.kv_b_proj_weight_t,
+                num_prefill_tokens,
+                self._num_heads_per_rank,
+                num_decode_tokens,
+                *projection_quant_args,
+            )
+        else:
+            projected_kv = torch.empty(
+                0,
+                self._num_heads_per_rank,
+                self.qk_nope_head_dim + self.v_head_dim,
+                dtype=kv_c_normed.dtype,
+                device=kv_c_normed.device,
+            )
+        if num_decode_tokens > 0:
+            absorbed_q = q_absorb_op(
+                q_states,
+                self.W_UK_T,
+                num_decode_tokens,
+                self.qk_rope_head_dim,
+                num_prefill_tokens,
+                *q_absorb_quant_args,
+            )
+        else:
+            absorbed_q = torch.empty(
+                0,
+                self._num_heads_per_rank,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                dtype=q_states.dtype,
+                device=q_states.device,
+            )
 
         # --- Decode Context Parallel (decode path only) ---
         # Gather Q heads across the DCP group so each rank holds h_q*dcp/tp heads,
@@ -345,7 +435,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         # ``_multihead_latent_attention_properties_helper``.
         apply_dcp = self.dcp_group.world_size > 1 and attention_meta is not None and attention_meta.is_dcp_decode
         if apply_dcp:
-            q_states = self.dcp_group.all_gather(q_states, dim=1)
+            absorbed_q = self.dcp_group.all_gather(absorbed_q, dim=1)
             dcp_size = self.dcp_group.world_size
             # Round the shard UP, and clamp to >= 1. Two reasons this is not floor:
             #
@@ -400,24 +490,16 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         if self.quant_config is not None:
             attention_backend = partial(
                 self._get_attention_op(quant_enabled=True),
-                W_UK_T=self.W_UK_T,
-                W_UV=self.W_UV,
-                kv_b_proj=self.kv_b_proj_weight_t,
                 v_head_dim=self.v_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
                 query_scale=self.quant_config.query_scale,
                 query_offset=self.quant_config.query_offset,
                 kv_scale=self.quant_config.kv_scale,
                 kv_offset=self.quant_config.kv_offset,
-                kv_projected_scale=self.quant_config.kv_projected_scale,
-                kv_projected_offset=self.quant_config.kv_projected_offset,
-                qk_scale=self.quant_config.qk_scale,
-                qk_offset=self.quant_config.qk_offset,
                 v_scale=self.quant_config.v_scale,
                 v_offset=self.quant_config.v_offset,
                 attention_prob_scale=self.quant_config.attention_prob_scale,
                 attention_prob_offset=self.quant_config.attention_prob_offset,
-                kv_b_proj_scale=self.kv_b_proj_scale,
-                kv_b_proj_offset=self.kv_b_proj_offset,
                 out_scale=self.quant_config.out_scale,
                 out_offset=self.quant_config.out_offset,
                 out_dtype=hidden_states.dtype,
@@ -426,15 +508,15 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         else:
             attention_backend = partial(
                 self._get_attention_op(quant_enabled=False),
-                W_UK_T=self.W_UK_T,
-                W_UV=self.W_UV,
-                kv_b_proj=self.kv_b_proj_weight_t,
                 v_head_dim=self.v_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
                 **extra_backend_kwargs,
             )
 
-        attn_output = attention_backend(
+        prefill_output, decode_latent_output = attention_backend(
             q=q_states,
+            projected_kv=projected_kv,
+            absorbed_q=absorbed_q,
             kv_cache=kv_cache,
             block_table=attention_meta.block_table_tensor if attention_meta is not None else None,
             query_start_loc=query_start_loc,
@@ -450,9 +532,36 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         # communication volume must be counted in fp32 (4 bytes/elem) regardless of
         # the model/KV dtype - enforced here purely via the fp32 meta tensor.
         if apply_dcp:
-            attn_output = self._dcp_merge_all_to_all(attn_output, batch_size, seq_length)
+            decode_latent_output = self._dcp_merge_all_to_all(decode_latent_output, batch_size, seq_length)
+
+        v_up_projection_op = (
+            torch.ops.tensor_cast.mla_v_up_projection_quant
+            if self.quant_config is not None
+            else torch.ops.tensor_cast.mla_v_up_projection
+        )
+        if num_decode_tokens > 0:
+            decode_output = v_up_projection_op(decode_latent_output, self.W_UV)
+        else:
+            decode_output = torch.empty(
+                0,
+                self._num_heads_per_rank,
+                self.v_head_dim,
+                dtype=decode_latent_output.dtype,
+                device=decode_latent_output.device,
+            )
+        merge_tokens = int(prefill_output.shape[0]) + int(decode_output.shape[0])
+        if merge_tokens == 0:
+            merge_tokens = int(q_states.shape[0])
+        attn_output = torch.ops.tensor_cast.mla_merge_phase_outputs(
+            prefill_output,
+            decode_output,
+            merge_tokens,
+            _get_request_phase_values(attention_meta),
+            getattr(attention_meta, "query_lens_values", None) if attention_meta is not None else None,
+        )
 
         attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
+        attn_output = self._postprocess_attention_output(attn_output, hidden_states)
         attn_output = self.o_proj(attn_output)
         return self._format_forward_output(attn_output, None, pre_attn_out)
 
@@ -468,7 +577,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
     ) -> torch.Tensor:
         """Model the DCP output+lse all_to_all and return output reduced to h_q/tp heads.
 
-        ``attn_output`` enters as ``(num_tokens, h_q*dcp/tp, v_head_dim)``. We build a
+        ``attn_output`` enters as ``(num_tokens, h_q*dcp/tp, kv_lora_rank)``. We build a
         synthetic fp32 ``output + lse`` payload with the gathered heads on dim 0 (the
         dimension ``all_to_all`` splits) and exchange ``h_q/tp``-head shards across the
         ``dcp`` ranks. The exchanged tensor is only needed for its communication cost;
@@ -479,14 +588,14 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         heads_per_rank = self._num_heads_per_rank
         gathered_heads = heads_per_rank * dcp
         num_tokens = batch_size * seq_length
-        # output (v_head_dim) + lse (1 column per head), upcast to fp32 for the a2a.
+        # latent output + lse (1 column per head), upcast to fp32 for the a2a.
         # The payload must carry a value edge from the placeholder-derived
         # ``attn_output``: a bare ``torch.empty`` is an all-constant input, so the meta
         # constant-folder would precompute the whole ``empty -> all_to_all`` chain and
         # erase the collective (dropping its communication cost). Adding a value-neutral
         # ``[0] * 0`` term keeps the a2a *input* non-constant so it survives folding.
         out_lse = torch.empty(
-            (gathered_heads, num_tokens * (self.v_head_dim + 1)),
+            (gathered_heads, num_tokens * (attn_output.shape[-1] + 1)),
             dtype=torch.float32,
             device=attn_output.device,
         )
@@ -512,11 +621,8 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         self,
         attention_meta: Optional[AttentionMetadataBase] = None,
     ) -> dict:
-        """Hook for subclasses to inject attention-metadata-derived arguments.
-
-        Default implementation returns an empty dict (standard dense attention).
-        """
-        return {}
+        """Hook for subclasses to inject attention-metadata-derived arguments."""
+        return {"is_decode_values": _get_request_phase_values(attention_meta)}
 
     def _get_attention_op(self, quant_enabled: bool):
         """Return the TC op to use for attention. Subclasses override for non-dense paths."""
@@ -622,12 +728,6 @@ class DeepseekSparseAttention(MultiheadLatentAttentionTensorCast):
             "topk_limit": self.indexer.topk_limit,
             "topk_indices": pre_attn_out,
         }
-
-    def _get_backend_metadata_kwargs(
-        self,
-        attention_meta: Optional[AttentionMetadataBase] = None,
-    ) -> dict:
-        return {"is_decode_values": _get_request_phase_values(attention_meta)}
 
     def _get_attention_op(self, quant_enabled: bool):
         """Return the sparse-MLA (SFA) TC op for the DSA path.

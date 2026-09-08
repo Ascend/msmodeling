@@ -75,6 +75,7 @@ def test_deepseek_v3_theory_env_binds_attention_symbols() -> None:
 
     assert (env["Qlora"], env["KVlora"]) == (1536, 512)
     assert (env["QKnope"], env["QKrope"], env["Vh"], env["Hmla"]) == (128, 64, 128, 192)
+    assert (env["Tprefill"], env["Tdecode"]) == (env["T"], 0)
     assert env["Dsa_k"] == 2
     assert env["MOE_COMBINE_DTYPE"] == "float32"
 
@@ -120,6 +121,7 @@ def test_deepseek_v3_theory_env_binds_decode_dsa_width() -> None:
 
     assert env["S"] == 129
     assert env["Dsa_k"] == 129
+    assert (env["Tprefill"], env["Tdecode"]) == (0, env["T"])
 
 
 def test_deepseek_v3_theory_env_defaults_lm_head_tp_to_tensor_parallel() -> None:
@@ -204,12 +206,14 @@ def test_deepseek_v3_spec_expands_dense_prefix_and_moe_layers() -> None:
     assert [stage.stage_id for stage in language.layer_specs["dense"].stages] == [
         "mla_projection",
         "dsa_indexer",
+        "mla_kv_projection",
         "sparse_attention",
         "dense_ffn",
     ]
     assert [stage.stage_id for stage in language.layer_specs["moe"].stages] == [
         "mla_projection",
         "dsa_indexer",
+        "mla_kv_projection",
         "sparse_attention",
         "moe_gate",
         "moe_dispatch",
@@ -328,21 +332,82 @@ def test_deepseek_v3_sparse_attention_declares_stable_runtime_inputs() -> None:
     for layer_spec in language.layer_specs.values():
         attention = next(stage for stage in layer_spec.stages if stage.stage_id == "sparse_attention")
         theory = attention.source_options[SourceKind.THEORY]
+        sparse_attention_core = next(
+            operator for operator in theory.operators if operator.operator_name == "mla_sparse_attention_core"
+        )
         sparse_attention = next(
             operator for operator in theory.operators if operator.operator_name == "mla_sparse_attention"
         )
 
-        assert set(sparse_attention.tensors) == {
+        assert set(sparse_attention_core.tensors) == {
             INPUT[0],
             INPUT[1],
             INPUT[2],
             INPUT[3],
             INPUT[4],
             INPUT[5],
-            OUTPUT[0],
+            INPUT[6],
+            INPUT[7],
         }
-        assert sparse_attention.tensors[INPUT[1]].shape.expression == "[Nblk, Bs, KVlora + QKrope]"
-        assert sparse_attention.tensors[INPUT[2]].shape.expression == "[B, Mb]"
+        assert sparse_attention_core.tensors[INPUT[0]].shape.expression == "[T, Lh, Hmla]"
+        assert sparse_attention_core.tensors[INPUT[1]].shape.expression == "[Tprefill, Lh, QKnope + Vh]"
+        assert sparse_attention_core.tensors[INPUT[2]].shape.expression == "[Tdecode, Lh, KVlora + QKrope]"
+        assert sparse_attention_core.tensors[INPUT[3]].shape.expression == "[Nblk, Bs, KVlora + QKrope]"
+        assert sparse_attention_core.tensors[INPUT[4]].shape.expression == "[B, Mb]"
+        assert set(sparse_attention.tensors) == {OUTPUT[0]}
+
+
+def _deepseek_spec(context: ModelRunContext):
+    from tools.model_diagnostics.builtin import create_stage_comparison_registry
+    from tools.model_diagnostics.specification.builtin_activation import create_builtin_operator_activation_registry
+    from tools.model_diagnostics.specification.loader import YamlModelDiagnosticsSpecLoader
+    from tools.model_diagnostics.specification.source_options import create_builtin_source_options_parsers
+    from tools.model_diagnostics.specification.theory_fragments import load_builtin_theory_fragment_registry
+
+    fragments = load_builtin_theory_fragment_registry()
+    loader = YamlModelDiagnosticsSpecLoader(
+        comparison_registry=create_stage_comparison_registry(),
+        activation_registry=create_builtin_operator_activation_registry(),
+        source_options_parsers=create_builtin_source_options_parsers(fragment_registry=fragments),
+        fragment_registry=fragments,
+    )
+    return loader.materialize(loader.load("deepseek_v3_v1"), context)
+
+
+def test_deepseek_v3_prefill_declares_kv_projection_contract() -> None:
+    spec = _deepseek_spec(_context())
+    language = next(region for region in spec.regions if region.region_id == "language")
+
+    assert spec.operator_aliases["tensor_cast.mla_kv_projection_quant.default"] == "mla_kv_projection"
+    for layer_spec in language.layer_specs.values():
+        projection = next(stage for stage in layer_spec.stages if stage.stage_id == "mla_kv_projection")
+        theory = projection.source_options[SourceKind.THEORY]
+        assert [operator.operator_name for operator in theory.operators] == ["mla_kv_projection"]
+        kv_proj = theory.operators[0]
+        assert kv_proj.tensors[INPUT[0]].shape.expression == "[T, KVlora]"
+        assert kv_proj.tensors[INPUT[1]].shape.expression == "[KVlora, Lh * (QKnope + Vh)]"
+        assert kv_proj.tensors[OUTPUT[0]].shape.expression == "[Tprefill, Lh, QKnope + Vh]"
+        runtime = projection.source_options[SourceKind.RUNTIME]
+        assert "mla_kv_projection" not in runtime.ignored_operators
+        assert "mla_kv_projection_quant" not in runtime.ignored_operators
+
+    env = build_theory_env(_context())
+    regions = build_theory_regions(_context(), spec, {"language": (0,)}, ())
+    kv_stage = next(stage for stage in regions[0].layers[0].stages if stage.stage_id == "mla_kv_projection")
+    assert [call.operator_name for call in kv_stage.operator_calls] == ["mla_kv_projection"]
+    kv_call = kv_stage.operator_calls[0]
+    output = next(tensor for tensor in kv_call.tensors if tensor.slot == OUTPUT[0])
+    assert output.shape == (env["Tprefill"], env["Lh"], env["QKnope"] + env["Vh"])
+
+
+def test_deepseek_v3_decode_omits_kv_projection_contract() -> None:
+    spec = _deepseek_spec(_context(phase=ExecutionPhase.DECODE, query_length=1, context_length=128))
+    language = next(region for region in spec.regions if region.region_id == "language")
+    for layer_spec in language.layer_specs.values():
+        assert all(stage.stage_id != "mla_kv_projection" for stage in layer_spec.stages)
+        projection = next(stage for stage in layer_spec.stages if stage.stage_id == "mla_projection")
+        theory = projection.source_options[SourceKind.THEORY]
+        assert [operator.operator_name for operator in theory.operators] == ["mlapo"]
 
 
 @pytest.mark.parametrize(

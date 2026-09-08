@@ -63,27 +63,26 @@ def _apply_multistream_pass(
 def _build_mla_graph():
     graph = fx.Graph()
     q = graph.placeholder("q")
+    projected_kv = graph.placeholder("projected_kv")
+    absorbed_q = graph.placeholder("absorbed_q")
     kv_cache = graph.placeholder("kv_cache")
     block_table = graph.placeholder("block_table")
     query_start_loc = graph.placeholder("query_start_loc")
     seq_lens = graph.placeholder("seq_lens")
     query_lens = graph.placeholder("query_lens")
-    w_uk_t = graph.placeholder("w_uk_t")
-    w_uv = graph.placeholder("w_uv")
-    kv_b_proj = graph.placeholder("kv_b_proj")
     out = graph.call_function(
         torch.ops.tensor_cast.multihead_latent_attention.default,
         args=(
             q,
+            projected_kv,
+            absorbed_q,
             kv_cache,
             block_table,
             query_start_loc,
             seq_lens,
             query_lens,
-            w_uk_t,
-            w_uv,
-            kv_b_proj,
             64,
+            512,
         ),
     )
     graph.output(out)
@@ -193,8 +192,11 @@ def _estimate_fake_analytic_cost(gm, cost_node, placeholder_specs, output_spec):
             gm,
             {name: torch.empty(shape, dtype=dtype) for name, (shape, dtype) in placeholder_specs.items()},
         )
-        output_shape, output_dtype = output_spec
-        cost_node.meta["val"] = torch.empty(output_shape, dtype=output_dtype)
+        if isinstance(output_spec[1], torch.dtype):
+            output_shape, output_dtype = output_spec
+            cost_node.meta["val"] = torch.empty(output_shape, dtype=output_dtype)
+        else:
+            cost_node.meta["val"] = tuple(torch.empty(shape, dtype=dtype) for shape, dtype in output_spec)
 
         cost = pass_._estimate_node_cost_with_analytic(cost_node)
 
@@ -333,16 +335,18 @@ class MultiStreamPassTestCase(unittest.TestCase):
                 _build_mla_graph,
                 {
                     "q": ((100, 128, 576), torch.float16),
+                    "projected_kv": ((100, 128, 128), torch.float16),
+                    "absorbed_q": ((100, 128, 576), torch.float16),
                     "kv_cache": ((10000, 128, 576), torch.float16),
                     "block_table": ((1, 10), torch.int64),
                     "query_start_loc": ((2,), torch.int64),
                     "seq_lens": ((1,), torch.int64),
                     "query_lens": ((1,), torch.int64),
-                    "w_uk_t": ((128, 512, 512), torch.float16),
-                    "w_uv": ((128, 512, 64), torch.float16),
-                    "kv_b_proj": ((512, 128 * (64 + 64)), torch.float16),
                 },
-                ((100, 128, 64), torch.float16),
+                (
+                    ((100, 128, 64), torch.float16),
+                    ((100, 128, 512), torch.float16),
+                ),
             ),
             "attention": (
                 _build_attention_graph,
@@ -404,30 +408,32 @@ class MultiStreamPassTestCase(unittest.TestCase):
             query_start_loc = torch.empty((2,), dtype=torch.int64)
             seq_lens = torch.empty((1,), dtype=torch.int64)
             query_lens = torch.empty((1,), dtype=torch.int64)
-            w_uk_t = torch.empty((128, 512, 512), dtype=torch.float16)
-            w_uv = torch.empty((128, 512, 64), dtype=torch.float16)
-            kv_b_proj = torch.empty((512, 128 * (64 + 64)), dtype=torch.float16)
-            out = torch.empty((100, 128, 64), dtype=torch.float16)
+            projected_kv = torch.empty((100, 128, 128), dtype=torch.float16)
+            absorbed_q = torch.empty((100, 128, 576), dtype=torch.float16)
+            out = (
+                torch.empty((100, 128, 64), dtype=torch.float16),
+                torch.empty((100, 128, 512), dtype=torch.float16),
+            )
             dense_op_info = OpInvokeInfo(
                 torch.ops.tensor_cast.multihead_latent_attention.default,
                 (
                     q,
+                    projected_kv,
+                    absorbed_q,
                     kv_cache,
                     block_table,
                     query_start_loc,
                     seq_lens,
                     query_lens,
-                    w_uk_t,
-                    w_uv,
-                    kv_b_proj,
                     64,
+                    512,
                 ),
                 {},
                 out,
             )
             sparse_op_info = OpInvokeInfo(
                 torch.ops.tensor_cast.multihead_latent_attention.default,
-                dense_op_info.args + (64,),
+                dense_op_info.args + (64, None),
                 {},
                 out,
             )
@@ -456,13 +462,26 @@ class MultiStreamPassTestCase(unittest.TestCase):
             query_start_loc = torch.empty((1,), dtype=torch.int64)
             seq_lens = torch.empty((batch_size,), dtype=torch.int64)
             query_lens = torch.empty((batch_size,), dtype=torch.int64)
-            w_uk_t = torch.empty((128, 512, 512), dtype=torch.float16)
-            w_uv = torch.empty((128, 512, 64), dtype=torch.float16)
-            kv_b_proj = torch.empty((512, 128 * (64 + 64)), dtype=torch.float16)
-            out = torch.empty((100, 128, 64), dtype=torch.float16)
+            projected_kv = torch.empty((100, 128, 128), dtype=torch.float16)
+            absorbed_q = torch.empty((100, 128, 576), dtype=torch.float16)
+            out = (
+                torch.empty((100, 128, 64), dtype=torch.float16),
+                torch.empty((100, 128, 512), dtype=torch.float16),
+            )
             return OpInvokeInfo(
                 torch.ops.tensor_cast.multihead_latent_attention.default,
-                (q, kv_cache, None, query_start_loc, seq_lens, query_lens, w_uk_t, w_uv, kv_b_proj, 64),
+                (
+                    q,
+                    projected_kv,
+                    absorbed_q,
+                    kv_cache,
+                    None,
+                    query_start_loc,
+                    seq_lens,
+                    query_lens,
+                    64,
+                    512,
+                ),
                 {},
                 out,
             ).get_perf_properties()
@@ -489,29 +508,25 @@ class MultiStreamPassTestCase(unittest.TestCase):
             query_start_loc = torch.empty((2,), dtype=torch.int64)
             seq_lens = torch.empty((1,), dtype=torch.int64)
             query_lens = torch.empty((1,), dtype=torch.int64)
-            w_uk_t = torch.empty((128, 512, 512), dtype=torch.float16)
-            w_uv = torch.empty((128, 512, 64), dtype=torch.float16)
-            kv_b_proj = torch.empty((512, 128 * (64 + 64)), dtype=torch.float16)
+            projected_kv = torch.empty((100, 128, 128), dtype=torch.float16)
+            absorbed_q = torch.empty((100, 128, 576), dtype=torch.float16)
             scale = torch.empty((), dtype=torch.float32)
-            out = torch.empty((100, 128, 64), dtype=torch.float16)
+            out = (
+                torch.empty((100, 128, 64), dtype=torch.float16),
+                torch.empty((100, 128, 512), dtype=torch.float16),
+            )
             args = (
                 q,
+                projected_kv,
+                absorbed_q,
                 kv_cache,
                 block_table,
                 query_start_loc,
                 seq_lens,
                 query_lens,
-                w_uk_t,
-                w_uv,
-                kv_b_proj,
                 64,
+                512,
                 None,
-                None,
-                scale,
-                None,
-                scale,
-                None,
-                scale,
                 None,
                 scale,
                 None,
@@ -551,29 +566,25 @@ class MultiStreamPassTestCase(unittest.TestCase):
             query_start_loc = torch.empty((2,), dtype=torch.int64)
             seq_lens = torch.empty((1,), dtype=torch.int64)
             query_lens = torch.empty((1,), dtype=torch.int64)
-            w_uk_t = torch.empty((128, 512, 512), dtype=torch.float16)
-            w_uv = torch.empty((128, 512, 64), dtype=torch.float16)
-            kv_b_proj = torch.empty((512, 128 * (64 + 64)), dtype=torch.float16)
+            projected_kv = torch.empty((100, 128, 128), dtype=torch.float16)
+            absorbed_q = torch.empty((100, 128, 576), dtype=torch.float16)
             scale = torch.empty((), dtype=torch.float32)
-            out = torch.empty((100, 128, 64), dtype=out_dtype or q.dtype)
+            out = (
+                torch.empty((100, 128, 64), dtype=out_dtype or q.dtype),
+                torch.empty((100, 128, 512), dtype=out_dtype or q.dtype),
+            )
             args = (
                 q,
+                projected_kv,
+                absorbed_q,
                 kv_cache,
                 block_table,
                 query_start_loc,
                 seq_lens,
                 query_lens,
-                w_uk_t,
-                w_uv,
-                kv_b_proj,
                 64,
+                512,
                 None,
-                None,
-                scale,
-                None,
-                scale,
-                None,
-                scale,
                 None,
                 scale,
                 None,
@@ -615,35 +626,28 @@ class MultiStreamPassTestCase(unittest.TestCase):
             return node
 
         q = placeholder("q", torch.empty((100, 128, 576), device="meta", dtype=torch.float16))
+        projected_kv = placeholder("projected_kv", torch.empty((100, 128, 128), device="meta", dtype=torch.float16))
+        absorbed_q = placeholder("absorbed_q", torch.empty((100, 128, 576), device="meta", dtype=torch.float16))
         kv_cache = placeholder("kv_cache", torch.empty((10000, 128, 576), device="meta", dtype=torch.float16))
         block_table = placeholder("block_table", torch.empty((1, 10), device="meta", dtype=torch.int64))
         query_start_loc = placeholder("query_start_loc", torch.empty((2,), device="meta", dtype=torch.int64))
         seq_lens = placeholder("seq_lens", torch.empty((1,), device="meta", dtype=torch.int64))
         query_lens = placeholder("query_lens", torch.empty((1,), device="meta", dtype=torch.int64))
-        w_uk_t = placeholder("w_uk_t", torch.empty((128, 512, 512), device="meta", dtype=torch.float16))
-        w_uv = placeholder("w_uv", torch.empty((128, 512, 64), device="meta", dtype=torch.float16))
-        kv_b_proj = placeholder("kv_b_proj", torch.empty((512, 128 * (64 + 64)), device="meta", dtype=torch.float16))
         scale = placeholder("scale", torch.empty((), device="meta", dtype=torch.float32))
         out = graph.call_function(
             torch.ops.tensor_cast.multihead_latent_attention_quant.default,
             args=(
                 q,
+                projected_kv,
+                absorbed_q,
                 kv_cache,
                 block_table,
                 query_start_loc,
                 seq_lens,
                 query_lens,
-                w_uk_t,
-                w_uv,
-                kv_b_proj,
                 64,
+                512,
                 None,
-                None,
-                scale,
-                None,
-                scale,
-                None,
-                scale,
                 None,
                 scale,
                 None,
@@ -658,7 +662,10 @@ class MultiStreamPassTestCase(unittest.TestCase):
                 None,
             ),
         )
-        out.meta["val"] = torch.empty((100, 128, 64), device="meta", dtype=torch.float16)
+        out.meta["val"] = (
+            torch.empty((100, 128, 64), device="meta", dtype=torch.float16),
+            torch.empty((100, 128, 512), device="meta", dtype=torch.float16),
+        )
         graph.output(out)
 
         pass_ = MultiStreamSchedulePass(device_name=TEST_DEVICE.name)
@@ -671,29 +678,25 @@ class MultiStreamPassTestCase(unittest.TestCase):
             query_start_loc = torch.tensor([0, 5, 6], dtype=torch.int64)
             seq_lens = torch.tensor([6, 1], dtype=torch.int64)
             query_lens = torch.tensor([5, 1], dtype=torch.int64)
-            w_uk_t = torch.empty((2, 6, 4), dtype=torch.float16)
-            w_uv = torch.empty((2, 4, 3), dtype=torch.float16)
-            kv_b_proj = torch.empty((4, 2 * (6 + 3)), dtype=torch.float16)
+            projected_kv = torch.empty((5, 2, 9), dtype=torch.float16)
+            absorbed_q = torch.empty((1, 2, 6), dtype=torch.float16)
             scale = torch.empty((), dtype=torch.float32)
-            out = torch.empty((6, 2, 3), dtype=out_dtype or q.dtype)
+            out = (
+                torch.empty((5, 2, 3), dtype=out_dtype or q.dtype),
+                torch.empty((1, 2, 4), dtype=out_dtype or q.dtype),
+            )
             args = (
                 q,
+                projected_kv,
+                absorbed_q,
                 kv_cache,
                 None,
                 query_start_loc,
                 seq_lens,
                 query_lens,
-                w_uk_t,
-                w_uv,
-                kv_b_proj,
                 3,
+                4,
                 None,
-                None,
-                scale,
-                None,
-                scale,
-                None,
-                scale,
                 None,
                 scale,
                 None,

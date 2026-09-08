@@ -1086,32 +1086,25 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         )
         request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
-        W_UK_T = torch.randn(num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype)
-        W_UV = torch.randn(num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype)
-        kv_b_proj = torch.randn(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
-            device="meta",
-            dtype=dtype,
-        )
 
         actual_execution_time = self._execute_multihead_latent_attention_and_get_base_data(
             (
                 q,
+                torch.empty(total_tokens, num_heads, qk_nope_head_dim + v_head_dim, device="meta", dtype=dtype),
+                torch.empty(0, num_heads, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype),
                 kv_cache,
                 None,
                 None,
                 request_total_seq_lens,
                 query_lens,
-                W_UK_T,
-                W_UV,
-                kv_b_proj,
                 v_head_dim,
+                kv_lora_rank,
                 topk_limit,
             )
         )
 
-        assert_close(self, actual_execution_time, 6.443208610547408e-05)
+        # Core-only MLA: projection compute is billed on mla_kv_projection.
+        assert_close(self, actual_execution_time, 4.728510737228394e-05)
 
     def test_mla_eager_prefill_with_context(self):
         B, S, num_heads, q_head_dim = 2, 7008, 8, 192
@@ -1135,32 +1128,25 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         )
         request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
-        W_UK_T = torch.randn(num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype)
-        W_UV = torch.randn(num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype)
-        kv_b_proj = torch.randn(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
-            device="meta",
-            dtype=dtype,
-        )
 
         actual_execution_time = self._execute_multihead_latent_attention_and_get_base_data(
             (
                 q,
+                torch.empty(total_tokens, num_heads, qk_nope_head_dim + v_head_dim, device="meta", dtype=dtype),
+                torch.empty(0, num_heads, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype),
                 kv_cache,
                 None,
                 None,
                 request_total_seq_lens,
                 query_lens,
-                W_UK_T,
-                W_UV,
-                kv_b_proj,
                 v_head_dim,
+                kv_lora_rank,
                 topk_limit,
             )
         )
 
-        assert_close(self, actual_execution_time, 6.443208610547408e-05)
+        # Core-only MLA: projection compute is billed on mla_kv_projection.
+        assert_close(self, actual_execution_time, 4.728510737228394e-05)
 
     def test_mla_eager_decode(self):
         B, S, num_heads, q_head_dim = 16, 7008, 8, 192
@@ -1184,32 +1170,25 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         )
         request_total_seq_lens = torch.full((B,), S, dtype=torch.long, device="cpu")
         query_lens = torch.full((B,), query_len, dtype=torch.long, device="cpu")
-        W_UK_T = torch.randn(num_heads, qk_nope_head_dim, kv_lora_rank, device="meta", dtype=dtype)
-        W_UV = torch.randn(num_heads, kv_lora_rank, v_head_dim, device="meta", dtype=dtype)
-        kv_b_proj = torch.randn(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
-            device="meta",
-            dtype=dtype,
-        )
 
         actual_execution_time = self._execute_multihead_latent_attention_and_get_base_data(
             (
                 q,
+                torch.empty(0, num_heads, qk_nope_head_dim + v_head_dim, device="meta", dtype=dtype),
+                torch.empty(total_tokens, num_heads, kv_lora_rank + qk_rope_head_dim, device="meta", dtype=dtype),
                 kv_cache,
                 None,
                 None,
                 request_total_seq_lens,
                 query_lens,
-                W_UK_T,
-                W_UV,
-                kv_b_proj,
-                topk_limit,
                 v_head_dim,
+                kv_lora_rank,
+                topk_limit,
             )
         )
 
-        assert_close(self, actual_execution_time, 0.00015605324564501644)
+        # Core-only MLA: Q absorb and V up-projection are billed on dedicated ops.
+        assert_close(self, actual_execution_time, 6.2113847732543945e-06)
 
     def _run_test_model(self, model_id, do_compile):
         num_tokens = 100

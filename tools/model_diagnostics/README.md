@@ -559,6 +559,7 @@ DeepSeek V3 还使用以下由 HF/model config 派生的符号：
 | --- | --- |
 | `Qlora` / `KVlora` | query / KV LoRA rank |
 | `QKnope` / `QKrope` / `Vh` / `Hmla` | MLA 的 non-RoPE、RoPE、value head 维度及本地输出宽度 |
+| `Tprefill` / `Tdecode` | 拆分 MLA core 的相 token 数；纯 Prefill 为 `T`/`0`，纯 Decode 为 `0`/`T` |
 | `Dsa_k` | Runtime 已稳定暴露的 DSA 有效 top-k；`Dsa_k=min(index_topk,S)` |
 | `Nshared` / `Fshared` | shared expert 数及总中间宽度；`Fshared=moe_intermediate_size*Nshared` |
 | `MOE_COMBINE_DTYPE` | routed expert 加权归并的 dtype；DeepSeek V3.2 为 `float32`，DeepSeek V3/GLM5/Kimi K2 跟随激活 dtype |

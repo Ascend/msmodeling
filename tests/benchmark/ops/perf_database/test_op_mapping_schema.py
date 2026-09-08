@@ -241,6 +241,13 @@ def test_phase2_add_mapping_uses_elementwise_query_mode(version_ctx):
         assert entry.get("query_mode") == "elementwise", f"[{label}] aten.add.Tensor needs elementwise query mode"
 
 
+def test_mla_phase_merge_is_zero_cost(version_ctx):
+    label, entries, _data_dir = version_ctx
+    entry = entries.get("tensor_cast.mla_merge_phase_outputs.default")
+    if entry is not None:
+        assert entry.get("zero_cost") is True, f"[{label}] MLA phase merge must not require a profiling kernel"
+
+
 def test_concat_mapping_uses_output_numel_axis(version_ctx):
     label, entries, data_dir = version_ctx
     cat_entries = [entries[name] for name in ("aten.cat.default", "tensor_cast.cat.default") if name in entries]

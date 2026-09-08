@@ -6,6 +6,45 @@ from torch._subclasses.fake_tensor import is_fake
 from ..utils import register_tensor_cast_op
 
 
+def local_mla_phase_token_counts(local_tokens: int, num_prefill_tokens: int, num_decode_tokens: int) -> tuple[int, int]:
+    """Split rank-local tokens across Prefill and Decode without independent clamps.
+
+    Forward traces global ``num_prefill_tokens`` / ``num_decode_tokens``.
+    SequenceParallelPass then rewrites activations to T/TP but leaves those
+    integers unchanged. Independent ``min(local, declared_phase)`` is valid for
+    a single populated phase, but mixed batches can produce
+    ``prefill_local + decode_local > local_tokens``. Scale both phases so they
+    jointly occupy the local activation.
+    """
+    local_tokens = int(local_tokens)
+    prefill = max(int(num_prefill_tokens), 0)
+    decode = max(int(num_decode_tokens), 0)
+    if local_tokens <= 0:
+        return 0, 0
+    if prefill <= 0:
+        return 0, min(local_tokens, decode)
+    if decode <= 0:
+        return min(local_tokens, prefill), 0
+    declared = prefill + decode
+    prefill_local = (prefill * local_tokens) // declared
+    return prefill_local, local_tokens - prefill_local
+
+
+def _mla_phase_token_count(
+    activation: torch.Tensor,
+    declared_tokens: int,
+    sibling_tokens: int,
+    *,
+    is_prefill: bool,
+) -> int:
+    prefill, decode = local_mla_phase_token_counts(
+        int(activation.shape[0]),
+        declared_tokens if is_prefill else sibling_tokens,
+        sibling_tokens if is_prefill else declared_tokens,
+    )
+    return prefill if is_prefill else decode
+
+
 @register_tensor_cast_op("kv_rmsnorm_rope_cache", mutates_args=("kv_cache",))
 def _(
     kv: torch.Tensor,
@@ -184,45 +223,46 @@ def _(
 @register_tensor_cast_op("multihead_latent_attention")
 def _(
     q: torch.Tensor,
+    projected_kv: torch.Tensor,
+    absorbed_q: torch.Tensor,
     kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     query_lens: Optional[torch.Tensor],
-    W_UK_T: Optional[torch.Tensor],
-    W_UV: Optional[torch.Tensor],
-    kv_b_proj: Optional[torch.Tensor],
     v_head_dim: int,
+    kv_lora_rank: int,
     topk_limit: Optional[int] = None,
     topk_indices: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+    *,
+    is_decode_values: Optional[list[bool]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    This op computes multi-head latent attention (MLA). It is supposed to use different
-    algorithms for prefill and decode shapes while the input sequences could fuse prefill
-    and decode sequences and should be handled separately with different algorithms.
+    This op represents the core multi-head latent attention kernel: score
+    calculation, softmax, and value aggregation.  Phase-specific Q/KV/V linear
+    projections are outside this op's performance-modeling boundary.
 
     We judge the prefill or decode phase according to the query length per `query_start_loc`.
     If the query length is
 
     For prefill (non-strict math/code):
-        k_nope, v = (kv_c_normed @ kv_b_proj).view(-1, num_heads, qk_nope_head_dim + v_head_dim).split(dim=-1)
-        softmax(q @ (k_nope, k_rot) + sparse_mask(topk_indices)) @ v
+        softmax(q @ k + sparse_mask(topk_indices)) @ v
 
     For decode (non-strict math/code):
-        softmax(q @ W_UK_T @ k_cache + sparse_mask(topk_indices)) @ v_cache @ W_UV
+        softmax(q_absorbed @ k_cache + sparse_mask(topk_indices)) @ v_cache
 
     `sparse_mask(topk_indices)` is omitted when `topk_indices` is None.
 
     Args:
         q: (num_tokens, num_heads, qk_nope_head_dim+qk_rope_head_dim)
             The query states after compression and decompression.
+        projected_kv: Prefill KV projection output. The token dimension is zero
+            when the batch has no Prefill requests.
+        absorbed_q: Decode Q-absorption output. The token dimension is zero
+            when the batch has no Decode requests.
         kv_cache: (total_num_blocks, block_size, kv_lora_rank + qk_rope_head_dim)
             The cached key-value states with current KV states already updated.
         block_table/query_start_loc/seq_lens: see `AttentionMetadataBase`
-        W_UK_T, W_UV: (num_heads, qk_nope_head_dim, kv_lora_rank), (num_heads, kv_lora_rank, v_head_dim)
-            used in the decode phase, None if only prefill sequences are provided.
-        kv_b_proj: (kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim))
-            used in the prefill phase, None if only decode sequences are provided.
         topk_limit: Number of top-K tokens for sparse attention.
         topk_indices: Preselected token positions for sparse attention.
             For dense MLA (DeepSeek-V3) these are typically None; the DSA sparse
@@ -231,49 +271,153 @@ def _(
             the helper clamps the attended context length to topk (see
             _multihead_latent_attention_properties_helper).
     Returns:
-        (num_tokens, num_heads, v_head_dim)
+        Prefill values with width ``v_head_dim`` and Decode latent values with
+        width ``kv_lora_rank``.
     """
-    return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=q.dtype, device="meta")
+    del is_decode_values
+    return (
+        torch.empty(projected_kv.shape[0], projected_kv.shape[1], v_head_dim, dtype=q.dtype, device="meta"),
+        torch.empty(absorbed_q.shape[0], absorbed_q.shape[1], kv_lora_rank, dtype=q.dtype, device="meta"),
+    )
+
+
+@register_tensor_cast_op("mla_kv_projection")
+def _(
+    kv_c_normed: torch.Tensor,
+    kv_b_proj: torch.Tensor,
+    num_prefill_tokens: int,
+    num_heads: int,
+    num_decode_tokens: int,
+) -> torch.Tensor:
+    """Prefill compressed-KV projection with its physical output width."""
+    output_dim = kv_b_proj.shape[1] // num_heads
+    num_tokens = _mla_phase_token_count(kv_c_normed, num_prefill_tokens, num_decode_tokens, is_prefill=True)
+    return torch.empty(num_tokens, num_heads, output_dim, dtype=kv_c_normed.dtype, device="meta")
+
+
+@register_tensor_cast_op("mla_kv_projection_quant")
+def _(
+    kv_c_normed: torch.Tensor,
+    kv_b_proj: torch.Tensor,
+    num_prefill_tokens: int,
+    num_heads: int,
+    num_decode_tokens: int,
+    projected_scale: torch.Tensor,
+    projected_offset: Optional[torch.Tensor],
+    weight_scale: torch.Tensor,
+    weight_offset: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Quantized variant of :func:`mla_kv_projection`."""
+    output_dim = kv_b_proj.shape[1] // num_heads
+    num_tokens = _mla_phase_token_count(kv_c_normed, num_prefill_tokens, num_decode_tokens, is_prefill=True)
+    return torch.empty(num_tokens, num_heads, output_dim, dtype=kv_c_normed.dtype, device="meta")
+
+
+@register_tensor_cast_op("mla_q_absorb_projection")
+def _(
+    q: torch.Tensor,
+    W_UK_T: torch.Tensor,
+    num_decode_tokens: int,
+    qk_rope_head_dim: int,
+    num_prefill_tokens: int,
+) -> torch.Tensor:
+    """Decode Q absorption with the physical latent-plus-RoPE width."""
+    return torch.empty(
+        _mla_phase_token_count(q, num_decode_tokens, num_prefill_tokens, is_prefill=False),
+        W_UK_T.shape[0],
+        W_UK_T.shape[-1] + qk_rope_head_dim,
+        dtype=q.dtype,
+        device="meta",
+    )
+
+
+@register_tensor_cast_op("mla_q_absorb_projection_quant")
+def _(
+    q: torch.Tensor,
+    W_UK_T: torch.Tensor,
+    num_decode_tokens: int,
+    qk_rope_head_dim: int,
+    num_prefill_tokens: int,
+    qk_scale: torch.Tensor,
+    qk_offset: Optional[torch.Tensor],
+    weight_scale: torch.Tensor,
+    weight_offset: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Quantized variant of :func:`mla_q_absorb_projection`."""
+    return torch.empty(
+        _mla_phase_token_count(q, num_decode_tokens, num_prefill_tokens, is_prefill=False),
+        W_UK_T.shape[0],
+        W_UK_T.shape[-1] + qk_rope_head_dim,
+        dtype=q.dtype,
+        device="meta",
+    )
+
+
+@register_tensor_cast_op("mla_v_up_projection")
+def _(attention_output: torch.Tensor, W_UV: torch.Tensor) -> torch.Tensor:
+    """Decode latent-value up-projection to the physical value-head width."""
+    return torch.empty(
+        attention_output.shape[0], W_UV.shape[0], W_UV.shape[-1], dtype=attention_output.dtype, device="meta"
+    )
+
+
+@register_tensor_cast_op("mla_v_up_projection_quant")
+def _(attention_output: torch.Tensor, W_UV: torch.Tensor) -> torch.Tensor:
+    """Quantized variant of :func:`mla_v_up_projection`."""
+    return torch.empty(
+        attention_output.shape[0], W_UV.shape[0], W_UV.shape[-1], dtype=attention_output.dtype, device="meta"
+    )
+
+
+@register_tensor_cast_op("mla_merge_phase_outputs")
+def _(
+    prefill_output: torch.Tensor,
+    decode_output: torch.Tensor,
+    total_tokens: int,
+    is_decode_values: Optional[list[bool]],
+    query_lens_values: Optional[list[int]],
+) -> torch.Tensor:
+    """Restore packed request order after phase-specific MLA kernels."""
+    del is_decode_values, query_lens_values
+    packed_tokens = int(prefill_output.shape[0]) + int(decode_output.shape[0])
+    num_tokens = packed_tokens if packed_tokens > 0 else int(total_tokens)
+    num_heads = prefill_output.shape[1] if prefill_output.shape[0] else decode_output.shape[1]
+    value_dim = prefill_output.shape[-1] if prefill_output.shape[0] else decode_output.shape[-1]
+    return torch.empty(num_tokens, num_heads, value_dim, dtype=prefill_output.dtype, device="meta")
 
 
 @register_tensor_cast_op("multihead_latent_attention_quant")
 def _(
     q: torch.Tensor,
+    projected_kv: torch.Tensor,
+    absorbed_q: torch.Tensor,
     kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     query_lens: Optional[torch.Tensor],
-    W_UK_T: Optional[torch.Tensor],
-    W_UV: Optional[torch.Tensor],
-    kv_b_proj: Optional[torch.Tensor],
     v_head_dim: int,
+    kv_lora_rank: int,
     topk_limit: Optional[int],
     topk_indices: Optional[torch.Tensor],
     query_scale: torch.Tensor,
     query_offset: Optional[torch.Tensor],
     kv_scale: torch.Tensor,
     kv_offset: Optional[torch.Tensor],
-    kv_projected_scale: torch.Tensor,
-    kv_projected_offset: Optional[torch.Tensor],
-    qk_scale: torch.Tensor,
-    qk_offset: Optional[torch.Tensor],
     v_scale: torch.Tensor,
     v_offset: Optional[torch.Tensor],
     attention_prob_scale: torch.Tensor,
     attention_prob_offset: Optional[torch.Tensor],
-    kv_b_proj_scale: torch.Tensor,
-    kv_b_proj_offset: Optional[torch.Tensor],
     out_scale: Optional[torch.Tensor],
     out_offset: Optional[torch.Tensor],
     out_dtype: Optional[torch.dtype],
-) -> torch.Tensor:
+    *,
+    is_decode_values: Optional[list[bool]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Similar to `multihead_latent_attention` but with quantization support.
+    Quantized core-attention variant of `multihead_latent_attention`.
 
-    For prefill (non-strict math/code):
-        quant_kv_proj = quant(kv_c_normed @ kv_b_proj, kv_projected_scale, kv_projected_offset)
-        k_nope, v = quant_kv_proj.view(-1, num_heads, qk_nope_head_dim + v_head_dim).split(dim=-1)
+    For prefill (non-strict math/code), projected KV is already provided:
         out_fp = quant(
             softmax(q @ (k_nope, k_rot) + sparse_mask(topk_indices)),
             attention_prob_scale,
@@ -281,15 +425,13 @@ def _(
         ) @ v
         out = quant(out_fp, out_scale, out_offset) # optional
 
-    For decode (non-strict math/code):
-        quant_qk = quant(q @ W_UK_T, qk_scale, qk_offset)
+    For decode (non-strict math/code), absorbed Q is already provided:
         quant_scores = quant(
-            softmax(quant_qk @ k_cache + sparse_mask(topk_indices)),
+            softmax(absorbed_q @ k_cache + sparse_mask(topk_indices)),
             attention_prob_scale,
             attention_prob_offset,
         )
-        out_fp = quant(quant_scores @ v_cache, v_scale, v_offset) @ W_UV
-        out = quant(out_fp, out_scale, out_offset) # optional
+        latent_out = quant(quant_scores @ v_cache, v_scale, v_offset)
 
     `sparse_mask(topk_indices)` is omitted when `topk_indices` is None.
 
@@ -300,28 +442,32 @@ def _(
     Returns:
         (num_tokens, num_heads, v_head_dim)
     """
+    del is_decode_values
     if out_dtype is None:
         out_dtype = q.dtype
-    return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=out_dtype, device="meta")
+    return (
+        torch.empty(projected_kv.shape[0], projected_kv.shape[1], v_head_dim, dtype=out_dtype, device="meta"),
+        torch.empty(absorbed_q.shape[0], absorbed_q.shape[1], kv_lora_rank, dtype=out_dtype, device="meta"),
+    )
 
 
 @register_tensor_cast_op("mla_sparse_attention")
 def _(
     q: torch.Tensor,
+    projected_kv: torch.Tensor,
+    absorbed_q: torch.Tensor,
     kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     query_lens: Optional[torch.Tensor],
-    W_UK_T: Optional[torch.Tensor],
-    W_UV: Optional[torch.Tensor],
-    kv_b_proj: Optional[torch.Tensor],
     v_head_dim: int,
+    kv_lora_rank: int,
     topk_limit: Optional[int] = None,
     topk_indices: Optional[torch.Tensor] = None,
     *,
     is_decode_values: Optional[list[bool]] = None,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Sparse MLA attention (DSA path) for DeepSeek-V3.2 and GLM-5.1.
 
@@ -335,43 +481,40 @@ def _(
     vllm-ascend dispatch condition: hf_config has index_topk → AscendSFABackend
     → npu_sparse_flash_attention.
     """
-    return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=q.dtype, device="meta")
+    return (
+        torch.empty(projected_kv.shape[0], projected_kv.shape[1], v_head_dim, dtype=q.dtype, device="meta"),
+        torch.empty(absorbed_q.shape[0], absorbed_q.shape[1], kv_lora_rank, dtype=q.dtype, device="meta"),
+    )
 
 
 @register_tensor_cast_op("mla_sparse_attention_quant")
 def _(
     q: torch.Tensor,
+    projected_kv: torch.Tensor,
+    absorbed_q: torch.Tensor,
     kv_cache: torch.Tensor,
     block_table: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     query_lens: Optional[torch.Tensor],
-    W_UK_T: Optional[torch.Tensor],
-    W_UV: Optional[torch.Tensor],
-    kv_b_proj: Optional[torch.Tensor],
     v_head_dim: int,
+    kv_lora_rank: int,
     topk_limit: Optional[int],
     topk_indices: Optional[torch.Tensor],
     query_scale: torch.Tensor,
     query_offset: Optional[torch.Tensor],
     kv_scale: torch.Tensor,
     kv_offset: Optional[torch.Tensor],
-    kv_projected_scale: torch.Tensor,
-    kv_projected_offset: Optional[torch.Tensor],
-    qk_scale: torch.Tensor,
-    qk_offset: Optional[torch.Tensor],
     v_scale: torch.Tensor,
     v_offset: Optional[torch.Tensor],
     attention_prob_scale: torch.Tensor,
     attention_prob_offset: Optional[torch.Tensor],
-    kv_b_proj_scale: torch.Tensor,
-    kv_b_proj_offset: Optional[torch.Tensor],
     out_scale: Optional[torch.Tensor],
     out_offset: Optional[torch.Tensor],
     out_dtype: Optional[torch.dtype],
     *,
     is_decode_values: Optional[list[bool]] = None,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Quantized sparse MLA attention (DSA path). SFA variant of
     multihead_latent_attention_quant. Used by DeepSeek-V3.2 and GLM-5.1
@@ -380,7 +523,10 @@ def _(
     """
     if out_dtype is None:
         out_dtype = q.dtype
-    return torch.empty(q.shape[0], q.shape[1], v_head_dim, dtype=out_dtype, device="meta")
+    return (
+        torch.empty(projected_kv.shape[0], projected_kv.shape[1], v_head_dim, dtype=out_dtype, device="meta"),
+        torch.empty(absorbed_q.shape[0], absorbed_q.shape[1], kv_lora_rank, dtype=out_dtype, device="meta"),
+    )
 
 
 @register_tensor_cast_op("dsa_indexer", mutates_args=("indexer_cache",))

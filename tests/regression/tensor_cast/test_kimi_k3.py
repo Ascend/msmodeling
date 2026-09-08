@@ -144,6 +144,34 @@ class TestKimiK3(unittest.TestCase):
             f"{test_name}: MoE expert computation (grouped_matmul) should be present in the operation trace",
         )
 
+    def _assert_split_mla_operators_present(self, result_dict: dict, phase: str, test_name: str = ""):
+        """Verify K3 executes the split MLA projection interface for this phase."""
+        table = result_dict["table_result"]
+        self.assertIn(
+            "tensor_cast.mla_merge_phase_outputs",
+            table,
+            f"{test_name}: split MLA phase outputs should be merged",
+        )
+        if phase == "prefill":
+            self.assertIn(
+                "tensor_cast.mla_kv_projection",
+                table,
+                f"{test_name}: prefill should project latent KV before attention",
+            )
+        elif phase == "decode":
+            self.assertIn(
+                "tensor_cast.mla_q_absorb_projection",
+                table,
+                f"{test_name}: decode should absorb Q before attention",
+            )
+            self.assertIn(
+                "tensor_cast.mla_v_up_projection",
+                table,
+                f"{test_name}: decode should up-project latent attention output",
+            )
+        else:
+            self.fail(f"Unsupported MLA phase: {phase}")
+
     def test_kimi_k3_text_prefill(self):
         """
         Test Case 1: Text-only Prefill Simulation
@@ -181,6 +209,7 @@ class TestKimiK3(unittest.TestCase):
         # Additional K3-specific operator checks
         result_dict = asdict(result) if isinstance(result, ModelRunnerMetrics) else result
         self._assert_k3_operators_present(result_dict, "test_kimi_k3_text_prefill")
+        self._assert_split_mla_operators_present(result_dict, "prefill", "test_kimi_k3_text_prefill")
 
     def test_kimi_k3_text_decode(self):
         """
@@ -220,6 +249,7 @@ class TestKimiK3(unittest.TestCase):
         # Additional K3-specific operator checks
         result_dict = asdict(result) if isinstance(result, ModelRunnerMetrics) else result
         self._assert_k3_operators_present(result_dict, "test_kimi_k3_text_decode")
+        self._assert_split_mla_operators_present(result_dict, "decode", "test_kimi_k3_text_decode")
 
         # Verify KV cache is allocated for decode with context
         self.assertGreater(

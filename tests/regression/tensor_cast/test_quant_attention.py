@@ -119,8 +119,8 @@ class TestQuantAttention(unittest.TestCase):
         query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
         request_total_seq_lens = torch.tensor([32, 32], dtype=torch.int32)
         query_lens = torch.tensor([1, 1], dtype=torch.int32)
-        W_UK_T = torch.empty((2, 12, 8), dtype=torch.bfloat16, device="meta")
-        W_UV = torch.empty((2, 8, 16), dtype=torch.bfloat16, device="meta")
+        projected_kv = torch.empty((0, 2, 20), dtype=q.dtype, device="meta")
+        absorbed_q = torch.empty((2, 2, 12), dtype=q.dtype, device="meta")
         scale = torch.tensor(1.0)
 
         machine_config = TEST_DEVICE
@@ -128,22 +128,16 @@ class TestQuantAttention(unittest.TestCase):
         with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
             torch.ops.tensor_cast.multihead_latent_attention_quant(
                 q,
+                projected_kv,
+                absorbed_q,
                 kv_cache,
                 block_table,
                 query_start_loc,
                 request_total_seq_lens,
                 query_lens,
-                W_UK_T,
-                W_UV,
-                None,
                 16,
+                8,
                 None,
-                None,
-                scale,
-                None,
-                scale,
-                None,
-                scale,
                 None,
                 scale,
                 None,
@@ -181,30 +175,24 @@ class TestQuantAttention(unittest.TestCase):
         query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
         request_total_seq_lens = torch.tensor([32, 32], dtype=torch.int32)
         query_lens = torch.tensor([1, 1], dtype=torch.int32)
-        W_UK_T = torch.empty((2, 12, 8), dtype=torch.bfloat16, device="meta")
-        W_UV = torch.empty((2, 8, 16), dtype=torch.bfloat16, device="meta")
+        projected_kv = torch.empty((0, 2, 20), dtype=q.dtype, device="meta")
+        absorbed_q = torch.empty((2, 2, 12), dtype=q.dtype, device="meta")
         scale = torch.tensor(1.0)
 
         perf_model = AnalyticPerformanceModel(device)
         with Runtime(perf_model, device) as runtime, torch.no_grad():
             torch.ops.tensor_cast.multihead_latent_attention_quant(
                 q,
+                projected_kv,
+                absorbed_q,
                 kv_cache,
                 block_table,
                 query_start_loc,
                 request_total_seq_lens,
                 query_lens,
-                W_UK_T,
-                W_UV,
-                None,
                 16,
+                8,
                 None,
-                None,
-                scale,
-                None,
-                scale,
-                None,
-                scale,
                 None,
                 scale,
                 None,

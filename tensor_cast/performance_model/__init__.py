@@ -10,6 +10,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 
 from .. import ops  # noqa: F401
 from ..device import DeviceProfile
+from ..ops.mla import local_mla_phase_token_counts
 from ..utils import is_fp8_dtype, performance_dtype
 from .bound_analyzer import StatsKey
 from .base import PerformanceModel
@@ -1389,24 +1390,22 @@ def _mla_metadata_properties(
     op_invoke_info: OpInvokeInfo,
     softmax_dtype: torch.dtype,
     q: torch.Tensor,
+    projected_kv: torch.Tensor,
+    absorbed_q: torch.Tensor,
     kv_cache: torch.Tensor,
     block_table,
     request_total_seq_lens,
-    W_UK_T,
-    W_UV,
-    kv_b_proj,
     v_head_dim: int,
+    kv_lora_rank: int,
     sparse_topk: Optional[int],
 ) -> OpInvokeInfo.PerformanceProperties:
     # This path is used only when the runtime length tensors are fake/meta. In
     # that case we cannot know whether the node is prefill or decode from values,
     # so estimate both valid MLA shapes and keep the larger compute cost.
-    num_heads = int(q.size(1))
+    num_heads = int(absorbed_q.size(1) if absorbed_q.size(0) > 0 else projected_kv.size(1))
     q_head_dim = int(q.size(2))
     total_tokens = int(q.size(0))
-    kv_lora_rank = int(W_UK_T.size(-1) if W_UK_T is not None else kv_b_proj.size(0))
     qk_rope_head_dim = int(kv_cache.size(-1) - kv_lora_rank)
-    qk_nope_head_dim = int(q_head_dim - qk_rope_head_dim)
     prefill_attn_len = _mla_metadata_sparse_attn_len(kv_cache, block_table, sparse_topk)
     decode_attn_len = _mla_metadata_sparse_attn_len(kv_cache, block_table, sparse_topk)
     prefill_context_sum = total_tokens * prefill_attn_len
@@ -1414,38 +1413,27 @@ def _mla_metadata_properties(
 
     prefill_fma_ops = 0
     prefill_gp_ops = 0
-    if kv_b_proj is not None:
-        kv_proj_out_dim = num_heads * (qk_nope_head_dim + v_head_dim)
+    if projected_kv.size(0) > 0:
         prefill_fma_ops = (
-            total_tokens * kv_proj_out_dim * kv_lora_rank * 2
-            + prefill_context_sum * num_heads * q_head_dim * 2
-            + prefill_context_sum * num_heads * v_head_dim * 2
+            prefill_context_sum * num_heads * q_head_dim * 2 + prefill_context_sum * num_heads * v_head_dim * 2
         )
         prefill_gp_ops = prefill_context_sum * num_heads * 4
 
     decode_fma_ops = 0
     decode_gp_ops = 0
-    if W_UK_T is not None and W_UV is not None:
-        # Absorb matmuls run at the WEIGHT's head count, not ``q``'s: under DCP ``q``
-        # is all-gathered to ``h_q*dcp/tp`` heads but the absorb weights stay at this
-        # rank's ``h_q/tp``. See the concrete-value path for the full rationale.
-        absorb_heads = int(W_UK_T.size(0))
+    if absorbed_q.size(0) > 0:
         decode_fma_ops = (
-            total_tokens * absorb_heads * qk_nope_head_dim * kv_lora_rank * 2
-            + decode_context_sum * num_heads * (kv_lora_rank + qk_rope_head_dim) * 2
+            decode_context_sum * num_heads * (kv_lora_rank + qk_rope_head_dim) * 2
             + decode_context_sum * num_heads * kv_lora_rank * 2
-            + total_tokens * absorb_heads * kv_lora_rank * v_head_dim * 2
         )
         decode_gp_ops = decode_context_sum * num_heads * 4
 
-    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={1, 6, 7, 8})
-    prefill_weight_read_bytes = bytes_of_tensor(kv_b_proj) if kv_b_proj is not None else 0
-    decode_weight_read_bytes = 0
-    if W_UK_T is not None:
-        decode_weight_read_bytes += bytes_of_tensor(W_UK_T)
-    if W_UV is not None:
-        decode_weight_read_bytes += bytes_of_tensor(W_UV)
-    properties.memory_read_bytes += max(prefill_weight_read_bytes, decode_weight_read_bytes)
+    # Keep fused-kernel memory: charge ``q`` once here, not the projection
+    # intermediates that used to live inside the fused MLA op.
+    properties = op_invoke_info.get_memory_access_properties(
+        exclude_input_ids={1, 2, 3, 4},
+        exclude_output_ids={1},
+    )
     cache_entry_size = bytes_of_elements(kv_cache.size(-1), kv_cache.dtype)
     if block_table is not None:
         batch_size = int(block_table.size(0))
@@ -1822,15 +1810,15 @@ def _multihead_latent_attention_properties_helper(
     assert len(op_invoke_info.args) >= 10
     (
         q,
+        projected_kv,
+        absorbed_q,
         kv_cache,
         block_table,
         query_start_loc,
         request_total_seq_lens,
         query_lens,
-        W_UK_T,
-        W_UV,
-        kv_b_proj,
         v_head_dim,
+        kv_lora_rank,
         *rest,
     ) = op_invoke_info.args
 
@@ -1838,19 +1826,9 @@ def _multihead_latent_attention_properties_helper(
     topk_indices = rest[1] if len(rest) > 1 else None
 
     # Extract dimensions from input tensors.
-    # A prefill-only batch has W_UK_T=None (decode weights absent); derive
-    # kv_lora_rank from kv_b_proj instead, mirroring _mla_metadata_properties.
-    num_heads = q.size(1)
+    num_heads = absorbed_q.size(1) if absorbed_q.size(0) > 0 else projected_kv.size(1)
     q_head_dim = q.size(2)
-    if W_UK_T is not None:
-        kv_lora_rank = W_UK_T.size(-1)
-    elif kv_b_proj is not None:
-        kv_lora_rank = kv_b_proj.size(0)
-    else:
-        # Neither decode nor prefill weights available: return empty properties.
-        return op_invoke_info.get_memory_access_properties()
     qk_rope_head_dim = kv_cache.size(-1) - kv_lora_rank
-    qk_nope_head_dim = q_head_dim - qk_rope_head_dim
     sparse_topk = topk_indices.shape[-1] if topk_indices is not None else topk_limit
 
     if _tensor_value_unavailable(request_total_seq_lens) or _tensor_value_unavailable(query_lens):
@@ -1858,13 +1836,13 @@ def _multihead_latent_attention_properties_helper(
             op_invoke_info,
             softmax_dtype,
             q,
+            projected_kv,
+            absorbed_q,
             kv_cache,
             block_table,
             request_total_seq_lens,
-            W_UK_T,
-            W_UV,
-            kv_b_proj,
             v_head_dim,
+            kv_lora_rank,
             _mla_sparse_topk(topk_limit, topk_indices),
         )
 
@@ -1879,20 +1857,15 @@ def _multihead_latent_attention_properties_helper(
 
     total_fma_ops = 0
     total_gp_ops = 0
-    exclude_input_ids = {1, 2, 6, 7, 8}  # kv_cache, block_table, W_UK_T, W_UV, kv_b_proj
+    # cache/table are accounted below; projected_kv / absorbed_q are fused-internal
+    # edges billed on the projection ops as compute, not as extra DRAM traffic.
+    exclude_input_ids = {1, 2, 3, 4}
 
     # 3. Calculate FLOPs for the Prefill Phase
     num_prefill_tokens = torch.sum(num_tokens_per_seq[is_prefill]).item()
     if num_prefill_tokens > 0:
-        assert kv_b_proj is not None
-        exclude_input_ids = exclude_input_ids - {8}  # kv_b_proj
         prefill_request_total_seq_lens = request_total_seq_lens[is_prefill]
         prefill_num_tokens_per_seq = num_tokens_per_seq[is_prefill]
-
-        # Op 1: Project compressed KV: `kv_c_normed @ kv_b_proj`
-        # Shapes: (num_prefill_tokens, kv_lora_rank) @ (kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim))
-        kv_proj_out_dim = num_heads * (qk_nope_head_dim + v_head_dim)
-        prefill_op1_ops = num_prefill_tokens * kv_proj_out_dim * kv_lora_rank * 2
 
         # For attention ops, we need the sum of (query_len * key_len) over the batch
         prefill_attn_len = (
@@ -1911,14 +1884,12 @@ def _multihead_latent_attention_properties_helper(
         # Op 4: Score aggregation: `Scores @ V`
         prefill_op4_ops = prefill_context_sum * num_heads * v_head_dim * 2
 
-        total_fma_ops += prefill_op1_ops + prefill_op2_ops + prefill_op4_ops
+        total_fma_ops += prefill_op2_ops + prefill_op4_ops
         total_gp_ops += prefill_op3_ops
 
     # 4. Calculate FLOPs for the Decode Phase
     num_decode_tokens = torch.sum(num_tokens_per_seq[is_decode]).item()
     if num_decode_tokens > 0:
-        assert W_UK_T is not None and W_UV is not None
-        exclude_input_ids = exclude_input_ids - {6, 7}  # W_UK_T, W_UV
         decode_request_total_seq_lens = request_total_seq_lens[is_decode]
         decode_num_tokens_per_seq = num_tokens_per_seq[is_decode]
 
@@ -1930,25 +1901,7 @@ def _multihead_latent_attention_properties_helper(
         )
         decode_context_sum = torch.sum(decode_num_tokens_per_seq.to(decode_attn_len.dtype) * decode_attn_len).item()
 
-        # The decode formula is: softmax(q_nope @ W_UK_T @ k_cache) @ v_cache @ W_UV
-        #
-        # Under DCP, ``q`` arrives all-gathered to ``h_q*dcp/tp`` heads while the absorb
-        # weights stay at this rank's ``h_q/tp`` heads, so the two absorb matmuls below
-        # must be counted at the WEIGHT's head count, not ``q``'s. Real DCP does
-        # ``q @ W_UK`` before the all_gather and ``@ W_UV`` after the merge, precisely
-        # because a rank holds no other rank's absorb weights. Only the FIA terms
-        # (op2/op3/op4) run on gathered heads -- and there the ``dcp``-fold head growth
-        # cancels the ``S/dcp`` context shrink, which is what makes MLA's DCP KV-read
-        # saving show up. Deriving this from ``W_UK_T`` keeps it consistent with the
-        # weight-read-bytes term below (also only ``h_q/tp`` worth) and needs no dcp
-        # parameter; without DCP it equals ``num_heads`` and nothing changes.
-        absorb_heads = W_UK_T.size(0)
-
-        # Op 1: `q_nope @ W_UK_T`
-        # Shapes: (num_decode_tokens, absorb_heads, qk_nope_head_dim) @ (absorb_heads, qk_nope_head_dim, kv_lora_rank)
-        decode_op1_ops = num_decode_tokens * absorb_heads * qk_nope_head_dim * kv_lora_rank * 2
-
-        # Op 2: `(result_op1, q_rope) @ kv_cache`
+        # Core decode attention consumes the already absorbed query and latent KV.
         decode_op2_ops = decode_context_sum * num_heads * (kv_lora_rank + qk_rope_head_dim) * 2
 
         # Op 3: Softmax
@@ -1957,14 +1910,13 @@ def _multihead_latent_attention_properties_helper(
         # Op 4: `Scores @ v_cache`
         decode_op4_ops = decode_context_sum * num_heads * kv_lora_rank * 2
 
-        # Op 5: `(result_op4) @ W_UV`
-        # Shapes: (num_decode_tokens, absorb_heads, kv_lora_rank) @ (absorb_heads, kv_lora_rank, v_head_dim)
-        decode_op5_ops = num_decode_tokens * absorb_heads * kv_lora_rank * v_head_dim * 2
-
-        total_fma_ops += decode_op1_ops + decode_op2_ops + decode_op4_ops + decode_op5_ops
+        total_fma_ops += decode_op2_ops + decode_op4_ops
         total_gp_ops += decode_op3_ops
 
-    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids=exclude_input_ids)  # exclude kv_cache
+    properties = op_invoke_info.get_memory_access_properties(
+        exclude_input_ids=exclude_input_ids,
+        exclude_output_ids={1},  # decode latent is consumed by mla_v_up_projection
+    )  # exclude kv_cache
 
     # Estimate paged sparse-KV reads with a local page efficiency. Decode shapes reuse
     # the staged sparse KV set across an S1 tile, while prefill reads scale with query tokens.
@@ -1996,6 +1948,80 @@ def _multihead_latent_attention_properties_helper(
     compute_ops.gp_ops = total_gp_ops
 
     return properties
+
+
+def _mla_input_projection_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    # Quant variants append scales/offsets after this structural prefix.
+    activation, weight, num_tokens, _layout = op_invoke_info.args[:4]
+    sibling_tokens = 0
+    if len(op_invoke_info.args) > 4 and not isinstance(op_invoke_info.args[4], torch.Tensor):
+        sibling_tokens = int(op_invoke_info.args[4])
+    # Only the weight was external DRAM traffic in the fused MLA accounting.
+    properties = op_invoke_info.get_memory_access_properties(
+        exclude_input_ids={0, 2, 3, 4, 5, 6, 7, 8},
+        exclude_output_ids={0},
+    )
+    compute_ops = properties.compute_ops.setdefault(activation.dtype, OpInvokeInfo.ComputeOps())
+    is_kv = "mla_kv_projection" in str(op_invoke_info.func)
+    prefill_tokens = int(num_tokens) if is_kv else sibling_tokens
+    decode_tokens = sibling_tokens if is_kv else int(num_tokens)
+    prefill_local, decode_local = local_mla_phase_token_counts(int(activation.size(0)), prefill_tokens, decode_tokens)
+    token_count = prefill_local if is_kv else decode_local
+    compute_ops.mma_ops = token_count * int(weight.numel()) * 2
+    properties.extra_static_cost_count = -1
+    if "_quant" in str(op_invoke_info.func):
+        if weight.ndim == 2:
+            compute_ops.gp_ops = token_count * int(weight.shape[1]) * 2
+        else:
+            compute_ops.gp_ops = token_count * int(weight.shape[0]) * int(weight.shape[-1]) * 2
+    return properties
+
+
+def _mla_v_up_projection_properties(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    attention_output, W_UV = op_invoke_info.args
+    # The latent input was internal to the fused MLA program.
+    properties = op_invoke_info.get_memory_access_properties(exclude_input_ids={0})
+    compute_ops = properties.compute_ops.setdefault(attention_output.dtype, OpInvokeInfo.ComputeOps())
+    compute_ops.mma_ops = int(attention_output.size(0)) * int(W_UV.numel()) * 2
+    properties.extra_static_cost_count = -1
+    if "_quant" in str(op_invoke_info.func):
+        compute_ops.gp_ops = int(attention_output.size(0)) * int(W_UV.size(0)) * int(W_UV.size(1)) * 2
+    return properties
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_kv_projection.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return _mla_input_projection_properties(op_invoke_info)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_kv_projection_quant.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return _mla_input_projection_properties(op_invoke_info)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_q_absorb_projection.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return _mla_input_projection_properties(op_invoke_info)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_q_absorb_projection_quant.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return _mla_input_projection_properties(op_invoke_info)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_v_up_projection.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return _mla_v_up_projection_properties(op_invoke_info)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_v_up_projection_quant.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return _mla_v_up_projection_properties(op_invoke_info)
+
+
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.mla_merge_phase_outputs.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    return OpInvokeInfo.PerformanceProperties()
 
 
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.multihead_latent_attention.default)
@@ -2042,17 +2068,11 @@ def _calculate_mla_quant_ops(
             prefill_num_tokens_per_seq.to(prefill_request_total_seq_lens.dtype) * prefill_request_total_seq_lens
         ).item()
 
-        # 1. Quantization of kv_c_normed @ kv_b_proj output
-        # Number of elements: num_prefill_tokens * num_heads * (qk_nope_head_dim + v_head_dim)
-        # Each quantization: scale multiplication + optional offset addition (2 ops worst case)
-        kv_proj_out_dim = num_heads * (qk_nope_head_dim + v_head_dim)
-        quant_kv_proj_ops = num_prefill_tokens * kv_proj_out_dim * 2
-
-        # 2. Quantization of attention probabilities (softmax output)
+        # Quantization of attention probabilities (softmax output)
         # Number of elements: prefill_context_sum * num_heads
         quant_attention_prob_ops = prefill_context_sum * num_heads * 2
 
-        total_quant_dequant_ops += quant_kv_proj_ops + quant_attention_prob_ops
+        total_quant_dequant_ops += quant_attention_prob_ops
 
     # Calculate quant/dequant ops for decode phase
     num_decode_tokens = torch.sum(num_tokens_per_seq[is_decode]).item()
@@ -2063,19 +2083,11 @@ def _calculate_mla_quant_ops(
             decode_num_tokens_per_seq.to(decode_request_total_seq_lens.dtype) * decode_request_total_seq_lens
         ).item()
 
-        # 1. Quantization of q @ W_UK_T output
-        # Number of elements: num_decode_tokens * num_heads * kv_lora_rank
-        quant_qk_ops = num_decode_tokens * num_heads * kv_lora_rank * 2
-
-        # 2. Quantization of attention probabilities (softmax output)
+        # Quantization of attention probabilities (softmax output)
         # Number of elements: decode_context_sum * num_heads
         quant_attention_prob_ops = decode_context_sum * num_heads * 2
 
-        # 3. Quantization of (Scores @ v_cache) output before @ W_UV
-        # Number of elements: num_decode_tokens * num_heads * kv_lora_rank
-        quant_v_ops = num_decode_tokens * num_heads * kv_lora_rank * 2
-
-        total_quant_dequant_ops += quant_qk_ops + quant_attention_prob_ops + quant_v_ops
+        total_quant_dequant_ops += quant_attention_prob_ops
 
     # Optional final output dtype conversion (both prefill and decode).
     if out_dtype is not None and out_dtype != q_dtype:
@@ -2091,8 +2103,8 @@ def _calculate_mla_metadata_quant_ops(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
     block_table,
-    W_UK_T,
-    kv_b_proj,
+    projected_kv,
+    absorbed_q,
     num_heads: int,
     q_head_dim: int,
     kv_lora_rank: int,
@@ -2103,24 +2115,18 @@ def _calculate_mla_metadata_quant_ops(
     q_dtype: torch.dtype,
 ) -> int:
     total_tokens = int(q.size(0))
-    qk_nope_head_dim = q_head_dim - qk_rope_head_dim
     prefill_attn_len = _mla_metadata_sparse_attn_len(kv_cache, block_table, sparse_topk)
     decode_attn_len = _mla_metadata_sparse_attn_len(kv_cache, block_table, sparse_topk)
     prefill_context_sum = total_tokens * prefill_attn_len
     decode_context_sum = total_tokens * decode_attn_len
 
     prefill_ops = 0
-    if kv_b_proj is not None:
-        kv_proj_out_dim = num_heads * (qk_nope_head_dim + v_head_dim)
-        prefill_ops = total_tokens * kv_proj_out_dim * 2 + prefill_context_sum * num_heads * 2
+    if projected_kv.size(0) > 0:
+        prefill_ops = prefill_context_sum * num_heads * 2
 
     decode_ops = 0
-    if W_UK_T is not None:
-        decode_ops = (
-            total_tokens * num_heads * kv_lora_rank * 2
-            + decode_context_sum * num_heads * 2
-            + total_tokens * num_heads * kv_lora_rank * 2
-        )
+    if absorbed_q.size(0) > 0:
+        decode_ops = decode_context_sum * num_heads * 2
 
     total_quant_dequant_ops = max(prefill_ops, decode_ops)
     if out_dtype is not None and out_dtype != q_dtype:
@@ -2139,16 +2145,16 @@ def _mla_quant_analytic_properties(
     share this body.
     """
     q = op_invoke_info.args[0]
-    kv_cache = op_invoke_info.args[1]
-    query_start_loc = op_invoke_info.args[3]
-    request_total_seq_lens = op_invoke_info.args[4]
-    query_lens = op_invoke_info.args[5]
-    W_UK_T = op_invoke_info.args[6]
-    kv_b_proj = op_invoke_info.args[8]
-    v_head_dim = op_invoke_info.args[9]
+    projected_kv = op_invoke_info.args[1]
+    absorbed_q = op_invoke_info.args[2]
+    kv_cache = op_invoke_info.args[3]
+    query_start_loc = op_invoke_info.args[5]
+    request_total_seq_lens = op_invoke_info.args[6]
+    query_lens = op_invoke_info.args[7]
+    v_head_dim = op_invoke_info.args[8]
     out_dtype = op_invoke_info.kwargs.get("out_dtype")
-    if out_dtype is None and len(op_invoke_info.args) > 28:
-        out_dtype = op_invoke_info.args[28]
+    if out_dtype is None and len(op_invoke_info.args) > 22:
+        out_dtype = op_invoke_info.args[22]
 
     if out_dtype is None or out_dtype == q.dtype:
         # use half as default softmax dtype
@@ -2170,15 +2176,9 @@ def _mla_quant_analytic_properties(
     # derive kv_lora_rank from kv_b_proj instead, mirroring the meta path in
     # _mla_metadata_properties. The prefill quant ops do not depend on W_UK_T, so
     # dropping them would understate quant prefill as BF16.
-    num_heads = q.size(1)
+    num_heads = absorbed_q.size(1) if absorbed_q.size(0) > 0 else projected_kv.size(1)
     q_head_dim = q.size(2)
-    if W_UK_T is not None:
-        kv_lora_rank = W_UK_T.size(-1)
-    elif kv_b_proj is not None:
-        kv_lora_rank = kv_b_proj.size(0)
-    else:
-        # Neither decode nor prefill weights available: no quant ops to add.
-        return properties
+    kv_lora_rank = op_invoke_info.args[9]
     qk_rope_head_dim = kv_cache.size(-1) - kv_lora_rank
     qk_nope_head_dim = q_head_dim - qk_rope_head_dim
 
@@ -2189,9 +2189,9 @@ def _mla_quant_analytic_properties(
         total_quant_dequant_ops = _calculate_mla_metadata_quant_ops(
             q,
             kv_cache,
-            op_invoke_info.args[2],
-            W_UK_T,
-            op_invoke_info.args[8],
+            op_invoke_info.args[4],
+            projected_kv,
+            absorbed_q,
             num_heads,
             q_head_dim,
             kv_lora_rank,

@@ -9,6 +9,10 @@ from tensor_cast.layers.mla import (
     DeepseekSparseAttentionIndexer,
     MultiheadLatentAttentionTensorCast,
 )
+from tensor_cast.performance_model.analytic_mla_fusion import rescale_analytic_mla_bundle
+from tensor_cast.performance_model.base import PerformanceModel
+from tensor_cast.performance_model.bound_analyzer import StatsKey
+from tensor_cast.runtime import RuntimeEvent
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
 from tensor_cast.model_config import LinearQuantConfig, MlaConfig, QuantConfig
 from tensor_cast.parallel_group import ParallelGroup
@@ -38,13 +42,10 @@ class TestMlaIndexerCacheHooks(unittest.TestCase):
 
     def test_sparse_backend_metadata_kwargs_propagate_phase(self):
         phase_values = [False, True]
-
-        kwargs = DeepseekSparseAttention._get_backend_metadata_kwargs(
-            SimpleNamespace(),
-            SimpleNamespace(is_decode_values=phase_values),
-        )
-
-        self.assertIs(kwargs["is_decode_values"], phase_values)
+        meta = SimpleNamespace(is_decode_values=phase_values)
+        for cls in (DeepseekSparseAttention, MultiheadLatentAttentionTensorCast):
+            kwargs = cls._get_backend_metadata_kwargs(SimpleNamespace(), meta)
+            self.assertIs(kwargs["is_decode_values"], phase_values)
 
     def test_base_build_tp_plan_extras_empty(self):
         self.assertEqual(
@@ -198,7 +199,7 @@ class TestMlaIndexerCacheHooks(unittest.TestCase):
         unused_qa_normed = torch.empty((3, 0))
 
         def attention_backend(**kwargs):
-            return kwargs["q"]
+            return kwargs["projected_kv"], kwargs["absorbed_q"]
 
         with (
             patch(
@@ -215,6 +216,14 @@ class TestMlaIndexerCacheHooks(unittest.TestCase):
                 "_pre_attention_forward",
                 return_value=None,
             ) as mock_pre_attention,
+            patch(
+                "torch.ops.tensor_cast.mla_kv_projection",
+                return_value=torch.empty((3, 2, 3)),
+            ) as mock_kv_projection,
+            patch(
+                "torch.ops.tensor_cast.mla_merge_phase_outputs",
+                return_value=torch.empty((3, 2, 2)),
+            ) as mock_merge,
         ):
             output, attention_weights = wrapper(
                 hidden_states,
@@ -228,8 +237,25 @@ class TestMlaIndexerCacheHooks(unittest.TestCase):
         self.assertIsNone(mlapo_args[5])
         self.assertIsNone(mlapo_args[13])
         self.assertIsNone(mock_pre_attention.call_args.kwargs["qa_normed"])
+        mock_kv_projection.assert_called_once()
+        mock_merge.assert_called_once()
         self.assertEqual(output.shape, hidden_states.shape)
         self.assertIsNone(attention_weights)
+
+    def test_cached_mla_results_are_copied_and_rescaled_once_per_layer(self):
+        def result(compute, memory, static=0.0):
+            stats = {StatsKey.MMA_OPS: compute, StatsKey.MEMORY_ACCESS: memory, "static_cost_time_s": static}
+            return PerformanceModel.Result(max(compute, memory) + static, stats)
+
+        cached = [result(0.04, 0.01), result(0.01, 0.03, 0.002)]
+        names = ("tensor_cast.mla_kv_projection.default", "tensor_cast.multihead_latent_attention.default")
+        layer = [RuntimeEvent(SimpleNamespace(func=n), {"analytic": v}) for n, v in zip(names, cached)]
+        rescale_analytic_mla_bundle(layer)
+        classified = [(event.op_invoke_info, event.perf_results["analytic"]) for event in layer]
+        self.assertAlmostEqual(sum(item.execution_time_s for _, item in classified), 0.052)
+        private = [event.perf_results["analytic"] for event in layer]
+        self.assertEqual(len({id(item) for item in private}), 2)
+        self.assertFalse({id(item) for item in private} & {id(item) for item in cached})
 
 
 class TestDeepseekSparseAttentionIndexer(unittest.TestCase):
@@ -482,3 +508,46 @@ class TestDeepseekSparseAttentionIndexer(unittest.TestCase):
         )
 
         self.assertEqual(out.shape, (2, 1, 4))
+
+
+class TestMlaProjectionSequenceParallelShapes(unittest.TestCase):
+    def test_kv_projection_clamps_declared_tokens_to_local_activation(self):
+        kv_c = torch.empty(256, 512, device="meta")
+        weight = torch.empty(512, 4096, device="meta")
+        out = torch.ops.tensor_cast.mla_kv_projection(kv_c, weight, 4096, 16, 0)
+        self.assertEqual(tuple(out.shape), (256, 16, 256))
+
+    def test_q_absorb_clamps_declared_tokens_to_local_activation(self):
+        q = torch.empty(32, 16, 192, device="meta")
+        w_uk_t = torch.empty(16, 128, 512, device="meta")
+        out = torch.ops.tensor_cast.mla_q_absorb_projection(q, w_uk_t, 512, 64, 0)
+        self.assertEqual(tuple(out.shape), (32, 16, 576))
+
+    def test_merge_phase_outputs_follows_phase_tensors_not_global_token_arg(self):
+        prefill = torch.empty(256, 16, 128, device="meta")
+        decode = torch.empty(0, 16, 128, device="meta")
+        out = torch.ops.tensor_cast.mla_merge_phase_outputs(prefill, decode, 4096, [False], [256])
+        self.assertEqual(tuple(out.shape), (256, 16, 128))
+
+    def test_mixed_sp_phase_counts_sum_to_local_activation(self):
+        from tensor_cast.ops.mla import local_mla_phase_token_counts
+
+        prefill_local, decode_local = local_mla_phase_token_counts(32, 48, 16)
+        self.assertEqual((prefill_local, decode_local), (24, 8))
+
+        kv_c = torch.empty(32, 512, device="meta")
+        weight = torch.empty(512, 4096, device="meta")
+        kv_out = torch.ops.tensor_cast.mla_kv_projection(kv_c, weight, 48, 16, 16)
+        q = torch.empty(32, 16, 192, device="meta")
+        w_uk_t = torch.empty(16, 128, 512, device="meta")
+        q_out = torch.ops.tensor_cast.mla_q_absorb_projection(q, w_uk_t, 16, 64, 48)
+        self.assertEqual(kv_out.shape[0], 24)
+        self.assertEqual(q_out.shape[0], 8)
+        merged = torch.ops.tensor_cast.mla_merge_phase_outputs(
+            torch.empty(24, 16, 128, device="meta"),
+            torch.empty(8, 16, 128, device="meta"),
+            64,
+            [False, True],
+            [48, 16],
+        )
+        self.assertEqual(tuple(merged.shape), (32, 16, 128))

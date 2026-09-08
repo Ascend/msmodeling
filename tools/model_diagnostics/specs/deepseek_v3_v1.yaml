@@ -8,7 +8,12 @@ matches:
 
 operator_aliases:
   tensor_cast.mlapo_quant.default: mlapo
-  tensor_cast.multihead_latent_attention.default: mla_sparse_attention
+  tensor_cast.mla_kv_projection_quant.default: mla_kv_projection
+  tensor_cast.multihead_latent_attention.default: mla_sparse_attention_core
+  tensor_cast.multihead_latent_attention_quant.default: mla_sparse_attention_core
+  tensor_cast.mla_sparse_attention.default: mla_sparse_attention_core
+  tensor_cast.mla_sparse_attention_quant.default: mla_sparse_attention_core
+  tensor_cast.mla_merge_phase_outputs.default: mla_sparse_attention
 
 regions:
   input:

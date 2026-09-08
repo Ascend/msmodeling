@@ -600,9 +600,8 @@ operator_mappings:
     decomposer: true
     notes: >
       [HIGH] MLA composite. Python decomposer (_decompose_mla_common) handles
-      shape derivation. NPU kernel sequence:
-      Decode: BatchMatMulNd(q@W_UK_T) + FIA(attention) + TransposeBMM(out@W_UV).
-      Prefill: MatMulV2(kv_c@kv_b_proj) + FIA.
+      attention shape derivation. The semantic boundary is FIA only; decode
+      absorption and prefill KV projection kernels belong to surrounding ops.
       v0.18.0: Prefill uses FIA (unified, RING kernel removed).
 
   "tensor_cast.multihead_latent_attention_quant.default":
@@ -610,10 +609,55 @@ operator_mappings:
     decomposer: true
     notes: >
       [HIGH] Quantized MLA composite. Python decomposer (_decompose_mla_common) handles
-      shape derivation. NPU kernel sequence:
-      Decode: QuantBatchMatmulV3(q@W_UK_T) + FIA + TransposeBMM(out@W_UV).
-      Prefill: MatMulV2(kv_c@kv_b_proj) + FIA.
+      attention shape derivation. The semantic boundary is FIA only; quantized
+      projection kernels belong to surrounding preprocessing/postprocessing ops.
       v0.18.0: Prefill uses FIA (unified, RING kernel removed).
+
+  "tensor_cast.mla_kv_projection.default":
+    composite: true
+    decomposer: true
+    notes: >
+      Explicit Prefill compressed-KV projection before core attention;
+      kv_c@kv_b_proj maps to MatMulV2 as (M,K) x (N,K). GLM-5.2 SP prefill
+      needs N=28672 with K=512; the v0.18 MatMulV2 table tops out at N=16384
+      for that K, so the op must miss rather than interpolate past the grid.
+
+  "tensor_cast.mla_kv_projection_quant.default":
+    composite: true
+    decomposer: true
+    notes: >
+      Explicit quantized Prefill compressed-KV projection before core attention;
+      kv_c@kv_b_proj maps to MatMulV2.
+
+  "tensor_cast.mla_merge_phase_outputs.default":
+    zero_cost: true
+    notes: >
+      Shape-only TensorCast boundary that restores the packed request order after
+      phase-specific MLA kernels. It does not dispatch a standalone NPU kernel.
+
+  "tensor_cast.mla_q_absorb_projection.default":
+    composite: true
+    decomposer: true
+    notes: Explicit decode q@W_UK_T absorption mapped to BatchMatMulV2/BatchMatMulNd.
+
+  "tensor_cast.mla_q_absorb_projection_quant.default":
+    composite: true
+    decomposer: true
+    notes: Explicit quantized decode q@W_UK_T absorption mapped to QuantBatchMatmulV3.
+
+  "tensor_cast.mla_v_up_projection.default":
+    composite: true
+    decomposer: true
+    notes: >
+      Explicit decode value up-projection, mapped to TransposeBatchMatMul.
+      Prefill has no post-projection cost.
+
+  "tensor_cast.mla_v_up_projection_quant.default":
+    composite: true
+    decomposer: true
+    notes: >
+      Quantized decode value up-projection, mapped to TransposeBatchMatMul.
+      Prefill has no post-projection cost.
 
   "tensor_cast.mlapo.default":
     composite: true
@@ -693,8 +737,9 @@ operator_mappings:
       vllm-ascend: AscendSFABackend → npu_sparse_flash_attention.
       Dispatch condition: hf_config has index_topk attribute. With DSA CP the
       TensorCast op already carries global heads, so sequence-parallel prefill
-      projects only the token axis from T to T/TP. Decode and SP-disabled runs
-      keep the runtime shape.
+      projects only the token axis from T to T/TP. Prefill graphs emit
+      mla_kv_projection + this core; absorb/value-up kernels are not matched
+      here. Decode bills those on mla_q_absorb_projection / mla_v_up_projection.
 
   "tensor_cast.mla_sparse_attention_quant.default":
     composite: true

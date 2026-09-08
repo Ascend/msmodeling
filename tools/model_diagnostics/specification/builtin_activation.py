@@ -63,6 +63,19 @@ class DsaEnabledActivation:
         return "index_topk" in request.context.model_config
 
 
+class MlaPrefillKvProjectionActivation:
+    """Enable the Prefill-only compressed-KV decompress projection.
+
+    Decode leaves ``num_prefill_tokens == 0`` and does not emit
+    ``mla_kv_projection``; the unused-phase placeholder stays on the attention core.
+    """
+
+    policy_id = "mla_prefill_kv_projection"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return request.context.phase is ExecutionPhase.PREFILL
+
+
 class ExplicitMoeGateActivation:
     """Activate the standalone gate only when Runtime emits it as a call.
 
@@ -130,6 +143,7 @@ def create_builtin_operator_activation_registry() -> OperatorActivationRegistry:
     registry.register(MtpEnabledActivation())
     registry.register(NonMtpLmHeadActivation())
     registry.register(DsaEnabledActivation())
+    registry.register(MlaPrefillKvProjectionActivation())
     registry.register(ExplicitMoeGateActivation())
     registry.register(MoEFusedTopkActivation())
     registry.register(Qwen35DenseFfnActivation())

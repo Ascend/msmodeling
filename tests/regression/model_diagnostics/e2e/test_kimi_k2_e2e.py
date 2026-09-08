@@ -112,6 +112,7 @@ def test_kimi_k2_base_capture_organize_and_compare(
     stage_ids = {finding.stage_id for finding in result.findings}
     assert "dsa_indexer" not in stage_ids
     assert {"sparse_attention", "moe_experts", "moe_combine", "shared_ffn"}.issubset(stage_ids)
+    assert ("mla_kv_projection" in stage_ids) is (profile.phase is ExecutionPhase.PREFILL)
     if profile.quantize_linear_action == "W8A8_DYNAMIC":
         operator_names = {call.operator_name for call in artifact.operator_calls}
         assert "tensor_cast.mlapo_quant.default" in operator_names

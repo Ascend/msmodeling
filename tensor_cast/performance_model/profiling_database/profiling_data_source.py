@@ -53,6 +53,7 @@ import yaml
 
 from ... import config
 from ...device import DeviceProfile
+from ...ops.mla import local_mla_phase_token_counts
 from .backend_projector import CANNBackendProjector
 from .data_source import (
     DataSourcePerformanceModel,
@@ -859,9 +860,9 @@ class SubKernelSpec:
 def _is_decode_mla(args: tuple) -> bool:
     """Determine if MLA op is in decode mode.
 
-    query_lens (args[5]) is None or all 1s → decode.
+    query_lens (args[7]) is None or all 1s → decode.
     """
-    query_lens = args[5]
+    query_lens = args[7]
     if query_lens is None:
         return True
     if isinstance(query_lens, torch.Tensor):
@@ -973,25 +974,60 @@ def _composite_num_tokens(op_invoke_info: "OpInvokeInfo") -> Optional[int]:
     return None
 
 
+def _sparse_prefill_tail_transpose_spec(
+    mapping: dict,
+    *,
+    num_heads: int,
+    work_tokens: int,
+    v_head_dim: int,
+    dtype_str: str,
+) -> Optional[SubKernelSpec]:
+    """SP prefill Transpose attached by yaml ``prefill_tail_transpose``."""
+    decomposer_options = mapping.get("decomposer_options", {})
+    dsa_cp_layout = decomposer_options.get("dsa_cp_layout", {})
+    tail_options = decomposer_options.get("prefill_tail_transpose", {})
+    if not tail_options:
+        return None
+    requires_sp = bool(tail_options.get("requires_sequence_parallel"))
+    runtime_sp = bool(mapping.get("_runtime_sequence_parallel"))
+    if requires_sp and not runtime_sp:
+        return None
+    tp_size = mapping.get("_runtime_tp_size")
+    tail_kernel_type = tail_options.get("kernel_type")
+    if not isinstance(tp_size, int) or tp_size <= 1 or not isinstance(tail_kernel_type, str):
+        raise ValueError("sparse prefill tail transpose requires tp_size>1 and kernel_type")
+    tail_width = num_heads * v_head_dim
+    if bool(dsa_cp_layout.get("attention_heads_already_global")) and dsa_cp_layout.get("tail_width_partition") == "tp":
+        if tail_width % tp_size != 0:
+            raise ValueError("sparse prefill tail width is not divisible by tp")
+        tail_width //= tp_size
+    return SubKernelSpec(
+        kernel_type=tail_kernel_type,
+        input_shapes=[(work_tokens, tp_size, tail_width), (3,)],
+        dtype=dtype_str,
+        input_dtypes=[dtype_str, "INT64"],
+        tc_input_count=2,
+    )
+
+
 def _decompose_mla_common(
     op_invoke_info: "OpInvokeInfo",
     mapping: dict,
-    first_kernel_type: str,
+    first_kernel_type: str = "BatchMatMulV2",
     alternate_kernel_types: Optional[List[str]] = None,
     attention_kernel_type: str = "FusedInferAttentionScore",
 ) -> Optional[List[SubKernelSpec]]:
     """Shared MLA decomposition for BF16 and quantized variants.
 
-    Decode: first_kernel_type(q@W_UK_T) + attention_kernel_type + TransposeBatchMatMul(out@W_UV)
-    Prefill: MatMulV2(kv_c@kv_b_proj) + attention_kernel_type
+    Dense MLA maps to the measured attention kernel only.  Phase-specific
+    projection kernels are preprocessing/postprocessing and are deliberately
+    outside the ``multihead_latent_attention`` semantic boundary.
 
-    Args:
-        first_kernel_type: "BatchMatMulV2" for BF16, "QuantBatchMatmulV3" for quant.
-        alternate_kernel_types: Optional fallback kernel types for the
-            first decode matmul sub-kernel.
-        attention_kernel_type: Kernel type for the attention sub-kernel.
-            "FusedInferAttentionScore" for dense MLA (default);
-            "SparseFlashAttention" for sparse MLA (DeepSeek-V3.2 / GLM-5.1).
+    Sparse MLA maps the core to SparseFlashAttention. Prefill absorb BMM and
+    value-up TransposeBatchMatMul are not synthesized here: those kernels only
+    exist when the graph emits ``mla_q_absorb_projection`` /
+    ``mla_v_up_projection`` (decode). Sequence-parallel prefill may still
+    attach a tail Transpose via yaml ``prefill_tail_transpose``.
     """
     args = op_invoke_info.args
     if len(args) < 10:
@@ -1000,7 +1036,7 @@ def _decompose_mla_common(
     dsa_cp_layout = decomposer_options.get("dsa_cp_layout", {})
     sp_heads_already_global = bool(dsa_cp_layout.get("attention_heads_already_global"))
     q = args[0]  # (num_tokens, num_heads, qk_head_dim)
-    seq_lens = args[4]  # (batch_size,)
+    seq_lens = args[6]  # (batch_size,)
     dtype_str = DTYPE_MAP.get(q.dtype)
     if dtype_str is None:
         return None
@@ -1008,8 +1044,8 @@ def _decompose_mla_common(
     if not isinstance(seq_lens, torch.Tensor):
         return None
     batch_size = seq_lens.shape[0]
-    num_heads = q.shape[1]
-    kv_cache = args[1]  # (total_blocks, block_size, kv_lora_rank + qk_rope_head_dim)
+    num_heads = args[2].shape[1] if args[2].shape[0] > 0 else args[1].shape[1]
+    kv_cache = args[3]  # (total_blocks, block_size, kv_lora_rank + qk_rope_head_dim)
     head_dim = kv_cache.shape[-1]
     num_tokens = q.shape[0]
     is_sparse_attention = attention_kernel_type == "SparseFlashAttention"
@@ -1031,12 +1067,7 @@ def _decompose_mla_common(
         return None
     if sparse_phase is None:
         sparse_phase = "prefill" if avg_seq_len and num_tokens >= avg_seq_len else "decode"
-    has_sparse_absorption_weights = (
-        is_sparse_attention
-        and len(args) > 7
-        and isinstance(args[6], torch.Tensor)
-        and isinstance(args[7], torch.Tensor)
-    )
+    has_absorbed_queries = isinstance(args[2], torch.Tensor) and args[2].shape[0] > 0
     shape_is_decode = _is_decode_mla(args)
     if is_sparse_attention and sparse_phase == "prefill" and shape_is_decode:
         logger.warning(
@@ -1045,15 +1076,10 @@ def _decompose_mla_common(
         )
         return None
 
-    if shape_is_decode or has_sparse_absorption_weights:
-        W_UK_T = args[6]  # (num_heads, qk_nope_head_dim, kv_lora_rank)
-        W_UV = args[7]  # (num_heads, kv_lora_rank, v_head_dim)
-        if W_UK_T is None or W_UV is None:
+    if shape_is_decode or has_absorbed_queries:
+        if not has_absorbed_queries:
             return None
-
-        qk_nope_head_dim = W_UK_T.shape[1]
-        kv_lora_rank = W_UK_T.shape[2]
-        v_head_dim_val = W_UV.shape[2]
+        kv_lora_rank = args[9]
 
         # Fix MISS #5: FIA decode Q only sees kv_lora_rank (512), not full head_dim (576).
         # The rope dim (64) is handled by InterleaveRope separately.
@@ -1072,7 +1098,7 @@ def _decompose_mla_common(
                 and isinstance(tp_size, int)
                 and tp_size > 1
             ):
-                query_lens = args[5] if isinstance(args[5], torch.Tensor) else None
+                query_lens = args[7] if isinstance(args[7], torch.Tensor) else None
                 global_query_tokens = sum(_tensor_int_values(query_lens) or [num_tokens])
                 if not sp_heads_already_global:
                     work_heads = num_heads * tp_size
@@ -1122,69 +1148,15 @@ def _decompose_mla_common(
                 is_attention=True,
             )
 
-        # QuantBatchMatmulV3 CSV has extra inputs (bias columns) beyond
-        # the 2 TC shapes; tc_input_count=2 tells shape matching to only
-        # compare the first 2 CSV inputs. BF16 BatchMatMulV2/BatchMatMulNd
-        # CSV inputs already match the 2 TC shapes, so no override is needed.
-        first_tc_input_count = 2 if first_kernel_type == "QuantBatchMatmulV3" else None
-
-        # Fix MISS #6: NPU BatchMatMulV2/BatchMatMulNd/TransposeBatchMatMul
-        # use heads-first layout (H,T,D), not (T,H,D).
-
-        specs = [
-            SubKernelSpec(
-                kernel_type=first_kernel_type,
-                input_shapes=[
-                    (work_heads, work_tokens, qk_nope_head_dim),
-                    (work_heads, qk_nope_head_dim, kv_lora_rank),
-                ],
-                dtype=dtype_str,
-                tc_input_count=first_tc_input_count,
-                alternate_kernel_types=alternate_kernel_types,
-            ),
-            attn_spec,
-            SubKernelSpec(
-                kernel_type="TransposeBatchMatMul",
-                input_shapes=[
-                    (work_heads, work_tokens, kv_lora_rank),
-                    (work_heads, kv_lora_rank, v_head_dim_val),
-                ],
-                dtype=dtype_str,
-            ),
-        ]
-        tail_options = decomposer_options.get("prefill_tail_transpose", {})
-        if is_sparse_attention and sparse_phase == "prefill" and tail_options:
-            requires_sp = bool(tail_options.get("requires_sequence_parallel"))
-            runtime_sp = bool(mapping.get("_runtime_sequence_parallel"))
-            if not requires_sp or runtime_sp:
-                tp_size = mapping.get("_runtime_tp_size")
-                tail_kernel_type = tail_options.get("kernel_type")
-                if not isinstance(tp_size, int) or tp_size <= 1 or not isinstance(tail_kernel_type, str):
-                    return None
-                tail_width = num_heads * v_head_dim_val
-                if sp_heads_already_global and dsa_cp_layout.get("tail_width_partition") == "tp":
-                    if tail_width % tp_size != 0:
-                        return None
-                    tail_width //= tp_size
-                specs.append(
-                    SubKernelSpec(
-                        kernel_type=tail_kernel_type,
-                        input_shapes=[(work_tokens, tp_size, tail_width), (3,)],
-                        dtype=dtype_str,
-                        input_dtypes=[dtype_str, "INT64"],
-                        tc_input_count=2,
-                    )
-                )
-        return specs
+        return [attn_spec]
     else:
         # Prefill: MatMulV2(kv_c@kv_b_proj) + FusedInferAttentionScore
         # vllm-ascend v0.18.0: MLA prefill uses FIA (unified, RING kernel removed)
-        kv_b_proj = args[8]  # (kv_lora_rank, num_heads*(qk_nope_head_dim+v_head_dim))
-        if kv_b_proj is None:
-            logger.debug("MLA prefill: kv_b_proj is None, fallback to analytic")
+        projected_kv = args[1]
+        if not isinstance(projected_kv, torch.Tensor) or projected_kv.shape[0] == 0:
+            logger.debug("MLA prefill: projected KV is empty, fallback to analytic")
             return None
-
-        kv_lora_rank = kv_b_proj.shape[0]
+        kv_lora_rank = args[9]
         # Fix MISS #4: FIA prefill uses TND layout: (num_tokens, num_heads, qk_nope_head_dim).
         # qk_head_dim = q.shape[2], qk_rope_head_dim = head_dim - kv_lora_rank,
         # qk_nope_head_dim = qk_head_dim - qk_rope_head_dim.
@@ -1204,7 +1176,7 @@ def _decompose_mla_common(
             runtime_vectors = None
             tp_size = mapping.get("_runtime_tp_size")
             if mapping.get("_runtime_sequence_parallel") and isinstance(tp_size, int) and tp_size > 1:
-                query_lens = args[5] if isinstance(args[5], torch.Tensor) else None
+                query_lens = args[7] if isinstance(args[7], torch.Tensor) else None
                 global_query_tokens = sum(_tensor_int_values(query_lens) or [num_tokens])
                 if not sp_heads_already_global:
                     sfa_heads = num_heads * tp_size
@@ -1237,6 +1209,20 @@ def _decompose_mla_common(
                 ),
                 is_attention=True,
             )
+            try:
+                tail_spec = _sparse_prefill_tail_transpose_spec(
+                    mapping,
+                    num_heads=num_heads,
+                    work_tokens=sfa_tokens,
+                    v_head_dim=int(args[8]),
+                    dtype_str=dtype_str,
+                )
+            except ValueError:
+                return None
+            specs = [prefill_attn_spec]
+            if tail_spec is not None:
+                specs.append(tail_spec)
+            return specs
         else:
             prefill_attn_spec = SubKernelSpec(
                 kernel_type=attention_kernel_type,
@@ -1261,33 +1247,123 @@ def _decompose_mla_common(
                 is_attention=True,
             )
 
-        return [
-            SubKernelSpec(
-                kernel_type="MatMulV2",
-                input_shapes=[
-                    (num_tokens, kv_lora_rank),
-                    tuple(kv_b_proj.shape),
-                ],
-                dtype=dtype_str,
-                tc_input_count=2,
-            ),
-            prefill_attn_spec,
-        ]
+        return [prefill_attn_spec]
 
 
 def _decompose_mla(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
     """Decompose multihead_latent_attention (BF16)."""
-    return _decompose_mla_common(
+    return _decompose_mla_common(op_invoke_info, mapping)
+
+
+def _decompose_mla_quant(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
+    """Decompose multihead_latent_attention_quant."""
+    return _decompose_mla_common(op_invoke_info, mapping)
+
+
+def _mla_projection_input_dtypes(activation: torch.Tensor, weight: torch.Tensor) -> Optional[List[str]]:
+    activation_dtype = DTYPE_MAP.get(activation.dtype)
+    weight_dtype = DTYPE_MAP.get(weight.dtype)
+    if activation_dtype is None or weight_dtype is None or activation_dtype != weight_dtype:
+        return None
+    return [activation_dtype, weight_dtype]
+
+
+def _decompose_mla_projection_preprocess_common(
+    op_invoke_info: "OpInvokeInfo",
+    first_kernel_type: str,
+    alternate_kernel_types: Optional[List[str]] = None,
+) -> Optional[List[SubKernelSpec]]:
+    if len(op_invoke_info.args) < 4:
+        return None
+    # Quantized variants append scale/offset tensors after the structural
+    # prefix: activation, weight, this-phase tokens, layout, sibling-phase tokens.
+    activation, weight, num_tokens, _layout = op_invoke_info.args[:4]
+    sibling_tokens = 0
+    if len(op_invoke_info.args) > 4 and not isinstance(op_invoke_info.args[4], torch.Tensor):
+        sibling_tokens = int(op_invoke_info.args[4])
+    declared_tokens = int(num_tokens)
+    if declared_tokens == 0:
+        return None
+    actual_tokens = int(activation.shape[0]) if isinstance(activation, torch.Tensor) and activation.ndim >= 1 else 0
+    is_kv = "mla_kv_projection" in str(op_invoke_info.func)
+    prefill_tokens = declared_tokens if is_kv else sibling_tokens
+    decode_tokens = sibling_tokens if is_kv else declared_tokens
+    local_tokens = actual_tokens if actual_tokens > 0 else prefill_tokens + decode_tokens
+    prefill_local, decode_local = local_mla_phase_token_counts(local_tokens, prefill_tokens, decode_tokens)
+    work_tokens = prefill_local if is_kv else decode_local
+    if work_tokens <= 0:
+        return None
+    kernel_type = "MatMulV2" if "mla_kv_projection" in str(op_invoke_info.func) else first_kernel_type
+    input_dtypes = _mla_projection_input_dtypes(activation, weight)
+    if input_dtypes is None:
+        return None
+    if kernel_type == "MatMulV2":
+        # Profiling MatMulV2 stores GEMM as (M,K) x (N,K). TC kv_b_proj_weight_t is (K,N).
+        k_dim = int(weight.shape[0])
+        n_dim = int(weight.shape[1])
+        return [
+            SubKernelSpec(
+                kernel_type="MatMulV2",
+                input_shapes=[(work_tokens, k_dim), (n_dim, k_dim)],
+                dtype=input_dtypes[0],
+                input_dtypes=input_dtypes,
+                tc_input_count=2,
+            )
+        ]
+    tc_input_count = 2 if first_kernel_type == "QuantBatchMatmulV3" else None
+    return [
+        SubKernelSpec(
+            kernel_type=first_kernel_type,
+            input_shapes=[
+                (weight.shape[0], work_tokens, weight.shape[1]),
+                tuple(weight.shape),
+            ],
+            dtype=input_dtypes[0],
+            input_dtypes=input_dtypes,
+            tc_input_count=tc_input_count,
+            alternate_kernel_types=alternate_kernel_types,
+        )
+    ]
+
+
+def _decompose_mla_projection_preprocess(
+    op_invoke_info: "OpInvokeInfo", mapping: dict
+) -> Optional[List[SubKernelSpec]]:
+    return _decompose_mla_projection_preprocess_common(
         op_invoke_info,
-        mapping,
         "BatchMatMulV2",
         alternate_kernel_types=["BatchMatMulNd"],
     )
 
 
-def _decompose_mla_quant(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
-    """Decompose multihead_latent_attention_quant."""
-    return _decompose_mla_common(op_invoke_info, mapping, "QuantBatchMatmulV3")
+def _decompose_mla_projection_preprocess_quant(
+    op_invoke_info: "OpInvokeInfo", mapping: dict
+) -> Optional[List[SubKernelSpec]]:
+    return _decompose_mla_projection_preprocess_common(op_invoke_info, "QuantBatchMatmulV3")
+
+
+def _decompose_mla_projection_postprocess(
+    op_invoke_info: "OpInvokeInfo", mapping: dict
+) -> Optional[List[SubKernelSpec]]:
+    if len(op_invoke_info.args) < 2:
+        return None
+    attention_output, W_UV = op_invoke_info.args
+    if attention_output.shape[0] == 0:
+        return None
+    input_dtypes = _mla_projection_input_dtypes(attention_output, W_UV)
+    if input_dtypes is None:
+        return None
+    return [
+        SubKernelSpec(
+            kernel_type="TransposeBatchMatMul",
+            input_shapes=[
+                (W_UV.shape[0], attention_output.shape[0], W_UV.shape[1]),
+                tuple(W_UV.shape),
+            ],
+            dtype=input_dtypes[0],
+            input_dtypes=input_dtypes,
+        )
+    ]
 
 
 def _decompose_mla_sparse(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[List[SubKernelSpec]]:
@@ -1795,6 +1871,12 @@ COMPOSITE_DECOMPOSERS: Dict[
     # See §14 in OP_PLUGIN_MAPPING_TUTORIAL.md for the full SOP.
     "tensor_cast.multihead_latent_attention.default": _decompose_mla,
     "tensor_cast.multihead_latent_attention_quant.default": _decompose_mla_quant,
+    "tensor_cast.mla_kv_projection.default": _decompose_mla_projection_preprocess,
+    "tensor_cast.mla_kv_projection_quant.default": _decompose_mla_projection_preprocess_quant,
+    "tensor_cast.mla_q_absorb_projection.default": _decompose_mla_projection_preprocess,
+    "tensor_cast.mla_q_absorb_projection_quant.default": _decompose_mla_projection_preprocess_quant,
+    "tensor_cast.mla_v_up_projection.default": _decompose_mla_projection_postprocess,
+    "tensor_cast.mla_v_up_projection_quant.default": _decompose_mla_projection_postprocess,
     "tensor_cast.mla_sparse_attention.default": _decompose_mla_sparse,
     "tensor_cast.mla_sparse_attention_quant.default": _decompose_mla_sparse_quant,
     "tensor_cast.mlapo.default": _decompose_mlapo,

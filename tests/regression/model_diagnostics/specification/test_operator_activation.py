@@ -25,6 +25,7 @@ from tools.model_diagnostics.specification.builtin_activation import (
     DsaEnabledActivation,
     ExplicitMoeGateActivation,
     LmHeadTokenSelectionActivation,
+    MlaPrefillKvProjectionActivation,
     MtpEnabledActivation,
     NonMtpLmHeadActivation,
     Qwen35DenseFfnActivation,
@@ -159,6 +160,16 @@ def test_dsa_enabled_activation(index_topk: int | None, expected: bool) -> None:
     )
 
     assert DsaEnabledActivation().is_active(request) is expected
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    ((ExecutionPhase.PREFILL, True), (ExecutionPhase.DECODE, False)),
+)
+def test_mla_prefill_kv_projection_activation(phase: ExecutionPhase, expected: bool) -> None:
+    request = _request(phase=phase, query_length=2, num_mtp_tokens=0)
+
+    assert MlaPrefillKvProjectionActivation().is_active(request) is expected
 
 
 @pytest.mark.parametrize(("model_type", "expected"), (("kimi_k2", False), ("deepseek_v3", True)))

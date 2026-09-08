@@ -346,7 +346,7 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --dp-size 4 \
   --ep-size 64 \
   --compilation-config enable_multistream \
-  --enable-shared-expert-tp 
+  --enable-shared-expert-tp
 ```
 
 decode阶段：
@@ -365,7 +365,7 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --dp-size 4 \
   --ep-size 64 \
   --compilation-config enable_multistream \
-  --enable-shared-expert-tp 
+  --enable-shared-expert-tp
 ```
 
 **多模态推理仿真**（W4A8_DYNAMIC 量化 + DP4/TP16/EP64）：：
@@ -389,7 +389,7 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --dp-size 4 \
   --ep-size 64 \
   --compilation-config enable_multistream \
-  --enable-shared-expert-tp 
+  --enable-shared-expert-tp
 ```
 
 decode阶段：
@@ -408,7 +408,7 @@ python -m cli.inference.text_generate "moonshotai/Kimi-K3" \
   --dp-size 4 \
   --ep-size 64 \
   --compilation-config enable_multistream \
-  --enable-shared-expert-tp 
+  --enable-shared-expert-tp
 ```
 
 ---

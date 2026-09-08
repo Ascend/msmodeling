@@ -13,7 +13,7 @@ stages:
           OUTPUT[3]: {shape: "[T, Qlora]", dtype: ACT}
     runtime:
       boundary_operators: [rms_norm]
-      ignored_operators: [rms_norm, view, index]
+      ignored_operators: [rms_norm, view, index, mla_q_absorb_projection, mla_q_absorb_projection_quant]
 
   - id: dsa_indexer
     modules:
@@ -25,19 +25,34 @@ stages:
           OUTPUT[0]: {shape: "[B, Q, Dsa_k]", dtype: int64}
     runtime:
       boundary_operators: [dsa_indexer]
+      ignored_operators: [view, mla_q_absorb_projection, mla_q_absorb_projection_quant]
+
+  - id: mla_kv_projection
+    activation: mla_prefill_kv_projection
+    modules:
+      - name: mla_kv_projection
+        tensors:
+          INPUT[0]: {shape: "[T, KVlora]", dtype: ACT}
+          INPUT[1]: {shape: "[KVlora, Lh * (QKnope + Vh)]", dtype: WEIGHT}
+          OUTPUT[0]: {shape: "[Tprefill, Lh, QKnope + Vh]", dtype: ACT}
+    runtime:
+      boundary_operators: [mla_kv_projection]
       ignored_operators: [view]
 
   - id: sparse_attention
     modules:
-      - name: mla_sparse_attention
+      - name: mla_sparse_attention_core
         tensors:
           INPUT[0]: {shape: "[T, Lh, Hmla]", dtype: ACT}
-          # MLA reads one compressed latent cache instead of separate K/V caches.
-          INPUT[1]: {shape: "[Nblk, Bs, KVlora + QKrope]", dtype: ACT}
-          INPUT[2]: {shape: "[B, Mb]", dtype: int64}
-          INPUT[3]: {shape: "[B + 1]", dtype: int64}
-          INPUT[4]: {shape: "[B]", dtype: int64}
-          INPUT[5]: {shape: "[B]", dtype: int64}
+          INPUT[1]: {shape: "[Tprefill, Lh, QKnope + Vh]", dtype: ACT}
+          INPUT[2]: {shape: "[Tdecode, Lh, KVlora + QKrope]", dtype: ACT}
+          INPUT[3]: {shape: "[Nblk, Bs, KVlora + QKrope]", dtype: ACT}
+          INPUT[4]: {shape: "[B, Mb]", dtype: int64}
+          INPUT[5]: {shape: "[B + 1]", dtype: int64}
+          INPUT[6]: {shape: "[B]", dtype: int64}
+          INPUT[7]: {shape: "[B]", dtype: int64}
+      - name: mla_sparse_attention
+        tensors:
           OUTPUT[0]: {shape: "[T, Lh, Vh]", dtype: ACT}
       - name: o_projection
         tensors:
@@ -45,7 +60,7 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [concat_and_cache_mla]
-      ignored_operators: [concat_and_cache_mla, view, dynamic_quantize_symmetric, all_reduce]
+      ignored_operators: [concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_v_up_projection, mla_v_up_projection_quant, view, dynamic_quantize_symmetric, all_reduce, add, copy_, alias]
 
   - id: dense_ffn
     modules:
@@ -61,5 +76,5 @@ stages:
           INPUT[0]: {shape: "[T, Ftp]", dtype: LINEAR_IN}
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
-      boundary_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2]
-      ignored_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2, view, split_with_sizes, add, copy_, dynamic_quantize_symmetric, all_reduce]
+      boundary_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2, add_rms_norm, rms_norm]
+      ignored_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2, add_rms_norm, rms_norm, view, split_with_sizes, add, copy_, dynamic_quantize_symmetric, all_reduce, convert_element_type, mla_kv_projection, mla_kv_projection_quant, mla_merge_phase_outputs]

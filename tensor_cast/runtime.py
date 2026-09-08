@@ -19,6 +19,7 @@ from .performance_model.bound_analyzer import (
     BoundAnalyzer,
 )
 from .patch_torch import patch_torch
+from .performance_model.analytic_mla_fusion import AnalyticMlaFusionRescaler
 from .performance_model.base import CachingPerformanceModel, PerformanceModel
 from .performance_model.memory_tracker import MemoryTracker
 from .performance_model.op_invoke_info import OpInvokeInfo, Region
@@ -391,11 +392,14 @@ class Runtime(TorchDispatchMode):
         self._pending_wait_dependency_token_ids.clear()
         self.event_list.clear()
         self._event_reference_ids.clear()
+        mla_fusion = AnalyticMlaFusionRescaler()
         for op_invoke_info, reference_id in invocations:
             num_events_before_replay = len(self.event_list)
             self._replay_single_op(op_invoke_info)
             if len(self.event_list) > num_events_before_replay:
                 self._event_reference_ids.append(reference_id)
+                mla_fusion.observe(self.event_list[-1])
+        mla_fusion.flush()
         if self._pending_wait_stream_id is not None:
             logger.warning(
                 "Dropping dangling _internal_wait_and_bind context on stream %s.",

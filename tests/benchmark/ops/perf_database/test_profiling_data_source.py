@@ -3792,19 +3792,21 @@ def _make_glm5_sparse_mla_op(
     seq_lens_values = [seq_len] if seq_lens_values is None else seq_lens_values
     query_lens_values = [query_len] if query_lens_values is None else query_lens_values
     is_decode_values = [is_decode] * len(seq_lens_values) if is_decode_values is None else is_decode_values
+    prefill_tokens = sum(length for length, decode in zip(query_lens_values, is_decode_values) if not decode)
+    decode_tokens = sum(length for length, decode in zip(query_lens_values, is_decode_values) if decode)
     return _make_op_info(
         _FakeTorchOp("tensor_cast.mla_sparse_attention.default"),
         [
             torch.empty(query_len, 2, 192, device="meta", dtype=torch.bfloat16),
+            torch.empty(prefill_tokens, 2, 256, device="meta", dtype=torch.bfloat16),
+            torch.empty(decode_tokens, 2, 576, device="meta", dtype=torch.bfloat16),
             torch.empty(64, 128, 576, device="meta", dtype=torch.bfloat16),
             None,
             None,
             torch.tensor(seq_lens_values, dtype=torch.int64),
             torch.tensor(query_lens_values, dtype=torch.int64),
-            torch.empty(2, 128, 512, device="meta", dtype=torch.bfloat16),
-            torch.empty(2, 512, 128, device="meta", dtype=torch.bfloat16),
-            None,
-            None,
+            128,
+            512,
             2048,
         ],
         kwargs={"is_decode_values": is_decode_values},
@@ -3918,13 +3920,12 @@ def test_glm5_sparse_mla_projects_sequence_parallel_shapes():
                 }
             },
         },
-        "BatchMatMulV2",
         attention_kernel_type="SparseFlashAttention",
     )
 
     assert specs is not None
-    assert specs[0].input_shapes == [(32, 256, 128), (32, 128, 512)]
-    assert specs[1].attention_params["q_shape_3d"] == (256, 32, 512)
+    assert specs[0].kernel_type == "SparseFlashAttention"
+    assert specs[0].attention_params["q_shape_3d"] == (256, 32, 512)
     assert specs[-1].input_shapes == [(256, 16, 256), (3,)]
 
 
@@ -3941,14 +3942,47 @@ def test_glm5_sparse_mla_chunked_prefill_keeps_sequence_parallel_shapes():
                 }
             },
         },
-        "BatchMatMulV2",
         attention_kernel_type="SparseFlashAttention",
     )
 
     assert specs is not None
-    assert specs[0].input_shapes == [(32, 256, 128), (32, 128, 512)]
-    assert specs[1].attention_params["q_shape_3d"] == (256, 32, 512)
+    assert specs[0].kernel_type == "SparseFlashAttention"
+    assert specs[0].attention_params["q_shape_3d"] == (256, 32, 512)
     assert specs[-1].input_shapes == [(256, 16, 256), (3,)]
+
+
+_GLM52_SP_PREFILL_MAPPING = {
+    "_runtime_tp_size": 16,
+    "_runtime_sequence_parallel": True,
+    "decomposer_options": {
+        "dsa_cp_layout": {
+            "attention_heads_already_global": True,
+            "tail_width_partition": "tp",
+        },
+        "prefill_tail_transpose": {
+            "requires_sequence_parallel": True,
+            "kernel_type": "Transpose",
+        },
+    },
+}
+
+
+def test_glm52_sp_prefill_sparse_subkernels_match_core_and_sp_tail():
+    """GLM-5.2 TP16 SP prefill core is SFA + SP Transpose; not absorb/up."""
+    specs = _decompose_mla_common(
+        _make_glm5_sparse_mla_op(query_len=256, query_lens_values=[4096]),
+        _GLM52_SP_PREFILL_MAPPING,
+        "BatchMatMulV2",
+        alternate_kernel_types=["BatchMatMulNd"],
+        attention_kernel_type="SparseFlashAttention",
+    )
+    assert specs is not None
+    assert [spec.kernel_type for spec in specs] == [
+        "SparseFlashAttention",
+        "Transpose",
+    ]
+    assert specs[0].attention_params["q_shape_3d"] == (256, 2, 512)
+    assert specs[-1].input_shapes == [(256, 16, 16), (3,)]
 
 
 def test_glm5_sparse_mla_interpolation_keeps_runtime_sequence_parallel_shapes(monkeypatch):
@@ -4047,14 +4081,12 @@ def test_glm5_sparse_mla_decode_does_not_apply_sequence_parallel():
                 }
             },
         },
-        "BatchMatMulV2",
         attention_kernel_type="SparseFlashAttention",
     )
 
     assert specs is not None
-    assert specs[0].input_shapes == [(2, 1, 128), (2, 128, 512)]
-    assert specs[1].attention_params["q_shape_3d"] == (1, 2, 512)
-    assert len(specs) == 3
+    assert specs[0].attention_params["q_shape_3d"] == (1, 2, 512)
+    assert len(specs) == 1
 
 
 def test_glm5_sparse_mla_mixed_phase_falls_back_from_composite_decomposition(caplog):
@@ -4071,7 +4103,6 @@ def test_glm5_sparse_mla_mixed_phase_falls_back_from_composite_decomposition(cap
             "_runtime_tp_size": 16,
             "_runtime_sequence_parallel": True,
         },
-        "BatchMatMulV2",
         attention_kernel_type="SparseFlashAttention",
     )
 
@@ -4090,7 +4121,6 @@ def test_glm5_sparse_mla_malformed_phase_fails_closed(caplog):
             "_runtime_tp_size": 16,
             "_runtime_sequence_parallel": True,
         },
-        "BatchMatMulV2",
         attention_kernel_type="SparseFlashAttention",
     )
 
@@ -4101,7 +4131,7 @@ def test_glm5_sparse_mla_malformed_phase_fails_closed(caplog):
 def test_glm5_sparse_mla_explicit_prefill_rejects_decode_shaped_query_lens(caplog):
     op = _make_glm5_sparse_mla_op(seq_len=8192, is_decode=False)
     args = list(op.args)
-    args[5] = None
+    args[7] = None
     op.args = tuple(args)
     caplog.set_level("WARNING")
 
@@ -4111,7 +4141,6 @@ def test_glm5_sparse_mla_explicit_prefill_rejects_decode_shaped_query_lens(caplo
             "_runtime_tp_size": 16,
             "_runtime_sequence_parallel": True,
         },
-        "BatchMatMulV2",
         attention_kernel_type="SparseFlashAttention",
     )
 
@@ -4124,15 +4153,15 @@ def test_glm5_sparse_mla_chunked_prefill_dsa_cp_does_not_reconstruct_global_head
         _FakeTorchOp("tensor_cast.mla_sparse_attention.default"),
         [
             torch.empty(256, 64, 256, device="meta", dtype=torch.bfloat16),
+            torch.empty(256, 64, 448, device="meta", dtype=torch.bfloat16),
+            torch.empty(0, 64, 576, device="meta", dtype=torch.bfloat16),
             torch.empty(64, 128, 576, device="meta", dtype=torch.bfloat16),
             None,
             None,
             torch.tensor([8192], dtype=torch.int64),
             torch.tensor([4096], dtype=torch.int64),
-            torch.empty(64, 192, 512, device="meta", dtype=torch.bfloat16),
-            torch.empty(64, 512, 256, device="meta", dtype=torch.bfloat16),
-            None,
-            None,
+            256,
+            512,
             2048,
         ],
         kwargs={"is_decode_values": [False]},
@@ -4153,14 +4182,12 @@ def test_glm5_sparse_mla_chunked_prefill_dsa_cp_does_not_reconstruct_global_head
                 },
             },
         },
-        "BatchMatMulV2",
         attention_kernel_type="SparseFlashAttention",
     )
 
     assert specs is not None
-    assert specs[0].input_shapes == [(64, 256, 192), (64, 192, 512)]
-    assert specs[1].attention_params["q_shape_3d"] == (256, 64, 512)
-    assert specs[2].input_shapes == [(64, 256, 512), (64, 512, 256)]
+    assert specs[0].kernel_type == "SparseFlashAttention"
+    assert specs[0].attention_params["q_shape_3d"] == (256, 64, 512)
     assert specs[-1].input_shapes == [(256, 16, 1024), (3,)]
 
 
@@ -4169,15 +4196,15 @@ def test_glm5_sparse_mla_dsa_cp_does_not_shard_local_tokens_twice():
         _FakeTorchOp("tensor_cast.mla_sparse_attention.default"),
         [
             torch.empty(1024, 64, 256, device="meta", dtype=torch.bfloat16),
+            torch.empty(1024, 64, 448, device="meta", dtype=torch.bfloat16),
+            torch.empty(0, 64, 576, device="meta", dtype=torch.bfloat16),
             torch.empty(129, 128, 576, device="meta", dtype=torch.bfloat16),
             None,
             None,
             torch.tensor([16384], dtype=torch.int64),
             torch.tensor([16384], dtype=torch.int64),
-            torch.empty(64, 192, 512, device="meta", dtype=torch.bfloat16),
-            torch.empty(64, 512, 256, device="meta", dtype=torch.bfloat16),
-            None,
-            None,
+            256,
+            512,
             2048,
         ],
         kwargs={"is_decode_values": [False]},
@@ -4194,14 +4221,14 @@ def test_glm5_sparse_mla_dsa_cp_does_not_shard_local_tokens_twice():
                 }
             },
         },
-        "BatchMatMulV2",
         attention_kernel_type="SparseFlashAttention",
     )
 
     assert specs is not None
-    assert specs[1].attention_params["q_shape_3d"] == (1024, 64, 512)
-    assert specs[1].attention_params["actual_seq_lengths_values"] == [1024]
-    assert specs[1].attention_params["actual_seq_lengths_kv_values"] == [1024]
+    sfa_spec = next(spec for spec in specs if spec.kernel_type == "SparseFlashAttention")
+    assert sfa_spec.attention_params["q_shape_3d"] == (1024, 64, 512)
+    assert sfa_spec.attention_params["actual_seq_lengths_values"] == [1024]
+    assert sfa_spec.attention_params["actual_seq_lengths_kv_values"] == [1024]
 
 
 def test_glm5_mlapo_quant_dsa_cp_uses_global_q_head_count_once():

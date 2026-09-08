@@ -554,6 +554,13 @@ class TestMlaDcpAbsorbHeadAccounting:
     at S=2048), biasing the optimizer against DCP on short/medium contexts.
     """
 
+    _MLA_FAMILY_SUFFIXES = (
+        "multihead_latent_attention.default",
+        "mla_kv_projection.default",
+        "mla_q_absorb_projection.default",
+        "mla_v_up_projection.default",
+    )
+
     @staticmethod
     def _mla_event(events):
         for event in events:
@@ -562,10 +569,13 @@ class TestMlaDcpAbsorbHeadAccounting:
         raise AssertionError("no multihead_latent_attention event found")
 
     def _mma_time(self, dcp_size, seq_len):
+        """Re-estimate the whole family's raw demand before fusion rescaling."""
         group = ParallelGroup(rank=0, rank_groups=[list(range(dcp_size))], global_world_size=dcp_size)
         _, events = _run_mla_attention(group, seq_len=seq_len)
-        result = next(iter(self._mla_event(events).perf_results.values()))
-        return result.statistics["mma_ops_time_s"]
+        family = [e for e in events if str(e.op_invoke_info.func).endswith(self._MLA_FAMILY_SUFFIXES)]
+        assert family, "no MLA family events found"
+        model = AnalyticPerformanceModel(TEST_DEVICE)
+        return sum(model.process_op(e.op_invoke_info).statistics.get("mma_ops_time_s", 0.0) for e in family)
 
     def test_absorb_weights_are_built_at_local_head_count(self):
         """Pins the premise: the absorb weights carry ``h_q/tp`` heads, not ``h_q*dcp/tp``."""
@@ -615,10 +625,10 @@ class TestMlaDcpSeqLenSharding:
 
     @staticmethod
     def _op_seq_lens(events):
-        """The ``seq_lens`` tensor actually passed to the MLA attention op (arg 4)."""
+        """The ``seq_lens`` tensor actually passed to the MLA attention op (arg 6)."""
         for event in events:
             if str(event.op_invoke_info.func).endswith("multihead_latent_attention.default"):
-                return event.op_invoke_info.args[4].tolist()
+                return event.op_invoke_info.args[6].tolist()
         raise AssertionError("no multihead_latent_attention event found")
 
     def test_short_context_does_not_shard_to_zero_kv(self):

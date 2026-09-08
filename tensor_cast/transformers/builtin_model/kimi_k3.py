@@ -20,6 +20,7 @@ Patch numbering follows the design doc  scheme:
 """
 
 import contextlib
+import contextvars
 import importlib.machinery
 import importlib.util
 import logging
@@ -2710,8 +2711,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     # =================================================================
     from tensor_cast.layers.mla import MultiheadLatentAttentionTensorCast
 
-    # Register mla_prolog fused op before MLA forward patch is installed
-    # . Must run before _patched_mla_forward_split calls the op.
+    # Register mla_prolog before the K3 prolog hook can call it.
     _install_mla_prolog_op()
 
     # position_embeddings resolver
@@ -2761,44 +2761,21 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
         MultiheadLatentAttentionTensorCast._patched_rope_resolve = True
         patched = True
 
-    # Initialize _has_rotary_emb lazily on the wrapper
-    # K3's MLA has rotary_emb=None (mla_use_nope=True). The resolver
-    #      needs _has_rotary_emb=False to skip RoPE and return identity.
-    if not hasattr(MultiheadLatentAttentionTensorCast, "_patched_has_rotary_emb_init"):
+    # K3 customizes only the prolog and post-merge gate. The shared MLA
+    # forward remains the single owner of projection, attention, DCP, and
+    # phase-merge semantics so future core signature changes cannot drift here.
+    if not hasattr(MultiheadLatentAttentionTensorCast, "_patched_k3_mla_hooks"):
         _original_mla_forward = MultiheadLatentAttentionTensorCast.forward
+        _original_compute_mla_prolog = MultiheadLatentAttentionTensorCast._compute_mla_prolog
+        _original_postprocess_attention_output = MultiheadLatentAttentionTensorCast._postprocess_attention_output
 
-        # =================================================================
-        # MLA forward with mlapo split (over-fusion split)
-        # ----------------------------------------------------------------
-        # TC's ``mlapo`` fuses q_a_proj + q_a_norm + q_b_proj + kv_a_proj
-        #      + kv_a_norm + RoPE into one graph node. NPU profiling shows
-        #      ``q_a_proj`` as an independent ``MatMulV3`` (16us) and the rest
-        #      fused into ``MlaPrologV3`` (23us). This function mirrors the
-        #      native ``MultiheadLatentAttentionTensorCast.forward`` exactly,
-        #      except the ``mlapo`` call is replaced by:
-        #        1. ``aten.mm`` (q_a_proj)          → profiling MatMulV3
-        #        2. ``mla_prolog``  (q_a_norm +     → profiling MlaPrologV3
-        #            q_b_proj + kv_a_proj + kv_a_norm + RoPE)
-        #      The quant path (linear_quant_enabled=True) retains the native
-        #      ``mlapo_quant`` call — K3 uses DISABLED so this branch is unused.
-        # =================================================================
-        def _patched_mla_forward_split(
-            self,
-            hidden_states: torch.Tensor,
-            position_embeddings: tuple,
-            attention_mask: Optional[torch.Tensor],
-            kv_cache_unused: Optional[torch.Tensor] = None,
-            attention_meta=None,
-            **kwargs,
-        ):
-            from functools import partial  # local import — same as native mla.py
+        def _is_k3_mla(self) -> bool:
+            return bool(getattr(self._inner, "use_output_gate", False))
 
-            kv_cache_by_layers = kwargs.pop("kv_cache_by_layers", None)
-            kv_cache = kv_cache_by_layers[self.layer_idx] if kv_cache_by_layers else None
-            batch_size, seq_length = hidden_states.shape[:-1]
-            num_tokens = batch_size * seq_length
-            hidden_states_view = hidden_states.view(num_tokens, -1)
-            cos, sin = position_embeddings
+        def _patched_compute_mla_prolog(self, hidden_states_view, cos, sin):
+            if not _is_k3_mla(self):
+                return _original_compute_mla_prolog(self, hidden_states_view, cos, sin)
+
             self.q_a_proj_weight, self.q_a_proj_scale, self.q_a_proj_offset = self.extract_qparams(self.q_a_proj)
             self.q_b_proj_weight, self.q_b_proj_scale, self.q_b_proj_offset = self.extract_qparams(self.q_b_proj)
             self.kv_a_proj_weight, self.kv_a_proj_scale, self.kv_a_proj_offset = self.extract_qparams(
@@ -2807,190 +2784,44 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             self.q_a_layernorm_weight = self.q_a_layernorm.weight.data
             self.kv_a_layernorm_weight = self.kv_a_layernorm.weight.data
             linear_quant_enabled = (
-                getattr(self, "q_a_proj_scale", None) is not None
-                and getattr(self, "q_b_proj_scale", None) is not None
-                and getattr(self, "kv_a_proj_scale", None) is not None
+                self.q_a_proj_scale is not None and self.q_b_proj_scale is not None and self.kv_a_proj_scale is not None
             )
             if linear_quant_enabled:
-                # K3 uses DISABLED — normally not entered. Retain native
-                # mlapo_quant call (un-split) for other models that may use it.
-                q_states, kv_c_normed, k_rot, qa_normed = torch.ops.tensor_cast.mlapo_quant(
-                    hidden_states_view,
-                    cos,
-                    sin,
-                    self.q_a_proj_weight,
-                    self.q_a_layernorm_weight,
-                    self.q_b_proj_weight,
-                    self.kv_a_proj_weight,
-                    self.kv_a_layernorm_weight,
-                    self._num_heads_per_rank,
-                    self.qk_head_dim,
-                    self.qk_nope_head_dim,
-                    self.qk_rope_head_dim,
-                    self.kv_lora_rank,
-                    self.q_lora_rank,
-                    self.q_a_proj_scale,
-                    self.q_a_proj_offset,
-                    self.q_b_proj_scale,
-                    self.q_b_proj_offset,
-                    self.kv_a_proj_scale,
-                    self.kv_a_proj_offset,
-                )
-            else:
-                # === O2 split: aten.mm (q_a_proj) + mla_prolog (rest) ===
-                # q_a_proj: independent GEMM → profiling MatMulV3 (16us)
-                # q_a_proj_weight shape is (q_lora_rank, hidden_size), transpose for mm
-                qa = torch.mm(hidden_states_view, self.q_a_proj_weight.t())
-                # mla_prolog: fused q_a_norm + q_b_proj + kv_a_proj + kv_a_norm + RoPE
-                # → profiling MlaPrologV3 (23us)
-                q_states, kv_c_normed, k_rot, qa_normed = torch.ops.tensor_cast.mla_prolog(
-                    hidden_states_view,
-                    qa,
-                    cos,
-                    sin,
-                    self.q_a_layernorm_weight,
-                    self.q_b_proj_weight,
-                    self.kv_a_proj_weight,
-                    self.kv_a_layernorm_weight,
-                    self._num_heads_per_rank,
-                    self.qk_head_dim,
-                    self.qk_nope_head_dim,
-                    self.qk_rope_head_dim,
-                    self.kv_lora_rank,
-                    self.q_lora_rank,
-                )
+                return _original_compute_mla_prolog(self, hidden_states_view, cos, sin)
 
-            # ===== Below mirrors native forward (mla.py L293-437) exactly =====
-            if self.q_lora_rank is not None:
-                qa_normed = qa_normed.view(batch_size, seq_length, -1)
-            else:
-                qa_normed = None
-            pre_attn_out = self._pre_attention_forward(
-                hidden_states=hidden_states,
-                qa_normed=qa_normed,
-                position_embeddings=position_embeddings,
-                attention_meta=attention_meta,
-                **kwargs,
+            qa = torch.mm(hidden_states_view, self.q_a_proj_weight.t())
+            return torch.ops.tensor_cast.mla_prolog(
+                hidden_states_view,
+                qa,
+                cos,
+                sin,
+                self.q_a_layernorm_weight,
+                self.q_b_proj_weight,
+                self.kv_a_proj_weight,
+                self.kv_a_layernorm_weight,
+                self._num_heads_per_rank,
+                self.qk_head_dim,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.kv_lora_rank,
+                self.q_lora_rank,
             )
 
-            query_start_loc = attention_meta.query_start_loc if attention_meta else None
-            seq_lens = attention_meta.seq_lens if attention_meta else None
-            query_lens = attention_meta.query_lens if attention_meta else None
+        def _patched_postprocess_attention_output(self, attn_output, hidden_states):
+            if not _is_k3_mla(self) or not hasattr(self._inner, "g_proj"):
+                return _original_postprocess_attention_output(self, attn_output, hidden_states)
 
-            # --- Decode Context Parallel (decode path only) ---
-            apply_dcp = self.dcp_group.world_size > 1 and attention_meta is not None and attention_meta.is_dcp_decode
-            if apply_dcp:
-                q_states = self.dcp_group.all_gather(q_states, dim=1)
-                dcp_size = self.dcp_group.world_size
-                seq_lens = torch.clamp(torch.div(seq_lens + (dcp_size - 1), dcp_size, rounding_mode="floor"), min=1)
-
-            if self.quant_config is not None:
-                quant_config = self.quant_config
-                out_dtype = self.quant_config.get_quant_dtype()
-                q_states = torch.ops.tensor_cast.quantize(
-                    q_states,
-                    quant_config.query_scale,
-                    quant_config.query_offset,
-                    out_dtype,
-                )
-                kv_c_normed = torch.ops.tensor_cast.quantize(
-                    kv_c_normed,
-                    quant_config.kv_scale,
-                    quant_config.kv_offset,
-                    out_dtype,
-                )
-                k_rot = torch.ops.tensor_cast.quantize(
-                    k_rot,
-                    quant_config.kv_scale,
-                    quant_config.kv_offset,
-                    out_dtype,
-                )
-                if attention_meta is not None:
-                    torch.ops.tensor_cast.concat_and_cache_mla(
-                        kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping
-                    )
+            g_proj = self._inner.g_proj
+            if getattr(g_proj, "tp_size", 1) > 1:
+                local_gate = torch.sigmoid(g_proj(hidden_states))
             else:
-                if attention_meta is not None:
-                    torch.ops.tensor_cast.concat_and_cache_mla(
-                        kv_c_normed, k_rot, kv_cache, attention_meta.slot_mapping
-                    )
+                full_gate = torch.sigmoid(g_proj(hidden_states))
+                gate_slice = self._num_heads_per_rank * self.v_head_dim
+                gate_offset = self.tp_group.rank_in_group * gate_slice
+                local_gate = full_gate[..., gate_offset : gate_offset + gate_slice]
+            return attn_output * local_gate
 
-            extra_backend_kwargs = {
-                "topk_limit": None,
-                "topk_indices": None,
-                **self._get_backend_kwargs(pre_attn_out),
-            }
-            if self.quant_config is not None:
-                attention_backend = partial(
-                    self._get_attention_op(quant_enabled=True),
-                    W_UK_T=self.W_UK_T,
-                    W_UV=self.W_UV,
-                    kv_b_proj=self.kv_b_proj_weight_t,
-                    v_head_dim=self.v_head_dim,
-                    query_scale=self.quant_config.query_scale,
-                    query_offset=self.quant_config.query_offset,
-                    kv_scale=self.quant_config.kv_scale,
-                    kv_offset=self.quant_config.kv_offset,
-                    kv_projected_scale=self.quant_config.kv_projected_scale,
-                    kv_projected_offset=self.quant_config.kv_projected_offset,
-                    qk_scale=self.quant_config.qk_scale,
-                    qk_offset=self.quant_config.qk_offset,
-                    v_scale=self.quant_config.v_scale,
-                    v_offset=self.quant_config.v_offset,
-                    attention_prob_scale=self.quant_config.attention_prob_scale,
-                    attention_prob_offset=self.quant_config.attention_prob_offset,
-                    kv_b_proj_scale=self.kv_b_proj_scale,
-                    kv_b_proj_offset=self.kv_b_proj_offset,
-                    out_scale=self.quant_config.out_scale,
-                    out_offset=self.quant_config.out_offset,
-                    out_dtype=hidden_states.dtype,
-                    **extra_backend_kwargs,
-                )
-            else:
-                attention_backend = partial(
-                    self._get_attention_op(quant_enabled=False),
-                    W_UK_T=self.W_UK_T,
-                    W_UV=self.W_UV,
-                    kv_b_proj=self.kv_b_proj_weight_t,
-                    v_head_dim=self.v_head_dim,
-                    **extra_backend_kwargs,
-                )
-
-            attn_output = attention_backend(
-                q=q_states,
-                kv_cache=kv_cache,
-                block_table=attention_meta.block_table_tensor if attention_meta is not None else None,
-                query_start_loc=query_start_loc,
-                seq_lens=seq_lens,
-                query_lens=query_lens,
-            )
-
-            # --- Decode Context Parallel merge ---
-            if apply_dcp:
-                attn_output = self._dcp_merge_all_to_all(attn_output, batch_size, seq_length)
-
-            attn_output = attn_output.reshape(batch_size, seq_length, -1).contiguous()
-
-            # K3 output gate: apply sigmoid gate before o_proj (inlined
-            # to avoid Dynamo graph break from register_forward_pre_hook)
-            use_output_gate = getattr(self._inner, "use_output_gate", False)
-            if use_output_gate and hasattr(self._inner, "g_proj"):
-                _g_proj = self._inner.g_proj
-                _g_tp_size = getattr(_g_proj, "tp_size", 1)
-                if _g_tp_size > 1:
-                    _g_local = torch.sigmoid(_g_proj(hidden_states))
-                else:
-                    _g_full = torch.sigmoid(_g_proj(hidden_states))
-                    _tp_rank = self.tp_group.rank_in_group
-                    _gate_slice = self._num_heads_per_rank * self.v_head_dim
-                    _gate_offset = _tp_rank * _gate_slice
-                    _g_local = _g_full[..., _gate_offset : _gate_offset + _gate_slice]
-                attn_output = attn_output * _g_local
-
-            attn_output = self.o_proj(attn_output)
-            return self._format_forward_output(attn_output, None, pre_attn_out)
-
-        def _patched_mla_forward_with_gate_check(
+        def _patched_mla_forward_with_k3_position_embeddings(
             self,
             hidden_states: torch.Tensor,
             position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
@@ -2999,18 +2830,21 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
             attention_meta=None,
             **kwargs,
         ):
-            # Lazy-initialize _has_rotary_emb
+            if not _is_k3_mla(self):
+                return _original_mla_forward(
+                    self,
+                    hidden_states,
+                    position_embeddings,
+                    attention_mask,
+                    kv_cache_unused,
+                    attention_meta,
+                    **kwargs,
+                )
             if not hasattr(self, "_has_rotary_emb"):
-                self._has_rotary_emb = hasattr(self._inner, "rotary_emb") and (self._inner.rotary_emb is not None)
-
-            # K3: resolve position_embeddings from position_ids if not provided
+                self._has_rotary_emb = hasattr(self._inner, "rotary_emb") and self._inner.rotary_emb is not None
             if position_embeddings is None:
                 position_embeddings = self._resolve_position_embeddings(hidden_states, None, **kwargs)
-
-            # K3 output gate is applied inline inside _patched_mla_forward_split
-            # (before o_proj) to avoid Dynamo graph break from
-            # register_forward_pre_hook.
-            return _patched_mla_forward_split(
+            return _original_mla_forward(
                 self,
                 hidden_states,
                 position_embeddings,
@@ -3020,10 +2854,11 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
                 **kwargs,
             )
 
-        MultiheadLatentAttentionTensorCast.forward = _patched_mla_forward_with_gate_check
-        MultiheadLatentAttentionTensorCast._patched_has_rotary_emb_init = True
+        MultiheadLatentAttentionTensorCast._compute_mla_prolog = _patched_compute_mla_prolog
+        MultiheadLatentAttentionTensorCast._postprocess_attention_output = _patched_postprocess_attention_output
+        MultiheadLatentAttentionTensorCast.forward = _patched_mla_forward_with_k3_position_embeddings
+        MultiheadLatentAttentionTensorCast._patched_k3_mla_hooks = True
         patched = True
-
     # =================================================================
     # KimiDecoderLayer — AttnRes cross-layer residual stub
     # (K3-specific)
@@ -3737,8 +3572,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
                 # Scope the MetaConstantFolder guard to this run so dynamo
                 # compilation (which happens inside run_inference) never
                 # folds K3's region markers / torch.empty stub allocations,
-                # while later simulations in the same process keep the
-                # pristine folding behavior.
+                # while other execution contexts keep the default policy.
                 with _k3_constant_folder_guard(getattr(self, "model", None)):
                     metrics = _orig_run_inference_k3(self, *args, **kwargs)
                 _k3_inject_kda_state(metrics, _k3_kda_state_size_gb(self.model))
@@ -3831,86 +3665,50 @@ def _k3_is_k3_model(model) -> bool:
         return False
 
 
-# Reference-counted scope guard for the constant-folder patch below.
-# The lock serialises install/restore; the counter ensures only the last
-# concurrent K3 inference restores the original ``MetaConstantFolder.run_node``.
-# ``_K3_CONSTANT_FOLDER_ORIG_RUN_NODE`` stores the true original method,
-# captured only when depth transitions 0→1 (inside the lock), so concurrent
-# entries never re-capture the already-installed guard as "original".
-_K3_CONSTANT_FOLDER_GUARD_LOCK = threading.Lock()
-_K3_CONSTANT_FOLDER_GUARD_DEPTH = 0
+# The wrapper is installed once, while this ContextVar makes the changed
+# folding policy local to the current K3 execution context. Concurrent non-K3
+# threads keep the original behavior.
+_K3_CONSTANT_FOLDER_GUARD_ACTIVE = contextvars.ContextVar("tensor_cast_k3_constant_folder_guard_active", default=False)
+_K3_CONSTANT_FOLDER_INSTALL_LOCK = threading.Lock()
 _K3_CONSTANT_FOLDER_ORIG_RUN_NODE = None
 
 
 def _guarded_run_node(self, node):
-    """Skip folding for ``_internal_*`` markers and ``aten.empty*`` allocs."""
-    if node.op == "call_function":
+    """Skip K3-only folding targets in the active K3 execution context."""
+    if _K3_CONSTANT_FOLDER_GUARD_ACTIVE.get() and node.op == "call_function":
         target_str = str(node.target)
         if "_internal_" in target_str or (target_str.startswith("aten.") and "empty" in target_str):
             return self.unknown_value
     return _K3_CONSTANT_FOLDER_ORIG_RUN_NODE(self, node)
 
 
+def _install_k3_constant_folder_wrapper() -> None:
+    """Install the context-aware wrapper once without per-run global swapping."""
+    global _K3_CONSTANT_FOLDER_ORIG_RUN_NODE
+
+    from ...compilation.constant_folding import MetaConstantFolder
+
+    if _K3_CONSTANT_FOLDER_ORIG_RUN_NODE is not None:
+        return
+    with _K3_CONSTANT_FOLDER_INSTALL_LOCK:
+        if _K3_CONSTANT_FOLDER_ORIG_RUN_NODE is None:
+            _K3_CONSTANT_FOLDER_ORIG_RUN_NODE = MetaConstantFolder.run_node
+            MetaConstantFolder.run_node = _guarded_run_node
+
+
 @contextlib.contextmanager
 def _k3_constant_folder_guard(model):
-    """Scope the ``MetaConstantFolder`` guard to a single K3 run.
-
-    K3's meta-device stub builds ``inputs_embeds`` via ``torch.empty``. The
-    shared ``MetaConstantFolder`` folds that ``aten.empty`` and propagates
-    constants through the layer group, so DCE drops the layer's
-    ``region_begin`` marker while ``region_end`` survives — tripping the
-    ``Runtime.repeat_op_invoke_infos`` pairing assertion.
-
-    Instead of modifying the shared ``constant_folding`` module (which could
-    change folding behavior for other models) or replacing its class method
-    permanently, install the guarded ``run_node`` only while K3's
-    ``run_inference`` (which contains dynamo compilation and graph
-    execution) is on the stack, and restore the original method afterwards.
-    Non-K3 models and any later simulation in the same process see the
-    pristine ``MetaConstantFolder``.
-
-    The guard is thread-safe: a lock serialises install/restore, and a
-    reference counter ensures only the first concurrent K3 inference
-    installs the patch and only the last one restores the original method.
-    The true original ``run_node`` is stored in a module-level variable
-    captured only on the 0→1 transition, so concurrent entries never
-    re-capture the already-installed guard as "original".
-
-    Guarded ops (never folded, even when all inputs are constants):
-
-    - ``tensor_cast._internal_*`` marker/control ops (region begin/end,
-      copy, wait/record) carry runtime replay semantics.
-    - ``aten.empty*`` allocations produce uninitialized memory, which is not
-      a compile-time constant; folding them can erase whole op chains from
-      the simulation graph.
-    """
-    global _K3_CONSTANT_FOLDER_GUARD_DEPTH, _K3_CONSTANT_FOLDER_ORIG_RUN_NODE
-
+    """Disable unsafe marker/empty folding only in this K3 run context."""
     if not _k3_is_k3_model(model):
         yield
         return
 
-    from ...compilation.constant_folding import MetaConstantFolder
-
-    with _K3_CONSTANT_FOLDER_GUARD_LOCK:
-        if _K3_CONSTANT_FOLDER_GUARD_DEPTH == 0:
-            _K3_CONSTANT_FOLDER_ORIG_RUN_NODE = MetaConstantFolder.run_node
-            MetaConstantFolder.run_node = _guarded_run_node
-            logger.info(
-                "[Kimi-K3] installed scoped MetaConstantFolder guard: skip folding "
-                "tensor_cast._internal_* marker ops and aten.empty* allocations"
-            )
-        _K3_CONSTANT_FOLDER_GUARD_DEPTH += 1
-
+    _install_k3_constant_folder_wrapper()
+    token = _K3_CONSTANT_FOLDER_GUARD_ACTIVE.set(True)
     try:
         yield
     finally:
-        with _K3_CONSTANT_FOLDER_GUARD_LOCK:
-            _K3_CONSTANT_FOLDER_GUARD_DEPTH -= 1
-            if _K3_CONSTANT_FOLDER_GUARD_DEPTH == 0:
-                MetaConstantFolder.run_node = _K3_CONSTANT_FOLDER_ORIG_RUN_NODE
-                _K3_CONSTANT_FOLDER_ORIG_RUN_NODE = None
-                logger.info("[Kimi-K3] restored original MetaConstantFolder.run_node")
+        _K3_CONSTANT_FOLDER_GUARD_ACTIVE.reset(token)
 
 
 def _patch_model_for_kimi_k3(model) -> None:
@@ -3952,20 +3750,17 @@ def _patch_model_for_kimi_k3(model) -> None:
       - Unwrap singleton (``repeat_count==1``) language-layer
         ``RegionMarkerWrapper`` instances — no replay copies reference them, so this
         is safe and only loses region grouping for one layer out of 93.
-      - Scope a K3-local ``MetaConstantFolder`` guard (never folds
+      - Scope a K3-context-local ``MetaConstantFolder`` guard (never folds
         ``tensor_cast._internal_*`` marker ops or ``aten.empty*`` allocations)
-        to K3's ``run_inference`` window — keeps the shared
-        ``constant_folding`` module untouched and leaves no process-wide
-        side effects for other models.
+        to K3's ``run_inference`` window. The installed wrapper is inert in
+        concurrent non-K3 execution contexts.
     """
     import operator as _operator
 
     from ..custom_model_registry import get_language_layers as _get_lang_layers
 
-    # NOTE: the MetaConstantFolder guard is NOT installed here anymore; it
-    # is scoped to K3's run_inference window (see _k3_constant_folder_guard,
-    # installed by _patched_run_inference_k3) so other models simulated in
-    # the same process keep the pristine constant-folding behavior.
+    # The context-aware wrapper is activated only by K3 run_inference; other
+    # execution contexts keep the default constant-folding policy.
 
     # ----------------------------------------------------------------
     # Restore vision tower layers from region wrappers

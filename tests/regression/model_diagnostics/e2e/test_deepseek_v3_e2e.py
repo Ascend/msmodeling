@@ -121,6 +121,7 @@ def test_deepseek_v3_capture_organize_and_compare(deepseek_v3_case) -> None:
         "lm_head",
     }
     assert ("dsa_indexer" in stage_ids) is (artifact.run_context.model_config["model_type"] == "deepseek_v32")
+    assert ("mla_kv_projection" in stage_ids) is (profile.phase is ExecutionPhase.PREFILL)
     operator_names = {call.operator_name for call in artifact.operator_calls}
     if profile.quantize_linear_action == "W8A8_DYNAMIC":
         assert "tensor_cast.mlapo_quant.default" in operator_names
