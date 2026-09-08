@@ -317,11 +317,6 @@ class MemoryTracker:
                     if input_id is None:
                         continue
                     set_alias(input_id, output_id)
-                    aliased_tensor_id = self.alias_info.get(input_id)
-                    if aliased_tensor_id is not None:
-                        self.alias_info[output_id] = aliased_tensor_id
-                    else:
-                        self.alias_info[output_id] = input_id
                     break
             elif output_kind is OutputKind.LIST:
                 if not isinstance(output, list):
@@ -433,11 +428,14 @@ class MemoryTracker:
         for op_idx, (op_info, _) in enumerate(self.op_invoke_infos_with_repeat_id):
             usage_before_call = current_memory_usage
 
-            # Calculate memory allocated for new output tensors. We don't allocate for aliases.
+            # Allocate storage only where a TensorKey is first defined. In-place and
+            # custom mutating ops can return an existing input TensorKey.
             output_tensor_ids = self.op_output_tensor_ids[op_idx]
 
             mem_allocated = sum(
-                self.tensor_infos[t_id].size_bytes for t_id in output_tensor_ids if t_id not in self.alias_info
+                self.tensor_infos[t_id].size_bytes
+                for t_id in output_tensor_ids
+                if t_id not in self.alias_info and self.tensor_infos[t_id].def_op_idx == op_idx
             )
 
             # The memory usage after the call includes the newly allocated tensors.

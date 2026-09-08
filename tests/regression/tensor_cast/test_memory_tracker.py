@@ -91,6 +91,57 @@ class TestMemoryTracker(unittest.TestCase):
         expected_profile = [(800, 800), (800, 800)]
         self._run_and_check(func, [x, y], expected_profile)
 
+    def test_inplace_intermediate_output_does_not_reallocate_storage(self):
+        """An in-place output reusing an intermediate TensorKey is not a new allocation."""
+        x = torch.randn(100)  # 400 bytes
+        y = torch.randn(100)  # 400 bytes
+        root = x + y
+        result = root * 2.0
+
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.record_single_op_invocation(OpInvokeInfo(torch.ops.aten.add.Tensor, (x, y), {}, root))
+        tracker.record_single_op_invocation(OpInvokeInfo(torch.ops.aten.add_.Tensor, (root, 1.0), {}, root))
+        tracker.record_single_op_invocation(OpInvokeInfo(torch.ops.aten.mul.Tensor, (root, 2.0), {}, result))
+        tracker.analyze()
+
+        # Inputs x/y consume 800 bytes. add allocates root once; add_ reuses it;
+        # mul allocates the 400-byte model output and then releases root.
+        expected_profile = [(800, 1200), (1200, 1200), (1200, 1600), (1200, 1200)]
+        profile = tracker.get_profile()
+        self.assertEqual(
+            [(entry.usage_before_call_bytes, entry.usage_after_call_bytes) for entry in profile],
+            expected_profile,
+        )
+
+    def test_mutating_custom_op_returning_input_does_not_reallocate_storage(self):
+        """A mutating custom op returning its input does not allocate the root again."""
+        x = torch.randn(100)  # 400 bytes
+        y = torch.randn(100)  # 400 bytes
+        cos = torch.randn(1)  # 4 bytes
+        sin = torch.randn(1)  # 4 bytes
+        root = x + y
+        result = root * 2.0
+
+        tracker = MemoryTracker(TEST_DEVICE)
+        tracker.record_single_op_invocation(OpInvokeInfo(torch.ops.aten.add.Tensor, (x, y), {}, root))
+        tracker.record_single_op_invocation(
+            OpInvokeInfo(
+                torch.ops.tensor_cast.apply_rope_inplace.default,
+                (root, cos, sin, True, False, -1),
+                {},
+                root,
+            )
+        )
+        tracker.record_single_op_invocation(OpInvokeInfo(torch.ops.aten.mul.Tensor, (root, 2.0), {}, result))
+        tracker.analyze()
+
+        expected_profile = [(808, 1208), (1208, 1208), (1208, 1608), (1208, 1208)]
+        profile = tracker.get_profile()
+        self.assertEqual(
+            [(entry.usage_before_call_bytes, entry.usage_after_call_bytes) for entry in profile],
+            expected_profile,
+        )
+
     def test_view_op_alias(self):
         """Tests a view operation where the output aliases the input."""
 
