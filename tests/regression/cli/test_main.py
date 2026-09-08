@@ -113,20 +113,49 @@ def test_main_dispatches_nested_image_generate_subcommand() -> None:
     image_generate_main.assert_called_once()
 
 
-def test_nested_image_generate_help_uses_module_parser() -> None:
-    result = run_cli_main(
-        main,
-        ["inference", "image-generate", "--help"],
-        prog="msmodeling",
-    )
+@pytest.mark.parametrize("help_flag", ["-h", "--help"])
+@pytest.mark.parametrize(
+    ("subcommand", "expected_fragments"),
+    [
+        (
+            "text-generate",
+            ("--num-queries", "--query-length", "--chrome-trace-file", "--model-id"),
+        ),
+        (
+            "throughput-optimizer",
+            ("--tp-sizes", "--disagg", "--jobs"),
+        ),
+        (
+            "video-generate",
+            ("--ulysses-size", "--num-devices", "--model-id"),
+        ),
+        (
+            "model-adapter",
+            ("doctor", "verify", "export-evidence"),
+        ),
+        (
+            "image-generate",
+            (
+                "--output-image-size",
+                "HEIGHT WIDTH",
+                "Transformer denoising",
+                "--num-devices",
+                "--model-id",
+                "--chrome-trace-file",
+            ),
+        ),
+    ],
+)
+def test_nested_inference_help_uses_module_parser(
+    help_flag: str,
+    subcommand: str,
+    expected_fragments: tuple[str, ...],
+) -> None:
+    result = run_cli_main(main, ["inference", subcommand, help_flag], prog="msmodeling")
 
     assert result.returncode == 0
-    assert "--output-image-size" in result.stdout
-    assert "HEIGHT WIDTH" in result.stdout
-    assert "Transformer denoising" in result.stdout
-    assert "--num-devices" in result.stdout
-    assert "--model-id" in result.stdout
-    assert "--chrome-trace-file" in result.stdout
+    for fragment in expected_fragments:
+        assert fragment in result.stdout
 
 
 def test_main_does_not_register_top_level_image_generate_alias() -> None:

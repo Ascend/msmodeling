@@ -94,15 +94,23 @@ def main() -> int:
     )
     add_version_option(inference_parser)
     inference_sub = inference_parser.add_subparsers(dest="inference_command", parser_class=SpecArgumentParser)
-    inference_sub.add_parser("text-generate", help="Run a simulated LLM inference pass")
-    inference_sub.add_parser("throughput-optimizer", help="Search serving throughput strategies")
-    inference_sub.add_parser("model-adapter", help="Model adaptation doctor, verify, and export-evidence")
-    inference_sub.add_parser("video-generate", help="Run a simulated video generation pass")
+    # Defer -h/--help to each module parser so the full flag list is rendered
+    # instead of the empty stub (Usage: ... [-h] only).
+    inference_sub.add_parser("text-generate", help="Run a simulated LLM inference pass", add_help=False)
+    inference_sub.add_parser(
+        "throughput-optimizer",
+        help="Search serving throughput strategies",
+        add_help=False,
+    )
+    inference_sub.add_parser(
+        "model-adapter",
+        help="Model adaptation doctor, verify, and export-evidence",
+        add_help=False,
+    )
+    inference_sub.add_parser("video-generate", help="Run a simulated video generation pass", add_help=False)
     inference_sub.add_parser(
         "image-generate",
         help="Run a simulated image generation pass",
-        # Defer --help to cli.inference.image_generate's own parser so the full
-        # image-specific flag list is rendered instead of just this help line.
         add_help=False,
     )
 
