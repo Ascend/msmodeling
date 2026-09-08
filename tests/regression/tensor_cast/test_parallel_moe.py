@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from parameterized import parameterized
 from tensor_cast.compilation import get_backend
@@ -447,6 +448,110 @@ def test_fused_moe_per_expert_local_padding_restores_real_token_count():
     assert expert.seen_shape == (8, 16)
     assert output.shape == hidden_states.shape
     assert output.dtype == hidden_states.dtype
+
+
+@pytest.mark.parametrize("num_tokens,tp_size", [(6, 2), (5, 2), (2, 4), (1, 2)])
+@pytest.mark.parametrize("gate_kind", ["tuple", "triple", "logits", "custom", "raw_logits", "route_after"])
+def test_parallel_moe_shared_expert_tp_routing_alignment(num_tokens, tp_size, gate_kind):
+    # Distinct token values expose a wrong-rank slice, even when shapes match.
+    hidden = torch.arange(num_tokens, dtype=torch.float32).view(1, num_tokens, 1).expand(-1, -1, 16)
+    local_tokens = (num_tokens + tp_size - 1) // tp_size
+    for rank in range(tp_size):
+        gate = torch.nn.Identity()
+
+        def gate_output(module, args, output):
+            token = args[0][:, 0]
+            indices = torch.stack((token.long(), token.long() + 1), dim=-1)
+            weights = torch.stack((token + 2, token + 1), dim=-1)
+            if gate_kind in ("logits", "raw_logits"):
+                return weights
+            if gate_kind == "triple":
+                return weights, weights, indices
+            return indices, weights
+
+        gate.register_forward_hook(gate_output)
+
+        def custom_router(gate, states, top_k, input_ids, layer_idx, **kwargs):
+            indices, weights = gate(states)
+            start = rank * local_tokens
+            stop = min(start + local_tokens, num_tokens)
+            local_indices = torch.zeros(local_tokens, 2, dtype=indices.dtype)
+            local_weights = torch.zeros(local_tokens, 2, dtype=weights.dtype)
+            if start < num_tokens:
+                local_indices[: stop - start] = indices[start:stop]
+                local_weights[: stop - start] = weights[start:stop]
+            return local_indices, local_weights
+
+        config = MoEConfig(
+            module_name="FakeMoE",
+            enable_shared_expert_tp=True,
+            gate_returns_raw_logits=gate_kind == "raw_logits",
+            gate_router=custom_router if gate_kind == "custom" else None,
+            route_after_dp_transform=gate_kind == "route_after",
+        )
+        shared = _make_spy_identity()
+        module = SimpleNamespace(
+            gate=gate,
+            top_k=2,
+            norm_topk_prob=False,
+            experts=torch.nn.ModuleList([torch.nn.Identity() for _ in range(4)]),
+            shared_experts=shared,
+            shared_experts_gate=None,
+        )
+        with patch("tensor_cast.layers.moe_layer.FusedMoETensorCast", _make_fake_fused_moe):
+            parallel_moe = ParallelMoELayer(
+                MoELayer(config, module),
+                _FakeParallelGroup(1),
+                _FakeParallelGroup(tp_size, rank),
+                _FakeParallelGroup(tp_size, rank),
+                _FakeParallelGroup(tp_size, rank),
+                0,
+                0,
+            )
+            captured = []
+            parallel_moe._inner.fused_moe.register_forward_pre_hook(
+                lambda module, args: captured.append(tuple(t.clone() for t in args[:3])),
+                prepend=True,
+            )
+            output = parallel_moe(hidden)
+
+        states, indices, weights = captured[0]
+        assert states.shape == (local_tokens, 16)
+        assert indices.shape == weights.shape == (local_tokens, 2)
+        assert output.shape == hidden.shape
+        assert parallel_moe.mlp_tp_group.all_reduce_calls == 1
+        if gate_kind == "raw_logits":
+            # The custom kernel models shapes, not routing values.
+            continue
+        for offset in range(local_tokens):
+            token = rank * local_tokens + offset
+            valid = token < num_tokens
+            assert states[offset, 0].item() == (token if valid else 0)
+            if valid:
+                expected_indices = [0, 1] if gate_kind == "logits" else [token, token + 1]
+                expected_weights = [token + 2, token + 1]
+            elif gate_kind == "route_after":
+                expected_indices, expected_weights = [0, 1], [2, 1]
+            else:
+                expected_indices, expected_weights = [0, 0], [0, 0]
+            assert indices[offset].tolist() == expected_indices
+            assert weights[offset].tolist() == expected_weights
+
+
+@pytest.mark.parametrize("indices_shape,weights_shape", [((4, 2), (4, 2)), ((6, 2), (3, 2)), ((1, 6, 2), (1, 6, 2))])
+def test_parallel_moe_shared_expert_tp_rejects_invalid_routing(indices_shape, weights_shape):
+    owner = SimpleNamespace(
+        _inner=SimpleNamespace(moe_config=MoEConfig(module_name="FakeMoE")),
+        global_tp_group=_FakeParallelGroup(2),
+    )
+    with pytest.raises(ValueError, match="MoE routing"):
+        ParallelMoELayer._align_routing_to_tp_slice(
+            owner,
+            torch.zeros(indices_shape),
+            torch.zeros(weights_shape),
+            6,
+            3,
+        )
 
 
 def test_parallel_moe_shared_expert_tp_skip_inner_shared_experts():

@@ -374,6 +374,34 @@ class ParallelMoELayer(ModelWrapperBase):
             hidden_states = self.global_dp_group.slice(hidden_states, dim=0)
         return hidden_states[:num_tokens]
 
+    def _align_routing_to_tp_slice(self, topk_indices, topk_weights, num_tokens, local_tokens):
+        """Align full-token routing with the padded TP input slice, exactly once."""
+        if topk_indices.shape != topk_weights.shape or topk_indices.ndim != 2:
+            raise ValueError("MoE routing indices and weights must have matching [tokens, top_k] shapes")
+        routing_tokens = topk_indices.shape[0]
+        config = self._inner.moe_config
+        # With one token, full and local sizes can coincide. Standard gates still
+        # return full routing; raw-logits/custom routers own their TP slicing.
+        full_standard_routing = (
+            routing_tokens == num_tokens and not config.gate_returns_raw_logits and config.gate_router is None
+        )
+        if routing_tokens == local_tokens and not full_standard_routing:
+            return topk_indices, topk_weights
+        if routing_tokens != num_tokens:
+            raise ValueError(
+                f"MoE routing has {routing_tokens} tokens; expected {num_tokens} full or {local_tokens} local tokens"
+            )
+        tp_size = self.global_tp_group.world_size
+        tp_rank = self.global_tp_group.rank_in_group
+        padding = (-num_tokens) % tp_size
+        if padding:
+            topk_indices = F.pad(topk_indices, (0, 0, 0, padding))
+            topk_weights = F.pad(topk_weights, (0, 0, 0, padding))
+        return (
+            torch.tensor_split(topk_indices, tp_size, dim=0)[tp_rank],
+            torch.tensor_split(topk_weights, tp_size, dim=0)[tp_rank],
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -403,6 +431,9 @@ class ParallelMoELayer(ModelWrapperBase):
                         hidden_states, tp_size=tp_size, tp_rank=tp_rank, input_ids=input_ids
                     )
                     hidden_states, num_tokens = self._dp_transform_enter(hidden_states)
+                    topk_indices, topk_weights = self._align_routing_to_tp_slice(
+                        topk_indices, topk_weights, num_tokens, hidden_states.shape[0]
+                    )
                 hidden_states = self._inner.fused_moe(
                     hidden_states,
                     topk_indices,
