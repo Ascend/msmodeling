@@ -20,7 +20,7 @@ msModeling provides single-model performance simulation and service-level throug
 
 ### 1.2 Environment Preparation
 
-👉 **Important: Complete the environment installation and configuration in the [msModeling Install Guide](../install_guide/msmodeling_install_guide.md) first.**
+👉 **Important: Complete the environment installation and configuration in the [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md) first.**
 
 > [!CAUTION]
 > This guide assumes commands are run from the msModeling repository root. If you run them from another directory, set `PYTHONPATH` first. Otherwise, errors such as `No module named cli` or `No module named tensor_cast` may occur.
@@ -32,7 +32,7 @@ msModeling provides single-model performance simulation and service-level throug
 
 ### 2.1 Environment: Confirm Runtime Setup
 
-Before starting, complete the environment setup in the [msModeling Install Guide](../install_guide/msmodeling_install_guide.md), including repository cloning, virtual environment creation, dependency installation, and `PYTHONPATH` configuration.
+Before starting, complete the environment setup in the [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md), including repository cloning, virtual environment creation, dependency installation, and `PYTHONPATH` configuration.
 
 The following commands assume you are in the msModeling repository root. If not, set:
 
@@ -60,7 +60,7 @@ If the commands do not print help information, check that the virtual environmen
 TensorCast performs performance modeling for PyTorch programs. It does not execute the model on a real accelerator. Instead, it intercepts the computation graph and estimates operator latency, memory usage, and overall inference performance based on the target device profile.
 
 > [!NOTE]
-> TensorCast prints operator-level performance summaries, total execution time, TPS/Device, and memory usage by default. If `--chrome-trace-file` is specified, it can also generate a Chrome Trace file for timeline analysis.
+> TensorCast prints operator-level performance summaries, total execution time, TPS/Device, and memory usage by default. If `--chrome-trace` is specified, it can also generate a Chrome Trace file for timeline analysis.
 
 #### 2.2.1 Run LLM Text-Generation Simulation
 
@@ -104,14 +104,14 @@ Success criteria:
 
 #### 2.2.3 Generate Chrome Trace (Optional)
 
-To inspect a more fine-grained timeline, add `--chrome-trace-file`:
+To inspect a more fine-grained timeline, add `--chrome-trace`:
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-32B \
     --num-queries 2 \
     --query-length 3500 \
     --device TEST_DEVICE \
-    --chrome-trace-file ./tensorcast_trace.json
+    --chrome-trace ./tensorcast_trace.json
 ```
 
 After generation, open the trace file with `chrome://tracing` or MindStudio Insight.
@@ -134,8 +134,8 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --input-length 3500 \
     --output-length 1500 \
     --quantize-linear-action W8A8_DYNAMIC \
-    --quantize-attention-action disabled \
-    --tpot-limit 50
+    --quantize-attention-action DISABLED \
+    --tpot-limits 50
 ```
 
 #### 2.3.2 Check Optimization Results
@@ -155,7 +155,7 @@ Overall Best Configuration:
 
 Top 4 PD Aggregated Configurations:
 | Top | Throughput (token/s) | TTFT (ms) | TPOT (ms) | concurrency | num_devices | parallel           | batch_size |
-|  1  | 2161.56              | 13848.08  | 49.98     | 128         | 8           | TP=4 | PP=1 | DP=2 | 64         |
+|  1  | 2161.56              | 13848.08  | 49.98     | 128         | 8           | TP=4 , PP=1 , DP=2 | 64         |
 ```
 
 Focus on the following fields:

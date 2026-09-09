@@ -21,7 +21,7 @@ docs/design/model_adaptation_efficiency_design.md
 
 ## 1. Scope
 
-Use this guide when a model needs TensorCast-specific adaptation, such as:
+Use the workflow in this guide when a model requires one or more of the following adaptations:
 
 - MoE module metadata or non-default expert count keys.
 - MLA or MTP module metadata.
@@ -30,10 +30,9 @@ Use this guide when a model needs TensorCast-specific adaptation, such as:
 - New operator adaptation (op declaration plus compute/memory performance
   properties).
 
-For dense text models with no special structure, the workflow may produce a
-minimal profile that only records `model_type`.
+For dense text models with no special structure, the adaptation workflow may require only a minimal model profile.
 
-## 2. Prepare the Environment
+## 2. Preparing the Environment
 
 Run all commands from the msmodeling repository root with a configured Python
 environment. If you are not at the root, set `PYTHONPATH` first:
@@ -78,7 +77,7 @@ artifact and is never committed**. Keep it for local debugging and for the
 downstream precision alignment workflow to consume off-repo; the repository
 only receives code, tests, docs, and optionally the ST guardrail case.
 
-Optional input:
+Optional inputs:
 
 | Input | Save as | Purpose |
 | --- | --- | --- |
@@ -118,7 +117,7 @@ python -m cli.inference.text_generate Qwen/Qwen3-VL-8B-Instruct \
   --image-batch-size 1 \
   --image-height 224 \
   --image-width 224 \
-  --quantize-attention-action disabled \
+  --quantize-attention-action DISABLED \
   --quantize-linear-action W8A8_DYNAMIC
 EOF
 ```
@@ -214,7 +213,7 @@ Additional constraints:
 - A new operator needs unit tests: correct meta shape propagation and
   reasonable performance-property magnitudes.
 
-## 8. Register the Reviewed Profile
+## 8. Registering the Reviewed Profile
 
 Move the reviewed draft to:
 
@@ -260,7 +259,7 @@ register_model_profile(
 )
 ```
 
-## 9. Handle Runtime Patch Needs
+## 9. Handling Runtime Patch Needs
 
 Use a `patch_method` only when the installed model source is incompatible
 with TensorCast simulation. Common reasons:
@@ -312,10 +311,9 @@ Review rules:
 - Preserve normal tensor behavior where possible.
 - Rerun doctor and verification after adding a patch.
 
-## 10. Rerun Doctor After Profile Registration
+## 10. Rerunning Doctor After Profile Registration
 
-After adding or updating `tensor_cast/transformers/builtin_model/<model_type>.py`,
-rerun doctor:
+After adding or updating `tensor_cast/transformers/builtin_model/<model_type>.py`, rerun doctor:
 
 ```bash
 python -m cli.inference.model_adapter doctor \

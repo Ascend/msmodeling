@@ -1,189 +1,126 @@
 # Web UI User Guide
 
-> **⚠ Security Notice**
->
-> The Web UI service has **no authentication** and binds to the loopback address (`127.0.0.1` / `::1`). Loopback only blocks *remote* network access — TCP loopback is visible to **all users on the same host**. Any local user can call every API, submit jobs, and read results.
->
-> **This service is designed for single-user, single-machine use only.** Do NOT run it on shared or multi-user hosts. If the server process runs with elevated privileges (root / admin), this constitutes a local privilege-escalation risk.
+This document is intended for everyday Modeling users and developers who are about to integrate the project. It helps you quickly understand what the tool can do, how to launch simulations from the Web UI or the CLI, how to interpret results, and how to configure parameters for different business scenarios.
 
-This document is intended for daily users of Modeling and developers who are about to integrate the project. Its goal is to help you quickly understand what the tool can do, how to launch simulations from the Web UI or CLI, how to interpret results, and how to configure parameters for different business scenarios.
-
-If you only want to start the Web UI, run the launcher from the repo root (with the venv activated):
+If you only want to start the frontend page, run:
 
 ```bash
-python web_ui/main.py
+python -m web_ui.web_ui_start --port 2345
 ```
 
-After starting, open `http://127.0.0.1:5173` in your browser. The frontend will automatically proxy `/api` requests to the backend at `http://127.0.0.1:8000`.
+After startup, open `http://127.0.0.1:2345` in your browser.
 
 ---
 
-## Reading Guide
+## Reading Navigation
 
 | Goal | Recommended Section |
 | --- | --- |
-| First time launching Web UI | [3. Web UI Quick Start](#web-ui-quick-start) |
-| Configuring LLM / VL simulations | [4. LLM / VL Simulation Guide](#llm-vl-simulation) |
-| Configuring video generation simulations | [5. Video Generation Simulation Guide](#video-generation-simulation) |
-| Using the throughput optimizer | [6. Optimizer Throughput Tuning Guide](#optimizer-guide) |
-| Interpreting results and exporting data | [7. How to Read Result Charts and Detail Tables](#results-guide) |
+| Starting the Web UI for the first time | [3. Web UI Quick Start](#web-ui-quick-start) |
+| Configuring LLM/VL simulation | [4. LLM/VL Simulation Guide](#llm-vl-simulation) |
+| Configuring video generation simulation | [5. Video Generation Simulation Guide](#video-generation-simulation) |
+| Using the throughput optimizer | [6. Optimizer Throughput Optimization Guide](#optimizer-guide) |
+| Interpreting results and exporting data | [7. Reading Result Charts and Detail Tables](#results-guide) |
+| Troubleshooting common issues | [9. FAQ](#faq) |
 
 ---
 
-## 1. Tool Positioning
+## 1 Tool Positioning
 
 Modeling is a simulation tool for model inference performance analysis. Its core capabilities include:
 
-- Predicting operator latency, memory usage, communication overhead, and overall inference time based on device profiles, without requiring real hardware or a full runtime environment for large models.
-- Supporting LLM text inference, VL multimodal inference, video generation Diffusion Transformer inference, and service throughput tuning.
-- Supporting cross-chip comparisons to help evaluate performance differences of the same model on different devices.
-- Supporting parameter combination analysis for concurrency, TP, quantization, MTP, Prefix Cache, Ulysses, DiT Cache, PD Aggregated, PD Disaggregated, PD Ratio, and more.
-- The Web UI provides visual charts, detail tables, case selection, CSV export, job history, Chrome trace download, and historical caching; the CLI is suitable for scripted batch experiments.
+- Predict operator latency, memory usage, communication overhead, and overall inference time based on device profiles without real hardware or a full environment for running a real LLM.
+- Support LLM text inference, VL multimodal inference, Diffusion Transformer inference for video generation, and serving throughput optimization.
+- Support side-by-side comparison across multiple chips to help determine the performance differences of the same model on different devices.
+- Support analysis of parameter combinations such as concurrency, TP, quantization, MTP, Prefix Cache, Ulysses, DiT Cache, PD aggregation, PD disaggregation, and PD ratio.
+- The Web UI provides visual charts, detail tables, case selection, Excel export, and history cache, while the CLI suits scripted batch experiments.
 
-The most relevant entry points in the repository are as follows:
+The entry points most relevant to you in the repository are as follows:
 
-| Entry Point | Purpose | Recommended Scenario |
-| --- | --- | --- |
-| `python web_ui/main.py` | Launch the Vue 3 + FastAPI Web UI (single launcher starts both frontend and backend) | Interactive configuration, result visualization, non-developer users |
-| `python -m cli.inference.text_generate` | LLM / VL forward inference simulation | One-off or scripted LLM/VL performance analysis |
-| `python -m cli.inference.video_generate` | Video generation model simulation | Diffusion Transformer / Wan / HunyuanVideo scenarios |
-| `python -m cli.inference.image_generate` | Image generation model simulation (Transformer denoising stage) | Diffusion Transformer / FLUX / Qwen-Image-Edit scenarios |
-| `python -m cli.inference.throughput_optimizer` | Service throughput tuning | Finding optimal parallel and batch under TTFT/TPOT/SLO constraints |
+| Entry Point                                     | Purpose | Recommended Use Case |
+|-------------------------------------------------|---|---|
+| python -m web_ui.web_ui_start                   | Start the Gradio frontend | Interactive configuration, result visualization, and use by non-developers |
+| python -m cli.inference.text_generate           | LLM/VL forward inference simulation | Single or scripted LLM/VL performance analysis |
+| python -m cli.inference.video_generate          | Video generation model simulation | Scenarios such as Diffusion Transformer/Wan/HunyuanVideo |
+| python -m cli.inference.throughput_optimizer    | Serving throughput optimization | Find the optimal parallelism and batch under TTFT/TPOT/SLO constraints |
 
 ---
 
-## 2. Environment Setup
+## 2 Environment Preparation
 
-For complete environment setup steps (cloning the repository, creating a virtual environment, installing dependencies, setting `PYTHONPATH` and Hugging Face access), please refer to the [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md).
+For the complete environment setup steps (cloning the repository, creating a virtual environment, installing dependencies, and configuring `PYTHONPATH` and Hugging Face access), see the [msModeling Installation Guide](../install_guide/msmodeling_install_guide.md).
 
-If the environment is already set up, launching the Web UI from the repository root generally requires no additional configuration. The tool reads model configurations, with common sources including Hugging Face, ModelScope, or local model directories. If the network cannot access Hugging Face, you can select `modelscope` in the Web UI's `remote-source`, or set the `HF_ENDPOINT` mirror as described in the installation guide.
-
-### 2.1 Additional Web UI Dependencies
-
-The Web UI uses a frontend-backend separation architecture. In addition to the Python dependencies above, you also need to install frontend dependencies:
-
-**Backend dependencies** (already included in the repository root `pyproject.toml`, installed with the main project):
-
-- FastAPI, uvicorn, sqlmodel, alembic, pydantic, etc.
-
-**Frontend dependencies** (requires Node.js ≥ 18 and npm):
-
-```bash
-cd web_ui/frontend
-npm install
-```
-
-This installs Vue 3, Element Plus, ECharts, Pinia, and other frontend libraries. Only needs to be run once. Subsequent `npm run dev` will detect dependency changes automatically.
-
-> **Node.js installation**: If Node.js is not installed, download the LTS version from [nodejs.org](https://nodejs.org/), or use a version manager such as nvm or fnm.
+If the environment is already set up, starting the Web UI from the repository root generally requires no additional configuration. The tool reads model configurations, commonly from Hugging Face, ModelScope, or a local model directory. If Hugging Face is inaccessible from your network, you can select `modelscope` in the `remote-source` field of the Web UI, or configure the `HF_ENDPOINT` mirror as described in the installation guide.
 
 ---
 
 <a id="web-ui-quick-start"></a>
 
-## 3. Web UI Quick Start
+## 3 Web UI Quick Start
 
-### 3.1 Launch the Local Page
-
-The Web UI uses a frontend-backend separation architecture.
-
-**Before first launch**, install frontend dependencies (only once):
+### 3.1 Starting the Local Page
 
 ```bash
-cd web_ui/frontend && npm install
+python -m web_ui.web_ui_start --port 2345
 ```
 
-Also ensure Python dependencies are installed (see [Install Guide](../install_guide/msmodeling_install_guide.md)):
-
-```bash
-uv sync  # or pip install -e .
-```
-
-Then run the launcher from the repo root (with the venv activated):
-
-```bash
-python web_ui/main.py
-```
-
-The launcher concurrently starts the frontend (Vite dev server, default port 5173) and the backend (FastAPI, default port 8000), streams both outputs with `[backend]` / `[frontend]` prefixes, and tree-kills both on Ctrl+C.
-
-Open in your browser:
+Suitable for local use. Open it in your browser:
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:2345
 ```
 
-The frontend Vite dev server will automatically proxy `/api` requests to the backend at `http://127.0.0.1:8000`.
+### 3.2 Web UI Page Description
 
-### 3.2 Web UI Page Overview
+The current Web UI mainly contains three types of workspaces:
 
-The Web UI is a single-page application (SPA). The top navigation bar provides the following:
+| Page | Capability |
+|---|---|
+| Simulator - LLM Forward | LLM text inference simulation, supporting concurrency lists, TP lists, quantization, MTP, Prefix Cache, fine-grained parallelism, operator and memory analysis |
+| Simulator - VL Forward | Multimodal VL inference simulation, adding image parameters such as image batch, height, and width on top of the LLM parameters |
+| Video Generation | Video generation model inference simulation, supporting parameters such as Ulysses, CFG, DiT Cache, and Chrome Trace |
+| Optimizer | Serving throughput optimization, supporting three deployment modes: `PD aggregation`, `PD disaggregation`, and `PD ratio` |
 
-| Navigation Button | Description |
-| --- | --- |
-| Home | Return to the workspace (Console) |
-| Docs | Embedded user guide |
-| History | View submitted job history, status, and results |
-| Locale Switch | Chinese / English real-time switching |
-| Theme Switch | Light / Dark real-time switching |
+### 3.3 Basic Web UI Operation Process
 
-The main workspace **Console** uses a **Tab + vertical split** layout. Three modules share the same page:
-
-| Tab | Capabilities |
-| --- | --- |
-| Text Generation | LLM / VL forward inference simulation, supporting concurrency list, TP list, quantization, MTP, Prefix Cache, parallel breakdown, operator and memory analysis |
-| Video Generation | Video generation model inference simulation, supporting Ulysses, CFG, DiT Cache, Chrome Trace and other parameters |
-| Throughput Optimizer | Service throughput tuning, supporting three deployment modes: `PD Aggregated`, `PD Disaggregated`, `PD Ratio` |
-
-Each Tab's workspace is divided into two parts:
-
-- **Upper part**: Configuration form (fields dynamically generated from TypeScript config, grouped into collapsible sections, hover over field names to see bilingual tooltips)
-- **Lower part**: Result pane (changes with job status: idle placeholder → running → success result / failure details)
-- A draggable divider between them allows resizing the form and result areas
-
-### 3.3 Basic Web UI Workflow
-
-1. Select the model, primary chip, and optional competitor chip.
-2. Fill in parameters such as number of devices, concurrency, length, quantization, and parallelism.
-3. Click the **▶ Run** button to submit the job. A Toast notification will appear on success (with the job ID).
-4. The result pane automatically switches to the running state, showing a spinning icon and progress text. You can view logs or cancel the job at any time.
-5. After the job completes, the result pane displays the summary, scatter plots / charts, memory analysis, operator details, etc.
-6. If multi-value fields are set (e.g., concurrency list, TP list), the system automatically expands them into multiple cases, and the results are displayed in a multi-case view.
-7. Click **History** in the top navigation bar to view all historical jobs and their results.
-
-> **Note**: Tab switching is blocked while a job is running (a warning toast appears). You must wait for it to complete or cancel it before switching tabs.
+1. Select the model, the primary chip, and optional competitor chips.
+2. Fill in parameters such as the number of devices, concurrency, length, quantization, and parallelism.
+3. Click "Preview Configuration" or "Preview Command" to confirm the CLI command to be run.
+4. Click "Start Running".
+5. View the summary conclusion, charts, memory analysis, bandwidth bottlenecks, operator details, and exported results.
+6. If you set a concurrency list or TP list, select a specific case in the detail analysis area, for example, `Concurrency=32 | TP=2`, and then view the memory and operator data of that case.
 
 ---
 
 <a id="llm-vl-simulation"></a>
 
-## 4. LLM / VL Simulation Guide
+## 4 LLM/VL Simulation Guide
 
-Both LLM and VL simulations ultimately invoke:
+Both LLM and VL simulations ultimately call:
 
 ```bash
 python -m cli.inference.text_generate <model_id> [options]
 ```
 
-where VL adds image input parameters on top of the LLM simulation.
+VL adds image input parameters on top of the LLM simulation.
 
 ### 4.1 Key Concepts
 
-| Concept | Description |
-| --- | --- |
-| `num-queries` | Number of concurrent requests, affecting batch, KV Cache, memory, and throughput |
-| `query-length` | Number of newly added tokens. Prefill is usually large; decode is usually 1 or a small value |
-| `context-length` | Existing context length, affecting KV Cache and attention cost |
-| `decode` | Enable autoregressive decode mode |
-| `tp-size` | Tensor Parallel size |
-| `dp-size` | Data Parallel size; can be set to `auto` in the Web UI |
-| `ep-size` | Expert Parallel size, commonly used for MoE models |
-| `num-mtp-tokens` | Number of MTP tokens, available for models that support MTP such as DeepSeek |
-| `prefix-cache-hit-rate` | Prefix Cache hit rate, value range `[0,1)`, used to estimate the benefit of prefill token reuse |
-| `quantize-linear-action` | Linear layer quantization method, such as `W8A8_DYNAMIC`, `fp8`, `mxfp4` |
-| `quantize-non-expert-linear-action` | Non-expert Linear layer quantization override, mainly used for DeepSeek V4; applies to attention projections, dense MLP, and shared experts; routed MoE experts still use `quantize-linear-action` |
-| `quantize-attention-action` | KV Cache / Attention quantization method, such as `disabled`, `int8`, `fp8` |
-| `image-height/image-width` | VL image dimensions |
+| Concept                              | Description |
+|--------------------------------------|---|
+| num-queries                          | Number of concurrent requests, affecting batch, KV Cache, memory, and throughput |
+| query-length                         | Number of new tokens in this run. Prefill is usually larger, and decode is usually 1 or a small value |
+| context-length                       | Existing context length, affecting KV Cache and attention cost |
+| decode                               | Enable autoregressive decode mode |
+| tp-size                              | Number of Tensor Parallel workers |
+| dp-size                              | Number of Data Parallel workers. You can enter `auto` in the Web UI |
+| ep-size                              | Number of Expert Parallel workers, commonly used for MoE models |
+| num-mtp-tokens                       | Number of MTP tokens, available for models that support MTP, such as DeepSeek |
+| prefix-cache-hit-rate                | Prefix Cache hit rate, in the range [0,1), used to estimate the reuse benefit of prefill tokens |
+| quantize-linear-action               | Quantization method for Linear layers, for example, `W8A8_DYNAMIC`, `FP8`, or `MXFP4` |
+| quantize-non-expert-linear-action    | Quantization override for non-expert Linear layers, mainly used for DeepSeek V4. It applies to attention projections, dense MLP, and shared experts, while routed MoE experts still use `quantize-linear-action` |
+| quantize-attention-action            | Quantization method for KV Cache/Attention, for example, `DISABLED`, `INT8`, or `FP8` |
+| image-height/image-width             | VL image size |
 
 ### 4.2 Minimal LLM Example: Single-Chip Decode
 
@@ -196,10 +133,10 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
   --context-length 4500 \
   --decode \
   --quantize-linear-action W8A8_DYNAMIC \
-  --quantize-attention-action disabled
+  --quantize-attention-action DISABLED
 ```
 
-Suitable for quickly observing single-device inference time, TPS/Device, memory usage, and operator breakdown for a given chip under a typical decode scenario.
+Suitable for quickly observing the single-device inference time, `TPS/Device`, memory, and operator proportions of a chip in a typical decode scenario.
 
 ### 4.3 Prefill Example: Long-Input Throughput and Bottleneck Analysis
 
@@ -213,27 +150,27 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
   --compile \
   --tp-size 8 \
   --quantize-linear-action W8A8_DYNAMIC \
-  --quantize-attention-action int8
+  --quantize-attention-action INT8
 ```
 
-This scenario focuses on the cost of processing the first input segment, suitable for comparing:
+This scenario focuses on the processing cost of the initial input segment, suitable for comparing:
 
-- Whether prefill is affected by communication bottlenecks under different TP configurations.
-- Whether attention quantization reduces memory and bandwidth pressure.
+- Whether prefill is affected by communication bottlenecks at different TP values.
+- Whether Attention quantization reduces memory and bandwidth pressure.
 - The impact of `compile` on graph compilation and execution time.
 
 ### 4.4 Concurrency List Example: Plotting Concurrency Curves
 
-In the Web UI, you can fill in:
+You can enter the following in the Web UI:
 
 ```text
 Concurrency list: [16,32,64]
-TP parallel size: 1
+TP degree: 1
 ```
 
-This is equivalent to running multiple experiments with different `--num-queries` values. The results area will plot the relationship between concurrency count and inference time, throughput, and so on, suitable for finding the optimal concurrency range.
+This is equivalent to running multiple experiments with different `--num-queries` values. The result area plots the relationship between concurrency and inference time and throughput, helping you find the optimal concurrency range.
 
-If using the CLI for batch experiments, you can use a script loop:
+For batch experiments from the CLI, you can use a script loop:
 
 ```bash
 for nq in 16 32 64; do
@@ -245,51 +182,60 @@ for nq in 16 32 64; do
     --context-length 4500 \
     --decode \
     --tp-size 1 \
-    --quantize-linear-action mxfp4 \
-    --quantize-attention-action disabled
+    --quantize-linear-action MXFP4 \
+    --quantize-attention-action DISABLED
 done
 ```
 
-### 4.5 TP List Example: Sweeping Multiple TP Values for the Same Model
+### 4.5 TP List Example: Iterating Multiple TP Values for the Same Model
 
-In the Web UI, you can fill in:
+You can enter the following in the Web UI:
 
 ```text
-Number of devices: 8
+Number of deployed devices: 8
 Request concurrency: 32
 TP list: [1,2,4,8]
 ```
 
-The tool will sweep through multiple TP values at the same concurrency and output a chart of TP count versus inference time. The x-axis is the TP count, and the y-axis is the inference time.
+The tool iterates over multiple TP values at the same concurrency and outputs a chart of inference time against the TP count. The horizontal axis is the TP count, and the vertical axis is the inference time.
 
-Suitable for answering:
+It helps answer:
 
-- Whether increasing TP accelerates computation.
-- Whether communication overhead cancels out computation gains.
-- The optimal TP range for the current chip and model.
+- Whether computation speeds up as TP increases.
+- Whether communication overhead cancels out the computation gains.
+- The most suitable TP range for the current chip and model.
 
 ### 4.6 Concurrency List + TP List Example
 
-In the Web UI, you can fill in:
+You can enter the following in the Web UI:
 
 ```text
-Number of devices: 8
+Number of deployed devices: 8
 Concurrency list: [16,32,64]
 TP list: [1,2]
 ```
 
-The tool will sweep concurrency for each TP and output a concurrency curve for each TP. The results can be understood as:
+The tool iterates over concurrency values for each TP and outputs concurrency curves for each TP. The results can be understood as:
 
-| TP | Cases that will run |
-| --- | --- |
-| 1 | Concurrency 16, 32, 64 |
-| 2 | Concurrency 16, 32, 64 |
+| TP | Cases to Run |
+|---|---|
+| 1 | Concurrency 16, 32, and 64 |
+| 2 | Concurrency 16, 32, and 64 |
 
-Subsequently, the result pane automatically switches to the **multi-case view**: a Summary table lists the core metrics for each case (concurrency, TP, inference time, memory, etc.). Clicking a row drills down to the full result for that case (memory distribution chart, operator timing table, etc.).
+Afterward, the memory, bandwidth, and operator detail areas show case selection options, for example:
 
-The old manual case selector has been replaced by automatic multi-case expansion + drill-down interaction.
+```text
+Concurrency=16 | TP=1
+Concurrency=32 | TP=1
+Concurrency=64 | TP=1
+Concurrency=16 | TP=2
+Concurrency=32 | TP=2
+Concurrency=64 | TP=2
+```
 
-### 4.7 DeepSeek / MTP Example
+When viewing details, select the chip first and then the specific case. Otherwise, you may confuse the memory and operator data of different concurrency and TP values.
+
+### 4.7 DeepSeek/MTP Example
 
 ```bash
 python -m cli.inference.text_generate deepseek-ai/DeepSeek-R1 \
@@ -306,7 +252,7 @@ python -m cli.inference.text_generate deepseek-ai/DeepSeek-R1 \
   --compile
 ```
 
-Note: `query-length` must be greater than the number of MTP tokens; otherwise there will not be enough generated tokens to carry out MTP analysis.
+Note: `query-length` must be greater than the number of MTP tokens. Otherwise, there are not enough generated tokens to support MTP analysis.
 
 ### 4.8 Prefix Cache Example
 
@@ -322,9 +268,9 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
   --quantize-linear-action W8A8_DYNAMIC
 ```
 
-`prefix-cache-hit-rate=0.5` means estimating a 50% prefix hit at the token level. The higher the hit rate, the shorter the effective prefill length, and typically the lower the TTFT and prefill-side memory pressure.
+`prefix-cache-hit-rate=0.5` indicates an approximate token-level estimate of 50% prefix hits. The higher the hit rate, the shorter the effective prefill length, and the TTFT and prefill-side memory pressure usually decrease.
 
-### 4.9 VL Example: Image Input Inference
+### 4.9 VL Example: Image-Input Inference
 
 ```bash
 python -m cli.inference.text_generate Qwen/Qwen3-VL-235B-A22B-Instruct \
@@ -339,20 +285,20 @@ python -m cli.inference.text_generate Qwen/Qwen3-VL-235B-A22B-Instruct \
   --image-height 720 \
   --image-width 1080 \
   --quantize-linear-action W8A8_DYNAMIC \
-  --quantize-attention-action int8
+  --quantize-attention-action INT8
 ```
 
-For VL scenarios, it is recommended to focus on:
+For VL scenarios, focus on the following:
 
-- The impact of image dimension changes on memory usage.
-- The peak memory when image batch is combined with text concurrency.
-- The latency proportion of operators related to the vision tower or multimodal projection.
+- The impact of image size changes on memory.
+- The memory peak after image batch is combined with text concurrency.
+- The time proportion of operators related to the vision tower or multimodal projection.
 
 ---
 
 <a id="video-generation-simulation"></a>
 
-## 5. Video Generation Simulation Guide
+## 5 Video Generation Simulation Guide
 
 Video generation entry point:
 
@@ -360,26 +306,26 @@ Video generation entry point:
 python -m cli.inference.video_generate <model_id> [options]
 ```
 
-This tool simulates the Diffusion Transformer forward process, commonly used for performance estimation of video generation models such as Wan and HunyuanVideo.
+This tool simulates the Diffusion Transformer forward process and is commonly used for performance estimation of video generation models such as Wan and HunyuanVideo.
 
 ### 5.1 Key Parameters
 
-| Parameter | Description |
-| --- | --- |
-| `--batch-size` | Video generation batch |
-| `--seq-len` | Text prompt token length |
-| `--height / --width` | Video resolution |
-| `--frame-num` | Number of frames |
-| `--sample-step` | Number of denoise steps |
-| `--dtype` | `float16`, `float32`, `bfloat16` |
-| `--num-devices` | Total number of devices |
-| `--ulysses-size` | Ulysses sequence parallel size, must evenly divide `--num-devices` |
-| `--use-cfg` | Enable CFG |
-| `--cfg-parallel` | Use CFG parallel |
-| `--dit-cache` | Enable DiT block cache |
-| `--cache-step-range` | Step range for DiT Cache to take effect, format `start,end` |
-| `--cache-step-interval` | Refresh cache every N steps; `1` is equivalent to no reuse |
-| `--cache-block-range` | Block cache range, format `start,end` |
+| Parameter                | Description |
+|--------------------------|---|
+| --batch-size             | Video generation batch |
+| --seq-len                | Text prompt token length |
+| --height/--width         | Video resolution |
+| --frame-num              | Number of frames |
+| --sample-step            | Number of denoise steps |
+| --dtype                  | `float16`, `float32`, or `bfloat16` |
+| --world-size             | Total number of devices |
+| --ulysses-size           | Ulysses sequence parallel size, which must divide `world-size` |
+| --use-cfg                | Enable CFG |
+| --cfg-parallel           | Use CFG parallelism |
+| --dit-cache              | Enable DiT block cache |
+| --cache-step-range       | Step range in which DiT Cache takes effect, in the `start,end` format |
+| --cache-step-interval    | Refresh the cache every N steps. 1 is equivalent to no reuse |
+| --cache-block-range      | Block cache range, in the `start,end` format |
 
 ### 5.2 Minimal Video Simulation Example
 
@@ -407,7 +353,7 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --width 1280 \
   --frame-num 129 \
   --sample-step 50 \
-  --num-devices 8 \
+  --world-size 8 \
   --ulysses-size 4 \
   --dtype float16
 ```
@@ -418,7 +364,7 @@ Configuration requirement:
 world-size % ulysses-size == 0
 ```
 
-If this is not satisfied, the program will report an error. The Web UI will also validate this in advance.
+If this is not satisfied, the program reports an error. The Web UI also validates it in advance.
 
 ### 5.4 CFG and CFG Parallel Example
 
@@ -431,13 +377,13 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --width 1280 \
   --frame-num 81 \
   --sample-step 30 \
-  --num-devices 8 \
+  --world-size 8 \
   --ulysses-size 4 \
   --use-cfg \
   --cfg-parallel
 ```
 
-`--use-cfg` simulates classifier-free guidance. `--cfg-parallel` is suitable for comparing the impact of CFG on communication and parallel efficiency.
+`--use-cfg` simulates classifier-free guidance. `--cfg-parallel` is suitable for comparing the impact of CFG on communication and parallelism efficiency.
 
 ### 5.5 DiT Cache Example
 
@@ -456,11 +402,11 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --cache-block-range 0,20
 ```
 
-Explanation:
+Notes:
 
-- `--cache-step-range 10,40` means attempting to reuse cache from denoise step 10 through step 40.
-- `--cache-step-interval 5` means refreshing the cache every 5 steps, with the remaining steps reusing it.
-- `--cache-step-interval 1` effectively disables cache reuse.
+- `--cache-step-range 10,40` means cache reuse is attempted from the 10th to the 40th denoise step.
+- `--cache-step-interval 5` means the cache refreshes every 5 steps and is reused for the remaining steps.
+- `--cache-step-interval 1` basically disables cache reuse.
 
 ### 5.6 Chrome Trace Export
 
@@ -469,7 +415,7 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers \
   --device ATLAS_800_A2_280T_32G_PCIE \
   --batch-size 1 \
   --seq-len 128 \
-  --chrome-trace-file trace/video.json
+  --chrome-trace trace/video.json
 ```
 
 After generation, you can open it in the Chrome browser:
@@ -482,27 +428,27 @@ chrome://tracing
 
 <a id="optimizer-guide"></a>
 
-## 6. Optimizer Throughput Tuning Guide
+## 6 Optimizer Throughput Optimization Guide
 
-Throughput tuning entry point:
+Throughput optimization entry point:
 
 ```bash
 python -m cli.inference.throughput_optimizer <model_id> [options]
 ```
 
-The Optimizer does not just run a single fixed parallel configuration; instead, given a model, device, number of devices, input/output lengths, SLO constraints, and a search space, it automatically searches for better parallel configurations, batch size, concurrency, and throughput.
+The Optimizer does not run only one fixed parallelism configuration. Given the model, device, device count, input and output lengths, SLO constraints, and search space, it automatically searches for better parallelism, batch size, concurrency, and throughput.
 
 ### 6.1 Three Deployment Modes
 
 The deployment mode names in the Web UI are:
 
-| Web UI Name | CLI Parameter | Applicable Scenario |
-| --- | --- | --- |
-| `PD Aggregated` | Default, without `--disagg`, without `--enable-optimize-prefill-decode-ratio` | Prefill and Decode are co-deployed in the same instance type; suitable for baselines and cross-chip comparisons |
-| `PD Disaggregated` | Add `--disagg` | Prefill and Decode disaggregated analysis; separately evaluating capacity under TTFT or TPOT constraints |
-| `PD Ratio` | Add `--enable-optimize-prefill-decode-ratio`, and specify the number of devices per P/D instance | Under a PD disaggregated architecture, finding the optimal Prefill-to-Decode instance ratio |
+| Web UI Name          | CLI Parameters | Applicable Scenario |
+|----------------------|---|---|
+| PD aggregation       | Default. Do not add `--disagg` or `--enable-optimize-prefill-decode-ratio` | prefill and decode are deployed together on the same type of instance. Run a baseline and compare across multiple chips first |
+| PD disaggregation    | Add `--disagg` | Analyze prefill and decode separately, evaluating their capabilities under TTFT or TPOT constraints |
+| PD ratio             | Add `--enable-optimize-prefill-decode-ratio` and specify the number of devices per P/D instance | In a PD-disaggregation architecture, find the ratio of prefill to decode instances |
 
-### 6.2 PD Aggregated: Offline Throughput Tuning
+### 6.2 PD Aggregation: Offline Throughput Optimization
 
 When TTFT/TPOT constraints are not set, the tool focuses more on maximum throughput:
 
@@ -514,18 +460,18 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --output-length 1500 \
   --compile \
   --quantize-linear-action W8A8_DYNAMIC \
-  --quantize-attention-action int8
+  --quantize-attention-action INT8
 ```
 
-Suitable for answering:
+It helps answer:
 
-- Given 8 devices, what is the theoretical maximum throughput of this model.
-- What the optimal TP/DP and batch approximately look like.
-- In cross-chip comparisons, which chip achieves higher optimal throughput.
+- What the theoretical maximum throughput of this model is with 8 devices.
+- What the optimal TP/DP and batch roughly are.
+- Which chip has higher optimal throughput in a multi-chip comparison.
 
-### 6.3 PD Aggregated: Online Service SLO Constraints
+### 6.3 PD Aggregation: Online Service SLO Constraints
 
-Setting both TTFT and TPOT:
+Set both TTFT and TPOT:
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -535,20 +481,20 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --output-length 1500 \
   --compile \
   --quantize-linear-action W8A8_DYNAMIC \
-  --quantize-attention-action int8 \
-  --ttft-limit 2000 \
-  --tpot-limit 50
+  --quantize-attention-action INT8 \
+  --ttft-limits 2000 \
+  --tpot-limits 50
 ```
 
 Suitable for online service capacity evaluation:
 
-- Whether TTFT can meet the first-token response target.
-- Whether TPOT can meet the sustained generation speed target.
-- The optimal batch and concurrency under the given constraints.
+- Whether TTFT meets the first-token response target.
+- Whether TPOT meets the sustained generation speed target.
+- What the optimal batch and concurrency are under the constraints.
 
-### 6.4 Restricting the TP Search Space
+### 6.4 Limiting the TP Search Space
 
-By default, the Optimizer will search available TP values. You can also manually restrict them:
+By default, the Optimizer searches available TP values. You can also limit them manually:
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -561,7 +507,7 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --jobs 8
 ```
 
-In the Web UI, the `TP Parallel Size List` can be filled in as:
+In the Web UI, you can enter a value in `TP parallel size list`:
 
 ```text
 [1,2,4,8]
@@ -569,29 +515,12 @@ In the Web UI, the `TP Parallel Size List` can be filled in as:
 
 `batch-range` supports two meanings:
 
-| Syntax | Meaning |
-| --- | --- |
-| `--batch-range 256` | min defaults to 1, max is 256 |
-| `--batch-range 1 256` | min is 1, max is 256 |
+| Syntax                   | Meaning |
+|--------------------------|---|
+| --batch-range 256        | min defaults to 1 and max is 256 |
+| --batch-range 1 256      | min is 1 and max is 256 |
 
-### 6.5 PD Disaggregated: Prefill-Side TTFT Analysis
-
-```bash
-python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
-  --device ATLAS_800_A2_280T_32G_PCIE \
-  --num-devices 8 \
-  --input-length 3500 \
-  --output-length 1500 \
-  --compile \
-  --quantize-linear-action W8A8_DYNAMIC \
-  --quantize-attention-action disabled \
-  --disagg \
-  --ttft-limit 2000
-```
-
-This mode focuses on how many requests the Prefill stage can handle under TTFT constraints.
-
-### 6.6 PD Disaggregated: Decode-Side TPOT Analysis
+### 6.5 PD Disaggregation: Prefill-Side TTFT Analysis
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
@@ -601,165 +530,130 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
   --output-length 1500 \
   --compile \
   --quantize-linear-action W8A8_DYNAMIC \
-  --quantize-attention-action disabled \
+  --quantize-attention-action DISABLED \
   --disagg \
-  --tpot-limit 50
+  --ttft-limits 2000
 ```
 
-This mode focuses on the sustained output capability of the Decode stage under TPOT constraints.
+This mode focuses on how many requests the prefill phase can handle under TTFT constraints.
 
-### 6.7 PD Ratio: Prefill / Decode Instance Ratio Tuning
+### 6.6 PD Disaggregation: Decode-Side TPOT Analysis
 
 ```bash
 python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
-  --device ATLAS_850_486T_112G_FM16 \
+  --device ATLAS_800_A2_280T_32G_PCIE \
   --num-devices 8 \
-  --input-length 500 \
-  --output-length 100 \
+  --input-length 3500 \
+  --output-length 1500 \
   --compile \
   --quantize-linear-action W8A8_DYNAMIC \
-  --quantize-attention-action disabled \
+  --quantize-attention-action DISABLED \
+  --disagg \
+  --tpot-limits 50
+```
+
+This mode focuses on the sustained output capability of the decode phase under TPOT constraints.
+
+### 6.7 PD Ratio: Optimizing the Prefill/Decode Instance Ratio
+
+```bash
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
+  --device ATLAS_800_A2_280T_32G_PCIE \
+  --num-devices 16 \
+  --input-length 3500 \
+  --output-length 1500 \
+  --compile \
+  --quantize-linear-action W8A8_DYNAMIC \
+  --quantize-attention-action DISABLED \
   --enable-optimize-prefill-decode-ratio \
   --prefill-devices-per-instance 4 \
-  --decode-devices-per-instance 4 \
-  --ttft-limit 10000 \
-  --tpot-limit 3000 \
+  --decode-devices-per-instance 2 \
+  --ttft-limits 2000 \
+  --tpot-limits 50 \
+  --log-level info
 ```
 
-The core idea of PD Ratio is to compute the Prefill QPS and Decode QPS separately, then find a more balanced Prefill / Decode instance ratio.
+The core idea of PD ratio is to calculate the Prefill QPS and Decode QPS separately, and then find a more balanced prefill/decode instance ratio.
 
-Approximate understanding:
+For a rough understanding:
 
 ```text
 Prefill QPS = prefill_concurrency / ttft_ms * 1000
 Decode QPS  = decode_concurrency / (tpot_ms * output_length) * 1000
-PD Ratio    = Decode QPS / Prefill QPS
+PD Ratio = Decode QPS / Prefill QPS
 Balanced QPS = min(Prefill QPS, Decode QPS)
 ```
 
-When `PD Ratio > 1`, the Decode side is relatively stronger, and more Prefill instances may be needed; when `PD Ratio < 1`, the Decode side may become the bottleneck.
+When `PD ratio > 1`, the decode side is relatively stronger and may need more prefill instances. When `PD ratio < 1`, the decode side may become the bottleneck.
 
-### 6.8 Optimizer Output Interpretation
+### 6.8 Interpreting Optimizer Output
 
 Typical output includes:
 
-| Field | Description |
-| --- | --- |
-| `Best Throughput` | Optimal token/s under the current constraints |
-| `TTFT` | Time To First Token, first-token latency |
-| `TPOT` | Time Per Output Token, per-output-token latency |
-| `concurrency` | Concurrency corresponding to the optimal configuration |
-| `parallel` | Parallel configuration, such as `tp4pp1dp2` |
-| `batch_size` | Optimal batch |
-| `pd_ratio` | Instance ratio in PD Ratio mode |
-| `balanced_qps` | System QPS after P/D balancing in PD Ratio mode |
+| Field              | Description |
+|--------------------|---|
+| Best Throughput    | Optimal token/s under the current constraints |
+| TTFT               | Time To First Token, the first-token latency |
+| TPOT               | Time Per Output Token, the per-output-token latency |
+| concurrency        | Concurrency corresponding to the optimal configuration |
+| parallel           | Parallelism configuration, for example, `tp4pp1dp2` |
+| batch_size         | Optimal batch size |
+| pd_ratio           | Instance ratio in PD ratio mode |
+| balanced_qps       | System QPS after P/D balancing in PD ratio mode |
 
 The Web UI also displays:
 
-- Optimal throughput comparison across chips.
-- Optimal TTFT / TPOT comparison across chips.
-- Fixed-configuration cross-chip comparison.
-- PD Ratio key metrics table.
-- Single-chip Pareto details.
+- Comparison of the optimal throughput across chips.
+- Comparison of the optimal TTFT/TPOT across chips.
+- Side-by-side comparison of fixed configurations.
+- Key metrics table for PD ratio.
+- Per-chip Pareto details.
 
 ---
 
 <a id="results-guide"></a>
 
-## 7. How to Read Result Charts and Detail Tables
+## 7 Reading Result Charts and Detail Tables
 
-The Web UI uses modular result components. Different modules have dedicated result views. The result pane supports both light and dark themes, and charts adapt automatically.
+### 7.1 LLM/VL Results
 
-### 7.1 Text Generation Results
+Read the results in the following order:
 
-The result pane displays the following from top to bottom:
+1. Summary conclusion: check the total time, `TPS/Device`, and whether there are failures or warnings.
+2. Inference time curves: check whether the time keeps decreasing as concurrency or TP increases.
+3. Memory analysis: check the proportions of model weights, KV Cache, activations, and reserved memory.
+4. Bandwidth bottlenecks: check memory bound, communication bound, and compute bound.
+5. Operator details: sort by total time to locate the dominant operators.
+6. Operator classification statistics: determine the optimization direction from categories such as GEMM, Attention, and Communication.
 
-1. **Summary metric cards**: batch_size / execution_time / peak_usage / total_device — key values at a glance.
-2. **Simulator run time**: standalone display of the simulator wall-clock time (including compile; not the model execution time).
-3. **TPS per Device bar chart**: one bar per chip for multi-chip comparisons.
-4. **Memory distribution chart**: visual breakdown of total_device / model_weight / kv_cache / peak_usage / available.
-5. **Operator bottleneck distribution (OpBound)**: compact text showing memory bound / communication bound / compute bound proportions.
-6. **Operator timing table**: Name / total / avg / # of Calls, sorted by total latency descending, with expandable input shapes and bound analysis.
-7. **Chrome Trace downloads**: JSON download links per case / seq index (requires `--chrome-trace-file`).
-
-If multi-value fields are configured (multiple devices, multiple quantization methods, concurrency lists, etc.), the result automatically switches to the **multi-case view**: a Summary table lists core metrics for each case; click to drill down to the full single-case result.
+If you configured a concurrency list or TP list, select a case before viewing the details.
 
 ### 7.2 Video Results
 
-Key areas of focus:
+Focus on:
 
 - The relationship between total analytic time and sample steps.
 - The proportion of communication operators after Ulysses.
-- Whether CFG / CFG Parallel introduces additional all-gather or batch expansion.
-- Whether DiT Cache significantly reduces the computation time of repeated blocks.
-- Operator timing table / chart and Chrome Trace downloads (shared display components with Text Generation).
-
-Multi-case results also show a Summary table + drill-down.
+- Whether CFG/CFG Parallel introduces extra all-gather or batch expansion.
+- Whether DiT Cache significantly reduces the compute time of repeated blocks.
 
 ### 7.3 Optimizer Results
 
-The Optimizer displays different views depending on the deployment mode:
+Recommended reading order:
 
-**PD Aggregated (AggregatedView)**:
-
-- Scatter plot: Throughput vs Concurrency / TPOT, colored by parallel strategy
-- Cross-device optimal throughput comparison bar chart (for multi-device cases)
-- Sweep ranking table: rank / throughput / TTFT / TPOT / concurrency / num_devices / parallel / batch_size
-- CSV export
-
-**PD Disaggregated (DisaggregatedView)**:
-
-- Prefill table (TTFT-oriented) + Best configuration card
-- Decode table (TPOT-oriented) + Best configuration card
-- CSV export
-
-**PD Ratio (PDRatioView)**:
-
-- PD Ratio table: PD Ratio / Balanced QPS / P/D QPS / TTFT / TPOT / parallel configuration
-- Best PD ratio card
-
-**Scatter Plot (OptimizerCurves)**:
-
-- Data source: all raw exploration points (raw records), colored by parallel strategy
-- Automatically filters out-of-memory points (OOM) and duplicate rows
-- Mode-aware: 2 charts for Aggregated / 4 charts for Disaggregated / 2 charts for PD Ratio
-- Light / dark theme auto-adaptation
-
-**Multi-case View (ThroughputMultiCaseResult)**:
-
-- Summary table (one row per case: device + metrics)
-- Click to drill down to single-case full results (scatter plot + mode view)
-
-### 7.4 Job Logs
-
-Click the "Logs" button in the workspace or job status page to open the log drawer (JobLogDrawer):
-
-| Feature | Description |
-| --- | --- |
-| Full log | Main job log (banner + all cases interleaved output) |
-| Per-case log | Independent log filtered by case (radio switch) |
-| Log search | Case-insensitive line filter (shows matching lines / total lines) |
-| ANSI rendering | Terminal colors → HTML (preserves bold / color / italic / underline) |
-
-### 7.5 History
-
-Click **History** in the top navigation bar to enter the History page:
-
-| Feature | Description |
-| --- | --- |
-| Job list | Table display: Job ID / Module / Label / Status / Created / Completed |
-| Status labels | Color-coded: success (green) / failed (red) / running (blue) / cancelled (yellow) |
-| Filtering | Filter by module / status; search by Job ID / label |
-| Pagination | Select 10 / 20 / 50 / 100 per page |
-| Actions | View result (succeeded) / View status (running) / View details (failed) |
+1. Recommendation conclusion: check the optimal chip, throughput, parallelism, batch, and concurrency.
+2. Per-chip optimal comparison: used to compare competitor chips with the primary chip.
+3. Fixed-configuration comparison: ensure the comparison runs under the same configuration instead of comparing only the respective optimal points.
+4. PD ratio: for a PD-disaggregation architecture, check the Balanced QPS and the prefill/decode instance ratio.
+5. Per-chip Pareto: determine whether there are alternative points with higher throughput but slightly worse latency.
 
 ---
 
-## 8. Parameter Selection Recommendations
+## 8 Parameter Selection Recommendations
 
-### 8.1 When You Don't Know Where to Start
+### 8.1 If You Don't Know Where to Start
 
-LLM decode initial values:
+Initial LLM decode values:
 
 ```text
 num-devices: 8
@@ -769,10 +663,10 @@ context-length: 4500
 decode: true
 tp-size: 8
 quantize-linear-action: W8A8_DYNAMIC
-quantize-attention-action: disabled
+quantize-attention-action: DISABLED
 ```
 
-LLM prefill initial values:
+Initial LLM prefill values:
 
 ```text
 num-devices: 8
@@ -782,10 +676,10 @@ context-length: 0
 decode: false
 tp-size: 8
 quantize-linear-action: W8A8_DYNAMIC
-quantize-attention-action: int8
+quantize-attention-action: INT8
 ```
 
-Optimizer online service initial values:
+Initial Optimizer values for online service:
 
 ```text
 input-length: 3500
@@ -801,131 +695,242 @@ jobs: 8
 
 Rules of thumb:
 
-- If the model weights are too large to fit in memory: prioritize increasing TP.
-- If a single device has a clear compute bottleneck: increasing TP may yield significant gains.
-- If communication proportion is high: continuing to increase TP may have diminishing returns.
-- For small models or small batches: excessively large TP may slow things down due to communication and synchronization overhead.
+- If the model weights are too large to fit, increase TP first.
+- If single-device compute is the obvious bottleneck, increasing TP may bring significant gains.
+- If communication accounts for a high proportion, further increasing TP may reduce the gains.
+- For small models or small batches, an overly large TP may slow things down because of communication and synchronization overhead.
 
-It is recommended to first run a TP list of `[1,2,4,8]` in the Web UI, then narrow down the search range based on the curves.
+You are advised to first run [1,2,4,8] with the TP list in the Web UI, and then narrow the search range based on the curves.
 
 ### 8.3 How to Choose Concurrency
 
 Rules of thumb:
 
-- Too low concurrency: device utilization may be insufficient.
-- Gradually increasing concurrency: throughput usually improves, but latency and memory also increase.
-- Excessively high concurrency: may trigger memory bottlenecks, excessive KV Cache, or unacceptable latency.
+- If concurrency is too low, device utilization may be insufficient.
+- As concurrency increases gradually, throughput usually improves, but latency and memory also rise.
+- If concurrency is too high, you may hit memory bottlenecks, an oversized KV Cache, or unacceptable latency.
 
-It is recommended to use `[16,32,64,128]` for the first round, then perform a finer sweep around the optimal range.
+You are advised to run [16,32,64,128] in the first round, and then scan finely around the optimal range.
 
 ### 8.4 How to Choose Quantization
 
 | Scenario | Recommendation |
-| --- | --- |
+|---|---|
 | Quick baseline | `W8A8_DYNAMIC` |
-| Do not want to introduce quantization effects | `disabled` |
-| Significant memory pressure | Try `int8` attention or `fp8` |
-| mxfp4 solution evaluation | Use `mxfp4`, adjust `mxfp4-group-size` if necessary |
+| No quantization impact desired | `DISABLED` |
+| Obvious memory pressure | Try `INT8` attention or `FP8` |
+| MXFP4 scheme evaluation | Use `MXFP4`, and adjust `mxfp4-group-size` when necessary |
 
-Note: The simulation tool focuses on performance and resource estimation, and does not replace real accuracy evaluation. Model quality after quantization must still be verified through accuracy testing.
-
----
-
-## 9. Developer Notes
-
-If you want to modify the Web UI, it is recommended to first read the design document:
-
-```text
-docs/design/web_ui_refactor_design.md
-```
-
-### 9.1 Architecture Overview
-
-The Web UI uses a frontend-backend separation architecture:
-
-```text
-Browser (Vue 3 SPA)  ──HTTP/JSON──▶  FastAPI Backend  ──subprocess──▶  CLI Core
-```
-
-- **Frontend**: Vue 3 + Element Plus + Pinia + ECharts + Vite. Build artifacts are served by the backend via StaticFiles.
-- **Backend**: FastAPI + SQLite (WAL mode) + Alembic migrations. Jobs run in isolated subprocesses.
-- **Frontend source**: `web_ui/frontend/`
-- **Backend source**: `web_ui/backend/`
-
-### 9.2 Core File Relationships
-
-**Frontend**:
-
-```text
-web_ui/frontend/src/
-├── App.vue                    # Root component (app-bar + router-view)
-├── main.ts                    # Entry (Vue + Element Plus + Pinia)
-├── router/index.ts            # Routes (Console / History / JobResult / Docs)
-├── pages/                     # Route pages (Console / History / JobResult / JobStatus / Docs)
-├── components/
-│   ├── workspace/             # Workspace (ModuleWorkspace + ResultPane)
-│   ├── form/                  # Dynamic form (SchemaForm + SchemaFormItem)
-│   ├── result/                # Result components (text / video / throughput subdirs)
-│   └── job-status/            # Job status card + log drawer
-├── composables/               # Composable functions (useJobRunner / useFormValidation etc.)
-├── stores/                    # Pinia stores (formState / telemetry)
-├── services/                  # API layer (axios wrappers)
-├── config/forms/              # Form config source of truth (.ts files)
-└── styles/theme.css           # CSS variable theme
-```
-
-**Backend**:
-
-```text
-web_ui/backend/
-├── main.py                    # FastAPI app + lifespan + uvicorn entry
-├── db.py                      # SQLite engine + Alembic migrations
-├── api/
-│   ├── routers/               # API routes (jobs / cases / modules / options)
-│   ├── schemas.py             # Pydantic response models
-│   └── errors.py              # Error handling
-├── models/                    # Data entities + ORM definitions
-├── services/
-│   ├── job_manager.py         # Async job management
-│   ├── job_runner.py          # Job execution (ThreadPoolExecutor + subprocess)
-│   ├── result_view.py         # Result assembly (Top-N + SLO + multi-case)
-│   ├── ranking.py             # Rank calculation
-│   ├── repositories.py        # Data access layer
-│   ├── schema_registry.py     # Form schema snapshots + hash
-│   └── capture.py             # Log capture
-├── runners/                   # Runner adapters (text_generate / video_generate / throughput_optimizer)
-└── migrations/                # Alembic migrations
-```
-
-### 9.3 Web Startup
-
-```bash
-# Install frontend dependencies first (only once)
-cd web_ui/frontend && npm install
-
-# Start the launcher (concurrently runs frontend on :5173 and backend on :8000)
-python web_ui/main.py
-```
-
-### 9.4 Form Configuration Development
-
-Form field definitions live in `web_ui/frontend/src/config/forms/*.ts` (source of truth). At build time, `npm run gen:schemas` generates data-only JSON for the backend schema_registry to load. After modifying fields, you must bump the version number.
+Note: The simulation tool focuses on performance and resource estimation and does not replace real accuracy evaluation. The quality of the quantized model still needs to be verified through accuracy tests.
 
 ---
 
-## 10. Quick Command Index
+<a id="faq"></a>
 
-Launch Web UI:
+## 9 FAQ
 
-```bash
-# Install frontend dependencies first (only once)
-cd web_ui/frontend && npm install
+### 9.1 Browser Cannot Open the Web UI After Startup
 
-# Start (single command, runs both frontend and backend)
-python web_ui/main.py
+Check:
+
+- Whether you used the correct address: `http://127.0.0.1:2345`.
+- Whether the port is occupied. You can change it to `--port 2346`.
+
+### 9.2 Device Name Invalid
+
+`--device` must come from `DeviceProfile.all_device_profiles`. The Web UI automatically loads the brand and chip lists from device profiles. From the CLI, you can view the choices in the error message, or select an available chip in the Web UI first.
+
+### 9.3 Invalid TP/DP/EP Configuration
+
+Common causes:
+
+- `num-devices` is not divisible by `tp-size`.
+- `world-size` is not divisible by `ulysses-size`.
+- `TP * DP * EP` exceeds the number of deployed devices.
+- Some fine-grained TP/DP parameters do not match the total device count.
+
+Suggested handling: first run a simple configuration, for example, `tp-size=1, dp-size=auto, ep-size=1`, and then gradually increase the parallelism complexity.
+
+### 9.4 Optimizer Finds No Feasible Solution
+
+Common causes:
+
+- The TTFT or TPOT constraints are too strict.
+- `max-batched-tokens` is smaller than the effective input length.
+- The batch search range is too small.
+- The device count is insufficient or the TP search space is unsuitable.
+- The reserved memory is too large, leaving insufficient available memory.
+
+Suggested handling:
+
+1. First remove the TTFT/TPOT constraints and check whether an offline optimum can be found.
+2. Loosen `tpot-limits` or `ttft-limits`.
+3. Increase the upper limit of `batch-range`.
+4. Check whether `tp-sizes` contains feasible values.
+5. Reduce `reserved-memory-gb` or use a stronger device profile.
+
+### 9.5 Results Come from Cache and You Want to Rerun
+
+The Web UI reads the cache in `.msmodeling_ui/results.sqlite3` and `.msmodeling_ui/logs/` based on the task hash. If you need a full rerun, you can clear the corresponding cache directory, or adjust a parameter that affects the simulation to generate a new task hash.
+
+### 9.6 Chart Titles Obscure Content
+
+The new Web UI places chart titles in a separate title position outside the image area instead of using the Gradio overlay title in the upper-left corner. If you still see the old style, confirm that the browser has not loaded an old page, and restart the Web UI.
+
+---
+
+## 10 Recommended Workflow Examples
+
+### 10.1 Example A: Comparing the LLM Decode Capability of Two Chips
+
+Web UI:
+
+```text
+Model: Qwen/Qwen3-32B
+Primary chip: ATLAS_800_A2_280T_32G_PCIE
+Comparison chip: Select another chip
+Number of deployed devices: 8
+Concurrency list: [16,32,64]
+TP list: [1,2,4,8]
+Number of generated tokens: 8
+Context length: 4500
+Decode mode: enabled
+Quantization: MLP=W8A8_DYNAMIC, Attention=DISABLED
 ```
 
-Open `http://127.0.0.1:5173` in your browser.
+Observe:
+
+- Which chip has lower inference time at the same TP and concurrency.
+- Whether some chip shows more obvious communication bottlenecks at high TP.
+- Whether the bottlenecks in the memory and operator details are consistent.
+
+### 10.2 Example B: Evaluating the Impact of VL Image Size
+
+First round:
+
+```text
+image-height: 720
+image-width: 1080
+```
+
+Second round:
+
+```text
+image-height: 1024
+image-width: 1024
+```
+
+Keep the other parameters unchanged and compare:
+
+- The change in total inference time.
+- The change in memory usage.
+- The change in the time of Vision-related operators.
+
+### 10.3 Example C: Video Generation Ulysses Scalability
+
+Test in sequence:
+
+```text
+world-size=8, ulysses-size=1
+world-size=8, ulysses-size=2
+world-size=8, ulysses-size=4
+world-size=8, ulysses-size=8
+```
+
+Observe:
+
+- Whether the total time decreases as Ulysses increases.
+- Whether the proportion of communication operators rises.
+- Whether there is an optimal Ulysses value instead of "the larger, the better".
+
+### 10.4 Example D: Online Service Capacity Evaluation
+
+Web UI Optimizer:
+
+```text
+Deployment mode: PD aggregation
+Model: Qwen/Qwen3-32B
+Number of deployed devices: 8
+Input length: 3500
+Output length: 1500
+TP degree list: [1,2,4,8]
+Batch range: [1,256]
+TTFT: 2000
+TPOT: 50
+Quantization: MLP=W8A8_DYNAMIC, Attention=INT8
+```
+
+Focus on the following in the output:
+
+- Whether a feasible solution exists.
+- Whether the optimal throughput, TTFT, and TPOT all meet the targets.
+- Whether the optimal parallel and batch match the deployment expectations.
+
+### 10.5 Example E: PD Ratio Deployment Planning
+
+Web UI Optimizer:
+
+```text
+Deployment mode: PD ratio
+Number of deployed devices: 16
+Prefill devices per instance: 4
+Decode devices per instance: 2
+Input length: 3500
+Output length: 1500
+TTFT: 2000
+TPOT: 50
+```
+
+Observe:
+
+- Balanced QPS.
+- Which of Prefill QPS and Decode QPS is lower.
+- Whether the recommended P/D instance count and total device count match the actual cluster plan.
+
+---
+
+## 11 Additional Notes for Developers
+
+If you plan to modify the Web UI, you are advised to first read:
+
+```text
+web_ui/README.md
+```
+
+Core file relationships:
+
+```text
+web_ui/__init__.py          Package entry point, lazily exposes launch_app
+web_ui/app.py               Page layout and event binding
+web_ui/components.py        Reusable components and result areas
+web_ui/callbacks.py         Form building, validation, execution, and result collation
+web_ui/command_builder.py   CLI command and task matrix generation
+web_ui/runner.py            Caching, subprocess execution, and progress streaming
+web_ui/parsers.py           Log parsing
+web_ui/result_store.py      SQLite and log caching
+web_ui/charts.py            Chart drawing
+web_ui/styles.py            Shared CSS, theme helpers, and header styles
+web_ui/schemas.py           Data classes shared among builders, runners, parsers, and stores
+web_ui/utils.py             Shared parsing, hashing, and normalization helpers
+web_ui/time_tracker.py      Tracks and displays simulation time information
+web_ui/web_ui_start.py      Web UI server startup entry point
+```
+
+After modifying frontend features, you are advised to run:
+
+```bash
+python -m py_compile web_ui/__init__.py web_ui/app.py web_ui/callbacks.py web_ui/command_builder.py web_ui/components.py web_ui/charts.py web_ui/parsers.py web_ui/result_store.py web_ui/runner.py web_ui/schemas.py web_ui/styles.py web_ui/time_tracker.py web_ui/utils.py web_ui/web_ui_start.py
+```
+
+---
+
+## 12 Quick Command Index
+
+Start the Web UI:
+
+```bash
+python -m web_ui.web_ui_start --port 2345
+```
 
 LLM decode:
 
@@ -948,5 +953,5 @@ python -m cli.inference.video_generate Wan-AI/Wan2.2-T2V-A14B-Diffusers --device
 Optimizer:
 
 ```bash
-python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B --device ATLAS_800_A2_280T_32G_PCIE --num-devices 8 --input-length 3500 --output-length 1500 --tp-sizes 1 2 4 8 --batch-range 1 256 --ttft-limit 2000 --tpot-limit 50
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B --device ATLAS_800_A2_280T_32G_PCIE --num-devices 8 --input-length 3500 --output-length 1500 --tp-sizes 1 2 4 8 --batch-range 1 256 --ttft-limits 2000 --tpot-limits 50
 ```
