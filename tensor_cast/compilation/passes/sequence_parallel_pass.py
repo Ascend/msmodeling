@@ -427,21 +427,28 @@ def _unwrap_comm(node):
     return None, None
 
 
+def _data_users(node):
+    """Return users that are not graph-output bookkeeping edges."""
+    return [user for user in node.users if user.op != "output"]
+
+
 def _find_norm_after_add(add_node):
     """Walk add -> [region_end?] -> [copy_region*] -> norm."""
-    users = list(add_node.users)
+    users = _data_users(add_node)
     if len(users) != 1:
         return None
     cur = users[0]
     if cur.op == "call_function" and cur.target is _REGION_END:
-        users = list(cur.users)
+        # Region replay keeps a formal output edge alive for Runtime aliases.
+        # It is bookkeeping, not the decoder data path we are matching.
+        users = _data_users(cur)
         if len(users) != 1:
             return None
         cur = users[0]
     visited = set()
-    while cur.op == "call_function" and cur.target is _COPY_REGION and id(cur) not in visited:
+    while cur.op == "call_function" and cur.target in {_COPY_REGION, _COPY_REGION_V2} and id(cur) not in visited:
         visited.add(id(cur))
-        users = list(cur.users)
+        users = _data_users(cur)
         if len(users) != 1:
             return None
         cur = users[0]
@@ -452,19 +459,19 @@ def _find_norm_after_add(add_node):
 
 def _find_moe_norm_after_add(add_node):
     """MoE/repetition variant that accepts a region-begin before the norm."""
-    users = list(add_node.users)
+    users = _data_users(add_node)
     if len(users) != 1:
         return None
     cur = users[0]
     if cur.op == "call_function" and cur.target is _REGION_END:
-        users = list(cur.users)
+        users = _data_users(cur)
         if len(users) != 1:
             return None
         cur = users[0]
     visited = set()
-    while cur.op == "call_function" and cur.target is _COPY_REGION and id(cur) not in visited:
+    while cur.op == "call_function" and cur.target in {_COPY_REGION, _COPY_REGION_V2} and id(cur) not in visited:
         visited.add(id(cur))
-        users = list(cur.users)
+        users = _data_users(cur)
         if len(users) != 1:
             return None
         cur = users[0]

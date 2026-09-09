@@ -299,7 +299,10 @@ class SequenceParallelPassRegressionTestCase(unittest.TestCase):
         region_begin = graph.call_function(torch.ops.tensor_cast._internal_mark_region_begin.default, (copied, 2))
         graph.call_function(torch.ops.aten.clone.default, (region_begin,))
         norm = graph.call_function(torch.ops.tensor_cast.rms_norm.default, (region_begin, weight, 1e-5))
-        graph.output(norm)
+        # Region replay keeps the representative region output as a formal
+        # graph output for Runtime alias bookkeeping.  P3 must ignore that
+        # bookkeeping edge while following the norm data path.
+        graph.output((norm, region_end))
 
         self.assertTrue(_is_moe_p3_tail(residual))
         self.assertEqual(Pattern3Rewriter().apply(graph), 1)

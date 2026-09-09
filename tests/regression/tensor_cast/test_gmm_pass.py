@@ -155,6 +155,6 @@ class GmmPassTestCase(unittest.TestCase):
             expected_swiglu_op = torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default
         elif quant_type == LinearQuantType.MXFP4:
             expected_op = torch.ops.tensor_cast.grouped_matmul_mxfp4.default
-            expected_swiglu_op = torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu.default
+            expected_swiglu_op = torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default
         self.assertEqual(count_events(runtime, expected_op), 1)
         self.assertEqual(count_events(runtime, expected_swiglu_op), 1)
