@@ -121,7 +121,7 @@ After generation, open the trace file with `chrome://tracing` or MindStudio Insi
 The ServingCast throughput optimizer searches for the best parallel strategy and batch configuration under SLO constraints such as TTFT and TPOT. It helps estimate the maximum serving throughput of a target model on target hardware.
 
 > [!NOTE]
-> PD colocated means Prefill and Decode run in the same instance. It is suitable for quickly evaluating overall service throughput. To evaluate Prefill and Decode separately, see the [Throughput Optimizer Guide](../user_guide/msmodeling_throughput_optimizer_user_guide.md).
+> PD (Prefill-Decode) colocated means Prefill and Decode run in the same instance. It is suitable for quickly evaluating overall service throughput. To evaluate Prefill and Decode separately, see the [Throughput Optimizer Guide](../user_guide/msmodeling_throughput_optimizer_user_guide.md).
 
 #### 2.3.1 Run Service-Level Performance Simulation
 

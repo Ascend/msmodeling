@@ -121,7 +121,7 @@ python -m cli.inference.text_generate Qwen/Qwen3-32B \
 Throughput Optimizer（服务化性能仿真）可在 TTFT、TPOT 等 SLO 约束下，自动搜索最优并行策略和 batch 配置，帮助评估给定模型在目标硬件上的最大服务吞吐。
 
 > [!NOTE]知识点：PD 混部
-> PD 混部表示 Prefill 与 Decode 运行在同一实例中，适合快速评估整体服务吞吐。若需要分别评估 Prefill 与 Decode，可继续阅读《[服务化性能仿真使用指南](../user_guide/msmodeling_throughput_optimizer_user_guide.md)》。
+> PD（Prefill-Decode）混部表示 Prefill 与 Decode 运行在同一实例中，适合快速评估整体服务吞吐。若需要分别评估 Prefill 与 Decode，可继续阅读《[服务化性能仿真使用指南](../user_guide/msmodeling_throughput_optimizer_user_guide.md)》。
 
 #### 2.3.1 执行服务化性能仿真
 
