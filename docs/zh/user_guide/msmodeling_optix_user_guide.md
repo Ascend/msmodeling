@@ -34,12 +34,14 @@
 |`ais_bench`|测评工具（`-b`）|AISBench 测评工具适配|
 |`vllm_benchmark`|测评工具（`-b`）|vllm_benchmark 测评工具适配|
 
-**扩展插件示例**（位于 `contrib/optix/`，按需安装）：
+**扩展插件**（位于 `contrib/optix/`，按需安装）：
 
 |插件名称|类型|提供者|插件描述|插件目录|
 |---|---|---|---|---|
 |`custom_vllm`|服务框架（`-e`）|contrib 示例|通过 Docker + SSH 拉起本地与远端 vLLM 容器，演示自定义服务框架接入|`contrib/optix/vllm_msserviceprofiler/`|
-|`evalscopeperf`|测评工具（`-b`）|contrib 示例|封装 `evalscope perf` 命令作为测评工具，演示自定义测评工具接入|`contrib/optix/evalscopeplugin/`|
+|`multihost_infer`|服务框架（`-e`）|小巧灵突击队|vLLM 多机混合部署插件，基于多节点 DP（Data Parallel）+ headless 方案，node 主节点对外提供 API、work 节点仅作工作节点|`contrib/optix/multihost_infer/`|
+|`vllm_pd`|服务框架（`-e`）|小巧灵突击队|vLLM PD（Prefill-Decode）分离部署集群插件，通过 SSH 远程管理多节点启停与健康检查|`contrib/optix/vllm_pd_simulator/`|
+|`evalscopeperf`|测评工具（`-b`）|小巧灵突击队|封装 `evalscope perf` 命令作为测评工具，演示自定义测评工具接入|`contrib/optix/evalscopeplugin/`|
 
 > 插件通过 Python entry points 注册，自定义插件开发与使用详见[插件开发操作步骤](msmodeling_optix_plugin_user_guide.md)。
 
