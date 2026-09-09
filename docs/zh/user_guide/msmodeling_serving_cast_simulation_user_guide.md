@@ -32,6 +32,17 @@ ServingCast 仿真基于 YAML 配置，模拟多实例、多请求的端到端 s
 | `instance_config_path` | 描述一个或多个实例组，例如角色、实例数量、TP/DP 并行方式等。 |
 | `common_config_path` | 描述全局配置，例如模型结构、请求负载、服务限制与仿真参数。 |
 
+### 3.1 MTP 支持契约
+
+`model_config.num_mtp_tokens` 表示 speculative token 数量。`model_config.mtp_acceptance_rate` 默认为 `[0.9, 0.6, 0.4, 0.2]`，因此 `num_mtp_tokens <= 4` 时无需覆盖默认值；使用更多 speculative token 或自定义接受率时，需提供至少相同数量、位于 `[0, 1]` 的有限值。Decode 查询窗口固定为 `num_mtp_tokens + 1`，请求序列长度和 KV 增量只保留 accepted tokens。
+
+| 模式 | MTP 支持 |
+| --- | --- |
+| 聚合与 P/D 分离 serving | 支持 |
+| interpolation | 暂不支持；设置 `model_config.enable_interpolate: false` |
+| multi-process prediction | 暂不支持；设置 `model_config.enable_multi_process: false` |
+| 同一步混合 Prefill/Decode | 串行拆分为 Prefill-only 与 Decode-only 同构调用；不代表真实 mixed-batch latency |
+
 ## 4 运行仿真
 
 其一般用法如下所示：
@@ -89,14 +100,14 @@ bash serving_cast/example/pd_disaggregation/run_pd_disaggregation.sh
 仿真结束后，控制台会打印类似以下的性能摘要：
 
 ```text
-         E2E_TIME(s)  TTFT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
-AVERAGE     1052.591    0.378    0.301        1500.0         3500.0                           3.327
-MIN         1050.000    0.300    0.300        1500.0         3500.0                           2.978
-MAX         1175.500    0.600    0.336        1500.0         3500.0                           3.334
-MEDIAN      1050.100    0.400    0.300        1500.0         3500.0                           3.334
-P75         1050.125    0.400    0.300        1500.0         3500.0                           3.334
-P90         1050.200    0.500    0.300        1500.0         3500.0                           3.334
-P99         1175.500    0.600    0.336        1500.0         3500.0                           3.334
+         E2E_TIME(s)  CLIENT_TTFT(s)  SERVER_TTFT(s)  ADMISSION_WAIT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
+AVERAGE     1052.591           0.378           0.301              0.077    0.301        1500.0         3500.0                           3.327
+MIN         1050.000           0.300           0.300              0.000    0.300        1500.0         3500.0                           2.978
+MAX         1175.500           0.600           0.336              0.264    0.336        1500.0         3500.0                           3.334
+MEDIAN      1050.100           0.400           0.300              0.100    0.300        1500.0         3500.0                           3.334
+P75         1050.125           0.400           0.300              0.100    0.300        1500.0         3500.0                           3.334
+P90         1050.200           0.500           0.300              0.200    0.300        1500.0         3500.0                           3.334
+P99         1175.500           0.600           0.336              0.264    0.336        1500.0         3500.0                           3.334
 ======== Overall Summary ========
 benchmark_duration(s)          1225.500
 total_requests                 100.000
@@ -110,8 +121,10 @@ output_token_throughput(tok/s) 285.598
 指标说明：
 
 - E2E_TIME：单请求的端到端延迟（发出请求 → 最后一个 token）
-- TTFT：首 token 时间（Time-to-first-token）
-- TPOT：首 token 之后每个输出 token 的时间（Time-per-output-token）
+- CLIENT_TTFT：请求离开客户端到首 token
+- SERVER_TTFT：请求被服务端接纳到首 token
+- ADMISSION_WAIT：请求离开客户端到服务端接纳；`CLIENT_TTFT = SERVER_TTFT + ADMISSION_WAIT`
+- TPOT：首 token 之后的标准请求级每输出 token 时间；仅一个输出 token 时为零
 - OUTPUT_TOKEN_THROUGHPUT：单请求的输出 token 速率
 - request_throughput：系统级请求速率
 - `input_token_throughput` / `output_token_throughput`：聚合 token 吞吐

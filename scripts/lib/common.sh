@@ -7,6 +7,7 @@
 # Environment set or consumed here:
 #   PYTHONPATH   Exported to repository root (PROJECT_DIR); overrides any prior value
 #   PYTHON       Optional absolute path to interpreter; if unset, uses uv or python3
+#   UV_NO_SYNC   Set to 1 when dependencies were already synchronized
 
 # Guard against multiple inclusion
 [[ -n "${COMMON_SH_LOADED:-}" ]] && return 0
@@ -103,7 +104,7 @@ run_pytest() {
   "${RUN_PYTEST[@]}" "$@"
 }
 
-if $USE_UV; then
+if $USE_UV && [[ "${UV_NO_SYNC:-}" != "1" ]]; then
   (
     cd "${PROJECT_DIR}"
     uv sync --frozen --group ci

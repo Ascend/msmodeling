@@ -2,10 +2,16 @@
 import unittest
 from unittest.mock import Mock, patch
 
-import serving_cast.stime as stime
-from serving_cast.config import CommunicationConfig, Config, InstanceConfig, ParallelConfig
+from serving_cast import stime
+from serving_cast.config import (
+    CommunicationConfig,
+    Config,
+    InstanceConfig,
+    ParallelConfig,
+)
 from serving_cast.instance import Instance
 from serving_cast.load_gen import FixedLengthLoadGen
+from serving_cast.request import Request, RequestState
 from serving_cast.serving import PdAggregationServing, PdDisaggregationServing
 from serving_cast.utils import main_processing
 from tests.helpers.assert_utils import assert_latency_within
@@ -20,6 +26,8 @@ class ServingTestCase(unittest.TestCase):
         self.mock_cfg.common_config.serving_config.block_size = 128
         self.mock_cfg.common_config.serving_config.max_tokens_budget = 8192
         self.mock_cfg.common_config.model_config.name = "dummy-serving-model"
+        self.mock_cfg.common_config.model_config.num_mtp_tokens = 0
+        self.mock_cfg.common_config.model_config.mtp_acceptance_rate = []
         self.mock_cfg.common_config.model_config.enable_multi_process = False
         self.mock_cfg.enable_profiling = False
         self.mock_cfg.common_config.model_config.enable_multi_process = False
@@ -40,8 +48,8 @@ class ServingTestCase(unittest.TestCase):
         self.fake_ret.kv_cache_per_token_gb = 0.001
         self.fake_ret.kv_cache_token_capacity_factor = 1
         self.latency_thresholds = build_latency_thresholds(
-            ttft_ms=self.dummy_duration.get("analytic"),
-            tpot_ms=self.dummy_duration.get("analytic"),
+            ttft_ms=self.dummy_duration["analytic"],
+            tpot_ms=self.dummy_duration["analytic"],
             tolerance_ms=0.1,
         )
 
@@ -55,6 +63,119 @@ class ServingTestCase(unittest.TestCase):
     def tearDown(self):
         self.patch_get_instance.stop()
         self.patch_model_runner.stop()
+
+    def test_admission_uses_active_request_count(self):
+        self.mock_cfg.common_config.serving_config.max_concurrency = 2
+        instance = Mock()
+        instance.get_work_load.return_value = 2048
+        instance.get_in_flight_request_count.return_value = 0
+        serving = PdAggregationServing([instance])
+        requests = [Request(id=1000), Request(id=1000)]
+
+        for request in requests:
+            request.state = RequestState.LEAVES_CLIENT
+            serving.serve(request)
+
+        self.assertEqual(len(serving.active_requests), 2)
+        self.assertTrue(serving.exceed_concurrency_limit())
+        self.assertEqual(serving.get_work_load(), 2048)
+
+        requests[0].state = RequestState.DECODE_DONE
+        self.assertEqual(len(serving.active_requests), 1)
+        self.assertFalse(serving.exceed_concurrency_limit())
+
+    def test_disaggregation_releases_active_request(self):
+        self.mock_cfg.common_config.serving_config.max_concurrency = 1
+        prefill_instance = Mock()
+        decode_instance = Mock()
+        prefill_instance.get_work_load.return_value = 2048
+        prefill_instance.get_in_flight_request_count.return_value = 0
+        decode_instance.get_work_load.return_value = 1
+        decode_instance.get_in_flight_request_count.return_value = 0
+        serving = PdDisaggregationServing([prefill_instance], [decode_instance])
+        request = Request()
+        request.state = RequestState.LEAVES_CLIENT
+
+        serving.serve(request)
+        self.assertTrue(serving.exceed_concurrency_limit())
+
+        request.state = RequestState.DECODE_DONE
+        self.assertFalse(serving.exceed_concurrency_limit())
+
+    def test_rejected_request_does_not_leak_active_slot(self):
+        self.mock_cfg.common_config.serving_config.max_concurrency = 1
+        prefill_instance = Mock()
+        decode_instance = Mock()
+        for instance in (prefill_instance, decode_instance):
+            instance.get_work_load.return_value = 0
+            instance.get_in_flight_request_count.return_value = 0
+        prefill_instance.handle.side_effect = ValueError("request rejected")
+
+        servings = (
+            PdAggregationServing([prefill_instance]),
+            PdDisaggregationServing([prefill_instance], [decode_instance]),
+        )
+        for serving in servings:
+            request = Request()
+            request.state = RequestState.LEAVES_CLIENT
+            with self.subTest(serving=type(serving).__name__), self.assertRaisesRegex(ValueError, "request rejected"):
+                serving.serve(request)
+
+            self.assertNotIn(request, serving.active_requests)
+            self.assertFalse(serving.exceed_concurrency_limit())
+
+    def test_fixed_length_load_gen_request_rate_boundaries(self):
+        load_gen = FixedLengthLoadGen(
+            model_name="test-model",
+            num_requests=1,
+            num_input_tokens=1,
+            num_output_tokens=1,
+            request_rate=0,
+        )
+        _, interval = load_gen.next_request()
+        self.assertEqual(interval, 0)
+
+        with self.assertRaisesRegex(ValueError, "request_rate must be non-negative"):
+            FixedLengthLoadGen(
+                model_name="test-model",
+                num_requests=1,
+                num_input_tokens=1,
+                num_output_tokens=1,
+                request_rate=-1,
+            )
+
+    def test_zero_rate_batches_requests_before_scheduler_runs(self):
+        self.mock_cfg.common_config.serving_config.max_concurrency = 11
+        instance_config = InstanceConfig(
+            num_instances=1,
+            num_devices_per_instance=4,
+            device_type="TEST_DEVICE",
+            pd_role="prefill_decode",
+            parallel_config=ParallelConfig(tp_size=4, dp_size=1),
+            communication_config=CommunicationConfig(),
+        )
+        inference_batches = []
+
+        def record_batch(batch, with_sampler=True):
+            if not (len(batch) == 1 and batch[0].num_input_tokens == 8192):
+                inference_batches.append(list(batch))
+            return self.fake_ret
+
+        self.mock_engine.run_inference.side_effect = record_batch
+        serving = PdAggregationServing([Instance(instance_config)])
+        load_gen = FixedLengthLoadGen(
+            model_name=self.mock_cfg.common_config.model_config.name,
+            num_requests=11,
+            num_input_tokens=2048,
+            num_output_tokens=5,
+            request_rate=0,
+        )
+
+        stime.CallableTask(main_processing, serving, load_gen)
+        stime.start_simulation()
+
+        self.assertEqual(len(inference_batches[0]), 4)
+        self.assertTrue(all(request.query_len == 2048 for request in inference_batches[0]))
 
     def test_pd_disaggregation_dummy_model(self):
         prefill_instance_config = InstanceConfig(
@@ -113,7 +234,7 @@ class ServingTestCase(unittest.TestCase):
         num_output_tokens = 50
         serving = PdDisaggregationServing(prefill_instances, decode_instances)
         load_runner = FixedLengthLoadGen(
-            model_name=None,
+            model_name=self.mock_cfg.common_config.model_config.name,
             num_requests=num_requests,
             num_input_tokens=num_input_tokens,
             num_output_tokens=num_output_tokens,
@@ -169,7 +290,7 @@ class ServingTestCase(unittest.TestCase):
         num_output_tokens = 50
         serving = PdAggregationServing(prefill_decode_instances)
         load_runner = FixedLengthLoadGen(
-            model_name=None,
+            model_name=self.mock_cfg.common_config.model_config.name,
             num_requests=num_requests,
             num_input_tokens=num_input_tokens,
             num_output_tokens=num_output_tokens,
@@ -223,7 +344,7 @@ class ServingTestCase(unittest.TestCase):
         num_output_tokens = 50
         serving = PdAggregationServing(prefill_decode_instances)
         load_runner = FixedLengthLoadGen(
-            model_name=None,
+            model_name=self.mock_cfg.common_config.model_config.name,
             num_requests=num_requests,
             num_input_tokens=num_input_tokens,
             num_output_tokens=num_output_tokens,
@@ -272,7 +393,7 @@ class ServingTestCase(unittest.TestCase):
         num_output_tokens = 50
         serving = PdAggregationServing(prefill_decode_instances)
         load_runner = FixedLengthLoadGen(
-            model_name=None,
+            model_name=self.mock_cfg.common_config.model_config.name,
             num_requests=num_requests,
             num_input_tokens=num_input_tokens,
             num_output_tokens=num_output_tokens,

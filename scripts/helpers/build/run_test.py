@@ -119,6 +119,7 @@ def _run_named_suite(options: BuildOptions) -> int:
 
     bootstrap("test")
     env = _apply_extras(apply_test_defaults(), options)
+    env["UV_NO_SYNC"] = "1"
     log_path = _TEST_REPORTS_DIR / f"{options.suite.value}.log"
     started = time.monotonic()
     exit_code = _run_teed(["bash", str(script)], env=env, log_path=log_path)
@@ -171,6 +172,7 @@ def _run_ci_gate(options: BuildOptions) -> int:
         return 1
 
     bootstrap("test")
+    env["UV_NO_SYNC"] = "1"
     env["MSMODELING_TEST_MAP_PATH"] = str(test_map_path)
     env["MSMODELING_TEST_BASE_BRANCH"] = base_branch
 

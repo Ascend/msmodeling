@@ -32,6 +32,17 @@ The service simulation relies on two YAML configuration files:
 | instance_config_path  | Describes one or more instance groups, for example, role, number of instances, and TP/DP modes. |
 | common_config_path    | Describes global configuration, for example, model architecture, request workload, serving limits, and simulation parameters. |
 
+### 3.1 MTP support contract
+
+Set `model_config.num_mtp_tokens` to the number of speculative tokens. `model_config.mtp_acceptance_rate` defaults to `[0.9, 0.6, 0.4, 0.2]`, so `num_mtp_tokens <= 4` needs no override; provide at least that many finite values in `[0, 1]` when using more speculative tokens or custom rates. Decode queries use a full `num_mtp_tokens + 1` token window, while request sequence length and KV growth retain accepted tokens only.
+
+| Mode | MTP support |
+| --- | --- |
+| Aggregated and P/D-disaggregated serving | Supported |
+| Interpolation | Not supported; set `model_config.enable_interpolate: false` |
+| Multi-process prediction | Not supported; set `model_config.enable_multi_process: false` |
+| Mixed Prefill/Decode scheduler batch | Modeled as serial homogeneous Prefill-only and Decode-only calls; not a real mixed-batch latency model |
+
 ## 4 Running Simulation
 
 Its general usage is shown below:
@@ -79,14 +90,14 @@ python -m serving_cast.main --instance_config_path=./serving_cast/example/instan
 After the simulation finishes, the console prints a performance summary similar to the following:
 
 ```text
-         E2E_TIME(s)  TTFT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
-AVERAGE     1052.591    0.378    0.301        1500.0         3500.0                           3.327
-MIN         1050.000    0.300    0.300        1500.0         3500.0                           2.978
-MAX         1175.500    0.600    0.336        1500.0         3500.0                           3.334
-MEDIAN      1050.100    0.400    0.300        1500.0         3500.0                           3.334
-P75         1050.125    0.400    0.300        1500.0         3500.0                           3.334
-P90         1050.200    0.500    0.300        1500.0         3500.0                           3.334
-P99         1175.500    0.600    0.336        1500.0         3500.0                           3.334
+         E2E_TIME(s)  CLIENT_TTFT(s)  SERVER_TTFT(s)  ADMISSION_WAIT(s)  TPOT(s)  INPUT_TOKENS  OUTPUT_TOKENS  OUTPUT_TOKEN_THROUGHPUT(tok/s)
+AVERAGE     1052.591           0.378           0.301              0.077    0.301        1500.0         3500.0                           3.327
+MIN         1050.000           0.300           0.300              0.000    0.300        1500.0         3500.0                           2.978
+MAX         1175.500           0.600           0.336              0.264    0.336        1500.0         3500.0                           3.334
+MEDIAN      1050.100           0.400           0.300              0.100    0.300        1500.0         3500.0                           3.334
+P75         1050.125           0.400           0.300              0.100    0.300        1500.0         3500.0                           3.334
+P90         1050.200           0.500           0.300              0.200    0.300        1500.0         3500.0                           3.334
+P99         1175.500           0.600           0.336              0.264    0.336        1500.0         3500.0                           3.334
 ======== Overall Summary ========
 benchmark_duration(s)          1225.500
 total_requests                 100.000
@@ -100,8 +111,10 @@ output_token_throughput(tok/s) 285.598
 Metric descriptions:
 
 - `E2E_TIME`: end-to-end latency per request (issue → last token)
-- `TTFT`: time-to-first-token
-- `TPOT`: time-per-output-token after the first token
+- `CLIENT_TTFT`: request departure to first token
+- `SERVER_TTFT`: server admission to first token
+- `ADMISSION_WAIT`: request departure to server admission; `CLIENT_TTFT = SERVER_TTFT + ADMISSION_WAIT`
+- `TPOT`: canonical request-level time per output token after the first token; one-output-token requests report zero
 - `OUTPUT_TOKEN_THROUGHPUT`: per-request output-token rate
 - `request_throughput`: system-wide request rate
 - `input_token_throughput`/`output_token_throughput`: aggregate token throughput

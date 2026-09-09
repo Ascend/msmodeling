@@ -3,11 +3,12 @@ import json
 import os
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any
 
 import numpy as np
 import pandas as pd
-import serving_cast.stime as stime
+
+from serving_cast import stime
 
 logger = stime.get_logger(__name__)
 
@@ -18,16 +19,16 @@ def main_processing(serving, load_gen):
         while serving.exceed_concurrency_limit():
             stime.elapse(0.1)
         serving.serve(request)
-        stime.elapse(interval)
+        if interval > 0:
+            stime.elapse(interval)
     while not load_gen.is_finished():
         stime.elapse(10)
 
     logger.debug("time %.1f: all of the requests are finished, stop simulation", stime.now())
     stime.stop_simulation()
-    return
 
 
-def summarize(requests_list, output_json_path: str = None):
+def summarize(requests_list, output_json_path: str | None = None):
     """
     Compute and print performance metrics for a completed request trace.
 
@@ -59,8 +60,10 @@ def summarize(requests_list, output_json_path: str = None):
     Notes
     -----
     - E2E_TIME  : end-to-end latency (decode_done - leaves_client)
-    - TTFT      : time-to-first-token (prefill_done - arrives_server)
-    - TPOT      : time-per-output-token (decode_only_time / output_tokens)
+    - CLIENT_TTFT   : client departure to prefill completion
+    - SERVER_TTFT   : server arrival to prefill completion
+    - ADMISSION_WAIT: client departure to server arrival
+    - TPOT          : time-per-output-token from Request.time_per_output_token()
     - All throughput figures are computed against the *wall-clock* span from
       the first request leaving the client to the last response finishing decode.
     """
@@ -68,15 +71,27 @@ def summarize(requests_list, output_json_path: str = None):
     # 1. Compute per-sample metrics
     def calc_metrics(req) -> pd.Series:
         e2e = req.decode_done_time - req.leaves_client_time
-        ttft = req.prefill_done_time - req.arrives_server_time
-        # TPOT = pure decode time / number of output tokens
-        tpot = (req.decode_done_time - req.prefill_done_time) / max(1, req.num_output_tokens)
+        client_ttft = req.client_time_to_first_token()
+        server_ttft = req.server_time_to_first_token()
+        admission_wait = req.admission_wait()
+        tpot = req.time_per_output_token()
         out_tps = req.num_output_tokens / max(0.001, (req.decode_done_time - req.prefill_done_time))
         return pd.Series(
-            [e2e, ttft, tpot, req.num_input_tokens, req.num_output_tokens, out_tps],
+            [
+                e2e,
+                client_ttft,
+                server_ttft,
+                admission_wait,
+                tpot,
+                req.num_input_tokens,
+                req.num_output_tokens,
+                out_tps,
+            ],
             index=[
                 "E2E_TIME(s)",
-                "TTFT(s)",
+                "CLIENT_TTFT(s)",
+                "SERVER_TTFT(s)",
+                "ADMISSION_WAIT(s)",
                 "TPOT(s)",
                 "INPUT_TOKENS",
                 "OUTPUT_TOKENS",
@@ -101,7 +116,7 @@ def summarize(requests_list, output_json_path: str = None):
     # 4. Summary table
     summary = pd.DataFrame(
         {col: [fn(df[col]) for fn in aggs.values()] for col in df.columns},
-        index=list(aggs.keys()),
+        index=pd.Index(aggs.keys()),
     )
 
     output_str = "\n" + summary.round(3).to_string()
@@ -164,7 +179,7 @@ def _convert_value(value: Any, *, skip_none: bool) -> Any:
     return value
 
 
-def dataclass2dict(obj: Any, *, skip_none: bool = False) -> Dict[str, Any]:
+def dataclass2dict(obj: Any, *, skip_none: bool = False) -> dict[str, Any]:
     """
     Recursively convert a dataclass instance to a plain dict
     (dataclasses inside lists/dicts are also converted).
@@ -179,7 +194,7 @@ def dataclass2dict(obj: Any, *, skip_none: bool = False) -> Dict[str, Any]:
     if not is_dataclass(obj):
         raise TypeError(f"dataclass2dict() expects a dataclass instance, got {type(obj)}")
 
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
     for field in fields(obj):
         value = getattr(obj, field.name)
         if skip_none and value is None:

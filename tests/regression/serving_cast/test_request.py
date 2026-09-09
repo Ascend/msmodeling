@@ -1,7 +1,7 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import unittest
 
-import serving_cast.stime as stime
+from serving_cast import stime
 from serving_cast.request import Request, RequestState
 
 
@@ -76,11 +76,65 @@ class TestRequest(unittest.TestCase):
         request.state = RequestState.RECOMPUTATION
         self.assertEqual(request.state, RequestState.RECOMPUTATION)
 
+    def test_non_mtp_decode_progression(self):
+        request = Request(num_output_tokens=4)
+        request.state = RequestState.PREFILLING
+
+        self.assertEqual(request.complete_generation_step(), 1)
+        request.state = RequestState.DECODING
+        for expected_tokens in (2, 3, 4):
+            request.prepare_decode_step(query_len=1, average_tokens=1)
+            self.assertEqual(request.num_accepted_tokens_in_current_step, 1)
+            self.assertEqual(request.complete_generation_step(), 1)
+            self.assertEqual(request.num_decoded_tokens, expected_tokens)
+
+    def test_mtp_decode_progression(self):
+        request = Request(num_output_tokens=7)
+        request.state = RequestState.PREFILLING
+
+        self.assertEqual(request.complete_generation_step(), 1)
+        request.state = RequestState.DECODING
+        for expected_accepted, expected_tokens in ((3, 4), (3, 7)):
+            request.prepare_decode_step(query_len=3, average_tokens=3)
+            self.assertEqual(request.num_accepted_tokens_in_current_step, expected_accepted)
+            self.assertEqual(request.complete_generation_step(), expected_accepted)
+            self.assertEqual(request.num_decoded_tokens, expected_tokens)
+
+    def test_fractional_average_decode_progression(self):
+        request = Request(num_output_tokens=8)
+        request.state = RequestState.PREFILLING
+
+        self.assertEqual(request.complete_generation_step(), 1)
+        request.state = RequestState.DECODING
+        accepted_tokens = []
+        decoded_tokens = []
+        for _ in range(5):
+            request.prepare_decode_step(query_len=3, average_tokens=1.5)
+            accepted_tokens.append(request.num_accepted_tokens_in_current_step)
+            request.complete_generation_step()
+            decoded_tokens.append(request.num_decoded_tokens)
+
+        self.assertEqual(accepted_tokens, [1, 2, 1, 2, 1])
+        self.assertEqual(decoded_tokens, [2, 4, 5, 7, 8])
+
+    def test_decode_progression_caps_the_final_step(self):
+        request = Request(num_output_tokens=5)
+        request.state = RequestState.DECODING
+        request.num_decoded_tokens = 4
+        request.num_accepted_tokens_in_current_step = 3
+
+        self.assertEqual(request.complete_generation_step(), 1)
+        self.assertEqual(request.num_decoded_tokens, 5)
+
     def test_time_to_first_token(self):
         """Test time_to_first_token calculation."""
         request = Request(num_input_tokens=100, num_output_tokens=10)
         request.leaves_client_time = 0.0
+        request.arrives_server_time = 0.5
         request.prefill_done_time = 2.0
+        self.assertEqual(request.client_time_to_first_token(), 2.0)
+        self.assertEqual(request.server_time_to_first_token(), 1.5)
+        self.assertEqual(request.admission_wait(), 0.5)
         self.assertEqual(request.time_to_first_token(), 2.0)
 
     def test_time_per_output_token(self):

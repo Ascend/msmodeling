@@ -20,6 +20,8 @@ class TestSchedulerAdmissionAndBreak(unittest.TestCase):
         self.mock_cfg.common_config.serving_config.max_tokens_budget = 8192
         self.mock_cfg.common_config.model_config.enable_preprocessing_modeling = False
         self.mock_cfg.common_config.model_config.enable_kv_transfer_modeling = True
+        self.mock_cfg.common_config.model_config.num_mtp_tokens = 0
+        self.mock_cfg.common_config.model_config.mtp_acceptance_rate = []
         self.mock_cfg.enable_profiling = False
         self.patch_get_instance = patch.object(Config, "get_instance")
         mock_get_instance = self.patch_get_instance.start()

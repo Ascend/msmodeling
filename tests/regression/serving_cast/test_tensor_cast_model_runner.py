@@ -5,9 +5,10 @@ import threading
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
+from serving_cast import stime
 from serving_cast.config import Config, ParallelConfig
 from serving_cast.model_runner import (
     AsyncTask,
@@ -473,6 +474,58 @@ class TestModelRunnerStaticMethods(unittest.TestCase):
 
         request_infos = ModelRunner.request2info([request1, request2])
         self.assertEqual(len(request_infos), 2)
+
+    @staticmethod
+    def _process_runner(num_mtp_tokens):
+        runner = object.__new__(ModelRunner)
+        runner.common_config = SimpleNamespace(
+            model_config=SimpleNamespace(name="test-model", num_mtp_tokens=num_mtp_tokens)
+        )
+        runner.enable_multi_process = False
+        runner._get_estimated_time = Mock(side_effect=[1.0, 2.0])
+        return runner
+
+    def test_process_batch_splits_mixed_mtp_batch_serially(self):
+        """Mixed MTP batches use serial homogeneous latency estimates."""
+        stime.init_simulation()
+        runner = self._process_runner(num_mtp_tokens=2)
+        prefill = Request(num_input_tokens=10, num_output_tokens=5)
+        prefill.state = RequestState.PREFILLING
+        prefill.query_len = 10
+        prefill.seq_len = 10
+        decode = Request(num_input_tokens=10, num_output_tokens=5)
+        decode.state = RequestState.DECODING
+        decode.query_len = 3
+        decode.seq_len = 13
+
+        with patch("serving_cast.model_runner.stime.Duration") as duration:
+            runner.process_batch([decode, prefill])
+
+        self.assertEqual(runner._get_estimated_time.call_count, 2)
+        prefill_batch = runner._get_estimated_time.call_args_list[0].args[0]
+        decode_batch = runner._get_estimated_time.call_args_list[1].args[0]
+        self.assertEqual([(request.is_decode, request.query_len) for request in prefill_batch], [(False, 10)])
+        self.assertEqual([(request.is_decode, request.query_len) for request in decode_batch], [(True, 3)])
+        duration.assert_called_once_with(3.0)
+
+    def test_process_batch_does_not_split_homogeneous_or_non_mtp_batches(self):
+        prefill = Request(num_input_tokens=10, num_output_tokens=5)
+        prefill.state = RequestState.PREFILLING
+        prefill.query_len = 10
+        prefill.seq_len = 10
+        decode = Request(num_input_tokens=10, num_output_tokens=5)
+        decode.state = RequestState.DECODING
+        decode.query_len = 3
+        decode.seq_len = 13
+
+        for num_mtp_tokens, batch in ((2, [prefill]), (2, [decode]), (0, [prefill, decode])):
+            with self.subTest(num_mtp_tokens=num_mtp_tokens, states=[request.state.name for request in batch]):
+                stime.init_simulation()
+                runner = self._process_runner(num_mtp_tokens)
+
+                runner.process_batch(batch)
+
+                runner._get_estimated_time.assert_called_once()
 
     def test_get_interpolation_model_basic(self):
         """Test get_interpolation_model static method."""

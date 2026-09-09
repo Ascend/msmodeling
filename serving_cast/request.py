@@ -1,11 +1,11 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import itertools
-from enum import auto, Enum
-from typing import Optional
+import math
+from enum import Enum, auto
 
 from blinker import signal
 
-import serving_cast.stime as stime
+from serving_cast import stime
 
 
 class RequestState(Enum):
@@ -39,7 +39,7 @@ class Request:
         # The following fields are requirement to the serving system
         # TOBEDONE: support multiple sequences such as beam search and best-of-N
         # TOBEDONE: add sampling methods
-        self.model_name: Optional[str] = kwargs.get("model_name")
+        self.model_name: str | None = kwargs.get("model_name")
         self.num_input_tokens: int = kwargs.get("num_input_tokens", 0)
         self.num_output_tokens: int = kwargs.get("num_output_tokens", 0)  # number of expected output tokens
 
@@ -51,6 +51,9 @@ class Request:
         self.prefill_done_signal = signal(f"prefill_done_{self.id}")
         self.decode_done_signal = signal(f"decode_done_{self.id}")
         self.num_decoded_tokens: int = 0
+        self.num_accepted_tokens_in_current_step = 1
+        self._expected_num_decoded_tokens = 0.0
+        self._next_expected_num_decoded_tokens = 0.0
         # max num of tokens that need to computed in current loop of schedule
         self.num_current_max_new_tokens = self.num_input_tokens
         self.seq_len = 0
@@ -112,8 +115,44 @@ class Request:
             self.kvs_transferring_time = stime.now()
             self.kvs_transferring_signal.send(self)
 
-    def time_to_first_token(self):
+    def prepare_decode_step(self, query_len: int, average_tokens: float):
+        next_expected = min(self.num_output_tokens, self._expected_num_decoded_tokens + average_tokens)
+        self.num_accepted_tokens_in_current_step = max(
+            1,
+            math.floor(next_expected + 1e-9) - self.num_decoded_tokens,
+        )
+        self._next_expected_num_decoded_tokens = next_expected
+        self.num_current_max_new_tokens = query_len
+
+    def complete_generation_step(self) -> int:
+        if self.state == RequestState.DECODING:
+            remaining_tokens = max(0, self.num_output_tokens - self.num_decoded_tokens)
+            generated_tokens = min(self.num_accepted_tokens_in_current_step, remaining_tokens)
+            self._expected_num_decoded_tokens = max(
+                self._next_expected_num_decoded_tokens,
+                self.num_decoded_tokens + generated_tokens,
+            )
+        elif self.state == RequestState.PREFILLING:
+            generated_tokens = 1
+            self._expected_num_decoded_tokens = self.num_decoded_tokens + generated_tokens
+        elif self.state == RequestState.RECOMPUTATION:
+            generated_tokens = 0
+        else:
+            raise ValueError(f"Cannot complete generation step in state {self.state}")
+        self.num_decoded_tokens += generated_tokens
+        return generated_tokens
+
+    def client_time_to_first_token(self):
         return self.prefill_done_time - self.leaves_client_time
+
+    def server_time_to_first_token(self):
+        return self.prefill_done_time - self.arrives_server_time
+
+    def admission_wait(self):
+        return self.arrives_server_time - self.leaves_client_time
+
+    def time_to_first_token(self):
+        return self.client_time_to_first_token()
 
     def time_per_output_token(self):
         if self.num_output_tokens == 1:

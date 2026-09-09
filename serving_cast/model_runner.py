@@ -326,31 +326,42 @@ class ModelRunner:
         return dt
 
     def process_batch(self, batch: List[Request]):
-        batch = self.request2info(batch)
-        if self.enable_multi_process:
-            future_batch_list = []
-            current_batch = batch
-            for _ in range(self.predict_steps):
-                future_batch = self.predict_next_batch(current_batch)
-                if not future_batch:
-                    break
-                future_batch_list.append(future_batch)
-                current_batch = future_batch
-            result = self.async_task_manager.find_result(batch)
-            if result is not None:
-                duration = result.execution_time_s.get("analytic")
+        batches = [batch]
+        if self.common_config.model_config.num_mtp_tokens > 0:
+            prefill_batch = [request for request in batch if request.state != RequestState.DECODING]
+            decode_batch = [request for request in batch if request.state == RequestState.DECODING]
+            if prefill_batch and decode_batch:
+                batches = [prefill_batch, decode_batch]
+
+        duration = 0
+        batch_size = 0
+        for request_batch in batches:
+            request_info_batch = self.request2info(request_batch)
+            batch_size += len(request_info_batch)
+            if self.enable_multi_process:
+                future_batch_list = []
+                current_batch = request_info_batch
+                for _ in range(self.predict_steps):
+                    future_batch = self.predict_next_batch(current_batch)
+                    if not future_batch:
+                        break
+                    future_batch_list.append(future_batch)
+                    current_batch = future_batch
+                result = self.async_task_manager.find_result(request_info_batch)
+                if result is not None:
+                    duration += result.execution_time_s.get("analytic")
+                else:
+                    duration += self._get_estimated_time(request_info_batch)
+                for future_batch in future_batch_list:
+                    self.async_task_manager.add_task(future_batch)
             else:
-                duration = self._get_estimated_time(batch)
-            for future_batch in future_batch_list:
-                self.async_task_manager.add_task(future_batch)
-        else:
-            duration = self._get_estimated_time(batch)
+                duration += self._get_estimated_time(request_info_batch)
 
         with stime.Duration(duration):
             logger.debug(
                 "%s process batch, batch length: %d, consume %s seconds",
                 self.common_config.model_config.name,
-                len(batch),
+                batch_size,
                 duration,
             )
 

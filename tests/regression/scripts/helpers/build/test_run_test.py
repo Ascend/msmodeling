@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+import os
+import subprocess
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
+from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.build import run_test as run_test_mod
 from scripts.helpers.build.argv import BuildSuite
 from scripts.helpers.build.main import main
@@ -32,6 +33,7 @@ def test_run_test_ci_gate_downloads_when_map_unset(
 ) -> None:
     """Normal: unset map → download then CI gate."""
     monkeypatch.delenv("MSMODELING_TEST_MAP_PATH", raising=False)
+    monkeypatch.delenv("UV_NO_SYNC", raising=False)
     dest = repo_root / ".msmodeling_cache" / "test_map" / "master" / "test_map.json"
 
     def fake_resolve(**_kwargs: Any) -> Path:
@@ -45,6 +47,7 @@ def test_run_test_ci_gate_downloads_when_map_unset(
     call = subprocess_capture.merged_output_calls[0]
     assert call["cmd"] == ["bash", str(repo_root / "scripts" / "run_ci_gate.sh")]
     assert call["env"]["MSMODELING_TEST_MAP_PATH"] == str(dest)
+    assert call["env"]["UV_NO_SYNC"] == "1"
     summary = json.loads(
         (repo_root / "artifacts" / "test-reports" / "gate-summary.json").read_text(encoding="utf-8"),
     )
@@ -116,13 +119,16 @@ def test_run_test_full_suite_applies_offline_extras(
 )
 def test_run_test_named_suite_delegates_to_script(
     repo_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
     subprocess_capture: SubprocessRunCapture,
     suite: BuildSuite,
     script_name: str,
 ) -> None:
+    monkeypatch.delenv("UV_NO_SYNC", raising=False)
     assert run_test(build_options(is_test=True, suite=suite)) == 0
     call = subprocess_capture.merged_output_calls[0]
     assert call["cmd"] == ["bash", str(repo_root / "scripts" / script_name)]
+    assert call["env"]["UV_NO_SYNC"] == "1"
     summary = json.loads(
         (repo_root / "artifacts" / "test-reports" / "gate-summary.json").read_text(encoding="utf-8"),
     )
@@ -344,6 +350,33 @@ def test_run_test_syncs_ci_group_not_build(
     sync_cmd = capture.sync_calls[0]
     assert sync_cmd[sync_cmd.index("--group") + 1] == "ci"
     assert "build" not in sync_cmd[sync_cmd.index("--group") :]
+
+
+def test_common_sh_skips_sync_when_parent_already_bootstrapped(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uv_log = tmp_path / "uv.log"
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "${UV_LOG}"\n', encoding="utf-8")
+    fake_uv.chmod(0o755)
+
+    env = dict(os.environ)
+    env.pop("PYTHON", None)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["SCRIPT_DIR"] = str(REPO_ROOT / "scripts")
+    env["UV_LOG"] = str(uv_log)
+    env["UV_NO_SYNC"] = "1"
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"', "common-sh-test", str(REPO_ROOT / "scripts" / "lib" / "common.sh")],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not uv_log.exists()
 
 
 def test_run_test_applies_uv_and_hf_defaults(

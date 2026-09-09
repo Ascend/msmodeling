@@ -1,20 +1,18 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Dict
 
+from serving_cast import stime
 from serving_cast.request import Request, RequestState
-
-import serving_cast.stime as stime
 
 logger = stime.get_logger(__name__)
 
 
 class LoadGen(ABC):
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str | None):
         self.model_name = model_name
 
     @abstractmethod
-    def next_request(self) -> Request:
+    def next_request(self) -> tuple[Request, float]:
         """
         Each request is a stime object (i.e. has a timestamp attached to it) meaning its
         expected arriving time.
@@ -22,10 +20,10 @@ class LoadGen(ABC):
         thread would be aligned to the timestamp of the returned request if the current
         timestamp of the thread is no later than the arriving time of the request.
         """
-        return None
+        raise NotImplementedError
 
     @abstractmethod
-    def has_request(self):
+    def has_request(self) -> bool:
         """
         Check if the load runner has any request to generate. This includes all the requests
         that have not arrived yet but would come in the future.
@@ -40,33 +38,35 @@ class FixedLengthLoadGen(LoadGen):
 
     def __init__(
         self,
-        model_name: str,
+        model_name: str | None,
         num_requests: int,
         num_input_tokens: int,
         num_output_tokens: int,
         request_rate: float,
     ):
         super().__init__(model_name)
+        if request_rate < 0:
+            raise ValueError("request_rate must be non-negative")
         self.request_rate = request_rate
-        self.requests: Dict[int, Request] = {}
+        self.requests: dict[int, Request] = {}
         self.num_requests = num_requests
         for _ in range(num_requests):
             request = Request(num_input_tokens=num_input_tokens, num_output_tokens=num_output_tokens)
             self.requests[request.id] = request
         self.finished_requests = {}
 
-    def next_request(self) -> Request:
+    def next_request(self) -> tuple[Request, float]:
         if not self.requests:
             raise ValueError("self.requests is None")
         first_key = next(iter(self.requests))
         request = self.requests.pop(first_key)
         request.decode_done_signal.connect(self._decode_done_callback)
         request.state = RequestState.LEAVES_CLIENT
-        interval = 1 / self.request_rate
+        interval = 0 if self.request_rate == 0 else 1 / self.request_rate
         return request, interval
 
-    def has_request(self) -> Request:
-        return self.requests
+    def has_request(self) -> bool:
+        return bool(self.requests)
 
     def is_finished(self):
         return len(self.finished_requests) == self.num_requests

@@ -4,10 +4,14 @@ import os
 import tempfile
 import unittest
 from dataclasses import dataclass
-from typing import Optional
 
 from serving_cast.request import Request, RequestState
-from serving_cast.utils import dataclass2dict, gen_profiling_config_set_env_variable, get_basic_timestamp, summarize
+from serving_cast.utils import (
+    dataclass2dict,
+    gen_profiling_config_set_env_variable,
+    get_basic_timestamp,
+    summarize,
+)
 
 
 @dataclass
@@ -19,7 +23,7 @@ class NestedDataclass:
 class SampleDataclass:
     name: str
     count: int
-    nested: Optional[NestedDataclass] = None
+    nested: NestedDataclass | None = None
 
 
 @dataclass
@@ -201,7 +205,9 @@ class TestSummarize(unittest.TestCase):
             per_metric = payload["per_metric_summary"]
             for column in (
                 "E2E_TIME(s)",
-                "TTFT(s)",
+                "CLIENT_TTFT(s)",
+                "SERVER_TTFT(s)",
+                "ADMISSION_WAIT(s)",
                 "TPOT(s)",
                 "INPUT_TOKENS",
                 "OUTPUT_TOKENS",
@@ -211,6 +217,15 @@ class TestSummarize(unittest.TestCase):
                 for row in ("AVERAGE", "MIN", "MAX", "MEDIAN", "P75", "P90", "P99"):
                     self.assertIn(row, per_metric[column])
                     self.assertIsInstance(per_metric[column][row], float)
+
+            self.assertNotIn("TTFT(s)", per_metric)
+            self.assertAlmostEqual(per_metric["CLIENT_TTFT(s)"]["AVERAGE"], 1.25)
+            self.assertAlmostEqual(per_metric["SERVER_TTFT(s)"]["AVERAGE"], 1.15)
+            self.assertAlmostEqual(per_metric["ADMISSION_WAIT(s)"]["AVERAGE"], 0.1)
+            self.assertAlmostEqual(
+                per_metric["TPOT(s)"]["AVERAGE"],
+                (request1.time_per_output_token() + request2.time_per_output_token()) / 2,
+            )
 
             overall = payload["overall_summary"]
             for key in (

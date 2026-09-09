@@ -122,6 +122,38 @@ class TestServingConfig(unittest.TestCase):
 
 
 class TestModelConfig(unittest.TestCase):
+    def test_model_config_accepts_non_mtp_and_mtp_values(self):
+        non_mtp = ModelConfig(name="non-mtp", num_mtp_tokens=0, mtp_acceptance_rate=[])
+        mtp = ModelConfig(
+            name="mtp",
+            num_mtp_tokens=2,
+            mtp_acceptance_rate=[0.8, 0.5],
+            enable_interpolate=False,
+        )
+
+        self.assertEqual(non_mtp.num_mtp_tokens, 0)
+        self.assertEqual(mtp.num_mtp_tokens, 2)
+
+    def test_model_config_rejects_invalid_mtp_values(self):
+        cases = [
+            ({"num_mtp_tokens": -1}, "num_mtp_tokens must be a non-negative integer"),
+            (
+                {"num_mtp_tokens": 2, "mtp_acceptance_rate": [0.8]},
+                "num_mtp_tokens cannot exceed mtp_acceptance_rate length",
+            ),
+            ({"num_mtp_tokens": 1, "mtp_acceptance_rate": [float("nan")]}, "finite numbers in \\[0, 1\\]"),
+            ({"num_mtp_tokens": 1, "mtp_acceptance_rate": [float("inf")]}, "finite numbers in \\[0, 1\\]"),
+            ({"num_mtp_tokens": 1, "mtp_acceptance_rate": [-0.1]}, "finite numbers in \\[0, 1\\]"),
+            ({"num_mtp_tokens": 1, "mtp_acceptance_rate": [1.1]}, "finite numbers in \\[0, 1\\]"),
+            ({"num_mtp_tokens": 1.5}, "num_mtp_tokens must be a non-negative integer"),
+            ({"num_mtp_tokens": True}, "num_mtp_tokens must be a non-negative integer"),
+            ({"num_mtp_tokens": 1, "mtp_acceptance_rate": None}, "mtp_acceptance_rate must be a list"),
+        ]
+
+        for kwargs, message in cases:
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, message):
+                ModelConfig(name="invalid", **kwargs)
+
     def test_model_config_creation(self):
         """Test ModelConfig creation."""
         config = ModelConfig(name="test-model")
@@ -144,7 +176,7 @@ class TestModelConfig(unittest.TestCase):
             allow_graph_break=True,
             quantize_linear_action="FP8",
             quantize_lmhead=True,
-            enable_multi_process=True,
+            enable_multi_process=False,
             num_processes=8,
             predict_steps=10,
             enable_interpolate=False,
@@ -156,11 +188,53 @@ class TestModelConfig(unittest.TestCase):
         self.assertTrue(config.allow_graph_break)
         self.assertEqual(config.quantize_linear_action, "FP8")
         self.assertTrue(config.quantize_lmhead)
-        self.assertTrue(config.enable_multi_process)
+        self.assertFalse(config.enable_multi_process)
         self.assertEqual(config.num_processes, 8)
         self.assertEqual(config.predict_steps, 10)
         self.assertFalse(config.enable_interpolate)
         self.assertEqual(config.interpolation_seed, 42)
+
+    def test_model_config_rejects_mtp_with_interpolation(self):
+        with self.assertRaisesRegex(ValueError, "num_mtp_tokens > 0.*interpolation.*enable_interpolate=False"):
+            ModelConfig(
+                name="mtp-interpolation",
+                num_mtp_tokens=1,
+                mtp_acceptance_rate=[0.9],
+                enable_interpolate=True,
+                enable_multi_process=False,
+            )
+
+    def test_model_config_rejects_mtp_with_multi_process(self):
+        with self.assertRaisesRegex(ValueError, "num_mtp_tokens > 0.*multi-process.*enable_multi_process=False"):
+            ModelConfig(
+                name="mtp-multi-process",
+                num_mtp_tokens=1,
+                mtp_acceptance_rate=[0.9],
+                enable_interpolate=False,
+                enable_multi_process=True,
+            )
+
+    def test_model_config_allows_mtp_without_advanced_modes(self):
+        config = ModelConfig(
+            name="mtp",
+            num_mtp_tokens=1,
+            mtp_acceptance_rate=[0.9],
+            enable_interpolate=False,
+            enable_multi_process=False,
+        )
+
+        self.assertEqual(config.num_mtp_tokens, 1)
+
+    def test_model_config_allows_advanced_modes_without_mtp(self):
+        interpolation = ModelConfig(name="interpolation", enable_interpolate=True)
+        multi_process = ModelConfig(
+            name="multi-process",
+            enable_interpolate=False,
+            enable_multi_process=True,
+        )
+
+        self.assertTrue(interpolation.enable_interpolate)
+        self.assertTrue(multi_process.enable_multi_process)
 
 
 class TestCommonConfig(unittest.TestCase):
@@ -196,6 +270,26 @@ class TestConfig(unittest.TestCase):
         """Test that get_instance raises error when not initialized."""
         with self.assertRaises(ValueError):
             Config.get_instance()
+
+    def test_parse_config_rejects_invalid_yaml_documents(self):
+        invalid_documents = (
+            ("empty", b"", "top-level YAML document must be a mapping"),
+            ("list", b"[]\n", "top-level YAML document must be a mapping"),
+            ("invalid-utf8", b"\xff", "Failed to load .* config"),
+        )
+        parsers = (
+            ("common", Config._parse_common_config),
+            ("instance", Config._parse_instance_config),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for config_name, parser in parsers:
+                for case_name, contents, message in invalid_documents:
+                    path = os.path.join(tmpdir, f"{config_name}-{case_name}.yaml")
+                    with open(path, "wb") as f:
+                        f.write(contents)
+                    with self.subTest(config=config_name, case=case_name), self.assertRaisesRegex(ValueError, message):
+                        parser(path)
 
     def test_config_singleton(self):
         """Test that Config is a singleton."""

@@ -2,14 +2,11 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
 from abc import ABC, abstractmethod
-from typing import List
 
+from serving_cast import stime
 from serving_cast.config import Config
 from serving_cast.instance import Instance, InstanceLoadBalancer
 from serving_cast.request import Request, RequestState
-
-import serving_cast.stime as stime
-
 
 logger = stime.get_logger(__name__)
 
@@ -26,9 +23,10 @@ class Serving(ABC):
 
     def __init__(self):
         self.max_concurrency = Config.get_instance().common_config.serving_config.max_concurrency
+        self.active_requests = set()
 
     @abstractmethod
-    def serve(self, args, **kwargs) -> None:
+    def serve(self, request: Request) -> None:
         """
         Serves a request.
         """
@@ -60,7 +58,12 @@ class Serving(ABC):
         saturate the admission gate and serialize high-concurrency prefill
         (see issue #337).
         """
-        return self.get_in_flight_request_count() >= self.max_concurrency
+        # Client lifecycle and engine queues can differ briefly during P/D handoff.
+        in_flight_requests = max(len(self.active_requests), self.get_in_flight_request_count())
+        return in_flight_requests >= self.max_concurrency
+
+    def _request_done_callback(self, request: Request):
+        self.active_requests.discard(request)
 
     def _before_serve(self, request: Request):
         """
@@ -68,6 +71,8 @@ class Serving(ABC):
         """
         if request.state != RequestState.LEAVES_CLIENT:
             raise ValueError("request.state != RequestState.LEAVES_CLIENT")
+        self.active_requests.add(request)
+        request.decode_done_signal.connect(self._request_done_callback)
         request.state = RequestState.ARRIVES_SERVER
         logger.debug("Start serving %s", request)
 
@@ -85,7 +90,7 @@ class PdDisaggregationServing(Serving):
 
     """
 
-    def __init__(self, prefill_instances: List[Instance], decode_instances: List[Instance]):
+    def __init__(self, prefill_instances: list[Instance], decode_instances: list[Instance]):
         # TOBEDONEL use InstanceGroup to group these prefill and decode instances, pass InstanceGroup to Serving
         super().__init__()
 
@@ -98,12 +103,15 @@ class PdDisaggregationServing(Serving):
     def serve(self, request: Request):
         """Handle the request from the client side"""
         self._before_serve(request)
-        request.need_kv_transfer = True
+        try:
+            request.need_kv_transfer = True
+            request.kvs_transferring_signal.connect(self._continue_serve_callback)
 
-        request.kvs_transferring_signal.connect(self._continue_serve_callback)
-
-        prefill_instance = self.prefill_balancer.select(request)
-        prefill_instance.handle(request)
+            prefill_instance = self.prefill_balancer.select(request)
+            prefill_instance.handle(request)
+        except Exception:
+            self._request_done_callback(request)
+            raise
 
     def get_work_load(self):
         work_load = sum(instance.get_work_load() for instance in self.prefill_instances) + sum(
@@ -139,7 +147,7 @@ class PdAggregationServing(Serving):
 
     """
 
-    def __init__(self, prefill_decode_instances: List[Instance]):
+    def __init__(self, prefill_decode_instances: list[Instance]):
         # TOBEDONEL use InstanceGroup to group these prefill and decode instances, pass InstanceGroup to Serving
         super().__init__()
         self.prefill_decode_instances = prefill_decode_instances
@@ -148,9 +156,12 @@ class PdAggregationServing(Serving):
     def serve(self, request: Request):
         """Handle the request from the client side"""
         self._before_serve(request)
-
-        prefill_decode_instance = self.prefill_decode_balancer.select(request)
-        prefill_decode_instance.handle(request)
+        try:
+            prefill_decode_instance = self.prefill_decode_balancer.select(request)
+            prefill_decode_instance.handle(request)
+        except Exception:
+            self._request_done_callback(request)
+            raise
 
     def get_work_load(self):
         """Get the work load of the instance group"""
