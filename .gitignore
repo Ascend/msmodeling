@@ -60,3 +60,7 @@ web_ui/frontend/src/config/forms/*.json
 people.local.yaml
 govern-state.json
 msmodeling-govern-logs/
+
+# Model adaptation working artifacts (doctor/verify reports stay local; only
+# code, tests, docs, and optional ST guardrail cases are committed)
+reports/

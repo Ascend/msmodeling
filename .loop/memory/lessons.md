@@ -100,7 +100,7 @@ TensorCast 引用上游模型代码时，必须通过适配层而非直接改上
 适配新模型时不得凭模型名臆造字段或 patch。
 
 - 触发场景：接入新 HuggingFace 模型到 TensorCast
-- 正确做法：遵循 [model-adaptation skill](../../.agents/skills/model-adaptation/SKILL.md) 的标准 Workflow（确定性工具 + 人工审视），具体包括：不凭模型名臆造 `ModelProfile` 字段；不基于臆测写 patch method，必须基于 failure log 和已安装模型源码；`evidence.yaml` 必须导出 `evidence_draft` 后审视，不手写；私有路径、本地虚拟环境路径、临时 walkthrough 不进 commit
+- 正确做法：遵循 [model-adaptation skill](../../.agents/skills/model-adaptation/SKILL.md) 的标准 Workflow（确定性工具 + 人工审视），具体包括：不凭模型名臆造 `ModelProfile` 字段；不基于臆测写 patch method，必须基于 failure log 和已安装模型源码；适配只做到跑通级（仿真跑通 + attention/MoE gating 调用次数与公开结构对账），不接受实测数据输入，精度对齐由下游精度工作流负责；私有路径、本地虚拟环境路径、临时 walkthrough 不进 commit
 - 引用：`.agents/skills/model-adaptation/SKILL.md` Core Rule
 
 ---

@@ -3,7 +3,6 @@ import json
 
 from cli.logo import print_logo
 from cli.spec_cli import (
-    METAVAR_DIR,
     METAVAR_FILE,
     METAVAR_N,
     METAVAR_NAME,
@@ -31,8 +30,6 @@ from ..utils import (
     check_positive_integer,
     require_model_id,
 )
-
-SUPPORTED_PERFORMANCE_MODELS = ["analytic", "profiling"]
 
 
 def _add_output_file_option(parser: argparse.ArgumentParser, help_text: str) -> None:
@@ -100,7 +97,12 @@ def _write_report(report: dict, output: str | None) -> None:
         print(content)
 
 
-def _add_doctor_runtime_options(parser: argparse.ArgumentParser) -> None:
+def _add_case_runtime_options(parser: argparse.ArgumentParser) -> None:
+    """Runtime options shared by doctor and verify.
+
+    They define the simulation case under inspection: workload shape,
+    compilation, quantization, vision input, and parallelism.
+    """
     runtime_group = parser.add_argument_group("Runtime Options")
     runtime_group.add_argument(
         "--num-queries",
@@ -154,7 +156,7 @@ def _add_doctor_runtime_options(parser: argparse.ArgumentParser) -> None:
         "--no-repetition",
         dest="disable_repetition",
         action="store_true",
-        help="Disable automatic repeated-layer reuse during dry-run.",
+        help="Disable automatic repeated-layer reuse during the dry-run.",
         aliases=("--disable-repetition",),
     )
     parse_linear, linear_meta = make_enum_type(QuantizeLinearAction, "--quantize-linear-action")
@@ -255,51 +257,35 @@ def _add_parallelism_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _make_doctor_user_input(args: argparse.Namespace) -> UserInputConfig:
+def _make_case_user_input(args: argparse.Namespace) -> UserInputConfig:
     args.word_embedding_tp = None
-    args.performance_model = getattr(args, "performance_model", None) or ["analytic"]
+    args.performance_model = ["analytic"]
     return UserInputConfig.from_args(args)
 
 
 def _run_doctor(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     adaptation_context = None
-    raw_insight = None
-    hints = None
     if args.from_command_file:
         from tensor_cast.adapter.context import (
             apply_context_to_namespace,
             load_context_from_command_file,
         )
 
-        adaptation_context = load_context_from_command_file(
-            args.from_command_file,
-            raw_insight_file=args.raw_insight_file,
-            hints_file=args.hints_file,
-        )
+        adaptation_context = load_context_from_command_file(args.from_command_file)
         apply_context_to_namespace(args, adaptation_context)
     _normalize_adapter_common_args(args, parser)
     _configure_logging(args)
 
     from tensor_cast.adapter.doctor import run_model_doctor
 
-    if args.raw_insight_file:
-        from tensor_cast.adapter.insight import load_raw_insight
-
-        raw_insight = load_raw_insight(args.raw_insight_file)
-    if args.hints_file:
-        from tensor_cast.adapter.hints import load_hints
-
-        hints = load_hints(args.hints_file)
     patch_failure_text = None
     if args.patch_failure_file:
         with open(args.patch_failure_file, "r", encoding="utf-8") as handle:
             patch_failure_text = handle.read()
 
     report = run_model_doctor(
-        _make_doctor_user_input(args),
+        _make_case_user_input(args),
         adaptation_context=adaptation_context,
-        raw_insight=raw_insight,
-        hints=hints,
         ignore_existing_profiles=args.ignore_existing_profile,
         patch_failure_text=patch_failure_text,
     ).to_dict()
@@ -319,128 +305,42 @@ def _run_doctor(args: argparse.Namespace, parser: argparse.ArgumentParser) -> No
     _write_report(report, args.output)
 
 
-def _add_verify_case_options(parser: argparse.ArgumentParser) -> None:
-    case_group = parser.add_argument_group("Evidence Case Defaults")
-    case_group.add_argument(
-        "--num-queries",
-        type=check_positive_integer,
-        default=1,
-        metavar=METAVAR_N,
-        help="Number of parallel inference queries.",
-    )
-    case_group.add_argument(
-        "--query-length",
-        type=check_positive_integer,
-        default=1,
-        metavar=METAVAR_N,
-        help="New input length in tokens.",
-    )
-    case_group.add_argument(
-        "--context-length",
-        type=check_non_negative_integer,
-        default=0,
-        metavar=METAVAR_N,
-        help="Existing context length in tokens.",
-    )
-    case_group.add_argument("--decode", action="store_true", help="Enable decode mode.")
-    case_group.add_argument(
-        "--num-hidden-layers-override",
-        type=int,
-        default=0,
-        metavar=METAVAR_N,
-        help="Override model layers for a fast adapter dry-run.",
-    )
-    add_option(
-        case_group,
-        "--no-repetition",
-        dest="disable_repetition",
-        action="store_true",
-        help="Disable automatic repeated-layer reuse.",
-        aliases=("--disable-repetition",),
-    )
-
-    perf_group = parser.add_argument_group("Performance Model Options")
-    perf_group.add_argument(
-        "--performance-model",
-        action="append",
-        default=None,
-        choices=SUPPORTED_PERFORMANCE_MODELS,
-        metavar="{analytic,profiling}",
-        help="Performance model type(s). Defaults to analytic unless evidence case overrides it.",
-    )
-    add_option(
-        perf_group,
-        "--profiling-database-path",
-        dest="profiling_database",
-        type=str,
-        default=None,
-        metavar=METAVAR_DIR,
-        help="Profiling database directory.",
-        aliases=("--profiling-database",),
-    )
-    _add_parallelism_options(parser)
-
-    parser.add_argument(
-        "--remote-source",
-        choices=["huggingface", "modelscope"],
-        default="huggingface",
-        metavar="{huggingface,modelscope}",
-        help="The remote source for the model.",
-    )
-
-
-def _make_verify_user_input(args: argparse.Namespace) -> UserInputConfig:
-    args.word_embedding_tp = None
-    if args.performance_model is None:
-        args.performance_model = ["analytic"]
-    return UserInputConfig.from_args(args)
-
-
 def _run_verify(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    if not (args.model_id or args.model_id_positional):
-        from tensor_cast.adapter.evidence import load_evidence
-
-        model_id = load_evidence(args.evidence_file).model.get("model_id")
-        if model_id:
-            args.model_id = str(model_id)
     _normalize_adapter_common_args(args, parser)
     _configure_logging(args)
 
-    from tensor_cast.adapter.doctor import run_evidence_verification
+    from tensor_cast.adapter.doctor import run_simulation_verification
 
-    report = run_evidence_verification(args.evidence_file, _make_verify_user_input(args)).to_dict()
+    report = run_simulation_verification(_make_case_user_input(args)).to_dict()
     if args.st_case_output:
         from tensor_cast.adapter.st_case import (
-            build_st_cases_from_report,
+            build_st_cases_from_verification,
             write_st_cases,
         )
 
-        st_cases = build_st_cases_from_report(report)
-        report["st_case_outputs"] = [str(path) for path in write_st_cases(st_cases, args.st_case_output)]
+        st_cases = build_st_cases_from_verification(report)
+        if st_cases:
+            report["st_case_outputs"] = [str(path) for path in write_st_cases(st_cases, args.st_case_output)]
+        else:
+            report["st_case_outputs"] = []
     _write_report(report, args.output)
     if not report["passed"]:
         raise SystemExit(1)
 
 
-def _run_export_evidence(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    if not args.doctor_report:
-        parser.error("--doctor-report-file is required")
-    from tensor_cast.adapter.evidence_export import export_evidence_from_doctor_report
-
-    content = export_evidence_from_doctor_report(args.doctor_report, args.output)
-    if not args.output:
-        print(content, end="")
-
-
 def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
     parser = SpecArgumentParser(
         prog="msmodeling inference model-adapter",
-        description="Inspect and verify TensorCast model adapter onboarding artifacts.",
+        description=(
+            "Onboard a new model to TensorCast simulation: inspect its structure, "
+            "register a ModelProfile, and verify the simulation runs with correct "
+            "key operator call counts. No measured profiling data is required."
+        ),
         examples=(
             "# Inspect a local model\n"
             "msmodeling inference model-adapter doctor --model-id Qwen/Qwen3-32B\n"
-            "# Verify reviewed evidence\n"
-            "msmodeling inference model-adapter verify --evidence-file evidence.yaml"
+            "# Verify the simulation runs through with correct key op counts\n"
+            "msmodeling inference model-adapter verify --model-id Qwen/Qwen3-32B"
         ),
     )
     add_version_option(parser)
@@ -449,32 +349,18 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
 
     doctor_parser = subparsers.add_parser(
         "doctor",
-        description="Inspect a model adapter profile, patch result, and deterministic suggestions.",
+        description="Inspect a model structure, derive a ModelProfile candidate, and classify patch failures.",
         examples="# Run doctor on a local model\nmsmodeling inference model-adapter doctor --model-id Qwen/Qwen3-32B",
         output_help="JSON report on stdout, or --output-file.",
     )
     _add_adapter_common_args(doctor_parser)
-    _add_doctor_runtime_options(doctor_parser)
+    _add_case_runtime_options(doctor_parser)
     doctor_parser.add_argument(
         "--from-command-file",
         type=str,
         default=None,
         metavar=METAVAR_FILE,
         help="Read a TensorCast simulation command and use it as the adaptation context.",
-    )
-    doctor_parser.add_argument(
-        "--raw-insight-file",
-        type=str,
-        default=None,
-        metavar=METAVAR_FILE,
-        help="MindStudio Insight raw profiling export that corresponds to the simulation command.",
-    )
-    doctor_parser.add_argument(
-        "--hints-file",
-        type=str,
-        default=None,
-        metavar=METAVAR_FILE,
-        help="Optional iterative user hints YAML file.",
     )
     doctor_parser.add_argument(
         "--patch-failure-file",
@@ -512,21 +398,18 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
 
     verify_parser = subparsers.add_parser(
         "verify",
-        description="Run profiling evidence verification for a TensorCast model adapter.",
-        examples="# Verify evidence\nmsmodeling inference model-adapter verify --evidence-file evidence.yaml",
+        description=(
+            "Run one simulation case and check that key TensorCast ops (attention, "
+            "MoE gating) are invoked as often as the model structure implies."
+        ),
+        examples=(
+            "# Verify run-through and key op counts\n"
+            "msmodeling inference model-adapter verify --model-id Qwen/Qwen3-32B"
+        ),
         output_help="JSON report on stdout, or --output-file.",
     )
     _add_adapter_common_args(verify_parser)
-    verify_parser.add_argument(
-        "--evidence-file",
-        required=True,
-        metavar=METAVAR_FILE,
-        help="YAML file with manually reviewed expected op counts and latency.",
-    )
-    _add_output_file_option(
-        verify_parser,
-        "Optional JSON output path. Prints JSON to stdout when omitted.",
-    )
+    _add_case_runtime_options(verify_parser)
     add_option(
         verify_parser,
         "--st-case-output-path",
@@ -534,37 +417,15 @@ def _build_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Argumen
         type=str,
         default=None,
         metavar=METAVAR_FILE,
-        help="Optional file or directory for generated ST guardrail case JSON.",
+        help="Optional file or directory for a generated ST guardrail case JSON (passed runs only).",
         aliases=("--st-case-output",),
     )
-    _add_verify_case_options(verify_parser)
+    _add_output_file_option(
+        verify_parser,
+        "Optional JSON output path. Prints JSON to stdout when omitted.",
+    )
     verify_parser.set_defaults(handler=_run_verify)
     command_parsers["verify"] = verify_parser
-
-    export_evidence_parser = subparsers.add_parser(
-        "export-evidence",
-        description="Export doctor report evidence_draft as evidence YAML.",
-        examples=(
-            "# Export evidence YAML\n"
-            "msmodeling inference model-adapter export-evidence --doctor-report-file doctor.json"
-        ),
-        output_help="Evidence YAML on stdout, or --output-file.",
-    )
-    add_version_option(export_evidence_parser)
-    add_option(
-        export_evidence_parser,
-        "--doctor-report-file",
-        dest="doctor_report",
-        metavar=METAVAR_FILE,
-        help="Doctor JSON report that contains an evidence_draft field.",
-        aliases=("--doctor-report",),
-    )
-    _add_output_file_option(
-        export_evidence_parser,
-        "Optional evidence YAML output path. Prints YAML to stdout when omitted.",
-    )
-    export_evidence_parser.set_defaults(handler=_run_export_evidence)
-    command_parsers["export-evidence"] = export_evidence_parser
 
     return parser, command_parsers
 

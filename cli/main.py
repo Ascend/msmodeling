@@ -104,7 +104,7 @@ def main() -> int:
     )
     inference_sub.add_parser(
         "model-adapter",
-        help="Model adaptation doctor, verify, and export-evidence",
+        help="Model adaptation doctor and run-through verify",
         add_help=False,
     )
     inference_sub.add_parser("video-generate", help="Run a simulated video generation pass", add_help=False)

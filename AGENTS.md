@@ -61,7 +61,7 @@ GitCode 配置：
 | `profiling-database-axis-density` | "新增采集轴"、"修改轴密度"、"检查数据库轴密度" | 定标 profiling database 轴范围、密度和 exact 锚点 |
 | `msmodeling-env-installer` | "安装 msmodeling 环境"、"uv sync" | 安装并验证当前仓库开发环境、依赖和必要环境变量 |
 | `gitcode-cli-installer` | "安装 gitcode-cli"、"gitcode 认证"、"gc auth login" | 安装和认证 gitcode CLI（npm + auth login + lark），一次性配置 |
-| `model-adaptation` | "接入新模型"、"生成 ModelProfile"、"处理 doctor report" | 从仿真命令和 raw profiling 出发，完成 TensorCast 新模型适配流程 |
+| `model-adaptation` | "接入新模型"、"生成 ModelProfile"、"处理 doctor report" | 从仿真命令和开源模型公开信息出发，完成 TensorCast 新模型跑通级适配（仿真跑通 + 关键算子调用次数对账） |
 | `text-generate-executor` | "跑 text_generate"、"验证 best row"、"导出 trace" | 生成并执行 `python -m cli.inference.text_generate` 单点验证命令 |
 | `throughput-optimizer-executor` | "搜索最佳 TP/EP"、"硬件对比"、"PD 配比优化" | 生成并执行 `python -m cli.inference.throughput_optimizer` 吞吐规划命令 |
 | `throughput-optimizer-explainer` | "结果是否合理"、"为什么硬件不同"、"Cube/Vec/Comm/Mem 瓶颈" | 解释 optimizer 结果，并将 best row 映射到 `text_generate` 验证命令 |

@@ -1,10 +1,9 @@
 import dataclasses
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
-from .actual import ActualSummary
 from .inspect import ModelStructureFacts, ProfileCandidate
 from .patch_report import PatchReport
-from .verifier import VerificationReport
+from .verifier import VerificationIssue
 
 
 @dataclasses.dataclass(frozen=True)
@@ -15,16 +14,15 @@ class AdvisorSuggestion:
     evidence: str
 
 
-def _has_category(report: VerificationReport, category: str) -> bool:
-    return any(issue.category == category for issue in report.issues)
+def _has_category(issues: Iterable[VerificationIssue], category: str) -> bool:
+    return any(issue.category == category for issue in issues)
 
 
 def advise(
     structure: Optional[ModelStructureFacts] = None,
     candidate: Optional[ProfileCandidate] = None,
     patch_reports: Optional[List[PatchReport]] = None,
-    actual: Optional[ActualSummary] = None,
-    verification: Optional[VerificationReport] = None,
+    verification_issues: Optional[List[VerificationIssue]] = None,
 ) -> List[AdvisorSuggestion]:
     suggestions: List[AdvisorSuggestion] = []
     patch_reports = [] if patch_reports is None else patch_reports
@@ -56,77 +54,54 @@ def advise(
                 )
             )
 
-    if verification is not None:
-        if _has_category(verification, "OP_COUNT_MISMATCH"):
+    if verification_issues:
+        if _has_category(verification_issues, "KEY_OP_MISSING"):
+            suggestions.append(
+                AdvisorSuggestion(
+                    code="KEY_OP_MISSING",
+                    message=(
+                        "A key op category was never invoked. Check ModelProfile fields, "
+                        "patch replacement counts, and whether the model fell back to "
+                        "original HF modules."
+                    ),
+                    confidence="high",
+                    evidence="verification.issues[KEY_OP_MISSING]",
+                )
+            )
+        if _has_category(verification_issues, "OP_COUNT_MISMATCH"):
             suggestions.append(
                 AdvisorSuggestion(
                     code="OP_COUNT_MISMATCH",
                     message=(
-                        "Major op count differs from evidence. Check repetition, MTP/layer override, "
-                        "or missing TensorCast wrapper replacement."
+                        "Key op call count differs from the structure-derived expectation. "
+                        "Check layer overrides, MTP, vision input, or missing wrapper replacement."
                     ),
                     confidence="medium",
                     evidence="verification.issues[OP_COUNT_MISMATCH]",
                 )
             )
-        if _has_category(verification, "OP_MAPPING_MISSING"):
+        if _has_category(verification_issues, "NO_TENSOR_CAST_OPS"):
             suggestions.append(
                 AdvisorSuggestion(
-                    code="OP_MAPPING_MISSING",
+                    code="NO_TENSOR_CAST_OPS",
                     message=(
-                        "Expected profiling op is absent in actual summary. Check op naming/mapping "
-                        "or whether the model falls back to original HF modules."
-                    ),
-                    confidence="medium",
-                    evidence="verification.issues[OP_MAPPING_MISSING]",
-                )
-            )
-        if _has_category(verification, "LATENCY_MODEL_MISMATCH"):
-            message = "Latency differs while deterministic counts may still match. Check profiling coverage first."
-            if actual and actual.coverage:
-                message += " Coverage data is available in ActualSummary.coverage."
-            suggestions.append(
-                AdvisorSuggestion(
-                    code="LATENCY_MODEL_MISMATCH",
-                    message=message,
-                    confidence="medium",
-                    evidence="verification.issues[LATENCY_MODEL_MISMATCH]",
-                )
-            )
-        if _has_category(verification, "PROFILING_SHAPE_MISSING"):
-            suggestions.append(
-                AdvisorSuggestion(
-                    code="PROFILING_SHAPE_MISSING",
-                    message=(
-                        "Profiling hit rate is incomplete. Add missing op mapping/shape records "
-                        "before treating latency mismatch as a model-structure bug."
+                        "No tensor_cast ops were recorded by the simulation. The model is not "
+                        "adapted yet; register a ModelProfile and rerun doctor and verify."
                     ),
                     confidence="high",
-                    evidence="verification.issues[PROFILING_SHAPE_MISSING]",
+                    evidence="verification.issues[NO_TENSOR_CAST_OPS]",
                 )
             )
-        if _has_category(verification, "PATCH_SEMANTICS_MISSING"):
+        if _has_category(verification_issues, "STRUCTURE_SCAN_EMPTY"):
             suggestions.append(
                 AdvisorSuggestion(
-                    code="PATCH_SEMANTICS_MISSING",
+                    code="STRUCTURE_SCAN_EMPTY",
                     message=(
-                        "Expected TensorCast wrapper ops are absent. Check ModelProfile fields, "
-                        "runtime patch_method, and PatchReport replacement counts."
+                        "The structure scan found no attention-like modules. Check the model "
+                        "build path and installed transformers source."
                     ),
                     confidence="high",
-                    evidence="verification.issues[PATCH_SEMANTICS_MISSING]",
-                )
-            )
-        if _has_category(verification, "COMMUNICATION_GAP"):
-            suggestions.append(
-                AdvisorSuggestion(
-                    code="COMMUNICATION_GAP",
-                    message=(
-                        "Communication operators appear missing or unexplained. Check TP/DP/EP sizes, "
-                        "collective naming, and whether communication evidence should be added or accepted."
-                    ),
-                    confidence="medium",
-                    evidence="verification.issues[COMMUNICATION_GAP]",
+                    evidence="verification.issues[STRUCTURE_SCAN_EMPTY]",
                 )
             )
 

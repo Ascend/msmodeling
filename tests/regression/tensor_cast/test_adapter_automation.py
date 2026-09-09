@@ -1,10 +1,7 @@
 import copy
-import json
 import sys
-import tempfile
 import types
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -13,17 +10,16 @@ import torch
 from tensor_cast.adapter.actual import build_actual_summary_from_events
 from tensor_cast.adapter.advisor import advise
 from tensor_cast.adapter.ai_task import AiAssistanceTask
-from tensor_cast.adapter.context import parse_simulation_command
+from tensor_cast.adapter.context import parse_simulation_command, user_input_to_case_dict
 from tensor_cast.adapter.doctor import run_model_doctor
-from tensor_cast.adapter.evidence import EvidenceCase, EvidenceDocument, load_evidence
-from tensor_cast.adapter.evidence_builder import build_evidence_draft
-from tensor_cast.adapter.evidence_export import export_evidence_from_doctor_report
-from tensor_cast.adapter.hints import HintLedger
+from tensor_cast.adapter.expectations import (
+    derive_key_op_expectations,
+    classify_op,
+    summarize_key_ops,
+)
 from tensor_cast.adapter.inspect import inspect_model_structure
-from tensor_cast.adapter.insight import load_raw_insight, normalize_kernel_name
 from tensor_cast.adapter.patch_discovery import classify_patch_failure
 from tensor_cast.adapter.recipes import (
-    build_unsupported_semantics_task,
     materialization_hints_to_dict,
     materialize_profile_candidate,
 )
@@ -32,13 +28,16 @@ from tensor_cast.adapter.profile_draft import (
     render_builtin_profile_draft,
 )
 from tensor_cast.adapter.questions import build_human_questions
-from tensor_cast.adapter.verifier import verify_evidence_case
+from tensor_cast.adapter.verifier import (
+    collect_verification_issues,
+    verify_key_op_counts,
+)
 from tensor_cast.adapter.patch_report import PatchReport
 from tensor_cast.adapter.profile import profile_to_review_dict, validate_profile
-from tensor_cast.adapter.runner import run_actual_case
+from tensor_cast.adapter.runner import run_simulation_case
 from tensor_cast.adapter.st_case import (
-    build_st_case_from_dicts,
-    build_st_cases_from_report,
+    build_st_case_from_verification,
+    build_st_cases_from_verification,
 )
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
@@ -177,6 +176,21 @@ class _FakeQwen3VLRoot(torch.nn.Module):
         self.language_model = _FakeLanguageModel()
 
 
+def _event(op_name, time_s=0.01):
+    return RuntimeEvent(
+        OpInvokeInfo(_FakeOp(op_name), (), {}, None),
+        {"analytic": PerformanceModel.Result(time_s)},
+    )
+
+
+def _summary(events, **kwargs):
+    return build_actual_summary_from_events(
+        events,
+        perf_model_name="analytic",
+        **kwargs,
+    )
+
+
 class AdapterAutomationTestCase(unittest.TestCase):
     def test_parse_simulation_command_builds_adaptation_context(self):
         command = """
@@ -218,442 +232,526 @@ python -m cli.inference.text_generate MiniMaxAI/MiniMax-M2.7 \
             self.assertIsNone(get_model_profile(model_type))
         self.assertIsNotNone(get_model_profile(model_type))
 
-    def test_raw_insight_parser_and_evidence_draft(self):
-        content = "\n".join(
-            [
-                "Name\tWall Duration(ms)\tSelf Time(ms)\tAverage Wall Duration(ms)\tMax Wall Duration(ms)\tMin Wall Duration(ms)\tOccurrences",
-                "Totals\t17.521695\t17.521695\t0.005782\t0.214164\t0.000000\t1803",
-                "DispatchFFNCombine_88b83c5492c0cb285ac9833d4cd54554_1000010\t11.148411\t11.148411\t0.179813\t0.214164\t0.162103\t62",
-                "FusedInferAttentionScore_3b093497fc536d61a77a7a3293a524da_5000000000010200203\t3.072324\t3.072324\t0.049553\t0.070102\t0.043861\t62",
-                "MoeGatingTopK_81369a2fa0455f39b5d19d432d261f57_1\t0.229640\t0.229640\t0.003703\t0.004620\t0.003320\t62",
-                "CAPTURE_WAIT\t3.071320\t3.071320\t0.001899\t0.007120\t0.000000\t1617",
-            ]
-        )
-        command = "python -m cli.inference.text_generate MiniMaxAI/MiniMax-M2.7 --num-queries 24 --query-length 1 --context-length 3900 --compile"
-        context = parse_simulation_command(command)
-        hints = HintLedger.from_dict(
-            {
-                "version": 1,
-                "hints": [
-                    {
-                        "kind": "op_mapping_hint",
-                        "profiling_op": "DispatchFFNCombine",
-                        "tc_op": "tensor_cast.dispatch_ffn_combine.default",
-                        "confidence": "medium",
-                    }
-                ],
-            }
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "raw_insight.txt"
-            path.write_text(content, encoding="utf-8")
-            summary = load_raw_insight(path)
-
-        draft = build_evidence_draft(context, summary, hints=hints)
-        major_ops = draft["cases"][0]["expected"]["major_ops"]
-
-        self.assertEqual(summary.totals.wall_duration_ms, 17.521695)
-        self.assertEqual(summary.total_wall_duration_ms, 17.521695)
-        self.assertEqual(
-            draft["cases"][0]["expected"]["total_forward"],
-            {
-                "time_s": 0.017521695,
-                "rel_tolerance": 0.2,
-                "source": "raw_insight:Totals.wall_duration_ms",
-            },
-        )
-        self.assertEqual(
-            normalize_kernel_name("QuantBatchMatmulV3_ND_NZ_int8_24"),
-            "QuantBatchMatmulV3",
-        )
-        self.assertEqual(summary.kernels[0].normalized_name, "DispatchFFNCombine")
-        self.assertEqual(summary.kernels[0].category, "moe")
-        self.assertEqual(summary.kernels[1].category, "attention")
-        self.assertEqual(major_ops[0]["name"], "tensor_cast.dispatch_ffn_combine.default")
-        self.assertIn(
-            {
-                "name": "tensor_cast.attention.default",
-                "count": 62,
-                "confidence": "medium",
-                "source": "raw_insight:FusedInferAttentionScore",
-            },
-            major_ops,
-        )
-        self.assertIn(
-            {
-                "name": "tensor_cast.moe_gating_top_k_softmax.default",
-                "count": 62,
-                "confidence": "medium",
-                "source": "raw_insight:MoeGatingTopK",
-            },
-            major_ops,
-        )
-
-    def test_hints_conflicts_and_human_questions_are_actionable(self):
-        content = "\n".join(
-            [
-                "Name\tWall Duration(ms)\tSelf Time(ms)\tAverage Wall Duration(ms)\tMax Wall Duration(ms)\tMin Wall Duration(ms)\tOccurrences",
-                "Totals\t3.0\t3.0\t0.1\t0.1\t0.1\t63",
-                "FusedInferAttentionScore_hash\t3.0\t3.0\t0.1\t0.1\t0.1\t62",
-            ]
-        )
-        command = "python -m cli.inference.text_generate MiniMaxAI/MiniMax-M2.7 --num-queries 24 --query-length 1"
-        context = parse_simulation_command(command)
-        hints = HintLedger.from_dict(
-            {
-                "version": 1,
-                "hints": [
-                    {
-                        "kind": "profiling_op_observation",
-                        "op": "FusedInferAttentionScore",
-                        "count": 60,
-                    },
-                    {
-                        "kind": "op_mapping_hint",
-                        "profiling_op": "MissingKernel",
-                        "tc_op": "tensor_cast.missing.default",
-                    },
-                ],
-            }
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "raw_insight.txt"
-            path.write_text(content, encoding="utf-8")
-            summary = load_raw_insight(path)
-
-        conflicts = [item.to_dict() for item in hints.conflicts_with_raw_insight(summary)]
-        draft = build_evidence_draft(context, summary, hints=hints)
-        questions = build_human_questions(draft, conflicts)
-
-        self.assertEqual(conflicts[0]["category"], "HINT_COUNT_CONFLICT")
-        self.assertEqual(conflicts[1]["category"], "HINT_MAPPING_SOURCE_MISSING")
-        self.assertTrue(any(item["kind"] == "resolve_hint_conflict" for item in questions))
-        self.assertTrue(any(item["kind"] == "confirm_op_mapping" for item in questions))
-
-    def test_raw_insight_requires_totals_row(self):
-        content = "\n".join(
-            [
-                "Name\tWall Duration(ms)\tSelf Time(ms)\tAverage Wall Duration(ms)\tMax Wall Duration(ms)\tMin Wall Duration(ms)\tOccurrences",
-                "FusedInferAttentionScore_hash\t3.0\t3.0\t0.1\t0.1\t0.1\t62",
-            ]
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "raw_insight.txt"
-            path.write_text(content, encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "Totals"):
-                load_raw_insight(path)
-
-    def test_raw_insight_rejects_kernel_before_totals(self):
-        content = "\n".join(
-            [
-                "Name\tWall Duration(ms)\tSelf Time(ms)\tAverage Wall Duration(ms)\tMax Wall Duration(ms)\tMin Wall Duration(ms)\tOccurrences",
-                "FusedInferAttentionScore_hash\t3.0\t3.0\t0.1\t0.1\t0.1\t62",
-                "Totals\t3.0\t3.0\t0.1\t0.1\t0.1\t63",
-            ]
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "raw_insight.txt"
-            path.write_text(content, encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "line 2.*Totals"):
-                load_raw_insight(path)
-
-    def test_evidence_loader_and_verifier_pass(self):
-        data = {
-            "version": 1,
-            "model": {"model_type": "tiny"},
-            "cases": [
-                {
-                    "name": "decode",
-                    "expected": {
-                        "total_forward": {"time_s": 0.1, "rel_tolerance": 0.2},
-                        "major_ops": [
-                            {
-                                "name": "tensor_cast.fake_op.default",
-                                "count": 2,
-                                "total_time_s": 0.08,
-                                "rel_tolerance": 0.1,
-                            }
-                        ],
-                    },
-                }
-            ],
-        }
-        evidence = EvidenceDocument.from_dict(data)
-        events = [
-            RuntimeEvent(
-                OpInvokeInfo(_FakeOp("tensor_cast.fake_op.default"), (), {}, None),
-                {"analytic": PerformanceModel.Result(0.04)},
-            ),
-            RuntimeEvent(
-                OpInvokeInfo(_FakeOp("tensor_cast.fake_op.default"), (), {}, None),
-                {"analytic": PerformanceModel.Result(0.04)},
-            ),
-            RuntimeEvent(
-                OpInvokeInfo(_FakeOp("tensor_cast.extra.default"), (), {}, None),
-                {"analytic": PerformanceModel.Result(0.01)},
-            ),
+    def test_classify_op_covers_attention_family_and_excludes_auxiliaries(self):
+        attention_ops = [
+            "torch.ops.tensor_cast.attention.default",
+            "torch.ops.tensor_cast.attention_quant.default",
+            "torch.ops.tensor_cast.multihead_latent_attention.default",
+            "torch.ops.tensor_cast.mla_sparse_attention_quant.default",
+            "torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule.default",
+            "torch.ops.tensor_cast.sparse_attn_sharedkv.default",
+            "tensor_cast.attention.default",
         ]
-        actual = build_actual_summary_from_events(
-            events,
-            case_name="decode",
-            perf_model_name="analytic",
-            total_forward_time_s=0.09,
+        for op in attention_ops:
+            self.assertEqual(classify_op(op), "attention", op)
+
+        self.assertEqual(classify_op("torch.ops.tensor_cast.moe_gating_top_k_softmax.default"), "moe_gating")
+        self.assertEqual(classify_op("torch.ops.tensor_cast.moe_gating_top_k_hash.default"), "moe_gating")
+
+        # Auxiliary per-layer ops must not count as attention invocations.
+        self.assertIsNone(classify_op("torch.ops.tensor_cast.linear_attn_causal_conv.default"))
+        self.assertIsNone(classify_op("torch.ops.tensor_cast.linear_attn_fused_gdn_gating.default"))
+        self.assertIsNone(classify_op("torch.ops.tensor_cast.dsa_indexer.default"))
+        self.assertIsNone(classify_op("torch.ops.tensor_cast.reshape_and_cache.default"))
+        # Native ops never count, so un-adapted HF fallbacks cannot mask a
+        # missing TensorCast replacement.
+        self.assertIsNone(classify_op("aten.scaled_dot_product_attention.default"))
+        self.assertIsNone(classify_op("aten.topk.default"))
+
+    def test_summarize_key_ops_aggregates_counts_per_category(self):
+        summary = summarize_key_ops(
+            {
+                "torch.ops.tensor_cast.attention.default": SimpleNamespace(count=3),
+                "torch.ops.tensor_cast.mla_sparse_attention.default": SimpleNamespace(count=2),
+                "torch.ops.tensor_cast.moe_gating_top_k_softmax.default": SimpleNamespace(count=5),
+                "aten.mm.default": SimpleNamespace(count=100),
+            }
         )
 
-        report = verify_evidence_case(evidence.cases[0], actual, extra_op_time_ratio=0.2)
+        self.assertEqual(summary["attention"]["count"], 5)
+        self.assertEqual(
+            summary["attention"]["op_breakdown"],
+            {
+                "torch.ops.tensor_cast.attention.default": 3,
+                "torch.ops.tensor_cast.mla_sparse_attention.default": 2,
+            },
+        )
+        self.assertEqual(summary["moe_gating"]["count"], 5)
 
-        self.assertTrue(report.passed)
-        self.assertEqual(report.issues, [])
+    def test_derive_key_op_expectations_filters_and_dedupes(self):
+        structure = {
+            "visual_module_paths": ("visual",),
+            "num_hidden_layers": 2,
+            "attention_like_modules": [
+                {"path": "language_model.layers.0.self_attn"},
+                {"path": "language_model.layers.0.self_attn._inner"},
+                {"path": "language_model.layers.0.self_attn.indexer"},
+                {"path": "language_model.layers.1.self_attn"},
+                {"path": "visual.blocks.0.attn"},
+                {"path": "visual.blocks.1.attn"},
+                {"path": "mtp_layers.0.self_attn"},
+            ],
+            "moe_like_modules": [
+                {"path": "language_model.layers.1.mlp"},
+            ],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=1,
+            image_height=224,
+            image_width=224,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
 
-    def test_verify_cli_uses_model_id_from_evidence(self):
-        from cli.inference.model_adapter import _build_parser
+        basis = derive_key_op_expectations(structure, user_input)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            evidence_path = Path(tmpdir) / "evidence.yaml"
-            output_path = Path(tmpdir) / "verify.json"
-            evidence_path.write_text(
-                "\n".join(
-                    [
-                        "version: 1",
-                        "model:",
-                        "  model_id: Tiny/Adapter",
-                        "cases:",
-                        "  - name: decode",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            parser, command_parsers = _build_parser()
-            args = parser.parse_args(
-                [
-                    "verify",
-                    "--evidence-file",
-                    str(evidence_path),
-                    "--output",
-                    str(output_path),
-                ]
-            )
-            verification_report = MagicMock()
-            verification_report.to_dict.return_value = {"passed": True}
+        self.assertEqual(
+            basis.text_attention_modules,
+            ["language_model.layers.0.self_attn", "language_model.layers.1.self_attn"],
+        )
+        self.assertEqual(
+            basis.vision_attention_modules,
+            ["visual.blocks.0.attn", "visual.blocks.1.attn"],
+        )
+        self.assertEqual(basis.moe_modules, ["language_model.layers.1.mlp"])
+        self.assertTrue(basis.vision_executed)
+        self.assertEqual(basis.expectations["attention"].expected_count, 4)
+        self.assertEqual(basis.expectations["moe_gating"].expected_count, 1)
+        self.assertIn("structure scan", basis.expectations["moe_gating"].basis)
 
-            with patch(
-                "tensor_cast.adapter.doctor.run_evidence_verification",
-                return_value=verification_report,
-            ) as run_evidence_verification:
-                args.handler(args, command_parsers[args.command])
+    def test_derive_key_op_expectations_skips_vision_without_image_input(self):
+        structure = {
+            "visual_module_paths": ("visual",),
+            "num_hidden_layers": 2,
+            "attention_like_modules": [
+                {"path": "language_model.layers.0.self_attn"},
+                {"path": "language_model.layers.1.self_attn"},
+                {"path": "visual.blocks.0.attn"},
+            ],
+            "moe_like_modules": [],
+        }
+        without_image = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+        decode_with_image = SimpleNamespace(
+            decode=True,
+            image_batch_size=1,
+            image_height=224,
+            image_width=224,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
 
-        user_input = run_evidence_verification.call_args.args[1]
-        self.assertEqual(user_input.model_id, "Tiny/Adapter")
+        basis = derive_key_op_expectations(structure, without_image)
+        self.assertFalse(basis.vision_executed)
+        self.assertEqual(basis.expectations["attention"].expected_count, 2)
+        self.assertTrue(any("Visual tower is present but not executed" in note for note in basis.notes))
 
-    def test_st_case_generator_builds_guardrail_from_report(self):
+        decode_basis = derive_key_op_expectations(structure, decode_with_image)
+        self.assertFalse(decode_basis.vision_executed)
+        self.assertEqual(decode_basis.expectations["attention"].expected_count, 2)
+
+    def test_derive_key_op_expectations_prefers_moe_patch_report(self):
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": 2,
+            "attention_like_modules": [{"path": "layers.0.self_attn"}],
+            # Patched trees hide MoE fields; the patch report is the source.
+            "moe_like_modules": [],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+
+        basis = derive_key_op_expectations(structure, user_input, moe_patch_replacements=58)
+
+        self.assertEqual(basis.expectations["moe_gating"].expected_count, 58)
+        self.assertIn("patch report", basis.expectations["moe_gating"].basis)
+        self.assertEqual(basis.moe_expectation_source, "doctor build MoE patch report (replaced MoE blocks)")
+
+    def test_verify_key_op_counts_match_and_mismatch(self):
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": 2,
+            "attention_like_modules": [
+                {"path": "layers.0.self_attn"},
+                {"path": "layers.1.self_attn"},
+            ],
+            "moe_like_modules": [],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+        basis = derive_key_op_expectations(structure, user_input)
+        matched = _summary(
+            [
+                _event("torch.ops.tensor_cast.attention.default"),
+                _event("torch.ops.tensor_cast.attention.default"),
+            ]
+        )
+        mismatched = _summary([_event("torch.ops.tensor_cast.attention.default")])
+
+        checks = verify_key_op_counts(basis, matched, user_input)
+        self.assertTrue(all(check.matched for check in checks))
+        self.assertEqual(collect_verification_issues(checks, basis, matched, user_input), [])
+
+        checks = verify_key_op_counts(basis, mismatched, user_input)
+        issues = collect_verification_issues(checks, basis, mismatched, user_input)
+        self.assertEqual(issues[0].category, "OP_COUNT_MISMATCH")
+        self.assertEqual(issues[0].severity, "error")
+
+    def test_collect_issues_flags_missing_key_op_and_no_tensor_cast_ops(self):
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": 1,
+            "attention_like_modules": [{"path": "layers.0.self_attn"}],
+            "moe_like_modules": [],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+        basis = derive_key_op_expectations(structure, user_input)
+        # Everything fell back to native HF modules: only aten ops recorded.
+        fallback = _summary([_event("aten.scaled_dot_product_attention.default")])
+
+        checks = verify_key_op_counts(basis, fallback, user_input)
+        issues = collect_verification_issues(checks, basis, fallback, user_input)
+        categories = {issue.category for issue in issues}
+
+        self.assertIn("KEY_OP_MISSING", categories)
+        self.assertIn("NO_TENSOR_CAST_OPS", categories)
+        self.assertTrue(all(issue.severity == "error" for issue in issues))
+
+    def test_collect_issues_flags_unadapted_moe_but_accepts_standard_gating(self):
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": 1,
+            "attention_like_modules": [{"path": "layers.0.self_attn"}],
+            "moe_like_modules": [{"path": "layers.0.mlp"}],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+        adapted_basis = derive_key_op_expectations(structure, user_input, moe_patch_replacements=1)
+        unadapted_basis = derive_key_op_expectations(structure, user_input)
+        actual = _summary([_event("torch.ops.tensor_cast.attention.default")])
+
+        adapted_checks = verify_key_op_counts(adapted_basis, actual, user_input)
+        # Standard gating path (torch.topk): no tensor_cast gating op, but the
+        # MoE patch report proves the blocks were adapted.
+        issues = collect_verification_issues(
+            adapted_checks, adapted_basis, actual, user_input, moe_patch_replacements=1
+        )
+        self.assertEqual(issues, [])
+
+        unadapted_checks = verify_key_op_counts(unadapted_basis, actual, user_input)
+        issues = collect_verification_issues(unadapted_checks, unadapted_basis, actual, user_input)
+        categories = {issue.category for issue in issues}
+        self.assertIn("MOE_NOT_ADAPTED", categories)
+        self.assertTrue(all(issue.severity == "error" for issue in issues if issue.category == "MOE_NOT_ADAPTED"))
+
+    def test_collect_issues_accepts_custom_adapted_moe_via_moe_path_ops(self):
+        """Custom-fn adapted MoE without a patch report must not be flagged.
+
+        Models adapted through a custom model function may not record a MoE
+        patch report; routing/dispatch ops (init_routing_v2, unpermute_tokens,
+        dispatch_ffn_combine and its quant variants) prove the MoE blocks
+        execute on the TensorCast path even though gating goes through
+        torch.topk and emits no tensor_cast gating op. grouped_matmul is not
+        accepted as evidence because its variants are not exclusive to the
+        MoE path.
+        """
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": 1,
+            "attention_like_modules": [{"path": "layers.0.self_attn"}],
+            "moe_like_modules": [{"path": "layers.0.mlp"}],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+        basis = derive_key_op_expectations(structure, user_input)
+
+        moe_path_events = [
+            _event("torch.ops.tensor_cast.attention.default"),
+            _event("torch.ops.tensor_cast.init_routing_v2.default"),
+            _event("torch.ops.tensor_cast.unpermute_tokens.default"),
+            _event("torch.ops.tensor_cast.dispatch_ffn_combine_quant.default"),
+        ]
+        actual = _summary(moe_path_events)
+        checks = verify_key_op_counts(basis, actual, user_input)
+        issues = collect_verification_issues(checks, basis, actual, user_input)
+        self.assertEqual(
+            [issue.category for issue in issues if issue.category == "MOE_NOT_ADAPTED"],
+            [],
+        )
+
+        # grouped_matmul alone is not adaptation evidence.
+        gmm_only = _summary(
+            [
+                _event("torch.ops.tensor_cast.attention.default"),
+                _event("torch.ops.tensor_cast.grouped_matmul_quant.default"),
+            ]
+        )
+        checks = verify_key_op_counts(basis, gmm_only, user_input)
+        issues = collect_verification_issues(checks, basis, gmm_only, user_input)
+        self.assertIn("MOE_NOT_ADAPTED", {issue.category for issue in issues})
+
+    def test_collect_issues_flags_empty_moe_patch_report(self):
+        """A zero-replacement MoE patch report must not mask an un-adapted MoE.
+
+        When ModelProfile.moe_module_name mismatches the real class (or fields
+        are missing), patch_moe records an empty "MoE" report; verify must
+        still fail instead of silently passing.
+        """
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": 1,
+            "attention_like_modules": [{"path": "layers.0.self_attn"}],
+            "moe_like_modules": [{"path": "layers.0.mlp"}],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+        # Empty patch report: the expectation falls back to the structure scan.
+        basis = derive_key_op_expectations(structure, user_input, moe_patch_replacements=0)
+        self.assertEqual(basis.expectations["moe_gating"].expected_count, 1)
+        self.assertIn("structure scan", basis.expectations["moe_gating"].basis)
+
+        actual = _summary([_event("torch.ops.tensor_cast.attention.default")])
+        checks = verify_key_op_counts(basis, actual, user_input)
+        issues = collect_verification_issues(checks, basis, actual, user_input, moe_patch_replacements=0)
+
+        self.assertIn("MOE_NOT_ADAPTED", {issue.category for issue in issues})
+
+    def test_collect_issues_hints_unclassified_ops_for_missing_attention(self):
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": 2,
+            "attention_like_modules": [
+                {"path": "layers.0.self_attn"},
+                {"path": "layers.1.self_attn"},
+            ],
+            "moe_like_modules": [],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+        basis = derive_key_op_expectations(structure, user_input)
+        actual = _summary(
+            [
+                _event("torch.ops.tensor_cast.new_fancy_attn_core.default"),
+                _event("torch.ops.tensor_cast.new_fancy_attn_core.default"),
+            ]
+        )
+
+        checks = verify_key_op_counts(basis, actual, user_input)
+        issues = collect_verification_issues(checks, basis, actual, user_input)
+
+        key_op_missing = next(issue for issue in issues if issue.category == "KEY_OP_MISSING")
+        self.assertIn("tensor_cast.new_fancy_attn_core.default x2", key_op_missing.message)
+        self.assertIn("_ATTENTION_CORE_OPS", key_op_missing.message)
+
+    def test_collect_issues_degrades_mtp_cases_to_warnings(self):
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": 2,
+            "attention_like_modules": [
+                {"path": "layers.0.self_attn"},
+                {"path": "layers.1.self_attn"},
+            ],
+            "moe_like_modules": [],
+        }
+        mtp_user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=2,
+            pp_size=1,
+        )
+        basis = derive_key_op_expectations(structure, mtp_user_input)
+        actual = _summary([_event("torch.ops.tensor_cast.attention.default")])
+
+        checks = verify_key_op_counts(basis, actual, mtp_user_input)
+        issues = collect_verification_issues(checks, basis, actual, mtp_user_input)
+
+        mismatch = [issue for issue in issues if issue.category == "OP_COUNT_MISMATCH"]
+        self.assertEqual(mismatch[0].severity, "warning")
+        self.assertIn("EXPECTATION_DEGRADED", {issue.category for issue in issues})
+
+    def test_struct_empty_scan_is_reported(self):
+        structure = {
+            "visual_module_paths": (),
+            "num_hidden_layers": None,
+            "attention_like_modules": [],
+            "moe_like_modules": [],
+        }
+        user_input = SimpleNamespace(
+            decode=False,
+            image_batch_size=None,
+            image_height=None,
+            image_width=None,
+            num_mtp_tokens=0,
+            pp_size=1,
+        )
+        basis = derive_key_op_expectations(structure, user_input)
+        actual = _summary([_event("torch.ops.tensor_cast.attention.default")])
+
+        checks = verify_key_op_counts(basis, actual, user_input)
+        issues = collect_verification_issues(checks, basis, actual, user_input)
+
+        self.assertIn("STRUCTURE_SCAN_EMPTY", {issue.category for issue in issues})
+        suggestions = advise(verification_issues=issues)
+        self.assertTrue(any(item.code == "STRUCTURE_SCAN_EMPTY" for item in suggestions))
+
+    def test_user_input_to_case_dict_round_trips_through_config(self):
+        user_input = UserInputConfig(
+            model_id="Tiny/Adapter",
+            device="TEST_DEVICE",
+            num_queries=1,
+            query_len=4,
+            context_length=8,
+            decode=True,
+            quantize_linear_action=UserInputConfig().quantize_linear_action,
+            tp_size=2,
+            image_batch_size=1,
+            image_height=224,
+            image_width=224,
+            word_embedding_tp=None,
+        )
+
+        case_input = user_input_to_case_dict(user_input)
+        # Every key must be a valid UserInputConfig constructor kwarg.
+        restored = UserInputConfig(**case_input)
+
+        self.assertEqual(restored.model_id, user_input.model_id)
+        self.assertEqual(restored.num_queries, user_input.num_queries)
+        self.assertEqual(restored.query_len, user_input.query_len)
+        self.assertEqual(restored.context_length, user_input.context_length)
+        self.assertTrue(restored.decode)
+        self.assertEqual(restored.tp_size, 2)
+        self.assertEqual(restored.image_batch_size, 1)
+        # Defaults are omitted to keep the emitted case minimal.
+        defaults = user_input_to_case_dict(UserInputConfig())
+        self.assertEqual(defaults, {})
+
+    def test_st_case_from_verification_is_benchmark_compatible(self):
         report = {
-            "evidence_model": {"model_id": "Tiny/Adapter"},
-            "evidence_cases": [
-                {
-                    "name": "tiny-prefill",
-                    "input": {"num_queries": 1, "query_len": 4, "context_length": 0},
-                }
-            ],
-            "actual_summaries": [
-                {
-                    "case_name": "tiny-prefill",
-                    "total_forward_time_s": 0.25,
-                    "ops": {
-                        "aten.mm.default": {"count": 2, "total_time_s": 0.2},
-                        "aten.add.Tensor": {"count": 1, "total_time_s": 0.01},
-                    },
-                }
-            ],
-            "verification_reports": [{"case_name": "tiny-prefill", "passed": True, "issues": []}],
             "passed": True,
-        }
-
-        cases = build_st_cases_from_report(report)
-
-        self.assertEqual(cases[0]["name"], "tiny-prefill")
-        self.assertEqual(cases[0]["status"], "verified")
-        self.assertEqual(cases[0]["baseline_time_s"], 0.25)
-        self.assertEqual(cases[0]["user_input"]["model_id"], "Tiny/Adapter")
-        self.assertEqual(cases[0]["operators"][0]["name"], "aten.mm.default")
-        self.assertEqual(cases[0]["operators"][0]["num_calls"], 2)
-
-    def test_st_case_generator_marks_unverified_report_as_draft(self):
-        report = {
-            "evidence_model": {"model_id": "Tiny/Adapter"},
-            "evidence_cases": [{"name": "tiny-prefill", "input": {"num_queries": 1}}],
-            "actual_summaries": [
-                {
-                    "case_name": "tiny-prefill",
-                    "total_forward_time_s": 0.25,
-                    "ops": {"aten.mm.default": {"count": 2, "total_time_s": 0.2}},
-                }
+            "case_name": "tiny-prefill",
+            "simulation": {"total_forward_time_s": 0.25},
+            "case_input": {"model_id": "Tiny/Adapter", "num_queries": 1, "query_len": 4},
+            "key_op_checks": [
+                {"category": "attention", "actual_count": 2},
             ],
-            "verification_reports": [
-                {
-                    "case_name": "tiny-prefill",
-                    "passed": False,
-                    "issues": [{"category": "OP_MAPPING_MISSING"}],
+            "actual_summary": {
+                "ops": {
+                    "aten.mm.default": {"count": 2, "total_time_s": 0.2},
+                    "aten.add.Tensor": {"count": 1, "total_time_s": 0.01},
                 }
-            ],
-            "passed": False,
-        }
-
-        cases = build_st_cases_from_report(report)
-
-        self.assertEqual(cases[0]["status"], "draft")
-        self.assertEqual(cases[0]["verification_issues"][0]["category"], "OP_MAPPING_MISSING")
-
-    def test_st_case_generator_uses_actual_case_name_and_top_operator_limit(self):
-        actual = {
-            "case_name": "fallback-case",
-            "total_forward_time_s": 2.0,
-            "ops": {
-                "slow": {"total_time_s": 0.8, "count": 4},
-                "fast": {"total_time_s": 0.1, "count": 2},
             },
         }
 
-        case = build_st_case_from_dicts(
-            {"input": {}},
-            actual,
-            {"model_id": "Tiny/Adapter"},
-            operator_top_n=1,
-        )
+        cases = build_st_cases_from_verification(report)
 
-        self.assertEqual(case["name"], "fallback-case")
+        self.assertEqual(len(cases), 1)
+        case = cases[0]
+        self.assertEqual(case["name"], "tiny-prefill")
+        self.assertEqual(case["initial_time_s"], 0.25)
+        self.assertEqual(case["baseline_time_s"], 0.25)
         self.assertEqual(case["user_input"]["model_id"], "Tiny/Adapter")
-        self.assertEqual(case["operators"], [{"name": "slow", "total_time_s": 0.8, "num_calls": 4}])
+        self.assertEqual(case["operators"][0]["name"], "aten.mm.default")
+        self.assertEqual(case["operators"][0]["num_calls"], 2)
+        # Only keys the benchmark regression loader understands may appear.
+        self.assertEqual(
+            set(case),
+            {
+                "type",
+                "name",
+                "description",
+                "initial_time_s",
+                "baseline_time_s",
+                "initial_tolerance",
+                "baseline_tolerance",
+                "operator_top_n",
+                "operator_tolerance",
+                "user_input",
+                "operators",
+            },
+        )
 
-    def test_evidence_loader_reads_yaml(self):
-        content = """
-version: 1
-model:
-  model_type: tiny
-cases:
-  - name: decode
-    expected:
-      major_ops:
-        - name: tensor_cast.fake_op.default
-          count:
-            min: 1
-            max: 3
-"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "evidence.yaml"
-            path.write_text(content, encoding="utf-8")
-            evidence = load_evidence(path)
-
-        self.assertEqual(evidence.cases[0].major_ops[0].count_min, 1)
-        self.assertEqual(evidence.cases[0].major_ops[0].count_max, 3)
-
-    def test_export_evidence_from_doctor_report_writes_yaml(self):
+    def test_st_case_not_generated_for_failed_verification(self):
         report = {
-            "evidence_draft": {
-                "version": 1,
-                "model": {"model_id": "Tiny/Adapter"},
-                "cases": [
-                    {
-                        "name": "tiny",
-                        "input": {"num_queries": 1},
-                        "expected": {"major_ops": []},
-                    }
-                ],
-            }
+            "passed": False,
+            "case_name": "tiny-prefill",
+            "simulation": {"total_forward_time_s": 0.25},
+            "case_input": {},
+            "key_op_checks": [],
+            "actual_summary": {"ops": {}},
         }
-        with tempfile.TemporaryDirectory() as tmpdir:
-            report_path = Path(tmpdir) / "doctor_after_profile.json"
-            evidence_path = Path(tmpdir) / "evidence.yaml"
-            report_path.write_text(json.dumps(report), encoding="utf-8")
 
-            content = export_evidence_from_doctor_report(str(report_path), str(evidence_path))
-            evidence = load_evidence(evidence_path)
+        self.assertEqual(build_st_cases_from_verification(report), [])
 
-        self.assertIn("model_id: Tiny/Adapter", content)
-        self.assertEqual(evidence.model["model_id"], "Tiny/Adapter")
-        self.assertEqual(evidence.cases[0].name, "tiny")
+    def test_st_case_operator_limit(self):
+        report = {
+            "passed": True,
+            "case_name": "fallback-case",
+            "simulation": {"total_forward_time_s": 2.0},
+            "case_input": {},
+            "key_op_checks": [],
+            "actual_summary": {
+                "ops": {
+                    "slow": {"total_time_s": 0.8, "count": 4},
+                    "fast": {"total_time_s": 0.1, "count": 2},
+                }
+            },
+        }
 
-    def test_verifier_reports_count_and_latency_mismatch(self):
-        evidence = EvidenceDocument.from_dict(
-            {
-                "version": 1,
-                "model": {},
-                "cases": [
-                    {
-                        "name": "decode",
-                        "expected": {
-                            "total_forward": {"time_s": 1.0, "rel_tolerance": 0.01},
-                            "major_ops": [
-                                {
-                                    "name": "tensor_cast.fake_op.default",
-                                    "count": 4,
-                                    "total_time_s": 1.0,
-                                    "rel_tolerance": 0.01,
-                                }
-                            ],
-                        },
-                    }
-                ],
-            }
-        )
-        actual = build_actual_summary_from_events(
-            [
-                RuntimeEvent(
-                    OpInvokeInfo(_FakeOp("tensor_cast.fake_op.default"), (), {}, None),
-                    {"analytic": PerformanceModel.Result(0.2)},
-                )
-            ],
-            case_name="decode",
-            perf_model_name="analytic",
-            total_forward_time_s=0.2,
-        )
+        case = build_st_case_from_verification(report, operator_top_n=1)
 
-        report = verify_evidence_case(evidence.cases[0], actual)
-        categories = {issue.category for issue in report.issues}
-
-        self.assertFalse(report.passed)
-        self.assertIn("OP_COUNT_MISMATCH", categories)
-        self.assertIn("LATENCY_MODEL_MISMATCH", categories)
-
-    def test_verifier_classifies_patch_semantics_and_communication_gap(self):
-        evidence = EvidenceDocument.from_dict(
-            {
-                "version": 1,
-                "model": {},
-                "cases": [
-                    {
-                        "name": "decode",
-                        "expected": {
-                            "major_ops": [{"name": "tensor_cast.attention.default", "count": 1}],
-                        },
-                    }
-                ],
-            }
-        )
-        actual = build_actual_summary_from_events(
-            [
-                RuntimeEvent(
-                    OpInvokeInfo(_FakeOp("aten.mm.default"), (), {}, None),
-                    {"analytic": PerformanceModel.Result(0.01)},
-                ),
-                RuntimeEvent(
-                    OpInvokeInfo(_FakeOp("HcomAllReduce"), (), {}, None),
-                    {"analytic": PerformanceModel.Result(0.2)},
-                ),
-            ],
-            case_name="decode",
-            perf_model_name="analytic",
-            total_forward_time_s=0.21,
-        )
-
-        report = verify_evidence_case(evidence.cases[0], actual, extra_op_time_ratio=0.1)
-        categories = {issue.category for issue in report.issues}
-
-        self.assertIn("PATCH_SEMANTICS_MISSING", categories)
-        self.assertIn("COMMUNICATION_GAP", categories)
+        self.assertEqual(case["operators"], [{"name": "slow", "total_time_s": 0.8, "num_calls": 4}])
 
     def test_patch_mla_reports_missing_fields_and_strict_failure(self):
         model = SimpleNamespace()
@@ -738,6 +836,38 @@ cases:
                 for item in advise(facts, candidate)
             )
         )
+
+    def test_questions_flag_low_confidence_candidate_and_structure_gaps(self):
+        model = SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type="questions_adapter_auto",
+                num_hidden_layers=1,
+                hidden_size=4,
+                num_attention_heads=1,
+                num_experts=2,
+            ),
+            unwrap=lambda: SimpleNamespace(),
+        )
+        root = torch.nn.Module()
+        root.self_attn = _FakeAttention()
+        root.mlp = Qwen3MoeSparseMoeBlock()
+        model.unwrap = lambda: root
+
+        facts, candidate = inspect_model_structure(model)
+        questions = build_human_questions(structure=facts, candidate=candidate)
+
+        kinds = {item["kind"] for item in questions}
+        # moe_gate_returns_raw_logits is a safe default with low confidence.
+        self.assertIn("confirm_candidate_field", kinds)
+
+        no_expert_key_structure, no_expert_key_candidate = inspect_model_structure(
+            SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="no_expert_key_adapter_auto", num_hidden_layers=1),
+                unwrap=lambda: root,
+            )
+        )
+        questions = build_human_questions(structure=no_expert_key_structure, candidate=no_expert_key_candidate)
+        self.assertIn("confirm_expert_key", {item["kind"] for item in questions})
 
     def test_qwen3_vl_replay_discovers_visual_profile_without_registered_profile(self):
         root = _FakeQwen3VLRoot()
@@ -861,6 +991,26 @@ cases:
         self.assertNotIn("custom_expert_module_type", report.candidate_profile)
         self.assertNotIn("mla_module_class_type", report.candidate_profile)
 
+    def test_doctor_report_has_no_measured_input_fields(self):
+        report = run_model_doctor(
+            UserInputConfig(
+                model_id="tests/assets/model_config/qwen3_vl_tiny",
+                num_queries=1,
+                query_len=1,
+                context_length=0,
+                word_embedding_tp=None,
+            )
+        )
+        data = report.to_dict()
+
+        self.assertNotIn("raw_insight_summary", data)
+        self.assertNotIn("evidence_draft", data)
+        self.assertNotIn("user_hints", data)
+        self.assertNotIn("hint_conflicts", data)
+        self.assertIn("structure", data)
+        self.assertIn("candidate_profile", data)
+        self.assertIn("human_questions", data)
+
     def test_patch_discovery_classifies_qwen3_vl_meta_failure(self):
         failure = """
 Traceback (most recent call last):
@@ -982,20 +1132,6 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
     def test_materialized_candidate_matches_registered_deepseek_v32_summary(self):
         model_type = "deepseek_v32"
         model_id = "tests/assets/model_config/deepseek_v32"
-        case = EvidenceCase.from_dict(
-            {
-                "name": "decode_compare",
-                "input": {
-                    "num_queries": 1,
-                    "query_len": 1,
-                    "context_length": 0,
-                    "decode": True,
-                    "device": "TEST_DEVICE",
-                    "performance_model": "analytic",
-                    "num_hidden_layers_override": 1,
-                },
-            }
-        )
 
         def make_user_input():
             return UserInputConfig(
@@ -1011,7 +1147,7 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
             )
 
         def summarize_key_ops():
-            summary = run_actual_case(case, make_user_input()).summary
+            summary = run_simulation_case(make_user_input(), case_name="decode_compare").summary
             return {
                 name: (op.count, op.total_time_s)
                 for name, op in summary.ops.items()
@@ -1031,7 +1167,7 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
 
         self.assertEqual(generated_ops, baseline_ops)
 
-    def test_run_actual_case_accumulates_events_from_multiple_runtime_observers(self):
+    def test_run_simulation_case_accumulates_events_from_multiple_runtime_observers(self):
         user_input = UserInputConfig(
             model_id="tests/assets/model_config/deepseek_v32",
             num_queries=1,
@@ -1041,7 +1177,6 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
             performance_model=["analytic"],
             word_embedding_tp=None,
         )
-        case = EvidenceCase.from_dict({"name": "decode", "input": {"decode": True}})
         stage_event = RuntimeEvent(
             OpInvokeInfo(_FakeOp("tensor_cast.stage0.default"), (), {}, None),
             {"analytic": PerformanceModel.Result(0.1)},
@@ -1070,7 +1205,7 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
                 return SimpleNamespace()
 
             runner_cls.return_value.run_inference.side_effect = run_inference
-            result = run_actual_case(case, user_input)
+            result = run_simulation_case(user_input, case_name="decode")
 
         self.assertEqual(set(result.summary.ops), {"tensor_cast.stage0.default", "tensor_cast.transfer.default"})
         self.assertEqual(result.summary.ops["tensor_cast.stage0.default"].count, 1)
@@ -1078,7 +1213,7 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
         self.assertAlmostEqual(result.summary.total_forward_time_s, 0.3)
         self.assertEqual(result.summary.perf_model_name, "analytic")
 
-    def test_run_actual_case_does_not_mutate_shared_user_input(self):
+    def test_run_simulation_case_does_not_mutate_shared_user_input(self):
         user_input = UserInputConfig(
             model_id="tests/assets/model_config/deepseek_v32",
             num_queries=1,
@@ -1086,12 +1221,6 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
             context_length=0,
             decode=False,
             word_embedding_tp=None,
-        )
-        case = EvidenceCase.from_dict(
-            {
-                "name": "decode",
-                "input": {"decode": True, "context_length": 8},
-            }
         )
         fake_runtime = SimpleNamespace(perf_models=[], event_list=[], total_execution_time_s=lambda: {})
         fake_summary = MagicMock()
@@ -1109,55 +1238,92 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
                 return SimpleNamespace()
 
             runner_cls.return_value.run_inference.side_effect = run_inference
-            result = run_actual_case(case, user_input)
+            result = run_simulation_case(user_input, case_name="decode")
 
         self.assertIs(result.summary, fake_summary)
         self.assertFalse(user_input.decode)
-        self.assertEqual(user_input.context_length, 0)
-        case_input = runner_cls.call_args.args[0]
-        self.assertTrue(case_input.decode)
-        self.assertEqual(case_input.context_length, 8)
+        runner_input = runner_cls.call_args.args[0]
+        self.assertIs(runner_input, user_input)
 
-    def test_verifier_respects_low_confidence_and_accepted_gap(self):
-        evidence = EvidenceDocument.from_dict(
-            {
-                "version": 1,
-                "model": {},
-                "cases": [
-                    {
-                        "name": "decode",
-                        "accepted_gaps": ["tensor_cast.extra"],
-                        "expected": {
-                            "major_ops": [
-                                {
-                                    "name": "tensor_cast.missing.default",
-                                    "count": 1,
-                                    "confidence": "low",
-                                }
-                            ],
-                        },
-                    }
-                ],
-            }
-        )
-        actual = build_actual_summary_from_events(
-            [
-                RuntimeEvent(
-                    OpInvokeInfo(_FakeOp("tensor_cast.extra.default"), (), {}, None),
-                    {"analytic": PerformanceModel.Result(1.0)},
-                )
-            ],
-            case_name="decode",
-            perf_model_name="analytic",
-            total_forward_time_s=1.0,
+    def test_simulation_verification_end_to_end_on_tiny_fixture(self):
+        from tensor_cast.adapter.doctor import run_simulation_verification
+
+        user_input = UserInputConfig(
+            model_id="tests/assets/model_config/qwen3_vl_tiny",
+            num_queries=1,
+            query_len=8,
+            context_length=0,
+            image_batch_size=1,
+            image_height=224,
+            image_width=224,
+            word_embedding_tp=None,
+            performance_model=["analytic"],
         )
 
-        report = verify_evidence_case(evidence.cases[0], actual, extra_op_time_ratio=0.1)
+        report = run_simulation_verification(user_input).to_dict()
 
-        self.assertTrue(report.passed)
-        self.assertEqual(report.issues[0].severity, "warning")
-        self.assertEqual(report.issues[0].category, "OP_MAPPING_MISSING")
-        self.assertNotIn("tensor_cast.extra.default", str(report.to_dict()))
+        self.assertTrue(report["passed"], report["issues"])
+        attention = next(c for c in report["key_op_checks"] if c["category"] == "attention")
+        self.assertEqual(attention["expected_count"], attention["actual_count"])
+        self.assertGreater(attention["actual_count"], 0)
+        self.assertTrue(report["expectations_basis"]["vision_executed"])
+        self.assertEqual(report["case_input"]["model_id"], user_input.model_id)
+
+    def test_simulation_verification_captures_crash_with_patch_discovery(self):
+        """A crashing simulation must yield a structured report, not a traceback.
+
+        The report carries SIMULATION_ERROR plus patch-discovery AI tasks so
+        the skill (or the downstream workflow) can drive the bug fix without
+        manually collecting logs.
+        """
+        from tensor_cast.adapter.doctor import run_simulation_verification
+
+        user_input = UserInputConfig(
+            model_id="tests/assets/model_config/qwen3_vl_tiny",
+            num_queries=1,
+            query_len=8,
+            context_length=0,
+            word_embedding_tp=None,
+            performance_model=["analytic"],
+        )
+        failure = RuntimeError("aten.nonzero.default cannot infer output shape for meta tensor boolean mask indexing")
+
+        with patch("tensor_cast.adapter.doctor.run_simulation_case", side_effect=failure):
+            report = run_simulation_verification(user_input).to_dict()
+
+        self.assertFalse(report["passed"])
+        self.assertFalse(report["simulation"]["ran_without_error"])
+        self.assertIn("nonzero", report["simulation"]["error"])
+        self.assertIn("Traceback", report["simulation"]["traceback"])
+        categories = {issue["category"] for issue in report["issues"]}
+        self.assertIn("SIMULATION_ERROR", categories)
+        task_types = [task["task_type"] for task in report["ai_tasks"]]
+        self.assertIn("PATCH_METHOD_AUTHORING", task_types)
+        self.assertTrue(any("nonzero" in task["prompt_text"] for task in report["ai_tasks"]))
+
+    def test_simulation_verification_flags_unregistered_moe_model(self):
+        from tensor_cast.adapter.doctor import run_simulation_verification
+
+        user_input = UserInputConfig(
+            model_id="tests/assets/model_config/qwen3_moe_30b_a3b",
+            num_queries=1,
+            query_len=8,
+            context_length=0,
+            word_embedding_tp=None,
+            performance_model=["analytic"],
+        )
+
+        original_profile = registry._MODEL_PROFILE_REGISTRY.pop("qwen3_moe")
+        try:
+            report = run_simulation_verification(user_input).to_dict()
+        finally:
+            registry._MODEL_PROFILE_REGISTRY["qwen3_moe"] = original_profile
+
+        self.assertFalse(report["passed"])
+        categories = {issue["category"] for issue in report["issues"]}
+        self.assertIn("MOE_NOT_ADAPTED", categories)
+        attention = next(c for c in report["key_op_checks"] if c["category"] == "attention")
+        self.assertTrue(attention["matched"])
 
     def test_inspect_picks_nested_and_non_default_expert_key(self):
         model = SimpleNamespace(
@@ -1279,16 +1445,6 @@ RuntimeError: aten.nonzero.default cannot infer output shape for meta tensor boo
         self.assertEqual(report.pass_name, "Quant")
         self.assertEqual(report.replaced_modules, ["linear"])
         self.assertIsInstance(model._inner.linear, TensorCastQuantLinear)
-
-    def test_skill_task_protocol(self):
-        task = build_unsupported_semantics_task(
-            "new gate semantics",
-            {"verification_report": {"category": "UNSUPPORTED_MODEL_SEMANTICS"}},
-            recipe="deepseek_like_mla_moe",
-        )
-
-        self.assertIn("deterministic PASS", " ".join(task.verification_steps))
-        self.assertEqual(task.recipe, "deepseek_like_mla_moe")
 
     def test_ai_assistance_task_serializes_dataclass_payload(self):
         task = AiAssistanceTask(

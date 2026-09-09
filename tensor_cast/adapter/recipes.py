@@ -133,32 +133,3 @@ def materialization_hints_to_dict(
         }
         for hint in _matching_recipe_hints(structure, candidate)
     ]
-
-
-@dataclasses.dataclass(frozen=True)
-class SkillTask:
-    title: str
-    reason: str
-    inputs: Dict[str, Any]
-    expected_outputs: List[str]
-    verification_steps: List[str]
-    recipe: Optional[str] = None
-
-
-def build_unsupported_semantics_task(reason: str, inputs: Dict[str, Any], recipe: Optional[str] = None) -> SkillTask:
-    return SkillTask(
-        title="Implement unsupported TensorCast model adapter semantics",
-        reason=reason,
-        inputs=inputs,
-        expected_outputs=[
-            "candidate ModelProfile diff",
-            "candidate wrapper or performance-model implementation",
-            "tests or evidence verifier assertions",
-        ],
-        verification_steps=[
-            "run patch dry-run and inspect PatchReport",
-            "run actual summary collection for evidence case",
-            "run EvidenceVerifier and require deterministic PASS",
-        ],
-        recipe=recipe,
-    )

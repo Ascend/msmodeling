@@ -73,12 +73,11 @@
 |:---|:---|:---|:---|:---|
 | `--chrome-trace-file` | `--chrome-trace` | `chrome_trace` | text-generate、throughput-optimizer、video-generate、image-generate | Chrome trace JSON，metavar `<FILE>` |
 | `--graph-log-path` | `--graph-log-url`、`--graph-log-file` | `graph_log_url` | 仅 text-generate | 编译图 dump **目录**，`<DIR>`。内部交给 `GraphTransformObserver(log_url=...)` |
-| `--profiling-database-path` | `--profiling-database` | `profiling_database` | text-generate、throughput-optimizer、model-adapter verify 相关路径 | profiling CSV 目录，`<DIR>` |
+| `--profiling-database-path` | `--profiling-database` | `profiling_database` | text-generate、throughput-optimizer 相关路径 | profiling CSV 目录，`<DIR>` |
 | `--export-empirical-metrics-file` | `--export-empirical-metrics` | `export_empirical_metrics` | text-generate | M1–M5 JSON；须 `--performance-model profiling` |
-| `-o, --output-file` | `--output` | `output` | model-adapter doctor / verify / export-evidence | JSON 或 evidence YAML |
+| `-o, --output-file` | `--output` | `output` | model-adapter doctor / verify | JSON 报告 |
 | `--profile-draft-output-file` | `--profile-draft-output` | `profile_draft_output` | model-adapter doctor | ModelProfile 草稿文件 |
 | `--st-case-output-path` | `--st-case-output` | `st_case_output` | model-adapter verify | ST case 输出；help 写文件或目录，metavar 为 `<FILE>` |
-| `--doctor-report-file` | `--doctor-report` | `doctor_report` | model-adapter export-evidence | 输入 doctor JSON；缺省时 handler 报错（别名不能 `required=True`） |
 
 其它改名：
 
@@ -101,7 +100,7 @@
 | 正式接口 | dest / 行为 | 挂载位置（当前代码） |
 |:---|:---|:---|
 | `-V, --version` | `VersionAction`，打印后 `parser.exit(0)` | 顶层 `msmodeling`、`inference` 父 parser、text-generate / throughput-optimizer（经 `get_common_argparser`）、video-generate、image-generate、model-adapter 及其子命令、optix |
-| `--log-level {debug,info,warning,error,critical}` | `log_level`，argparse 默认 `"error"` | `get_common_argparser`、video-generate、image-generate、model-adapter **doctor/verify**、optix。**顶层 `msmodeling` 与 `model-adapter export-evidence` 不挂日志选项** |
+| `--log-level {debug,info,warning,error,critical}` | `log_level`，argparse 默认 `"error"` | `get_common_argparser`、video-generate、image-generate、model-adapter **doctor/verify**、optix。**顶层 `msmodeling` 不挂日志选项** |
 | `-v, --verbose` | `verbose`，`store_true` | 与 `--log-level` 同挂载 |
 | `-q, --quiet` | `quiet`，`store_true` | 同上 |
 | `-j, --jobs` | 默认 `8`，`<N>` | 仅 throughput-optimizer；寻优进程并发，不是模型 TP/DP |
@@ -201,7 +200,7 @@ msmodeling (cli/main.py, SpecArgumentParser)
 ├── inference               # 仅 version + Commands；剩余 argv 转交
 │   ├── text-generate       # parents=get_common_argparser()；inherit_deprecated
 │   ├── throughput-optimizer
-│   ├── model-adapter {doctor, verify, export-evidence}
+│   ├── model-adapter {doctor, verify}
 │   ├── video-generate      # 独立 parser，不走 common_parser
 │   └── image-generate      # 独立 parser，不走 common_parser
 └── optix                   # optix/optimizer/optimizer.py，独立 SpecArgumentParser
@@ -351,7 +350,7 @@ optix：`msmodeling optix --help`。若缺 `pydantic_settings` 直接报错，�
 - `python -m cli.inference.throughput_optimizer --help`
 - `python -m cli.inference.video_generate --help`
 - `python -m cli.inference.image_generate --help`
-- `python -m cli.inference.model_adapter doctor --help`（`verify` / `export-evidence` 抽一个）
+- `python -m cli.inference.model_adapter doctor --help`（`verify` 抽一个）
 - `msmodeling optix --help`
 
 **通过标准：**

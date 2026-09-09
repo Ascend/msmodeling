@@ -101,29 +101,32 @@ def test_model_adapter_main_cli(
     tmp_path: Path,
 ) -> None:
     """Exercise model_adapter.main in-process for CI test_map coverage."""
-    doctor_report = tmp_path / "doctor.json"
-    doctor_report.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
-        "tensor_cast.adapter.evidence_export.export_evidence_from_doctor_report",
-        lambda _report, _output: "version: 1\n",
+        "tensor_cast.adapter.doctor.run_simulation_verification",
+        lambda _user_input: SimpleNamespace(
+            to_dict=lambda: {"passed": True},
+        ),
     )
 
+    verify_output = tmp_path / "verify.json"
     result = run_module_main(
         "cli.inference.model_adapter",
         [
-            "export-evidence",
-            "--doctor-report",
-            str(doctor_report),
+            "verify",
+            "--model-id",
+            "Tiny/Adapter",
+            "--output-file",
+            str(verify_output),
         ],
     )
 
     assert result.returncode == 0
-    assert "version: 1" in result.stdout
+    assert '"passed": true' in verify_output.read_text(encoding="utf-8")
     _assert_logo_on_stderr(result.stderr)
 
 
 def test_model_adapter_help_entrypoints_do_not_require_check_dependencies() -> None:
-    for argv in (["--help"], ["doctor", "--help"], ["verify", "--help"], ["export-evidence", "--help"]):
+    for argv in (["--help"], ["doctor", "--help"], ["verify", "--help"]):
         result = run_module_main("cli.inference.model_adapter", argv)
         assert result.returncode == 0, argv
         assert "usage:" in (result.stdout + result.stderr).lower()

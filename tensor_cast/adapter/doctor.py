@@ -1,5 +1,7 @@
 import contextlib
+import copy
 import dataclasses
+import traceback as traceback_module
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from tensor_cast.core.model_builder import build_model
@@ -9,22 +11,24 @@ from tensor_cast.transformers.custom_model_registry import (
     ignore_model_profiles,
 )
 
-from .actual import ActualSummary
 from .advisor import AdvisorSuggestion, advise
-from .context import AdaptationContext
-from .evidence import EvidenceDocument, load_evidence
-from .evidence_builder import build_evidence_draft
-from .hints import HintLedger
+from .context import AdaptationContext, user_input_to_case_dict
+from .expectations import derive_key_op_expectations
 from .inspect import ModelStructureFacts, ProfileCandidate, inspect_model_structure
-from .insight import RawInsightSummary
 from .patch_report import PatchReport
 from .patch_discovery import classify_patch_failure
 from .profile import profile_to_review_dict, validate_profile
 from .profile_draft import render_builtin_profile_draft
 from .questions import build_human_questions
 from .recipes import materialization_hints_to_dict, materialize_profile_candidate
-from .runner import run_actual_case
-from .verifier import VerificationReport, verify_evidence_case
+from .runner import run_simulation_case
+from .verifier import (
+    KeyOpCheck,
+    SimulationVerificationReport,
+    VerificationIssue,
+    collect_verification_issues,
+    verify_key_op_counts,
+)
 
 
 def _dataclass_to_dict(value: Any) -> Any:
@@ -60,10 +64,6 @@ class DoctorReport:
     model_id: str
     model_type: Optional[str]
     adaptation_context: Optional[Dict[str, Any]]
-    raw_insight_summary: Optional[Dict[str, Any]]
-    user_hints: Optional[Dict[str, Any]]
-    hint_conflicts: List[Dict[str, Any]]
-    evidence_draft: Optional[Dict[str, Any]]
     human_questions: List[Dict[str, Any]]
     patch_discovery: Optional[Dict[str, Any]]
     ai_tasks: List[Dict[str, Any]]
@@ -87,15 +87,20 @@ def run_model_doctor(
     user_input: UserInputConfig,
     build_runtime_model: bool = True,
     adaptation_context: Optional[AdaptationContext] = None,
-    raw_insight: Optional[RawInsightSummary] = None,
-    hints: Optional[HintLedger] = None,
     ignore_existing_profiles: Optional[Sequence[str]] = None,
     patch_failure_text: Optional[str] = None,
 ) -> DoctorReport:
     ignored_profiles = list(ignore_existing_profiles or [])
     profile_context = ignore_model_profiles(ignored_profiles) if ignored_profiles else contextlib.nullcontext()
+    # The structure scan needs the complete module tree: repeated-layer reuse
+    # collapses identical layers into copy wrappers and would under-report the
+    # module counts that key-op expectations are derived from. The runtime
+    # verification run keeps the user's repetition setting (region replay
+    # restores full op counts either way).
+    scan_input = copy.copy(user_input)
+    scan_input.disable_repetition = True
     with profile_context:
-        model = build_model(user_input) if build_runtime_model else None
+        model = build_model(scan_input) if build_runtime_model else None
         if model is None:
             raise ValueError(
                 "build_runtime_model=False is not supported yet because structure scan needs a model instance."
@@ -111,16 +116,6 @@ def run_model_doctor(
             structure=structure,
             candidate=candidate,
             patch_reports=patch_reports,
-        )
-        evidence_draft = None
-        if adaptation_context is not None and raw_insight is not None:
-            evidence_draft = build_evidence_draft(
-                adaptation_context,
-                raw_insight,
-                hints=hints,
-            )
-        hint_conflicts = (
-            [] if hints is None else [conflict.to_dict() for conflict in hints.conflicts_with_raw_insight(raw_insight)]
         )
         patch_discovery = None
         ai_tasks = []
@@ -140,17 +135,13 @@ def run_model_doctor(
             patch_method_name=patch_method_name,
         )
         human_questions = build_human_questions(
-            evidence_draft=evidence_draft,
-            hint_conflicts=hint_conflicts,
+            structure=structure,
+            candidate=candidate,
         )
     return DoctorReport(
         model_id=user_input.model_id,
         model_type=structure.model_type,
         adaptation_context=adaptation_context.to_dict() if adaptation_context is not None else None,
-        raw_insight_summary=raw_insight.to_dict(top_n=20) if raw_insight is not None else None,
-        user_hints=hints.to_dict() if hints is not None else None,
-        hint_conflicts=hint_conflicts,
-        evidence_draft=evidence_draft,
         human_questions=human_questions,
         patch_discovery=patch_discovery,
         ai_tasks=ai_tasks,
@@ -168,54 +159,125 @@ def run_model_doctor(
     )
 
 
-@dataclasses.dataclass(frozen=True)
-class EvidenceRunReport:
-    evidence_model: Dict[str, Any]
-    evidence_cases: List[Dict[str, Any]]
-    actual_summaries: List[Dict[str, Any]]
-    verification_reports: List[Dict[str, Any]]
-    suggestions: List[Dict[str, Any]]
-
-    @property
-    def passed(self) -> bool:
-        return all(report.get("passed", False) for report in self.verification_reports)
-
-    def to_dict(self) -> Dict[str, Any]:
-        data = dataclasses.asdict(self)
-        data["passed"] = self.passed
-        return data
+def default_verification_case_name(user_input: UserInputConfig) -> str:
+    model_name = user_input.model_id.rstrip("/").split("/")[-1].lower().replace("_", "-")
+    phase = "decode" if user_input.decode else "prefill"
+    return f"{model_name}-{phase}"
 
 
-def verify_evidence_with_actuals(
-    evidence: EvidenceDocument,
-    actuals: Dict[str, ActualSummary],
-) -> EvidenceRunReport:
-    verification_reports: List[VerificationReport] = []
-    suggestions: List[AdvisorSuggestion] = []
-    for case in evidence.cases:
-        actual = actuals.get(case.name)
-        if actual is None:
-            raise ValueError(f"No actual summary was provided for evidence case {case.name!r}.")
-        verification = verify_evidence_case(case, actual)
-        verification_reports.append(verification)
-        suggestions.extend(advise(actual=actual, verification=verification))
-    return EvidenceRunReport(
-        evidence_model=evidence.model,
-        evidence_cases=[_dataclass_to_dict(case) for case in evidence.cases],
-        actual_summaries=[actual.to_dict() for actual in actuals.values()],
-        verification_reports=[report.to_dict() for report in verification_reports],
-        suggestions=suggestions_to_dict(suggestions),
+def _moe_patch_replacements(patch_reports: List[Dict[str, Any]]) -> Optional[int]:
+    """Total MoE-block replacements recorded during the doctor build, if any."""
+    total = None
+    for report in patch_reports or []:
+        if report.get("pass_name") != "MoE":
+            continue
+        count = len(report.get("replaced_modules") or [])
+        total = count if total is None else total + count
+    return total
+
+
+def _simulation_failure_report(
+    user_input: UserInputConfig,
+    case_name: str,
+    error: BaseException,
+    doctor_report: Optional[DoctorReport] = None,
+) -> SimulationVerificationReport:
+    """Build a failed report for a simulation that raised.
+
+    The failure is captured instead of propagating so that callers (the AI
+    skill or the downstream precision workflow) always get a structured
+    report: the error details plus patch-discovery AI tasks that guide the
+    bug fix, which is the critical loop for reaching a runnable simulation.
+    """
+    tb_text = "".join(traceback_module.format_exception(type(error), error, error.__traceback__))
+    model_type = doctor_report.model_type if doctor_report is not None else None
+    patch_discovery = classify_patch_failure(
+        tb_text,
+        model_type=model_type,
+        failed_command=None,
+    ).to_dict()
+    structure = doctor_report.structure if doctor_report is not None else {}
+    basis = derive_key_op_expectations(structure, user_input)
+    issue = VerificationIssue(
+        category="SIMULATION_ERROR",
+        message=(
+            f"The simulation case did not complete: {type(error).__name__}: {error}. "
+            "Patch-discovery findings and AI assistance tasks are attached in "
+            "ai_tasks; follow them to fix the model adaptation, then rerun verify."
+        ),
+        severity="error",
+        expected="simulation completes",
+        actual=f"{type(error).__name__}: {error}",
+    )
+    issues = [issue]
+    return SimulationVerificationReport(
+        model_id=user_input.model_id,
+        model_type=model_type,
+        case_name=case_name,
+        passed=False,
+        case_input=user_input_to_case_dict(user_input),
+        simulation={
+            "ran_without_error": False,
+            "error": f"{type(error).__name__}: {error}",
+            "traceback": tb_text,
+        },
+        expectations_basis=basis.to_dict(),
+        key_op_checks=[],
+        issues=issues,
+        suggestions=suggestions_to_dict(advise(verification_issues=issues)),
+        actual_summary={},
+        ai_tasks=list(patch_discovery.get("ai_tasks", [])),
     )
 
 
-def run_evidence_verification(evidence_path: str, user_input: UserInputConfig) -> EvidenceRunReport:
-    evidence = load_evidence(evidence_path)
-    if not user_input.model_id:
-        model_id = evidence.model.get("model_id")
-        if model_id:
-            user_input.model_id = str(model_id)
-    actuals: Dict[str, ActualSummary] = {}
-    for case in evidence.cases:
-        result = run_actual_case(case, user_input)
-        actuals[case.name] = result.summary
-    return verify_evidence_with_actuals(evidence, actuals)
+def run_simulation_verification(
+    user_input: UserInputConfig,
+    case_name: Optional[str] = None,
+) -> SimulationVerificationReport:
+    """Verify a newly adapted model end to end without measured data.
+
+    Runs the doctor structure scan, executes one simulation case, and
+    reconciles key TensorCast op call counts against structure-derived
+    expectations. A simulation that raises is captured as a failed report
+    with patch-discovery AI tasks attached instead of propagating.
+    """
+    name = case_name or default_verification_case_name(user_input)
+    doctor_report: Optional[DoctorReport] = None
+    try:
+        doctor_report = run_model_doctor(user_input)
+        result = run_simulation_case(user_input, case_name=name)
+    except Exception as error:  # noqa: BLE001 - reported as SIMULATION_ERROR
+        return _simulation_failure_report(user_input, name, error, doctor_report=doctor_report)
+    moe_patch_replacements = _moe_patch_replacements(doctor_report.patch_reports)
+    basis = derive_key_op_expectations(
+        doctor_report.structure,
+        user_input,
+        moe_patch_replacements=moe_patch_replacements,
+    )
+    checks: List[KeyOpCheck] = verify_key_op_counts(basis, result.summary, user_input)
+    issues: List[VerificationIssue] = collect_verification_issues(
+        checks,
+        basis,
+        result.summary,
+        user_input,
+        moe_patch_replacements=moe_patch_replacements,
+    )
+    suggestions = advise(verification_issues=issues)
+    passed = not any(issue.severity == "error" for issue in issues)
+    return SimulationVerificationReport(
+        model_id=user_input.model_id,
+        model_type=doctor_report.model_type,
+        case_name=name,
+        passed=passed,
+        case_input=user_input_to_case_dict(user_input),
+        simulation={
+            "ran_without_error": True,
+            "total_forward_time_s": result.summary.total_forward_time_s,
+            "perf_model_name": result.summary.perf_model_name,
+        },
+        expectations_basis=basis.to_dict(),
+        key_op_checks=checks,
+        issues=issues,
+        suggestions=suggestions_to_dict(suggestions),
+        actual_summary=result.summary.to_dict(),
+    )

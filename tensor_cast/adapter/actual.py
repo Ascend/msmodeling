@@ -1,6 +1,6 @@
 import collections
 import dataclasses
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 
@@ -14,7 +14,6 @@ class ActualOpSummary:
     total_time_s: float
     avg_time_s: float
     shape_variants: Tuple[str, ...] = ()
-    coverage: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -23,7 +22,6 @@ class ActualOpSummary:
             "total_time_s": self.total_time_s,
             "avg_time_s": self.avg_time_s,
             "shape_variants": list(self.shape_variants),
-            "coverage": dict(self.coverage),
         }
 
 
@@ -33,20 +31,15 @@ class ActualSummary:
     total_forward_time_s: float
     ops: Dict[str, ActualOpSummary]
     perf_model_name: Optional[str] = None
-    coverage: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def get_op(self, name: str) -> Optional[ActualOpSummary]:
         return self.ops.get(name)
-
-    def high_time_ops(self, min_total_time_s: float) -> List[ActualOpSummary]:
-        return [op for op in self.ops.values() if op.total_time_s >= min_total_time_s]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "case_name": self.case_name,
             "total_forward_time_s": self.total_forward_time_s,
             "perf_model_name": self.perf_model_name,
-            "coverage": dict(self.coverage),
             "ops": {name: op.to_dict() for name, op in sorted(self.ops.items())},
         }
 
@@ -75,7 +68,6 @@ def build_actual_summary_from_events(
     case_name: str = "default",
     perf_model_name: Optional[str] = None,
     total_forward_time_s: Optional[float] = None,
-    coverage: Optional[Dict[str, Any]] = None,
 ) -> ActualSummary:
     aggregated: Dict[str, Dict[str, Any]] = collections.defaultdict(
         lambda: {"count": 0, "total_time_s": 0.0, "shape_variants": set()}
@@ -115,7 +107,6 @@ def build_actual_summary_from_events(
         total_forward_time_s=total_time_sum if total_forward_time_s is None else total_forward_time_s,
         ops=ops,
         perf_model_name=inferred_perf_model_name,
-        coverage={} if coverage is None else coverage,
     )
 
 
@@ -123,7 +114,6 @@ def build_actual_summary_from_runtime(
     runtime: Runtime,
     case_name: str = "default",
     perf_model_name: Optional[str] = None,
-    coverage: Optional[Dict[str, Any]] = None,
 ) -> ActualSummary:
     model_name = perf_model_name
     if model_name is None and runtime.perf_models:
@@ -136,5 +126,4 @@ def build_actual_summary_from_runtime(
         case_name=case_name,
         perf_model_name=model_name,
         total_forward_time_s=total_forward_time_s,
-        coverage=coverage,
     )

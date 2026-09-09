@@ -131,7 +131,7 @@ def test_main_dispatches_nested_image_generate_subcommand() -> None:
         ),
         (
             "model-adapter",
-            ("doctor", "verify", "export-evidence"),
+            ("doctor", "verify", "ModelProfile", "key operator call counts"),
         ),
         (
             "image-generate",

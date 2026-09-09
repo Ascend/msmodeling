@@ -497,7 +497,6 @@ def test_model_adapter_subcommand_help_meets_spec() -> None:
         ["--help"],
         ["doctor", "--help"],
         ["verify", "--help"],
-        ["export-evidence", "--help"],
     ):
         result = run_module_main("cli.inference.model_adapter", argv)
         assert result.returncode == 0, argv
@@ -511,6 +510,9 @@ def test_model_adapter_subcommand_help_meets_spec() -> None:
             assert "--model_id" in result.stdout
             assert "--no-repetition" in result.stdout
             assert "--disable-repetition" not in result.stdout
+        if argv[0] == "doctor":
+            assert "--raw-insight-file" not in result.stdout
+            assert "--hints-file" not in result.stdout
 
 
 def test_top_level_help_lists_commands() -> None:

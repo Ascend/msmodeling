@@ -1,7 +1,7 @@
 import dataclasses
 import shlex
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Union
 
 
 _BOOL_OPTIONS = {
@@ -153,21 +153,38 @@ def load_command_text(path: Union[str, Path]) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def load_context_from_command_file(
-    command_file: Union[str, Path],
-    raw_insight_file: Optional[Union[str, Path]] = None,
-    hints_file: Optional[Union[str, Path]] = None,
-) -> AdaptationContext:
-    context = parse_simulation_command(load_command_text(command_file))
-    artifacts = dict(context.artifacts)
-    if raw_insight_file is not None:
-        artifacts["raw_insight_file"] = str(raw_insight_file)
-    if hints_file is not None:
-        artifacts["hints_file"] = str(hints_file)
-    return dataclasses.replace(context, artifacts=artifacts)
+def load_context_from_command_file(command_file: Union[str, Path]) -> AdaptationContext:
+    return parse_simulation_command(load_command_text(command_file))
 
 
 def apply_context_to_namespace(args: Any, context: AdaptationContext) -> None:
     args.model_id = context.model_id
     for key, value in context.normalized_args.items():
         setattr(args, key, value)
+
+
+def user_input_to_case_dict(user_input: Any) -> Dict[str, Any]:
+    """Serialize a UserInputConfig into a regression-case compatible dict.
+
+    Only fields that differ from their defaults are kept, values are
+    JSON-friendly (enums as names, tuples as lists), and every emitted key is
+    a valid ``UserInputConfig`` constructor kwarg so the dict can round-trip
+    through the benchmark regression case loader.
+    """
+    import dataclasses
+    import enum
+
+    defaults = type(user_input)()
+    data: Dict[str, Any] = {}
+    for field in dataclasses.fields(user_input):
+        value = getattr(user_input, field.name)
+        if value is None or value == getattr(defaults, field.name):
+            continue
+        if isinstance(value, enum.Enum):
+            value = value.name
+        elif isinstance(value, tuple):
+            value = [item.name if isinstance(item, enum.Enum) else item for item in value]
+        elif isinstance(value, list):
+            value = [item.name if isinstance(item, enum.Enum) else item for item in value]
+        data[field.name] = value
+    return data

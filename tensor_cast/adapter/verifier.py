@@ -1,8 +1,28 @@
+"""Run-through verification for streamlined model adaptation.
+
+Verification has two guarantees, both free of measured profiling data:
+
+1. the simulation runs the case end to end without raising;
+2. key TensorCast operator call counts (attention-style ops, MoE gating ops)
+   match the expectations derived from the model's public structure.
+
+Full-coverage op-shape/dtype checks and profiling-based precision comparison
+are handled by the downstream precision workflow, not here.
+"""
+
 import dataclasses
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .actual import ActualSummary
-from .evidence import EvidenceCase, ExpectedOp
+from .expectations import (
+    KEY_OP_CATEGORIES,
+    MOE_GATING_CATEGORY,
+    ExpectationBasis,
+    classify_op,
+    summarize_key_ops,
+    tensor_cast_op_token,
+    unclassified_tensor_cast_ops,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -12,7 +32,6 @@ class VerificationIssue:
     severity: str = "error"
     expected: Optional[object] = None
     actual: Optional[object] = None
-    evidence_path: str = ""
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -21,182 +40,231 @@ class VerificationIssue:
             "severity": self.severity,
             "expected": self.expected,
             "actual": self.actual,
-            "evidence_path": self.evidence_path,
         }
 
 
 @dataclasses.dataclass(frozen=True)
-class VerificationReport:
-    case_name: str
-    passed: bool
-    issues: List[VerificationIssue]
+class KeyOpCheck:
+    category: str
+    expected_count: int
+    actual_count: int
+    op_breakdown: Dict[str, int]
+    basis: str
+    severity: str = "error"
 
-    def issues_by_category(self) -> Dict[str, List[VerificationIssue]]:
-        grouped: Dict[str, List[VerificationIssue]] = {}
-        for issue in self.issues:
-            grouped.setdefault(issue.category, []).append(issue)
-        return grouped
+    @property
+    def matched(self) -> bool:
+        return self.expected_count == self.actual_count
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            "case_name": self.case_name,
-            "passed": self.passed,
-            "issues": [issue.to_dict() for issue in self.issues],
+            "category": self.category,
+            "expected_count": self.expected_count,
+            "actual_count": self.actual_count,
+            "matched": self.matched,
+            "op_breakdown": dict(self.op_breakdown),
+            "basis": self.basis,
+            "severity": self.severity,
         }
 
 
-def _format_expected_count(expected_op: ExpectedOp) -> object:
-    if expected_op.count is not None:
-        return expected_op.count
-    return {"min": expected_op.count_min, "max": expected_op.count_max}
+@dataclasses.dataclass(frozen=True)
+class SimulationVerificationReport:
+    model_id: str
+    model_type: Optional[str]
+    case_name: str
+    passed: bool
+    case_input: Dict[str, Any]
+    simulation: Dict[str, Any]
+    expectations_basis: Dict[str, Any]
+    key_op_checks: List[KeyOpCheck]
+    issues: List[VerificationIssue]
+    suggestions: List[Dict[str, Any]]
+    actual_summary: Dict[str, Any]
+    ai_tasks: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = {
+            "model_id": self.model_id,
+            "model_type": self.model_type,
+            "case_name": self.case_name,
+            "passed": self.passed,
+            "case_input": dict(self.case_input),
+            "simulation": dict(self.simulation),
+            "expectations_basis": dict(self.expectations_basis),
+            "key_op_checks": [check.to_dict() for check in self.key_op_checks],
+            "issues": [issue.to_dict() for issue in self.issues],
+            "suggestions": list(self.suggestions),
+            "actual_summary": dict(self.actual_summary),
+            "ai_tasks": list(self.ai_tasks),
+        }
+        return data
 
 
-def _severity_for_expected_op(expected_op: ExpectedOp) -> str:
-    return "warning" if expected_op.confidence.lower() in {"low", "medium"} else "error"
+def _has_tensor_cast_ops(actual: ActualSummary) -> bool:
+    return any("tensor_cast." in name for name in actual.ops)
 
 
-def _accepted_gap_matches(evidence_case: EvidenceCase, op_name: str) -> bool:
-    return any(op_name in gap or gap in op_name for gap in evidence_case.accepted_gaps)
+# MoE-path TensorCast ops invoked by the MoE wrapper forward regardless of
+# the gating branch (routing, dispatch/combine). Their presence proves the
+# MoE blocks execute on the TensorCast path even when gating goes through
+# the standard torch.topk / pre-computed route and emits no tensor_cast
+# gating op. Tokens are matched exactly (dispatch_ffn_combine by prefix to
+# cover its quant variants); grouped_matmul is deliberately excluded because
+# its many variants are not exclusive to the MoE path.
+_MOE_PATH_EXACT_TOKENS = frozenset({"init_routing_v2", "unpermute_tokens"})
+_MOE_PATH_TOKEN_PREFIXES = ("dispatch_ffn_combine",)
 
 
-def _is_tensor_cast_op(op_name: str) -> bool:
-    return op_name.startswith("tensor_cast.")
+def _is_moe_path_op(name: str) -> bool:
+    token = tensor_cast_op_token(name)
+    if token is None or classify_op(name) is not None:
+        return False
+    return token in _MOE_PATH_EXACT_TOKENS or any(token.startswith(prefix) for prefix in _MOE_PATH_TOKEN_PREFIXES)
 
 
-def _is_communication_op(op_name: str) -> bool:
-    lowered = op_name.lower()
-    return any(
-        token in lowered
-        for token in (
-            "allreduce",
-            "all_reduce",
-            "allgather",
-            "all_gather",
-            "alltoall",
-            "all_to_all",
-            "broadcast",
-            "reduce_scatter",
-            "hcom",
-            "hccl",
-            "collective",
-        )
-    )
+def _moe_path_op_count(actual: ActualSummary) -> int:
+    return sum(op.count for name, op in actual.ops.items() if _is_moe_path_op(name))
 
 
-def _missing_expected_category(expected_op: ExpectedOp, actual: ActualSummary) -> str:
-    if expected_op.name.startswith("profiling."):
-        return "FUSION_GAP_ACCEPTED_OR_NEEDS_REVIEW"
-    if _is_communication_op(expected_op.name):
-        return "COMMUNICATION_GAP"
-    if _is_tensor_cast_op(expected_op.name) and not any(_is_tensor_cast_op(name) for name in actual.ops):
-        return "PATCH_SEMANTICS_MISSING"
-    return "OP_MAPPING_MISSING"
+def _check_severity(user_input: Any) -> str:
+    """Key-op equality is only asserted for basic cases.
+
+    MTP and pipeline-parallel executions change how often key ops fire per
+    layer, so their mismatches are reported as warnings instead of errors.
+    """
+    if getattr(user_input, "num_mtp_tokens", 0) and int(user_input.num_mtp_tokens) > 0:
+        return "warning"
+    if getattr(user_input, "pp_size", 1) and int(user_input.pp_size) > 1:
+        return "warning"
+    return "error"
 
 
-def _coverage_issues(actual: ActualSummary) -> List[VerificationIssue]:
-    issues: List[VerificationIssue] = []
-    for model_name, coverage in actual.coverage.items():
-        if not isinstance(coverage, dict):
-            continue
-        m1 = coverage.get("m1") or coverage
-        hit_rate = m1.get("m1_raw_op_count_hr") if isinstance(m1, dict) else None
-        if hit_rate is not None and hit_rate < 1.0:
-            issues.append(
-                VerificationIssue(
-                    category="PROFILING_SHAPE_MISSING",
-                    message="Profiling coverage is incomplete for empirical performance model.",
-                    severity="warning",
-                    expected={"m1_raw_op_count_hr": 1.0},
-                    actual={"model": model_name, "m1_raw_op_count_hr": hit_rate},
-                    evidence_path="actual.coverage",
-                )
-            )
-    return issues
-
-
-def verify_evidence_case(
-    evidence_case: EvidenceCase,
+def verify_key_op_counts(
+    basis: ExpectationBasis,
     actual: ActualSummary,
-    extra_op_time_ratio: float = 0.05,
-    extra_op_min_time_s: float = 0.0,
-) -> VerificationReport:
-    issues: List[VerificationIssue] = []
+    user_input: Any = None,
+) -> List[KeyOpCheck]:
+    severity = _check_severity(user_input) if user_input is not None else "error"
+    actual_by_category = summarize_key_ops(actual.ops)
+    checks: List[KeyOpCheck] = []
+    for category in KEY_OP_CATEGORIES:
+        expectation = basis.expectations[category]
+        actual_entry = actual_by_category.get(category, {"count": 0, "op_breakdown": {}})
+        checks.append(
+            KeyOpCheck(
+                category=category,
+                expected_count=expectation.expected_count,
+                actual_count=int(actual_entry["count"]),
+                op_breakdown=dict(actual_entry["op_breakdown"]),
+                basis=expectation.basis,
+                severity=severity,
+            )
+        )
+    return checks
 
-    if evidence_case.total_forward is not None and not evidence_case.total_forward.matches(actual.total_forward_time_s):
+
+def collect_verification_issues(
+    checks: List[KeyOpCheck],
+    basis: ExpectationBasis,
+    actual: Optional[ActualSummary],
+    user_input: Any = None,
+    moe_patch_replacements: Optional[int] = None,
+) -> List[VerificationIssue]:
+    issues: List[VerificationIssue] = []
+    if not basis.text_attention_modules:
         issues.append(
             VerificationIssue(
-                category="LATENCY_MODEL_MISMATCH",
-                message="Total forward time is outside tolerance.",
-                expected=evidence_case.total_forward.time_s,
-                actual=actual.total_forward_time_s,
-                evidence_path=f"cases[{evidence_case.name}].expected.total_forward.time_s",
+                category="STRUCTURE_SCAN_EMPTY",
+                message=("No attention-like modules were found in the structure scan; expectations cannot be derived."),
+                expected=">=1 attention modules",
+                actual=0,
             )
         )
-
-    expected_names = {op.name for op in evidence_case.major_ops}
-    for index, expected_op in enumerate(evidence_case.major_ops):
-        actual_op = actual.get_op(expected_op.name)
-        path = f"cases[{evidence_case.name}].expected.major_ops[{index}]"
-        if actual_op is None:
-            category = _missing_expected_category(expected_op, actual)
+    if actual is None:
+        return issues
+    if not _has_tensor_cast_ops(actual):
+        issues.append(
+            VerificationIssue(
+                category="NO_TENSOR_CAST_OPS",
+                message=(
+                    "The simulation recorded no tensor_cast ops. The model likely fell "
+                    "back to un-adapted HF modules; check ModelProfile registration "
+                    "and patch replacement."
+                ),
+            )
+        )
+    unclassified = unclassified_tensor_cast_ops(actual.ops)
+    for check in checks:
+        if check.matched:
+            continue
+        if check.category == MOE_GATING_CATEGORY and check.expected_count > 0 and check.actual_count == 0:
+            if moe_patch_replacements or _moe_path_op_count(actual) > 0:
+                # MoE blocks execute on the TensorCast path (a non-empty MoE
+                # patch report or routing/dispatch ops prove it) and this
+                # model gates through the standard non-tensor-cast path (HF
+                # pre-computed top-k or torch.topk), so there is no
+                # tensor_cast gating op to count. An empty patch report
+                # (module name mismatch, missing fields) is not evidence and
+                # falls through to MOE_NOT_ADAPTED.
+                continue
             issues.append(
                 VerificationIssue(
-                    category=category,
-                    message=f"Expected major op {expected_op.name!r} is missing from actual summary.",
-                    severity=_severity_for_expected_op(expected_op),
-                    expected=expected_op.name,
-                    actual=None,
-                    evidence_path=f"{path}.name",
+                    category="MOE_NOT_ADAPTED",
+                    message=(
+                        f"{check.expected_count} MoE modules were found by the structure scan "
+                        "but no MoE patch was applied and no TensorCast MoE-path ops were "
+                        "invoked; the MoE path fell back to un-adapted HF modules. "
+                        "Register or fix the ModelProfile MoE fields."
+                    ),
+                    severity="error",
+                    expected=check.expected_count,
+                    actual=check.actual_count,
                 )
             )
             continue
-
-        if not expected_op.count_matches(actual_op.count):
-            issues.append(
-                VerificationIssue(
-                    category="OP_COUNT_MISMATCH",
-                    message=f"Op {expected_op.name!r} call count is outside expectation.",
-                    severity=_severity_for_expected_op(expected_op),
-                    expected=_format_expected_count(expected_op),
-                    actual=actual_op.count,
-                    evidence_path=f"{path}.count",
+        message = (
+            f"Key op category {check.category!r} call count is "
+            f"{check.actual_count}, expected {check.expected_count} ({check.basis})."
+        )
+        if check.actual_count == 0:
+            category = "KEY_OP_MISSING"
+            message += " No matching TensorCast ops were invoked; check module replacement and op routing."
+            if unclassified and check.category == "attention":
+                message += (
+                    " Unclassified tensor_cast ops recorded (name x count): "
+                    + ", ".join(f"{name} x{count}" for name, count in unclassified)
+                    + ". If one of them is a new attention computation core, register it in"
+                    " _ATTENTION_CORE_OPS (tensor_cast/adapter/expectations.py)."
                 )
+        else:
+            category = "OP_COUNT_MISMATCH"
+            message += " Check layer overrides, MTP, vision input, or missing wrapper replacement."
+        issues.append(
+            VerificationIssue(
+                category=category,
+                message=message,
+                severity=check.severity,
+                expected=check.expected_count,
+                actual=check.actual_count,
             )
-
-        if expected_op.total_time is not None and not expected_op.total_time.matches(actual_op.total_time_s):
-            issues.append(
-                VerificationIssue(
-                    category="LATENCY_MODEL_MISMATCH",
-                    message=f"Op {expected_op.name!r} total time is outside tolerance.",
-                    severity=_severity_for_expected_op(expected_op),
-                    expected=expected_op.total_time.time_s,
-                    actual=actual_op.total_time_s,
-                    evidence_path=f"{path}.total_time_s",
-                )
+        )
+    if user_input is not None and _check_severity(user_input) == "warning":
+        reasons = []
+        if int(getattr(user_input, "num_mtp_tokens", 0) or 0) > 0:
+            reasons.append("num_mtp_tokens > 0")
+        if int(getattr(user_input, "pp_size", 1) or 1) > 1:
+            reasons.append("pp_size > 1")
+        issues.append(
+            VerificationIssue(
+                category="EXPECTATION_DEGRADED",
+                message=(
+                    "Key-op count checks are degraded to warnings for this case ("
+                    + ", ".join(reasons)
+                    + "); rerun verify with a basic case (no MTP, pp_size=1) for "
+                    "strict equality."
+                ),
+                severity="warning",
             )
-
-    extra_threshold = max(actual.total_forward_time_s * extra_op_time_ratio, extra_op_min_time_s)
-    if extra_threshold > 0:
-        for op in actual.high_time_ops(extra_threshold):
-            if op.name in expected_names or _accepted_gap_matches(evidence_case, op.name):
-                continue
-            category = "COMMUNICATION_GAP" if _is_communication_op(op.name) else "FUSION_GAP_ACCEPTED_OR_NEEDS_REVIEW"
-            issues.append(
-                VerificationIssue(
-                    category=category,
-                    message=f"Actual high-time op {op.name!r} is not declared in evidence.",
-                    severity="warning",
-                    expected=None,
-                    actual={"count": op.count, "total_time_s": op.total_time_s},
-                    evidence_path=f"cases[{evidence_case.name}].expected.major_ops",
-                )
-            )
-
-    issues.extend(_coverage_issues(actual))
-
-    blocking = [issue for issue in issues if issue.severity == "error"]
-    return VerificationReport(
-        case_name=evidence_case.name,
-        passed=not blocking,
-        issues=issues,
-    )
+        )
+    return issues

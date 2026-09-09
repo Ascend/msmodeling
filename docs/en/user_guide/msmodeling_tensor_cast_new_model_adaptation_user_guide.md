@@ -1,9 +1,17 @@
-# TensorCast New Model Adaptation Guide
+# TensorCast New Model Adaptation Guide (Run-Through Scope)
 
 This guide describes the operational workflow for adding a HuggingFace-style
-model to TensorCast with the model adapter tools and the model-adaptation skill.
-It is the authoritative place for step-by-step commands, required inputs,
-outputs, review checkpoints, and replay/audit procedures.
+model to TensorCast with the model adapter tools and the model-adaptation
+skill. The current scope is **run-through adaptation**: the new model's
+simulation runs end to end on basic cases without errors, and key operator
+call counts (for example, attention-family ops) match what the model's public
+structure implies. No measured data is involved — the only inputs are the
+simulation command, the installed open-source model source/config, and
+optional simulation failure logs.
+
+Full-coverage shape/dtype validation and measured-profiling precision
+comparison are owned by the downstream precision workflow, which chains this
+guide's outputs.
 
 Use the design document for architecture and rationale:
 
@@ -19,71 +27,72 @@ Use this guide when a model needs TensorCast-specific adaptation, such as:
 - MLA or MTP module metadata.
 - Vision-language module paths and visual linear mappings.
 - Meta-device or compile compatibility patches.
-- Profiling evidence and regression guardrails for a newly adapted model.
+- New operator adaptation (op declaration plus compute/memory performance
+  properties).
 
 For dense text models with no special structure, the workflow may produce a
 minimal profile that only records `model_type`.
 
 ## 2. Prepare the Environment
 
-Run all commands from the repository root in a configured Linux or WSL Python
-environment.
+Run all commands from the msmodeling repository root with a configured Python
+environment. If you are not at the root, set `PYTHONPATH` first:
 
-Check the adapter CLI:
+```bash
+export PYTHONPATH=/path/to/msmodeling:$PYTHONPATH
+```
+
+Check that the model adapter CLI is available:
 
 ```bash
 python -m cli.inference.model_adapter doctor --help
-python -m cli.inference.model_adapter export-evidence --help
 python -m cli.inference.model_adapter verify --help
 ```
 
-If your AI assistant can load project skills, use:
+If your AI assistant supports project skills, use the model-adaptation skill:
 
 ```text
 .agents/skills/model-adaptation
 ```
 
-The skill helps process doctor reports, profile review, human checkpoints, AI
-patch tasks, evidence export, and verification. The deterministic adapter tools
-remain the source of truth for parsing, validation, and pass/fail checks.
+The skill helps with doctor reports, profile review, human checkpoints,
+new-operator placement, AI patch tasks, and run-through verification. The
+deterministic adapter tools remain the accurate source for parsing,
+validation, and pass/fail decisions.
 
-## 3. Required Inputs
+## 3. Prepare Inputs
 
-You need exactly two required inputs for a case:
+Create a case directory under `reports/` (a local working directory, covered
+by `.gitignore`) with the following input:
 
-| Input | Save As | Requirement |
+| Input | Save as | Requirement |
 | --- | --- | --- |
-| TensorCast simulation command | `reports/<case_name>/command.txt` | The exact command for the workload that matches the profiling export |
-| MindStudio Insight raw profiling export | `reports/<case_name>/raw_insight.txt` | A raw table export with a `Totals` row immediately after the header |
+| TensorCast simulation command | `reports/<case_name>/command.txt` | The full runnable workload command. |
 
-The raw Insight `Totals` row is important. Its `Wall Duration(ms)` value is the
-measured total forward time and is used in generated evidence.
+No measured input (no MindStudio Insight export, no profiling data) is
+required by this flow.
 
-Minimal raw Insight shape:
-
-```text
-Name    Wall Duration(ms)    Self Time(ms)    Average Wall Duration(ms)    Max Wall Duration(ms)    Min Wall Duration(ms)    Occurrences
-Totals  22.328398            22.328398        0.005782                     0.238545                 0.000000                 3862
-FusedInferAttentionScore_*    3.055183         3.055183                    0.049277                 0.068602                 0.043541                 62
-```
+Note: everything under `reports/<case_name>/` (command.txt, doctor.json,
+verify.json, failure.log, st_cases, ...) is a **development-time working
+artifact and is never committed**. Keep it for local debugging and for the
+downstream precision alignment workflow to consume off-repo; the repository
+only receives code, tests, docs, and optionally the ST guardrail case.
 
 Optional input:
 
-| Input | Save As | Use |
+| Input | Save as | Purpose |
 | --- | --- | --- |
-| Confirmed hints | `reports/<case_name>/hints.yaml` | Record reviewed kernel mappings, counts, shape notes, or user observations |
-| Failure log | `reports/<case_name>/failure.log` | Let doctor classify dry-run or smoke failures that may need a patch |
+| Failure log | `reports/<case_name>/failure.log` | Lets doctor classify dry-run or smoke failures and decide whether a patch is needed. |
 
-## 4. Create a Case Directory
+## 4. Create the Case Directory
 
-Replace `<case_name>` with a short stable name, for example
-`qwen3_vl_8b_prefill`.
+Choose a short, stable `<case_name>`, for example `qwen3_vl_8b_prefill`.
 
 ```bash
 mkdir -p reports/<case_name>
 ```
 
-Save the exact TensorCast simulation command:
+Save the full TensorCast simulation command:
 
 ```bash
 cat > reports/<case_name>/command.txt <<'EOF'
@@ -96,7 +105,7 @@ python -m cli.inference.text_generate <model_id> \
 EOF
 ```
 
-Example with multimodal and parallel options:
+Multimodal and quantization example:
 
 ```bash
 cat > reports/qwen3_vl_8b_prefill/command.txt <<'EOF'
@@ -114,64 +123,11 @@ python -m cli.inference.text_generate Qwen/Qwen3-VL-8B-Instruct \
 EOF
 ```
 
-Copy the matching MindStudio Insight raw export to:
-
-```text
-reports/<case_name>/raw_insight.txt
-```
-
-Expected outputs after this step:
-
-```text
-reports/<case_name>/command.txt
-reports/<case_name>/raw_insight.txt
-```
-
-## 5. Add Optional Hints
-
-Skip this step if no extra facts are confirmed.
-
-Create `reports/<case_name>/hints.yaml`:
-
-```yaml
-version: 1
-hints:
-  - kind: op_mapping_hint
-    profiling_op: FusedInferAttentionScore
-    tc_op: tensor_cast.attention.default
-    confidence: medium
-    note: "Derived from kernel name and matching call count."
-```
-
-Common hint kinds:
-
-| Kind | Fields | Use |
-| --- | --- | --- |
-| `op_mapping_hint` | `profiling_op`, `tc_op`, `confidence`, `note` | Map a raw Insight kernel to a TensorCast semantic op |
-| `profiling_op_observation` | `op`, `count`, `confidence`, `note` | Record a confirmed profiling-side count or interpretation |
-| `tc_op_observation` | `op`, `count`, `shape_variants`, `confidence`, `note` | Record a confirmed TensorCast-side count or shape |
-
-Hints are incremental. Do not guess fields just to fill the file.
-
-## 6. Run Doctor
-
-Run doctor with hints:
+## 5. Run Doctor
 
 ```bash
 python -m cli.inference.model_adapter doctor \
   --from-command-file reports/<case_name>/command.txt \
-  --raw-insight-file reports/<case_name>/raw_insight.txt \
-  --hints-file reports/<case_name>/hints.yaml \
-  --profile-draft-output reports/<case_name>/<model_type>_draft.py \
-  --output reports/<case_name>/doctor.json
-```
-
-Run doctor without hints:
-
-```bash
-python -m cli.inference.model_adapter doctor \
-  --from-command-file reports/<case_name>/command.txt \
-  --raw-insight-file reports/<case_name>/raw_insight.txt \
   --profile-draft-output reports/<case_name>/<model_type>_draft.py \
   --output reports/<case_name>/doctor.json
 ```
@@ -183,40 +139,80 @@ reports/<case_name>/doctor.json
 reports/<case_name>/<model_type>_draft.py
 ```
 
-Review these fields in `doctor.json`:
+Review the following `doctor.json` fields:
 
 | Field | Meaning | Action |
 | --- | --- | --- |
-| `adaptation_context` | Parsed command and normalized workload arguments | Confirm it matches the profiled workload |
-| `raw_insight_summary` | Parsed `Totals` and top kernels | Confirm total time and top kernels look plausible |
-| `candidate_profile` | Minimal proposed `ModelProfile` fields | Review against installed source |
-| `candidate_profile_validation` | Deterministic validation result for the candidate | Fix errors before registering the profile |
-| `candidate_profile_draft` | Draft Python module content | Use as a starting point only |
-| `profile` | Existing registered profile, if any | Use as reference in normal adaptation |
-| `profile_validation` | Validation result for the existing profile | Fix errors if present |
-| `evidence_draft` | Draft verification evidence | Export and review later |
-| `human_questions` | Minimal facts needed from the user | Answer through `hints.yaml` when possible |
-| `ai_tasks` | Bounded tasks for an AI assistant | Use only after reviewing deterministic findings |
-| `patch_reports` | Dry-run patch pass results | Check expected replacements and skipped modules |
-| `suggestions` | Recommended next actions | Use to decide the next iteration |
+| `adaptation_context` | Parsed command and normalized workload parameters. | Confirm they match the intended workload. |
+| `candidate_profile` | Minimal candidate `ModelProfile` fields. | Review against the installed model source. |
+| `candidate_profile_validation` | Deterministic validation of the candidate. | Fix errors before registering. |
+| `candidate_profile_draft` | Draft builtin profile module content. | Use only as a starting point. |
+| `profile` | Registered profile, if any. | Reference for a healthy adaptation. |
+| `profile_validation` | Validation of the registered profile. | Fix errors if present. |
+| `human_questions` | Minimal facts needing user confirmation (low-confidence candidate fields, structural gaps). | Confirm against source and encode into the profile. |
+| `ai_tasks` | Bounded tasks for an AI assistant. | Use only after reviewing deterministic findings. |
+| `patch_reports` | Dry-run patch results. | Check expected replacements and skipped modules. |
+| `suggestions` | Recommended next steps. | Drive the next iteration. |
 
-## 7. Inspect Installed Model Source
+## 6. Locate the Model Source Code
 
-Use the installed `transformers` implementation as the source of truth:
+Model source does not always come from the installed `transformers`. Resolve
+the source in this order:
 
-```bash
-python -c "import transformers; print(transformers.__file__)"
-```
+1. **The repository's current `transformers` version already supports the
+   model** — read it directly, usually
+   `transformers.models.<model_name>.modeling_<model_name>`.
+2. **A newer `transformers` release supports it, but the pinned version does
+   not** — prefer upgrading the repository's `transformers` dependency
+   (`pyproject.toml` / `uv.lock`) instead of copying model code into the
+   repo; after the upgrade this becomes case 1.
+3. **No `transformers` release supports it** — fetch the model source from
+   wherever it is open-sourced (HuggingFace model repo / remote code, vLLM or
+   other inference-framework implementations), and land it as a
+   model-specific module under `tensor_cast/transformers/builtin_model/`,
+   following the repo constraint of patch/wrapper layering (never modify
+   upstream dependencies in place).
 
-Then inspect the matching source module, usually:
+In every case, confirm real class names, module paths, config fields, and
+forward behavior in the actual source; do not fill profile fields from the
+model name alone.
 
-```text
-transformers.models.<model_name>.modeling_<model_name>
-```
+## 7. Adapt New Operators
 
-Do not fill profile fields from the model name alone. Confirm actual class
-names, module paths, config fields, and forward behavior in the installed
-source.
+Only add operator adaptation when the model forward uses semantics TensorCast
+does not yet support. Evidence: an `UNSUPPORTED_OP_ROUTING` classification in
+a dry-run failure log, or a confirmed new computational semantic in the model
+source. A new operator needs two pieces, placed as follows:
+
+1. **Op declaration (shape propagation)**: declare the op with
+   `@register_tensor_cast_op("<name>")` in the matching category file (or a
+   new file) under `tensor_cast/ops/`, with a meta-only body that propagates
+   shapes, and register the import in `tensor_cast/ops/__init__.py`. See
+   `tensor_cast/ops/attention.py` or `tensor_cast/ops/layernorm.py` for
+   reference implementations.
+
+2. **Performance properties (compute/memory formulas)**: register a functor
+   with `@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.<name>.default)`
+   in `tensor_cast/performance_model/__init__.py` that derives `mma_ops` /
+   `gp_ops` and memory traffic from the input shapes/dtypes in
+   `OpInvokeInfo`. Model-specific operators may live in
+   `tensor_cast/performance_model/builtin_model/` or the builtin model module.
+   The formulas must be derived from the open-source model's mathematical
+   semantics (order of magnitude of FLOPs, tensor sizes read/written);
+   cross-check magnitudes against comparable existing operators.
+
+Additional constraints:
+
+- If the new op is an attention computation core (invoked once per layer) and
+  its name does not contain the `attention` substring (for example
+  DeepSeek-V4's `sparse_attn_sharedkv`), it must also be added to
+  `_ATTENTION_CORE_OPS` in `tensor_cast/adapter/expectations.py`, otherwise
+  run-through verification cannot count it.
+- The empirical performance model relies on `op_mapping.yaml` op mapping; that
+  mapping is calibrated by the downstream precision workflow and is out of
+  scope here.
+- A new operator needs unit tests: correct meta shape propagation and
+  reasonable performance-property magnitudes.
 
 ## 8. Register the Reviewed Profile
 
@@ -226,21 +222,20 @@ Move the reviewed draft to:
 tensor_cast/transformers/builtin_model/<model_type>.py
 ```
 
-Use `register_model_profile(ModelProfile(...))`.
+Register with `register_model_profile(ModelProfile(...))`.
 
 Keep the profile minimal:
 
 - Include `model_type`.
-- Include only non-default MoE/MLA/MTP/VL fields that are confirmed.
+- Include only confirmed non-default MoE, MLA, MTP, or VL fields.
 - Use a plain `dict` for `moe_field_names_override`.
-- Use list form for nested expert count keys, for example
-  `["text_config", "num_experts"]`.
+- Use a list for nested expert count keys, e.g. `["text_config", "num_experts"]`.
 - Do not write empty overrides.
 - Do not write default `None` fields.
-- Do not write default `moe_num_experts_key="num_experts"` unless required by
-  the reviewed code path.
+- Do not write the default `moe_num_experts_key="num_experts"` unless a
+  reviewed code path needs it.
 
-Example profile:
+Profile example:
 
 ```python
 from tensor_cast.transformers.custom_model_registry import ModelProfile, register_model_profile
@@ -267,18 +262,18 @@ register_model_profile(
 
 ## 9. Handle Runtime Patch Needs
 
-Use `patch_method` only when the installed model source is incompatible with
-TensorCast simulation. Common causes:
+Use a `patch_method` only when the installed model source is incompatible
+with TensorCast simulation. Common reasons:
 
-- Data-dependent tensor scalar reads on `meta` tensors.
+- Reading data-dependent tensor scalars on `meta` tensors.
 - Python control flow based on tensor values.
-- Strict image or video placeholder checks.
-- Boolean mask indexing with dynamic output shape.
+- Strict image/video placeholder validation.
+- Boolean-mask indexing with dynamic output shapes.
 - Compile graph breaks.
-- Unsupported operator routing.
-- Forward signature mismatch.
+- Unsupported op routing.
+- Forward signature mismatches.
 
-Capture a full failure log:
+Capture the full failure log:
 
 ```bash
 set -o pipefail
@@ -290,14 +285,10 @@ Rerun doctor with the failure log:
 ```bash
 python -m cli.inference.model_adapter doctor \
   --from-command-file reports/<case_name>/command.txt \
-  --raw-insight-file reports/<case_name>/raw_insight.txt \
-  --hints-file reports/<case_name>/hints.yaml \
   --patch-failure-file reports/<case_name>/failure.log \
   --profile-draft-output reports/<case_name>/<model_type>_draft_with_patch.py \
   --output reports/<case_name>/doctor_with_failure.json
 ```
-
-If no hints file exists, omit `--hints-file`.
 
 Expected outputs:
 
@@ -307,19 +298,19 @@ reports/<case_name>/doctor_with_failure.json
 reports/<case_name>/<model_type>_draft_with_patch.py
 ```
 
-When a patch is needed, doctor emits `PATCH_METHOD_AUTHORING` under `ai_tasks`.
-Give `ai_tasks[].prompt_text` to the model-adaptation skill or another AI
-assistant. The assistant should return a patch-method draft, class/method
-targets, semantic explanation, and verification commands.
+When a patch is needed, doctor emits a `PATCH_METHOD_AUTHORING` AI task. Give
+`ai_tasks[].prompt_text` to the model-adaptation skill or another AI
+assistant; it should return a patch-method draft, class/method targets,
+semantics notes, and verification commands.
 
 Review rules:
 
-- Doctor provides deterministic evidence and a prompt; it does not produce final
+- Doctor provides deterministic evidence and prompts, never final
   model-specific patch code.
-- AI output is advisory until reviewed.
-- Patch only the simulation-incompatible path.
-- Preserve normal tensor behavior as closely as possible.
-- Rerun doctor, smoke, and verification after adding the patch.
+- AI output is advisory until human-reviewed.
+- Patch only simulation-incompatible paths.
+- Preserve normal tensor behavior where possible.
+- Rerun doctor and verification after adding a patch.
 
 ## 10. Rerun Doctor After Profile Registration
 
@@ -329,109 +320,72 @@ rerun doctor:
 ```bash
 python -m cli.inference.model_adapter doctor \
   --from-command-file reports/<case_name>/command.txt \
-  --raw-insight-file reports/<case_name>/raw_insight.txt \
-  --hints-file reports/<case_name>/hints.yaml \
   --output reports/<case_name>/doctor_after_profile.json
-```
-
-If no hints file exists, omit `--hints-file`.
-
-Expected output:
-
-```text
-reports/<case_name>/doctor_after_profile.json
 ```
 
 The report should show:
 
 - `profile` is not null.
 - `profile_validation.passed` is true.
-- `candidate_profile_validation.passed` is true or any issue is understood.
-- `patch_reports` match the expected replacement and skip counts.
-- `human_questions` are either empty or handled through reviewed hints.
+- `candidate_profile_validation.passed` is true, or the issues are understood.
+- `patch_reports` match expected replacement/skip counts (MoE layer count,
+  MLA module count, ...).
+- `human_questions` is empty or has been confirmed against source.
 
-## 11. Export Evidence
+## 11. Run Run-Through Verification
 
-Export the reviewed `evidence_draft` from the post-profile doctor report:
-
-```bash
-python -m cli.inference.model_adapter export-evidence \
-  --doctor-report reports/<case_name>/doctor_after_profile.json \
-  --output reports/<case_name>/evidence.yaml
-```
-
-Expected output:
-
-```text
-reports/<case_name>/evidence.yaml
-```
-
-Review `evidence.yaml` before verification:
-
-| Field | Check |
-| --- | --- |
-| `model.model_id` | Matches the adapted model |
-| `model.raw_command` | Matches `command.txt` |
-| `cases[].name` | Stable and descriptive |
-| `cases[].input` | Matches the profiled workload |
-| `expected.total_forward` | Comes from `raw_insight:Totals.wall_duration_ms` with reasonable tolerance |
-| `expected.major_ops` | Contains reviewed TensorCast semantic ops, counts, sources, and confidence |
-| `shape_hints` | Present only when confirmed or useful |
-| `accepted_gaps` | Used only for reviewed backend fusion or modeling gaps |
-
-The export command performs deterministic format conversion. It does not replace
-human review.
-
-## 12. Verify Evidence
-
-Run verification:
+verify runs one basic simulation case and reconciles the actual call counts
+of key ops (attention family, MoE gating) against structure-derived
+expectations:
 
 ```bash
 python -m cli.inference.model_adapter verify \
   <model_id> \
-  --evidence-file reports/<case_name>/evidence.yaml \
   --device <device_profile> \
+  --num-queries 1 \
+  --query-length 8 \
+  --context-length 0 \
   --output reports/<case_name>/verify.json
 ```
 
-If `model.model_id` is present in evidence, the positional model ID may be
-omitted:
+Vision-language prefill cases need image parameters (the vision tower does
+not execute in decode mode or without image input):
 
 ```bash
 python -m cli.inference.model_adapter verify \
-  --evidence-file reports/<case_name>/evidence.yaml \
-  --device <device_profile> \
-  --output reports/<case_name>/verify.json
+  <model_id> \
+  --image-batch-size 1 --image-height 224 --image-width 224 \
+  --output reports/<case_name>/verify_vl_prefill.json
 ```
 
-Expected output:
-
-```text
-reports/<case_name>/verify.json
-```
+Pass criteria: `verify.json` reports `passed: true` (the simulation ran and
+all error-severity issues are clear).
 
 Common verification issues:
 
-| Category | Typical Cause | Next Action |
+| Type | Common cause | Next step |
 | --- | --- | --- |
-| `OP_MAPPING_MISSING` | Evidence op name does not match actual TensorCast op, or backend fusion has no direct TensorCast equivalent | Fix mapping, add hints, or record reviewed accepted gap |
-| `OP_COUNT_MISMATCH` | Layer count, repetition, MTP, MoE routing, or parallel configuration mismatch | Fix profile or case input |
-| `LATENCY_MODEL_MISMATCH` | Profiling mapping, performance database, fusion strategy, or device profile issue | Review profiling coverage and tolerances |
-| `PROFILING_SHAPE_MISSING` | Raw profiling lacks shape detail or database coverage | Add shape hints or profiling data |
-| `PATCH_SEMANTICS_MISSING` | Runtime patch did not route the intended TensorCast path | Fix patch and rerun doctor |
-| `COMMUNICATION_GAP` | TP/DP/EP communication not covered by evidence | Add communication evidence or accepted gap |
+| `SIMULATION_ERROR` | The simulation case crashed (meta compatibility, placeholder validation, dynamic shapes, ...) | The report embeds the traceback and patch-discovery `ai_tasks`; follow the task prompt, fix, and rerun verify — no manual log collection needed |
+| `KEY_OP_MISSING` | An attention-family op was never invoked; the model fell back to un-adapted HF modules | Check ModelProfile registration and module replacement; if the message lists unclassified tensor_cast ops, check whether one is a new attention core and register `_ATTENTION_CORE_OPS` |
+| `OP_COUNT_MISMATCH` | Layer overrides, MTP, vision input, or partially replaced layers | Fix the profile or case input |
+| `NO_TENSOR_CAST_OPS` | The simulation recorded no tensor_cast ops at all | Register a profile and rerun |
+| `MOE_NOT_ADAPTED` | MoE modules were found with no MoE patch, no gating op, and no TensorCast MoE-path ops (init_routing_v2, ...) | Register or fix the MoE profile fields |
+| `STRUCTURE_SCAN_EMPTY` | The structure scan found no attention modules | Check the model build path and installed source |
+| `EXPECTATION_DEGRADED` (warning) | The case enables MTP or PP; count checks are degraded | Rerun with a basic case (no MTP, pp_size=1) for strict equality |
 
-The case is ready when `verify.json` reports `passed: true`, or when every
-remaining issue is explicitly reviewed and documented as an accepted gap.
+Note: correctly adapted models may legitimately gate MoE through the standard
+`torch.topk` path instead of a tensor_cast op (for example DeepSeek V3.2). In
+that case verification relies on the doctor MoE patch report to confirm
+adaptation completeness; this is not an issue.
 
-## 13. Generate ST Guardrail Cases
+## 12. Generate the ST Guardrail Case
 
-Generate ST cases from verification:
+Generate a regression case from a passed verification (only passed runs emit
+a case):
 
 ```bash
 python -m cli.inference.model_adapter verify \
   <model_id> \
-  --evidence-file reports/<case_name>/evidence.yaml \
   --device <device_profile> \
   --st-case-output reports/<case_name>/st_cases \
   --output reports/<case_name>/verify_with_st.json
@@ -441,28 +395,29 @@ Expected outputs:
 
 ```text
 reports/<case_name>/verify_with_st.json
-reports/<case_name>/st_cases/*.json
+reports/<case_name>/st_cases/<case_name>.json
 ```
 
 Rules:
 
-- Passed verification produces `verified` ST cases.
-- Failed verification produces `draft` ST cases.
-- Do not submit a draft case as a verified guardrail.
-- Case `user_input` should come from the normalized command and evidence input,
-  not from manual guesses.
+- The generated case JSON is fully compatible with
+  `tests/benchmark/models/test_model_regression.py`; passed cases can be
+  committed under `tests/benchmark/models/cases/` to join the precision
+  guardrail for existing models.
+- Failed verifications never emit a case; fix the issues and re-verify.
+- The case `user_input` comes from the normalized command parameters, not
+  manual guessing.
 
-## 14. Replay or Audit an Existing Model
+## 13. Replay or Audit an Existing Model
 
-Replay mode checks whether the workflow can rediscover an adaptation without
-reading the existing profile as the answer.
+Replay mode checks whether the flow can rediscover adaptation information
+without reading the existing profile as the answer.
 
-Use `--ignore-existing-profile` only for replay or audit tests:
+Use `--ignore-existing-profile` only for replay or audit testing:
 
 ```bash
 python -m cli.inference.model_adapter doctor \
   --from-command-file reports/qwen3_vl_replay/command.txt \
-  --raw-insight-file reports/qwen3_vl_replay/raw_insight.txt \
   --ignore-existing-profile qwen3_vl \
   --ignore-existing-profile qwen3_vl_moe \
   --profile-draft-output reports/qwen3_vl_replay/qwen3_vl_replay_draft.py \
@@ -471,90 +426,66 @@ python -m cli.inference.model_adapter doctor \
 
 Replay constraints:
 
-- Do not use `tensor_cast/transformers/builtin_model/qwen3_vl.py` as input
-  evidence while replay is running.
-- Reading the installed `transformers` Qwen3-VL source is allowed because normal
-  new-model adaptation also uses installed source.
-- Existing TensorCast Qwen3-VL profile may be used only after replay discovery
-  completes, as an oracle for comparison.
+- Do not feed `tensor_cast/transformers/builtin_model/qwen3_vl.py` as input
+  evidence during replay.
+- Reading the installed `transformers` Qwen3-VL source is allowed, since a
+  normal new-model adaptation also uses the installed source.
+- The existing TensorCast Qwen3-VL profile may only be used as an oracle
+  after replay discovery completes.
 
-## 15. Qwen3-VL Blind Replay Test
-
-The adapter automation suite includes a tiny config-only Qwen3-VL fixture:
-
-```text
-tests/assets/model_config/qwen3_vl_tiny/config.json
-```
-
-Use it to test the replay workflow without downloading weights.
-
-Run the focused regression test:
+The Qwen3-VL blind replay test uses a config-only fixture
+(`tests/assets/model_config/qwen3_vl_tiny/config.json`) and needs no weight
+download:
 
 ```bash
 pytest tests/regression/tensor_cast/test_adapter_automation.py -k qwen3_vl -q
 ```
 
-The test should verify that doctor, under profile hiding, can rediscover:
+## 14. Verification Checklist
 
-- `model_type=qwen3_vl`.
-- `model_family=qwen3_vl`.
-- `visual_module_path=visual`.
-- `language_module_path=language_model`.
-- `visual_layers_module_path=visual.blocks`.
-- Visual merger linear mappings.
-- Visual MLP linear mappings.
-- Qwen3-VL placeholder or dynamic-mask patch authoring evidence from a failure
-  log.
-
-Recommended broader test:
+Run the focused adaptation suite:
 
 ```bash
 pytest tests/regression/tensor_cast/test_adapter_automation.py -q
 ```
 
-After replay discovery completes, compare the replay candidate and patch task
-expectations against the existing Qwen3-VL adaptation as an oracle. The oracle
-comparison should not be used to seed the replay candidate.
-
-## 16. Validation Checklist
-
-Run the focused adapter test suite:
-
-```bash
-pytest tests/regression/tensor_cast/test_adapter_automation.py -q
-```
-
-Check CLI entry points:
+Check the CLI entry points:
 
 ```bash
 python -m cli.inference.model_adapter doctor --help
-python -m cli.inference.model_adapter export-evidence --help
 python -m cli.inference.model_adapter verify --help
 ```
 
-If runtime behavior changed, run relevant TensorCast tests:
+If runtime behavior changed, run the related TensorCast tests:
 
 ```bash
 pytest tests/test_tensor_cast/test_runtime.py tests/test_tensor_cast/test_text_generate.py
 ```
 
 If the adaptation touches a specific model family, run the closest model or
-benchmark smoke path available in the repository.
+benchmark smoke path in the repository.
 
-## 17. Submission Checklist
+## 15. Submission Checklist
 
-Before submitting a new adaptation:
+Before submitting a new adaptation, confirm:
 
-- The required command and raw profiling inputs are preserved under
-  `reports/<case_name>/` or documented outside the repository if they cannot be
-  committed.
-- The final built-in profile is minimal and source-backed.
-- `candidate_profile_validation` and `profile_validation` pass.
-- Any patch method came from deterministic failure evidence, AI assistance, and
-  human review.
-- `evidence.yaml` was exported from doctor output and reviewed.
-- `verify.json` passes, or remaining gaps are documented and accepted.
-- ST guardrail cases are generated only from verified or explicitly accepted
-  evidence.
-- Temporary local files, private paths, raw internal notes, and walkthroughs are
-  not staged.
+- **No working artifacts are committed**: command.txt, doctor.json,
+  verify.json, failure.log, st_cases, and everything else under `reports/`
+  stay local (the directory is covered by `.gitignore`); they serve the
+  development process and the downstream precision alignment workflow
+  off-repo.
+- The final builtin profile is minimal and source-backed; the model source
+  origin (in-repo transformers / dependency upgrade / open-source fetch) was
+  made explicit during adaptation.
+- `candidate_profile_validation` and `profile_validation` both pass.
+- Every patch method comes from deterministic failure evidence, AI
+  assistance, and human review.
+- New operators have declaration + performance properties + unit tests, and
+  the attention-core op table was updated when needed.
+- `verify.json` reports `passed: true`, or remaining warnings were explicitly
+  reviewed (the report itself stays off-repo).
+- ST guardrail cases are generated only from passed verifications; commit
+  them under `tests/benchmark/models/cases/` when regression protection is
+  wanted.
+- No temporary local files, private paths, raw internal notes, or
+  walkthroughs are staged.
