@@ -1,0 +1,65 @@
+# Qwen3-VL MoE attention stages shared by routed-MoE and dense-MLP layers.
+fragment_id: qwen3_vl_moe_attention_v1
+fragment_kind: model_decoder
+stages:
+  - id: attention_qkv
+    modules:
+      - name: q_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: k_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+      - name: v_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+    runtime:
+      # Match the complete input RMSNorm sequence, not one of its casts.
+      boundary_operators: [rms_norm]
+      ignored_operators:
+        - _to_copy
+        - pow
+        - mean
+        - add
+        - rsqrt
+        - mul
+        - view
+        - t
+        - transpose
+        - index
+        - index_select
+        - unsqueeze
+        - expand
+        - slice
+        - select
+        - split_with_sizes
+        - alias
+        - copy_
+        - neg
+        - cat
+        - reshape_and_cache
+        - apply_rope
+        - dynamic_quantize_symmetric
+  - id: attention
+    modules:
+      - name: attention
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: o_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [attention]
+      ignored_operators:
+        - view
+        - t
+        - transpose
+        - alias
+        - copy_
+        - slice
+        - select
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_reduce
+        - add
+

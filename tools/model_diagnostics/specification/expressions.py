@@ -149,3 +149,14 @@ def evaluate_dtype(expression: str, env: Mapping[str, object]) -> DType | None:
     if not isinstance(value, str) or not value.strip():
         raise SpecificationLoadError(f"dtype expression must evaluate to a non-empty string: {expression!r}")
     return value
+
+
+def evaluate_positive_integer(expression: str, env: Mapping[str, object]) -> int:
+    """Evaluate an integer expression used for deterministic Theory expansion."""
+
+    value = _eval_node(_parse_expression(expression), env)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise SpecificationLoadError(
+            f"integer expression must evaluate to a positive integer: {expression!r}"
+        )
+    return value

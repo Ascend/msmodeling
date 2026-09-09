@@ -343,7 +343,10 @@ def _materialize_stage(
             operators.append(operator)
         if not operators:
             return None
-        source_options[SourceKind.THEORY] = TheoryStageOptions(operators=tuple(operators))
+        source_options[SourceKind.THEORY] = TheoryStageOptions(
+            operators=tuple(operators),
+            repeat=theory.repeat,
+        )
     if not source_options:
         return None
     return StageSpec(
@@ -1146,7 +1149,10 @@ class YamlModelDiagnosticsSpecLoader:
             except KeyError as error:
                 raise SpecificationLoadError(str(error)) from error
         source_options: dict[SourceKind, SourceStageOptions] = {
-            SourceKind.THEORY: TheoryStageOptions(operators=operators)
+            SourceKind.THEORY: TheoryStageOptions(
+                operators=operators,
+                repeat=fragment_stage.repeat,
+            )
         }
         if fragment_stage.runtime_options is not None:
             source_options[SourceKind.RUNTIME] = fragment_stage.runtime_options

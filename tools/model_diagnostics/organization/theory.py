@@ -37,7 +37,11 @@ from tools.model_diagnostics.domain.specification import (
 from tools.model_diagnostics.errors import InvalidDiagnosticsRequest, SourceLoadError
 from tools.model_diagnostics.specification.context_env import build_theory_env
 from tools.model_diagnostics.specification.errors import SpecificationLoadError
-from tools.model_diagnostics.specification.expressions import evaluate_dtype, evaluate_shape
+from tools.model_diagnostics.specification.expressions import (
+    evaluate_dtype,
+    evaluate_positive_integer,
+    evaluate_shape,
+)
 
 
 def _tensors_for_operator(
@@ -64,17 +68,27 @@ def _stage_calls(
 ) -> tuple[tuple[OperatorCallRecord, ...], int]:
     calls: list[OperatorCallRecord] = []
     call_index = call_index_start
-    for operator in theory.operators:
-        calls.append(
-            OperatorCallRecord(
-                call_index=call_index,
-                operator_name=operator.operator_name,
-                original_operator_name=None,
-                tensors=_tensors_for_operator(operator, env),
-                source_reference=f"{source_prefix}:{operator.operator_name}",
+    repeat_count = (
+        evaluate_positive_integer(theory.repeat, env)
+        if theory.repeat is not None
+        else 1
+    )
+    for repeat_index in range(repeat_count):
+        for operator in theory.operators:
+            calls.append(
+                OperatorCallRecord(
+                    call_index=call_index,
+                    operator_name=operator.operator_name,
+                    original_operator_name=None,
+                    tensors=_tensors_for_operator(operator, env),
+                    source_reference=(
+                        f"{source_prefix}:repeat[{repeat_index}]:{operator.operator_name}"
+                        if theory.repeat is not None
+                        else f"{source_prefix}:{operator.operator_name}"
+                    ),
+                )
             )
-        )
-        call_index += 1
+            call_index += 1
     return tuple(calls), call_index
 
 

@@ -85,10 +85,13 @@ class TheoryOperatorSpec:
 @dataclass(frozen=True)
 class TheoryStageOptions:
     operators: tuple[TheoryOperatorSpec, ...]
+    repeat: str | None = None
 
     def __post_init__(self) -> None:
         if not self.operators:
             raise ValueError("theory operators must not be empty")
+        if self.repeat is not None:
+            _require_text(self.repeat, "theory repeat expression")
 
 
 @dataclass(frozen=True)

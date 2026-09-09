@@ -1,0 +1,210 @@
+schema_version: "1"
+spec_id: qwen3_vl_moe_v1
+spec_version: 1.2.0
+model_category: qwen3_vl_moe
+matches:
+  entrypoints: [text_generate]
+  model_types: [qwen3_vl_moe]
+
+# Qwen3-VL MoE keeps the Qwen3-VL multimodal/vision front-end, while the
+# language decoder uses routed MoE FFN blocks. Qwen3-VL-235B-A22B has
+# decoder_sparse_step and mlp_only_layers are materialized into the same
+# per-layer Dense/MoE sequence used by Hugging Face. Qwen3-VL-235B-A22B has
+# decoder_sparse_step=1 and mlp_only_layers=[], so its existing result remains
+# all-MoE.
+operator_aliases:
+  aten.index_select.default: index
+  addmm: mm
+  aten.addmm.default: mm
+  expert_gate_projection: mm
+  expert_up_projection: mm
+  expert_down_projection: mm
+  gate_projection: mm
+  up_projection: mm
+  vision_patch_embedding: convolution
+  vision_qkv_projection: mm
+  vision_attention: attention
+  vision_o_projection: mm
+  vision_mlp_fc1: mm
+  vision_mlp_fc2: mm
+  vision_merger_fc1: mm
+  vision_merger_fc2: mm
+
+regions:
+  input:
+    stages:
+      - id: text_embedding
+        source_options:
+          theory:
+            modules:
+              - name: embedding
+                tensors:
+                  INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[1, T]", dtype: int64}
+                  OUTPUT[0]: {shape: "[1, T, EO]", dtype: ACT}
+          runtime:
+            boundary_operators: [embedding]
+            ignored_operators:
+              - view
+              - index
+              - alias
+              - slice
+              - unsqueeze
+              - expand
+              - bitwise_not
+              - where
+              - masked_fill_
+              - all_gather
+              - all_reduce
+              # Vision position/grid preparation runs before the patch
+              # convolution. Keep those framework mechanics outside the
+              # embedding contract without a Runtime-only pseudo Stage.
+              - linspace
+              - detach
+              - _to_copy
+              - add
+              - clamp
+              - sub
+              - rsub
+              - mul
+              - arange
+              - transpose
+              - clone
+              - _unsafe_view
+              - repeat
+              - cat
+              - stack
+              - lift_fresh
+              - select
+              - repeat_interleave
+              - index_select
+              - cumsum
+              - constant_pad_nd
+              - sum
+        comparisons:
+          theory-runtime:
+            strategy: boundary_equal
+            options:
+              mapping:
+                mode: explicit
+                pairs:
+                  - left_call_index: 0
+                    left_slot: {direction: output, index: 0, name: null}
+                    right_call_index: 0
+                    right_slot: {direction: output, index: 0, name: null}
+                relations: []
+
+  vision_prelude:
+    activation: vision_prefill
+    stages:
+      - id: vision_patch_embedding
+        source_options:
+          theory:
+            modules:
+              - name: vision_patch_embedding
+                tensors:
+                  INPUT[0]: {shape: "[VTok, Vc, Vt, Vp, Vp]", dtype: ACT}
+                  INPUT[1]: {shape: "[VH, Vc, Vt, Vp, Vp]", dtype: WEIGHT}
+                  INPUT[2]: {shape: "[VH]", dtype: WEIGHT}
+                  OUTPUT[0]: {shape: "[VTok, VH, 1, 1, 1]", dtype: ACT}
+          runtime:
+            boundary_operators: [convolution]
+            ignored_operators:
+              - _to_copy
+              - view
+              - embedding
+              - unsqueeze
+              - mul
+              - sum
+              - add
+              - cat
+              - cos
+              - sin
+
+  vision_encoder:
+    activation: vision_prefill
+    layer_layout_rule:
+      strategy: sequence
+      count_from: model_config.vision_num_hidden_layers
+      kinds_from: model_config.vision_layer_kinds
+    layer_specs:
+      qwen3_vl_vision_block:
+        include_fragment:
+          fragment: qwen3_vl_vision_encoder_v1
+          stage_group: block
+      qwen3_vl_deepstack_vision_block:
+        include_fragment:
+          fragment: qwen3_vl_vision_encoder_v1
+          stage_group: deepstack_block
+
+  vision_merger:
+    activation: vision_prefill
+    include_fragment:
+      fragment: qwen3_vl_vision_encoder_v1
+      stage_group: final_merger
+
+  language:
+    layer_layout_rule:
+      strategy: sequence
+      count_from: model_config.effective_num_hidden_layers
+      kinds_from: model_config.language_layer_kinds
+    layer_specs:
+      qwen3_vl_moe_dense_text_decoder:
+        include_fragment: qwen3_vl_moe_dense_decoder_v1
+      qwen3_vl_moe_text_decoder:
+        include_fragment: qwen3_vl_moe_decoder_v1
+
+  output:
+    stages:
+      - id: lm_head
+        source_options:
+          theory:
+            modules:
+              - name: lm_head_select
+                activation: lm_head_token_selection
+                tensors:
+                  INPUT[0]: {shape: "[B, Q, H]", dtype: ACT}
+                  INPUT[1]: {shape: "[B]", dtype: int64}
+                  OUTPUT[0]: {shape: "[B, 1, H]", dtype: ACT}
+              - name: lm_head
+                activation: non_mtp_lm_head
+                tensors:
+                  INPUT[0]: {shape: "[Rout, H]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
+          runtime:
+            # Match the complete final RMSNorm sequence. Its internal casts are
+            # ignored below and never serve as boundaries on their own.
+            boundary_operators: [rms_norm]
+            ignored_operators:
+              - rms_norm
+              - _to_copy
+              - pow
+              - mean
+              - add
+              - rsqrt
+              - mul
+              - t
+              - view
+              - _unsafe_view
+              - slice
+              - alias
+              - copy_
+              - dynamic_quantize_symmetric
+              - device_put
+              - select
+              - argmax
+              - all_gather
+
+  # TensorCast constructs predictor blocks at the indices following the
+  # captured language layers, so the same HF Dense/MoE rule applies.
+  mtp:
+    activation: mtp_enabled
+    layer_layout_rule:
+      strategy: sequence
+      count_from: model_config.effective_num_mtp_layers
+      kinds_from: model_config.mtp_layer_kinds
+    compose:
+      framework: mtp_framework_v1
+      predictors:
+        qwen3_vl_moe_dense_mtp: qwen3_vl_moe_dense_decoder_v1
+        qwen3_vl_moe_mtp: qwen3_vl_moe_decoder_v1

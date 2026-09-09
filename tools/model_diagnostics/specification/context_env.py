@@ -23,6 +23,7 @@ from tools.model_diagnostics.domain.models import (
     ModelRunContext,
     validate_expert_parallel_features,
 )
+from tools.model_diagnostics.domain.constants import VISION_IMAGE_BOUNDARY_TOKEN_COUNT
 from tools.model_diagnostics.specification.errors import SpecificationLoadError
 from tools.model_diagnostics.specification.mtp_window import (
     parse_num_mtp_tokens,
@@ -353,6 +354,98 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
     embedding_hidden = int(math.ceil(hidden / tp)) if embedding_tp_mode == "col" else hidden
     embedding_output_hidden = embedding_hidden if embedding_tp_mode == "col" else hidden
 
+    vision_env: dict[str, object] = {}
+    if "vision_hidden_size" in config:
+        vision_hidden = _config_int(config, "vision_hidden_size")
+        vision_intermediate = _config_int(config, "vision_intermediate_size")
+        vision_patch = _config_int(config, "vision_patch_size")
+        vision_merge = _config_int(config, "vision_spatial_merge_size")
+        vision_temporal = _config_int(config, "vision_temporal_patch_size")
+        vision_channels = _config_int(config, "vision_in_channels")
+        vision_out_hidden = _config_int(config, "vision_out_hidden_size")
+        image_values = tuple(config.get(key, 0) for key in ("image_batch_size", "image_height", "image_width"))
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in image_values
+        ):
+            raise SpecificationLoadError(
+                "image_batch_size/image_height/image_width must be non-negative integers"
+            )
+        image_batch, image_height, image_width = image_values
+        patch_tokens = projector_tokens = text_tokens = 0
+        if image_batch and image_height and image_width:
+            token_keys = (
+                "vision_patch_tokens",
+                "vision_projector_tokens",
+                "vision_text_tokens",
+            )
+            if all(key in config for key in token_keys):
+                patch_tokens = _config_int(config, "vision_patch_tokens")
+                projector_tokens = _config_int(config, "vision_projector_tokens")
+                text_tokens = _config_int(config, "vision_text_tokens")
+            else:
+                resized_height = config.get("image_resized_height")
+                resized_width = config.get("image_resized_width")
+                if not (
+                    isinstance(resized_height, int)
+                    and not isinstance(resized_height, bool)
+                    and resized_height > 0
+                    and isinstance(resized_width, int)
+                    and not isinstance(resized_width, bool)
+                    and resized_width > 0
+                ):
+                    missing_tokens = tuple(key for key in token_keys if key not in config)
+                    raise SpecificationLoadError(
+                        "visual geometry must be materialized by Runtime capture; "
+                        "provide positive image_resized_height/image_resized_width or all token counts; "
+                        f"missing {', '.join(missing_tokens)}"
+                    )
+                grid_t = _optional_config_int(config, "vision_grid_t", default=1)
+                grid_h = _optional_config_int(
+                    config,
+                    "vision_grid_h",
+                    default=resized_height // vision_patch,
+                )
+                grid_w = _optional_config_int(
+                    config,
+                    "vision_grid_w",
+                    default=resized_width // vision_patch,
+                )
+                patch_tokens = _optional_config_int(
+                    config,
+                    "vision_patch_tokens",
+                    default=image_batch * grid_t * grid_h * grid_w,
+                )
+                projector_tokens = _optional_config_int(
+                    config,
+                    "vision_projector_tokens",
+                    default=patch_tokens // (vision_merge**2),
+                )
+                text_tokens = _optional_config_int(
+                    config,
+                    "vision_text_tokens",
+                    default=image_batch
+                    * (grid_t * grid_h * grid_w // (vision_merge**2) + VISION_IMAGE_BOUNDARY_TOKEN_COUNT),
+                )
+        vision_env = {
+            "Vp": vision_patch,
+            "Vt": vision_temporal,
+            "Vc": vision_channels,
+            "VTok": patch_tokens,
+            "VProjTok": projector_tokens,
+            "VH": vision_hidden,
+            "VF": vision_intermediate,
+            "VMH": vision_hidden * (vision_merge**2),
+            "VOH": vision_out_hidden,
+        }
+        if text_tokens:
+            if context.phase is ExecutionPhase.PREFILL:
+                query += text_tokens
+                seq = context_length + query
+                tokens = local_batch * query
+            elif context.phase is ExecutionPhase.DECODE:
+                seq = context_length + query + text_tokens
+
     validate_mtp_decode_window(context)
     mtp = parse_num_mtp_tokens(context)
     rtgt = local_batch * (mtp + 1)
@@ -437,6 +530,7 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
                 enable_redundant_experts=enable_redundant,
             )
             te = tmoe * ktop
+            local_experts = experts
         else:
             external, redundant = _derive_ep_expert_counts(
                 ep=ep,
@@ -456,8 +550,14 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
                 ep_rank=ep_rank,
                 num_external_shared_experts=external,
             )
+            _local_start, local_experts = _assign_experts(
+                experts + redundant,
+                ep - external,
+                0,
+            )
         moe_env = {
             "E": experts,
+            "Elocal": local_experts,
             "Ktop": ktop,
             "Fmoe": fmoe,
             "MTPt": 1,  # Fixed: --moe-tp-size > 1 is unsupported by this module.
@@ -595,5 +695,6 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         **dsa_env,
         **linear_env,
         **shared_env,
+        **vision_env,
         **v4_env,
     }

@@ -18,6 +18,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping
 
 import yaml
@@ -44,6 +45,7 @@ _ALLOWED_KEYS = frozenset(
         "num_mtp_tokens",
         "parallel",
         "selected_language_layers",
+        "selected_region_layers",
         "selected_stage_regions",
         "num_hidden_layers_override",
         "do_compile",
@@ -52,6 +54,9 @@ _ALLOWED_KEYS = frozenset(
         "word_embedding_tp",
         "enable_redundant_experts",
         "enable_external_shared_experts",
+        "image_batch_size",
+        "image_height",
+        "image_width",
     }
 )
 _FORBIDDEN_KEYS = frozenset(
@@ -101,9 +106,29 @@ class DiagnosticsRunProfile:
     word_embedding_tp: str | None
     enable_redundant_experts: bool = False
     enable_external_shared_experts: bool = False
+    image_batch_size: int | None = None
+    image_height: int | None = None
+    image_width: int | None = None
     selected_language_layers: tuple[int, ...] | None = None
+    selected_region_layers: Mapping[str, tuple[int, ...]] | None = None
 
     def __post_init__(self) -> None:
+        image_dimensions = {
+            "image_batch_size": self.image_batch_size,
+            "image_height": self.image_height,
+            "image_width": self.image_width,
+        }
+        provided_image_dimensions = tuple(
+            field_name for field_name, value in image_dimensions.items() if value is not None
+        )
+        if provided_image_dimensions and len(provided_image_dimensions) != len(image_dimensions):
+            missing_image_dimensions = tuple(
+                field_name for field_name, value in image_dimensions.items() if value is None
+            )
+            raise SpecificationLoadError(
+                "image_batch_size, image_height, and image_width must be provided together; "
+                f"missing {', '.join(missing_image_dimensions)}"
+            )
         if self.selected_language_layers is not None:
             object.__setattr__(
                 self,
@@ -113,6 +138,22 @@ class DiagnosticsRunProfile:
                     field_name="selected_language_layers",
                 ),
             )
+        normalized_region_layers: dict[str, tuple[int, ...]] = {}
+        if self.selected_region_layers is not None:
+            for region_id, indices in self.selected_region_layers.items():
+                if not isinstance(region_id, str) or not region_id.strip():
+                    raise SpecificationLoadError(
+                        "selected_region_layers keys must be non-empty region ids"
+                    )
+                normalized_region_layers[region_id.strip()] = _normalize_layer_indices(
+                    indices,
+                    field_name=f"selected_region_layers.{region_id.strip()}",
+                )
+        object.__setattr__(
+            self,
+            "selected_region_layers",
+            MappingProxyType(normalized_region_layers),
+        )
 
     def to_request(
         self,
@@ -124,6 +165,7 @@ class DiagnosticsRunProfile:
 
         Region selection is derived from the Spec (never a hardcoded region id):
         ``selected_language_layers`` samples only physical language decoder layers.
+        ``selected_region_layers`` samples other layered regions by region id.
         When omitted, every materialized language layer is selected. MTP proposal
         selection is independent and always uses the built-in representative-layer
         policy.
@@ -185,13 +227,47 @@ def _derive_selected_layers(
         if selected_mtp:
             layers["mtp"] = selected_mtp
 
+    requested_region_layers = dict(profile.selected_region_layers or {})
+    reserved = set(requested_region_layers).intersection({"language", "mtp"})
+    if reserved:
+        reserved_id = sorted(reserved)[0]
+        raise InvalidDiagnosticsRequest(
+            f"selected_region_layers cannot select reserved region {reserved_id!r}"
+        )
+    selectable_regions = set(layered_regions).difference({"language", "mtp"})
+    unknown = set(requested_region_layers).difference(selectable_regions)
+    if unknown:
+        raise InvalidDiagnosticsRequest(
+            f"selected_region_layers references unknown or non-layered region {sorted(unknown)[0]!r}"
+        )
+
     for region_id, region in layered_regions.items():
         if region_id in {"language", "mtp"}:
             continue
         layout_count = len(region.layer_layout)
         if layout_count <= 0:
             continue
-        layers[region_id] = tuple(range(layout_count))
+        requested = requested_region_layers.get(region_id)
+        if requested is None:
+            selected = tuple(range(layout_count))
+        else:
+            selected = tuple(index for index in requested if index < layout_count)
+            unavailable = tuple(index for index in requested if index >= layout_count)
+            if unavailable:
+                available = f"0..{layout_count - 1}"
+                if not selected:
+                    raise InvalidDiagnosticsRequest(
+                        f"selected_region_layers.{region_id} has no indices within captured "
+                        f"layers; requested {requested}, available {available}"
+                    )
+                warnings.warn(
+                    f"selected_region_layers.{region_id} contains unavailable indices "
+                    f"{unavailable}; captured layers are {available}; unavailable layers are skipped",
+                    DiagnosticsSelectionWarning,
+                    stacklevel=2,
+                )
+        if selected:
+            layers[region_id] = selected
     return layers
 
 
@@ -318,6 +394,9 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
             raw.get("selected_language_layers"),
             field_name="selected_language_layers",
         ),
+        selected_region_layers=_optional_region_layer_indices(
+            raw.get("selected_region_layers"),
+        ),
         selected_stage_regions=selected_stage_regions,
         num_hidden_layers_override=override,
         do_compile=_optional_bool(raw.get("do_compile"), default=True, field_name="do_compile"),
@@ -342,6 +421,9 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
             default=False,
             field_name="enable_external_shared_experts",
         ),
+        image_batch_size=_optional_positive_int(raw.get("image_batch_size"), field_name="image_batch_size"),
+        image_height=_optional_positive_int(raw.get("image_height"), field_name="image_height"),
+        image_width=_optional_positive_int(raw.get("image_width"), field_name="image_width"),
     )
 
 
@@ -373,6 +455,14 @@ def _optional_non_negative_int(value: object, *, field_name: str) -> int | None:
     return value
 
 
+def _optional_positive_int(value: object, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise SpecificationLoadError(f"{field_name} must be a positive integer")
+    return value
+
+
 def _optional_non_empty_str(value: object, *, default: str, field_name: str) -> str:
     if value is None:
         return default
@@ -397,6 +487,29 @@ def _optional_layer_indices(
     if value is None:
         return None
     return _normalize_layer_indices(value, field_name=field_name)
+
+
+def _optional_region_layer_indices(
+    value: object,
+) -> Mapping[str, tuple[int, ...]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or not value:
+        raise SpecificationLoadError(
+            "selected_region_layers must be a non-empty mapping of region ids to layer indices"
+        )
+    normalized: dict[str, tuple[int, ...]] = {}
+    for region_id, indices in value.items():
+        if not isinstance(region_id, str) or not region_id.strip():
+            raise SpecificationLoadError(
+                "selected_region_layers keys must be non-empty region ids"
+            )
+        name = region_id.strip()
+        normalized[name] = _normalize_layer_indices(
+            indices,
+            field_name=f"selected_region_layers.{name}",
+        )
+    return normalized
 
 
 def _normalize_layer_indices(

@@ -26,7 +26,8 @@ import importlib.util
 import logging
 import sys
 import threading
-import types
+from importlib.machinery import ModuleSpec
+from types import ModuleType
 from typing import Optional, Tuple
 
 import torch
@@ -144,6 +145,12 @@ _FLA_REQUIRED_SUBMODULES = (
 )
 
 
+def _new_fla_stub_module(name: str, *, is_package: bool = False) -> ModuleType:
+    """Create an importlib-compatible in-memory module for the fla stub."""
+    spec = ModuleSpec(name, loader=None, is_package=is_package)
+    return importlib.util.module_from_spec(spec)
+
+
 def _fla_submodules_importable() -> bool:
     """Return ``True`` only if all ``fla`` submodules needed by K3 import cleanly.
 
@@ -177,23 +184,13 @@ def _install_fla_stub() -> None:
         _FLA_STUB_INSTALLED = True
         return
 
-    fla = types.ModuleType("fla")
-    fla.__path__ = []  # mark as package
-    fla.__spec__ = importlib.machinery.ModuleSpec("fla", None, is_package=True)
-    fla_modules = types.ModuleType("fla.modules")
-    fla_modules.__spec__ = importlib.machinery.ModuleSpec("fla.modules", None)
-    fla_ops = types.ModuleType("fla.ops")
-    fla_ops.__path__ = []
-    fla_ops.__spec__ = importlib.machinery.ModuleSpec("fla.ops", None, is_package=True)
-    fla_ops_kda = types.ModuleType("fla.ops.kda")
-    fla_ops_kda.__spec__ = importlib.machinery.ModuleSpec("fla.ops.kda", None)
-    fla_ops_utils = types.ModuleType("fla.ops.utils")
-    fla_ops_utils.__path__ = []
-    fla_ops_utils.__spec__ = importlib.machinery.ModuleSpec("fla.ops.utils", None, is_package=True)
-    fla_ops_utils_index = types.ModuleType("fla.ops.utils.index")
-    fla_ops_utils_index.__spec__ = importlib.machinery.ModuleSpec("fla.ops.utils.index", None)
-    fla_utils = types.ModuleType("fla.utils")
-    fla_utils.__spec__ = importlib.machinery.ModuleSpec("fla.utils", None)
+    fla = _new_fla_stub_module("fla", is_package=True)
+    fla_modules = _new_fla_stub_module("fla.modules")
+    fla_ops = _new_fla_stub_module("fla.ops", is_package=True)
+    fla_ops_kda = _new_fla_stub_module("fla.ops.kda")
+    fla_ops_utils = _new_fla_stub_module("fla.ops.utils", is_package=True)
+    fla_ops_utils_index = _new_fla_stub_module("fla.ops.utils.index")
+    fla_utils = _new_fla_stub_module("fla.utils")
 
     fla_modules.ShortConvolution = _ShortConvolutionStub
     fla_modules.FusedRMSNormGated = _FusedRMSNormGatedStub

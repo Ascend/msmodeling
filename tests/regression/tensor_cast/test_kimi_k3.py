@@ -500,10 +500,30 @@ class TestKimiK3Patches(unittest.TestCase):
 
     def setUp(self):
         """Reset global patch state before each test."""
+        import sys
+
         import tensor_cast.transformers.builtin_model.kimi_k3 as _km
 
         self._km = _km
+        self._saved_patched_kimi_k3 = self._km._patched_kimi_k3
+        self._saved_fla_stub_installed = self._km._FLA_STUB_INSTALLED
+        self._fla_module_names = (
+            "fla",
+            "fla.modules",
+            "fla.ops",
+            "fla.ops.kda",
+            "fla.ops.utils",
+            "fla.ops.utils.index",
+            "fla.utils",
+        )
+        self._missing_fla_module = object()
+        self._saved_fla_modules = {
+            name: sys.modules.get(name, self._missing_fla_module) for name in self._fla_module_names
+        }
         self._km._patched_kimi_k3 = False
+        self._km._FLA_STUB_INSTALLED = False
+        for name in self._fla_module_names:
+            sys.modules.pop(name, None)
 
     def tearDown(self):
         """Restore global state after each test to prevent test infection.
@@ -584,52 +604,30 @@ class TestKimiK3Patches(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_fla_stub_idempotent(self):
-        """Second call is a no-op; ``_FLA_STUB_INSTALLED`` flag prevents re-entry."""
+        """The import-compatible stub is installed once and supports discovery."""
+        import importlib.util
         import sys
 
-        _saved_flag = self._km._FLA_STUB_INSTALLED
-        _saved_modules = {
-            k: sys.modules.get(k)
-            for k in [
-                "fla",
-                "fla.modules",
-                "fla.ops",
-                "fla.ops.kda",
-                "fla.ops.utils",
-                "fla.ops.utils.index",
-                "fla.utils",
-            ]
-        }
-        try:
-            self._km._FLA_STUB_INSTALLED = False
+        from transformers.utils.import_utils import is_flash_linear_attention_available
 
-            # First call: installs stubs
-            self._km._install_fla_stub()
-            self.assertTrue(self._km._FLA_STUB_INSTALLED)
+        self._km._install_fla_stub()
+        self.assertTrue(self._km._FLA_STUB_INSTALLED)
 
-            # Snapshot sys.modules after first install
-            fla_module = sys.modules.get("fla")
-            self.assertIsNotNone(fla_module, "fla stub should be in sys.modules after install")
+        fla_module = sys.modules.get("fla")
+        self.assertIsNotNone(fla_module, "fla stub should be in sys.modules after install")
+        self.assertIsNotNone(fla_module.__spec__)
+        self.assertEqual(importlib.util.find_spec("fla").name, "fla")
+        for name in self._fla_module_names:
+            self.assertIsNotNone(sys.modules[name].__spec__, f"{name} should have an import spec")
+        self.assertIsInstance(is_flash_linear_attention_available(), bool)
 
-            # Second call: no-op (flag prevents re-entry)
-            self._km._install_fla_stub()
-            self.assertTrue(self._km._FLA_STUB_INSTALLED)
-
-            # fla module should be the same object (not re-created)
-            self.assertIs(
-                sys.modules.get("fla"),
-                fla_module,
-                "Second call should not re-create fla stub",
-            )
-        finally:
-            # Restore original state
-            self._km._FLA_STUB_INSTALLED = _saved_flag
-            for mod_name, mod in _saved_modules.items():
-                if mod is not None:
-                    sys.modules[mod_name] = mod
-                elif mod_name in sys.modules and not _saved_flag:
-                    # Only remove if we installed it (original flag was False)
-                    del sys.modules[mod_name]
+        self._km._install_fla_stub()
+        self.assertTrue(self._km._FLA_STUB_INSTALLED)
+        self.assertIs(
+            sys.modules.get("fla"),
+            fla_module,
+            "Second call should not re-create fla stub",
+        )
 
     # ------------------------------------------------------------------
     # _install_copy_layer_attr_patch — idempotency

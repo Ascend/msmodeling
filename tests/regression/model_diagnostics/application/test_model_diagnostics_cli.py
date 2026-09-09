@@ -399,6 +399,61 @@ def test_run_profile_rejects_unknown_word_embedding_tp_mode(tmp_path: Path) -> N
         load_diagnostics_run_profile(path)
 
 
+@pytest.mark.parametrize(
+    "image_fields",
+    (
+        ("image_batch_size: 1",),
+        ("image_height: 224",),
+        ("image_width: 224",),
+        ("image_batch_size: 1", "image_height: 224"),
+        ("image_batch_size: 1", "image_width: 224"),
+        ("image_height: 224", "image_width: 224"),
+    ),
+)
+def test_run_profile_rejects_partial_image_dimensions(
+    tmp_path: Path,
+    image_fields: tuple[str, ...],
+) -> None:
+    path = tmp_path / "partial_image_dimensions.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "model_name: Qwen/Qwen3-VL-8B-Instruct",
+                "phase: prefill",
+                "batch_size: 1",
+                "query_length: 2",
+                *image_fields,
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SpecificationLoadError, match="must be provided together"):
+        load_diagnostics_run_profile(path)
+
+
+def test_run_profile_accepts_complete_image_dimensions(tmp_path: Path) -> None:
+    path = tmp_path / "complete_image_dimensions.yaml"
+    path.write_text(
+        "\n".join(
+            [
+                "model_name: Qwen/Qwen3-VL-8B-Instruct",
+                "phase: prefill",
+                "batch_size: 1",
+                "query_length: 2",
+                "image_batch_size: 1",
+                "image_height: 224",
+                "image_width: 224",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profile = load_diagnostics_run_profile(path)
+
+    assert (profile.image_batch_size, profile.image_height, profile.image_width) == (1, 224, 224)
+
+
 def test_run_profile_selects_only_explicit_language_layers(tmp_path: Path) -> None:
     path = tmp_path / "selected.yaml"
     path.write_text(

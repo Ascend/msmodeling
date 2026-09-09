@@ -18,8 +18,10 @@ stages:
           INPUT[1]: {shape: "[Rtgt]", dtype: int64}
           OUTPUT[0]: {shape: "[Rtgt, H]", dtype: ACT}
     runtime:
-      boundary_operators: [aten.index.Tensor]
-      ignored_operators: [device_put, alias]
+      # Compiled wrappers use aten.index.Tensor; the Qwen3-VL eager wrapper
+      # uses index_select for the same request-row selection.
+      boundary_operators: [aten.index.Tensor, index_select]
+      ignored_operators: [device_put, alias, t]
   - id: target_lm_head
     modules:
       - name: lm_head
@@ -41,6 +43,7 @@ stages:
         - device_put
         - select
         - argmax
+        - all_gather
   - id: verification_sampler
     modules:
       - name: mtp_target_sampler
@@ -50,7 +53,7 @@ stages:
       boundary_operators: [cat]
       # PyTorch 2.10 may place output-buffer update mechanics before the
       # following select_scatter boundary.
-      ignored_operators: [select, copy]
+      ignored_operators: [select, copy, copy_, detach, unsqueeze, expand, _to_copy, view, _unsafe_view, transpose, bmm]
   - id: mtp_output
     modules:
       - name: mtp_output
@@ -59,7 +62,7 @@ stages:
     runtime:
       # Older graphs expose the initialized output through slice; PyTorch 2.10
       # can eliminate that slice and expose the updated buffer as select_scatter.
-      boundary_operators: [slice, select_scatter]
+      boundary_operators: [slice, select_scatter, empty]
       ignored_operators:
         - select
         - copy
@@ -73,6 +76,14 @@ stages:
         - sin
         - mul
         - convert_element_type
+        - detach
+        - copy_
+        - _to_copy
+        - view
+        - _unsafe_view
+        - transpose
+        - slice
+        - cat
     # Runtime retains multiple slice calls in this stage. Select the wrapper
     # output boundary explicitly instead of using call-count-sensitive one_to_one.
     comparisons:
@@ -105,7 +116,7 @@ stages:
         tensors:
           INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
           INPUT[1]: {shape: "[1, T]", dtype: int64}
-          OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, EO]", dtype: ACT}
     runtime:
       boundary_operators: [embedding]
       # Ignore fused and expanded RMSNorm mechanics between embedding and fusion.
@@ -118,6 +129,8 @@ stages:
         - mul
         - rms_norm
         - rms_norm_dynamic_quant_symmetric
+        - _to_copy
+        - add_
   - id: input_fusion
     modules:
       - name: mtp_fusion_projection
@@ -129,6 +142,9 @@ stages:
       ignored_operators:
         - cat
         - view
+        - _unsafe_view
+        - t
+        - transpose
         - convert_element_type
         - pow
         - mean
@@ -147,8 +163,8 @@ stages:
           INPUT[1]: {shape: "[Rprop]", dtype: int64}
           OUTPUT[0]: {shape: "[Rprop, H]", dtype: ACT}
     runtime:
-      boundary_operators: [aten.index.Tensor]
-      ignored_operators: [device_put, alias]
+      boundary_operators: [aten.index.Tensor, index_select]
+      ignored_operators: [device_put, alias, t]
   - id: proposal_lm_head
     modules:
       - name: mtp_proposal_lm_head
@@ -161,7 +177,9 @@ stages:
     modules:
       - name: mtp_proposal_sampler
         tensors:
-          INPUT[0]: {shape: "[Rprop, Vtp]", dtype: OUT}
+          # MTP lm_head is TP-local, then all_gather reconstructs the complete
+          # vocabulary before argmax sampling.
+          INPUT[0]: {shape: "[Rprop, V]", dtype: OUT}
           OUTPUT[0]: {shape: "[B, 1]", dtype: int64}
     runtime:
       boundary_operators: [argmax]

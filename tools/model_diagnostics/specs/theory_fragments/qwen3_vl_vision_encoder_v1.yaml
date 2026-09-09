@@ -1,0 +1,123 @@
+# Qwen3-VL Dense and MoE share the same Hugging Face vision backbone:
+# fused QKV attention, two-layer GELU MLP, DeepStack mergers at configured
+# indices, and one final merger after the last block.
+fragment_id: qwen3_vl_vision_encoder_v1
+fragment_kind: vision_encoder
+
+stages:
+  - id: vision_attention_qkv
+    modules:
+      - name: vision_qkv_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, 3 * VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [native_layer_norm]
+      ignored_operators:
+        - native_layer_norm
+        - t
+        - view
+        - permute
+        - unbind
+        - _to_copy
+        - unsqueeze
+        - mul
+        - slice
+        - neg
+        - cat
+        - add
+        - transpose
+        - sub
+        - split_with_sizes
+
+  - id: vision_attention
+    modules:
+      - name: vision_attention
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+      - name: vision_o_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [attention]
+      ignored_operators:
+        - cat
+        - view
+        - t
+        - add
+
+  - id: vision_mlp
+    modules:
+      - name: vision_mlp_fc1
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VF]", dtype: ACT}
+      - name: gelu
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VF]", dtype: ACT}
+      - name: vision_mlp_fc2
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [native_layer_norm]
+      ignored_operators:
+        - native_layer_norm
+        - t
+        - add
+        - view
+
+  - id: vision_deepstack_merger
+    modules:
+      - name: vision_merger_fc1
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VMH]", dtype: ACT}
+      - name: gelu
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VMH]", dtype: ACT}
+      - name: vision_merger_fc2
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
+    runtime:
+      boundary_operators: [native_layer_norm]
+      ignored_operators:
+        - native_layer_norm
+        - view
+        - t
+
+  - id: vision_final_merger
+    modules:
+      - name: vision_merger_fc1
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VMH]", dtype: ACT}
+      - name: gelu
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VMH]", dtype: ACT}
+      - name: vision_merger_fc2
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
+    runtime:
+      boundary_operators: [native_layer_norm]
+      ignored_operators:
+        - native_layer_norm
+        - view
+        - t
+        - prod
+        - div
+        - split_with_sizes
+        - eq
+        - unsqueeze
+        - expand
+        - slice
+        - select
+        - index
+
+stage_groups:
+  block:
+    - vision_attention_qkv
+    - vision_attention
+    - vision_mlp
+  deepstack_block:
+    - vision_attention_qkv
+    - vision_attention
+    - vision_mlp
+    - vision_deepstack_merger
+  final_merger:
+    - vision_final_merger

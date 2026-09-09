@@ -153,9 +153,9 @@ outputs/model_diagnostics/<profile-stem>-<timestamp>/
 - [decode_example.yaml](profiles/decode_example.yaml)：当前为 Qwen3 MoE decode，
   **默认开启 MTP**（`num_mtp_tokens>0` 且合法 window）。
 
-这两份文件是**完整字段参考版**：列出 run profile 的全部可配字段，每个字段上方注释
-是否可缺省及其默认值。实际使用时复制一份，只保留本次需要覆盖的字段即可。以下亦为一份
-完整、可运行的 decode Profile 基准：
+这两份文件是当前类别的**代表配置**，用于直接试跑，不保证随每个可选字段同步扩充；完整
+字段定义、默认值和约束以本节字段表为准。实际使用时复制一份，只保留本次需要覆盖的字段
+即可。以下是一份包含全部公开字段的 decode Profile 基准：
 
 ```yaml
 schema_version: "1"
@@ -173,6 +173,7 @@ parallel:
   expert_parallel_size: 1
   moe_data_parallel_size: 1
 selected_language_layers: [0]
+selected_region_layers: null
 selected_stage_regions: [input, output]
 num_hidden_layers_override: 1
 do_compile: true
@@ -181,6 +182,9 @@ quantize_linear_action: DISABLED
 word_embedding_tp: null
 enable_redundant_experts: false
 enable_external_shared_experts: false
+image_batch_size: null
+image_height: null
+image_width: null
 ```
 
 实际使用时建议从两个仓库样例中选择与 phase 对应的一份复制，再只保留本次确实需要的
@@ -200,6 +204,7 @@ enable_external_shared_experts: false
 | `num_mtp_tokens` | 否 | `0` | 非负整数；只在合法 MTP decode 窗口启用 MTP region |
 | `parallel` | 否 | 各维度均为 1 | mapping；见下表 |
 | `selected_language_layers` | 否 | 所有已执行 language 层 | 非空、非负整数列表；排序去重；部分越界 warning 后跳过；全部越界则报错 |
+| `selected_region_layers` | 否 | 其他分层 region 的全部已物化层 | region ID 到非空、非负整数列表的 mapping；用于 `vision_encoder` 等分层 region；不能选择保留的 `language`、`mtp` region |
 | `selected_stage_regions` | 否 | Spec 中全部非分层 region | 非空字符串列表；仅在需要限制 input/output 等 region 时使用 |
 | `num_hidden_layers_override` | 否 | `0` | 非负整数；控制本次实际执行的 language decoder 层数 |
 | `do_compile` | 否 | `true` | 必须是布尔值；正式 Theory↔Runtime E2E 使用编译态语义算子 |
@@ -208,6 +213,9 @@ enable_external_shared_experts: false
 | `word_embedding_tp` | 否 | `null` | `col`、`row` 或省略；分别按 hidden/vocab 维切分 embedding |
 | `enable_redundant_experts` | 否 | `false` | 按 msmodeling EP shard 规则增加冗余专家副本；要求 `expert_parallel_size > 1` |
 | `enable_external_shared_experts` | 否 | `false` | 分配独立 rank 运行 shared experts；要求 `expert_parallel_size > 1` 且模型含 shared experts |
+| `image_batch_size` | 否 | `null` | 正整数；视觉输入的图像 batch 数；视觉诊断时与 `image_height`、`image_width` 一起填写 |
+| `image_height` | 否 | `null` | 正整数；送入模型预处理前的图像高度；视觉诊断时与另外两个图像字段一起填写 |
+| `image_width` | 否 | `null` | 正整数；送入模型预处理前的图像宽度；视觉诊断时与另外两个图像字段一起填写 |
 
 `parallel` 支持以下正整数（均为可缺省、默认 `1`）：
 
@@ -277,6 +285,34 @@ num_mtp_tokens: 2
 num_hidden_layers_override: 1
 quantize_linear_action: W8A8_DYNAMIC
 ```
+
+### 3.4 多 Region 选层与视觉输入
+
+`selected_language_layers` 只选择 language decoder。对于 `vision_encoder` 等其他分层
+region，使用 `selected_region_layers` 按 region ID 选择代表层：
+
+```yaml
+selected_language_layers: [0]
+selected_region_layers:
+  vision_encoder: [0, 8, 16, 24, 26]
+```
+
+省略 `selected_region_layers` 时，已物化的其他分层 region 默认选择全部层。显式配置时，
+region ID 必须对应 Spec 中存在的非 language、非 MTP 分层 region；索引会排序、去重，部分
+越界索引发出 warning 后跳过，全部越界则报错。
+
+视觉 prefill 通过以下三个字段描述原始图像输入：
+
+```yaml
+phase: prefill
+image_batch_size: 1
+image_height: 224
+image_width: 224
+```
+
+三个值都必须是正整数，视觉诊断时应同时填写；全部省略表示不构造视觉输入。Runtime capture
+会根据模型预处理规则计算实际 resize/grid 信息并写入 `ModelRunContext`，Theory 再使用该
+上下文推导视觉 patch token、projector token 以及最终文本序列长度。
 
 ## 4. 端到端测试用例编写
 

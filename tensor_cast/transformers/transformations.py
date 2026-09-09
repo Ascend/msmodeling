@@ -49,8 +49,6 @@ from ..adapter.patch_report import PatchReport, attach_patch_report
 
 logger = logging.getLogger(__name__)
 
-_MINIMAX_M3_MODEL_TYPE = "minimax_m3_vl"
-
 
 def wrap_model(model: "ModelWrapperBase") -> "ModelWrapperBase":
     """
@@ -805,7 +803,7 @@ def shard_model_by_tp(
             else:
                 params.update({"head_num": config_info.num_attention_heads})
                 tp_plan.update({f"{language_layers}.*.q_proj": (COLWISE_LINEAR, params)})
-                if self.hf_config.model_type == _MINIMAX_M3_MODEL_TYPE and self.model_config.mtp_config is not None:
+                if self.model_config.mtp_config is not None:
                     tp_plan.update(
                         {
                             tp_plan_nested_module_path("mtp.layers.*.mtp_block", "q_proj"): (
@@ -833,7 +831,7 @@ def shard_model_by_tp(
                         ),
                     }
                 )
-                if self.hf_config.model_type == _MINIMAX_M3_MODEL_TYPE and self.model_config.mtp_config is not None:
+                if self.model_config.mtp_config is not None:
                     tp_plan.update(
                         {
                             tp_plan_nested_module_path("mtp.layers.*.mtp_block", "k_proj"): (

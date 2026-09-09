@@ -48,6 +48,7 @@ _FRAGMENT_KINDS = frozenset(
         "mtp_framework",
         "mtp_predictor_adapter",
         "model_decoder",
+        "vision_encoder",
     }
 )
 
@@ -56,6 +57,7 @@ _FRAGMENT_KINDS = frozenset(
 class TheoryFragmentStage:
     stage_id: str
     operators: tuple[TheoryOperatorSpec, ...]
+    repeat: str | None = None
     runtime_options: RuntimeStageOptions | None = None
     comparisons: Mapping[str, object] | None = None
     activation: str | None = None
@@ -220,7 +222,7 @@ def _parse_fragment_file(raw: object, *, source: str) -> _ParsedFragmentFile:
             _exact_keys(
                 stage_map,
                 required={"id", "modules"},
-                optional={"runtime", "comparisons", "activation"},
+                optional={"runtime", "comparisons", "activation", "repeat"},
                 label=f"stages[{index}]",
             )
             stage_id = _as_str(stage_map.get("id"), f"stages[{index}].id")
@@ -262,6 +264,11 @@ def _parse_fragment_file(raw: object, *, source: str) -> _ParsedFragmentFile:
                 TheoryFragmentStage(
                     stage_id=stage_id,
                     operators=operators,
+                    repeat=(
+                        _as_str(stage_map.get("repeat"), f"stages[{index}].repeat")
+                        if "repeat" in stage_map
+                        else None
+                    ),
                     runtime_options=runtime_options,
                     comparisons=(
                         None
@@ -385,6 +392,7 @@ def _resolve_fragment_includes(
                     stage = TheoryFragmentStage(
                         stage_id=stage.stage_id,
                         operators=stage.operators,
+                        repeat=stage.repeat,
                         runtime_options=stage.runtime_options,
                         comparisons=stage.comparisons,
                         activation=fragment_activation,
@@ -448,6 +456,7 @@ def _apply_fragment_runtime_override(
     return TheoryFragmentStage(
         stage_id=stage.stage_id,
         operators=stage.operators,
+        repeat=stage.repeat,
         runtime_options=RuntimeStageOptions(
             boundary_operators=boundaries,
             ignored_operators=tuple(ignored),

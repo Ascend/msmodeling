@@ -1,0 +1,154 @@
+# Qwen3-VL MoE text decoder fragment for the HF native Runtime path captured by
+# model_diagnostics. It intentionally does not reuse qwen3_moe_decoder_v1:
+# Qwen3-VL MoE emits decomposed RMSNorm, independent q/k/v projections, and
+# per-local-expert static_quant_linear calls instead of fused grouped_matmul.
+fragment_id: qwen3_vl_moe_decoder_v1
+fragment_kind: model_decoder
+include_fragments:
+  - qwen3_vl_moe_attention_v1
+stages:
+  - id: moe_gate
+    modules:
+      - name: moe_gate_linear
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, E]", dtype: ACT}
+      - name: topk
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop]", dtype: float32}
+          OUTPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+    runtime:
+      # Match the complete pre-FFN RMSNorm sequence, not one of its casts.
+      boundary_operators: [rms_norm]
+      ignored_operators:
+        - _to_copy
+        - pow
+        - mean
+        - add
+        - rsqrt
+        - mul
+        - view
+        - t
+        - slice
+        - select
+        - alias
+        - copy_
+        - _softmax
+        - sum
+        - div_
+        - unsqueeze
+        - squeeze
+        - all_gather
+        - dynamic_quantize_symmetric
+  - id: moe_dispatch
+    modules:
+      - name: init_routing_v2
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [init_routing_v2]
+      ignored_operators:
+        - view
+        - reshape
+        - alias
+        - copy_
+        - cat
+        - split
+        - split_with_sizes
+        - slice
+        - select
+        - pad
+        - permute
+        - transpose
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_to_all
+  - id: moe_experts
+    # TensorCast invokes gate/up/down once per EP-local expert. Elocal is
+    # derived from the model's routed-expert count and expert parallel size.
+    repeat: Elocal
+    modules:
+      - &expert_gate
+        name: expert_gate_projection
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Fmoe]", dtype: OUT}
+      - &expert_up
+        name: expert_up_projection
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Fmoe]", dtype: OUT}
+      - &expert_down
+        name: expert_down_projection
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [static_quant_linear]
+      ignored_operators:
+        - view
+        - reshape
+        - alias
+        - copy_
+        - cat
+        - split
+        - split_with_sizes
+        - slice
+        - select
+        - pad
+        - t
+        - transpose
+        - silu
+        - mul
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_to_all
+  - id: moe_combine
+    modules:
+      - name: unpermute_tokens
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: mul
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: sum
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [unpermute_tokens]
+      ignored_operators:
+        - view
+        - reshape
+        - alias
+        - copy_
+        - unsqueeze
+        - squeeze
+        - slice
+        - select
+        - to
+        - _to_copy
+        - all_to_all
+        - all_gather
+        - add
+        - rms_norm
+        - device_put
+    comparisons:
+      theory-runtime:
+        # Final RMSNorm/request bookkeeping can share this Runtime window when
+        # MTP deactivates the ordinary output region. Compare the three HF MoE
+        # combine boundaries explicitly and leave the following framework
+        # mechanics outside this stage's semantic contract.
+        strategy: boundary_equal
+        options:
+          mapping:
+            mode: explicit
+            pairs:
+              - left_call_index: 0
+                left_slot: {direction: output, index: 0, name: null}
+                right_call_index: 0
+                right_slot: {direction: output, index: 0, name: null}
+              - left_call_index: 1
+                left_slot: {direction: output, index: 0, name: null}
+                right_call_index: 1
+                right_slot: {direction: output, index: 0, name: null}
+              - left_call_index: 2
+                left_slot: {direction: output, index: 0, name: null}
+                right_call_index: 2
+                right_slot: {direction: output, index: 0, name: null}
+            relations: []

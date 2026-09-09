@@ -21,6 +21,7 @@ from ..model_config import config_has_draft_spec
 from ..performance_model import bytes_of_tensor
 from ..transformers.utils import get_attention_quant_config, logger
 from ..utils import exact_division
+from .vision_geometry import VISION_IMAGE_BOUNDARY_TOKEN_COUNT
 
 # Qwen2-VL / Qwen3-VL preprocessor_config.json defaults when no local config is available.
 _QWEN_VL_DEFAULT_MIN_PIXELS = 65536
@@ -433,7 +434,7 @@ def generate_image_inputs(model, image_batch_size, image_height, image_width, co
     )
     # Calculate the token embedded in the text.
     merge_length = merge_size**2
-    num_image_tokens = image_batch_size * (tokens // merge_length + 2)
+    num_image_tokens = image_batch_size * (tokens // merge_length + VISION_IMAGE_BOUNDARY_TOKEN_COUNT)
     parallel_config = model.model_config.parallel_config
     batch_size = (concurrency + parallel_config.data_parallel_size - 1) // parallel_config.data_parallel_size
     pixel_values = pixel_values.repeat(batch_size, 1)

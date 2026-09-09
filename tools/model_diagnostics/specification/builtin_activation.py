@@ -54,6 +54,21 @@ class NonMtpLmHeadActivation:
         return not is_mtp_enabled(request.context)
 
 
+class VisionPrefillActivation:
+    """Enable vision-front-end regions only for image prefill captures."""
+
+    policy_id = "vision_prefill"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        image_batch = request.context.model_config.get("image_batch_size", 0)
+        return (
+            request.context.phase is ExecutionPhase.PREFILL
+            and isinstance(image_batch, int)
+            and not isinstance(image_batch, bool)
+            and image_batch > 0
+        )
+
+
 class DsaEnabledActivation:
     """Enable DSA semantics when the loaded model config exposes DSA top-k."""
 
@@ -142,6 +157,7 @@ def create_builtin_operator_activation_registry() -> OperatorActivationRegistry:
     registry.register(LmHeadTokenSelectionActivation())
     registry.register(MtpEnabledActivation())
     registry.register(NonMtpLmHeadActivation())
+    registry.register(VisionPrefillActivation())
     registry.register(DsaEnabledActivation())
     registry.register(MlaPrefillKvProjectionActivation())
     registry.register(ExplicitMoeGateActivation())

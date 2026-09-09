@@ -209,7 +209,10 @@ class RuntimeArtifactOrganizer:
         return None
 
 
-_RMSNORM_SIGNATURE = ("pow", "mean", "add", "rsqrt", "mul", "mul")
+_RMSNORM_SIGNATURES = (
+    ("pow", "mean", "add", "rsqrt", "mul", "mul"),
+    ("_to_copy", "pow", "mean", "add", "rsqrt", "mul", "_to_copy", "mul"),
+)
 
 
 def _canonical_operator_field(operator_name: str) -> str:
@@ -231,23 +234,21 @@ def _matches_operator_name(operator_name: str, pattern: str) -> bool:
 def _matches_composite_boundary(calls, index: int, boundary: str) -> bool:
     """Match a boundary that Runtime expands into an ATen operator sequence.
 
-    Qwen3.5/Qwen3-Next expand RMSNorm into ATen ops instead of
-    ``tensor_cast.rms_norm``. An unfused RMSNorm emits one contiguous,
-    deterministic operator run, so a ``rms_norm`` boundary matches when the
-    canonical operator fields starting at ``index`` equal that exact contiguous
-    signature (pow -> mean -> add -> rsqrt -> mul -> mul). This yields exactly
-    one boundary candidate per norm sequence and never matches partial or
-    interleaved windows. This is organization-time pattern matching only;
-    Artifact evidence is never mutated (U-c008-08).
+    Several Hugging Face models expand RMSNorm into ATen ops instead of
+    ``tensor_cast.rms_norm``. The Qwen3-VL MoE implementation additionally
+    casts into and out of float32, so both the cast-free and cast-wrapped exact
+    signatures are accepted. This yields one semantic boundary per complete
+    norm sequence and never treats an isolated cast as a boundary. Artifact
+    evidence is never mutated (U-c008-08).
     """
 
     if boundary != "rms_norm":
         return False
-    if _canonical_operator_field(calls[index].operator_name) != _RMSNORM_SIGNATURE[0]:
-        return False
-    for offset, expected in enumerate(_RMSNORM_SIGNATURE):
-        if index + offset >= len(calls):
-            return False
-        if _canonical_operator_field(calls[index + offset].operator_name) != expected:
-            return False
-    return True
+    return any(
+        index + len(signature) <= len(calls)
+        and all(
+            _canonical_operator_field(calls[index + offset].operator_name) == expected
+            for offset, expected in enumerate(signature)
+        )
+        for signature in _RMSNORM_SIGNATURES
+    )

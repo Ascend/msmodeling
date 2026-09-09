@@ -181,6 +181,122 @@ def test_run_context_uses_resolved_runtime_dtype_when_hf_declares_bf16(quantizat
         )
 
 
+@pytest.mark.parametrize(
+    ("root_model_type", "text_model_type", "expected_model_type"),
+    (
+        ("qwen3_5", "qwen3_5_text", "qwen3_5_text"),
+        ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_moe_text"),
+        ("qwen3_vl", "qwen3_vl_text", "qwen3_vl"),
+        ("qwen3_vl_moe", "qwen3_vl_moe_text", "qwen3_vl_moe"),
+    ),
+)
+def test_run_context_selects_qwen_spec_matching_model_type(
+    root_model_type: str,
+    text_model_type: str,
+    expected_model_type: str,
+) -> None:
+    """Use Qwen3-VL root types without overriding Qwen3.5 text types."""
+    from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load
+    from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
+
+    profile = DiagnosticsRunProfile(
+        schema_version="1",
+        model_name="tests/assets/model_config/test_model",
+        entrypoint="text_generate",
+        phase=ExecutionPhase.PREFILL,
+        batch_size=1,
+        query_length=2,
+        context_length=None,
+        num_mtp_tokens=0,
+        parallel=ParallelContext(),
+        selected_stage_regions=(),
+        num_hidden_layers_override=1,
+        do_compile=False,
+        device="TEST_DEVICE",
+        quantize_linear_action="DISABLED",
+        word_embedding_tp=None,
+    )
+    root_config = SimpleNamespace(model_type=root_model_type, torch_dtype="float16")
+    text_config = SimpleNamespace(
+        hidden_size=1024,
+        intermediate_size=3072,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        num_hidden_layers=1,
+        vocab_size=151936,
+        head_dim=64,
+        model_type=text_model_type,
+        torch_dtype="float16",
+    )
+    runner = SimpleNamespace(
+        model=SimpleNamespace(hf_config=root_config, text_config=text_config),
+        user_input=SimpleNamespace(num_mtp_tokens=0, block_size=128),
+    )
+
+    context = _run_context_after_model_load(profile, runner)
+
+    assert context.model_config["model_type"] == expected_model_type
+
+
+def test_run_context_derives_qwen3_vl_moe_language_and_mtp_layer_kinds() -> None:
+    from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load
+    from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
+
+    profile = DiagnosticsRunProfile(
+        schema_version="1",
+        model_name="tests/assets/model_config/qwen3_vl_moe_mixed",
+        entrypoint="text_generate",
+        phase=ExecutionPhase.DECODE,
+        batch_size=1,
+        query_length=3,
+        context_length=128,
+        num_mtp_tokens=2,
+        parallel=ParallelContext(),
+        selected_stage_regions=(),
+        num_hidden_layers_override=6,
+        do_compile=False,
+        device="TEST_DEVICE",
+        quantize_linear_action="DISABLED",
+        word_embedding_tp=None,
+    )
+    root_config = SimpleNamespace(model_type="qwen3_vl_moe", torch_dtype="float16")
+    text_config = SimpleNamespace(
+        hidden_size=1024,
+        intermediate_size=3072,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        num_hidden_layers=6,
+        vocab_size=151936,
+        head_dim=64,
+        model_type="qwen3_vl_moe_text",
+        num_experts=8,
+        num_experts_per_tok=2,
+        moe_intermediate_size=768,
+        decoder_sparse_step=2,
+        mlp_only_layers=[3],
+        torch_dtype="float16",
+    )
+    runner = SimpleNamespace(
+        model=SimpleNamespace(hf_config=root_config, text_config=text_config),
+        user_input=SimpleNamespace(num_mtp_tokens=2, block_size=128),
+    )
+
+    context = _run_context_after_model_load(profile, runner)
+
+    assert context.model_config["language_layer_kinds"] == (
+        "qwen3_vl_moe_dense_text_decoder",
+        "qwen3_vl_moe_text_decoder",
+        "qwen3_vl_moe_dense_text_decoder",
+        "qwen3_vl_moe_dense_text_decoder",
+        "qwen3_vl_moe_dense_text_decoder",
+        "qwen3_vl_moe_text_decoder",
+    )
+    assert context.model_config["mtp_layer_kinds"] == (
+        "qwen3_vl_moe_dense_mtp",
+        "qwen3_vl_moe_mtp",
+    )
+
+
 def test_run_context_preserves_outer_dtype_when_text_config_is_missing_it() -> None:
     from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
     from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load

@@ -33,20 +33,66 @@ from tools.model_diagnostics.domain import (
     TensorInfo,
     validate_expert_parallel_features,
 )
+from tools.model_diagnostics.domain.constants import VISION_IMAGE_BOUNDARY_TOKEN_COUNT
 from tools.model_diagnostics.errors import SourceLoadError
 from tensor_cast.runtime import Runtime
 
 _CAPTURE_BACKEND = "tensor_cast.runtime_observer"
 _SCHEMA_VERSION = "1"
+_QWEN3_VL_MOE_DENSE_LAYER = "qwen3_vl_moe_dense_text_decoder"
+_QWEN3_VL_MOE_LAYER = "qwen3_vl_moe_text_decoder"
+
+
+def _qwen3_vl_moe_layer_kinds(
+    config: Mapping[str, object],
+    *,
+    start: int,
+    count: int,
+) -> tuple[str, ...]:
+    """Mirror Hugging Face Qwen3-VL MoE's per-layer MLP selection rule."""
+
+    sparse_step = config.get("decoder_sparse_step")
+    if isinstance(sparse_step, bool) or not isinstance(sparse_step, int) or sparse_step <= 0:
+        raise SourceLoadError("Qwen3-VL MoE decoder_sparse_step must be a positive integer")
+    mlp_only_layers = config.get("mlp_only_layers")
+    if not isinstance(mlp_only_layers, (list, tuple)) or any(
+        isinstance(index, bool) or not isinstance(index, int) or index < 0
+        for index in mlp_only_layers
+    ):
+        raise SourceLoadError("Qwen3-VL MoE mlp_only_layers must contain non-negative integers")
+    if len(mlp_only_layers) != len(set(mlp_only_layers)):
+        raise SourceLoadError("Qwen3-VL MoE mlp_only_layers must not contain duplicates")
+    num_experts = config.get("num_experts")
+    if isinstance(num_experts, bool) or not isinstance(num_experts, int) or num_experts <= 0:
+        raise SourceLoadError("Qwen3-VL MoE num_experts must be a positive integer")
+    if isinstance(start, bool) or not isinstance(start, int) or start < 0:
+        raise SourceLoadError("Qwen3-VL MoE layer start must be a non-negative integer")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise SourceLoadError("Qwen3-VL MoE layer count must be a non-negative integer")
+
+    dense_layers = set(mlp_only_layers)
+    return tuple(
+        _QWEN3_VL_MOE_LAYER
+        if layer_index not in dense_layers and (layer_index + 1) % sparse_step == 0
+        else _QWEN3_VL_MOE_DENSE_LAYER
+        for layer_index in range(start, start + count)
+    )
 
 
 def _is_moe_config(config: object) -> bool:
     """Return whether the loaded HF config exposes routed-MoE fields."""
 
+    get_text_config = getattr(config, "get_text_config", None)
+    text_config = get_text_config() if callable(get_text_config) else config
     has_routed_experts = any(
-        getattr(config, key, None) is not None for key in ("num_experts", "n_routed_experts")
+        getattr(text_config, key, None) is not None or getattr(config, key, None) is not None
+        for key in ("num_experts", "n_routed_experts")
     )
-    return has_routed_experts and getattr(config, "num_experts_per_tok", None) is not None
+    has_topk = (
+        getattr(text_config, "num_experts_per_tok", None) is not None
+        or getattr(config, "num_experts_per_tok", None) is not None
+    )
+    return has_routed_experts and has_topk
 
 
 @lru_cache(maxsize=32)
@@ -326,6 +372,9 @@ def capture_artifact_for_profile(profile: object) -> SimulationExecutionArtifact
         moe_dp_size=parallel.moe_data_parallel_size,
         quantize_linear_action=quant_action,
         word_embedding_tp=profile.word_embedding_tp,
+        image_batch_size=profile.image_batch_size,
+        image_height=profile.image_height,
+        image_width=profile.image_width,
         enable_redundant_experts=profile.enable_redundant_experts,
         enable_external_shared_experts=profile.enable_external_shared_experts,
         performance_model=["analytic"],
@@ -393,6 +442,8 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         "num_experts",
         "num_experts_per_tok",
         "moe_intermediate_size",
+        "decoder_sparse_step",
+        "mlp_only_layers",
         "n_routed_experts",
         "first_k_dense_replace",
         "kv_lora_rank",
@@ -411,6 +462,13 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         value = getattr(hf_config, key, None)
         if value is not None:
             model_config[key] = value
+    root_model_type = getattr(root_config, "model_type", None)
+    # Qwen3-VL Specs intentionally match the multimodal root type. Other
+    # nested configs keep the effective text type copied above; in particular,
+    # Qwen3.5 Specs match ``qwen3_5_text`` / ``qwen3_5_moe_text`` rather than
+    # their multimodal root types.
+    if root_model_type in {"qwen3_vl", "qwen3_vl_moe"}:
+        model_config["model_type"] = root_model_type
     if "index_topk" not in model_config:
         topk_limit = getattr(hf_config, "topk_limit", None)
         if topk_limit is not None:
@@ -422,6 +480,93 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         model_config["moe_dp_size"] = profile.parallel.moe_data_parallel_size
         model_config["enable_redundant_experts"] = profile.enable_redundant_experts
         model_config["enable_external_shared_experts"] = profile.enable_external_shared_experts
+    vision_config = getattr(root_config, "vision_config", None)
+    if vision_config is not None:
+        for source_keys, target_key in (
+            (("hidden_size",), "vision_hidden_size"),
+            (("intermediate_size",), "vision_intermediate_size"),
+            (("depth", "num_hidden_layers"), "vision_num_hidden_layers"),
+            (("patch_size",), "vision_patch_size"),
+            (("spatial_merge_size",), "vision_spatial_merge_size"),
+            (("temporal_patch_size",), "vision_temporal_patch_size"),
+            (("in_channels",), "vision_in_channels"),
+            (("out_hidden_size",), "vision_out_hidden_size"),
+        ):
+            value = next(
+                (
+                    getattr(vision_config, source_key, None)
+                    for source_key in source_keys
+                    if getattr(vision_config, source_key, None) is not None
+                ),
+                None,
+            )
+            if value is not None:
+                model_config[target_key] = value
+
+        depth = model_config.get("vision_num_hidden_layers")
+        deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", ())
+        if not isinstance(deepstack_indexes, (list, tuple)):
+            raise SourceLoadError("vision_config.deepstack_visual_indexes must be a list or tuple")
+        if len(deepstack_indexes) != len(set(deepstack_indexes)) or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in deepstack_indexes
+        ):
+            raise SourceLoadError(
+                "vision_config.deepstack_visual_indexes must contain unique non-negative integers"
+            )
+        if isinstance(depth, int) and any(index >= depth for index in deepstack_indexes):
+            raise SourceLoadError("vision_config.deepstack_visual_indexes contains an out-of-range index")
+        if isinstance(depth, int) and depth > 0:
+            deepstack_set = set(deepstack_indexes)
+            model_config["vision_layer_kinds"] = tuple(
+                "qwen3_vl_deepstack_vision_block"
+                if index in deepstack_set
+                else "qwen3_vl_vision_block"
+                for index in range(depth)
+            )
+
+    for field_name in ("image_batch_size", "image_height", "image_width"):
+        value = getattr(profile, field_name)
+        if value is not None:
+            model_config[field_name] = value
+    if (
+        vision_config is not None
+        and profile.image_batch_size is not None
+        and profile.image_height is not None
+        and profile.image_width is not None
+    ):
+        from tensor_cast.core.input_generator import resize_image
+
+        patch_size = getattr(vision_config, "patch_size", None)
+        merge_size = getattr(vision_config, "spatial_merge_size", None) or 2
+        temporal_patch_size = getattr(vision_config, "temporal_patch_size", None) or 2
+        if isinstance(patch_size, int) and patch_size > 0:
+            resized_height, resized_width = resize_image(
+                profile.model_name,
+                str(model_config.get("model_type", "")),
+                profile.image_height,
+                profile.image_width,
+                patch_size=patch_size,
+                merge_size=merge_size,
+                temporal_patch_size=temporal_patch_size,
+            )
+            grid_t = 1
+            grid_h = resized_height // patch_size
+            grid_w = resized_width // patch_size
+            patch_tokens = profile.image_batch_size * grid_t * grid_h * grid_w
+            model_config.update(
+                {
+                    "image_resized_height": resized_height,
+                    "image_resized_width": resized_width,
+                    "vision_grid_t": grid_t,
+                    "vision_grid_h": grid_h,
+                    "vision_grid_w": grid_w,
+                    "vision_patch_tokens": patch_tokens,
+                    "vision_projector_tokens": patch_tokens // (merge_size**2),
+                    "vision_text_tokens": profile.image_batch_size
+                    * (grid_t * grid_h * grid_w // (merge_size**2) + VISION_IMAGE_BOUNDARY_TOKEN_COUNT),
+                }
+            )
     declared_dtype = next(_config_dtypes((root_config, text_config)), None)
     runtime_model_config = getattr(model, "model_config", None)
     runtime_dtype = getattr(runtime_model_config, "dtype", None)
@@ -456,10 +601,25 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
     effective = model_config.get("effective_num_hidden_layers")
     if isinstance(layer_types, list) and isinstance(effective, int) and len(layer_types) > effective:
         model_config["layer_types"] = layer_types[:effective]
+    if root_model_type == "qwen3_vl_moe" and _is_moe_config(hf_config) and isinstance(effective, int):
+        model_config["language_layer_kinds"] = _qwen3_vl_moe_layer_kinds(
+            model_config,
+            start=0,
+            count=effective,
+        )
     user_input = getattr(model_runner, "user_input", None)
     num_mtp_tokens = getattr(user_input, "num_mtp_tokens", None)
     if isinstance(num_mtp_tokens, int) and not isinstance(num_mtp_tokens, bool) and num_mtp_tokens >= 0:
         model_config["num_mtp_tokens"] = num_mtp_tokens
+        if root_model_type == "qwen3_vl_moe" and _is_moe_config(hf_config) and isinstance(effective, int):
+            model_config["mtp_layer_kinds"] = tuple(
+                kind.replace("_text_decoder", "_mtp")
+                for kind in _qwen3_vl_moe_layer_kinds(
+                    model_config,
+                    start=effective,
+                    count=num_mtp_tokens,
+                )
+            )
     block_size = getattr(user_input, "block_size", None)
     if isinstance(block_size, int) and block_size > 0:
         model_config["block_size"] = block_size
