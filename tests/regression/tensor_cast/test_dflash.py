@@ -413,6 +413,29 @@ class TestDflashKvInjectTcAttention(unittest.TestCase):
         self.assertEqual(out.shape, (1, 4, 64))
 
 
+def _event_tensor_shapes(event) -> list[tuple[int, ...]]:
+    return [tuple(a.shape) for a in event.op_invoke_info.args if isinstance(a, torch.Tensor)]
+
+
+def _has_full_lctx_linear(event, l_ctx: int, in_f: int, out_f: int) -> bool:
+    """Match compile-time Linear on both x86 MKL (2D) and aarch64 ACL MKLDNN (3D).
+
+    freeze() may record ``(L_ctx, in_f)`` after flatten, or keep ``(B, L_ctx, in_f)``
+    for ``mkldnn._linear_pointwise``. Both are full-context GEMMs; folded graphs
+    would not keep seq == L_ctx.
+    """
+    shapes = _event_tensor_shapes(event)
+    has_weight = any(len(s) == 2 and in_f in s and out_f in s for s in shapes)
+    if not has_weight:
+        return False
+    for shape in shapes:
+        if len(shape) == 2 and shape[0] == l_ctx and shape[-1] == in_f:
+            return True
+        if len(shape) == 3 and shape[1] == l_ctx and shape[-1] == in_f:
+            return True
+    return False
+
+
 class TestDflashFcOnDecodePath(unittest.TestCase):
     def test_fc_laux_hidden_is_recorded(self):
         """draft.fc (L_aux·H → H) must appear in Runtime events for decode draft forward."""
@@ -566,18 +589,8 @@ class TestDflashFcOnDecodePath(unittest.TestCase):
         self.assertEqual(out.shape[-1], 64)
         in_f, out_f = 3 * 64, 64
         kv_in, kv_out = 64, 1 * 2 * 2 * 16
-        found_full_fc = False
-        found_ctx_proj = False
-        for event in runtime.event_list:
-            shapes = [tuple(a.shape) for a in event.op_invoke_info.args if isinstance(a, torch.Tensor)]
-            if any(len(s) == 2 and s[0] == l_ctx and s[-1] == in_f for s in shapes) and any(
-                len(s) == 2 and in_f in s and out_f in s for s in shapes
-            ):
-                found_full_fc = True
-            if any(len(s) == 2 and s[0] == l_ctx and s[-1] == kv_in for s in shapes) and any(
-                len(s) == 2 and kv_in in s and kv_out in s for s in shapes
-            ):
-                found_ctx_proj = True
+        found_full_fc = any(_has_full_lctx_linear(event, l_ctx, in_f, out_f) for event in runtime.event_list)
+        found_ctx_proj = any(_has_full_lctx_linear(event, l_ctx, kv_in, kv_out) for event in runtime.event_list)
         self.assertTrue(found_full_fc, f"expected full-L_ctx={l_ctx} draft.fc under TC compile")
         self.assertTrue(found_ctx_proj, f"expected full-L_ctx={l_ctx} context_kv_proj under TC compile")
 
@@ -634,13 +647,7 @@ class TestDflashFcOnDecodePath(unittest.TestCase):
             f"expected tensor_cast.cat under compile with graph aux, got: {names}",
         )
         in_f, out_f = 3 * 64, 64
-        found_fc = False
-        for event in runtime.event_list:
-            shapes = [tuple(a.shape) for a in event.op_invoke_info.args if isinstance(a, torch.Tensor)]
-            if any(len(s) == 2 and s[0] == l_ctx and s[-1] == in_f for s in shapes) and any(
-                len(s) == 2 and in_f in s and out_f in s for s in shapes
-            ):
-                found_fc = True
+        found_fc = any(_has_full_lctx_linear(event, l_ctx, in_f, out_f) for event in runtime.event_list)
         self.assertTrue(found_fc, "expected draft.fc under compile with graph-connected aux")
 
     def test_hidden_norm_fuses_under_torch_compile(self):
