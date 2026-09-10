@@ -1,5 +1,11 @@
 # 特性设计：服务化参数实测寻优功能
 
+## 修订记录
+
+| 日期 | 修订版本 | 修改描述 | 作者 | RFC文档 |
+| -- | -- | -- | -- | -- |
+| 2026-09-08 | 1.0 | 明确 `REQUESTRATE=0` 的不限速与最大施压语义 | 待确认 | 待确认 |
+
 ## 背景描述
 
 大模型推理服务在上线前通常需要根据模型、硬件、数据集和服务框架反复调整参数，例如 MindIE 的
@@ -362,7 +368,7 @@ msmodeling optix \
 | `ttft_penalty` | float | `3.0` | TTFT 指数惩罚系数 |
 | `tpot_penalty` | float | `3.0` | TPOT 指数惩罚系数 |
 | `success_rate_penalty` | float | `5.0` | 成功率指数惩罚系数 |
-| `use_request_rate_calibration` | bool | `true` | false → scheduler.run 搜索 CONCURRENCY（REQUESTRATE 固定 max）；true → scheduler.run_with_request_rate 固定 CONCURRENCY=max |
+| `use_request_rate_calibration` | bool | `true` | false → scheduler.run 搜索 CONCURRENCY，REQUESTRATE 固定为最大施压速率；true → scheduler.run_with_request_rate 固定 CONCURRENCY=max，先以最大施压速率运行再校准。REQUESTRATE 范围包含 0 时，0（不限速）是最大施压速率；否则取数值 max |
 | `data_storage.pso_top_k` | int | `3` | PSO 后进入 fine tune 的 top 结果数量 |
 
 部署环境配置：
@@ -571,6 +577,8 @@ io_error = ["IO error"]
 | 异常-命令落在 msmodeling venv | 异常测试 | 部署命令解析到 venv 内 | 校验或物化命令 | 拒绝启动并输出 `[optix/env]` 修复建议 |
 | 边界-粒子数过大 | 边界测试 | `n_particles > 200` | 创建 PSOOptimizer | 自动截断为 200 |
 | 边界-迭代数过大 | 边界测试 | `iters > 200` | 创建 PSOOptimizer | 自动截断为 200 |
+| 边界-request rate 含 0 | 边界测试 | `REQUESTRATE` 范围包含 0 | 进入 PSO 字段适配 | REQUESTRATE 固定为 0（不限速） |
+| 边界-request rate 不含 0 | 边界测试 | `REQUESTRATE` 范围不包含 0 | 进入 PSO 字段适配 | REQUESTRATE 固定为数值 max |
 | 边界-request rate 固定 | 边界测试 | `REQUESTRATE.min == max` | 调用 `run_with_request_rate()` | 跳过第二次 request rate 评测 |
 | 边界-备份目录超限 | 边界测试 | `bak` 大于 1GB | 调用 `set_back_up_path()` | 禁用本轮备份路径 |
 

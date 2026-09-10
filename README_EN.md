@@ -23,8 +23,8 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>DeepSeek Series</b></summary>
 
-🔹 **[Jun 4, 2026]**: msModeling adds support for the **DeepSeek-V4** model.  
-🔹 **[Apr 20, 2026]**: msModeling adds support for the **DeepSeek V3.2** model.  
+🔹 **[Jun 4, 2026]**: msModeling adds support for the **DeepSeek-V4** model.<br>
+🔹 **[Apr 20, 2026]**: msModeling adds support for the **DeepSeek V3.2** model.<br>
 🔹 **[Sep 6, 2025]**: msModeling adds support for the **DeepSeek V3** model.
 
 </details>
@@ -32,8 +32,8 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>Kimi Series</b></summary>
 
-🔹 **[Jun 11, 2026]**: msModeling adds support for the **Kimi-K2.6** model.  
-🔹 **[May 27, 2026]**: msModeling adds support for the **Kimi-K2.5** model.  
+🔹 **[Jun 11, 2026]**: msModeling adds support for the **Kimi-K2.6** model.<br>
+🔹 **[May 27, 2026]**: msModeling adds support for the **Kimi-K2.5** model.<br>
 🔹 **[Sep 6, 2025]**: msModeling adds support for the **Kimi-K2** model.
 
 </details>
@@ -41,10 +41,10 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>Qwen Series</b></summary>
 
-🔹 **[Apr 20, 2026]**: msModeling adds image-input support for **Qwen3.5**.  
-🔹 **[Mar 31, 2026]**: msModeling adds text-input support for **Qwen3.5 Dense / MoE**.  
-🔹 **[Dec 25, 2025]**: msModeling adds support for the **Qwen3 MoE** model.  
-🔹 **[Sep 18, 2025]**: msModeling adds support for the **Qwen3-Next** model.  
+🔹 **[Apr 20, 2026]**: msModeling adds image-input support for **Qwen3.5**.<br>
+🔹 **[Mar 31, 2026]**: msModeling adds text-input support for **Qwen3.5 Dense / MoE**.<br>
+🔹 **[Dec 25, 2025]**: msModeling adds support for the **Qwen3 MoE** model.<br>
+🔹 **[Sep 18, 2025]**: msModeling adds support for the **Qwen3-Next** model.<br>
 🔹 **[Aug 18, 2025]**: msModeling adds support for the **Qwen3 Dense** model.
 
 </details>
@@ -52,8 +52,8 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>GLM Series</b></summary>
 
-🔹 **[Jun 4, 2026]**: msModeling adds support for the **GLM5.1** model.  
-🔹 **[Apr 30, 2026]**: msModeling adds support for the **GLM5** model.  
+🔹 **[Jun 4, 2026]**: msModeling adds support for the **GLM5.1** model.<br>
+🔹 **[Apr 30, 2026]**: msModeling adds support for the **GLM5** model.<br>
 🔹 **[Mar 31, 2026]**: msModeling adds support for the **GLM-4 MoE** model.
 
 </details>
@@ -74,15 +74,15 @@ Click a module name to expand the list of **supported features**.
 <details>
 <summary><b>Model Inference Performance Simulation</b></summary>
 
-🔹 Multi-hardware simulation for Ascend devices, including Atlas 800 A2/A3 and Atlas 350, with support for custom device profiles  
-🔹 Separate simulation of the LLM prefill and decode stages  
-🔹 Prefix Cache simulation  
-🔹 MTP speculative decoding simulation  
-🔹 Compilation and graph optimization, and multi-stream compute-communication overlap  
-🔹 Quantization simulation, including `W8A8`, `W4A8`, `FP8`, and `MXFP4`  
-🔹 Parallelism and MoE extensions, including TP, DP, EP, and fine-grained parallelism such as Embedding TP and Vision TP  
-🔹 Switching between the Roofline and Profiling performance models  
-🔹 Chrome Trace and debugging  
+🔹 Multi-hardware simulation for Ascend devices, including Atlas 800 A2/A3 and Atlas 350, with support for custom device profiles<br>
+🔹 Separate simulation of the LLM prefill and decode stages<br>
+🔹 Prefix Cache simulation<br>
+🔹 MTP speculative decoding simulation<br>
+🔹 Compilation and graph optimization, and multi-stream compute-communication overlap<br>
+🔹 Quantization simulation, including `W8A8`, `W4A8`, `FP8`, and `MXFP4`<br>
+🔹 Parallelism and MoE extensions, including TP, DP, EP, and fine-grained parallelism such as Embedding TP and Vision TP<br>
+🔹 Switching between the Roofline and Profiling performance models<br>
+🔹 Chrome Trace and debugging<br>
 🔹 DiT simulation for video generation, including Ulysses, CFG, and DiT Cache
 
 </details>
@@ -90,14 +90,14 @@ Click a module name to expand the list of **supported features**.
 <details>
 <summary><b>Serving Performance Simulation</b></summary>
 
-🔹 Throughput optimization for LLM and VLM workloads under constraints such as TTFT, TPOT, and serving cost  
-🔹 PD modes, including colocation, disaggregation, and ratio-based deployment  
-🔹 Parallel strategy search, including TP, EP, and MOE-DP  
-🔹 MTP configuration search  
-🔹 Chunked prefill simulation  
-🔹 Prefix Cache simulation  
-🔹 Variable-length workload simulation  
-🔹 Multi-stream compute-communication overlap  
+🔹 Throughput optimization for LLM and VLM workloads under constraints such as TTFT, TPOT, and serving cost<br>
+🔹 PD modes, including colocation, disaggregation, and ratio-based deployment<br>
+🔹 Parallel strategy search, including TP, EP, and MOE-DP<br>
+🔹 MTP configuration search<br>
+🔹 Chunked prefill simulation<br>
+🔹 Prefix Cache simulation<br>
+🔹 Variable-length workload simulation<br>
+🔹 Multi-stream compute-communication overlap<br>
 🔹 Cross-hardware comparison
 
 </details>
@@ -105,9 +105,9 @@ Click a module name to expand the list of **supported features**.
 <details>
 <summary><b>Web UI</b></summary>
 
-🔹 LLM and VL forward-pass simulation, and video generation simulation  
-🔹 Throughput optimization experiments, including PD colocation, disaggregation, and ratio-based deployment  
-🔹 Command preview and task caching  
+🔹 LLM and VL forward-pass simulation, and video generation simulation<br>
+🔹 Throughput optimization experiments, including PD colocation, disaggregation, and ratio-based deployment<br>
+🔹 Command preview and task caching<br>
 🔹 Result display and export, including charts, tables, device memory and operator details, and Excel files
 
 </details>
@@ -115,8 +115,8 @@ Click a module name to expand the list of **supported features**.
 <details>
 <summary><b>Serving Optimization Based on Real-World Measurements</b></summary>
 
-🔹 Serving framework optimization based on real-world measurements using particle swarm optimization (PSO) and Early Rejection  
-🔹 Multi-engine support, including vLLM and MindIE, as well as evaluation strategies  
+🔹 Serving framework optimization based on real-world measurements using particle swarm optimization (PSO) and Early Rejection<br>
+🔹 Multi-engine support, including vLLM and MindIE, as well as evaluation strategies<br>
 🔹 Custom optimization configurations and checkpoint-based resumption
 
 </details>

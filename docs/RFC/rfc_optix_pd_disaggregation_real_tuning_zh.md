@@ -9,7 +9,7 @@
 | 状态          | Draft      |
 | 作者          | 待确认     |
 | 创建日期      | 2026-08-04 |
-| 最后更新      | 2026-08-20 |
+| 最后更新      | 2026-09-08 |
 | 相关 Issue/PR | 待确认     |
 
 ### 版本记录
@@ -20,6 +20,44 @@
 | 2026-08-05 | 1.1      | 补充方案前提、优缺点分析、选择矩阵和分阶段交付建议 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
 | 2026-08-20 | 1.2      | 明确 D QPS 仅由并发和 TPOT 计算，并统一相关示例和测试口径 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
 | 2026-08-20 | 1.3      | 移除 PD 编排层的冗余负载配置及相关约束 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+| 2026-08-22 | 1.4      | 明确 Prefill 输出长度固定为 1 token，P QPS 直接采用 benchmark throughput | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+| 2026-08-28 | 1.5      | 明确内置 PD 流程专用于 vLLM，benchmark 通过统一接口独立选择 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+| 2026-09-07 | 1.6      | 拆分为 P/D 服务参数搜索与外部服务 benchmark-only 微调两步 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+| 2026-09-08 | 1.7      | 统一 P/D QPS 为 benchmark 实测请求吞吐，保留资源约束下的整数实例推荐 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+| 2026-09-08 | 1.8      | 允许 `pd_disagg.top_k=0` 跳过 P/D 阶段 FineTune | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+| 2026-09-08 | 1.9      | Decode 搜索通过重复 benchmark 预热 prefix cache，并仅采用最后一轮吞吐 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+| 2026-09-10 | 2.0      | PD 搜索改为仅由 `--mode pd_disagg` 显式启用，省略参数时保持旧版流程 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+| 2026-09-10 | 2.1      | 将原有通用寻优模式值更名为 `standard`，强化用户语义 | 待确认 | `docs/RFC/rfc_optix_pd_disaggregation_real_tuning_zh.md` |
+
+### 1.6 决策增补：两步寻优边界
+
+本节是 1.6 的最新决策，替代本 RFC 后续章节中“一次任务自动执行三阶段”、“Final 必须使用
+`vllm_pd` simulator”和“OptiX 接管 Final 服务生命周期”的 1.0–1.5 基线设计。旧段落仅保留为方案演进记录，实现以本节和
+`docs/design/optix_pd_disaggregation_phase1_design_zh.md` 最新版为准。
+
+1. `pd_disagg` 只执行 Prefill/Decode 服务参数搜索，输出 QPS、`pd_ratio`、整数实例推荐和阶段产物；summary 以
+   `service_search_completed` 结束。
+2. `pd_disagg` 不再提供 `resume_phase`、`resume_run_id` 或 `final_benchmark` 配置。用户启动 PD 服务后，使用独立的普通
+   `standard` 配置执行第二步。
+3. 微调配置使用 `skip_pso=true`、`manage_simulator_lifecycle=false`、`fine_tune_mode="pd_mixed"`，只在 benchmark 侧声明
+   `CONCURRENCY` 和 `REQUESTRATE`；不运行、监控或停止 simulator。
+4. 不安装 `contrib/optix/vllm_pd_simulator` 也可运行该流程。
+
+### 1.7 决策增补：统一 QPS 语义
+
+P/D QPS 均直接使用各自 benchmark 返回的请求吞吐 `throughput`（req/s）。Decode 不再使用
+`concurrency/tpot_s`，避免将近似 token/s 与 Prefill 的 req/s 混用。`pd_ratio=D_QPS/P_QPS` 的定义不变；
+最终整数实例数继续在总卡数、单实例用卡数和至少各一个 P/D 实例的约束下枚举。因此总计 16 卡且 P/D 单实例均为 8 卡时，仍合理推荐 `1P:1D`。
+
+### 1.8 决策增补：P/D 阶段 FineTune 可选
+
+`pd_disagg.top_k` 允许为 0。`top_k=0` 时 Prefill/Decode 仍完成 PSO 搜索和最优候选验证，但不执行阶段 FineTune；工具仍使用最优 P/D 结果计算 QPS、理论配比和实例推荐。用户拉起完整 PD 服务后的 benchmark-only FineTune 是独立第二步，不受该值影响。
+
+### 1.9 决策增补：Decode prefix cache 预热
+
+独立 Decode 搜索使用启用了 prefix caching 的 D 服务，并在同一服务实例上连续执行两轮相同 benchmark。第一轮只填充 prefix cache，第二轮才作为有效评测；只有第二轮指标进入 DataStorage、fitness、D QPS 和配比计算。两轮必须使用固定 benchmark seed 和相同负载参数，且中间不得重启服务。
+
+阶段级 `benchmark_run_count` 表示单个候选的 benchmark 总执行次数，默认 1、最小 1；Decode 示例配置为 2。该字段大于 1 时要求 `use_request_rate_calibration=false`；校准模式与多轮 benchmark 同时配置会在配置加载阶段直接报错。外部完整 PD 服务上的 benchmark-only 微调直接测量真实 PD 链路，不要求执行 Decode 双跑。
 
 ## 背景描述
 
@@ -31,7 +69,7 @@ OptiX 当前定位为服务化参数实测寻优工具，已支持通过 `msmode
 
 1. 搜一次 P：通过 benchmark 参数控制和 PD 混部能力，模拟单个 Prefill 节点能力，对 P 节点服务化参数做实测寻优，得到较优 P 配置和 P QPS。
 2. 搜一次 D：通过 benchmark 参数控制和 PD 混部能力，模拟单个 Decode 节点能力，对 D 节点服务化参数做实测寻优，得到较优 D 配置和 D QPS。
-3. 搜一次 benchmark：根据 P/D QPS 推导 PD 配比，使用搜索得到的 P/D 服务化参数拉起完整 PD 分离部署，此时服务化参数不再搜索，只对 benchmark 侧负载参数做实测寻优。该阶段与已上线的极光平台 benchmark 参数搜索能力对齐，具体平台接口与插件名待确认。
+3. 搜一次 benchmark：根据 P/D QPS 推导 PD 配比，使用搜索得到的 P/D 服务化参数拉起完整 vLLM PD 分离部署，此时服务化参数不再搜索，只对 benchmark 侧负载参数做实测寻优。benchmark 工具通过统一插件接口选择，内置流程不感知具体实现。
 
 当前痛点集中在流程编排和产物衔接：
 
@@ -40,7 +78,7 @@ OptiX 当前定位为服务化参数实测寻优工具，已支持通过 `msmode
 | 步骤割裂     | 用户需要手动准备 P、D、完整 PD 三份配置，手动传递搜索结果和配比                      |
 | 易错成本高   | P/D 阶段 SLO、benchmark 参数、服务参数固定方式容易配错                               |
 | 结果不可串联 | 三次寻优分别输出 CSV，缺少统一 run 视图、PD 配比摘要和最终 benchmark 结论            |
-| 插件覆盖不足 | 完整 PD 分离部署依赖专用 simulator/benchmark 插件，未覆盖场景仍需要额外配置或 Agent 编排 |
+| 插件覆盖不足 | 完整 PD 分离部署依赖 vLLM PD simulator 插件；benchmark 可复用原生插件或另行注册 |
 
 核心价值：
 
@@ -62,7 +100,7 @@ OptiX 当前定位为服务化参数实测寻优工具，已支持通过 `msmode
 
 1. 不替代 ServingCast 中已有的 PD 配比仿真能力；本提案面向 OptiX 真机实测。
 2. 不在首版实现生产环境自动扩缩容、流量切换或在线发布。
-3. 不承诺所有推理框架和 benchmark 工具天然支持 PD 分离；未适配的组合需要新增插件、提供可调用脚本或保留人工流程。
+3. 首版内置 PD 分离流程不支持 vLLM 以外的推理框架；benchmark 只需完成 OptiX 统一接口适配。
 4. 不改变现有 `msmodeling optix -e <engine> -b <benchmark>` 默认服务化参数寻优行为。
 5. 不在首版重写 PSO 算法，仅在编排、搜索范围控制、结果组合和插件协议上扩展。
 
@@ -93,9 +131,9 @@ OptiX 当前定位为服务化参数实测寻优工具，已支持通过 `msmode
 3. PD 插件只解决部署和指标接入问题，不自动保证 P/D 单节点模拟语义正确。P/D 阶段的流量构造、指标口径和 QPS 公式必须分别校准。
 4. `rerun_benchmark_only()` 仅在 benchmark 参数不会改变服务拓扑、缓存状态或服务启动参数时成立，不能作为所有插件的默认能力。
 
-工具内置模式作为主路径：在 `msmodeling optix` 增加 `pd_disagg` 模式，由一个 PD 编排器负责顺序执行三个阶段。前两个阶段仍复用现有 OptiX 服务参数寻优能力，只是通过阶段配置固定 P/D 的 benchmark 语义。第三阶段拉起完整 PD 分离部署，把 P/D 服务化参数固定为前两阶段最优值，只开放 benchmark 侧 `target_field` 参与搜索。
+工具内置模式作为主路径：在 `msmodeling optix` 增加 `pd_disagg` 模式，由一个 PD 编排器负责顺序执行三个阶段。前两个阶段仍复用现有 OptiX 服务参数寻优能力，只是通过阶段配置固定 P/D 的 benchmark 语义。第三阶段拉起完整 PD 分离部署，把 P/D 服务化参数固定为前两阶段最优值，只开放 benchmark 侧 `target_field` 直接微调，不执行 PSO。
 
-插件作为部署和 benchmark 语义隔离层：核心编排器不硬编码某个推理框架的 PD 启动命令，也不硬编码“如何模拟 P 节点或 D 节点”的 benchmark 参数。相关逻辑由 PD simulator/benchmark 插件表达，插件负责命令拼接、参数注入、健康检查和指标解析。首版建议把稳定场景沉淀为插件；未覆盖场景由 Skill 生成三份配置并指导用户运行。
+插件作为部署和 benchmark 语义隔离层：内置流程的服务侧明确限定为 vLLM，P/D 阶段使用 `vllm`，Final 阶段使用 `vllm_pd`；具体 PD 启动命令、参数注入和健康检查仍由 simulator 插件实现。benchmark 侧仅依赖统一插件接口，核心不按工具名分支；未安装额外插件时直接使用原生 `vllm_benchmark` 或 `ais_bench`。
 
 ### 方案选择分析
 
@@ -143,14 +181,13 @@ OptiX 当前定位为服务化参数实测寻优工具，已支持通过 `msmode
 PD 配比由 P/D 阶段 QPS 计算。OptiX 指标内部以秒为单位时使用：
 
 ```text
-P_QPS = prefill_concurrency / ttft_s
-D_QPS = decode_concurrency / tpot_s
+P_QPS = prefill_benchmark_throughput
+D_QPS = decode_benchmark_throughput
 pd_ratio = D_QPS / P_QPS
 ```
 
-本 RFC 中 QPS 以请求为单位。D QPS 仅由 Decode 阶段并发请求数和 TPOT 计算。P 阶段可以直接采用 benchmark 输出的请求 QPS。
-
-若 benchmark 直接给出阶段请求吞吐 `throughput`，且插件确认其语义为阶段 QPS，则优先使用 `throughput`；否则使用上述公式兜底。若指标单位来自外部平台或 CSV 是毫秒，则在插件层归一化为秒，避免核心流程重复处理单位。插件必须记录 QPS 的来源是 benchmark 直接值还是公式计算值，便于结果审计。
+本 RFC 中 QPS 以请求为单位。Prefill 阶段必须将 benchmark 输出长度固定为 1 token，使每个请求在首 token 后结束，
+尽量消除 Decode 过程对吞吐的影响。Decode 阶段先用相同请求填满 prefix cache，再以第二轮 benchmark 的请求吞吐近似 D 节点 QPS。P/D 两阶段有效 benchmark 返回的 `throughput` 直接作为各自 QPS，核心编排器不使用 TTFT、TPOT 或并发数计算或兜底。`throughput` 缺失、无法转换为数值或非正数时，对应阶段失败。阶段结果的 QPS 来源统一记录为 `benchmark_throughput`。
 
 `pd_ratio` 与 ServingCast 既有文档保持一致，表示推荐的 `P instances : D instances` 比例。例如 P QPS 为 10 req/s，D QPS 为 15 req/s，则 `pd_ratio = 1.5`，含义是每 1 个 D 实例约需要 1.5 个 P 实例才能供需均衡。
 
@@ -232,24 +269,27 @@ stop
 
 #### 阶段一：Prefill 节点实测寻优
 
-P 阶段使用单个 P 节点等价能力进行服务参数搜索。具体实现上，插件通过 benchmark 参数控制运行形态，使请求主要度量 Prefill 能力，例如输入长度、是否启用 PD 混部模拟、首 token 统计字段等。具体参数名依赖 AISBench、vLLM benchmark 或极光平台插件，首版在插件配置中声明，不写死在核心编排器。
+P 阶段使用单个 P 节点等价能力进行服务参数搜索。具体实现上，插件通过 benchmark 参数控制运行形态，将输出长度
+固定为 1 token，使请求在首 token 后结束，尽量消除 Decode 过程对结果的影响。输出长度的具体参数名依赖 AISBench、
+vLLM benchmark 或极光平台插件，在插件配置中声明，不写死在核心编排器。
 
 P 阶段优化目标：
 
 1. 以 TTFT SLO、成功率和阶段吞吐作为主要 fitness 输入。
 2. 搜索 P 侧服务化参数，例如 `maxPrefillBatchSize`、`maxPrefillTokens`、`MAX_NUM_BATCHED_TOKENS`、Prefill 相关调度参数等。
-3. benchmark 侧压力参数可搜索或固定，但必须能产出稳定 P QPS。
+3. benchmark 侧压力参数可搜索或固定，输出长度必须固定为 1 token，并产出稳定、单位为 req/s 的正数 `throughput`；该值直接作为 P QPS。
 4. 输出 P 最优参数、P 阶段 CSV、P QPS 和 P 阶段配置快照。
 
 #### 阶段二：Decode 节点实测寻优
 
-D 阶段使用单个 D 节点等价能力进行服务参数搜索。插件通过 benchmark 参数控制运行形态，使请求主要度量 Decode 能力，例如上下文长度、TPOT 统计字段、decode-only 或近似 decode-only 压测模式等。
+D 阶段使用单个 D 节点等价能力进行服务参数搜索。D 服务启用 prefix caching，每组候选在同一服务上执行两轮固定 seed、相同负载的 benchmark：第一轮填充 prefix cache，第二轮度量 Decode 能力。两轮之间仅回收 benchmark 进程和结果文件，不停止服务或清理 cache。
 
 D 阶段优化目标：
 
 1. 以 TPOT SLO、成功率和阶段吞吐作为主要 fitness 输入。
 2. 搜索 D 侧服务化参数，例如 Decode batch、KV cache 相关参数、`MAX_NUM_SEQS`、并行度相关参数等。
-3. 输出 D 最优参数、D 阶段 CSV、D QPS 和 D 阶段配置快照。
+3. 只使用最后一轮 benchmark 的 TPOT、成功率和 `throughput` 参与适应度与 D QPS 计算；预热轮不入库。
+4. 输出 D 最优参数、D 阶段 CSV、D QPS 和 D 阶段配置快照。
 
 #### 阶段三：完整 PD 分离 Benchmark 参数寻优
 
@@ -291,22 +331,27 @@ balanced_qps = min(P_instances * P_QPS, D_instances * D_QPS)
 
 | 配置                                       | 类型 | 默认值        | 说明                                                           |
 | ------------------------------------------ | ---- | ------------- | -------------------------------------------------------------- |
-| `pd_disagg.enabled`                      | bool | `false`     | 是否启用 PD 分离编排；也可由 CLI `--mode pd_disagg` 覆盖     |
 | `pd_disagg.total_devices`                | int  | `0`         | 可选，总设备数；为 0 时只输出浮点配比                          |
 | `pd_disagg.prefill_devices_per_instance` | int  | 待确认        | 单个 P 实例设备数                                              |
 | `pd_disagg.decode_devices_per_instance`  | int  | 待确认        | 单个 D 实例设备数                                              |
-| `pd_disagg.top_k`                        | int  | `3`         | 从 P/D 阶段各取 Top K 组合计算候选配比                         |
+| `pd_disagg.top_k`                        | int  | `3`         | P/D 阶段候选数；0 跳过阶段 FineTune，仍保留最优点计算配比                         |
 | `pd_disagg.use_full_device`              | bool | `true`      | 是否要求整数实例分配用满 `total_devices`                     |
 | `pd_disagg.resume_phase`                 | str  | `""`        | 可选，从 `prefill`、`decode`、`final_benchmark` 阶段恢复 |
 | `pd_disagg.phase_output_dir`             | str  | `pd_disagg` | 阶段产物目录名                                                 |
+| `pd_disagg.prefill/decode.n_particles`   | int  | 顶层同名值    | P/D 各自的 PSO 粒子数                                         |
+| `pd_disagg.prefill/decode.iters`         | int  | 顶层同名值    | P/D 各自的 PSO 迭代数                                         |
+| `pd_disagg.prefill/decode.benchmark_run_count` | int | `1` | 同一服务上 benchmark 总次数；仅关闭请求速率校准时生效，前 N-1 轮预热 |
 
 建议为三类阶段配置增加独立段落：
 
 | 配置段                          | 说明                                                            |
 | ------------------------------- | --------------------------------------------------------------- |
-| `[pd_disagg.prefill]`         | P 阶段 engine、benchmark、SLO、配置文件覆盖、benchmark 控制参数 |
-| `[pd_disagg.decode]`          | D 阶段 engine、benchmark、SLO、配置文件覆盖、benchmark 控制参数 |
+| `[pd_disagg.prefill]`         | P 阶段 engine、独立 vLLM 命令、搜索空间、SLO 和 benchmark 参数 |
+| `[pd_disagg.decode]`          | D 阶段 engine、独立 vLLM 命令、搜索空间、SLO 和 benchmark 参数 |
 | `[pd_disagg.final_benchmark]` | 完整 PD 阶段插件名、benchmark 搜索空间、SLO、是否复用服务       |
+
+Final 固定跳过 PSO，在基线后直接进入 FineTune；配置模型拒绝
+`pd_disagg.final_benchmark.n_particles` 和 `pd_disagg.final_benchmark.iters`。
 
 建议新增或复用以下输出文件：
 
@@ -320,9 +365,12 @@ balanced_qps = min(P_instances * P_QPS, D_instances * D_QPS)
 
 ### 插件设计
 
-| 插件                  | 注册名草案                                | 职责                                                               |
-| --------------------- | ----------------------------------------- | ------------------------------------------------------------------ |
-| `PdDisaggSimulator` | `pd_disagg_vllm` / `pd_disagg_mindie` | 拉起完整 P/D 分离服务，注入 P/D 参数，提供健康检查、停止和日志备份 |
+| 插件                  | 注册名  | 职责                                                               |
+| --------------------- | ----------- | ------------------------------------------------------------------ |
+| `PdClusterSimulator` | `vllm_pd` | 拉起完整 vLLM P/D 分离服务，注入 P/D 参数，提供健康检查、停止和日志备份 |
+
+benchmark 不与 `vllm_pd` 捆绑，可选任一已注册且已部署的 benchmark 插件。OptiX 内置的
+`vllm_benchmark`（默认）和 `ais_bench` 不需要额外适配。
 
 ### Agent Skill 编排路线
 
@@ -365,14 +413,14 @@ Skill 路线不替代工具内置模式，也不替代底层部署和压测接�
 
 性能影响：
 
-1. 完整流程至少包含 P、D、final benchmark 三段搜索，总耗时约为单次寻优的 2 到 3 倍，具体取决于 `n_particles`、`iters`、服务启动时间和 benchmark 数据量。
+1. 完整流程包含 P、D 两段粒子搜索以及 Final 基线与微调，总耗时取决于 P/D 各自的 `n_particles`、`iters`、服务启动时间和 benchmark 数据量。
 2. final benchmark 阶段若复用服务，仅重跑 benchmark，可显著降低重启完整 PD 集群的成本。
 3. P/D 阶段仍然会频繁重启服务，因为服务化参数参与搜索。
 
 兼容性：
 
 1. 现有 `config.toml`、CLI 默认参数和输出 CSV 不变。
-2. 新模式只在显式 `--mode pd_disagg` 或 `pd_disagg.enabled = true` 时启用。
+2. 新模式只在显式指定 `--mode pd_disagg` 时启用；省略 `--mode` 固定进入 `standard`，并执行原有通用寻优流程。
 3. 老版本无法识别的新配置段应通过 `extra=allow` 或文档说明避免误报，具体行为需实现时确认。
 
 安全性和可靠性：
@@ -417,54 +465,145 @@ msmodeling optix -e vllm -b ais_bench -c ./config.toml
 
 | 参数                  | 可选/必选 | 默认值            | 说明                                                                             |
 | --------------------- | --------- | ----------------- | -------------------------------------------------------------------------------- |
-| `--mode`            | 可选      | `service_param` | `service_param` 表示现有服务参数寻优；`pd_disagg` 表示 PD 分离三阶段实测寻优 |
+| `--mode`            | 可选      | `standard` | `standard` 表示现有通用寻优流程，可包含 PSO 和 FineTune；`pd_disagg` 表示分别执行 Prefill 和 Decode 搜索后推荐配比 |
 | `--config`          | 可选      | 默认搜索路径      | PD 分离模式建议显式指定配置文件                                                  |
 | `--load_breakpoint` | 可选      | `false`         | 后续支持从阶段输出恢复，恢复粒度由 `pd_disagg.resume_phase` 控制               |
 | `--backup`          | 可选      | `false`         | 开启阶段日志和配置备份                                                           |
 
 ### 配置示例
 
-以下为草案示例，具体插件名、benchmark 参数名和极光平台字段待实现时确认。
+以下为 vLLM 专用 PD 流程示例。benchmark 通过统一接口接入，可使用原生 `vllm_benchmark`、
+`ais_bench` 或其他已注册 benchmark，编排器不感知具体压测工具。
 
 ```toml
 n_particles = 10
 iters = 5
+use_request_rate_calibration = false
 
 [pd_disagg]
-enabled = true
 total_devices = 16
 prefill_devices_per_instance = 4
 decode_devices_per_instance = 2
-top_k = 3
+top_k = 0 # 跳过 P/D 搜索阶段的 FineTune
 use_full_device = true
 phase_output_dir = "pd_disagg"
 
 [pd_disagg.prefill]
 engine = "vllm"
-benchmark_policy = "pd_phase_benchmark"
+benchmark_policy = "vllm_benchmark" # 也可使用 "ais_bench"
+benchmark_run_count = 1
+n_particles = 8
+iters = 4
+# Prefill benchmark 的插件命令必须将输出长度固定为 1 token。
+# 具体参数名由插件定义，例如等价的 output_len = 1。
 ttft_penalty = 1
 tpot_penalty = 0
 ttft_slo = 2.0
-phase = "prefill_probe"
+
+[pd_disagg.prefill.simulator_command_overrides]
+others = "--tensor-parallel-size 4 --no-enable-prefix-caching"
+
+[pd_disagg.prefill.benchmark_command_overrides]
+others = "--num-prompts 500 --random-input-len 1024 --random-output-len 1"
+
+[[pd_disagg.prefill.target_field]]
+name = "MAX_NUM_BATCHED_TOKENS"
+config_position = "env"
+min = 8192
+max = 65536
+dtype = "int"
+value = 8192
+
+[[pd_disagg.prefill.target_field]]
+name = "MAX_NUM_SEQS"
+config_position = "env"
+min = 8
+max = 128
+dtype = "int"
+value = 32
+
+[[pd_disagg.prefill.target_field]]
+name = "CONCURRENCY"
+config_position = "env"
+min = 1
+max = 256
+dtype = "int"
+value = 32
+
+[[pd_disagg.prefill.target_field]]
+name = "REQUESTRATE"
+config_position = "env"
+min = 0
+max = 0
+dtype = "float"
+value = 0
 
 [pd_disagg.decode]
 engine = "vllm"
-benchmark_policy = "pd_phase_benchmark"
+benchmark_policy = "vllm_benchmark" # 也可使用 "ais_bench"
+benchmark_run_count = 2 # 第一轮填充 prefix cache，只采用第二轮指标
+n_particles = 12
+iters = 6
 ttft_penalty = 0
 tpot_penalty = 1
 tpot_slo = 0.05
-phase = "decode_probe"
+
+[pd_disagg.decode.simulator_command_overrides]
+others = "--tensor-parallel-size 2 --enable-prefix-caching"
+
+[pd_disagg.decode.benchmark_command_overrides]
+others = "--seed 1024 --num-prompts 500 --random-input-len 1024 --random-output-len 256"
+
+[[pd_disagg.decode.target_field]]
+name = "MAX_NUM_BATCHED_TOKENS"
+config_position = "env"
+min = 128
+max = 4096
+dtype = "int"
+value = 512
+
+[[pd_disagg.decode.target_field]]
+name = "MAX_NUM_SEQS"
+config_position = "env"
+min = 32
+max = 512
+dtype = "int"
+value = 64
+
+[[pd_disagg.decode.target_field]]
+name = "CONCURRENCY"
+config_position = "env"
+min = 1
+max = 1000
+dtype = "int"
+value = 100
+
+[[pd_disagg.decode.target_field]]
+name = "REQUESTRATE"
+config_position = "env"
+min = 0
+max = 0
+dtype = "float"
+value = 0
 
 [pd_disagg.final_benchmark]
-engine = "pd_disagg_vllm"
-benchmark_policy = "pd_final_benchmark"
+engine = "vllm_pd"
+benchmark_policy = "vllm_benchmark" # 也可使用 "ais_bench"
 search_scope = "benchmark"
 reuse_service = true
 ttft_slo = 2.0
 tpot_slo = 0.05
+# Final 固定跳过 PSO，禁止配置 n_particles/iters。
+
+[pd_disagg.final_benchmark.benchmark_command_overrides]
+others = "--num-prompts 500 --random-input-len 1024 --random-output-len 256"
 ```
 
-P/D 服务参数仍使用现有 `[[vllm.target_field]]` 或 `[[mindie.target_field]]` 表达。最终 benchmark 阶段可以通过独立的 benchmark `target_field` 表达压测参数：
+`[vllm.command]` 作为 P/D 公共基线；`simulator_command_overrides` 只修改当前阶段的命令副本。
+P/D 分别使用 `[[pd_disagg.prefill.target_field]]` 与 `[[pd_disagg.decode.target_field]]` 表达完整搜索空间；
+一旦某阶段显式配置 `target_field`，该阶段就不再继承或合并 `[[vllm.target_field]]`。因此两个阶段可以具有
+不同的启动参数、参数范围和搜索维度，且需分别列出其服务字段与 `CONCURRENCY`、`REQUESTRATE`。
+最终 benchmark 阶段通过独立的 benchmark `target_field` 表达压测参数：
 
 ```toml
 [[pd_disagg.final_benchmark.target_field]]
@@ -529,11 +668,13 @@ value = 100
 ### 使用约束
 
 1. P/D 阶段 benchmark 必须能稳定表达单 P 或单 D 能力，否则 QPS 和配比没有工程意义。
-2. 完整 PD 阶段必须有可用 simulator 插件，能拉起真实 P/D 分离部署。
-3. 插件输出的 TTFT、TPOT 必须统一为秒，QPS 必须统一为 req/s。
-4. 若总设备数或单实例设备数缺失，则只能输出浮点配比，不能给出整数实例推荐。
-5. 实测寻优会反复拉起服务和压测，建议在独占或资源稳定的环境运行。
-6. benchmark-only 阶段只有在插件确认服务参数不变且 benchmark 参数不要求重启服务时才复用服务。
+2. Prefill benchmark 必须把输出长度固定为 1 token；P/D 两阶段 benchmark 均必须返回单位为 req/s 的正数 `throughput`，该值直接作为对应阶段 QPS，缺失时不使用时延或并发公式兜底。
+3. Decode 双跑必须启用服务端 prefix caching，并通过固定 benchmark seed 保证两轮 workload 相同；服务端 seed 不能替代 benchmark seed。
+4. 完整 PD 阶段必须有可用 simulator 插件，能拉起真实 P/D 分离部署。
+5. 插件输出的 TTFT、TPOT 必须统一为秒，QPS 必须统一为 req/s。
+6. 若总设备数或单实例设备数缺失，则只能输出浮点配比，不能给出整数实例推荐。
+7. 实测寻优会反复拉起服务和压测，建议在独占或资源稳定的环境运行。
+8. benchmark-only 阶段只有在插件确认服务参数不变且 benchmark 参数不要求重启服务时才复用服务。
 
 ### 兼容与迁移
 
@@ -548,11 +689,18 @@ value = 100
 | ------------------------- | ---------- | -------------------------------------------------------------------- | ------------------------------------------ | --------------------------------------------- |
 | UT-解析默认模式           | 单元测试   | 默认配置                                                             | 构造无 `pd_disagg` 配置的 Settings       | 现有 OptiX 默认模式不变                       |
 | UT-解析 PD 配置           | 单元测试   | 含 `[pd_disagg]` TOML                                              | 加载 Settings                              | 正确生成 `PdDisaggConfig`，必填字段校验生效 |
-| UT-QPS 公式秒单位         | 单元测试   | P 并发 4、TTFT 0.4 秒；D 并发 3、TPOT 0.2 秒                         | 调用配比计算器                             | P QPS=10、D QPS=15、pd_ratio=1.5              |
-| UT-QPS 公式毫秒归一       | 单元测试   | 插件输入毫秒指标                                                     | 插件归一化后计算                           | 核心计算只接收秒，不重复乘 1000               |
+| UT-QPS 口径               | 单元测试   | P throughput=10；D throughput=15                               | 调用配比计算器                             | P QPS=10、D QPS=15、pd_ratio=1.5              |
+| UT-P throughput 缺失      | 异常测试   | P 仅有并发 4、TTFT 0.4 秒                                            | 调用 P QPS 计算                            | 明确报错，不使用并发/TTFT 兜底                 |
+| UT-D throughput 缺失      | 异常测试   | D 仅有并发和 TPOT                                            | 调用 D QPS 计算                            | 明确报错，不使用并发/TPOT 兜底                 |
 | UT-整数实例分配           | 单元测试   | `total_devices=16`、P 单实例 4 卡、D 单实例 2 卡、`pd_ratio=1.5` | 调用实例分配函数                           | 输出 P=3、D=2 或最接近候选                    |
 | UT-无可行实例分配         | 单元测试   | 设备数不足或比例不可满足                                             | 调用实例分配函数                           | 输出浮点配比和失败原因，不崩溃                |
-| UT-search_scope=benchmark | 单元测试   | 服务字段固定、benchmark 字段可调                                     | 构造 final 阶段 target_field               | PSO 维度只包含 benchmark 字段                 |
+| UT-P/D 配置隔离           | 单元测试   | P/D 使用不同命令覆盖与 `target_field`                              | 依次配置两个 vLLM simulator                | 启动参数、字段范围互不污染且全局配置不变      |
+| UT-P/D 搜索预算           | 单元测试   | P/D 使用不同 `n_particles`、`iters`                              | 分别构造阶段优化器                         | 两阶段使用各自预算，缺省值回退顶层配置        |
+| UT-Decode cache 预热      | 单元测试   | 关闭速率校准，Decode `benchmark_run_count=2`                  | 执行一个候选                               | 服务启动一次、benchmark 两次，仅采用第二轮指标 |
+| UT-benchmark 次数边界     | 边界测试   | 次数省略或配置为 0                                             | 加载阶段配置                               | 省略时为 1，0 校验失败                         |
+| UT-校准模式兼容           | 回归测试   | 开启速率校准且阶段次数为 2                                     | 执行一个候选                               | 不叠加双跑，维持既有校准流程                   |
+| UT-Final 直接微调         | 单元测试   | 顶层 `skip_pso=false`                                               | 执行 final                                 | 强制跳过 PSO，基线后直接微调                  |
+| UT-search_scope=benchmark | 单元测试   | 服务字段固定、benchmark 字段可调                                     | 构造 final 阶段 target_field               | 微调字段只包含 benchmark 字段                 |
 | IT-P 阶段 mock 搜索       | 集成测试   | mock simulator/benchmark                                             | 执行 P 阶段                                | 产生 P CSV、P 最优参数和 P QPS                |
 | IT-D 阶段 mock 搜索       | 集成测试   | mock simulator/benchmark                                             | 执行 D 阶段                                | 产生 D CSV、D 最优参数和 D QPS                |
 | IT-final benchmark-only   | 集成测试   | mock PD simulator 支持复用服务                                       | 执行 final 阶段多候选 benchmark            | simulator 启动一次，benchmark 多次运行        |

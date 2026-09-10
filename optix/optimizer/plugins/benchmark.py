@@ -80,10 +80,20 @@ class AisBench(BenchmarkInterface):
         super().__init__(*args, **kwargs)
         self.work_path = self.config.work_path
         self.update_command()
+        self._load_model_config()
+        self.mindie_benchmark_perf_columns = [k.lower().strip() for k in MINDIE_BENCHMARK_PERF_COLUMNS]
+
+    def _load_model_config(self):
         self.model_config_path = self.get_models_config_path()
         with open_file(self.model_config_path, "r", encoding="utf-8") as f:
             self.default_data = f.read()
-        self.mindie_benchmark_perf_columns = [k.lower().strip() for k in MINDIE_BENCHMARK_PERF_COLUMNS]
+
+    def configure_pd_phase(self, *, phase_name, phase_config):
+        """Refresh AISBench's derived model path after a phase-local command override."""
+
+        del phase_name
+        if phase_config.benchmark_command_overrides:
+            self._load_model_config()
 
     def update_command(self):
         self.command = AisBenchCommand(self.config.command).command

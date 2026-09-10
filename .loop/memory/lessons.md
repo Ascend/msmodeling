@@ -54,6 +54,7 @@ agent 会话启动时，应：
 | Skill 治理 | 7-8 | 结构树 / frontmatter |
 | Agent 可靠性 | 9 | 幻觉规避 |
 | 测试与 CI | 10-11 | 虚拟环境 / 本地门禁 |
+| OptiX | 12 | 配置字段与结果表兼容性 |
 
 ---
 
@@ -170,8 +171,21 @@ CI 门禁会重跑这些检查，本地不通过直接推会浪费 CI 资源并�
 
 ---
 
+## OptiX
+
+### 12. **配置对象存在字段不代表结果 CSV 存在同名列**
+
+为命令配置模型新增带默认值的字段后，`hasattr(command, field)` 会恒为真，但固定命令参数不一定作为搜索参数写入 DataStorage CSV。
+
+- 触发场景：按 benchmark 命令字段过滤历史或最佳结果
+- 正确做法：同时检查配置值有效且 DataFrame 包含对应列；跨 TOML/CSV 比较时统一数据类型，并覆盖“字段存在但列缺失”的回归测试
+- 引用：`optix/optimizer/store.py`、`tests/regression/optix/test_optimizer/test_store.py`
+
+---
+
 ## 变更日志
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-09 | v0.2 | 新增 OptiX 配置字段与结果 CSV schema 兼容经验 |
 | 2026-07-21 | v0.1 | 初始化，含 11 条教训（代码架构 4 + 新模型适配 1 + 文档与北向接口 1 + Skill 治理 2 + Agent 可靠性 1 + 测试与 CI 2） |

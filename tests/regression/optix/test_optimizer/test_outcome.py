@@ -75,6 +75,7 @@ class TestSchedulerRunOutcome(unittest.TestCase):
     def test_run_sets_last_outcome_success(self, _sleep, _time):
         perf = PerformanceIndex(throughput=10.0)
         self.scheduler.benchmark.get_performance_index.return_value = perf
+        self.scheduler.benchmark.check_success = MagicMock(return_value=True)
         params = np.array([1.0])
         fields = (OptimizerConfigField(name="p", value=1.0, min=0, max=5),)
         result = self.scheduler.run(params, fields)

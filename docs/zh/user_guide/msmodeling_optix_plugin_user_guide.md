@@ -197,3 +197,19 @@
     ```bash
     msmodeling optix -e vllm_infer -b vllm_infer_benchmark
     ```
+
+## P/D 服务参数搜索插件扩展点
+
+内置 `--mode pd_disagg` 仍使用现有 `register_simulator()` 和 `register_benchmarks()` 注册入口。P/D 阶段插件可选实现：
+
+```python
+def configure_pd_phase(self, *, phase_name, phase_config):
+    """根据 prefill/decode 阶段刷新命令或流量语义。"""
+```
+
+Prefill benchmark 插件必须在 Prefill 阶段把输出长度设置为 1 token，使请求在首 token 后结束，尽量消除 Decode
+过程对测量的影响；参数名由具体 benchmark 决定，例如通过自身命令配置传入等价的 `output_len=1`。P/D 两阶段插件都必须将请求吞吐以正数 `throughput` 返回，单位为 req/s。核心编排器直接使用该值作为各阶段 QPS，不使用 TTFT、TPOT 或并发数公式兜底。
+
+`pd_disagg` 只调用该扩展点搜索 Prefill 和 Decode 服务参数并推荐配比。用户启动完整 PD 服务后，使用普通
+`standard` 模式配置 `skip_pso=true` 和 `manage_simulator_lifecycle=false` 调整 benchmark 侧并发与请求率；
+该步骤不调用 PD simulator 插件。插件输出的 TTFT/TPOT 必须为秒，throughput 必须为 req/s。

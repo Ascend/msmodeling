@@ -39,12 +39,22 @@ from optix.optimizer.early_exit import (
     EarlyExitPhase,
     EarlyExitTriggered,
     MetricsUnavailableError,
+    WarmupResult,
 )
 from optix.optimizer.scheduler import Scheduler
 
 # health()-path simulator mock. Omitting check_success avoids Python <3.12
 # isinstance(..., SupportsCheckSuccess) becoming True via MagicMock.__getattr__.
-_HEALTH_SIMULATOR_SPEC = ("health", "process", "run", "backup", "bak_path", "command", "run_log", "get_last_log")
+_HEALTH_SIMULATOR_SPEC = (
+    "health",
+    "process",
+    "run",
+    "backup",
+    "bak_path",
+    "command",
+    "run_log",
+    "get_last_log",
+)
 
 
 def _make_health_simulator() -> MagicMock:
@@ -228,7 +238,7 @@ class TestScheduler(unittest.TestCase):
         self.scheduler.early_exit_controller = controller
         self.scheduler.run_simulate = MagicMock()
         self.scheduler.benchmark.run = MagicMock()
-        self.scheduler.benchmark.check_success.return_value = False
+        self.scheduler.benchmark.check_success = MagicMock(return_value=False)
         self.scheduler.simulator.process.poll.return_value = None
         self.scheduler.stop_target_server = MagicMock()
 
@@ -260,7 +270,7 @@ class TestScheduler(unittest.TestCase):
         self.scheduler.early_exit_controller = controller
         self.scheduler.run_simulate = MagicMock()
         self.scheduler.benchmark.run = MagicMock()
-        self.scheduler.benchmark.check_success.return_value = True
+        self.scheduler.benchmark.check_success = MagicMock(return_value=True)
         self.scheduler.simulator.check_success = MagicMock()
         self.scheduler.simulator.process.poll.return_value = None
         self.scheduler.stop_target_server = MagicMock()
@@ -272,7 +282,7 @@ class TestScheduler(unittest.TestCase):
         controller.check.assert_not_called()
         controller.observe.assert_called_once()
         self.scheduler.stop_target_server.assert_not_called()
-        self.scheduler.benchmark.check_success.return_value = False
+        self.scheduler.benchmark.check_success = MagicMock(return_value=False)
 
         with self.assertRaises(EarlyExitTriggered):
             self.scheduler.run_target_server(np.array([1, 2, 3]), ("field1", "field2", "field3"))
@@ -337,7 +347,7 @@ class TestScheduler(unittest.TestCase):
         self.scheduler.early_exit_controller = controller
         self.scheduler.run_simulate = MagicMock()
         self.scheduler.benchmark.run = MagicMock()
-        self.scheduler.benchmark.check_success.return_value = True
+        self.scheduler.benchmark.check_success = MagicMock(return_value=True)
         self.scheduler.simulator.check_success = MagicMock()
         self.scheduler.simulator.process.poll.return_value = None
 
@@ -449,6 +459,148 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.performance_index.throughput = 100.0
         self.benchmark.get_performance_index.return_value = self.performance_index
 
+    def test_benchmark_run_count_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "benchmark_run_count"):
+            Scheduler(
+                simulator=self.simulator,
+                benchmark=self.benchmark,
+                data_storage=self.data_storage,
+                benchmark_run_count=0,
+            )
+
+    @patch("time.sleep", return_value=None)
+    def test_run_repeats_benchmark_on_same_service_and_uses_last_result(self, _):
+        scheduler = Scheduler(
+            simulator=self.simulator,
+            benchmark=self.benchmark,
+            data_storage=self.data_storage,
+            benchmark_run_count=2,
+        )
+        measured = PerformanceIndex(throughput=20.0)
+        phases = []
+        scheduler.run_simulate = MagicMock()
+        scheduler.monitoring_status = MagicMock(
+            side_effect=lambda *args, **kwargs: phases.append(scheduler.current_phase)
+        )
+        self.benchmark.get_performance_index.side_effect = lambda: (
+            PerformanceIndex(throughput=999.0) if self.benchmark.run.call_count == 1 else measured
+        )
+
+        result = scheduler.run(self.params, self.params_field)
+        scheduler.save_result(fitness=0.0)
+
+        scheduler.run_simulate.assert_called_once_with(self.params, self.params_field)
+        self.assertEqual(self.benchmark.run.call_count, 2)
+        self.assertEqual(self.benchmark.run.call_args_list[0], self.benchmark.run.call_args_list[1])
+        self.benchmark.get_performance_index.assert_called_once_with()
+        self.assertIs(result, measured)
+        self.assertEqual(result.throughput, 20.0)
+        self.assertEqual(phases, [EarlyExitPhase.CALIBRATION, EarlyExitPhase.EVALUATION])
+        self.data_storage.save.assert_called_once()
+        self.assertIs(self.data_storage.save.call_args.args[0], measured)
+        self.simulator.stop.assert_called_once()
+        self.assertEqual(self.benchmark.stop.call_count, 2)
+
+    @patch("time.sleep", return_value=None)
+    def test_default_run_count_runs_single_measured_benchmark(self, _):
+        phases = []
+        self.scheduler.run_simulate = MagicMock()
+        self.scheduler.monitoring_status = MagicMock(
+            side_effect=lambda *args, **kwargs: phases.append(self.scheduler.current_phase)
+        )
+
+        result = self.scheduler.run(self.params, self.params_field)
+
+        self.scheduler.run_simulate.assert_called_once_with(self.params, self.params_field)
+        self.benchmark.run.assert_called_once()
+        self.benchmark.get_performance_index.assert_called_once_with()
+        self.assertIs(result, self.performance_index)
+        self.assertEqual(phases, [EarlyExitPhase.EVALUATION])
+
+    @patch("time.sleep", return_value=None)
+    def test_warmup_failure_does_not_run_or_return_measured_pass(self, _):
+        scheduler = Scheduler(
+            simulator=self.simulator,
+            benchmark=self.benchmark,
+            data_storage=self.data_storage,
+            benchmark_run_count=2,
+        )
+        scheduler.run_simulate = MagicMock()
+        scheduler.monitoring_status = MagicMock(side_effect=RuntimeError("warmup failed"))
+
+        result = scheduler.run(self.params, self.params_field)
+
+        self.assertEqual(self.benchmark.run.call_count, 1)
+        self.benchmark.get_performance_index.assert_not_called()
+        self.assertIsNone(result.throughput)
+        self.assertEqual(scheduler.last_outcome.status.value, "failed")
+
+    @patch("time.sleep", return_value=None)
+    def test_benchmark_only_repeat_does_not_start_simulator(self, _):
+        scheduler = Scheduler(
+            simulator=self.simulator,
+            benchmark=self.benchmark,
+            data_storage=self.data_storage,
+            benchmark_run_count=2,
+        )
+        measured = PerformanceIndex(throughput=20.0)
+        phases = []
+        scheduler.monitoring_status = MagicMock(
+            side_effect=lambda *args, **kwargs: phases.append(scheduler.current_phase)
+        )
+        self.benchmark.get_performance_index.return_value = measured
+
+        result = scheduler.run_benchmark_only(self.params, self.params_field, monitor_service=False)
+
+        self.simulator.run.assert_not_called()
+        self.assertEqual(self.benchmark.run.call_count, 2)
+        self.benchmark.get_performance_index.assert_called_once_with()
+        self.assertIs(result, measured)
+        self.assertEqual(phases, [EarlyExitPhase.CALIBRATION, EarlyExitPhase.EVALUATION])
+        self.assertEqual(
+            scheduler.monitoring_status.call_args_list[0].kwargs,
+            {"monitor_service": False},
+        )
+        self.assertEqual(
+            scheduler.monitoring_status.call_args_list[1].kwargs,
+            {"monitor_service": False},
+        )
+
+    @patch("time.sleep", return_value=None)
+    def test_benchmark_only_attaches_warmup_summary_when_measured_pass_fails(self, _):
+        from optix.optimizer.outcome import RunStatus
+
+        scheduler = Scheduler(
+            simulator=self.simulator,
+            benchmark=self.benchmark,
+            data_storage=self.data_storage,
+            benchmark_run_count=2,
+        )
+        scheduler.early_exit_controller = MagicMock(
+            warmup_result=WarmupResult(
+                end_timestamp=12.0,
+                elapsed_seconds=2.0,
+                reason="load_ready",
+                sample_count=3,
+                effective_target=8,
+                load_threshold=6,
+                running_requests=7,
+                waiting_requests=1,
+                load_ratio=0.875,
+                forced=False,
+            )
+        )
+        scheduler.monitoring_status = MagicMock(side_effect=[None, RuntimeError("measured pass failed")])
+
+        result = scheduler.run_benchmark_only(self.params, self.params_field, monitor_service=False)
+
+        self.assertEqual(scheduler.last_outcome.status, RunStatus.FAILED)
+        self.assertEqual(result.warmup_end_elapsed_seconds, 2.0)
+        self.assertEqual(result.warmup_end_reason, "load_ready")
+        self.assertEqual(result.warmup_sample_count, 3)
+        self.assertEqual(result.warmup_load_ratio, 0.875)
+        self.assertIs(scheduler.last_outcome.performance_index, result)
+
     @patch("time.time")
     def test_run_with_fixed_request_rate(self, mock_time):
         """Test run_with_request_rate behavior with fixed request rate"""
@@ -494,7 +646,7 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.scheduler.early_exit_controller = PhaseController()
         self.scheduler.run_simulate = MagicMock()
         self.scheduler.benchmark.run = MagicMock()
-        self.scheduler.benchmark.check_success.return_value = False
+        self.scheduler.benchmark.check_success = MagicMock(return_value=False)
         self.scheduler.simulator.process.poll.return_value = None
         self.scheduler.stop_target_server = MagicMock()
 
@@ -534,12 +686,13 @@ class TestSchedulerRunMethods(unittest.TestCase):
         req_rate_field = OptimizerConfigField(name="REQUESTRATE", value=50.0, min=1.0, max=1000.0)
         params_field_with_variable_req_rate = self.params_field + (req_rate_field,)
         params = np.array([1.0, 2.0, 3.0, 50.0])
+        self.scheduler.benchmark_run_count = 3
         self.scheduler.early_exit_controller = PhaseController()
         self.scheduler.run_simulate = MagicMock()
         self.scheduler.benchmark.run = MagicMock()
         self.scheduler.benchmark.stop = MagicMock()
         self.scheduler.benchmark.update_command = MagicMock()
-        self.scheduler.benchmark.check_success.side_effect = [True, False]
+        self.scheduler.benchmark.check_success = MagicMock(side_effect=[True, False])
         self.scheduler.simulator.check_success = MagicMock()
         self.scheduler.simulator.process.poll.return_value = None
         self.scheduler.stop_target_server = MagicMock()
@@ -554,6 +707,7 @@ class TestSchedulerRunMethods(unittest.TestCase):
         result = self.scheduler.run_with_request_rate(params, params_field_with_variable_req_rate)
 
         self.assertEqual(phases, [EarlyExitPhase.CALIBRATION, EarlyExitPhase.EVALUATION])
+        self.assertEqual(self.scheduler.benchmark.run.call_count, 2)
         self.assertTrue(result.early_exit)
         self.assertEqual(result.early_exit_reason, "score exceeded threshold")
         self.scheduler.stop_target_server.assert_called_once_with(False)
@@ -593,6 +747,119 @@ class TestSchedulerRunMethods(unittest.TestCase):
         self.scheduler.current_back_path = None
         self.scheduler.save_result()
         self.data_storage.save.assert_called_once()
+
+    @patch("time.time")
+    def test_save_result_can_keep_service_running(self, mock_time):
+        """Test save_result can persist metrics without stopping service."""
+        mock_time.return_value = 1000.0
+        self.scheduler.run_start_timestamp = 999.0
+        self.scheduler.performance_index = PerformanceIndex()
+        self.scheduler.simulate_run_info = self.params_field
+        self.scheduler.error_info = None
+        self.scheduler.current_back_path = None
+
+        self.scheduler.save_result(stop_service=False)
+
+        self.data_storage.save.assert_called_once()
+        self.simulator.stop.assert_not_called()
+        self.benchmark.stop.assert_not_called()
+
+    @patch("time.time")
+    def test_save_result_persists_trial_logs_while_keeping_service_running(self, mock_time):
+        """Agent trial logs and externally managed service lifecycle can be used together."""
+        import tempfile
+        from pathlib import Path
+
+        mock_time.return_value = 1000.0
+        self.scheduler.run_start_timestamp = 999.0
+        self.scheduler.performance_index = PerformanceIndex()
+        self.scheduler.simulate_run_info = self.params_field
+        self.scheduler.error_info = None
+        self.scheduler.current_back_path = None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "agent_run"
+            simulator_log = Path(tmp) / "simulator.log"
+            benchmark_log = Path(tmp) / "benchmark.log"
+            simulator_log.write_text("simulator", encoding="utf-8")
+            benchmark_log.write_text("benchmark", encoding="utf-8")
+            self.simulator.run_log = simulator_log
+            self.benchmark.run_log = benchmark_log
+
+            self.scheduler.save_result(
+                stop_service=False,
+                candidate_id="candidate-1",
+                run_dir=run_dir,
+            )
+
+            self.assertEqual((run_dir / "trial_logs" / "candidate-1.log").read_text(), "simulator")
+            self.assertEqual((run_dir / "trial_logs" / "candidate-1.1.log").read_text(), "benchmark")
+
+        self.data_storage.save.assert_called_once()
+        self.assertNotIn("candidate_id", self.data_storage.save.call_args.kwargs)
+        self.assertNotIn("run_dir", self.data_storage.save.call_args.kwargs)
+        self.simulator.stop.assert_not_called()
+        self.benchmark.stop.assert_not_called()
+
+    @patch("time.time")
+    @patch("time.sleep")
+    def test_run_benchmark_only_does_not_start_simulator(self, mock_sleep, mock_time):
+        """Test benchmark-only run updates benchmark and keeps the simulator running."""
+        mock_time.return_value = 1000.0
+        self.simulator.check_success = MagicMock(return_value=True)
+        self.benchmark.check_success = MagicMock(return_value=True)
+
+        result = self.scheduler.run_benchmark_only(self.params, self.params_field)
+
+        assert result == self.performance_index
+        self.simulator.run.assert_not_called()
+        self.benchmark.stop.assert_called_once()
+        self.benchmark.run.assert_called_once()
+        self.benchmark.get_performance_index.assert_called_once()
+
+    @patch("time.time")
+    @patch("time.sleep")
+    def test_run_benchmark_only_can_skip_service_monitoring(self, mock_sleep, mock_time):
+        """Test benchmark-only run can skip service monitoring for externally managed services."""
+        mock_time.return_value = 1000.0
+        self.benchmark.check_success = MagicMock(return_value=True)
+        self.scheduler.service_checks = MagicMock()
+
+        self.scheduler.run_benchmark_only(self.params, self.params_field, monitor_service=False)
+
+        self.scheduler.service_checks.run.assert_not_called()
+
+    @patch("time.time")
+    @patch("time.sleep")
+    def test_run_benchmark_only_supports_health_only_benchmark(self, mock_sleep, mock_time):
+        """Test benchmark-only run supports benchmarks without check_success."""
+
+        class HealthOnlyBenchmark:
+            def __init__(self, performance_index):
+                self.data_field = None
+                self.run_log = None
+                self.bak_path = None
+                self.performance_index = performance_index
+                self.stop = MagicMock()
+                self.run = MagicMock()
+                self.update_command = MagicMock()
+
+            def health(self):
+                return ProcessState(stage=Stage.stop)
+
+            def get_performance_index(self):
+                return self.performance_index
+
+        mock_time.return_value = 1000.0
+        benchmark = HealthOnlyBenchmark(self.performance_index)
+        scheduler = Scheduler(self.simulator, benchmark, self.data_storage)
+        scheduler.service_checks = MagicMock()
+
+        result = scheduler.run_benchmark_only(self.params, self.params_field, monitor_service=False)
+
+        assert result == self.performance_index
+        scheduler.service_checks.run.assert_not_called()
+        benchmark.run.assert_called_once()
 
     @patch("time.time")
     def test_save_result_passes_del_log_flag(self, mock_time):
@@ -680,7 +947,7 @@ class TestSchedulerRunMethods(unittest.TestCase):
 
 class TestSchedulerRunWithRequestRate(unittest.TestCase):
     def setUp(self):
-        self.simulator = MagicMock()
+        self.simulator = _make_health_simulator()
         self.benchmark = MagicMock()
         self.data_storage = MagicMock()
         self.scheduler = Scheduler(
@@ -701,7 +968,7 @@ class TestSchedulerRunWithRequestRate(unittest.TestCase):
         mock_time.return_value = 1000.0
         perf = PerformanceIndex(throughput=4.0, generate_speed=100)
         self.benchmark.get_performance_index.return_value = perf
-        self.benchmark.check_success.return_value = True
+        self.benchmark.check_success = MagicMock(return_value=True)
         self.simulator.check_success = MagicMock(return_value=True)
 
         result = self.scheduler.run_with_request_rate(self.params, self.params_field)
@@ -727,7 +994,7 @@ class TestSchedulerRunWithRequestRate(unittest.TestCase):
         )
         perf = PerformanceIndex(throughput=4.0, generate_speed=100)
         self.benchmark.get_performance_index.return_value = perf
-        self.benchmark.check_success.return_value = True
+        self.benchmark.check_success = MagicMock(return_value=True)
         self.simulator.check_success = MagicMock(return_value=True)
 
         result = self.scheduler.run_with_request_rate(self.params, params_field_fixed)
@@ -777,34 +1044,56 @@ class TestSchedulerMonitoringStatus(unittest.TestCase):
         del self.simulator.check_success
         self.simulator.__class__ = type("OtherSim", (), {})
         self.simulator.health = MagicMock(return_value=MagicMock(stage=Stage.running))
-        self.benchmark.health.return_value = MagicMock(stage=Stage.stop)
+        self.benchmark.health = MagicMock(return_value=MagicMock(stage=Stage.stop))
 
         self.scheduler.monitoring_status()
 
-    @patch("time.time")
+    @patch("time.time", return_value=1.0)
+    @patch("time.sleep")
+    @patch("optix.optimizer.scheduler.get_settings")
+    def test_benchmark_only_monitor_uses_only_benchmark_checks(self, mock_settings, mock_sleep, mock_time):
+        mock_settings.return_value.particles_time_out = 5
+        self.scheduler._benchmark_finished = MagicMock(return_value=True)
+
+        self.scheduler.monitoring_status(monitor_service=False)
+
+        self.scheduler.service_checks.run.assert_not_called()
+        self.scheduler.benchmark_checks.run.assert_called_once()
+        self.scheduler._benchmark_finished.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @patch("time.time", return_value=1.0)
+    @patch("time.sleep")
+    @patch("optix.optimizer.scheduler.get_settings")
+    def test_benchmark_only_monitor_preserves_timeout(self, mock_settings, mock_sleep, mock_time):
+        mock_settings.return_value.particles_time_out = 2
+        self.scheduler._benchmark_finished = MagicMock(return_value=False)
+
+        with self.assertRaisesRegex(TimeoutError, "2"):
+            self.scheduler.monitoring_status(monitor_service=False)
+
+        self.scheduler.service_checks.run.assert_not_called()
+        self.assertEqual(self.scheduler.benchmark_checks.run.call_count, 2)
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    @patch("time.time", return_value=100.0)
     @patch("time.sleep")
     @patch("optix.optimizer.scheduler.get_settings")
     @patch("optix.optimizer.scheduler.logger")
-    def test_monitoring_first_duration_warning(self, mock_logger, mock_settings, mock_sleep, mock_time):
-        """Test monitoring_status logs warning when duration exceeds 2x first_duration"""
+    def test_benchmark_only_monitor_preserves_duration_warning(
+        self,
+        mock_logger,
+        mock_settings,
+        mock_sleep,
+        mock_time,
+    ):
         mock_settings.return_value.particles_time_out = 3
-        # start_time + iter1(elapsed, context, duration) + iter2(elapsed, context) = 6 calls
-        mock_time.side_effect = [0, 100, 100, 100, 100, 100]
-        # Remove check_success to go directly to health path
-        del self.simulator.check_success
-        self.simulator.__class__ = type("OtherSim", (), {})
-        self.simulator.health = MagicMock(return_value=MagicMock(stage=Stage.running))
-        # First iter: running so we reach duration check; second iter: stop so we return
-        self.benchmark.health.side_effect = [
-            MagicMock(stage=Stage.running),
-            MagicMock(stage=Stage.stop),
-        ]
+        self.scheduler._benchmark_finished = MagicMock(side_effect=[False, True])
         self.scheduler.run_start_timestamp = 1.0
         self.scheduler.first_duration = 1.0
 
-        self.scheduler.monitoring_status()
+        self.scheduler.monitoring_status(monitor_service=False)
 
-        # Verify the warning was actually logged
         mock_logger.warning.assert_called_once_with(
             "The current runtime is more than twice the duration of the first run."
         )
@@ -909,7 +1198,7 @@ class TestMonitoringStatusBranches(unittest.TestCase):
         mock_vllm.return_value = False
         self.simulator.process.poll.return_value = None
         self.simulator.check_success = MagicMock(return_value=True)
-        self.benchmark.check_success.return_value = True
+        self.benchmark.check_success = MagicMock(return_value=True)
 
         self.scheduler.monitoring_status()
         self.benchmark.check_success.assert_called()
@@ -970,23 +1259,6 @@ class TestMonitoringStatusBranches(unittest.TestCase):
         self.assertIn("exit=1", message)
         self.assertIn("command:", message)
         self.assertNotIn("Failed in run simulator", message)
-
-    @patch("time.time")
-    @patch("time.sleep")
-    @patch("optix.optimizer.scheduler.get_settings")
-    def test_monitoring_timeout_raises(self, mock_settings, mock_sleep, mock_time):
-        """Test monitoring_status raises TimeoutError when timeout reached"""
-        mock_settings.return_value.particles_time_out = 2
-        mock_time.side_effect = list(range(10))
-        del self.simulator.check_success
-        from optix.config.constant import ProcessState
-
-        self.simulator.__class__ = type("OtherSim", (), {})
-        self.simulator.health = MagicMock(return_value=ProcessState(stage=Stage.running))
-        self.benchmark.health = MagicMock(return_value=ProcessState(stage=Stage.running))
-
-        with self.assertRaises(TimeoutError):
-            self.scheduler.monitoring_status()
 
 
 class TestRunTargetServerRetry(unittest.TestCase):

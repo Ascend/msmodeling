@@ -36,3 +36,14 @@ class RunOutcome:
     @property
     def has_error(self) -> bool:
         return self.status == RunStatus.FAILED
+
+
+@dataclass(frozen=True)
+class OptimizationResult:
+    """Best result selected by one complete optimizer run."""
+
+    fitness: float
+    params: dict[str, Any]
+    performance_index: PerformanceIndex
+    service_param_names: tuple[str, ...] = ()
+    benchmark_param_names: tuple[str, ...] = ()

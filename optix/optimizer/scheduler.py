@@ -24,7 +24,12 @@ import numpy as np
 from loguru import logger
 
 from ..common import get_train_sub_path, is_mindie, is_vllm
-from ..config.base_config import CONCURRENCYS, FOLDER_LIMIT_SIZE, REAL_EVALUATION, REQUESTRATES
+from ..config.base_config import (
+    CONCURRENCYS,
+    FOLDER_LIMIT_SIZE,
+    REAL_EVALUATION,
+    REQUESTRATES,
+)
 from ..config.config import (
     DecodeContext,
     ErrorSeverity,
@@ -78,11 +83,15 @@ class Scheduler:
         retry_number: int = 3,
         wait_start_time: Optional[int] = None,
         engine: Optional[str] = None,
+        benchmark_run_count: int = 1,
     ):
+        if benchmark_run_count < 1:
+            raise ValueError("benchmark_run_count must be greater than or equal to 1")
         self.simulator = simulator
         self.benchmark = benchmark
         self.data_storage = data_storage
         self.engine = engine
+        self.benchmark_run_count = benchmark_run_count
         self.bak_path = bak_path
         self.retry_number = retry_number
         self.wait_time = wait_start_time or get_settings().wait_start_time
@@ -316,7 +325,10 @@ class Scheduler:
                 )
                 self._metrics_unavailable_warned = True
             else:
-                logger.debug("Skip benchmark early exit check because metrics are unavailable: {}", error)
+                logger.debug(
+                    "Skip benchmark early exit check because metrics are unavailable: {}",
+                    error,
+                )
             return
         self._metrics_unavailable_warned = False
         if decision is None:
@@ -495,7 +507,51 @@ class Scheduler:
         self.simulator.backup()
         self.benchmark.backup()
 
-    def monitoring_status(self):
+    def _benchmark_finished(self) -> bool:
+        if isinstance(self.benchmark, SupportsCheckSuccess):
+            return self.benchmark.check_success()
+        if isinstance(self.benchmark, SupportsHealth):
+            res = self.benchmark.health()
+            if res.stage == Stage.error:
+                proc = getattr(self.benchmark, "process", None)
+                rc = getattr(proc, "returncode", None) if proc is not None else None
+                raise subprocess.SubprocessError(
+                    f"Benchmark subprocess failed exit_code={rc} "
+                    f"log={getattr(self.benchmark, 'run_log', None)} "
+                    f"info={getattr(res, 'info', None)}"
+                )
+            return res.stage != Stage.running
+        raise RuntimeError(
+            f"No actionable method found. the expected is check_success or health. benchmark: {type(self.benchmark)}"
+        )
+
+    def _warn_if_runtime_exceeds_baseline(self) -> None:
+        if self.run_start_timestamp and self.first_duration:
+            duration = time.time() - self.run_start_timestamp
+            if duration > 2 * self.first_duration:
+                logger.warning("The current runtime is more than twice the duration of the first run.")
+
+    def _monitor_benchmark_only(self) -> None:
+        start_time = time.time()
+        for _ in range(get_settings().particles_time_out):
+            elapsed = time.time() - start_time
+            context = self._create_check_context(elapsed)
+            benchmark_result = self.benchmark_checks.run(BenchmarkHookPoint.RUNTIME_MONITOR, context)
+            if not benchmark_result.is_healthy:
+                self._handle_error(benchmark_result.error_context)
+            self._check_early_exit()
+            if self._benchmark_finished():
+                return
+            self._warn_if_runtime_exceeds_baseline()
+            time.sleep(1)
+
+        raise TimeoutError(f"{get_settings().particles_time_out}")
+
+    def monitoring_status(self, monitor_service: bool = True):
+        if not monitor_service:
+            self._monitor_benchmark_only()
+            return
+
         start_time = time.time()
         for _ in range(get_settings().particles_time_out):
             elapsed = time.time() - start_time
@@ -515,7 +571,7 @@ class Scheduler:
                             self.simulator.process.returncode,
                         )
                         raise subprocess.SubprocessError(self._simulator_failure_message())
-                if self.benchmark.check_success():
+                if self._benchmark_finished():
                     return
             if isinstance(self.simulator, SupportsHealth):
                 if not isinstance(self.simulator, Simulator):
@@ -526,13 +582,9 @@ class Scheduler:
                             res.stage,
                         )
                         raise subprocess.SubprocessError(self._simulator_failure_message())
-                res = self.benchmark.health()
-                if res.stage != Stage.running:
+                if self._benchmark_finished():
                     return
-            if self.run_start_timestamp and self.first_duration:
-                _duration = time.time() - self.run_start_timestamp
-                if _duration > 2 * self.first_duration:
-                    logger.warning("The current runtime is more than twice the duration of the first run.")
+            self._warn_if_runtime_exceeds_baseline()
             time.sleep(1)
 
         raise TimeoutError(f"{get_settings().particles_time_out}")
@@ -548,10 +600,10 @@ class Scheduler:
                 self.run_simulate(params, params_field)
                 time.sleep(1)
                 logger.debug("starting benchmark subprocess")
+                self._reset_early_exit_window()
                 self.benchmark.run(tuple(self.simulate_run_info))
                 logger.debug("benchmark subprocess started")
                 time.sleep(1)
-                self._reset_early_exit_window()
                 self.monitoring_status()
                 return
             except EarlyExitTriggered as e:
@@ -605,8 +657,19 @@ class Scheduler:
         except OSError as exc:
             logger.debug("trial log persist failed for {}: {}", candidate_id, exc)
 
-    def save_result(self, stop_simulator: bool = True, **kwargs):
+    def save_result(
+        self,
+        stop_simulator: bool = True,
+        stop_service: Optional[bool] = None,
+        **kwargs,
+    ):
         """Save the result of this run and clean up processes.
+
+        ``stop_service`` is the fine-tuning lifecycle switch introduced by the
+        standalone fine-tune flow.  When it is explicitly false, neither the
+        simulator nor benchmark is stopped.  ``stop_simulator`` retains the
+        existing master behavior for legacy callers.
+
         stop_simulator: when True, stop both simulator and benchmark (default behavior).
         When False, stop only the benchmark and keep the simulator running
         """
@@ -635,6 +698,10 @@ class Scheduler:
         if self.bak_path:
             self.backup()
         del_log = self.del_log if self.del_log is not None else False
+        if stop_service is not None:
+            if stop_service:
+                self.stop_target_server(del_log)
+            return
         if stop_simulator:
             self.stop_target_server(del_log)
         else:
@@ -656,7 +723,12 @@ class Scheduler:
             self.benchmark.data_field = params_field
             self.benchmark.update_command()
 
-    def _apply_request_rate_second_run(self, params_field: tuple[OptimizerConfigField]) -> None:
+    def _apply_request_rate_second_run(
+        self,
+        params_field: tuple[OptimizerConfigField],
+        *,
+        monitor_service: bool = True,
+    ) -> None:
         self.benchmark.stop()
         need_second_run = False
         for _field in self.simulate_run_info:
@@ -671,19 +743,54 @@ class Scheduler:
             "second run param info {}",
             {v.name: v.value for v in self.simulate_run_info},
         )
+        self.benchmark_pass += 1
+        self.current_phase = EarlyExitPhase.EVALUATION
+        self._reset_early_exit_window()
         if isinstance(self.benchmark, SupportsDataField):
             self.benchmark.data_field = params_field
         self.benchmark.update_command()
         if isinstance(self.benchmark, SupportsPrepare):
             self.benchmark.prepare()
-        self.benchmark_pass += 1
         self.benchmark.run(tuple(self.simulate_run_info))
-        self.current_phase = EarlyExitPhase.EVALUATION
-        self._reset_early_exit_window()
-        self.monitoring_status()
+        self.monitoring_status(monitor_service=monitor_service)
         time.sleep(1)
         performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
         self.performance_index = self._merge_report_only_early_exit(performance_index)
+
+    def _apply_repeated_benchmark_runs(
+        self,
+        *,
+        monitor_service: bool = True,
+    ) -> None:
+        """Run the remaining identical benchmark passes against the live service.
+
+        The first pass has already completed when this method is called.  All
+        intermediate passes are warm-up passes; only the final pass is parsed
+        and exposed as the evaluation result.
+        """
+        for pass_number in range(2, self.benchmark_run_count + 1):
+            self.benchmark.stop()
+            self.benchmark_pass = pass_number
+            is_final_pass = pass_number == self.benchmark_run_count
+            self.current_phase = EarlyExitPhase.EVALUATION if is_final_pass else EarlyExitPhase.CALIBRATION
+            self._reset_early_exit_window()
+            if isinstance(self.benchmark, SupportsDataField):
+                self.benchmark.data_field = tuple(self.simulate_run_info)
+            self.benchmark.update_command()
+            if isinstance(self.benchmark, SupportsPrepare):
+                self.benchmark.prepare()
+            logger.info(
+                "benchmark pass {}/{} role={}",
+                pass_number,
+                self.benchmark_run_count,
+                "measured" if is_final_pass else "warmup",
+            )
+            self.benchmark.run(tuple(self.simulate_run_info))
+            self.monitoring_status(monitor_service=monitor_service)
+            time.sleep(1)
+            if is_final_pass:
+                performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
+                self.performance_index = self._merge_report_only_early_exit(performance_index)
 
     def _run_evaluation(
         self,
@@ -695,12 +802,19 @@ class Scheduler:
     ) -> PerformanceIndex:
         with logger.contextualize(stage=LogStage.EVALUATE.value):
             self.run_start_timestamp = time.time()
-            logger.debug("evaluation start param_count={} values={}", len(params), params.tolist())
+            logger.debug(
+                "evaluation start param_count={} values={}",
+                len(params),
+                params.tolist(),
+            )
             self.set_back_up_path()
             self.simulate_run_info = map_param_with_value(params, params_field, decode_context)
             self.current_case_id = self._new_case_id()
             self.benchmark_pass = 1
-            logger.opt(lazy=True).trace("run param info {}", lambda: {v.name: v.value for v in self.simulate_run_info})
+            logger.opt(lazy=True).trace(
+                "run param info {}",
+                lambda: {v.name: v.value for v in self.simulate_run_info},
+            )
             self._error_info = None
             self.last_outcome = None
             self.del_log = True
@@ -712,14 +826,25 @@ class Scheduler:
                 fixed_request_rate = with_request_rate and self._has_fixed_request_rate(tuple(self.simulate_run_info))
                 if with_request_rate and not fixed_request_rate:
                     self.current_phase = EarlyExitPhase.CALIBRATION
+                elif not with_request_rate and self.benchmark_run_count > 1:
+                    self.current_phase = EarlyExitPhase.CALIBRATION
+                    logger.info(
+                        "benchmark pass 1/{} role=warmup",
+                        self.benchmark_run_count,
+                    )
                 else:
                     self.current_phase = EarlyExitPhase.EVALUATION
                 self.run_target_server(params, params_field)
                 time.sleep(1)
-                performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
-                self.performance_index = self._merge_report_only_early_exit(performance_index)
                 if with_request_rate:
+                    performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
+                    self.performance_index = self._merge_report_only_early_exit(performance_index)
                     self._apply_request_rate_second_run(params_field)
+                elif self.benchmark_run_count > 1:
+                    self._apply_repeated_benchmark_runs()
+                else:
+                    performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
+                    self.performance_index = self._merge_report_only_early_exit(performance_index)
             except EarlyExitTriggered as e:
                 self._error_info = None
                 self.del_log = False
@@ -776,6 +901,83 @@ class Scheduler:
         """
         return self._run_evaluation(params, params_field, decode_context, with_request_rate=True)
 
+    def run_benchmark_only(
+        self,
+        params: np.ndarray,
+        params_field: tuple[OptimizerConfigField],
+        decode_context: Optional[DecodeContext] = None,
+        monitor_service: bool = True,
+    ) -> PerformanceIndex:
+        """
+        Run benchmark with updated benchmark-side parameters against the existing service.
+
+        This is used by fine-tuning flows whose service-side parameters stay unchanged.
+        """
+        with logger.contextualize(stage=LogStage.EVALUATE.value):
+            self.run_start_timestamp = time.time()
+            logger.debug(
+                "benchmark-only evaluation start param_count={} values={}",
+                len(params),
+                params.tolist(),
+            )
+            self.simulate_run_info = map_param_with_value(params, params_field, decode_context)
+            self.current_case_id = self._new_case_id()
+            self.benchmark_pass = 1
+            logger.opt(lazy=True).trace(
+                "benchmark-only param info {}",
+                lambda: {v.name: v.value for v in self.simulate_run_info},
+            )
+            self._error_info = None
+            self.last_outcome = None
+            self.del_log = True
+            self.performance_index = PerformanceIndex(case_id=self.current_case_id)
+            self.early_exit_info = None
+            try:
+                self.benchmark.stop()
+                if isinstance(self.benchmark, SupportsDataField):
+                    self.benchmark.data_field = tuple(self.simulate_run_info)
+                    self.benchmark.update_command()
+                if isinstance(self.benchmark, SupportsPrepare):
+                    self.benchmark.prepare()
+                if self.benchmark_run_count > 1:
+                    self.current_phase = EarlyExitPhase.CALIBRATION
+                    logger.info(
+                        "benchmark pass 1/{} role=warmup",
+                        self.benchmark_run_count,
+                    )
+                else:
+                    self.current_phase = EarlyExitPhase.EVALUATION
+                self._reset_early_exit_window()
+                self.benchmark.run(tuple(self.simulate_run_info))
+                time.sleep(1)
+                self.monitoring_status(monitor_service=monitor_service)
+                time.sleep(1)
+                if self.benchmark_run_count > 1:
+                    self._apply_repeated_benchmark_runs(monitor_service=monitor_service)
+                else:
+                    self.performance_index = self.benchmark.get_performance_index()
+            except OptimizerError:
+                raise
+            except Exception as e:
+                self._error_info = e
+                self.del_log = False
+            self._attach_warmup_summary(self.performance_index)
+            status = RunStatus.FAILED if self._error_info else RunStatus.SUCCESS
+            duration = time.time() - self.run_start_timestamp if self.run_start_timestamp else None
+            error_type = type(self._error_info).__name__ if self._error_info else "-"
+            logger.debug(
+                "benchmark-only evaluation finished status={} duration={:.2f}s error_type={}",
+                status.value,
+                duration or 0.0,
+                error_type,
+            )
+            self.last_outcome = RunOutcome(
+                status=status,
+                performance_index=self.performance_index,
+                error_context=self._error_info,
+            )
+            return self.performance_index
+
     def rerun_benchmark_only(
         self,
         params: np.ndarray,
@@ -783,6 +985,7 @@ class Scheduler:
         decode_context: Optional[DecodeContext] = None,
         *,
         with_request_rate: bool = False,
+        monitor_service: bool = True,
     ) -> PerformanceIndex:
         """
         Reuse the currently running simulator and rerun only the benchmark.
@@ -812,17 +1015,29 @@ class Scheduler:
                     self.benchmark.update_command()
                 if isinstance(self.benchmark, SupportsPrepare):
                     self.benchmark.prepare()
+                if not with_request_rate and self.benchmark_run_count > 1:
+                    self.current_phase = EarlyExitPhase.CALIBRATION
+                    logger.info(
+                        "benchmark pass 1/{} role=warmup",
+                        self.benchmark_run_count,
+                    )
+                else:
+                    self.current_phase = EarlyExitPhase.EVALUATION
+                self._reset_early_exit_window()
                 self.benchmark.run(tuple(self.simulate_run_info))
                 time.sleep(1)
-                self.current_phase = EarlyExitPhase.EVALUATION
-                self._reset_early_exit_window()
                 # monitoring_status runs health-check hooks on both the live simulator and benchmark.
-                self.monitoring_status()
+                self.monitoring_status(monitor_service=monitor_service)
                 time.sleep(1)
-                performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
-                self.performance_index = self._merge_report_only_early_exit(performance_index)
                 if with_request_rate:
-                    self._apply_request_rate_second_run(params_field)
+                    performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
+                    self.performance_index = self._merge_report_only_early_exit(performance_index)
+                    self._apply_request_rate_second_run(params_field, monitor_service=monitor_service)
+                elif self.benchmark_run_count > 1:
+                    self._apply_repeated_benchmark_runs(monitor_service=monitor_service)
+                else:
+                    performance_index = self._attach_metrics_window_reference(self.benchmark.get_performance_index())
+                    self.performance_index = self._merge_report_only_early_exit(performance_index)
             except OptimizerError:
                 raise
             except Exception as e:
@@ -835,15 +1050,23 @@ class Scheduler:
                 )
                 self._error_info = e
                 self.del_log = False
-                # The benchmark may have produced results before the server errored; try to fetch
-                # the performance index to avoid losing valid data.
-                try:
-                    self.performance_index = self._attach_metrics_window_reference(
-                        self.benchmark.get_performance_index()
-                    )
-                    logger.info("Successfully retrieved performance index despite server error.")
-                except Exception as perf_err:
-                    logger.warning("Failed to get performance index after server error: {}", perf_err)
+                if not with_request_rate and self.benchmark_run_count > 1:
+                    # A warm-up or measured-pass failure must not fall back to
+                    # an earlier cache-warmup result.
+                    self.performance_index = PerformanceIndex(case_id=self.current_case_id)
+                else:
+                    # The benchmark may have produced results before the server errored; try to fetch
+                    # the performance index to avoid losing valid data.
+                    try:
+                        self.performance_index = self._attach_metrics_window_reference(
+                            self.benchmark.get_performance_index()
+                        )
+                        logger.info("Successfully retrieved performance index despite server error.")
+                    except Exception as perf_err:
+                        logger.warning(
+                            "Failed to get performance index after server error: {}",
+                            perf_err,
+                        )
             self._attach_warmup_summary(self.performance_index)
             status = RunStatus.FAILED if self._error_info else RunStatus.SUCCESS
             duration = time.time() - self.run_start_timestamp if self.run_start_timestamp else None

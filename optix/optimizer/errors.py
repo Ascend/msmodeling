@@ -136,3 +136,7 @@ class NoFeasibleSolutionError(OptimizerError):
 
     def __init__(self, message: str = "No feasible solution found") -> None:
         super().__init__(message)
+
+
+class PdDisaggError(OptimizerError):
+    """Raised when the built-in PD disaggregation workflow cannot continue."""

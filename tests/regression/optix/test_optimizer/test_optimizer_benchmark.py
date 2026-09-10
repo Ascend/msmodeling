@@ -250,6 +250,17 @@ class TestAisBenchInit(unittest.TestCase):
         bench = AisBench(config=mock_config)
         assert bench.work_path == "/work"
 
+    def test_pd_phase_command_override_refreshes_model_config(self):
+        from optix.optimizer.plugins.benchmark import AisBench
+
+        bench = AisBench.__new__(AisBench)
+        bench._load_model_config = MagicMock()
+        phase_config = MagicMock(benchmark_command_overrides={"models": "prefill_models"})
+
+        bench.configure_pd_phase(phase_name="prefill", phase_config=phase_config)
+
+        bench._load_model_config.assert_called_once_with()
+
     @patch("optix.optimizer.plugins.benchmark.subprocess.run")
     @patch("optix.deploy_env.shutil.which")
     def test_get_models_config_path_failure(self, mock_which, mock_run):

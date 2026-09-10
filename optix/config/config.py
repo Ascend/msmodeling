@@ -27,7 +27,7 @@ from typing import Any, Literal, Optional, Union
 
 import numpy as np
 from loguru import logger
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -1044,6 +1044,92 @@ class DeployConfig(BaseModel):
     path_prefix: Optional[str] = None
 
 
+class PdDisaggPhaseConfig(BaseModel):
+    """Configuration shared by one PD disaggregation tuning phase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    engine: str = "vllm"
+    benchmark_policy: str = "vllm_benchmark"
+    simulator_command_overrides: dict[str, Any] = Field(default_factory=dict)
+    benchmark_command_overrides: dict[str, Any] = Field(default_factory=dict)
+    target_field: list[OptimizerConfigField] = Field(default_factory=list)
+    n_particles: Optional[int] = Field(default=None, gt=0, lt=1000)
+    iters: Optional[int] = Field(default=None, gt=0, lt=1000)
+    ttft_penalty: float = 1.0
+    tpot_penalty: float = 1.0
+    success_rate_penalty: float = 5.0
+    ttft_slo: float = Field(default=0.5, gt=0)
+    tpot_slo: float = Field(default=0.05, gt=0)
+    success_rate_slo: float = Field(default=1.0, gt=0)
+    fine_tune_mode: Literal["pd_mixed", "pd_disaggregation"] = "pd_mixed"
+    concurrency_field: str = "CONCURRENCY"
+    benchmark_run_count: int = Field(default=1, ge=1)
+
+    @field_validator("engine", "benchmark_policy", "concurrency_field")
+    @classmethod
+    def validate_plugin_token(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(char.isspace() for char in value):
+            raise ValueError("plugin and field names must be non-empty tokens")
+        return value
+
+
+def _default_prefill_phase() -> PdDisaggPhaseConfig:
+    return PdDisaggPhaseConfig(
+        ttft_penalty=1.0,
+        tpot_penalty=0.0,
+        fine_tune_mode="pd_mixed",
+    )
+
+
+def _default_decode_phase() -> PdDisaggPhaseConfig:
+    return PdDisaggPhaseConfig(
+        ttft_penalty=0.0,
+        tpot_penalty=1.0,
+        fine_tune_mode="pd_disaggregation",
+    )
+
+
+class PdDisaggConfig(BaseModel):
+    """Built-in P/D service parameter search and ratio recommendation settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total_devices: int = Field(default=0, ge=0)
+    prefill_devices_per_instance: int = Field(default=0, ge=0)
+    decode_devices_per_instance: int = Field(default=0, ge=0)
+    top_k: int = Field(default=3, ge=0)
+    use_full_device: bool = True
+    phase_output_dir: str = "pd_disagg"
+    prefill: PdDisaggPhaseConfig = Field(default_factory=_default_prefill_phase)
+    decode: PdDisaggPhaseConfig = Field(default_factory=_default_decode_phase)
+
+    @field_validator("phase_output_dir")
+    @classmethod
+    def validate_phase_output_dir(cls, value: str) -> str:
+        path = Path(value)
+        if not value.strip() or path.is_absolute() or ".." in path.parts:
+            raise ValueError("phase_output_dir must be a relative path without '..'")
+        return value
+
+    @model_validator(mode="after")
+    def validate_pd_disagg_settings(self):
+        device_fields = (
+            self.total_devices,
+            self.prefill_devices_per_instance,
+            self.decode_devices_per_instance,
+        )
+        if any(device_fields) and not all(device_fields):
+            raise ValueError(
+                "total_devices, prefill_devices_per_instance and decode_devices_per_instance "
+                "must be configured together"
+            )
+        if self.prefill.engine != "vllm" or self.decode.engine != "vllm":
+            raise ValueError("built-in pd_disagg supports only the 'vllm' engine for prefill and decode")
+        return self
+
+
 class LatencyModel(BaseModel):
     base_path: Path = Path("latency_model")
     model_path: Optional[Path] = Field(
@@ -1235,8 +1321,10 @@ class Settings(BaseSettings):
     agent_optimizer: AgentOptimizerConfig = Field(default_factory=AgentOptimizerConfig)
     particles_time_out: int = 1 * 60 * 60
     wait_start_time: int = 1800
-    n_particles: int = Field(default=5, gt=0, lt=1000)
-    iters: int = Field(default=10, gt=0, lt=1000)
+    skip_pso: bool = False
+    fine_tune_mode: str = "pd_mixed"
+    n_particles: int = Field(default=5, ge=0, lt=1000)
+    iters: int = Field(default=10, ge=0, lt=1000)
     ftol: float = -np.inf
     ftol_iter: int = 1
     ttft_penalty: float = 3.0
@@ -1248,8 +1336,9 @@ class Settings(BaseSettings):
     slo_coefficient: float = 0.1
     generate_speed_target: float = 5000.0
     mem_coefficient: float = 0.8
-    max_fine_tune: int = 10
+    max_fine_tune: int = 30
     use_request_rate_calibration: bool = True
+    manage_simulator_lifecycle: bool = True
     scaling_coefficient: float = 1.3
     step_size: float = 0.6
     theory_guided_enable: bool = True
@@ -1280,6 +1369,33 @@ class Settings(BaseSettings):
     health_check: HealthCheckConfig = Field(default_factory=HealthCheckConfig)
 
     deploy: DeployConfig = Field(default_factory=DeployConfig)
+
+    pd_disagg: PdDisaggConfig = Field(default_factory=PdDisaggConfig)
+
+    @model_validator(mode="after")
+    def validate_pso_settings(self):
+        if self.fine_tune_mode not in {"pd_mixed", "pd_disaggregation"}:
+            raise ValueError("fine_tune_mode must be 'pd_mixed' or 'pd_disaggregation'.")
+        repeated_pd_phases = [
+            phase_name
+            for phase_name in ("prefill", "decode")
+            if getattr(self.pd_disagg, phase_name).benchmark_run_count > 1
+        ]
+        if self.use_request_rate_calibration and repeated_pd_phases:
+            invalid_phases = ", ".join(repeated_pd_phases)
+            raise ValueError(
+                "pd_disagg benchmark_run_count > 1 requires use_request_rate_calibration=false; "
+                f"invalid phases: {invalid_phases}."
+            )
+        if not self.manage_simulator_lifecycle and not self.skip_pso:
+            raise ValueError("manage_simulator_lifecycle=false requires skip_pso=true.")
+        if self.skip_pso:
+            return self
+        if self.n_particles <= 0:
+            raise ValueError("n_particles must be greater than 0 when skip_pso is false.")
+        if self.iters <= 0:
+            raise ValueError("iters must be greater than 0 when skip_pso is false.")
+        return self
 
     @classmethod
     def settings_customise_sources(

@@ -11,10 +11,12 @@ tpot_penalty = 1
 success_rate_penalty = 5.0
 ttft_slo = 2
 tpot_slo = 0.05
-# false: use scheduler.run, search CONCURRENCY during PSO, REQUESTRATE fixed to max.
-#   scheduler.run is called at max request rate for each candidate concurrency.
-# true: use scheduler.run_with_request_rate, CONCURRENCY fixed to max, REQUESTRATE fixed to max.
+# false: use scheduler.run, search CONCURRENCY during PSO. REQUESTRATE is fixed
+#   at its maximum pressure: 0 when the range contains 0 (unlimited), otherwise max.
+# true: use scheduler.run_with_request_rate, CONCURRENCY fixed to max. The first
+#   run uses the same maximum-pressure rule, then a finite rate is calibrated.
 use_request_rate_calibration = true
+skip_pso = false
 
 # ------------------------- Select top_k for fine-tuning ------------------------------------------------
 [data_storage]
@@ -189,6 +191,183 @@ value = 0
 enabled = false
 action = "terminate"
 metrics_url = "http://127.0.0.1:8000/metrics"
+
+# ------------------------- Built-in PD Disaggregation Tuning --------------------------------------------
+# This mode only searches P/D service parameters and recommends the ratio:
+#   msmodeling optix --mode pd_disagg -c ./config.toml
+# After starting the PD service yourself, use the regular standard mode
+# with skip_pso=true and manage_simulator_lifecycle=false for benchmark tuning.
+# Prefill/Decode can override the top-level n_particles/iters independently;
+# an omitted phase value falls back to the corresponding top-level value.
+# For Decode prefix-cache warmup, set the top-level
+# use_request_rate_calibration=false and configure benchmark_run_count=2.
+# [pd_disagg]
+# total_devices = 16
+# prefill_devices_per_instance = 4
+# decode_devices_per_instance = 2
+# top_k = 3
+# use_full_device = true
+# phase_output_dir = "pd_disagg"
+
+# [pd_disagg.prefill]
+# engine = "vllm"
+# benchmark_policy = "vllm_benchmark" # Or "ais_bench".
+# benchmark_run_count = 1
+# n_particles = 8
+# iters = 4
+# ttft_penalty = 1
+# tpot_penalty = 0
+# ttft_slo = 2.0
+# fine_tune_mode = "pd_mixed"
+# Only this phase's vLLM command is changed. The global [vllm.command] remains
+# the common baseline. Placeholders must also be declared in this phase's target_field.
+# [pd_disagg.prefill.simulator_command_overrides]
+# others = "--tensor-parallel-size 4 --no-enable-prefix-caching --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION"
+# The prefill benchmark must set output length to 1 token. Prefill QPS is read
+# directly from the benchmark throughput (req/s), without a TTFT-based fallback.
+# [pd_disagg.prefill.benchmark_command_overrides]
+# others = "--num-prompts 500 --random-input-len 1024 --random-output-len 1"
+
+# [[pd_disagg.prefill.target_field]]
+# name = "MAX_NUM_BATCHED_TOKENS"
+# config_position = "env"
+# min = 8192
+# max = 65536
+# dtype = "int"
+# value = 8192
+
+# [[pd_disagg.prefill.target_field]]
+# name = "MAX_NUM_SEQS"
+# config_position = "env"
+# min = 8
+# max = 128
+# dtype = "int"
+# value = 32
+
+# [[pd_disagg.prefill.target_field]]
+# name = "MAX_MODEL_LEN"
+# config_position = "env"
+# min = 8192
+# max = 131072
+# dtype = "int"
+# value = 8192
+
+# [[pd_disagg.prefill.target_field]]
+# name = "GPU_MEMORY_UTILIZATION"
+# config_position = "env"
+# min = 0.5
+# max = 0.95
+# dtype = "float"
+# value = 0.8
+
+# [[pd_disagg.prefill.target_field]]
+# name = "CONCURRENCY"
+# config_position = "env"
+# min = 1
+# max = 256
+# dtype = "int"
+# value = 32
+
+# [[pd_disagg.prefill.target_field]]
+# name = "REQUESTRATE"
+# config_position = "env"
+# min = 0
+# max = 0
+# dtype = "float"
+# value = 0
+
+# [pd_disagg.decode]
+# engine = "vllm"
+# benchmark_policy = "vllm_benchmark" # Or "ais_bench".
+# benchmark_run_count = 2
+# n_particles = 12
+# iters = 6
+# ttft_penalty = 0
+# tpot_penalty = 1
+# tpot_slo = 0.05
+# fine_tune_mode = "pd_disaggregation"
+# [pd_disagg.decode.simulator_command_overrides]
+# others = "--tensor-parallel-size 2 --enable-prefix-caching --max-model-len $MAX_MODEL_LEN --gpu-memory-utilization $GPU_MEMORY_UTILIZATION"
+# [pd_disagg.decode.benchmark_command_overrides]
+# others = "--seed 1024 --num-prompts 500 --random-input-len 1024 --random-output-len 256"
+
+# [[pd_disagg.decode.target_field]]
+# name = "MAX_NUM_BATCHED_TOKENS"
+# config_position = "env"
+# min = 128
+# max = 4096
+# dtype = "int"
+# value = 512
+
+# [[pd_disagg.decode.target_field]]
+# name = "MAX_NUM_SEQS"
+# config_position = "env"
+# min = 32
+# max = 512
+# dtype = "int"
+# value = 64
+
+# [[pd_disagg.decode.target_field]]
+# name = "MAX_MODEL_LEN"
+# config_position = "env"
+# min = 8192
+# max = 131072
+# dtype = "int"
+# value = 8192
+
+# [[pd_disagg.decode.target_field]]
+# name = "GPU_MEMORY_UTILIZATION"
+# config_position = "env"
+# min = 0.5
+# max = 0.95
+# dtype = "float"
+# value = 0.8
+
+# [[pd_disagg.decode.target_field]]
+# name = "CONCURRENCY"
+# config_position = "env"
+# min = 1
+# max = 1000
+# dtype = "int"
+# value = 100
+
+# [[pd_disagg.decode.target_field]]
+# name = "REQUESTRATE"
+# config_position = "env"
+# min = 0
+# max = 1000
+# dtype = "float"
+# value = 0
+
+# ------------------------- External PD Service Fine-tuning --------------------------------------------
+# Put these settings in a separate config after the PD service is running, then execute:
+#   msmodeling optix --mode standard -e vllm -b vllm_benchmark -c ./pd_fine_tune.toml
+# skip_pso = true
+# manage_simulator_lifecycle = false
+# fine_tune_mode = "pd_mixed"
+# [vllm]
+# target_field = []
+# [vllm_benchmark.command]
+# host = "pd-service-host"
+# port = "8000"
+# model = "model_path"
+# served_model_name = "model_name"
+# dataset_name = "random"
+# others = "--num-prompts 500 --random-input-len 1024 --random-output-len 256"
+# [[vllm_benchmark.target_field]]
+# name = "CONCURRENCY"
+# config_position = "env"
+# min = 1
+# max = 1000
+# dtype = "int"
+# value = 100
+# [[vllm_benchmark.target_field]]
+# name = "REQUESTRATE"
+# config_position = "env"
+# min = 1
+# max = 1000
+# dtype = "float"
+# value = 100
 
 # ------------------------- Agent Optimizer Configuration ------------------------------------------------
 [agent_optimizer]

@@ -138,7 +138,7 @@ class DataStorage:
         params: tuple[OptimizerConfigField],
         **kwargs,
     ):
-        logger.info("Save result with DataStorage. File path: {!r}", self.save_file)
+        logger.info("Save result with DataStorage. File path: {!r}", self.save_file.resolve())
 
         _column = []
         _value = []
@@ -182,45 +182,54 @@ class DataStorage:
         return default
 
     def _get_eligible_results(self):
+        settings = get_settings()
         optimizer_result = read_csv_s(self.save_file)
         optimizer_result = optimizer_result.replace([np.inf, -np.inf], np.nan)
         pso_result = optimizer_result
         if self.benchmark:
             command = self.benchmark.config.command
-            if hasattr(command, "num_prompts"):
-                request_nums = command.num_prompts
-                pso_result = optimizer_result[optimizer_result[NUM_PROMPTS] == request_nums]
+            request_nums = getattr(command, "num_prompts", None)
+            if request_nums not in (None, "") and NUM_PROMPTS in optimizer_result.columns:
+                request_nums = str(request_nums).strip()
+                pso_result = optimizer_result[
+                    optimizer_result[NUM_PROMPTS].apply(lambda value: str(value).strip()) == request_nums
+                ]
         pso_result = pso_result.dropna(subset="fitness")
         if "early_exit" in pso_result.columns:
             pso_result = pso_result[~pso_result["early_exit"].apply(DataStorage._to_bool)]
         if "usable_as_best" in pso_result.columns:
             pso_result = pso_result[pso_result["usable_as_best"].apply(lambda value: DataStorage._to_bool(value, True))]
-        pso_result = pso_result[pso_result["time_to_first_token"] > 0]
-        pso_result = pso_result[pso_result["time_per_output_token"] > 0]
+        if settings.ttft_penalty > 0:
+            pso_result = pso_result[pso_result["time_to_first_token"] > 0]
+        if settings.tpot_penalty > 0:
+            pso_result = pso_result[pso_result["time_per_output_token"] > 0]
         pso_result = pso_result[pso_result["generate_speed"] > 0]
         return pso_result.reset_index()
 
     def get_best_result(self):
         settings = get_settings()
         pso_result = self._get_eligible_results()
-        _fitness_index = pso_result.nsmallest(self.config.pso_top_k, "fitness").index
+        # pso_top_k=0 disables candidate FineTune, but the optimizer still needs
+        # at least one PSO result for final validation and best-result selection.
+        selection_top_k = max(1, self.config.pso_top_k)
+        _fitness_index = pso_result.nsmallest(selection_top_k, "fitness").index
         if settings.ttft_penalty and settings.tpot_penalty:
             _generate_speed_index = (
                 pso_result[
                     (pso_result["time_to_first_token"] <= settings.ttft_slo * (1 + settings.slo_coefficient))
                     & (pso_result["time_per_output_token"] <= settings.tpot_slo * (1 + settings.slo_coefficient))
                 ]
-                .nlargest(self.config.pso_top_k, "generate_speed")
+                .nlargest(selection_top_k, "generate_speed")
                 .index
             )
         elif settings.tpot_penalty:
             _generate_speed_index = (
                 pso_result[pso_result["time_per_output_token"] <= settings.tpot_slo * (1 + settings.slo_coefficient)]
-                .nlargest(self.config.pso_top_k, "generate_speed")
+                .nlargest(selection_top_k, "generate_speed")
                 .index
             )
         else:
-            _generate_speed_index = pso_result.nlargest(self.config.pso_top_k, "generate_speed").index
+            _generate_speed_index = pso_result.nlargest(selection_top_k, "generate_speed").index
         _fine_tune_index = _fitness_index.union(_generate_speed_index)
         return pso_result.iloc[_fine_tune_index]
 

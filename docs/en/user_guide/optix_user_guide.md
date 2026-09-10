@@ -209,6 +209,7 @@ msmodeling optix [options]
 
 |Parameter|Mandatory (Yes/No)|Description|
 |---|---|---|
+|`--mode`|No|Optimization workflow. `standard` runs the existing general optimization, including optional PSO and fine-tuning; `pd_disagg` runs separate Prefill and Decode searches followed by ratio recommendation and requires `skip_pso=false` and `manage_simulator_lifecycle=true`. The default is `standard`; omitting this option preserves the existing workflow, and PD search is enabled only by explicitly specifying `--mode pd_disagg`.|
 |-`lb` or `--load_breakpoint`|No|Controls whether to resume the optimization process from a breakpoint. Including this parameter enables the feature; omitting it disables the feature.|
 |`--backup`|No|Determines whether to back up data during optimization. Including this parameter enables backup. The options are as follows:<br>&#8226;`True`: enables backup<br>&#8226;`False`: disables backup.<br/>The default value is `False`.|
 |-`b` or `--benchmark_policy`|No|Specifies a benchmark tool. The options are as follows:<br>&#8226;`vllm_benchmark`: uses `vllm_benchmark` as the test tool <br/>&#8226;`ais_bench`: uses AISBench as the test tool<br/>The default value is `ais_bench`.<br/>You need to select the inference framework and the test framework that are compatible with each other.|
@@ -332,8 +333,18 @@ You can configure the number of seeds and iterations based on the estimated time
 |success_rate_penalty|Yes|Penalty coefficient for the request success rate. Value range: an integer from 1 to 1000. You are advised to set it to 5. |
 |ttft_slo|Yes|Latency constraint of `time_to_first_token`. For example, if `time_to_first_token` is limited to 2 seconds, set the value to 2. Value range: (0, 100], in seconds.|
 |tpot_slo|Yes|Latency constraint of `time_per_output_token`. For example, if `time_per_output_token` is limited to 50 ms, set the value to 0.05. Value range: (0, 100], in seconds. |
+|use_request_rate_calibration|No|Whether to calibrate `REQUESTRATE` through real measurements. The default value is `true`. See the mode description below.|
 |service|Yes|Marks whether the node is the primary node or the secondary node in multi-node startup. In multi-node scenarios, set the secondary node to `slave`. The options are as follows:<br>&#8226;`master`: primary node<br/>&#8226;`slave`: secondary node,<br/>The default value is `master`.|
 |sample_size|No|Sampling size of the original dataset. Using the sampled data for tuning can improve optimization efficiency. Value range: an integer from 1000 to 10000. You are advised to set it to 1/3 of the requests in the original dataset.|
+
+`use_request_rate_calibration` determines how the two special fields `CONCURRENCY` and `REQUESTRATE` participate in PSO:
+
+|Value|Description|CONCURRENCY|REQUESTRATE|
+|---|---|---|---|
+|`true` (default)|Search for a better request rate with fixed concurrency.|Fixed at `max` and not searched.|First benchmarked at maximum pressure, then calibrated from measured throughput.|
+|`false`|Search for a better concurrency without calibrating the request rate.|Searched by PSO within `[min, max]`.|Fixed at the maximum-pressure rate.|
+
+`REQUESTRATE=0` means unlimited traffic. Therefore, the maximum-pressure rate is `0` when the configured range contains `0`; otherwise, it is the numeric `max`.
 
 **Benchmark Tool Parameters**:
 If `AISBench` is used for the test, modify the following parameters. You can modify them by referring to the [AISBench Usage Description](https://gitee.com/aisbench/benchmark/blob/master/README.md).

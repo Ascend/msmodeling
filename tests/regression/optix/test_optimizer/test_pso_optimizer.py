@@ -24,6 +24,8 @@ from optix.config.config import (
     DecodeContext,
     OptimizerConfigField,
     PerformanceIndex,
+    field_to_param,
+    map_param_with_value,
 )
 from optix.optimizer.optimizer import (
     PSOOptimizer,
@@ -43,6 +45,7 @@ def _make_pso_optimizer(**overrides):
     scheduler = MagicMock()
     scheduler.error_info = None
     scheduler.data_storage = MagicMock()
+    scheduler.data_storage.config.pso_top_k = 3
     defaults = {
         "scheduler": scheduler,
         "n_particles": 3,
@@ -233,6 +236,34 @@ class TestPSOOptimizer:
         f, p, pi = opt.best_params(fitness_list, params_list, perf_list)
         assert pi.generate_speed == 10
 
+    def test_best_params_pd_disaggregation_prefers_fastest_under_tpot_slo(self):
+        opt = self._create_optimizer(ttft_penalty=1.0, tpot_penalty=0)
+        opt.fine_tune = _make_fine_tune_mock(fine_tune_mode="pd_disaggregation", tpot_upper_bound=0.05)
+        perf_list = [
+            PerformanceIndex(
+                generate_speed=10,
+                throughput=5.0,
+                time_to_first_token=0.1,
+                time_per_output_token=0.04,
+            ),
+            PerformanceIndex(
+                generate_speed=50,
+                throughput=9.0,
+                time_to_first_token=0.1,
+                time_per_output_token=0.08,
+            ),
+            PerformanceIndex(
+                generate_speed=30,
+                throughput=7.0,
+                time_to_first_token=0.1,
+                time_per_output_token=0.045,
+            ),
+        ]
+        fitness_list = [1.0, 0.2, 0.5]
+        params_list = [np.array([10]), np.array([20]), np.array([30])]
+        f, p, pi = opt.best_params(fitness_list, params_list, perf_list)
+        assert pi.throughput == 7.0
+
     def test_normalize_particle_position(self):
         opt = self._create_optimizer()
         position = np.array([50.0, 25000.0])
@@ -268,6 +299,26 @@ class TestPSOOptimizer:
         with pytest.raises(ValueError, match="Invalid data"):
             opt.get_target_field_from_case_data(case_data)
 
+    def test_run_plugin_skip_pso_refines_default_only(self):
+        opt = self._create_optimizer(skip_pso=True, ttft_penalty=0, tpot_penalty=0, max_fine_tune=0)
+        opt.prepare_plugin = MagicMock()
+        opt.default_run_param = np.array([50.0, 10000.0])
+        opt.default_res = PerformanceIndex(
+            generate_speed=3000,
+            time_to_first_token=0.3,
+            time_per_output_token=0.04,
+            success_rate=1.0,
+        )
+        opt.default_fitness = 1.5
+        opt.fine_tune = MagicMock()
+
+        opt.run_plugin()
+
+        opt.prepare_plugin.assert_called_once()
+        opt.scheduler.data_storage.get_best_result.assert_not_called()
+        opt.scheduler.run_with_request_rate.assert_not_called()
+        opt.fine_tune.reset_history.assert_called_once()
+
 
 class TestAdapterTargetField:
     def test_context_manager_restores_field(self):
@@ -290,6 +341,28 @@ class TestAdapterTargetField:
         original_field = opt.target_field
         with adapter_target_field(opt):
             assert opt.target_field is not original_field
+        assert opt.target_field is original_field
+
+    def test_context_manager_restores_field_after_exception(self):
+        scheduler = MagicMock()
+        target_field = (OptimizerConfigField(name="CONCURRENCY", min=1, max=64, dtype="int", value=32),)
+        opt = PSOOptimizer(
+            scheduler=scheduler,
+            target_field=target_field,
+            ttft_penalty=0,
+            tpot_penalty=0,
+            success_rate_penalty=0,
+            ttft_slo=1.0,
+            tpot_slo=0.1,
+            success_rate_slo=0.9,
+            generate_speed_target=100,
+        )
+        original_field = opt.target_field
+
+        with pytest.raises(RuntimeError, match="adapter failure"):
+            with adapter_target_field(opt):
+                raise RuntimeError("adapter failure")
+
         assert opt.target_field is original_field
 
     def test_concurrency_not_fixed_by_default(self):
@@ -329,10 +402,67 @@ class TestAdapterTargetField:
             success_rate_slo=0.9,
             generate_speed_target=100,
         )
-        with adapter_target_field(opt):
+        on_pin_concurrency = MagicMock()
+        with adapter_target_field(opt, on_pin_concurrency=on_pin_concurrency):
             conc_field = next(f for f in opt.target_field if f.name == "CONCURRENCY")
             assert conc_field.constant == 64
             assert conc_field.value == 64
+            on_pin_concurrency.assert_called_once_with(conc_field)
+
+    @pytest.mark.parametrize(
+        ("use_request_rate_calibration", "minimum_rate", "expected_rate"),
+        [
+            (False, 0.0, 0.0),
+            (False, 0.1, 1000.0),
+            (True, 0.0, 0.0),
+            (True, 0.1, 1000.0),
+        ],
+    )
+    def test_request_rate_uses_semantic_maximum(
+        self,
+        use_request_rate_calibration,
+        minimum_rate,
+        expected_rate,
+    ):
+        """Zero is the maximum-pressure request rate when the range includes it."""
+        scheduler = MagicMock()
+        target_field = (
+            OptimizerConfigField(name="CONCURRENCY", min=1, max=128, dtype="int", value=64),
+            OptimizerConfigField(
+                name="REQUESTRATE",
+                min=minimum_rate,
+                max=1000,
+                dtype="float",
+                value=100,
+            ),
+        )
+        opt = PSOOptimizer(
+            scheduler=scheduler,
+            target_field=target_field,
+            use_request_rate_calibration=use_request_rate_calibration,
+            ttft_penalty=0,
+            tpot_penalty=0,
+            success_rate_penalty=0,
+            ttft_slo=1.0,
+            tpot_slo=0.1,
+            success_rate_slo=0.9,
+            generate_speed_target=100,
+        )
+
+        with adapter_target_field(opt):
+            request_rate_field = next(f for f in opt.target_field if f.name == "REQUESTRATE")
+            assert request_rate_field.constant == expected_rate
+            assert request_rate_field.value == expected_rate
+
+            benchmark_fields = map_param_with_value(field_to_param(opt.target_field), opt.target_field)
+            benchmark_request_rate = next(f for f in benchmark_fields if f.name == "REQUESTRATE")
+            assert benchmark_request_rate.value == expected_rate
+
+            concurrency_field = next(f for f in opt.target_field if f.name == "CONCURRENCY")
+            if use_request_rate_calibration:
+                assert concurrency_field.constant == 128
+            else:
+                assert concurrency_field.constant is None
 
 
 class TestOpFunc:
@@ -408,6 +538,52 @@ class TestOpFunc:
         opt.op_func(x)
         opt.scheduler.run_with_request_rate.assert_called_once()
         opt.scheduler.run.assert_not_called()
+
+    def test_op_func_reuses_external_simulator_without_stopping_it(self):
+        opt = self._create_optimizer(
+            manage_simulator_lifecycle=False,
+            use_request_rate_calibration=True,
+        )
+        perf = PerformanceIndex(
+            generate_speed=200,
+            time_to_first_token=0.1,
+            time_per_output_token=0.01,
+            success_rate=1.0,
+        )
+        opt.scheduler.rerun_benchmark_only.return_value = perf
+
+        opt.op_func(np.array([[50.0, 25000.0]]))
+
+        opt.scheduler.run.assert_not_called()
+        opt.scheduler.run_with_request_rate.assert_not_called()
+        opt.scheduler.rerun_benchmark_only.assert_called_once()
+        call = opt.scheduler.rerun_benchmark_only.call_args
+        assert np.array_equal(call.args[0], np.array([50.0, 25000.0]))
+        assert call.args[1] == opt.target_field
+        assert call.kwargs["decode_context"] is not None
+        assert call.kwargs["with_request_rate"] is True
+        assert call.kwargs["monitor_service"] is False
+        opt.scheduler.save_result.assert_called_once_with(
+            fitness=pytest.approx(0.8),
+            stop_service=False,
+        )
+
+    def test_duplicate_external_candidate_does_not_stop_simulator(self):
+        opt = self._create_optimizer(manage_simulator_lifecycle=False)
+        perf = PerformanceIndex(
+            generate_speed=200,
+            time_to_first_token=0.1,
+            time_per_output_token=0.01,
+            success_rate=1.0,
+        )
+        opt.scheduler.rerun_benchmark_only.return_value = perf
+        candidate = np.array([[50.0, 25000.0]])
+
+        opt.op_func(candidate.copy())
+        opt.op_func(candidate.copy())
+
+        assert opt.scheduler.rerun_benchmark_only.call_count == 1
+        assert opt.scheduler.save_result.call_args_list[-1].kwargs["stop_service"] is False
 
 
 class TestComputerFitness:
@@ -566,8 +742,20 @@ class TestRefineOptimizationCandidates:
     def _create_optimizer(self, **kwargs):
         overrides = dict(
             target_field=(
-                OptimizerConfigField(name="CONCURRENCY", min=1, max=100, dtype="int", config_position="env"),
-                OptimizerConfigField(name="REQUESTRATE", min=0.1, max=50, dtype="float", config_position="env"),
+                OptimizerConfigField(
+                    name="CONCURRENCY",
+                    min=1,
+                    max=100,
+                    dtype="int",
+                    config_position="env",
+                ),
+                OptimizerConfigField(
+                    name="REQUESTRATE",
+                    min=0.1,
+                    max=50,
+                    dtype="float",
+                    config_position="env",
+                ),
             ),
             ttft_penalty=3.0,
             tpot_penalty=3.0,
@@ -635,6 +823,23 @@ class TestRefineOptimizationCandidates:
         opt.scheduler.run.assert_called()
         opt.scheduler.disable_early_exit.assert_called_once()
 
+    def test_refine_skips_fine_tune_when_pso_top_k_is_zero(self):
+        opt = self._create_optimizer()
+        opt.scheduler.data_storage.config.pso_top_k = 0
+        opt.scheduler.run.return_value = PerformanceIndex(
+            generate_speed=4000,
+            time_to_first_token=0.2,
+            time_per_output_token=0.03,
+            success_rate=1.0,
+        )
+        best_results = pd.DataFrame([{"CONCURRENCY": 60, "REQUESTRATE": 15.0}])
+
+        fitness_list, _, _ = opt.refine_optimization_candidates(best_results)
+
+        assert len(fitness_list) == 2
+        opt.scheduler.run.assert_called_once()
+        assert opt.fine_tune.method_calls == []
+
     def test_refine_handles_runtime_exception(self):
         opt = self._create_optimizer()
         opt.scheduler.run.side_effect = Exception("service error")
@@ -645,6 +850,166 @@ class TestRefineOptimizationCandidates:
         fitness_list, params_list, res_list = opt.refine_optimization_candidates(best_results)
         # Should contain at least the default
         assert len(fitness_list) >= 1
+
+    def test_refine_reuses_external_simulator_without_stopping_it(self):
+        opt = self._create_optimizer(
+            manage_simulator_lifecycle=False,
+            max_fine_tune=0,
+        )
+        perf = PerformanceIndex(
+            generate_speed=4000,
+            time_to_first_token=0.2,
+            time_per_output_token=0.03,
+            success_rate=1.0,
+        )
+        opt.scheduler.rerun_benchmark_only.return_value = perf
+        best_results = pd.DataFrame([{"CONCURRENCY": 60, "REQUESTRATE": 15.0}])
+
+        fitness_list, _, _ = opt.refine_optimization_candidates(best_results)
+
+        assert len(fitness_list) == 2
+        opt.scheduler.run.assert_not_called()
+        opt.scheduler.rerun_benchmark_only.assert_called_once()
+        assert opt.scheduler.rerun_benchmark_only.call_args.kwargs["with_request_rate"] is False
+        assert opt.scheduler.rerun_benchmark_only.call_args.kwargs["monitor_service"] is False
+        opt.scheduler.save_result.assert_any_call(
+            fitness=pytest.approx(fitness_list[1]),
+            stop_service=False,
+        )
+        opt.scheduler.stop_target_server.assert_not_called()
+
+    def test_pd_mixed_fine_tune_runs_benchmark_only_without_restart(self):
+        from optix.optimizer.experience_fine_tunning import FineTune
+
+        opt = self._create_optimizer(max_fine_tune=1, manage_simulator_lifecycle=False)
+        opt.scheduler.data_storage.config.pso_top_k = 0
+        opt.fine_tune = FineTune(
+            ttft_penalty=1.0,
+            tpot_penalty=1.0,
+            target_field=opt.target_field,
+            ttft_slo=0.5,
+            tpot_slo=0.05,
+            fine_tune_mode="pd_mixed",
+        )
+        tuned_perf = PerformanceIndex(
+            throughput=4.5,
+            generate_speed=1200,
+            time_to_first_token=0.2,
+            time_per_output_token=0.045,
+            success_rate=1.0,
+        )
+        opt.scheduler.run_benchmark_only.return_value = tuned_perf
+        record_fitness = [opt.default_fitness]
+        record_params = [opt.default_run_param]
+        record_res = [opt.default_res]
+
+        opt._fine_tune_from_candidate(
+            opt.default_run_param,
+            opt.default_res,
+            record_fitness,
+            record_params,
+            record_res,
+        )
+
+        opt.scheduler.run.assert_not_called()
+        opt.scheduler.run_benchmark_only.assert_called_once()
+        assert opt.scheduler.run_benchmark_only.call_args.kwargs["monitor_service"] is False
+        opt.scheduler.save_result.assert_any_call(fitness=pytest.approx(record_fitness[1]), stop_service=False)
+        opt.scheduler.stop_target_server.assert_not_called()
+
+    def test_pd_disaggregation_refine_probes_qps_then_tunes_concurrency(self):
+        from optix.optimizer.experience_fine_tunning import FineTune
+
+        opt = self._create_optimizer(max_fine_tune=1)
+        opt.fine_tune = FineTune(
+            ttft_penalty=1.0,
+            tpot_penalty=0,
+            target_field=opt.target_field,
+            tpot_slo=0.05,
+            fine_tune_mode="pd_disaggregation",
+        )
+        probe_perf = PerformanceIndex(
+            throughput=12.39,
+            generate_speed=3000,
+            time_to_first_token=0.3,
+            time_per_output_token=0.04,
+            success_rate=1.0,
+        )
+        tuned_perf = PerformanceIndex(
+            throughput=12.3,
+            generate_speed=3500,
+            time_to_first_token=0.3,
+            time_per_output_token=0.06,
+            success_rate=1.0,
+        )
+        opt.scheduler.run.return_value = probe_perf
+        opt.scheduler.run_benchmark_only.return_value = tuned_perf
+        record_fitness = [opt.default_fitness]
+        record_params = [opt.default_run_param]
+        record_res = [opt.default_res]
+
+        opt._fine_tune_from_candidate(
+            opt.default_run_param,
+            opt.default_res,
+            record_fitness,
+            record_params,
+            record_res,
+        )
+
+        assert len(record_params) == 3
+        assert record_params[1][1] == 0.0
+        assert record_params[2][0] == 100.0
+        assert record_params[2][1] == 12.3
+        opt.scheduler.run.assert_called_once()
+        opt.scheduler.run_benchmark_only.assert_called_once()
+        opt.scheduler.save_result.assert_any_call(fitness=pytest.approx(record_fitness[1]), stop_service=False)
+        opt.scheduler.save_result.assert_any_call(fitness=pytest.approx(record_fitness[2]), stop_service=False)
+        opt.scheduler.stop_target_server.assert_called_once()
+
+    def test_pd_disaggregation_external_service_runs_benchmark_only(self):
+        from optix.optimizer.experience_fine_tunning import FineTune
+
+        opt = self._create_optimizer(max_fine_tune=1, manage_simulator_lifecycle=False)
+        opt.fine_tune = FineTune(
+            ttft_penalty=1.0,
+            tpot_penalty=0,
+            target_field=opt.target_field,
+            tpot_slo=0.05,
+            fine_tune_mode="pd_disaggregation",
+        )
+        probe_perf = PerformanceIndex(
+            throughput=4.59,
+            generate_speed=1175,
+            time_to_first_token=1.7,
+            time_per_output_token=0.047,
+            success_rate=1.0,
+        )
+        tuned_perf = PerformanceIndex(
+            throughput=4.32,
+            generate_speed=1107,
+            time_to_first_token=0.2,
+            time_per_output_token=0.049,
+            success_rate=1.0,
+        )
+        opt.scheduler.run_benchmark_only.side_effect = [probe_perf, tuned_perf]
+        record_fitness = [opt.default_fitness]
+        record_params = [opt.default_run_param]
+        record_res = [opt.default_res]
+
+        opt._fine_tune_from_candidate(
+            opt.default_run_param,
+            opt.default_res,
+            record_fitness,
+            record_params,
+            record_res,
+        )
+
+        opt.scheduler.run.assert_not_called()
+        assert opt.scheduler.run_benchmark_only.call_count == 2
+        for call in opt.scheduler.run_benchmark_only.call_args_list:
+            assert call.kwargs["monitor_service"] is False
+        opt.scheduler.stop_target_server.assert_not_called()
+        opt.scheduler.benchmark.stop.assert_called_once()
 
 
 class TestOptimizerMain:
@@ -689,7 +1054,10 @@ class TestOptimizerMain:
         settings.success_rate_slo = 1.0
         settings.generate_speed_target = 5000
         settings.max_fine_tune = 5
+        settings.skip_pso = False
+        settings.fine_tune_mode = "pd_mixed"
         settings.use_request_rate_calibration = False
+        settings.manage_simulator_lifecycle = True
         settings.output = MagicMock()
         settings.step_size = 0.1
         settings.slo_coefficient = 1.2
@@ -724,11 +1092,21 @@ class TestOptimizerMain:
             stack.enter_context(patch("optix.optimizer.scheduler.Scheduler"))
             stack.enter_context(patch("optix.optimizer.store.DataStorage"))
             mock_fine_tune = stack.enter_context(patch("optix.optimizer.experience_fine_tunning.FineTune"))
-            stack.enter_context(patch("optix.optimizer.register.shutil.which", return_value="/usr/bin/ais_bench"))
+            stack.enter_context(
+                patch(
+                    "optix.optimizer.register.shutil.which",
+                    return_value="/usr/bin/ais_bench",
+                )
+            )
             stack.enter_context(patch("optix.deploy_env.os.path.isfile", return_value=True))
             stack.enter_context(patch("optix.deploy_env.shutil.which", return_value="/usr/bin/ais_bench"))
             stack.enter_context(patch.dict("optix.optimizer.register.simulates", {"mindie": _create_simulator}))
-            stack.enter_context(patch.dict("optix.optimizer.register.benchmarks", {"ais_bench": _create_benchmark}))
+            stack.enter_context(
+                patch.dict(
+                    "optix.optimizer.register.benchmarks",
+                    {"ais_bench": _create_benchmark},
+                )
+            )
             stack.enter_context(patch.object(sys, "argv", ["optix", "-e", "mindie", "-b", "ais_bench"]))
 
             optix_main()
@@ -746,9 +1124,15 @@ class TestOptimizerMain:
             assert pso_kwargs["success_rate_slo"] == 1.0
             assert pso_kwargs["generate_speed_target"] == 5000
             assert pso_kwargs["max_fine_tune"] == 5
+            assert pso_kwargs["skip_pso"] is False
             assert pso_kwargs["use_request_rate_calibration"] is False
+            assert pso_kwargs["manage_simulator_lifecycle"] is True
             assert pso_kwargs["load_breakpoint"] is False
             assert pso_kwargs["fine_tune"] is mock_fine_tune.return_value
+            assert pso_kwargs["pso_init_kwargs"] == {"ftol": 1e-3, "ftol_iter": 5}
+            mock_fine_tune.assert_called_once()
+            _, fine_tune_kwargs = mock_fine_tune.call_args
+            assert fine_tune_kwargs["fine_tune_mode"] == "pd_mixed"
             assert pso_kwargs["pso_init_kwargs"] == {"ftol": 1e-3, "ftol_iter": 5}
 
             assert simulator_kwargs["runtime_ctx"] is benchmark_kwargs["runtime_ctx"]
@@ -807,7 +1191,11 @@ class TestOptimizerMain:
         opt.scheduler.data_storage.get_best_result.return_value = pd.DataFrame()
         opt.refine_optimization_candidates = MagicMock(return_value=([], [], []))
         opt.best_params = MagicMock(
-            return_value=(0.5, np.array([50.0, 25000.0]), PerformanceIndex(generate_speed=100.0)),
+            return_value=(
+                0.5,
+                np.array([50.0, 25000.0]),
+                PerformanceIndex(generate_speed=100.0),
+            ),
         )
 
         # -- exercise ---------------------------------------------------
@@ -817,6 +1205,53 @@ class TestOptimizerMain:
         opt.prepare_plugin.assert_called_once()
         _mock_pso_cls.assert_called_once()
         _mock_optimizer.optimize.assert_called_once_with(opt.op_func, iters=opt.iters)
+
+    @patch("optix.optimizer.global_best_custom.CustomGlobalBestPSO")
+    def test_run_plugin_retries_value_error_when_global_best_is_missing(self, _mock_pso_cls):
+        opt = _make_pso_optimizer(load_breakpoint=False, fine_tune=False, max_fine_tune=0)
+        opt.prepare_plugin = MagicMock()
+
+        _mock_optimizer = MagicMock()
+        _mock_optimizer._is_global_best_missing.return_value = True
+        _mock_optimizer.optimize.side_effect = [
+            ValueError("numpy wording changed"),
+            (0.5, np.array([50.0, 25000.0])),
+        ]
+        _mock_pso_cls.return_value = _mock_optimizer
+
+        opt.scheduler.data_storage.get_best_result.return_value = pd.DataFrame()
+        opt.refine_optimization_candidates = MagicMock(return_value=([], [], []))
+        opt.best_params = MagicMock(
+            return_value=(
+                0.5,
+                np.array([50.0, 25000.0]),
+                PerformanceIndex(generate_speed=100.0),
+            ),
+        )
+
+        opt.run_plugin()
+
+        assert _mock_optimizer.optimize.call_count == 2
+        _mock_optimizer._is_global_best_missing.assert_called_once()
+
+    @patch("optix.optimizer.global_best_custom.CustomGlobalBestPSO")
+    def test_run_plugin_catches_retry_failure_and_reraises(self, _mock_pso_cls):
+        opt = _make_pso_optimizer(load_breakpoint=False, fine_tune=False, max_fine_tune=0)
+        opt.prepare_plugin = MagicMock()
+
+        _mock_optimizer = MagicMock()
+        _mock_optimizer._is_global_best_missing.return_value = True
+        _mock_optimizer.optimize.side_effect = [
+            ValueError("first failure"),
+            ValueError("retry failure"),
+        ]
+        _mock_pso_cls.return_value = _mock_optimizer
+
+        with pytest.raises(ValueError, match="retry failure"):
+            opt.run_plugin()
+
+        assert _mock_optimizer.optimize.call_count == 2
+        opt.scheduler.data_storage.get_best_result.assert_not_called()
 
     @patch("optix.optimizer.global_best_custom.CustomGlobalBestPSO")
     def test_load_breakpoint_filter_field_in_run_plugin(self, _mock_pso_cls):
@@ -833,7 +1268,11 @@ class TestOptimizerMain:
         opt.scheduler.data_storage.get_best_result.return_value = pd.DataFrame()
         opt.refine_optimization_candidates = MagicMock(return_value=([], [], []))
         opt.best_params = MagicMock(
-            return_value=(0.5, np.array([50.0, 25000.0]), PerformanceIndex(generate_speed=100.0)),
+            return_value=(
+                0.5,
+                np.array([50.0, 25000.0]),
+                PerformanceIndex(generate_speed=100.0),
+            ),
         )
 
         opt.run_plugin()

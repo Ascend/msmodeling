@@ -234,21 +234,22 @@ class TestDataStorage(unittest.TestCase):
     def test_save_logs_csv_path_for_every_case(self, mock_logger):
         import tempfile
 
-        tmp_dir = Path(tempfile.mkdtemp())
-        config = MagicMock()
-        config.store_dir = tmp_dir
-        storage = DataStorage(config)
-        performance_index = PerformanceIndex()
-        params = (OptimizerConfigField(name="p1", value=1),)
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as tmp_dir:
+            config = MagicMock()
+            config.store_dir = Path(tmp_dir).resolve().relative_to(Path.cwd().resolve())
+            storage = DataStorage(config)
+            performance_index = PerformanceIndex()
+            params = (OptimizerConfigField(name="p1", value=1),)
 
-        storage.save(performance_index, params)
-        storage.save(performance_index, params)
+            storage.save(performance_index, params)
+            storage.save(performance_index, params)
 
-        assert mock_logger.info.call_count == 2
-        mock_logger.info.assert_called_with(
-            "Save result with DataStorage. File path: {!r}",
-            storage.save_file,
-        )
+            assert mock_logger.info.call_count == 2
+            mock_logger.info.assert_called_with(
+                "Save result with DataStorage. File path: {!r}",
+                storage.save_file.resolve(),
+            )
+            assert not storage.save_file.is_absolute()
 
     def test_filter_data_with_bool_values(self):
         data_rows = [
@@ -300,6 +301,68 @@ class TestDataStorage(unittest.TestCase):
             mock_settings.return_value.slo_coefficient = 0.1
             result = storage.get_best_result()
         assert len(result) > 0
+
+    def test_get_best_result_skips_num_prompts_filter_when_csv_column_is_missing(self):
+        """A fixed benchmark num_prompts must not require it to be a search-result column."""
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock(store_dir=tmp_dir, pso_top_k=1)
+        benchmark = MagicMock()
+        benchmark.config.command.num_prompts = "64"
+        storage = DataStorage(config, benchmark=benchmark)
+        storage.save_file = tmp_dir / "data.csv"
+        with open(storage.save_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "fitness",
+                    "generate_speed",
+                    "time_to_first_token",
+                    "time_per_output_token",
+                ]
+            )
+            writer.writerow([0.5, 2000, 0.3, 0.04])
+
+        with patch("optix.optimizer.store.get_settings") as mock_settings:
+            mock_settings.return_value.ttft_penalty = 0
+            mock_settings.return_value.tpot_penalty = 0
+            result = storage.get_best_result()
+
+        self.assertEqual(len(result), 1)
+
+    def test_get_best_result_filters_num_prompts_across_string_and_numeric_types(self):
+        """TOML string values must match numeric num_prompts values loaded from CSV."""
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock(store_dir=tmp_dir, pso_top_k=1)
+        benchmark = MagicMock()
+        benchmark.config.command.num_prompts = "64"
+        storage = DataStorage(config, benchmark=benchmark)
+        storage.save_file = tmp_dir / "data.csv"
+        with open(storage.save_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "fitness",
+                    "generate_speed",
+                    "time_to_first_token",
+                    "time_per_output_token",
+                    "num_prompts",
+                ]
+            )
+            writer.writerow([0.5, 2000, 0.3, 0.04, 64])
+            writer.writerow([0.1, 3000, 0.2, 0.03, 128])
+
+        with patch("optix.optimizer.store.get_settings") as mock_settings:
+            mock_settings.return_value.ttft_penalty = 0
+            mock_settings.return_value.tpot_penalty = 0
+            result = storage.get_best_result()
+
+        self.assertEqual(result["num_prompts"].tolist(), [64])
 
     def test_get_best_result_tpot_only(self):
         """Test get_best_result filters by tpot penalty only"""
@@ -370,6 +433,105 @@ class TestDataStorage(unittest.TestCase):
             mock_settings.return_value.tpot_penalty = 0
             result = storage.get_best_result()
         assert len(result) > 0
+
+    def test_get_best_result_keeps_best_candidate_when_pso_top_k_is_zero(self):
+        """Disabling FineTune must not discard the best PSO result."""
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock(store_dir=tmp_dir, pso_top_k=0)
+        storage = DataStorage(config, benchmark=None)
+        storage.save_file = tmp_dir / "data.csv"
+        with open(storage.save_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "fitness",
+                    "generate_speed",
+                    "time_to_first_token",
+                    "time_per_output_token",
+                    "success_rate",
+                    "throughput",
+                    "candidate_id",
+                ]
+            )
+            writer.writerow([0.5, 2000, 0.3, 0.04, 1.0, 4.0, "other"])
+            writer.writerow([0.3, 2500, 0.2, 0.02, 1.0, 5.0, "best"])
+
+        with patch("optix.optimizer.store.get_settings") as mock_settings:
+            mock_settings.return_value.ttft_penalty = 0
+            mock_settings.return_value.tpot_penalty = 0
+            result = storage.get_best_result()
+
+        assert result["candidate_id"].tolist() == ["best"]
+
+    def test_get_best_result_prefill_keeps_zero_tpot(self):
+        """Prefill does not require TPOT when the TPOT penalty is disabled."""
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock(store_dir=tmp_dir, pso_top_k=3)
+        storage = DataStorage(config, benchmark=None)
+        storage.save_file = tmp_dir / "data.csv"
+        with open(storage.save_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "fitness",
+                    "generate_speed",
+                    "time_to_first_token",
+                    "time_per_output_token",
+                    "success_rate",
+                    "throughput",
+                    "candidate_id",
+                ]
+            )
+            writer.writerow([0.3, 2500, 0.2, 0, 1.0, 5.0, "prefill"])
+
+        with patch("optix.optimizer.store.get_settings") as mock_settings:
+            mock_settings.return_value.ttft_penalty = 1.0
+            mock_settings.return_value.tpot_penalty = 0
+            mock_settings.return_value.ttft_slo = 0.5
+            mock_settings.return_value.slo_coefficient = 0.1
+            result = storage.get_best_result()
+
+        assert result["candidate_id"].tolist() == ["prefill"]
+
+    def test_get_best_result_decode_rejects_zero_tpot(self):
+        """Decode still requires a positive TPOT when the TPOT penalty is enabled."""
+        import csv
+        import tempfile
+
+        tmp_dir = Path(tempfile.mkdtemp())
+        config = MagicMock(store_dir=tmp_dir, pso_top_k=3)
+        storage = DataStorage(config, benchmark=None)
+        storage.save_file = tmp_dir / "data.csv"
+        with open(storage.save_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "fitness",
+                    "generate_speed",
+                    "time_to_first_token",
+                    "time_per_output_token",
+                    "success_rate",
+                    "throughput",
+                    "candidate_id",
+                ]
+            )
+            writer.writerow([0.1, 3000, 0, 0, 1.0, 6.0, "invalid_decode"])
+            writer.writerow([0.3, 2500, 0, 0.02, 1.0, 5.0, "decode"])
+
+        with patch("optix.optimizer.store.get_settings") as mock_settings:
+            mock_settings.return_value.ttft_penalty = 0
+            mock_settings.return_value.tpot_penalty = 1.0
+            mock_settings.return_value.tpot_slo = 0.05
+            mock_settings.return_value.slo_coefficient = 0.1
+            result = storage.get_best_result()
+
+        assert result["candidate_id"].tolist() == ["decode"]
 
     def test_get_best_result_excludes_early_exit_and_unusable_rows(self):
         import csv
