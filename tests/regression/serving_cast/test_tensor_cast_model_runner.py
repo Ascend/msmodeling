@@ -250,6 +250,35 @@ class TestInterpolationBatchGeneration(unittest.TestCase):
         self.assertTrue(all(request.query_len > 0 and request.seq_len > 0 for batch in batches for request in batch))
         self.assertEqual(batches[-1][0].query_len, 100)
 
+    def test_generate_random_batches_covers_near_cap_mixed_batches(self):
+        """Decode concurrency cap must shrink with the current prefill count.
+
+        Regression for the max_nums_prefill_req typo: with
+        upper_batch_size=100 and max_nums_prefill_req=3, the (1 prefill,
+        99 decode) near-cap mixed batch was never sampled.
+        """
+        runner = ModelRunner.__new__(ModelRunner)
+        common_config = SimpleNamespace(
+            serving_config=SimpleNamespace(max_concurrency=100, block_size=128, max_tokens_budget=8192),
+            load_gen=SimpleNamespace(num_input_tokens=3500, num_output_tokens=50),
+        )
+
+        with (
+            patch(
+                "serving_cast.model_runner.Config.get_instance",
+                return_value=SimpleNamespace(common_config=common_config),
+            ),
+            patch.object(runner, "warmup", return_value=(2800, 128)),
+        ):
+            batches = runner.generate_random_batches()
+
+        # upper_batch_size = min(2800 // 28, 100) = 100; max_nums_prefill_req =
+        # min(100, ceil(8192/3500)) = 3.
+        counts = {(sum(not r.is_decode for r in batch), sum(r.is_decode for r in batch)) for batch in batches}
+        self.assertIn((1, 99), counts)
+        # every sampled mixed batch must respect the batch capacity limit
+        self.assertTrue(all(p + d <= 100 for p, d in counts))
+
 
 class TestAsyncTask(unittest.TestCase):
     """Tests for AsyncTask class."""

@@ -276,7 +276,10 @@ class ModelRunner:
                 RequestInfo(query_len=max_query_len, seq_len=max_query_len, is_decode=False)
                 for _ in range(num_prefill_req)
             ]
-            max_num_decode_req = upper_batch_size - max_nums_prefill_req
+            # decode capacity shrinks as the current prefill count grows; using
+            # the constant max_nums_prefill_req here under-sampled near-cap
+            # mixed batches for smaller prefill counts.
+            max_num_decode_req = upper_batch_size - num_prefill_req
             for num_decode_req in range(1, max_num_decode_req + 1, 2):
                 decode_reqs = [
                     RequestInfo(query_len=1, seq_len=max_seq_len, is_decode=True) for _ in range(num_decode_req)

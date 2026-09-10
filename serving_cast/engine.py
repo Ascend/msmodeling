@@ -60,9 +60,15 @@ class BatchScheduler(stime.Task):
         self._scheduling_loop()
 
     def get_work_load(self):
+        # RECOMPUTATION requests are preempted ones awaiting full prefill-like
+        # recomputation; they still occupy engine compute/KV, so count them with
+        # the same token-weighted metric as PREFILLING (issue: engines holding
+        # preempted requests were reported as idle and kept receiving new ones).
         res = 0
         for request in self.requests.values():
             if request.state == RequestState.PREFILLING:
+                res += request.num_input_tokens
+            elif request.state == RequestState.RECOMPUTATION:
                 res += request.num_input_tokens
             elif request.state == RequestState.DECODING:
                 res += 1
