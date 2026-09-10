@@ -7,6 +7,7 @@ import torch.fx as fx
 
 from ... import ops  # noqa: F401
 from ..pass_base import TensorCastGraphModulePass
+from ..topo_sort import stable_topo_sort
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,11 @@ class LiftCombineQuantPass(TensorCastGraphModulePass):
                 else:
                     original_quant_node.replace_all_uses_with(final_node)
 
-        # Turn on DCE before recompile.
-        graph.eliminate_dead_code()
+        # Rebuilt views can consume symbolic shape nodes that appeared later
+        # in the original graph. Restore topological order before DCE, whose
+        # lint step rejects such graphs.
+        stable_topo_sort(gm)
+        gm.graph.lint()
+        gm.graph.eliminate_dead_code()
         gm.recompile()
         return gm

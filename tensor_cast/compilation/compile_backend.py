@@ -24,6 +24,7 @@ from .passes.multistream_pass import MultiStreamSchedulePass
 from .passes.peep_hole_pass import PeepHolePass
 from .passes.redundant_node_elimination_pass import ReduandantNodeEliminationPass
 from .passes.sequence_parallel_pass import SequenceParallelPass
+from .topo_sort import stable_topo_sort
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,11 @@ class CompilerBackend:
             logger.debug("Graph before compiling:")
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(fx_graph.print_readable(print_output=False))
+            # AOT Autograd may place symbolic shape expressions after the
+            # view/reshape nodes that consume them. Normalize once before any
+            # pass starts rewriting the graph.
+            stable_topo_sort(fx_graph)
+            fx_graph.graph.lint()
             self.apply_peep_hole_pass(fx_graph, inputs)
             self.apply_redundant_node_elimination_pass(fx_graph, inputs)
             self.apply_quantization_passes(fx_graph, inputs)
