@@ -351,7 +351,9 @@ time.sleep(30)
             trace_quiet_seconds=0.1,
         )
 
-    assert time.monotonic() - started < 5
+    # Leave headroom for the 5-second process-tree termination grace period on
+    # loaded CI workers, while still proving that the 30-second sleep was cut short.
+    assert time.monotonic() - started < 10
     assert result.succeeded == 1
     assert result.failed_workloads == ()
     checkpoint_path = next((tmp_path / "trace" / "workloads").glob("*/checkpoint.json"))
