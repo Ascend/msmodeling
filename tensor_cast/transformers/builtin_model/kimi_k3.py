@@ -3909,7 +3909,7 @@ def _patch_model_for_kimi_k3(model) -> None:
 
     if _singleton_stats:
         logger.info(
-            "Restored %d singleton layer(s) from RegionMarkerWrapper ",
+            "Restored %d singleton layer(s) from RegionMarkerWrapper: %s",
             _total_unwrapped,
             ", ".join(f"{k}={v}" for k, v in _singleton_stats.items()),
         )
