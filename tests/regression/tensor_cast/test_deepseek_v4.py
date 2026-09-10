@@ -17,8 +17,10 @@ from tensor_cast.transformers.builtin_model.deepseek_v4 import (
     DeepseekV4Indexer,
     DeepseekV4MLP,
     DeepseekV4Model,
+    DeepseekV4RotaryEmbedding,
     DeepseekV4SparseAttention as BuiltinDeepseekV4SparseAttention,
 )
+from tensor_cast.layers.rotary_embedding import CachingRotaryEmb
 from tensor_cast.layers.deepseek_v4 import (
     DeepseekV4SparseAttention,
     DeepseekV4SparseAttentionIndexer,
@@ -181,6 +183,51 @@ class TestDeepseekV4Config(unittest.TestCase):
             index_topk=32,
         )
         assert config.topk_limit == 32
+
+
+class TestDeepseekV4RotaryEmbedding(unittest.TestCase):
+    def test_cache_uses_only_rope_dimensions(self):
+        max_position_embeddings = 1_048_576
+        config = _tiny_v4_config(
+            head_dim=512,
+            qk_rope_head_dim=64,
+            max_position_embeddings=max_position_embeddings,
+            rope_scaling={
+                "type": "yarn",
+                "factor": 16,
+                "original_max_position_embeddings": 65_536,
+                "beta_fast": 32,
+                "beta_slow": 1,
+            },
+        )
+
+        rotary = DeepseekV4RotaryEmbedding(config)
+        cached = CachingRotaryEmb(rotary, torch.bfloat16, max_position_embeddings)
+
+        assert config.head_dim == 512
+        assert rotary.inv_freq.shape == (32,)
+        assert cached.cos_cache.shape == (max_position_embeddings, 64)
+        assert cached.sin_cache.shape == (max_position_embeddings, 64)
+        cache_bytes = sum(buffer.numel() * buffer.element_size() for buffer in (cached.cos_cache, cached.sin_cache))
+        assert cache_bytes == 256 * 1024**2
+        full_head_cache_bytes = 2 * max_position_embeddings * config.head_dim * torch.bfloat16.itemsize
+        assert full_head_cache_bytes - cache_bytes == 1_792 * 1024**2
+
+    def test_rope_cache_lookup_reads_only_selected_rows(self):
+        cache = torch.empty(1_048_576, 64, dtype=torch.bfloat16, device="meta")
+        indices = torch.empty(65_536, dtype=torch.long, device="meta")
+        output = torch.empty(65_536, 64, dtype=torch.bfloat16, device="meta")
+
+        properties = OpInvokeInfo(
+            torch.ops.aten.index_select.default,
+            (cache, 0, indices),
+            {},
+            output,
+        ).get_perf_properties()
+
+        expected_selected_bytes = 65_536 * 64 * torch.bfloat16.itemsize
+        assert properties.memory_read_bytes == expected_selected_bytes + indices.numel() * indices.element_size()
+        assert properties.memory_write_bytes == expected_selected_bytes
 
 
 class TestDeepseekV4HCOperators(unittest.TestCase):

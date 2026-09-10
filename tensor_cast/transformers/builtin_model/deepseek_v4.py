@@ -1,4 +1,5 @@
 # Copyright (C) 2025 HuggingFace Inc. team.
+# Copyright (c) 2025 sgl-project
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as published by
@@ -11,6 +12,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import copy
 import logging
 import math
 from pathlib import Path
@@ -372,7 +374,13 @@ class DeepseekV4RMSNorm(DeepseekV3RMSNorm):
 
 
 class DeepseekV4RotaryEmbedding(DeepseekV3RotaryEmbedding):
-    pass
+    def __init__(self, config: DeepseekV4Config, device=None):
+        # V4's full attention head is 512-wide, but only the trailing
+        # qk_rope_head_dim dimensions participate in RoPE.  Keep that override
+        # local to the rotary module so attention projections retain head_dim.
+        rotary_config = copy.copy(config)
+        rotary_config.head_dim = config.qk_rope_head_dim
+        super().__init__(config=rotary_config, device=device)
 
 
 class DeepseekV4MoE(DeepseekV3MoE):
