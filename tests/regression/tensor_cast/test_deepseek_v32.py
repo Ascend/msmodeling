@@ -78,10 +78,19 @@ class TestDeepseekV32ModelNightly(unittest.TestCase):
             with Runtime(perf_model, machine_config) as runtime, torch.no_grad():
                 model.forward(**inputs)
 
+            # Decode MLA is split: projections + attention core (+ DSA indexer on V3.2).
+            # Compare the family, not the fused-core name that no longer holds all work.
+            mla_family_markers = (
+                "multihead_latent_attention",
+                "mla_sparse_attention",
+                "mla_q_absorb_projection",
+                "mla_v_up_projection",
+                "dsa_indexer",
+            )
             total_time = 0.0
             for event in runtime.event_list:
                 func_name = str(event.op_invoke_info.func)
-                if "multihead_latent_attention_quant" in func_name or "mla_sparse_attention_quant" in func_name:
+                if any(marker in func_name for marker in mla_family_markers):
                     total_time += event.perf_results.get("analytic").execution_time_s
             return total_time
 
