@@ -1,5 +1,5 @@
-# op_mapping.yaml — operator mapping table (CANN 8.5 + vLLM-ascend 0.18.0 + PyTorch 2.9.0)
-# Path: tensor_cast/performance_model/perf_database/data/{device}/vllm_ascend/{version}/op_mapping.yaml
+# op_mapping.yaml — operator mapping table (CANN 9.0.1 + vLLM-ascend 0.23.0rc1 + PyTorch 2.10.0)
+# Path: tensor_cast/performance_model/profiling_database/data/{device}/vllm_ascend/{stack}/op_mapping.yaml
 #
 # Mapping methodology (follow tutorial/OP_PLUGIN_MAPPING_TUTORIAL.md):
 # Each mapping follows a complete evidence chain, and the evidence is written into the notes field:
@@ -9,38 +9,10 @@
 #
 # Data source:
 # - TensorCast registration operator: register_tensor_cast_op (56 ops, tensor_cast/ops/*.py)
-#   - pytorch-npu (op-plugin): /Users/horacehxw/Projects/pytorch-npu/ (v7.3.0-pytorch2.9.0)
-#   - vLLM-ascend: /Users/horacehxw/Projects/vllm-ascend/ (main (v0.18.0 compatible))
-#   - CANN repos: ops-nn, ops-transformer, ops-math (v8.5.0)
-#   - Qwen3-32B 0325 Profiling (CANN 8.5, vllm 0.18.0)
-#   - DeepSeek-V3 0325 Profiling (CANN 8.5, vllm 0.18.0)
-#
-#CANN 8.5 vs 8.3 Key changes:
-# - AddRmsNorm → AddRmsNormBias (vllm-ascend v0.15.0 custom op, csrc/add_rms_norm_bias/)
-# - ApplyRotaryPosEmb → _triton_rope + split_qkv_rmsnorm_rope_kernel (Triton fusion)
-# - ApplyTopKTopPWithSorted → ApplyTopKTopPCustom (vllm-ascend custom sampling op)
-# - Added MatMulV3 (Big M Prefill GEMM, CANN 8.5 new kernel; Decode still uses MatMulV2)
-# - Added LinearIndex (ScatterElementsV2 internal sub-kernel)
-# - DispatchFFNCombine: vllm-ascend v0.15.0 super fusion MoE op (csrc/dispatch_ffn_combine/)
-#
-# vLLM 0.18.0 vs 0.15.0 Key changes:
-# - DSv3 Prefill: RINGMLAPrefillBF16Kernel disappeared and unified to FusedInferAttentionScore
-# - Qwen3 PF: MatMulV3 still (512x, large M Prefill FFN); DC MatMulV2 only
-# - Added muls_add_kernel: Triton fusion (MulsAddFusionPass, x*scale+y, MoE routing)
-# - AICPU control kernel: allgatherAicpuKernel, reduce_scatterAicpuKernel still in PF (Qwen3 PF 516x each), DC not present
-#   - Qwen3 DC: ReshapeAndCacheNdKernel → reshape_and_cache_200000000
-# - DSv3: PagedCacheLoadNdKernel disappears, Muls → muls_add_kernel
-#
-# DSv3 0319 New kernel (vs 0316):
-# - Communication mode change: hcom_reduceScatter_ → hcom_allReduce_ (reduceScatter disappears in new data)
-# - Added PadV3 / PadV3AiCore (decode padding, 35K+ calls)
-# - Added MemSet (memory initialization, 35K+ times)
-# - Added allreduceAicpuKernel (AICPU allReduce variant, 6.6K times)
-# - Added BatchMatMulNd (BMM variant, 282 times)
-# - A large number of AiCore acceleration variants: SliceAiCore, AddAiCore, AscendQuantV2Aicore, TransposeAiCore, etc.
-# - TransData disappears
-# Replacement MoeDistributeDispatchV2 + GroupedMatmul(×2) + SwiGlu + MoeDistributeCombineV2 + Unpermute
-# In DSv3 profiling, routing expert FFN is all executed by DispatchFFNCombine, and GroupedMatmul no longer appears
+#   - pytorch-npu (op-plugin): v7.4.0-pytorch2.10.0 (gitee.com/ascend/pytorch)
+#   - vLLM-ascend: v0.23.0rc1 (gitee.com/ascend/vllm-ascend)
+#   - CANN repos: ops-nn, ops-transformer, ops-math (v9.0.1)
+#   - GLM-5.2 Profiling (CANN 9.0.1, vLLM-ascend 0.23.0rc1, collected 2026-08-16)
 #
 # ============================================================================
 #Field Reference (Field Reference)
