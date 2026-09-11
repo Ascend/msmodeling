@@ -4,6 +4,7 @@
 
 - msModeling is a development, simulation, and performance evaluation tool, and must not be used as an online production service.
 - To ensure security, you are advised to use the msModeling tool as a complete package. If you need to perform secondary development, you are responsible for monitoring and handling any security risks that may be introduced.
+- This repository provides VS Code and devcontainer configurations for development and debugging. Use them only to develop and debug this repository in a secure debugging environment. Review the configuration security and adjust it to your actual requirements.
 - msModeling runs from the CLI or the local Web UI by default. The Web UI binds to `127.0.0.1` by default. You are advised to start and use it locally instead of exposing it to the public network or untrusted networks.
 - If you need to open an access entry through `0.0.0.0`, a remote address, Gradio share, or a reverse proxy, note the security risks introduced by remote communication, and configure access control, authentication, network isolation, and transport encryption yourself.
 - This tool is a development-stage tool. It does not restrict the owner and permissions of the installation or of the file objects it processes. You need to assign appropriate owners and permissions based on the usage scenario and ensure that the file content processed by the tool is secure and trustworthy.
