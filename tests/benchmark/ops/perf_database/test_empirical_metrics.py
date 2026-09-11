@@ -2,8 +2,11 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 import torch
-from tensor_cast.performance_model.base import PerformanceModel
+from tensor_cast.device import TEST_DEVICE
+from tensor_cast.performance_model.base import CachingPerformanceModel, PerformanceModel
+from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo
 from tensor_cast.performance_model.empirical import (
     EmpiricalOpRecord,
     EmpiricalPerformanceModel,
@@ -20,6 +23,38 @@ from tensor_cast.performance_model.profiling_database.data_source import (
 )
 
 # --- MetricsCollector Unit Tests ---
+
+
+def test_cached_invocations_preserve_hit_counts_and_latency_weights():
+    """Caching repeated layers must not change the workload's M1/M5."""
+    data_source = MagicMock(spec=DataSourcePerformanceModel)
+    data_source.lookup.side_effect = lambda op: (
+        QueryResult(20.0, 1.0, QuerySource.MEASURED, details={"kernel_type": "Add"})
+        if op.func == torch.ops.aten.add.Tensor
+        else None
+    )
+    fallback = MagicMock(spec=PerformanceModel)
+    fallback.process_op.side_effect = lambda op: PerformanceModel.Result(
+        10e-6 if op.func == torch.ops.aten.add.Tensor else 100e-6
+    )
+    empirical = EmpiricalPerformanceModel(TEST_DEVICE, data_source, fallback)
+    cached = CachingPerformanceModel(empirical)
+    x = torch.empty(8, device="meta")
+    hit = OpInvokeInfo(torch.ops.aten.add.Tensor, (x, x), {}, x)
+    miss = OpInvokeInfo(torch.ops.aten.mul.Tensor, (x, x), {}, x)
+    durations = [cached.process_op(hit).execution_time_s for _ in range(10)]
+    durations.append(cached.process_op(miss).execution_time_s)
+    collector = MetricsCollector()
+    collector.collect_from_records(empirical.op_records)
+
+    assert sum(durations) == pytest.approx(300e-6)
+    assert data_source.lookup.call_count == 2
+    assert fallback.process_op.call_count == 2
+    assert len(empirical.op_records) == 2
+    assert collector.get_stats()["hit"] == 10
+    assert collector.get_stats()["miss"] == 1
+    assert collector._hit_latency_sum == pytest.approx(100e-6)
+    assert collector._total_latency_sum == pytest.approx(200e-6)
 
 
 class TestMetricsCollector:

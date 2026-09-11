@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 DEFAULT_SOURCE_FILTER = {"MEASURED", "INTERPOLATED"}
@@ -32,7 +33,7 @@ def _sum_kernels_with_dedup(events: list) -> tuple:
     hcom_seen: dict[tuple, float] = {}
 
     for start, end, ktype, _ in events:
-        dur = end - start
+        dur = float(end - start)
         if ktype.endswith("AicpuKernel"):
             kernel_count += 1
             aicpu_us += dur
@@ -95,14 +96,25 @@ def _load_prof_trace(prof_trace_path: Path) -> tuple[float, float, float]:
     """
     events = []
     with prof_trace_path.open(encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        required_columns = {"Type", "Start Time(us)", "Duration(us)"}
+        if not required_columns.issubset(reader.fieldnames or []):
+            raise ValueError(
+                f"Invalid profiling trace {prof_trace_path}: expected {sorted(required_columns)}. "
+                "For Git LFS files, fetch and checkout the CSV contents first."
+            )
+        for row in reader:
             ktype = (row.get("Type") or "").strip()
             if not ktype:
                 continue
             try:
-                start = float((row.get("Start Time(us)") or "0").strip())
-                dur = float((row.get("Duration(us)") or "0").strip())
-            except ValueError:
+                # Epoch timestamps are around 1e15 us. Binary floats lose
+                # submicrosecond durations when adding then subtracting start.
+                start = Decimal((row.get("Start Time(us)") or "0").strip())
+                dur = Decimal((row.get("Duration(us)") or "0").strip())
+            except InvalidOperation:
+                continue
+            if not start.is_finite() or not dur.is_finite() or dur < 0:
                 continue
             events.append((start, start + dur, ktype, ""))
 
@@ -165,10 +177,8 @@ def _format_report(result: dict) -> str:
         f"Prof trace:      {result['prof_trace']}",
         f"Source filter:   {result['source_filter']}",
         "",
-        f"Empirical HIT total: {result['empirical_hit_us']:>12,.1f} us "
-        f"({result['empirical_hit_us'] / 1e3:,.1f} ms)",
-        f"Real per-fwd:        {result['real_per_fwd_us']:>12,.1f} us "
-        f"({result['real_per_fwd_us'] / 1e3:,.1f} ms)",
+        f"Empirical HIT total: {result['empirical_hit_us']:>12,.1f} us ({result['empirical_hit_us'] / 1e3:,.1f} ms)",
+        f"Real per-fwd:        {result['real_per_fwd_us']:>12,.1f} us ({result['real_per_fwd_us'] / 1e3:,.1f} ms)",
         f"  Compute:           {result['selected_fwd_compute_us']:>12,.1f} us",
         f"  hcom:              {result['selected_fwd_hcom_us']:>12,.1f} us",
         "",
@@ -179,9 +189,7 @@ def _format_report(result: dict) -> str:
 
 
 def build_argparser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Compute M6: compare TC chrome trace vs profiling forward pass."
-    )
+    parser = argparse.ArgumentParser(description="Compute M6: compare TC chrome trace vs profiling forward pass.")
     parser.add_argument(
         "--tc-trace",
         required=True,

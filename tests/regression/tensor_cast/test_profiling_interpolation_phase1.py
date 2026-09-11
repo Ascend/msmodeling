@@ -3186,6 +3186,26 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
         assert ds.last_miss_details["target_axes"]["seq"] == pytest.approx(1500.0)
 
 
+def test_attention_index_preserves_fractional_average_sequence_length(tmp_path):
+    data_dir = tmp_path / "fractional_attention_sequence"
+    data_dir.mkdir()
+    _write_text(data_dir / "op_mapping.yaml", 'version: "test"')
+    _write_text(
+        data_dir / "FusedInferAttentionScore.csv",
+        """
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us),Runtime avg_seq_len
+"16,4,128","DT_BF16","ND","16,4,128","DT_BF16","ND",52.6,4106.8125
+""",
+    )
+    ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+
+    index = ds._get_attention_index("FusedInferAttentionScore")
+
+    assert index is not None
+    assert len(index.points) == 1
+    assert index.points[0].axes["seq"] == pytest.approx(4106.8125)
+
+
 def test_elementwise_candidate_shortage_records_miss(tmp_path):
     data_dir = tmp_path / "elementwise_shortage"
     data_dir.mkdir()

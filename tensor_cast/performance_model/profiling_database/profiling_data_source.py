@@ -3259,7 +3259,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
     ) -> Optional[Tuple[float, str]]:
         """Shared attention query core: iterate kernel_types, match FIA params.
 
-        params must contain: q_shape_3d (tuple), avg_seq_len (int).
+        params must contain: q_shape_3d (tuple), avg_seq_len (float).
         Optional: sparse_mode (int), num_kv_heads (int).
 
         Returns (latency_us, matched_kernel_type) or None.
@@ -3418,8 +3418,11 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
             if pd.isna(row[col_info.avg_seq_col]):
                 return None
-            csv_avg_seq = int(row[col_info.avg_seq_col])
-            if csv_avg_seq < 0:
+            try:
+                csv_avg_seq = float(row[col_info.avg_seq_col])
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if not math.isfinite(csv_avg_seq) or csv_avg_seq < 0:
                 return None
 
             shapes_str = str(row.get("Input Shapes", "")).strip('"')
@@ -3936,8 +3939,11 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         # Compute avg_seq_len from seq_lens
         if seq_lens is not None and isinstance(seq_lens, torch.Tensor):
             try:
-                tc_avg_seq_len = int(seq_lens.float().mean().item())
+                tc_avg_seq_len = float(seq_lens.float().mean().item())
             except Exception:
+                self.last_miss_reason = "invalid_seq_lens"
+                return None
+            if not math.isfinite(tc_avg_seq_len) or tc_avg_seq_len < 0:
                 self.last_miss_reason = "invalid_seq_lens"
                 return None
         else:
@@ -3951,7 +3957,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         tc_num_kv_heads = key.shape[-2] if isinstance(key, torch.Tensor) and key.ndim >= 2 else None
 
         # Derive input_layout from query shape ndim
-        input_layout = "TND" if query.ndim == 3 else "BNSD_NBSD" if query.ndim == 4 else None
+        input_layout = "TND" if query.ndim in (2, 3) else "BNSD_NBSD" if query.ndim == 4 else None
 
         # Build params dict
         seq_values = _tensor_int_values(seq_lens)

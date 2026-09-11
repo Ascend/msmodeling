@@ -32,6 +32,7 @@ class EmpiricalOpRecord:
     analytic_latency_s: float
     tc_shapes: List[tuple]
     miss_reason: Optional[str] = None
+    invocation_count: int = 1
 
 
 class EmpiricalPerformanceModel(PerformanceModel):
@@ -57,6 +58,13 @@ class EmpiricalPerformanceModel(PerformanceModel):
         self._fallback_model = fallback_model
         # Raw op records — read by MetricsCollector to compute M1-M5 metrics
         self.op_records: List[EmpiricalOpRecord] = []
+        self._records_by_cache_key: dict[str, EmpiricalOpRecord] = {}
+
+    @override
+    def record_cache_hit(self, op_invoke_info: OpInvokeInfo) -> None:
+        record = self._records_by_cache_key.get(op_invoke_info.cache_key)
+        if record is not None:
+            record.invocation_count += 1
 
     @property
     def fallback_model(self) -> PerformanceModel:
@@ -73,15 +81,22 @@ class EmpiricalPerformanceModel(PerformanceModel):
 
         # Analytic fallback — needed for MISS latency and as weight
         analytic_result = self.fallback_model.process_op(op_invoke_info)
+        analytic_stats = analytic_result.statistics if isinstance(analytic_result.statistics, dict) else {}
         tc_shapes = [tuple(a.shape) for a in op_invoke_info.args if isinstance(a, torch.Tensor)]
+        reason = getattr(self.data_source, "last_miss_reason", "unknown") if result is None else None
+        record = EmpiricalOpRecord(func_name, result, analytic_result.execution_time_s, tc_shapes, reason)
+        self.op_records.append(record)
+        self._records_by_cache_key[op_invoke_info.cache_key] = record
 
         if result is not None and result.source != QuerySource.PARTIAL:
             # Full HIT
-            self.op_records.append(EmpiricalOpRecord(func_name, result, analytic_result.execution_time_s, tc_shapes))
             empirical_s = result.latency_us * 1e-6
             return PerformanceModel.Result(
                 execution_time_s=empirical_s,
                 statistics={
+                    # Keep the analytic attribution used by get_classifiers;
+                    # measured latency does not provide hardware bound counters.
+                    **analytic_stats,
                     "source": result.source.name,
                     "confidence": result.confidence,
                     **result.details,
@@ -91,11 +106,11 @@ class EmpiricalPerformanceModel(PerformanceModel):
 
         if result is not None and result.source == QuerySource.PARTIAL:
             # PARTIAL
-            self.op_records.append(EmpiricalOpRecord(func_name, result, analytic_result.execution_time_s, tc_shapes))
             empirical_s = result.latency_us * 1e-6
             return PerformanceModel.Result(
                 execution_time_s=empirical_s,
                 statistics={
+                    **analytic_stats,
                     "source": result.source.name,
                     "confidence": result.confidence,
                     **result.details,
@@ -104,16 +119,6 @@ class EmpiricalPerformanceModel(PerformanceModel):
             )
 
         # Full MISS
-        reason = getattr(self.data_source, "last_miss_reason", "unknown")
-        self.op_records.append(
-            EmpiricalOpRecord(
-                func_name,
-                None,
-                analytic_result.execution_time_s,
-                tc_shapes,
-                miss_reason=reason,
-            )
-        )
         if isinstance(analytic_result.statistics, dict):
             analytic_result.statistics["shape_match_rule"] = "analytic"
         return analytic_result

@@ -711,8 +711,8 @@ class Runtime(TorchDispatchMode):
             for model_name, result in event.perf_results.items():
                 pid = perf_model_pids[model_name]
                 timeline = model_timelines[model_name]
-                start_time_us = max(0, int(round(timeline["event_start_s"][event_idx] * 1e6)))
-                duration_us = max(0, int(round(result.execution_time_s * 1e6)))
+                start_time_us = max(0.0, timeline["event_start_s"][event_idx] * 1e6)
+                duration_us = max(0.0, result.execution_time_s * 1e6)
 
                 trace_event = {
                     "name": op_name,

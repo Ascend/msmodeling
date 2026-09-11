@@ -432,23 +432,45 @@ def _data_users(node):
     return [user for user in node.users if user.op != "output"]
 
 
+def _current_data_users(node):
+    """Return users that consume *node* as the current Region value.
+
+    ``_internal_copy_region_v2(current, template, ...)`` keeps the
+    representative Region output as a template edge for every replayed layer.
+    Those template-only edges are bookkeeping; following them makes the
+    representative ``region_end`` appear to fan out and hides the unique
+    add-to-norm data path from P3.
+    """
+    return [
+        user
+        for user in _data_users(node)
+        if not (
+            user.op == "call_function"
+            and user.target is _COPY_REGION_V2
+            and len(user.args) > 1
+            and user.args[1] is node
+            and user.args[0] is not node
+        )
+    ]
+
+
 def _find_norm_after_add(add_node):
     """Walk add -> [region_end?] -> [copy_region*] -> norm."""
-    users = _data_users(add_node)
+    users = _current_data_users(add_node)
     if len(users) != 1:
         return None
     cur = users[0]
     if cur.op == "call_function" and cur.target is _REGION_END:
         # Region replay keeps a formal output edge alive for Runtime aliases.
         # It is bookkeeping, not the decoder data path we are matching.
-        users = _data_users(cur)
+        users = _current_data_users(cur)
         if len(users) != 1:
             return None
         cur = users[0]
     visited = set()
     while cur.op == "call_function" and cur.target in {_COPY_REGION, _COPY_REGION_V2} and id(cur) not in visited:
         visited.add(id(cur))
-        users = _data_users(cur)
+        users = _current_data_users(cur)
         if len(users) != 1:
             return None
         cur = users[0]
@@ -459,19 +481,19 @@ def _find_norm_after_add(add_node):
 
 def _find_moe_norm_after_add(add_node):
     """MoE/repetition variant that accepts a region-begin before the norm."""
-    users = _data_users(add_node)
+    users = _current_data_users(add_node)
     if len(users) != 1:
         return None
     cur = users[0]
     if cur.op == "call_function" and cur.target is _REGION_END:
-        users = _data_users(cur)
+        users = _current_data_users(cur)
         if len(users) != 1:
             return None
         cur = users[0]
     visited = set()
     while cur.op == "call_function" and cur.target in {_COPY_REGION, _COPY_REGION_V2} and id(cur) not in visited:
         visited.add(id(cur))
-        users = _data_users(cur)
+        users = _current_data_users(cur)
         if len(users) != 1:
             return None
         cur = users[0]
@@ -1017,9 +1039,11 @@ class MoeLocalTokenRewriter:
 
         full_view = _first_ancestor(
             gate_logits,
-            lambda n: n.op == "call_function"
-            and n.target in _VIEW_OPS
-            and MoeLocalTokenRewriter._entry_gather_from_view(n) is not None,
+            lambda n: (
+                n.op == "call_function"
+                and n.target in _VIEW_OPS
+                and MoeLocalTokenRewriter._entry_gather_from_view(n) is not None
+            ),
         )
         if full_view is None:
             return None

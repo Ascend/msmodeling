@@ -28,6 +28,7 @@ from .interpolation_index import (
     make_regime_key,
 )
 from .profiling_data_source import (
+    _AVG_SEQ_LEN_TOLERANCE,
     _compute_scale_axes as _base_compute_scale_axes,
     _compute_scale_input_format,
     _compute_scale_mode as _base_compute_scale_mode,
@@ -41,6 +42,7 @@ from .profiling_data_source import (
     _parse_shape_str,
     _parse_str_list,
     _project_dispatch_ffn_combine_inputs,
+    _resolve_batch_phase,
     _scalar_aware_numel as _base_scalar_aware_numel,
     _strip_batch_dim,
     COMPOSITE_DECOMPOSERS,
@@ -58,6 +60,7 @@ _BATCHED_MATMUL_KERNELS = frozenset({"BatchMatMulV2", "BatchMatMulNd", "Transpos
 _INTERPOLATION_MATMUL_KERNELS = _MATMUL_KERNELS | frozenset({"BatchMatMulNd"})
 _UNKNOWN_SPARSE_MODE = -1
 _UNKNOWN_KV_HEADS = -1
+_FIA_MAX_RELATIVE_ATTENTION_WORK_GAP = 0.01
 
 
 def _to_int_cell(value: Any) -> Optional[int]:
@@ -75,6 +78,19 @@ def _to_int_cell(value: Any) -> Optional[int]:
     if not numeric.is_integer():
         return None
     return int(numeric)
+
+
+def _to_finite_float_cell(value: Any) -> Optional[float]:
+    try:
+        if value is None or pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return numeric if math.isfinite(numeric) else None
 
 
 def _optional_str_cell(value: Any) -> Optional[str]:
@@ -188,6 +204,7 @@ _SPARSE_ATTENTION_AXIS_GROUPS = (("prefill_tokens",),) + _LIGHTNING_INDEXER_AXIS
 _SCATTER_ND_UPDATE_AXIS_GROUPS = (("tokens",),)
 _RUNTIME_ATTENTION_KERNELS = frozenset({"LightningIndexer", "LightningIndexerVllm"})
 _SPARSE_RUNTIME_ATTENTION_KERNELS = frozenset({"SparseFlashAttention"})
+_FIA_BLOCK_TABLE_INPUT_INDEX = 14  # 15th FusedInferAttentionScore input: block_table
 _MOE_FUSED_ROUTE_INPUT_INDEX = 3
 _MOE_FUSED_ROUTE_DTYPE = "INT32"
 
@@ -212,6 +229,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         self._lightning_indexer_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
         self._sparse_attention_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
         self._scatter_nd_update_index_cache: Dict[tuple[Any, ...], tuple[CandidateIndex, dict[str, int]]] = {}
+        self._fia_row_workload_cache: Dict[tuple[str, str, int], Optional[dict[str, Any]]] = {}
         self._dataframe_fingerprint_cache: Dict[int, tuple[weakref.ReferenceType, str]] = {}
         self._compute_index_diagnostics: Dict[Any, dict[str, Any]] = {}
         self._attention_index_diagnostics: Dict[str, dict[str, Any]] = {}
@@ -1761,7 +1779,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         has_layout_col: bool,
         has_quant_col: bool,
     ) -> Optional[CandidatePoint]:
-        seq_value = _to_int_cell(row.get(avg_seq_col))
+        seq_value = _to_finite_float_cell(row.get(avg_seq_col))
         if seq_value is None or seq_value < 0:
             return None
 
@@ -1904,8 +1922,10 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if q_3d is None:
             return None
         try:
-            avg_seq_len = int(seq_lens.float().mean().item())
+            avg_seq_len = float(seq_lens.float().mean().item())
         except Exception:
+            return None
+        if not math.isfinite(avg_seq_len) or avg_seq_len < 0:
             return None
 
         dtype_str = DTYPE_MAP.get(query.dtype)
@@ -2056,6 +2076,237 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         candidate = int(candidate_value)
         target = int(target_value)
         return candidate == target or _is_block_padded(candidate, target) or _is_block_padded(target, candidate)
+
+    @staticmethod
+    def _fia_contiguous_prefill_workload(row: Any) -> Optional[dict[str, Any]]:
+        """Recover a full-Prefill workload from one contiguous FIA row.
+
+        TND ``actual_seq_lengths*`` values are cumulative offsets.  Treating
+        them as independent request lengths makes ``avg_seq_len`` look close
+        while hiding a different scheduler partition.  Recover the request
+        lengths first so the comparison can use actual attention work.
+        """
+
+        try:
+            input_shapes = _parse_shape_str(str(row.get("Input Shapes", "")))
+        except (TypeError, ValueError):
+            return None
+        if len(input_shapes) < 3:
+            return None
+        q_shape, key_shape, value_shape = input_shapes[:3]
+        if len(q_shape) != 3 or len(key_shape) != 3 or len(value_shape) != 3:
+            return None
+        if any(int(dim) <= 0 for shape in (q_shape, key_shape, value_shape) for dim in shape):
+            return None
+        if key_shape != value_shape or key_shape[0] != q_shape[0]:
+            return None
+        if len(input_shapes) > _FIA_BLOCK_TABLE_INPUT_INDEX and input_shapes[_FIA_BLOCK_TABLE_INPUT_INDEX]:
+            return None
+        if _optional_str_cell(row.get("Runtime block_table_shape")) is not None:
+            return None
+        cache_mode = _optional_str_cell(row.get("Runtime kv_cache_mode"))
+        if cache_mode not in (None, "contiguous"):
+            return None
+        runtime_phase = _optional_str_cell(row.get("Runtime phase"))
+        if runtime_phase is not None and runtime_phase.lower() != "prefill":
+            return None
+
+        q_tokens = int(q_shape[0])
+        query_offsets = InterpolatingDataSource._runtime_int_values(row.get("Runtime actual_seq_lengths_values"))
+        kv_offsets = InterpolatingDataSource._runtime_int_values(row.get("Runtime actual_seq_lengths_kv_values"))
+        if query_offsets is None or kv_offsets is None:
+            return None
+        query_lengths = InterpolatingDataSource._query_lengths_from_cumulative(q_tokens, query_offsets)
+        kv_lengths = InterpolatingDataSource._query_lengths_from_cumulative(int(key_shape[0]), kv_offsets)
+        if query_lengths is None or kv_lengths is None:
+            return None
+        if any(value <= 0 for value in (*query_lengths, *kv_lengths)):
+            return None
+        workload = InterpolatingDataSource._attention_runtime_workload(
+            q_tokens=q_tokens,
+            query_lengths=query_lengths,
+            kv_lengths=kv_lengths,
+        )
+        if workload is None or workload["phase"] != "prefill":
+            return None
+        return {
+            **workload,
+            "q_shape": q_shape,
+            "key_shape": key_shape,
+            "query_lengths": query_lengths,
+            "kv_lengths": kv_lengths,
+        }
+
+    def _fia_row_workload(
+        self,
+        kernel_type: str,
+        dataframe_fingerprint: str,
+        row_index: int,
+        row: Any,
+    ) -> Optional[dict[str, Any]]:
+        """Cache parsed FIA row workloads for repeated layer queries."""
+
+        cache_key = (kernel_type, dataframe_fingerprint, row_index)
+        if cache_key not in self._fia_row_workload_cache:
+            self._fia_row_workload_cache[cache_key] = self._fia_contiguous_prefill_workload(row)
+        return self._fia_row_workload_cache[cache_key]
+
+    def _interpolate_fia_full_prefill_projection(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        mapping: dict,
+        *,
+        fallback_from: str,
+    ) -> tuple[Optional[QueryResult], bool]:
+        """Project scheduler-equivalent full Prefill onto a measured FIA row.
+
+        TensorCast represents KV through a block table, while vLLM may launch
+        the full-Prefill FIA kernel with contiguous TND K/V.  A service batch
+        can also split the same total Q tokens across requests.  Such rows are
+        safe only as a bounded proxy: exact lookup remains strict, and this
+        path reports INTERPOLATED after comparing the true attention work
+        ``sum(query_len * kv_len)``.
+        """
+
+        kernel_type = mapping.get("kernel_type")
+        if kernel_type != "FusedInferAttentionScore":
+            return None, False
+        args = op_invoke_info.args
+        if len(args) < 8:
+            return None, False
+        query, key, value = args[:3]
+        if not all(isinstance(tensor, torch.Tensor) for tensor in (query, key, value)):
+            return None, False
+        if key.shape != value.shape or query.dtype != key.dtype or key.dtype != value.dtype:
+            return None, False
+        head_dim = int(key.shape[-1]) if key.ndim >= 1 else 0
+        q_shape = _normalize_fia_q_shape(tuple(query.shape), head_dim)
+        dtype_str = DTYPE_MAP.get(query.dtype)
+        if q_shape is None or dtype_str is None:
+            return None, False
+
+        kv_lengths = self._runtime_int_values(args[6])
+        query_lengths = self._runtime_int_values(args[7]) or kv_lengths
+        if query_lengths is None or kv_lengths is None:
+            return None, False
+        if any(value <= 0 for value in (*query_lengths, *kv_lengths)):
+            return None, False
+        target_workload = self._attention_runtime_workload(
+            q_tokens=int(q_shape[0]),
+            query_lengths=query_lengths,
+            kv_lengths=kv_lengths,
+        )
+        if target_workload is None or target_workload["phase"] != "prefill":
+            return None, False
+        explicit_phase = _resolve_batch_phase(op_invoke_info, len(query_lengths))
+        if explicit_phase not in (None, "prefill"):
+            return None, False
+
+        input_layout = _infer_attention_input_layout(tuple(query.shape), head_dim)
+        sparse_mode = _infer_attention_sparse_mode(args[7], input_layout)
+        kv_heads = _attention_kv_heads_from_key(key, input_layout)
+        block_size = int(key.shape[1]) if key.ndim == 4 else None
+        if input_layout != "TND" or sparse_mode is None or kv_heads is None or block_size is None or block_size <= 0:
+            return None, False
+        block_table = args[4]
+        required_blocks = [math.ceil(length / block_size) for length in kv_lengths]
+        if (
+            not isinstance(block_table, torch.Tensor)
+            or block_table.ndim != 2
+            or int(block_table.shape[0]) != len(kv_lengths)
+            or int(block_table.shape[1]) < max(required_blocks)
+            or int(key.shape[0]) < sum(required_blocks)
+        ):
+            return None, False
+
+        df = self.base._load_csv(kernel_type)
+        if df is None or df.empty:
+            return None, False
+        latency_col = self.base._latency_col(df)
+        dataframe_fingerprint = self._dataframe_fingerprint(df)
+        candidates: list[dict[str, Any]] = []
+        for row_index, (_, row) in enumerate(df.iterrows()):
+            source_workload = self._fia_row_workload(kernel_type, dataframe_fingerprint, row_index, row)
+            if source_workload is None or source_workload["q_shape"] != q_shape:
+                continue
+            input_dtypes = _parse_str_list(str(row.get("Input Data Types", "")))
+            if len(input_dtypes) < 3 or any(value != dtype_str for value in input_dtypes[:3]):
+                continue
+            source_key_shape = source_workload["key_shape"]
+            if source_key_shape[-2:] != (int(kv_heads), head_dim):
+                continue
+            exact_runtime_fields = (
+                ("Runtime sparse_mode", sparse_mode),
+                ("Runtime num_key_value_heads", kv_heads),
+                ("Runtime num_heads", q_shape[1]),
+                ("Runtime block_size", block_size),
+            )
+            if any(_to_int_cell(row.get(column)) != int(target) for column, target in exact_runtime_fields):
+                continue
+            if _optional_str_cell(row.get("Runtime input_layout")) != input_layout:
+                continue
+
+            work_gap = abs(target_workload["effective_kv_len"] - source_workload["effective_kv_len"])
+            relative_work_gap = work_gap / target_workload["effective_kv_len"]
+            if work_gap > _AVG_SEQ_LEN_TOLERANCE or relative_work_gap > _FIA_MAX_RELATIVE_ATTENTION_WORK_GAP:
+                continue
+            latency, latency_meta = self._candidate_latency(row, latency_col)
+            if latency is None:
+                continue
+            candidates.append(
+                {
+                    "row_index": row_index,
+                    "latency_us": latency,
+                    "work_gap": work_gap,
+                    "relative_work_gap": relative_work_gap,
+                    "workload": source_workload,
+                    **latency_meta,
+                }
+            )
+
+        if not candidates:
+            return None, False
+        candidates.sort(key=lambda item: (item["work_gap"], item["row_index"]))
+        best = candidates[0]
+        tied = [
+            item for item in candidates if math.isclose(item["work_gap"], best["work_gap"], rel_tol=0.0, abs_tol=1e-9)
+        ]
+        if len(tied) != 1:
+            self._record_miss(
+                f"ambiguous_semantic_match:{kernel_type}",
+                kernel_type=kernel_type,
+                interpolation_path="fia_full_prefill_projection",
+                candidate_count=len(tied),
+            )
+            return None, True
+
+        source_workload = best["workload"]
+        return QueryResult(
+            latency_us=best["latency_us"],
+            confidence=0.75,
+            source=QuerySource.INTERPOLATED,
+            details={
+                "kernel_type": kernel_type,
+                "query_mode": "attention_special",
+                "method": "bounded_full_prefill_work_projection",
+                "interpolation_path": "fia_full_prefill_projection",
+                "fallback_from": fallback_from,
+                "candidate_count": len(candidates),
+                "source_query_lengths": list(source_workload["query_lengths"]),
+                "target_query_lengths": list(query_lengths),
+                "source_effective_kv_len": source_workload["effective_kv_len"],
+                "target_effective_kv_len": target_workload["effective_kv_len"],
+                "effective_kv_len_gap": best["work_gap"],
+                "relative_attention_work_gap": best["relative_work_gap"],
+                "latency_column": best["latency_column"],
+                "latency_column_selection": best["latency_column_selection"],
+            },
+            shape_match_info=ShapeMatchInfo(
+                simulation_shapes=[list(q_shape)],
+                kernel_shapes=[list(source_workload["q_shape"])],
+                shape_match_rule="fia_full_prefill_work_projection",
+            ),
+        ), True
 
     @staticmethod
     def _attention_input_layout_from_params(params: Dict[str, Any]) -> Optional[str]:
@@ -3222,6 +3473,13 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         *,
         fallback_from: str = "exact_miss",
     ) -> Optional[QueryResult]:
+        projected, terminal = self._interpolate_fia_full_prefill_projection(
+            op_invoke_info,
+            mapping,
+            fallback_from=fallback_from,
+        )
+        if terminal:
+            return projected
         return self._interpolate_attention_multidim(op_invoke_info, mapping, fallback_from=fallback_from)
 
     def _interpolate_composite(

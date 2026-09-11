@@ -60,6 +60,9 @@ class PerformanceModel(ABC):
     def get_classifiers(self) -> List[OpClassifier]:
         return []
 
+    def record_cache_hit(self, op_invoke_info: OpInvokeInfo) -> None:
+        """Account for an invocation whose performance result was reused."""
+
 
 class CachingPerformanceModel(PerformanceModel):
     """
@@ -73,6 +76,7 @@ class CachingPerformanceModel(PerformanceModel):
 
     def process_op(self, op_invoke_info: OpInvokeInfo) -> "PerformanceModel.Result":
         if op_invoke_info.cache_key in self._cache:
+            self._base_model.record_cache_hit(op_invoke_info)
             return self._cache[op_invoke_info.cache_key]
         result = self._base_model.process_op(op_invoke_info)
         self._cache[op_invoke_info.cache_key] = result

@@ -141,6 +141,13 @@ class TestComputeM6TraceMode:
         assert result["selected_fwd_compute_us"] == pytest.approx(6600.0)
         assert result["selected_fwd_hcom_us"] == pytest.approx(6400.0)
 
+    def test_epoch_timestamps_preserve_fractional_durations(self, tmp_path):
+        tc_path = _make_tc_trace(tmp_path)
+        rows = [("MatMulV2", "0.04", "1774441597735090.778", "", '""') for _ in range(25)]
+        prof_path = _make_prof_trace(tmp_path, rows)
+        result = compute_m6(str(tc_path), str(prof_path))
+        assert result["real_per_fwd_us"] == pytest.approx(1.0)
+
     def test_source_filter_measured_only(self, tmp_path):
         """--source-filter MEASURED excludes INTERPOLATED events."""
         events = [
@@ -198,6 +205,21 @@ class TestComputeM6TraceMode:
     def test_file_not_found(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             compute_m6(tc_trace="/nonexistent.json", prof_trace=str(tmp_path / "x.csv"))
+
+    @pytest.mark.parametrize(
+        "contents",
+        [
+            "",
+            "Type,Start Time(us)\nMatMulV2,0\n",
+            "version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 10\n",
+        ],
+    )
+    def test_invalid_profiler_schema_is_not_reported_as_zero_m6(self, tmp_path, contents):
+        tc_path = _make_tc_trace(tmp_path)
+        prof_path = tmp_path / "prof.csv"
+        prof_path.write_text(contents)
+        with pytest.raises(ValueError, match="Invalid profiling trace"):
+            compute_m6(str(tc_path), str(prof_path))
 
     def test_hcom_dedup_in_prof_trace(self, tmp_path):
         """Prof trace hcom dedup works correctly."""

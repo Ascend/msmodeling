@@ -1,6 +1,8 @@
 from unittest.mock import MagicMock
 
+import pytest
 import torch
+from tensor_cast.performance_model.analytic import OpBoundClassifier
 from tensor_cast.performance_model.base import PerformanceModel
 from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
 from tensor_cast.performance_model.profiling_database.data_source import (
@@ -55,6 +57,24 @@ def test_empirical_uses_datasource_when_hit():
     assert result.statistics.get("kernel_type") == "MatMulV2"
     # M5: fallback also called for analytic weight
     fallback.process_op.assert_called_once()
+
+
+@pytest.mark.parametrize("source", [QuerySource.MEASURED, QuerySource.INTERPOLATED, QuerySource.PARTIAL])
+def test_empirical_preserves_analytic_bound_attribution(source):
+    """Database hits must remain visible in the fallback bound classifier."""
+    data_source = MagicMock(spec=DataSourcePerformanceModel)
+    data_source.lookup.return_value = QueryResult(45.3, 0.9, source)
+    fallback = MagicMock(spec=PerformanceModel)
+    analytic = PerformanceModel.Result(200e-6, {"comm_time_s": 200e-6})
+    fallback.process_op.return_value = analytic
+    model = EmpiricalPerformanceModel(_make_mock_device_profile(), data_source, fallback)
+    op = _make_mock_op_invoke_info()
+    result = model.process_op(op)
+
+    assert result.execution_time_s == pytest.approx(45.3e-6)
+    assert result.statistics["source"] == source.name
+    assert OpBoundClassifier().classify([(op, result)])["communication_bound"] == 200e-6
+    assert analytic.statistics == {"comm_time_s": 200e-6}
 
 
 def test_empirical_falls_back_when_miss():

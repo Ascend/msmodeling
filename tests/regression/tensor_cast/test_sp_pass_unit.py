@@ -822,6 +822,54 @@ class Pattern3RewriterTestCase(unittest.TestCase):
         entry_position = min(pos for pos in reduce_scatter_positions if pos != p3_position)
         self.assertGreater(p3_position, entry_position)
 
+    def test_p3_ignores_region_v2_template_fanout(self):
+        graph = fx.Graph()
+        weight = graph.placeholder("weight")
+        x = graph.placeholder("x")
+        residual_input = graph.placeholder("residual_input")
+        tail_input = graph.placeholder("tail_input")
+        for node in (x, tail_input):
+            node.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        residual_input.meta["val"] = _meta_tensor(LOCAL_INPUT_SHAPE)
+
+        entry_comm = graph.call_function(torch.ops.tensor_cast.all_reduce.default, (x, 0, RANK_GROUP))
+        entry_comm.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        norm2 = graph.call_function(
+            torch.ops.tensor_cast.add_rms_norm2.default,
+            (entry_comm, residual_input, weight, EPS),
+        )
+        norm2.meta["val"] = (_meta_tensor(INPUT_SHAPE), _meta_tensor(INPUT_SHAPE))
+        residual = graph.call_function(operator.getitem, (norm2, 1))
+        residual.meta["val"] = _meta_tensor(INPUT_SHAPE)
+
+        tail_comm = graph.call_function(torch.ops.tensor_cast.all_reduce.default, (tail_input, 0, RANK_GROUP))
+        tail_comm.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        add_node = graph.call_function(torch.ops.aten.add.Tensor, (residual, tail_comm))
+        add_node.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        region_end = graph.call_function(
+            torch.ops.tensor_cast._internal_mark_region_end.default,
+            (add_node, 9),
+        )
+        region_end.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        current = region_end
+        for _ in range(2):
+            current = graph.call_function(
+                torch.ops.tensor_cast._internal_copy_region_v2.default,
+                (current, region_end, 9),
+            )
+            current.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        tail_norm = graph.call_function(torch.ops.tensor_cast.rms_norm.default, (current, weight, EPS))
+        tail_norm.meta["val"] = _meta_tensor(INPUT_SHAPE)
+        graph.output((tail_norm, region_end))
+        graph_module = fx.GraphModule({}, graph)
+
+        graph_module = _run_pass(graph_module)
+
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.all_reduce.default), 0)
+        self.assertEqual(_count_calls(graph_module, torch.ops.tensor_cast.reduce_scatter.default), 2)
+        self.assertFalse(_has_user(residual, torch.ops.tensor_cast.all_gather.default))
+        self.assertTrue(_has_user(tail_norm, torch.ops.tensor_cast.all_gather.default))
+
 
 class SequenceParallelPassEdgeTestCase(unittest.TestCase):
     def test_sequence_parallel_pass_owns_rewriters(self):

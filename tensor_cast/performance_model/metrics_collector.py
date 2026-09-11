@@ -246,6 +246,7 @@ class MetricsCollector:
                 record.analytic_latency_s,
                 record.tc_shapes,
                 record.miss_reason,
+                record.invocation_count,
             )
 
     def _collect_one(
@@ -255,13 +256,14 @@ class MetricsCollector:
         analytic_latency_s: float,
         tc_shapes: list[tuple],
         miss_reason: Optional[str] = None,
+        invocation_count: int = 1,
     ) -> None:
-        self._total_latency_sum += analytic_latency_s
+        self._total_latency_sum += analytic_latency_s * invocation_count
 
         if result is not None and result.source != QuerySource.PARTIAL:
             # Full HIT — count as HIT in metrics
-            self._stats["hit"] += 1
-            self._hit_latency_sum += analytic_latency_s
+            self._stats["hit"] += invocation_count
+            self._hit_latency_sum += analytic_latency_s * invocation_count
             kernel_type = result.details.get("kernel_type", "?")
             # For M3/M4 metrics, zero_cost and accepted_miss ops need a
             # sentinel kernel_type so compute_fused_op_stats can exclude them.
@@ -273,22 +275,22 @@ class MetricsCollector:
                 metric_kernel_type = "accepted_miss"
             shape_sig = tuple(tc_shapes)
             empirical_s = result.latency_us * 1e-6
-            self._hit_details.append((func_name, metric_kernel_type, shape_sig, empirical_s))
+            self._hit_details.extend([(func_name, metric_kernel_type, shape_sig, empirical_s)] * invocation_count)
 
         elif result is not None and result.source == QuerySource.PARTIAL:
             # PARTIAL: use empirical latency in E2E sum, but count as MISS
             # in match rate (M1). Do NOT update _hit_latency_sum (M5) —
             # PARTIAL is still conceptually a MISS for accuracy metrics.
-            self._stats["miss"] += 1
+            self._stats["miss"] += invocation_count
             missed_kernels = result.details.get("missed_kernels", [])
             reason = f"partial:{','.join(missed_kernels)}"
-            self._miss_details.append((func_name, reason, tc_shapes, analytic_latency_s))
+            self._miss_details.extend([(func_name, reason, tc_shapes, analytic_latency_s)] * invocation_count)
 
         else:
             # Full MISS
-            self._stats["miss"] += 1
+            self._stats["miss"] += invocation_count
             reason = miss_reason or "unknown"
-            self._miss_details.append((func_name, reason, tc_shapes, analytic_latency_s))
+            self._miss_details.extend([(func_name, reason, tc_shapes, analytic_latency_s)] * invocation_count)
 
     def get_stats(self) -> dict:
         """Return M1: Raw Op-Count Match Rate."""

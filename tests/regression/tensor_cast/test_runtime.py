@@ -79,6 +79,20 @@ def test_runtime_region_v2_tracks_distinct_real_input_and_output():
     assert copied.real_output_tensor.shape == (1, 4, 16)
 
 
+def test_chrome_trace_preserves_submicrosecond_durations():
+    model = AnalyticPerformanceModel(TEST_DEVICE)
+    runtime = Runtime(model, TEST_DEVICE)
+    x = torch.empty(8, device="meta")
+    op = OpInvokeInfo(torch.ops.aten.add.Tensor, (x, x), {}, x)
+    runtime.event_list = [
+        RuntimeEvent(op_invoke_info=op, perf_results={model.name: PerformanceModel.Result(0.2e-6)}) for _ in range(3)
+    ]
+    events = [event for event in runtime.get_trace_events() if event["ph"] == "X"]
+    assert [event["ts"] for event in events] == pytest.approx([0.0, 0.2, 0.4])
+    assert [event["dur"] for event in events] == pytest.approx([0.2, 0.2, 0.2])
+    assert sum(event["dur"] for event in events) * 1e-6 == pytest.approx(runtime.total_execution_time_s()[model.name])
+
+
 class PerfAnalysisTestMixin:
     @classmethod
     def setUpClass(cls):

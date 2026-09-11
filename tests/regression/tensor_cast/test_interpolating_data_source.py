@@ -315,6 +315,57 @@ def test_attention_interpolation_linear(interp_data_dir):
     assert list(result.details["axis_boundary"]) == ["seq"]
 
 
+def test_attention_interpolation_preserves_fractional_runtime_average(interp_data_dir):
+    """Heterogeneous integer KV lengths must retain their fractional mean."""
+    csv_path = interp_data_dir / "FusedInferAttentionScore.csv"
+    frame = pd.read_csv(csv_path)
+    frame["Input Shapes"] = "2,4,128;32,128,4,128;32,128,4,128"
+    frame["Runtime batch_size"] = 2
+    frame.to_csv(csv_path, index=False)
+    ds = InterpolatingDataSource(ProfilingDataSource(interp_data_dir))
+    op = _make_op_info(
+        torch.ops.tensor_cast.attention.default,
+        [
+            torch.empty(2, 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(32, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(32, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            None,
+            torch.tensor([0, 1, 2]),
+            torch.tensor([2000, 2001]),
+            torch.tensor([1, 1]),
+        ],
+    )
+    result = ds.lookup(op)
+    assert result is not None
+    assert result.source == QuerySource.INTERPOLATED
+    assert result.details["attention_axes"]["seq"] == 2000.5
+    assert result.latency_us == pytest.approx(600.25)
+
+
+@pytest.mark.parametrize("seq_values", [[float("nan")], [float("inf")], [-1], []])
+def test_attention_rejects_invalid_runtime_sequence_lengths(interp_data_dir, seq_values):
+    base = ProfilingDataSource(interp_data_dir)
+    ds = InterpolatingDataSource(base)
+    op = _make_op_info(
+        torch.ops.tensor_cast.attention.default,
+        [
+            torch.empty(1, 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(16, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(16, 128, 4, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            None,
+            None,
+            torch.tensor(seq_values),
+            torch.tensor([1]),
+        ],
+    )
+    assert base.lookup(op) is None
+    assert base.last_miss_reason == "invalid_seq_lens"
+    assert ds._build_attention_target(op, {}, "FusedInferAttentionScore") is None
+    assert ds.lookup(op) is None
+
+
 def test_attention_param_interpolation_uses_linear_default(interp_data_dir):
     ds = InterpolatingDataSource(ProfilingDataSource(interp_data_dir))
 

@@ -7,6 +7,7 @@ import torch
 from tensor_cast.device import CommGrid, InterconnectTopology
 from tensor_cast.model_config import ParallelConfig
 from tensor_cast.performance_model.profiling_database.data_source import QuerySource, ShapeMatchInfo
+from tensor_cast.performance_model.profiling_database.interpolating_data_source import InterpolatingDataSource
 from tensor_cast.performance_model.profiling_database.profiling_data_source import (
     COMPOSITE_DECOMPOSERS,
     DTYPE_MAP,
@@ -4626,6 +4627,165 @@ def test_glm5_sfa_selects_effective_sequence_context(tmp_path):
     assert long == (200.0, "SparseFlashAttention")
 
 
+@pytest.fixture
+def qwen3_fia_decode_case(tmp_path):
+    (tmp_path / "op_mapping.yaml").write_text("version: test\noperator_mappings: {}\n")
+    measured_kv_values = "4110,4108,4108,4108,4108,4108,4108,4107,4106,4106,4106,4106,4105,4105,4105,4105"
+    valid_blocks = ",".join(["33"] * 16)
+    (tmp_path / "FusedInferAttentionScore.csv").write_text(
+        "Input Shapes,Input Data Types,Profiling Average Duration(us),Runtime avg_seq_len,"
+        "Runtime actual_seq_lengths_values,Runtime actual_seq_lengths_kv_values,"
+        "Runtime block_table_valid_blocks,Runtime num_heads,Runtime num_key_value_heads,"
+        "Runtime sparse_mode,Runtime input_layout,Runtime block_size\n"
+        f'"16,4,128",DT_BF16,52.6,4106.8125,,"{measured_kv_values}",'
+        f'"{valid_blocks}",4,1,3,TND,128\n'
+    )
+    params = {
+        "q_shape_3d": (16, 4, 128),
+        "avg_seq_len": 4097,
+        "actual_seq_lengths_values": list(range(1, 17)),
+        "actual_seq_lengths_kv_values": [4097] * 16,
+        "block_table_valid_blocks": [33] * 16,
+        "num_heads": 4,
+        "num_kv_heads": 1,
+        "sparse_mode": 3,
+        "input_layout": "TND",
+        "block_size": 128,
+        "kv_cache_mode": "paged",
+        "cache_layout": "PA_BSND",
+    }
+    return tmp_path, params
+
+
+def test_fia_decode_rejects_different_per_request_kv_lengths(qwen3_fia_decode_case):
+    data_dir, params = qwen3_fia_decode_case
+    ds = ProfilingDataSource(data_dir)
+
+    assert ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16") is None
+    assert (
+        ds._query_by_attn_params(
+            ["FusedInferAttentionScore"],
+            {**params, "actual_seq_lengths_values": None, "actual_seq_lengths_kv_values": [4097]},
+            "DT_BF16",
+        )
+        is None
+    )
+    assert (
+        ds._query_by_attn_params(
+            ["FusedInferAttentionScore"],
+            {**params, "avg_seq_len": 4865, "actual_seq_lengths_kv_values": [4865] * 16},
+            "DT_BF16",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("require_unique", [False, True])
+@pytest.mark.parametrize("reverse_rows", [False, True])
+def test_fia_exact_kv_match_precedes_nearby_rows(qwen3_fia_decode_case, require_unique, reverse_rows):
+    data_dir, params = qwen3_fia_decode_case
+    (data_dir / "op_mapping.yaml").write_text(
+        "version: test\noperator_mappings: {}\nquery_selection_policy:\n"
+        "  kernel_overrides:\n    FusedInferAttentionScore:\n"
+        f"      require_semantic_unique: {str(require_unique).lower()}\n"
+    )
+    csv_path = data_dir / "FusedInferAttentionScore.csv"
+    frame = pd.read_csv(csv_path)
+    near = frame.iloc[0].copy()
+    near["Runtime avg_seq_len"] = 4106
+    near["Runtime actual_seq_lengths_kv_values"] = ",".join(["4105", "4107"] * 8)
+    near["Profiling Average Duration(us)"] = 60.0
+    exact = near.copy()
+    exact["Runtime actual_seq_lengths_kv_values"] = ",".join(["4106"] * 16)
+    exact["Profiling Average Duration(us)"] = 52.6
+    rows = [near, exact] if reverse_rows else [exact, near]
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    params = {**params, "avg_seq_len": 4106, "actual_seq_lengths_kv_values": [4106] * 16}
+
+    assert ProfilingDataSource(data_dir)._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16") == (
+        52.6,
+        "FusedInferAttentionScore",
+    )
+
+
+def test_fia_exact_kv_ambiguity_does_not_fall_back_to_nearby_row(qwen3_fia_decode_case):
+    data_dir, params = qwen3_fia_decode_case
+    (data_dir / "op_mapping.yaml").write_text(
+        "version: test\noperator_mappings: {}\nquery_selection_policy:\n"
+        "  kernel_overrides:\n    FusedInferAttentionScore:\n      require_semantic_unique: true\n"
+    )
+    csv_path = data_dir / "FusedInferAttentionScore.csv"
+    near = pd.read_csv(csv_path).iloc[0].copy()
+    exact = near.copy()
+    exact["Runtime avg_seq_len"] = 4097
+    exact["Runtime actual_seq_lengths_kv_values"] = ",".join(["4097"] * 16)
+    conflict = exact.copy()
+    conflict["Profiling Average Duration(us)"] = 70.0
+    pd.DataFrame([near, exact, conflict]).to_csv(csv_path, index=False)
+    ds = ProfilingDataSource(data_dir)
+
+    assert ds._query_by_attn_params(["FusedInferAttentionScore"], params, "DT_BF16") is None
+    assert ds.last_miss_reason == "ambiguous_semantic_match:FusedInferAttentionScore"
+
+
+@pytest.mark.parametrize("kernel_type", ["FusedInferAttentionScore", "LightningIndexer", "SparseFlashAttention"])
+def test_attention_non_decode_preserves_per_request_kv_workload(qwen3_fia_decode_case, kernel_type):
+    data_dir, _ = qwen3_fia_decode_case
+    mapping = {"primary_kernel_type": "LightningIndexer", "_runtime_tp_size": 2, "_runtime_sequence_parallel": True}
+    specs = _decompose_dsa_indexer(
+        _make_glm5_dsa_op(
+            query_len=17, query_lens_values=[16, 18], seq_lens_values=[17, 34], is_decode_values=[False, False]
+        ),
+        mapping,
+    )
+    params = specs[-1].attention_params
+    assert params["actual_seq_lengths_values"] == [16, 17]
+    assert params["actual_seq_lengths_kv_values"] == [17, 17]
+    row = pd.read_csv(data_dir / "FusedInferAttentionScore.csv").iloc[0].copy()
+    row["Input Shapes"] = "17,32,128"
+    row["Runtime num_heads"] = 32
+    row["Runtime avg_seq_len"] = 17
+    row["Runtime actual_seq_lengths_values"] = "16,17"
+    row["Runtime actual_seq_lengths_kv_values"] = "33,1"
+    row["Runtime block_table_valid_blocks"] = "1,1"
+    row["Runtime topk"] = 2048
+    pd.DataFrame([row]).to_csv(data_dir / f"{kernel_type}.csv", index=False)
+    ds = ProfilingDataSource(data_dir)
+
+    assert ds._query_by_attn_params([kernel_type], params, "DT_BF16") is None
+    assert ds._query_by_attn_params([kernel_type], {**params, "actual_seq_lengths_kv_values": [33, 1]}, "DT_BF16") == (
+        52.6,
+        kernel_type,
+    )
+
+
+@pytest.mark.parametrize("kernel_type", ["LightningIndexer", "SparseFlashAttention"])
+def test_sparse_decode_does_not_use_fia_kv_tolerance(qwen3_fia_decode_case, kernel_type):
+    data_dir, params = qwen3_fia_decode_case
+    (data_dir / f"{kernel_type}.csv").write_bytes((data_dir / "FusedInferAttentionScore.csv").read_bytes())
+    ds = ProfilingDataSource(data_dir)
+
+    assert ds._query_by_attn_params([kernel_type], {**params, "phase": "decode"}, "DT_BF16") is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"phase": "prefill"},
+        {"phase": "mixed"},
+        {"kv_cache_mode": "contiguous"},
+        {"kv_cache_mode": None},
+        {"actual_seq_lengths_values": None},
+        {"block_table_valid_blocks": None},
+    ],
+)
+def test_fia_nearby_kv_requires_paged_decode_context(qwen3_fia_decode_case, overrides):
+    data_dir, params = qwen3_fia_decode_case
+    ds = ProfilingDataSource(data_dir)
+
+    assert ds._query_by_attn_params(["FusedInferAttentionScore"], {**params, **overrides}, "DT_BF16") is None
+
+
 def test_glm5_dfc_projects_the_complete_physical_shape():
     projected = _project_dispatch_ffn_combine_inputs(_make_glm5_quant_dfc_op(157))
 
@@ -4749,3 +4909,222 @@ def test_glm5_allreduce_exact_sample_is_queryable():
     ds = ProfilingDataSource(_glm5_a3_data_dir())
 
     assert ds._query_comm_csv("hcom_allReduce_", 331776, 4, 1) == (24.87465, False)
+
+
+@pytest.mark.parametrize("query_shape", [(16, 512), (16, 4, 128)])
+def test_fia_decode_lookup_normalizes_flattened_q_layout(qwen3_fia_decode_case, query_shape):
+    data_dir, _ = qwen3_fia_decode_case
+    (data_dir / "op_mapping.yaml").write_text(ATTN_OP_MAPPING_YAML)
+    measured_lengths = [4110, 4108, 4108, 4108, 4108, 4108, 4108, 4107, 4106, 4106, 4106, 4106, 4105, 4105, 4105, 4105]
+    op = _make_op_info(
+        torch.ops.tensor_cast.attention.default,
+        [
+            torch.empty(query_shape, device="meta", dtype=torch.bfloat16),
+            torch.empty(513, 128, 1, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(513, 128, 1, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            torch.empty(16, 33, device="meta", dtype=torch.int64),
+            torch.arange(17),
+            torch.tensor(measured_lengths),
+            torch.tensor([1] * 16),
+        ],
+    )
+    ds = ProfilingDataSource(data_dir)
+    result = ds.lookup(op)
+    assert result is not None
+    assert result.source == QuerySource.MEASURED
+    assert result.latency_us == 52.6
+
+
+@pytest.mark.parametrize(
+    "row_override",
+    [
+        {},
+        {"Runtime kv_cache_mode": "paged"},
+        {"Runtime kv_cache_mode": "contiguous"},
+        {"Runtime cache_layout": "TND"},
+        {"Runtime block_table_shape": "2,33"},
+        {"Runtime input_layout": "BSND"},
+        {"Input Shapes": "4112,4,128;34,128,1,128;34,128,1,128"},
+        {"Input Shapes": "4112,4,128;invalid;4112,1,128"},
+        {"Input Data Types": "DT_BF16;DT_INT8;DT_INT8"},
+    ],
+)
+@pytest.mark.parametrize(
+    "query_lengths,kv_lengths,phase",
+    [
+        ([4104, 8], [4104, 8], None),
+        ([4104, 8], [4104, 8], "prefill"),
+        ([4112], [4112], None),
+        ([4103, 9], [4103, 9], None),
+        ([4104, 8], [4105, 9], None),
+        ([4104, 8], [4104, 8], "decode"),
+    ],
+)
+def test_fia_paged_prefill_rejects_legacy_contiguous_row(tmp_path, query_lengths, kv_lengths, phase, row_override):
+    _write_contiguous_fia_csv(tmp_path, row_override)
+    op = _make_paged_fia_op(query_lengths, kv_lengths, phase)
+    result = ProfilingDataSource(tmp_path).lookup(op)
+    assert result is None
+
+
+def _write_contiguous_fia_csv(tmp_path, row_override):
+    (tmp_path / "op_mapping.yaml").write_text(ATTN_OP_MAPPING_YAML)
+    pd.DataFrame(
+        [
+            {
+                "Input Shapes": "4112,4,128;4112,1,128;4112,1,128",
+                "Input Data Types": "DT_BF16;DT_BF16;DT_BF16",
+                "Profiling Average Duration(us)": 161.084777,
+                "Runtime avg_seq_len": 4108,
+                "Runtime actual_seq_lengths_values": "4104,4112",
+                "Runtime actual_seq_lengths_kv_values": "4104,4112",
+                "Runtime block_table_valid_blocks": "33,33",
+                "Runtime num_heads": 4,
+                "Runtime num_key_value_heads": 1,
+                "Runtime sparse_mode": 3,
+                "Runtime input_layout": "TND",
+                "Runtime block_size": 128,
+                **row_override,
+            }
+        ]
+    ).to_csv(tmp_path / "FusedInferAttentionScore.csv", index=False)
+
+
+def _make_paged_fia_op(query_lengths, kv_lengths, phase=None):
+    return _make_op_info(
+        torch.ops.tensor_cast.attention.default,
+        [
+            torch.empty(sum(query_lengths), 512, device="meta", dtype=torch.bfloat16),
+            torch.empty(34, 128, 1, 128, device="meta", dtype=torch.bfloat16),
+            torch.empty(34, 128, 1, 128, device="meta", dtype=torch.bfloat16),
+            None,
+            torch.empty(len(query_lengths), 33, device="meta", dtype=torch.int64),
+            torch.tensor([0, *torch.tensor(query_lengths).cumsum(0).tolist()]),
+            torch.tensor(kv_lengths),
+            torch.tensor(query_lengths),
+        ],
+        kwargs={} if phase is None else {"phase": phase},
+    )
+
+
+@pytest.mark.parametrize("strict_latencies", [[170.0], [170.0, 180.0]])
+def test_fia_strict_prefill_preserves_selection_and_ambiguity(tmp_path, strict_latencies):
+    _write_contiguous_fia_csv(tmp_path, {})
+    path = tmp_path / "FusedInferAttentionScore.csv"
+    legacy = pd.read_csv(path).iloc[0].to_dict()
+    strict_rows = [
+        {
+            **legacy,
+            "Input Shapes": "4112,4,128;34,128,1,128;34,128,1,128",
+            "Runtime kv_cache_mode": "paged",
+            "Runtime cache_layout": "PA_BSND",
+            "Runtime actual_seq_lengths_kv_values": "4104,8",
+            "Runtime avg_seq_len": 2056,
+            "Runtime block_table_valid_blocks": "33,1",
+            "Profiling Average Duration(us)": latency,
+        }
+        for latency in strict_latencies
+    ]
+    pd.DataFrame([legacy, *strict_rows]).to_csv(path, index=False)
+    ds = ProfilingDataSource(tmp_path)
+    ds._query_selection_kernel_overrides["FusedInferAttentionScore"] = {"require_semantic_unique": True}
+    result = ds.lookup(_make_paged_fia_op([4104, 8], [4104, 8]))
+    if len(strict_latencies) == 1:
+        assert result.latency_us == 170.0
+    else:
+        assert result is None
+        assert ds.last_miss_reason == "ambiguous_semantic_match:FusedInferAttentionScore"
+
+
+def test_fia_full_prefill_scheduler_partition_uses_bounded_interpolation(tmp_path):
+    _write_contiguous_fia_csv(tmp_path, {"Average Duration(us)": 152.48})
+    op = _make_paged_fia_op([4112], [4112], phase="prefill")
+    base = ProfilingDataSource(tmp_path)
+
+    assert base.lookup(op) is None
+    result = InterpolatingDataSource(base).lookup(op)
+
+    assert result is not None
+    assert result.source == QuerySource.INTERPOLATED
+    assert result.latency_us == pytest.approx(152.48)
+    assert result.details["method"] == "bounded_full_prefill_work_projection"
+    assert result.details["source_query_lengths"] == [4104, 8]
+    assert result.details["target_query_lengths"] == [4112]
+    assert result.details["effective_kv_len_gap"] == pytest.approx(15.968871595330711)
+    assert result.details["relative_attention_work_gap"] == pytest.approx(0.0038834804463352963)
+
+
+def test_fia_full_prefill_projection_rejects_large_relative_work_gap(tmp_path):
+    _write_contiguous_fia_csv(
+        tmp_path,
+        {
+            "Input Shapes": "128,4,128;128,1,128;128,1,128",
+            "Runtime actual_seq_lengths_values": "120,128",
+            "Runtime actual_seq_lengths_kv_values": "120,128",
+        },
+    )
+
+    result = InterpolatingDataSource(ProfilingDataSource(tmp_path)).lookup(
+        _make_paged_fia_op([128], [128], phase="prefill")
+    )
+
+    assert result is None
+
+
+def test_fia_full_prefill_projection_caches_row_workload_parsing(tmp_path, monkeypatch):
+    _write_contiguous_fia_csv(tmp_path, {"Average Duration(us)": 152.48})
+    source = InterpolatingDataSource(ProfilingDataSource(tmp_path))
+    original = source._fia_contiguous_prefill_workload
+    parse_count = 0
+
+    def counting_parser(row):
+        nonlocal parse_count
+        parse_count += 1
+        return original(row)
+
+    monkeypatch.setattr(source, "_fia_contiguous_prefill_workload", counting_parser)
+    op = _make_paged_fia_op([4112], [4112], phase="prefill")
+
+    for _ in range(64):
+        assert source.lookup(op) is not None
+    assert parse_count == 1
+
+
+def test_fia_full_prefill_projection_rejects_ambiguous_candidates(tmp_path):
+    _write_contiguous_fia_csv(tmp_path, {"Average Duration(us)": 152.48})
+    path = tmp_path / "FusedInferAttentionScore.csv"
+    row = pd.read_csv(path).iloc[0].to_dict()
+    pd.DataFrame([row, {**row, "Average Duration(us)": 153.48}]).to_csv(path, index=False)
+    source = InterpolatingDataSource(ProfilingDataSource(tmp_path))
+
+    result = source.lookup(_make_paged_fia_op([4112], [4112], phase="prefill"))
+
+    assert result is None
+    assert source.last_miss_reason == "ambiguous_semantic_match:FusedInferAttentionScore"
+    assert source.last_miss_details["interpolation_path"] == "fia_full_prefill_projection"
+
+
+@pytest.mark.parametrize(
+    "source_offsets,target_queries,target_kv,phase",
+    [
+        ("4096,4112", [4112], [4112], "prefill"),
+        ("4104,4112", [16], [4112], "prefill"),
+        ("4104,4112", [4112], [4112], "decode"),
+    ],
+)
+def test_fia_full_prefill_projection_rejects_non_equivalent_workloads(
+    tmp_path, source_offsets, target_queries, target_kv, phase
+):
+    _write_contiguous_fia_csv(
+        tmp_path,
+        {
+            "Runtime actual_seq_lengths_values": source_offsets,
+            "Runtime actual_seq_lengths_kv_values": source_offsets,
+        },
+    )
+    result = InterpolatingDataSource(ProfilingDataSource(tmp_path)).lookup(
+        _make_paged_fia_op(target_queries, target_kv, phase=phase)
+    )
+
+    assert result is None
