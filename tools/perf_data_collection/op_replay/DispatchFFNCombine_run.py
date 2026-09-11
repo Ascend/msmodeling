@@ -29,6 +29,7 @@ try:
         build_standard_argparser,
         csv_has_complete_microbench,
         ensure_npu_available,
+        FRACTAL_NZ_FORMAT_ID,
         get_replay_repeat_count,
         get_runtime_modules,
         get_target_data_dir,
@@ -48,6 +49,7 @@ except ImportError:
         build_standard_argparser,
         csv_has_complete_microbench,
         ensure_npu_available,
+        FRACTAL_NZ_FORMAT_ID,
         get_replay_repeat_count,
         get_runtime_modules,
         get_target_data_dir,
@@ -77,6 +79,7 @@ HCOMM_INFO: str | None = None
 MAX_OUTPUT_SIZE: int | None = None
 EP_SIZE: int = DEFAULT_EP_SIZE
 ENABLE_BALANCED: bool = True
+DFC_API: str = "auto"
 _PRINTED_DFC_DEVICE_DEBUG = False
 _EXTENSION_LOAD_STATE: list[bool | None] = [None]
 
@@ -322,28 +325,28 @@ def build_expert_idx_tensor(shape: tuple[int, ...], num_experts: int):
 
 
 def build_balanced_expert_idx_tensor(shape: tuple[int, ...], num_experts: int):
-    """Build deterministic expert ids balanced over this rank's local experts.
+    """Build deterministic expert ids balanced over ranks, in GLOBAL id space.
 
-    DispatchFFNCombine receives per-rank expert weights, so expert_idx must
-    address the local expert dimension rather than the global EP expert space.
-    In EP32, running the same local round-robin pattern on all 32 ranks still
-    exercises every rank's local experts and avoids out-of-range global ids.
+    The vendor kernel (matching the vLLM-Ascend FusedMC2 service path, which
+    passes log2phy-mapped global ids) interprets expert_idx as global physical
+    expert ids in [0, num_experts * EP_SIZE); the CSV row's weight shard is one
+    rank's local slice. Tokens are spread round-robin over ranks so every rank
+    receives work for its own local experts; mixing local-shard ids into a
+    multi-rank group makes remote ranks read scale/weight storage out of range
+    (AICore MTE fault).
     """
     runtime_torch, _ = get_runtime_modules()
     num_tokens, topk = shape
     total_slots = num_tokens * topk
-    if num_experts <= 0:
-        raise ValueError(f"num_experts must be positive, got {num_experts}")
-    if EP_SIZE > 1 and num_experts % EP_SIZE == 0:
-        local_experts = num_experts // EP_SIZE
-        slots = runtime_torch.arange(total_slots, dtype=runtime_torch.int32)
-        # Balance by EP rank first. For small decode rows where slots < global
-        # experts, a plain 0..N expert cycle starves high-rank experts.
-        rank_ids = slots % EP_SIZE
-        local_ids = (slots // EP_SIZE) % local_experts
-        flat_ids = rank_ids * local_experts + local_ids
-    else:
-        flat_ids = runtime_torch.arange(total_slots, dtype=runtime_torch.int32) % num_experts
+    global_experts = num_experts * EP_SIZE
+    if global_experts <= 0:
+        raise ValueError(f"global expert count must be positive, got {global_experts}")
+    slots = runtime_torch.arange(total_slots, dtype=runtime_torch.int32) % global_experts
+    # Balance by EP rank first. For small decode rows where slots < global
+    # experts, a plain 0..N expert cycle starves high-rank experts.
+    rank_ids = slots % EP_SIZE
+    local_ids = (slots // EP_SIZE) % num_experts
+    flat_ids = rank_ids * num_experts + local_ids
     return flat_ids.reshape(num_tokens, topk).npu()
 
 
@@ -454,20 +457,31 @@ def build_row_case(row: dict[str, str], balanced: bool = True) -> dict[str, Any]
     scale2_expected_shape = (num_experts, hidden_size)
 
     x = build_npu_tensor(x_shape, input_dtypes[0], input_formats[0])
+    runtime_torch, runtime_torch_npu = get_runtime_modules()
     weight1 = build_npu_tensor(weight1_shape, input_dtypes[1], input_formats[1])
     weight2 = build_npu_tensor(weight2_shape, input_dtypes[2], input_formats[2])
+    if EP_SIZE > 1 and os.environ.get("DFC_WEIGHT_FORMAT", "nd") == "nz":
+        # The vLLM-Ascend FusedMC2 service path casts weights to FRACTAL_NZ
+        # before dispatch_ffn_combine. ND weights also execute cross-node in
+        # replay; keep ND by default so profiler signatures keep matching the
+        # CSV rows for duration write-back.
+        weight1 = runtime_torch_npu.npu_format_cast(weight1, FRACTAL_NZ_FORMAT_ID)
+        weight2 = runtime_torch_npu.npu_format_cast(weight2, FRACTAL_NZ_FORMAT_ID)
 
     topk = expert_idx_shape[1]
     expert_idx_num_experts = num_experts * EP_SIZE
     if balanced:
-        # DispatchFFNCombine receives one per-rank expert weight shard in replay,
-        # so expert_idx values are local IDs for that shard.
+        # expert_idx carries GLOBAL physical expert ids in
+        # [0, num_experts * EP_SIZE); the row's weight shard is one rank's
+        # local slice (see build_balanced_expert_idx_tensor).
         expert_idx = build_balanced_expert_idx_tensor(expert_idx_shape, num_experts)
         probs = build_uniform_probs_tensor(probs_shape, topk)
     else:
-        # See the balanced path above: random replay also uses local expert IDs.
-        expert_idx = build_expert_idx_tensor(expert_idx_shape, num_experts)
-        probs = build_npu_tensor(probs_shape, input_dtypes[6], input_formats[6])
+        # Random replay also draws global expert ids.
+        expert_idx = build_expert_idx_tensor(expert_idx_shape, expert_idx_num_experts)
+        probs = build_npu_tensor(probs_shape, input_dtypes[6], input_formats[6]).to(
+            runtime_torch.float32
+        )
 
     if input_dtypes[1] == "INT8" or input_dtypes[2] == "INT8":
         # Profiler CSVs can record these auxiliary scale buffers as INT64
@@ -568,6 +582,18 @@ def build_argparser():
         ),
     )
     parser.add_argument(
+        "--dfc-api",
+        choices=("auto", "primary", "fallback"),
+        default="auto",
+        help=(
+            "Which vendor API executes the row. 'auto' uses dispatch_ffn_combine and falls "
+            "back to dispatch_gmm_combine_decode only when the primary op is unavailable. "
+            "'fallback' forces dispatch_gmm_combine_decode, which takes explicit "
+            "ep_rank_size/ep_rank_id arguments and is the working invocation for "
+            "cross-container EP32 replay where the primary op faults on a remote rank."
+        ),
+    )
+    parser.add_argument(
         "--nproc-per-node",
         type=int,
         default=None,
@@ -606,6 +632,9 @@ def execute_dfc_op(case: dict[str, Any]) -> tuple:
     runtime_torch, _ = get_runtime_modules()
     ensure_vllm_ascend_extension_loaded()
 
+    if DFC_API == "fallback":
+        return execute_gmm_combine_decode(case)
+
     try:
         out, expert_token_nums = runtime_torch.ops._C_ascend.dispatch_ffn_combine(
             x=case["x"],
@@ -638,12 +667,21 @@ def execute_dfc_op(case: dict[str, Any]) -> tuple:
                 case["out"],
             )
             return out, case["expert_token_nums"], False
-        if (
+        if DFC_API == "primary" or (
             "does not support opType [DispatchFFNCombine]" not in message
             and "has no attribute 'dispatch_ffn_combine'" not in message
         ):
             raise
 
+    return execute_gmm_combine_decode(case)
+
+
+def execute_gmm_combine_decode(case: dict[str, Any]) -> tuple:
+    runtime_torch, _ = get_runtime_modules()
+    # moe_expert_num is the GLOBAL expert count and must be divisible by the
+    # EP rank size (kernel tiling requirement); the row's weight shard is the
+    # per-rank local slice.
+    global_moe_expert_num = case["num_experts"] * EP_SIZE
     out, expert_token_nums = runtime_torch.ops._C_ascend.dispatch_gmm_combine_decode(
         x=case["x"],
         expert_ids=case["expert_idx"],
@@ -657,7 +695,7 @@ def execute_dfc_op(case: dict[str, Any]) -> tuple:
         group_ep=case["group"],
         ep_rank_size=EP_SIZE,
         ep_rank_id=EP_RANK,
-        moe_expert_num=case["num_experts"],
+        moe_expert_num=global_moe_expert_num,
         shared_expert_num=1,
         shared_expert_rank_num=0,
         quant_mode=0,
@@ -733,6 +771,10 @@ def main() -> None:
     EP_SIZE = args.ep_size
     ENABLE_BALANCED = args.balanced
     MAX_OUTPUT_SIZE = args.max_output_size
+    global DFC_API
+    # DFC_API_MODE lets orchestration layers (msprof/run_all_op/torchrun
+    # children) force the API without new flag plumbing at every hop.
+    DFC_API = os.environ.get("DFC_API_MODE") or args.dfc_api
 
     env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
     env_rank = int(os.environ.get("RANK", "0"))

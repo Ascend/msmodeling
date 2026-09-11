@@ -30,7 +30,7 @@ from tensor_cast.performance_model.profiling_database.query_demand import (
 from .query_model import QueryModelArchitecture
 
 
-QUERY_WORKLOAD_POLICY_VERSION = "query-workloads/v3"
+QUERY_WORKLOAD_POLICY_VERSION = "query-workloads/v4"
 QUERY_WORKLOAD_CHECKPOINT_VERSION = 2
 MAX_PARALLEL_QUERY_WORKLOADS = 8
 QUERY_TRACE_POLL_SECONDS = 1.0
@@ -58,6 +58,18 @@ class WorkloadScenario:
     quantize_non_expert_linear_action: str = "DISABLED"
     quantize_attention_action: str = "DISABLED"
     batch_range: tuple[int, int] = (1, 512)
+    disagg: bool = False
+    ttft_limit: float | None = None
+    tpot_limit: float | None = None
+    reserved_memory_gb: float | None = None
+    prefix_cache_hit_rate: float = 0.0
+    enable_shared_expert_tp: bool = False
+    word_embedding_tp: str = ""
+    mtp_acceptance_rates: tuple[float, ...] = ()
+    compile: bool = False
+    mxfp4_group_size: int | None = None
+    pp_sizes: tuple[int, ...] = ()
+    pp_layer_partitions: tuple[tuple[int, ...], ...] = ()
 
     @property
     def workload_id(self) -> str:
@@ -66,17 +78,36 @@ class WorkloadScenario:
         parallel = (
             f"tp={','.join(map(str, self.tp_sizes))};ep={','.join(map(str, self.ep_sizes))};"
             f"moedp={','.join(map(str, self.moe_dp_sizes))};dcp={','.join(map(str, self.dcp_sizes))};"
-            f"mtp={','.join(map(str, self.mtp_tokens)) or 'default'}"
+            f"mtp={','.join(map(str, self.mtp_tokens)) or 'default'};"
+            f"pp={','.join(map(str, self.pp_sizes)) or 'default'}"
+        )
+        partitions = self.pp_layer_partitions
+        partition_tag = (
+            hashlib.sha256(
+                json.dumps([list(part) for part in partitions], separators=(",", ":")).encode("utf-8")
+            ).hexdigest()[:12]
+            if partitions
+            else "default"
         )
         quantization = (
             f"linear={self.quantize_linear_action};nonexpert={self.quantize_non_expert_linear_action};"
             f"attention={self.quantize_attention_action}"
         )
+        serving = (
+            f"disagg={int(self.disagg)};ttft={self.ttft_limit or 0};tpot={self.tpot_limit or 0};"
+            f"mem={self.reserved_memory_gb if self.reserved_memory_gb is not None else 'default'};"
+            f"prefix={self.prefix_cache_hit_rate};sharedexperttp={int(self.enable_shared_expert_tp)};"
+            f"wordembeddingtp={self.word_embedding_tp or 'off'};"
+            f"mtpacc={','.join(f'{rate:g}' for rate in self.mtp_acceptance_rates) or 'default'};"
+            f"torchcompile={int(self.compile)};"
+            f"mxfp4group={self.mxfp4_group_size if self.mxfp4_group_size is not None else 'default'};"
+            f"pppartitions={partition_tag}"
+        )
         return (
             f"{QUERY_WORKLOAD_POLICY_VERSION};model={self.model_id};sweep={self.sweep_name};"
             f"devices={self.num_devices};input={self.input_length};output={self.output_length};"
             f"chunk={chunk};batch={self.batch_range[0]},{self.batch_range[1]};"
-            f"mode={compilation};{parallel};{quantization}"
+            f"mode={compilation};{parallel};{quantization};{serving}"
         )
 
     def command(self, database_path: Path) -> list[str]:
@@ -121,10 +152,39 @@ class WorkloadScenario:
         ]
         if self.mtp_tokens:
             command.extend(["--num-mtp-tokens", *(str(value) for value in self.mtp_tokens)])
+        if self.mtp_acceptance_rates:
+            command.extend(["--mtp-acceptance-rates", *(f"{rate:g}" for rate in self.mtp_acceptance_rates)])
         if self.max_batched_tokens is not None:
             command.extend(["--max-batched-tokens", str(self.max_batched_tokens)])
+        if self.mxfp4_group_size is not None:
+            command.extend(["--mxfp4-group-size", str(self.mxfp4_group_size)])
+        if self.compilation_config or self.compile:
+            command.append("--compile")
         if self.compilation_config:
-            command.extend(["--compile", "--compilation-config", *self.compilation_config])
+            command.extend(["--compilation-config", *self.compilation_config])
+        if self.pp_sizes:
+            command.extend(["--pp-sizes", *(str(value) for value in self.pp_sizes)])
+        if self.pp_layer_partitions:
+            command.extend(
+                [
+                    "--pp-layer-partitions",
+                    json.dumps([list(partition) for partition in self.pp_layer_partitions], separators=(",", ":")),
+                ]
+            )
+        if self.disagg:
+            command.append("--disagg")
+        if self.ttft_limit is not None:
+            command.extend(["--ttft-limit", f"{self.ttft_limit:g}"])
+        if self.tpot_limit is not None:
+            command.extend(["--tpot-limit", f"{self.tpot_limit:g}"])
+        if self.reserved_memory_gb is not None:
+            command.extend(["--reserved-memory-gb", f"{self.reserved_memory_gb:g}"])
+        if self.prefix_cache_hit_rate:
+            command.extend(["--prefix-cache-hit-rate", f"{self.prefix_cache_hit_rate:g}"])
+        if self.enable_shared_expert_tp:
+            command.append("--enable-shared-expert-tp")
+        if self.word_embedding_tp:
+            command.extend(["--word-embedding-tp", self.word_embedding_tp])
         return command
 
     @property
@@ -132,6 +192,7 @@ class WorkloadScenario:
         """Return the configured parallel-axis Cartesian size before validation."""
         return (
             len(self.tp_sizes)
+            * max(1, len(self.pp_sizes))
             * len(self.ep_sizes)
             * len(self.moe_dp_sizes)
             * len(self.dcp_sizes)
@@ -281,28 +342,62 @@ def _split_non_baseline_batch_boundaries(
     return expanded
 
 
+def parallel_combination_is_legal(
+    *,
+    num_devices: int,
+    tp: int,
+    pp: int = 1,
+    ep: int,
+    moe_dp: int,
+    dcp: int,
+) -> bool:
+    """Mirror the optimizer's PP-aware parallel divisibility constraints.
+
+    ``dp = num_devices / (tp * pp)`` and ``moe_tp = (num_devices / pp) /
+    (ep * moe_dp)`` must both be integral, ``pp`` must divide ``num_devices``,
+    and DCP reuses TP devices (``tp % dcp == 0``). ``pp == 1`` reduces exactly
+    to the legacy TP/EP/MOE-DP/DCP rules.
+    """
+    if pp > num_devices or num_devices % pp:
+        return False
+    stage_devices = num_devices // pp
+    if num_devices % (tp * pp):
+        return False
+    if tp % dcp:
+        return False
+    return stage_devices % (ep * moe_dp) == 0
+
+
 def _expand_parallel_combinations(scenarios: Iterable[WorkloadScenario]) -> list[WorkloadScenario]:
     """Make every optimizer subprocess own exactly one legal parallel configuration."""
     expanded: list[WorkloadScenario] = []
     for scenario in scenarios:
+        pp_values: tuple[int | None, ...] = scenario.pp_sizes or (None,)
         mtp_values: tuple[int | None, ...] = scenario.mtp_tokens or (None,)
-        for tp_size, ep_size, moe_dp_size, dcp_size, mtp_token in product(
+        for pp_size, tp_size, ep_size, moe_dp_size, dcp_size, mtp_token in product(
+            pp_values,
             scenario.tp_sizes,
             scenario.ep_sizes,
             scenario.moe_dp_sizes,
             scenario.dcp_sizes,
             mtp_values,
         ):
-            if (
-                scenario.num_devices % tp_size
-                or scenario.num_devices % ep_size
-                or scenario.num_devices % (ep_size * moe_dp_size)
-                or tp_size % dcp_size
+            if pp_size is not None and pp_size > 1 and (mtp_token or 0) != 0:
+                # PP>1 does not support MTP yet (model_builder rejects it).
+                continue
+            if not parallel_combination_is_legal(
+                num_devices=scenario.num_devices,
+                tp=tp_size,
+                pp=1 if pp_size is None else pp_size,
+                ep=ep_size,
+                moe_dp=moe_dp_size,
+                dcp=dcp_size,
             ):
                 continue
             expanded.append(
                 replace(
                     scenario,
+                    pp_sizes=() if pp_size is None else (pp_size,),
                     tp_sizes=(tp_size,),
                     ep_sizes=(ep_size,),
                     moe_dp_sizes=(moe_dp_size,),

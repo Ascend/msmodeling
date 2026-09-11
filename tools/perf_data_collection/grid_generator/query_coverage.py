@@ -10,11 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from fractions import Fraction
 import hashlib
-from itertools import chain, combinations, product, zip_longest
+from itertools import combinations, product, zip_longest
 import json
 import math
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Collection, Iterable, Iterator, Sequence
 
 from tensor_cast.performance_model.profiling_database.query_demand import KernelQueryDemand
 
@@ -590,6 +590,8 @@ def _project_generic(
         normalized = demand_inputs[0]
         outputs = [normalized, (*normalized[:-1], 1), normalized]
     elif demand.kernel_type == "DispatchFFNCombine" and len(demand_inputs) >= 2:
+        # demand_inputs[1] is the projected weight, so output[1] records
+        # (num_experts,) exactly as the replay contract and existing rows do.
         outputs = [demand_inputs[0], (demand_inputs[1][0],)]
     elif demand.kernel_type == "MoeTokenPermute" and outputs:
         routed_shape = outputs[0]
@@ -878,6 +880,18 @@ def _permuted_product(
         yield tuple(reversed(values))
 
 
+# Structural axis positions that coverage interpolation must never vary for a
+# kernel. DispatchFFNCombine's expert dimension (weight1/weight2 dim0, the
+# per-expert scale slots, and the expert_token_nums output) is tied to the EP
+# configuration recorded in the row's EP Size; perturbing it independently
+# produces rows the DFC kernel rejects at tiling time (EZ9999).
+_COVERAGE_STRUCTURAL_POSITIONS: dict[str, frozenset[tuple[str, int, int]]] = {
+    "DispatchFFNCombine": frozenset(
+        {("input", 1, 0), ("input", 2, 0), ("input", 4, 0), ("input", 5, 0), ("output", 1, 0)}
+    ),
+}
+
+
 def _coverage_candidates(exact: Sequence[ProjectedCandidate], seed: int) -> Iterator[ProjectedCandidate]:
     by_schema: dict[str, list[ProjectedCandidate]] = {}
     for candidate in exact:
@@ -887,9 +901,12 @@ def _coverage_candidates(exact: Sequence[ProjectedCandidate], seed: int) -> Iter
         # All operators now go through coverage interpolation. Attention
         # kernels previously skipped this (exact-only), but the unified
         # three-stage pipeline lets them interpolate from real anchors too.
+        structural = _COVERAGE_STRUCTURAL_POSITIONS.get(schema_candidates[0].kernel_type, frozenset())
         groups = _proportional_groups(schema_candidates)
-        if not groups:
-            continue
+        if structural:
+            groups = [group for group in groups if not any(position in structural for position in group[0])]
+            if not groups:
+                continue
         base = schema_candidates[0]
         domains = [_axis_domain(observed) for _positions, observed in groups]
         for group_index, (positions, _observed) in enumerate(groups):
@@ -1102,6 +1119,9 @@ def _validate_candidate(candidate: "ProjectedCandidate") -> bool:
     return True
 
 
+_EXACT_STATUS_PENDING = "pending"
+
+
 def build_query_generated_rows(
     *,
     csv_path: Path,
@@ -1110,17 +1130,30 @@ def build_query_generated_rows(
     demands: Iterable[KernelQueryDemand],
     row_limit: int,
     seed: int,
-) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """Return up to ``row_limit`` new rows; duplicates never consume budget."""
+    exact_unlimited_workload_ids: Collection[str] = (),
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Return up to ``row_limit`` new rows; duplicates never consume budget.
+
+    Exact demands whose ``workload_id`` is in ``exact_unlimited_workload_ids``
+    are always appended and never consume the ``--rows`` budget. Other exact
+    demands share that budget with coverage and constraint fallback candidates.
+    Every exact demand receives a deterministic status so no demand is silently
+    dropped.
+    """
     demand_list = list(demands)
     templates = _unique_templates(source_rows)
     projected: list[tuple[ProjectedCandidate, dict[str, str]]] = []
     rejected = 0
     seen_candidate_keys: set[tuple[Any, ...]] = set()
+    candidate_keys: dict[int, tuple[Any, ...]] = {}
+    demand_keys: list[tuple[Any, ...] | None] = []
+    key_owner: dict[tuple[Any, ...], int] = {}
+    unlimited_keys: set[tuple[Any, ...]] = set()
     for demand in demand_list:
         result = project_query_demand(demand, headers, templates)
         if result is None:
             rejected += 1
+            demand_keys.append(None)
             continue
         candidate, template = result
         key = (
@@ -1129,9 +1162,17 @@ def build_query_generated_rows(
             candidate.output_shapes,
             candidate.extra_values,
         )
+        candidate_keys[id(candidate)] = key
+        demand_keys.append(key)
+        is_unlimited = demand.workload_id in exact_unlimited_workload_ids
+        if is_unlimited:
+            unlimited_keys.add(key)
         if key in seen_candidate_keys:
+            if is_unlimited and demand_list[key_owner[key]].workload_id not in exact_unlimited_workload_ids:
+                key_owner[key] = len(demand_keys) - 1
             continue
         seen_candidate_keys.add(key)
+        key_owner[key] = len(demand_keys) - 1
         projected.append((candidate, template))
 
     projected.sort(
@@ -1144,26 +1185,66 @@ def build_query_generated_rows(
     }
     template_by_schema = {candidate.schema_key: template for candidate, template in projected}
     exact = [candidate for candidate, _template in projected]
-    ordered: Iterator[ProjectedCandidate] = chain(exact, _coverage_candidates(exact, seed))
 
     seen_rows = {profile_dedupe_key(csv_path, headers, row) for row in source_rows}
     generated: list[dict[str, str]] = []
     duplicate_count = 0
     rejected_count = 0
-    for candidate in ordered:
+    key_status: dict[tuple[Any, ...], str] = {}
+    exact_existing = 0
+    exact_generated = 0
+    exact_budget_truncated = 0
+    generated_exact_demand_indexes: list[int] = []
+
+    def candidate_key(candidate: ProjectedCandidate) -> tuple[Any, ...]:
+        return candidate_keys[id(candidate)]
+
+    budget_used = 0
+    for candidate in exact:
+        key = candidate_key(candidate)
+        is_unlimited = key in unlimited_keys
+        if not is_unlimited and budget_used >= row_limit:
+            key_status[key] = "budget_truncated"
+            exact_budget_truncated += 1
+            continue
         if not _validate_candidate(candidate):
             rejected_count += 1
+            key_status[key] = "validation_rejected"
             continue
         template = candidate_template.get(id(candidate)) or template_by_schema[candidate.schema_key]
         row = candidate.to_row(headers, template)
-        key = profile_dedupe_key(csv_path, headers, row)
-        if key in seen_rows:
+        dedupe_key = profile_dedupe_key(csv_path, headers, row)
+        if dedupe_key in seen_rows:
             duplicate_count += 1
+            key_status[key] = "existing"
+            exact_existing += 1
             continue
-        seen_rows.add(key)
+        seen_rows.add(dedupe_key)
         generated.append(row)
-        if len(generated) >= row_limit:
-            break
+        generated_exact_demand_indexes.append(key_owner[key])
+        key_status[key] = "generated"
+        exact_generated += 1
+        if not is_unlimited:
+            budget_used += 1
+
+    coverage_appended = 0
+    if budget_used < row_limit:
+        for candidate in _coverage_candidates(exact, seed):
+            if budget_used >= row_limit:
+                break
+            if not _validate_candidate(candidate):
+                rejected_count += 1
+                continue
+            template = template_by_schema[candidate.schema_key]
+            row = candidate.to_row(headers, template)
+            dedupe_key = profile_dedupe_key(csv_path, headers, row)
+            if dedupe_key in seen_rows:
+                duplicate_count += 1
+                continue
+            seen_rows.add(dedupe_key)
+            generated.append(row)
+            coverage_appended += 1
+            budget_used += 1
 
     # ── Constraint fallback (stage 3): when exact + coverage (stages 1-2)
     #    produce fewer rows than requested, fill the remainder with shapes
@@ -1174,8 +1255,8 @@ def build_query_generated_rows(
     fallback_duplicates = 0
     fallback_appended = 0
     fallback_rejected_safety = 0
-    if len(generated) < row_limit:
-        remaining = row_limit - len(generated)
+    if budget_used < row_limit:
+        remaining = row_limit - budget_used
         fallback_rows, fallback_summary = build_constraint_fallback_rows(
             kernel_type=kernel_type,
             csv_path=csv_path,
@@ -1190,6 +1271,18 @@ def build_query_generated_rows(
         fallback_rejected_safety = fallback_summary.get("rejected_safety", 0)
         generated.extend(fallback_rows)
 
+    # One deterministic status per demand occurrence, aligned with the input
+    # demand order; identical signatures still get their own occurrence entry.
+    demand_statuses: list[str] = []
+    for index, key in enumerate(demand_keys):
+        if key is None:
+            status = "projection_rejected"
+        elif key_owner.get(key) != index:
+            status = "duplicate"
+        else:
+            status = key_status.get(key, "unresolved")
+        demand_statuses.append(status)
+
     return generated, {
         "demands": len(demand_list),
         "projected_exact": len(exact),
@@ -1197,6 +1290,12 @@ def build_query_generated_rows(
         "duplicates": duplicate_count,
         "appended": len(generated),
         "validation_rejected": rejected_count,
+        "exact_existing": exact_existing,
+        "exact_generated": exact_generated,
+        "exact_budget_truncated": exact_budget_truncated,
+        "coverage_appended": coverage_appended,
+        "demand_statuses": demand_statuses,
+        "generated_exact_demand_indexes": generated_exact_demand_indexes,
         "fallback_attempted": fallback_attempted,
         "fallback_duplicates": fallback_duplicates,
         "fallback_appended": fallback_appended,

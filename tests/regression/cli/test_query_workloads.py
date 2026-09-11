@@ -359,3 +359,54 @@ time.sleep(30)
     checkpoint_path = next((tmp_path / "trace" / "workloads").glob("*/checkpoint.json"))
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     assert checkpoint["completion_reason"] == "query_trace_converged"
+
+
+def test_scenario_command_forwards_actual_optimizer_flags(tmp_path: Path) -> None:
+    scenario = WorkloadScenario(
+        model_id="org/model",
+        device="TEST_DEVICE",
+        num_devices=32,
+        input_length=80000,
+        output_length=1024,
+        max_batched_tokens=320000,
+        tp_sizes=(2,),
+        ep_sizes=(4,),
+        moe_dp_sizes=(1,),
+        dcp_sizes=(1,),
+        mtp_tokens=(0, 2),
+        disagg=True,
+        tpot_limit=70,
+        reserved_memory_gb=10,
+        enable_shared_expert_tp=True,
+        word_embedding_tp="row",
+        mtp_acceptance_rates=(0.9, 0.6),
+        compile=True,
+    )
+    command = scenario.command(tmp_path)
+    text = " ".join(command)
+
+    assert "--disagg" in text
+    assert "--tpot-limit 70" in text
+    assert "--reserved-memory-gb 10" in text
+    assert "--enable-shared-expert-tp" in text
+    assert "--word-embedding-tp row" in text
+    assert "--mtp-acceptance-rates 0.9 0.6" in text
+    assert "--compile" in command
+    assert "--ttft-limit" not in text
+    assert "--prefix-cache-hit-rate" not in text
+
+    # Default-constructed scenarios keep the historical internal command.
+    baseline = _scenario().command(tmp_path)
+    baseline_text = " ".join(baseline)
+    assert "--disagg" not in baseline_text
+    assert "--reserved-memory-gb" not in baseline_text
+    assert "--mtp-acceptance-rates" not in baseline_text
+
+    # The workload identity must change with every serving-relevant field.
+    identities = {
+        scenario.workload_id,
+        WorkloadScenario(**{**scenario.__dict__, "disagg": False}).workload_id,
+        WorkloadScenario(**{**scenario.__dict__, "reserved_memory_gb": 5.0}).workload_id,
+        WorkloadScenario(**{**scenario.__dict__, "mtp_acceptance_rates": (0.5,)}).workload_id,
+    }
+    assert len(identities) == 4

@@ -342,7 +342,11 @@ class TestTaskRunner(unittest.TestCase):
         summary_df = result[0].get_summary_df()
         row = summary_df.iloc[0]
         self.assertEqual(row["concurrency"], 2)
+        self.assertEqual(row["tp_size"], 1)
         self.assertEqual(row["pp_size"], 1)
+        self.assertEqual(row["dp_size"], 1)
+        self.assertEqual(row["ep_size"], 1)
+        self.assertEqual(row["moe_dp_size"], 1)
         self.assertEqual(row["pp_bubble_ratio"], 0.0)
         self.assertEqual(
             result[0].get_best_result_row()["parallel"],

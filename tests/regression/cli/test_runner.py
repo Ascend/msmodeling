@@ -10,6 +10,7 @@ from unittest import mock
 import pytest
 
 from tensor_cast.performance_model.profiling_database.query_demand import KernelQueryDemand
+from tools.perf_data_collection.grid_generator.query_model import QueryModelArchitecture
 from tools.perf_data_collection.grid_generator.query_workloads import QueryWorkloadRunResult
 from tools.perf_data_collection.grid_generator.runner import (
     _query_cache_directory,
@@ -108,12 +109,29 @@ class TestPublicInputNormalization:
 
 
 class TestRunQueryMode:
+    @pytest.fixture(autouse=True)
+    def _stub_query_model_architecture(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "tools.perf_data_collection.grid_generator.runner.resolve_query_model_architecture",
+            lambda _model_id: QueryModelArchitecture(
+                max_context_length=1024,
+                num_experts=0,
+                num_mtp_layers=0,
+                tp_sizes=(1,),
+                ep_sizes=(1,),
+            ),
+        )
+        monkeypatch.setattr(
+            "tools.perf_data_collection.grid_generator.runner.preflight_generated_rows",
+            lambda _kernel_type, rows, _op_replay_dir: [mock.Mock(passed=True) for _row in rows],
+        )
+
     def test_rows_are_incremental_per_csv(self, tmp_path: Path) -> None:
         database = tmp_path / "database"
         replay = tmp_path / "op_replay"
         database.mkdir()
         replay.mkdir()
-        (database / "op_mapping.yaml").write_text("device: TEST\n", encoding="utf-8")
+        (database / "op_mapping.yaml").write_text("device: TEST_DEVICE\n", encoding="utf-8")
         _write_add_csv(database / "Add.csv")
         (replay / "Add_run.py").write_text("", encoding="utf-8")
         args = argparse.Namespace(
@@ -160,7 +178,7 @@ class TestRunQueryMode:
         replay = tmp_path / "op_replay"
         database.mkdir()
         replay.mkdir()
-        (database / "op_mapping.yaml").write_text("device: TEST\n", encoding="utf-8")
+        (database / "op_mapping.yaml").write_text("device: TEST_DEVICE\n", encoding="utf-8")
         _write_add_csv(database / "Add.csv")
         (replay / "Add_run.py").write_text("", encoding="utf-8")
         args = argparse.Namespace(rows=1, target_models=["org/model"], ops=["Add"], seed=0)
@@ -206,7 +224,7 @@ class TestRunQueryMode:
         replay = tmp_path / "op_replay"
         database.mkdir()
         replay.mkdir()
-        (database / "op_mapping.yaml").write_text("device: TEST\n", encoding="utf-8")
+        (database / "op_mapping.yaml").write_text("device: TEST_DEVICE\n", encoding="utf-8")
         for operator in ("Add", "MaskedFill"):
             _write_add_csv(database / f"{operator}.csv")
             (replay / f"{operator}_run.py").write_text("", encoding="utf-8")
@@ -258,7 +276,7 @@ class TestRunQueryMode:
         replay = tmp_path / "op_replay"
         database.mkdir()
         replay.mkdir()
-        (database / "op_mapping.yaml").write_text("device: TEST\n", encoding="utf-8")
+        (database / "op_mapping.yaml").write_text("device: TEST_DEVICE\n", encoding="utf-8")
         _write_add_csv(database / "BatchMatMulV2.csv")
         (replay / "BatchMatMulV2_run.py").write_text("", encoding="utf-8")
         args = argparse.Namespace(
@@ -292,7 +310,7 @@ class TestRunQueryMode:
         replay = tmp_path / "op_replay"
         database.mkdir()
         replay.mkdir()
-        (database / "op_mapping.yaml").write_text("device: TEST\n", encoding="utf-8")
+        (database / "op_mapping.yaml").write_text("device: TEST_DEVICE\n", encoding="utf-8")
         for operator in ("Add", "MoeTokenPermute"):
             _write_add_csv(database / f"{operator}.csv")
             (replay / f"{operator}_run.py").write_text("", encoding="utf-8")
@@ -332,7 +350,7 @@ class TestRunQueryMode:
         replay = tmp_path / "op_replay"
         database.mkdir()
         replay.mkdir()
-        (database / "op_mapping.yaml").write_text("device: TEST\n", encoding="utf-8")
+        (database / "op_mapping.yaml").write_text("device: TEST_DEVICE\n", encoding="utf-8")
         _write_add_csv(database / "MoeTokenPermute.csv")
         (replay / "MoeTokenPermute_run.py").write_text("", encoding="utf-8")
         args = argparse.Namespace(
@@ -367,7 +385,7 @@ class TestRunQueryMode:
         replay = tmp_path / "op_replay"
         database.mkdir()
         replay.mkdir()
-        (database / "op_mapping.yaml").write_text("device: TEST\n", encoding="utf-8")
+        (database / "op_mapping.yaml").write_text("device: TEST_DEVICE\n", encoding="utf-8")
         for operator in ("Add", "MaskedFill"):
             _write_add_csv(database / f"{operator}.csv")
             (replay / f"{operator}_run.py").write_text("", encoding="utf-8")

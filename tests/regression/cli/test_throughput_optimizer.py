@@ -1036,7 +1036,11 @@ class TestPPCandidateGeneration:
         ),
     )
     def test_invalid_pp_candidates_are_filtered(self, overrides):
-        assert self._candidates(**overrides) == []
+        if max(overrides["pp_sizes"]) > overrides.get("num_devices", 32):
+            with pytest.raises(ValueError, match="larger than 'num_devices'"):
+                self._candidates(**overrides)
+        else:
+            assert self._candidates(**overrides) == []
 
     def test_moe_tp_uses_stage_local_devices(self):
         configs = self._candidates(
@@ -1157,6 +1161,18 @@ class TestPPCandidateGeneration:
             num_devices=32,
             tp_sizes=[4],
             pp_sizes=[3, 4],
+            num_hidden_layers=80,
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+            num_mtp_tokens=4,
+        )
+        assert configs == []
+
+    def test_mtp_not_misattributed_when_another_pp_exceeds_layer_count(self):
+        configs = build_pp_search_candidates(
+            num_devices=256,
+            tp_sizes=[1],
+            pp_sizes=[2, 128],
             num_hidden_layers=80,
             ep_sizes=[1],
             moe_dp_sizes=[1],

@@ -643,20 +643,80 @@ class ParallelSearchCandidate:
     schedule: str = "forward"
 
 
-def _parse_partition_list(partition_values) -> tuple[int, ...]:
+def _parse_partition_list(partition_values: list[int] | tuple[int, ...] | str) -> tuple[int, ...]:
     """Validate a list of positive ints and return as tuple.
 
     Accepts either a list of ints (e.g. ``[40, 40]``) or a comma-separated
     string (e.g. ``"40,40"``) for flexibility across CLI and direct call sites.
     """
     if isinstance(partition_values, str):
-        partition_values = [int(x.strip()) for x in partition_values.split(",")]
-    if not partition_values:
+        try:
+            partition_values = [int(value.strip()) for value in partition_values.split(",")]
+        except ValueError as error:
+            raise ValueError(f"partition {partition_values!r} contains a non-integer entry") from error
+    if not isinstance(partition_values, (list, tuple)) or not partition_values:
         raise ValueError("partition has no entries")
-    counts = tuple(int(c) for c in partition_values)
+    if any(isinstance(count, bool) or not isinstance(count, int) for count in partition_values):
+        raise ValueError(f"partition {partition_values!r} contains a non-integer entry")
+    counts = tuple(partition_values)
     if any(c <= 0 for c in counts):
         raise ValueError(f"partition {partition_values!r} has non-positive entries")
     return counts
+
+
+def resolve_pp_sizes(pp_sizes: list[int] | None, num_devices: int) -> list[int]:
+    """Resolve ``--pp-sizes`` once for CLI and workload-spec callers."""
+    if pp_sizes is None:
+        return [1]
+    if not isinstance(pp_sizes, list):
+        raise ValueError("pp_sizes must be a list of positive integers")
+    if not pp_sizes:
+        return [1 << index for index in range(num_devices.bit_length())]
+
+    resolved: list[int] = []
+    for size in pp_sizes:
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            raise ValueError(f"pp_sizes contains non-positive integer value {size!r}")
+        if size > num_devices:
+            raise ValueError(f"pp_sizes contains value {size}, which is larger than 'num_devices' ({num_devices})")
+        if size not in resolved:
+            resolved.append(size)
+    return resolved
+
+
+def resolve_pp_layer_partitions(
+    pp_layer_partitions: list[list[int] | str] | None,
+    pp_sizes: list[int],
+    num_hidden_layers: int,
+) -> dict[int, list[tuple[int, ...]]]:
+    """Validate and group PP layer partitions for all PP entry points."""
+    if pp_layer_partitions is None:
+        return {}
+    if not isinstance(pp_layer_partitions, list) or not pp_layer_partitions:
+        raise ValueError("pp_layer_partitions must be a non-empty list of layer-count lists")
+
+    requested_pp = {pp for pp in pp_sizes if pp > 1}
+    partitions_by_length: dict[int, list[tuple[int, ...]]] = {}
+    for partition_values in pp_layer_partitions:
+        partition = _parse_partition_list(partition_values)
+        pp_size = len(partition)
+        if pp_size not in requested_pp:
+            raise ValueError(
+                f"partition length {pp_size} does not match any requested pp_sizes > 1 ({sorted(requested_pp)})"
+            )
+        if sum(partition) != num_hidden_layers:
+            raise ValueError(
+                f"partition {list(partition)} sums to {sum(partition)}, expected num_hidden_layers {num_hidden_layers}"
+            )
+        partitions_by_length.setdefault(pp_size, []).append(partition)
+
+    missing = sorted(requested_pp - set(partitions_by_length))
+    if missing:
+        raise ValueError(
+            f"no partition of length {missing} for requested pp_sizes {sorted(requested_pp)}; "
+            "PP>1 requires an explicit matching-length partition when pp_layer_partitions is provided"
+        )
+    return partitions_by_length
 
 
 def build_pp_search_candidates(
@@ -668,7 +728,7 @@ def build_pp_search_candidates(
     moe_dp_sizes: list[int] | None = None,
     num_mtp_token_sizes: list[int] | None = None,
     num_mtp_tokens: int = 0,
-    pp_layer_partitions: list[list[int]] | None = None,
+    pp_layer_partitions: list[list[int] | str] | None = None,
     dcp_sizes: list[int] | None = None,
 ) -> list[ParallelSearchCandidate]:
     """Enumerate PP-aware parallel search candidates with stage-local arithmetic.
@@ -676,8 +736,9 @@ def build_pp_search_candidates(
     Uses ``dp = num_devices // (tp * pp)`` and
     ``moe_tp = (num_devices // pp) // (ep * moe_dp)`` so EP stays in the
     stage-local MoE sub-world. Returns candidates that satisfy all divisibility
-    and partition constraints; invalid ones are silently filtered (except
-    partition format errors, which raise ``ValueError``).
+    and partition constraints. Combinations that violate stage-local
+    divisibility or exceed ``num_hidden_layers`` are filtered; malformed PP
+    sizes and partitions raise ``ValueError``.
 
     PP=1 compatibility: when ``pp_sizes`` is None, only PP=1 is searched and
     the TP/EP/MOE-DP defaults match the legacy ``resolve_parallel_search_candidates``
@@ -686,24 +747,20 @@ def build_pp_search_candidates(
     resolve to ``stage_devices = num_devices // pp`` so that adding
     ``--pp-sizes`` alone produces valid candidates.
     """
-    # When pp_sizes is None, only search PP=1 (legacy behavior).
-    if pp_sizes is None:
-        pp_list = [1]
-    elif len(pp_sizes) == 0:
-        pp_list = [1 << i for i in range(num_devices.bit_length())]
-    else:
-        pp_list = [p for p in pp_sizes if p > 0]
+    pp_list = resolve_pp_sizes(pp_sizes, num_devices)
     moe_dp_list = resolve_search_sizes(moe_dp_sizes, num_devices, 1)
     mtp_list = num_mtp_token_sizes or [num_mtp_tokens]
 
     # Parse partition strings eagerly so format errors raise immediately. Group
     # partitions by length so each partition is paired only with matching pp_size,
     # not cartesian-producted across all PP sizes.
-    partitions_by_length: dict[int, list[tuple[int, ...]]] = {}
-    if pp_layer_partitions is not None:
-        for pv in pp_layer_partitions:
-            counts = _parse_partition_list(pv)
-            partitions_by_length.setdefault(len(counts), []).append(counts)
+    if pp_layer_partitions is not None and pp_sizes is None:
+        raise ValueError("pp_layer_partitions requires pp_sizes to be provided")
+    partitions_by_length = resolve_pp_layer_partitions(
+        pp_layer_partitions,
+        pp_list,
+        num_hidden_layers,
+    )
 
     candidates: list[ParallelSearchCandidate] = []
     mtp_blocked_pp_sizes: list[int] = []
@@ -711,10 +768,12 @@ def build_pp_search_candidates(
     for pp in pp_list:
         # Filter pp_size that can't divide num_devices before computing
         # stage_devices, so stage_devices is always > 0 and resolve_search_sizes
-        # never gets a zero default. This also rejects pp > num_devices.
+        # never gets a zero default. ``resolve_pp_sizes`` already rejects
+        # pp > num_devices.
         # Record such pp as base-failed so the final MTP error attribution
         # knows not every empty pp was blocked by MTP.
         if pp > num_hidden_layers:
+            base_failed_pp_sizes.append(pp)
             continue
         if num_devices % pp != 0:
             base_failed_pp_sizes.append(pp)
@@ -755,11 +814,6 @@ def build_pp_search_candidates(
                     f"no partition of length {pp} found for pp_size={pp}; "
                     f"provided partitions have lengths {sorted(partitions_by_length)}"
                 )
-            for p_opt in partition_options:
-                if p_opt is not None and sum(p_opt) != num_hidden_layers:
-                    raise ValueError(
-                        f"partition {p_opt} sum ({sum(p_opt)}) must equal num_hidden_layers ({num_hidden_layers})"
-                    )
         else:
             partition_options = [None]
 

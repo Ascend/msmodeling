@@ -938,7 +938,7 @@ class TestDispatchFFNCombineReplayHelpers:
         monkeypatch.setattr(module, "get_runtime_modules", lambda: (FakeTorch, object()))
         monkeypatch.setattr(module, "resolve_runtime_dtype", lambda name: name)
 
-        with pytest.raises(ValueError, match="num_experts must be positive"):
+        with pytest.raises(ValueError, match="global expert count must be positive"):
             module.build_balanced_expert_idx_tensor((2, 2), 0)
         with pytest.raises(ValueError, match="scale shape mismatch"):
             module.build_scale_tensor((2, 3), (2, 4), "FLOAT")
@@ -1057,6 +1057,7 @@ class TestDispatchFFNCombineReplayHelpers:
             node_rank=0,
             master_addr="127.0.0.1",
             master_port=None,
+            dfc_api="auto",
         )
         monkeypatch.setattr(module, "build_argparser", lambda: SimpleNamespace(parse_args=lambda: args))
         monkeypatch.setattr(module, "get_replay_repeat_count", lambda value: value)

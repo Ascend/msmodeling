@@ -74,6 +74,8 @@ def test_generate_shape_grid_main_cli(
             total_appended_rows=0,
             generated_files=(),
             skipped_files=(),
+            report={},
+            report_path=None,
         ),
     )
 

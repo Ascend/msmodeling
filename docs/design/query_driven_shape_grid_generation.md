@@ -9,17 +9,18 @@ MoE-DP、DCP、MTP 和编译融合会共同改变真实查询。因此，Shape �
 
 ## 用户接口
 
-工具只公开五类输入：
-
 | 参数 | 必选 | 含义 |
 |---|---:|---|
 | `--database-path` | 是 | 目标性能数据库目录，同时提供设备和软件栈映射 |
 | `--rows` | 否 | 每个 CSV 本次最多新增的有效唯一行数，默认 1000 |
-| `--target-models` | 是 | 一个或多个 HuggingFace 模型 ID |
+| `--target-models` | 二选一 | 一个或多个 HuggingFace 模型 ID，触发内部采样扫描 |
+| `--optimizer-args-file` | 二选一 | 描述实际 throughput_optimizer 场景的 YAML/JSON workload spec |
 | `--ops` | 否 | 最终需要生成的 replay-supported Kernel；未指定时使用模型查询结果 |
 | `--seed` | 否 | Coverage 候选的稳定排序种子，默认 0 |
+| `--report-path` | 否 | 机器可读 JSON 生成报告的输出路径；缺省写入自动查询缓存目录 |
 
-设备、vLLM/PyTorch/CANN 版本从数据库的 `op_mapping.yaml` 读取，不再作为重复的公开参数。
+`--target-models` 与 `--optimizer-args-file` 至少提供一个，可以同时提供（场景合并）。设备、vLLM/PyTorch/CANN
+版本从数据库的 `op_mapping.yaml` 读取，不再作为重复的公开参数。
 
 ```powershell
 python tools/perf_data_collection/generate_shape_grid.py `
@@ -32,25 +33,91 @@ python tools/perf_data_collection/generate_shape_grid.py `
 重复执行时，已有行、重复候选和非法候选都不占用 `--rows`；工具会继续追加后续候选。因此 `--rows 1000`
 表示“每个目标 CSV 本轮最多新增 1000 行”，不是“最终总行数为 1000”。
 
+## 实际寻优参数驱动的生成模式
+
+`--optimizer-args-file` 接受一个 YAML 或 JSON 文件，描述一个或多个用户实际执行的
+`throughput_optimizer` 场景。字段名与 optimizer CLI 的 snake_case 语义一一对应；省略的键与 CLI 省略
+flag 的行为一致（含 TP-only 向后兼容默认）。工作负载并行候选先复用 optimizer 自己的
+`resolve_parallel_search_candidates` / `resolve_search_sizes` 解析，再展开为单并行配置的独立子进程，
+与内部采样模式共享 checkpoint 缓存、并发调度和查询收敛逻辑。
+
+```yaml
+workloads:
+  - name: prefill-20k
+    model: zai-org/GLM-5.1
+    device: ATLAS_800_A3_752T_128G_DIE
+    num_devices: 32
+    input_length: 20000
+    output_length: 1024
+    disagg: true
+    ttft_limit: 10000
+    max_batched_tokens: 20000
+    batch_range: [1, 32]
+    tp_sizes: [1, 2, 4, 8, 16]
+    ep_sizes: [4, 8, 16, 32]
+    moe_dp_sizes: [1]
+    num_mtp_tokens: [0]
+    quantize_linear_action: W8A8_DYNAMIC
+    quantize_attention_action: DISABLED
+    reserved_memory_gb: 10
+    compile: true
+    compilation_config: [enable_sequence_parallel, enable_dispatch_ffn_combine]
+    enable_shared_expert_tp: true
+```
+
+失败封闭（fail closed）约定：
+
+- 未知字段直接报错，并列出全部合法字段；
+- 历史命令行里存在、但当前工具语义无法兑现的字段（`dp_sizes`、speculative 三件套、multimodal、
+  PD-ratio、`performance_model`/`profiling_database_path`、仅影响输出文件或警告的执行参数等）给出定向错误；
+- `input_length` 仅接受整数，长度分布文件不支持；
+- spec 的 `device` 必须是已注册 DeviceProfile 且与目标数据库设备一致；
+- 展开后不存在任何合法并行组合时报错；被过滤的非法组合数量写入报告。
+
+PP 搜索：`pp_sizes`/`pp_layer_partitions` 直接映射 optimizer 的 `--pp-sizes`/`--pp-layer-partitions`；
+并行组合合法性按 optimizer 的 stage-local 规则（`dp = num_devices/(tp×pp)`、
+`moe_tp = (num_devices/pp)/(ep×moe_dp)`）预过滤；PP>1 要求 `num_mtp_tokens` 包含 0（即不允许
+推测性 MTP）；pp 超过模型 `num_hidden_layers` 时与 optimizer CLI 一致按非法候选过滤并计入汇总。
+
+预算语义：optimizer-args workload 产生的 exact demand 行不受 `--rows` 约束，永远全部写入；组合模式下
+target-model workload 的 exact demand 仍与 Coverage 插值、constraint fallback 候选共享 `--rows` 预算。
+纯 `--target-models` 模式保持原语义。
+
+每条 exact demand 都有确定状态：`existing`（已有有效行）、`generated`（生成新行）、`duplicate`（与另一条
+demand 重复）、`projection_rejected`（无法投影到现有 schema）、`validation_rejected`（违反 replay 约束）、
+`preflight_rejected`（真实 build_case 预检拒绝）、`budget_truncated`（仅 target-models 来源）或
+`unsupported`（Kernel 无 CSV/replay 入口）。状态台账连同
+workload 摘要、spec 稳定 digest、每个算子的 preflight 结果和 CSV 行数前后对比写入 JSON 生成报告；
+`demand_id` 与 runtime-rich 算子行内的 `Runtime case_id` 同源，可从报告追溯 demand → CSV row。
+
+## 生成行 replay preflight
+
+所有新增行（含内部采样模式的理论兜底行）在写入 CSV 前执行纯 Python replay preflight：加载对应
+`op_replay/*_run.py`，stub 掉 NPU 张量构建后真实执行该 Kernel 的 `build_case` 契约，校验输入输出
+Shape、dtype、format 和辅助张量约束。preflight 失败的行不写入数据库，失败原因进入生成报告，
+避免浪费 A3 microbench 时间或被 microbench 静默删除。
+
 ## 数据流
 
 ```text
-HuggingFace ModelArchitecture
-        ↓
-内部 workload policy（设备数、长度、batch、并行与编译组合）
-        ↓
-多次 throughput_optimizer
-        ↓
-ProfilingDataSource 捕获 HIT/MISS 的实际 Kernel 查询
-        ↓
-版本化 CANNBackendProjector
-        ↓
-查询命中：精确锚点 + CoveragePlanner 插值/边界候选
-查询未命中的显式 --ops：通用 Theory Generator
-        ↓
-仅写入存在 op_replay/*_run.py 的 Kernel CSV
-        ↓
-start_microbench / op_replay 实测回填
+HuggingFace ModelArchitecture ── 或 ── optimizer-args workload spec
+        ↓                                  ↓
+内部 workload policy              实际寻优参数场景展开
+        └────────────┬─────────────────────┘
+              多次 throughput_optimizer
+                     ↓
+      ProfilingDataSource 捕获 HIT/MISS 的实际 Kernel 查询
+                     ↓
+          版本化 CANNBackendProjector
+                     ↓
+   查询命中：精确锚点 + CoveragePlanner 插值/边界候选
+   查询未命中的显式 --ops：通用 Theory Generator
+                     ↓
+       replay build_case 纯 Python preflight
+                     ↓
+        仅写入通过 preflight 的 Kernel CSV
+                     ↓
+         start_microbench / op_replay 实测回填
 ```
 
 ## 算子选择优先级
@@ -145,8 +212,10 @@ workload 的 TP/EP 候选，并且 trace 与整个 optimizer 进程树连续 30 
 数据库内容以及查询/投影关键源码摘要；数据库、模型或查询语义变化时自动失效。中断后再次执行同一命令会复用已完成
 workload，不需要新增公开参数，失败或不完整的 workload 会重新运行。缓存不写入性能数据库，也不改变最终 CSV 来源语义。
 
-PP 通常只改变层在 stage 之间的归属，不改变单层 Kernel Shape。因此当前 optimizer 没有为了不同 PP 数重复生成同一层
-Shape；涉及跨 stage 通信或特殊 pipeline kernel 时，应先在仿真查询层显式建模，再由相同捕获机制自然进入网格。
+PP 改变层在 stage 之间的归属，但不改变单层 Kernel 的 Shape 语义；PP>1 要求 `num_mtp_tokens` 包含 0
+（即不允许推测性 MTP）。因此 optimizer 的 PP 搜索
+产生的查询主要由 TP/EP/阶段本地并行维度决定，PP 本身不引入新的 Kernel Shape 轴；涉及跨 stage 通信或特殊
+pipeline kernel 时，应先在仿真查询层显式建模，再由相同捕获机制自然进入网格。
 
 ## CoveragePlanner
 

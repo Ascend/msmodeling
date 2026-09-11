@@ -35,7 +35,9 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Run internal throughput-optimizer sweeps for the target HuggingFace model(s), "
-            "capture profiling-database queries, and append replayable query or generic fallback rows."
+            "capture profiling-database queries, and append replayable query or generic fallback rows. "
+            "Pass --optimizer-args-file to generate shapes for your actual optimizer scenarios instead "
+            "of (or in addition to) the internal model-structure sweeps."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Replay-supported operators: {supported}",
@@ -53,14 +55,31 @@ def build_argparser() -> argparse.ArgumentParser:
         help=(
             "Maximum new valid and unique rows appended to each target operator CSV in this run. "
             "Existing, duplicate, and rejected rows do not consume the budget. "
+            "Exact demands originating from --optimizer-args-file never consume this budget; "
+            "target-model exact demands and coverage/fallback candidates do. "
             f"Default: {DEFAULT_ROWS}."
         ),
     )
-    parser.add_argument(
+    target_group = parser.add_argument_group("Workload Source (one of both may be given)")
+    target_group.add_argument(
         "--target-models",
         nargs="+",
-        required=True,
-        help="One or more HuggingFace model IDs. Comma-separated IDs are also accepted.",
+        default=None,
+        help=(
+            "One or more HuggingFace model IDs for the internal sampling sweeps. "
+            "Comma-separated IDs are also accepted. Required unless --optimizer-args-file is given."
+        ),
+    )
+    target_group.add_argument(
+        "--optimizer-args-file",
+        type=Path,
+        default=None,
+        help=(
+            "YAML or JSON file describing one or more actual throughput-optimizer scenarios "
+            "(field names mirror the optimizer CLI in snake_case). Unknown or unsupported fields "
+            "fail closed. Exact query demand from these scenarios is always generated and never "
+            "truncated by --rows."
+        ),
     )
     parser.add_argument(
         "--ops",
@@ -76,6 +95,15 @@ def build_argparser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Seed for deterministic coverage-candidate ordering. Default: 0.",
+    )
+    parser.add_argument(
+        "--report-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional output path for the machine-readable JSON generation report. "
+            "By default the report is written into the automatic query cache directory."
+        ),
     )
     return parser
 
@@ -94,21 +122,36 @@ def main(argv: Sequence[str] | None = None) -> None:
         op_replay_dir=OP_REPLAY_DIR,
         repo_root=REPO_ROOT,
     )
+    totals = result.report.get("totals", {})
     print(
         "Query-driven shape generation complete: "
         f"workloads={result.workloads.succeeded}/{result.workloads.attempted}, "
         f"cached={result.workloads.cached}, elapsed={result.workloads.elapsed_seconds:.1f}s, "
         f"captured_demands={result.captured_demands}, "
         f"appended_rows={result.total_appended_rows}, "
-        f"updated_csvs={len(result.generated_files)}."
+        f"updated_csvs={len(result.generated_files)}"
+        + (
+            f", preflight_rejected={totals.get('preflight_rejected', 0)}"
+            if totals.get("preflight_rejected")
+            else ""
+        )
+        + "."
     )
+    unsupported = result.report.get("unsupported_kernel_demands") or {}
+    if unsupported:
+        print(
+            "Warning: captured demands target kernels without database/replay support and were not generated: "
+            + ", ".join(f"{name} x{count}" for name, count in unsupported.items())
+        )
     if result.workloads.failed_workloads:
         print(
-            f"Warning: {len(result.workloads.failed_workloads)} internal workload(s) failed; "
+            f"Warning: {len(result.workloads.failed_workloads)} workload(s) failed; "
             "successful workloads were still used."
         )
     if result.skipped_files:
         print(f"No new replay row was produced for {len(result.skipped_files)} supported CSV(s).")
+    if result.report_path is not None:
+        print(f"Generation report: {result.report_path}")
 
 
 if __name__ == "__main__":

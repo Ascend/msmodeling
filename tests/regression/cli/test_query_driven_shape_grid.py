@@ -30,7 +30,7 @@ def _headers() -> list[str]:
     ]
 
 
-def test_shape_grid_cli_exposes_only_five_inputs() -> None:
+def test_shape_grid_cli_exposes_stable_public_inputs() -> None:
     parser = build_argparser()
     public_options = {
         option
@@ -43,6 +43,8 @@ def test_shape_grid_cli_exposes_only_five_inputs() -> None:
         "--database-path",
         "--rows",
         "--target-models",
+        "--optimizer-args-file",
+        "--report-path",
         "--ops",
         "--seed",
     }
@@ -491,6 +493,8 @@ def test_dispatch_ffn_combine_projection_uses_runtime_expert_count() -> None:
     projected, _ = project_query_demand(demand, headers, [template])
 
     assert projected.input_shapes[1:3] == ((256, 6144, 4096), (256, 2048, 6144))
+    # expert_token_nums must mirror the projected weight's expert count — the
+    # replay contract (build_row_case) and existing rows record (num_experts,).
     assert projected.output_shapes == ((128, 6144), (256,))
     assert dict(projected.extra_values)["EP Size"] == "1"
 
@@ -830,3 +834,215 @@ def test_validate_candidate_rejects_degenerate_batch_matmul_contraction() -> Non
     assert _validate_candidate(_candidate("BatchMatMulV2", [(1, 32, 128), (1, 128, 1)], [(1, 32, 1)]))
     assert _validate_candidate(_candidate("BatchMatMulV2", [(1, 32, 128), (1, 1, 128)], [(1, 32, 1)]))
     assert not _validate_candidate(_candidate("BatchMatMulV2", [(1, 32, 128), (1, 256, 64)], [(1, 32, 64)]))
+
+
+# ── Budget semantics: exact demand vs the --rows budget ─────────────────────
+
+
+def _budget_csv(tmp_path: Path) -> Path:
+    csv_path = tmp_path / "Add.csv"
+    header = ",".join(_headers())
+    csv_path.write_text(f'{header}\nenabled,"1,4;1,4",BF16;BF16,ND;ND,"1,4",BF16,ND,0\n', encoding="utf-8")
+    return csv_path
+
+
+def _elementwise_demand(shape: tuple[int, int], workload_id: str = "target") -> KernelQueryDemand:
+    return KernelQueryDemand(
+        projector_version="test/v1",
+        op_name="tensor_cast.add.default",
+        kernel_type="Add",
+        query_mode="elementwise",
+        input_shapes=(shape, shape),
+        output_shapes=(shape,),
+        input_dtypes=("BF16", "BF16"),
+        output_dtypes=("BF16",),
+        tensor_parallel_size=1,
+        expert_parallel_size=1,
+        workload_id=workload_id,
+    )
+
+
+def _budget_rows(tmp_path: Path, row_limit: int, exact_unlimited: bool):
+    from tools.perf_data_collection.grid_generator.query_coverage import build_query_generated_rows
+    from tools.perf_data_collection.grid_generator.utils import load_csv_template_rows
+
+    csv_path = _budget_csv(tmp_path)
+    headers, source_rows = load_csv_template_rows(csv_path, require_rows=True)
+    workload_id = "spec" if exact_unlimited else "target"
+    demands = [
+        _elementwise_demand((2, 4), workload_id),
+        _elementwise_demand((3, 4), workload_id),
+        _elementwise_demand((4, 4), workload_id),
+    ]
+    return build_query_generated_rows(
+        csv_path=csv_path,
+        headers=headers,
+        source_rows=source_rows,
+        demands=demands,
+        row_limit=row_limit,
+        seed=0,
+        exact_unlimited_workload_ids={"spec"} if exact_unlimited else set(),
+    )
+
+
+def test_legacy_budget_still_caps_exact_rows(tmp_path: Path) -> None:
+    rows, summary = _budget_rows(tmp_path, row_limit=2, exact_unlimited=False)
+
+    assert len(rows) == 2
+    assert summary["exact_generated"] == 2
+    assert summary["exact_budget_truncated"] == 1
+    assert summary["coverage_appended"] == 0
+    statuses = sorted(summary["demand_statuses"])
+    assert statuses.count("generated") == 2
+    assert statuses.count("budget_truncated") == 1
+
+
+def test_exact_unlimited_mode_never_truncates_exact_demand(tmp_path: Path) -> None:
+    rows, summary = _budget_rows(tmp_path, row_limit=1, exact_unlimited=True)
+
+    # All three exact demand rows are written; the budget bounds exactly one
+    # interpolated coverage row.
+    assert summary["exact_generated"] == 3
+    assert summary["exact_budget_truncated"] == 0
+    assert summary["coverage_appended"] == 1
+    assert len(rows) == 4
+    statuses = sorted(summary["demand_statuses"])
+    assert statuses == ["generated", "generated", "generated"]
+
+
+def test_existing_and_duplicate_demand_statuses(tmp_path: Path) -> None:
+    from tools.perf_data_collection.grid_generator.query_coverage import build_query_generated_rows
+    from tools.perf_data_collection.grid_generator.utils import load_csv_template_rows
+
+    csv_path = _budget_csv(tmp_path)
+    headers, source_rows = load_csv_template_rows(csv_path, require_rows=True)
+    # One demand already covered by the template row, two identical new demands.
+    demands = [
+        _elementwise_demand((1, 4)),
+        _elementwise_demand((2, 4)),
+        _elementwise_demand((2, 4)),
+    ]
+    _rows, summary = build_query_generated_rows(
+        csv_path=csv_path,
+        headers=headers,
+        source_rows=source_rows,
+        demands=demands,
+        row_limit=10,
+        seed=0,
+        exact_unlimited_workload_ids={"target"},
+    )
+
+    statuses = list(summary["demand_statuses"])
+    assert statuses.count("existing") == 1
+    assert statuses.count("generated") == 1
+    assert statuses.count("duplicate") == 1
+
+
+def test_mixed_sources_only_exempt_optimizer_args_exact_demands(tmp_path: Path) -> None:
+    from tools.perf_data_collection.grid_generator.query_coverage import build_query_generated_rows
+    from tools.perf_data_collection.grid_generator.utils import load_csv_template_rows
+
+    csv_path = _budget_csv(tmp_path)
+    headers, source_rows = load_csv_template_rows(csv_path, require_rows=True)
+    demands = [
+        _elementwise_demand((2, 4), "spec"),
+        _elementwise_demand((3, 4), "spec"),
+        _elementwise_demand((4, 4), "target"),
+        _elementwise_demand((5, 4), "target"),
+    ]
+
+    rows, summary = build_query_generated_rows(
+        csv_path=csv_path,
+        headers=headers,
+        source_rows=source_rows,
+        demands=demands,
+        row_limit=1,
+        seed=0,
+        exact_unlimited_workload_ids={"spec"},
+    )
+
+    assert len(rows) == 3
+    assert summary["exact_generated"] == 3
+    assert summary["exact_budget_truncated"] == 1
+    statuses = list(summary["demand_statuses"])
+    assert statuses[:2] == ["generated", "generated"]
+    assert statuses[2:].count("generated") == 1
+    assert statuses[2:].count("budget_truncated") == 1
+
+
+def test_dfc_coverage_keeps_structural_expert_axis_at_anchor_values(tmp_path: Path) -> None:
+    from tools.perf_data_collection.grid_generator.query_coverage import build_query_generated_rows
+    from tools.perf_data_collection.grid_generator.utils import load_csv_template_rows
+
+    headers = [
+        "OP State",
+        "Input Shapes",
+        "Input Data Types",
+        "Input Formats",
+        "Output Shapes",
+        "Output Data Types",
+        "Output Formats",
+        "EP Size",
+        "Average Duration(us)",
+    ]
+    template = ",".join(
+        [
+            "dynamic",
+            '"20000,6144;16,6144,4096;16,2048,6144;20000,8;65536;98304;20000,8"',
+            "DT_BF16;INT8;INT8;INT32;INT64;INT64;FLOAT",
+            "ND;FRACTAL_NZ;FRACTAL_NZ;ND;ND;ND;ND",
+            '"20000,6144;16"',
+            "DT_BF16;INT32",
+            "ND;ND",
+            "16",
+            "1",
+        ]
+    )
+    csv_path = tmp_path / "DispatchFFNCombine.csv"
+    csv_path.write_text(",".join(headers) + "\n" + template + "\n", encoding="utf-8")
+    csv_headers, source_rows = load_csv_template_rows(csv_path, require_rows=True)
+
+    def dfc_demand(tokens: int, local_experts: int, ep_size: int) -> KernelQueryDemand:
+        scales = local_experts * 4096, local_experts * 6144
+        return KernelQueryDemand(
+            projector_version="projector/v1",
+            op_name="tensor_cast.dispatch_ffn_combine_quant.default",
+            kernel_type="DispatchFFNCombine",
+            query_mode="moe_fused",
+            input_shapes=(
+                (tokens, 6144),
+                (local_experts, 6144, 4096),
+                (local_experts, 2048, 6144),
+                (tokens, 8),
+                (scales[0],),
+                (scales[1],),
+                (tokens, 8),
+            ),
+            output_shapes=((tokens, 8, 6144),),
+            input_dtypes=("DT_BF16", "INT8", "INT8", "INT32", "INT64", "INT64", "FLOAT"),
+            output_dtypes=("DT_BF16",),
+            attributes={"ep_size": ep_size},
+        )
+
+    demands = [
+        dfc_demand(20000, 16, 16),
+        dfc_demand(1, 16, 16),
+        dfc_demand(20000, 8, 32),
+    ]
+    rows, summary = build_query_generated_rows(
+        csv_path=csv_path,
+        headers=csv_headers,
+        source_rows=source_rows,
+        demands=demands,
+        row_limit=100,
+        seed=0,
+        exact_unlimited_workload_ids={""},
+    )
+
+    assert rows, "coverage should still interpolate the token axis"
+    for row in rows:
+        shapes = row["Input Shapes"].replace('"', "").split(";")
+        experts = int(shapes[1].split(",")[0])
+        scale1 = int(shapes[4])
+        assert experts in (16, 8), f"expert axis must stay at anchor values, got {experts}"
+        assert scale1 == experts * 4096, "scale slot must stay coupled to the expert count"

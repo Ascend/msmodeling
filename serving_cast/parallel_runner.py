@@ -664,6 +664,20 @@ class ParallelRunner:
             else:
                 tmp_user_input.num_mtp_tokens = num_mtp_tokens
                 tmp_user_input.speculative_method = None
+            # Give the legacy PP=1 path the same typed candidate context as the
+            # PP search path. OptimizerSummary must not infer these columns from
+            # display text or from attributes that OptimizerData never owns.
+            tmp_user_input.parallel_search_candidate = ParallelSearchCandidate(
+                tp_size=tmp_user_input.tp_size,
+                pp_size=1,
+                ep_size=tmp_user_input.ep_size,
+                moe_dp_size=tmp_user_input.moe_dp_size,
+                moe_tp_size=tmp_user_input.moe_tp_size,
+                dp_size=tmp_user_input.dp_size,
+                num_mtp_tokens=tmp_user_input.num_mtp_tokens,
+                layer_partition=None,
+                dcp_size=dcp,
+            )
             tmp_user_input.dynamic_shapes = not tmp_user_input.enable_sequence_parallel
             tmp_user_input.dcp_size = dcp
             if base_chrome_trace:
