@@ -20,6 +20,8 @@ from tensor_cast.core.user_config import UserInputConfig
 logger = logging.getLogger(__name__)
 
 CASE_DIR = Path(__file__).resolve().parent / "cases"
+MAX_TEXT_BASELINE_INCREASE_PCT = 0.05
+MAX_NON_TEXT_BASELINE_INCREASE_PCT = 0.20
 
 
 @dataclass
@@ -30,6 +32,7 @@ class BasePerfRegressionCase:
     baseline_time_s: float = 0.0
     initial_tolerance: float = 0.10
     baseline_tolerance: float = 0.20
+    baseline_max_increase_pct: Optional[float] = None
     operator_top_n: int = 10
     operator_tolerance: float = 0.10
     operators: list[dict[str, float]] = None
@@ -74,6 +77,19 @@ def _parse_total_time_s(table_result: str, model_name: str = "analytic") -> floa
     value = float(m.group(1))
     unit = m.group(2)
     return value * {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}[unit]
+
+
+def _is_baseline_time_acceptable(
+    actual_time_s: float,
+    baseline_time_s: float,
+    tolerance: float,
+    max_increase_pct: float,
+) -> bool:
+    """Allow Actual to exceed the baseline by the configured case-type limit."""
+    if baseline_time_s <= 0.0:
+        return True
+    diff_pct = (actual_time_s - baseline_time_s) / baseline_time_s
+    return diff_pct <= max_increase_pct and abs(diff_pct) <= tolerance
 
 
 def _parse_top_operators(
@@ -279,7 +295,21 @@ class TestPerformanceRegression(unittest.TestCase):
 
         if case.baseline_time_s > 0.0:
             baseline_diff_pct = (actual_time_s - case.baseline_time_s) / case.baseline_time_s
-            baseline_passed = abs(baseline_diff_pct) <= case.baseline_tolerance
+            max_baseline_increase_pct = (
+                case.baseline_max_increase_pct
+                if case.baseline_max_increase_pct is not None
+                else (
+                    MAX_NON_TEXT_BASELINE_INCREASE_PCT
+                    if isinstance(case, VideoPerfRegressionCase)
+                    else MAX_TEXT_BASELINE_INCREASE_PCT
+                )
+            )
+            baseline_passed = _is_baseline_time_acceptable(
+                actual_time_s,
+                case.baseline_time_s,
+                case.baseline_tolerance,
+                max_baseline_increase_pct,
+            )
 
         time_overall = initial_passed and baseline_passed
 
@@ -504,7 +534,8 @@ class TestPerformanceRegression(unittest.TestCase):
                 msg_parts.append(
                     f"  vs Baseline: {case.baseline_time_s * 1000:.3f}ms "
                     f"({baseline_diff_pct * 100:+.2f}%, tolerance: ±{case.baseline_tolerance * 100:.0f}%) "
-                    f"{'PASS' if baseline_passed else 'FAIL'}"
+                    f"{'PASS' if baseline_passed else 'FAIL'} "
+                    f"(allows up to +{max_baseline_increase_pct * 100:.0f}% vs Baseline)"
                 )
             self.fail("\n".join(msg_parts))
 
@@ -518,6 +549,27 @@ class TestPerformanceRegression(unittest.TestCase):
             for v in violations:
                 msg_parts.append(v)
             logger.warning("\n".join(msg_parts))
+
+
+class TestBaselineTimeThreshold(unittest.TestCase):
+    def test_allows_text_actual_within_five_percent_of_baseline(self):
+        baseline_time_s = 0.064380
+        tolerance = 0.20
+
+        self.assertTrue(_is_baseline_time_acceptable(0.060820, baseline_time_s, tolerance, 0.05))
+        self.assertTrue(_is_baseline_time_acceptable(baseline_time_s, baseline_time_s, tolerance, 0.05))
+        self.assertTrue(_is_baseline_time_acceptable(0.065000, baseline_time_s, tolerance, 0.05))
+        self.assertFalse(_is_baseline_time_acceptable(0.067600, baseline_time_s, tolerance, 0.05))
+
+    def test_allows_non_text_actual_within_twenty_percent_of_baseline(self):
+        baseline_time_s = 0.064380
+        tolerance = 0.20
+
+        self.assertTrue(_is_baseline_time_acceptable(0.077000, baseline_time_s, tolerance, 0.20))
+        self.assertFalse(_is_baseline_time_acceptable(0.078000, baseline_time_s, tolerance, 0.20))
+
+    def test_keeps_baseline_tolerance_for_large_improvements(self):
+        self.assertFalse(_is_baseline_time_acceptable(0.040000, 0.064380, 0.20, 0.05))
 
 
 def _emit(text: str):

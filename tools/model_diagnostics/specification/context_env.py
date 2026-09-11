@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+from statistics import NormalDist
 from typing import Mapping
 
 from tools.model_diagnostics.domain.models import (
@@ -191,6 +192,43 @@ def _validate_ep_token_args(
         raise SpecificationLoadError("analytic EP rank must be in [0, EP)")
 
 
+_SOFT_SPLIT_MIN_EXPERTS_PER_RANK = 4
+
+
+def _balanced_split(total: int, parts: int) -> list[int]:
+    """Distribute ``total`` over ``parts`` with at most one item of skew."""
+    base = total // parts
+    remainder = total - base * parts
+    return [base + int(index < remainder) for index in range(parts)]
+
+
+def _expected_max_load(total: int, parts: int) -> int:
+    """Independent equivalent of TensorCast's finite-sample hotspot estimate."""
+    if total == 0 or parts == 1:
+        return total
+    mean_load = total / parts
+    variance = mean_load * (1 - 1 / parts)
+    quantile = (parts - 0.375) / (parts + 0.25)
+    return min(total, math.ceil(mean_load + NormalDist().inv_cdf(quantile) * math.sqrt(variance)))
+
+
+def _soft_critical_load(
+    total: int,
+    parts: int,
+    num_global_experts: int,
+    num_local_experts: int,
+) -> int:
+    """Mirror the soft capacity split without importing TensorCast internals."""
+    balanced_load = (total + parts - 1) // parts
+    if num_global_experts < _SOFT_SPLIT_MIN_EXPERTS_PER_RANK * parts:
+        return balanced_load
+
+    expected_max_load = _expected_max_load(total, parts)
+    capacity_load = min(total, math.ceil(total / num_global_experts) * num_local_experts)
+    capacity_weighted_load = math.ceil((expected_max_load + 2 * capacity_load) / 3)
+    return min(total, max(expected_max_load, capacity_weighted_load))
+
+
 def _simulated_ep_local_token_count(
     *,
     routed_tokens: int,
@@ -203,10 +241,10 @@ def _simulated_ep_local_token_count(
     """EP-local Te under tensor_cast analytic MoE dispatch assumptions.
 
     Mirrors ``FusedMoETensorCast.get_split_sizes`` including optional external
-    shared-expert ranks and redundant experts in ``num_global_experts``: spread
-    ``routed_tokens`` (=T·Ktop) uniformly across global experts (and external
-    ranks when enabled), then Te = this_rank_share · EP because each peer is
-    assumed to send the same share. Never use ``T·Ktop/EP``.
+    shared-expert ranks and redundant experts in ``num_global_experts``. The
+    first routing rank uses the soft critical-rank load; remaining pairs are
+    balanced over the other routing ranks. Te is this rank's input split times
+    EP because each peer is assumed to send the same share.
     """
 
     _validate_ep_token_args(
@@ -218,12 +256,6 @@ def _simulated_ep_local_token_count(
         num_external_shared_experts=num_external_shared_experts,
     )
 
-    per_expert = routed_tokens // num_global_experts
-    remainder = routed_tokens % num_global_experts
-    by_expert = [
-        per_expert + (1 if expert_index < remainder else 0) for expert_index in range(num_global_experts)
-    ]
-
     input_split_sizes_by_device: list[int] = []
     if num_external_shared_experts > 0:
         tokens_per_external = routed_tokens // top_k // num_external_shared_experts
@@ -232,13 +264,28 @@ def _simulated_ep_local_token_count(
             input_split_sizes_by_device.append(tokens_per_external + (1 if rank < external_rest else 0))
 
     routing_devices = ep - num_external_shared_experts
-    for rank in range(num_external_shared_experts, ep):
-        start, num_local = _assign_experts(
+    expert_assignments = [
+        _assign_experts(num_global_experts, routing_devices, rank)
+        for rank in range(routing_devices)
+    ]
+    routing_ranks_with_experts = [
+        rank for rank, (_, num_local_experts) in enumerate(expert_assignments) if num_local_experts > 0
+    ]
+    routed_tokens_by_rank = [0] * routing_devices
+    if routing_ranks_with_experts:
+        critical_rank = routing_ranks_with_experts[0]
+        routed_tokens_by_rank[critical_rank] = _soft_critical_load(
+            routed_tokens,
+            len(routing_ranks_with_experts),
             num_global_experts,
-            routing_devices,
-            rank - num_external_shared_experts,
+            expert_assignments[critical_rank][1],
         )
-        input_split_sizes_by_device.append(sum(by_expert[start : start + num_local]))
+        remaining_ranks = routing_ranks_with_experts[1:]
+        remaining_tokens = routed_tokens - routed_tokens_by_rank[critical_rank]
+        for rank, rank_tokens in zip(remaining_ranks, _balanced_split(remaining_tokens, len(remaining_ranks))):
+            routed_tokens_by_rank[rank] = rank_tokens
+
+    input_split_sizes_by_device.extend(routed_tokens_by_rank)
 
     return input_split_sizes_by_device[ep_rank] * ep
 
@@ -558,6 +605,14 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         moe_env = {
             "E": experts,
             "Elocal": local_experts,
+            # ``Te`` is the dispatched input of one local expert rank after
+            # concatenating the equal contribution from every EP peer.  Empty
+            # ModuleList expert inputs return before their projections execute,
+            # so the per-expert contract must instead count the non-empty
+            # *pre-concatenation* expert buckets on that rank.  Those buckets
+            # sum to ``Te / EP`` and are balanced locally by
+            # FusedMoETensorCast.get_split_sizes.
+            "Eactive": min(local_experts, te // ep),
             "Ktop": ktop,
             "Fmoe": fmoe,
             "MTPt": 1,  # Fixed: --moe-tp-size > 1 is unsupported by this module.

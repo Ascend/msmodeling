@@ -229,8 +229,10 @@ def test_qwen3_vl_moe_theory_shapes_materialize_with_tp8_ep8() -> None:
         "init_routing_v2",
         "expert_gate_projection",
     )
-    assert names[10:57:3] == ("expert_up_projection",) * 16
-    assert names[11:58:3] == ("expert_down_projection",) * 16
+    # The representative rank receives 15 routed pairs.  The 16 local experts
+    # therefore have 15 non-empty slices, and only those emit projections.
+    assert names[10:54:3] == ("expert_up_projection",) * 15
+    assert names[11:55:3] == ("expert_down_projection",) * 15
     assert names[-4:] == (
         "unpermute_tokens",
         "mul",

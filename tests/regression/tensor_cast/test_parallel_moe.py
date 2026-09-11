@@ -13,6 +13,7 @@ from tensor_cast.layers.moe_layer import (
     FusedMoETensorCast,
     MoELayer,
     ParallelMoELayer,
+    assign_experts,
 )
 from tensor_cast.model_config import ModelConfig, MoEConfig, ParallelConfig, QuantConfig
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
@@ -448,6 +449,110 @@ def test_fused_moe_per_expert_local_padding_restores_real_token_count():
     assert expert.seen_shape == (8, 16)
     assert output.shape == hidden_states.shape
     assert output.dtype == hidden_states.dtype
+
+
+def _make_split_test_fused_moe(
+    world_size,
+    rank,
+    num_global_experts,
+    top_k,
+    num_external_shared_experts=0,
+):
+    ep_group = _FakeParallelGroup(world_size=world_size, rank_in_group=rank)
+    is_external_shared_expert_rank = rank < num_external_shared_experts
+    experts = (
+        None
+        if is_external_shared_expert_rank
+        else torch.nn.ModuleList([torch.nn.Identity() for _ in range(num_global_experts)])
+    )
+    shared_experts = torch.nn.Identity() if is_external_shared_expert_rank else None
+    return FusedMoETensorCast(
+        moe_config=MoEConfig(module_name="FakeMoE"),
+        experts=experts,
+        shared_experts=shared_experts,
+        shared_experts_gate=None,
+        top_k=top_k,
+        ep_group=ep_group,
+        num_external_shared_experts=num_external_shared_experts,
+        num_global_experts=num_global_experts,
+    )
+
+
+class FusedMoESplitSizesTestCase(unittest.TestCase):
+    def test_model_soft_routed_tokens_across_ep_ranks(self):
+        world_size = 32
+        num_global_experts = 384
+        top_k = 6
+
+        for num_tokens, expected_input_by_device in (
+            (48, [10] + [2] * 7 + [1] * 24),
+            (192, [12] + [6] * 25 + [5] * 6),
+        ):
+            fused_moe = _make_split_test_fused_moe(world_size, 0, num_global_experts, top_k)
+            input_by_device, output_by_device, input_by_expert, output_by_expert = fused_moe.get_split_sizes(
+                num_tokens, top_k
+            )
+
+            self.assertEqual(input_by_device, expected_input_by_device)
+            self.assertEqual(output_by_device, [expected_input_by_device[0]] * world_size)
+            self.assertEqual(sum(input_by_device), num_tokens)
+            self.assertEqual(sum(input_by_expert), num_tokens)
+
+            for rank, expected_rank_tokens in enumerate(expected_input_by_device):
+                start, num_local_experts = assign_experts(num_global_experts, world_size, rank)
+                local_split_sizes = input_by_expert[start : start + num_local_experts]
+                self.assertEqual(sum(local_split_sizes), expected_rank_tokens)
+                self.assertLessEqual(max(local_split_sizes) - min(local_split_sizes), 1)
+
+            self.assertEqual(output_by_expert, [input_by_expert[: fused_moe.num_local_experts]] * world_size)
+
+    def test_preserve_external_shared_expert_splits(self):
+        num_tokens = 10  # 5 original tokens routed with top_k=2
+        world_size = 4
+        num_global_experts = 6
+        top_k = 2
+
+        external_rank = _make_split_test_fused_moe(
+            world_size,
+            0,
+            num_global_experts,
+            top_k,
+            num_external_shared_experts=1,
+        )
+        input_by_device, output_by_device, input_by_expert, output_by_expert = external_rank.get_split_sizes(
+            num_tokens, top_k
+        )
+        self.assertEqual(input_by_device, [5, 4, 3, 3])
+        self.assertEqual(output_by_device, [5] * world_size)
+        self.assertEqual(input_by_expert, [2, 2, 2, 1, 2, 1])
+        self.assertIsNone(output_by_expert)
+
+        routing_rank = _make_split_test_fused_moe(
+            world_size,
+            2,
+            num_global_experts,
+            top_k,
+            num_external_shared_experts=1,
+        )
+        _, output_by_device, _, output_by_expert = routing_rank.get_split_sizes(num_tokens, top_k)
+        self.assertEqual(output_by_device, [3] * world_size)
+        self.assertEqual(output_by_expert, [[2, 1]] * world_size)
+
+    def test_support_non_divisible_expert_and_ep_sizes(self):
+        world_size = 3
+        num_global_experts = 5
+        num_tokens = 7
+        top_k = 1
+        fused_moe = _make_split_test_fused_moe(world_size, 0, num_global_experts, top_k)
+
+        input_by_device, output_by_device, input_by_expert, output_by_expert = fused_moe.get_split_sizes(
+            num_tokens, top_k
+        )
+
+        self.assertEqual(input_by_device, [3, 2, 2])
+        self.assertEqual(output_by_device, [3] * world_size)
+        self.assertEqual(input_by_expert, [2, 1, 1, 1, 2])
+        self.assertEqual(output_by_expert, [[2, 1]] * world_size)
 
 
 @pytest.mark.parametrize("num_tokens,tp_size", [(6, 2), (5, 2), (2, 4), (1, 2)])

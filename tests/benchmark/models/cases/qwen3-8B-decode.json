@@ -2,7 +2,7 @@
   "type": "text",
   "name": "qwen3-8B-decode",
   "description": "Qwen3-8B decode, 32 queries, ctx=1536, TP=2, compile",
-  "initial_time_s": 0.012733,
+  "initial_time_s": 0.012735,
   "baseline_time_s": 0.015406,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.2,

@@ -126,7 +126,9 @@ def test_qwen3_moe_e2e_with_ep_dp_token_transform() -> None:
     env = build_theory_env(artifact.run_context)
     assert env["T"] == 3
     assert env["Tmoe"] == 2
-    assert env["Te"] == 32
+    # Soft-capacity routing keeps one representative EP hotspot instead of
+    # assuming a perfectly balanced 32-token split.
+    assert env["Te"] == 28
 
     application = create_model_diagnostics_application()
     spec = application.spec_provider.get(artifact.run_context)

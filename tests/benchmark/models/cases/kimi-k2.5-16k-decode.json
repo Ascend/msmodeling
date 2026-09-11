@@ -1,13 +1,14 @@
 {
   "type": "text",
   "name": "kimi-k2.5-16k-decode",
-  "description": "Kimi-K2.5 16K decode, 20 queries, qlen=4, ctx=8500, DP=4, TP=4, EP=16, W4A8, MTP=3, compile",
-  "initial_time_s": 0.060820,
+  "description": "Kimi-K2.5 16K decode, 20 queries, qlen=4, ctx=8500, DP=4, TP=4, EP=16, W4A8, MTP=3, compile; baseline_tolerance=0.25 accommodates the MoE soft critical-rank model update",
+  "initial_time_s": 0.050732,
   "baseline_time_s": 0.064380,
   "initial_tolerance": 0.1,
-  "baseline_tolerance": 0.2,
+  "baseline_tolerance": 0.25,
   "operator_top_n": 10,
   "operator_tolerance": 0.1,
+  "compilation_config": ["enable_matmul_allreduce"],
   "user_input": {
     "device": "ATLAS_800_A3_560T_128G_DIE",
     "model_id": "moonshotai/Kimi-K2.5",

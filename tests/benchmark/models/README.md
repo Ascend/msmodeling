@@ -19,7 +19,7 @@ Add a JSON configuration file under the `cases/` directory and the framework aut
 
 | Check | Description |
 |-------|-------------|
-| **Check 1: Total Time Comparison** | vs initial time (default 10%) + vs baseline time (default 20%) |
+| **Check 1: Total Time Comparison** | vs initial time (default 10%) + vs baseline time (default 20%; text case Actual may exceed Baseline by at most 5%, non-text case by at most 20%) |
 | **Check 2: Operator-Level Comparison** | Top-N operators vs initial operator baseline (default 10%) |
 
 Execution policy in this repo:
@@ -112,7 +112,7 @@ Create a JSON file under the `cases/` directory. The filename should match the `
 | `name` | `str` | **required** | Unique case identifier; operator baseline is stored in `operators` field of this file |
 | `description` | `str` | **required** | Case description, shown on failure |
 | `initial_time_s` | `float` | `0.0` | Initial total time (seconds). Set `0` to skip initial comparison |
-| `baseline_time_s` | `float` | `0.0` | Baseline total time (seconds). Set `0` to skip baseline comparison |
+| `baseline_time_s` | `float` | `0.0` | Baseline total time (seconds). Text case Actual may exceed this value by at most 5%, non-text case by at most 20%; both must be within `baseline_tolerance`. Set `0` to skip baseline comparison |
 | `initial_tolerance` | `float` | `0.10` | Tolerance vs initial time (10%) |
 | `baseline_tolerance` | `float` | `0.20` | Tolerance vs baseline time (20%) |
 | `operator_top_n` | `int` | `10` | Compare top-N most expensive operators |

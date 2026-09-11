@@ -1,6 +1,9 @@
 import copy
 import logging
+import math
 from abc import ABC, abstractmethod
+from functools import lru_cache
+from statistics import NormalDist
 from typing import Any, List, Optional
 
 import torch
@@ -25,6 +28,107 @@ def assign_experts(num_experts, world_size, rank):
         num_local_experts = num_experts_per_device
 
     return start, num_local_experts
+
+
+def _balanced_split(total: int, parts: int) -> List[int]:
+    """Split ``total`` items across ``parts`` buckets with at most one item of skew."""
+    if parts <= 0:
+        raise ValueError(f"parts must be positive, got {parts}")
+    # ``total`` can be a torch.SymInt while this helper is traced by
+    # torch.compile. Dynamo does not support tracing the builtin ``divmod``
+    # for symbolic integers, so spell out the equivalent arithmetic.
+    base = total // parts
+    remainder = total - base * parts
+    return [base + int(index < remainder) for index in range(parts)]
+
+
+@lru_cache(maxsize=None)
+def _expected_max_z(parts: int) -> float:
+    """Return the normal-order-statistic quantile used for ``parts`` buckets."""
+    if parts <= 1:
+        return 0.0
+    # Blom's approximation estimates the expected maximum of ``parts``
+    # approximately normal bucket loads without introducing a tuning knob.
+    quantile = (parts - 0.375) / (parts + 0.25)
+    return NormalDist().inv_cdf(quantile)
+
+
+def _expected_max_load(total: int, parts: int, z: Optional[float] = None) -> int:
+    """Estimate a finite-sample hotspot load for uniform random routing.
+
+    A perfectly balanced split models the mean bucket load and hides the
+    critical-rank effect of finite token counts.  Treating routed pairs as
+    uniformly sampled buckets gives a deterministic estimate of the expected
+    maximum load, which is used as the representative critical-rank load.
+    """
+    if parts <= 0:
+        raise ValueError(f"parts must be positive, got {parts}")
+    if total < 0:
+        raise ValueError(f"total must be non-negative, got {total}")
+    if total == 0 or parts == 1:
+        return total
+
+    mean_load = total / parts
+    variance = mean_load * (1 - 1 / parts)
+    z = _expected_max_z(parts) if z is None else z
+    max_load = math.ceil(mean_load + z * math.sqrt(variance))
+    return min(total, max_load)
+
+
+_SOFT_SPLIT_MIN_EXPERTS_PER_RANK = 4
+
+
+def _expert_capacity_load(total: int, num_global_experts: int, num_local_experts: int) -> int:
+    """Estimate the per-rank capacity when every local expert has one bucket."""
+    if num_global_experts <= 0:
+        raise ValueError(f"num_global_experts must be positive, got {num_global_experts}")
+    if num_local_experts < 0:
+        raise ValueError(f"num_local_experts must be non-negative, got {num_local_experts}")
+    if total < 0:
+        raise ValueError(f"total must be non-negative, got {total}")
+    if total == 0 or num_local_experts == 0:
+        return 0
+
+    per_expert_capacity = math.ceil(total / num_global_experts)
+    return min(total, per_expert_capacity * num_local_experts)
+
+
+def _soft_critical_load(
+    total: int,
+    parts: int,
+    num_global_experts: int,
+    num_local_experts: int,
+    z: Optional[float] = None,
+) -> int:
+    """Return a conservative representative load without a tuning parameter.
+
+    The expected maximum is a useful lower bound for random routing, while the
+    per-expert capacity is a conservative upper envelope for sparse workloads.
+    For large MoE layouts, bias the representative load toward the capacity
+    envelope so GMM does not inherit an unrealistically small perfectly
+    balanced shape. Small layouts retain the exact balanced split because the
+    normal approximation is not meaningful there and it keeps edge-case
+    routing behavior stable.
+    """
+    if parts <= 0:
+        raise ValueError(f"parts must be positive, got {parts}")
+    if total < 0:
+        raise ValueError(f"total must be non-negative, got {total}")
+    if num_global_experts <= 0:
+        raise ValueError(f"num_global_experts must be positive, got {num_global_experts}")
+    if num_local_experts < 0:
+        raise ValueError(f"num_local_experts must be non-negative, got {num_local_experts}")
+    if total == 0:
+        return 0
+
+    balanced_load = (total + parts - 1) // parts
+    if num_global_experts < _SOFT_SPLIT_MIN_EXPERTS_PER_RANK * parts:
+        return balanced_load
+
+    expected_max_load = _expected_max_load(total, parts, z)
+    capacity_load = _expert_capacity_load(total, num_global_experts, num_local_experts)
+    capacity_weighted_load = math.ceil((expected_max_load + 2 * capacity_load) / 3)
+    return min(total, max(expected_max_load, capacity_weighted_load))
 
 
 class ExpertWrapper(torch.nn.Module):
@@ -503,6 +607,11 @@ class FusedMoETensorCast(FusedMoEBase):
         self.ep_group = ep_group
         self.num_global_experts = num_global_experts or (self.experts.num_experts if self.experts is not None else 0)
         self.num_external_shared_experts = num_external_shared_experts
+        num_routing_devices = self.ep_group.world_size - num_external_shared_experts
+        num_active_routing_devices = max(1, min(self.num_global_experts, num_routing_devices))
+        # Precompute this outside the compiled forward path.  NormalDist uses
+        # the CPython _statistics builtin, which TorchDynamo cannot trace.
+        self._expected_max_z = _expected_max_z(num_active_routing_devices)
         # Global TP size for per-expert local padding.
         # RowParallelLinear.gather_slice_data needs token dim % global_tp == 0.
         self._global_tp_size = global_tp_size
@@ -526,13 +635,45 @@ class FusedMoETensorCast(FusedMoEBase):
         return output
 
     def get_split_sizes(self, num_tokens: int, top_k: int):
-        num_tokens_per_expert = num_tokens // self.num_global_experts
-        num_tokens_rest = num_tokens % self.num_global_experts
-
-        input_split_sizes_by_expert = [
-            num_tokens_per_expert + (i < num_tokens_rest) for i in range(self.num_global_experts)
+        num_routing_devices = self.ep_group.world_size - self.num_external_shared_experts
+        expert_assignments = [
+            assign_experts(self.num_global_experts, num_routing_devices, rank) for rank in range(num_routing_devices)
         ]
 
+        # ``num_tokens`` is the number of routed (token, expert) pairs, not the
+        # number of original tokens. Use a soft critical-rank load: the
+        # expected maximum captures finite-sample imbalance, while the local
+        # expert capacity prevents GMM from inheriting an idealized tiny
+        # shape. Conserve the remaining pairs across the other EP ranks.
+        routing_ranks_with_experts = [
+            rank for rank, (_, num_experts) in enumerate(expert_assignments) if num_experts > 0
+        ]
+        routed_tokens_by_rank = [0] * num_routing_devices
+        if routing_ranks_with_experts:
+            critical_rank = routing_ranks_with_experts[0]
+            expected_max_z = getattr(self, "_expected_max_z", None)
+            if expected_max_z is None:
+                num_active_routing_devices = max(
+                    1,
+                    min(self.num_global_experts, len(routing_ranks_with_experts)),
+                )
+                expected_max_z = _expected_max_z(num_active_routing_devices)
+            critical_load = _soft_critical_load(
+                num_tokens,
+                len(routing_ranks_with_experts),
+                self.num_global_experts,
+                expert_assignments[critical_rank][1],
+                expected_max_z,
+            )
+            routed_tokens_by_rank[critical_rank] = critical_load
+
+            remaining_ranks = routing_ranks_with_experts[1:]
+            remaining_tokens = num_tokens - critical_load
+            routed_tokens = _balanced_split(remaining_tokens, len(remaining_ranks)) if remaining_ranks else []
+            for rank, rank_tokens in zip(remaining_ranks, routed_tokens):
+                routed_tokens_by_rank[rank] = rank_tokens
+
+        input_split_sizes_by_expert = [0] * self.num_global_experts
         input_split_sizes_by_device = []
         if self.num_external_shared_experts > 0:
             num_tokens_per_device = num_tokens // top_k // self.num_external_shared_experts
@@ -540,13 +681,10 @@ class FusedMoETensorCast(FusedMoEBase):
             for rank in range(self.num_external_shared_experts):
                 input_split_sizes_by_device.append(num_tokens_per_device + (rank < num_tokens_rest))
 
-        for rank in range(self.num_external_shared_experts, self.ep_group.world_size):
-            start, num_experts = assign_experts(
-                self.num_global_experts,
-                self.ep_group.world_size - self.num_external_shared_experts,
-                rank - self.num_external_shared_experts,
-            )
-            input_split_sizes_by_device.append(sum(input_split_sizes_by_expert[start : start + num_experts]))
+        for rank, (start, num_experts) in enumerate(expert_assignments):
+            local_split_sizes = _balanced_split(routed_tokens_by_rank[rank], num_experts) if num_experts else []
+            input_split_sizes_by_expert[start : start + num_experts] = local_split_sizes
+            input_split_sizes_by_device.append(sum(local_split_sizes))
 
         output_split_sizes_by_device = [
             input_split_sizes_by_device[self.ep_group.rank_in_group]

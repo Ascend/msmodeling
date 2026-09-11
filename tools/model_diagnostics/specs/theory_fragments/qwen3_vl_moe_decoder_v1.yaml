@@ -63,9 +63,9 @@ stages:
         - quantize
         - all_to_all
   - id: moe_experts
-    # TensorCast invokes gate/up/down once per EP-local expert. Elocal is
-    # derived from the model's routed-expert count and expert parallel size.
-    repeat: Elocal
+    # Empty per-expert slices return before gate/up/down projections, so only
+    # experts receiving at least one routed token emit runtime operators.
+    repeat: Eactive
     modules:
       - &expert_gate
         name: expert_gate_projection

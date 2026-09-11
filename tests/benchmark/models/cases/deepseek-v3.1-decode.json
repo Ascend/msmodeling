@@ -2,7 +2,7 @@
     "type": "text",
     "name": "deepseek-v3.1-decode",
     "description": "DeepSeek-V3.1 decode, 172 queries, ctx=4200, EP=32, DP=32, W8A8, INT8 attn, MTP=3",
-    "initial_time_s": 0.064124,
+    "initial_time_s": 0.070262,
     "baseline_time_s": 0.070849,
     "initial_tolerance": 0.1,
     "baseline_tolerance": 0.2,

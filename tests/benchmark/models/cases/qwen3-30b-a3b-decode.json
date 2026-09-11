@@ -2,7 +2,7 @@
   "type": "text",
   "name": "qwen3-30b-a3b-decode",
   "description": "Qwen3-30B-A3B decode, 1 query, ctx=3450, TP=4, compile",
-  "initial_time_s": 0.012712,
+  "initial_time_s": 0.012706,
   "baseline_time_s": 0.012706,
   "initial_tolerance": 0.1,
   "baseline_tolerance": 0.45,

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensor_cast.layers.moe_layer import FusedMoETensorCast, assign_experts
+from tensor_cast.layers.moe_layer import FusedMoETensorCast, _soft_critical_load, assign_experts
 from tools.model_diagnostics.builtin import create_stage_comparison_registry
 from tools.model_diagnostics.domain import ExecutionPhase, ModelRunContext, ParallelContext, SourceKind
 from tools.model_diagnostics.specification import (
@@ -30,6 +30,7 @@ from tools.model_diagnostics.specification import (
 from tools.model_diagnostics.specification.context_env import (
     _assign_experts,
     _simulated_ep_local_token_count,
+    _soft_critical_load as _diagnostics_soft_critical_load,
     _validate_ep_token_args,
     build_theory_env,
 )
@@ -48,6 +49,28 @@ def _loader() -> YamlModelDiagnosticsSpecLoader:
             fragment_registry=fragment_registry,
         ),
         fragment_registry=fragment_registry,
+    )
+
+
+@pytest.mark.parametrize(
+    ("total", "parts", "num_global_experts", "num_local_experts"),
+    [
+        (0, 32, 384, 12),
+        (48, 32, 384, 12),
+        (192, 32, 384, 12),
+        (7, 3, 5, 2),
+        (10, 3, 6, 2),
+    ],
+)
+def test_soft_critical_load_matches_tensor_cast(
+    total: int,
+    parts: int,
+    num_global_experts: int,
+    num_local_experts: int,
+) -> None:
+    """Keep the diagnostics mirror aligned with TensorCast MoE split modeling."""
+    assert _diagnostics_soft_critical_load(total, parts, num_global_experts, num_local_experts) == _soft_critical_load(
+        total, parts, num_global_experts, num_local_experts
     )
 
 
@@ -175,14 +198,18 @@ def test_qwen3_moe_theory_env_binds_category2_symbols() -> None:
 
 def test_qwen3_moe_theory_env_binds_simulated_te_when_ep_gt1() -> None:
     # Same contract as tensor_cast get_split_sizes (no external shared experts):
-    # N=T*Ktop=16 over E=128 → remainder on experts 0..15; rank0 owns 0..63 →
-    # share=16; Te = share*EP = 32. Never T*Ktop/EP (=8).
+    # N=T*Ktop=16 over EP=2 uses a soft critical load of 14 on rank0;
+    # Te = share*EP = 28, rather than T*Ktop/EP (=8).
     env = build_theory_env(_context(ep=2))
     assert env["EP"] == 2
     assert env["T"] == 2
     assert env["Ktop"] == 8
     assert env["E"] == 128
-    assert env["Te"] == 32
+    assert env["Te"] == 28
+    # Te contains the contributions of both EP peers.  The rank-local split
+    # before concatenation has 14 non-empty expert buckets, so exactly 14
+    # ModuleList experts execute their projections.
+    assert env["Eactive"] == 14
     assert env["Te"] != env["T"] * env["Ktop"] // env["EP"]
 
 
@@ -220,7 +247,7 @@ def test_qwen3_moe_theory_env_binds_te_with_external_shared_experts() -> None:
         )
         for rank in range(4)
     )
-    assert shares == (8, 64, 0, 0)
+    assert shares == (8, 52, 8, 4)
 
 
 def test_qwen3_moe_ep_token_distribution_allows_empty_ranks() -> None:
@@ -320,6 +347,17 @@ def test_theory_ep_token_count_matches_tensor_cast_split_contract(
         == runtime_local_tokens
     )
 
+    if routing_rank >= 0:
+        runtime_expert_splits = FusedMoETensorCast.get_split_sizes(
+            runtime_layer,
+            routed_tokens,
+            top_k,
+        )[2]
+        runtime_active_experts = sum(
+            split_size > 0 for split_size in runtime_expert_splits[expert_start : expert_start + num_local_experts]
+        )
+        assert runtime_active_experts == min(num_local_experts, runtime_local_tokens // ep)
+
 
 @pytest.mark.parametrize(
     "overrides,expected_message",
@@ -353,7 +391,7 @@ def test_ep_token_args_reject_invalid_values(
 
 def test_qwen3_moe_theory_env_derives_external_from_enable_flag() -> None:
     # EP=4, Ktop=8 → top_k+1 > EP ⇒ Next=1 (same as shard_model_by_ep).
-    # The analytic representative rank is the first routing rank (=1).
+    # The first routing rank uses the soft critical load.
     context = ModelRunContext(
         model_name="Qwen/Qwen3-30B-A3B",
         entrypoint="text_generate",
@@ -374,12 +412,11 @@ def test_qwen3_moe_theory_env_derives_external_from_enable_flag() -> None:
     )
     env = build_theory_env(context)
     assert env["EP"] == 4
-    assert env["Te"] == 64
+    assert env["Te"] == 52
 
 
 def test_qwen3_moe_theory_env_binds_te_with_redundant_experts() -> None:
-    # EP=2, E=3, routed=10: without redundant Te(rank0)=8; with enable_redundant
-    # Nred=EP=2 ⇒ global=5 ⇒ rank0 share=6 ⇒ Te=12.
+    # Redundant experts are included in the soft critical-rank split.
     context = ModelRunContext(
         model_name="Qwen/Qwen3-30B-A3B",
         entrypoint="text_generate",
@@ -401,7 +438,7 @@ def test_qwen3_moe_theory_env_binds_te_with_redundant_experts() -> None:
         quantization_config={},
     )
     env = build_theory_env(context)
-    assert env["Te"] == 12
+    assert env["Te"] == 10
 
 
 def test_qwen3_moe_theory_env_binds_mdp_symbol() -> None:
@@ -475,7 +512,7 @@ def test_qwen3_moe_theory_env_mirrors_runtime_dp_transform(
     env = build_theory_env(context)
 
     assert env["Tmoe"] == expected_tmoe
-    assert env["Te"] == 32
+    assert env["Te"] == 28
 
 
 def test_qwen3_moe_dispatch_and_combine_ignore_all_to_all() -> None:
