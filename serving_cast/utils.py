@@ -228,6 +228,8 @@ def gen_profiling_config_set_env_variable(prof_dir):
 # (column, ascending): higher QPS/throughput first; lower latency first on ties.
 PD_RATIO_RANK_KEYS: tuple[tuple[str, bool], ...] = (
     ("balanced_qps", False),
+    ("allocated_devices", False),
+    ("allocation_ratio_error", True),
     ("d_qps", False),
     ("p_qps", False),
     ("ttft_p", True),

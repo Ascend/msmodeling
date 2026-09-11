@@ -474,18 +474,9 @@ class OptimizerSummary:
         r = self.get_best_result_row()
         if r is None:
             return None
-        p_inst = None
-        d_inst = None
+        p_inst = int(r["p_instances"]) if "p_instances" in r and pd.notna(r["p_instances"]) else None
+        d_inst = int(r["d_instances"]) if "d_instances" in r and pd.notna(r["d_instances"]) else None
         nd = self.data_config.num_devices
-        if nd is not None:
-            p_calc, d_calc = self._calculate_instance_distribution(
-                float(r["pd_ratio"]),
-                int(nd),
-                int(r["num_devices_p"]),
-                int(r["num_devices_d"]),
-            )
-            if p_calc > 0 and d_calc > 0:
-                p_inst, d_inst = p_calc, d_calc
 
         return {
             "device": device_label,
@@ -499,6 +490,9 @@ class OptimizerSummary:
             "parallel_d": r["parallel_d"],
             "p_instances": p_inst,
             "d_instances": d_inst,
+            "allocated_p_qps": float(r["allocated_p_qps"]) if "allocated_p_qps" in r else None,
+            "allocated_d_qps": float(r["allocated_d_qps"]) if "allocated_d_qps" in r else None,
+            "allocated_devices": int(r["allocated_devices"]) if "allocated_devices" in r else None,
             "total_devices": int(nd) if nd is not None else None,
         }
 
@@ -593,8 +587,9 @@ class OptimizerSummary:
         """Prepare and filter results for PD ratio mode.
 
         Filters applied:
-        1. Keep only the best result for each unique (p_parallel, d_parallel) combination
-        2. Keep only one result for each unique balanced_qps value
+        1. Apply a total-device allocation when at least one P/D pair is deployable
+        2. Keep only the best result for each unique (p_parallel, d_parallel) combination
+        3. Keep only one result for each unique balanced_qps value
 
         Results are sorted by PD_RATIO_RANK_KEYS (see serving_cast.utils).
         """
@@ -606,12 +601,63 @@ class OptimizerSummary:
             pd.to_numeric(self._summary_df["tpot_d"], errors="coerce").fillna(float("inf")) <= tpot_limit
         )
 
-        filtered_df = best_pd_row_per_group(self._summary_df[mask], ["parallel_p", "parallel_d"])
+        filtered_df = self._apply_pd_instance_distribution(self._summary_df[mask])
+        filtered_df = best_pd_row_per_group(filtered_df, ["parallel_p", "parallel_d"])
         filtered_df["_balanced_qps_rounded"] = filtered_df["balanced_qps"].round(2)
         result_df = best_pd_row_per_group(filtered_df, ["_balanced_qps_rounded"]).drop(
             columns=["_balanced_qps_rounded"]
         )
         return rank_pd_ratio_rows(result_df).reset_index(drop=True)
+
+    def _apply_pd_instance_distribution(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply cluster instance allocation and recompute QPS when a budget is usable.
+
+        The shared CLI defaults ``num_devices`` to one even when the user does not
+        request a cluster allocation. In PD-ratio mode that value cannot fit the
+        required P+D instances, so the existing per-instance result is preserved
+        when no row has a feasible allocation.
+        """
+        total_devices = getattr(self.data_config, "num_devices", None)
+        if total_devices is None or df.empty:
+            return df
+
+        feasible_indices = []
+        updates = []
+        for index, row in df.iterrows():
+            p_inst, d_inst = self._calculate_instance_distribution(
+                float(row["pd_ratio"]),
+                int(total_devices),
+                int(row["num_devices_p"]),
+                int(row["num_devices_d"]),
+            )
+            if p_inst <= 0 or d_inst <= 0:
+                continue
+
+            feasible_indices.append(index)
+            allocated_p_qps = p_inst * float(row["p_qps"])
+            allocated_d_qps = d_inst * float(row["d_qps"])
+            updates.append(
+                {
+                    "p_instances": p_inst,
+                    "d_instances": d_inst,
+                    "allocated_p_qps": allocated_p_qps,
+                    "allocated_d_qps": allocated_d_qps,
+                    "balanced_qps": min(allocated_p_qps, allocated_d_qps),
+                    "allocated_devices": p_inst * int(row["num_devices_p"]) + d_inst * int(row["num_devices_d"]),
+                    "allocation_ratio_error": abs(p_inst / d_inst - float(row["pd_ratio"])),
+                }
+            )
+
+        if not feasible_indices:
+            return df
+
+        allocated_df = df.loc[feasible_indices].copy()
+        update_df = pd.DataFrame(updates, index=feasible_indices)
+        for column in update_df:
+            allocated_df[column] = update_df[column]
+        for column in ("p_instances", "d_instances", "allocated_devices"):
+            allocated_df[column] = allocated_df[column].astype(int)
+        return allocated_df
 
     def _get_pd_ratio_final_out(self, args, sorted_summary_df):
         """Generate the final output string for PD ratio mode.
@@ -662,17 +708,37 @@ class OptimizerSummary:
             f"Batch: {best_result['batch_size_d']}, Concurrency: {best_result['concurrency_d']})"
         )
 
-        # Calculate instance distribution when num_devices is specified
-        if self.data_config.num_devices is not None:
-            p_inst, d_inst = self._calculate_instance_distribution(
-                best_result["pd_ratio"],
-                self.data_config.num_devices,
-                best_result["num_devices_p"],
-                best_result["num_devices_d"],
-            )
+        # Show the cluster allocation when num_devices can fit at least one P+D pair.
+        total_devices = getattr(self.data_config, "num_devices", None)
+        if total_devices is not None:
+            if "p_instances" in best_result and pd.notna(best_result["p_instances"]):
+                p_inst = int(best_result["p_instances"])
+                d_inst = int(best_result["d_instances"])
+                allocated_p_qps = float(best_result["allocated_p_qps"])
+                allocated_d_qps = float(best_result["allocated_d_qps"])
+                balanced_qps = float(best_result["balanced_qps"])
+                allocated_devices = int(best_result["allocated_devices"])
+            else:
+                p_inst, d_inst = self._calculate_instance_distribution(
+                    best_result["pd_ratio"],
+                    total_devices,
+                    best_result["num_devices_p"],
+                    best_result["num_devices_d"],
+                )
             if p_inst > 0 and d_inst > 0:
+                if "p_instances" not in best_result or pd.isna(best_result["p_instances"]):
+                    allocated_p_qps = p_inst * float(best_result["p_qps"])
+                    allocated_d_qps = d_inst * float(best_result["d_qps"])
+                    balanced_qps = min(allocated_p_qps, allocated_d_qps)
+                    allocated_devices = p_inst * int(best_result["num_devices_p"]) + d_inst * int(
+                        best_result["num_devices_d"]
+                    )
                 final_out.append(f"      P Instances: {p_inst} ({p_inst * best_result['num_devices_p']} devices)")
                 final_out.append(f"      D Instances: {d_inst} ({d_inst * best_result['num_devices_d']} devices)")
+                final_out.append(f"      Allocated Prefill QPS: {allocated_p_qps:.2f} req/s")
+                final_out.append(f"      Allocated Decode QPS:  {allocated_d_qps:.2f} req/s")
+                final_out.append(f"      Balanced QPS: {balanced_qps:.2f} req/s")
+                final_out.append(f"      Devices Used: {allocated_devices}/{int(self.data_config.num_devices)}")
 
         final_out.append("  " + "-" * 116)
 
@@ -699,8 +765,8 @@ class OptimizerSummary:
             d_devices_per_inst: Devices per D instance.
 
         Returns:
-            Tuple of (p_instances, d_instances). When multiple allocations have
-            the same ratio error, the allocation using more devices is preferred.
+            Tuple of (p_instances, d_instances). Cluster balanced QPS is
+            maximized first, then device utilization, then ratio proximity.
         """
         # PD ratio = D_QPS / P_QPS
         # For supply-demand balance: P_instances * P_QPS = D_instances * D_QPS
@@ -709,26 +775,29 @@ class OptimizerSummary:
 
         best_p_inst = 0
         best_d_inst = 0
-        best_diff = float("inf")
-        best_total_used = 0
+        best_score = None
 
         max_d_inst = total_devices // d_devices_per_inst
         for d_inst in range(1, max_d_inst + 1):
-            ideal_p_inst = d_inst * pd_ratio
-            p_inst = round(ideal_p_inst)
-
+            remaining_devices = total_devices - d_inst * d_devices_per_inst
+            p_inst = remaining_devices // p_devices_per_inst
             if p_inst < 1:
-                p_inst = 1
+                break
 
+            # For a fixed d_inst, balanced QPS is monotonic in p_inst. Once
+            # it plateaus, the device-utilization tie-break also favors the
+            # largest feasible p_inst, so smaller P counts cannot win.
             total_used = p_inst * p_devices_per_inst + d_inst * d_devices_per_inst
-            if total_used <= total_devices:
-                diff = abs(p_inst - ideal_p_inst)
-                # Avoid leaving devices idle when candidates have the same ratio error.
-                if diff < best_diff or (diff == best_diff and total_used > best_total_used):
-                    best_diff = diff
-                    best_total_used = total_used
-                    best_p_inst = p_inst
-                    best_d_inst = d_inst
+            # Divide the real balanced QPS by P_QPS. Since
+            # pd_ratio=D_QPS/P_QPS, this preserves the ordering without
+            # adding redundant QPS arguments to this helper.
+            normalized_balanced_qps = min(float(p_inst), d_inst * pd_ratio)
+            ratio_error = abs(p_inst / d_inst - pd_ratio)
+            score = (normalized_balanced_qps, total_used, -ratio_error)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_p_inst = p_inst
+                best_d_inst = d_inst
 
         return best_p_inst, best_d_inst
 
@@ -888,12 +957,20 @@ def _get_pd_ratio_table_buf(df: pd.DataFrame):
 
     table = PrettyTable()
 
+    has_allocation = {
+        "p_instances",
+        "d_instances",
+        "allocated_p_qps",
+        "allocated_d_qps",
+        "allocated_devices",
+    }.issubset(df.columns)
+
     columns = [
         "Top",
         "PD Ratio",
         "Balanced QPS (req/s)",
-        "P QPS (req/s)",
-        "D QPS (req/s)",
+        "P QPS/Instance",
+        "D QPS/Instance",
         "TTFT (ms)",
         "TPOT (ms)",
         "P Parallel",
@@ -905,6 +982,15 @@ def _get_pd_ratio_table_buf(df: pd.DataFrame):
         "P Concurrency",
         "D Concurrency",
     ]
+    if has_allocation:
+        allocation_columns = [
+            "P Instances",
+            "D Instances",
+            "Allocated P QPS",
+            "Allocated D QPS",
+            "Devices Used",
+        ]
+        columns[5:5] = allocation_columns
     table.field_names = columns
 
     for i in range(show_len):
@@ -926,6 +1012,15 @@ def _get_pd_ratio_table_buf(df: pd.DataFrame):
             row["concurrency_p"],
             row["concurrency_d"],
         ]
+        if has_allocation:
+            allocation_data = [
+                int(row["p_instances"]),
+                int(row["d_instances"]),
+                f"{row['allocated_p_qps']:.2f}",
+                f"{row['allocated_d_qps']:.2f}",
+                int(row["allocated_devices"]),
+            ]
+            row_data[5:5] = allocation_data
         _add_table_row(table, row_data, columns)
 
     table_buf.append(table.get_string())
@@ -993,8 +1088,10 @@ def render_cross_hardware_pd_ratio(rows: list[dict]) -> str:
         "Device",
         "Balanced QPS (req/s)",
         "PD Ratio (P:D inst)",
-        "P QPS (req/s)",
-        "D QPS (req/s)",
+        "P QPS/Instance",
+        "D QPS/Instance",
+        "Allocated P QPS",
+        "Allocated D QPS",
         "TTFT (ms)",
         "TPOT (ms)",
         "P inst",
@@ -1011,6 +1108,8 @@ def render_cross_hardware_pd_ratio(rows: list[dict]) -> str:
                 f"{row['pd_ratio']:.2f}",
                 f"{row['p_qps']:.2f}",
                 f"{row['d_qps']:.2f}",
+                f"{row['allocated_p_qps']:.2f}" if row.get("allocated_p_qps") is not None else "-",
+                f"{row['allocated_d_qps']:.2f}" if row.get("allocated_d_qps") is not None else "-",
                 f"{row['ttft_p']:.2f}",
                 f"{row['tpot_d']:.2f}",
                 str(p_inst) if p_inst is not None else "-",
@@ -1022,7 +1121,7 @@ def render_cross_hardware_pd_ratio(rows: list[dict]) -> str:
         td = sorted_rows[0].get("total_devices")
         if td is not None:
             lines.append(
-                "  P/D instance counts: heuristic integer split under "
+                "  P/D instance counts maximize allocated balanced QPS under "
                 f"--num-devices={td} (same rule as per-device Overall Best)."
             )
     lines.append("*" * banner_w)

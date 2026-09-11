@@ -499,8 +499,8 @@ PD ratio mode uses QPS (Queries Per Second) as the primary metric for matching p
 
   Interpretation:
   - PD Ratio = 1.0: One prefill instance can feed one decode instance
-  - PD Ratio = 2.0: One prefill instance can feed two decode instances
-  - PD Ratio = 0.5: Two prefill instances are needed to feed one decode instance
+  - PD Ratio = 2.0: Each decode instance needs approximately two prefill instances
+  - PD Ratio = 0.5: One prefill instance can feed approximately two decode instances
 
 - **Instance Distribution**:
 
@@ -511,6 +511,15 @@ PD ratio mode uses QPS (Queries Per Second) as the primary metric for matching p
      `max_d_inst = total_devices / d_devices_per_instance`
 
   2. Find the P:D instance combination that:
-     - Matches the PD ratio as closely as possible
+     - First maximizes allocated `Balanced QPS`
+     - Uses more devices when `Balanced QPS` ties
+     - Matches the theoretical PD ratio more closely when device usage also ties
      - Fits within the total device budget
-     - Maximizes overall system throughput
+
+  The allocated cluster throughput is calculated as follows:
+
+  `Allocated P QPS = P instances * P QPS`
+
+  `Allocated D QPS = D instances * D QPS`
+
+  `Balanced QPS = min(Allocated P QPS, Allocated D QPS)`

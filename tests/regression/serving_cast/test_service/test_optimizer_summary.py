@@ -411,6 +411,97 @@ class TestSummaryPDMode(unittest.TestCase):
         )
         self.assertEqual((p_inst, d_inst), (2, 2))
 
+    def test_calculate_instance_distribution_maximizes_allocated_balanced_qps(self):
+        """Issue 406: allocation should maximize cluster balanced QPS."""
+        p_inst, d_inst = self.summary._calculate_instance_distribution(
+            pd_ratio=12.96 / 9.44,
+            total_devices=32,
+            p_devices_per_inst=8,
+            d_devices_per_inst=16,
+        )
+        self.assertEqual((p_inst, d_inst), (2, 1))
+
+    def test_calculate_instance_distribution_uses_more_devices_on_qps_tie(self):
+        """A balanced-QPS tie should prefer the allocation using more devices."""
+        p_inst, d_inst = self.summary._calculate_instance_distribution(
+            pd_ratio=1.0,
+            total_devices=6,
+            p_devices_per_inst=2,
+            d_devices_per_inst=2,
+        )
+        self.assertEqual(p_inst * 2 + d_inst * 2, 6)
+
+    def test_prepare_pd_ratio_results_ranks_allocated_balanced_qps(self):
+        """A scalable config should win after applying the total device budget."""
+        self.pd_data_config.num_devices = 8
+        self.summary.set_summary_df(
+            pd.DataFrame(
+                {
+                    "ttft_p": [100.0, 100.0],
+                    "tpot_d": [10.0, 10.0],
+                    "concurrency_p": [10, 6],
+                    "concurrency_d": [10, 6],
+                    "parallel_p": ["p-large", "p-small"],
+                    "parallel_d": ["d-large", "d-small"],
+                    "batch_size_p": [1, 1],
+                    "batch_size_d": [1, 1],
+                    "num_devices_p": [4, 2],
+                    "num_devices_d": [4, 2],
+                    "p_qps": [10.0, 6.0],
+                    "d_qps": [10.0, 6.0],
+                    "pd_ratio": [1.0, 1.0],
+                    "balanced_qps": [10.0, 6.0],
+                }
+            )
+        )
+
+        result = self.summary._prepare_pd_ratio_results()
+
+        best = result.iloc[0]
+        self.assertEqual(best["parallel_p"], "p-small")
+        self.assertEqual((best["p_instances"], best["d_instances"]), (2, 2))
+        self.assertEqual(best["allocated_p_qps"], 12.0)
+        self.assertEqual(best["allocated_d_qps"], 12.0)
+        self.assertEqual(best["balanced_qps"], 12.0)
+        self.assertEqual(best["allocated_devices"], 8)
+
+        output = "\n".join(self.summary._get_pd_ratio_final_out(SimpleArgs(), result))
+        self.assertIn("Allocated Prefill QPS: 12.00 req/s", output)
+        self.assertIn("Allocated Decode QPS:  12.00 req/s", output)
+        self.assertIn("Balanced QPS: 12.00 req/s", output)
+        self.assertIn("Devices Used: 8/8", output)
+
+    def test_prepare_pd_ratio_results_without_budget_keeps_single_instance_qps(self):
+        """Without a deployable total-device budget, keep the existing ratio result."""
+        self.pd_data_config.num_devices = 1
+        self.summary.set_summary_df(
+            pd.DataFrame(
+                {
+                    "ttft_p": [100.0, 100.0],
+                    "tpot_d": [10.0, 10.0],
+                    "concurrency_p": [10, 6],
+                    "concurrency_d": [10, 6],
+                    "parallel_p": ["p-large", "p-small"],
+                    "parallel_d": ["d-large", "d-small"],
+                    "batch_size_p": [1, 1],
+                    "batch_size_d": [1, 1],
+                    "num_devices_p": [4, 2],
+                    "num_devices_d": [4, 2],
+                    "p_qps": [10.0, 6.0],
+                    "d_qps": [10.0, 6.0],
+                    "pd_ratio": [1.0, 1.0],
+                    "balanced_qps": [10.0, 6.0],
+                }
+            )
+        )
+
+        result = self.summary._prepare_pd_ratio_results()
+
+        best = result.iloc[0]
+        self.assertEqual(best["parallel_p"], "p-large")
+        self.assertEqual(best["balanced_qps"], 10.0)
+        self.assertNotIn("p_instances", result.columns)
+
     def test_get_pd_ratio_final_out_structure(self):
         """Test _get_pd_ratio_final_out output structure."""
         df = pd.DataFrame(

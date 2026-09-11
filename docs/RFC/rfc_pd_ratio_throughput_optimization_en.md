@@ -143,12 +143,18 @@ Overall Best Configuration is displayed first, followed by the Top N PD ratio ta
 When the user provides `--num-devices` (total devices), the system calculates the total device allocation for P and D sides based on the PD ratio and per-instance device count. Constraints:
 
 ```bash
-P_instances * prefill_devices_per_instance + D_instances * decode_devices_per_instance = num_devices
+P_instances * prefill_devices_per_instance + D_instances * decode_devices_per_instance <= num_devices
 P_instances / D_instances ≈ pd_ratio
 P_instances >= 1, D_instances >= 1 (positive integers)
 ```
 
-Calculation: Enumerate all valid `(P_instances, D_instances)` positive integer pairs satisfying the total device constraint, and select the pair whose actual ratio `P_instances / D_instances` is closest to `pd_ratio`.
+Calculation: Enumerate all valid `(P_instances, D_instances)` positive integer pairs satisfying the total device constraint, then select a pair using these priorities:
+
+1. Maximize allocated `balanced_qps = min(P_instances * P_QPS, D_instances * D_QPS)`.
+2. When `balanced_qps` ties, prefer the allocation that uses more devices.
+3. When device usage also ties, prefer the actual ratio `P_instances / D_instances` closest to `pd_ratio`.
+
+If the total device budget cannot fit at least one P instance and one D instance, no integer allocation is calculated and the per-instance PD-ratio result is preserved.
 
 Example: `num_devices=16, prefill_devices_per_instance=4, decode_devices_per_instance=2, pd_ratio=1.5`
 
@@ -173,6 +179,10 @@ Example: `num_devices=16, prefill_devices_per_instance=4, decode_devices_per_ins
     Decode QPS:  15.00 req/s  (TPOT: 13.33 ms, Parallel: tp2pp1dp1, Batch: 8, Concurrency: 8)
     P Instances: 3 (12 devices)               ← Only displayed when user provides --num-devices
     D Instances: 2 (4 devices)                ← Only displayed when user provides --num-devices
+    Allocated Prefill QPS: 30.00 req/s
+    Allocated Decode QPS:  30.00 req/s
+    Balanced QPS: 30.00 req/s
+    Devices Used: 16/16
   --------------------------------------------------------------------------
   Top N PD Ratio Configurations:
   +-----+----------+-----------+-----------+---------+---------+------------+------------+-----------+-----------+---------+---------+---------------+---------------+

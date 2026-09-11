@@ -650,8 +650,8 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
 
   含义：
   - PD 配比 = 1.0：一个 Prefill 实例可支撑一个 Decode 实例
-  - PD 配比 = 2.0：一个 Prefill 实例可支撑两个 Decode 实例
-  - PD 配比 = 0.5：需要两个 Prefill 实例才能支撑一个 Decode 实例
+  - PD 配比 = 2.0：每个 Decode 实例约需要两个 Prefill 实例
+  - PD 配比 = 0.5：一个 Prefill 实例约可支撑两个 Decode 实例
 
 - **实例分布**：
 
@@ -662,6 +662,15 @@ PD 配比模式使用 QPS（Queries Per Second，每秒查询数）作为匹配 
      `max_d_inst = total_devices / d_devices_per_instance`
 
   2. 寻找 P:D 实例组合，使其：
-     - 尽可能接近 PD 配比
+     - 优先最大化分配后的 `Balanced QPS`
+     - `Balanced QPS` 相同时使用更多设备
+     - 设备使用量也相同时尽可能接近理论 PD 配比
      - 落在总设备预算内
-     - 使系统整体吞吐量最大
+
+  分配后的集群吞吐量按以下公式计算：
+
+  `Allocated P QPS = P 实例数 * P QPS`
+
+  `Allocated D QPS = D 实例数 * D QPS`
+
+  `Balanced QPS = min(Allocated P QPS, Allocated D QPS)`

@@ -154,12 +154,18 @@ def optimize(self) -> pd.DataFrame:
 当用户提供 `--num-devices`（总设备数）时，需要根据 PD ratio 和每个实例的卡数，计算出 P 和 D 侧的总设备分配数。约束条件：
 
 ```bash
-P_instances * prefill_devices_per_instance + D_instances * decode_devices_per_instance = num_devices
+P_instances * prefill_devices_per_instance + D_instances * decode_devices_per_instance <= num_devices
 P_instances / D_instances ≈ pd_ratio
 P_instances >= 1, D_instances >= 1 (正整数)
 ```
 
-计算方式：遍历所有满足总设备数约束的 `(P_instances, D_instances)` 正整数组合，选择实际比值 `P_instances / D_instances` 最接近 `pd_ratio` 的方案。
+计算方式：遍历所有满足总设备数约束的 `(P_instances, D_instances)` 正整数组合，按以下优先级选择方案：
+
+1. 最大化分配后的 `balanced_qps = min(P_instances * P_QPS, D_instances * D_QPS)`；
+2. `balanced_qps` 相同时，优先使用更多设备；
+3. 使用设备数也相同时，优先选择实际比值 `P_instances / D_instances` 更接近 `pd_ratio` 的方案。
+
+当总设备数不足以同时部署一个 P 实例和一个 D 实例时，不计算整数实例分配，保持单实例 PD 配比结果。
 
 示例：`num_devices=16, prefill_devices_per_instance=4, decode_devices_per_instance=2, pd_ratio=1.5`
 
@@ -184,6 +190,10 @@ P_instances >= 1, D_instances >= 1 (正整数)
     Decode QPS:  15.00 req/s  (TPOT: 13.33 ms, Parallel: tp2pp1dp1, Batch: 8, Concurrency: 8)
     P Instances: 3 (12 devices)               ← 仅在用户输入 --num-devices 时输出
     D Instances: 2 (4 devices)                ← 仅在用户输入 --num-devices 时输出
+    Allocated Prefill QPS: 30.00 req/s
+    Allocated Decode QPS:  30.00 req/s
+    Balanced QPS: 30.00 req/s
+    Devices Used: 16/16
   --------------------------------------------------------------------------
   Top N PD Ratio Configurations:
   +-----+----------+-----------+-----------+---------+---------+------------+------------+-----------+-----------+---------+---------+---------------+---------------+
