@@ -1,0 +1,19 @@
+schema_version: 1
+decision_id: replace-me
+case_id: replace-me
+finding_code: STRUCTURE_MAPPING_MISSING
+structure_group: replace-me
+mapping:
+  profiling_names: []
+  tensorcast_operators: []
+  relation: one_to_one
+evidence:
+  - path: replace-me
+    reference: replace-me
+confidence: low
+decision: pending
+rationale: replace-me
+reviewer: replace-me
+reviewed_at: null
+invalidate_stages:
+  - profiling_comparison

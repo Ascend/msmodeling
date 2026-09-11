@@ -12,6 +12,8 @@
 - [GitCode CLI 能力](#gitcode-cli-能力)
 - [msmodeling-env-installer](#msmodeling-env-installer)
 - [model-adaptation](#model-adaptation)
+- [model-adaptation-validation-workflow](#model-adaptation-validation-workflow)
+- [model-adaptation-calibration-loop](#model-adaptation-calibration-loop)
 - [device_config](#device_config)
 - [op_mapping](#op_mapping)
 - [microbench](#microbench)
@@ -36,6 +38,8 @@
 | `msmodeling-ci-recovery` | 读取 openLiBing 结果、定位日志、修复、复验并循环至通过或明确阻塞 |
 | `msmodeling-review-feedback` | 分析和处理 PR 检视意见，验证修改并通过 CLI 回复 |
 | `profiling-database-lifecycle` | 串联轴密度规则、Shape 生成、NPU 采集、生产回放、异常审计和数据库 PR 发布 |
+| `model-adaptation-validation-workflow` | 先执行跑通级模型适配，再串联 Theory↔Runtime Shape/dtype 看护和 NPU 实测分层对账 |
+| `model-adaptation-calibration-loop` | 对非通过项进行人工映射审查、最小代码修正和受影响门禁复验 |
 
 默认是逐阶段确认的 `guided` 模式。用户明确给出仓库、Issue、分支和目标范围后，可切换为
 `autonomous`；安全、权限、门禁绕过、强制推送、审批和合并仍是硬停止点。
@@ -133,6 +137,46 @@ TensorCast 新模型接入流程 skill（跑通级）——从仿真命令出发
 - doctor 不生成模型专属 patch 代码，只生成 AI task 和 prompt。
 - 本流程不接受任何实测数据输入（raw profiling、kernel 计数、实测时延）；精度对齐由下游精度工作流负责。
 - 不提交本地 walkthrough、私人路径或临时材料。
+
+---
+
+## model-adaptation-validation-workflow
+
+模型适配精度闭环执行 Skill。第一阶段调用当前 `model-adaptation`，完成 doctor、Profile 人工确认、关键算子次数 verify 和原始仿真命令；后续再执行 Shape/dtype 看护和可选 NPU profiling 分层对账。
+
+### File layout
+
+| File | Purpose |
+| ---- | ------- |
+| `model-adaptation-validation-workflow/SKILL.md` | 主流程、人工停止点和完成标准 |
+| `model-adaptation-validation-workflow/references/execution.md` | Windows 命令、状态解释和 MiniMax-M2.7 示例 |
+| `model-adaptation-validation-workflow/assets/workflow-summary-template.md` | 统一人工摘要模板 |
+
+### Key constraints
+
+- 实测 profiling 不进入基础 `model-adaptation` 的 doctor/verify。
+- Profile 缺失、无效或与候选不一致时，必须暂停并等待用户选择 `确认注册`、`仅保留草稿` 或 `修改字段`。
+- Theory 缺失时阻塞，不从 Runtime trace 倒推预期。
+- 缺少 kernel CSV 或 TensorCast trace 时，profiling 保持 pending/incomplete，不能写成完整通过。
+
+---
+
+## model-adaptation-calibration-loop
+
+模型适配校准闭环 Skill。它消费上一 Skill 的非通过项，通过人工检查点确认算子映射，实施最小范围修复，并重跑受影响门禁及其下游验证。
+
+### File layout
+
+| File | Purpose |
+| ---- | ------- |
+| `model-adaptation-calibration-loop/SKILL.md` | 校准循环、问题路由和停止条件 |
+| `model-adaptation-calibration-loop/assets/mapping-decision-template.yaml` | 人工映射决策模板 |
+
+### Key constraints
+
+- 不重新引入旧版 `evidence.yaml` 或 profiling 参数到基础 doctor/verify。
+- 不为通过测试而放宽容差、忽略必需算子或关闭目标量化/并行路径。
+- 生产 `op_mapping.yaml` 变更继续遵循 `op-mapping-generator` 的源码链路验证。
 
 ---
 

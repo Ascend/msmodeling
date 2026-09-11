@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Adaptation Calibration Loop"
+  short_description: "人工审查映射、修正模型适配并循环复验"
+  default_prompt: "Use $model-adaptation-calibration-loop to review validation findings, confirm mappings, apply minimal fixes, and rerun affected checks."

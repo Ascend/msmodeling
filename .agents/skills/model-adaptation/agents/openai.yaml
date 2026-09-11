@@ -1,4 +1,4 @@
 interface:
   display_name: "TensorCast Model Adaptation"
-  short_description: "Guide new model onboarding from doctor report to profile, patch tasks, evidence YAML, and verification."
-  default_prompt: "Use this skill to adapt a new HuggingFace-style model to TensorCast from a simulation command and MindStudio Insight raw profiling export."
+  short_description: "Guide run-through model onboarding, key-op count checks, and optional new-op adaptation."
+  default_prompt: "Use $model-adaptation to adapt a HuggingFace-style model to TensorCast from a simulation command, then run doctor and key-operator verification without measured profiling input."
