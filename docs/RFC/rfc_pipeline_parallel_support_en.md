@@ -38,7 +38,7 @@ This avoids the previous full-model-first approach. A full-model trace may inclu
 - The first version does not implement real cross-process distributed execution. `send/recv` are logical communication events in runtime trace and performance modeling, not real tensor transfers.
 - The first version does not implement strict event-level 1F1B, interleaved PP, or virtual pipeline stage scheduling.
 - The first version does not parse `_pp_plan` automatically and does not support user-declared non-uniform stage partitions.
-- The first version does not provide full stage-local behavior for VL, MTP, or multimodal models. These models fall back to conservative estimates or skip stage-first tracing on related paths.
+- The first version does not provide full stage-local behavior for VL or multimodal models. These models fall back to conservative estimates or skip stage-first tracing on related paths. (MTP/DFlash/DSpark speculative decode coexistence is supported by PR #773.)
 - The first version does not redefine the combination semantics of MoE/EP rank groups and PP stages. MoE groups continue to use the existing global `EP * MOE-TP * MOE-DP == world_size` semantics.
 - The first version does not require profiling databases to already contain stage-local samples. Profiling/empirical PP support can be added through a separate contract later.
 
@@ -385,7 +385,7 @@ Weight memory estimation rules:
 | Model or Stage | Estimation |
 | :--- | :--- |
 | `pp_size=1` | Return full-model weights. |
-| VL or MTP model | Fall back to full-model weights and log a warning. |
+| VL or multimodal model | Fall back to full-model weights and log a warning. |
 | Unable to locate language layers | Fall back to full-model weights and log a warning. |
 | First stage | `embedding + active_layer_size`. |
 | Middle stage | `active_layer_size`. |
@@ -537,7 +537,7 @@ Mem 25.00 | Comm 25.00 | Cube 50.00 | Vec 0.00 | PP Compute 50.00 | PP Comm 16.6
 | `pp_size=1` | Does not build multi-stage graphs, does not insert send/recv, and degrades to the existing single-stage behavior. |
 | analytic-only | Stage-first tracing primarily serves the analytic performance model; if no analytic model is present, it may fall back to an approximation and mark it. |
 | profiling/empirical | Profiling + PP needs a stage-local profiling data contract; until then, profiling mode must not claim complete PP modeling. |
-| VL/MTP | Stage-local graph construction and weight estimation fall back or are skipped to avoid incorrectly pruning non-standard model structures. |
+| VL/multimodal | Stage-local graph construction and weight estimation fall back or are skipped to avoid incorrectly pruning non-standard model structures. |
 | MoE | EP/MoE groups are not included in the PP stage dimension for now, preserving existing global MoE semantics. |
 | Cross-layer fusion | `torch.compile` and runtime trace must run on stage-local graphs to avoid cross-PP-boundary fusion. |
 | Output fields | The `parallel` label can continue to display `TP=... \| PP=... \| DP=...`; the new PP breakdown does not change existing columns such as `ttft`, `tpot`, and `token/s`. |
@@ -665,7 +665,7 @@ Required coverage:
 | Evolution Item | Trigger | Scope | Exit Criteria |
 | :--- | :--- | :--- | :--- |
 | Configurable stage partition | Uniform partitioning does not match target model deployment. | Support manual stage layer ranges or `_pp_plan`. | RFC updated and non-uniform partition tests added. |
-| VL/MTP/multimodal PP | Target models need PP search. | Define ownership for vision tower, MTP head, language layers, and output layers. | No full-model weight fallback; stage traces run stably. |
+| VL/multimodal PP | Target models need PP search. | Define ownership for vision tower, language layers, and output layers. | No full-model weight fallback; stage traces run stably. |
 | PP + MoE stage-local groups | MoE models need simultaneous PP and EP search. | Redefine stage-local EP/MoE-TP/MoE-DP groups and global group relationships. | Rank groups, cache, dispatch/combine communication all have test coverage. |
 | Real send/recv kernels | Real distributed communication or end-to-end pipeline execution is needed. | Evolve logical send/recv pseudo events into real Runtime ops. | Real communication kernels appear in trace and align with device execution. |
 | Strict microbatch scheduling | Fill-drain approximation error is not acceptable. | Support event-level 1F1B, interleaved PP, and bubble/overlap simulation. | Aligned with real scheduling or a reference simulator, with error reports. |

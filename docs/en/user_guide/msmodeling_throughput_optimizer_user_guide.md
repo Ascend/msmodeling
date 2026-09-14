@@ -15,6 +15,8 @@ The throughput optimizer can be used for hardware planning, throughput optimizat
 | PD disaggregation | prefill and decode are deployed separately, requiring evaluation of the capability of each phase | `--disagg`, `--ttft-limits` or `--tpot-limits` |
 | PD ratio | For planning the ratio of prefill to decode instance counts | `--enable-optimize-prefill-decode-ratio`, `--prefill-devices-per-instance`, `--decode-devices-per-instance` |
 
+Any of the above scenarios can be combined with `--speculative-method {dflash,dspark}` to enable speculative decoding (for MTP, prefer the unified entry `--speculative-method mtp`); see [Adding Speculative Decoding (DFlash / DSpark)](#adding-speculative-decoding-dflash--dspark).
+
 ### 2.1 PD Aggregation Scenario
 
 Aggregation mode optimizes throughput for a combined prefill-decode serving architecture where both phases run on the same instance. The optimizer searches across all possible TP (Tensor Parallelism) and DP (Data Parallelism) configurations to find the best throughput under SLO (Service Level Objective) constraints.
@@ -97,6 +99,66 @@ python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
     --disagg \
     --tpot-limits 50
 ```
+
+#### Adding Speculative Decoding (DFlash / DSpark)
+
+In PD aggregation, PD disaggregation, or PD ratio scenarios, you can stack draft speculative decoding modeling via `--speculative-method {dflash,dspark}` to evaluate its impact on decode throughput and TPOT. It is mutually exclusive with MTP (`--num-mtp-tokens` non-zero); `--num-speculative-tokens`, `--acceptance-length`, `--num-draft-layers`, and `--draft-model-config-path` require `--speculative-method` to be set first; DSpark optionally accepts `--dspark-markov-rank` / `--dspark-markov-head` (defaults `256` / `vanilla`).
+
+> Note: for MTP, prefer the unified entry `--speculative-method mtp --num-speculative-tokens N [--acceptance-length A]`. The legacy entry `--num-mtp-tokens` / `--mtp-acceptance-rates` cannot be mixed with the new entry `--speculative-method` / `--num-speculative-tokens` / `--acceptance-length`; when `mtp` is selected, `--num-speculative-tokens` is mandatory. The legacy `--num-mtp-tokens` (and `--mtp-acceptance-rates`) still work standalone for compatibility and will be gradually deprecated. `--num-speculative-tokens` supports multi-value search; `--acceptance-length` is uniformly clamped to `n` (= `block_size - 1`) for all methods.
+
+The following example appends speculative decoding parameters to the PD disaggregation decode example:
+
+```bash
+python -m cli.inference.throughput_optimizer Qwen/Qwen3-32B \
+    --device TEST_DEVICE \
+    --num-devices 8 \
+    --input-length 3500 \
+    --output-length 1500 \
+    --compile \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --quantize-attention-action DISABLED \
+    --disagg \
+    --tpot-limits 50 \
+    --speculative-method dflash \
+    --num-speculative-tokens 7 \
+    --acceptance-length 5 \
+    --num-draft-layers 6
+```
+
+Notes:
+
+- When `--speculative-method` is set, any explicit `0` candidate in `--num-speculative-tokens` fails to parse; omit `--speculative-method` to disable. When the parameter is omitted, dflash/dspark still use the builtin `block_size`. `--num-speculative-tokens` also accepts multiple candidate values (e.g. `2 4`) for search.
+- `--num-draft-layers` / `--draft-model-config-path` only apply to `dflash` / `dspark` and cannot be used with `--speculative-method mtp`.
+- For DSpark, change `--speculative-method` to `dspark`; Markov parameters default to `--dspark-markov-rank 256` and `--dspark-markov-head vanilla` (alternatives `gated`, `rnn`; setting rank to `0` disables the MarkovHead).
+- The default draft config is `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`; see [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md) for field descriptions and customization.
+
+#### Pipeline Parallel (PP) Search
+
+The following example enables pipeline parallel (PP) search on top of PD disaggregation to evaluate TTFT/TPOT/throughput across PP configurations:
+
+```bash
+python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
+    --device ATLAS_800_A3_560T_128G_DIE \
+    --num-devices 32 \
+    --input-length 2048 \
+    --output-length 512 \
+    --quantize-linear-action W8A8_DYNAMIC \
+    --disagg \
+    --tpot-limits 50 --ttft-limits 10000 \
+    --tp-sizes 8 \
+    --pp-sizes 1 2 4 \
+    --ep-sizes 8 \
+    --moe-dp-sizes 1
+```
+
+Notes:
+
+- Without `--pp-sizes`, PP is fixed to 1 and the original TP/EP/DCP search path is used with fully compatible behavior and results; when specified, the PP-aware search path is used.
+- For PP>1, `dp = num_devices // (tp * pp)` and `moe_tp = (num_devices // pp) // (ep * moe_dp)` are derived via stage-local arithmetic, and a forward-blocking pipeline scheduler computes makespan / bubble ratio / bottleneck stage; the result table adds columns such as `pp_size` / `pp_bubble_ratio` / `pp_bottleneck_stage` / `pp_makespan_ms`.
+- Use `--pp-layer-partitions '[[31,30],[16,15,15,15]]'` to specify layer partitions explicitly (each inner list length must equal its `pp_size`, and inner-list elements must sum to `num_hidden_layers`); balanced partitioning is used when omitted.
+- PP and DCP can be searched jointly (explicit `--dcp-sizes` is not dropped).
+- PP>1 does not yet support: VL/multimodal models and variable-length input distribution (`length_distribution`) — such candidates are skipped with a warning. PP can be searched jointly with speculative decoding (`--speculative-method mtp/dflash/dspark`); speculative proposal/draft compute runs on the last pipeline stage.
+- The forward-blocking (no-overlap) scheduler gives a conservative lower bound for PP>1 throughput (systematically overestimates bubbles); do not conclude that PP is strictly worse from it. Future 1F1B / interleaved scheduling evolution will improve this.
 
 ### 2.3 PD Ratio Scenario
 
@@ -374,6 +436,13 @@ The main parameters are described as follows:
 | --compile                               | Model & Quantization Options | Optional | Invokes `torch.compile()` on the model before inference.<br>1. Type: Bool.<br>2. Value range: switch parameter.<br>3. Default: `False`. |
 | --compile-allow-graph-break             | Model & Quantization Options | Optional | Allows graph breaks during `torch.compile()`.<br>1. Type: Bool.<br>2. Value range: switch parameter.<br>3. Default: `False`. |
 | --num-mtp-tokens                        | Model & Quantization Options | Optional | Specifies the number of MTP tokens. 0 means disabled.<br>1. Type: Int.<br>2. Value range: 0 to 9.<br>3. Default: 0. |
+| --speculative-method | Model & Quantization Options | Optional | Specifies the speculative decoding method.<br>1. Type: Str.<br>2. Values: `mtp`, `dflash`, or `dspark`.<br>3. Default: unset (disabled).<br>4. New speculative entry; cannot be mixed with the legacy MTP entry `--num-mtp-tokens` / `--mtp-acceptance-rates`.<br>5. Selecting `mtp` requires `--num-speculative-tokens`. It is the prerequisite switch for dependent parameters such as `--num-speculative-tokens` / `--acceptance-length`. |
+| --num-speculative-tokens | Model & Quantization Options | Optional | Speculative token count / depth `n` (excluding anchor/bonus).<br>1. Type: List[Int] (`nargs="+"`, multi-value search supported).<br>2. Semantics: when `>= 1`, internal `block_size = n + 1`; when **omitted**, dflash/dspark use the builtin / external config; when `--speculative-method` is set, any **explicit** `0` candidate fails to parse (omit `--speculative-method` to disable); for `mtp`, `n` is the MTP token count and must be set explicitly.<br>3. Default: unset.<br>4. Requires `--speculative-method`. Multiple values combine with TP / EP / MOE-DP for search. |
+| --acceptance-length | Model & Quantization Options | Optional | Acceptance length for decode throughput folding.<br>1. Type: Float.<br>2. Range: non-negative; uniformly clamped to `n` (= `block_size - 1`) for all methods.<br>3. Default: `5.0`.<br>4. Requires `--speculative-method`; it does not participate in graph building and only affects decode latency folding. |
+| --dspark-markov-rank | Model & Quantization Options | Optional | Markov embedding dimension.<br>1. Type: Int.<br>2. Range: non-negative integer; `0` disables the MarkovHead.<br>3. Default: `256`.<br>4. Requires `--speculative-method dspark`. |
+| --dspark-markov-head | Model & Quantization Options | Optional | Markov head type.<br>1. Type: Str.<br>2. Values: `vanilla`, `gated`, `rnn`.<br>3. Default: `vanilla`.<br>4. Requires `--speculative-method dspark`. |
+| --num-draft-layers | Model & Quantization Options | Optional | Overrides draft `num_hidden_layers`.<br>1. Type: Int.<br>2. Range: non-negative integer; `0` uses the config default.<br>3. Default: `0`.<br>4. Requires `--speculative-method dflash` or `dspark` (cannot be used with `mtp`). |
+| --draft-model-config-path | Model & Quantization Options | Optional | Path to an external draft `config.json` (or a directory containing it).<br>1. Type: Str.<br>2. Default: `None` (uses `tensor_cast/runtime_configs/draft_configs/dflash_draft_builtin.json`).<br>3. Requires `--speculative-method dflash` or `dspark` (cannot be used with `mtp`).<br>4. See [`tensor_cast/runtime_configs/draft_configs/README.md`](../../../tensor_cast/runtime_configs/draft_configs/README.md) for field descriptions. |
 | --quantize-linear-action                | Model & Quantization Options | Optional | Specifies the quantization mode for linear layers.<br>1. Type: Str.<br>2. Reference values: `DISABLED`, `W8A16_STATIC`, `W8A8_STATIC`, `W4A8_STATIC`, `W8A16_DYNAMIC`, `W8A8_DYNAMIC`, `W4A8_DYNAMIC`, `FP8`, `MXFP4`.<br>3. Default: `W8A8_DYNAMIC`. |
 | --quantize-non-expert-linear-action     | Model & Quantization Options | Optional | Specifies a separate quantization mode for non-expert linear layers, such as attention projections, dense MLP layers, and shared experts.<br>1. Type: Str.<br>2. Reference values: same as the preceding list.<br>3. Default: `DISABLED`.<br>4. Mainly intended for DeepSeek V4-style MoE models. Routed MoE experts still use `--quantize-linear-action`. |
 | --mxfp4-group-size                      | Model & Quantization Options | Optional | Specifies the group size for MXFP4 quantization.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: 32. |
@@ -381,6 +450,8 @@ The main parameters are described as follows:
 | --tp-sizes                              | Model & Quantization Options | Optional | Enables TP search and can explicitly specify the TP value range.<br>1. Type: List[Int].<br>2. Value range: a list of positive integers.<br>3. Default: `None`. When the argument is passed without values, powers of 2 up to `world_size` are searched by default. |
 | --ep-sizes                              | Model & Quantization Options | Optional | Enables EP search and can explicitly specify the EP value range.<br>1. Type: List[Int].<br>2. Value range: a list of positive integers.<br>3. Default: `None`. When the argument is passed without values, powers of 2 up to `world_size` are searched by default. |
 | --moe-dp-sizes                          | Model & Quantization Options | Optional | Enables MoE-DP search and can explicitly specify the MoE-DP value range.<br>1. Type: List[Int].<br>2. Value range: a list of positive integers.<br>3. Default: `None`. When the argument is passed without values, powers of 2 up to `world_size` are searched by default. |
+| --pp-sizes | Model & Quantization Options | Optional | Enables Pipeline Parallel (PP) search and optionally specifies PP candidates.<br>1. Type: List[Int] (`nargs="*"`).<br>2. Valid range: positive integers, each not exceeding `num_devices` and the model's `num_hidden_layers`.<br>3. Default: `None`; when omitted, PP is fixed to 1 (backward compatible, using the legacy TP/EP/DCP search path). When provided without values, searches powers of 2 up to `num_devices` (`1, 2, 4, ...`).<br>4. When set, enters the PP-aware search path: derives `dp = num_devices // (tp * pp)` and `moe_tp = (num_devices // pp) // (ep * moe_dp)` via stage-local arithmetic, and uses a forward blocking pipeline scheduler to compute makespan, bubble ratio, and schedule-aware throughput for PP>1 candidates. PP and DCP can be searched jointly (explicit `--dcp-sizes` is not dropped).<br>5. Unsupported for PP>1: VL/multimodal models and variable-length input distribution (`length_distribution`) — such candidates are skipped with a warning. PP can be searched jointly with speculative decoding (`--speculative-method mtp/dflash/dspark`); speculative proposal/draft compute runs on the last pipeline stage. |
+| --pp-layer-partitions | Model & Quantization Options | Optional | Explicitly specifies per-stage layer partitions for PP.<br>1. Type: Str (JSON list of lists).<br>2. Format: e.g. `'[[31,30],[16,15,15,15]]'`; each inner list length must equal its `pp_size`, and the sum of all inner-list elements must equal the model's `num_hidden_layers` (DeepSeek-V3.1 has 61 layers: 31+30=61, 16+15+15+15=61). Inner lists are auto-matched to their `pp_size` by length.<br>3. Default: `None`; uses balanced partitioning (remainder placed on earlier stages, avoiding the last stage carrying both norm + lm_head).<br>4. Only effective for PP>1. |
 | --ttft-limits                           | Service Options | Optional | Specifies the TTFT constraint under which to search for the best throughput.<br>1. Type: Float.<br>2. Value range: positive, in ms.<br>3. Default: `None`, meaning no TTFT limit. |
 | --tpot-limits                           | Service Options | Optional | Specifies the TPOT constraint under which to search for the best throughput.<br>1. Type: Float.<br>2. Value range: positive, in ms.<br>3. Default: `None`, meaning no TPOT limit. |
 | --max-batched-tokens                    | Service Options | Optional | Specifies the maximum number of batched tokens for one prefill or mixed prefill/decode step.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: 8192. |

@@ -38,7 +38,7 @@ TensorCast 和 serving 吞吐优化器需要在现有 TP/DP/EP/MoE 估算能力�
 - 首版不实现真实跨进程分布式执行；`send/recv` 是 runtime trace 和性能模型中的逻辑通信事件，不要求真实传输 tensor。
 - 首版不实现严格事件级 1F1B、interleaved PP 或虚拟 pipeline stage 调度。
 - 首版不做自动 `_pp_plan` 解析，不支持用户手动声明非均匀 stage partition。
-- 首版不为 VL、MTP、多模态模型提供完整 stage-local 行为；这些模型在相关路径上回退到保守估算或跳过 stage-first trace。
+- 首版不为 VL、多模态模型提供完整 stage-local 行为；这些模型在相关路径上回退到保守估算或跳过 stage-first trace。（MTP/DFlash/DSpark 投机解码已由 PR #773 实现支持。）
 - 首版不重新定义 MoE/EP rank group 与 PP stage 的组合语义。MoE group 仍沿用 `EP * MOE-TP * MOE-DP == world_size` 的既有全局语义。
 - 首版不强制要求 profiling database 已经存在 stage-local 采样数据；profiling/empirical PP 可作为后续独立契约扩展。
 
@@ -385,7 +385,7 @@ self.pipeline_stage_plan = build_pipeline_stage_plan(
 | 模型或 stage | 估算方式 |
 | :--- | :--- |
 | `pp_size=1` | 返回完整模型权重。 |
-| VL 或 MTP 模型 | 回退完整模型权重，并记录 warning。 |
+| VL 或多模态模型 | 回退完整模型权重，并记录 warning。 |
 | 无法定位 language layers | 回退完整模型权重，并记录 warning。 |
 | 首 stage | `embedding + active_layer_size`。 |
 | 中间 stage | `active_layer_size`。 |
@@ -537,7 +537,7 @@ Mem 25.00 | Comm 25.00 | Cube 50.00 | Vec 0.00 | PP Compute 50.00 | PP Comm 16.6
 | `pp_size=1` | 不构造多 stage graph，不插入 send/recv，退化为原有单 stage 行为。 |
 | analytic-only | stage-first trace 优先服务 analytic 性能模型；没有 analytic 模型时可以回退近似路径并标记。 |
 | profiling/empirical | profiling + PP 需要定义 stage-local profiling 数据契约；未完成前不可声称 profiling 模式已有完整 PP 建模。 |
-| VL/MTP | stage-local graph 构造和权重估算回退或跳过，避免错误裁剪非标准模型结构。 |
+| VL/多模态 | stage-local graph 构造和权重估算回退或跳过，避免错误裁剪非标准模型结构。 |
 | MoE | EP/MoE group 暂不纳入 PP stage 维度，保留既有全局 MoE 语义。 |
 | 跨层融合 | `torch.compile` 和 runtime trace 必须在 stage-local graph 上执行，避免跨 PP 边界融合。 |
 | 输出字段 | `parallel` 标签继续可以显示 `TP=... \| PP=... \| DP=...`；新增 PP breakdown 不改变原有 `ttft`、`tpot`、`token/s` 等列名。 |
@@ -665,7 +665,7 @@ python -m pytest serving_cast/tests/ut/test_tensor_cast_model_runner.py -q
 | 演进项 | 启动条件 | 范围 | 退出标准 |
 | :--- | :--- | :--- | :--- |
 | Stage partition 配置化 | 均匀切分无法满足目标模型真实部署时 | 支持手动 stage layer ranges 或 `_pp_plan`。 | RFC 更新并覆盖非均匀 partition 测试。 |
-| VL/MTP/多模态 PP | 目标模型需要 PP 搜索时 | 明确视觉塔、MTP head、语言层和输出层的 stage 所属关系。 | 不再回退完整模型权重，stage trace 可稳定运行。 |
+| VL/多模态 PP | 目标模型需要 PP 搜索时 | 明确视觉塔、语言层和输出层的 stage 所属关系。 | 不再回退完整模型权重，stage trace 可稳定运行。 |
 | PP + MoE stage-local group | MoE 模型需要同时搜索 PP 和 EP 时 | 重新定义 stage 内 EP/MoE-TP/MoE-DP group 与全局 group 的关系。 | rank group、cache、dispatch/combine 通信都有测试覆盖。 |
 | 真实 send/recv kernel | 需要真实分布式通信或端到端 pipeline 执行时 | 从 logical send/recv pseudo event 演进为真实 Runtime op。 | trace 中可见真实通信 kernel，并与设备执行对齐。 |
 | 严格 microbatch 调度 | 需要 ServingCast chunked prefill 或真实运行时调度时 | 支持 1F1B、interleaved PP、bubble/overlap 事件级模拟。 | 与真实调度或参考 simulator 对齐，并提供误差报告。 |
