@@ -49,6 +49,11 @@ class PipelineStageSpec:
     is_last: bool
     layer_types: tuple[str, ...] = ()
     extra_tail_layers: int = 0
+    # Draft layers (DFlash/DSpark) on the last stage. Like extra_tail_layers,
+    # extends the KV-cache slice range and input_ids forwarding, but does NOT
+    # affect num_hidden_layers_override (draft layers live inside the wrapper,
+    # not in the HF decoder ModuleList).
+    extra_draft_layers: int = 0
 
     @property
     def num_layers(self) -> int:
@@ -332,10 +337,20 @@ def build_pipeline_plan(
     stages = []
     mtp_config = getattr(model_config, "mtp_config", None)
     mtp_layers = int(getattr(mtp_config, "num_mtp_layers", 0) or 0)
+    draft_layers = int(model_config.draft_num_layers()) if model_config.has_draft_spec() else 0
     for stage_id, stage_layers in enumerate(stage_layer_counts):
         layer_end = layer_start + stage_layers
         layer_types = getattr(text_config, "layer_types", None)
         is_last = stage_id == pp_size - 1
+        if is_last and draft_layers > stage_layers:
+            # Draft (DFlash/DSpark) aux layers gather from the last stage's
+            # target decoder stack; a plain ValueError deeper in the build
+            # chain would abort the worker instead of skipping the candidate.
+            raise UnsupportedPPConfigurationError(
+                f"last pipeline stage has {stage_layers} target decoder layer(s) "
+                f"but DFlash/DSpark draft needs {draft_layers}; reduce pp_size or "
+                "--num-draft-layers so the last stage fits the draft model"
+            )
         stages.append(
             PipelineStageSpec(
                 stage_id=stage_id,
@@ -346,6 +361,7 @@ def build_pipeline_plan(
                 is_last=is_last,
                 layer_types=tuple(layer_types[layer_start:layer_end]) if isinstance(layer_types, list) else (),
                 extra_tail_layers=mtp_layers if is_last else 0,
+                extra_draft_layers=draft_layers if is_last else 0,
             )
         )
         layer_start = layer_end
@@ -367,10 +383,13 @@ def build_stage_model_config(model_config: ModelConfig, stage_spec: PipelineStag
     )
     stage_config.num_hidden_layers_override = stage_spec.num_layers
     if not stage_spec.is_last:
-        # MTP proposal layers run after the final decoder stage and lm_head.
-        # Enabling them on earlier PP stages would duplicate proposal work and
-        # rebase MTP layer indices against the wrong local layer stack.
+        # MTP/DFlash/DSpark proposal layers run after the final decoder stage
+        # and lm_head. Enabling them on earlier PP stages would duplicate
+        # proposal work and rebase draft layer indices against the wrong local
+        # layer stack.
         stage_config.mtp_config = None
+        stage_config.dflash_config = None
+        stage_config.dspark_config = None
     return stage_config
 
 
@@ -650,7 +669,28 @@ class PipelineModel(torch.nn.Module):
     @property
     def num_hidden_layers(self) -> int:
         mtp_config = getattr(self.model_config, "mtp_config", None)
-        return self.plan.num_hidden_layers + int(getattr(mtp_config, "num_mtp_layers", 0) or 0)
+        mtp_layers = int(getattr(mtp_config, "num_mtp_layers", 0) or 0)
+        draft_layers = int(self.model_config.draft_num_layers()) if self.model_config.has_draft_spec() else 0
+        return self.plan.num_hidden_layers + mtp_layers + draft_layers
+
+    @property
+    def draft_hf_config(self):
+        """DFlash/DSpark draft HF config exposed by the last stage's wrapper.
+
+        Speculative configs are cleared on non-last stages, so only the last
+        stage's TransformerModel carries the DflashWrapper/DsparkWrapper (or
+        MtpWrapper) that owns ``draft_hf_config``. Returns None when no
+        wrapper exposes one; KV cache allocation must not fall back to the
+        target layout in that case.
+        """
+        if not self.stages:
+            return None
+        stage_model = self.stages[-1].model
+        # Peel torch.compile's OptimizedModule without unwrapping the
+        # speculative wrapper itself (ModelWrapperBase.unwrap would go too far).
+        stage_model = getattr(stage_model, "_orig_mod", stage_model)
+        inner = getattr(stage_model, "_inner", None)
+        return getattr(inner, "draft_hf_config", None)
 
     @property
     def hidden_size(self) -> int:
@@ -709,7 +749,7 @@ def build_pipeline_stage_kwargs(
         # PipelineStageModel.forward owns the PP stage I/O contract and converts
         # this wrapper-level hidden_states input to TransformerModel inputs_embeds.
         stage_kwargs["hidden_states"] = hidden_states
-        if stage_spec.is_last and stage_spec.extra_tail_layers > 0:
+        if stage_spec.is_last and (stage_spec.extra_tail_layers + stage_spec.extra_draft_layers) > 0:
             stage_kwargs["input_ids"] = input_kwargs["input_ids"]
 
     for key in _PASSTHROUGH_STAGE_KWARGS:
@@ -775,7 +815,7 @@ def _slice_layer_cache(
         raise ValueError(f"{cache_key} must be a layer-indexed dict for pipeline parallel execution.")
 
     allow_sparse_layers = cache_key == "indexer_cache_by_layers"
-    layer_end = stage_spec.layer_end + stage_spec.extra_tail_layers
+    layer_end = stage_spec.layer_end + stage_spec.extra_tail_layers + stage_spec.extra_draft_layers
     if not allow_sparse_layers:
         missing_layers = [
             layer_idx for layer_idx in range(stage_spec.layer_start, layer_end) if layer_idx not in cache_by_layers

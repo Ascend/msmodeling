@@ -1092,6 +1092,45 @@ class TestDisaggPipelineParallel(unittest.TestCase):
         self.assertEqual(row["tpot"], 8002.0)
         self.assertAlmostEqual(row["token/s"], 2.0 / 6.002, places=3)
 
+    def test_pp_decode_applies_mtp_fold(self):
+        """PP>1 decode TPOT and throughput are folded by (accept+1) when MTP is enabled."""
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        _, repeated = _pp_schedule_estimates(
+            makespan_s=10.0,
+            interval_s=6.0,
+            worst_tpot_s=8.0,
+        )
+        optimizer_data = OptimizerData(
+            ttft_limits=None,
+            tpot_limits=10000,
+            batch_size=2,
+            input_length=512,
+            output_length=128,
+            max_batched_tokens=2048,
+            serving_cost=2,
+            num_mtp_tokens=2,
+            speculative_method="mtp",
+            acceptance_length=1.5,
+            mtp_acceptance_rate=[],
+        )
+        with (
+            patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)),
+            patch(
+                "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
+                return_value=repeated,
+            ),
+        ):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        # fold = clamp(1.5, 0, 2) + 1 = 2.5
+        fold = 2.5
+        expected_tpot = 8000.0 / fold + 2.0  # 3202.0
+        expected_interval_s = 6.0 / fold + 0.002  # 2.402
+        self.assertIsNone(row["ttft"])
+        self.assertAlmostEqual(row["tpot"], expected_tpot, places=2)
+        self.assertAlmostEqual(row["token/s"], 2.0 / expected_interval_s, places=3)
+
     def test_dp_scaling_uses_shared_matrix(self):
         for name, dp, pp, tp, batch_size, expected_concurrency in _PP_SCALING_MATRIX:
             with self.subTest(name=name):

@@ -19,11 +19,13 @@ from tensor_cast.core.input_generator import (
     get_sparse_attention_indexer_cache_info,
     RequestInfo,
 )
-from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
+from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics, _spec_decode_skips_runner_sampler
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
 from tensor_cast.model_config import (
     AttentionQuantConfig,
+    DflashConfig,
+    DsparkConfig,
     MlaConfig,
     ModelConfig,
     MoEConfig,
@@ -48,6 +50,7 @@ from tensor_cast.pipeline_parallel import (
     PipelineStageModel,
     PipelineTransferStats,
     StageRunner,
+    UnsupportedPPConfigurationError,
     build_pipeline_plan,
     _pipeline_parallel_breakdowns,
     _pipeline_total_time_s,
@@ -1121,6 +1124,55 @@ def test_pipeline_stage_kwargs_remaps_mtp_tail_cache_to_last_stage():
     assert stage_kwargs["kv_cache_by_layers"][3] is input_kwargs["kv_cache_by_layers"][6]
 
 
+def test_build_pipeline_plan_sets_extra_draft_layers_for_dflash():
+    """DFlash draft layers must be counted in extra_draft_layers on the last stage.
+
+    13 target layers / PP=2 leaves 6 decoder layers on the last stage, exactly
+    fitting the 6-layer draft (guard boundary).
+    """
+    model_config = _make_model_config(num_layers=13, pp_size=2, world_size=4)
+    model_config.dflash_config = DflashConfig(num_draft_layers=6)
+    plan = build_pipeline_plan(model_config, pp_size=2)
+
+    assert [s.extra_draft_layers for s in plan.stages] == [0, 6]
+
+
+def test_pipeline_stage_kwargs_remaps_draft_cache_to_last_stage():
+    """DFlash draft layer KV cache must be sliced into the last stage's local cache."""
+    model_config = _make_model_config(num_layers=7, pp_size=2, world_size=4)
+    model_config.dflash_config = DflashConfig(num_draft_layers=3)
+    plan = build_pipeline_plan(model_config, pp_size=2)
+    hidden_states = torch.empty(2, 7, 16, device="meta")
+    total_layers = model_config.hf_config.num_hidden_layers + 3  # 7 decoder + 3 draft
+    input_kwargs = {
+        "position_ids": torch.empty(2, 7, dtype=torch.long, device="meta"),
+        "input_ids": torch.empty(2, 7, dtype=torch.long, device="meta"),
+        "kv_cache_by_layers": {
+            layer_idx: torch.empty(1, layer_idx + 1, device="meta") for layer_idx in range(total_layers)
+        },
+        "kv_cache_per_token": 1.0,
+    }
+
+    stage_kwargs, _ = build_pipeline_stage_kwargs(
+        plan.stages[-1],
+        input_kwargs,
+        hidden_states=hidden_states,
+    )
+
+    # Last stage has decoder layers [4,7) (3 layers) + 3 draft layers = 6 local indices [0..5]
+    assert set(stage_kwargs["kv_cache_by_layers"]) == {0, 1, 2, 3, 4, 5}
+    # input_ids forwarded because extra_draft_layers > 0
+    assert stage_kwargs["input_ids"] is input_kwargs["input_ids"]
+    # Decoder layers: local 0,1,2 ← global 4,5,6
+    assert stage_kwargs["kv_cache_by_layers"][0] is input_kwargs["kv_cache_by_layers"][4]
+    assert stage_kwargs["kv_cache_by_layers"][1] is input_kwargs["kv_cache_by_layers"][5]
+    assert stage_kwargs["kv_cache_by_layers"][2] is input_kwargs["kv_cache_by_layers"][6]
+    # Draft layers: local 3,4,5 ← global 7,8,9
+    assert stage_kwargs["kv_cache_by_layers"][3] is input_kwargs["kv_cache_by_layers"][7]
+    assert stage_kwargs["kv_cache_by_layers"][4] is input_kwargs["kv_cache_by_layers"][8]
+    assert stage_kwargs["kv_cache_by_layers"][5] is input_kwargs["kv_cache_by_layers"][9]
+
+
 def test_pipeline_model_sparse_indexer_cache_resolves_stage_layers():
     model_config = _make_model_config(num_layers=4, pp_size=2, world_size=4)
     model_config.mla_config = MlaConfig(module_name="self_attn", mla_cls=_RequiresIndexerCache)
@@ -2056,3 +2108,305 @@ def test_non_pipeline_metrics_keep_pipeline_profile_none():
         batch_size=1,
     )
     assert metrics.pipeline_profile is None
+
+
+def test_spec_decode_skips_runner_sampler_for_mtp():
+    """MtpWrapper always samples internally; runner sampler must be skipped."""
+    from tensor_cast.layers.mtp import MtpWrapper
+
+    # Model chain: TransformerModel -> MtpWrapper -> CausalLmWrapper -> HF model
+    mtp_wrapper = MagicMock(spec=MtpWrapper)
+    mtp_wrapper._inner = MagicMock()
+    mtp_wrapper._inner._inner = None  # end of chain
+
+    assert _spec_decode_skips_runner_sampler(mtp_wrapper, {}) is True
+
+
+def test_spec_decode_skips_runner_sampler_without_spec_decode():
+    """No MtpWrapper/DflashWrapper in chain → runner sampler stays on."""
+    model = MagicMock()
+    model._inner = None  # end of chain
+
+    assert _spec_decode_skips_runner_sampler(model, {}) is False
+
+
+def test_build_stage_model_clears_dflash_dspark_on_non_last_stage(monkeypatch):
+    """DFlash/DSpark configs must be cleared on non-last PP stages (like MTP)."""
+    model_config = _make_model_config(num_layers=14, pp_size=2, world_size=4)
+    model_config.dflash_config = DflashConfig(num_draft_layers=6)
+    builds = _install_fake_builder(monkeypatch, model_config)
+    user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=2, pp_size=2)
+
+    model_builder.build_model(user_input)
+
+    assert builds[0].dflash_config is None  # non-last stage cleared
+    assert builds[1].dflash_config is not None  # last stage retains
+    assert builds[1].dflash_config.num_draft_layers == 6
+
+
+def test_pipeline_model_num_hidden_layers_includes_draft_layers(monkeypatch):
+    """PipelineModel.num_hidden_layers must include draft layers for KV cache."""
+    model_config = _make_model_config(num_layers=14, pp_size=2, world_size=4)
+    model_config.dflash_config = DflashConfig(num_draft_layers=6)
+    _install_fake_builder(monkeypatch, model_config)
+    user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=2, pp_size=2)
+
+    model = model_builder.build_model(user_input)
+
+    assert isinstance(model, PipelineModel)
+    # 14 decoder + 6 draft = 20
+    assert model.num_hidden_layers == 20
+
+
+def test_spec_decode_skips_runner_sampler_for_pp_with_dflash(monkeypatch):
+    """PP PipelineModel with DflashWrapper on last stage → sampler guard returns True."""
+    from tensor_cast.layers.dflash import DflashWrapper
+
+    # Build a fake PipelineModel: last stage's model contains a DflashWrapper
+    dflash_wrapper = MagicMock(spec=DflashWrapper)
+    dflash_wrapper._inner = MagicMock()
+    dflash_wrapper._inner._inner = None
+
+    last_stage = SimpleNamespace(model=dflash_wrapper)
+    early_stage = SimpleNamespace(model=MagicMock())
+    early_stage.model._inner = None
+
+    pipeline_model = MagicMock()
+    pipeline_model.stages = [early_stage, last_stage]
+    # Remove _inner so the function can't shortcut (PipelineModel has no _inner)
+    del pipeline_model._inner
+
+    # DFlash decode step → should return True
+    monkeypatch.setattr(DflashWrapper, "_is_decode_step", lambda _: True)
+    assert _spec_decode_skips_runner_sampler(pipeline_model, {}) is True
+
+
+def test_pipeline_vl_stage_preserves_existing_dflash_wrapper(monkeypatch):
+    """VL narrowing must keep the DFlash/DSpark wrapper and only re-wire its target inner.
+
+    DsparkWrapper subclasses DflashWrapper, so the isinstance branch covers both.
+    """
+
+    class _FakeDflashWrapper(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self._inner = inner
+
+        def __getattr__(self, item):
+            try:
+                return super().__getattr__(item)
+            except AttributeError:
+                return getattr(self._inner, item)
+
+    class _VLStage(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.hf_config = SimpleNamespace(model_type="minimax_m3_vl")
+            self.text_config = _FakeTextConfig(num_hidden_layers=2)
+            self.language_model = torch.nn.Module()
+            self.language_model.layers = torch.nn.ModuleList()
+            original_inner = torch.nn.Module()
+            original_inner.lm_head = torch.nn.Identity()
+            self._inner = _FakeDflashWrapper(original_inner)
+            self.is_vl_model = True
+
+        def unwrap(self):
+            return self
+
+    monkeypatch.setattr(model_builder, "DflashWrapper", _FakeDflashWrapper)
+    monkeypatch.setattr(
+        model_builder,
+        "get_model_profile",
+        lambda _model_type: SimpleNamespace(
+            language_module_path="language_model",
+            language_layers_path_str="language_model.layers",
+        ),
+    )
+    stage_model = _VLStage()
+    dflash_wrapper = stage_model._inner
+
+    narrowed = model_builder._narrow_pipeline_vl_stage_to_language_model(stage_model)
+
+    assert narrowed is stage_model
+    # Wrapper preserved (not overwritten by a bare CausalLmWrapper)...
+    assert stage_model._inner is dflash_wrapper
+    # ...with its target inner re-wired to the narrowed language model.
+    assert isinstance(stage_model._inner._inner, model_builder.CausalLmWrapper)
+    assert stage_model._inner._inner._inner is stage_model.language_model
+    assert isinstance(stage_model._inner._inner.lm_head, torch.nn.Identity)
+    assert stage_model.is_vl_model is False
+
+
+def test_pipeline_model_draft_hf_config_exposed_from_last_stage(monkeypatch):
+    """PipelineModel.draft_hf_config must reach the last stage's speculative wrapper."""
+    model_config = _make_model_config(num_layers=14, pp_size=2, world_size=4)
+    model_config.dflash_config = DflashConfig(num_draft_layers=6)
+    _install_fake_builder(monkeypatch, model_config)
+    user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=2, pp_size=2)
+
+    model = model_builder.build_model(user_input)
+
+    assert isinstance(model, PipelineModel)
+    # _FakeTransformerModel stages carry no speculative wrapper -> unreachable
+    assert model.draft_hf_config is None
+
+    draft_cfg = SimpleNamespace(num_key_value_heads=2, head_dim=3)
+    model.stages[-1].model._inner = SimpleNamespace(draft_hf_config=draft_cfg)
+    assert model.draft_hf_config is draft_cfg
+
+
+def test_build_stage_model_clears_dspark_on_non_last_stage(monkeypatch):
+    """DSpark configs must be cleared on non-last PP stages (like MTP and DFlash)."""
+    model_config = _make_model_config(num_layers=14, pp_size=2, world_size=4)
+    model_config.dspark_config = DsparkConfig(num_draft_layers=6, dspark_block_size=8)
+    builds = _install_fake_builder(monkeypatch, model_config)
+    user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=2, pp_size=2)
+
+    model_builder.build_model(user_input)
+
+    assert builds[0].dspark_config is None  # non-last stage cleared
+    assert builds[1].dspark_config is not None  # last stage retains
+    assert builds[1].dspark_config.dspark_block_size == 8
+
+
+@pytest.mark.parametrize(
+    ("spec_attr", "spec_config", "expected_total", "expected_tail"),
+    [
+        ("mtp_config", MtpConfig(num_mtp_layers=2), 16, 2),
+        ("dflash_config", DflashConfig(num_draft_layers=6, dflash_block_size=8), 20, 6),
+        ("dspark_config", DsparkConfig(num_draft_layers=6, dspark_block_size=8), 20, 6),
+    ],
+)
+def test_pp_spec_decode_candidate_to_profile_contract(
+    monkeypatch, spec_attr, spec_config, expected_total, expected_tail
+):
+    """Candidate -> ConfigResolver -> PipelineModel -> PipelineRunner profile contract.
+
+    Locks the cross-layer contract for MTP/DFlash/DSpark: spec layers are counted
+    at the top level, stage configs are split (cleared non-last / retained last),
+    the last stage slices a draft-inclusive KV cache, and the runner-level sampler
+    runs exactly once per executed decode pass.
+    """
+    model_config = _make_model_config(num_layers=14, pp_size=2, world_size=4)
+    setattr(model_config, spec_attr, spec_config)
+    builds = _install_fake_builder(monkeypatch, model_config)
+    user_input = UserInputConfig(model_id="fake/model", world_size=4, tp_size=2, pp_size=2)
+
+    model = model_builder.build_model(user_input)
+
+    # ConfigResolver -> PipelineModel: spec layers counted, stage configs split.
+    assert isinstance(model, PipelineModel)
+    assert model.num_hidden_layers == expected_total
+    spec_cfgs = [getattr(b, spec_attr) for b in builds]
+    assert spec_cfgs[0] is None  # non-last stage cleared
+    assert spec_cfgs[1] is not None  # last stage retains
+    # MTP tail layers stay in the decoder ModuleList remap (extra_tail_layers),
+    # not extra_draft_layers; DFlash/DSpark draft layers use extra_draft_layers.
+    assert model.plan.stages[-1].extra_draft_layers == (0 if spec_attr == "mtp_config" else expected_tail)
+
+    # PipelineModel -> profile: real run with draft-inclusive caches.
+    runner = PipelineRunner(
+        model=model,
+        perf_models=[_ConstantPerformanceModel()],
+        device_profile=DeviceProfile.all_device_profiles["TEST_DEVICE"],
+    )
+    input_kwargs = _make_pipeline_input_kwargs(num_layers=expected_total, batch=1, seq_len=4)
+    result = runner.run(input_kwargs)
+
+    profile = result.pipeline_profile
+    assert profile is not None
+    last_stage = profile.stages[-1]
+    assert last_stage.kv_cache_bytes > 0
+    # Last stage slices decoder layers [7,14) (7 layers) plus the spec tail:
+    # 7 + 2 MTP tail = 9 local KV entries for MTP; 7 + 6 draft = 13 for
+    # DFlash/DSpark (draft layers come via extra_draft_layers).
+    local_kv_entries = 7 + expected_tail
+    per_entry_bytes = bytes_of_tensor(torch.empty(2, 4, 1, 4))
+    assert last_stage.kv_cache_bytes == local_kv_entries * per_entry_bytes
+    assert last_stage.compute_time_s_by_model  # non-empty compute record
+
+    # Runner-level sampler executes exactly once per decode pass with
+    # with_sampler=True (ModelRunner downgrades to False for spec decode;
+    # see test_run_inference_wires_sampler_skip_to_pipeline_runner).
+    sampler_calls = []
+    runner.run(input_kwargs, with_sampler=True, sampler=lambda *args: sampler_calls.append(args))
+    assert len(sampler_calls) == 1
+
+
+@pytest.mark.parametrize("wrapper_spec", ["mtp", "dflash", "dspark", None])
+def test_run_inference_wires_sampler_skip_to_pipeline_runner(monkeypatch, wrapper_spec):
+    """ModelRunner must forward with_sampler=False to PipelineRunner.run for spec decode.
+
+    Helper-level tests alone can't catch a wiring regression that would feed
+    already-sampled token IDs back into the runner sampler.
+    """
+    from tensor_cast.layers.dflash import DflashWrapper
+    from tensor_cast.layers.dspark import DsparkWrapper
+    from tensor_cast.layers.mtp import MtpWrapper
+
+    captured = {}
+
+    def _fake_run(self, input_kwargs, *, with_sampler=False, sampler=None, runtime_observer=None):
+        captured["with_sampler"] = with_sampler
+        return SimpleNamespace(trace_events=[])
+
+    monkeypatch.setattr(PipelineRunner, "run", _fake_run)
+    monkeypatch.setattr(ModelRunner, "_build_pipeline_metrics", lambda self, result, **kw: "metrics-sentinel")
+    monkeypatch.setattr(ModelRunner, "_log_empirical_model_stats", lambda self: None)
+    if wrapper_spec in ("dflash", "dspark"):
+        monkeypatch.setattr(DflashWrapper, "_is_decode_step", lambda _: True)
+
+    wrapper_classes = {"mtp": MtpWrapper, "dflash": DflashWrapper, "dspark": DsparkWrapper}
+    # A real PipelineModel so run_inference takes the PP branch; only the last
+    # stage's model is replaced with the spec wrapper.
+    fake_model = _make_pipeline_model(num_layers=2, pp_size=2, world_size=4)
+    if wrapper_spec is not None:
+        wrapper = MagicMock(spec=wrapper_classes[wrapper_spec])
+        wrapper._inner = MagicMock()
+        wrapper._inner._inner = None
+        fake_model.stages[-1].model = wrapper
+    runner = ModelRunner.__new__(ModelRunner)
+    runner.user_input = SimpleNamespace(num_queries=1, block_size=16, chrome_trace=None)
+    runner.model = fake_model
+    runner.sampler = MagicMock()
+    runner.perf_models = []
+    runner.device_profile = DeviceProfile.all_device_profiles["TEST_DEVICE"]
+    runner.request_info_default = None
+
+    metrics = runner.run_inference(
+        requests=None,
+        generate_inputs_func=lambda model, requests, block_size: {},
+        with_sampler=True,
+    )
+
+    assert metrics == "metrics-sentinel"
+    # MTP/DFlash/DSpark downgrade the runner sampler; plain models keep it on.
+    assert captured["with_sampler"] is (wrapper_spec is None)
+
+
+def test_build_pipeline_plan_rejects_draft_deeper_than_last_stage():
+    """Last stage must fit the draft model: a too-deep draft is a candidate skip.
+
+    8 target layers / PP=2 leaves 4 decoder layers on the last stage; a 6-layer
+    DFlash draft would previously abort the worker with a plain ValueError from
+    sync_target_layer_ids. build_pipeline_plan must raise
+    UnsupportedPPConfigurationError instead so the serving layer skips the
+    candidate.
+    """
+    model_config = _make_model_config(num_layers=8, pp_size=2, world_size=4)
+    model_config.dflash_config = DflashConfig(num_draft_layers=6)
+    with pytest.raises(UnsupportedPPConfigurationError, match="4 target decoder layer"):
+        build_pipeline_plan(model_config, pp_size=2)
+
+    # DSpark shares the same draft depth budget via draft_num_layers().
+    model_config.dspark_config = DsparkConfig(num_draft_layers=6, dspark_block_size=8)
+    model_config.dflash_config = None
+    with pytest.raises(UnsupportedPPConfigurationError, match="4 target decoder layer"):
+        build_pipeline_plan(model_config, pp_size=2)
+
+    # Boundary: draft depth equal to the last stage's decoder count is accepted.
+    model_config.dspark_config = None
+    model_config.dflash_config = DflashConfig(num_draft_layers=4)
+    plan = build_pipeline_plan(model_config, pp_size=2)
+    assert [s.num_layers for s in plan.stages] == [4, 4]
+    assert plan.stages[-1].extra_draft_layers == 4

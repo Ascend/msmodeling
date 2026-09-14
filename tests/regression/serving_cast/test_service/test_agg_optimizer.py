@@ -968,6 +968,97 @@ class TestAggPipelineParallel(unittest.TestCase):
         self.assertEqual(row["tpot"], 80.0)
         self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
 
+    def test_pp_decode_applies_mtp_fold(self):
+        """PP>1 decode TPOT and throughput are folded by (accept+1) when MTP is enabled."""
+        strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+        profile = _agg_pp_profile((2.0, 2.0))
+        first_wave, repeated = _pp_schedule_estimates(
+            makespan_s=0.06,
+            interval_s=0.05,
+            worst_tpot_s=0.08,
+        )
+        optimizer_data = OptimizerData(
+            input_length=4,
+            output_length=4,
+            batch_size=2,
+            max_batched_tokens=2048,
+            num_mtp_tokens=2,
+            speculative_method="mtp",
+            acceptance_length=1.5,
+            mtp_acceptance_rate=[],
+        )
+        with (
+            patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
+            patch(
+                "serving_cast.service.base_throughput_optimizer.estimate_forward_pipeline",
+                return_value=first_wave,
+            ),
+            patch(
+                "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
+                return_value=repeated,
+            ),
+        ):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        # fold = clamp(1.5, 0, 2) + 1 = 2.5
+        fold = 2.5
+        expected_tpot = 80.0 / fold  # 32.0
+        expected_interval_ms = 50.0 / fold  # 20.0
+        expected_e2el = 60.0 + expected_interval_ms * 3  # 120.0
+        self.assertAlmostEqual(row["ttft"], 60.0, places=6)
+        self.assertAlmostEqual(row["tpot"], expected_tpot, places=6)
+        self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
+
+    def test_pp_decode_applies_block_fold_dflash_and_dspark(self):
+        """PP>1 decode TPOT is folded by (clamp(accept, 0, block-1) + 1) for DFlash/DSpark."""
+        for method, block_field, acceptance_field in (
+            ("dflash", "dflash_block_size", "dflash_acceptance_length"),
+            ("dspark", "dspark_block_size", "dspark_acceptance_length"),
+        ):
+            with self.subTest(method=method):
+                strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
+                profile = _agg_pp_profile((2.0, 2.0))
+                first_wave, repeated = _pp_schedule_estimates(
+                    makespan_s=0.06,
+                    interval_s=0.05,
+                    worst_tpot_s=0.08,
+                )
+                optimizer_data = OptimizerData(
+                    input_length=4,
+                    output_length=4,
+                    batch_size=2,
+                    max_batched_tokens=2048,
+                    num_mtp_tokens=0,
+                    speculative_method=method,
+                    acceptance_length=None,
+                    mtp_acceptance_rate=[],
+                )
+                setattr(optimizer_data, block_field, 6)  # n = block - 1 = 5
+                setattr(optimizer_data, acceptance_field, 3.5)
+
+                with (
+                    patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
+                    patch(
+                        "serving_cast.service.base_throughput_optimizer.estimate_forward_pipeline",
+                        return_value=first_wave,
+                    ),
+                    patch(
+                        "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
+                        return_value=repeated,
+                    ),
+                ):
+                    row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+                # fold = clamp(3.5, 0, 5) + 1 = 4.5
+                fold = 4.5
+                expected_tpot = 80.0 / fold
+                expected_interval_ms = 50.0 / fold
+                expected_e2el = 60.0 + expected_interval_ms * 3
+                # summary rows round to 3 decimals; 80/4.5 is not exact
+                self.assertAlmostEqual(row["ttft"], 60.0, places=6)
+                self.assertAlmostEqual(row["tpot"], expected_tpot, delta=1e-2)
+                self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, delta=1e-1)
+
     def test_single_token_skips_decode_profile_schedule_and_oom(self):
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
         prefill_profile = _agg_pp_profile((2.0, 2.0))

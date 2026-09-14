@@ -144,7 +144,9 @@ def build_draft_hf_config(
     """Builtin/optional path → Qwen3Config; CLI fields on ``dcfg`` already applied."""
     source = load_dflash_draft_config_dict(dcfg.draft_model_config_path)
     dflash = source.get("dflash_config", {}) or {}
-    target_layer_ids = list(dcfg.aux_hidden_state_layer_ids or dflash.get("target_layer_ids") or [])
+    target_layer_ids = list(
+        dcfg.aux_hidden_state_layer_ids or dflash.get("target_layer_ids") or source.get("target_layer_ids") or []
+    )
     if not target_layer_ids:
         raise ValueError("Dflash requires non-empty target_layer_ids / aux_hidden_state_layer_ids")
 
@@ -214,7 +216,10 @@ def apply_cli_overrides_to_source_and_dcfg(
     dcfg.dflash_block_size = int(block_size)
     dcfg.num_draft_layers = int(num_layers)
     if dcfg.aux_hidden_state_layer_ids is None:
-        ids = dflash.get("target_layer_ids")
+        # Draft profiles store target_layer_ids either nested under
+        # ``dflash_config`` or at the top level (e.g. Inferact/Kimi-K3-DSpark);
+        # accept both spellings.
+        ids = dflash.get("target_layer_ids") or source.get("target_layer_ids")
         if ids:
             dcfg.aux_hidden_state_layer_ids = list(ids)
     # Re-clamp acceptance after block_size may change.
@@ -1058,8 +1063,14 @@ class DflashWrapper(ModelWrapperBase):
         ``L_aux`` via :meth:`_synthesize_modeling_aux_hiddens`. Formal aux lists
         (if ever returned) are still passed through ``as_bsh`` once.
         """
+        # Mirror the MTP target contract (mtp.py): under PP the last stage
+        # receives hidden_states (converted to inputs_embeds) plus forwarded
+        # input_ids for the draft anchor. Target requires either-or — passing
+        # both raises "both input_ids and inputs_embeds were passed". Raw
+        # input_ids stay available to the draft anchor path in forward().
+        target_input_ids = None if inputs_embeds is not None else input_ids
         result = self._inner(
-            input_ids,
+            target_input_ids,
             position_ids,
             inputs_embeds,
             output_intermediate_hidden_states=True,

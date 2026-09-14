@@ -577,7 +577,32 @@ class ParallelRunner:
             tmp_user_input.ep_size = candidate.ep_size
             tmp_user_input.moe_dp_size = candidate.moe_dp_size
             tmp_user_input.moe_tp_size = candidate.moe_tp_size
-            tmp_user_input.num_mtp_tokens = candidate.num_mtp_tokens
+            # Translate the speculative-method search slot: DFlash/DSpark reuse
+            # the MTP search slot (candidate.num_mtp_tokens = N), but must NOT
+            # set num_mtp_tokens=N on UserInputConfig — that would make
+            # ConfigResolver build MtpConfig alongside DflashConfig (mutually
+            # exclusive). MTP keeps N for MtpWrapper construction.
+            method = getattr(base_user_input, "speculative_method", None)
+            if method in ("dflash", "dspark", "mtp"):
+                from cli.utils import clamp_acceptance_length
+
+                # Mirror the legacy translation explicitly (review: keep both
+                # paths aligned instead of relying on copy.copy inheritance).
+                tmp_user_input.speculative_method = method
+                block = int(candidate.num_mtp_tokens) + 1 if int(candidate.num_mtp_tokens) >= 1 else 0
+                if block >= 2:
+                    tmp_user_input.acceptance_length = clamp_acceptance_length(
+                        float(getattr(self.args, "acceptance_length", 5.0)), block, method
+                    )
+                else:
+                    tmp_user_input.acceptance_length = float(getattr(self.args, "acceptance_length", 5.0))
+                if method in ("dflash", "dspark"):
+                    tmp_user_input.num_speculative_tokens = candidate.num_mtp_tokens
+                    tmp_user_input.num_mtp_tokens = 0
+                else:  # mtp
+                    tmp_user_input.num_mtp_tokens = candidate.num_mtp_tokens
+            else:
+                tmp_user_input.num_mtp_tokens = candidate.num_mtp_tokens
             tmp_user_input.pp_layer_partition = candidate.layer_partition
             tmp_user_input.parallel_search_candidate = candidate
             tmp_user_input.dcp_size = candidate.dcp_size
@@ -591,6 +616,16 @@ class ParallelRunner:
                 tmp_user_input.chrome_trace = f"{name}_{trace_suffix}{ext}"
             return tmp_user_input
 
+        mtp_token_sizes = getattr(self.args, "num_mtp_token_sizes", None)
+        num_mtp_tokens_arg = self.args.num_mtp_tokens
+        # Prefill keeps the legacy constraint (mtp_list=[0] on the non-PP path):
+        # legacy and new-entry MTP must stay off for Prefill so TTFT remains a
+        # pure prefill measurement. DFlash/DSpark draft layers DO run during
+        # Prefill (aux collection is RFC-defined behavior), so their search
+        # slot keeps N.
+        if is_prefill and getattr(base_user_input, "speculative_method", None) not in ("dflash", "dspark"):
+            mtp_token_sizes = [0]
+            num_mtp_tokens_arg = 0
         candidates = build_pp_search_candidates(
             num_devices=target_devices,
             tp_sizes=self.args.tp_sizes,
@@ -598,8 +633,8 @@ class ParallelRunner:
             num_hidden_layers=num_hidden_layers,
             ep_sizes=self.args.ep_sizes,
             moe_dp_sizes=self.args.moe_dp_sizes,
-            num_mtp_token_sizes=getattr(self.args, "num_mtp_token_sizes", None),
-            num_mtp_tokens=self.args.num_mtp_tokens,
+            num_mtp_token_sizes=mtp_token_sizes,
+            num_mtp_tokens=num_mtp_tokens_arg,
             pp_layer_partitions=getattr(self.args, "pp_layer_partitions", None),
             # DCP is decode-only; prefill forces dcp_sizes=None (→ [1]).
             dcp_sizes=None if is_prefill else getattr(self.args, "dcp_sizes", None),

@@ -876,8 +876,11 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             repeated = decode_wave.repeated
             if repeated is None:
                 raise RuntimeError("decode_wave.repeated must not be None when repeat=True")
-            decode_latency = repeated.worst_tpot_s * 1000.0
-            decode_interval_ms = repeated.measured_interval_s * 1000.0
+            # Apply speculative-decode fold (MTP/DFlash/DSpark) to the scheduler's
+            # steady-state TPOT and wave period. When no speculative method is
+            # configured the fold is a no-op (divides by 1), preserving baseline.
+            decode_latency = self._fold_decode_latency_ms(repeated.worst_tpot_s * 1000.0, optimizer_data)
+            decode_interval_ms = self._fold_decode_latency_ms(repeated.measured_interval_s * 1000.0, optimizer_data)
             tpot = decode_latency
             e2el = ttft + decode_interval_ms * remaining_decode_tokens
             output_throughput = 1000 * output_length * concurrency / e2el if e2el > 0 else 0.0

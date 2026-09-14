@@ -118,6 +118,158 @@ class TestTaskRunner(unittest.TestCase):
         self.assertEqual(configs[0].draft_block_size(), 16)
         self.assertIn("dflash16", configs[0].chrome_trace)
 
+    def test_pp_build_user_input_sets_num_mtp_zero_for_dflash(self):
+        """PP path must set num_mtp_tokens=0 for DFlash (avoids MtpConfig/DflashConfig conflict)."""
+        self.args.speculative_method = "dflash"
+        self.args.num_speculative_tokens = 15
+        self.args.draft_block_size = 16
+        self.args.acceptance_length = 5.0
+        self.args.num_draft_layers = 0
+        self.args.draft_model_config_path = None
+        self.args.num_mtp_tokens = 0
+        self.args.num_mtp_token_sizes = [15]
+        self.args.num_devices = 2
+        self.args.tp_sizes = [1]
+        self.args.ep_sizes = [1]
+        self.args.pp_sizes = [2]
+        self.args.num_hidden_layers_override = 2
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+
+        self.assertTrue(configs)
+        # PP path must reset num_mtp_tokens=0 for DFlash to avoid
+        # ConfigResolver building MtpConfig alongside DflashConfig.
+        self.assertEqual(configs[0].speculative_method, "dflash")
+        self.assertEqual(configs[0].num_mtp_tokens, 0)
+        self.assertTrue(configs[0].dflash)
+        self.assertEqual(configs[0].num_speculative_tokens, 15)
+        self.assertEqual(configs[0].draft_block_size(), 16)
+        self.assertEqual(configs[0].pp_size, 2)
+
+    def test_pp_build_user_input_multi_n_dflash_sets_per_candidate_spec_tokens(self):
+        """PP multi-N DFlash: each candidate gets its own num_speculative_tokens."""
+        self.args.speculative_method = "dflash"
+        self.args.num_speculative_tokens = 3  # CLI first value (multi_n sets to n_candidates[0])
+        self.args.draft_block_size = 0  # multi-n: resolved per-candidate, not at args level
+        self.args.acceptance_length = 5.0
+        self.args.num_draft_layers = 0
+        self.args.draft_model_config_path = None
+        self.args.num_mtp_tokens = 0
+        self.args.num_mtp_token_sizes = [3, 7]
+        self.args.num_devices = 4
+        self.args.tp_sizes = [1]
+        self.args.ep_sizes = [1]
+        self.args.pp_sizes = [2]
+        self.args.num_hidden_layers_override = 2
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+
+        self.assertEqual(len(configs), 2)
+        # Candidate 1: N=3
+        self.assertEqual(configs[0].num_speculative_tokens, 3)
+        self.assertEqual(configs[0].num_mtp_tokens, 0)
+        self.assertEqual(configs[0].draft_block_size(), 4)
+        # Candidate 2: N=7 — must NOT inherit base's num_speculative_tokens=3
+        self.assertEqual(configs[1].num_speculative_tokens, 7)
+        self.assertEqual(configs[1].num_mtp_tokens, 0)
+        self.assertEqual(configs[1].draft_block_size(), 8)
+
+    def test_pp_build_user_input_multi_n_dspark_sets_per_candidate_spec_tokens(self):
+        """PP multi-N DSpark: each candidate gets its own num_speculative_tokens."""
+        self.args.speculative_method = "dspark"
+        self.args.num_speculative_tokens = 3
+        self.args.draft_block_size = 0  # multi-n: resolved per-candidate, not at args level
+        self.args.acceptance_length = 5.0
+        self.args.num_draft_layers = 0
+        self.args.draft_model_config_path = None
+        self.args.num_mtp_tokens = 0
+        self.args.num_mtp_token_sizes = [3, 7]
+        self.args.num_devices = 4
+        self.args.tp_sizes = [1]
+        self.args.ep_sizes = [1]
+        self.args.pp_sizes = [2]
+        self.args.num_hidden_layers_override = 2
+
+        task_runner = ParallelRunner(self.args)
+        configs = list(task_runner._get_user_config())
+
+        self.assertEqual(len(configs), 2)
+        for config, n in zip(configs, [3, 7]):
+            # DSpark reuses the MTP search slot but must carry num_mtp_tokens=0
+            # (ConfigResolver would build MtpConfig alongside DsparkConfig).
+            self.assertEqual(config.speculative_method, "dspark")
+            self.assertEqual(config.num_speculative_tokens, n)
+            self.assertEqual(config.num_mtp_tokens, 0)
+            self.assertTrue(config.dspark)
+            self.assertEqual(config.draft_block_size(), n + 1)
+
+    def test_pp_build_user_input_prefill_forces_mtp_zero(self):
+        """Disaggregated Prefill: legacy/new MTP candidates must be forced off under PP search.
+
+        Mirrors the non-PP path's ``if is_prefill: mtp_list = [0]`` so TTFT
+        stays a pure prefill measurement; DFlash/DSpark are excluded (their
+        draft runs during Prefill by RFC design).
+        """
+        for speculative_method in ("mtp", None):
+            with self.subTest(speculative_method=speculative_method):
+                self.args.speculative_method = speculative_method
+                self.args.num_speculative_tokens = 0
+                self.args.draft_block_size = 0
+                self.args.acceptance_length = 5.0
+                self.args.num_draft_layers = 0
+                self.args.draft_model_config_path = None
+                self.args.num_mtp_tokens = 2
+                self.args.num_mtp_token_sizes = [2]
+                self.args.num_devices = 2
+                self.args.tp_sizes = [1]
+                self.args.ep_sizes = [1]
+                self.args.pp_sizes = [2]
+                self.args.num_hidden_layers_override = 2
+
+                task_runner = ParallelRunner(self.args)
+                prefill_configs = list(task_runner._get_user_config(is_prefill=True))
+                decode_configs = list(task_runner._get_user_config(is_prefill=False))
+
+                self.assertTrue(prefill_configs)
+                for config in prefill_configs:
+                    self.assertEqual(config.num_mtp_tokens, 0)
+                    self.assertEqual(config.pp_size, 2)
+                # Decode phase keeps the MTP search slot.
+                self.assertTrue(decode_configs)
+                for config in decode_configs:
+                    self.assertEqual(config.num_mtp_tokens, 2)
+
+    def test_pp_build_user_input_prefill_keeps_dflash_speculative_tokens(self):
+        """Disaggregated Prefill keeps DFlash/DSpark draft candidates (RFC-defined behavior)."""
+        self.args.speculative_method = "dflash"
+        self.args.num_speculative_tokens = 3
+        self.args.draft_block_size = 0
+        self.args.acceptance_length = 5.0
+        self.args.num_draft_layers = 0
+        self.args.draft_model_config_path = None
+        self.args.num_mtp_tokens = 0
+        self.args.num_mtp_token_sizes = [3]
+        self.args.num_devices = 2
+        self.args.tp_sizes = [1]
+        self.args.ep_sizes = [1]
+        self.args.pp_sizes = [2]
+        self.args.num_hidden_layers_override = 2
+
+        task_runner = ParallelRunner(self.args)
+        prefill_configs = list(task_runner._get_user_config(is_prefill=True))
+
+        self.assertTrue(prefill_configs)
+        for config in prefill_configs:
+            self.assertEqual(config.speculative_method, "dflash")
+            self.assertTrue(config.dflash)
+            self.assertEqual(config.num_mtp_tokens, 0)
+            # acceptance clamped per-candidate to n = block - 1 = 3
+            self.assertEqual(config.acceptance_length, 3.0)
+            self.assertEqual(config.num_speculative_tokens, 3)
+            self.assertEqual(config.draft_block_size(), 4)
+
     def test_optimizer_data_fills_dspark_fields_when_enabled(self):
         # Fixture matches post-arg_parse args: block is already resolved (n+1),
         # and N candidates occupy the MTP search slot.

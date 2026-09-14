@@ -1118,19 +1118,23 @@ class TestPPCandidateGeneration:
         assert len(pp2) == 1
         assert pp2[0].layer_partition == (40, 40)
 
-    def test_pp_gt1_with_mtp_raises(self):
-        with pytest.raises(ValueError, match="num_mtp_tokens=0"):
-            build_pp_search_candidates(
-                num_devices=32,
-                tp_sizes=[1],
-                pp_sizes=[2],
-                num_hidden_layers=80,
-                ep_sizes=[1],
-                moe_dp_sizes=[1],
-                num_mtp_tokens=4,
-            )
+    def test_pp_gt1_with_mtp_allowed(self):
+        """PP>1 with non-zero MTP produces valid candidates (gate removed)."""
+        configs = build_pp_search_candidates(
+            num_devices=32,
+            tp_sizes=[1],
+            pp_sizes=[2],
+            num_hidden_layers=80,
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+            num_mtp_tokens=4,
+        )
+        assert len(configs) == 1
+        assert configs[0].pp_size == 2
+        assert configs[0].num_mtp_tokens == 4
 
-    def test_mixed_pp1_pp2_with_mtp_keeps_pp1(self):
+    def test_mixed_pp1_pp2_with_mtp_keeps_both(self):
+        """Both PP=1 and PP=2 produce candidates with non-zero MTP."""
         configs = build_pp_search_candidates(
             num_devices=32,
             tp_sizes=[1],
@@ -1141,9 +1145,15 @@ class TestPPCandidateGeneration:
             num_mtp_tokens=4,
         )
         assert len(configs) > 0
-        assert all(c.pp_size == 1 for c in configs)
+        pp1 = [c for c in configs if c.pp_size == 1]
+        pp2 = [c for c in configs if c.pp_size == 2]
+        assert len(pp1) == 1
+        assert pp1[0].num_mtp_tokens == 4
+        assert len(pp2) == 1
+        assert pp2[0].num_mtp_tokens == 4
 
-    def test_pp2_with_mtp_zero_and_nonzero_keeps_zero(self):
+    def test_pp2_with_mtp_zero_and_nonzero_keeps_both(self):
+        """PP=2 retains both MTP=0 and MTP=4 candidates."""
         configs = build_pp_search_candidates(
             num_devices=32,
             tp_sizes=[1],
@@ -1154,9 +1164,13 @@ class TestPPCandidateGeneration:
             num_mtp_token_sizes=[0, 4],
         )
         assert len(configs) > 0
-        assert all(c.num_mtp_tokens == 0 for c in configs)
+        mtp_values = sorted(c.num_mtp_tokens for c in configs)
+        assert mtp_values == [0, 4]
 
-    def test_mtp_not_misattributed_when_base_divisibility_fails(self):
+    def test_mtp_candidate_survives_when_other_pp_fails_divisibility(self):
+        """PP=4 has valid base divisibility and produces an MTP candidate;
+        PP=3 fails divisibility and produces none.
+        """
         configs = build_pp_search_candidates(
             num_devices=32,
             tp_sizes=[4],
@@ -1166,9 +1180,14 @@ class TestPPCandidateGeneration:
             moe_dp_sizes=[1],
             num_mtp_tokens=4,
         )
-        assert configs == []
+        assert len(configs) == 1
+        assert configs[0].pp_size == 4
+        assert configs[0].num_mtp_tokens == 4
 
-    def test_mtp_not_misattributed_when_another_pp_exceeds_layer_count(self):
+    def test_mtp_candidate_survives_when_another_pp_exceeds_layer_count(self):
+        """PP=2 stays within num_hidden_layers and produces an MTP candidate;
+        PP=128 exceeds num_hidden_layers and produces none.
+        """
         configs = build_pp_search_candidates(
             num_devices=256,
             tp_sizes=[1],
@@ -1178,7 +1197,9 @@ class TestPPCandidateGeneration:
             moe_dp_sizes=[1],
             num_mtp_tokens=4,
         )
-        assert configs == []
+        assert len(configs) == 1
+        assert configs[0].pp_size == 2
+        assert configs[0].num_mtp_tokens == 4
 
     def test_pp_gt1_with_mtp_zero_allowed(self):
         configs = build_pp_search_candidates(

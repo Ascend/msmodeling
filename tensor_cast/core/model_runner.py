@@ -57,21 +57,36 @@ def _primary_model_output(output: object) -> object:
 
 
 def _spec_decode_skips_runner_sampler(model: object, input_kwargs: dict) -> bool:
-    """True when DFlash/DSpark Decode already sampled inside the wrapper.
+    """True when DFlash/DSpark/MTP Decode already sampled inside the wrapper.
 
-    Decode primary is ``draft_tokens``, not vocab logits — do not feed it to sampler.
+    Decode primary is ``draft_tokens`` (DFlash) or ``token_ids`` (MTP), not vocab
+    logits — do not feed it to the runner sampler.
     """
     from ..layers.dflash import DflashWrapper
+    from ..layers.mtp import MtpWrapper
 
-    # Start at ``model`` itself: DflashWrapper may be the top node or nested under
+    # For PipelineModel, the wrapper sits on the last stage's model, not on
+    # the top-level PipelineModel (which has no ``_inner``). Delegate to it.
+    if hasattr(model, "stages"):
+        stages = list(getattr(model, "stages", []))
+        if stages:
+            last_stage_model = getattr(stages[-1], "model", None)
+            if last_stage_model is not None:
+                model = last_stage_model
+
+    # Start at ``model`` itself: wrappers may be the top node or nested under
     # ``TransformerModel._inner``. Skipping straight to ``_inner`` would miss a
-    # bare DflashWrapper and incorrectly keep the runner sampler on Decode.
+    # bare wrapper and incorrectly keep the runner sampler on Decode.
     node = model
     seen: set[int] = set()
     while node is not None and id(node) not in seen:
         seen.add(id(node))
         if isinstance(node, DflashWrapper):
             return DflashWrapper._is_decode_step(input_kwargs)
+        if isinstance(node, MtpWrapper):
+            # MTP always samples internally (self.sampler = Sampler() in __init__).
+            # Its forward returns [batch, num_mtp_layers+1] token IDs, not logits.
+            return True
         node = getattr(node, "_inner", None)
     return False
 
@@ -233,9 +248,12 @@ class ModelRunner:
                 device_profile=self.device_profile,
                 user_input=self.user_input,
             )
+            # Guard against double-sampling when MTP/DFlash already sampled
+            # internally — mirrors the non-PP path's check at line 261.
+            skip_sampler = _spec_decode_skips_runner_sampler(self.model, input_kwargs)
             pipeline_result = pipeline_runner.run(
                 input_kwargs,
-                with_sampler=with_sampler,
+                with_sampler=with_sampler and not skip_sampler,
                 sampler=self.sampler,
                 runtime_observer=runtime_observer,
             )

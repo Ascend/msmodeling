@@ -1,6 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. All rights reserved.
 """Unit tests for unified Dflash modeling."""
 
+import json
+import os
+import tempfile
 import unittest
 
 import torch
@@ -1581,6 +1584,149 @@ class TestSpecDecodeSkipsRunnerSampler(unittest.TestCase):
         wrapper = self._make_wrapper()
         decode_kw = {"sampling_metadata": SamplingMetadata(selected_token_indices=None)}
         self.assertTrue(_spec_decode_skips_runner_sampler(wrapper, decode_kw))
+
+
+class TestTargetInputContractUnderPP(unittest.TestCase):
+    """PP+DFlash/DSpark target input contract: either-or, never both.
+
+    Under PP the last stage receives hidden_states (converted to inputs_embeds
+    by PipelineStageModel) plus forwarded input_ids for the draft anchor.
+    DflashWrapper._run_target_collect_aux must pass only one of them to the
+    target (transformers raises "both input_ids and inputs_embeds were
+    passed"), mirroring the MTP target contract.
+    """
+
+    @staticmethod
+    def _make_wrapper(dcfg):
+        apply_cli_overrides_to_source_and_dcfg(dcfg, cli_num_draft_layers=1)
+        draft_hf = build_draft_hf_config(dcfg, target_hidden_size=64, target_vocab_size=128)
+        draft = DflashDraftModel(draft_hf, dcfg, layer_idx_offset=0)
+        return DflashWrapper(dcfg, draft_hf, torch.nn.Identity(), draft, draft_hf)
+
+    @staticmethod
+    def _record_inner_calls(wrapper):
+        class _RecordingInner(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def forward(self, input_ids, position_ids, inputs_embeds, **kwargs):
+                self.calls.append({"input_ids": input_ids, "inputs_embeds": inputs_embeds})
+                return (torch.randn(1, 4, 128), [torch.randn(1, 4, 64)])
+
+        inner = _RecordingInner()
+        wrapper._inner = inner
+        return inner.calls
+
+    def test_target_collect_aux_prefers_inputs_embeds_under_pp(self):
+        dcfg = DflashConfig(
+            dflash_block_size=4,
+            num_draft_layers=1,
+            context_length=8,
+            aux_hidden_state_layer_ids=[0],
+        )
+        wrapper = self._make_wrapper(dcfg)
+        calls = self._record_inner_calls(wrapper)
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        inputs_embeds = torch.randn(1, 4, 64)
+        target_out, aux = wrapper._run_target_collect_aux(
+            input_ids,
+            torch.arange(4).view(1, 4),
+            inputs_embeds,
+            batch_size=1,
+            tokens_per_req=4,
+        )
+
+        self.assertEqual(len(calls), 1)
+        # Target receives inputs_embeds only; raw input_ids are NOT forwarded
+        # (they remain available to the draft anchor path in forward()).
+        self.assertIsNone(calls[0]["input_ids"])
+        self.assertIs(calls[0]["inputs_embeds"], inputs_embeds)
+        self.assertEqual(tuple(target_out.shape), (1, 4, 128))
+        self.assertEqual(len(aux), 1)
+
+    def test_target_collect_aux_keeps_input_ids_without_embeds(self):
+        """Non-PP path unchanged: without inputs_embeds the target gets input_ids."""
+        dcfg = DflashConfig(
+            dflash_block_size=4,
+            num_draft_layers=1,
+            context_length=8,
+            aux_hidden_state_layer_ids=[0],
+        )
+        wrapper = self._make_wrapper(dcfg)
+        calls = self._record_inner_calls(wrapper)
+
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+        wrapper._run_target_collect_aux(
+            input_ids,
+            torch.arange(4).view(1, 4),
+            None,
+            batch_size=1,
+            tokens_per_req=4,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0]["input_ids"], input_ids)
+        self.assertIsNone(calls[0]["inputs_embeds"])
+
+
+class TestTopLevelTargetLayerIdsFallback(unittest.TestCase):
+    """Draft profiles may store ``target_layer_ids`` at the top level.
+
+    Inferact/Kimi-K3-DSpark's config.json carries ``target_layer_ids`` next to
+    ``model_type`` (no nested ``dflash_config`` object); the aux-id fallback
+    must accept both spellings or the build dies with "requires non-empty
+    target_layer_ids".
+    """
+
+    def test_apply_cli_overrides_reads_top_level_target_layer_ids(self):
+        cfg = {
+            "model_type": "k3_dspark",
+            "num_hidden_layers": 5,
+            "hidden_size": 64,
+            "num_attention_heads": 4,
+            "vocab_size": 32,
+            "target_layer_ids": [2, 23, 47, 71, 89],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "draft_config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+
+            dcfg = DflashConfig(
+                dflash_block_size=4,
+                num_draft_layers=5,
+                context_length=16,
+                draft_model_config_path=path,
+            )
+            apply_cli_overrides_to_source_and_dcfg(dcfg)
+            self.assertEqual(dcfg.aux_hidden_state_layer_ids, [2, 23, 47, 71, 89])
+
+            draft_hf = build_draft_hf_config(dcfg, target_hidden_size=64, target_vocab_size=32)
+            self.assertEqual(draft_hf.num_hidden_layers, 5)
+
+    def test_nested_dflash_config_still_takes_priority(self):
+        cfg = {
+            "model_type": "k3_dspark",
+            "num_hidden_layers": 5,
+            "target_layer_ids": [2, 23, 47, 71, 89],
+            "dflash_config": {"target_layer_ids": [7, 8]},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "draft_config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+
+            dcfg = DflashConfig(
+                dflash_block_size=4,
+                num_draft_layers=5,
+                context_length=16,
+                draft_model_config_path=path,
+            )
+            apply_cli_overrides_to_source_and_dcfg(dcfg)
+            # Nested dflash_config wins over the top-level spelling.
+            self.assertEqual(dcfg.aux_hidden_state_layer_ids, [7, 8])
 
 
 if __name__ == "__main__":

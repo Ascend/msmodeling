@@ -407,9 +407,16 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             )
             repeated = wave.repeated
             assert repeated is not None
-            tpot = repeated.worst_tpot_s * 1000.0 + serving_cost_ms
+            # Apply speculative-decode fold (MTP/DFlash/DSpark) to the scheduler's
+            # steady-state TPOT and wave period. serving_cost_ms is a per-step
+            # overhead and must stay outside the fold (it is not compute latency).
+            # When no speculative method is configured the fold is a no-op.
+            tpot = self._fold_decode_latency_ms(repeated.worst_tpot_s * 1000.0, optimizer_data) + serving_cost_ms
             ttft = None
-            throughput_interval_s = repeated.measured_interval_s + serving_cost_ms / 1000.0
+            throughput_interval_s = (
+                self._fold_decode_latency_ms(repeated.measured_interval_s * 1000.0, optimizer_data) / 1000.0
+                + serving_cost_ms / 1000.0
+            )
             output_throughput = batch_size * self.dp / throughput_interval_s if throughput_interval_s > 0 else 0.0
         else:
             early_stop_reason = self._validate_pp_prefill_wave(optimizer_data, chunk_plan)

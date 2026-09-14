@@ -34,7 +34,11 @@ from tensor_cast.model_config import MtpConfig
 from tensor_cast.device import TEST_DEVICE
 from tensor_cast.performance_model.analytic import AnalyticPerformanceModel
 from tensor_cast.performance_model.utils import bytes_of_tensor
-from tensor_cast.pipeline_parallel import PipelineStageSpec, _slice_layer_cache
+from tensor_cast.pipeline_parallel import (
+    PipelineStageSpec,
+    UnsupportedPPConfigurationError,
+    _slice_layer_cache,
+)
 from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.model import TransformerModel
 
@@ -699,6 +703,42 @@ class TestSparseAttentionCacheHelpers:
         model.unwrap.return_value = SimpleNamespace(model=SimpleNamespace(layers=nested_layers))
         assert _resolve_decoder_layers(model) is nested_layers
 
+    def test_resolve_decoder_layers_with_pp_and_mtp(self):
+        """PP+MTP: decoder layers resolved, MTP indices stay None (no AttributeError)."""
+        stage0_layers = [MagicMock(), MagicMock(), MagicMock()]
+        stage0_model = MagicMock()
+        stage0_model.unwrap.return_value = SimpleNamespace(layers=stage0_layers)
+        stage0 = SimpleNamespace(
+            stage_spec=SimpleNamespace(layer_start=0),
+            model=stage0_model,
+        )
+        stage1_layers = [MagicMock(), MagicMock()]
+        stage1_model = MagicMock()
+        stage1_model.unwrap.return_value = SimpleNamespace(layers=stage1_layers)
+        stage1 = SimpleNamespace(
+            stage_spec=SimpleNamespace(layer_start=3),
+            model=stage1_model,
+        )
+        # num_hidden_layers=7 (5 decoder + 2 MTP), plan.num_hidden_layers=5 (decoder only)
+        plan = SimpleNamespace(num_hidden_layers=5)
+        inner = SimpleNamespace(
+            stages=[stage0, stage1],
+            num_hidden_layers=7,
+            plan=plan,
+        )
+        model = MagicMock()
+        model.unwrap.return_value = inner
+
+        result = _resolve_decoder_layers(model)
+
+        assert len(result) == 7
+        assert result[0] is stage0_layers[0]
+        assert result[2] is stage0_layers[2]
+        assert result[3] is stage1_layers[0]
+        assert result[4] is stage1_layers[1]
+        assert result[5] is None  # MTP layer 0
+        assert result[6] is None  # MTP layer 1
+
     @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
     def test_get_sparse_attention_indexer_cache_info_v4_layers(self, _mock_attn_quant):
         model = MagicMock()
@@ -1198,3 +1238,62 @@ class TestDsparkKvCacheHelpers:
         # the full layer must not inherit the target MLA DCP=8 shard (65 pages).
         assert tuple(cache_by_layers[0].shape) == (2, 17, 128, 1, 64)
         assert tuple(cache_by_layers[1].shape) == (2, 513, 128, 1, 64)
+
+
+class TestPPDraftKvCacheLayout:
+    """PP draft KV cache must follow the draft (Qwen3 GQA) layout, not the target's.
+
+    PipelineModel exposes draft_hf_config from its last stage's speculative
+    wrapper; falling back to the target layout silently would mis-size draft
+    KV bytes whenever target and draft head configs differ.
+    """
+
+    @staticmethod
+    def _make_pp_model(draft_cfg=None):
+        # 5 target layers (kv_heads=4, head_dim=4) + 2 draft layers (kv_heads=1, head_dim=3)
+        model = SimpleNamespace(
+            num_hidden_layers=7,
+            head_dim=4,
+            text_config=SimpleNamespace(num_key_value_heads=4, num_attention_heads=4, hidden_size=16),
+        )
+        model.model_config = SimpleNamespace(
+            mla_config=None,
+            dtype=torch.float16,
+            hf_config=SimpleNamespace(model_type="fake_decoder"),
+            parallel_config=SimpleNamespace(tensor_parallel_size=2),
+            dflash_config=SimpleNamespace(),
+            draft_num_layers=lambda: 2,
+        )
+        if draft_cfg is not None:
+            # PipelineModel.draft_hf_config surface (resolved from the last stage)
+            model.draft_hf_config = draft_cfg
+        return model
+
+    @patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=None)
+    def test_draft_layers_use_draft_gqa_layout_from_last_stage(self, _mock_quant):
+        draft_cfg = SimpleNamespace(
+            num_key_value_heads=1,
+            num_attention_heads=2,
+            hidden_size=8,
+            head_dim=3,
+        )
+        model = self._make_pp_model(draft_cfg)
+
+        cache_by_layers, cache_per_token = get_kv_cache_info(model, num_blocks=4, block_size=16)
+
+        # Target layers keep the target GQA layout: [2, blocks, block, 4/tp=2, head_dim=4]
+        assert cache_by_layers[0].shape == (2, 4, 16, 2, 4)
+        # Draft layers must use the draft config, NOT the target layout
+        assert cache_by_layers[5].shape == (2, 4, 16, 1, 3)
+        assert cache_by_layers[6].shape == (2, 4, 16, 1, 3)
+
+        elem = torch.empty((), dtype=torch.float16).element_size()
+        target_bytes = 5 * (2 * 4 * 16 * 2 * 4) * elem
+        draft_bytes = 2 * (2 * 4 * 16 * 1 * 3) * elem
+        assert cache_per_token == (target_bytes + draft_bytes) / (4 * 16)
+
+    def test_unreachable_draft_config_refuses_target_layout_fallback(self):
+        model = self._make_pp_model(draft_cfg=None)
+
+        with pytest.raises(UnsupportedPPConfigurationError, match="refusing to allocate draft KV cache"):
+            get_kv_cache_info(model, num_blocks=4, block_size=16)

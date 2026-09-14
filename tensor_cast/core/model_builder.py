@@ -13,6 +13,7 @@ from .. import config
 from ..compilation import get_backend
 from ..core.config_resolver import ConfigResolver
 from ..core.user_config import UserInputConfig
+from ..layers.dflash import DflashWrapper
 from ..layers.mtp import MtpWrapper
 from ..pipeline_parallel import (
     apply_stage_boundaries,
@@ -85,7 +86,11 @@ def _narrow_pipeline_vl_stage_to_language_model(
     if not getattr(stage_model, "is_vl_model", False) or not hasattr(stage_model, "unwrap"):
         return stage_model
     existing_inner = getattr(stage_model, "_inner", None)
-    existing_mtp_wrapper = existing_inner if isinstance(existing_inner, MtpWrapper) else None
+    # Keep the speculative wrapper (MTP or DFlash/DSpark) and only re-wire its
+    # target inner to the narrowed language model; dropping the wrapper would
+    # discard the draft model while ServingCast still folds by acceptance length.
+    # DsparkWrapper subclasses DflashWrapper.
+    existing_spec_wrapper = existing_inner if isinstance(existing_inner, (MtpWrapper, DflashWrapper)) else None
     existing_lm_head = getattr(existing_inner, "lm_head", None)
     try:
         language_model = get_vl_language_model(stage_model)
@@ -101,9 +106,9 @@ def _narrow_pipeline_vl_stage_to_language_model(
         language_wrapper = CausalLmWrapper(stage_model.text_config, language_model)
     if isinstance(existing_lm_head, torch.nn.Module):
         language_wrapper.lm_head = existing_lm_head
-    if existing_mtp_wrapper is not None:
-        existing_mtp_wrapper._inner = language_wrapper
-        stage_model._inner = existing_mtp_wrapper
+    if existing_spec_wrapper is not None:
+        existing_spec_wrapper._inner = language_wrapper
+        stage_model._inner = existing_spec_wrapper
     else:
         stage_model._inner = language_wrapper
     stage_model.is_vl_model = False

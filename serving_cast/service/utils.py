@@ -763,15 +763,14 @@ def build_pp_search_candidates(
     )
 
     candidates: list[ParallelSearchCandidate] = []
-    mtp_blocked_pp_sizes: list[int] = []
     base_failed_pp_sizes: list[int] = []
     for pp in pp_list:
         # Filter pp_size that can't divide num_devices before computing
         # stage_devices, so stage_devices is always > 0 and resolve_search_sizes
         # never gets a zero default. ``resolve_pp_sizes`` already rejects
         # pp > num_devices.
-        # Record such pp as base-failed so the final MTP error attribution
-        # knows not every empty pp was blocked by MTP.
+        # Record such pp as base-failed so the final empty-candidate warning
+        # can distinguish divisibility failures from user-requested combinations.
         if pp > num_hidden_layers:
             base_failed_pp_sizes.append(pp)
             continue
@@ -790,16 +789,11 @@ def build_pp_search_candidates(
         # to [1] (DCP is decode-only).
         dcp_list_pp = resolve_search_sizes(dcp_sizes, stage_devices, 1)
 
-        # PP>1 does not support MTP yet (model_builder rejects it). We do NOT
-        # skip the pp_size here — instead we defer the MTP decision until after
-        # the base (TP/EP/MoE-DP) divisibility check, so that the MTP error is
-        # only attributed when the pp_size would otherwise have produced a
-        # valid base candidate. This avoids misattributing an empty result to
-        # MTP when the real cause was e.g. TP not dividing num_devices.
-        if pp > 1:
-            effective_mtp_list = [m for m in mtp_list if m == 0]
-        else:
-            effective_mtp_list = mtp_list
+        # MTP is compatible with PP>1: the model builder places MTP proposal
+        # layers on the last pipeline stage (pipeline_parallel.py:348), and the
+        # serving-layer decode fold (_fold_decode_latency_ms) applies the
+        # acceptance-rate divisor to the scheduler's steady-state TPOT.
+        effective_mtp_list = mtp_list
 
         # Partitions for this pp_size. PP=1 always uses default (None), even
         # when explicit partitions are provided for other PP sizes. PP>1
@@ -818,7 +812,6 @@ def build_pp_search_candidates(
             partition_options = [None]
 
         pp_had_valid_base = False
-        pp_blocked_by_mtp = False
         candidates_added_this_pp = False
         for tp in tp_list_pp:
             if num_devices % (tp * pp) != 0:
@@ -834,11 +827,6 @@ def build_pp_search_candidates(
                         moe_tp = stage_devices // (ep * moe_dp)
                         # Base combination (TP/EP/MoE-DP) is valid for this pp_size.
                         pp_had_valid_base = True
-                        if pp > 1 and not effective_mtp_list:
-                            # PP>1 requires MTP=0 but none was requested; this
-                            # pp_size is blocked by MTP, not by base divisibility.
-                            pp_blocked_by_mtp = True
-                            continue
                         for num_mtp in effective_mtp_list:
                             for partition in partition_options:
                                 candidates.append(
@@ -855,22 +843,11 @@ def build_pp_search_candidates(
                                     )
                                 )
                                 candidates_added_this_pp = True
-        # Classify this pp_size's emptiness cause for final error attribution.
+        # Classify this pp_size's emptiness cause for the final warning.
         if not candidates_added_this_pp:
-            if pp_blocked_by_mtp and pp_had_valid_base:
-                mtp_blocked_pp_sizes.append(pp)
-            elif not pp_had_valid_base:
+            if not pp_had_valid_base:
                 base_failed_pp_sizes.append(pp)
 
-    # Raise an MTP-specific error only when EVERY empty pp_size was blocked
-    # solely by MTP (had a valid base but no MTP=0 fallback). If any pp_size
-    # failed base divisibility, the emptiness is not purely MTP's fault, so do
-    # not misattribute.
-    if not candidates and mtp_blocked_pp_sizes and not base_failed_pp_sizes:
-        raise ValueError(
-            "PP>1 currently requires num_mtp_tokens=0; "
-            f"pp sizes {mtp_blocked_pp_sizes} with mtp={mtp_list} are incompatible"
-        )
     if not candidates and pp_sizes is not None and len(pp_sizes) > 0:
         logger.warning(
             "No valid PP parallel combination found for the given "

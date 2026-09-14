@@ -975,6 +975,22 @@ def _get_kv_cache_info(
     if draft_enabled:
         inner = getattr(model, "_inner", None)
         draft_hf = getattr(inner, "draft_hf_config", None)
+        if draft_hf is None:
+            # PipelineModel has no _inner; the speculative wrapper lives on the
+            # last stage and exposes the draft HF config from there.
+            draft_hf = getattr(model, "draft_hf_config", None)
+        if draft_hf is None:
+            # UnsupportedPPConfigurationError instead of a bare AttributeError:
+            # the serving layer skips candidates raising it, while PP>1 re-raises
+            # other exceptions loud and would abort the whole multi-candidate
+            # search. Deferred import avoids a circular import.
+            from ..pipeline_parallel import UnsupportedPPConfigurationError
+
+            raise UnsupportedPPConfigurationError(
+                "DFlash/DSpark is enabled but the draft HF config is not reachable "
+                f"from {type(model).__name__}; refusing to allocate draft KV cache "
+                "with the target model layout."
+            )
 
     for i in range(model.num_hidden_layers):
         kvcache_dtype = _resolve_main_kv_cache_dtype(model, i)
@@ -996,14 +1012,10 @@ def _get_kv_cache_info(
                 draft_tail_tokens,
                 unsharded_num_blocks,
             )
-            if draft_hf is not None:
-                draft_kv_heads = int(draft_hf.num_key_value_heads)
-                draft_head_dim = int(
-                    getattr(draft_hf, "head_dim", draft_hf.hidden_size // draft_hf.num_attention_heads)
-                )
-            else:
-                draft_kv_heads = int(model.text_config.num_key_value_heads)
-                draft_head_dim = int(model.head_dim)
+            # draft_hf is mandatory (raise above) — never fall back to the
+            # target model's KV layout for draft layers.
+            draft_kv_heads = int(draft_hf.num_key_value_heads)
+            draft_head_dim = int(getattr(draft_hf, "head_dim", draft_hf.hidden_size // draft_hf.num_attention_heads))
             if draft_kv_heads >= parallel_config.tensor_parallel_size:
                 kv_heads = exact_division(draft_kv_heads, parallel_config.tensor_parallel_size)
             else:
@@ -1248,9 +1260,16 @@ def _resolve_decoder_layers(model):
                 layer_idx = layer_start + offset
                 if 0 <= layer_idx < len(layers):
                     layers[layer_idx] = layer
-        missing_layers = [idx for idx, layer in enumerate(layers) if layer is None]
-        if missing_layers:
-            raise AttributeError(f"Unable to locate pipeline decoder layer(s): {missing_layers}")
+        # Only raise for missing decoder layers; MTP proposal layers live in
+        # MtpWrapper.mtp (not in any stage's decoder ModuleList) so their
+        # indices legitimately remain None. Downstream _get_kv_cache_info
+        # handles None entries with the generic KV formula, which is correct
+        # for MTP blocks (they use standard MLA attention).
+        plan = getattr(inner, "plan", None)
+        decoder_count = int(plan.num_hidden_layers) if plan is not None else len(layers)
+        missing_decoder = [idx for idx in range(decoder_count) if layers[idx] is None]
+        if missing_decoder:
+            raise AttributeError(f"Unable to locate pipeline decoder layer(s): {missing_decoder}")
         return layers
     language_model = getattr(inner, "language_model", None)
     if language_model is not None and hasattr(language_model, "layers"):
