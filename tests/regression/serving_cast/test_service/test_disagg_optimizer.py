@@ -279,6 +279,7 @@ class TestDisaggStrategy(unittest.TestCase):
         # Each chunk fits in a single wave (concurrency=4, wave_size=4),
         # so TTFT equals the final chunk's completion time.
         self.assertEqual(row["ttft"], 5.0)
+        self.assertEqual(row["prefill_phase_makespan_ms"], 5.0)
         self.assertEqual(row["token/s"], 8000.0)
         self.assertEqual(row["percentage_breakdowns"], "Mem 20.00 | Comm 80.00 | Cube 0.00 | Vec 0.00")
 
@@ -810,6 +811,7 @@ class TestDisaggStrategyHermetic(unittest.TestCase):
         row = result.get_summary_df().iloc[0]
         # Model-only completion times are 10 ms and 30 ms; serving cost is added once.
         self.assertEqual(row["ttft"], 25.0)
+        self.assertEqual(row["prefill_phase_makespan_ms"], 37.0)
         self.assertAlmostEqual(row["token/s"], 11000 / 0.037, places=3)
         self.assertEqual(row["avail_GB"], 2.0)
 

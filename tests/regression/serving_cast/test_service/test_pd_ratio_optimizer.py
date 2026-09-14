@@ -130,6 +130,22 @@ class TestPDRatioThroughputOptimizer(unittest.TestCase):
         self.assertIn("ttft_p", result_df.columns)
         self.assertIn("tpot_d", result_df.columns)
 
+    def test_optimize_prefers_prefill_phase_makespan_for_qps(self):
+        self.optimizer.set_p_results(_prefill_df(ttft=[25.0], prefill_phase_makespan_ms=[37.0], concurrency=[5]))
+        self.optimizer.set_d_results(_decode_df())
+
+        result_df = self.optimizer.optimize()
+
+        self.assertAlmostEqual(result_df.iloc[0]["p_qps"], 5 / 37 * 1000)
+
+    def test_optimize_excludes_invalid_prefill_phase_makespan(self):
+        self.optimizer.set_p_results(_prefill_df(prefill_phase_makespan_ms=[None]))
+        self.optimizer.set_d_results(_decode_df())
+
+        result_df = self.optimizer.optimize()
+
+        self.assertTrue(result_df.empty)
+
     def test_optimize_multiple_results(self):
         """Test optimization with multiple P and D results."""
         # Set prefill results (with tpot=0)

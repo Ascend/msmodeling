@@ -331,6 +331,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             effective_input_length,
             optimizer_data.max_batched_tokens,
             prefill_num_chunks,
+            latency_ms if not decode_flag and device_memory_available_gb >= 0 else None,
             concurrency,
             ttft,
             tpot,
@@ -489,6 +490,9 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             effective_input_length,
             max_batched_tokens,
             len(chunk_plan),
+            (wave.schedule.makespan_s * 1000.0 + serving_cost_ms)
+            if not decode_flag and not wave.memory_exceeded
+            else None,
             concurrency,
             ttft,
             tpot,

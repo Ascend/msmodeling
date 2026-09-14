@@ -17,6 +17,7 @@ import logging
 import pandas as pd
 
 from serving_cast.service.optimizer_summary import PP_RESULT_COLUMNS
+from serving_cast.service.utils import PREFILL_PHASE_MAKESPAN_COLUMN
 from serving_cast.utils import rank_pd_ratio_rows
 
 
@@ -30,7 +31,8 @@ class PDRatioThroughputOptimizer:
     calculates QPS and PD ratio, and outputs Top N configurations.
 
     QPS Formulas:
-        P QPS = p_concurrency / ttft * 1000 (req/s)
+        P QPS = p_concurrency / prefill_phase_makespan_ms * 1000 (req/s)
+                (legacy rows fall back to ttft)
         D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000 (req/s)
 
     PD Ratio Calculation:
@@ -71,15 +73,21 @@ class PDRatioThroughputOptimizer:
             self._result_df = pd.DataFrame()
             return self._result_df
 
-        # Calculate QPS using vectorized operations
-        # P QPS = p_concurrency / ttft * 1000 (req/s)
-        # Filter out zero ttft to avoid ZeroDivisionError
+        # Calculate QPS using vectorized operations. Chunked prefill's TTFT is
+        # a request-average completion time, whereas its QPS is defined by the
+        # whole phase makespan. Older result frames did not retain that timing,
+        # so keep a TTFT fallback for backward compatibility.
         p_df = self._p_df.copy()
         for column in PP_RESULT_COLUMNS:
             if column not in p_df.columns:
                 p_df[column] = None
-        p_df = p_df[p_df["ttft"] > 0]
-        p_df["p_qps"] = p_df["concurrency"] / p_df["ttft"] * 1000
+        if PREFILL_PHASE_MAKESPAN_COLUMN in p_df.columns:
+            p_df["_p_qps_denominator"] = pd.to_numeric(p_df[PREFILL_PHASE_MAKESPAN_COLUMN], errors="coerce")
+        else:
+            p_df["_p_qps_denominator"] = pd.to_numeric(p_df["ttft"], errors="coerce")
+        p_df = p_df[p_df["_p_qps_denominator"] > 0]
+        p_df["p_qps"] = p_df["concurrency"] / p_df["_p_qps_denominator"] * 1000
+        p_df = p_df.drop(columns="_p_qps_denominator")
         p_df = p_df[p_df["p_qps"] > 0]
 
         # D QPS = d_concurrency / (tpot * max(output_length - 1, 1)) * 1000 (req/s)

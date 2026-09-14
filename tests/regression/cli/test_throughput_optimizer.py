@@ -461,8 +461,9 @@ class TestThroughputOptimizer(TestCase):
         local_columns = [
             "Top",
             "PD Ratio",
-            "P QPS (req/s)",
-            "D QPS (req/s)",
+            "Balanced QPS (req/s)",
+            "P QPS/Instance",
+            "D QPS/Instance",
             "TTFT (ms)",
             "TPOT (ms)",
             "P Parallel",

@@ -20,7 +20,7 @@ from typing import Optional
 import pandas as pd
 from prettytable import PrettyTable
 
-from serving_cast.service.utils import MEMORY_COLUMNS, MemoryInfo
+from serving_cast.service.utils import MEMORY_COLUMNS, PREFILL_PHASE_MAKESPAN_COLUMN, MemoryInfo
 from serving_cast.service.pipeline_schedule import PipelineScheduleEstimate
 from serving_cast.service.utils import ParallelSearchCandidate
 from serving_cast.utils import (
@@ -48,8 +48,9 @@ def _positive_float(value) -> Optional[float]:
 def _compute_disagg_request_qps(row: pd.Series, output_length: Optional[int]) -> Optional[float]:
     """Per-phase request QPS for disaggregation summary rows.
 
-    Same formulas as ``pd_ratio_throughput_optimizer``: prefill uses
-    ``concurrency / ttft * 1000``, decode uses
+    Prefill uses ``concurrency / prefill_phase_makespan_ms * 1000`` when the
+    phase timing is available.  Legacy rows without that field fall back to
+    ``concurrency / ttft * 1000``. Decode uses
     ``concurrency / (tpot * output_length) * 1000``. Rows with both TTFT and
     TPOT valid (aggregation-style) return ``None``.
     """
@@ -60,6 +61,11 @@ def _compute_disagg_request_qps(row: pd.Series, output_length: Optional[int]) ->
     tpot = _positive_float(row.get("tpot"))
 
     if ttft is not None and tpot is None:
+        if PREFILL_PHASE_MAKESPAN_COLUMN in row.index:
+            prefill_makespan = _positive_float(row.get(PREFILL_PHASE_MAKESPAN_COLUMN))
+            if prefill_makespan is None:
+                return None
+            return conc / prefill_makespan * 1000.0
         return conc / ttft * 1000.0
     if tpot is not None and ttft is None:
         if output_length is None or int(output_length) <= 0:
