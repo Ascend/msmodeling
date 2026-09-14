@@ -1004,7 +1004,11 @@ class ParallelRunner:
         # Create optimizer data for this phase
         overwrite_optimizer_data = copy.deepcopy(self.optimizer_data)
         if is_prefill:
-            overwrite_optimizer_data.ttft_limits = self.args.ttft_limits
+            # ``None`` means there is no TTFT SLO, not that this is a Decode
+            # search.  The disaggregated optimizer identifies Prefill from a
+            # non-None TTFT limit, so retain the Prefill path with an unbounded
+            # limit when PD-ratio mode omits ``--ttft-limits``.
+            overwrite_optimizer_data.ttft_limits = self.args.ttft_limits or float("inf")
             overwrite_optimizer_data.tpot_limits = None
             overwrite_optimizer_data.num_mtp_tokens = 0
         else:

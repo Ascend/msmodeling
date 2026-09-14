@@ -13,7 +13,7 @@ SERVING_CAST_MODULE = "serving_cast.main"
 VALID_INSTANCE_CONFIG = {
     "instance_groups": [
         {
-            "num_instances": 2,
+            "num_instances": 1,
             "num_devices_per_instance": 4,
             "pd_role": "both",
             "parallel_config": {
@@ -38,6 +38,10 @@ VALID_COMMON_CONFIG = {
         "num_input_tokens": 30,
         "num_output_tokens": 5,
         "request_rate": 2.0,
+    },
+    "serving_config": {
+        "max_concurrency": 1,
+        "max_tokens_budget": 128,
     },
 }
 

@@ -849,6 +849,36 @@ class TestParallelRunnerPDMode(unittest.TestCase):
         self.assertTrue(decode_runner.recorded_user_mtp)
         self.assertEqual(set(decode_runner.recorded_user_mtp), {1})
 
+    def test_pd_prefill_without_ttft_limit_uses_unbounded_prefill(self):
+        """An omitted TTFT SLO must not turn the PD Prefill phase into Decode."""
+
+        class RecordingParallelRunner(ParallelRunner):
+            def __init__(self, args):
+                super().__init__(args)
+                self.recorded_optimizer_data = None
+
+            def _get_df_list(
+                self,
+                overwrite_optimizer_data,
+                user_configs=None,
+                disagg_mode=None,
+                is_prefill=False,
+                process_context=None,
+            ):
+                del user_configs, disagg_mode, is_prefill, process_context
+                self.recorded_optimizer_data = overwrite_optimizer_data
+                return []
+
+        self.args.ttft_limits = None
+        task_runner = RecordingParallelRunner(self.args)
+        task_runner._run_pd_phase(
+            devices_per_instance=self.args.prefill_devices_per_instance,
+            is_prefill=True,
+        )
+
+        self.assertEqual(task_runner.recorded_optimizer_data.ttft_limits, float("inf"))
+        self.assertIsNone(task_runner.recorded_optimizer_data.tpot_limits)
+
     def test_get_df_list_passes_pd_process_context_to_process_pool(self):
         """PD ratio sub-phases must construct process pools with the spawn context."""
         import multiprocessing as mp
