@@ -4,6 +4,7 @@ import multiprocessing as mp
 import queue
 import random
 import threading
+import time
 from dataclasses import dataclass
 from multiprocessing import Event, Manager
 from typing import List, Optional, Tuple
@@ -29,6 +30,19 @@ logger = stime.get_logger(__name__)
 # silent-worker-death case (e.g. OOM-kill / segfault) where abort() cannot run.
 # Generous to avoid false positives on legitimate slow model init.
 _BARRIER_INIT_TIMEOUT_S = 600
+
+# Safety-net timeout (seconds) for runtime completion-event waits. The
+# deterministic fix is the worker error marker put on the completion queue when
+# a task raises (see ``_run_async_task_worker``), which wakes the waiter
+# immediately. This bounded wait plus worker-liveness check only guards the
+# rarer silent-worker-death case (e.g. OOM-kill / segfault) where no marker
+# can be sent; without it the main process blocked forever with no error.
+_TASK_WAIT_TIMEOUT_S = 600
+
+# Worker -> main marker signalling that a task failed in the worker. The
+# completion queue normally carries plain task hashes, so a tuple with this
+# sentinel tag is unambiguous.
+_WORKER_ERROR_MARKER = "__worker_task_error__"
 
 
 @dataclass
@@ -171,12 +185,23 @@ class ModelRunner:
         return transferred_batch
 
     @staticmethod
-    def predict_next_batch(current_batch: List[RequestInfo]) -> List[RequestInfo]:
+    def predict_next_batch(current_batch: List[RequestInfo], max_query_len: Optional[int] = None) -> List[RequestInfo]:
+        """Predict the next batch the scheduler will run, one step ahead.
+
+        ``request2info`` observes requests AFTER ``BatchScheduler._schedule`` has
+        already applied ``seq_len += num_computed_tokens`` for the current chunk,
+        so the remaining prefill work is ``num_input_tokens - seq_len`` and the
+        next chunk's sequence length is ``seq_len + future_query_len``. Chunks are
+        also clamped by ``max_query_len`` (the per-batch token budget) so 3+ chunk
+        prefills match what ``_schedule`` will actually compute.
+        """
         future_batch = []
         for current_req_info in current_batch:
             if current_req_info.seq_len < current_req_info.num_input_tokens:
-                future_query_len = current_req_info.num_input_tokens - current_req_info.query_len
-                future_seq_len = current_req_info.seq_len
+                future_query_len = current_req_info.num_input_tokens - current_req_info.seq_len
+                if max_query_len is not None:
+                    future_query_len = min(future_query_len, max_query_len)
+                future_seq_len = current_req_info.seq_len + future_query_len
                 future_is_decode = False
             elif current_req_info.seq_len < current_req_info.num_input_tokens + current_req_info.num_output_tokens - 1:
                 future_query_len = 1  # TOBEDONE consider mtp here
@@ -345,7 +370,9 @@ class ModelRunner:
                 future_batch_list = []
                 current_batch = request_info_batch
                 for _ in range(self.predict_steps):
-                    future_batch = self.predict_next_batch(current_batch)
+                    future_batch = self.predict_next_batch(
+                        current_batch, max_query_len=self.common_config.serving_config.max_tokens_budget
+                    )
                     if not future_batch:
                         break
                     future_batch_list.append(future_batch)
@@ -458,9 +485,19 @@ class ModelRunnerMetricCacheManager:
 
 
 class CompletionEventManager:
+    # Poll interval for the bounded completion wait; exposed as class attribute
+    # so tests can shorten it instead of sleeping through a full poll cycle.
+    _WAIT_POLL_INTERVAL_S = 5.0
+
     def __init__(self, multiprocessing_manager):
         self.event_dict = {}
         self.completion_queue = multiprocessing_manager.Queue()
+        # task_hash -> root-cause string reported by a failed worker; read by
+        # ``AsyncTaskManager.find_result`` after the (woken) wait completes.
+        self.worker_errors: dict = {}
+        # Live worker handles (shared list reference owned by AsyncTaskManager)
+        # for the silent-death fallback check in ``wait_completion_event``.
+        self.workers: list = []
 
         self._thread_running = True
 
@@ -477,8 +514,28 @@ class CompletionEventManager:
         self.event_dict[event_id] = event
 
     def wait_completion_event(self, event_id):
-        """main process call this func: wait event by event_id"""
-        self.event_dict[event_id].wait()
+        """main process call this func: wait event by event_id
+
+        Bounded wait: a worker task failure is reported via the completion queue
+        (which sets the event), so the normal path returns promptly. The poll
+        loop additionally guards against silent worker death (OOM-kill /
+        segfault): if every worker is dead while the event is still unset, or
+        the overall timeout expires, raise a clear RuntimeError instead of
+        blocking forever.
+        """
+        event = self.event_dict[event_id]
+        deadline = time.monotonic() + _TASK_WAIT_TIMEOUT_S
+        while not event.wait(timeout=self._WAIT_POLL_INTERVAL_S):
+            if self.workers and all(not worker.is_alive() for worker in self.workers):
+                raise RuntimeError(
+                    f"wait_completion_event {event_id}: all AsyncTaskManager workers died "
+                    "before completing the task; see worker logs for the root cause."
+                )
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"wait_completion_event {event_id} timed out after {_TASK_WAIT_TIMEOUT_S}s "
+                    "without completion; see worker logs for the root cause."
+                )
 
     def set_completion_event(self, event_id):
         """child process call this func: put completion message into queue and wait thread in main process to deal"""
@@ -513,6 +570,7 @@ class CompletionEventManager:
 
         # Clear event dictionary to release resources
         self.event_dict.clear()
+        self.worker_errors.clear()
         logger.info("CompletionEventManager: All resources cleaned up")
 
     def _process_completion_queue(self) -> None:
@@ -524,6 +582,17 @@ class CompletionEventManager:
                 continue
 
             if event_id is None:
+                continue
+
+            if isinstance(event_id, tuple) and len(event_id) == 3 and event_id[0] == _WORKER_ERROR_MARKER:
+                # A worker task failed: record the root cause and set the event
+                # so the blocked waiter wakes up and surfaces the error.
+                _, task_hash, error_str = event_id
+                self.worker_errors[task_hash] = error_str
+                event = self.event_dict.get(task_hash)
+                if event is not None:
+                    event.set()
+                self.completion_queue.task_done()
                 continue
 
             if event_id in self.event_dict:
@@ -586,7 +655,13 @@ def _run_async_task_worker(
         try:
             result = tensor_cast_model_runner.run_inference(task.batch, with_sampler=True)
         except Exception as e:
-            raise RuntimeError("AsyncTaskManager execute task failed") from e
+            # Report the failure to the main process via the completion queue so
+            # the waiter wakes up and surfaces a clear error. The old behaviour
+            # (bare re-raise) killed this worker silently while the main process
+            # blocked forever on wait_completion_event with no diagnostics.
+            logger.exception("Worker failed executing task %s", task_hash)
+            completion_queue.put((_WORKER_ERROR_MARKER, task_hash, f"{type(e).__name__}: {e}"))
+            return
 
         if task_hash not in metrics_cache:
             raise KeyError(f"record_cache failed, cache with cache_id {task_hash} not found")
@@ -606,9 +681,13 @@ class AsyncTaskManager:
 
         self.task_record = set()
 
+        # Share the workers list (same object, populated by _init_multi_process)
+        # so wait_completion_event can detect silent worker death.
+        self.workers = []
+        self.event_manager.workers = self.workers
+
         # init multi processes
         self.num_workers = num_workers
-        self.workers = []
         self._init_multi_process(device_type, parallel_config)
 
     def add_task(self, batch: List[RequestInfo]) -> None:
@@ -625,6 +704,9 @@ class AsyncTaskManager:
         task_hash = task.hash_value
         if task_hash in self.task_record:
             self.event_manager.wait_completion_event(task_hash)
+            worker_error = self.event_manager.worker_errors.get(task_hash)
+            if worker_error is not None:
+                raise RuntimeError(f"Async task {task_hash} failed in worker: {worker_error}") from None
             result = self.model_runner_metrics_cache_manager.get_cache(task_hash)
         else:
             result = None

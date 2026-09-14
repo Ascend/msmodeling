@@ -346,23 +346,71 @@ class TestModelRunnerStaticMethods(unittest.TestCase):
         self.assertEqual(point.total_query_len, 100)
 
     def test_predict_next_batch_prefill(self):
-        """Test predict_next_batch for prefill request."""
+        """Test predict_next_batch for mid-prefill (chunked) request.
+
+        seq_len already includes the current chunk's query (BatchScheduler
+        applies seq_len += num_computed_tokens before process_batch), so the
+        next chunk is the remaining prefill tokens with the sequence grown
+        accordingly. Regression: the old formula kept seq_len unchanged and
+        derived query_len from the current query, so predicted hashes never
+        matched the real next chunk for multi-chunk prefills.
+        """
         current_batch = [
             RequestInfo(
-                query_len=10,
-                seq_len=5,  # seq_len < num_input_tokens
-                num_input_tokens=100,
-                num_output_tokens=50,
+                query_len=2048,  # chunk 1 just computed
+                seq_len=2048,  # includes chunk 1
+                num_input_tokens=3500,
+                num_output_tokens=8,
                 is_decode=False,
             )
         ]
         future_batch = ModelRunner.predict_next_batch(current_batch)
         self.assertEqual(len(future_batch), 1)
-        # Future should continue prefill
-        # future_query_len = num_input_tokens - query_len = 100 - 10 = 90
-        self.assertEqual(future_batch[0].query_len, 90)
-        self.assertEqual(future_batch[0].seq_len, 5)
+        # remaining prefill = 3500 - 2048 = 1452; next seq = 2048 + 1452 = 3500
+        self.assertEqual(future_batch[0].query_len, 1452)
+        self.assertEqual(future_batch[0].seq_len, 3500)
         self.assertFalse(future_batch[0].is_decode)
+
+    def test_predict_next_batch_prefill_clamped_by_budget(self):
+        """Remaining prefill beyond the token budget must clamp to the budget.
+
+        Real scheduling caps each chunk at max_tokens_budget, so a 3+ chunk
+        prefill predicts a budget-sized next chunk, not the whole remainder.
+        """
+        current_batch = [
+            RequestInfo(
+                query_len=2048,
+                seq_len=2048,
+                num_input_tokens=6000,
+                num_output_tokens=8,
+                is_decode=False,
+            )
+        ]
+        future_batch = ModelRunner.predict_next_batch(current_batch, max_query_len=2048)
+        self.assertEqual(future_batch[0].query_len, 2048)
+        self.assertEqual(future_batch[0].seq_len, 4096)
+
+    def test_predict_next_batch_multi_step_chunked_prefill_matches_schedule(self):
+        """Multi-step prediction for chunked prefill must track the real schedule.
+
+        Mirrors the reported repro (input 3500 > budget 2048): after chunk 1
+        the predicted chain must be (1452, 3500) then the decode step
+        (1, 3501) — exactly the batches the scheduler really runs next.
+        """
+        current_batch = [
+            RequestInfo(
+                query_len=2048,
+                seq_len=2048,
+                num_input_tokens=3500,
+                num_output_tokens=8,
+                is_decode=False,
+            )
+        ]
+        step2 = ModelRunner.predict_next_batch(current_batch, max_query_len=2048)
+        self.assertEqual((step2[0].query_len, step2[0].seq_len), (1452, 3500))
+        step3 = ModelRunner.predict_next_batch(step2, max_query_len=2048)
+        # prefill complete -> next step is decode
+        self.assertEqual((step3[0].query_len, step3[0].seq_len, step3[0].is_decode), (1, 3501, True))
 
     def test_predict_next_batch_decode(self):
         """Test predict_next_batch for decode request."""
@@ -913,6 +961,11 @@ class TestProcessCompletionQueue(unittest.TestCase):
 class TestAsyncTaskManager(unittest.TestCase):
     """Tests for AsyncTaskManager class."""
 
+    @staticmethod
+    def _noop():
+        # picklable no-op target for spawn-safe dummy worker processes
+        pass
+
     def test_add_task(self):
         """Test add_task method."""
         batch = [RequestInfo(query_len=10, seq_len=100, is_decode=False)]
@@ -933,6 +986,78 @@ class TestAsyncTaskManager(unittest.TestCase):
         self.assertIn(task_hash, cache_manager.cache)
         # Verify event slot was created
         self.assertIn(task_hash, event_manager.event_dict)
+
+        event_manager.shutdown()
+        manager.shutdown()
+
+    def test_worker_error_marker_wakes_waiter_and_records_cause(self):
+        """Worker failure reported via the completion queue must set the event.
+
+        Regression for the runtime hang: a worker task exception used to kill
+        the worker silently while the main process blocked forever on
+        wait_completion_event. Now the worker puts an error marker that the
+        completion thread turns into a set event plus a recorded root cause.
+        """
+        from serving_cast.model_runner import _WORKER_ERROR_MARKER
+
+        manager = mp.Manager()
+        event_manager = CompletionEventManager(manager)
+        task_hash = "fake-task-hash"
+        event_manager.init_event_slot(task_hash)
+
+        event_manager.completion_queue.put((_WORKER_ERROR_MARKER, task_hash, "ValueError: boom"))
+
+        # must return (not hang) once the completion thread processes the marker
+        event_manager.wait_completion_event(task_hash)
+        self.assertIn(task_hash, event_manager.worker_errors)
+        self.assertEqual(event_manager.worker_errors[task_hash], "ValueError: boom")
+
+        event_manager.shutdown()
+        manager.shutdown()
+
+    def test_wait_completion_event_raises_when_all_workers_dead(self):
+        """Silent worker death (no marker) must raise instead of blocking."""
+        manager = mp.Manager()
+        event_manager = CompletionEventManager(manager)
+        task_hash = "fake-task-hash"
+        event_manager.init_event_slot(task_hash)
+
+        dead_worker = mp.Process(target=TestAsyncTaskManager._noop)
+        dead_worker.start()
+        dead_worker.join(timeout=10)
+        event_manager.workers = [dead_worker]
+        # shorten the poll interval so the test fails fast
+        event_manager._WAIT_POLL_INTERVAL_S = 0.1
+
+        with self.assertRaisesRegex(RuntimeError, "workers died"):
+            event_manager.wait_completion_event(task_hash)
+
+        event_manager.shutdown()
+        manager.shutdown()
+
+    def test_find_result_raises_on_worker_error(self):
+        """find_result must surface the worker's root cause as a clear error."""
+        from serving_cast.model_runner import AsyncTaskManager as _ATM
+
+        manager = mp.Manager()
+        event_manager = CompletionEventManager(manager)
+        cache_manager = ModelRunnerMetricCacheManager(manager)
+
+        batch = [RequestInfo(query_len=10, seq_len=100, is_decode=False)]
+        task = AsyncTask(batch)
+        task_hash = task.hash_value
+        cache_manager.init_cache_slot(task_hash)
+        event_manager.init_event_slot(task_hash)
+        event_manager.worker_errors[task_hash] = "RuntimeError: worker boom"
+        event_manager.event_dict[task_hash].set()
+
+        task_manager = _ATM.__new__(_ATM)
+        task_manager.task_record = {task_hash}
+        task_manager.event_manager = event_manager
+        task_manager.model_runner_metrics_cache_manager = cache_manager
+
+        with self.assertRaisesRegex(RuntimeError, "worker boom"):
+            task_manager.find_result(batch)
 
         event_manager.shutdown()
         manager.shutdown()
