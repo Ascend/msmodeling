@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -306,43 +307,50 @@ def test_workload_runner_uses_bounded_parallelism(tmp_path: Path) -> None:
 
 def test_workload_runner_stops_idle_process_after_query_trace_converges(tmp_path: Path) -> None:
     script = tmp_path / "emit_query_then_wait.py"
+    natural_exit_sentinel = tmp_path / "natural-exit-sentinel"
     script.write_text(
         """
+import json
 import os
 from pathlib import Path
 import time
 
-from tensor_cast.performance_model.profiling_database.query_demand import (
-    KernelQueryDemand,
-    QUERY_TRACE_DIR_ENV,
-    QueryDemandTraceWriter,
-)
-
-writer = QueryDemandTraceWriter(Path(os.environ[QUERY_TRACE_DIR_ENV]))
-writer.record(
-    KernelQueryDemand(
-        projector_version="test/v1",
-        op_name="Add",
-        kernel_type="Add",
-        query_mode="exact",
-        tensor_parallel_size=1,
-        expert_parallel_size=1,
+trace_dir = Path(os.environ["MSMODELING_SHAPE_QUERY_TRACE_DIR"])
+trace_path = trace_dir / f"query-demands-{os.getpid()}.jsonl"
+trace_path.write_text(
+    json.dumps(
+        {
+            "schema_version": 1,
+            "projector_version": "test/v1",
+            "op_name": "Add",
+            "kernel_type": "Add",
+            "query_mode": "exact",
+            "tensor_parallel_size": 1,
+            "expert_parallel_size": 1,
+        },
+        sort_keys=True,
     )
+    + "\\n",
+    encoding="utf-8",
 )
 os.write(1, b"\\xa9")
 time.sleep(30)
+Path(os.environ["MSMODELING_TEST_NATURAL_EXIT_SENTINEL"]).write_text("natural exit", encoding="utf-8")
 """.strip(),
         encoding="utf-8",
     )
 
     with (
+        mock.patch.dict(
+            os.environ,
+            {"MSMODELING_TEST_NATURAL_EXIT_SENTINEL": str(natural_exit_sentinel)},
+        ),
         mock.patch.object(WorkloadScenario, "command", return_value=[sys.executable, str(script)]),
         mock.patch(
             "tools.perf_data_collection.grid_generator.query_workloads.QUERY_TRACE_POLL_SECONDS",
             0.05,
         ),
     ):
-        started = time.monotonic()
         result = run_query_workloads(
             [_scenario()],
             database_path=tmp_path,
@@ -351,14 +359,12 @@ time.sleep(30)
             trace_quiet_seconds=0.1,
         )
 
-    # Leave headroom for the 5-second process-tree termination grace period on
-    # loaded CI workers, while still proving that the 30-second sleep was cut short.
-    assert time.monotonic() - started < 10
     assert result.succeeded == 1
     assert result.failed_workloads == ()
     checkpoint_path = next((tmp_path / "trace" / "workloads").glob("*/checkpoint.json"))
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     assert checkpoint["completion_reason"] == "query_trace_converged"
+    assert not natural_exit_sentinel.exists()
 
 
 def test_scenario_command_forwards_actual_optimizer_flags(tmp_path: Path) -> None:

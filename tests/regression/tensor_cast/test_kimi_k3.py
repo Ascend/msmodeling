@@ -643,6 +643,35 @@ class TestKimiK3Patches(unittest.TestCase):
         self.assertIs(result, expected_result)
         self.assertIs(captured_kwargs["is_decode_values"], phase_values)
 
+    def test_registered_mla_prolog_accepts_phase_metadata(self):
+        """The real custom-op schema must accept the forwarded phase metadata."""
+        self._km._install_mla_prolog_op()
+        phase_values = [False, True]
+
+        result = torch.ops.tensor_cast.mla_prolog(
+            torch.ones(2, 3),
+            torch.ones(2, 2),
+            torch.ones(2, 1),
+            torch.zeros(2, 1),
+            torch.ones(2),
+            torch.ones(2, 2),
+            torch.ones(3, 3),
+            torch.ones(2),
+            1,
+            2,
+            1,
+            1,
+            2,
+            2,
+            is_decode_values=phase_values,
+        )
+
+        self.assertEqual(
+            [argument.name for argument in torch.ops.tensor_cast.mla_prolog.default._schema.arguments][-1],
+            "is_decode_values",
+        )
+        self.assertEqual([tuple(tensor.shape) for tensor in result], [(2, 1, 2), (2, 2), (2, 1), (2, 2)])
+
     # ------------------------------------------------------------------
     # _install_fla_stub — idempotency
     # ------------------------------------------------------------------

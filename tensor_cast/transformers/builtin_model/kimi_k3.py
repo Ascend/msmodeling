@@ -1389,6 +1389,8 @@ def _install_mla_prolog_op() -> None:
         qk_rope_head_dim: int,
         kv_lora_rank: int,
         q_lora_rank: int,
+        *,
+        is_decode_values: Optional[list[bool]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fused MLA prolog (excluding q_a_proj).
 
@@ -1396,6 +1398,8 @@ def _install_mla_prolog_op() -> None:
         q_a_norm + q_b_proj + kv_a_proj + kv_a_norm + RoPE.
         ``q_a_proj`` is split out as an independent ``aten.mm``,
         matching profiling's independent ``MatMulV3`` kernel.
+        ``is_decode_values`` preserves per-request phase metadata for the
+        profiling lookup without changing the fused op's output shapes.
         """
         num_tokens = hidden_states.size(0)
         device = hidden_states.device
