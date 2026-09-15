@@ -79,7 +79,13 @@ AGG_COLUMNS = COMMON_COLUMNS + ["percentage_breakdowns(p)", "percentage_breakdow
 PREFILL_PHASE_MAKESPAN_COLUMN = "prefill_phase_makespan_ms"
 DISAGG_COLUMNS = COMMON_COLUMNS.copy()
 DISAGG_COLUMNS.insert(DISAGG_COLUMNS.index("concurrency"), PREFILL_PHASE_MAKESPAN_COLUMN)
-DISAGG_COLUMNS += ["percentage_breakdowns"] + MEMORY_COLUMNS
+DISAGG_COLUMNS += [
+    "percentage_breakdowns",
+    "profiling_sources",
+    "profiling_source_scope",
+    "profiling_result",
+    "profiling_misses",
+] + MEMORY_COLUMNS
 
 
 # UnsupportedPPConfigurationError is imported from tensor_cast.pipeline_parallel

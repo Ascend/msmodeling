@@ -1,4 +1,5 @@
 import inspect
+import logging
 
 import torch
 from transformers.cache_utils import DynamicCache
@@ -8,6 +9,9 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from ...layers.glm5 import Glm5SparseAttention
 from ...layers.internal import CopyLayerWrapper, RegionMarkerWrapper
 from ..custom_model_registry import ModelProfile, MoeExpertMLP, register_model_profile
+
+
+logger = logging.getLogger(__name__)
 
 
 _GLM5_ATTENTION_OUTPUT_HIDDEN_STATES_INDEX = 0
@@ -185,23 +189,27 @@ def _resolve_glm5_mtp_block_owner(mtp_layer: torch.nn.Module) -> torch.nn.Module
     return mtp_layer
 
 
-def patch_glm5_model(model) -> None:
-    """Bridge Transformers releases before the GLM-5 IndexShare decoder update."""
-    root = model.unwrap()
-    base_model = root
-    if not hasattr(base_model, "layers") and hasattr(base_model, "model"):
-        base_model = base_model.model
-    if not hasattr(base_model, "layers") or not base_model.layers:
-        return
+def _resolve_glm5_mtp_moe_module(mtp_block: torch.nn.Module) -> torch.nn.Module | None:
+    """Find the MTP MoE module through compatibility-style ``_inner`` wrappers."""
 
-    if _decoder_supports_prev_topk(base_model.layers[0]):
-        return
+    visited: set[int] = set()
+    current = mtp_block
+    while isinstance(current, torch.nn.Module) and id(current) not in visited:
+        visited.add(id(current))
+        moe_module = getattr(current, "mlp", None)
+        if isinstance(moe_module, torch.nn.Module):
+            return moe_module
+        current = getattr(current, "_inner", None)
+    return None
 
-    if not isinstance(base_model, Glm5ModelCompat):
-        replacement = Glm5ModelCompat(base_model)
-        if not _replace_child_module(model, base_model, replacement):
-            raise RuntimeError("Unable to install the GLM-5 Transformers compatibility wrapper")
 
+def _mark_glm5_mtp_moe_dfc_disabled(model) -> None:
+    """Match vLLM-Ascend: GLM5 MTP proposal blocks do not use DFC.
+
+    This helper relies on its sole caller, ``patch_glm5_model``, being selected
+    by the GLM5 model profile. ``MtpWrapper`` alone is intentionally not treated
+    as a model-type discriminator because other model families can reuse it.
+    """
     from ...layers.mtp import MtpWrapper
 
     for module in model.modules():
@@ -211,8 +219,47 @@ def patch_glm5_model(model) -> None:
             mtp_block_owner = _resolve_glm5_mtp_block_owner(mtp_layer)
             if mtp_block_owner is None:
                 continue
-            if not isinstance(mtp_block_owner.mtp_block, Glm5DecoderLayerCompat):
-                mtp_block_owner.mtp_block = Glm5DecoderLayerCompat(mtp_block_owner.mtp_block)
+            moe_module = _resolve_glm5_mtp_moe_module(mtp_block_owner.mtp_block)
+            if moe_module is None:
+                logger.warning("Unable to locate the GLM-5 MTP MoE module; DFC remains unchanged")
+                continue
+            moe_module.tensor_cast_disable_dispatch_ffn_combine = True
+            fused_moe = getattr(moe_module, "fused_moe", None)
+            if fused_moe is not None:
+                fused_moe.allow_dispatch_ffn_combine = False
+
+
+def patch_glm5_model(model) -> None:
+    """Bridge Transformers releases before the GLM-5 IndexShare decoder update."""
+    root = model.unwrap()
+    base_model = root
+    if not hasattr(base_model, "layers") and hasattr(base_model, "model"):
+        base_model = base_model.model
+    needs_decoder_compat = (
+        hasattr(base_model, "layers")
+        and bool(base_model.layers)
+        and not _decoder_supports_prev_topk(base_model.layers[0])
+    )
+
+    if needs_decoder_compat and not isinstance(base_model, Glm5ModelCompat):
+        replacement = Glm5ModelCompat(base_model)
+        if not _replace_child_module(model, base_model, replacement):
+            raise RuntimeError("Unable to install the GLM-5 Transformers compatibility wrapper")
+
+    if needs_decoder_compat:
+        from ...layers.mtp import MtpWrapper
+
+        for module in model.modules():
+            if not isinstance(module, MtpWrapper):
+                continue
+            for mtp_layer in module.mtp.layers:
+                mtp_block_owner = _resolve_glm5_mtp_block_owner(mtp_layer)
+                if mtp_block_owner is None:
+                    continue
+                if not isinstance(mtp_block_owner.mtp_block, Glm5DecoderLayerCompat):
+                    mtp_block_owner.mtp_block = Glm5DecoderLayerCompat(mtp_block_owner.mtp_block)
+
+    _mark_glm5_mtp_moe_dfc_disabled(model)
 
 
 register_model_profile(

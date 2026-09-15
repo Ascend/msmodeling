@@ -603,6 +603,17 @@ def test_grouped_matmul_meta_ops_preserve_shapes_and_dtype():
     assert torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default([], [], [], [], [], [], [], None).dtype == (
         torch.float32
     )
+    quant_swiglu_out = torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default(
+        [torch.empty((2, 4), dtype=torch.int8, device="meta")],
+        [torch.empty((4, 6), dtype=torch.int8, device="meta")],
+        [torch.empty((), device="meta")],
+        [None],
+        [torch.empty((), device="meta")],
+        [None],
+        [None],
+        torch.int8,
+    )
+    assert quant_swiglu_out.shape == (2, 3)
     assert torch.ops.tensor_cast.grouped_matmul_fp8_swiglu.default([], [], [], [], [], None).shape == (0, 0)
 
 
@@ -635,6 +646,15 @@ def test_grouped_matmul_swiglu_meta_ops_halve_gate_up_features():
 
     with pytest.raises(ValueError, match="must be even"):
         torch.ops.tensor_cast.grouped_matmul_swiglu.default(x, [torch.empty((4, 11), device="meta")], [None])
+
+
+def test_grouped_mxfp4_swiglu_quant_accepts_mtp_unfused_marker():
+    payload, scale = torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default(
+        [], [], [], [], [], None, 32, is_mtp_unfused=True
+    )
+
+    assert payload.shape == (0, 0)
+    assert scale.shape == (0, 0)
 
 
 def test_communication_meta_ops_compute_collective_shapes(monkeypatch):

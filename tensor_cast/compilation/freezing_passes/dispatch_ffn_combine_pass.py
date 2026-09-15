@@ -125,6 +125,31 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         for start_node in all_permute_starts:
             if start_node in processed_nodes:
                 continue
+            if not self._allows_dispatch_ffn_combine(start_node):
+                # DFC-disabled region (e.g. GLM5 MTP proposal blocks, or any MoE
+                # with allow_dispatch_ffn_combine=False). The grouped_matmul /
+                # init_routing_v2 / unpermute_tokens nodes here are NOT fused into
+                # DFC, so the perf lookup must use the GLM5 fixed-capacity /
+                # distribute kernel signature. Tag them so the lookup guard
+                # (_lookup_grouped_moe / _lookup_moe_distribute) can distinguish
+                # these unfused-MoE nodes from generic compute and avoid
+                # cross-model 6656/distribute contamination.
+                disabled_region, _ = self._collect_region_nodes_forward(
+                    start_node, processed_nodes, self._MAX_TRAVERSE_DEPTH
+                )
+                for region_node in disabled_region:
+                    if (
+                        self._is_grouped_matmul(region_node)
+                        or self._is_grouped_matmul_swiglu(region_node)
+                        or self._is_permute_token(region_node)
+                        or self._is_unpermute_token(region_node)
+                    ):
+                        if region_node.kwargs.get("is_mtp_unfused") is not True:
+                            region_node.update_kwarg("is_mtp_unfused", True)
+                            modified = True
+                processed_nodes.update(disabled_region)
+                logger.debug("DispatchFFNCombinePass skip explicitly disabled region start=%s", start_node.name)
+                continue
 
             # Collect region nodes with forward BFS
             region_nodes, end_node = self._collect_region_nodes_forward(
@@ -190,6 +215,12 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
             gm.recompile()
 
         return gm
+
+    @staticmethod
+    def _allows_dispatch_ffn_combine(start_node: fx.Node) -> bool:
+        if len(start_node.args) >= 3:
+            return bool(start_node.args[2])
+        return bool(start_node.kwargs.get("allow_dispatch_ffn_combine", True))
 
     def _resolve_dfc_variant(self, region_nodes):
         """Determine DFC variant and extract weight args from region.
@@ -440,7 +471,9 @@ class DispatchFFNCombinePass(TensorCastGraphModulePass):
         schema = getattr(target, "_schema", None)
         if schema is None:
             raise TypeError(f"DFC argument extraction expects a torch op overload with a _schema, got {target!r}")
-        return tuple(arg.name for arg in schema.arguments)
+        # Exclude the runtime-only is_mtp_unfused kwarg injected by the DFC-disabled
+        # region tagging; it is not part of the DFC kernel schema.
+        return tuple(arg.name for arg in schema.arguments if arg.name != "is_mtp_unfused")
 
     @staticmethod
     def _check_node_arg_index(node: fx.Node, index: int) -> None:

@@ -17,7 +17,12 @@ import torch
 from ..device import DeviceProfile
 from ..layers.sampler import Sampler
 from ..performance_model.analytic import AnalyticPerformanceModel
-from ..performance_model.empirical import EmpiricalPerformanceModel
+from ..performance_model.empirical import (
+    EmpiricalOpRecord,
+    EmpiricalPerformanceModel,
+    PROFILING_SOURCE_SCOPE,
+    summarize_empirical_records,
+)
 from ..performance_model.memory_tracker import MemoryTracker
 from ..performance_model.profiling_database import InterpolatingDataSource, ProfilingDataSource
 from ..performance_model.utils import bytes_of_tensor
@@ -224,6 +229,11 @@ class ModelRunner:
         with_sampler: bool = False,
         runtime_observer: Optional[Callable[[Runtime], None]] = None,
     ) -> ModelRunnerMetrics:
+        empirical_record_offsets = {
+            id(perf_model): len(perf_model.op_records)
+            for perf_model in self.perf_models
+            if isinstance(perf_model, EmpiricalPerformanceModel)
+        }
         data_parallel_size = self.model.model_config.parallel_config.data_parallel_size
         logger.debug("data_parallel_size: %s", data_parallel_size)
 
@@ -258,13 +268,17 @@ class ModelRunner:
                 runtime_observer=runtime_observer,
             )
             run_end = time.perf_counter()
-            self._log_empirical_model_stats()
+            empirical_records = self._new_empirical_records(empirical_record_offsets)
+            type(self)._log_empirical_model_stats(empirical_records)
+            profiling_source_times_s, profiling_miss_reasons = summarize_empirical_records(empirical_records)
             if self.user_input.chrome_trace:
                 PipelineRunner.export_chrome_trace(self.user_input.chrome_trace, pipeline_result.trace_events)
             return self._build_pipeline_metrics(
                 pipeline_result,
                 batch_size=batch_size,
                 run_time_s=run_end - run_start,
+                profiling_source_times_s=profiling_source_times_s,
+                profiling_miss_reasons=profiling_miss_reasons,
             )
 
         with (
@@ -281,7 +295,9 @@ class ModelRunner:
         run_end = time.perf_counter()
 
         # Log empirical model stats if using profiling mode
-        self._log_empirical_model_stats()
+        empirical_records = self._new_empirical_records(empirical_record_offsets)
+        type(self)._log_empirical_model_stats(empirical_records)
+        profiling_source_times_s, profiling_miss_reasons = summarize_empirical_records(empirical_records)
 
         all_execution_time_s = runtime.total_execution_time_s()
         run_time_s = run_end - run_start
@@ -376,6 +392,8 @@ class ModelRunner:
             breakdowns=runtime.get_breakdowns(),
             runtime_event_list=runtime_event_list,
             perf_model_name=perf_model_name,
+            profiling_source_times_s=profiling_source_times_s,
+            profiling_miss_reasons=profiling_miss_reasons,
         )
 
     def _build_pipeline_metrics(
@@ -384,6 +402,8 @@ class ModelRunner:
         *,
         batch_size: int,
         run_time_s: float,
+        profiling_source_times_s: Optional[Dict[str, float]] = None,
+        profiling_miss_reasons: Optional[Dict[str, int]] = None,
     ) -> ModelRunnerMetrics:
         all_execution_time_s = pipeline_result.execution_time_s
         tps_per_model = {
@@ -452,16 +472,26 @@ class ModelRunner:
             stage_latency_breakdown=pipeline_result.stage_latency_breakdown,
             stage_memory_breakdown=pipeline_result.stage_memory_breakdown,
             pipeline_profile=pipeline_result.pipeline_profile,
+            profiling_source_times_s=profiling_source_times_s or {},
+            profiling_miss_reasons=profiling_miss_reasons or {},
         )
 
-    def _log_empirical_model_stats(self) -> None:
-        for pm in self.perf_models:
-            if isinstance(pm, EmpiricalPerformanceModel):
-                from ..performance_model.metrics_collector import MetricsCollector
+    def _new_empirical_records(self, record_offsets: Dict[int, int]) -> List[EmpiricalOpRecord]:
+        records = []
+        for perf_model in self.perf_models:
+            if isinstance(perf_model, EmpiricalPerformanceModel):
+                records.extend(perf_model.op_records[record_offsets.get(id(perf_model), 0) :])
+        return records
 
-                collector = MetricsCollector()
-                collector.collect_from_records(pm.op_records)
-                collector.log_stats()
+    @staticmethod
+    def _log_empirical_model_stats(records: List[EmpiricalOpRecord]) -> None:
+        if not records:
+            return
+        from ..performance_model.metrics_collector import MetricsCollector
+
+        collector = MetricsCollector()
+        collector.collect_from_records(records)
+        collector.log_stats()
 
     def get_inputs_num_bytes(self, requests: List[RequestInfo]) -> int:
         return get_inputs_num_bytes(self.model, requests, self.user_input.block_size)
@@ -527,6 +557,8 @@ class ModelRunnerMetrics:
     stage_latency_breakdown: List[Dict] = field(default_factory=list)
     stage_memory_breakdown: List[Dict] = field(default_factory=list)
     pipeline_profile: Optional[PipelineProfile] = None
+    profiling_source_times_s: Dict[str, float] = field(default_factory=dict)
+    profiling_miss_reasons: Dict[str, int] = field(default_factory=dict)
 
     def print_info(self):
         print(f"Number of Queries per DP rank: {self.batch_size}")
@@ -585,6 +617,22 @@ class ModelRunnerMetrics:
                 continue
             formatted = ", ".join(f"{key}: {val * 100 / total:.2f}" for key, val in breakdown.items())
             print(f"  {breakdown_name}: {formatted}")
+        profiling_total_s = sum(self.profiling_source_times_s.values())
+        if profiling_total_s > 0:
+            formatted = ", ".join(
+                f"{source}: {latency_s * 100 / profiling_total_s:.2f}"
+                for source, latency_s in self.profiling_source_times_s.items()
+            )
+            print(f"  profiling_sources [scope={PROFILING_SOURCE_SCOPE}]: {formatted}")
+            if self.profiling_miss_reasons:
+                misses = ", ".join(
+                    f"{reason}: {count}"
+                    for reason, count in sorted(
+                        self.profiling_miss_reasons.items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )
+                )
+                print(f"  profiling_misses: {misses}")
 
     def dump_json(self, path: str) -> None:
         breakdowns_percent: Dict[str, Dict[str, float]] = {}
@@ -612,6 +660,9 @@ class ModelRunnerMetrics:
             "breakdowns_raw": {k: dict(v) for k, v in self.breakdowns.items()},
             "breakdowns_percent": breakdowns_percent,
             "perf_model_name": self.perf_model_name,
+            "profiling_source_scope": PROFILING_SOURCE_SCOPE,
+            "profiling_source_times_s": dict(self.profiling_source_times_s),
+            "profiling_miss_reasons": dict(self.profiling_miss_reasons),
             "runtime_event_list": self.runtime_event_list,
             "pipeline_stage_latency": self.stage_latency_breakdown,
             "pipeline_stage_memory": self.stage_memory_breakdown,

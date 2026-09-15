@@ -2041,6 +2041,60 @@ def _k3_kda_state_size_gb(model) -> float:
         return 0.0
 
 
+def _make_k3_mla_prolog_hook(original_compute_mla_prolog):
+    """Build the K3 MLA prolog hook while keeping it independently testable."""
+
+    def _patched_compute_mla_prolog(self, hidden_states_view, cos, sin, *, is_decode_values=None):
+        if not bool(getattr(self._inner, "use_output_gate", False)):
+            return original_compute_mla_prolog(
+                self,
+                hidden_states_view,
+                cos,
+                sin,
+                is_decode_values=is_decode_values,
+            )
+
+        self.q_a_proj_weight, self.q_a_proj_scale, self.q_a_proj_offset = self.extract_qparams(self.q_a_proj)
+        self.q_b_proj_weight, self.q_b_proj_scale, self.q_b_proj_offset = self.extract_qparams(self.q_b_proj)
+        self.kv_a_proj_weight, self.kv_a_proj_scale, self.kv_a_proj_offset = self.extract_qparams(
+            self.kv_a_proj_with_mqa
+        )
+        self.q_a_layernorm_weight = self.q_a_layernorm.weight.data
+        self.kv_a_layernorm_weight = self.kv_a_layernorm.weight.data
+        linear_quant_enabled = (
+            self.q_a_proj_scale is not None and self.q_b_proj_scale is not None and self.kv_a_proj_scale is not None
+        )
+        if linear_quant_enabled:
+            return original_compute_mla_prolog(
+                self,
+                hidden_states_view,
+                cos,
+                sin,
+                is_decode_values=is_decode_values,
+            )
+
+        qa = torch.mm(hidden_states_view, self.q_a_proj_weight.t())
+        return torch.ops.tensor_cast.mla_prolog(
+            hidden_states_view,
+            qa,
+            cos,
+            sin,
+            self.q_a_layernorm_weight,
+            self.q_b_proj_weight,
+            self.kv_a_proj_weight,
+            self.kv_a_layernorm_weight,
+            self._num_heads_per_rank,
+            self.qk_head_dim,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.kv_lora_rank,
+            self.q_lora_rank,
+            is_decode_values=is_decode_values,
+        )
+
+    return _patched_compute_mla_prolog
+
+
 def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     """Monkey-patch remote model classes before model instantiation.
 
@@ -2769,40 +2823,7 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
         def _is_k3_mla(self) -> bool:
             return bool(getattr(self._inner, "use_output_gate", False))
 
-        def _patched_compute_mla_prolog(self, hidden_states_view, cos, sin):
-            if not _is_k3_mla(self):
-                return _original_compute_mla_prolog(self, hidden_states_view, cos, sin)
-
-            self.q_a_proj_weight, self.q_a_proj_scale, self.q_a_proj_offset = self.extract_qparams(self.q_a_proj)
-            self.q_b_proj_weight, self.q_b_proj_scale, self.q_b_proj_offset = self.extract_qparams(self.q_b_proj)
-            self.kv_a_proj_weight, self.kv_a_proj_scale, self.kv_a_proj_offset = self.extract_qparams(
-                self.kv_a_proj_with_mqa
-            )
-            self.q_a_layernorm_weight = self.q_a_layernorm.weight.data
-            self.kv_a_layernorm_weight = self.kv_a_layernorm.weight.data
-            linear_quant_enabled = (
-                self.q_a_proj_scale is not None and self.q_b_proj_scale is not None and self.kv_a_proj_scale is not None
-            )
-            if linear_quant_enabled:
-                return _original_compute_mla_prolog(self, hidden_states_view, cos, sin)
-
-            qa = torch.mm(hidden_states_view, self.q_a_proj_weight.t())
-            return torch.ops.tensor_cast.mla_prolog(
-                hidden_states_view,
-                qa,
-                cos,
-                sin,
-                self.q_a_layernorm_weight,
-                self.q_b_proj_weight,
-                self.kv_a_proj_weight,
-                self.kv_a_layernorm_weight,
-                self._num_heads_per_rank,
-                self.qk_head_dim,
-                self.qk_nope_head_dim,
-                self.qk_rope_head_dim,
-                self.kv_lora_rank,
-                self.q_lora_rank,
-            )
+        _patched_compute_mla_prolog = _make_k3_mla_prolog_hook(_original_compute_mla_prolog)
 
         def _patched_postprocess_attention_output(self, attn_output, hidden_states):
             if not _is_k3_mla(self) or not hasattr(self._inner, "g_proj"):

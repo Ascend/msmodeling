@@ -29,6 +29,8 @@ class ForwardLatencyRecord:
     breakdowns: str
     memory_info: MemoryInfo | None = None
     raw_breakdowns: dict[str, dict[str, float]] = field(default_factory=dict)
+    profiling_source_times_s: dict[str, float] = field(default_factory=dict)
+    profiling_miss_reasons: dict[str, int] = field(default_factory=dict)
 
 
 def _unique_keys(keys: Iterable[ForwardShapeKey]) -> list[ForwardShapeKey]:

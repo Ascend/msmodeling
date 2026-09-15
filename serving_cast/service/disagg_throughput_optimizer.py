@@ -1,11 +1,12 @@
 # Copyright (c) 2026-2026 Huawei Technologies Co., Ltd.
 
 import logging
+from collections.abc import Mapping
 
 import pandas as pd
 
 from tensor_cast.core.model_runner import ModelRunner
-
+from tensor_cast.performance_model.empirical import PROFILING_SOURCE_SCOPE
 from .base_throughput_optimizer import BaseThroughputOptimizer
 from .latency_table import ForwardLatencyTable
 from .optimizer_summary import (
@@ -25,6 +26,55 @@ from .utils import (
 
 
 logger = logging.getLogger(__name__)
+
+_PROFILING_SOURCE_LABELS = (
+    ("measured", "Measured"),
+    ("interpolated", "Interpolated"),
+    ("analytic", "Analytic"),
+    ("hybrid", "Hybrid"),
+)
+
+
+def _record_values(record: object, attribute: str) -> dict:
+    values = getattr(record, attribute, None)
+    return dict(values) if isinstance(values, Mapping) else {}
+
+
+def _accumulate_values(target: dict, values: object) -> None:
+    if not isinstance(values, Mapping):
+        return
+    for key, value in values.items():
+        target[key] = target.get(key, 0) + value
+
+
+def _format_profiling_sources(source_times_s: dict[str, float]) -> str:
+    total = sum(source_times_s.values())
+    if total <= 0:
+        return ""
+    return " | ".join(
+        f"{label} {source_times_s[key] * 100 / total:.2f}"
+        for key, label in _PROFILING_SOURCE_LABELS
+        if key in source_times_s
+    )
+
+
+def _profiling_result_kind(source_times_s: dict[str, float]) -> str:
+    total = sum(source_times_s.values())
+    if total <= 0:
+        return "analytic"
+    empirical_total = sum(source_times_s.get(key, 0.0) for key in ("measured", "interpolated", "hybrid"))
+    if empirical_total <= 0:
+        return "analytic"
+    if source_times_s.get("analytic", 0.0) > 0 or source_times_s.get("hybrid", 0.0) > 0:
+        return "hybrid"
+    if source_times_s.get("interpolated", 0.0) > 0:
+        return "interpolated"
+    return "empirical"
+
+
+def _format_profiling_misses(miss_reasons: dict[str, int]) -> str:
+    ordered = sorted(miss_reasons.items(), key=lambda item: (-item[1], item[0]))
+    return " | ".join(f"{reason} x{count}" for reason, count in ordered[:3])
 
 
 class DisaggThroughputOptimizer(BaseThroughputOptimizer):
@@ -81,6 +131,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         decode_flag = optimizer_data.ttft_limits is None
         variable_input_mode = optimizer_data.length_distribution is not None
         composition_rows = []
+        profiling_source_times_s = {}
+        profiling_miss_reasons = {}
 
         batch_size = optimizer_data.batch_size
         input_length = optimizer_data.input_length
@@ -134,6 +186,14 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 for batch_result, completed_requests in chunk_results:
                     chunk_latency_ms = self._select_latency_s(batch_result.execution_time_s) * 1000
                     latency_ms += chunk_latency_ms
+                    _accumulate_values(
+                        profiling_source_times_s,
+                        _record_values(batch_result, "profiling_source_times_s"),
+                    )
+                    _accumulate_values(
+                        profiling_miss_reasons,
+                        _record_values(batch_result, "profiling_miss_reasons"),
+                    )
                     device_memory_available_gb = min(
                         device_memory_available_gb,
                         batch_result.device_memory_available_gb,
@@ -176,6 +236,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 device_memory_available_gb = batch_result.device_memory_available_gb
                 breakdowns = format_breakdowns(batch_result.breakdowns)
                 memory_info = build_memory_info(batch_result)
+                profiling_source_times_s = _record_values(batch_result, "profiling_source_times_s")
+                profiling_miss_reasons = _record_values(batch_result, "profiling_miss_reasons")
         else:
             latency_ms = optimizer_data.serving_cost
             device_memory_available_gb = float("inf")
@@ -224,6 +286,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             for key, wave_concurrency, is_final_chunk in wave_specs:
                 record = latency_table.get(key)
                 latency_ms += record.latency_ms
+                _accumulate_values(profiling_source_times_s, record.profiling_source_times_s)
+                _accumulate_values(profiling_miss_reasons, record.profiling_miss_reasons)
                 device_memory_available_gb = min(
                     device_memory_available_gb,
                     record.memory_left_gb,
@@ -340,6 +404,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             parallel,
             batch_size,
             breakdowns,
+            _format_profiling_sources(profiling_source_times_s),
+            PROFILING_SOURCE_SCOPE,
+            _profiling_result_kind(profiling_source_times_s),
+            _format_profiling_misses(profiling_miss_reasons),
             memory_info["model_weight_size_gb"] if memory_info else float("nan"),
             memory_info["kv_cache_size_gb"] if memory_info else float("nan"),
             memory_info["model_activation_size_gb"] if memory_info else float("nan"),
@@ -364,6 +432,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 detail_row[columns.index("token/s")] = None
                 detail_row[columns.index("token/s/device")] = None
                 detail_row[columns.index("percentage_breakdowns")] = None
+                detail_row[columns.index("profiling_sources")] = None
+                detail_row[columns.index("profiling_source_scope")] = None
+                detail_row[columns.index("profiling_result")] = None
+                detail_row[columns.index("profiling_misses")] = None
                 rows.append(detail_row)
 
         result_df = pd.DataFrame(columns=columns, data=rows).round(3)
@@ -479,6 +551,8 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
         }
         summary = OptimizerSummary(optimizer_data)
         summary.set_memory_info(memory_info)
+        profiling_source_times_s = wave.profiling_source_times_s
+        profiling_miss_reasons = wave.profiling_miss_reasons
         data = [
             self.model_runner.user_input.device,
             optimizer_data.num_devices,
@@ -501,6 +575,10 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             parallel,
             batch_size,
             "",
+            _format_profiling_sources(profiling_source_times_s),
+            PROFILING_SOURCE_SCOPE,
+            _profiling_result_kind(profiling_source_times_s),
+            _format_profiling_misses(profiling_miss_reasons),
             memory_info["model_weight_size_gb"],
             memory_info["kv_cache_size_gb"],
             memory_info["model_activation_size_gb"],

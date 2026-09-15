@@ -512,15 +512,11 @@ operator_mappings:
         input_projection: routing_weight_cast
         output_dtype: FLOAT
     notes: >
-      W8A8 DFC variant. embedded_communication is optional so missing HCOM
-      context or samples can fall back to the measured DFC latency. A successful
-      HCOM lookup is still included in the total latency.
-    embedded_communication:
-      kernel_type: hcom_alltoall_
-      optional: true
-      message_bytes_mode: routed_input
-      group_type: expert_parallel
-      interpolation_method: alpha_beta
+      W8A8 DFC variant. Both service profiling and standalone DFC replay invoke
+      the fused operator with a complete HCCL expert-parallel process group, so
+      their measured duration already includes its internal dispatch/combine
+      communication. HCOM children remain visible on auxiliary profiler streams,
+      but summing them again here double-counts overlap.
 
   "tensor_cast.dispatch_ffn_combine_quant_int4.default":
     kernel_type: DispatchFFNCombine

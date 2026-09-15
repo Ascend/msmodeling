@@ -6,6 +6,9 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 import torch
+from tensor_cast.device import TEST_DEVICE
+from tensor_cast.performance_model.base import PerformanceModel
+from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
 from tensor_cast.performance_model.profiling_database.data_source import (
     QueryResult,
     QuerySource,
@@ -14,7 +17,9 @@ from tensor_cast.performance_model.profiling_database.interpolating_data_source 
     InterpolatingDataSource,
 )
 from tensor_cast.performance_model.profiling_database.profiling_data_source import (
+    COMPOSITE_DECOMPOSERS,
     ProfilingDataSource,
+    SubKernelSpec,
 )
 
 
@@ -708,6 +713,63 @@ def test_partial_returns_none_when_interpolation_fails(interp_data_dir):
     )
     result = ds.lookup(op)
     assert result is None
+
+
+def test_decomposed_interpolation_partial_preserves_diagnostics_and_uses_full_analytic_fallback(tmp_path, monkeypatch):
+    """A later missing composite leaf keeps the hit diagnostic but never its subtotal."""
+    func_name = "tensor_cast.fake_partial.default"
+    (tmp_path / "op_mapping.yaml").write_text(
+        f'version: "test"\noperator_mappings:\n  "{func_name}":\n    composite: true\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "MatMulV2.csv").write_text(
+        "Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)\n"
+        '"100,4;4,8","DT_BF16;DT_BF16","ND;ND","100,8","DT_BF16","ND",10.0\n',
+        encoding="utf-8",
+    )
+    specs = [
+        SubKernelSpec(
+            kernel_type="MatMulV2",
+            input_shapes=[(100, 4), (4, 8)],
+            dtype="DT_BF16",
+        ),
+        SubKernelSpec(
+            kernel_type="Add",
+            input_shapes=[(100, 8), (100, 8)],
+            dtype="DT_BF16",
+        ),
+    ]
+    monkeypatch.setitem(COMPOSITE_DECOMPOSERS, func_name, lambda _op, _mapping: specs)
+    op = _make_op_info(
+        func_name,
+        [
+            torch.empty(100, 4, device="meta", dtype=torch.bfloat16),
+            torch.empty(4, 8, device="meta", dtype=torch.bfloat16),
+        ],
+    )
+    data_source = InterpolatingDataSource(ProfilingDataSource(tmp_path))
+
+    result = data_source.lookup(op)
+
+    assert result is not None
+    assert result.source == QuerySource.PARTIAL
+    assert result.latency_us == pytest.approx(10.0)
+    assert result.details["method"] == "decomposed_interpolation_partial"
+    assert result.details["hit_kernels"] == ["MatMulV2"]
+    assert result.details["missed_kernels"] == ["Add"]
+
+    analytic_result = PerformanceModel.Result(execution_time_s=123e-6, statistics={})
+    fallback = MagicMock()
+    fallback.process_op.return_value = analytic_result
+    model = EmpiricalPerformanceModel(TEST_DEVICE, data_source=data_source, fallback_model=fallback)
+
+    final_result = model.process_op(op)
+
+    assert final_result.execution_time_s == pytest.approx(123e-6)
+    assert final_result.statistics["source"] == "ANALYTIC"
+    assert final_result.statistics["fallback_from"] == QuerySource.PARTIAL.name
+    assert model.op_records[-1].lookup_result is not None
+    assert model.op_records[-1].lookup_result.source == QuerySource.PARTIAL
 
 
 def test_candidate_latency_uses_alternate_after_zero_preferred_column():

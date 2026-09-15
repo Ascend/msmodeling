@@ -132,6 +132,8 @@ def _(
     qk_rope_head_dim: int,
     kv_lora_rank: int,
     q_lora_rank: Optional[int],
+    *,
+    is_decode_values: Optional[list[bool]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Fused MLA preprocessing op that models RMS norm, matmuls, and RoPE rotation.
@@ -192,6 +194,8 @@ def _(
     q_b_proj_offset: Optional[torch.Tensor],
     kv_a_proj_scale: torch.Tensor,
     kv_a_proj_offset: Optional[torch.Tensor],
+    *,
+    is_decode_values: Optional[list[bool]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Quantized variant of the fused MLA preprocessing op.
@@ -589,6 +593,9 @@ def _(
 
     Returns:
         topk_indices: (batch, seq_len, min(topk_limit, active_seq_len))
+
+    ``query_lens`` carries request-level phase semantics for chunked prefill.
+    It is optional for compatibility with older captured workloads.
     """
     batch, seq_len, _ = hidden_states.shape
     # torch.compile traces this op with FakeTensors; avoid extracting a

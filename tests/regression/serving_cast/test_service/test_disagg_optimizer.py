@@ -4,7 +4,11 @@ from functools import partial
 from unittest.mock import Mock, patch
 
 import pandas as pd
-from serving_cast.service.disagg_throughput_optimizer import DisaggThroughputOptimizer
+from serving_cast.service.disagg_throughput_optimizer import (
+    _format_profiling_sources,
+    _profiling_result_kind,
+    DisaggThroughputOptimizer,
+)
 from serving_cast.service.optimizer_summary import OptimizerSummary
 from serving_cast.service.utils import (
     BYTES_TO_GB,
@@ -35,6 +39,29 @@ def _simple_length_distribution():
 
 
 class TestDisaggStrategy(unittest.TestCase):
+    def test_profiling_result_kind_distinguishes_interpolation(self):
+        self.assertEqual(_profiling_result_kind({}), "analytic")
+        self.assertEqual(_profiling_result_kind({"analytic": 1.0}), "analytic")
+        self.assertEqual(_profiling_result_kind({"measured": 1.0}), "empirical")
+        self.assertEqual(
+            _profiling_result_kind({"measured": 0.8, "interpolated": 0.2, "analytic": 0.0}),
+            "interpolated",
+        )
+        self.assertEqual(
+            _profiling_result_kind({"measured": 0.8, "interpolated": 0.0, "analytic": 0.2}),
+            "hybrid",
+        )
+        self.assertEqual(
+            _profiling_result_kind({"measured": 0.8, "analytic": 0.0, "hybrid": 0.2}),
+            "hybrid",
+        )
+
+    def test_formats_partial_lookup_latency_as_hybrid(self):
+        self.assertEqual(
+            _format_profiling_sources({"measured": 0.7, "interpolated": 0.1, "analytic": 0.0, "hybrid": 0.2}),
+            "Measured 70.00 | Interpolated 10.00 | Analytic 0.00 | Hybrid 20.00",
+        )
+
     def setUp(self):
         """Set up test fixtures before each test method."""
         self.strategy = DisaggThroughputOptimizer()
@@ -115,6 +142,15 @@ class TestDisaggStrategy(unittest.TestCase):
                 execution_time_s = {"empirical": 0.002}
                 device_memory_available_gb = 1.0
                 breakdowns = {}
+                profiling_source_times_s = {
+                    "measured": 0.0014,
+                    "interpolated": 0.0002,
+                    "analytic": 0.0004,
+                }
+                profiling_miss_reasons = {
+                    "outside_axis_boundary": 75,
+                    "generic_compute_no_compatible_regime": 3,
+                }
 
             return DummyMetrics()
 
@@ -124,6 +160,13 @@ class TestDisaggStrategy(unittest.TestCase):
         row = result.get_summary_df().iloc[0]
         # latency_ms = empirical (0.002 s -> 2 ms) + serving_cost (3) = 5 ms
         self.assertEqual(row["tpot"], 5.0)
+        self.assertEqual(row["profiling_sources"], "Measured 70.00 | Interpolated 10.00 | Analytic 20.00")
+        self.assertEqual(row["profiling_source_scope"], "modeled_forward_lookup_latency")
+        self.assertEqual(row["profiling_result"], "hybrid")
+        self.assertEqual(
+            row["profiling_misses"],
+            "outside_axis_boundary x75 | generic_compute_no_compatible_regime x3",
+        )
 
     def test_get_inference_info_prefill_mode(self):
         """Test get_inference_info method in prefill mode"""
@@ -254,6 +297,12 @@ class TestDisaggStrategy(unittest.TestCase):
                         "second": float(10 - len(captured_calls)),
                     }
                 }
+                profiling_source_times_s = {
+                    "measured": 0.0008,
+                    "interpolated": 0.0,
+                    "analytic": 0.0002,
+                }
+                profiling_miss_reasons = {"outside_axis_boundary": 1}
 
             return DummyMetrics()
 
@@ -282,6 +331,9 @@ class TestDisaggStrategy(unittest.TestCase):
         self.assertEqual(row["prefill_phase_makespan_ms"], 5.0)
         self.assertEqual(row["token/s"], 8000.0)
         self.assertEqual(row["percentage_breakdowns"], "Mem 20.00 | Comm 80.00 | Cube 0.00 | Vec 0.00")
+        self.assertEqual(row["profiling_sources"], "Measured 80.00 | Interpolated 0.00 | Analytic 20.00")
+        self.assertEqual(row["profiling_result"], "hybrid")
+        self.assertEqual(row["profiling_misses"], "outside_axis_boundary x3")
 
     def test_chunked_prefill_passes_prefill_phase_to_every_forward(self):
         optimizer_data = OptimizerData(
@@ -897,11 +949,15 @@ class _PPMetrics:
         *,
         execution_time_s=None,
         device_memory_available_gb=10.0,
+        profiling_source_times_s=None,
+        profiling_miss_reasons=None,
     ):
         self.pipeline_profile = profile
         self.execution_time_s = execution_time_s or {"analytic": 0.0}
         self.device_memory_available_gb = device_memory_available_gb
         self.breakdowns = {}
+        self.profiling_source_times_s = profiling_source_times_s or {}
+        self.profiling_miss_reasons = profiling_miss_reasons or {}
 
 
 def _make_pp_strategy(
@@ -1041,6 +1097,32 @@ _make_pp_disagg_strategy = partial(_make_pp_strategy, DisaggThroughputOptimizer)
 
 
 class TestDisaggPipelineParallel(unittest.TestCase):
+    def test_pp_summary_preserves_profiling_lookup_evidence(self):
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        metrics = _PPMetrics(
+            profile,
+            profiling_source_times_s={"measured": 0.008, "analytic": 0.002},
+            profiling_miss_reasons={"outside_axis_boundary": 3},
+        )
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=1,
+            input_length=4,
+            output_length=8,
+            max_batched_tokens=4,
+            serving_cost=0,
+        )
+
+        with patch.object(strategy, "_get_forward_info", return_value=metrics):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        self.assertEqual(row["profiling_sources"], "Measured 80.00 | Analytic 20.00")
+        self.assertEqual(row["profiling_source_scope"], "modeled_forward_lookup_latency")
+        self.assertEqual(row["profiling_result"], "hybrid")
+        self.assertEqual(row["profiling_misses"], "outside_axis_boundary x3")
+
     def test_prefill_formula_uses_wave_makespan_and_serving_cost(self):
         strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
         profile = _pp_profile((2.0, 2.0), include_transfers=False)

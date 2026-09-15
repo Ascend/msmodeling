@@ -25,6 +25,24 @@ from tensor_cast.runtime import Runtime
 from tensor_cast.transformers.model import TransformerModel
 
 
+_MTP_UNFUSED_TAG_TARGETS = sorted(
+    DispatchFFNCombinePass._GROUPED_MATMUL_OPS
+    | DispatchFFNCombinePass._GROUPED_MATMUL_SWIGLU_OPS
+    | {
+        torch.ops.tensor_cast.init_routing_v2.default,
+        torch.ops.tensor_cast.unpermute_tokens.default,
+    },
+    key=str,
+)
+
+
+@pytest.mark.parametrize("target", _MTP_UNFUSED_TAG_TARGETS, ids=str)
+def test_dfc_mtp_unfused_tag_targets_accept_runtime_marker(target):
+    schema_arg_names = {argument.name for argument in target._schema.arguments}
+
+    assert "is_mtp_unfused" in schema_arg_names
+
+
 class DfcPassTestMixin:
     """DispatchFFNCombine fusion pass tests.
 
@@ -222,6 +240,43 @@ class DfcPassNightlyTestCase(DfcPassTestMixin, unittest.TestCase):
 
 
 class DfcPassUnitTestCase(unittest.TestCase):
+    def test_dfc_respects_per_region_opt_out(self):
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        expert_indices = graph.placeholder("expert_indices")
+        gate_up_weight = graph.placeholder("gate_up_weight")
+        down_weight = graph.placeholder("down_weight")
+
+        routed = graph.call_function(
+            torch.ops.tensor_cast.init_routing_v2.default,
+            args=(x, expert_indices, False),
+        )
+        activated = graph.call_function(
+            torch.ops.tensor_cast.grouped_matmul_swiglu.default,
+            args=([routed], [gate_up_weight], [None]),
+        )
+        projected = graph.call_function(
+            torch.ops.tensor_cast.grouped_matmul.default,
+            args=([activated], [down_weight], [None]),
+        )
+        output = graph.call_function(
+            torch.ops.tensor_cast.unpermute_tokens.default,
+            args=(projected, expert_indices),
+        )
+        graph.output(output)
+
+        gm = DispatchFFNCombinePass()(fx.GraphModule(torch.nn.Module(), graph))
+        targets = {node.target for node in gm.graph.nodes if node.op == "call_function"}
+        tagged_nodes = [
+            node for node in gm.graph.nodes if node.op == "call_function" and node.target in _MTP_UNFUSED_TAG_TARGETS
+        ]
+
+        self.assertIn(torch.ops.tensor_cast.init_routing_v2.default, targets)
+        self.assertNotIn(torch.ops.tensor_cast.dispatch_ffn_combine.default, targets)
+        self.assertTrue(tagged_nodes)
+        self.assertTrue(all(node.kwargs.get("is_mtp_unfused") is True for node in tagged_nodes))
+        self.assertIn("is_mtp_unfused", gm.code)
+
     def test_resolve_dfc_variant_collects_all_unfused_gate_up_linears(self):
         """Case 2 should collect one gate_up and one down_proj linear per expert."""
         graph = fx.Graph()

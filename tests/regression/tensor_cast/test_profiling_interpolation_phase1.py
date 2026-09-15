@@ -1234,6 +1234,124 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
     assert result.details["kernel_type"] == "GatherV2"
 
 
+def test_swiglu_interpolation_merges_tensorcast_gate_and_up_inputs(tmp_path):
+    data_dir = tmp_path / "swiglu_concat_interpolation"
+    data_dir.mkdir()
+    _write_text(
+        data_dir / "op_mapping.yaml",
+        """
+version: "test"
+operator_mappings:
+  "tensor_cast.swiglu.default":
+    kernel_type: SwiGlu
+""",
+    )
+    _write_text(
+        data_dir / "SwiGlu.csv",
+        """
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"100,128","DT_BF16","ND","100,64","DT_BF16","ND",10.0
+"200,128","DT_BF16","ND","200,64","DT_BF16","ND",20.0
+""",
+    )
+    ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+    op = _make_op_info(
+        torch.ops.tensor_cast.swiglu.default,
+        [
+            torch.empty(1, 150, 64, device="meta", dtype=torch.bfloat16),
+            torch.empty(1, 150, 64, device="meta", dtype=torch.bfloat16),
+        ],
+    )
+
+    result = ds.lookup(op)
+
+    assert result is not None
+    assert result.source == QuerySource.INTERPOLATED
+    assert result.latency_us == pytest.approx(15.0)
+    assert result.details["kernel_type"] == "SwiGlu"
+    assert result.details["interpolation_path"] == "compute_1d"
+
+
+def test_glm5_sampling_bmm_interpolates_the_lowered_mul_kernel(tmp_path):
+    data_dir = tmp_path / "degenerate_bmm_mul_interpolation"
+    data_dir.mkdir()
+    _write_text(
+        data_dir / "op_mapping.yaml",
+        """
+version: "test"
+operator_mappings:
+  "aten.bmm.default":
+    kernel_type: BatchMatMulV2
+    alternate_kernel_types: [TransposeBatchMatMul, BatchMatMulNd]
+    degenerate_bmm_kernel_type: Mul
+""",
+    )
+    _write_text(
+        data_dir / "Mul.csv",
+        """
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"1,32,1;1,1,768","FLOAT;FLOAT","ND;ND","1,32,768","FLOAT","ND",4.6
+"1,32,1;1,1,5000","FLOAT;FLOAT","ND;ND","1,32,5000","FLOAT","ND",5.0
+""",
+    )
+    ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+    op = _make_op_info(
+        torch.ops.aten.bmm.default,
+        [
+            torch.empty(1, 32, 1, device="meta", dtype=torch.float32),
+            torch.empty(1, 1, 1536, device="meta", dtype=torch.float32),
+        ],
+    )
+    op.out = torch.empty(1, 32, 1536, device="meta", dtype=torch.float32)
+
+    result = ds.lookup(op)
+
+    assert result is not None
+    assert result.source == QuerySource.INTERPOLATED
+    assert 4.6 < result.latency_us < 5.0
+    assert result.details["kernel_type"] == "Mul"
+    assert result.details["interpolation_path"] == "elementwise_1d"
+
+
+def test_glm5_sampling_bmm_preserves_matmul_fallback_when_mul_misses(tmp_path):
+    data_dir = tmp_path / "degenerate_bmm_matmul_fallback"
+    data_dir.mkdir()
+    _write_text(
+        data_dir / "op_mapping.yaml",
+        """
+version: "test"
+operator_mappings:
+  "aten.bmm.default":
+    kernel_type: BatchMatMulV2
+    alternate_kernel_types: [BatchMatMulNd]
+    degenerate_bmm_kernel_type: Mul
+""",
+    )
+    _write_text(
+        data_dir / "BatchMatMulNd.csv",
+        """
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"1,32,1;1,1,768","FLOAT;FLOAT","ND;ND","1,32,768","FLOAT","ND",10.0
+"1,32,1;1,1,3072","FLOAT;FLOAT","ND;ND","1,32,3072","FLOAT","ND",30.0
+""",
+    )
+    ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+    op = _make_op_info(
+        torch.ops.aten.bmm.default,
+        [
+            torch.empty(1, 32, 1, device="meta", dtype=torch.float32),
+            torch.empty(1, 1, 1536, device="meta", dtype=torch.float32),
+        ],
+    )
+    op.out = torch.empty(1, 32, 1536, device="meta", dtype=torch.float32)
+
+    result = ds.lookup(op)
+
+    assert result is not None
+    assert result.source == QuerySource.INTERPOLATED
+    assert result.details["kernel_type"] == "BatchMatMulNd"
+
+
 def test_generic_compute_target_index_and_interpolation_use_candidate_group(tmp_path):
     data_dir = tmp_path / "generic_compute_1d"
     data_dir.mkdir()

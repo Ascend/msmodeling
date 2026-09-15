@@ -4,7 +4,11 @@ import pytest
 import torch
 from tensor_cast.performance_model.analytic import OpBoundClassifier
 from tensor_cast.performance_model.base import PerformanceModel
-from tensor_cast.performance_model.empirical import EmpiricalPerformanceModel
+from tensor_cast.performance_model.empirical import (
+    EmpiricalOpRecord,
+    EmpiricalPerformanceModel,
+    summarize_empirical_records,
+)
 from tensor_cast.performance_model.profiling_database.data_source import (
     DataSourcePerformanceModel,
     QueryResult,
@@ -59,9 +63,9 @@ def test_empirical_uses_datasource_when_hit():
     fallback.process_op.assert_called_once()
 
 
-@pytest.mark.parametrize("source", [QuerySource.MEASURED, QuerySource.INTERPOLATED, QuerySource.PARTIAL])
+@pytest.mark.parametrize("source", [QuerySource.MEASURED, QuerySource.INTERPOLATED])
 def test_empirical_preserves_analytic_bound_attribution(source):
-    """Database hits must remain visible in the fallback bound classifier."""
+    """Complete database hits must remain visible in the fallback bound classifier."""
     data_source = MagicMock(spec=DataSourcePerformanceModel)
     data_source.lookup.return_value = QueryResult(45.3, 0.9, source)
     fallback = MagicMock(spec=PerformanceModel)
@@ -160,6 +164,69 @@ def test_miss_sets_shape_match_rule_analytic():
     model = EmpiricalPerformanceModel(device, data_source=MissDataSource(), fallback_model=fallback)
     result = model.process_op(_make_mock_op_invoke_info())
     assert result.statistics.get("shape_match_rule") == "analytic"
+
+
+def test_summarize_empirical_records_uses_full_analytic_for_partial_sources():
+    records = [
+        EmpiricalOpRecord(
+            "measured",
+            QueryResult(2.0, 1.0, QuerySource.MEASURED),
+            analytic_latency_s=20e-6,
+            tc_shapes=[],
+        ),
+        EmpiricalOpRecord(
+            "interpolated",
+            QueryResult(3.0, 0.8, QuerySource.INTERPOLATED),
+            analytic_latency_s=30e-6,
+            tc_shapes=[],
+        ),
+        EmpiricalOpRecord(
+            "miss",
+            None,
+            analytic_latency_s=5e-6,
+            tc_shapes=[],
+            miss_reason="outside_axis_boundary",
+        ),
+        EmpiricalOpRecord(
+            "partial",
+            QueryResult(
+                7.0,
+                0.5,
+                QuerySource.PARTIAL,
+                details={"missed_kernels": ["SparseFlashAttention"]},
+            ),
+            analytic_latency_s=70e-6,
+            tc_shapes=[],
+        ),
+    ]
+
+    source_times_s, miss_reasons = summarize_empirical_records(records)
+
+    assert abs(source_times_s["measured"] - 2e-6) < 1e-12
+    assert abs(source_times_s["interpolated"] - 3e-6) < 1e-12
+    assert abs(source_times_s["analytic"] - 75e-6) < 1e-12
+    assert source_times_s["hybrid"] == 0.0
+    assert miss_reasons == {
+        "miss [outside_axis_boundary]": 1,
+        "partial [partial:SparseFlashAttention]": 1,
+    }
+
+
+def test_summarize_empirical_records_falls_back_for_none_lookup_latency():
+    records = [
+        EmpiricalOpRecord(
+            "invalid-measured",
+            QueryResult(None, 1.0, QuerySource.MEASURED),
+            analytic_latency_s=40e-6,
+            tc_shapes=[],
+        )
+    ]
+
+    source_times_s, miss_reasons = summarize_empirical_records(records)
+
+    assert source_times_s["analytic"] == 40e-6
+    assert source_times_s["measured"] == 0.0
+    assert miss_reasons == {"invalid-measured [invalid_lookup_latency]": 1}
 
 
 # --- C5: Interpolation toggle tests ---

@@ -44,6 +44,8 @@ class FakeModelRunner:
             execution_time_s={"analytic": 0.012},
             device_memory_available_gb=3.5,
             breakdowns={"stage": {"mem": 1.0, "comm": 3.0}},
+            profiling_source_times_s={"measured": 0.01, "analytic": 0.002},
+            profiling_miss_reasons={"shape_not_found": 2},
         )
 
 
@@ -522,6 +524,8 @@ class TestBaseBackend(unittest.TestCase):
         self.assertEqual(record.memory_left_gb, 3.5)
         self.assertEqual(record.breakdowns, "Mem 25.00 | Comm 75.00 | Cube 0.00 | Vec 0.00")
         self.assertEqual(record.raw_breakdowns, {"stage": {"mem": 1.0, "comm": 3.0}})
+        self.assertEqual(record.profiling_source_times_s, {"measured": 0.01, "analytic": 0.002})
+        self.assertEqual(record.profiling_miss_reasons, {"shape_not_found": 2})
         request = fake_runner.requests[0]
         self.assertEqual((request.query_len, request.seq_len, request.concurrency), (6, 12, 5))
         self.assertEqual((request.image_batch_size, request.image_height, request.image_width), (2, 224, 336))

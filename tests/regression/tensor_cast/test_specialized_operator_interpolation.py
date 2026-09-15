@@ -157,18 +157,19 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 "1,128,6144;128,6144;6144;","DT_BF16;DT_BF16;DT_BF16;DT_UNDEFINED","NCL;ND;ND;NULL","1,128,6144;1,128,1;1,128,6144","DT_BF16;FLOAT;DT_BF16","ND;ND;ND",20.0
 """,
     )
-    source = InterpolatingDataSource(ProfilingDataSource(data_dir))
-    monkeypatch.setattr(source.base, "lookup", lambda _op: None)
-    x = torch.empty((1, 96, 6144), device="meta", dtype=torch.float16)
+    ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+    monkeypatch.setattr(ds.base, "lookup", lambda _op: None)
+    x = torch.empty(1, 96, 6144, device="meta", dtype=torch.float16)
     residual = torch.empty_like(x)
-    weight = torch.empty((6144,), device="meta", dtype=torch.float16)
+    weight = torch.empty(6144, device="meta", dtype=torch.float16)
 
-    result = source.lookup(_make_op_info("tensor_cast.add_rms_norm2.default", [x, residual, weight, 1e-5]))
+    result = ds.lookup(_make_op_info("tensor_cast.add_rms_norm2.default", [x, residual, weight, 1e-5]))
 
     assert result is not None
     assert result.source == QuerySource.INTERPOLATED
     assert result.latency_us == pytest.approx(15.0)
     assert result.details["axes"] == ["axis_0"]
+    assert result.details["axis_boundary"] == {"axis_0": [64.0, 128.0]}
 
 
 def test_elementwise_base_miss_does_not_recover_local_measured_exact(tmp_path):
@@ -469,8 +470,8 @@ def test_real_sparse_attention_interpolates_effective_kv_length():
 
 
 @pytest.mark.parametrize("q_tokens", [844, 1094])
-def test_sparse_attention_interpolates_arbitrary_single_request_prefill(q_tokens):
-    source = InterpolatingDataSource(ProfilingDataSource(_REAL_V018_DATA_DIR))
+def test_real_sparse_attention_interpolates_arbitrary_single_request_prefill_length(q_tokens):
+    ds = InterpolatingDataSource(ProfilingDataSource(_REAL_V018_DATA_DIR))
     params = {
         "q_shape_3d": (q_tokens, 64, 512),
         "sparse_mode": 3,
@@ -488,11 +489,7 @@ def test_sparse_attention_interpolates_arbitrary_single_request_prefill(q_tokens
         "sparse_indices_valid_count": q_tokens,
     }
 
-    result = source._interpolate_attention_by_params_one(
-        "SparseFlashAttention",
-        params,
-        "DT_BF16",
-    )
+    result = ds._interpolate_attention_by_params_one("SparseFlashAttention", params, "DT_BF16")
 
     assert result is not None
     assert result.source == QuerySource.INTERPOLATED
@@ -501,8 +498,8 @@ def test_sparse_attention_interpolates_arbitrary_single_request_prefill(q_tokens
     assert result.details["exact_fields"]["sparse_indices_valid_count_state"] == "kv_limited"
 
 
-def test_sparse_attention_rejects_inconsistent_derived_valid_count():
-    source = InterpolatingDataSource(ProfilingDataSource(_REAL_V018_DATA_DIR))
+def test_real_sparse_attention_rejects_inconsistent_derived_valid_count():
+    ds = InterpolatingDataSource(ProfilingDataSource(_REAL_V018_DATA_DIR))
     params = {
         "q_shape_3d": (844, 64, 512),
         "sparse_mode": 3,
@@ -520,14 +517,10 @@ def test_sparse_attention_rejects_inconsistent_derived_valid_count():
         "sparse_indices_valid_count": 625,
     }
 
-    result = source._interpolate_attention_by_params_one(
-        "SparseFlashAttention",
-        params,
-        "DT_BF16",
-    )
+    result = ds._interpolate_attention_by_params_one("SparseFlashAttention", params, "DT_BF16")
 
     assert result is None
-    assert source.last_miss_reason == "sparse_attention_target_unextractable"
+    assert ds.last_miss_reason == "sparse_attention_target_unextractable"
 
 
 def test_v018_dsa_indexer_mapping_has_registered_decomposer():
@@ -573,6 +566,7 @@ operator_mappings:
 
 def test_moe_fused_real_csv_keeps_full_weight_shapes_in_candidate_regime():
     ds = InterpolatingDataSource(ProfilingDataSource(_REAL_V018_DATA_DIR, parallel_config=_ParallelConfig()))
+    # Keep the target between measured anchors so this test exercises interpolation.
     tokens = 3
     op = _make_op_info(
         "tensor_cast.dispatch_ffn_combine_quant.default",
@@ -661,7 +655,7 @@ def test_moe_fused_missing_weight_shape_fails_closed():
     assert ds.last_miss_reason == "moe_fused_target_unextractable"
 
 
-def test_scatter_base_miss_interpolates_across_cache_pool_capacity(tmp_path):
+def test_scatter_base_miss_recovers_pool_agnostic_interpolation(tmp_path):
     data_dir = tmp_path / "scatter_real_csv"
     data_dir.mkdir()
     _write_text(
@@ -690,6 +684,8 @@ operator_mappings:
 
     assert result is not None
     assert result.source == QuerySource.INTERPOLATED
+    assert result.latency_us == pytest.approx(101.382)
+    assert result.shape_match_info.shape_match_rule == "interpolated_1d_linear"
     assert result.details["axes"] == ["tokens"]
 
 
@@ -2467,7 +2463,32 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
     assert result.latency_us == pytest.approx(15.0)
 
 
-def test_scatter_cache_write_sub_kernel_records_failure_details(tmp_path):
+def test_scatter_cache_write_sub_kernel_ignores_cache_pool_dim0(tmp_path):
+    data_dir = tmp_path / "scatter_cache_write_sub_kernel_miss"
+    data_dir.mkdir()
+    _write_text(data_dir / "op_mapping.yaml", 'version: "test"\noperator_mappings: {}')
+    _write_text(
+        data_dir / "ScatterNdUpdate.csv",
+        """
+Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
+"1000,128;100,1;100,128","DT_BF16;INT32;DT_BF16","ND;ND;ND","1000,128","DT_BF16","ND",10.0
+"1000,128;200,1;200,128","DT_BF16;INT32;DT_BF16","ND;ND;ND","1000,128","DT_BF16","ND",20.0
+""",
+    )
+    ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+
+    result = ds._interpolate_scatter_nd_update_by_shapes(
+        ["ScatterNdUpdate"],
+        [(2000, 128), (150, 1), (150, 128)],
+        ["DT_BF16", "INT32", "DT_BF16"],
+    )
+
+    assert result is not None
+    assert result.source == QuerySource.INTERPOLATED
+    assert result.latency_us == pytest.approx(15.0)
+
+
+def test_scatter_cache_write_sub_kernel_records_regime_mismatch(tmp_path):
     data_dir = tmp_path / "scatter_cache_write_sub_kernel_miss"
     data_dir.mkdir()
     _write_text(data_dir / "op_mapping.yaml", 'version: "test"\noperator_mappings: {}')
@@ -2668,11 +2689,11 @@ operator_mappings:
         data_dir / "DynamicQuant.csv",
         """
 Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Output Formats,Duration(us)
-"1,100,64","DT_FLOAT16","NCL","1,100,64;","INT8;FLOAT","NCL;ND",10.0
-"1,200,64","DT_FLOAT16","NCL","1,200,64;","INT8;FLOAT","NCL;ND",20.0
+"1,100,64","DT_FLOAT16","NCL","1,100,64;()","INT8;FLOAT","NCL;ND",10.0
+"1,200,64","DT_FLOAT16","NCL","1,200,64;()","INT8;FLOAT","NCL;ND",20.0
 """,
     )
-    source = InterpolatingDataSource(ProfilingDataSource(data_dir))
+    ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
     x = torch.empty((1, 150, 64), device="meta", dtype=torch.float16)
     op = _make_op_info(
         "tensor_cast.dynamic_quantize_symmetric.default",
@@ -2683,7 +2704,7 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
         ),
     )
 
-    result = source.lookup(op)
+    result = ds.lookup(op)
 
     assert result is not None
     assert result.source == QuerySource.INTERPOLATED

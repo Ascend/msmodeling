@@ -16,8 +16,10 @@ from tensor_cast.transformers.builtin_model.glm5 import (
     Glm5DecoderLayerCompat,
     Glm5ModelCompat,
     _decoder_supports_prev_topk,
+    _mark_glm5_mtp_moe_dfc_disabled,
     _prepare_glm5_decoder_layer,
     _resolve_glm5_mtp_block_owner,
+    _resolve_glm5_mtp_moe_module,
 )
 from tensor_cast.transformers.transformations import maybe_enable_mtp, patch_mla
 
@@ -213,6 +215,96 @@ def test_glm5_mtp_patch_skips_copy_layers_and_unwraps_representatives():
 
     assert _resolve_glm5_mtp_block_owner(representative) is representative._inner
     assert _resolve_glm5_mtp_block_owner(copy_layer) is None
+
+
+def test_glm5_mtp_moe_disables_dfc(monkeypatch):
+    class FakeMoe(torch.nn.Module):
+        pass
+
+    class FakeBlock(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = FakeMoe()
+
+    class FakeMtpLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mtp_block = Glm5DecoderLayerCompat(FakeBlock())
+
+    class FakeMtpWrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mtp = torch.nn.Module()
+            self.mtp.layers = torch.nn.ModuleList([FakeMtpLayer(), FakeMtpLayer()])
+
+    model = torch.nn.Module()
+    model.mtp_wrapper = FakeMtpWrapper()
+    monkeypatch.setattr("tensor_cast.layers.mtp.MtpWrapper", FakeMtpWrapper)
+
+    _mark_glm5_mtp_moe_dfc_disabled(model)
+
+    for layer in model.mtp_wrapper.mtp.layers:
+        assert layer.mtp_block._inner.mlp.tensor_cast_disable_dispatch_ffn_combine is True
+
+
+def test_glm5_mtp_moe_disables_dfc_after_generic_moe_patch(monkeypatch):
+    class FakeFusedMoe(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.allow_dispatch_ffn_combine = True
+
+    class FakePatchedMoe(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fused_moe = FakeFusedMoe()
+
+    class FakeBlock(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = FakePatchedMoe()
+
+    class FakeMtpLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mtp_block = Glm5DecoderLayerCompat(FakeBlock())
+
+    class FakeMtpWrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mtp = torch.nn.Module()
+            self.mtp.layers = torch.nn.ModuleList([FakeMtpLayer()])
+
+    model = torch.nn.Module()
+    model.mtp_wrapper = FakeMtpWrapper()
+    monkeypatch.setattr("tensor_cast.layers.mtp.MtpWrapper", FakeMtpWrapper)
+
+    _mark_glm5_mtp_moe_dfc_disabled(model)
+
+    patched_moe = model.mtp_wrapper.mtp.layers[0].mtp_block._inner.mlp
+    assert patched_moe.tensor_cast_disable_dispatch_ffn_combine is True
+    assert patched_moe.fused_moe.allow_dispatch_ffn_combine is False
+
+
+def test_glm5_mtp_moe_resolution_traverses_nested_inner_wrappers():
+    class FakeMoe(torch.nn.Module):
+        pass
+
+    class FakeBlock(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.mlp = FakeMoe()
+
+    class ExtraWrapper(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self._inner = inner
+
+    moe_module = FakeMoe()
+    block = FakeBlock()
+    block.mlp = moe_module
+    wrapped = ExtraWrapper(Glm5DecoderLayerCompat(ExtraWrapper(block)))
+
+    assert _resolve_glm5_mtp_moe_module(wrapped) is moe_module
 
 
 def test_glm5_returns_topk_when_next_layer_skips_topk():

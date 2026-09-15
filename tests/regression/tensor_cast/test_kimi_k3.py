@@ -1,6 +1,8 @@
 import unittest
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import Union
+from unittest import mock
 
 import pytest
 import torch
@@ -598,6 +600,48 @@ class TestKimiK3Patches(unittest.TestCase):
             model_type = "kimi_k3"
 
         self.assertFalse(_patch_model_classes_for_kimi_k3(_Kimi(), None))
+
+    def test_non_quantized_mla_prolog_forwards_phase_metadata(self):
+        """The K3 custom BF16 prolog must preserve Chunked-Prefill phase metadata."""
+        phase_values = [False, False]
+        captured_kwargs = {}
+        expected_result = object()
+
+        def original_compute_mla_prolog(*_args, **_kwargs):
+            self.fail("The K3 non-quantized path must call tensor_cast.mla_prolog directly")
+
+        def fake_mla_prolog(*_args, **kwargs):
+            captured_kwargs.update(kwargs)
+            return expected_result
+
+        hook = self._km._make_k3_mla_prolog_hook(original_compute_mla_prolog)
+        attention = SimpleNamespace(
+            _inner=SimpleNamespace(use_output_gate=True),
+            q_a_proj=SimpleNamespace(weight=torch.ones(2, 3)),
+            q_b_proj=SimpleNamespace(weight=torch.ones(2, 2)),
+            kv_a_proj_with_mqa=SimpleNamespace(weight=torch.ones(2, 3)),
+            q_a_layernorm=SimpleNamespace(weight=torch.ones(2)),
+            kv_a_layernorm=SimpleNamespace(weight=torch.ones(2)),
+            extract_qparams=lambda module: (module.weight, None, None),
+            _num_heads_per_rank=1,
+            qk_head_dim=2,
+            qk_nope_head_dim=1,
+            qk_rope_head_dim=1,
+            kv_lora_rank=2,
+            q_lora_rank=2,
+        )
+
+        with mock.patch.object(torch.ops.tensor_cast, "mla_prolog", new=fake_mla_prolog, create=True):
+            result = hook(
+                attention,
+                torch.ones(2, 3),
+                torch.ones(2, 1),
+                torch.zeros(2, 1),
+                is_decode_values=phase_values,
+            )
+
+        self.assertIs(result, expected_result)
+        self.assertIs(captured_kwargs["is_decode_values"], phase_values)
 
     # ------------------------------------------------------------------
     # _install_fla_stub — idempotency

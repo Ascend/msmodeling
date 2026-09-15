@@ -254,6 +254,8 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         hidden_states_view: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        *,
+        is_decode_values: Optional[list[bool]] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build MLA Q/KV states; model adapters may override only this boundary."""
         if self.q_lora_rank is None:
@@ -297,6 +299,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
                 self.q_b_proj_offset,
                 self.kv_a_proj_scale,
                 self.kv_a_proj_offset,
+                is_decode_values=is_decode_values,
             )
         return torch.ops.tensor_cast.mlapo(
             hidden_states_view,
@@ -313,6 +316,7 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
             self.qk_rope_head_dim,
             self.kv_lora_rank,
             self.q_lora_rank,
+            is_decode_values=is_decode_values,
         )
 
     def _postprocess_attention_output(self, attn_output: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -334,7 +338,12 @@ class MultiheadLatentAttentionTensorCast(MultiheadLatentAttentionBase):
         num_tokens = batch_size * seq_length
         hidden_states_view = hidden_states.view(num_tokens, -1)
         cos, sin = position_embeddings
-        q_states, kv_c_normed, k_rot, qa_normed = self._compute_mla_prolog(hidden_states_view, cos, sin)
+        q_states, kv_c_normed, k_rot, qa_normed = self._compute_mla_prolog(
+            hidden_states_view,
+            cos,
+            sin,
+            is_decode_values=getattr(attention_meta, "is_decode_values", None),
+        )
 
         if self.q_lora_rank is not None:
             qa_normed = qa_normed.view(batch_size, seq_length, -1)

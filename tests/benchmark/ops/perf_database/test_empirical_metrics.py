@@ -1,5 +1,6 @@
 """Unit tests for M4/M5/M6 evaluation metrics."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -107,7 +108,7 @@ class TestMetricsCollector:
         assert collector._total_latency_sum == 50e-6
 
     def test_collect_partial(self):
-        """collect_from_records() with PARTIAL result counts as MISS but uses empirical latency."""
+        """collect_from_records() with PARTIAL result counts as an analytic MISS."""
         collector = MetricsCollector()
         result = QueryResult(
             latency_us=100.0,
@@ -226,8 +227,8 @@ class TestMetricsCollector:
 
 
 class TestPartialMetrics:
-    def test_partial_uses_latency_but_counts_as_miss(self):
-        """PARTIAL result: latency is used in E2E, but counted as MISS in metrics."""
+    def test_partial_uses_full_analytic_latency_and_counts_as_miss(self):
+        """PARTIAL result is evidence only; runtime uses the full analytic fallback."""
         mock_ds = MagicMock(spec=DataSourcePerformanceModel)
         mock_ds.lookup.return_value = QueryResult(
             latency_us=100.0,
@@ -260,8 +261,12 @@ class TestPartialMetrics:
 
         result = pm.process_op(op)
 
-        # PARTIAL uses empirical latency
-        assert abs(result.execution_time_s - 100e-6) < 1e-9
+        assert abs(result.execution_time_s - 200e-6) < 1e-9
+        assert result.statistics["source"] == "ANALYTIC"
+        assert result.statistics["shape_match_rule"] == "analytic"
+        assert result.statistics["fallback_from"] == "PARTIAL"
+        assert result.statistics["hit_kernels"] == []
+        assert result.statistics["missed_kernels"] == ["KvRmsNormRopeCache"]
 
         # But counts as MISS in stats
         collector = MetricsCollector()
@@ -730,6 +735,143 @@ class TestModelRunnerProfilingMetrics:
         assert new_stats["hit"] == old_stats["hit"] == 1
         assert new_stats["miss"] == old_stats["miss"] == 1
         assert new_stats["m1_raw_op_count_hr"] == old_stats["m1_raw_op_count_hr"]
+
+    def test_consecutive_run_inference_calls_isolate_empirical_records(self, monkeypatch):
+        from tensor_cast.core import model_runner as model_runner_module
+        from tensor_cast.core.model_runner import ModelRunner
+
+        pm = self._make_empirical_pm(hit_shapes=set())
+
+        class FakePipelineModel:
+            model_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=1))
+
+        class FakePipelineRunner:
+            def __init__(self, *, perf_models, **_kwargs):
+                self.perf_model = perf_models[0]
+
+            def run(self, *_args, **_kwargs):
+                self.perf_model.op_records.append(
+                    EmpiricalOpRecord(
+                        "aten.mm.default",
+                        QueryResult(10.0, 1.0, QuerySource.MEASURED),
+                        analytic_latency_s=50e-6,
+                        tc_shapes=[(1, 1)],
+                    )
+                )
+                return SimpleNamespace(trace_events=[])
+
+        monkeypatch.setattr(model_runner_module, "PipelineModel", FakePipelineModel)
+        monkeypatch.setattr(model_runner_module, "PipelineRunner", FakePipelineRunner)
+
+        runner = object.__new__(ModelRunner)
+        runner.perf_models = [pm]
+        runner.model = FakePipelineModel()
+        runner.device_profile = _make_device()
+        runner.user_input = SimpleNamespace(
+            num_queries=1,
+            query_len=1,
+            world_size=1,
+            block_size=128,
+            chrome_trace=None,
+        )
+        runner.request_info_default = []
+        runner.sampler = None
+
+        def build_pipeline_metrics(_result, **kwargs):
+            return SimpleNamespace(**kwargs)
+
+        runner._build_pipeline_metrics = build_pipeline_metrics
+
+        def generate_inputs(_model, _requests, **_kwargs):
+            return {}
+
+        first = runner.run_inference(generate_inputs_func=generate_inputs)
+        second = runner.run_inference(generate_inputs_func=generate_inputs)
+
+        assert len(pm.op_records) == 2
+        assert abs(first.profiling_source_times_s["measured"] - 10e-6) < 1e-12
+        assert abs(second.profiling_source_times_s["measured"] - 10e-6) < 1e-12
+
+    def test_consecutive_non_pipeline_runs_isolate_empirical_records(self, monkeypatch):
+        from tensor_cast.core import model_runner as model_runner_module
+        from tensor_cast.core.model_runner import ModelRunner
+
+        pm = self._make_empirical_pm(hit_shapes=set())
+
+        class FakeMemoryTracker:
+            def peak_mem_usage(self):
+                return 0
+
+        class FakeRuntime:
+            def __init__(self, *_args, **_kwargs):
+                self.memory_tracker = FakeMemoryTracker()
+                self.event_list = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def total_execution_time_s(self):
+                return {"empirical": 10e-6}
+
+            def table_averages(self, **_kwargs):
+                return ""
+
+            def get_breakdowns(self):
+                return {}
+
+        class FakeModel:
+            model_config = SimpleNamespace(parallel_config=SimpleNamespace(data_parallel_size=1))
+
+            def forward(self, **_kwargs):
+                pm.op_records.append(
+                    EmpiricalOpRecord(
+                        "aten.mm.default",
+                        QueryResult(10.0, 1.0, QuerySource.MEASURED),
+                        analytic_latency_s=50e-6,
+                        tc_shapes=[(1, 1)],
+                    )
+                )
+                return torch.empty(1)
+
+        monkeypatch.setattr(model_runner_module, "Runtime", FakeRuntime)
+        monkeypatch.setattr(model_runner_module, "MemoryTracker", lambda _device: FakeMemoryTracker())
+        monkeypatch.setattr(model_runner_module, "kv_cache_excluded_layer_indices", lambda _model: set())
+        monkeypatch.setattr(model_runner_module, "dcp_kv_token_capacity_factor", lambda _model: 1)
+        monkeypatch.setattr(model_runner_module, "get_visual", lambda _model: None)
+
+        runner = object.__new__(ModelRunner)
+        runner.perf_models = [pm]
+        runner.model = FakeModel()
+        runner.device_profile = _make_device()
+        runner.total_device_memory_gb = 1.0
+        runner.model_weight_size_gb = 0.0
+        runner.user_input = SimpleNamespace(
+            num_queries=1,
+            query_len=1,
+            world_size=1,
+            block_size=128,
+            chrome_trace=None,
+            dump_input_shapes=False,
+            dump_op_bound_results=False,
+            reserved_memory_gb=0.0,
+        )
+        runner.request_info_default = []
+        runner.sampler = None
+
+        def generate_inputs(_model, _requests, **_kwargs):
+            return {"kv_cache_by_layers": {}, "kv_cache_per_token": 0}
+
+        first = runner.run_inference(generate_inputs_func=generate_inputs)
+        second = runner.run_inference(generate_inputs_func=generate_inputs)
+
+        assert len(pm.op_records) == 2
+        assert first.profiling_source_times_s["measured"] == pytest.approx(10e-6)
+        assert second.profiling_source_times_s["measured"] == pytest.approx(10e-6)
+        assert sum(first.profiling_source_times_s.values()) == pytest.approx(10e-6)
+        assert sum(second.profiling_source_times_s.values()) == pytest.approx(10e-6)
 
 
 # --- compute_fused_op_stats unit tests ---

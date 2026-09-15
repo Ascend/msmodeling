@@ -45,6 +45,8 @@ from .profiling_data_source import (
     _resolve_batch_phase,
     _scalar_aware_numel as _base_scalar_aware_numel,
     _strip_batch_dim,
+    _SWIGLU_KERNELS,
+    _uses_glm5_sampling_bmm_mul,
     COMPOSITE_DECOMPOSERS,
     DTYPE_MAP,
     fractal_nz_to_nd,
@@ -494,9 +496,40 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return shape[1:]
         return shape
 
-    def _candidate_latency(self, row: Any, latency_col: str) -> tuple[Optional[float], dict[str, Any]]:
+    def _candidate_latency(
+        self,
+        row: Any,
+        kernel_type: str,
+        latency_col: Optional[str] = None,
+    ) -> tuple[Optional[float], dict[str, Any]]:
+        # Preserve the historical two-argument helper for direct callers while
+        # production candidate builders pass the kernel type so exact lookup and
+        # interpolation share the same versioned latency policy.
+        if latency_col is None:
+            latency_col = kernel_type
+            kernel_type = ""
+        if not isinstance(row, pd.Series):
+            row = pd.Series(row)
+
+        base = getattr(self, "base", None)
+        if base is not None:
+            effective_latency = base._effective_row_latency(row, kernel_type, latency_col)
+            if effective_latency is not None:
+                selected_col, latency, details = effective_latency
+                return latency, {
+                    "latency_column": selected_col,
+                    "latency_column_selection": (
+                        _LATENCY_COLUMN_PREFERRED if selected_col == latency_col else _LATENCY_COLUMN_ALTERNATE
+                    ),
+                    "raw_latency_us": latency,
+                    **details,
+                }
+            candidate_columns = base._candidate_latency_cols(latency_col)
+        else:
+            candidate_columns = _candidate_latency_cols(latency_col)
+
         first_rejection: Optional[dict[str, Any]] = None
-        for column in _candidate_latency_cols(latency_col):
+        for column in candidate_columns:
             try:
                 raw_value = row[column]
             except KeyError:
@@ -592,7 +625,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return None, "matmul_axes_unextractable"
         axes, batch_dims, source_layout = axes_and_batch
 
-        latency, latency_meta = self._candidate_latency(row, latency_col)
+        latency, latency_meta = self._candidate_latency(row, kernel_type, latency_col)
         if latency is None:
             return None, str(latency_meta["latency_rejected_reason"])
 
@@ -947,6 +980,8 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 if logical_shape and logical_shape[0] == axis_0:
                     logical_shape = logical_shape[1:]
                 elif axis_0 != 1 or logical_shape != first[1:]:
+                    # A declared co-varying input must either expose the same
+                    # leading token axis or be the already-stripped M=1 form.
                     return None
             signature_shapes.append(logical_shape)
         return (first[1:], tuple(signature_shapes))
@@ -1032,10 +1067,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             not isinstance(index, int) or index <= 0 for index in co_varying_input_indices
         ):
             return None, "generic_compute_co_varying_input_indices_invalid"
-        shape_signature = self._generic_compute_shape_signature(
-            logical_shapes,
-            co_varying_input_indices,
-        )
+        shape_signature = self._generic_compute_shape_signature(logical_shapes, co_varying_input_indices)
         if shape_signature is None:
             return None, "generic_compute_co_varying_input_axis_mismatch"
         return (
@@ -1079,6 +1111,22 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         logical_shapes = [tuple(_strip_batch_dim(shape)) for shape in input_shapes]
         if not logical_shapes[0]:
             return None, "generic_compute_input_shape_unavailable"
+
+        # Exact lookup merges TensorCast's gate/up tensors into the single
+        # concatenated SwiGlu input represented by CANN profiling rows.
+        if kernel_type in _SWIGLU_KERNELS and len(logical_shapes) == 2:
+            first, second = logical_shapes
+            if (
+                len(first) != len(second)
+                or not first
+                or first[:-1] != second[:-1]
+                or (dtype_values is not None and (len(dtype_values) < 2 or dtype_values[0] != dtype_values[1]))
+            ):
+                return None, "swiglu_inputs_unmergeable"
+            logical_shapes = [first[:-1] + (first[-1] + second[-1],)]
+            if dtype_values is not None:
+                dtype_values = dtype_values[:1]
+
         input_count = len(logical_shapes)
         if dtype_values is None:
             dtype_key = tuple(self._dtype_key(kernel_type, dtype_str) for _ in range(input_count))
@@ -1206,7 +1254,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if axes_and_extra_regime is None:
             return None, reason or "generic_compute_axis_unextractable"
         axes, extra_regime = axes_and_extra_regime
-        latency, latency_meta = self._candidate_latency(row, latency_col)
+        latency, latency_meta = self._candidate_latency(row, policy_kernel_type or kernel_type, latency_col)
         if latency is None:
             return None, str(latency_meta["latency_rejected_reason"])
 
@@ -1562,7 +1610,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return None, "token_axis_unextractable"
         tokens, hidden, leading_dims = shape_info
 
-        latency, latency_meta = self._candidate_latency(row, latency_col)
+        latency, latency_meta = self._candidate_latency(row, kernel_type, latency_col)
         if latency is None:
             return None, str(latency_meta["latency_rejected_reason"])
 
@@ -1796,7 +1844,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if not csv_dtypes:
             return None
 
-        latency, latency_meta = self._candidate_latency(row, latency_col)
+        latency, latency_meta = self._candidate_latency(row, kernel_type, latency_col)
         if latency is None:
             return None
 
@@ -2624,6 +2672,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                 [
                     ("sparse_block_size", sparse_block_size),
                     ("sparse_indices_pattern", str(params["sparse_indices_pattern"])),
+                    # The exact count is derived from min(topk, max(kv_lengths)).
+                    # Keep the topk boundary as a strict regime without turning
+                    # every shorter sequence length into an unrelated regime.
                     ("sparse_indices_valid_count_state", valid_count_state),
                 ]
             )
@@ -2636,8 +2687,9 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         include_sparse_fields: bool,
     ) -> dict[str, float]:
         if include_sparse_fields and workload["phase"] == "prefill" and workload["batch_size"] == 1:
-            # One-request Prefill has one physical degree of freedom. Keeping
-            # two equal axes would make valid measured points collinear.
+            # For one-request Prefill, q_tokens and effective_kv_len are the
+            # same physical degree of freedom. Representing them as a 2-D grid
+            # makes valid measured points collinear and prevents interpolation.
             return {"prefill_tokens": workload["q_tokens"]}
         return {
             "q_tokens": workload["q_tokens"],
@@ -2703,15 +2755,12 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         )
         if regime_fields is None:
             return None, "runtime_regime_incomplete"
-        latency, latency_meta = self._candidate_latency(row, latency_col)
+        latency, latency_meta = self._candidate_latency(row, kernel_type, latency_col)
         if latency is None:
             return None, str(latency_meta["latency_rejected_reason"])
         return CandidatePoint(
             kernel_type=kernel_type,
-            axes=self._runtime_attention_axes(
-                workload,
-                include_sparse_fields=include_sparse_fields,
-            ),
+            axes=self._runtime_attention_axes(workload, include_sparse_fields=include_sparse_fields),
             latency_us=latency,
             regime_key=make_regime_key(regime_fields),
             input_shapes=[q_shape],
@@ -2803,10 +2852,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         return InterpolationTarget(
             func_name=kernel_type,
             kernel_type=kernel_type,
-            axes=self._runtime_attention_axes(
-                workload,
-                include_sparse_fields=include_sparse_fields,
-            ),
+            axes=self._runtime_attention_axes(workload, include_sparse_fields=include_sparse_fields),
             regime_key=make_regime_key(regime_fields),
             tc_shapes=[q_shape],
             input_dtypes=[dtype_str],
@@ -2885,7 +2931,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         update_shape = self._scatter_update_shape(tuple(input_shapes[2]))
         if not cache_shape or not update_shape:
             return None, "scatter_shape_unextractable"
-        latency, latency_meta = self._candidate_latency(row, latency_col)
+        latency, latency_meta = self._candidate_latency(row, kernel_type, latency_col)
         if latency is None:
             return None, str(latency_meta["latency_rejected_reason"])
         key_fields: list[tuple[str, Any]] = [
@@ -3211,7 +3257,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return None, "compute_scale_mode_unextractable"
         auxiliary_modes = tuple(mode for mode in extracted_modes if mode is not None)
         scale_mode, block_size = auxiliary_modes[0]
-        latency, latency_meta = self._candidate_latency(row, latency_col)
+        latency, latency_meta = self._candidate_latency(row, kernel_type, latency_col)
         if latency is None:
             return None, str(latency_meta["latency_rejected_reason"])
 
@@ -3430,6 +3476,22 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if not kernel_type:
             self._record_miss("compute_kernel_type_missing")
             return None
+
+        # CANN lowers the known GLM5 sampling BMM to broadcast Mul. Try that
+        # physical kernel first, but preserve the existing matmul/alternate
+        # fallback when no compatible Mul interpolation regime exists.
+        degenerate_bmm_kernel = mapping.get("degenerate_bmm_kernel_type")
+        tc_inputs = self.base._extract_tensor_inputs(op_invoke_info)
+        if isinstance(degenerate_bmm_kernel, str) and _uses_glm5_sampling_bmm_mul(tc_inputs):
+            result = self._interpolate_elementwise_kernel(
+                op_invoke_info,
+                mapping,
+                degenerate_bmm_kernel,
+                fallback_from=fallback_from,
+            )
+            if result is not None:
+                return result
+
         if kernel_type in _INTERPOLATION_MATMUL_KERNELS:
             return self._interpolate_compute_multidim(op_invoke_info, mapping, fallback_from=fallback_from)
 
@@ -3497,11 +3559,18 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         runtime_mapping = self.base._build_composite_runtime_mapping(op_invoke_info, mapping)
         specs = decomposer(op_invoke_info, runtime_mapping)
         if not specs:
+            self._record_miss(
+                "composite_decompose_failed",
+                op_name=func_str,
+                base_miss_reason=self.base.last_miss_reason,
+                fallback_from="composite",
+            )
             return None
 
         total_latency = 0.0
         hit_kernels = []
         sub_kernel_details = []
+        missed_kernels = []
 
         for spec_index, spec in enumerate(specs):
             lat = None
@@ -3624,24 +3693,54 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
                     )
 
             if lat is None:
+                # For trailing non-attention compute sub-kernels (e.g. prefill
+                # tail transpose), allow a partial result rather than aborting
+                # latency already accumulated from earlier leaves. Attention
+                # sub-kernels remain mandatory, and a composite with no
+                # successful leaves must fail closed instead of returning a
+                # synthetic zero-latency result.
+                if spec.query_mode == "attention" or not sub_kernel_details:
+                    self._record_miss(
+                        "composite_sub_kernel_failed",
+                        kernel_type=spec.kernel_type,
+                        query_mode=spec.query_mode,
+                        fallback_from="composite",
+                        completed_sub_kernels=sub_kernel_details,
+                        failed_sub_kernel_index=spec_index,
+                        sub_kernel_count=len(specs),
+                        completed_latency_us=total_latency,
+                        failed_sub_kernel={
+                            "kernel_type": spec.kernel_type,
+                            "query_mode": spec.query_mode,
+                            "alternate_kernel_types": spec.alternate_kernel_types or [],
+                        },
+                        sub_kernel_miss_reason=self.last_miss_reason,
+                        sub_kernel_miss_details=self.last_miss_details,
+                    )
+                    return None
+                # Non-attention compute miss: record and continue (partial).
+                # The missed leaf is tracked so the result source is PARTIAL and
+                # callers do not mistake a partial sum for a full MEASURED hit.
+                missed_kernels.append(spec.kernel_type)
                 self._record_miss(
-                    "composite_sub_kernel_failed",
+                    "composite_sub_kernel_partial",
                     kernel_type=spec.kernel_type,
                     query_mode=spec.query_mode,
                     fallback_from="composite",
                     completed_sub_kernels=sub_kernel_details,
                     failed_sub_kernel_index=spec_index,
                     sub_kernel_count=len(specs),
-                    completed_latency_us=total_latency,
-                    failed_sub_kernel={
-                        "kernel_type": spec.kernel_type,
-                        "query_mode": spec.query_mode,
-                        "alternate_kernel_types": spec.alternate_kernel_types or [],
-                    },
                     sub_kernel_miss_reason=self.last_miss_reason,
-                    sub_kernel_miss_details=self.last_miss_details,
                 )
-                return None
+                sub_detail.update(
+                    {
+                        "source": "MISSED",
+                        "method": "analytic_fallback_required",
+                        "latency_us": None,
+                    }
+                )
+                sub_kernel_details.append(sub_detail)
+                continue
 
             total_latency += lat
             hit_kernels.append(sub_detail.get("matched_kernel_type", matched_kernel_type))
@@ -3654,6 +3753,30 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             hit_kernels,
             total_latency,
         )
+        if missed_kernels:
+            # A partial composite must not be reported as MEASURED: the missed
+            # leaves carry analytic latency the caller must add separately. This
+            # mirrors the base ProfilingDataSource PARTIAL contract and prevents
+            # silently inflating empirical coverage.
+            return QueryResult(
+                latency_us=total_latency,
+                confidence=len(hit_kernels) / len(specs) if specs else 0.0,
+                source=QuerySource.PARTIAL,
+                details={
+                    "kernel_type": ",".join(hit_kernels),
+                    "composite": True,
+                    "partial": True,
+                    "method": "decomposed_interpolation_partial",
+                    "hit_kernels": hit_kernels,
+                    "missed_kernels": missed_kernels,
+                    "sub_kernels": sub_kernel_details,
+                },
+                shape_match_info=ShapeMatchInfo(
+                    simulation_shapes=[],
+                    kernel_shapes=[],
+                    shape_match_rule="partial_composite",
+                ),
+            )
         all_sub_kernels_measured = all(
             detail.get("source") == QuerySource.MEASURED.name for detail in sub_kernel_details
         )
@@ -3962,7 +4085,7 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if not csv_shape:
             return None
 
-        latency, latency_meta = self._candidate_latency(row, latency_col)
+        latency, latency_meta = self._candidate_latency(row, kernel_type, latency_col)
         if latency is None:
             return None
 

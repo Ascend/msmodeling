@@ -119,6 +119,15 @@ class TestIsDecodeMLA:
         args = (None, None, None, None, None, None, None, torch.full((2,), 68, dtype=torch.int64))
         assert _is_decode_mla(args) is False
 
+    def test_mixed_query_lens_are_not_coerced_to_decode(self):
+        args = _make_mla_prefill_args(num_tokens=69, batch_size=2, avg_seq_len=68)
+        args[7] = torch.tensor([68, 1], dtype=torch.int64)
+
+        assert _is_decode_mla(tuple(args)) is False
+
+        op = _make_op_info(torch.ops.tensor_cast.multihead_latent_attention.default, args)
+        assert _decompose_mla(op, {}) is None
+
 
 class TestDecomposeMLA:
     def test_decode_returns_attention_only(self):

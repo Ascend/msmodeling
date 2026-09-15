@@ -212,6 +212,7 @@ class FusedMoEBase(torch.nn.Module, ABC):
         self.shared_experts = shared_experts
         self.shared_experts_gate = shared_experts_gate
         self.top_k = top_k
+        self.allow_dispatch_ffn_combine = True
         if top_k is None:
             logger.error(
                 """The required parameter 'top_k' is missing in the MoE configuration.
@@ -397,6 +398,7 @@ class ParallelMoELayer(ModelWrapperBase):
                 experts.append(copy.deepcopy(experts[0]))
 
         fused_moe_cls = moe_config.fused_moe_cls or FusedMoETensorCast
+        allow_dispatch_ffn_combine = getattr(module.fused_moe, "allow_dispatch_ffn_combine", True)
         self._inner.fused_moe = fused_moe_cls(
             moe_config,
             experts,
@@ -408,6 +410,7 @@ class ParallelMoELayer(ModelWrapperBase):
             num_global_experts=num_routing_experts + num_redundant_experts,
             global_tp_size=global_tp_group.world_size,
         )
+        self._inner.fused_moe.allow_dispatch_ffn_combine = allow_dispatch_ffn_combine
 
         self.global_dp_group = global_dp_group
         self.global_tp_group = global_tp_group
@@ -751,7 +754,11 @@ class FusedMoETensorCast(FusedMoEBase):
         output_split_sizes_by_device: List[int],
         output_split_sizes_by_expert: Optional[List[List[int]]],
     ) -> List[torch.Tensor]:
-        x = torch.ops.tensor_cast.init_routing_v2(x, expert_indices)
+        x = torch.ops.tensor_cast.init_routing_v2(
+            x,
+            expert_indices,
+            self.allow_dispatch_ffn_combine,
+        )
         dispatched_x = self.ep_group.all_to_all(x, output_split_sizes_by_device, input_split_sizes_by_device)
         dispatched_x = self.rearrange_token_by_expert(
             dispatched_x, output_split_sizes_by_device, output_split_sizes_by_expert

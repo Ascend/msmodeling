@@ -375,6 +375,25 @@ def _rank_zero_sparse_runtime_vectors(
     return local_cumulative, local_kv_lengths
 
 
+def _sequence_parallel_local_token_count(
+    *,
+    runtime_tokens: int,
+    global_query_tokens: int,
+    tp_size: int,
+) -> Optional[int]:
+    """Resolve whether the runtime tensor is global or already SP-local."""
+
+    if runtime_tokens <= 0 or global_query_tokens <= 0 or tp_size <= 1:
+        return None
+    min_local_tokens, remainder = divmod(global_query_tokens, tp_size)
+    max_local_tokens = min_local_tokens + (1 if remainder else 0)
+    if runtime_tokens == global_query_tokens:
+        return max_local_tokens
+    if runtime_tokens in {min_local_tokens, max_local_tokens}:
+        return runtime_tokens
+    return None
+
+
 def _sparse_runtime_attention_params(
     *,
     work_tokens: int,
@@ -594,7 +613,9 @@ _DTYPE_BYTE_SIZES = {
 
 # Query modes handled by dedicated _lookup_<mode>() methods.
 # Tests import this to avoid duplicating the dispatch contract.
-SUPPORTED_QUERY_MODES: frozenset[str] = frozenset({"attention_special", "elementwise", "moe_fused", "mtp_projection"})
+SUPPORTED_QUERY_MODES: frozenset[str] = frozenset(
+    {"attention_special", "elementwise", "moe_fused", "mtp_projection", "moe_distribute", "grouped_moe"}
+)
 
 
 def _dtype_byte_size(dtype_str: str) -> int:
@@ -857,20 +878,83 @@ class SubKernelSpec:
     is_attention: bool = False
 
 
+def _infer_attention_phase(
+    query_lens: Optional[torch.Tensor],
+    *,
+    num_tokens: int,
+    batch_size: int,
+) -> Optional[str]:
+    """Resolve a pure attention batch from existing per-request query lengths."""
+
+    if isinstance(query_lens, torch.Tensor):
+        if query_lens.dtype == torch.bool or query_lens.is_floating_point() or query_lens.is_complex():
+            return "invalid"
+        query_values = _tensor_int_values(query_lens)
+        if not query_values or any(value <= 0 for value in query_values):
+            return "invalid"
+        if batch_size > 0 and len(query_values) != batch_size:
+            return "invalid"
+        decode_values = [value == 1 for value in query_values]
+        if all(decode_values):
+            return "decode"
+        if any(decode_values):
+            return "mixed"
+        return "prefill"
+    if batch_size > 0:
+        return "decode" if num_tokens <= batch_size else "prefill"
+    return None
+
+
+def _project_grouped_moe_inputs(
+    op_invoke_info: "OpInvokeInfo",
+    fixed_capacity_first_dim: int,
+) -> Optional[List[Tuple[Tuple[int, ...], torch.dtype]]]:
+    """Project TensorCast per-expert lists to the fixed-capacity NPU GMM signature."""
+    if fixed_capacity_first_dim <= 0 or len(op_invoke_info.args) < 2:
+        return None
+    activations, weights = op_invoke_info.args[:2]
+    if not isinstance(activations, (list, tuple)) or not isinstance(weights, (list, tuple)):
+        return None
+    if not activations or len(activations) != len(weights):
+        return None
+    if not all(isinstance(value, torch.Tensor) and value.ndim == 2 for value in (*activations, *weights)):
+        return None
+
+    activation_shape = tuple(activations[0].shape)
+    activation_dtype = activations[0].dtype
+    weight_shape = tuple(weights[0].shape)
+    weight_dtype = weights[0].dtype
+    if any(value.shape[1] != activation_shape[1] or value.dtype != activation_dtype for value in activations):
+        return None
+    if any(tuple(value.shape) != weight_shape or value.dtype != weight_dtype for value in weights):
+        return None
+    if activation_shape[-1] != weight_shape[0]:
+        return None
+    if sum(value.shape[0] for value in activations) > fixed_capacity_first_dim:
+        return None
+
+    return [
+        ((fixed_capacity_first_dim, activation_shape[-1]), activation_dtype),
+        ((len(weights), *weight_shape), weight_dtype),
+    ]
+
+
 def _is_decode_mla(args: tuple) -> bool:
     """Determine if MLA op is in decode mode.
 
-    query_lens (args[7]) is None or all 1s → decode.
+    A missing ``query_lens`` keeps the legacy decode convention. Otherwise only
+    a homogeneous batch of one-token requests is decode; mixed or malformed
+    query metadata must not be coerced to the decode absorption path.
     """
+    q = args[0]
+    seq_lens = args[6]
     query_lens = args[7]
     if query_lens is None:
         return True
-    if isinstance(query_lens, torch.Tensor):
-        try:
-            return query_lens.max().item() <= 1
-        except Exception:
-            return True
-    return True
+    batch_size = int(seq_lens.numel()) if isinstance(seq_lens, torch.Tensor) else 0
+    num_tokens = int(q.shape[0]) if isinstance(q, torch.Tensor) else 0
+    phase = _infer_attention_phase(query_lens, num_tokens=num_tokens, batch_size=batch_size)
+    return phase == "decode"
 
 
 def _resolve_batch_phase(
@@ -941,30 +1025,13 @@ def _resolve_batch_phase(
     return "mixed"
 
 
-def _infer_attention_phase(
-    query_lens: Optional[torch.Tensor],
-    *,
-    num_tokens: int,
-    batch_size: int,
-) -> Optional[str]:
-    """Resolve a homogeneous phase from query lengths when metadata is absent."""
-    query_values = _tensor_int_values(query_lens) if isinstance(query_lens, torch.Tensor) else None
-    if query_values:
-        if batch_size > 0 and len(query_values) != batch_size:
-            return "mixed"
-        decode_values = [value <= 1 for value in query_values]
-        if all(decode_values):
-            return "decode"
-        if any(decode_values):
-            return "mixed"
-        return "prefill"
-    if batch_size > 0:
-        return "decode" if num_tokens <= batch_size else "prefill"
-    return None
-
-
 def _composite_num_tokens(op_invoke_info: "OpInvokeInfo") -> Optional[int]:
-    """Best-effort token count for composite runtime phase inference."""
+    """Best-effort token count for composite decomposer phase inference.
+
+    MLAPO/MLA composites receive ``hidden_states`` as ``args[0]`` with shape
+    ``(num_tokens, hidden_size)``. Falls back to None when the leading arg is
+    not a 2D tensor (e.g., MLA sparse paths that pass a different layout).
+    """
     args = getattr(op_invoke_info, "args", ())
     if not args:
         return None
@@ -1066,7 +1133,15 @@ def _decompose_mla_common(
     if sparse_phase == "invalid":
         return None
     if sparse_phase is None:
-        sparse_phase = "prefill" if avg_seq_len and num_tokens >= avg_seq_len else "decode"
+        sparse_phase = _infer_attention_phase(
+            args[7] if isinstance(args[7], torch.Tensor) else None,
+            num_tokens=int(num_tokens),
+            batch_size=int(batch_size),
+        )
+        if sparse_phase in {"mixed", "invalid"}:
+            return None
+        if sparse_phase is None:
+            sparse_phase = "decode" if _is_decode_mla(args) else "prefill"
     has_absorbed_queries = isinstance(args[2], torch.Tensor) and args[2].shape[0] > 0
     shape_is_decode = _is_decode_mla(args)
     if is_sparse_attention and sparse_phase == "prefill" and shape_is_decode:
@@ -1100,6 +1175,14 @@ def _decompose_mla_common(
             ):
                 query_lens = args[7] if isinstance(args[7], torch.Tensor) else None
                 global_query_tokens = sum(_tensor_int_values(query_lens) or [num_tokens])
+                local_tokens = _sequence_parallel_local_token_count(
+                    runtime_tokens=int(num_tokens),
+                    global_query_tokens=global_query_tokens,
+                    tp_size=tp_size,
+                )
+                if local_tokens is None:
+                    return None
+                work_tokens = local_tokens
                 if not sp_heads_already_global:
                     work_heads = num_heads * tp_size
                 runtime_vectors = _rank_zero_sparse_runtime_vectors(
@@ -1178,6 +1261,14 @@ def _decompose_mla_common(
             if mapping.get("_runtime_sequence_parallel") and isinstance(tp_size, int) and tp_size > 1:
                 query_lens = args[7] if isinstance(args[7], torch.Tensor) else None
                 global_query_tokens = sum(_tensor_int_values(query_lens) or [num_tokens])
+                local_tokens = _sequence_parallel_local_token_count(
+                    runtime_tokens=int(num_tokens),
+                    global_query_tokens=global_query_tokens,
+                    tp_size=tp_size,
+                )
+                if local_tokens is None:
+                    return None
+                sfa_tokens = local_tokens
                 if not sp_heads_already_global:
                     sfa_heads = num_heads * tp_size
                 runtime_vectors = _rank_zero_sparse_runtime_vectors(
@@ -1432,6 +1523,13 @@ def _decompose_mlapo_common(
     if len(args) < min_args:
         return None
 
+    # The opaque MLAPO preprocess kernel is a Decode-only profiling signature.
+    # A batch which explicitly mixes Prefill and Decode requests, or carries
+    # malformed phase metadata, has no single matching physical workload.  Do
+    # not let its disabled SP flag accidentally select the opaque Decode path.
+    if mapping.get("_runtime_phase") in {"mixed", "invalid"}:
+        return None
+
     hidden_states = args[0]
     q_a_proj = args[3]
     q_b_proj = args[5]
@@ -1514,13 +1612,11 @@ def _decompose_mlapo_common(
     if runtime_sequence_parallel and decomposer_options.get("projection_token_partition") == "tp":
         if not isinstance(tp_size, int) or tp_size < 1:
             return None
-        # Sequence parallel gives uneven requests at most one token of skew.
-        # Query the busiest rank so arbitrary sequence lengths remain valid.
+        # Sequence parallel partitions an uneven token count across ranks with
+        # at most one token of skew.  Model the busiest rank so arbitrary
+        # request lengths (for example 27K / TP32) do not lose the physical
+        # MLAPO decomposition merely because the division is not exact.
         physical_tokens = math.ceil(num_tokens / tp_size)
-        # Guard against skew > 1 token: the busiest rank may never have executed
-        # this shape, so fall back rather than generate an unreplayable coverage row.
-        if physical_tokens * tp_size - num_tokens > 1:
-            return None
 
     # Fix MISS #1: QuantBatchMatmulV3 activation dtype is INT8 (DynamicQuant runs
     # before QBMV3 on NPU). BF16 path (MatMulV2) keeps the original dtype_str.
@@ -1602,16 +1698,23 @@ def _decompose_mlapo_common(
     kv_cache_query = decomposer_options.get("kv_cache_query", {})
     kv_cache_query_mode = kv_cache_query.get("mode")
     if kv_cache_query_mode == "pool_dim0_agnostic":
+        cache_dtype = kv_cache_query.get("dtype", dtype_str)
         kv_lora_rank = int(kv_a_norm_weight.shape[0])
         rope_dim = kv_proj_dim - kv_lora_rank
         block_size = kv_cache_query.get("block_size")
-        if rope_dim <= 0 or not isinstance(block_size, int) or block_size <= 0:
+        if (
+            rope_dim <= 0
+            or not isinstance(block_size, int)
+            or block_size <= 0
+            or not isinstance(cache_dtype, str)
+            or not cache_dtype
+        ):
             return None
         specs.append(
             SubKernelSpec(
                 kernel_type="KvRmsNormRopeCache",
                 input_shapes=[],
-                dtype=dtype_str,
+                dtype=cache_dtype,
                 query_mode="cache_postprocess",
                 cache_params={
                     "tokens": physical_tokens,
@@ -1710,23 +1813,28 @@ def _decompose_dsa_indexer(op_invoke_info: "OpInvokeInfo", mapping: dict) -> Opt
     if phase == "invalid":
         return None
     if phase is None:
-        # Compatibility fallback for older call sites without explicit phase.
-        # seq_lens is already the effective length (do not add query tokens
-        # again), so a forward whose local query work covers that length is
-        # prefill; a much smaller query is decode.
-        phase = (
-            "prefill"
-            if effective_seq_len is not None and num_tokens >= effective_seq_len
-            else "decode"
-            if effective_seq_len is not None
-            else None
+        query_lens = args[16] if len(args) > 16 and isinstance(args[16], torch.Tensor) else None
+        phase = _infer_attention_phase(
+            query_lens,
+            num_tokens=num_tokens,
+            batch_size=int(seq_lens.numel()),
         )
+        if phase in {"mixed", "invalid"}:
+            return None
 
     indexer_tokens = num_tokens
     runtime_vectors = None
     tp_size = mapping.get("_runtime_tp_size")
     if phase == "prefill" and mapping.get("_runtime_sequence_parallel") and isinstance(tp_size, int) and tp_size > 1:
         global_query_tokens = sum(_tensor_int_values(query_lens) or [num_tokens])
+        local_tokens = _sequence_parallel_local_token_count(
+            runtime_tokens=num_tokens,
+            global_query_tokens=global_query_tokens,
+            tp_size=tp_size,
+        )
+        if local_tokens is None:
+            return None
+        indexer_tokens = local_tokens
         runtime_vectors = _rank_zero_sparse_runtime_vectors(
             seq_lens=seq_lens,
             global_query_tokens=global_query_tokens,
@@ -2264,13 +2372,22 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         rows, a second versioned policy can replace such an outlier with the
         concurrent device-core execution envelope.
         """
-        pair = self._row_latency_pair(row, preferred_col)
+        override = self._latency_kernel_overrides.get(kernel_type, {})
+        pair = None
+        if override.get("prefer_profiling_rows") and _PROFILING_DURATION_COL in row.index:
+            try:
+                profiling_latency = float(row[_PROFILING_DURATION_COL])
+            except (TypeError, ValueError):
+                profiling_latency = float("nan")
+            if np.isfinite(profiling_latency) and profiling_latency > 0:
+                pair = (_PROFILING_DURATION_COL, profiling_latency)
+        if pair is None:
+            pair = self._row_latency_pair(row, preferred_col)
         if pair is None:
             return None
         selected_col, raw_latency_us = pair
         details: Dict[str, Any] = {}
 
-        override = self._latency_kernel_overrides.get(kernel_type, {})
         fallback = override.get("profiling_core_envelope_fallback", {})
         threshold = fallback.get("max_duration_to_core_ratio")
         if (
@@ -2569,6 +2686,10 @@ class ProfilingDataSource(DataSourcePerformanceModel):
             return self._lookup_moe(op_invoke_info, mapping)
         if mapping.get("query_mode") == "mtp_projection":
             return self._lookup_mtp_projection(op_invoke_info, mapping)
+        if mapping.get("query_mode") == "moe_distribute":
+            return self._lookup_moe_distribute(op_invoke_info, mapping)
+        if mapping.get("query_mode") == "grouped_moe":
+            return self._lookup_grouped_moe(op_invoke_info, mapping)
         if mapping.get("compute_subcategory") == "compute_scale":
             return self._lookup_compute_scale(op_invoke_info, mapping)
 
@@ -2797,21 +2918,48 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         global_sp = bool(config.compilation.passes.enable_sequence_parallel)
         phase = _resolve_batch_phase(op_invoke_info)
         if phase is None:
+            # Do not guess prefill/decode from token count: multi-request decode
+            # and MTP proposal batches have token>1 but are decode, while a
+            # single large token count is not a reliable prefill signal.
+            # Operator-specific decomposers can still infer a phase from their
+            # structured inputs and fail closed when those inputs are ambiguous.
             num_tokens = _composite_num_tokens(op_invoke_info)
-            if num_tokens is not None:
-                phase = _infer_attention_phase(
-                    None,
-                    num_tokens=num_tokens,
-                    batch_size=1,
-                )
-        runtime_mapping["_runtime_phase"] = phase
-        if phase in {"prefill", "decode"}:
+            if num_tokens is not None and num_tokens <= 1:
+                # A single token is unambiguously decode (no query batch).
+                phase = "decode"
+        if phase in ("prefill", "decode"):
+            runtime_mapping["_runtime_phase"] = phase
             runtime_mapping["_runtime_sequence_parallel"] = global_sp and phase == "prefill"
         else:
-            # Mixed/invalid phase remains visible to the decomposer, which is
-            # responsible for failing closed instead of inventing a projection.
-            runtime_mapping["_runtime_sequence_parallel"] = global_sp
+            runtime_mapping["_runtime_phase"] = phase
+            # Preserve the legacy global SP setting only when phase metadata is
+            # absent, so input-aware decomposers can apply their own projection.
+            # Explicit mixed/invalid metadata disables SP and fails closed.
+            runtime_mapping["_runtime_sequence_parallel"] = global_sp if phase is None else False
         return runtime_mapping
+
+    @staticmethod
+    def _truncate_attention_params_for_log(params: Any, max_items: int = 8) -> str:
+        """Compact *params* for log / miss-reason strings.
+
+        Attention decomposition params may carry long per-sequence lists
+        (actual_seq_lengths_values, block_table_valid_blocks, ...) that make
+        a single miss warning span thousands of characters.  Truncate those
+        to a short head/tail summary so the 80 K simulation log stays
+        readable without losing the diagnostic value of the key fields.
+        """
+        if isinstance(params, dict):
+            parts = []
+            for key, value in params.items():
+                if isinstance(value, (list, tuple)) and len(value) > max_items:
+                    head = list(value[:3])
+                    tail = list(value[-1:])
+                    compact = str(head)[:-1] + ", ..., " + str(tail)[1:]
+                    parts.append(f"'{key}': {compact} ({len(value)} items)")
+                else:
+                    parts.append(f"'{key}': {value!r}")
+            return "{" + ", ".join(parts) + "}"
+        return repr(params)
 
     def _lookup_composite_decomposed(
         self,
@@ -2837,7 +2985,14 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         specs = decomposer(op_invoke_info, runtime_mapping)
         if not specs:
             visible_regime = mapping.get("decomposer_options", {}).get("visible_kernel_regime", {})
-            if visible_regime.get("requires_sequence_parallel") and not runtime_mapping["_runtime_sequence_parallel"]:
+            runtime_phase = runtime_mapping.get("_runtime_phase")
+            func_str = _normalize_func_name(op_invoke_info.func)
+            if func_str in {"tensor_cast.mlapo.default", "tensor_cast.mlapo_quant.default"} and runtime_phase in {
+                "mixed",
+                "invalid",
+            }:
+                self.last_miss_reason = f"unsupported_runtime_phase:{func_str}:{runtime_phase}"
+            elif visible_regime.get("requires_sequence_parallel") and not runtime_mapping["_runtime_sequence_parallel"]:
                 self.last_miss_reason = (
                     "structural_mismatch:mlapo_quant:opaque_mla_preprocess:"
                     "visible_kernel_regime_requires_sequence_parallel"
@@ -2910,7 +3065,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                     semantic_reason = self.last_miss_reason or "semantic_key_mismatch"
                     self.last_miss_reason = (
                         f"attention_sub_kernel_miss:{spec.kernel_type}:{semantic_reason};"
-                        f"semantic_key={spec.attention_params};dtype={spec.dtype}"
+                        f"semantic_key={self._truncate_attention_params_for_log(spec.attention_params)};dtype={spec.dtype}"
                     )
                     logger.warning(
                         "attention sub-kernel miss for %s (%s): reason=%s semantic_key=%s dtype=%s; "
@@ -2918,7 +3073,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                         spec.kernel_type,
                         _normalize_func_name(op_invoke_info.func),
                         semantic_reason,
-                        spec.attention_params,
+                        self._truncate_attention_params_for_log(spec.attention_params),
                         spec.dtype,
                     )
                     return None
@@ -3188,9 +3343,10 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                     or any(fmt != "ND" for fmt in output_formats)
                 ):
                     continue
-                latency = self._row_latency_value(row, preferred_latency_col)
-                if latency is None:
+                effective_latency = self._effective_row_latency(row, kernel_type, preferred_latency_col)
+                if effective_latency is None:
                     continue
+                _, latency, _ = effective_latency
                 candidates.append((row_ints["num_tokens"], latency, row, kernel_type))
 
         if not candidates:
@@ -3636,7 +3792,12 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 ),
             )
 
-        hit = self._find_candidates(kernel_types, checker, select="nearest")
+        # Pool capacity is intentionally absent from the semantic key. Several
+        # service captures may therefore be equally valid exact matches with
+        # different allocation sizes and harmless run-to-run latency noise.
+        # Returning the first stable measured row avoids treating those
+        # capacity-only variants as an ambiguous operator signature.
+        hit = self._find_candidates(kernel_types, checker)
         if hit is None and not self.last_miss_reason:
             self.last_miss_reason = "semantic_key_mismatch:cache_postprocess"
         return hit
@@ -4423,7 +4584,10 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                 ),
             )
 
-        hit = self._find_candidates([kernel_type], checker)
+        # DFC databases can contain both microbench and service-profiling rows
+        # for one exact physical signature. Use the versioned latency policy
+        # instead of silently returning whichever row appears first.
+        hit = self._find_candidates([kernel_type], checker, select="nearest")
         if hit is None:
             if not self.last_miss_reason:
                 self.last_miss_reason = "shape_mismatch"
@@ -4636,6 +4800,102 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         )
 
         return projection_result
+
+    def _lookup_moe_distribute(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
+        """Match GLM5 unfused MTP dispatch/combine against vLLM fixed-capacity kernels.
+
+        The distribute/fixed-capacity projection is GLM5 MTP-specific (CANN 8.5
+        aclgraph MTP unfused path). The DispatchFFNCombinePass tags nodes in a
+        DFC-disabled region with ``is_mtp_unfused``; without that runtime flag the
+        generic init_routing_v2 / unpermute_tokens ops fall through to miss rather
+        than being forced into the 6656/distribute signature.
+        """
+        if not op_invoke_info.kwargs.get("is_mtp_unfused"):
+            self.last_miss_reason = "moe_distribute_context_missing"
+            return None
+        kernel_type = mapping.get("kernel_type")
+        projection = mapping.get("moe_distribute_projection")
+        tc_inputs = self._extract_tensor_inputs(op_invoke_info)
+        if not isinstance(kernel_type, str) or projection not in {"dispatch", "combine"} or len(tc_inputs) < 2:
+            self.last_miss_reason = "invalid_moe_distribute_projection"
+            return None
+
+        projected_inputs = tc_inputs[:2]
+        index_shape, _ = projected_inputs[1]
+        projected_inputs[1] = (index_shape, torch.int32)
+        if projection == "combine":
+            capacity = mapping.get("fixed_capacity_first_dim")
+            if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity <= 0:
+                self.last_miss_reason = "invalid_moe_distribute_projection"
+                return None
+            routed_shape, routed_dtype = projected_inputs[0]
+            if len(routed_shape) != 2:
+                self.last_miss_reason = "invalid_moe_distribute_projection"
+                return None
+            if routed_shape[0] > capacity:
+                self.last_miss_reason = "moe_distribute_capacity_exceeded"
+                return None
+            projected_inputs[0] = ((capacity, routed_shape[-1]), routed_dtype)
+
+        hit = self._find_compute_match([kernel_type], projected_inputs, tc_input_count=2)
+        if hit is None:
+            return None
+        self.last_shape_match_info = hit.shape_match_info
+        return QueryResult(
+            latency_us=hit.latency_us,
+            confidence=hit.confidence,
+            source=QuerySource.MEASURED,
+            details={"kernel_type": hit.kernel_type, "projection": projection},
+            shape_match_info=hit.shape_match_info,
+        )
+
+    def _lookup_grouped_moe(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
+        """Match per-expert TensorCast lists to the vLLM fixed-capacity grouped kernel.
+
+        The fixed-capacity (6656) projection matches the CANN 8.5 GLM5 MTP
+        grouped-matmul kernel signature. The DispatchFFNCombinePass tags nodes
+        in a DFC-disabled region with ``is_mtp_unfused``; generic grouped_matmul
+        calls without that flag fall through to miss rather than being forced
+        into the 6656 signature (cross-model contamination guard).
+        """
+        if not op_invoke_info.kwargs.get("is_mtp_unfused"):
+            self.last_miss_reason = "grouped_moe_context_missing"
+            return None
+        kernel_type = mapping.get("kernel_type")
+        capacity = mapping.get("fixed_capacity_first_dim")
+        if (
+            not isinstance(kernel_type, str)
+            or not isinstance(capacity, int)
+            or isinstance(capacity, bool)
+            or capacity <= 0
+        ):
+            self.last_miss_reason = "invalid_grouped_moe_projection"
+            return None
+        projected_inputs = _project_grouped_moe_inputs(op_invoke_info, capacity)
+        if projected_inputs is None:
+            activations = op_invoke_info.args[0] if op_invoke_info.args else None
+            if (
+                isinstance(activations, (list, tuple))
+                and activations
+                and all(isinstance(value, torch.Tensor) and value.ndim == 2 for value in activations)
+                and sum(value.shape[0] for value in activations) > capacity
+            ):
+                self.last_miss_reason = "grouped_moe_capacity_exceeded"
+            else:
+                self.last_miss_reason = "invalid_grouped_moe_projection"
+            return None
+
+        hit = self._find_compute_match([kernel_type], projected_inputs, tc_input_count=2)
+        if hit is None:
+            return None
+        self.last_shape_match_info = hit.shape_match_info
+        return QueryResult(
+            latency_us=hit.latency_us,
+            confidence=hit.confidence,
+            source=QuerySource.MEASURED,
+            details={"kernel_type": hit.kernel_type, "fixed_capacity_first_dim": capacity},
+            shape_match_info=hit.shape_match_info,
+        )
 
     # ---- Compute op lookup ----
 

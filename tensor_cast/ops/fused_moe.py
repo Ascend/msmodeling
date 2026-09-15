@@ -9,6 +9,9 @@ from ..utils import register_tensor_cast_op
 def _(
     x: torch.Tensor,
     topk_indices: torch.Tensor,
+    allow_dispatch_ffn_combine: bool = True,
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     """
     Repeat the input tokens top-k times, and rearrange them according to the order of the experts
@@ -17,6 +20,7 @@ def _(
     Args:
         x: (bsz, seq_len, hidden_size), the tokens
         topk_indices: (bsz, seq_len, top_k), the top-k experts selected by each token
+        allow_dispatch_ffn_combine: Whether the compiler may fuse this MoE region into DFC.
 
     Returns:
         permuted_x: (bsz * seq_len * top_k, hidden_size)
@@ -29,6 +33,8 @@ def _(
 def _(
     x: torch.Tensor,
     topk_indices: torch.Tensor,
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     """
     Rearrange the input tokens (initially sorted by their selected experts) by token indices.

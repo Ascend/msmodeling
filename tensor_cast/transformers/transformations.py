@@ -706,6 +706,8 @@ def patch_moe(
                 moe_layer = custom_moe_layer(moe_config, module)
             else:
                 moe_layer = MoELayer(moe_config, module)
+            if getattr(module, "tensor_cast_disable_dispatch_ffn_combine", False):
+                moe_layer.fused_moe.allow_dispatch_ffn_combine = False
 
             expert_num = moe_layer.fused_moe.experts.num_experts
             if model.top_k is None:

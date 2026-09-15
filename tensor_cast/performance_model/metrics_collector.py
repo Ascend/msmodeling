@@ -278,9 +278,9 @@ class MetricsCollector:
             self._hit_details.extend([(func_name, metric_kernel_type, shape_sig, empirical_s)] * invocation_count)
 
         elif result is not None and result.source == QuerySource.PARTIAL:
-            # PARTIAL: use empirical latency in E2E sum, but count as MISS
-            # in match rate (M1). Do NOT update _hit_latency_sum (M5) —
-            # PARTIAL is still conceptually a MISS for accuracy metrics.
+            # PARTIAL is diagnostic evidence only. Runtime and source totals use
+            # the complete full-op analytic fallback; match metrics still count
+            # it as a MISS and exclude it from the M5 numerator.
             self._stats["miss"] += invocation_count
             missed_kernels = result.details.get("missed_kernels", [])
             reason = f"partial:{','.join(missed_kernels)}"

@@ -1,8 +1,9 @@
 """EmpiricalPerformanceModel: measurement-based performance model."""
 
 import logging
+from collections import Counter
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from overrides import override
@@ -17,6 +18,11 @@ from .profiling_database.data_source import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Source durations summarize lookup records selected for one modeled forward or
+# wave. They are collected before runtime events are expanded by repeated layer
+# calls, so their percentages are not trace-call-weighted or wall-time shares.
+PROFILING_SOURCE_SCOPE = "modeled_forward_lookup_latency"
 
 
 @dataclass
@@ -33,6 +39,47 @@ class EmpiricalOpRecord:
     tc_shapes: List[tuple]
     miss_reason: Optional[str] = None
     invocation_count: int = 1
+
+
+def summarize_empirical_records(records: List[EmpiricalOpRecord]) -> Tuple[Dict[str, float], Dict[str, int]]:
+    """Summarize lookup latency sources and misses for one modeled forward.
+
+    The result uses :data:`PROFILING_SOURCE_SCOPE`: it sums selected lookup
+    records before runtime-event expansion. It must not be interpreted as a
+    call-weighted trace breakdown or as a wall-time decomposition.
+    """
+
+    source_times_s = {
+        "measured": 0.0,
+        "interpolated": 0.0,
+        "analytic": 0.0,
+        "hybrid": 0.0,
+    }
+    miss_reasons: Counter[str] = Counter()
+
+    for record in records:
+        result = record.lookup_result
+        if result is None:
+            source_times_s["analytic"] += record.analytic_latency_s
+            miss_reasons[f"{record.func_name} [{record.miss_reason or 'unknown'}]"] += 1
+        elif result.latency_us is None:
+            source_times_s["analytic"] += record.analytic_latency_s
+            miss_reasons[f"{record.func_name} [invalid_lookup_latency]"] += 1
+        elif result.source == QuerySource.MEASURED:
+            source_times_s["measured"] += result.latency_us * 1e-6
+        elif result.source in (QuerySource.INTERPOLATED, QuerySource.EXTRAPOLATED):
+            source_times_s["interpolated"] += result.latency_us * 1e-6
+        else:
+            # PARTIAL lookup latency is only the subtotal of successful leaves,
+            # not a complete operation estimate. Runtime therefore uses the
+            # full-op analytic fallback and the source summary must do the same.
+            source_times_s["analytic"] += record.analytic_latency_s
+            missed_kernels = result.details.get("missed_kernels", [])
+            suffix = ",".join(str(kernel) for kernel in missed_kernels)
+            reason = f"partial:{suffix}" if suffix else "partial"
+            miss_reasons[f"{record.func_name} [{reason}]"] += 1
+
+    return source_times_s, dict(miss_reasons)
 
 
 class EmpiricalPerformanceModel(PerformanceModel):
@@ -88,7 +135,7 @@ class EmpiricalPerformanceModel(PerformanceModel):
         self.op_records.append(record)
         self._records_by_cache_key[op_invoke_info.cache_key] = record
 
-        if result is not None and result.source != QuerySource.PARTIAL:
+        if result is not None and result.source != QuerySource.PARTIAL and result.latency_us is not None:
             # Full HIT
             empirical_s = result.latency_us * 1e-6
             return PerformanceModel.Result(
@@ -105,18 +152,36 @@ class EmpiricalPerformanceModel(PerformanceModel):
             )
 
         if result is not None and result.source == QuerySource.PARTIAL:
-            # PARTIAL
-            empirical_s = result.latency_us * 1e-6
-            return PerformanceModel.Result(
-                execution_time_s=empirical_s,
-                statistics={
-                    **analytic_stats,
-                    "source": result.source.name,
-                    "confidence": result.confidence,
-                    **result.details,
-                    **result.shape_debug_statistics(),
-                },
-            )
+            # PARTIAL is diagnostic evidence only: its latency is the subtotal
+            # of successful leaves, so use the complete full-op analytic result.
+            if isinstance(analytic_result.statistics, dict):
+                analytic_result.statistics.update(
+                    {
+                        "source": "ANALYTIC",
+                        "shape_match_rule": "analytic",
+                        "fallback_from": QuerySource.PARTIAL.name,
+                        "hit_kernels": result.details.get("hit_kernels", []),
+                        "missed_kernels": result.details.get("missed_kernels", []),
+                    }
+                )
+            return analytic_result
+
+        if result is not None:
+            # A non-partial lookup without latency is invalid as a complete hit.
+            # Fail closed to the full-op analytic model and keep an actionable
+            # miss reason instead of raising while converting microseconds.
+            record.lookup_result = None
+            record.miss_reason = "invalid_lookup_latency"
+            if isinstance(analytic_result.statistics, dict):
+                analytic_result.statistics.update(
+                    {
+                        "source": "ANALYTIC",
+                        "shape_match_rule": "analytic",
+                        "fallback_from": result.source.name,
+                        "miss_reason": "invalid_lookup_latency",
+                    }
+                )
+            return analytic_result
 
         # Full MISS
         if isinstance(analytic_result.statistics, dict):

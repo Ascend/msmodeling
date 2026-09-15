@@ -14,6 +14,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from itertools import groupby
 from typing import Optional
@@ -65,6 +66,17 @@ class _PPWaveEvaluation:
     memory_left_gb: float
     memory_exceeded: bool
     bottleneck_stage_id: int
+    profiling_source_times_s: dict[str, float]
+    profiling_miss_reasons: dict[str, int]
+
+
+@dataclass(frozen=True)
+class _PPMicrobatchProfile:
+    """A cached PP profile together with the empirical lookup evidence it used."""
+
+    profile: PipelineProfile
+    profiling_source_times_s: dict[str, float]
+    profiling_miss_reasons: dict[str, int]
 
 
 class BaseThroughputOptimizer(ABC):
@@ -96,7 +108,7 @@ class BaseThroughputOptimizer(ABC):
         # profiled once through run_inference and expanded to the full wave.
         # Per-instance (cleared on initialize): each parallel candidate gets an
         # isolated strategy instance, so candidates never share this cache.
-        self._pp_profile_cache: dict[tuple, PipelineProfile] = {}
+        self._pp_profile_cache: dict[tuple, _PPMicrobatchProfile] = {}
         self._last_run_early_stop_reason: str | None = None
 
     def initialize(self, model_runner: ModelRunner):
@@ -480,6 +492,8 @@ class BaseThroughputOptimizer(ABC):
             breakdowns=format_breakdowns(metrics.breakdowns),
             memory_info=build_memory_info(metrics),
             raw_breakdowns=metrics.breakdowns,
+            profiling_source_times_s=getattr(metrics, "profiling_source_times_s", {}),
+            profiling_miss_reasons=getattr(metrics, "profiling_miss_reasons", {}),
         )
 
     def _compute_forward_latency_record(
@@ -857,8 +871,8 @@ class BaseThroughputOptimizer(ABC):
         *,
         query_len: int = None,
         seq_len: int = None,
-    ) -> PipelineProfile:
-        """Profile one microbatch shape and return its PipelineProfile.
+    ) -> _PPMicrobatchProfile:
+        """Profile one microbatch shape and return its profile plus lookup evidence.
 
         Caches per (is_decode, query_len, seq_len, microbatch_size). Raises if
         the run did not produce a pipeline_profile (PP>1 must always produce
@@ -892,8 +906,31 @@ class BaseThroughputOptimizer(ABC):
                 "PP>1 evaluation expected a pipeline_profile from run_inference but got None; "
                 "the model is not a PipelineModel or profiling did not produce a profile."
             )
-        self._pp_profile_cache[cache_key] = profile
-        return profile
+        profile_record = _PPMicrobatchProfile(
+            profile=profile,
+            profiling_source_times_s=self._profiling_metric_values(metrics, "profiling_source_times_s"),
+            profiling_miss_reasons=self._profiling_metric_values(metrics, "profiling_miss_reasons"),
+        )
+        self._pp_profile_cache[cache_key] = profile_record
+        return profile_record
+
+    @staticmethod
+    def _profiling_metric_values(metrics: ModelRunnerMetrics, attribute: str) -> dict:
+        values = getattr(metrics, attribute, None)
+        return dict(values) if isinstance(values, Mapping) else {}
+
+    @staticmethod
+    def _aggregate_pp_profiling_metrics(
+        profile_records: tuple[_PPMicrobatchProfile, ...],
+    ) -> tuple[dict[str, float], dict[str, int]]:
+        source_times_s: dict[str, float] = {}
+        miss_reasons: dict[str, int] = {}
+        for record in profile_records:
+            for source, latency_s in record.profiling_source_times_s.items():
+                source_times_s[source] = source_times_s.get(source, 0.0) + latency_s
+            for reason, count in record.profiling_miss_reasons.items():
+                miss_reasons[reason] = miss_reasons.get(reason, 0) + count
+        return source_times_s, miss_reasons
 
     @staticmethod
     def _consolidate_prefill_profiles(
@@ -963,7 +1000,7 @@ class BaseThroughputOptimizer(ABC):
             # own (query_len, seq_len).  The combined sequence is ordered by
             # chunk index then microbatch index within each chunk, so the
             # pipeline schedule models 1F1B chunk pipelining across stages.
-            profiles = tuple(
+            profile_records = tuple(
                 self._profile_pp_microbatch(
                     mb_size,
                     optimizer_data,
@@ -975,7 +1012,7 @@ class BaseThroughputOptimizer(ABC):
                 for mb_size in microbatch_sizes
             )
         else:
-            profiles = tuple(
+            profile_records = tuple(
                 self._profile_pp_microbatch(
                     microbatch_size,
                     optimizer_data,
@@ -985,6 +1022,8 @@ class BaseThroughputOptimizer(ABC):
                 )
                 for microbatch_size in microbatch_sizes
             )
+        profiles = tuple(record.profile for record in profile_records)
+        profiling_source_times_s, profiling_miss_reasons = self._aggregate_pp_profiling_metrics(profile_records)
         perf_model_name = self._pp_perf_model_name()
         repeated = estimate_repeated_pipeline(profiles, perf_model_name) if repeat else None
         schedule = repeated.first_wave if repeated is not None else estimate_forward_pipeline(profiles, perf_model_name)
@@ -1037,4 +1076,6 @@ class BaseThroughputOptimizer(ABC):
             memory_left_gb=min_remaining_bytes / BYTES_TO_GB,
             memory_exceeded=memory_estimate.exceeds_budget,
             bottleneck_stage_id=memory_estimate.bottleneck_stage_id,
+            profiling_source_times_s=profiling_source_times_s,
+            profiling_miss_reasons=profiling_miss_reasons,
         )

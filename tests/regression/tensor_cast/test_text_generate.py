@@ -1746,6 +1746,18 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
         self.assertIn("matmul", output)
         self.assertIn("attention", output)
 
+    @patch("sys.stdout", new_callable=StringIO)
+    def test_print_info_labels_profiling_source_scope(self, mock_stdout):
+        self.metrics.profiling_source_times_s = {"measured": 0.8, "analytic": 0.2}
+
+        self.metrics.print_info()
+
+        output = mock_stdout.getvalue()
+        self.assertIn(
+            "profiling_sources [scope=modeled_forward_lookup_latency]: measured: 80.00, analytic: 20.00",
+            output,
+        )
+
     def test_dump_json_writes_expected_payload(self):
         """ModelRunnerMetrics.dump_json should write the full metrics payload."""
         self.metrics.perf_model_name = "analytic"
@@ -1790,6 +1802,7 @@ class TestModelRunnerMetricsPrintInfo(unittest.TestCase):
             self.assertAlmostEqual(sum(percent.values()), 100.0, places=2, msg=category)
 
         self.assertEqual(payload["perf_model_name"], "analytic")
+        self.assertEqual(payload["profiling_source_scope"], "modeled_forward_lookup_latency")
         self.assertEqual(payload["runtime_event_list"], self.metrics.runtime_event_list)
 
     def test_dump_json_skips_zero_total_breakdowns_in_percent(self):

@@ -10,6 +10,8 @@ def _(
     x: List[torch.Tensor],
     w: List[torch.Tensor],
     bias: List[Optional[torch.Tensor]],
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     """
     Perform grouped quantized matrix multiplication. The arguments follow
@@ -33,6 +35,8 @@ def _(
     x_offset: List[Optional[torch.Tensor]],
     bias: List[Optional[torch.Tensor]],
     out_dtype: Optional[torch.dtype],
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     """Similar to `grouped_matmul` but with quantization parameters."""
     if out_dtype is None:
@@ -51,6 +55,8 @@ def _(
     x_scale: List[torch.Tensor],
     bias: List[Optional[torch.Tensor]],
     out_dtype: Optional[torch.dtype],
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     """Similar to `grouped_matmul` but for FP8 quantization."""
     if out_dtype is None:
@@ -94,6 +100,8 @@ def _(
     x: List[torch.Tensor],
     w: List[torch.Tensor],
     bias: List[Optional[torch.Tensor]],
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     dtype = x[0].dtype if x else torch.float32
     return _grouped_matmul_swiglu_out(x, w, dtype, packed_4bit_weight=False)
@@ -109,6 +117,8 @@ def _(
     x_offset: List[Optional[torch.Tensor]],
     bias: List[Optional[torch.Tensor]],
     out_dtype: Optional[torch.dtype],
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     if out_dtype is None:
         out_dtype = x[0].dtype if x else torch.float32
@@ -125,6 +135,8 @@ def _(
     x_offset: List[Optional[torch.Tensor]],
     bias: List[Optional[torch.Tensor]],
     out_dtype: Optional[torch.dtype],
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     if out_dtype is None:
         out_dtype = x[0].dtype if x else torch.float32
@@ -139,6 +151,8 @@ def _(
     x_scale: List[torch.Tensor],
     bias: List[Optional[torch.Tensor]],
     out_dtype: Optional[torch.dtype],
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     if out_dtype is None:
         out_dtype = x[0].dtype if x else torch.float32
@@ -153,6 +167,8 @@ def _(
     x_scale: List[torch.Tensor],
     bias: List[Optional[torch.Tensor]],
     out_dtype: Optional[torch.dtype],
+    *,
+    is_mtp_unfused: bool = False,
 ) -> torch.Tensor:
     if out_dtype is None:
         out_dtype = x[0].dtype if x else torch.float32
@@ -168,6 +184,8 @@ def _(
     bias: List[Optional[torch.Tensor]],
     out_dtype: Optional[torch.dtype],
     group_size: int,
+    *,
+    is_mtp_unfused: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Native MXFP4 GMM1 fusion: GMM + SwiGLU + post-activation MX quant.
 
