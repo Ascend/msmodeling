@@ -187,7 +187,7 @@ msModeling does not guarantee the security of remote code. At runtime, it prints
 
 ### 4.1 Text Generation
 
-We provide the `text_generate.py` CLI to simulate text generation. This script supports text generation simulation for a batch of queries with the same input length and optionally the same context length. A table summary of the operator performance breakdown is provided by default. You can also choose to export a Chrome trace.
+We provide the `text_generate.py` CLI to simulate text generation with text-only or VL image-and-text inputs. This script supports text generation simulation for a batch of queries with the same input length and optionally the same context length. A table summary of the operator performance breakdown is provided by default. You can also choose to export a Chrome trace.
 
 Its general usage is as follows:
 
@@ -283,6 +283,200 @@ The main parameters are as follows:
 For VL models, you can set `--image-batch-size`, `--image-height`, and `--image-width` together to describe the number and resolution of the input images. For text-only models, you can omit these parameters.
 
 Run `python -m cli.inference.text_generate --help` for details.
+
+#### Practical cases and result analysis
+
+The following cases use Hugging Face model IDs to verify the execution mode, representative operators, input shapes, performance, memory, and bottlenecks from `text_generate` output. `text_generate` constructs simulated inputs; it does not read text or image files or return natural-language generations. The examples disable linear-layer quantization; output values illustrate the analysis method and are not fixed acceptance thresholds.
+
+`Stats breakdowns` is the normalized share of analytically estimated operator time grouped by the dominant resource, not measured hardware utilization. `memory_bound`, `communication_bound`, `compute_bound_mma`, and `compute_bound_gp` represent memory-access-, communication-, matrix-compute-, and general-purpose-compute-bound components, respectively.
+
+`Model compilation and execution time` is the simulator runtime on the host; `Total time for analytic` is the sum of `analytic total` in the operator table; `[analytic] Execution time` is the target-device latency predicted by the analytic model, and `TPS/Device` is calculated from this latency.
+
+##### Case 1: DeepSeek-V4-Flash text-only incremental prefill
+
+**Case goal:**
+
+Simulate eight text-only requests on 16 A3 dies with `TP=2`, `DP=8`, and `EP=16`, then analyze the execution mode, operator hotspots, memory usage, and performance bottlenecks for incremental or chunked Prefill.
+
+**Full command:**
+
+```bash
+python -m cli.inference.text_generate deepseek-ai/DeepSeek-V4-Flash \
+  --device ATLAS_800_A3_752T_128G_DIE \
+  --num-devices 16 \
+  --tp-size 2 \
+  --dp-size 8 \
+  --ep-size 16 \
+  --num-queries 8 \
+  --query-length 128 \
+  --context-length 2048 \
+  --quantize-linear-action DISABLED \
+  --compile \
+  --compilation-config enable_dispatch_ffn_combine
+```
+
+**Key output** (truncated)
+
+```text
+Number of Queries per DP rank: 1
+Model compilation and execution time: 15.923 s
+----------------------------------------------  --------------  ------------  ----------
+                     Name                       analytic total  analytic avg  # of Calls
+----------------------------------------------  --------------  ------------  ----------
+tensor_cast.dispatch_ffn_combine.default              35.837ms     833.409us          43
+aten.mm.default                                         9.640ms      22.418us         430
+tensor_cast.sparse_attn_sharedkv.default               2.626ms      61.072us          43
+tensor_cast.compressor.default                         1.836ms      29.609us          62
+tensor_cast.quant_lightning_indexer.default          137.760us       6.560us          21
+tensor_cast.v4_clamped_swiglu.default                118.037us       2.745us          43
+...
+Total time for analytic: 67.209ms
+[analytic] Execution time: 0.067209 s
+[analytic] TPS/Device: 952.3 token/s
+Total device memory: 64.000 GB
+  Model weight size: 42.669 GB
+  KV cache: 0.024 GB
+  Model activation size: 0.103 GB
+  Memory available: 21.204 GB
+Stats breakdowns:
+  analytic_OpBound: memory_bound: 99.19, communication_bound: 0.81, compute_bound_mma: 0.00, compute_bound_gp: 0.00
+```
+
+**Result analysis:**
+
+1. Omitting `--decode` leaves `decode=False`, so the CLI uses the Prefill path. `--context-length 2048` specifies existing context and does not change the execution mode. Processing another `128` tokens is incremental or chunked prefill with a sequence length of `2048 + 128 = 2176`. `DP=8` distributes eight requests across eight DP ranks, matching `Number of Queries per DP rank: 1`; `TP × DP × PP = 2 × 8 × 1 = 16`, and `EP=16` shards the routed experts.
+2. `--compilation-config enable_dispatch_ffn_combine` explicitly enables the fused MoE FFN path. Identify hotspots by comparing `analytic total`, rather than the per-call `analytic avg`. The fused `dispatch_ffn_combine` operator accounts for approximately `53.3%` of the total analytic time and should be examined first; matrix multiplication and sparse attention are the secondary hotspots.
+3. `memory_bound: 99.19` is the dominant modeled bottleneck category, indicating that the analytic model estimates this case to be primarily memory-access bound. `Memory available: 21.204 GB` is positive, so the parallel configuration fits under the current device profile and simulation assumptions.
+
+##### Case 2: Qwen3-VL image-and-text Prefill and Decode
+
+**Case goal:**
+
+Simulate eight initial image-and-text Prefill requests on one A3 die. Each request contains `32` text tokens and one `720 × 1080` image. Then simulate single-token Decode after Prefill to verify input shapes and language/vision paths, and analyze memory usage and performance bottlenecks.
+
+**Full command:**
+
+```bash
+python -m cli.inference.text_generate Qwen/Qwen3-VL-8B-Instruct \
+  --device ATLAS_800_A3_752T_128G_DIE \
+  --num-devices 1 \
+  --num-queries 8 \
+  --query-length 32 \
+  --context-length 0 \
+  --image-batch-size 1 \
+  --image-height 720 \
+  --image-width 1080 \
+  --quantize-linear-action DISABLED \
+  --compile \
+  --dump-input-shapes
+```
+
+**Key output** (truncated)
+
+```text
+Number of Queries per DP rank: 8
+Model compilation and execution time: 6.411 s
+-------------------------------------  ----------------------------------------------------------------------------  --------------  ------------  ----------
+                 Name                                                  Input Shapes                                  analytic total  analytic avg  # of Calls
+-------------------------------------  ----------------------------------------------------------------------------  --------------  ------------  ----------
+aten.mm.default                        [6256, 4096], [4096, 24576]                                                        172.452ms       4.790ms          36
+aten.mm.default                        [6256, 12288], [12288, 4096]                                                        86.316ms       2.398ms          36
+tensor_cast.attention.default          [2992, 1152], [1, 2992, 16, 72], [1, 2992, 16, 72]                                  42.969ms     198.933us         216
+aten.addmm.default                     [4304], [23936, 1152], [1152, 4304]                                                 24.484ms     906.821us          27
+tensor_cast.attention.default          [6256, 4096], [49, 128, 8, 128], [49, 128, 8, 128], [8, 7], [9], [8], [8]            12.607ms     350.198us          36
+aten.convolution.default               [23936, 3, 2, 16, 16], [1152, 3, 2, 16, 16], [1152]                                326.944us     326.944us           1
+...
+Total time for analytic: 619.789ms
+[analytic] Execution time: 0.619789 s
+[analytic] TPS/Device: 413 token/s
+Total device memory: 64.000 GB
+  Model weight size: 16.455 GB
+  KV cache: 0.861 GB
+  Model activation size: 0.862 GB
+  Memory available: 45.821 GB
+Stats breakdowns:
+  analytic_OpBound: memory_bound: 24.06, communication_bound: 0.00, compute_bound_mma: 74.40, compute_bound_gp: 1.55
+```
+
+**Result analysis:**
+
+1. Omitting `--decode` and setting `--context-length 0` selects initial Prefill. With the default `DP=1`, one DP rank handles all eight requests, matching `Number of Queries per DP rank: 8`.
+2. The processor resizes each image from `720 × 1080` to `704 × 1088`. Based on the current processor's input-construction rules, each request has an internal `image_grid_thw` of `[1, 44, 68]`, representing `2992` patches. A `2 × 2` spatial merge plus two boundary tokens produces `2992 / 4 + 2 = 750` image tokens. Therefore, the model-side query and sequence length for each request are both `32 + 750 = 782`, and the fused sequence across eight requests has a leading dimension of `8 × 782 = 6256`.
+3. The tool derives internal tensor shapes of `pixel_values.shape=[23936, 1536]` and `image_grid_thw.shape=[8, 3]` from the image parameters; neither is a CLI image-input parameter. In the operator table above, the leading dimensions `2992`, `23936`, and `6256` correspond to the vision sequence, flattened image patches, and fused multimodal sequence, respectively, and can be used to verify this derivation. If the model revision or processor configuration changes, use the actual operator shapes reported by `--dump-input-shapes`.
+4. Convolutional patch embedding and vision attention confirm that the image enters the vision tower.
+5. `compute_bound_mma: 74.40` is the dominant modeled bottleneck category. `Memory available: 45.821 GB` is positive, so the configuration fits under the current device profile and simulation assumptions. `TPS/Device` counts only the configured `32` text query tokens per request and excludes image tokens; do not compare it directly with text-only TPS.
+
+**Decode configuration:**
+
+The following command independently simulates next-token Decode after image-and-text Prefill. Image tokens are included in `--context-length`, so the image parameters are omitted:
+
+```bash
+python -m cli.inference.text_generate Qwen/Qwen3-VL-8B-Instruct \
+  --device ATLAS_800_A3_752T_128G_DIE \
+  --num-devices 1 \
+  --num-queries 8 \
+  --query-length 1 \
+  --context-length 782 \
+  --decode \
+  --quantize-linear-action DISABLED \
+  --compile \
+  --dump-input-shapes
+```
+
+`--context-length 782` represents the `32 + 750 = 782` tokens already in the KV cache after image-and-text Prefill: text tokens and image tokens. Decode uses `--query-length 1` to process the current decode token, giving a sequence length of `782 + 1 = 783`.
+
+During Prefill, the image is encoded into tokens that are included in the KV cache. Decode executes only the language path and does not construct `pixel_values` or `image_grid_thw`, nor does it execute the vision tower. When troubleshooting with `--log-level info`, the no-image-input message is expected; do not also set image parameters, or the image tokens will be counted twice.
+
+**Decode key output** (truncated)
+
+```text
+Number of Queries per DP rank: 8
+Model compilation and execution time: 2.925 s
+-------------------------------------  ----------------------------------------------------------------------  --------------  ------------  ----------
+                 Name                                               Input Shapes                               analytic total  analytic avg  # of Calls
+-------------------------------------  ----------------------------------------------------------------------  --------------  ------------  ----------
+aten.mm.default                        [8, 4096], [4096, 24576]                                                        7.062ms     196.169us          36
+tensor_cast.attention.default          [8, 4096], [49, 128, 8, 128], [49, 128, 8, 128], [8, 7], [9], [8], [8]         1.060ms      29.432us          36
+...
+Total time for analytic: 16.927ms
+[analytic] Execution time: 0.016927 s
+[analytic] TPS/Device: 472.6 token/s
+Total device memory: 64.000 GB
+  KV cache: 0.861 GB
+  Memory available: 47.757 GB
+Stats breakdowns:
+  analytic_OpBound: memory_bound: 100.00, communication_bound: 0.00, compute_bound_mma: 0.00, compute_bound_gp: 0.00
+```
+
+The leading operator-input dimension is `8`, representing one token for each of eight requests. This configuration does not construct image tensors, so Decode executes only the language path; when reproducing the case, confirm in the complete operator table that vision operators such as convolutional patch embedding and vision attention no longer appear.
+
+##### Text-only and VL input configuration differences
+
+| Stage or parameter | Text-only input | VL image-and-text input |
+| --- | --- | --- |
+| Prefill `--query-length` | Number of text tokens in the current Prefill | `--query-length` represents text tokens only; the tool derives image tokens internally and adds them to the model-side Prefill sequence |
+| Prefill image parameters | Omitted | Set `--image-batch-size`, `--image-height`, and `--image-width` together |
+| Decode `--context-length` | Number of text tokens already stored in the KV cache | Total number of text and image tokens already stored in the KV cache |
+
+#### FAQ
+
+##### Why does the vision path not run after the image parameters are set?
+
+The vision path runs only during Prefill for a VL model. Ensure that `--decode` is omitted and that `--image-batch-size`, `--image-height`, and `--image-width` are all provided. If any parameter is omitted, a VL model runs without image input; a non-VL model ignores these parameters. Decode executes only the language path. Use `--log-level info` to view the corresponding message.
+
+##### Why does the operator shape differ from the input image size?
+
+The model processor adjusts the image to dimensions compatible with its patch and spatial-merge requirements. In this case, `720 × 1080` is adjusted to `704 × 1088`. If the model revision or processor configuration changes, use the actual operator shapes reported by `--dump-input-shapes`.
+
+##### What do the length parameters mean in Prefill and Decode?
+
+For Prefill, omit `--decode`. Initial Prefill normally uses `--context-length 0`, with `--query-length` representing the token count of the complete text prompt. For chunked or incremental Prefill, `--context-length` represents the model-side tokens already stored in the KV cache, while `--query-length` represents the new tokens in the current chunk.
+
+For Decode, set `--decode`. Standard single-token Decode normally uses `--query-length 1`. When speculative decoding is enabled, the CLI aligns the Decode `--query-length` to `N + 1`, where `N` is the number of speculative tokens. For MTP, prefer the unified interface `--speculative-method mtp --num-speculative-tokens N`; the legacy `--num-mtp-tokens N` option is retained for backward compatibility. `--context-length` represents the model-side tokens already stored in the KV cache before the current Decode step. For a VL model, this length also includes image tokens produced during Prefill.
+
+##### What should be done if the command succeeds but memory is insufficient?
+
+`Memory available < 0` means that the target device cannot hold the current configuration. Adjust the model, parallel strategy, `--num-queries`, `--image-batch-size`, or sequence length.
 
 ### 4.2 Video Generation
 

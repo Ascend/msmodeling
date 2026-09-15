@@ -280,7 +280,7 @@ Python 代码，msmodeling 不对远端代码安全性做保证；运行时会�
 
 ### 4.1 文本生成
 
-我们提供 `text_generate.py` 命令行接口来仿真文本生成。该脚本支持对一批具有相同输入长度、可选相同 context 长度的 query 进行文本生成仿真。默认提供算子性能分解的表格汇总。也可选择导出 Chrome trace。
+我们提供 `text_generate.py` 命令行接口来仿真文本生成，支持纯文本输入和 VL 图文输入。该脚本支持对一批具有相同输入长度、可选相同 context 长度的 query 进行仿真。默认提供算子性能分解的表格汇总。也可选择导出 Chrome trace。
 
 其一般用法如下：
 
@@ -383,6 +383,200 @@ Run a simulated LLM inference pass and dump the perf result.
 对于 VL 模型，可同时设置 `--image-batch-size`、`--image-height` 和 `--image-width` 来描述输入图像数量与分辨率；纯文本模型可省略这些参数。
 
 运行 `python -m cli.inference.text_generate --help` 查看详情。
+
+#### 实践案例与结果分析
+
+以下两个案例使用 Hugging Face 模型 ID，演示如何从 `text_generate` 输出核验执行模式、代表算子、输入 shape、性能、显存和瓶颈。`text_generate` 仅构造模拟输入，不读取实际文本或图片文件，也不返回自然语言生成结果。示例关闭线性层量化；输出数值仅用于说明分析方法，不作为固定验收阈值。
+
+`Stats breakdowns` 是解析性能模型将算子估算耗时按主导资源分类并归一化后的占比，不是硬件实测利用率。`memory_bound`、`communication_bound`、`compute_bound_mma` 和 `compute_bound_gp` 分别表示访存、通信、矩阵计算和通用计算受限分量。
+
+`Model compilation and execution time` 是仿真器在宿主机上的运行时间；`Total time for analytic` 是算子表中 `analytic total` 的累计值；`[analytic] Execution time` 是解析模型预测的目标设备时延，`TPS/Device` 基于该时延计算。
+
+##### 案例一：DeepSeek-V4-Flash 纯文本增量 Prefill
+
+**案例目标：**
+
+在 16 个 A3 die 上以 `TP=2`、`DP=8`、`EP=16` 仿真 8 个纯文本请求，分析增量或分块 Prefill 的执行模式、热点算子、显存和瓶颈。
+
+**完整命令：**
+
+```bash
+python -m cli.inference.text_generate deepseek-ai/DeepSeek-V4-Flash \
+  --device ATLAS_800_A3_752T_128G_DIE \
+  --num-devices 16 \
+  --tp-size 2 \
+  --dp-size 8 \
+  --ep-size 16 \
+  --num-queries 8 \
+  --query-length 128 \
+  --context-length 2048 \
+  --quantize-linear-action DISABLED \
+  --compile \
+  --compilation-config enable_dispatch_ffn_combine
+```
+
+**关键输出**（已截断）
+
+```text
+Number of Queries per DP rank: 1
+Model compilation and execution time: 15.923 s
+----------------------------------------------  --------------  ------------  ----------
+                     Name                       analytic total  analytic avg  # of Calls
+----------------------------------------------  --------------  ------------  ----------
+tensor_cast.dispatch_ffn_combine.default              35.837ms     833.409us          43
+aten.mm.default                                         9.640ms      22.418us         430
+tensor_cast.sparse_attn_sharedkv.default               2.626ms      61.072us          43
+tensor_cast.compressor.default                         1.836ms      29.609us          62
+tensor_cast.quant_lightning_indexer.default          137.760us       6.560us          21
+tensor_cast.v4_clamped_swiglu.default                118.037us       2.745us          43
+...
+Total time for analytic: 67.209ms
+[analytic] Execution time: 0.067209 s
+[analytic] TPS/Device: 952.3 token/s
+Total device memory: 64.000 GB
+  Model weight size: 42.669 GB
+  KV cache: 0.024 GB
+  Model activation size: 0.103 GB
+  Memory available: 21.204 GB
+Stats breakdowns:
+  analytic_OpBound: memory_bound: 99.19, communication_bound: 0.81, compute_bound_mma: 0.00, compute_bound_gp: 0.00
+```
+
+**结果分析：**
+
+1. 未指定 `--decode` 时 `decode=False`，CLI 进入 Prefill 路径；`--context-length 2048` 仅表示已有上下文，不改变执行模式。本次继续处理 `128` 个新 token，属于增量或分块 Prefill，sequence length 为 `2048 + 128 = 2176`。`DP=8` 将 8 个请求均分到 8 个 DP rank，与 `Number of Queries per DP rank: 1` 一致；`TP × DP × PP = 2 × 8 × 1 = 16`，`EP=16` 对 routed experts 进行分片。
+2. `--compilation-config enable_dispatch_ffn_combine` 显式启用融合 MoE FFN 路径。定位热点时应比较 `analytic total`，而非单次调用的 `analytic avg`。`dispatch_ffn_combine` 单个融合算子约占解析总耗时的 `53.3%`，是本例首要分析对象；矩阵乘和稀疏 attention 为次要热点。
+3. `memory_bound: 99.19` 是主导的建模瓶颈类别，表明解析模型估算本例主要受访存限制。`Memory available: 21.204 GB` 为正，说明设备显存在当前设备画像与仿真假设下可容纳该并行配置。
+
+##### 案例二：Qwen3-VL 图文 Prefill 与 Decode
+
+**案例目标：**
+
+在 1 个 A3 die 上仿真 8 个首次图文 Prefill 请求，每个请求包含 `32` 个文本 token 和一张 `720 × 1080` 图片；再仿真 Prefill 后的单 token Decode，核验输入 shape、语言与视觉路径、显存和瓶颈。
+
+**完整命令：**
+
+```bash
+python -m cli.inference.text_generate Qwen/Qwen3-VL-8B-Instruct \
+  --device ATLAS_800_A3_752T_128G_DIE \
+  --num-devices 1 \
+  --num-queries 8 \
+  --query-length 32 \
+  --context-length 0 \
+  --image-batch-size 1 \
+  --image-height 720 \
+  --image-width 1080 \
+  --quantize-linear-action DISABLED \
+  --compile \
+  --dump-input-shapes
+```
+
+**关键输出**（已截断）
+
+```text
+Number of Queries per DP rank: 8
+Model compilation and execution time: 6.411 s
+-------------------------------------  ----------------------------------------------------------------------------  --------------  ------------  ----------
+                 Name                                                  Input Shapes                                  analytic total  analytic avg  # of Calls
+-------------------------------------  ----------------------------------------------------------------------------  --------------  ------------  ----------
+aten.mm.default                        [6256, 4096], [4096, 24576]                                                        172.452ms       4.790ms          36
+aten.mm.default                        [6256, 12288], [12288, 4096]                                                        86.316ms       2.398ms          36
+tensor_cast.attention.default          [2992, 1152], [1, 2992, 16, 72], [1, 2992, 16, 72]                                  42.969ms     198.933us         216
+aten.addmm.default                     [4304], [23936, 1152], [1152, 4304]                                                 24.484ms     906.821us          27
+tensor_cast.attention.default          [6256, 4096], [49, 128, 8, 128], [49, 128, 8, 128], [8, 7], [9], [8], [8]            12.607ms     350.198us          36
+aten.convolution.default               [23936, 3, 2, 16, 16], [1152, 3, 2, 16, 16], [1152]                                326.944us     326.944us           1
+...
+Total time for analytic: 619.789ms
+[analytic] Execution time: 0.619789 s
+[analytic] TPS/Device: 413 token/s
+Total device memory: 64.000 GB
+  Model weight size: 16.455 GB
+  KV cache: 0.861 GB
+  Model activation size: 0.862 GB
+  Memory available: 45.821 GB
+Stats breakdowns:
+  analytic_OpBound: memory_bound: 24.06, communication_bound: 0.00, compute_bound_mma: 74.40, compute_bound_gp: 1.55
+```
+
+**结果分析：**
+
+1. 未指定 `--decode` 且设置 `--context-length 0` 时，CLI 执行首次 Prefill。默认 `DP=1`，8 个请求均由同一 DP rank 处理，与 `Number of Queries per DP rank: 8` 一致。
+2. 图片由 processor 从 `720 × 1080` 调整为 `704 × 1088`。根据当前 processor 的输入构造规则，每个请求的内部 `image_grid_thw` 为 `[1, 44, 68]`，对应 `2992` 个 patch；经过 `2 × 2` spatial merge 并加入两个边界 token 后，生成 `2992 / 4 + 2 = 750` 个图片 token。因此每个请求的模型侧 query 和 sequence length 均为 `32 + 750 = 782`，8 个请求的融合序列首维为 `8 × 782 = 6256`。
+3. 工具根据图片参数构造的内部张量 shape 为 `pixel_values.shape=[23936, 1536]` 和 `image_grid_thw.shape=[8, 3]`，二者不是 CLI 图片输入参数。上方算子表中的首维 `2992`、`23936` 和 `6256` 分别对应视觉序列、展开后的图片 patch 和融合多模态序列，可用于核对上述推导；模型 revision 或 processor 配置变化时，以 `--dump-input-shapes` 展示的实际算子 shape 为准。
+4. `convolution` patch embedding 与视觉 attention 说明图片已进入 vision tower。
+5. `compute_bound_mma: 74.40` 是主导的建模瓶颈类别。`Memory available: 45.821 GB` 为正，说明设备显存在当前设备画像与仿真假设下可容纳该配置。`TPS/Device` 仅按每个请求配置的 `32` 个文本 query token 计算，不包含图片 token，因此不能与纯文本 TPS 直接比较。
+
+**Decode 配置：**
+
+以下命令用于单独仿真图文 Prefill 后的下一 token Decode。图片 token 已计入 `--context-length`，因此无需设置图片参数：
+
+```bash
+python -m cli.inference.text_generate Qwen/Qwen3-VL-8B-Instruct \
+  --device ATLAS_800_A3_752T_128G_DIE \
+  --num-devices 1 \
+  --num-queries 8 \
+  --query-length 1 \
+  --context-length 782 \
+  --decode \
+  --quantize-linear-action DISABLED \
+  --compile \
+  --dump-input-shapes
+```
+
+`--context-length 782` 表示图文 Prefill 后 KV cache 中已有 `32 + 750 = 782` 个 token，分别对应文本 token 和图片 token。Decode 使用 `--query-length 1` 处理当前解码 token，因此 sequence length 为 `782 + 1 = 783`。
+
+图片已在 Prefill 阶段编码为 token 并纳入 KV cache。Decode 仅执行 language 路径，不再构造 `pixel_values`、`image_grid_thw` 或执行 vision tower。使用 `--log-level info` 排障时出现无图片输入提示属于预期；不要同时设置图片参数，否则图片 token 会被重复计入。
+
+**Decode 关键输出**（已截断）
+
+```text
+Number of Queries per DP rank: 8
+Model compilation and execution time: 2.925 s
+-------------------------------------  ----------------------------------------------------------------------  --------------  ------------  ----------
+                 Name                                               Input Shapes                               analytic total  analytic avg  # of Calls
+-------------------------------------  ----------------------------------------------------------------------  --------------  ------------  ----------
+aten.mm.default                        [8, 4096], [4096, 24576]                                                        7.062ms     196.169us          36
+tensor_cast.attention.default          [8, 4096], [49, 128, 8, 128], [49, 128, 8, 128], [8, 7], [9], [8], [8]         1.060ms      29.432us          36
+...
+Total time for analytic: 16.927ms
+[analytic] Execution time: 0.016927 s
+[analytic] TPS/Device: 472.6 token/s
+Total device memory: 64.000 GB
+  KV cache: 0.861 GB
+  Memory available: 47.757 GB
+Stats breakdowns:
+  analytic_OpBound: memory_bound: 100.00, communication_bound: 0.00, compute_bound_mma: 0.00, compute_bound_gp: 0.00
+```
+
+算子输入首维为 `8`，对应 8 个请求各处理 1 个 token。该配置不构造图片张量，因此 Decode 仅执行 language 路径；复现时可在完整算子表中确认不再出现 Prefill 阶段的 `convolution` 和视觉 attention 等视觉算子。
+
+##### 纯文本与 VL 输入配置差异
+
+| 阶段或参数 | 纯文本输入 | VL 图文输入 |
+| --- | --- | --- |
+| Prefill `--query-length` | 表示当前 Prefill 的文本 token 数 | `--query-length` 仅表示文本 token 数；工具根据图片参数在内部推导图片 token，并将其加入模型侧 Prefill 序列长度 |
+| Prefill 图片参数 | 省略 | 同时设置 `--image-batch-size`、`--image-height` 和 `--image-width` |
+| Decode `--context-length` | 表示 KV cache 中已有的文本 token 数 | 表示 KV cache 中已有的文本 token 与图片 token 总数 |
+
+#### 常见问题
+
+##### 为什么设置图片参数后仍未进入视觉路径？
+
+视觉路径仅在 VL 模型的 Prefill 阶段执行。请确认未设置 `--decode`，并同时提供 `--image-batch-size`、`--image-height` 和 `--image-width`；缺少任一参数时，VL 模型将按无图片输入处理，非 VL 模型则忽略这些参数。Decode 阶段仅执行 language 路径。可添加 `--log-level info` 查看相应提示。
+
+##### 为什么输入图片尺寸与算子 shape 不一致？
+
+图片会根据模型 processor 配置调整为满足 patch 和 spatial merge 要求的尺寸。例如本例的 `720 × 1080` 会调整为 `704 × 1088`。模型 revision 或 processor 配置变化时，以 `--dump-input-shapes` 展示的实际算子 shape 为准。
+
+##### Prefill 与 Decode 中的长度参数分别表示什么？
+
+Prefill 阶段不设置 `--decode`。首次 Prefill 通常设置 `--context-length 0`，并使用 `--query-length` 表示完整文本 prompt 的 token 数；分块或增量 Prefill 时，`--context-length` 表示 KV cache 中已有的模型侧 token 数，`--query-length` 表示当前块的新 token 数。
+
+Decode 阶段设置 `--decode`。普通单 token Decode 通常设置 `--query-length 1`。启用投机解码时，CLI 会将 Decode 的 `--query-length` 对齐为 `N + 1`，其中 `N` 为投机 token 数；MTP 建议使用统一接口 `--speculative-method mtp --num-speculative-tokens N`，原有 `--num-mtp-tokens N` 仅保留用于向后兼容。`--context-length` 表示本轮 Decode 前 KV cache 中已有的模型侧 token 数；对于 VL 模型，该长度还应包含 Prefill 阶段产生的图片 token。
+
+##### 命令执行成功但显存不足时如何处理？
+
+`Memory available < 0` 表示目标设备显存无法容纳当前配置，需要调整模型、并行策略、`--num-queries`、`--image-batch-size` 或序列长度。
 
 ### 4.2 视频生成
 
