@@ -1266,6 +1266,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
     def test_model(self, model_id, do_compile):
         self._run_test_model(model_id, do_compile)
 
+    @pytest.mark.nightly
     @parameterized.expand(
         [
             ["deepseek-ai/DeepSeek-V3.1", False],

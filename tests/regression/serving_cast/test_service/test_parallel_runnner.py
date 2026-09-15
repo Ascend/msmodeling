@@ -5,6 +5,7 @@ from concurrent.futures.process import BrokenProcessPool
 from unittest.mock import MagicMock, Mock, patch
 
 import pandas as pd
+import pytest
 
 from serving_cast.parallel_runner import ParallelRunner
 from serving_cast.service.optimizer_summary import OptimizerSummary
@@ -647,6 +648,7 @@ class TestTaskRunner(unittest.TestCase):
 
         self.assertEqual(task_runner.recorded_mtp, [(0, {0}), (1, {1})])
 
+    @pytest.mark.nightly
     def test_submit_task(self):
         """Test _submit_task method"""
         user_config = UserInputConfig.from_args(self.args)

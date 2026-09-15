@@ -143,6 +143,7 @@ class TestThroughputOptimizerSmoke(TestCase):
         result = self._run_throughput_optimizer(args, check=False)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    @pytest.mark.nightly
     def test_vl_moe_aggregation_compile_smoke(self):
         """VL MOE + compile aggregation; guards test_VL_MOE_model_aggregation_with_output_validation.
 

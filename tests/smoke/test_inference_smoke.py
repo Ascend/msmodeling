@@ -17,6 +17,7 @@ test_perf_analysis_qwen235b_compile_remote        -> PerfAnalysisNightlyTestCase
 
 from __future__ import annotations
 
+import pytest
 import torch
 from tensor_cast.core.input_generator import generate_inputs
 from tensor_cast.core.model_builder import build_model
@@ -146,6 +147,7 @@ def test_perf_analysis_glm45_compile_remote():
     assert "tensor_cast." in result
 
 
+@pytest.mark.nightly
 def test_perf_analysis_qwen235b_compile_remote():
     """Guards PerfAnalysisNightlyTestCase.test_model for remote Qwen3-235B compile."""
     user_config = UserInputConfig(

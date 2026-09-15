@@ -24,6 +24,17 @@ pytest_plugins = (
     "tests.regression.serving_cast.conftest",
 )
 
+
+def pytest_collection_modifyitems(items) -> None:
+    """Mark parameterized.expand node ids that drop method-level nightly marks."""
+    from tests.helpers.slow_ci_compile_nightly import EXPAND_NIGHTLY_NODE_IDS
+
+    nightly = pytest.mark.nightly
+    for item in items:
+        if item.nodeid in EXPAND_NIGHTLY_NODE_IDS:
+            item.add_marker(nightly)
+
+
 _REPO_CACHE = Path.cwd() / ".msmodeling_cache"
 
 

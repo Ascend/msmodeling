@@ -15,12 +15,15 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
+import pytest
+
 from tensor_cast.core.input_generator import generate_inputs
 from tensor_cast.core.model_runner import ModelRunner, ModelRunnerMetrics
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
 
 
+@pytest.mark.nightly
 def test_gmm_pass_grouped_matmul_smoke():
     """MoE compile path with grouped_matmul; guards GmmPassTestCase.test_qwen3_fp on 235B."""
     user_input = UserInputConfig(
@@ -40,6 +43,7 @@ def test_gmm_pass_grouped_matmul_smoke():
     assert "tensor_cast.grouped_matmul" in result["table_result"]
 
 
+@pytest.mark.nightly
 def test_gmm_pass_vl_moe_smoke():
     """VL MoE compile path with grouped_matmul; guards GmmPassTestCase.test_qwen3_fp on VL-30B."""
     user_input = UserInputConfig(
@@ -88,6 +92,7 @@ def test_gmm_fusion_ep_smoke():
     assert "tensor_cast.grouped_matmul" in result["table_result"]
 
 
+@pytest.mark.nightly
 def test_dfc_dispatch_ffn_combine_smoke():
     """Single DFC prefill scenario; guards DfcPassNightlyTestCase.test_dfc_dsv3_ep."""
     from tensor_cast.core.compilation_config import apply_compilation_config
@@ -123,6 +128,7 @@ def test_dfc_dispatch_ffn_combine_smoke():
         apply_compilation_config(None)
 
 
+@pytest.mark.nightly
 def test_vl_moe_tp_ep_compile_smoke():
     """VL MoE TP+EP compile; guards TestTextGenerateNightly.test_vl_moe_tp_ep_different_parallel."""
     user_input = UserInputConfig(

@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from conftest import assert_parallel_contract
+from conftest import assert_parallel_contract  # pylint: disable=no-name-in-module
 from tools.model_diagnostics import create_model_diagnostics_application
 from tools.model_diagnostics.domain import ExecutionPhase, FindingStatus, ParallelContext
 from tools.model_diagnostics.integrations import assert_diagnostics_passed
@@ -116,7 +116,7 @@ def test_glm5_capture_organize_and_compare(
 @pytest.mark.parametrize(
     "model_name",
     (
-        pytest.param("tests/assets/model_config/glm5", id="glm-5"),
+        pytest.param("tests/assets/model_config/glm5", id="glm-5", marks=pytest.mark.nightly),
         pytest.param("tests/assets/model_config/glm5_1", id="glm-5.1", marks=pytest.mark.nightly),
     ),
 )

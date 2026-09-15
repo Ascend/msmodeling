@@ -187,7 +187,20 @@ def _assert_qwen3_moe_mtp_case(case) -> None:
     assert_diagnostics_passed(result)
 
 
-@pytest.mark.parametrize("case", _ROUTINE_MTP_CASES, ids=tuple(_mtp_case_id(case) for case in _ROUTINE_MTP_CASES))
+@pytest.mark.parametrize(
+    "case",
+    (
+        pytest.param(
+            (_MODELS[0], "DISABLED"),
+            id=_mtp_case_id((_MODELS[0], "DISABLED")),
+        ),
+        pytest.param(
+            (_MODELS[0], "W8A8_DYNAMIC"),
+            id=_mtp_case_id((_MODELS[0], "W8A8_DYNAMIC")),
+            marks=pytest.mark.nightly,
+        ),
+    ),
+)
 def test_qwen3_moe_mtp_capture_organize_and_compare(case) -> None:
     """Keep representative unquantized and quantized MTP E2E in routine gates."""
 

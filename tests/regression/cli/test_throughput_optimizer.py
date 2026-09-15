@@ -251,6 +251,7 @@ class TestThroughputOptimizer(TestCase):
         throughput_matches = re.findall(throughput_pattern, output_text)
         self.assertGreaterEqual(len(throughput_matches), 1, "Throughput values not found in table")
 
+    @pytest.mark.nightly
     def test_aggregation_functionality_with_output_validation(self):
         """Test aggregation functionality with comprehensive output validation"""
         args = [

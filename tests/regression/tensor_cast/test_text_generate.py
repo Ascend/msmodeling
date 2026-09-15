@@ -498,6 +498,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
             result = asdict(result)
         self.assertIn("tensor_cast.attention_quant", result["table_result"])
 
+    @pytest.mark.nightly
     @parameterized.expand(
         [
             ["deepseek-ai/DeepSeek-V3.1"],
@@ -549,6 +550,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
             result = asdict(result)
         self.assertIn("tensor_cast.multihead_latent_attention_quant", result["table_result"])
 
+    @pytest.mark.nightly
     @parameterized.expand(
         [
             ["deepseek-ai/DeepSeek-V3.1"],
@@ -573,6 +575,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
             result = asdict(result)
         self.assertIn("tensor_cast.mlapo.default", result["table_result"])
 
+    @pytest.mark.nightly
     @parameterized.expand(
         [
             ["deepseek-ai/DeepSeek-V3.1"],
@@ -636,6 +639,8 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
             ["baidu/ERNIE-4.5-300B-A47B-PT"],
             ["XiaomiMiMo/MiMo-V2-Flash"],
             ["MiniMaxAI/MiniMax-M2"],
+            # Qwen3.5-397B (>4m30s on 2026-09-14 compile) is listed in
+            # tests/helpers/slow_ci_compile_nightly.py; remaining models stay in CI.
             ["Qwen/Qwen3.5-397B-A17B"],
             ["Qwen/Qwen3-235B-A22B"],
             ["Qwen/Qwen3-Next-80B-A3B-Instruct"],
@@ -1306,6 +1311,8 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
 
     @parameterized.expand(
         [
+            # Ling-1T (>4m30s on 2026-09-14 compile) is listed in
+            # tests/helpers/slow_ci_compile_nightly.py; Ling-flash-2.0 stays in CI.
             ["inclusionAI/Ling-1T"],
             ["inclusionAI/Ling-flash-2.0"],
         ]

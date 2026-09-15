@@ -72,11 +72,10 @@ def _run_qwen35_case(
 @pytest.mark.parametrize(
     "model_name",
     (
-        _QWEN35_DENSE,
-        _QWEN35_MOE,
-        _QWEN3_NEXT,
+        pytest.param(_QWEN35_DENSE, id="dense"),
+        pytest.param(_QWEN35_MOE, id="moe", marks=pytest.mark.nightly),
+        pytest.param(_QWEN3_NEXT, id="next", marks=pytest.mark.nightly),
     ),
-    ids=("dense", "moe", "next"),
 )
 @pytest.mark.parametrize(
     ("phase", "query_length", "context_length", "quantization"),

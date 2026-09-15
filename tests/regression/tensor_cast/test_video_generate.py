@@ -1290,6 +1290,7 @@ class TestVideoGeneration(unittest.TestCase):
 
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    @pytest.mark.nightly
     def test_video_inference_with_raw_tencent_hunyuanvideo15_t2v_selector(self):
         temp_dir = tempfile.mkdtemp(dir=os.path.realpath(os.getcwd()))
         snapshot_root = os.path.join(temp_dir, "snapshot")

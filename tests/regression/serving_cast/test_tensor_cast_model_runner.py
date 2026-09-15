@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
+import pytest
 from serving_cast import stime
 from serving_cast.config import Config, ParallelConfig
 from serving_cast.model_runner import (
@@ -1253,6 +1254,7 @@ class TestModelRunnerIntegration(unittest.TestCase):
         runner.shutdown()
 
 
+@pytest.mark.nightly
 class TestModelRunnerWithInterpolation(unittest.TestCase):
     """Tests for ModelRunner with interpolation enabled."""
 

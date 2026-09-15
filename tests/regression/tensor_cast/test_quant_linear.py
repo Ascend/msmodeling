@@ -251,6 +251,8 @@ class TestQuantLinear(QuantLinearTestMixin, unittest.TestCase):
         [
             ["Qwen/Qwen3-32B", True, False],
             ["Qwen/Qwen3-235B-A22B", True, True],
+            # GLM-4.5 (>4m30s on 2026-09-14 compile) is listed in
+            # tests/helpers/slow_ci_compile_nightly.py; remaining shapes stay in CI.
             ["zai-org/GLM-4.5", True, False],
             ["Qwen/Qwen3-32B", False, True],
         ]

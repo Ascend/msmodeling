@@ -298,6 +298,7 @@ class ParallelLinearTestCase(unittest.TestCase):
         result = runtime.table_averages()
         self._validate_comm_result(result, runtime, parallel_config)
 
+    @pytest.mark.nightly
     @parameterized.expand(
         [
             ["deepseek-ai/DeepSeek-V3.1", (16, 4, 2, 8, 16)],

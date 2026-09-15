@@ -120,6 +120,7 @@ def test_deepseek_v4_mtp_capture_and_compare() -> None:
     assert all(finding.status is FindingStatus.PASS for finding in mtp_findings)
 
 
+@pytest.mark.nightly
 def test_deepseek_v4_compressed_attention_paths_capture_and_compare() -> None:
     profile = DiagnosticsRunProfile(
         schema_version="1",
