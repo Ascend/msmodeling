@@ -1,0 +1,108 @@
+# GLM-4V dense text decoder fragment.
+fragment_id: glm4v_dense_decoder_v1
+fragment_kind: model_decoder
+stages:
+  - id: attention_qkv
+    modules:
+      - name: q_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: k_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+      - name: v_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+    runtime:
+      # Match the complete input RMSNorm sequence, not one of its dtype casts.
+      boundary_operators: [rms_norm]
+      ignored_operators:
+        - _to_copy
+        - pow
+        - mean
+        - add
+        - rsqrt
+        - mul
+        - view
+        - t
+        - transpose
+        - index
+        - index_select
+        - unsqueeze
+        - expand
+        - slice
+        - select
+        - split_with_sizes
+        - alias
+        - copy_
+        - neg
+        - cat
+        - stack
+        - reshape_and_cache
+        - apply_rope
+        - clone
+        - _unsafe_view
+        - dynamic_quantize_symmetric
+  - id: attention
+    modules:
+      - name: attention
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: o_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [attention]
+      ignored_operators:
+        - view
+        - t
+        - transpose
+        - alias
+        - copy_
+        - slice
+        - select
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_reduce
+        - add
+        - _unsafe_view
+        - _to_copy
+        - pow
+        - mean
+        - rsqrt
+        - mul
+  - id: dense_ffn
+    modules:
+      - name: gate_up_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, 2 * Ftp]", dtype: OUT}
+      - name: silu
+        tensors:
+          OUTPUT[0]: {shape: "[B, Q, Ftp]", dtype: ACT}
+      - name: down_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      # Match the complete pre-FFN RMSNorm sequence, not one of its dtype casts.
+      boundary_operators: [rms_norm]
+      ignored_operators:
+        - _to_copy
+        - pow
+        - mean
+        - add
+        - rsqrt
+        - mul
+        - view
+        - split
+        - split_with_sizes
+        - slice
+        - select
+        - t
+        - _unsafe_view
+        - alias
+        - copy_
+        - dynamic_quantize_symmetric
+        - quantize
+        - rms_norm
+        - device_put
+        - all_reduce

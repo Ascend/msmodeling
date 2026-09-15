@@ -1,0 +1,216 @@
+# GLM-4V Dense and MoE share the same Hugging Face vision backbone:
+# fused QKV attention, a gated SiLU MLP, 24 repeated blocks, followed by
+# post-layer normalization, a 2x2 Conv2d downsample and a gated merger.
+fragment_id: glm4v_vision_encoder_v1
+fragment_kind: vision_encoder
+
+stages:
+  - id: vision_attention_qkv
+    modules:
+      - name: vision_qkv_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, 3 * VH]", dtype: ACT}
+    runtime:
+      # The decomposed RMSNorm immediately before fused QKV starts at pow.
+      boundary_operators: [pow]
+      ignored_operators:
+        - pow
+        - mean
+        - add
+        - rsqrt
+        - mul
+        - _to_copy
+        - t
+        - view
+        - permute
+        - unbind
+        - unsqueeze
+        - slice
+        - neg
+        - cat
+        - transpose
+        - sub
+        - split_with_sizes
+
+  - id: vision_attention
+    modules:
+      - name: vision_attention
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [attention]
+      ignored_operators:
+        - cat
+        - view
+        - t
+        - add
+        - _to_copy
+
+  - id: vision_o_projection
+    modules:
+      - name: vision_o_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [mm]
+      ignored_operators:
+        - add
+        - _to_copy
+        - pow
+        - mean
+        - rsqrt
+        - mul
+        - t
+
+  - id: vision_mlp_gate
+    modules:
+      # Glm4VisionMlp uses config.out_hidden_size (VOH), not the merger's
+      # config.intermediate_size (VF), as its per-block intermediate width.
+      - name: vision_mlp_gate_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VOH]", dtype: ACT}
+    runtime:
+      boundary_operators: [mm]
+      ignored_operators: [t]
+
+  - id: vision_mlp_activation
+    modules:
+      - name: silu
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VOH]", dtype: ACT}
+    runtime:
+      boundary_operators: [silu]
+      ignored_operators: [t]
+
+  - id: vision_mlp_up
+    modules:
+      - name: vision_mlp_up_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VOH]", dtype: ACT}
+    runtime:
+      boundary_operators: [mm]
+
+  - id: vision_mlp_multiply
+    modules:
+      - name: mul
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VOH]", dtype: ACT}
+    runtime:
+      boundary_operators: [mul]
+      ignored_operators: [t]
+
+  - id: vision_mlp_down
+    modules:
+      - name: vision_mlp_down_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [mm]
+      ignored_operators:
+        - pow
+        - mean
+        - add
+        - rsqrt
+        - _to_copy
+        - t
+        - mul
+        - view
+        - permute
+
+  - id: vision_post_layernorm
+    modules:
+      - name: vision_post_block_normalize
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: float32}
+      - name: vision_post_block_layernorm
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [pow]
+      ignored_operators: [pow, mean, add, rsqrt, _to_copy, view, permute]
+
+  - id: vision_downsample
+    modules:
+      - name: vision_downsample
+        tensors:
+          INPUT[0]: {shape: "[VProjTok, VH, Vm, Vm]", dtype: ACT}
+          INPUT[1]: {shape: "[VOH, VH, Vm, Vm]", dtype: WEIGHT}
+          INPUT[2]: {shape: "[VOH]", dtype: WEIGHT}
+          OUTPUT[0]: {shape: "[VProjTok, VOH, 1, 1]", dtype: ACT}
+    runtime:
+      boundary_operators: [convolution]
+      ignored_operators:
+        - convolution_backward
+        - view
+        - t
+
+  - id: vision_merger_projection
+    modules:
+      - name: vision_merger_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
+      - name: native_layer_norm
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
+      - name: gelu
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
+    runtime:
+      boundary_operators: [mm]
+      ignored_operators:
+        - t
+
+  - id: vision_merger_mlp
+    modules:
+      - name: vision_merger_gate_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VF]", dtype: ACT}
+      - name: silu
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VF]", dtype: ACT}
+      - name: vision_merger_up_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VF]", dtype: ACT}
+      - name: mul
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VF]", dtype: ACT}
+      - name: vision_merger_down_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
+    runtime:
+      boundary_operators: [mm]
+      ignored_operators:
+        - t
+        - view
+        - prod
+        - div
+        - floor_divide
+        - split_with_sizes
+        - cat
+        - eq
+        - sum
+        - empty_like
+        - detach
+        - unsqueeze
+        - expand
+        - slice
+        - select
+        - index
+        - index_select
+        - _to_copy
+
+stage_groups:
+  block:
+    - vision_attention_qkv
+    - vision_attention
+    - vision_o_projection
+    - vision_mlp_gate
+    - vision_mlp_activation
+    - vision_mlp_up
+    - vision_mlp_multiply
+    - vision_mlp_down
+  final_merger:
+    - vision_post_layernorm
+    - vision_downsample
+    - vision_merger_projection
+    - vision_merger_mlp

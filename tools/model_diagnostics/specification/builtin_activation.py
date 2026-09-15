@@ -60,12 +60,16 @@ class VisionPrefillActivation:
     policy_id = "vision_prefill"
 
     def is_active(self, request: OperatorActivationRequest) -> bool:
-        image_batch = request.context.model_config.get("image_batch_size", 0)
+        image_dimensions = tuple(
+            request.context.model_config.get(key, 0)
+            for key in ("image_batch_size", "image_height", "image_width")
+        )
         return (
             request.context.phase is ExecutionPhase.PREFILL
-            and isinstance(image_batch, int)
-            and not isinstance(image_batch, bool)
-            and image_batch > 0
+            and all(
+                isinstance(value, int) and not isinstance(value, bool) and value > 0
+                for value in image_dimensions
+            )
         )
 
 

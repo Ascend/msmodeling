@@ -463,11 +463,11 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         if value is not None:
             model_config[key] = value
     root_model_type = getattr(root_config, "model_type", None)
-    # Qwen3-VL Specs intentionally match the multimodal root type. Other
-    # nested configs keep the effective text type copied above; in particular,
-    # Qwen3.5 Specs match ``qwen3_5_text`` / ``qwen3_5_moe_text`` rather than
-    # their multimodal root types.
-    if root_model_type in {"qwen3_vl", "qwen3_vl_moe"}:
+    # Qwen3-VL and GLM-4V Specs intentionally match their multimodal root
+    # types. Other nested configs keep the effective text type copied above;
+    # in particular, Qwen3.5 Specs match ``qwen3_5_text`` /
+    # ``qwen3_5_moe_text`` rather than their multimodal root types.
+    if root_model_type in {"qwen3_vl", "qwen3_vl_moe", "glm4v", "glm4v_moe"}:
         model_config["model_type"] = root_model_type
     if "index_topk" not in model_config:
         topk_limit = getattr(hf_config, "topk_limit", None)

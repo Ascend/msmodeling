@@ -212,6 +212,58 @@ def test_run_profile_can_explicitly_disable_compile(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "image_lines",
+    (
+        ("image_batch_size: 1",),
+        ("image_height: 224", "image_width: 224"),
+        ("image_batch_size: 1", "image_height: 224"),
+    ),
+)
+def test_glm4v_run_profile_rejects_partial_image_dimensions(
+    tmp_path: Path,
+    image_lines: tuple[str, ...],
+) -> None:
+    path = tmp_path / "partial_image.yaml"
+    path.write_text(
+        "\n".join(
+            (
+                "model_name: zai-org/GLM-4.1V-9B-Thinking",
+                "phase: prefill",
+                "batch_size: 1",
+                "query_length: 30",
+                *image_lines,
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SpecificationLoadError, match="must be provided together"):
+        load_diagnostics_run_profile(path)
+
+
+def test_glm4v_run_profile_accepts_complete_image_dimensions(tmp_path: Path) -> None:
+    path = tmp_path / "complete_image.yaml"
+    path.write_text(
+        "\n".join(
+            (
+                "model_name: zai-org/GLM-4.1V-9B-Thinking",
+                "phase: prefill",
+                "batch_size: 1",
+                "query_length: 30",
+                "image_batch_size: 1",
+                "image_height: 224",
+                "image_width: 224",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    profile = load_diagnostics_run_profile(path)
+
+    assert (profile.image_batch_size, profile.image_height, profile.image_width) == (1, 224, 224)
+
+
+@pytest.mark.parametrize(
     ("field", "value", "message"),
     (
         ("schema_version", "false", "schema_version"),

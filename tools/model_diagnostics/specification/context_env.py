@@ -476,6 +476,7 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
                 )
         vision_env = {
             "Vp": vision_patch,
+            "Vm": vision_merge,
             "Vt": vision_temporal,
             "Vc": vision_channels,
             "VTok": patch_tokens,
@@ -618,6 +619,7 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
             "MTPt": 1,  # Fixed: --moe-tp-size > 1 is unsupported by this module.
             "MDP": mdp,
             "Tmoe": tmoe,
+            "Tshared": tmoe,
             "Fe": fe,
             "Te": te,
         }
@@ -628,7 +630,7 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
         # other layouts/models gate on the post-transform domain Tmoe. Qwen3.5
         # MoE also gates on the full sequence under TP>1.
         model_type = config.get("model_type")
-        if (model_type in {"deepseek_v3", "glm_moe_dsa"} and ep > 1) or (
+        if (model_type in {"deepseek_v3", "glm_moe_dsa", "glm4v_moe"} and ep > 1) or (
             model_type == "qwen3_5_moe_text" and tp > 1
         ):
             moe_env["MOE_GATE_TOKENS"] = tokens

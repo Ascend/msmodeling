@@ -24,6 +24,25 @@ GLM4V_VISUAL_CONFIG = resolve_visual_config(
 )
 
 
+def _patch_mtp_position_ids(rotary_cls):
+    """Accept the 2-D text positions supplied by TensorCast's MTP wrapper."""
+    if getattr(rotary_cls, "_tensor_cast_mtp_position_ids_patched", False):
+        return
+
+    original_forward = rotary_cls.forward
+
+    def patched_forward(self, x, position_ids, *args, **kwargs):
+        # HF GLM-4V normally receives three MRoPE position streams from the
+        # multimodal model. TensorCast MTP starts from flattened text positions;
+        # for text-only speculative decode all three streams are identical.
+        if position_ids.ndim == 2:
+            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+        return original_forward(self, x, position_ids, *args, **kwargs)
+
+    rotary_cls.forward = patched_forward
+    rotary_cls._tensor_cast_mtp_position_ids_patched = True
+
+
 def patch_method_for_glm4_vl(_model):
     """
     Patch the GLM4V-MoE model to fix simulation issues in meta mode.
@@ -41,28 +60,65 @@ def patch_method_for_glm4_vl(_model):
 
     from transformers.models.glm4v_moe import Glm4vMoeModel
 
-    original_get_placeholder_mask = Glm4vMoeModel.get_placeholder_mask
+    if not getattr(Glm4vMoeModel, "_tensor_cast_placeholder_mask_patched", False):
+        original_get_placeholder_mask = Glm4vMoeModel.get_placeholder_mask
 
-    def patched_get_placeholder_mask(self, *args, **kwargs):
-        # Forcibly skip image_features
-        kwargs["image_features"] = None
-        return original_get_placeholder_mask(self, *args, **kwargs)
+        def patched_get_placeholder_mask(self, *args, **kwargs):
+            # Forcibly skip image_features
+            kwargs["image_features"] = None
+            return original_get_placeholder_mask(self, *args, **kwargs)
 
-    Glm4vMoeModel.get_placeholder_mask = patched_get_placeholder_mask
+        Glm4vMoeModel.get_placeholder_mask = patched_get_placeholder_mask
+        Glm4vMoeModel._tensor_cast_placeholder_mask_patched = True
 
     from transformers.models.glm4v_moe.modeling_glm4v_moe import (
+        Glm4vMoeTextRotaryEmbedding,
         Glm4vMoeVisionEmbeddings,
     )
 
-    original_forward = Glm4vMoeVisionEmbeddings.forward
+    _patch_mtp_position_ids(Glm4vMoeTextRotaryEmbedding)
 
-    def patched_forward(self, *args, **kwargs):
-        if len(args) > 1 and isinstance(args[1], list):
-            lengths_tensor = torch.tensor(args[1], dtype=torch.long)
-            args = (args[0], lengths_tensor) + args[2:]
-        return original_forward(self, *args, **kwargs)
+    if not getattr(Glm4vMoeVisionEmbeddings, "_tensor_cast_lengths_patched", False):
+        original_forward = Glm4vMoeVisionEmbeddings.forward
 
-    Glm4vMoeVisionEmbeddings.forward = patched_forward
+        def patched_forward(self, *args, **kwargs):
+            if len(args) > 1 and isinstance(args[1], list):
+                lengths_tensor = torch.tensor(args[1], dtype=torch.long)
+                args = (args[0], lengths_tensor) + args[2:]
+            return original_forward(self, *args, **kwargs)
+
+        Glm4vMoeVisionEmbeddings.forward = patched_forward
+        Glm4vMoeVisionEmbeddings._tensor_cast_lengths_patched = True
+
+
+def patch_method_for_glm4v_dense(_model):
+    """Patch dense GLM-4V placeholder checks that call ``item()`` in meta mode."""
+
+    from transformers.models.glm4v import Glm4vModel
+    from transformers.models.glm4v.modeling_glm4v import Glm4vTextRotaryEmbedding
+
+    _patch_mtp_position_ids(Glm4vTextRotaryEmbedding)
+
+    if not getattr(Glm4vModel, "_tensor_cast_placeholder_mask_patched", False):
+        original_get_placeholder_mask = Glm4vModel.get_placeholder_mask
+
+        def patched_get_placeholder_mask(self, *args, **kwargs):
+            kwargs["image_features"] = None
+            return original_get_placeholder_mask(self, *args, **kwargs)
+
+        Glm4vModel.get_placeholder_mask = patched_get_placeholder_mask
+        Glm4vModel._tensor_cast_placeholder_mask_patched = True
+
+
+register_model_profile(
+    ModelProfile(
+        model_type="glm4v",
+        model_family="glm4v",
+        mtp_block_module_name="Glm4vTextDecoderLayer",
+        patch_method=patch_method_for_glm4v_dense,
+        **GLM4V_VISUAL_CONFIG,
+    )
+)
 
 
 register_model_profile(
@@ -72,6 +128,7 @@ register_model_profile(
         moe_gate_returns_raw_logits=True,
         moe_num_experts_key=["text_config", "n_routed_experts"],
         model_family="glm4v",
+        mtp_block_module_name="Glm4vMoeTextDecoderLayer",
         patch_method=patch_method_for_glm4_vl,
         **GLM4V_VISUAL_CONFIG,
     )

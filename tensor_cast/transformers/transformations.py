@@ -937,6 +937,14 @@ def shard_model_by_tp(
                         tp_plan_module_path(prefix, "mlp.down_proj"): (ROWWISE_LINEAR, params),
                     }
                 )
+                if model_profile is not None and model_profile.model_family == "glm4v":
+                    # Dense GLM-4V fuses gate/up into one 2F projection. The
+                    # paired down projection is row-sharded, so gate_up_proj
+                    # must be column-sharded by the same MLP TP group.
+                    tp_plan[tp_plan_module_path(prefix, "mlp.gate_up_proj")] = (
+                        COLWISE_LINEAR,
+                        params,
+                    )
             visual_layers_path = get_visual_layers_path(self.hf_config.model_type)
             if visual_layers_path is not None and vision_tp_group.world_size > 1:
                 params = {

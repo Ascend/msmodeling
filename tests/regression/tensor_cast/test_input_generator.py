@@ -505,6 +505,24 @@ def test_resize_image_uses_local_preprocessor_config(tmp_path):
     assert (resized_height, resized_width) == (1088, 1920)
 
 
+def test_glm4v_dense_and_moe_use_the_same_glm_resize() -> None:
+    resize_kwargs = {
+        "model_id": "",
+        "image_height": 32,
+        "image_width": 32,
+        "patch_size": 14,
+        "merge_size": 2,
+        "temporal_patch_size": 2,
+    }
+
+    dense_size = resize_image(model_type="glm4v", **resize_kwargs)
+    moe_size = resize_image(model_type="glm4v_moe", **resize_kwargs)
+    qwen_size = resize_image(model_type="qwen3_vl", **resize_kwargs)
+
+    assert dense_size == moe_size
+    assert dense_size != qwen_size
+
+
 def test_read_preprocessor_config_invalid_json_returns_none(tmp_path):
     _load_preprocessor_pixel_limits.cache_clear()
     (tmp_path / "preprocessor_config.json").write_text("not valid json", encoding="utf-8")

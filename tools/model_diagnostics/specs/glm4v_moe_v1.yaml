@@ -1,0 +1,296 @@
+schema_version: "1"
+spec_id: glm4v_moe_v1
+spec_version: 1.0.2
+model_category: glm4v_moe
+matches:
+  entrypoints: [text_generate]
+  model_types: [glm4v_moe]
+
+operator_aliases:
+  aten.index.Tensor: index_select
+  lm_head_select: index_select
+  mtp_target_select: index_select
+  mtp_proposal_select: index_select
+  addmm: mm
+  shared_gate_up_projection: mm
+  shared_swiglu: swiglu
+  shared_down_projection: mm
+  vision_patch_embedding: convolution
+  vision_position_interpolation: grid_sampler_2d
+  vision_post_conv_normalize: mul
+  vision_post_conv_layernorm: mul
+  vision_post_block_normalize: mul
+  vision_post_block_layernorm: mul
+  vision_qkv_projection: mm
+  vision_attention: attention
+  vision_o_projection: mm
+  vision_mlp_gate_projection: mm
+  vision_mlp_up_projection: mm
+  vision_mlp_down_projection: mm
+  vision_downsample: convolution
+  vision_merger_projection: mm
+  vision_merger_gate_projection: mm
+  vision_merger_up_projection: mm
+  vision_merger_down_projection: mm
+
+regions:
+  input:
+    stages:
+      - id: text_embedding
+        source_options:
+          theory:
+            modules:
+              - name: embedding
+                tensors:
+                  INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[B, Q]", dtype: int64}
+                  OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
+          runtime:
+            boundary_operators: [embedding]
+            ignored_operators:
+              - view
+              - index
+              - alias
+              - slice
+              - unsqueeze
+              - expand
+              - bitwise_not
+              - where
+              - masked_fill_
+              - all_gather
+              - all_reduce
+              # Vision position/grid preparation precedes the patch
+              # convolution. Filter these framework mechanics in the
+              # embedding window instead of declaring a Runtime-only Stage.
+              - linspace
+              - detach
+              - _to_copy
+              - add
+              - clamp
+              - sub
+              - mul
+              - arange
+              - transpose
+              - clone
+              - _unsafe_view
+              - repeat
+              - cat
+              - stack
+              - lift_fresh
+              - select
+              - repeat_interleave
+              - index_select
+              - cumsum
+              - constant_pad_nd
+              - sum
+        comparisons:
+          theory-runtime:
+            strategy: boundary_equal
+            options:
+              mapping:
+                mode: explicit
+                pairs:
+                  - left_call_index: 0
+                    left_slot: {direction: output, index: 0, name: null}
+                    right_call_index: 0
+                    right_slot: {direction: output, index: 0, name: null}
+                relations: []
+
+  vision_prelude:
+    activation: vision_prefill
+    stages:
+      - id: vision_patch_embedding
+        source_options:
+          theory:
+            modules:
+              - name: vision_patch_embedding
+                tensors:
+                  INPUT[0]: {shape: "[VTok, Vc, Vt, Vp, Vp]", dtype: ACT}
+                  INPUT[1]: {shape: "[VH, Vc, Vt, Vp, Vp]", dtype: WEIGHT}
+                  INPUT[2]: {shape: "[VH]", dtype: WEIGHT}
+                  OUTPUT[0]: {shape: "[VTok, VH, 1, 1, 1]", dtype: ACT}
+          runtime:
+            boundary_operators: [convolution]
+            ignored_operators:
+              - _to_copy
+              - view
+              - arange
+              - detach
+              - embedding
+              - unsqueeze
+              - mul
+              - sum
+              - add
+              - cat
+              - clone
+              - cos
+              - sin
+              - pow
+              - mean
+              - rsqrt
+              - slice
+              - sub
+              - select
+              - index
+              - div
+              - stack
+              - cumsum
+              - ge
+              - grid_sampler_2d
+              - squeeze
+              - permute
+              - neg
+              - t
+
+      - id: vision_post_conv_layernorm
+        source_options:
+          theory:
+            modules:
+              - name: vision_post_conv_normalize
+                tensors:
+                  OUTPUT[0]: {shape: "[VTok, VH]", dtype: float32}
+              - name: vision_post_conv_layernorm
+                tensors:
+                  OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+          runtime:
+            boundary_operators: [pow]
+            ignored_operators: [pow, mean, add, rsqrt, _to_copy]
+
+      - id: vision_position_interpolation
+        source_options:
+          theory:
+            modules:
+              - name: vision_position_interpolation
+                tensors:
+                  OUTPUT[0]: {shape: "[1, VH, VTok, 1]", dtype: float32}
+          runtime:
+            # Start at the first rotary/interpolation setup op after
+            # post_conv_layernorm; grid_sampler_2d remains the only kept call.
+            boundary_operators: [unsqueeze]
+            ignored_operators:
+              - unsqueeze
+              - mul
+              - view
+              - cat
+              - cos
+              - sin
+              - slice
+              - sub
+              - select
+              - arange
+              - detach
+              - cumsum
+              - ge
+              - sum
+              - index
+              - add
+              - div
+              - stack
+              - squeeze
+              - permute
+              - _to_copy
+
+  vision_encoder:
+    activation: vision_prefill
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: glm4v_vision_block
+      count_from: model_config.vision_num_hidden_layers
+    layer_specs:
+      glm4v_vision_block:
+        include_fragment:
+          fragment: glm4v_vision_encoder_v1
+          stage_group: block
+
+  vision_merger:
+    activation: vision_prefill
+    include_fragment:
+      fragment: glm4v_vision_encoder_v1
+      stage_group: final_merger
+
+  language:
+    layer_layout_rule:
+      strategy: prefix_then_repeat
+      prefix_layer_kind: glm4v_dense_text_decoder
+      prefix_count_from: model_config.first_k_dense_replace
+      repeated_layer_kind: glm4v_moe_text_decoder
+      count_from: model_config.effective_num_hidden_layers
+    layer_specs:
+      glm4v_dense_text_decoder:
+        include_fragment: qwen3_dense_decoder_v1
+        runtime_options:
+          attention_qkv:
+            boundary_operators:
+              - rms_norm
+              - rms_norm_dynamic_quant_symmetric
+              - rms_norm_quant
+            ignored_operators:
+              - rms_norm
+              - rms_norm_dynamic_quant_symmetric
+              - rms_norm_quant
+              - view
+              - index
+              - reshape_and_cache
+              - split_with_sizes
+              - alias
+              - copy_
+              - slice
+              - select
+              - apply_rope
+              - permute
+              - dynamic_quantize_symmetric
+              - mean
+              - pow
+              - rsqrt
+              - add
+              - mul
+              - _to_copy
+              - unsqueeze
+              - neg
+              - cat
+              - clone
+      glm4v_moe_text_decoder:
+        include_fragment: glm4v_moe_decoder_v1
+
+  output:
+    stages:
+      - id: lm_head
+        source_options:
+          theory:
+            modules:
+              - name: lm_head_select
+                activation: lm_head_token_selection
+                tensors:
+                  INPUT[0]: {shape: "[B, Q, H]", dtype: ACT}
+                  INPUT[1]: {shape: "[B]", dtype: int64}
+                  OUTPUT[0]: {shape: "[B, 1, H]", dtype: ACT}
+              - name: lm_head
+                activation: non_mtp_lm_head
+                tensors:
+                  INPUT[0]: {shape: "[Rout, H]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
+          runtime:
+            boundary_operators: [rms_norm]
+            ignored_operators:
+              - rms_norm
+              - view
+              - slice
+              - alias
+              - copy_
+              - dynamic_quantize_symmetric
+              - device_put
+              - select
+              - argmax
+
+  # The MTP predictor reuses the source Glm4vMoeTextDecoderLayer. Because the
+  # last HF layer is MoE, the predictor uses the MoE decoder fragment rather
+  # than the dense first-layer fragment.
+  mtp:
+    activation: mtp_enabled
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: glm4v_moe_mtp
+      count_from: model_config.effective_num_mtp_layers
+    compose:
+      framework: mtp_framework_v1
+      predictor: glm4v_moe_decoder_v1

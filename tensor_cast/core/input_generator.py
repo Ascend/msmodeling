@@ -290,6 +290,10 @@ def resize_image(
         }
 
     resize_specs = {
+        "glm4v": (
+            "transformers.models.glm4v.image_processing_glm4v",
+            build_glm_resize_params,
+        ),
         "glm4v_moe": (
             "transformers.models.glm4v.image_processing_glm4v",
             build_glm_resize_params,

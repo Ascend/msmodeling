@@ -32,6 +32,7 @@ from tools.model_diagnostics.specification.builtin_activation import (
     Qwen35LinearGdnActivation,
     Qwen35MoeFfnActivation,
     Qwen3NextLinearAttnActivation,
+    VisionPrefillActivation,
 )
 from tools.model_diagnostics.specification.errors import SpecificationLoadError
 from tools.model_diagnostics.specification.mtp_window import parse_num_mtp_tokens
@@ -148,6 +149,34 @@ def test_non_mtp_lm_head_activation(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize(
+    ("phase", "image_config", "expected"),
+    (
+        (
+            ExecutionPhase.PREFILL,
+            {"image_batch_size": 1, "image_height": 224, "image_width": 224},
+            True,
+        ),
+        (ExecutionPhase.DECODE, {"image_batch_size": 1, "image_height": 224, "image_width": 224}, False),
+        (ExecutionPhase.PREFILL, {"image_batch_size": 1}, False),
+        (ExecutionPhase.PREFILL, {"image_batch_size": 1, "image_height": 224}, False),
+    ),
+)
+def test_vision_prefill_requires_complete_image_dimensions(
+    phase: ExecutionPhase,
+    image_config: dict[str, object],
+    expected: bool,
+) -> None:
+    request = _request(
+        phase=phase,
+        query_length=30,
+        num_mtp_tokens=0,
+        model_config=image_config,
+    )
+
+    assert VisionPrefillActivation().is_active(request) is expected
 
 
 @pytest.mark.parametrize(("index_topk", "expected"), ((None, False), (2048, True)))

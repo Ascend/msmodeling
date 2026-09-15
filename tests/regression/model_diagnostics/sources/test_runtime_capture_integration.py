@@ -188,14 +188,16 @@ def test_run_context_uses_resolved_runtime_dtype_when_hf_declares_bf16(quantizat
         ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_moe_text"),
         ("qwen3_vl", "qwen3_vl_text", "qwen3_vl"),
         ("qwen3_vl_moe", "qwen3_vl_moe_text", "qwen3_vl_moe"),
+        ("glm4v", "glm4v_text", "glm4v"),
+        ("glm4v_moe", "glm4v_moe_text", "glm4v_moe"),
     ),
 )
-def test_run_context_selects_qwen_spec_matching_model_type(
+def test_run_context_selects_multimodal_spec_matching_model_type(
     root_model_type: str,
     text_model_type: str,
     expected_model_type: str,
 ) -> None:
-    """Use Qwen3-VL root types without overriding Qwen3.5 text types."""
+    """Use VL root types without overriding Qwen3.5 text types."""
     from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load
     from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
 

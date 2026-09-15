@@ -1,0 +1,219 @@
+# GLM-4V MoE text decoder fragment.
+# GLM-4.5V keeps a dense FFN for the first `first_k_dense_replace` layers and
+# uses this MoE fragment for later layers.
+fragment_id: glm4v_moe_decoder_v1
+fragment_kind: model_decoder
+stages:
+  - id: attention_qkv
+    modules:
+      - name: q_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: k_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+      - name: v_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+      ignored_operators:
+        - rms_norm
+        - rms_norm_dynamic_quant_symmetric
+        - rms_norm_quant
+        - view
+        - index
+        - reshape_and_cache
+        - split_with_sizes
+        - alias
+        - copy_
+        - slice
+        - select
+        - apply_rope
+        - permute
+        - dynamic_quantize_symmetric
+        - mean
+        - pow
+        - rsqrt
+        - add
+        - mul
+        - _to_copy
+        - unsqueeze
+        - neg
+        - cat
+        - clone
+    comparisons:
+      theory-runtime:
+        strategy: concat_shape
+  - id: attention
+    modules:
+      - name: attention
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: o_projection
+        tensors:
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [attention]
+      ignored_operators:
+        - view
+        - index
+        - reshape_and_cache
+        - split_with_sizes
+        - alias
+        - copy_
+        - slice
+        - select
+        - apply_rope
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_reduce
+        - add
+  - id: moe_gate
+    modules:
+      - name: moe_gate_linear
+        tensors:
+          OUTPUT[0]: {shape: "[MOE_GATE_TOKENS, E]", dtype: float32}
+      - name: moe_gating_top_k_softmax
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop]", dtype: float32}
+          OUTPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+    runtime:
+      boundary_operators:
+        - add_rms_norm2
+        - add_rms_norm_dynamic_quant2_symmetric
+        - add_rms_norm_quant2
+      ignored_operators:
+        - add_rms_norm2
+        - add_rms_norm_dynamic_quant2_symmetric
+        - add_rms_norm_quant2
+        - add
+        - view
+        - reshape
+        - alias
+        - copy_
+        - slice
+        - select
+        - constant_pad_nd
+        - device_put
+        - rms_norm
+        - to
+        - _to_copy
+        - convert_element_type
+        - sum
+        - div
+        - all_gather
+  - id: moe_dispatch
+    modules:
+      - name: init_routing_v2
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [init_routing_v2]
+      ignored_operators:
+        - view
+        - reshape
+        - alias
+        - copy_
+        - cat
+        - split
+        - split_with_sizes
+        - slice
+        - select
+        - pad
+        - permute
+        - transpose
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_to_all
+  - id: moe_experts
+    modules:
+      - name: grouped_matmul_swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[Te, Fe]", dtype: OUT}
+      - name: grouped_matmul
+        tensors:
+          OUTPUT[0]: {shape: "[Te, H]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - grouped_matmul_swiglu
+        - grouped_matmul_quant_swiglu
+        - grouped_matmul_quant_int4_swiglu
+        - grouped_matmul_fp8_swiglu
+        - grouped_matmul_mxfp4_swiglu
+      ignored_operators:
+        - view
+        - reshape
+        - alias
+        - copy_
+        - cat
+        - split
+        - split_with_sizes
+        - slice
+        - select
+        - pad
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_to_all
+  - id: moe_combine
+    modules:
+      - name: unpermute_tokens
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: mul
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: sum
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [unpermute_tokens]
+      ignored_operators:
+        - view
+        - reshape
+        - alias
+        - copy_
+        - unsqueeze
+        - squeeze
+        - slice
+        - select
+        - to
+        - _to_copy
+        - all_to_all
+        - all_gather
+        - add
+        - rms_norm
+        - device_put
+  - id: shared_expert
+    modules:
+      # HF applies shared_experts to every pre-routing residual token. Tshared
+      # is that full local token domain; it is not the top-k-expanded routed
+      # domain Tmoe*Ktop (or the EP-local expert domain Te).
+      - name: shared_gate_up_projection
+        tensors:
+          OUTPUT[0]: {shape: "[Tshared, 2 * Fshared]", dtype: OUT}
+      - name: shared_swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[Tshared, Fshared]", dtype: ACT}
+      - name: shared_down_projection
+        tensors:
+          OUTPUT[0]: {shape: "[Tshared, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [mm]
+      ignored_operators:
+        - view
+        - reshape
+        - alias
+        - copy_
+        - split_with_sizes
+        - slice
+        - select
+        - add
+        - rms_norm
+        - device_put
+        - dynamic_quantize_symmetric
+        - quantize
+        - all_gather
