@@ -13,7 +13,7 @@ from cli.registry.modules import get_spec
 # ── Module metadata ─────────────────────────────────────────────
 
 MODULE_ID = "text_generate"
-VERSION = "2.9.13"
+VERSION = "2.9.14"
 TITLE = I18nText("文本生成", "Text Generation")
 RUNNER = "ModelRunner"
 
@@ -620,7 +620,11 @@ UI: dict[str, UIFieldProps] = {
         tooltip=I18nText('性能模型类型。可以多次指定', 'Performance model type(s). Can be specified multiple times'),
         hidden=True,
         data_type='string[]',
-        choices=[{'value': 'analytic', 'label': 'Analytic'}, {'value': 'profiling', 'label': 'Profiling'}],
+        choices=[
+            {'value': 'analytic', 'label': 'Analytic'},
+            {'value': 'calibrated', 'label': 'Calibrated'},
+            {'value': 'profiling', 'label': 'Profiling'},
+        ],
         default=['analytic'],
         control='multi-select',
     ),
@@ -640,6 +644,8 @@ UI: dict[str, UIFieldProps] = {
         default=False,
         control='switch',
     ),
+    "analytic-calibration-profile": UIFieldProps(hidden=True),
+    "analytic-calibration-stack": UIFieldProps(hidden=True),
     "remote-source": UIFieldProps(
         label=I18nText('模型远程来源', 'Model Remote Source'),
         tooltip=I18nText('模型加载的远程来源。', 'Remote source for model loading.'),

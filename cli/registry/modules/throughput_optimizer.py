@@ -177,10 +177,11 @@ WORD_EMBEDDING_TP = Param(
 PERFORMANCE_MODEL = Param(
     name="performance-model",
     data_type="string",
-    default="analytic",
-    choices=["analytic", "profiling"],
+    default=None,
+    choices=["analytic", "calibrated", "profiling"],
+    cli_action="append",
     group="Performance Model Options",
-    cli_metavar="{analytic,profiling}",
+    cli_metavar="{analytic,calibrated,profiling}",
     cli_help="Performance model type.",
 )
 
@@ -454,6 +455,8 @@ SPEC = ModuleSpec(
         # Performance Model Options
         PERFORMANCE_MODEL,
         S.PROFILING_DATABASE.override(cli_help="Profiling CSV database directory for 'profiling' mode."),
+        S.ANALYTIC_CALIBRATION_PROFILE,
+        S.ANALYTIC_CALIBRATION_STACK,
         # Debug Options
         S.CHROME_TRACE,
         # Service Options

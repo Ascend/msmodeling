@@ -225,11 +225,11 @@ PERFORMANCE_MODEL = Param(
     name="performance-model",
     data_type="string",
     default=None,
-    choices=["analytic", "profiling"],
+    choices=["analytic", "calibrated", "profiling"],
     cli_action="append",
     group="Performance Model",
-    cli_metavar="{analytic,profiling}",
-    cli_help="Performance model type(s). Repeat the option to select more than one. 'analytic': Roofline model. 'profiling': empirical model (requires --profiling-database-path).",
+    cli_metavar="{analytic,calibrated,profiling}",
+    cli_help="Performance model type(s). Repeat the option to select more than one. 'analytic': raw roofline model. 'calibrated': analytic model calibrated by --analytic-calibration-profile. 'profiling': empirical model (requires --profiling-database-path).",
 )
 
 PROFILING_DATABASE = Param(
@@ -250,6 +250,24 @@ DISABLE_PROFILING_INTERPOLATION = Param(
     group="Performance Model",
     cli_aliases=("no-profiling-interpolation",),
     cli_help="Use exact and partial profiling matches only with --performance-model profiling.",
+)
+
+ANALYTIC_CALIBRATION_PROFILE = Param(
+    name="analytic-calibration-profile",
+    data_type="string",
+    default=None,
+    group="Analytic Calibration",
+    cli_metavar="<FILE>",
+    cli_help="SQLite profile that calibrates analytic latency without profiling OP mapping.",
+)
+
+ANALYTIC_CALIBRATION_STACK = Param(
+    name="analytic-calibration-stack",
+    data_type="string",
+    default=None,
+    group="Analytic Calibration",
+    cli_metavar="<STACK>",
+    cli_help="Actual software stack for a multi-stack analytic profile; a single-stack profile auto-selects.",
 )
 
 # ── Other shared parameters ─────────────────────────────────────────

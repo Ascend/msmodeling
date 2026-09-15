@@ -82,6 +82,8 @@ def test_text_generate_help_hides_legacy_parallel_flags() -> None:
     assert "--no-repetition" in help_text
     assert "--disable-repetition" not in help_text
     assert "--model-id" in help_text
+    assert "--analytic-calibration-profile" in help_text
+    assert "--analytic-calibration-stack" in help_text
     assert "--model_id" not in help_text
     assert "-v" in help_text
     assert "-V" in help_text
@@ -104,6 +106,47 @@ def test_text_generate_accepts_model_id_option(
     )
     assert ns.model_id == "Qwen/Qwen3-32B"
     assert "deprecated" not in capsys.readouterr().err
+
+
+def test_text_generate_parses_analytic_calibration_options() -> None:
+    ns = _capture_text_generate_args(
+        [
+            "text_generate",
+            "Qwen/Qwen3-32B",
+            "--num-queries",
+            "1",
+            "--query-length",
+            "8",
+            "--analytic-calibration-profile",
+            "profile.sqlite",
+            "--performance-model",
+            "calibrated",
+            "--analytic-calibration-stack",
+            "cann8.5",
+        ]
+    )
+
+    assert ns.analytic_calibration_profile == "profile.sqlite"
+    assert ns.analytic_calibration_stack == "cann8.5"
+
+
+def test_text_generate_requires_profile_for_calibrated_model() -> None:
+    with pytest.raises(SystemExit):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "text_generate",
+                "Qwen/Qwen3-32B",
+                "--num-queries",
+                "1",
+                "--query-length",
+                "8",
+                "--performance-model",
+                "calibrated",
+            ],
+        ):
+            text_generate.arg_parse()
 
 
 def test_text_generate_tp_size_parses_without_deprecation(

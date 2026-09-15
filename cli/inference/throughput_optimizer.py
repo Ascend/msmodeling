@@ -74,8 +74,12 @@ def arg_parse():
 
         return normalized[0], normalized
 
-    if args.performance_model == "profiling" and not args.profiling_database_path:
+    performance_models = args.performance_model or ["analytic"]
+    args.performance_model = performance_models
+    if "profiling" in performance_models and not args.profiling_database_path:
         parser.error("--profiling-database-path is required when using --performance-model profiling")
+    if "calibrated" in performance_models and not args.analytic_calibration_profile:
+        parser.error("--analytic-calibration-profile is required when using --performance-model calibrated")
 
     def _normalize_and_validate(values: list[int] | None, arg_name: str, num_devices: int) -> list[int] | None:
         if values is None:

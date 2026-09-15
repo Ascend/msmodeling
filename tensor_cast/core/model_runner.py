@@ -17,6 +17,8 @@ import torch
 from ..device import DeviceProfile
 from ..layers.sampler import Sampler
 from ..performance_model.analytic import AnalyticPerformanceModel
+from ..performance_model.calibrated_analytic import CalibratedAnalyticPerformanceModel
+from ..performance_model.calibration import ProfileCalibrationDataSource
 from ..performance_model.empirical import (
     EmpiricalOpRecord,
     EmpiricalPerformanceModel,
@@ -156,6 +158,8 @@ class ModelRunner:
         ``ModelRunner``'s direct path.
         """
         perf_model_types: List[str] = getattr(user_input, "performance_model", ["analytic"])
+        if isinstance(perf_model_types, str):
+            perf_model_types = [perf_model_types]
         profiling_database = getattr(user_input, "profiling_database", None)
         perf_models: List[PerformanceModel] = []
         for perf_model_type in perf_model_types:
@@ -177,7 +181,27 @@ class ModelRunner:
                     )
                 )
             elif perf_model_type == "analytic":
-                perf_models.append(AnalyticPerformanceModel(device_profile))
+                analytic_model = AnalyticPerformanceModel(device_profile)
+                perf_models.append(analytic_model)
+            elif perf_model_type == "calibrated":
+                calibration_profile = getattr(user_input, "analytic_calibration_profile", None)
+                if not calibration_profile:
+                    raise ValueError(
+                        "--analytic-calibration-profile must be specified when using --performance-model calibrated"
+                    )
+                perf_models.append(
+                    CalibratedAnalyticPerformanceModel(
+                        AnalyticPerformanceModel(device_profile),
+                        ProfileCalibrationDataSource(
+                            calibration_profile,
+                            device_name=device_profile.name,
+                            software_stack=getattr(user_input, "analytic_calibration_stack", None),
+                            device_compute_efficiency=device_profile.compute_efficiency,
+                        ),
+                    )
+                )
+            else:
+                raise ValueError(f"Unsupported performance model: {perf_model_type}")
         return perf_models
 
     def _check_peak_memory_usage_gb(
@@ -301,6 +325,24 @@ class ModelRunner:
 
         all_execution_time_s = runtime.total_execution_time_s()
         run_time_s = run_end - run_start
+
+        calibrated_result_count = 0
+        calibrated_fallback_count = 0
+        for event in runtime.event_list:
+            result = event.perf_results.get("calibrated")
+            if result is None:
+                continue
+            calibration = result.statistics.get("calibration", {})
+            if calibration.get("profile_id"):
+                calibrated_result_count += 1
+            else:
+                calibrated_fallback_count += 1
+        if "calibrated" in all_execution_time_s:
+            logger.info(
+                "Analytic calibration summary: hits=%d fallbacks=%d",
+                calibrated_result_count,
+                calibrated_fallback_count,
+            )
 
         table_result = runtime.table_averages(
             group_by_input_shapes=self.user_input.dump_input_shapes,

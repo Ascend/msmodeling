@@ -147,13 +147,17 @@ class UserInputConfig:
     image_height: Optional[int] = None
     image_width: Optional[int] = None
     performance_model: Union[str, List[str]] = "analytic"
-    """Performance model type(s): 'analytic' | 'profiling'.
+    """Performance model type(s): 'analytic' | 'calibrated' | 'profiling'.
     Can be a single string or a list of strings to run multiple models.
     """
     profiling_database: Optional[str] = None
     """Path to the performance database directory (required for 'profiling' mode)."""
     disable_profiling_interpolation: bool = False
     """Disable InterpolatingDataSource wrapper in profiling mode."""
+    analytic_calibration_profile: Optional[str] = None
+    """Version-3 SQLite profile used to calibrate the analytic performance model."""
+    analytic_calibration_stack: Optional[str] = None
+    """Actual software stack for selecting a multi-stack calibration profile; a single-stack profile auto-selects."""
 
     def __post_init__(self):
         self._normalize_model_source()
@@ -231,8 +235,16 @@ class UserInputConfig:
     def _normalize_performance_model(self):
         """Normalize performance_model to a list of model type strings."""
         pm = self.performance_model
-        if isinstance(pm, str):
+        if pm is None:
+            self.performance_model = ["analytic"]
+        elif isinstance(pm, str):
             self.performance_model = [pm]
+        supported = {"analytic", "calibrated", "profiling"}
+        invalid = [name for name in self.performance_model if name not in supported]
+        if invalid:
+            raise ValueError(f"Unsupported performance model(s): {', '.join(invalid)}")
+        if "calibrated" in self.performance_model and not self.analytic_calibration_profile:
+            raise ValueError("analytic_calibration_profile is required when using the calibrated performance model")
 
     def _validate_device(self):
         if self.device not in DeviceProfile.all_device_profiles:
@@ -336,6 +348,14 @@ class UserInputConfig:
         if "profiling" in self.performance_model:
             status = "Disabled" if self.disable_profiling_interpolation else "Enabled"
             print(f"Profiling interpolation: {status}")
+        if self.analytic_calibration_profile:
+            if "calibrated" in self.performance_model:
+                print("Analytic calibration: Enabled")
+                print(f"  profile: {self.analytic_calibration_profile}")
+            elif "analytic" in self.performance_model:
+                logger.warning(
+                    "analytic calibration profile is ignored because the calibrated performance model was not selected"
+                )
         if self.image_batch_size:
             print(f"image_batch_size: {self.image_batch_size}")
             print(f"image_height: {self.image_height}")

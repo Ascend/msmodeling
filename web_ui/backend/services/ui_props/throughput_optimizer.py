@@ -10,7 +10,7 @@ from cli.registry.modules import get_spec
 from web_ui.backend.services.json_adapter import FormConfig, export_form_json
 
 
-VERSION = "2.9.12"
+VERSION = "2.9.13"
 TITLE = I18nText("吞吐优化", "Throughput Optimizer")
 RUNNER = "ParallelRunner"
 
@@ -426,6 +426,8 @@ UI: dict[str, UIFieldProps] = {
     "word-embedding-tp": UIFieldProps(hidden=True),
     "performance-model": UIFieldProps(hidden=True),
     "profiling-database-path": UIFieldProps(hidden=True),
+    "analytic-calibration-profile": UIFieldProps(hidden=True),
+    "analytic-calibration-stack": UIFieldProps(hidden=True),
     "chrome-trace-file": UIFieldProps(
         label=I18nText('Chrome trace 导出', 'Chrome Trace Export'),
         tooltip=I18nText(

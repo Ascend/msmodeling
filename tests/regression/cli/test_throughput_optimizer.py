@@ -131,7 +131,27 @@ class TestThroughputOptimizer(TestCase):
         with patch.object(sys, "argv", argv):
             args = throughput_optimizer_module.arg_parse()
 
-        self.assertEqual(args.performance_model, "analytic")
+        self.assertEqual(args.performance_model, ["analytic"])
+
+    def test_arg_parse_accepts_analytic_calibration_options(self):
+        from cli.inference import throughput_optimizer as throughput_optimizer_module
+
+        argv = [
+            "throughput_optimizer",
+            "--input-length=1",
+            "--output-length=1",
+            "--analytic-calibration-profile=profile.sqlite",
+            "--analytic-calibration-stack=cann8.5",
+            "--performance-model=calibrated",
+            "Qwen/Qwen3-32B",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            args = throughput_optimizer_module.arg_parse()
+
+        self.assertEqual(args.analytic_calibration_profile, "profile.sqlite")
+        self.assertEqual(args.analytic_calibration_stack, "cann8.5")
+        self.assertEqual(args.performance_model, ["calibrated"])
 
     def test_arg_parse_profiling_without_database_errors(self):
         argv = [
@@ -146,8 +166,7 @@ class TestThroughputOptimizer(TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("--profiling-database", result.stderr)
 
-    def test_arg_parse_performance_model_is_string_not_list(self):
-        """--performance-model should produce a single string, not a list."""
+    def test_arg_parse_performance_model_is_list(self):
         from cli.inference import throughput_optimizer as throughput_optimizer_module
 
         argv = [
@@ -162,11 +181,9 @@ class TestThroughputOptimizer(TestCase):
         with patch.object(sys, "argv", argv):
             args = throughput_optimizer_module.arg_parse()
 
-        self.assertIsInstance(args.performance_model, str)
-        self.assertEqual(args.performance_model, "profiling")
+        self.assertEqual(args.performance_model, ["profiling"])
 
-    def test_arg_parse_performance_model_last_wins_when_repeated(self):
-        """When --performance-model is specified twice, the last value wins (not appended)."""
+    def test_arg_parse_performance_model_appends_when_repeated(self):
         from cli.inference import throughput_optimizer as throughput_optimizer_module
 
         argv = [
@@ -182,11 +199,10 @@ class TestThroughputOptimizer(TestCase):
         with patch.object(sys, "argv", argv):
             args = throughput_optimizer_module.arg_parse()
 
-        self.assertIsInstance(args.performance_model, str)
-        self.assertEqual(args.performance_model, "profiling")
+        self.assertEqual(args.performance_model, ["analytic", "profiling"])
 
     def test_arg_parse_performance_model_rejects_invalid_choice(self):
-        """--performance-model should reject values outside analytic/profiling."""
+        """--performance-model should reject unsupported values."""
         argv = [
             "--input-length=1",
             "--output-length=1",

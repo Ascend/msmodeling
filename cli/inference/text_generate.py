@@ -14,7 +14,7 @@ from ..utils import (
 )
 
 # Supported performance model types
-SUPPORTED_PERFORMANCE_MODELS = ["analytic", "profiling"]
+SUPPORTED_PERFORMANCE_MODELS = ["analytic", "calibrated", "profiling"]
 
 
 def arg_parse(argv=None):
@@ -45,6 +45,8 @@ def arg_parse(argv=None):
             args.num_mtp_tokens = n
     if args.performance_model is None:
         args.performance_model = ["analytic"]
+    if "calibrated" in args.performance_model and not args.analytic_calibration_profile:
+        parser.error("--analytic-calibration-profile is required when using --performance-model calibrated")
     if args.export_empirical_metrics_file and "profiling" not in args.performance_model:
         parser.error("--export-empirical-metrics requires --performance-model profiling")
     if args.fusion_plugin and not args.compile:

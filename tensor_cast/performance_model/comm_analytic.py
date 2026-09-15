@@ -81,7 +81,7 @@ class CommAnalyticModel(PerformanceModel):
 
         raise ValueError(f"No suitable interconnect topology found for communication up to dimension {diff_dim}")
 
-    def _get_bandwidth_and_latency(self, rank: int, group: List[int]) -> Tuple[float, float]:
+    def _get_bandwidth_and_latency(self, rank: int, group: List[int]) -> Tuple[float, float, int]:
         topology_idx = self._get_topology_idx_for_group(group)
         topology = self.comm_grid.topologies[topology_idx]
         effective_bandwidth = topology.bandwidth_bytes_ps * topology.comm_efficiency
@@ -89,7 +89,7 @@ class CommAnalyticModel(PerformanceModel):
             group_size = len(group)
             max_group_size = math.prod(self.comm_grid.grid.shape[topology_idx:])
             effective_bandwidth *= (group_size - 1) / (max_group_size - 1)
-        return effective_bandwidth, topology.latency_s
+        return effective_bandwidth, topology.latency_s, topology_idx
 
     @override
     def process_op(self, op_invoke_info: OpInvokeInfo) -> PerformanceModel.Result:
@@ -117,7 +117,7 @@ class CommAnalyticModel(PerformanceModel):
         if num_ranks <= 1:
             return PerformanceModel.Result(execution_time_s=0.0)
 
-        bandwidth, latency = self._get_bandwidth_and_latency(rank, group)
+        bandwidth, latency, topology_tier = self._get_bandwidth_and_latency(rank, group)
 
         message_size_bytes = bytes_of_tensor(x)
 
@@ -147,6 +147,7 @@ class CommAnalyticModel(PerformanceModel):
             "algorithm": algorithm,
             "message_size_bytes": message_size_bytes,
             "group_size": num_ranks,
+            "topology_tier": topology_tier,
             "latency_s": latency,
             "bandwidth_bytes_ps": bandwidth,
             "estimated_ring_time_s": time_ring,
@@ -163,7 +164,7 @@ class CommAnalyticModel(PerformanceModel):
         if num_ranks <= 1:
             return PerformanceModel.Result(execution_time_s=0.0)
 
-        bandwidth, latency = self._get_bandwidth_and_latency(rank, group)
+        bandwidth, latency, topology_tier = self._get_bandwidth_and_latency(rank, group)
 
         # M is the size of the tensor from a single rank
         message_size_bytes = bytes_of_tensor(x)
@@ -194,6 +195,7 @@ class CommAnalyticModel(PerformanceModel):
             "algorithm": algorithm,
             "message_size_bytes": message_size_bytes,
             "group_size": num_ranks,
+            "topology_tier": topology_tier,
             "latency_s": latency,
             "bandwidth_bytes_ps": bandwidth,
             "estimated_ring_time_s": time_ring,
@@ -222,7 +224,7 @@ class CommAnalyticModel(PerformanceModel):
         if rank not in group:
             raise ValueError(f"rank {rank} is not in communication group {group}")
 
-        bandwidth, latency = self._get_bandwidth_and_latency(rank, group)
+        bandwidth, latency, topology_tier = self._get_bandwidth_and_latency(rank, group)
 
         rank_in_group = group.index(rank)
         elements_per_split = x.numel() // sum(input_split_sizes)
@@ -260,6 +262,7 @@ class CommAnalyticModel(PerformanceModel):
             "total_bytes_sent": bytes_of_elements(total_elements_sent, x.dtype),
             "total_bytes_received": bytes_of_elements(total_elements_received, x.dtype),
             "group_size": num_ranks,
+            "topology_tier": topology_tier,
             "latency_s": latency,
             "bandwidth_bytes_ps": bandwidth,
             "estimated_pairwise_time_s": time_pairwise,
@@ -276,7 +279,7 @@ class CommAnalyticModel(PerformanceModel):
         if num_ranks <= 1:
             return PerformanceModel.Result(execution_time_s=0.0)
 
-        bandwidth, latency = self._get_bandwidth_and_latency(rank, group)
+        bandwidth, latency, topology_tier = self._get_bandwidth_and_latency(rank, group)
 
         # M is the total size of the input tensor before scattering.
         message_size_bytes = bytes_of_tensor(x)
@@ -306,6 +309,7 @@ class CommAnalyticModel(PerformanceModel):
             "algorithm": algorithm,
             "message_size_bytes": message_size_bytes,
             "group_size": num_ranks,
+            "topology_tier": topology_tier,
             "latency_s": latency,
             "bandwidth_bytes_ps": bandwidth,
             "estimated_ring_time_s": time_ring,
