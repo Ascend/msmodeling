@@ -22,6 +22,7 @@ from tensor_cast.core.quantization.datatypes import (
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.layers.parallel_embedding import ParallelEmbedding
 from tensor_cast.model_config import WordEmbeddingTPMode
+from tests.helpers.model_assets import vendored_model_config_path
 
 
 class TextGenerateTestMixin:
@@ -637,13 +638,13 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
     @parameterized.expand(
         [
             ["baidu/ERNIE-4.5-300B-A47B-PT"],
-            ["XiaomiMiMo/MiMo-V2-Flash"],
+            [vendored_model_config_path("XiaomiMiMo/MiMo-V2-Flash")],
             ["MiniMaxAI/MiniMax-M2"],
             # Qwen3.5-397B (>4m30s on 2026-09-14 compile) is listed in
             # tests/helpers/slow_ci_compile_nightly.py; remaining models stay in CI.
-            ["Qwen/Qwen3.5-397B-A17B"],
+            [vendored_model_config_path("Qwen/Qwen3.5-397B-A17B")],
             ["Qwen/Qwen3-235B-A22B"],
-            ["Qwen/Qwen3-Next-80B-A3B-Instruct"],
+            [vendored_model_config_path("Qwen/Qwen3-Next-80B-A3B-Instruct")],
             ["Qwen/Qwen3-VL-30B-A3B-Instruct"],
         ]
     )
@@ -1605,7 +1606,7 @@ class TestTextGenerateNightly(TextGenerateTestMixin, unittest.TestCase):
     def test_qwen2_5_with_compile(self, quant_linear_action):
         user_input = UserInputConfig(
             device=self.device,
-            model_id="Qwen/Qwen2.5-7B",
+            model_id=vendored_model_config_path("Qwen/Qwen2.5-7B"),
             num_queries=2,
             query_len=1,
             context_length=500,
@@ -1685,9 +1686,9 @@ class TestTextGenerateNightly(TextGenerateTestMixin, unittest.TestCase):
     @parameterized.expand(
         [
             ["baidu/ERNIE-4.5-300B-A47B-PT"],
-            ["Qwen/Qwen3.5-397B-A17B"],
+            [vendored_model_config_path("Qwen/Qwen3.5-397B-A17B")],
             ["Qwen/Qwen3-235B-A22B"],
-            ["Qwen/Qwen3-Next-80B-A3B-Instruct"],
+            [vendored_model_config_path("Qwen/Qwen3-Next-80B-A3B-Instruct")],
         ]
     )
     def test_gate_returns_precomputed_topk(self, model_id):
@@ -1695,8 +1696,8 @@ class TestTextGenerateNightly(TextGenerateTestMixin, unittest.TestCase):
 
     @parameterized.expand(
         [
-            ["Qwen/Qwen3.5-397B-A17B"],
-            ["Qwen/Qwen3-Next-80B-A3B-Instruct"],
+            [vendored_model_config_path("Qwen/Qwen3.5-397B-A17B")],
+            [vendored_model_config_path("Qwen/Qwen3-Next-80B-A3B-Instruct")],
         ]
     )
     def test_single_token_prefill_vs_decode(self, model_id):

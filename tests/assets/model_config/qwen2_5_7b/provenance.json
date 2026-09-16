@@ -1,0 +1,8 @@
+{
+  "source": "huggingface",
+  "repo_id": "Qwen/Qwen2.5-7B",
+  "revision": "d149729398750b98c0af14eb82c78cfe92750796",
+  "files": [
+    "config.json"
+  ]
+}

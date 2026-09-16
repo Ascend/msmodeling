@@ -11,7 +11,7 @@
   "compilation_config": ["enable_matmul_allreduce"],
   "user_input": {
     "device": "ATLAS_800_A3_752T_128G_DIE",
-    "model_id": "Qwen/Qwen3-30B-A3B",
+    "model_id": "tests/assets/model_config/qwen3_moe_30b_a3b",
     "num_queries": 1,
     "query_len": 3200,
     "context_length": 0,

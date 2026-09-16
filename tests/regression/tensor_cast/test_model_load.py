@@ -6,6 +6,7 @@ from parameterized import parameterized
 from tensor_cast.compilation import get_backend
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.patch_torch import patch_torch
+from tests.helpers.model_assets import vendored_model_config_path
 
 from .test_common import (
     create_attn_metadata_and_kv_cache,
@@ -166,8 +167,8 @@ class ModelLoadTestCase(ModelLoadTestMixin, unittest.TestCase):
             )
             self.assertEqual(outputs.shape, (1, num_tokens, model.vocab_size))
 
-    def _run_test_qwen3_5(self, model_id, remote_source):
-        user_config = UserInputConfig(model_id=model_id, do_compile=False, remote_source=remote_source)
+    def _run_test_qwen3_5(self, model_id):
+        user_config = UserInputConfig(model_id=model_id, do_compile=False)
         model = self._get_model(user_config)
         attn_meta, kv_cache_by_layers, num_tokens = create_attn_metadata_and_kv_cache(model, model.model_config)
         inputs = torch.empty([1, num_tokens], dtype=torch.long, device="meta")
@@ -187,11 +188,11 @@ class ModelLoadTestCase(ModelLoadTestMixin, unittest.TestCase):
 class ModelLoadQwen35NightlyTestCase(ModelLoadTestMixin, unittest.TestCase):
     @parameterized.expand(
         [
-            ["Qwen/Qwen3.5-397B-A17B", "modelscope"],
+            [vendored_model_config_path("Qwen/Qwen3.5-397B-A17B")],
         ]
     )
-    def test_qwen3_5(self, model_id, remote_source):
-        ModelLoadTestCase._run_test_qwen3_5(self, model_id, remote_source)
+    def test_qwen3_5(self, model_id):
+        ModelLoadTestCase._run_test_qwen3_5(self, model_id)
 
 
 @pytest.mark.nightly

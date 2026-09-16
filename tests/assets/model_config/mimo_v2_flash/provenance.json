@@ -1,0 +1,8 @@
+{
+  "source": "huggingface",
+  "repo_id": "XiaomiMiMo/MiMo-V2-Flash",
+  "revision": "1afd314a2406c282e0956375c34a676501c78649",
+  "files": [
+    "config.json"
+  ]
+}
