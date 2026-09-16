@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from conftest import assert_parallel_contract  # pylint: disable=no-name-in-module
+from tests.helpers.model_diagnostics import assert_parallel_contract
 from tools.model_diagnostics import create_model_diagnostics_application
 from tools.model_diagnostics.domain import ExecutionPhase, FindingStatus, ParallelContext
 from tools.model_diagnostics.integrations import assert_diagnostics_passed

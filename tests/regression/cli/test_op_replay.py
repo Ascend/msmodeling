@@ -19,6 +19,7 @@ import torch
 from tools.perf_data_collection.op_replay import common
 
 OP_REPLAY_DIR = Path(__file__).resolve().parents[3] / "tools" / "perf_data_collection" / "op_replay"
+HELP_SUBPROCESS_TIMEOUT_SECONDS = 60
 if str(OP_REPLAY_DIR) not in sys.path:
     sys.path.insert(0, str(OP_REPLAY_DIR))
 
@@ -540,7 +541,9 @@ class TestOpReplayArgparse:
             [sys.executable, str(OP_REPLAY_DIR / script), "--help"],
             capture_output=True,
             text=True,
-            timeout=10,
+            # This is a hang guard, not a startup performance assertion. Importing
+            # torch can exceed 10 seconds on a heavily loaded xdist worker.
+            timeout=HELP_SUBPROCESS_TIMEOUT_SECONDS,
         )
         assert result.returncode == 0, f"--help failed for {script}: {result.stderr}"
         assert "--device" in result.stdout

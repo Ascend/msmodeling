@@ -220,6 +220,11 @@ class TestPerformanceRegression(unittest.TestCase):
         # compilation_config (if any) via apply_compilation_config below.
         apply_compilation_config([])
 
+    def tearDown(self):
+        # Do not leak case-level compilation flags to an unrelated test that
+        # xdist schedules next in the same worker process.
+        apply_compilation_config([])
+
     @classmethod
     def tearDownClass(cls):
         _print_time_summary(cls._time_results)
