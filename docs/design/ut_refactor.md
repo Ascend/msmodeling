@@ -73,7 +73,7 @@ pythonpath = ["."]
 markers = [
   "nightly: do_compile=True large model cases, only run in nightly",
   "npu: requires NPU hardware",
-  "network: requires live model Hub access (HuggingFace/ModelScope); excluded by default, run in nightly",
+  "network: requires live model Hub access (HuggingFace/ModelScope); excluded by default, run in nightly"
 ]
 addopts = "-m 'not npu and not nightly and not network'"
 testpaths = ["tests"]

@@ -338,7 +338,7 @@ input_generator 在生成 Qwen3.5 模型的输入时，在 `cache_position` tens
 
 - [Qwen3.5 模型源码](https://huggingface.co/Qwen/Qwen3.5-27B) — `modeling_qwen3_5.py`
 - Qwen3.5-27B 仿真算子覆盖度分析报告（内部文档）
-- 实测 LINEARATTENTION 实测算子记录（内部文档）
+- LINEARATTENTION 实测算子记录（内部文档）
 - 代码修改对齐说明（内部文档）
 - 视觉对比（内部文档）
 

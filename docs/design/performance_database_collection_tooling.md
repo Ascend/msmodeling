@@ -363,7 +363,7 @@ tests/tools/
     pytest tests/regression/cli/test_start_microbench.py
     pytest tests/regression/cli/test_generate_shape_grid.py
     pytest tests/regression/cli/test_shape_grid_model_configs.py
-    pytest tests/regression/cli/test_generate_comm_microbench.p
+    pytest tests/regression/cli/test_generate_comm_microbench.py
     pytest tests/regression/cli/test_validate_comm_alignment.py
     pytest tests/regression/cli/test_op_replay.py
     pytest tests/regression/cli/test_op_replay_common.py

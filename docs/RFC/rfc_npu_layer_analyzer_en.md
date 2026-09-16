@@ -19,7 +19,7 @@ The toolset consists of 5 independent scripts that form a complete data pipeline
 |------|------|------|------|
 | `trace_json_to_csv.py` | trace JSON | kernel_details CSV | Chrome Trace Event → standard CSV |
 | `npu_layer_analyzer.py` | kernel_details CSV | forward_XXX_layerN.csv | Forward segmentation + layer extraction + Stage annotation |
-| `layer_analyzer.py` | kernel_details CSV | *_layered.csv / *_layerN.csv | Global annotation + layer extraction + Stage annotation |
+| `layer_analyzer.py` | kernel_details CSV | *_layered.csv /*_layerN.csv | Global annotation + layer extraction + Stage annotation |
 | `layer_compare.py` | two layer CSVs | compare_result.xlsx | Stage-by-Stage comparison of time/operators/shapes |
 | `npu_layer_compare.py` | CSV + JSON/CSV | complete output directory | **Unified entry**, one-click full pipeline |
 
@@ -96,7 +96,7 @@ npu_layer_analyzer/
 
 The overall data flow is as follows, with `npu_layer_compare.py` chaining all steps:
 
-```
+```text
 ┌──────────────┐                ┌──────────────────────┐
 │ kernel_      │  npu_layer_    │ npu_out.xlsx         │
 │ details.csv  │  analyzer.py   │  ├── summary         │
@@ -125,6 +125,7 @@ The overall data flow is as follows, with `npu_layer_compare.py` chaining all st
 ```
 
 The two layer CSVs come from:
+
 - **File A**: `npu_layer_analyzer.py`'s `forward_XXX_layerN.csv` (NPU side, after Forward segmentation)
 - **File B**: `layer_analyzer.py`'s `*_layerN.csv` (framework side, after global annotation and extraction)
 
@@ -154,6 +155,7 @@ Layer boundary uses **Attention** as the start anchor (not RMSNorm/upsampling), 
 - **Single-Attention models**: From Attention to the first SwiGlu/MLP after it
 
 Attention recognition rules (all of the following patterns are recognized as Attention):
+
 - `attention` / `infer_attention` / `mla` / `ring_mla` / `grouped_attention`
 - `recurrent` / `attn_chunk_gated` (Recurrent models)
 - `delta_rule` / `gated_delta` (Recurrent Attention)
@@ -170,6 +172,7 @@ Each layer extraction CSV contains a `Stage` column annotating 2 stages. The sec
 | `FFN` (Dense layers) / `MOE` (MoE layers) | AddRmsNormBias → RmsNorm (inclusive) | AddRmsNormBias → MatMul → SwiGlu → MatMul → RmsNorm (Dense) or GroupedMatmul / DispatchFFNCombine / MoeGatingTopK (MoE) |
 
 Positioning logic (in `extract_substructure`):
+
 1. Layer boundary: from one Attention to just before the next Attention (single-Attention models extend to end)
 2. Find the first ATT, the first NORM (`AddRmsNormBias`, recorded as `first_norm`) and the second NORM (next layer's pre-ATT `RmsNorm`, recorded as `second_norm`) on the main stream
 3. **Attention Stage** = operators after `second_norm` (belonging to the tail of the previous layer's residual, kept continuous with the current layer) + (ATT → just before `first_norm`). `AddRmsNormBias` belongs to the second stage, not Attention.
@@ -181,13 +184,14 @@ Positioning logic (in `extract_substructure`):
 
 When RMSNorm is not fused into a single operator, the following operator sequence is recognized as one RMSNorm:
 
-```
+```text
 aten.view.default → aten.add.Tensor → prims.convert_element_type.default →
 aten.pow.Tensor_Scalar → aten.mean.dim → aten.add.Tensor →
 aten.rsqrt.default → aten.mul.Tensor → aten.mul.Tensor
 ```
 
 Recognition strategy (`mark_unfused_rmsnorm`):
+
 1. Iterate all rows, find rows with `Name` containing `rsqrt` as anchor
 2. Expand backward (up to 15 rows): if consecutive rows hit the `UNFUSED_NORM_OPS` set, extend start position
 3. Expand forward (up to 10 rows): if consecutive rows hit, extend end position
@@ -200,6 +204,7 @@ This allows `refine_sub_blocks` and `extract_substructure` to recognize them as 
 **MoE detection** (`detect_moe_in_segment`): Uses the `MOE_RE` regex (matching `moe` / `router` / `expert` / `GroupedMatmul` / `DispatchFFNCombine` / `MoeGatingTopK` etc.) to identify MoE layers. Detection checks **both `main_rows` and all rows** (`all_rows`); non-main-stream operators (e.g. `GroupedMatmul` running on another stream) are assigned to a layer by time overlap with the main-stream layer time range, so MoE layers whose expert operators are not on the main stream are still detected.
 
 **Representative layer selection** (`pick_representative_layer`):
+
 - Prioritize Dense layers containing Attention, take the top 1/3 position (avoiding boundary layers at start/end)
 - If no Dense layer with ATT, take top 1/3 of all Dense layers
 - For MoE layers, take the middle position
@@ -217,7 +222,7 @@ Filtered in `layer_compare.py`'s `split_by_stages`, ensuring pure Stage time.
 
 #### 2.4.1 npu_layer_analyzer Output
 
-```
+```text
 forward_segments/
 ├── summary.csv                        # Forward summary (one row per forward)
 ├── forward_000.csv                     # Forward 0 all operators
@@ -233,7 +238,7 @@ Filename rule: when the model has both Dense and MoE layers, both `_dense` and `
 
 #### 2.4.2 layer_analyzer Output
 
-```
+```text
 <base_stem>_layered.csv                # Global annotation (all rows + Layer/Marker/Structure/Is_Key columns)
 <base_stem>_layerN.csv                 # Dense representative layer + Stage annotation (pure Dense model, N = layer number)
 <base_stem>_layerN_dense.csv           # Dense representative layer (MoE models)
@@ -242,7 +247,7 @@ Filename rule: when the model has both Dense and MoE layers, both `_dense` and `
 
 #### 2.4.3 Unified Entry Output (npu_layer_compare.py)
 
-```
+```text
 <output_dir>/
 ├── npu_out.xlsx                # npu_layer_analyzer output (multi-sheet)
 │   ├── summary                 #   Forward segmentation summary
@@ -321,6 +326,7 @@ The `Is_Key` column marks key boundary operators (NORM / ATT / MLP) with `★` f
 | `gap` | Pure gap threshold segmentation | Decode segments without embedding anchors |
 
 Gap threshold auto-calculation strategy (`auto_gap_threshold`):
+
 1. Collect all positive gaps
 2. Sort descending, find adjacent `high/low` pair with max ratio and `high≥1000us`
 3. If max ratio ≥ 5, use `(high+low)/2` as threshold
@@ -530,7 +536,6 @@ The following are validation results using sample data from the `samples/` direc
 - [Chrome Trace Event Format Spec](https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview)
 - [torch.profiler Documentation](https://pytorch.org/docs/stable/profiler.html)
 - [openpyxl Documentation](https://openpyxl.readthedocs.io/) — xlsx generation dependency
-- Project README: [README.md](./README.md)
 
 ### Appendix B: Glossary
 

@@ -22,7 +22,7 @@
 #### 2.1.1 增加模型加载接口
 
 当前工具已支持两种模型加载方式：传入模型repo id，然后通过transformers的AutoModel自动从huggingface上拉取模型的`config.json`文件，完成模型加载；或者传入本地的模型路径，通过transformers的`AutoModel`接口中的remote code的方式，从传入路径下的`configuration.py`和`modeling.py`文件加载模型。
-而当前deepseekv32版本既没有在transformers上支持，huggingface上提供的权重文件中也没有configuration文件和modeling文件，针对这种场景，增加了新的模型加载接口。在tensor_cast中自定义实现`configuration_deepseekv32.py`和`modeling_deepseekv32.py`，再通过AutoConfig和AutoModel的register接口将模型结构和配置文件注册到`AutoConfig`和`AutoModel`中。再通过`AutoModel`，自动从huggingface上拉去模型的`config.json`文件，完成模型加载。
+而当前deepseekv32版本既没有在transformers上支持，huggingface上提供的权重文件中也没有configuration文件和modeling文件，针对这种场景，增加了新的模型加载接口。在tensor_cast中自定义实现`configuration_deepseekv32.py`和`modeling_deepseekv32.py`，再通过AutoConfig和AutoModel的register接口将模型结构和配置文件注册到`AutoConfig`和`AutoModel`中。再通过`AutoModel`，自动从huggingface上拉取模型的`config.json`文件，完成模型加载。
 
 #### 2.1.2 DeepseekV32模型结构适配
 
@@ -40,7 +40,7 @@ deepseekv32原本代码中，在q*kT得到score后，通过indexer筛选出index
 
 ##### indexer部分实现
 
-在layer层的mla中，增加indexer模块，仿照源码实现indexer计算逻辑。indexer的计算需要mla模块中的`q_a_layernorm`的输出，通过`forward`的返回值获取的化对代码改动较大，当前采用`forward_hook`的方式获取输出，后续需要评估是否需要修改，并且如果接入mlapo算子后，该值该如何获取也需要重新设计。
+在layer层的mla中，增加indexer模块，仿照源码实现indexer计算逻辑。indexer的计算需要mla模块中的`q_a_layernorm`的输出，通过`forward`的返回值获取对代码改动较大，当前采用`forward_hook`的方式获取输出，后续需要评估是否需要修改，并且如果接入mlapo算子后，该值该如何获取也需要重新设计。
 indexer部分存在cache机制，仿照kvcache，在模型输入的时候创建了一个indexer_cache。
 当前实现版本存在不足，待完善点：
 

@@ -118,14 +118,14 @@ cd msserviceprofiler
 |----------|----------|
 | 仓库根目录 | `cd experimental && pip install -e .` |
 
-#### 步骤 2：安装
+#### 步骤 3：安装
 
 ```bash
 cd experimental
 pip install -e .
 ```
 
-#### 步骤 6：验证
+#### 步骤 4：验证
 
 ```bash
 msmodeling optix --help

@@ -25,7 +25,7 @@ vllm --help
 MindIE 场景请确认 `mindieservice_daemon` 可用，或 `MIES_INSTALL_PATH` 指向的安装正确。
 
 > [!NOTE]
-> 部署栈的完整部署可参考 [VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)、[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start_motor.md)，以及 [AISBench 测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)。
+> 部署栈的完整部署可参考 [VLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)、[MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/quick_start.md)，以及 [AISBench 测评工具部署](https://gitee.com/aisbench/benchmark/blob/master/README.md)。
 
 **③ 可选：指定部署根目录**
 

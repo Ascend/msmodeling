@@ -68,7 +68,7 @@ For the complete steps, see [Recommended Practice: Environment and Deployment St
 
 **Deployment Stack Preparation**
 
-In the system environment, or in the path specified by `[deploy]`, confirm that the serving and benchmark tools can run properly. You can refer to [vLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html), [MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/v3.1.0/docs/en/user_guide/quick_start_motor.md), and [AISBench Benchmark Tool Deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md).
+In the system environment, or in the path specified by `[deploy]`, confirm that the serving and benchmark tools can run properly. You can refer to [vLLM Server](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html), [MindIE Service](https://gitcode.com/Ascend/MindIE-Motor/blob/v3.1.0/docs/en/user_guide/quick_start.md), and [AISBench Benchmark Tool Deployment](https://gitee.com/aisbench/benchmark/blob/master/README.md).
 
 ## Tool Installation
 

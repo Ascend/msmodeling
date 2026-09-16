@@ -150,7 +150,7 @@ Grid: (2, 2, 4)  → 最多 16 卡
 | dim 1 | 2 路 PCIe x16 到 CPU | 32 GB/s | 3.0 μs | 0.8 × 0.7 |
 | dim 0 | CPU 间 3 路 PCIe x16 | 24 GB/s | 4.5 μs | 0.75 × 0.7 |
 
-> PCle 链路额外乘以 0.7 折扣因子，反映协议开销。
+> PCIe 链路额外乘以 0.7 折扣因子，反映协议开销。
 
 #### 2.5.2 SERVER_ROCE_64 — RoCE + 8 卡 FullMesh
 

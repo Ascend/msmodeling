@@ -1389,11 +1389,11 @@ Runtime 观察结果反向拟合：
   YAML 结构、Theory 表达式、Source 与 Organizer；不得读取或使用 TensorCast 实现、
   Runtime Artifact、捕获算子列表、阶段调用数、Tensor 结果或 Python Spike Spec。
 - 双方分别记录输入、假设、限制和验证命令并冻结结果。冻结前不得交换具体算子、数量、
-  shape/dtype 或映射；只有双方冻结且经 c00853375 授权后才进行首次揭示和配对比较。
+  shape/dtype 或映射。
 - 揭示后的差异先分类为 Theory 缺陷、Runtime 建模缺陷、Spec/集成缺陷、不支持能力或
   证据不足；禁止仅为使 Runtime 通过而调整 Theory。
 - 并行开发必须按文件声明唯一所有者。共享领域接口和本设计如需变化，先暂停依赖工作、
-  提案并经 c00853375 确认，由单一所有者修改后再继续。
+  提案并经专员确认，由单一所有者修改后再继续。
 
 最终 builtin 仍收敛为本设计规定的一份严格类型化 YAML Spec。Python 临时数据只用于
 冻结后的交叉例证，不替代或改写独立 Theory YAML。
