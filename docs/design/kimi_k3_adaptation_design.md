@@ -35,8 +35,8 @@ K3 属于**社区远端模型**（`trust_remote_code=True`），其文本子模�
 | # | 缺口 | 影响 |
 |---|------|------|
 | 1 | `fla-core` 依赖缺失 | `modeling_kimi_linear.py` 顶部硬性 `raise ImportError`，import 阶段即失败，需 stub `fla` 到 `sys.modules` |
-| 2 | `situ` 激活算子缺失 | expert MLP 用 `SituAndMul`（`beta*tanh(g/beta)*sigmoid(g)*up`），现有 `swiglu` / `v4_clamped_swiglu` 无法识别，grouped_matmul 性能模型 act_fn 映射失败 |
-| 3 | 混合注意力路由 | 93 层中 69 层 KDA + 24 层 Gated MLA，由 `config.is_kda_layer(layer_idx)` 分支控制；KDA 层需路由到 `linear_attention` op |
+| 2 | `situ` 激活算子缺失 | expert MLP 用 `SituAndMul`（`beta*tanh(g/beta)*sigmoid(g)*up`），现有 `swiglu` / `clamped_swiglu` 无法识别，grouped_matmul 性能模型 act_fn 映射失败 |
+| 3 | 混合注意力路由 | 93 层中 69 层 KDA + 24 层 Gated MLA，由 `config.is_kda_layer(layer_idx)` 分支控制；KDA 层需路由到分解的 `linear_attn_*` 算子 |
 | 4 | Latent MoE 结构差异 | `KimiSparseMoeBlock` 在专家前后增加 `routed_expert_down_proj` → 专家 → `routed_expert_norm` → `routed_expert_up_proj` 包裹层，`patch_moe` 会丢弃这些投影 |
 | 5 | MLA Output Gate | K3 MLA 设 `mla_use_output_gate=True`，输出经 `g_proj` + sigmoid 门控乘法，`multihead_latent_attention` op 不含此路径 |
 | 6 | AttnRes 跨层残差 | `attn_res_block_size=12` 的 `_forward_attn_residual` 含 `block_residual` 跨层状态，torch.compile 追踪需 stub |
@@ -124,8 +124,7 @@ KimiDecoderLayer (93 层)
   │   ├─ prefill: chunk_kda            (并行展开)
   │   └─ decode:  fused_recurrent_kda  (逐 token 递归)
   │   ★隐藏坑1: K3 据 q 形状和 KV cache 状态自动判路径，开启 MTP 会让 query-length从 1 变 1+n，改变内部路径选择，
-  │             已由 P9 规避：_patched_kda_forward 把 forward 整体替换为单一 torch.ops.tensor_cast.linear_attention
-  │             由 TC 性能模型按 cache_position/seq_len 自行区分 prefill/decode
+  │             已由 P9 规避：_patched_kda_forward 按 cache_position/seq_len 选择分解的 chunk/recurrent 算子链
   │   ★隐藏坑2: chunk_kda="矩阵乘+状态递推"混合，仿真器可能漏掉状态递推，待精度需求明确后拆分
   │   标志位: use_qk_l2norm / use_gate / use_beta_sigmoid / safe_gate / lower_bound
   │   复用: linear_attn_chunk/recurrent_gated_delta_rule + 补 KDA 标志位
@@ -222,7 +221,7 @@ KimiDecoderLayer (93 层)
 
 | 算子类别 | 现有算子（复用） | 新增算子 | 来源参考 |
 |----------|-----------------|----------|----------|
-| 激活 | `swiglu`、`v4_clamped_swiglu` | **`situ`** | 参考 `v4_clamped_swiglu` 模式 |
+| 激活 | `swiglu`、`clamped_swiglu` | **`situ`**、`grouped_matmul_situ`、`grouped_matmul_quant_int4_situ` | 参考 `clamped_swiglu` 模式 |
 | 线性注意力 | `linear_attn_chunk_gated_delta_rule`、`linear_attn_recurrent_gated_delta_rule`、`linear_attn_fused_gdn_gating`、`linear_attn_causal_conv`、`linear_attn_gated_rmsnorm` | 无（补 KDA 标志位参数） | `qwen3_next.py` |
 | MLA | `multihead_latent_attention`、`apply_rope`、`kv_rmsnorm_rope_cache` | 无（output gate 在 patch 层处理） | `kimi_k25.py` |
 | MoE | `grouped_matmul`、`dispatch_ffn_combine`、`init_routing_v2`、`moe_gating_top_k_softmax` | 无（Latent MoE 的 down/up proj 走标准 grouped_matmul） | — |
@@ -245,7 +244,7 @@ KimiDecoderLayer (93 层)
 
 适配拆为四个层次，全部集中在 `kimi_k3.py`（约 2522 行）：
 
-1. **新算子层**：新增 `situ` 激活算子及对应性能模型，参考 `v4_clamped_swiglu` 实现模式。
+1. **新算子层**：新增 `situ` 激活算子（+ `grouped_matmul_situ` 变体）及对应性能模型，参考 `clamped_swiglu` 实现模式。
 2. **配置修补层（Phase 1，`_patch_hf_config_for_kimi_k3` + 各 `_install_*`）**：模型加载前修改 HF config 和全局 import 状态——fla-core stub、`is_torch_fx_available` 恢复、`flash_attention_2` 降级、vision config 字段桥接、专家计数字段复制、Latent MoE 投影保留、KDA TP plan、SiTU 融合链、VL 嵌套 TP、视觉 RMSNorm 融合等。
 3. **类 Monkey-Patch 层（Phase 2，`_patch_model_classes_for_kimi_k3`）**：动态导入远端模型类后注入修补方法——VL forward、视觉 backend、KDA → linear_attention 路由、MoE stub、MLA output gate、AttnRes、DynamicCache stub、SituAndMul 直连。
 4. **ModelProfile 注册层（Phase 3）**：在模块底部注册 `ModelProfile`，声明 MoE/MLA 模块名、专家计数字段、视觉路径等元数据。
@@ -267,15 +266,15 @@ KimiDecoderLayer (93 层)
 4. 通过 `sys.modules.update({...})` 注入 7 个模块，手工 wire 父子属性以支持 `from fla.ops.utils.index import X`。
 5. 幂等：`_FLA_STUB_INSTALLED` 全局 flag 守护。
 
-> **关键设计**：stub 只需提供正确 shape 推断，真实 KDA 计算由 P9 改路由到 `torch.ops.tensor_cast.linear_attention`，stub 永不执行。
+> **关键设计**：stub 只需提供正确 shape 推断，真实 KDA 计算由 P9 改路由到分解的 `torch.ops.tensor_cast.linear_attn_*` 算子，stub 永不执行。
 
 ### 4.3 复用策略
 
 | 复用来源 | 复用内容 | 复用度 |
 |----------|----------|--------|
 | Kimi K2.5 | VL forward kwargs 过滤、meta merge stub、视觉 backend、MLA RoPE patch、MoE stub、gate 路由 | ~60% |
-| Qwen3-Next | KDA → linear_attention 路由、meta tensor mask patch | 几乎照搬 |
-| DeepSeek V4 | 新激活算子实现模式（situ 参考 v4_clamped_swiglu） | 模式参考 |
+| Qwen3-Next | 分解线性注意力路由、meta tensor mask patch | 几乎照搬 |
+| DeepSeek V4 | 新激活算子实现模式（situ 参考公共 clamped_swiglu） | 模式参考 |
 
 K3 独有适配项（无现成可复用）：fla-core import stub、Latent MoE 扩展、MLA Output Gate、AttnRes 跨层残差、KimiDynamicCache stub、`situ` 激活算子、视觉 RMSNorm 融合。
 
@@ -313,7 +312,7 @@ K3 独有适配项（无现成可复用）：fla-core import stub、Latent MoE �
 | **P6** | `patched_vl_forward` | 1529–1590 | 不接受 TC kwargs；`image_grid_thw` vs `grid_thws` | 过滤 kwargs + 参数名映射 + attention_meta 注入 `_extra_forward_kwargs` | 复用 K2.5 P4 | 已验证 |
 | **P7** | `patched_merge_input_ids_with_image_features` | 1603–1659 | meta device embedding 失败 | 返回同 shape meta tensor（4 元组含 position_ids） | 复用 K2.5 P5 | 已验证 |
 | **P8** | `visual_tc_adapter` | 1689–1787 | 视觉注意力缺 `tensor_cast`/`sdpa` backend | 注册到 `VL_VISION_ATTENTION_FUNCTIONS` 三 key；meta 调 `tensor_cast.attention`，真实走 fallback | 复用 K2.5 P6 | 已验证 |
-| **P9** | `_patched_kda_forward` | 1804–1848 | fla-core 不可追踪 | 改路由到 `torch.ops.tensor_cast.linear_attention`，传 TP-local head 数（96/tp_size） | 照搬 Q3N | 已验证 |
+| **P9** | `_patched_kda_forward` | 1804–1848 | fla-core 不可追踪 | 改路由到分解的 `linear_attn_*` 算子链，传 TP-local head 数（96/tp_size） | 照搬 Q3N | 已验证 |
 | **P10** | `_patched_update_linear_attn_mask` | 1858–1900 | meta tensor `.item()` 崩溃 | meta 时跳过 | 照搬 Q3N | 已验证 |
 | **P11** | `patched_moe_forward`/`patched_moe_infer` | 1912–1934 | 动态派发不可追踪 | `zeros_like` stub | 复用 K2.5 P7 | 已验证 |
 | **P12** | `patched_gate_forward` | 1944–1971 | 非确定性 top-k | 等权重确定性路由 | 复用 K2.5 P8 | 已验证 |

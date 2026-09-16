@@ -1,10 +1,9 @@
 fragment_id: qwen3_5_linear_decoder_v1
 fragment_kind: model_decoder
 # Qwen3.5 / Qwen3-Next linear-attention decoder layer (language and MTP
-# predictor share this definition). GatedDeltaNet chain (Qwen3.5) or fused
-# linear_attention (Qwen3-Next) + FFN; activations select the model variant.
+# predictor share this definition). Both adapters emit the GatedDeltaNet
+# projection, delta-rule, and output stage chain.
 include_fragments:
   - {fragment: qwen3_5_linear_gdn_v1, activation: qwen3_5_linear_gdn}
-  - {fragment: qwen3_5_linear_attn_v1, activation: qwen3_next_linear_attn}
   - {fragment: qwen3_dense_ffn_v1, activation: qwen3_5_dense_ffn}
   - {fragment: qwen3_moe_ffn_v1, activation: qwen3_5_moe_ffn}

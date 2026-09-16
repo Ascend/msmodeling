@@ -98,7 +98,7 @@ V4 adaptation is divided into five layers:
 2. **HC Semantic Operator Layer**: 4 semantic operators for Head Compression
 3. **KV Compression Operator Layer**: compressor and scatter_nd_update_mla
 4. **Sparse Attention Operator Layer**: quant_lightning_indexer and sparse_attn_sharedkv
-5. **MoE Routing Operator Layer**: moe_gating_top_k/hash and v4_clamped_swiglu
+5. **MoE Routing Operator Layer**: moe_gating_top_k/hash and shared clamped_swiglu
 
 ### 5.2 Key Design Decisions
 
@@ -228,7 +228,7 @@ torch.ops.tensor_cast.quant_lightning_indexer(
 | `test_v4_attention_wrapper` | Different paths for ratio=0/4/128 |
 | `test_lightning_indexer` | Dynamic topk width, indexer_cache layout |
 | `test_moe_routing` | Hash routing and non-hash routing distinction |
-| `test_clamped_swiglu` | v4_clamped_swiglu vs standard SiLU behavior |
+| `test_clamped_swiglu` | Shared clamped_swiglu vs standard SiLU behavior |
 
 ### 6.2 Integration Tests
 

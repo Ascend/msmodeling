@@ -153,10 +153,9 @@ Qwen3.5 uses **W8A8_STATIC** static quantization. LA ops are decoupled from quan
 ```text
 tensor_cast/
 ├── ops/
-│   └── la.py                                ← NEW: 7 LA decomposed operator definitions
+│   └── linear_attention.py                  ← 7 decomposed linear-attention operator definitions
 ├── performance_model/
 │   └── __init__.py                          ← NEW: register_op_properties for 7 LA ops
-│                                             KEPT: old linear_attention op (qwen3_next compat)
 ├── transformers/
 │   ├── transformations.py                   ← NEW: vision_tp_group + LA TP plan + MTP lm_head TP
 │   ├── builtin_model/
@@ -327,7 +326,7 @@ The following are real HW measurements on ATLAS_800_A3_560T_128G_DIE (dual-card)
 |------|------|-----------|
 | Qwen3 simulation (existing) | Standard FlashAttention + RoPE + SwiGLU modeling | Qwen3.5 adds GatedDeltaNet and CausalConv1d on this basis |
 | Qwen3-VL simulation (existing) | Vision encoder + DeepStack + multimodal fusion | Reuse vision module Monkey Patch and TP sharding experience |
-| Qwen3Next simulation (existing) | Uses old `linear_attention` fused op | Old op retained for compatibility |
+| Qwen3-Next simulation | Uses the shared decomposed GatedDeltaNet chain | Shares operator semantics with Qwen3.5 |
 | Chunk Delta Rule reference implementation | `modeling_qwen3_5.py` official source code | Line-by-line cross-reference to ensure FLOPs and memory estimation consistency |
 
 ---

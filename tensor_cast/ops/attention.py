@@ -160,30 +160,3 @@ def _(
         sparsity: skipped KV-block ratio in [0.0, 1.0)
     """
     return torch.empty_like(query).contiguous()
-
-
-@register_tensor_cast_op("linear_attention")
-def _(
-    hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
-    cache_position: Optional[torch.Tensor],
-    num_k_heads: int,
-    num_v_heads: int,
-    head_k_dim: int,
-    head_v_dim: int,
-    conv_kernel_size: int,
-) -> torch.Tensor:
-    """
-    Fused linear attention op for Qwen3.5 GatedDeltaNet blocks.
-
-    Args:
-        hidden_states: (batch_size, seq_len, hidden_size)
-        attention_mask: optional mask tensor for left-padding cases
-        cache_position: optional cache positions, used to determine if there's previous state
-        num_k_heads: number of key heads
-        num_v_heads: number of value heads
-        head_k_dim: per-head key dimension
-        head_v_dim: per-head value dimension
-        conv_kernel_size: kernel size used by the causal depthwise conv1d
-    """
-    return torch.empty_like(hidden_states).contiguous()

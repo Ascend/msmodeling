@@ -41,6 +41,56 @@ from ..model_hub import (
 logger = logging.getLogger(__name__)
 
 
+def has_previous_linear_attention_state(cache_params, cache_position, layer_idx) -> bool:
+    """Return whether a linear-attention cache already contains recurrent state."""
+    if cache_position is not None and hasattr(cache_position, "numel") and cache_position.numel() > 0:
+        has_previous_state = getattr(cache_position, "tensor_cast_has_previous_state", None)
+        if has_previous_state is not None:
+            return bool(has_previous_state)
+        is_meta = hasattr(cache_position, "is_meta") and cache_position.is_meta
+        if not is_meta:
+            try:
+                return cache_position[0].item() > 0
+            except RuntimeError:
+                return False
+
+    if cache_params is None or torch.compiler.is_compiling():
+        return False
+    try:
+        return bool(cache_params.has_previous_state(layer_idx))
+    except TypeError:
+        try:
+            return bool(cache_params.has_previous_state())
+        except (AttributeError, RuntimeError):
+            return False
+    except (AttributeError, RuntimeError):
+        return False
+
+
+def is_recurrent_linear_attention_decode_batch(seq_len: int, cache_position) -> bool:
+    """Identify single-token (or MTP) decode batches that use the recurrent rule."""
+    if seq_len == 1:
+        return True
+
+    query_lens = getattr(cache_position, "tensor_cast_query_lens", None)
+    is_decode = getattr(cache_position, "tensor_cast_is_decode", None)
+    if query_lens is None or is_decode is None:
+        logger.debug(
+            "Missing metadata for recurrent decode detection: query_lens=%s, is_decode=%s. Falling back to chunk path.",
+            query_lens,
+            is_decode,
+        )
+        return False
+    if sum(query_lens) != seq_len or not all(is_decode):
+        return False
+
+    num_mtp_tokens = int(getattr(cache_position, "tensor_cast_num_mtp_tokens", 0) or 0)
+    recurrent_query_lens = {1}
+    if num_mtp_tokens > 0:
+        recurrent_query_lens.add(1 + num_mtp_tokens)
+    return all(query_len in recurrent_query_lens for query_len in query_lens)
+
+
 def _modelscope_snapshot_config_only(model_id: str) -> str:
     """
     Materialize a local Hub directory with config and code files only (no weight tensors).

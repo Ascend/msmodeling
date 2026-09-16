@@ -18,7 +18,7 @@ operator_aliases:
 # (GatedDeltaNet) layers use the linear fragments. Stage-level activation
 # selects the per-model variant inside one Spec:
 #   qwen3_5_dense_ffn / qwen3_5_moe_ffn       -> Dense FFN vs MoE + shared FFN
-#   qwen3_5_linear_gdn / qwen3_next_linear_attn -> GDN stage chain vs fused op
+#   qwen3_5_linear_gdn                           -> shared GDN stage chain
 # The per-layer kind sequence comes from model_config.layer_types
 # (strategy: sequence).
 regions:

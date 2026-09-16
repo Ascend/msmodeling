@@ -12,7 +12,7 @@ All patches are gated by ``model_type == "kimi_k3"`` and isolated to this
 file. The adaptation follows the design document at
 ``docs/design/kimi_k3_adaptation_design.md`` and reuses patterns from
 ``kimi_k25.py`` (VL framework, MLA RoPE patch, MoE stub) and
-``qwen3_next.py`` (KDA → linear_attention routing, meta mask patch).
+``qwen3_next.py`` (decomposed linear-attention routing, meta mask patch).
 
 Patch numbering follows the design doc  scheme:
   config-level:  ``_patch_hf_config_for_kimi_k3``
@@ -64,7 +64,7 @@ _K3_FLA_STUB_NAMES = (
 # ``modeling_kimi_linear.py`` L46-53 hard-imports fla-core and raises
 #       ``ImportError`` if missing. We inject stub modules into ``sys.modules``
 #       so the import succeeds; the actual KDA computation is rerouted by the patch
-#       to ``torch.ops.tensor_cast.linear_attention``.
+#       to decomposed ``torch.ops.tensor_cast.linear_attn_*`` operators.
 # The stubs only need to provide correct shape inference — real computation
 # never runs because P9 replaces ``KimiDeltaAttention.forward``.
 
@@ -117,7 +117,8 @@ def _chunk_kda_stub(q, k, v, g, beta, **kwargs):
     """Stub for ``fla.ops.kda.chunk_kda`` / ``fused_recurrent_kda``.
 
     Returns ``(output, recurrent_state)`` with output shape derived from ``v``.
-    Real computation is rerouted by the patch to ``tensor_cast.linear_attention``.
+    Real computation is rerouted by the patch to decomposed
+    ``tensor_cast.linear_attn_*`` operators.
     """
     if v.dim() == 4:
         b, s, h, dv = v.shape
@@ -174,7 +175,8 @@ def _install_fla_stub() -> None:
     ``fla-core`` (package present, submodules broken by missing ``triton``)
     falls through to stub injection so K3's ``modeling_kimi_linear`` can
     finish loading. Real KDA computation is rerouted by the patch to
-    ``torch.ops.tensor_cast.linear_attention``; the stubs are never executed.
+    decomposed ``torch.ops.tensor_cast.linear_attn_*`` operators; the stubs are
+    never executed.
     """
     global _FLA_STUB_INSTALLED
     if _FLA_STUB_INSTALLED:
@@ -512,7 +514,7 @@ def _install_copy_layer_attr_patch() -> None:
 #           full 96-head weights), inflating model weights by ~12 GB
 #           (TP=16: 69 layers x 2 projections x 88M params/layer).
 #        2. _patched_kda_forward passes the full 96 heads, so the performance
-#           model computes FLOPs for 96 heads, making linear_attention
+#           model computes FLOPs for 96 heads, making KDA
 #           account for 71.6% of total time (5.515s / 7.703s).
 #        3. f_b_proj/b_proj unsharded makes g_delta/beta use the full
 #           96 heads, inconsistent with NPU profiling's TP-local 12 heads
@@ -2408,9 +2410,8 @@ def _patch_model_classes_for_kimi_k3(config, model_id) -> bool:
     # KimiDeltaAttention.forward → decomposed linear_attn_* sub-ops
     # ----------------------------------------------------------------
     # KDA uses fla-core's chunk_kda / fused_recurrent_kda which are
-    #      untraceable and stubbed by the patch. Previously the entire forward was
-    #      routed to a single ``tensor_cast.linear_attention`` op (monolithic
-    #      fusion). Now decomposed into granular sub-ops to match NPU
+    #      untraceable and stubbed by the patch. The forward is decomposed into
+    #      granular sub-ops to match NPU
     #      profiling granularity and allow per-GEMM quantization visibility.
     #
     # Decomposition (8 GEMMs → aten.mm, 3 sub-ops for conv/delta/norm):

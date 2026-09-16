@@ -31,7 +31,6 @@ from tools.model_diagnostics.specification.builtin_activation import (
     Qwen35DenseFfnActivation,
     Qwen35LinearGdnActivation,
     Qwen35MoeFfnActivation,
-    Qwen3NextLinearAttnActivation,
     VisionPrefillActivation,
 )
 from tools.model_diagnostics.specification.errors import SpecificationLoadError
@@ -239,17 +238,16 @@ def test_qwen35_ffn_stage_activation(
 
 
 @pytest.mark.parametrize(
-    ("model_type", "gdn", "fused_linear"),
+    ("model_type", "gdn"),
     (
-        ("qwen3_5_text", True, False),
-        ("qwen3_5_moe_text", True, False),
-        ("qwen3_next", False, True),
+        ("qwen3_5_text", True),
+        ("qwen3_5_moe_text", True),
+        ("qwen3_next", True),
     ),
 )
 def test_qwen35_linear_stage_activation(
     model_type: str,
     gdn: bool,
-    fused_linear: bool,
 ) -> None:
     request = _request(
         phase=ExecutionPhase.PREFILL,
@@ -259,7 +257,6 @@ def test_qwen35_linear_stage_activation(
     )
 
     assert Qwen35LinearGdnActivation().is_active(request) is gdn
-    assert Qwen3NextLinearAttnActivation().is_active(request) is fused_linear
 
 
 @pytest.mark.parametrize("invalid", (-1, True, "2"))

@@ -27,6 +27,13 @@ def _(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return torch.empty(output_shape, dtype=gate.dtype, device="meta")
 
 
+@register_tensor_cast_op("clamped_swiglu")
+def _(gate: torch.Tensor, up: torch.Tensor, limit: float) -> torch.Tensor:
+    """SwiGLU with the gate and up projections clamped before activation."""
+    _check_gate_up_shape_match(gate, up, "clamped_swiglu")
+    return torch.nn.functional.silu(gate.clamp(max=limit)) * up.clamp(min=-limit, max=limit)
+
+
 @register_tensor_cast_op("m3_swiglu")
 def _(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
     """Fused M3 SwiGLU-OAI meta op.

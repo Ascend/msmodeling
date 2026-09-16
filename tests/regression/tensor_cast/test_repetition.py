@@ -157,6 +157,41 @@ def test_glm5_indexshare_reuses_mlp_submodules_only(monkeypatch):
     assert all(isinstance(layer.mlp, CopyLayerWrapper) for layer in layers[1:])
 
 
+def test_glm5_next_reuses_mlp_submodules_only(monkeypatch):
+    class FakeAttention(torch.nn.Module):
+        def __init__(self, layer_idx):
+            super().__init__()
+            self.layer_idx = layer_idx
+
+    class FakeMlp(torch.nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states
+
+    class FakeLayer(torch.nn.Module):
+        def __init__(self, layer_idx):
+            super().__init__()
+            self.self_attn = FakeAttention(layer_idx)
+            self.mlp = FakeMlp()
+
+    layers = torch.nn.ModuleList([FakeLayer(i) for i in range(4)])
+    hf_config = SimpleNamespace(model_type="glm5_next_text")
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(enable_repetition=True),
+        is_vl_model=False,
+        _inner=SimpleNamespace(hf_config=hf_config),
+        hf_config=hf_config,
+        unwrap=lambda: SimpleNamespace(layers=layers),
+    )
+    monkeypatch.setattr("tensor_cast.transformers.transformations.get_visual_layers", lambda _model: None)
+
+    maybe_reuse_layers(model)
+
+    assert all(not isinstance(layer, (RegionMarkerWrapper, CopyLayerWrapper)) for layer in layers)
+    assert isinstance(layers[0].mlp, RegionMarkerWrapper)
+    assert layers[0].mlp.repeat_count == len(layers)
+    assert all(isinstance(layer.mlp, CopyLayerWrapper) for layer in layers[1:])
+
+
 def test_glm51_sequence_parallel_reuses_mlp_submodules_only(monkeypatch):
     class FakeAttention(torch.nn.Module):
         def __init__(self, layer_idx):

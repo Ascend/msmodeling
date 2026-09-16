@@ -153,10 +153,9 @@ Qwen3.5 使用 **W8A8_STATIC** 静态量化。LA 算子本身与量化解耦—�
 ```text
 tensor_cast/
 ├── ops/
-│   └── la.py                                ← 新增：7 个 LA 分解算子定义
+│   └── linear_attention.py                  ← 7 个分解线性注意力算子定义
 ├── performance_model/
 │   └── __init__.py                          ← 新增：7 个 LA 算子的 register_op_properties
-│                                             保留：旧的 linear_attention op（qwen3_next 兼容）
 ├── transformers/
 │   ├── transformations.py                   ← 新增：vision_tp_group + LA TP plan + MTP lm_head TP
 │   ├── builtin_model/
@@ -327,7 +326,7 @@ input_generator 在生成 Qwen3.5 模型的输入时，在 `cache_position` tens
 |------|------|-----------|
 | Qwen3 仿真（已有） | 标准 FlashAttention + RoPE + SwiGLU 建模 | Qwen3.5 在此基础上新增 GatedDeltaNet 和 CausalConv1d |
 | Qwen3-VL 仿真（已有） | 视觉编码器 + DeepStack + 多模态融合 | 复用视觉模块的 Monkey Patch 和 TP 分片经验 |
-| Qwen3Next 仿真（已有） | 使用旧的 `linear_attention` fused op | 保留旧 op 以保证兼容性 |
+| Qwen3-Next 仿真 | 使用共享的分解 GatedDeltaNet 链路 | 与 Qwen3.5 共用算子语义 |
 | Chunk Delta Rule 参考实现 | `modeling_qwen3_5.py` 官方源码 | 逐行对照，确保 FLOPs 和内存估算一致 |
 
 ---

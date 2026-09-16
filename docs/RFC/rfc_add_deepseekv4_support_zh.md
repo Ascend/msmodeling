@@ -98,7 +98,7 @@ V4 适配分为五个层次：
 2. **HC 语义算子层**：4 个语义算子表达 Head Compression
 3. **KV 压缩算子层**：compressor 和 scatter_nd_update_mla
 4. **稀疏注意力算子层**：quant_lightning_indexer 和 sparse_attn_sharedkv
-5. **MoE 路由算子层**：moe_gating_top_k/kash 和 v4_clamped_swiglu
+5. **MoE 路由算子层**：moe_gating_top_k/hash 和公共 clamped_swiglu
 
 ### 5.2 关键设计决策
 
@@ -228,7 +228,7 @@ torch.ops.tensor_cast.quant_lightning_indexer(
 | `test_v4_attention_wrapper` | ratio=0/4/128 不同路径处理 |
 | `test_lightning_indexer` | Dynamic topk 宽度、indexer_cache layout |
 | `test_moe_routing` | Hash routing 和非 hash routing 区分 |
-| `test_clamped_swiglu` | v4_clamped_swiglu 与标准 SiLU 行为差异 |
+| `test_clamped_swiglu` | 公共 clamped_swiglu 与标准 SiLU 行为差异 |
 
 ### 6.2 集成测试
 

@@ -126,19 +126,6 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         actual_execution_time = analytic_result.execution_time_s
         return actual_execution_time
 
-    def _execute_linear_attention_and_get_base_data(self, linear_attention_args):
-        device_profile = TEST_DEVICE
-        perf_model = AnalyticPerformanceModel(device_profile)
-        with (
-            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
-            torch.no_grad(),
-        ):
-            torch.ops.tensor_cast.linear_attention(*linear_attention_args)
-        self.assertEqual(len(runtime.event_list), 1)
-        analytic_result = runtime.event_list[0].perf_results.get("analytic")
-        actual_execution_time = analytic_result.execution_time_s
-        return actual_execution_time
-
     def _execute_multihead_latent_attention_and_get_base_data(self, mla_args):
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
@@ -326,36 +313,6 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         )
 
         assert_close(self, actual_execution_time, 5.99e-6)
-
-    def test_linear_attention_eager(self):
-        hidden_states = torch.randn(2, 16, 4096, device="meta", dtype=torch.float16)
-        actual_execution_time = self._execute_linear_attention_and_get_base_data(
-            (
-                hidden_states,
-                None,
-                None,
-                16,
-                64,
-                128,
-                128,
-                4,
-            )
-        )
-        assert_close(self, actual_execution_time, 6.78e-5)
-
-    def test_linear_attention_chunk_gated_delta_modeling(self):
-        hidden_states = torch.randn(1, 65, 256, device="meta", dtype=torch.float16)
-        actual_execution_time = self._execute_linear_attention_and_get_base_data(
-            (hidden_states, None, None, 2, 4, 8, 16, 4)
-        )
-        assert_close(self, actual_execution_time, 5.53e-6)
-
-    def test_linear_attention_decode_uses_recurrent_modeling(self):
-        hidden_states = torch.randn(1, 1, 256, device="meta", dtype=torch.float16)
-        actual_execution_time = self._execute_linear_attention_and_get_base_data(
-            (hidden_states, None, None, 2, 4, 8, 16, 4)
-        )
-        assert_close(self, actual_execution_time, 5.0e-6, rtol=0.05)
 
     def test_linear_attn_chunk_rule_includes_scratch_memory_and_extra_static(self):
         batch_size, seq_len, num_heads, head_dim = 1, 65, 4, 16
@@ -610,6 +567,50 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         cache_position.tensor_cast_has_previous_state = True
         cache_position.tensor_cast_num_mtp_tokens = 3
 
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = linear_attn(hidden_states, cache_position=cache_position)
+
+        self.assertEqual(out.shape, hidden_states.shape)
+        op_names = {str(event.op_invoke_info.func) for event in runtime.event_list}
+        self.assertIn("tensor_cast.linear_attn_causal_conv_update.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_recurrent_gated_delta_rule.default", op_names)
+        self.assertNotIn("tensor_cast.linear_attn_chunk_gated_delta_rule.default", op_names)
+
+    def test_qwen3_next_linear_attention_uses_decomposed_ops(self):
+        user_config = UserInputConfig(
+            model_id="tests/assets/model_config/qwen3_next_80b_a3b",
+            do_compile=False,
+            num_hidden_layers_override=1,
+            quantize_linear_action=QuantizeLinearAction.DISABLED,
+        )
+        model = build_model(user_config)
+        linear_attn = model.unwrap().language_model.layers[0].linear_attn
+        hidden_states = torch.randn(1, 8, model.hidden_size, device="meta")
+
+        device_profile = TEST_DEVICE
+        perf_model = AnalyticPerformanceModel(device_profile)
+        with (
+            Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
+            torch.no_grad(),
+        ):
+            out = linear_attn(hidden_states)
+
+        self.assertEqual(out.shape, hidden_states.shape)
+        op_names = {str(event.op_invoke_info.func) for event in runtime.event_list}
+        self.assertIn("tensor_cast.linear_attn_causal_conv.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_fused_gdn_gating.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_chunk_gated_delta_rule.default", op_names)
+        self.assertIn("tensor_cast.linear_attn_gated_rmsnorm.default", op_names)
+        self.assertNotIn("tensor_cast.linear_attention.default", op_names)
+
+        cache_position = torch.tensor([8], dtype=torch.long, device="cpu")
+        cache_position.tensor_cast_has_previous_state = True
+        cache_position.tensor_cast_query_lens = (1,)
+        cache_position.tensor_cast_is_decode = (True,)
+        hidden_states = torch.randn(1, 1, model.hidden_size, device="meta")
         with (
             Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),

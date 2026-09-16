@@ -298,6 +298,10 @@ def resize_image(
             "transformers.models.glm4v.image_processing_glm4v",
             build_glm_resize_params,
         ),
+        "glm5_next": (
+            "transformers.models.glm5_next.image_processing_glm5_next",
+            build_glm_resize_params,
+        ),
         "qwen3_vl": (
             "transformers.models.qwen2_vl.image_processing_qwen2_vl",
             build_qwen_resize_params,
@@ -485,7 +489,7 @@ def _resolve_sparse_attention_indexer_cache_width(model, attention_layer) -> int
     (`index_head_dim`), which is intentionally different from the main KV cache
     width (`head_dim`).
     """
-    for attr in ("_index_head_dim", "indexer_head_dim"):
+    for attr in ("indexer_cache_width", "_index_head_dim", "indexer_head_dim"):
         width = getattr(attention_layer, attr, None)
         if _is_integral_non_bool(width):
             return int(width)
@@ -837,13 +841,46 @@ def _resolve_main_kv_cache_dtype(model, layer_idx: int) -> torch.dtype:
     return kvcache_dtype
 
 
-def _resolve_indexer_cache_dtype(model, layer_idx: int) -> torch.dtype:
+def _resolve_indexer_cache_dtype(model, layer_idx: int, attention_layer=None) -> torch.dtype:
     """Resolve storage dtype for sparse-attention indexer auxiliary cache."""
     model_config = model.model_config
+    if attention_layer is not None:
+        dtype = getattr(attention_layer, "indexer_cache_dtype", None)
+        if isinstance(dtype, torch.dtype):
+            return dtype
     cache_dtype = model_config.dtype
     if (attention_config := get_attention_quant_config(model, layer_idx)) is not None:
         cache_dtype = attention_config.get_quant_dtype()
     return cache_dtype
+
+
+_DTYPE_BYTE_WIDTHS = {
+    torch.bool: 1,
+    torch.uint8: 1,
+    torch.int8: 1,
+    torch.int16: 2,
+    torch.int32: 4,
+    torch.int64: 8,
+    torch.float16: 2,
+    torch.bfloat16: 2,
+    torch.float32: 4,
+    torch.float64: 8,
+    torch.complex64: 8,
+    torch.complex128: 16,
+}
+
+
+def glm5_next_kda_state_shape(text_config, dtype, tp_size, batch_size) -> tuple[int, int]:
+    """Packed per-request state; capacity is independent of context length."""
+    heads = exact_division(text_config.linear_num_heads, tp_size)
+    dim = text_config.linear_head_dim
+    recurrent_bytes = heads * dim * dim * 4
+    # HF keeps kernel_size entries, including the current convolution position.
+    dtype_bytes = _DTYPE_BYTE_WIDTHS.get(dtype)
+    if dtype_bytes is None:
+        raise ValueError(f"Unsupported GLM5Next KDA state dtype: {dtype}")
+    conv_bytes = 3 * heads * dim * text_config.linear_conv_kernel_dim * dtype_bytes
+    return int(batch_size or 1), recurrent_bytes + conv_bytes
 
 
 def _resolve_bailing_v3_kda_cache_bytes(attention_layer, model_config, parallel_config, batch_size) -> int:
@@ -1000,6 +1037,22 @@ def _get_kv_cache_info(
         kvcache_dtype = _resolve_main_kv_cache_dtype(model, i)
         is_draft_layer = draft_enabled and i >= num_target_layers
         layer_num_blocks = num_blocks
+
+        if (
+            not is_draft_layer
+            and getattr(model.text_config, "model_type", None) == "glm5_next_text"
+            and model.text_config.layer_types[i] == "linear_attention"
+        ):
+            kv_cache_by_layers[i] = torch.empty(
+                glm5_next_kda_state_shape(
+                    model.text_config, model_config.dtype, parallel_config.tensor_parallel_size, batch_size
+                ),
+                dtype=torch.uint8,
+                device="meta",
+            )
+            # Count persistent state in total memory, but not in per-token KV
+            # cache or KV transfer. This follows the Bailing KDA convention.
+            continue
 
         if is_draft_layer:
             # Draft is always Qwen3 GQA; allocate [2, blocks, block_size, kv_heads, head_dim]
@@ -1359,7 +1412,7 @@ def get_sparse_attention_indexer_cache_info(model, num_blocks, block_size, batch
         if cache_width is None:
             continue
 
-        cache_dtype = _resolve_indexer_cache_dtype(model, i)
+        cache_dtype = _resolve_indexer_cache_dtype(model, i, attention_layer)
 
         indexer_num_blocks = _resolve_sparse_attention_indexer_num_blocks(
             is_v4_model,

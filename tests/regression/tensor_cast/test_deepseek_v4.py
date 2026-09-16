@@ -400,14 +400,16 @@ class TestDeepseekV4MoEOperators(unittest.TestCase):
                 scores, top_k=8, normalize_weights=True, route_scale=1.0, input_ids=None, tid2eid=tid2eid
             )
 
-    def test_v4_clamped_swiglu_op(self):
-        """Test v4_clamped_swiglu operator."""
+    def test_clamped_swiglu_op(self):
+        """Test the shared clamped_swiglu operator used by DeepSeek V4."""
         gate = torch.randn(4, 1024)
         up = torch.randn(4, 1024)
 
-        result = torch.ops.tensor_cast.v4_clamped_swiglu(gate, up, swiglu_limit=10.0)
+        result = torch.ops.tensor_cast.clamped_swiglu(gate, up, limit=10.0)
+        expected = torch.nn.functional.silu(gate.clamp(max=10.0)) * up.clamp(min=-10.0, max=10.0)
         assert result.shape == up.shape
         assert result.dtype == up.dtype
+        torch.testing.assert_close(result, expected)
 
 
 class TestDeepseekV4SparseAttentionIndexer(unittest.TestCase):
@@ -1043,9 +1045,9 @@ class TestDeepseekV4PerformanceModel(unittest.TestCase):
         props = hash_gating_props(mock_invoke)
         assert props is not None
 
-    def test_v4_clamped_swiglu_performance(self):
-        """Test v4_clamped_swiglu performance properties."""
-        swiglu_props = _v4_perf_props(torch.ops.tensor_cast.v4_clamped_swiglu.default)
+    def test_clamped_swiglu_performance(self):
+        """Test shared clamped_swiglu performance properties."""
+        swiglu_props = _v4_perf_props(torch.ops.tensor_cast.clamped_swiglu.default)
 
         mock_invoke = MagicMock()
         gate = torch.randn(4, 1024)
@@ -1128,7 +1130,7 @@ class TestDeepseekV4DecoderLayer(unittest.TestCase):
         mlp = DeepseekV4MLP(config)
         x = torch.randn(2, 4, config.hidden_size)
 
-        with patch("torch.ops.tensor_cast.v4_clamped_swiglu") as mock_swiglu:
+        with patch("torch.ops.tensor_cast.clamped_swiglu") as mock_swiglu:
             mock_swiglu.return_value = torch.randn(2, 4, config.intermediate_size)
             out = mlp(x)
 

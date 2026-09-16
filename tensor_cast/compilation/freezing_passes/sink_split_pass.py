@@ -20,7 +20,7 @@ def _is_split_with_sizes_node(node: Node) -> bool:
 
 
 def _get_num_split_users(split_node: Node) -> int:
-    return len(split_node.users)
+    return sum(user.target == operator.getitem for user in split_node.users)
 
 
 def _get_getitem_sizes(split_node: Node) -> Dict[int, Argument]:
@@ -40,6 +40,16 @@ def _is_cat_node(node: Node) -> bool:
         torch.ops.aten.cat.default,
         torch.ops.tensor_cast.cat.default,
     )
+
+
+@dataclass
+class _SwigluSinkMatch:
+    """A per-expert SwiGLU pair whose token split can be sunk."""
+
+    swiglu_node: Node
+    gate_getitem: Node
+    up_getitem: Node
+    expert_index: int
 
 
 @dataclass
@@ -215,6 +225,7 @@ class SinkSplitPass(TensorCastGraphModulePass):
         binary_ops = [
             torch.ops.aten.mul.Tensor,
             torch.ops.tensor_cast.swiglu.default,
+            torch.ops.tensor_cast.clamped_swiglu.default,
             torch.ops.tensor_cast.m3_swiglu.default,
             # SiTU activation (Kimi K3) — same split consumer shape as swiglu:
             # consumes two getitems of a single split, outputs one tensor.
@@ -593,6 +604,103 @@ class SinkSplitPass(TensorCastGraphModulePass):
         return len(nodes_to_clean) > 0
 
     @staticmethod
+    def _find_split_getitem(split_node: Node, index: int) -> Optional[Node]:
+        for user in split_node.users:
+            if user.target == operator.getitem and len(user.args) == 2 and user.args[1] == index:
+                return user
+        return None
+
+    @classmethod
+    def _get_sibling_swiglu_split(cls, split_node: Node) -> Optional[Node]:
+        """Find the matching expert-token split on SwiGLU's up branch."""
+        parent_getitem = split_node.args[0]
+        if not (
+            isinstance(parent_getitem, Node)
+            and parent_getitem.target == operator.getitem
+            and len(parent_getitem.args) == 2
+            and isinstance(parent_getitem.args[0], Node)
+            and _is_split_with_sizes_node(parent_getitem.args[0])
+            and parent_getitem.args[1] == 0
+        ):
+            return None
+
+        hidden_split = parent_getitem.args[0]
+        sibling_getitem = cls._find_split_getitem(hidden_split, 1)
+        if sibling_getitem is None:
+            return None
+
+        split_dim = split_node.args[2] if len(split_node.args) > 2 else 0
+        siblings = [
+            user
+            for user in sibling_getitem.users
+            if _is_split_with_sizes_node(user)
+            and (user.args[2] if len(user.args) > 2 else 0) == split_dim
+            and user.args[1] == split_node.args[1]
+        ]
+        return siblings[0] if len(siblings) == 1 else None
+
+    @classmethod
+    def _match_swiglu_group(cls, graph: fx.Graph, split_node: Node) -> Optional[List[_SwigluSinkMatch]]:
+        """Match SwiGLUs below sibling token splits of a gate/up split."""
+        sibling_split = cls._get_sibling_swiglu_split(split_node)
+        if sibling_split is None:
+            return None
+
+        matches = []
+        for node in graph.nodes:
+            if node.target != torch.ops.tensor_cast.swiglu.default or len(node.args) != 2:
+                continue
+            gate_getitem, up_getitem = node.args
+            if not (
+                isinstance(gate_getitem, Node)
+                and isinstance(up_getitem, Node)
+                and gate_getitem.target == operator.getitem
+                and up_getitem.target == operator.getitem
+                and gate_getitem.args[0] == split_node
+                and up_getitem.args[0] == sibling_split
+                and gate_getitem.args[1] == up_getitem.args[1]
+                and len(gate_getitem.users) == 1
+                and len(up_getitem.users) == 1
+                and isinstance(gate_getitem.args[1], int)
+            ):
+                continue
+            matches.append(_SwigluSinkMatch(node, gate_getitem, up_getitem, gate_getitem.args[1]))
+
+        if not matches:
+            return None
+        split_indices = {user.args[1] for user in split_node.users if user.target == operator.getitem}
+        sibling_indices = {user.args[1] for user in sibling_split.users if user.target == operator.getitem}
+        matched_indices = {match.expert_index for match in matches}
+        if split_indices != sibling_indices or matched_indices != split_indices:
+            return None
+        return matches
+
+    @staticmethod
+    def _rewrite_swiglu_group(graph: fx.Graph, matches: List[_SwigluSinkMatch]):
+        """Move the expert-token split after a single gate/up SwiGLU."""
+        matches = sorted(matches, key=lambda match: match.expert_index)
+        template = matches[0]
+        token_split = template.gate_getitem.args[0]
+        gate = token_split.args[0]
+        sibling_token_split = template.up_getitem.args[0]
+        up = sibling_token_split.args[0]
+        assert isinstance(gate, Node) and isinstance(up, Node)
+        split_dim = token_split.args[2] if len(token_split.args) > 2 else 0
+
+        with graph.inserting_before(template.swiglu_node):
+            swiglu = graph.call_function(torch.ops.tensor_cast.swiglu.default, args=(gate, up))
+            split = graph.call_function(
+                torch.ops.aten.split_with_sizes.default,
+                args=(swiglu, token_split.args[1], split_dim),
+            )
+        for match in matches:
+            with graph.inserting_after(split):
+                getitem = graph.call_function(operator.getitem, args=(split, match.expert_index))
+                maybe_copy_meta(getitem, match.swiglu_node)
+            match.swiglu_node.replace_all_uses_with(getitem)
+            graph.erase_node(match.swiglu_node)
+
+    @staticmethod
     def _check_pattern(split_node: Node, op_registry: Dict[Target, SinkConfig]) -> List[Match]:
         """
         Checks if the users of a split_node match the sinking criteria.
@@ -622,7 +730,10 @@ class SinkSplitPass(TensorCastGraphModulePass):
             num_split_users = _get_num_split_users(split_node)
             if num_split_users == 0:
                 return source_op_groups
-            getitem_nodes = sorted(split_node.users, key=lambda n: n.args[1])  # sort by index
+            getitem_nodes = sorted(
+                (user for user in split_node.users if user.target == operator.getitem),
+                key=lambda node: node.args[1],
+            )
 
             # Group source ops by their target
             target_to_group: Dict[Target, List[Node]] = {}
@@ -928,22 +1039,68 @@ class SinkSplitPass(TensorCastGraphModulePass):
     def _run_sinking_pass(self, graph: fx.Graph, op_registry: Dict[Target, SinkConfig]):
         pass_changed = False
 
+        def has_output_metadata(match: Match) -> bool:
+            """Return whether every output needed by ``_rewrite_outputs`` is shaped.
+
+            Tensor-valued custom ops carry their shape directly on the call node,
+            while tuple- and list-returning ops (for example dynamic quantization
+            and ``split_with_sizes``) carry it on their ``getitem`` users.
+            Treating either aggregate as a tensor made the metadata guard skip
+            those matches, leaving per-expert quant and SwiGLU nodes unfused.
+            """
+            for output_index, output_type in enumerate(match.op_config.rewrite_output_types):
+                for source_op in match.source_op_group:
+                    if output_type is list:  # noqa: E721
+                        output_getitems = [user for user in source_op.users if user.target == operator.getitem]
+                        if not output_getitems or any(get_node_shape(user) is None for user in output_getitems):
+                            return False
+                    elif len(match.op_config.rewrite_output_types) == 1:
+                        if get_node_shape(source_op) is None:
+                            return False
+                    else:
+                        output_getitem = next(
+                            (
+                                user
+                                for user in source_op.users
+                                if user.target == operator.getitem and user.args[1] == output_index
+                            ),
+                            None,
+                        )
+                        if output_getitem is None or get_node_shape(output_getitem) is None:
+                            return False
+            return True
+
         for node in reversed(graph.nodes):
             if not _is_split_with_sizes_node(node):
                 continue
 
             split_node = node
 
+            swiglu_matches = self._match_swiglu_group(graph, split_node)
+            if swiglu_matches:
+                self._rewrite_swiglu_group(graph, swiglu_matches)
+                pass_changed = True
+                continue
+
             matches = self._check_pattern(split_node, op_registry)
             if not matches:
                 continue
 
             for match in matches:
+                # A fused custom op can legitimately reach this pass before
+                # fake-tensor propagation has attached output metadata.  The
+                # rewrite needs a tensor rank to reconstruct split outputs;
+                # leave this local pattern unchanged when that information is
+                # unavailable instead of aborting the whole compilation.
+                if not has_output_metadata(match):
+                    logger.debug("Skipping sink-split rewrite with missing output shape metadata")
+                    continue
                 new_op_node = self._build_new_op(graph, match)
                 self._rewrite_outputs(graph, match, new_op_node)
                 self._cleanup_nodes(graph, match)
-
-            pass_changed = True
+                # Only a completed rewrite advances the fixed-point loop.
+                # Metadata-less matches above leave the graph unchanged.
+                pass_changed = True
 
         return pass_changed
 

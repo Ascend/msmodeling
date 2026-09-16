@@ -4,6 +4,7 @@ import torch
 
 from ...model_config import MoEFieldNames
 from ..custom_model_registry import ModelProfile, register_model_profile
+from ..utils import has_previous_linear_attention_state, is_recurrent_linear_attention_decode_batch
 
 logger = logging.getLogger(__name__)
 
@@ -66,22 +67,103 @@ def patch_method_for_qwen3_next(_model):
         attention_mask=None,
         **kwargs,
     ):
-        # Route Qwen3Next GatedDeltaNet through tensor_cast.linear_attention so
-        # TensorCast can model mixed full/linear attention explicitly.
-        del kwargs
-        del cache_params
         local_num_k_heads, local_num_v_heads = self.num_k_heads, self.num_v_heads
+        batch_size, seq_len, _ = hidden_states.shape
 
-        return torch.ops.tensor_cast.linear_attention(
-            hidden_states,
-            attention_mask,
-            cache_position,
-            local_num_k_heads,
-            local_num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-            self.conv_kernel_size,
+        has_previous_state = has_previous_linear_attention_state(cache_params, cache_position, self.layer_idx)
+        use_recurrent = has_previous_state and is_recurrent_linear_attention_decode_batch(seq_len, cache_position)
+        flatten_decode_batch = use_recurrent and seq_len != 1
+
+        if attention_mask is not None:
+            hidden_states = torch.ops.tensor_cast.linear_attn_apply_padding_mask(hidden_states, attention_mask)
+
+        projected_states_qkvz = self.in_proj_qkvz(hidden_states)
+        projected_states_ba = self.in_proj_ba(hidden_states)
+        query, key, value, z = torch.split(
+            projected_states_qkvz,
+            [
+                local_num_k_heads * self.head_k_dim,
+                local_num_k_heads * self.head_k_dim,
+                local_num_v_heads * self.head_v_dim,
+                local_num_v_heads * self.head_v_dim,
+            ],
+            dim=-1,
         )
+        b, a = torch.split(projected_states_ba, [local_num_v_heads, local_num_v_heads], dim=-1)
+
+        query = query.reshape(batch_size, seq_len, local_num_k_heads, self.head_k_dim)
+        key = key.reshape(batch_size, seq_len, local_num_k_heads, self.head_k_dim)
+        value = value.reshape(batch_size, seq_len, local_num_v_heads, self.head_v_dim)
+        z = z.reshape(batch_size, seq_len, local_num_v_heads, self.head_v_dim)
+
+        core_batch_size = batch_size
+        core_seq_len = seq_len
+        if flatten_decode_batch:
+            core_batch_size = batch_size * seq_len
+            core_seq_len = 1
+            query = query.reshape(core_batch_size, core_seq_len, local_num_k_heads, self.head_k_dim)
+            key = key.reshape(core_batch_size, core_seq_len, local_num_k_heads, self.head_k_dim)
+            value = value.reshape(core_batch_size, core_seq_len, local_num_v_heads, self.head_v_dim)
+            z = z.reshape(core_batch_size, core_seq_len, local_num_v_heads, self.head_v_dim)
+            b = b.reshape(core_batch_size, core_seq_len, local_num_v_heads)
+            a = a.reshape(core_batch_size, core_seq_len, local_num_v_heads)
+
+        mixed_qkv = torch.cat(
+            (
+                query.reshape(core_batch_size, core_seq_len, -1),
+                key.reshape(core_batch_size, core_seq_len, -1),
+                value.reshape(core_batch_size, core_seq_len, -1),
+            ),
+            dim=-1,
+        ).transpose(1, 2)
+        conv_op = (
+            torch.ops.tensor_cast.linear_attn_causal_conv_update
+            if use_recurrent
+            else torch.ops.tensor_cast.linear_attn_causal_conv
+        )
+        mixed_qkv = conv_op(mixed_qkv, self.conv_kernel_size).transpose(1, 2)
+        key_dim = local_num_k_heads * self.head_k_dim
+        value_dim = local_num_v_heads * self.head_v_dim
+        query, key, value = torch.split(mixed_qkv, [key_dim, key_dim, value_dim], dim=-1)
+        query = query.reshape(core_batch_size, core_seq_len, local_num_k_heads, self.head_k_dim)
+        key = key.reshape(core_batch_size, core_seq_len, local_num_k_heads, self.head_k_dim)
+        value = value.reshape(core_batch_size, core_seq_len, local_num_v_heads, self.head_v_dim)
+        query, key, beta, g = torch.ops.tensor_cast.linear_attn_fused_gdn_gating(
+            query,
+            key,
+            b,
+            a,
+            self.A_log,
+            self.dt_bias,
+            local_num_v_heads,
+        )
+
+        if use_recurrent:
+            core_attn_out = torch.ops.tensor_cast.linear_attn_recurrent_gated_delta_rule(
+                query, key, value, beta, g, 1, 1
+            )
+        else:
+            chunk_size = kwargs.get("chunk_size", 64)
+            core_attn_out = torch.ops.tensor_cast.linear_attn_chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                beta,
+                g,
+                chunk_size,
+                1 if has_previous_state else 0,
+                1,
+            )
+        core_attn_out = torch.ops.tensor_cast.linear_attn_gated_rmsnorm(
+            core_attn_out,
+            z,
+            getattr(self.norm, "weight", None),
+            self.layer_norm_epsilon,
+        )
+        if flatten_decode_batch:
+            core_attn_out = core_attn_out.reshape(batch_size, seq_len, local_num_v_heads, self.head_v_dim)
+        core_attn_out = core_attn_out.reshape(batch_size * seq_len, -1)
+        return self.out_proj(core_attn_out).reshape(batch_size, seq_len, -1)
 
     modeling_qwen3_next.Qwen3NextModel._update_linear_attn_mask = _patched_update_linear_attn_mask
     modeling_qwen3_next.Qwen3NextGatedDeltaNet.forward = _patched_linear_attn_forward

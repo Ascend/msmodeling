@@ -22,7 +22,7 @@ DeepSeek-V4（Flash/Pro）是 DeepSeek 系列模型的最新版本，在 V3/V3.2
 
 5. **Hash 路由 MoE**：V4 前 `num_hash_layers` 层使用 token-id based hash routing 替代 top-k softmax routing，对应 `moe_gating_top_k_hash` 语义算子。
 
-6. **Clamped SwiGLU**：V4 expert 的 activation 使用 `clamp(gate) * SiLU(up)` 而非标准 SwiGLU，需要 `v4_clamped_swiglu` 语义算子。
+6. **Clamped SwiGLU**：V4 expert 的 activation 使用 `SiLU(clamp(gate)) * clamp(up)` 而非标准 SwiGLU，复用公共 `clamped_swiglu` 语义算子。
 
 7. **并行维度差异**：V4 的 O projection 使用独立的 `o_proj_tp_group`，与 attention 的 `tp_group` 可分离，需要在 TP plan 中单独处理。
 
@@ -44,7 +44,7 @@ DeepSeek-V4（Flash/Pro）是 DeepSeek 系列模型的最新版本，在 V3/V3.2
 
 4. **稀疏注意力算子层**：用 `quant_lightning_indexer` 表达 ratio=4 learned indexer，用 `sparse_attn_sharedkv` 表达共享 KV sparse attention。
 
-5. **MoE 路由算子层**：用 `moe_gating_top_k` 和 `moe_gating_top_k_hash` 区分非 hash 和 hash 路由，用 `v4_clamped_swiglu` 表达 clamped SwiGLU activation。
+5. **MoE 路由算子层**：用 `moe_gating_top_k` 和 `moe_gating_top_k_hash` 区分非 hash 和 hash 路由，用公共 `clamped_swiglu` 表达 clamped SwiGLU activation。
 
 ### 2.2 模型注册与配置
 
@@ -192,9 +192,9 @@ V4 的 per-layer `compress_ratio` 决定 KV 缓存和注意力模式：
 
 #### 2.6.3 Clamped SwiGLU
 
-`tensor_cast.v4_clamped_swiglu` 模型 V4 expert activation：
+`tensor_cast.clamped_swiglu` 模型 V4 expert activation，并与 GLM5.3-Flash 共用算子定义和性能模型：
 
-- `clamp(gate) * SiLU(up)` 而非标准 `SiLU(gate) * up`
+- `SiLU(clamp(gate, max=limit)) * clamp(up, min=-limit, max=limit)` 而非标准 `SiLU(gate) * up`
 
 ### claude 性能模型设计
 
@@ -212,7 +212,7 @@ V4 的 per-layer `compress_ratio` 决定 KV 缓存和注意力模式：
 | `sparse_attn_sharedkv` | GEMM + online softmax + KV gather |
 | `moe_gating_top_k` | bias add + topk + gather + normalize |
 | `moe_gating_top_k_hash` | hash lookup + gather + normalize |
-| `v4_clamped_swiglu` | clamp + SiLU + multiply |
+| `clamped_swiglu` | clamp + SiLU + multiply |
 
 ---
 
@@ -264,7 +264,7 @@ V4 sparse attention 路径中，trace 表应体现以下关键语义块：
 2. `layer_types` 必须与 `compress_ratios` 一致。
 3. `o_proj_tp_group.world_size` 必须 ≤ `o_groups`，否则抛出错误。
 4. Hash routing 层数由 `num_hash_layers` 控制，默认 0。
-5. `swiglu_limit > 0` 时使用 `v4_clamped_swiglu`，否则使用标准 SiLU。
+5. `swiglu_limit > 0` 时使用公共 `clamped_swiglu`，否则使用标准 SiLU。
 
 ---
 
@@ -293,7 +293,7 @@ V4 sparse attention 路径中，trace 表应体现以下关键语义块：
 
 5. **MoE 路由**
    - 验证 hash routing 使用 `tid2eid` lookup
-   - 验证 `v4_clamped_swiglu` 行为
+   - 验证 `clamped_swiglu` 行为
 
 ### 4.2 集成测试
 

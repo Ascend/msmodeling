@@ -139,21 +139,16 @@ class Qwen35MoeFfnActivation:
 
 
 class Qwen35LinearGdnActivation:
-    """Qwen3.5 GatedDeltaNet expands linear attention into projection/rule/output stages."""
+    """Qwen3.5 and Qwen3-Next expand GatedDeltaNet into projection/rule/output stages."""
 
     policy_id = "qwen3_5_linear_gdn"
 
     def is_active(self, request: OperatorActivationRequest) -> bool:
-        return request.context.model_config.get("model_type") != "qwen3_next"
-
-
-class Qwen3NextLinearAttnActivation:
-    """Qwen3-Next emits linear attention as one fused ``linear_attention`` op."""
-
-    policy_id = "qwen3_next_linear_attn"
-
-    def is_active(self, request: OperatorActivationRequest) -> bool:
-        return request.context.model_config.get("model_type") == "qwen3_next"
+        return request.context.model_config.get("model_type") in {
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+            "qwen3_next",
+        }
 
 
 def create_builtin_operator_activation_registry() -> OperatorActivationRegistry:
@@ -169,5 +164,4 @@ def create_builtin_operator_activation_registry() -> OperatorActivationRegistry:
     registry.register(Qwen35DenseFfnActivation())
     registry.register(Qwen35MoeFfnActivation())
     registry.register(Qwen35LinearGdnActivation())
-    registry.register(Qwen3NextLinearAttnActivation())
     return registry

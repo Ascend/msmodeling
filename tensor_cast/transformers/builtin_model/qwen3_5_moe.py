@@ -1,18 +1,14 @@
-import logging
-
 import torch
 
 from ...model_config import MoEFieldNames
 
 from ...utils import exact_division
-
 from ..custom_model_registry import (
     ModelProfile,
     register_model_profile,
     resolve_visual_config,
 )
-
-logger = logging.getLogger(__name__)
+from ..utils import has_previous_linear_attention_state, is_recurrent_linear_attention_decode_batch
 
 QWEN3_5_VISUAL_CONFIG = resolve_visual_config({})
 
@@ -75,53 +71,6 @@ def patch_method_for_qwen3_5(model):
             exact_division(self.num_v_heads, tp_size),
         )
 
-    def _has_previous_state(cache_params, cache_position, layer_idx):
-        if cache_position is not None and hasattr(cache_position, "numel") and cache_position.numel() > 0:
-            has_previous_state = getattr(cache_position, "tensor_cast_has_previous_state", None)
-            if has_previous_state is not None:
-                return bool(has_previous_state)
-            is_meta = hasattr(cache_position, "is_meta") and cache_position.is_meta
-            if not is_meta:
-                try:
-                    return cache_position[0].item() > 0
-                except RuntimeError:
-                    return False
-
-        if cache_params is None or torch.compiler.is_compiling():
-            return False
-        try:
-            return cache_params.has_previous_state(layer_idx)
-        except TypeError:
-            try:
-                return cache_params.has_previous_state()
-            except (AttributeError, RuntimeError):
-                return False
-        except (AttributeError, RuntimeError):
-            return False
-
-    def _is_recurrent_decode_batch(seq_len, cache_position):
-        if seq_len == 1:
-            return True
-
-        query_lens = getattr(cache_position, "tensor_cast_query_lens", None)
-        is_decode = getattr(cache_position, "tensor_cast_is_decode", None)
-        if query_lens is None or is_decode is None:
-            logger.debug(
-                "Missing metadata for recurrent decode detection: "
-                "query_lens=%s, is_decode=%s. Falling back to chunk path.",
-                query_lens,
-                is_decode,
-            )
-            return False
-        if sum(query_lens) != seq_len or not all(is_decode):
-            return False
-
-        num_mtp_tokens = int(getattr(cache_position, "tensor_cast_num_mtp_tokens", 0) or 0)
-        recurrent_query_lens = {1}
-        if num_mtp_tokens > 0:
-            recurrent_query_lens.add(1 + num_mtp_tokens)
-        return all(query_len in recurrent_query_lens for query_len in query_lens)
-
     def _patched_update_linear_attn_mask(self, attention_mask, cache_position):
         # Qwen3.5 linear-attention mask path has tensor-value-based branches that
         # are compile-unfriendly under TensorCast tracing; return None in compile
@@ -171,12 +120,12 @@ def patch_method_for_qwen3_5(model):
     ):
         local_num_k_heads, local_num_v_heads = _get_local_linear_attn_heads(self)
         batch_size, seq_len, _ = hidden_states.shape
-        has_previous_state = _has_previous_state(
+        has_previous_state = has_previous_linear_attention_state(
             cache_params,
             cache_position,
             self.layer_idx,
         )
-        use_recurrent = has_previous_state and _is_recurrent_decode_batch(seq_len, cache_position)
+        use_recurrent = has_previous_state and is_recurrent_linear_attention_decode_batch(seq_len, cache_position)
         flatten_decode_batch = use_recurrent and seq_len != 1
 
         if attention_mask is not None:

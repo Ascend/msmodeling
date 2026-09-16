@@ -184,7 +184,7 @@ def test_qwen3_5_moe_spec_materializes_hybrid_sequence() -> None:
     }
 
 
-def test_qwen3_next_spec_materializes_fused_linear_attention() -> None:
+def test_qwen3_next_spec_materializes_decomposed_linear_attention() -> None:
     loader = _loader()
     spec = loader.materialize(loader.load("qwen3_5_next_v1"), _context(config=_NEXT_CONFIG))
     language = next(region for region in spec.regions if region.region_id == "language")
@@ -209,18 +209,20 @@ def test_qwen3_next_spec_materializes_fused_linear_attention() -> None:
     }
     linear_stages = {stage.stage_id for stage in language.layer_specs["linear_attention"].stages}
     assert linear_stages == {
-        "linear_attention",
+        "linear_projection",
+        "linear_delta_rule",
+        "linear_output",
         "moe_gate",
         "moe_dispatch",
         "moe_experts",
         "moe_combine",
         "shared_ffn",
     }
-    linear_attention = next(
-        stage for stage in language.layer_specs["linear_attention"].stages if stage.stage_id == "linear_attention"
+    linear_delta_rule = next(
+        stage for stage in language.layer_specs["linear_attention"].stages if stage.stage_id == "linear_delta_rule"
     )
-    operators = linear_attention.source_options[SourceKind.THEORY].operators
-    assert [operator.operator_name for operator in operators] == ["linear_attention"]
+    operators = linear_delta_rule.source_options[SourceKind.THEORY].operators
+    assert [operator.operator_name for operator in operators] == ["linear_attn_chunk_gated_delta_rule"]
 
 
 def test_qwen3_5_theory_env_doubles_query_head_dim() -> None:

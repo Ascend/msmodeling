@@ -514,7 +514,7 @@ stages:
         - all_gather
         - add
         - silu
-        - v4_clamped_swiglu
+        - clamped_swiglu
         - sigmoid
         - all_reduce
         - dynamic_quantize_symmetric
@@ -527,7 +527,7 @@ stages:
         tensors:
           INPUT[0]: {shape: "[Tmoe, H]", dtype: LINEAR_IN}
           OUTPUT[0]: {shape: "[Tmoe, 2 * Fshared]", dtype: OUT}
-      - name: v4_clamped_swiglu
+      - name: clamped_swiglu
         tensors:
           INPUT[0]: {shape: "[Tmoe, Fshared]", dtype: ACT}
           INPUT[1]: {shape: "[Tmoe, Fshared]", dtype: ACT}

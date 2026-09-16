@@ -266,8 +266,10 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         else None
     )
     is_glm5_dsa = getattr(effective_hf_config, "model_type", None) == "glm_moe_dsa"
-    reuse_glm5_mlp_only = glm5_indexer_types is not None or (
-        is_glm5_dsa and config.compilation.passes.enable_sequence_parallel
+    reuse_glm5_mlp_only = (
+        getattr(effective_hf_config, "model_type", None) in ("glm5_next", "glm5_next_text")
+        or glm5_indexer_types is not None
+        or (is_glm5_dsa and config.compilation.passes.enable_sequence_parallel)
     )
 
     def get_submodule_structure_key(module: torch.nn.Module) -> str:
@@ -319,8 +321,9 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         IndexShare models need the real decoder chain to propagate auxiliary
         ``topk_indices``. All GLM DSA models also need it while sequence
         parallel is enabled so local-token residual state can flow between
-        layers; copying a complete decoder would collapse that chain into a
-        representative full-token graph. MLPs remain safe replay boundaries.
+        layers. GLM5Next additionally carries learned mHC streams and per-layer
+        KDA/k-pool state. Copying a complete decoder would collapse those chains
+        into a representative graph. MLPs remain safe replay boundaries.
         """
         mlps = []
         for layer in layers:
@@ -356,7 +359,10 @@ def maybe_reuse_layers(model: "ModelWrapperBase") -> "ModelWrapperBase":
         language_layers_path = get_language_layers(model.hf_config.model_type)
         try:
             language_layers = operator.attrgetter(language_layers_path)(model.unwrap())
-            reuse_layers(language_layers)
+            if reuse_glm5_mlp_only:
+                reuse_glm5_stateless_submodules(language_layers)
+            else:
+                reuse_layers(language_layers)
         except AttributeError:
             logger.debug(
                 f"Could not access language layers via path '{language_layers_path}' "

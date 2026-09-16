@@ -10,6 +10,7 @@ from tensor_cast.compilation import get_backend
 from tensor_cast.compilation.freezing_passes.grouped_matmul_swiglu_pass import (
     GroupedMatmulSwigluPass,
 )
+from tensor_cast.compilation.freezing_passes.sink_split_pass import SinkSplitPass
 from tensor_cast.core.config_resolver import ConfigResolver
 from tensor_cast.core.quantization.datatypes import QuantizeLinearAction
 from tensor_cast.core.user_config import UserInputConfig
@@ -98,6 +99,113 @@ def test_grouped_mxfp4_swiglu_pass_fuses_post_activation_quantization():
     targets = [node.target for node in result.graph.nodes if node.op == "call_function"]
     assert torch.ops.tensor_cast.grouped_matmul_mxfp4_swiglu_quant.default in targets
     assert torch.ops.tensor_cast.dynamic_quantize_mxfp4.default not in targets
+    assert torch.ops.tensor_cast.swiglu.default not in targets
+
+
+def test_sink_split_fuses_tuple_returning_dynamic_quant_before_quantized_gmm():
+    """Keep dynamic-quant tuple metadata from blocking the Qwen MoE GMM path."""
+    graph = fx.Graph()
+    hidden_states = graph.placeholder("hidden_states")
+    hidden_states.meta["val"] = torch.empty((4, 8), device="meta")
+    expert_inputs = graph.call_function(
+        torch.ops.aten.split_with_sizes.default,
+        args=(hidden_states, [2, 2], 0),
+    )
+    expert_inputs.meta["val"] = (
+        torch.empty((2, 8), device="meta"),
+        torch.empty((2, 8), device="meta"),
+    )
+    outputs = []
+    for expert_index in range(2):
+        weight = graph.placeholder(f"weight_{expert_index}")
+        weight.meta["val"] = torch.empty((8, 8), device="meta")
+        weight_scale = graph.placeholder(f"weight_scale_{expert_index}")
+        weight_scale.meta["val"] = torch.empty((8,), device="meta")
+        expert_input = graph.call_function(operator.getitem, args=(expert_inputs, expert_index))
+        expert_input.meta["val"] = torch.empty((2, 8), device="meta")
+        quantized = graph.call_function(
+            torch.ops.tensor_cast.dynamic_quantize_symmetric.default,
+            args=(expert_input, [-1]),
+            kwargs={"scale_dtype": torch.float32, "out_dtype": torch.int8},
+        )
+        quantized.meta["val"] = (
+            torch.empty((2, 8), dtype=torch.int8, device="meta"),
+            torch.empty((2, 1), dtype=torch.float32, device="meta"),
+        )
+        quantized_input = graph.call_function(operator.getitem, args=(quantized, 0))
+        quantized_input.meta["val"] = quantized.meta["val"][0]
+        activation_scale = graph.call_function(operator.getitem, args=(quantized, 1))
+        activation_scale.meta["val"] = quantized.meta["val"][1]
+        output = graph.call_function(
+            torch.ops.tensor_cast.static_quant_linear.default,
+            args=(
+                quantized_input,
+                weight,
+                weight_scale,
+                None,
+                activation_scale,
+                None,
+                None,
+                torch.bfloat16,
+            ),
+        )
+        output.meta["val"] = torch.empty((2, 8), dtype=torch.bfloat16, device="meta")
+        outputs.append(output)
+    graph.output(outputs)
+
+    graph_module = fx.GraphModule({}, graph)
+    result = SinkSplitPass()(graph_module)
+    targets = [node.target for node in result.graph.nodes if node.op == "call_function"]
+
+    assert targets.count(torch.ops.tensor_cast.dynamic_quantize_symmetric.default) == 1
+    assert torch.ops.tensor_cast.grouped_matmul_quant.default in targets
+    assert torch.ops.tensor_cast.static_quant_linear.default not in targets
+
+
+def test_sink_split_exposes_quantized_gmm_swiglu_pattern():
+    """Sink per-expert token splits so the existing GMM-SwiGLU pass can fire."""
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    x.meta["val"] = torch.empty((4, 8), dtype=torch.int8, device="meta")
+    weight = graph.placeholder("weight")
+    weight.meta["val"] = torch.empty((8, 8), dtype=torch.int8, device="meta")
+    weight_scale = graph.placeholder("weight_scale")
+    weight_scale.meta["val"] = torch.empty((8,), device="meta")
+    activation_scale = graph.placeholder("activation_scale")
+    activation_scale.meta["val"] = torch.empty((4, 1), device="meta")
+    gmm = graph.call_function(
+        torch.ops.tensor_cast.grouped_matmul_quant.default,
+        args=([x], [weight], [weight_scale], [None], [activation_scale], [None], [None], torch.bfloat16),
+    )
+    gmm.meta["val"] = torch.empty((4, 8), dtype=torch.bfloat16, device="meta")
+    expert_split = graph.call_function(torch.ops.aten.split_with_sizes.default, args=(gmm, [2, 2], 0))
+    expert_split.meta["val"] = (
+        torch.empty((2, 8), dtype=torch.bfloat16, device="meta"),
+        torch.empty((2, 8), dtype=torch.bfloat16, device="meta"),
+    )
+    outputs = []
+    for expert_index in range(2):
+        expert_hidden = graph.call_function(operator.getitem, args=(expert_split, expert_index))
+        expert_hidden.meta["val"] = expert_split.meta["val"][expert_index]
+        hidden_split = graph.call_function(torch.ops.aten.split_with_sizes.default, args=(expert_hidden, [4, 4], 1))
+        hidden_split.meta["val"] = (
+            torch.empty((2, 4), dtype=torch.bfloat16, device="meta"),
+            torch.empty((2, 4), dtype=torch.bfloat16, device="meta"),
+        )
+        expert_gate = graph.call_function(operator.getitem, args=(hidden_split, 0))
+        expert_gate.meta["val"] = hidden_split.meta["val"][0]
+        expert_up = graph.call_function(operator.getitem, args=(hidden_split, 1))
+        expert_up.meta["val"] = hidden_split.meta["val"][1]
+        output = graph.call_function(torch.ops.tensor_cast.swiglu.default, args=(expert_gate, expert_up))
+        output.meta["val"] = torch.empty((2, 4), dtype=torch.bfloat16, device="meta")
+        outputs.append(output)
+    graph.output(outputs)
+
+    graph_module = SinkSplitPass()(fx.GraphModule({}, graph))
+    result = GroupedMatmulSwigluPass()(graph_module)
+    targets = [node.target for node in result.graph.nodes if node.op == "call_function"]
+
+    assert torch.ops.tensor_cast.grouped_matmul_quant_swiglu.default in targets
     assert torch.ops.tensor_cast.swiglu.default not in targets
 
 

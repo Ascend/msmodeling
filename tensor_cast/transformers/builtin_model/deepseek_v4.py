@@ -396,7 +396,7 @@ class DeepseekV4MLP(DeepseekV3MLP):
         gate = self.gate_proj(x)
         up = self.up_proj(x)
         if self.swiglu_limit > 0:
-            hidden_states = torch.ops.tensor_cast.v4_clamped_swiglu(
+            hidden_states = torch.ops.tensor_cast.clamped_swiglu(
                 gate,
                 up,
                 self.swiglu_limit,
@@ -418,7 +418,7 @@ def _apply_v4_swiglu_limit(module: nn.Module, swiglu_limit: float) -> None:
         if all(hasattr(module, name) for name in ("gate_proj", "up_proj", "down_proj")):
             gate = module.gate_proj(x)
             up = module.up_proj(x)
-            hidden_states = torch.ops.tensor_cast.v4_clamped_swiglu(
+            hidden_states = torch.ops.tensor_cast.clamped_swiglu(
                 gate,
                 up,
                 module.swiglu_limit,

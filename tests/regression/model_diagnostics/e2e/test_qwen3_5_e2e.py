@@ -113,7 +113,7 @@ def test_qwen35_capture_organize_and_compare(
     stage_ids = {finding.stage_id for finding in result.findings}
     assert "attention" in stage_ids
     if model_name == _QWEN3_NEXT:
-        assert "linear_attention" in stage_ids
+        assert {"linear_projection", "linear_delta_rule", "linear_output"}.issubset(stage_ids)
         assert {"moe_gate", "moe_experts", "moe_combine", "shared_ffn"}.issubset(stage_ids)
     else:
         assert {"linear_projection", "linear_delta_rule", "linear_output"}.issubset(stage_ids)
