@@ -342,16 +342,20 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 # ------------------------- External PD Service Fine-tuning --------------------------------------------
 # Put these settings in a separate config after the PD service is running, then execute:
 #   msmodeling optix --mode standard -e vllm -b vllm_benchmark -c ./pd_fine_tune.toml
+# Settings.partial_update_vllm copies host, port, model and served_model_name from
+# [vllm.command] to [vllm_benchmark.command], even when manage_simulator_lifecycle=false.
+# Set these fields under [vllm.command]; this does not start or stop the external service.
 # skip_pso = true
 # manage_simulator_lifecycle = false
 # fine_tune_mode = "pd_mixed"
 # [vllm]
 # target_field = []
-# [vllm_benchmark.command]
+# [vllm.command]
 # host = "pd-service-host"
 # port = "8000"
 # model = "model_path"
 # served_model_name = "model_name"
+# [vllm_benchmark.command]
 # dataset_name = "random"
 # others = "--num-prompts 500 --random-input-len 1024 --random-output-len 256"
 # [[vllm_benchmark.target_field]]
