@@ -878,6 +878,9 @@ class SubKernelSpec:
     is_attention: bool = False
 
 
+SubKernelFallback = Callable[[SubKernelSpec], Optional[QueryResult]]
+
+
 def _infer_attention_phase(
     query_lens: Optional[torch.Tensor],
     *,
@@ -2641,7 +2644,12 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
     # ---- Main lookup ----
 
-    def lookup(self, op_invoke_info: "OpInvokeInfo") -> Optional[QueryResult]:
+    def lookup(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        *,
+        sub_kernel_fallback: Optional[SubKernelFallback] = None,
+    ) -> Optional[QueryResult]:
         """Query perf data for an op.
 
         Dispatch logic:
@@ -2675,7 +2683,11 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
         # Composite ops: try decomposition via sub_kernels, else skip
         if mapping.get("composite"):
-            return self._lookup_composite(op_invoke_info, mapping)
+            return self._lookup_composite(
+                op_invoke_info,
+                mapping,
+                sub_kernel_fallback=sub_kernel_fallback,
+            )
         if mapping.get("category") == "communication":
             return self._lookup_comm(op_invoke_info, mapping)
         if mapping.get("query_mode") == "attention_special":
@@ -2738,7 +2750,13 @@ class ProfilingDataSource(DataSourcePerformanceModel):
 
     # ---- Composite op lookup ----
 
-    def _lookup_composite(self, op_invoke_info: "OpInvokeInfo", mapping: dict) -> Optional[QueryResult]:
+    def _lookup_composite(
+        self,
+        op_invoke_info: "OpInvokeInfo",
+        mapping: dict,
+        *,
+        sub_kernel_fallback: Optional[SubKernelFallback] = None,
+    ) -> Optional[QueryResult]:
         """Decompose composite ops and sum sub-kernel latencies.
 
         For MLA/MLAPO: uses registered decomposer to derive sub-kernel shapes,
@@ -2750,7 +2768,12 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         func_str = _normalize_func_name(op_invoke_info.func)
         decomposer = COMPOSITE_DECOMPOSERS.get(func_str)
         if decomposer is not None:
-            return self._lookup_composite_decomposed(op_invoke_info, mapping, decomposer)
+            return self._lookup_composite_decomposed(
+                op_invoke_info,
+                mapping,
+                decomposer,
+                sub_kernel_fallback=sub_kernel_fallback,
+            )
 
         # Generic composite path (MC2 etc.)
         sub_kernels = mapping.get("sub_kernels", [])
@@ -2966,11 +2989,13 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         op_invoke_info: "OpInvokeInfo",
         mapping: dict,
         decomposer: Callable,
+        *,
+        sub_kernel_fallback: Optional[SubKernelFallback] = None,
     ) -> Optional[QueryResult]:
         """Query composite op using registered decomposer (MLA/MLAPO).
 
-        Calls the decomposer to get SubKernelSpec list, then queries each
-        sub-kernel via _find_compute_match or _query_by_attn_params.
+        Calls the decomposer once to get a SubKernelSpec list, queries each
+        sub-kernel exactly, and invokes sub_kernel_fallback only for a miss.
 
         Returns:
           - MEASURED if all sub-kernels hit.
@@ -3008,6 +3033,34 @@ class ProfilingDataSource(DataSourcePerformanceModel):
         missed_kernels = []
         has_interpolated = False
 
+        def use_fallback(spec: SubKernelSpec) -> bool:
+            nonlocal total_latency, has_interpolated
+            if sub_kernel_fallback is None:
+                return False
+            result = sub_kernel_fallback(spec)
+            if result is None:
+                return False
+
+            matched_kernel = str(result.details.get("kernel_type") or spec.kernel_type)
+            total_latency += result.latency_us
+            hit_kernels.append(matched_kernel)
+            sub_kernel_durations.append((matched_kernel, round(result.latency_us, 2)))
+            shape_info = result.shape_match_info
+            sub_kernel_shapes_list.append(
+                SubKernelShapeInfo(
+                    kernel_type=matched_kernel,
+                    simulation_shapes=(
+                        shape_info.simulation_shapes
+                        if shape_info is not None
+                        else [list(shape) for shape in spec.input_shapes]
+                    ),
+                    kernel_shapes=shape_info.kernel_shapes if shape_info is not None else [],
+                    shape_match_rule=shape_info.shape_match_rule if shape_info is not None else "interpolated",
+                )
+            )
+            has_interpolated = has_interpolated or result.source == QuerySource.INTERPOLATED
+            return True
+
         for spec in specs:
             kernel_types = [spec.kernel_type] + (spec.alternate_kernel_types or [])
             spec_attributes: Dict[str, Any] = {
@@ -3039,7 +3092,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                     sub_kernel_durations.append((hit.kernel_type, round(hit.latency_us, 2)))
                     has_interpolated = has_interpolated or bool(hit.details.get("interpolated"))
                     sub_kernel_shapes_list.append(self._candidate_sub_kernel_shape(hit))
-                else:
+                elif not use_fallback(spec):
                     missed_kernels.append(spec.kernel_type)
             elif spec.query_mode == "attention" and spec.attention_params:
                 result = self._query_by_attn_params(kernel_types, spec.attention_params, spec.dtype)
@@ -3057,7 +3110,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                             shape_match_rule="attention",
                         )
                     )
-                else:
+                elif not use_fallback(spec):
                     missed_kernels.append(spec.kernel_type)
                     # Attention sub-kernel miss: SFA/FIA CSV not available.
                     # Return None so analytic fallback produces a complete estimate
@@ -3093,7 +3146,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                             ),
                         )
                     )
-                else:
+                elif not use_fallback(spec):
                     missed_kernels.append(spec.kernel_type)
             elif spec.query_mode == "scatter_cache_write" and spec.cache_params:
                 hit = self._query_scatter_cache_write(kernel_types, spec.cache_params, spec.dtype)
@@ -3111,7 +3164,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                             ),
                         )
                     )
-                else:
+                elif not use_fallback(spec):
                     missed_kernels.append(spec.kernel_type)
             else:
                 profile_dtypes = spec.input_dtypes or [spec.dtype] * len(spec.input_shapes)
@@ -3127,7 +3180,8 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                         profile_dtypes,
                         spec.kernel_type,
                     )
-                    missed_kernels.append(spec.kernel_type)
+                    if not use_fallback(spec):
+                        missed_kernels.append(spec.kernel_type)
                     continue
                 tc_inputs = list(zip(spec.input_shapes, torch_dtypes))
                 hit = self._find_compute_match(
@@ -3150,7 +3204,7 @@ class ProfilingDataSource(DataSourcePerformanceModel):
                             ),
                         )
                     )
-                else:
+                elif not use_fallback(spec):
                     missed_kernels.append(spec.kernel_type)
                     if spec.is_attention:
                         # Attention sub-kernel matched in compute mode (e.g. SFA,

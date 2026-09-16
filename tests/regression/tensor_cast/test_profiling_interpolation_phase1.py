@@ -3170,17 +3170,57 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
     monkeypatch.setitem(interpolating_data_source_module.COMPOSITE_DECOMPOSERS, func_str, fake_decomposer)
     ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
 
-    result = ds._interpolate_composite(_make_op_info(func_str, []), {"composite": True}, func_str)
+    result = ds.lookup(_make_op_info(func_str, []))
 
     assert result is None
     assert ds.last_miss_reason == "composite_sub_kernel_failed"
     assert ds.last_miss_details["sub_kernel_miss_reason"] == "generic_compute_output_shape_unavailable"
 
 
-def test_composite_interpolation_records_exact_and_interpolated_sub_kernel_details(tmp_path, monkeypatch):
-    data_dir = tmp_path / "composite_sub_kernel_details"
+@pytest.mark.parametrize("query_mode", ["mlapo_preprocess", "cache_postprocess"])
+def test_composite_compute_like_leaf_interpolation_preserves_input_dtypes(tmp_path, monkeypatch, query_mode):
+    data_dir = tmp_path / "composite_compute_like_leaf"
     data_dir.mkdir()
     _write_text(data_dir / "op_mapping.yaml", 'version: "test"')
+    ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+    expected = QueryResult(latency_us=3.0, confidence=0.5, source=QuerySource.INTERPOLATED)
+    captured = {}
+
+    def fake_interpolate(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return expected
+
+    monkeypatch.setattr(ds, "_interpolate_compute_by_shapes", fake_interpolate)
+    spec = SubKernelSpec(
+        "OpaqueKernel",
+        [(150, 64), (64, 256)],
+        "DT_BF16",
+        input_dtypes=["DT_BF16", "INT64"],
+        query_mode=query_mode,
+        tc_input_count=2,
+    )
+
+    result = ds._interpolate_composite_sub_kernel(spec)
+
+    assert result is expected
+    assert captured["args"] == (["OpaqueKernel"], [(150, 64), (64, 256)], "DT_BF16", 2)
+    assert captured["kwargs"] == {"input_dtypes": ["DT_BF16", "INT64"]}
+
+
+def test_composite_interpolation_reuses_decomposed_leaf(tmp_path, monkeypatch):
+    data_dir = tmp_path / "composite_leaf_handoff"
+    data_dir.mkdir()
+    func_str = "tensor_cast.fake_composite.default"
+    _write_text(
+        data_dir / "op_mapping.yaml",
+        f"""
+version: "test"
+operator_mappings:
+  "{func_str}":
+    composite: true
+""",
+    )
     _write_text(
         data_dir / "MatMulV2.csv",
         """
@@ -3196,33 +3236,42 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 "200,64","DT_BF16","ND","200,64","DT_BF16","ND",40.0
 """,
     )
-    func_str = "tensor_cast.fake_composite.default"
+    specs = [
+        SubKernelSpec("MatMulV2", [(100, 64), (64, 256)], "DT_BF16"),
+        SubKernelSpec("RmsNorm", [(150, 64)], "DT_BF16"),
+    ]
+    decomposer_calls = 0
+    decomposer_mappings = []
 
     def fake_decomposer(_op_invoke_info, _mapping):
-        return [
-            SubKernelSpec("MatMulV2", [(100, 64), (64, 256)], "DT_BF16"),
-            SubKernelSpec("RmsNorm", [(150, 64)], "DT_BF16"),
-        ]
+        nonlocal decomposer_calls
+        decomposer_calls += 1
+        decomposer_mappings.append(_mapping)
+        return specs
 
     monkeypatch.setitem(interpolating_data_source_module.COMPOSITE_DECOMPOSERS, func_str, fake_decomposer)
     ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+    interpolated_specs = []
+    interpolate_leaf = ds._interpolate_composite_sub_kernel
 
-    result = ds._interpolate_composite(_make_op_info(func_str, []), {"composite": True}, func_str)
+    def record_interpolated_spec(spec):
+        interpolated_specs.append(spec)
+        return interpolate_leaf(spec)
+
+    monkeypatch.setattr(ds, "_interpolate_composite_sub_kernel", record_interpolated_spec)
+
+    result = ds.lookup(_make_op_info(func_str, []))
 
     assert result is not None
+    assert decomposer_calls == 1
+    assert "_runtime_tp_size" in decomposer_mappings[0]
+    assert "_runtime_sequence_parallel" in decomposer_mappings[0]
+    assert interpolated_specs == [specs[1]]
+    assert interpolated_specs[0] is specs[1]
     assert result.source == QuerySource.INTERPOLATED
     assert result.latency_us == pytest.approx(40.0)
-    assert result.shape_match_info is not None
-    assert result.shape_match_info.shape_match_rule == "interpolated_composite"
-    assert result.details["method"] == "decomposed_interpolation"
-    assert result.details["sub_kernels"][0]["source"] == QuerySource.MEASURED.name
-    assert result.details["sub_kernels"][0]["candidate_kernel_types"] == ["MatMulV2"]
-    assert result.details["sub_kernels"][0]["matched_kernel_type"] == "MatMulV2"
-    assert result.details["sub_kernels"][0]["latency_us"] == pytest.approx(10.0)
-    assert result.details["sub_kernels"][1]["source"] == QuerySource.INTERPOLATED.name
-    assert result.details["sub_kernels"][1]["matched_kernel_type"] == "RmsNorm"
-    assert result.details["sub_kernels"][1]["method"] == "linear_1d"
-    assert result.details["sub_kernels"][1]["latency_us"] == pytest.approx(30.0)
+    assert result.details["sub_kernel_durations"] == [("MatMulV2", 10.0), ("RmsNorm", 30.0)]
+    assert set(result.details) == {"kernel_type", "sub_kernel_durations", "composite", "note"}
 
 
 def test_composite_all_measured_sub_kernels_rolls_up_measured_source(tmp_path, monkeypatch):
@@ -3247,7 +3296,11 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 """,
     )
 
+    decomposer_calls = 0
+
     def fake_decomposer(_op_invoke_info, _mapping):
+        nonlocal decomposer_calls
+        decomposer_calls += 1
         return [
             SubKernelSpec("MatMulV2", [(100, 64), (64, 256)], "DT_BF16"),
             SubKernelSpec("MatMulV2", [(200, 64), (64, 128)], "DT_BF16"),
@@ -3255,27 +3308,21 @@ Input Shapes,Input Data Types,Input Formats,Output Shapes,Output Data Types,Outp
 
     monkeypatch.setitem(interpolating_data_source_module.COMPOSITE_DECOMPOSERS, func_str, fake_decomposer)
     ds = InterpolatingDataSource(ProfilingDataSource(data_dir))
+    monkeypatch.setattr(
+        ds,
+        "_interpolate_composite_sub_kernel",
+        lambda _spec: pytest.fail("all-exact composite must not invoke interpolation fallback"),
+    )
 
-    result = ds._interpolate_composite(_make_op_info(func_str, []), {"composite": True}, func_str)
+    result = ds.lookup(_make_op_info(func_str, []))
 
     assert result is not None
+    assert decomposer_calls == 1
     assert result.source == QuerySource.MEASURED
-    assert result.confidence == pytest.approx(0.5)
     assert result.latency_us == pytest.approx(30.0)
-    assert result.shape_match_info is not None
-    assert result.shape_match_info.shape_match_rule == "composite_measured"
     assert result.details["composite"] is True
-    assert len(result.details["sub_kernels"]) == 2
-    assert all(detail["source"] == QuerySource.MEASURED.name for detail in result.details["sub_kernels"])
-    assert [detail["matched_kernel_type"] for detail in result.details["sub_kernels"]] == ["MatMulV2", "MatMulV2"]
-
-    monkeypatch.setattr(ds.base, "lookup", lambda _op_invoke_info: None)
-    lookup_result = ds.lookup(_make_op_info(func_str, []))
-
-    assert lookup_result is not None
-    assert lookup_result.source == QuerySource.MEASURED
-    assert lookup_result.shape_match_info is not None
-    assert lookup_result.shape_match_info.shape_match_rule == "composite_measured"
+    assert result.shape_match_info is None
+    assert set(result.details) == {"kernel_type", "sub_kernel_durations", "composite", "note"}
 
 
 def test_composite_attention_candidate_shortage_records_miss(tmp_path):

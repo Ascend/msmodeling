@@ -12,7 +12,7 @@
 | 基线 | Phase1 插值能力及 PR262 合入后的行为 |
 | 关联 PR | #262、#366、#388、#389 |
 | 前置变更 | [PR #555](https://gitcode.com/Ascend/msmodeling/pull/555)、[PR #593](https://gitcode.com/Ascend/msmodeling/pull/593)、[Issue #272](https://gitcode.com/Ascend/msmodeling/issues/272) 的实现 |
-| 更新日期 | 2026-08-03 |
+| 更新日期 | 2026-08-17 |
 
 中英文 RFC 描述同一套能力范围和运行语义。修改默认行为、插值轴、regime、回退条件或验收标准时，必须同步修改两份文档。两份文档的章节编号、能力与验收表格、Section 7 测试矩阵是规范性结构对照；翻译导致的行数不同不构成差异，但实现 PR 必须附中英文结构 diff，并列明所有仅措辞不同的有意差异。
 
@@ -56,6 +56,7 @@ Phase2 不包含：
 - 外推或 `QuerySource.EXTRAPOLATED`；
 - 新的公共 CandidateIndex、数学后端或 datasource；
 - 新增父算子拆分规则或 overlap / pipeline latency 模型；
+- 改造仅通过静态 `sub_kernels` 声明的 MC2、RmsNorm + DynamicQuant 等 composite；本次接力只覆盖 `COMPOSITE_DECOMPOSERS` 已注册的 MLA、Quant MLA、Sparse MLA、Quant Sparse MLA、MLAPO、Quant MLAPO 和 DSA Indexer；
 - 在没有真实 profiling 数据时声明 FP8、MXFP4 或 DynamicBlockQuant 的插值精度。
 
 ## 2. 设计原则与 Phase1 复用边界
@@ -66,7 +67,7 @@ Phase2 以 [Phase1 RFC](./rfc_profiling_operator_interpolation_phase1_zh.md) 定
 
 | Phase1 能力 | Phase2 用法 |
 | --- | --- |
-| `InterpolatingDataSource` | 唯一 wrapper 入口和 Phase2 实现主体；复用既有 decomposer 取得叶子描述，不定义新的拆分规则 |
+| `InterpolatingDataSource` | 唯一 wrapper 入口和 Phase2 插值实现主体；只向 base 提供叶子 miss fallback，不调用 decomposer、不执行叶子 exact lookup、不汇总 composite latency |
 | `CandidateIndex` / `CandidateGroup` | 组织候选点、按 regime 分组、执行插值 |
 | `interpolation_math.py` | 复用 1D 线性插值和 2D / 3D 几何检查 |
 | `--disable-profiling-interpolation` | 全局回退到 base `ProfilingDataSource` |
@@ -79,7 +80,7 @@ Phase2 不引入新的插值数学。1D 继续使用相邻实测点线性插值�
 
 - 最小实现：每类算子只增加完成 target 和候选匹配所需的局部逻辑。
 - 奥卡姆剃刀：没有真实 blocker 时不抽象新平台，不设计未来接口。
-- exact 优先且职责单一：所有算子都先调用 base `ProfilingDataSource.lookup()`；完整结果直接返回，只有 `PARTIAL` 或 miss 才进入插值。wrapper 不绕过 base，也不在候选索引中执行第二次 exact。
+- exact 优先且职责单一：普通算子先调用 base `ProfilingDataSource.lookup()`，完整结果直接返回，只有 `PARTIAL` 或 miss 才进入插值；已注册的动态 composite 由同一次 base lookup 完成拆分和叶子 exact，并仅在某个叶子 miss 时调用 wrapper 提供的 fallback。wrapper 不执行第二次 decomposer、叶子 exact 或 composite 汇总。
 - 低维优先：允许的维度内始终先尝试各子类列出的 1D 轴，再尝试 2D、3D 轴组合；同一维度存在多个组合时，按该子类明确列出的顺序执行。
 - 同语义候选：离散 regime 不匹配时不插值。
 - 失败可解释：路径不适用或候选不合法时返回 miss，并记录原因。
@@ -92,9 +93,16 @@ Phase2 不引入新的插值数学。1D 继续使用相邻实测点线性插值�
 ```text
 InterpolatingDataSource.lookup(op)
   |
-  |-- base.lookup(op)
+  |-- registered dynamic composite
+  |     `-- base.lookup(op, sub_kernel_fallback)
+  |           |-- decompose once in ProfilingDataSource
+  |           |-- leaf exact hit -> keep measured result
+  |           |-- leaf exact miss -> interpolate the same SubKernelSpec
+  |           `-- aggregate once in ProfilingDataSource
+  |
+  |-- other operator -> base.lookup(op)
   |     |-- complete result -> return base result unchanged
-  |     `-- PARTIAL / None -> Phase2 fallback dispatch
+  |     `-- PARTIAL / None -> ordinary Phase2 fallback dispatch
   |
   v
 Phase2 fallback dispatch
@@ -136,13 +144,16 @@ Phase2 的叶子算子接口依赖以下前置变更：
 
 Phase2 目标基线必须包含上述叶子描述和运行时字段契约；当前实现直接复用该契约，不在 wrapper 内维护版本化替代接口。
 
-Phase2 基于这些前置能力消费既有 `SubKernelSpec`、`attention_params` 和 `cache_params`。拆分规则、叶子 shape 与运行时参数仍由 `ProfilingDataSource` 中的既有 decomposer 定义；Phase2 不新增拆分算法，也不修改 `ProfilingDataSource`。当父算子的 base 查询为 `PARTIAL` 或 miss 时，wrapper 调用同一个既有 decomposer，对各叶子先复用 base 子 kernel 查询，只有叶子 miss 才进入对应插值路径，最后按既有 composite 语义汇总一次 latency。
+Phase2 基于这些前置能力消费既有 `SubKernelSpec`、`attention_params` 和 `cache_params`。拆分规则、叶子 shape 与运行时参数仍由 `ProfilingDataSource` 中的既有 decomposer 定义。`SubKernelSpec` 是 base exact 与 wrapper interpolation 之间唯一的叶子媒介，不新增 planner 或第二种 descriptor。
+
+对于 `COMPOSITE_DECOMPOSERS` 已注册的动态 composite，`ProfilingDataSource.lookup()` 接受一个可选、仅关键字的 `sub_kernel_fallback`。base 注入 TP/SP 运行时字段并调用 decomposer 一次；每个叶子先执行既有 exact 查询，只有 miss 才把同一个 `SubKernelSpec` 对象交给 fallback。fallback 只调用既有叶子插值函数并返回 `QueryResult`，不重新 exact、不拆分、不汇总；base 最后按既有完整性规则汇总一次 latency。未注册的静态 composite 和不传 fallback 的 base 调用保持原行为。
 
 前置契约未满足或叶子语义字段不完整时必须 fail closed，不能在 wrapper 中猜测缺失的运行时语义。
 
 ### 3.3 结果来源
 
 - base 返回完整结果时保持原 `QuerySource`，wrapper 不改写；
+- 已注册动态 composite 的叶子全部 exact 命中时返回 `MEASURED`；只要一个叶子通过 fallback 插值且全部必需叶子完整解析，父结果返回 `INTERPOLATED`；
 - base 返回 `PARTIAL` 或 miss 后，专用路径只尝试插值，成功返回 `QuerySource.INTERPOLATED`；
 - 同 regime 只有一个同坐标候选、候选不足、regime 不匹配、latency 非法或目标越界时返回 miss，不执行本地 exact 兜底；
 - base 原结果为 `PARTIAL` 时，插值失败后沿用 Phase1 的回退规则。
@@ -548,7 +559,7 @@ Phase2 合入前满足：
 5. 不跨不兼容的 EP、topk、完整 GMM weight shape、shape tail、完整 cache shape、请求/序列分组、API path、dtype、DFC 物理输入签名或输出签名混用候选。
 6. DFC 只有与 CSV 七输入物理 dtype 签名、activation format、完整 GMM1/GMM2 weight shape 和 EP 严格对应的 target 可以使用候选；当前只有 v0.18 W8A8 具备有效数据，v0.15 及普通、INT4、FP8、MXFP4 路径稳定 miss。
 7. LightningIndexer 与 SparseFlashAttention 的累计 query offset、KV 长度和 regime 字段在 target 与 CSV 两侧同义可提取；字段不完整时稳定 miss。
-8. composite 使用既有 decomposer 生成的 `SubKernelSpec`，Phase2 不新增拆分算法；每个叶子先 base 查询，miss 后才插值，最终只汇总一次 latency。
+8. 已注册动态 composite 使用既有 decomposer 生成的 `SubKernelSpec`，Phase2 不新增拆分算法；一次 lookup 内 decomposer 恰好调用一次，同一个叶子对象先 exact、miss 后才 fallback，最终只汇总一次 latency。静态 composite 行为不变。
 9. Phase1 compute、attention、PARTIAL、disable switch 和 latency guard 回归测试通过。
 10. 中英文 RFC 与 mapping、代码和测试保持一致。
 

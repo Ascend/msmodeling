@@ -4392,7 +4392,6 @@ def test_glm5_sparse_mla_interpolation_keeps_runtime_sequence_parallel_shapes(mo
     )
     interpolating = InterpolatingDataSource(base)
     op = _make_glm5_sparse_mla_op(query_len=256, query_lens_values=[4096], seq_len=8192, is_decode=False)
-    mapping = base._op_mapping["operator_mappings"]["tensor_cast.mla_sparse_attention.default"]
     exact_compute_hit = MagicMock(latency_us=1.0, kernel_type="mock_compute")
     captured_attention_params = []
     captured_compute_inputs = []
@@ -4417,11 +4416,7 @@ def test_glm5_sparse_mla_interpolation_keeps_runtime_sequence_parallel_shapes(mo
 
     monkeypatch.setattr(interpolating, "_interpolate_attention_by_params", _capture_attention_params)
 
-    result = interpolating._interpolate_composite(
-        op,
-        mapping,
-        "tensor_cast.mla_sparse_attention.default",
-    )
+    result = interpolating.lookup(op)
 
     assert result is not None
     assert captured_attention_params[0]["q_shape_3d"] == (256, 2, 512)
@@ -4465,7 +4460,12 @@ def test_glm5_sp_attention_miss_does_not_retry_with_global_workload(tmp_path, mo
     monkeypatch.setattr(interpolating, "_interpolate_attention_by_params", fail_local_interpolation)
     op = _make_op_info(_FakeTorchOp(func_name), [])
 
-    result = interpolating._interpolate_composite(op, {}, func_name)
+    result = base._lookup_composite_decomposed(
+        op,
+        {},
+        COMPOSITE_DECOMPOSERS[func_name],
+        sub_kernel_fallback=interpolating._interpolate_composite_sub_kernel,
+    )
 
     assert result is None
     assert captured_params == [local_params]
@@ -4484,17 +4484,28 @@ def test_glm5_dsa_chunked_prefill_interpolation_uses_specialized_scatter_lookup(
     )
     monkeypatch.setattr(profiling_data_source.config.compilation.passes, "enable_sequence_parallel", True)
 
-    result = InterpolatingDataSource(base).lookup(
+    interpolating = InterpolatingDataSource(base)
+    leaf_results = {}
+    interpolate_leaf = interpolating._interpolate_composite_sub_kernel
+
+    def _capture_leaf_result(spec):
+        leaf_result = interpolate_leaf(spec)
+        leaf_results[spec.kernel_type] = leaf_result
+        return leaf_result
+
+    monkeypatch.setattr(interpolating, "_interpolate_composite_sub_kernel", _capture_leaf_result)
+
+    result = interpolating.lookup(
         _make_glm5_dsa_op(query_len=256, query_lens_values=[4096], seq_len=8192, is_decode=False)
     )
 
     assert result is not None
     assert result.source == QuerySource.INTERPOLATED
-    sub_kernels = {detail["kernel_type"]: detail for detail in result.details["sub_kernels"]}
-    assert sub_kernels["ScatterNdUpdate"]["method"] == "exact_scatter_cache_write"
+    sub_kernel_shapes = {detail.kernel_type: detail for detail in result.sub_kernel_shapes}
+    assert sub_kernel_shapes["ScatterNdUpdate"].shape_match_rule == "scatter_cache_pool_dim0_agnostic"
     # A denser database may keep q_tokens exact and interpolate only effective_kv_len.
     # attention_axes records the complete runtime workload independent of interpolation dimensionality.
-    assert sub_kernels["LightningIndexer"]["details"]["attention_axes"] == {
+    assert leaf_results["LightningIndexer"].details["attention_axes"] == {
         "q_tokens": 256.0,
         "effective_kv_len": 4352.0,
     }

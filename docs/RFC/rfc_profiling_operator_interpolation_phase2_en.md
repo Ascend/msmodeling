@@ -11,7 +11,7 @@
 | Baseline | Phase1 interpolation behavior after PR262 |
 | Related PRs | #262, #366, #388, #389 |
 | Prerequisites | [PR #555](https://gitcode.com/Ascend/msmodeling/pull/555), [PR #593](https://gitcode.com/Ascend/msmodeling/pull/593), and the implementation of [Issue #272](https://gitcode.com/Ascend/msmodeling/issues/272) |
-| Updated | 2026-08-03 |
+| Updated | 2026-08-17 |
 
 The Chinese and English RFCs describe the same capability scope and runtime semantics. Any change to default behavior, interpolation axes, regimes, fallback conditions, or acceptance criteria must update both documents. Their section numbers, capability and acceptance tables, and Section 7 test matrix are normative structural peers; prose line counts need not match because of translation, but an implementation PR must include a bilingual structure diff and identify any intentional wording-only difference.
 
@@ -55,6 +55,7 @@ Phase2 does not include:
 - extrapolation or `QuerySource.EXTRAPOLATED`;
 - a new public CandidateIndex, math backend, or datasource;
 - new parent-decomposition rules or overlap and pipeline latency models;
+- changes to MC2, RmsNorm + DynamicQuant, or other composites declared only through static `sub_kernels`; this handoff is limited to the registered MLA, Quant MLA, Sparse MLA, Quant Sparse MLA, MLAPO, Quant MLAPO, and DSA Indexer decomposers;
 - accuracy claims for FP8, MXFP4, or DynamicBlockQuant without real profiling data.
 
 ## 2. Design principles and Phase1 reuse
@@ -65,7 +66,7 @@ Phase2 uses the [Phase1 RFC](./rfc_profiling_operator_interpolation_phase1_en.md
 
 | Phase1 capability | Phase2 usage |
 | --- | --- |
-| `InterpolatingDataSource` | The only wrapper entry point and the Phase2 implementation owner. It reuses existing decomposers to obtain leaf descriptors and defines no new decomposition rules. |
+| `InterpolatingDataSource` | The only wrapper entry point and Phase2 interpolation owner. It provides a leaf-miss fallback to base but does not call a decomposer, perform leaf exact lookup, or aggregate composite latency. |
 | `CandidateIndex` / `CandidateGroup` | Candidate organization, regime grouping, and interpolation. |
 | `interpolation_math.py` | Existing 1D linear interpolation and 2D / 3D geometry checks. |
 | `--disable-profiling-interpolation` | Global fallback to base `ProfilingDataSource`. |
@@ -78,7 +79,7 @@ Phase2 introduces no new interpolation mathematics. 1D continues to use linear i
 
 - Minimal implementation: add only the local logic required to build and match a capability target.
 - Occam's razor: do not introduce a platform or future-facing interface without a concrete blocker.
-- Exact first with one owner: every operator first calls base `ProfilingDataSource.lookup()`. A complete result is returned unchanged; only `PARTIAL` or a miss enters interpolation. The wrapper neither bypasses base lookup nor performs a second exact lookup in its candidate indexes.
+- Exact first with one owner: ordinary operators first call base `ProfilingDataSource.lookup()` and only `PARTIAL` or a miss enters interpolation. For a registered dynamic composite, the same base lookup owns decomposition and leaf exact lookup and invokes the wrapper-provided fallback only for a leaf miss. The wrapper performs no second decomposition, leaf exact lookup, or composite aggregation.
 - Low dimension first: within the configured ceiling, try the 1D axes listed by each subcategory before 2D and 3D axis groups. When one dimension has multiple groups, use the order explicitly listed by that subcategory.
 - Same semantics: never interpolate across incompatible discrete regimes.
 - Explainable failure: return a miss reason when a path or candidate set is invalid.
@@ -91,9 +92,16 @@ Phase2 introduces no new interpolation mathematics. 1D continues to use linear i
 ```text
 InterpolatingDataSource.lookup(op)
   |
-  |-- base.lookup(op)
+  |-- registered dynamic composite
+  |     `-- base.lookup(op, sub_kernel_fallback)
+  |           |-- decompose once in ProfilingDataSource
+  |           |-- leaf exact hit -> keep measured result
+  |           |-- leaf exact miss -> interpolate the same SubKernelSpec
+  |           `-- aggregate once in ProfilingDataSource
+  |
+  |-- other operator -> base.lookup(op)
   |     |-- complete result -> return base result unchanged
-  |     `-- PARTIAL / None -> Phase2 fallback dispatch
+  |     `-- PARTIAL / None -> ordinary Phase2 fallback dispatch
   |
   v
 Phase2 fallback dispatch
@@ -135,13 +143,16 @@ The Phase2 leaf-operator interface depends on these upstream changes:
 
 The Phase2 target baseline must contain these leaf-descriptor and runtime-field contracts. The implementation consumes that contract directly and keeps no versioned substitute interface in the wrapper.
 
-Phase2 consumes the existing `SubKernelSpec`, `attention_params`, and `cache_params` contracts provided by these prerequisites. Decomposition rules, leaf shapes, and runtime parameters remain defined by the existing decomposers in `ProfilingDataSource`; Phase2 adds neither decomposition algorithms nor changes to `ProfilingDataSource`. When the parent base query returns `PARTIAL` or misses, the wrapper calls the same existing decomposer, reuses base sub-kernel lookup first for each leaf, interpolates only a leaf miss, and aggregates latency once under the existing composite semantics.
+Phase2 consumes the existing `SubKernelSpec`, `attention_params`, and `cache_params` contracts provided by these prerequisites. Decomposition rules, leaf shapes, and runtime parameters remain defined by the existing decomposers in `ProfilingDataSource`. `SubKernelSpec` is the only leaf carrier between base exact lookup and wrapper interpolation; no planner or second descriptor is introduced.
+
+For a dynamic composite registered in `COMPOSITE_DECOMPOSERS`, `ProfilingDataSource.lookup()` accepts an optional keyword-only `sub_kernel_fallback`. Base injects TP/SP runtime fields and invokes the decomposer once. Each leaf first uses its existing exact query; only a miss passes the same `SubKernelSpec` object to the fallback. The fallback invokes an existing leaf interpolation method and returns a `QueryResult`; it does not repeat exact lookup, decomposition, or aggregation. Base then aggregates latency once under the existing completeness rules. Static composites and base calls without a fallback keep their current behavior.
 
 If the prerequisite contract or required leaf semantics are incomplete, the path fails closed instead of guessing runtime semantics in the wrapper.
 
 ### 3.3 Result sources
 
 - A complete base result keeps its original `QuerySource`; the wrapper does not rewrite it.
+- A registered dynamic composite returns `MEASURED` when every leaf is exact. If at least one leaf is interpolated through fallback and every required leaf resolves, the parent returns `INTERPOLATED`.
 - After base returns `PARTIAL` or misses, a successful specialized path returns only `QuerySource.INTERPOLATED`.
 - A single same-coordinate candidate, insufficient candidates, regime mismatch, invalid latency, or an out-of-range target returns a miss; there is no wrapper-local exact fallback.
 - If base returned `PARTIAL`, the existing Phase1 fallback rule applies when interpolation also fails.
@@ -547,7 +558,7 @@ Before merge, Phase2 must satisfy:
 5. Candidates do not cross incompatible EP, topk, complete GMM weight shapes, shape tails, complete cache shapes, request/sequence grouping, API paths, dtypes, DFC physical-input signatures, or output signatures.
 6. A DFC candidate is used only when its seven-input physical dtype signature, activation format, complete GMM1/GMM2 weight shapes, and EP match the target. Current effective data coverage is limited to v0.18 W8A8; v0.15 and plain, INT4, FP8, and MXFP4 paths return stable misses.
 7. LightningIndexer and SparseFlashAttention cumulative query offsets, KV lengths, and regime fields are equivalently extractable from target and CSV; incomplete semantics return stable misses.
-8. Composite handling uses `SubKernelSpec` objects emitted by existing decomposers and adds no decomposition algorithm. Each leaf uses base query first, interpolation only after a miss, and latency is aggregated once.
+8. Registered dynamic composites use `SubKernelSpec` objects emitted by existing decomposers and add no decomposition algorithm. One lookup invokes the decomposer exactly once, passes the same leaf object from exact lookup to miss fallback, and aggregates latency exactly once. Static composite behavior is unchanged.
 9. Phase1 compute, attention, PARTIAL, disable switch, and latency-guard regressions pass.
 10. The Chinese and English RFCs match mappings, implementation, and tests.
 

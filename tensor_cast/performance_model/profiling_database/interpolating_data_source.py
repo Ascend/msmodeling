@@ -51,6 +51,7 @@ from .profiling_data_source import (
     DTYPE_MAP,
     fractal_nz_to_nd,
     ProfilingDataSource,
+    SubKernelSpec,
 )
 
 if TYPE_CHECKING:
@@ -255,9 +256,28 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
     def lookup(self, op_invoke_info: "OpInvokeInfo") -> Optional[QueryResult]:
         self._last_miss_reason = ""
         self._last_miss_details = {}
-        result = self.base.lookup(op_invoke_info)
+        func_str = _normalize_func_name(op_invoke_info.func)
+        mapping = self.base._op_mapping.get("operator_mappings", {}).get(func_str)
+        is_registered_composite = bool(
+            mapping is not None and mapping.get("composite") and func_str in COMPOSITE_DECOMPOSERS
+        )
+        if is_registered_composite:
+            result = self.base.lookup(
+                op_invoke_info,
+                sub_kernel_fallback=self._interpolate_composite_sub_kernel,
+            )
+        else:
+            result = self.base.lookup(op_invoke_info)
         if result is not None and result.source != QuerySource.PARTIAL:
             return result
+        if is_registered_composite:
+            if not self._last_miss_reason:
+                self._record_miss(
+                    "composite_sub_kernel_failed",
+                    base_miss_reason=self.base.last_miss_reason,
+                    fallback_from=("partial" if result is not None else "exact_miss"),
+                )
+            return None
         # PARTIAL or None: try interpolation.
         fallback_from = "partial" if result is not None and result.source == QuerySource.PARTIAL else "exact_miss"
         interp_result = self._interpolate(op_invoke_info, fallback_from=fallback_from)
@@ -306,9 +326,10 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             )
             return None
 
-        # Composite ops: decompose into sub-kernels, interpolate each
+        # Registered dynamic composites already consumed their leaf fallback in
+        # lookup(). Static composites keep their existing base-only behavior.
         if mapping.get("composite"):
-            return self._interpolate_composite(op_invoke_info, mapping, func_str)
+            return None
 
         if mapping.get("category") == "communication":
             # Comm interpolation handled by base's _query_comm_csv alpha-beta model
@@ -3544,260 +3565,47 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
             return projected
         return self._interpolate_attention_multidim(op_invoke_info, mapping, fallback_from=fallback_from)
 
-    def _interpolate_composite(
-        self, op_invoke_info: "OpInvokeInfo", mapping: dict, func_str: str
-    ) -> Optional[QueryResult]:
-        """Interpolate composite ops by decomposing into sub-kernels.
-
-        Uses registered decomposers to get sub-kernel specs, then interpolates
-        each sub-kernel individually and sums the results.
-        """
-        decomposer = COMPOSITE_DECOMPOSERS.get(func_str)
-        if decomposer is None:
-            return None
-
-        runtime_mapping = self.base._build_composite_runtime_mapping(op_invoke_info, mapping)
-        specs = decomposer(op_invoke_info, runtime_mapping)
-        if not specs:
+    def _interpolate_composite_sub_kernel(self, spec: SubKernelSpec) -> Optional[QueryResult]:
+        """Interpolate one already-decomposed leaf after base exact lookup misses."""
+        kernel_types = [spec.kernel_type] + (spec.alternate_kernel_types or [])
+        result = None
+        if spec.query_mode == "attention" and spec.attention_params:
+            result = self._interpolate_attention_by_params(kernel_types, spec.attention_params, spec.dtype)
+        elif spec.query_mode == "scatter_cache_write" and spec.cache_params:
+            input_dtypes = spec.input_dtypes or [spec.dtype] * len(spec.input_shapes)
+            result = self._interpolate_scatter_nd_update_by_shapes(
+                kernel_types,
+                spec.input_shapes,
+                input_dtypes,
+            )
+        elif spec.query_mode in {"compute", "mlapo_preprocess", "cache_postprocess"}:
+            result = self._interpolate_compute_by_shapes(
+                kernel_types,
+                spec.input_shapes,
+                spec.dtype,
+                spec.tc_input_count,
+                input_dtypes=spec.input_dtypes,
+            )
+        else:
             self._record_miss(
-                "composite_decompose_failed",
-                op_name=func_str,
-                base_miss_reason=self.base.last_miss_reason,
+                "composite_sub_kernel_query_mode_not_interpolated",
+                kernel_type=spec.kernel_type,
+                query_mode=spec.query_mode,
                 fallback_from="composite",
             )
             return None
 
-        total_latency = 0.0
-        hit_kernels = []
-        sub_kernel_details = []
-        missed_kernels = []
-
-        for spec_index, spec in enumerate(specs):
-            lat = None
-            sub_detail: dict[str, Any] = {
-                "kernel_type": spec.kernel_type,
-                "query_mode": spec.query_mode,
-                "fallback_from": "composite",
-            }
-
-            # First try exact match via base ProfilingDataSource
-            kernel_types = [spec.kernel_type] + (spec.alternate_kernel_types or [])
-            sub_detail["candidate_kernel_types"] = kernel_types
-            matched_kernel_type = spec.kernel_type
-            if spec.query_mode == "attention" and spec.attention_params:
-                result_exact = self.base._query_by_attn_params(kernel_types, spec.attention_params, spec.dtype)
-                lat = result_exact[0] if result_exact else None
-                if lat is not None:
-                    matched_kernel_type = result_exact[1]
-                    sub_detail.update(
-                        {
-                            "source": QuerySource.MEASURED.name,
-                            "method": "exact_attention_params",
-                            "matched_kernel_type": matched_kernel_type,
-                        }
-                    )
-            elif spec.query_mode == "mlapo_preprocess" and spec.runtime_params:
-                hit = self.base._query_mlapo_preprocess(kernel_types, spec.runtime_params, spec.dtype)
-                lat = hit.latency_us if hit is not None else None
-                if hit is not None:
-                    matched_kernel_type = hit.kernel_type
-                    sub_detail.update(
-                        {
-                            "source": QuerySource.MEASURED.name,
-                            "method": "exact_mlapo_preprocess",
-                            "matched_kernel_type": matched_kernel_type,
-                        }
-                    )
-            elif spec.query_mode == "scatter_cache_write" and spec.cache_params:
-                hit = self.base._query_scatter_cache_write(kernel_types, spec.cache_params, spec.dtype)
-                lat = hit.latency_us if hit is not None else None
-                if hit is not None:
-                    matched_kernel_type = hit.kernel_type
-                    sub_detail.update(
-                        {
-                            "source": QuerySource.MEASURED.name,
-                            "method": "exact_scatter_cache_write",
-                            "matched_kernel_type": matched_kernel_type,
-                        }
-                    )
-            elif spec.query_mode == "cache_postprocess" and spec.cache_params:
-                hit = self.base._query_cache_postprocess(kernel_types, spec.cache_params, spec.dtype)
-                lat = hit.latency_us if hit is not None else None
-                if hit is not None:
-                    matched_kernel_type = hit.kernel_type
-                    sub_detail.update(
-                        {
-                            "source": QuerySource.MEASURED.name,
-                            "method": "exact_cache_postprocess",
-                            "matched_kernel_type": matched_kernel_type,
-                        }
-                    )
-            else:
-                profile_dtypes = spec.input_dtypes or [spec.dtype] * len(spec.input_shapes)
-                torch_dtypes = [next((k for k, v in DTYPE_MAP.items() if v == dtype), None) for dtype in profile_dtypes]
-                if len(torch_dtypes) == len(spec.input_shapes) and all(dtype is not None for dtype in torch_dtypes):
-                    tc_inputs = list(zip(spec.input_shapes, torch_dtypes))
-                    hit = self.base._find_compute_match(
-                        kernel_types,
-                        tc_inputs,
-                        spec.tc_input_count,
-                        auto_truncate=True,
-                    )
-                    lat = hit.latency_us if hit else None
-                    if hit is not None:
-                        matched_kernel_type = hit.kernel_type
-                        sub_detail.update(
-                            {
-                                "source": QuerySource.MEASURED.name,
-                                "method": "exact_compute_match",
-                                "matched_kernel_type": matched_kernel_type,
-                            }
-                        )
-                else:
-                    lat = None
-
-            # If exact miss, try interpolation
-            if lat is None:
-                result_interp = None
-                if spec.query_mode == "attention" and spec.attention_params:
-                    result_interp = self._interpolate_attention_by_params(
-                        kernel_types, spec.attention_params, spec.dtype
-                    )
-                elif spec.query_mode == "scatter_cache_write":
-                    input_dtypes = spec.input_dtypes or [spec.dtype for _ in spec.input_shapes]
-                    result_interp = self._interpolate_scatter_nd_update_by_shapes(
-                        kernel_types,
-                        spec.input_shapes,
-                        input_dtypes,
-                    )
-                else:
-                    result_interp = self._interpolate_compute_by_shapes(
-                        kernel_types,
-                        spec.input_shapes,
-                        spec.dtype,
-                        spec.tc_input_count,
-                        input_dtypes=spec.input_dtypes,
-                    )
-                if result_interp is not None:
-                    lat = result_interp.latency_us
-                    sub_detail.update(
-                        {
-                            "source": result_interp.source.name,
-                            "method": result_interp.details.get("method"),
-                            "matched_kernel_type": result_interp.details.get("kernel_type", spec.kernel_type),
-                            "axes": result_interp.details.get("axes"),
-                            "candidate_count": result_interp.details.get("candidate_count"),
-                            "fallback_from": result_interp.details.get("fallback_from", "composite"),
-                            "details": result_interp.details,
-                        }
-                    )
-
-            if lat is None:
-                # For trailing non-attention compute sub-kernels (e.g. prefill
-                # tail transpose), allow a partial result rather than aborting
-                # latency already accumulated from earlier leaves. Attention
-                # sub-kernels remain mandatory, and a composite with no
-                # successful leaves must fail closed instead of returning a
-                # synthetic zero-latency result.
-                if spec.query_mode == "attention" or not sub_kernel_details:
-                    self._record_miss(
-                        "composite_sub_kernel_failed",
-                        kernel_type=spec.kernel_type,
-                        query_mode=spec.query_mode,
-                        fallback_from="composite",
-                        completed_sub_kernels=sub_kernel_details,
-                        failed_sub_kernel_index=spec_index,
-                        sub_kernel_count=len(specs),
-                        completed_latency_us=total_latency,
-                        failed_sub_kernel={
-                            "kernel_type": spec.kernel_type,
-                            "query_mode": spec.query_mode,
-                            "alternate_kernel_types": spec.alternate_kernel_types or [],
-                        },
-                        sub_kernel_miss_reason=self.last_miss_reason,
-                        sub_kernel_miss_details=self.last_miss_details,
-                    )
-                    return None
-                # Non-attention compute miss: record and continue (partial).
-                # The missed leaf is tracked so the result source is PARTIAL and
-                # callers do not mistake a partial sum for a full MEASURED hit.
-                missed_kernels.append(spec.kernel_type)
-                self._record_miss(
-                    "composite_sub_kernel_partial",
-                    kernel_type=spec.kernel_type,
-                    query_mode=spec.query_mode,
-                    fallback_from="composite",
-                    completed_sub_kernels=sub_kernel_details,
-                    failed_sub_kernel_index=spec_index,
-                    sub_kernel_count=len(specs),
-                    sub_kernel_miss_reason=self.last_miss_reason,
-                )
-                sub_detail.update(
-                    {
-                        "source": "MISSED",
-                        "method": "analytic_fallback_required",
-                        "latency_us": None,
-                    }
-                )
-                sub_kernel_details.append(sub_detail)
-                continue
-
-            total_latency += lat
-            hit_kernels.append(sub_detail.get("matched_kernel_type", matched_kernel_type))
-            sub_detail["latency_us"] = lat
-            sub_kernel_details.append(sub_detail)
-
-        logger.debug(
-            "INTERPOLATED (composite) %s: sub_kernels=%s, total=%.1f us",
-            func_str,
-            hit_kernels,
-            total_latency,
-        )
-        if missed_kernels:
-            # A partial composite must not be reported as MEASURED: the missed
-            # leaves carry analytic latency the caller must add separately. This
-            # mirrors the base ProfilingDataSource PARTIAL contract and prevents
-            # silently inflating empirical coverage.
-            return QueryResult(
-                latency_us=total_latency,
-                confidence=len(hit_kernels) / len(specs) if specs else 0.0,
-                source=QuerySource.PARTIAL,
-                details={
-                    "kernel_type": ",".join(hit_kernels),
-                    "composite": True,
-                    "partial": True,
-                    "method": "decomposed_interpolation_partial",
-                    "hit_kernels": hit_kernels,
-                    "missed_kernels": missed_kernels,
-                    "sub_kernels": sub_kernel_details,
-                },
-                shape_match_info=ShapeMatchInfo(
-                    simulation_shapes=[],
-                    kernel_shapes=[],
-                    shape_match_rule="partial_composite",
-                ),
+        if result is None:
+            self._record_miss(
+                "composite_sub_kernel_failed",
+                kernel_type=spec.kernel_type,
+                query_mode=spec.query_mode,
+                fallback_from="composite",
+                candidate_kernel_types=kernel_types,
+                sub_kernel_miss_reason=self.last_miss_reason,
+                sub_kernel_miss_details=self.last_miss_details,
             )
-        all_sub_kernels_measured = all(
-            detail.get("source") == QuerySource.MEASURED.name for detail in sub_kernel_details
-        )
-        source = QuerySource.MEASURED if all_sub_kernels_measured else QuerySource.INTERPOLATED
-        shape_match_rule = "composite_measured" if all_sub_kernels_measured else "interpolated_composite"
-        return QueryResult(
-            latency_us=total_latency,
-            confidence=0.5,
-            source=source,
-            details={
-                "kernel_type": ",".join(hit_kernels),
-                "composite": True,
-                "method": "decomposed_interpolation",
-                "sub_kernels": sub_kernel_details,
-            },
-            shape_match_info=ShapeMatchInfo(
-                simulation_shapes=[],
-                kernel_shapes=[],
-                shape_match_rule=shape_match_rule,
-            ),
-        )
+        return result
 
     def _interpolate_compute_by_shapes(
         self,
