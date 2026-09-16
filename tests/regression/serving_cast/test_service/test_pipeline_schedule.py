@@ -187,13 +187,15 @@ def test_forward_schedule_rejects_empty_inconsistent_and_missing_model():
 
 
 @pytest.mark.parametrize(
-    ("pp_size", "expected_repeated_makespan", "expected_period"),
+    ("pp_size", "expected_repeated_makespan", "expected_period", "expected_steady_completions"),
     # With 2 microbatches (K=2): PP=1 and PP=2 are filled (K>=P), period=2.0;
     # PP=4 is under-filled (K<P), so the period is the single-microbatch full
     # traversal (4 stages x 1.0 = 4.0), not the filled-pipeline cycle mean.
-    [(1, 4.0, 2.0), (2, 5.0, 2.0), (4, 7.0, 4.0)],
+    # The steady wave (wave 2) starts when stage 0 finishes wave 1 (2.0) and
+    # its completions continue from there.
+    [(1, 4.0, 2.0, (3.0, 4.0)), (2, 5.0, 2.0, (4.0, 5.0)), (4, 7.0, 4.0, (6.0, 7.0))],
 )
-def test_repeated_wave_matrix(pp_size, expected_repeated_makespan, expected_period):
+def test_repeated_wave_matrix(pp_size, expected_repeated_makespan, expected_period, expected_steady_completions):
     profile = _profile(pp_size, compute=1.0)
     estimate = estimate_repeated_pipeline((profile, profile), "analytic")
 
@@ -202,6 +204,24 @@ def test_repeated_wave_matrix(pp_size, expected_repeated_makespan, expected_peri
     assert estimate.measured_interval_s == pytest.approx(expected_period)
     assert estimate.repeated_makespan_s == pytest.approx(expected_repeated_makespan)
     assert estimate.completed_tokens == 2
+    assert estimate.steady_wave_start_s == pytest.approx(2.0)
+    assert estimate.steady_wave_completions_s == pytest.approx(expected_steady_completions)
+
+
+def test_repeated_wave_steady_offsets_reproduce_wave1_completion_profile():
+    # Scheduler invariant for uniform profiles: the saturated closed-batch
+    # orbit's per-slot offsets (wave-2 completions relative to the wave's own
+    # stage-0 start) equal wave 1's completion profile. Skewed stage
+    # distributions do NOT have this equality (a permanent orbit gap remains),
+    # which is why the optimizer anchors prefill request-level TTFT on wave 1
+    # and uses the orbit only for the steady rate (measured_interval_s). This
+    # test pins the uniform-profile orbit property of the exposed diagnostic
+    # fields, not a prefill TTFT dependency.
+    profile = _profile(4, compute=1.0)
+    estimate = estimate_repeated_pipeline((profile, profile, profile), "analytic")
+
+    offsets = tuple(completion - estimate.steady_wave_start_s for completion in estimate.steady_wave_completions_s)
+    assert offsets == pytest.approx(estimate.first_wave.microbatch_completion_s)
 
 
 def test_repeated_wave_under_filled_single_microbatch_respects_full_traversal():

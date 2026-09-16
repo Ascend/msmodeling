@@ -501,15 +501,31 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 batch_size,
                 optimizer_data,
                 is_decode=False,
+                repeat=True,
                 query_len=effective_input_length,
                 seq_len=effective_input_length,
                 resident_policy="inflight",
                 chunk_shapes=[(c.query_len, c.seq_len) for c in chunk_plan] if len(chunk_plan) > 1 else None,
             )
-            ttft = wave.schedule.makespan_s * 1000.0 + serving_cost_ms
+            # Explicit guards instead of assert: these are runtime
+            # preconditions of the steady-state prefill path and must survive
+            # `python -O`, failing with a diagnosable message rather than a
+            # late TypeError on None.
+            if wave.repeated is None or wave.prefill_request_ttft_s is None:
+                raise RuntimeError(
+                    "PP>1 prefill requires the steady-state evaluation (repeat=True) "
+                    "to produce a repeated estimate and a request-level TTFT; got "
+                    f"repeated={wave.repeated!r}, ttft={wave.prefill_request_ttft_s!r}."
+                )
+            # Request-level TTFT anchored on wave 1 (the no-queue anchor; see
+            # _evaluate_pp_wave) plus the fixed serving cost. Steady-state
+            # prefill throughput pairs one wave's tokens with the steady wave
+            # period (measured_interval_s), matching the decode branch above.
+            ttft = wave.prefill_request_ttft_s * 1000.0 + serving_cost_ms
             tpot = None
             completed_tokens = batch_size * effective_input_length
-            output_throughput = completed_tokens * self.dp * 1000.0 / ttft if ttft > 0 else 0.0
+            throughput_interval_s = wave.repeated.measured_interval_s + serving_cost_ms / 1000.0
+            output_throughput = completed_tokens * self.dp / throughput_interval_s if throughput_interval_s > 0 else 0.0
 
         device_memory_available_gb = wave.memory_left_gb
         token_s_device = output_throughput / self.dp / self.pp / self.tp

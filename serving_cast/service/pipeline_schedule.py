@@ -334,15 +334,24 @@ def _build_schedule_estimate(
 
 @dataclass(frozen=True)
 class RepeatedPipelineEstimate:
-    """Repeated-wave decode estimate for a forward pipeline.
+    """Repeated-wave steady-state estimate for a forward pipeline.
 
-    Two identical decode waves are scheduled without resetting stage
-    availability, so wave 2 queues behind wave 1's tail. The steady-state wave
-    period is computed from the max-plus free-state transition rather than
-    assuming the wave-1/wave-2 interval has already converged.
+    Two identical waves are scheduled without resetting stage availability, so
+    wave 2 queues behind wave 1's tail. The steady-state wave period is
+    computed from the max-plus free-state transition rather than assuming the
+    wave-1/wave-2 interval has already converged.
     ``same_slot_period_s`` contains that steady-state period for every
     microbatch slot, and ``worst_tpot_s`` is its maximum (the SLO-relevant
     TPOT).
+
+    Decode consumes the period fields. The steady-wave completion profile
+    (``steady_wave_completions_s`` relative to ``steady_wave_start_s``) is a
+    diagnostic of the saturated closed-batch orbit (identical for every wave
+    from wave 2 on): it is NOT the data source for prefill request-level
+    TTFT — the throughput optimizer anchors prefill TTFT on wave 1's
+    completions (the no-queue anchor matching production's continuous
+    injection) and takes the steady rate from ``measured_interval_s``. See
+    ``BaseThroughputOptimizer._evaluate_pp_wave`` for the full rationale.
 
     - ``completed_tokens``: number of decode STEPS completed in one wave
       (= number of microbatches in the wave). Each step produces one token per
@@ -357,6 +366,18 @@ class RepeatedPipelineEstimate:
       throughput and excludes wave-1 warmup.
     - ``repeated_makespan_s``: full two-wave wall-clock span from t=0 to wave
       2's last completion (diagnostic; NOT the throughput interval).
+    - ``steady_wave_completions_s``: finish time of each microbatch on the
+      final stage in wave 2, one entry per input microbatch. Wave 2 continues
+      from wave 1's ``final_free``, so these absolute timestamps include
+      queueing behind wave 1's tail. Diagnostic only (saturated closed-batch
+      orbit); not consumed as the prefill TTFT data source.
+    - ``steady_wave_start_s``: nominal start of wave 2 = wave 1's
+      ``final_free[0]``, the earliest time the first wave-2 microbatch can
+      begin stage-0 compute. ``completion - steady_wave_start_s`` is one
+      microbatch's latency within its own steady wave (wave-1 warmup
+      excluded). Diagnostic only; for uniform profiles these offsets equal
+      wave 1's completion profile, while skewed stage distributions leave a
+      permanent orbit gap that the prefill TTFT anchor deliberately excludes.
     """
 
     first_wave: PipelineScheduleEstimate
@@ -365,6 +386,8 @@ class RepeatedPipelineEstimate:
     worst_tpot_s: float
     completed_tokens: int
     measured_interval_s: float
+    steady_wave_completions_s: tuple[float, ...]
+    steady_wave_start_s: float
 
 
 def split_batch_size(batch_size: int, microbatch_size: int) -> tuple[int, ...]:
@@ -387,7 +410,7 @@ def estimate_repeated_pipeline(
     microbatch_profiles: tuple[PipelineProfile, ...] | list[PipelineProfile],
     perf_model_name: str,
 ) -> RepeatedPipelineEstimate:
-    """Estimate decode TPOT for indefinitely repeated identical waves.
+    """Estimate steady-state quantities for indefinitely repeated identical waves.
 
     Wave 1 schedules from idle stages (``free = [0, ...]``). Wave 2 schedules
     the same microbatch sequence continuing from wave 1's ``final_free``, so
@@ -395,6 +418,11 @@ def estimate_repeated_pipeline(
     makespan is retained as a warmup diagnostic. The steady-state period is the
     maximum cycle mean of the max-plus transition for one whole wave, avoiding
     the invalid assumption that the first repeated interval is already steady.
+    The wave-2 completion profile relative to wave 1's ``final_free[0]`` gives
+    each microbatch's latency within the saturated closed-batch orbit; it is
+    exposed for diagnostics and regression checks, not as the prefill TTFT
+    data source (the optimizer anchors prefill TTFT on wave 1 and takes the
+    steady rate from ``measured_interval_s``).
 
     Requires the same consistency as ``estimate_forward_pipeline`` (uniform
     ``pp_size``/stage count, contiguous stage ids, present perf-model keys).
@@ -507,6 +535,8 @@ def estimate_repeated_pipeline(
         worst_tpot_s=worst_tpot,
         completed_tokens=len(microbatch_profiles),
         measured_interval_s=measured_interval,
+        steady_wave_completions_s=wave2.microbatch_completion,
+        steady_wave_start_s=wave1.final_free[0],
     )
 
 

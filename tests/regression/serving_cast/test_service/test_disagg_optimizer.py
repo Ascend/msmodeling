@@ -1057,7 +1057,14 @@ def _run_pp_scaling_case(
     return summary, summary.get_summary_df().iloc[0]
 
 
-def _pp_schedule_estimates(*, makespan_s: float, interval_s: float, worst_tpot_s: float):
+def _pp_schedule_estimates(
+    *,
+    makespan_s: float,
+    interval_s: float,
+    worst_tpot_s: float,
+    steady_completions_s: tuple[float, ...] | None = None,
+    steady_start_s: float = 0.0,
+):
     from serving_cast.service.pipeline_schedule import (
         PipelineScheduleEstimate,
         RepeatedPipelineEstimate,
@@ -1082,6 +1089,7 @@ def _pp_schedule_estimates(*, makespan_s: float, interval_s: float, worst_tpot_s
         stage_outgoing_payload_bytes_s=(0, 0),
         stage_communication_buffer_bytes_s=(0, 0),
     )
+    steady = steady_completions_s if steady_completions_s is not None else (makespan_s / 2, makespan_s)
     repeated = RepeatedPipelineEstimate(
         first_wave=first_wave,
         repeated_makespan_s=makespan_s + interval_s,
@@ -1089,6 +1097,8 @@ def _pp_schedule_estimates(*, makespan_s: float, interval_s: float, worst_tpot_s
         worst_tpot_s=worst_tpot_s,
         completed_tokens=2,
         measured_interval_s=interval_s,
+        steady_wave_completions_s=steady,
+        steady_wave_start_s=steady_start_s,
     )
     return first_wave, repeated
 
@@ -1123,7 +1133,7 @@ class TestDisaggPipelineParallel(unittest.TestCase):
         self.assertEqual(row["profiling_result"], "hybrid")
         self.assertEqual(row["profiling_misses"], "outside_axis_boundary x3")
 
-    def test_prefill_formula_uses_wave_makespan_and_serving_cost(self):
+    def test_prefill_formula_uses_steady_request_mean_and_serving_cost(self):
         strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
         profile = _pp_profile((2.0, 2.0), include_transfers=False)
         optimizer_data = OptimizerData(
@@ -1140,9 +1150,105 @@ class TestDisaggPipelineParallel(unittest.TestCase):
         with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
             row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
 
-        self.assertEqual(row["ttft"], 6005.0)
+        # Real scheduler, bs=2 -> 2 microbatches x 2 stages (2.0s each, no
+        # transfers): wave-1 final-chunk completions (4, 6) — the no-queue
+        # anchor; request-level TTFT = mean + serving cost, NOT the wave-1
+        # makespan (6000 + 5). Throughput pairs one wave's tokens with the
+        # steady period (K*b = 4.0s) plus serving cost.
+        self.assertEqual(row["ttft"], 5005.0)
         self.assertIsNone(row["tpot"])
-        self.assertAlmostEqual(row["token/s"], 2 * 4 * 1000.0 / 6005.0, places=3)
+        self.assertAlmostEqual(row["token/s"], 2 * 4 / (4.0 + 0.005), places=3)
+
+    def test_prefill_request_mean_weights_uneven_microbatches(self):
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1, microbatch_size=2)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=3,
+            input_length=4,
+            output_length=8,
+            max_batched_tokens=12,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        # split_batch_size(3, 2) == (2, 1): microbatch sizes are uneven, so
+        # the request-weighted mean (2*4.0 + 1*6.0) / 3 = 4.667s must replace
+        # the naive per-microbatch mean (5.0s). (Summary rows round to 3
+        # decimals.)
+        self.assertAlmostEqual(row["ttft"], (2 * 4.0 + 1 * 6.0) / 3 * 1000.0, places=3)
+
+    def test_prefill_request_mean_uses_only_final_chunk_completions(self):
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        # input_length=8 > max_batched_tokens=5 -> chunks (q=5, seq=5) and
+        # (q=3, seq=8); with batch_size=2 the chunk-major schedule carries
+        # [c0mb0, c0mb1, c1mb0, c1mb1]: 4 microbatches x 2 stages.
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=2,
+            input_length=8,
+            output_length=8,
+            max_batched_tokens=5,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", return_value=_PPMetrics(profile)):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        # Wave-1 final-chunk completions are the last 2 of (4, 6, 8, 10) ->
+        # the no-queue anchor reads (8.0, 10.0), mean 9.0s. Averaging all 4
+        # slots (7.0s) or taking the makespan (10.0s) is wrong.
+        self.assertEqual(row["ttft"], 9000.0)
+        self.assertAlmostEqual(row["token/s"], 2 * 8 / 8.0, places=3)
+
+    def test_prefill_request_mean_anchors_on_wave1_not_steady_wave(self):
+        """Skewed stages split the wave-1 and steady-wave anchors: TTFT uses wave 1.
+
+        Production injects batches continuously into a pipeline that never
+        drains and has no inter-batch barrier, so a batch's requests do not
+        queue behind a whole previous batch; the steady-wave (wave-2, or
+        saturated closed batch) offsets over-state TTFT. Chaining waves on
+        the real scheduler converges exactly at wave 2, so the wave-1 vs
+        wave-2 difference is a permanent orbit gap and the anchor choice is
+        pinned explicitly here.
+        """
+        strategy = _make_pp_disagg_strategy(dp=1, pp=4, tp=1)
+        heavy = _pp_profile((0.30, 0.40, 0.55, 0.42), include_transfers=False)
+        light = _pp_profile((0.95, 0.85, 0.70, 0.83), include_transfers=False)
+
+        def fake_forward(concurrency, optimizer_data, is_decode, **kwargs):
+            return _PPMetrics(heavy if kwargs.get("query_len") == 5 else light)
+
+        # input_length=8 > max_batched_tokens=5 -> chunks (q=5, seq=5) and
+        # (q=3, seq=8); batch_size=2 -> chunk-major profiles [H, H, L, L].
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=2,
+            input_length=8,
+            output_length=8,
+            max_batched_tokens=5,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        # Wave-1 final-chunk completions (3.93, 4.88) -> 4405.0ms. The
+        # steady-wave offsets for the same profiles read (4.18, 5.01) ->
+        # 4595.0ms; the 190ms orbit gap is exactly what the anchor must NOT
+        # include. Throughput still uses the steady period (2.5s).
+        self.assertEqual(row["ttft"], 4405.0)
+        self.assertNotEqual(row["ttft"], 4595.0)
+        self.assertAlmostEqual(row["token/s"], 2 * 8 / 2.5, places=3)
 
     def test_decode_formula_separates_worst_tpot_and_measured_interval(self):
         strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
@@ -1327,6 +1433,27 @@ class TestDisaggPipelineParallel(unittest.TestCase):
         # Confirm each chunk actually participated in the pipeline schedule:
         # input_length=10 split by max_batched_tokens=4 yields 3 microbatches.
         self.assertEqual(summary.get_summary_df().iloc[0]["prefill_num_chunks"], 3)
+
+    def test_chunked_prefill_rejects_oversized_chunk_query(self):
+        """The per-microbatch budget contract is executable: an oversized chunk raises."""
+        from serving_cast.service.utils import PrefillChunk, UnsupportedPPConfigurationError
+
+        strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=2,
+            input_length=8,
+            output_length=8,
+            max_batched_tokens=4,
+            serving_cost=0,
+            num_mtp_tokens=0,
+            mtp_acceptance_rate=[],
+        )
+        oversized_plan = [PrefillChunk(index=0, query_len=5, seq_len=5, is_last_chunk=False)]
+        with self.assertRaises(UnsupportedPPConfigurationError) as ctx:
+            strategy._validate_pp_prefill_wave(optimizer_data, oversized_plan)
+        self.assertIn("exceeds", str(ctx.exception))
 
     def test_batch_budget_returns_early_stop_not_exception(self):
         """Batch exceeding token budget returns early-stop, not UnsupportedPPConfigurationError."""

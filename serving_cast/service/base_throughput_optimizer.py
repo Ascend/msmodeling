@@ -68,6 +68,11 @@ class _PPWaveEvaluation:
     bottleneck_stage_id: int
     profiling_source_times_s: dict[str, float]
     profiling_miss_reasons: dict[str, int]
+    # Request-level prefill TTFT in seconds: the request-weighted mean of
+    # wave-1 final-chunk microbatch completion times (the no-queue anchor;
+    # see _evaluate_pp_wave). None for decode waves and non-repeated
+    # estimates.
+    prefill_request_ttft_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -817,9 +822,23 @@ class BaseThroughputOptimizer(ABC):
             )
 
         if len(chunk_plan) > 1:
-            # Chunked prefill: each chunk already respects max_batched_tokens
-            # (the chunk plan splits by it).  The pipeline schedule handles
-            # multiple microbatches, so no batch-too-large check is needed.
+            # Chunked prefill token-budget contract: the pipeline schedule
+            # sends one microbatch per stage at a time (1F1B), so the binding
+            # per-step constraint is one microbatch's tokens, not the whole
+            # wave's batch_size * query_len. get_prefill_chunk_plan caps every
+            # chunk's query_len at max_batched_tokens; guard it explicitly so
+            # the contract stays executable if the chunk plan changes. (The
+            # single-chunk branch below keeps its stricter historical
+            # batch_size * query_len gate, matching the non-PP wave model
+            # where a whole wave is one forward.)
+            if max_batched_tokens is not None:
+                oversized = [chunk.query_len for chunk in chunk_plan if chunk.query_len > max_batched_tokens]
+                if oversized:
+                    raise UnsupportedPPConfigurationError(
+                        f"PP>1 {phase_label} chunk query_len {max(oversized)} exceeds "
+                        f"max_batched_tokens {max_batched_tokens}; the chunk plan must split "
+                        "prompts to fit the per-microbatch token budget."
+                    )
             return None
 
         prefill_query_len = chunk_plan[0].query_len if chunk_plan else effective_input_length
@@ -1030,6 +1049,37 @@ class BaseThroughputOptimizer(ABC):
         if publish_schedule:
             optimizer_data.pipeline_schedule_estimate = schedule
 
+        # Request-level TTFT definition for PP>1 prefill (uniform across the
+        # optimizer): ttft = sum(size_i * completion_i) / sum(size_i), where
+        # completion_i is microbatch i's finish time on the final stage in
+        # wave 1 and size_i is its per-DP-rank request count:
+        # - profiles are chunk-major (chunk index outer, microbatch inner), so
+        #   the final chunk owns the last len(microbatch_sizes) completion
+        #   slots — earlier chunks produce no first token;
+        # - weights are request counts because split_batch_size may produce
+        #   uneven microbatches (a naive per-microbatch average would give the
+        #   remainder microbatch an equal share);
+        # - the anchor is wave 1, not the steady-wave (wave-2) offsets.
+        #   Production engines inject batches continuously into a pipeline
+        #   that never drains and has no inter-batch barrier, so at
+        #   sub-saturation operating points a batch's requests queue behind
+        #   in-flight work only — not behind a whole previous batch. The
+        #   wave-2 offsets model a saturated closed batch (verified: chaining
+        #   waves converges exactly at wave 2, so the wave-1/wave-2 gap is a
+        #   permanent orbit difference, not a dissolving transition) and
+        #   over-state TTFT against production. The steady-state rate stays
+        #   carried by measured_interval_s (the wave-2 orbit), so TTFT
+        #   (no-queue anchor) and throughput (saturated anchor) intentionally
+        #   model different physics. Wave-1's makespan/cooldown remain
+        #   available as warmup diagnostics (pp_makespan_ms column).
+        prefill_request_ttft_s = None
+        if repeated is not None and not is_decode:
+            final_chunk_sizes = microbatch_sizes
+            wave1_final_chunk = repeated.first_wave.microbatch_completion_s[-len(final_chunk_sizes) :]
+            prefill_request_ttft_s = sum(
+                size * completion for size, completion in zip(final_chunk_sizes, wave1_final_chunk)
+            ) / sum(final_chunk_sizes)
+
         num_microbatches = len(profiles)
         resident_microbatches = num_microbatches if resident_policy == "full" else None
         device_memory_bytes = int(round(self.model_runner.total_device_memory_gb * BYTES_TO_GB))
@@ -1078,4 +1128,5 @@ class BaseThroughputOptimizer(ABC):
             bottleneck_stage_id=memory_estimate.bottleneck_stage_id,
             profiling_source_times_s=profiling_source_times_s,
             profiling_miss_reasons=profiling_miss_reasons,
+            prefill_request_ttft_s=prefill_request_ttft_s,
         )

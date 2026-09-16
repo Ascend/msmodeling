@@ -934,10 +934,10 @@ class TestAggPipelineParallel(unittest.TestCase):
         self.assertIsNotNone(summary)
         self.assertTrue(summary.get_pp_mixed_pd_overlap_approx())
 
-    def test_formula_keeps_prefill_ttft_worst_tpot_and_decode_interval_separate(self):
+    def test_formula_keeps_prefill_steady_request_ttft_and_decode_interval_separate(self):
         strategy = _make_pp_agg_strategy(dp=1, pp=2, tp=1)
         profile = _agg_pp_profile((2.0, 2.0))
-        first_wave, repeated = _pp_schedule_estimates(
+        _, repeated = _pp_schedule_estimates(
             makespan_s=0.06,
             interval_s=0.05,
             worst_tpot_s=0.08,
@@ -953,18 +953,18 @@ class TestAggPipelineParallel(unittest.TestCase):
         with (
             patch.object(strategy, "_get_forward_info", return_value=_AggPPMetrics(profile)),
             patch(
-                "serving_cast.service.base_throughput_optimizer.estimate_forward_pipeline",
-                return_value=first_wave,
-            ),
-            patch(
                 "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
                 return_value=repeated,
             ),
         ):
             row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
 
-        expected_e2el = 60.0 + 50.0 * (4 - 1)
-        self.assertEqual(row["ttft"], 60.0)
+        # Prefill ttft comes from the steady wave's request-level mean
+        # (steady completions (0.03, 0.06) - start 0.0 -> 45.0ms), not the
+        # wave-1 makespan (60.0ms); decode tpot/interval stay the steady
+        # worst_tpot / measured_interval.
+        expected_e2el = 45.0 + 50.0 * (4 - 1)
+        self.assertEqual(row["ttft"], 45.0)
         self.assertEqual(row["tpot"], 80.0)
         self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
 
@@ -1004,8 +1004,10 @@ class TestAggPipelineParallel(unittest.TestCase):
         fold = 2.5
         expected_tpot = 80.0 / fold  # 32.0
         expected_interval_ms = 50.0 / fold  # 20.0
-        expected_e2el = 60.0 + expected_interval_ms * 3  # 120.0
-        self.assertAlmostEqual(row["ttft"], 60.0, places=6)
+        # Prefill ttft is the steady-wave request-level mean (0.045s), and the
+        # decode interval is folded by (accept+1).
+        expected_e2el = 45.0 + expected_interval_ms * 3  # 105.0
+        self.assertAlmostEqual(row["ttft"], 45.0, places=6)
         self.assertAlmostEqual(row["tpot"], expected_tpot, places=6)
         self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, places=2)
 
@@ -1053,9 +1055,10 @@ class TestAggPipelineParallel(unittest.TestCase):
                 fold = 4.5
                 expected_tpot = 80.0 / fold
                 expected_interval_ms = 50.0 / fold
-                expected_e2el = 60.0 + expected_interval_ms * 3
+                # Prefill ttft is the steady-wave request-level mean (0.045s).
+                expected_e2el = 45.0 + expected_interval_ms * 3
                 # summary rows round to 3 decimals; 80/4.5 is not exact
-                self.assertAlmostEqual(row["ttft"], 60.0, places=6)
+                self.assertAlmostEqual(row["ttft"], 45.0, places=6)
                 self.assertAlmostEqual(row["tpot"], expected_tpot, delta=1e-2)
                 self.assertAlmostEqual(row["token/s"], 1000.0 * 4 * 2 / expected_e2el, delta=1e-1)
 
@@ -1083,19 +1086,16 @@ class TestAggPipelineParallel(unittest.TestCase):
             num_mtp_tokens=0,
             mtp_acceptance_rate=[],
         )
-        with (
-            patch.object(strategy, "_get_forward_info", side_effect=fake_forward),
-            patch(
-                "serving_cast.service.base_throughput_optimizer.estimate_repeated_pipeline",
-                side_effect=AssertionError("single-token aggregation must not decode"),
-            ),
-        ):
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
             summary = strategy.get_inference_info(optimizer_data)
 
         row = summary.get_summary_df().iloc[0]
         self.assertEqual(decode_calls, [])
         self.assertEqual(row["tpot"], 0.0)
-        self.assertAlmostEqual(row["token/s"], 1000.0 * 2 / 6000.0, places=3)
+        # Real scheduler on 2 microbatches x 2 stages (2.0s, no transfers):
+        # steady wave completions (8.0, 10.0) - start 4.0 -> request-level
+        # mean 5.0s (NOT the wave-1 makespan 6.0s).
+        self.assertAlmostEqual(row["token/s"], 1000.0 * 2 / 5000.0, places=3)
         self.assertFalse(summary.check_early_stop_flag())
         self.assertFalse(summary.get_pp_mixed_pd_overlap_approx())
 

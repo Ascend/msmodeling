@@ -850,13 +850,24 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
             batch_size,
             optimizer_data,
             is_decode=False,
+            repeat=True,
             query_len=effective_input_length,
             seq_len=effective_input_length,
             resident_policy=("inflight" if remaining_decode_tokens == 0 else "full"),
             chunk_shapes=[(c.query_len, c.seq_len) for c in chunk_plan] if len(chunk_plan) > 1 else None,
         )
+        # Explicit guard instead of assert: a runtime precondition of the
+        # steady-state prefill path that must survive `python -O`.
+        if prefill_wave.prefill_request_ttft_s is None:
+            raise RuntimeError(
+                "PP>1 aggregation prefill requires the steady-state evaluation "
+                "(repeat=True) to produce a request-level TTFT estimate; got None."
+            )
+        # ttft is the request-level mean anchored on wave 1 (the no-queue
+        # anchor; see _evaluate_pp_wave); the wave-1 makespan stays the
+        # prefill_latency warmup diagnostic.
         prefill_makespan_ms = prefill_wave.schedule.makespan_s * 1000.0
-        ttft = prefill_makespan_ms
+        ttft = prefill_wave.prefill_request_ttft_s * 1000.0
 
         if remaining_decode_tokens == 0:
             tpot = 0.0
