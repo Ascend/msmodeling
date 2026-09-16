@@ -822,23 +822,23 @@ def dcp_sharded_num_blocks(model, num_blocks: int) -> int:
 def _resolve_main_kv_cache_dtype(model, layer_idx: int) -> torch.dtype:
     """Resolve storage dtype for the primary (attention) KV cache.
 
-    DeepSeek V4's reference inference model keeps the shared attention KV cache
-    in the model working dtype (bf16/fp16) even when activations are FP8-quantized
-    elsewhere (model.py:506-507, 527). Indexer cache may still use FP8; see
-    ``_resolve_indexer_cache_dtype``.
-
     Draft attention quantization isolation is handled centrally in
     ``get_attention_quant_config`` (returns ``None`` for draft layers), so
     this function does not need to know about draft boundaries.
     """
     model_config = model.model_config
-    if _is_v4_model(model):
-        return model_config.dtype
-
-    kvcache_dtype = model_config.dtype
+    kvcache_dtype = torch.bfloat16 if _is_v4_model(model) else model_config.dtype
     if (attention_config := get_attention_quant_config(model, layer_idx)) is not None:
         kvcache_dtype = attention_config.get_quant_dtype()
     return kvcache_dtype
+
+
+def _v4_main_cache_storage(shape, dtype, rope_head_dim):
+    """Physical V4 payload; scale metadata and backend padding are not modeled."""
+    if dtype == torch.float8_e4m3fn:
+        # One byte per non-RoPE value, two bytes per BF16 RoPE value.
+        return [*shape[:-1], shape[-1] + rope_head_dim], torch.uint8
+    return shape, dtype
 
 
 def _resolve_indexer_cache_dtype(model, layer_idx: int, attention_layer=None) -> torch.dtype:
@@ -1112,6 +1112,8 @@ def _get_kv_cache_info(
                     batch_size,
                     total_kv_tokens,
                 )
+                rope_head_dim = int(getattr(model.text_config, "qk_rope_head_dim", 0))
+                kv_cache_shape, kvcache_dtype = _v4_main_cache_storage(kv_cache_shape, kvcache_dtype, rope_head_dim)
                 kv_cache_by_layers[i] = torch.empty(
                     kv_cache_shape,
                     dtype=kvcache_dtype,

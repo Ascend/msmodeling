@@ -237,7 +237,7 @@ def _(
             gp_ops += rows * head_dim * 5
         else:
             gp_ops += rows * nope_head_dim * 3
-        properties.memory_write_bytes += batch * total_post_compress_rows * head_dim * kv_cache.element_size()
+        properties.memory_write_bytes += batch * total_post_compress_rows * kv_cache.shape[-1] * kv_cache.element_size()
 
     _accumulate_compute_ops(
         properties,
@@ -562,7 +562,24 @@ def _(
     per_query_gp = num_heads + num_heads * v_head_dim
     gp_ops = query_tokens * (num_iters * per_iter_gp + per_query_gp)
 
-    _accumulate_compute_ops(properties, q.dtype, mma_ops=mma_ops, gp_ops=gp_ops)
+    kv_quant_dtype = (
+        op_invoke_info.args[7] if len(op_invoke_info.args) > 7 else op_invoke_info.kwargs.get("kv_quant_dtype")
+    )
+    rope_head_dim = (
+        op_invoke_info.args[8] if len(op_invoke_info.args) > 8 else op_invoke_info.kwargs.get("rope_head_dim", 0)
+    )
+    # A5 KV-quantized attention dequantizes KV, then uses BF16 operands
+    # with FP32 accumulation. KV storage precision is not Cube precision.
+    compute_dtype = torch.bfloat16 if kv_quant_dtype is not None else q.dtype
+    _accumulate_compute_ops(properties, compute_dtype, mma_ops=mma_ops)
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=gp_ops)
+    if kv_quant_dtype is not None:
+        quant_width = q_head_dim - rope_head_dim if kv_quant_dtype == torch.float8_e4m3fn else q_head_dim
+        # Per gathered shared-KV value: convert to FP32, multiply scale,
+        # convert to BF16. Count once for shared K/V, not once per query head.
+        # Scale storage/padding are omitted; dequantization arithmetic is not.
+        dequant_ops = query_tokens * sparse_topk * quant_width * 3
+        _accumulate_compute_ops(properties, torch.float32, gp_ops=dequant_ops)
 
     # Q/attn_sink padding traffic when the kernel internally pads h<16.
     if padded_head_delta > 0:

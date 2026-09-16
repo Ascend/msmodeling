@@ -1327,11 +1327,13 @@ def _exclude_unquantized_dsa_linears(model_config) -> None:
         modules_to_not_convert = []
         model_config.quant_config.modules_to_not_convert = modules_to_not_convert
 
-    for pattern in (
-        "*.kv_b_proj",
-        "*indexer*.wk",
-        "*indexer*.weights_proj",
-    ):
+    # Quantized MLA decomposes kv_b_proj into quantized W_UK/W_UV.
+    # DSA-CP must not suppress that prerequisite when attention quant is on.
+    attention_quantized = any(config is not None for config in model_config.quant_config.attention_configs.values())
+    patterns = ["*indexer*.wk", "*indexer*.weights_proj"]
+    if not attention_quantized:
+        patterns.append("*.kv_b_proj")
+    for pattern in patterns:
         if pattern not in modules_to_not_convert:
             modules_to_not_convert.append(pattern)
 

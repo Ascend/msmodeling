@@ -1,5 +1,6 @@
 """Regression test for DeepSeek-V4 model support."""
 
+import copy
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -9,6 +10,8 @@ import torch.nn as nn
 
 import tensor_cast.performance_model.builtin_model  # noqa: F401 — register V4 perf handlers
 
+from tensor_cast.core.quantization.config import create_attention_quant_config
+from tensor_cast.core.quantization.datatypes import QuantizeAttentionAction
 from tensor_cast.performance_model.builtin_model.deepseek_v4 import _safe_max_int
 from tensor_cast.transformers.builtin_model.deepseek_v4 import (
     DeepseekV4Compressor,
@@ -20,7 +23,6 @@ from tensor_cast.transformers.builtin_model.deepseek_v4 import (
     DeepseekV4RotaryEmbedding,
     DeepseekV4SparseAttention as BuiltinDeepseekV4SparseAttention,
 )
-from tensor_cast.layers.rotary_embedding import CachingRotaryEmb
 from tensor_cast.layers.deepseek_v4 import (
     DeepseekV4SparseAttention,
     DeepseekV4SparseAttentionIndexer,
@@ -31,6 +33,7 @@ from tensor_cast.layers.deepseek_v4 import (
     get_compress_topk_idxs,
 )
 from tensor_cast.layers.quant_linear import TensorCastQuantLinear
+from tensor_cast.layers.rotary_embedding import CachingRotaryEmb
 from tensor_cast.layers.attention import AttentionMetadataTensorCast
 from tensor_cast.layers.mla import (
     DeepseekSparseAttention,
@@ -350,6 +353,23 @@ class TestDeepseekV4AttentionOperators(unittest.TestCase):
         )
         # Result shape: [B, S, H, D]
         assert result.shape == (2, 8, 8, 512)
+
+    def test_sparse_attn_sharedkv_mixed_cache_output_dtype(self):
+        q = torch.empty(2, 8, 8, 512, dtype=torch.bfloat16)
+        kv = torch.empty(2, 16, 576, dtype=torch.uint8)
+        result = torch.ops.tensor_cast.sparse_attn_sharedkv(
+            q,
+            kv,
+            torch.empty(8),
+            torch.zeros(2, 8, 4, dtype=torch.int32),
+            0.01,
+            512,
+            kv_dependency=kv,
+            kv_quant_dtype=torch.float8_e4m3fn,
+            rope_head_dim=64,
+        )
+        assert result.shape == q.shape
+        assert result.dtype == torch.bfloat16
 
 
 class TestDeepseekV4MoEOperators(unittest.TestCase):
@@ -691,6 +711,60 @@ class TestDeepseekV4SparseAttention(unittest.TestCase):
                 kv_cache_by_layers={0: kv_cache},
             )
 
+        assert result.shape == hidden_states.shape
+        assert cache is None
+
+    def test_v4_attention_quant_config_describes_kv_storage(self):
+        inner = self._create_tiny_forward_inner_module()
+        mla_config = MlaConfig(module_name="DeepseekV4SparseAttention")
+        with patch(
+            "tensor_cast.layers.mla.MultiheadLatentAttentionTensorCast.__init__",
+            _stub_mla_tensor_cast_init,
+        ):
+            wrapper = DeepseekV4SparseAttention(mla_config, inner, self._mock_tp_group())
+        wrapper.layer_idx = 0
+        wrapper.quant_config = create_attention_quant_config(QuantizeAttentionAction.FP8)
+
+        hidden_states = torch.randn(1, 5, 8)
+        cos = torch.ones(1, 5, 2)
+        sin = torch.zeros(1, 5, 2)
+        attention_meta = AttentionMetadataTensorCast(
+            query_start_loc=torch.tensor([0, 5], dtype=torch.long),
+            seq_lens=torch.tensor([5], dtype=torch.long),
+            query_lens=torch.tensor([5], dtype=torch.long),
+            slot_mapping=torch.arange(5, dtype=torch.long),
+        )
+        kv_cache = torch.empty(1, 4, 6, dtype=torch.uint8)
+
+        def _dynamic_quantize_symmetric(x, *_args, **_kwargs):
+            return x, torch.ones(1, dtype=torch.float32, device=x.device)
+
+        def _quant_core(q, kv, *_args, kv_quant_dtype=None, rope_head_dim=0, kv_dependency=None, **_kwargs):
+            assert kv_quant_dtype == torch.float8_e4m3fn
+            assert rope_head_dim == 2
+            assert kv.dtype == torch.uint8
+            assert kv.shape[-1] == 6
+            assert kv_dependency is kv_cache
+            assert kv_dependency.dtype == torch.uint8
+            return q
+
+        with (
+            patch("torch.ops.tensor_cast.rms_norm", side_effect=lambda x, *_args, **_kwargs: x),
+            patch("torch.ops.tensor_cast.apply_rope_inplace", side_effect=lambda *_args, **_kwargs: None),
+            patch("torch.ops.tensor_cast.dynamic_quantize_symmetric", side_effect=_dynamic_quantize_symmetric),
+            patch("torch.ops.tensor_cast.quantize", side_effect=lambda x, _s, _o, dtype: x.to(dtype)),
+            patch("torch.ops.tensor_cast.scatter_nd_update_mla", side_effect=lambda _kv, cache, *_args: cache),
+            patch("torch.ops.tensor_cast.sparse_attn_sharedkv", side_effect=_quant_core) as quant_core,
+        ):
+            result, cache = wrapper(
+                hidden_states,
+                (cos, sin),
+                attention_mask=None,
+                attention_meta=attention_meta,
+                kv_cache_by_layers={0: kv_cache},
+            )
+
+        quant_core.assert_called_once()
         assert result.shape == hidden_states.shape
         assert cache is None
 
@@ -1312,6 +1386,48 @@ class TestDeepseekV4RouteFunctions(unittest.TestCase):
         assert normalize_weights is True
 
 
+@pytest.mark.parametrize("rope_type", ["default", "yarn"])
+def test_v4_rotary_cache_uses_partial_head_dim(rope_type):
+    rope_parameters = {"rope_type": rope_type, "rope_theta": 10000.0}
+    if rope_type == "yarn":
+        rope_parameters.update(factor=16.0, original_max_position_embeddings=65536, beta_fast=32.0, beta_slow=1.0)
+    config = _tiny_v4_config(
+        head_dim=512,
+        qk_rope_head_dim=64,
+        max_position_embeddings=1048576,
+        rope_parameters=rope_parameters,
+    )
+    original_config = copy.deepcopy(config.to_dict())
+    rotary = DeepseekV4RotaryEmbedding(config, device="meta")
+    cache = CachingRotaryEmb(rotary, torch.bfloat16, config.max_position_embeddings)
+
+    assert config.to_dict() == original_config
+    assert rotary.inv_freq.shape == (32,)
+    assert cache.cos_cache.shape == cache.sin_cache.shape == (1048576, 64)
+    assert sum(buffer.numel() * buffer.element_size() for buffer in cache.buffers()) == 268435456
+    cos, sin = cache(
+        torch.empty(1, 3, 128, device="meta", dtype=torch.bfloat16),
+        torch.empty(1, 3, device="meta", dtype=torch.long),
+    )
+    assert cos.shape == sin.shape == (1, 3, 64)
+    assert cos.dtype == sin.dtype == torch.bfloat16
+
+
+def test_v4_rotary_default_frequencies_use_rotary_dimension():
+    config = _tiny_v4_config(
+        head_dim=512, qk_rope_head_dim=64, rope_parameters={"rope_type": "default", "rope_theta": 10000.0}
+    )
+    rotary = DeepseekV4RotaryEmbedding(config)
+    positions = torch.tensor([[0, 1, 17]])
+    cos, sin = rotary(torch.empty(1, 3, 128), positions)
+    # Independent 64-dimensional RoPE formula; truncating a 512-wide table is incorrect.
+    frequencies = 10000.0 ** (-torch.arange(0, 64, 2, dtype=torch.float32) / 64)
+    angles = positions.float().unsqueeze(-1) * frequencies
+    angles = torch.cat((angles, angles), dim=-1)
+    torch.testing.assert_close(cos, angles.cos())
+    torch.testing.assert_close(sin, angles.sin())
+
+
 class TestDeepseekV4ConfigEdgeCases(unittest.TestCase):
     """Test V4 config edge cases."""
 
@@ -1432,5 +1548,155 @@ class TestDeepseekV4BuiltinModelRegistration(unittest.TestCase):
         assert types == ["sliding_attention", "compressed_sparse_attention", "heavily_compressed_attention"]
 
 
+@pytest.mark.parametrize(
+    "dtype,width,expected_bytes",
+    [
+        (torch.bfloat16, 512, 1024),
+        (torch.float8_e4m3fn, 576, 576),
+    ],
+)
+def test_v4_mixed_cache_payload_size(dtype, width, expected_bytes):
+    from tensor_cast.core.input_generator import _v4_main_cache_storage
+
+    shape, storage_dtype = _v4_main_cache_storage([3, 16, 512], dtype, 64)
+    cache = torch.empty(shape, dtype=storage_dtype, device="meta")
+    assert shape == [3, 16, width]
+    assert cache.numel() * cache.element_size() == 3 * 16 * expected_bytes
+
+
+@pytest.mark.parametrize("query_len", [1, 8])
+@pytest.mark.parametrize("ratio", [4, 128])
+def test_v4_compressor_preserves_mixed_storage_width(query_len, ratio):
+    hidden = torch.empty(1, query_len, 16, dtype=torch.bfloat16)
+    cache = torch.empty(1, 20, 576, dtype=torch.uint8)
+    compressed, updated = torch.ops.tensor_cast.compressor(
+        hidden,
+        cache,
+        ratio,
+        512,
+        64,
+        False,
+        torch.tensor([128]),
+        torch.tensor([query_len]),
+    )
+    assert compressed.shape[-1] == 576
+    assert compressed.dtype == updated.dtype == torch.uint8
+    assert updated.shape == cache.shape
+
+
+@pytest.mark.parametrize("row_bytes", [576, 1024])
+def test_v4_sparse_attention_reads_physical_rows(row_bytes):
+    quantized = row_bytes == 576
+    op = torch.ops.tensor_cast.sparse_attn_sharedkv.default
+    invoke = MagicMock()
+    q = torch.empty(1, 2, 16, 512, dtype=torch.bfloat16)
+    cache = torch.empty(1, 8, 576, dtype=torch.uint8) if quantized else torch.empty(1, 8, 512, dtype=torch.bfloat16)
+    invoke.args = [q, cache, torch.empty(16), torch.empty(1, 2, 4, dtype=torch.int32), 0.1, 512]
+    invoke.kwargs = {"kv_quant_dtype": torch.float8_e4m3fn, "rope_head_dim": 64} if quantized else {}
+    invoke.get_memory_access_properties.return_value = MagicMock(
+        memory_read_bytes=0, memory_write_bytes=0, memory_readwrite_bytes=0
+    )
+    props = _v4_perf_props(op)(invoke)
+    # Two queries gather four rows each, plus the padded 64 INT32 indices.
+    assert props.memory_read_bytes == 2 * 4 * row_bytes + 2 * 64 * 4
+
+
+def test_v4_scatter_and_compressor_write_mixed_row_bytes():
+    invoke = MagicMock()
+    cache = torch.empty(1, 16, 576, dtype=torch.uint8)
+    invoke.args = [torch.empty(1, 2, 576, dtype=torch.uint8), cache, None, 2, None]
+    invoke.get_memory_access_properties.return_value = MagicMock(
+        memory_read_bytes=0, memory_write_bytes=0, memory_readwrite_bytes=0
+    )
+    props = _v4_perf_props(torch.ops.tensor_cast.scatter_nd_update_mla.default)(invoke)
+    assert props.memory_write_bytes == 2 * 576
+
+    writes = []
+    for width in (512, 576):
+        invoke.args = [
+            torch.empty(1, 128, 16),
+            torch.empty(1, 16, width, dtype=torch.uint8),
+            128,
+            512,
+            64,
+            False,
+            torch.tensor([128]),
+        ]
+        invoke.get_memory_access_properties.return_value = MagicMock(
+            memory_read_bytes=0, memory_write_bytes=0, memory_readwrite_bytes=0
+        )
+        props = _v4_perf_props(torch.ops.tensor_cast.compressor.default)(invoke)
+        writes.append(props.memory_write_bytes)
+    assert writes[1] - writes[0] == 64
+
+
+@pytest.mark.parametrize("query_len", [1, 8])
+@pytest.mark.parametrize("ratio", [0, 4, 128])
+def test_v4_fp8_forward_mixed_cache(query_len, ratio):
+    helper = TestDeepseekV4SparseAttention()
+    inner = helper._create_tiny_forward_inner_module()
+    inner.compress_ratio = ratio
+    inner.use_compressor = ratio > 0
+    with patch("tensor_cast.layers.mla.MultiheadLatentAttentionTensorCast.__init__", _stub_mla_tensor_cast_init):
+        wrapper = DeepseekV4SparseAttention(
+            MlaConfig(module_name="DeepseekV4SparseAttention"), inner, helper._mock_tp_group()
+        )
+    wrapper.layer_idx = 0
+    wrapper.quant_config = create_attention_quant_config(QuantizeAttentionAction.FP8)
+    cache = torch.empty(1, 132, 6, dtype=torch.uint8)
+    meta = AttentionMetadataTensorCast(
+        query_start_loc=torch.tensor([0, query_len]),
+        seq_lens=torch.tensor([128]),
+        query_lens=torch.tensor([query_len]),
+        slot_mapping=torch.arange(query_len),
+    )
+    # The eager RoPE semantic op aliases its input; its separate tests cover
+    # rotation. Exercise real quantize/pack/scatter/compressor/attention here.
+    with patch("torch.ops.tensor_cast.apply_rope_inplace", return_value=None):
+        result, _ = wrapper(
+            torch.randn(1, query_len, 8),
+            (torch.ones(1, query_len, 2), torch.zeros(1, query_len, 2)),
+            attention_mask=None,
+            attention_meta=meta,
+            kv_cache_by_layers={0: cache},
+        )
+    assert result.shape == (1, query_len, 8)
+
+
+def test_v4_mixed_byte_views_compile_and_preserve_rope():
+    def pack(nope, rope):
+        return torch.cat(
+            [nope.contiguous().view(torch.uint8), rope.to(torch.bfloat16).contiguous().view(torch.uint8)], dim=-1
+        )
+
+    nope = torch.zeros(1, 2, 448, dtype=torch.float8_e4m3fn)
+    rope = torch.arange(128, dtype=torch.bfloat16).reshape(1, 2, 64)
+    compiled = torch.compile(pack, backend="eager", fullgraph=True)
+    packed = compiled(nope, rope)
+    assert packed.shape == (1, 2, 576)
+    assert torch.equal(packed[..., 448:].contiguous().view(torch.bfloat16), rope)
+
+
+@pytest.mark.parametrize("heads", [16, 32])
+def test_v4_fp8_storage_keeps_bf16_compute_and_dequantizes_shared_kv(heads):
+    def properties(quantized):
+        invoke = MagicMock()
+        q = torch.empty(1, 2, heads, 512, dtype=torch.bfloat16)
+        kv = torch.empty(1, 8, 576, dtype=torch.uint8) if quantized else torch.empty(1, 8, 512, dtype=torch.bfloat16)
+        invoke.args = [q, kv, torch.empty(heads), torch.empty(1, 2, 4, dtype=torch.int32), 0.1, 512]
+        invoke.kwargs = {"kv_quant_dtype": torch.float8_e4m3fn, "rope_head_dim": 64} if quantized else {}
+        invoke.get_memory_access_properties.return_value = OpInvokeInfo.PerformanceProperties()
+        return _v4_perf_props(torch.ops.tensor_cast.sparse_attn_sharedkv.default)(invoke)
+
+    plain, packed = properties(False), properties(True)
+    assert torch.float8_e4m3fn not in packed.compute_ops
+    assert packed.compute_ops[torch.bfloat16].mma_ops == 2 * 64 * heads * 512 * 4
+    assert packed.compute_ops[torch.bfloat16].mma_ops == plain.compute_ops[torch.bfloat16].mma_ops
+    # Two queries, four gathered rows, 448 non-RoPE values. No head multiplier,
+    # no separate Q/P quantization, and no separate K/V dequantization passes.
+    assert packed.compute_ops[torch.float32].gp_ops - plain.compute_ops[torch.float32].gp_ops == 2 * 4 * 448 * 3
+    assert packed.memory_read_bytes == 2 * 4 * 576 + 2 * 64 * 4
+
+
 if __name__ == "__main__":
-    unittest.main()
+    raise SystemExit(pytest.main([__file__]))

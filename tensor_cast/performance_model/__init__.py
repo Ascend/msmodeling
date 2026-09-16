@@ -312,6 +312,25 @@ def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     )
 
 
+@OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.quantize.default)
+def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
+    """Estimate static quantization arithmetic without adding intermediate traffic."""
+    x = op_invoke_info.args[0] if op_invoke_info.args else op_invoke_info.kwargs["x"]
+    offset = op_invoke_info.args[2] if len(op_invoke_info.args) > 2 else op_invoke_info.kwargs.get("offset")
+    properties = op_invoke_info.get_memory_access_properties()
+    # FP32 scaling, lower/upper saturation, and output conversion. FP8 rounding
+    # belongs to the conversion; integer quantization rounds before adding offset.
+    # These are logical GP operations, not hardware instruction counts. Static
+    # scales are inputs: no absmax reduction or scale-generation cost is added.
+    ops_per_element = 4 + int(x.dtype != torch.float32)
+    if not is_fp8_dtype(op_invoke_info.out.dtype):
+        ops_per_element += 1
+    if offset is not None:
+        ops_per_element += 1
+    _accumulate_compute_ops(properties, torch.float32, gp_ops=x.numel() * ops_per_element)
+    return properties
+
+
 @OpInvokeInfo.register_op_properties(torch.ops.tensor_cast.dynamic_quantize_mxfp4.default)
 def _(op_invoke_info: OpInvokeInfo) -> OpInvokeInfo.PerformanceProperties:
     x = op_invoke_info.args[0]

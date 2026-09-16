@@ -836,14 +836,15 @@ class TestDeepseekV4KvCacheHelpers:
         assert _is_v4_model(model) is expected
 
     @patch("tensor_cast.core.input_generator.get_attention_quant_config")
-    def test_resolve_main_kv_cache_dtype_v4_ignores_attention_quant(self, mock_get_attn_quant):
-        mock_get_attn_quant.return_value = MagicMock(get_quant_dtype=lambda: torch.float8_e4m3fn)
+    def test_resolve_main_kv_cache_dtype_v4_uses_attention_quant(self, mock_get_attn_quant):
         model = MagicMock()
         model.model_config.dtype = torch.bfloat16
         model.model_config.hf_config = MagicMock(model_type="deepseek_v4")
         model.text_config = None
 
-        assert _resolve_main_kv_cache_dtype(model, 0) == torch.bfloat16
+        for quant_dtype in (torch.float8_e4m3fn, torch.int8):
+            mock_get_attn_quant.return_value = MagicMock(get_quant_dtype=lambda dtype=quant_dtype: dtype)
+            assert _resolve_main_kv_cache_dtype(model, 0) == quant_dtype
 
     @patch("tensor_cast.core.input_generator.get_attention_quant_config")
     def test_resolve_main_kv_cache_dtype_non_v4_uses_attention_quant(self, mock_get_attn_quant):
@@ -1315,3 +1316,31 @@ class TestPPDraftKvCacheLayout:
 
         with pytest.raises(UnsupportedPPConfigurationError, match="refusing to allocate draft KV cache"):
             get_kv_cache_info(model, num_blocks=4, block_size=16)
+
+
+@pytest.mark.parametrize("quantized,expected_bytes", [(False, 1024), (True, 576)])
+@pytest.mark.parametrize("ratio", [0, 4, 128])
+def test_v4_main_cache_allocation_mixed_bytes(quantized, expected_bytes, ratio):
+    from tensor_cast.core.input_generator import get_kv_cache_info
+
+    model = MagicMock()
+    model.num_hidden_layers = 1
+    model.model_config.mla_config = SimpleNamespace()
+    model.model_config.dtype = torch.bfloat16
+    model.model_config.hf_config = SimpleNamespace(model_type="deepseek_v4")
+    model.model_config.has_draft_spec.return_value = False
+    model.text_config = SimpleNamespace(model_type="deepseek_v4", qk_rope_head_dim=64, sliding_window=128)
+    model.unwrap.return_value = SimpleNamespace(
+        layers=[SimpleNamespace(self_attn=SimpleNamespace(compress_ratio=ratio))]
+    )
+    quant = MagicMock(get_quant_dtype=lambda: torch.float8_e4m3fn) if quantized else None
+    with (
+        patch("tensor_cast.core.input_generator.get_attention_quant_config", return_value=quant),
+        patch("tensor_cast.core.input_generator.kv_cache_excluded_layer_indices", return_value=set()),
+        patch("tensor_cast.core.input_generator._resolve_sparse_attention_kv_cache_width", return_value=512),
+    ):
+        caches, per_token = get_kv_cache_info(model, 256, 16, batch_size=1, total_kv_tokens=4096)
+    slots = 128 + (4096 // ratio if ratio else 0)
+    slots = (slots + 15) // 16 * 16
+    assert caches[0].numel() * caches[0].element_size() == slots * expected_bytes
+    assert per_token == slots * expected_bytes / 4096

@@ -624,15 +624,37 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
         # the per-pass cost via `dynamic_quantize_symmetric` (FP8 e4m3fn), then
         # write the quantized values back into the same slice so the graph keeps
         # a real data dependency on the KV act-quant producer chain.
-        kv_nope_quant, _ = torch.ops.tensor_cast.dynamic_quantize_symmetric(
-            kv_normed[..., :-rd],
-            [-1],
-            scale_dtype=torch.float32,
-            out_dtype=torch.float8_e4m3fn,
-        )
-        kv_normed[..., :-rd] = kv_nope_quant.to(kv_normed.dtype)
-
-        kv_window_entry = kv_normed
+        if self.quant_config is None:
+            kv_nope_quant, _ = torch.ops.tensor_cast.dynamic_quantize_symmetric(
+                kv_normed[..., :-rd],
+                [-1],
+                scale_dtype=torch.float32,
+                out_dtype=torch.float8_e4m3fn,
+            )
+            kv_normed[..., :-rd] = kv_nope_quant.to(kv_normed.dtype)
+            kv_window_entry = kv_normed.to(torch.bfloat16)
+        else:
+            quant_dtype = self.quant_config.get_quant_dtype()
+            if quant_dtype == torch.float8_e4m3fn:
+                # Byte-packed payload: FP8 non-RoPE followed by BF16 RoPE.
+                # Keep logical head_dim separate from this physical row width.
+                # Scale metadata and backend alignment are deliberately omitted.
+                nope_dim = head_dim - rd
+                kv_nope = torch.ops.tensor_cast.quantize(
+                    kv_normed[..., :nope_dim],
+                    self.quant_config.kv_scale,
+                    self.quant_config.kv_offset,
+                    quant_dtype,
+                )
+                kv_rope = kv_normed[..., nope_dim:].to(torch.bfloat16).contiguous()
+                kv_window_entry = torch.cat([kv_nope.contiguous().view(torch.uint8), kv_rope.view(torch.uint8)], dim=-1)
+            else:
+                kv_window_entry = torch.ops.tensor_cast.quantize(
+                    kv_normed,
+                    self.quant_config.kv_scale,
+                    self.quant_config.kv_offset,
+                    quant_dtype,
+                )
 
         # Reference op order (model.py:507-515 + 524-525 + 533):
         #   - Window top-k indices materialized on every layer (inlined below).
@@ -703,6 +725,13 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             torch.empty(0, dtype=q_states.dtype, device=q_states.device),
         )
         softmax_scale = float(getattr(self._inner, "softmax_scale", getattr(self._inner, "scaling", head_dim**-0.5)))
+        attention_op = torch.ops.tensor_cast.sparse_attn_sharedkv
+        attention_quant_kwargs = {}
+        if self.quant_config is not None:
+            attention_quant_kwargs = {
+                "kv_quant_dtype": self.quant_config.get_quant_dtype(),
+                "rope_head_dim": rd,
+            }
 
         # 4-6. scatter + compressor + sparse_attn (model.py:518-533).
         slot_mapping = attention_meta.slot_mapping if attention_meta is not None else None
@@ -739,7 +768,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
             # torch.compile cannot DCE the upstream cache-update chain
             # (wkv -> kv_norm -> RoPE -> scatter -> compressor).
             # This avoids materializing a full-cache elementwise add.
-            attn_output = torch.ops.tensor_cast.sparse_attn_sharedkv(
+            attn_output = attention_op(
                 q_states,
                 kv_for_attn,
                 attn_sink,
@@ -747,6 +776,7 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                 softmax_scale,
                 head_dim,
                 kv_dependency=kv_attn_handle,
+                **attention_quant_kwargs,
             )
         else:
             # Decode (incl. packed multi-decode where sl=N>1 with all
@@ -776,13 +806,14 @@ class DeepseekV4SparseAttention(DeepseekSparseAttention):
                     meta_query_lens,
                 )
                 kv_for_attn = kv_cache
-            attn_output = torch.ops.tensor_cast.sparse_attn_sharedkv(
+            attn_output = attention_op(
                 q_states,
                 kv_for_attn,
                 attn_sink,
                 topk_indices,
                 softmax_scale,
                 head_dim,
+                **attention_quant_kwargs,
             )
         # attn_output: [batch_size, seq_length, n_local_heads, head_dim]
 

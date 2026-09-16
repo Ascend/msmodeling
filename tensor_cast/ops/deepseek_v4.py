@@ -65,7 +65,7 @@ def _(
     """Semantic op for V4 Compressor (Flash/Pro; mirrors `Compressor.forward`).
 
     Writes the coarse KV stream into the enclosing `kv_cache` AND returns:
-        - `compressed_kv` (shape `[B, seq_len // ratio, head_dim]`) so the
+        - `compressed_kv` (shape `[B, seq_len // ratio, storage_width]`) so the
           prefill caller can `torch.cat([kv, kv_compress], dim=1)` exactly like
           `model.py:524-526`.
         - `kv_cache_handle` (same shape/dtype as input `kv_cache`) so callers
@@ -95,7 +95,9 @@ def _(
     else:
         compressed_seq = seq_len // compress_ratio if seq_len >= compress_ratio else 0
 
-    compressed_kv = torch.empty(batch, compressed_seq, head_dim, dtype=hidden_states.dtype, device=hidden_states.device)
+    compressed_kv = torch.empty(
+        batch, compressed_seq, kv_cache.shape[-1], dtype=kv_cache.dtype, device=hidden_states.device
+    )
     return compressed_kv, torch.empty_like(kv_cache)
 
 
@@ -172,6 +174,8 @@ def _(
     softmax_scale: float,
     head_dim: int,
     kv_dependency: Optional[torch.Tensor] = None,
+    kv_quant_dtype: torch.dtype | None = None,
+    rope_head_dim: int = 0,
 ) -> torch.Tensor:
     """Semantic op for V4 sparse attention with shared KV.
 
@@ -180,17 +184,15 @@ def _(
     `softmax_scale` are carried explicitly so the op record matches the
     reference sparse-attention call signature.
     """
-    del attn_sink, softmax_scale
+    # Quantization describes KV storage only. Mixed FP8 rows contain BF16
+    # RoPE; KV is dequantized for attention, without quantizing Q or P.
+    del attn_sink, softmax_scale, kv_quant_dtype, rope_head_dim
     if kv_dependency is not None:
         # Keep optional cache-update handles live in the graph without spelling
         # out a full-tensor arithmetic dependency in Python.
         _ = kv_dependency.shape
     batch_size, seq_length, num_heads, _ = q.shape
-    # Reference V4 attention keeps the shared-KV / output stream in the model
-    # working dtype; q may be transiently promoted for compute, but the attention
-    # result feeding inverse-RoPE and O projection should stay aligned with the
-    # KV / hidden-state stream dtype.
-    return torch.empty(batch_size, seq_length, num_heads, head_dim, dtype=kv.dtype, device=q.device)
+    return torch.empty(batch_size, seq_length, num_heads, head_dim, dtype=q.dtype, device=q.device)
 
 
 # ============================================================
