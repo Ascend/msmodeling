@@ -84,7 +84,7 @@ class TestVllmCommand:
 
     def test_resolved_field_renders_capacity_flags(self) -> None:
         # Default PSO vLLM config declares MAX_NUM_BATCHED_TOKENS / MAX_NUM_SEQS
-        # as config_position="env" fields; they must render as serve flags.
+        # as config_position="run" fields; they must render as serve flags.
         config = VllmCommandConfig(host="localhost", port="8000", model="m", served_model_name="m", others="")
         fields = [
             SimpleNamespace(name="MAX_NUM_BATCHED_TOKENS", value=8192),
@@ -95,6 +95,25 @@ class TestVllmCommand:
         assert "8192" in cmd
         assert "--max-num-seqs" in cmd
         assert "64" in cmd
+
+    def test_resolved_field_renders_compilation_config_json(self) -> None:
+        config = VllmCommandConfig(host="localhost", port="8000", model="m", served_model_name="m", others="")
+        fields = [
+            SimpleNamespace(name="COMPILATION_CONFIG", value='{"cudagraph_mode": "FULL_DECODE_ONLY"}'),
+        ]
+
+        cmd = VllmCommand(config, fields).command
+
+        assert cmd.count("--compilation-config") == 1
+        assert cmd[cmd.index("--compilation-config") + 1] == '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+
+    def test_resolved_field_empty_string_skips_compilation_config(self) -> None:
+        config = VllmCommandConfig(host="localhost", port="8000", model="m", served_model_name="m", others="")
+        fields = [SimpleNamespace(name="COMPILATION_CONFIG", value="")]
+
+        cmd = VllmCommand(config, fields).command
+
+        assert "--compilation-config" not in cmd
 
     def test_resolved_field_empty_no_capacity_flags(self) -> None:
         # Command is fully field-driven: no resolved_field means no dynamic flags.

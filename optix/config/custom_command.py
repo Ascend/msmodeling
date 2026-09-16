@@ -52,13 +52,11 @@ JSON_SUBKEY_MAP = {
 #: rendering and the benchmark-side env handling never drift.
 BENCHMARK_ONLY_FIELDS = {"CONCURRENCY", "REQUESTRATE"}
 
-#: env-type capacity fields the vLLM serve command historically always rendered
-#: as hardcoded flags (pre-dynamic-rendering). Rendering is now fully driven by
-#: the field model — a config that does not declare them (e.g. a custom
-#: config.toml) silently loses the flags and vLLM falls back to its built-in
-#: defaults. simulate.py warns when injected fields miss any of these, so the
-#: regression is visible instead of silent.
-VLLM_SERVE_CAPACITY_ENV_FIELDS = ("MAX_NUM_BATCHED_TOKENS", "MAX_NUM_SEQS")
+#: vLLM serve capacity fields that were historically hardcoded. Rendering is
+#: now driven by the field model; a config that does not declare them falls
+#: back to vLLM's built-in defaults. simulate.py warns when injected fields
+#: miss any of these so the regression is visible instead of silent.
+VLLM_SERVE_CAPACITY_FIELDS = ("MAX_NUM_BATCHED_TOKENS", "MAX_NUM_SEQS")
 
 
 def param_to_cli_flag(name: str) -> str:
@@ -286,7 +284,7 @@ class VllmCommand:
             self.command_config.port,
         ]
 
-        # Dynamic flags from resolved_field (env-type candidate fields passed via
+        # Dynamic flags from resolved_field (run-type candidate fields passed via
         # the constructor; the command object is self-contained once built).
         resolved = self._resolved_field
         search_flags: list = []

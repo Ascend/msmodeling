@@ -143,6 +143,11 @@ model = "model_path"
 served_model_name = "model_name"
 others = ""
 
+# Fixed environment variables injected into the vLLM service subprocess.
+# Example:
+# [vllm.env]
+# ASCEND_RT_VISIBLE_DEVICES = "8,9"
+
 # ------------------------- Deploy Environment Configuration ------------------------------------------------
 # Optional override (DeployConfig.path_prefix). Default: system PATH after stripping msmodeling venv.
 # Set only when vllm/ais_bench are not on system PATH. Priority: OPTIX_DEPLOY_PATH env > path_prefix.
@@ -152,14 +157,14 @@ others = ""
 
 [[vllm.target_field]]
 name = "MAX_NUM_BATCHED_TOKENS"
-config_position = "env"
+config_position = "run"
 min = 8192
 max = 65536
 dtype = "int"
 value = 8192
 [[vllm.target_field]]
 name = "MAX_NUM_SEQS"
-config_position = "env"
+config_position = "run"
 min = 32
 max = 512
 dtype = "int"
@@ -230,7 +235,7 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 # [[pd_disagg.prefill.target_field]]
 # name = "MAX_NUM_BATCHED_TOKENS"
-# config_position = "env"
+# config_position = "run"
 # min = 8192
 # max = 65536
 # dtype = "int"
@@ -238,7 +243,7 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 # [[pd_disagg.prefill.target_field]]
 # name = "MAX_NUM_SEQS"
-# config_position = "env"
+# config_position = "run"
 # min = 8
 # max = 128
 # dtype = "int"
@@ -246,7 +251,7 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 # [[pd_disagg.prefill.target_field]]
 # name = "MAX_MODEL_LEN"
-# config_position = "env"
+# config_position = "run"
 # min = 8192
 # max = 131072
 # dtype = "int"
@@ -254,7 +259,7 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 # [[pd_disagg.prefill.target_field]]
 # name = "GPU_MEMORY_UTILIZATION"
-# config_position = "env"
+# config_position = "run"
 # min = 0.5
 # max = 0.95
 # dtype = "float"
@@ -293,7 +298,7 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 # [[pd_disagg.decode.target_field]]
 # name = "MAX_NUM_BATCHED_TOKENS"
-# config_position = "env"
+# config_position = "run"
 # min = 128
 # max = 4096
 # dtype = "int"
@@ -301,7 +306,7 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 # [[pd_disagg.decode.target_field]]
 # name = "MAX_NUM_SEQS"
-# config_position = "env"
+# config_position = "run"
 # min = 32
 # max = 512
 # dtype = "int"
@@ -309,7 +314,7 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 # [[pd_disagg.decode.target_field]]
 # name = "MAX_MODEL_LEN"
-# config_position = "env"
+# config_position = "run"
 # min = 8192
 # max = 131072
 # dtype = "int"
@@ -317,7 +322,7 @@ metrics_url = "http://127.0.0.1:8000/metrics"
 
 # [[pd_disagg.decode.target_field]]
 # name = "GPU_MEMORY_UTILIZATION"
-# config_position = "env"
+# config_position = "run"
 # min = 0.5
 # max = 0.95
 # dtype = "float"

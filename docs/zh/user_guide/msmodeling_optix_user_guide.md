@@ -195,16 +195,25 @@ others = ""
 |`port`|必选|端口号，需与 `[vllm_benchmark.command]` 中的 `port` 保持一致。|
 |`model`|必选|模型路径。|
 |`served_model_name`|必选|模型名称。|
-|`others`|可选|拼接其他参数，参数间使用空格分隔。如 `--tensor-parallel-size 2 --no-enable-prefix-caching`。默认为空。|
+|`others`|可选|追加固定参数，参数间使用空格分隔。如 `--tensor-parallel-size 2 --no-enable-prefix-caching`。默认为空。|
 
 ### VLLM 自定义参数寻优
 
 寻优工具支持通过 `[[vllm.target_field]]` 添加 VLLM 参数参与寻优。根据参数生效方式不同，配置方式分为两类：
 
 - **VLLM 环境变量**：只需在 `[[vllm.target_field]]` 中声明，且 `config_position = "env"`。工具会在每轮寻优启动服务前自动写入同名大写环境变量，不需要写入 `[vllm.command]` 的 `others`。
-- **VLLM 命令行参数**：先在 `[[vllm.target_field]]` 中声明，再在 `[vllm.command]` 的 `others` 中通过变量引用拼接到启动命令。
+- **VLLM 命令行参数**：在 `[[vllm.target_field]]` 中声明，且 `config_position = "run"`；工具会自动将字段名渲染为同名 `--kebab-case` 参数并追加到 `vllm serve`，无需在 `others` 中引用。
 
-> **变量引用规则**：在 `others` 中使用 `$字段名大写` 的格式引用寻优字段，工具运行时会自动将其替换为当前迭代的实际值。
+如需给 vLLM 服务进程注入固定环境变量，可在 `[vllm.env]` 中按 key/value 配置：
+
+```toml
+[vllm.env]
+ASCEND_RT_VISIBLE_DEVICES = "8,9"
+```
+
+这些变量会直接进入 vLLM 子进程环境，不会拼成命令行参数；如果同名变量同时出现在 `[[vllm.target_field]]` 的 `env` 字段中，寻优字段会按轮次覆盖固定值。
+
+> **变量引用规则**：`others` 仅用于固定参数；如需显式展开环境变量类字段，可使用 `$字段名大写`。
 
 #### 示例一：VLLM 环境变量寻优
 
@@ -219,41 +228,45 @@ dtype_param = ["fork", "spawn"]
 value = "fork"
 ```
 
-此类参数无需在 `[vllm.command]` 的 `others` 中引用，保持 `others = ""` 或仅填写其他命令行参数即可。
+#### 示例二：命令行参数寻优
 
-#### 示例二：命令行枚举数值参数（以 `gpu_memory_utilization` 为例）
+声明 `config_position = "run"` 后，工具会自动把字段名渲染为同名 `--kebab-case` 参数并追加到 `vllm serve`，无需在 `others` 中引用。
+
+普通标量参数：
 
 ```toml
-# 第一步：声明寻优字段
 [[vllm.target_field]]
 name = "GPU_MEMORY_UTILIZATION"
-config_position = "env"
+config_position = "run"
 dtype = "enum"
 dtype_param = [0.9, 0.91, 0.92]
 value = 0.9
-
-# 第二步：在 [vllm.command] 的 others 中引用变量
-[vllm.command]
-others = "--gpu-memory-utilization $GPU_MEMORY_UTILIZATION"
 ```
 
-#### 示例三：命令行开关型/复合字符串参数（以 `--compilation-config` 为例）
+生成：
 
-当参数本身是一段完整的 CLI 字符串时，可将"不启用"（空字符串 `""`）和"启用"两种形态作为枚举候选值。工具遇到空字符串时会自动跳过，不向启动命令追加任何内容。
+```bash
+--gpu-memory-utilization 0.9
+```
 
-> **注意**：TOML 字符串使用双引号 `"` 作为边界符，若字符串内容中包含双引号，需使用 `\"` 转义。
+JSON 容器参数：
 
 ```toml
 [[vllm.target_field]]
 name = "COMPILATION_CONFIG"
-config_position = "env"
+config_position = "run"
 dtype = "enum"
-dtype_param = ["", "--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'"]
-value = "--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'"
-
-[vllm.command]
-others = "$COMPILATION_CONFIG"
+dtype_param = ["", '{"cudagraph_mode": "FULL_DECODE_ONLY"}']
+value = '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
+
+生成：
+
+```bash
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
+空字符串候选表示不追加该参数。TOML 单引号字面量可以直接包含 JSON 双引号；若使用双引号字符串，则需将 JSON 内部双引号写成 `\"`。
 
 ### VLLM 常用寻优字段
 
@@ -316,11 +329,11 @@ dtype_param = "max_batch_size"
 
 | 字段 | 含义                                                                                                                                                                                          | 示例 |
 |---|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---|
-| `name` | 寻优字段名。环境变量类需大写，工具每轮启动服务前自动写入同名大写环境变量；命令行类用作 `$字段名大写` 变量引用                                                                                                                                   | `COMPILATION_CONFIG` |
-| `config_position` | 生效位置：`env`（环境变量）或MindIE服务配置文件路径（如 `BackendConfig.ScheduleConfig.maxBatchSize`）                                                                                                              | `env` |
+| `name` | 寻优字段名。环境变量类需大写，工具每轮启动服务前自动写入同名大写环境变量；命令行类由工具自动渲染为同名 `--kebab-case` 参数                                                                                                                                   | `COMPILATION_CONFIG` |
+| `config_position` | 生效位置：`env`（仅环境变量，不拼命令行）、`run`（命令行参数，工具自动追加同名 `--kebab-case` 参数，无需在 `others` 引用）或 MindIE 服务配置文件路径（如 `BackendConfig.ScheduleConfig.maxBatchSize`） | `run` |
 | `dtype` | 取值类型，决定 PSO 采样方式：`int`/`float`/`bool`/`enum`/`range`/`ratio`/`share`/`factories`/`times`/`ternary_factories`/`ternary_times`，各类型含义见 [target_field 支持的 dtype 类型](#target_field-支持的-dtype-类型) | `enum` |
-| `dtype_param` | 依 dtype 而定：`enum` 为候选值列表、`range` 为步长整数、`ratio` 与派生类为依赖字段配置                                                                                                                                  | `["", "--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'"]` |
-| `value` | 初始值，用于生成基线数据                                                                                                                                                                                | `"--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'"` |
+| `dtype_param` | 依 dtype 而定：`enum` 为候选值列表、`range` 为步长整数、`ratio` 与派生类为依赖字段配置                                                                                                                                  | `["", '{"cudagraph_mode": "FULL_DECODE_ONLY"}']` |
+| `value` | 初始值，用于生成基线数据                                                                                                                                                                                | `'{"cudagraph_mode": "FULL_DECODE_ONLY"}'` |
 | `min` / `max` | 搜索区间上下界（`int`/`float`/`range` 生效）；`min == max` 时字段视为常量、不参与搜索；`enum` 的实际候选由 `dtype_param` 给出，派生类型需将 `min`/`max` 均设为 0                                                                        | — |
 | `constant` | 可选；设值后字段固定为该值、不参与 PSO 搜索（`CONCURRENCY`/`REQUESTRATE` 自动改写时由工具写入）                                                                                                                            | — |
 
@@ -485,7 +498,7 @@ msmodeling optix -e vllm -b vllm_benchmark -c ../configs/vllm_config.toml
 msmodeling optix -c my_config.toml
 ```
 
-> 如需设置环境变量作用于 vLLM/MindIE 服务，只需在运行工具前设置即可（如 `export ASCEND_RT_VISIBLE_DEVICES=0`），工具会在寻优过程中自动设置。
+> 如需设置环境变量作用于 vLLM 服务，优先使用 `[vllm.env]`；如需作用于 MindIE 服务或整个工具进程，可在运行工具前设置（如 `export ASCEND_RT_VISIBLE_DEVICES=0`），工具会在寻优过程中自动继承。
 
 ### 内置 PD 分离两步寻优
 

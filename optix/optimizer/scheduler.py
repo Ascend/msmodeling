@@ -711,13 +711,13 @@ class Scheduler:
     def update_data_field(self, params_field: tuple[OptimizerConfigField]):
         if isinstance(self.simulator, SupportsDataField):
             self.simulator.data_field = params_field
-            # Store env-type fields for dynamic CLI generation in VllmCommand
-            env_fields = tuple(f for f in params_field if getattr(f, "config_position", "") == "env")
+            # Only run-type fields are rendered as vLLM serve flags.
+            run_fields = tuple(f for f in params_field if getattr(f, "config_position", "") == "run")
             set_resolved_field = getattr(self.simulator, "set_resolved_field", None)
             if callable(set_resolved_field):
-                set_resolved_field(env_fields)
+                set_resolved_field(run_fields)
             else:
-                self.simulator._resolved_field = env_fields
+                self.simulator._resolved_field = run_fields
             self.simulator.update_command()
         if isinstance(self.benchmark, SupportsDataField):
             self.benchmark.data_field = params_field

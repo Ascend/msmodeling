@@ -1206,6 +1206,7 @@ class VllmConfig(BaseModel):
     process_name: str = "vllm"
     work_path: Path = Field(default_factory=lambda: Path(os.getcwd()).resolve())
     command: VllmCommandConfig = VllmCommandConfig()
+    env: dict[str, str] = Field(default_factory=dict)
     target_field: list[OptimizerConfigField] = Field(default_factory=list)
 
 

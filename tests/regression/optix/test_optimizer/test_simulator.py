@@ -16,10 +16,13 @@
 import os
 import shutil
 import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
+from optix.deploy_env import RuntimeContext
 from optix.optimizer.plugins.simulate import Simulator
 
 
@@ -83,6 +86,28 @@ class TestVllmSimulator(unittest.TestCase):
 
         simulator = VllmSimulator(self.mock_config)
         self.assertEqual(simulator.config, self.mock_config)
+
+    @patch("optix.deploy_env.shutil.which")
+    def test_fixed_env_is_injected(self, mock_which):
+        """Test fixed env values are injected into the vLLM subprocess environment."""
+        mock_which.return_value = "/usr/local/bin/vllm"
+        from optix.optimizer.plugins.simulate import VllmSimulator
+
+        self.mock_config.env = {"ASCEND_RT_VISIBLE_DEVICES": "8,9"}
+        runtime_ctx = RuntimeContext(
+            in_virtualenv=False,
+            virtualenv_root=None,
+            python_executable=Path(sys.executable),
+        )
+
+        simulator = VllmSimulator(
+            self.mock_config,
+            runtime_ctx=runtime_ctx,
+            deploy_env={"PATH": "/usr/local/bin:/usr/bin"},
+        )
+
+        self.assertEqual(simulator.env["ASCEND_RT_VISIBLE_DEVICES"], "8,9")
+        self.assertNotIn("ASCEND_RT_VISIBLE_DEVICES=8,9", simulator.command)
 
     @patch("optix.deploy_env.shutil.which")
     def test_base_url_property(self, mock_which):

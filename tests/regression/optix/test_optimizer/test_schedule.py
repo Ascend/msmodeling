@@ -936,6 +936,49 @@ class TestSchedulerRunMethods(unittest.TestCase):
         assert self.simulator.data_field == self.params_field
         assert self.benchmark.data_field == self.params_field
 
+    def test_update_data_field_filters_cli_fields_only(self):
+        """Test only run fields are passed to the vLLM command renderer."""
+
+        class FakeSimulator:
+            def __init__(self):
+                self.data_field = None
+                self.set_resolved_field = MagicMock()
+                self.update_command = MagicMock()
+
+        env_field = OptimizerConfigField(
+            name="CONCURRENCY",
+            config_position="env",
+            value=10,
+            min=1,
+            max=100,
+            dtype="int",
+        )
+        cli_field = OptimizerConfigField(
+            name="MAX_NUM_BATCHED_TOKENS",
+            config_position="run",
+            value=8192,
+            min=8192,
+            max=65536,
+            dtype="int",
+        )
+        backend_field = OptimizerConfigField(
+            name="max_batch_size",
+            config_position="BackendConfig.ScheduleConfig.maxBatchSize",
+            value=128,
+            min=10,
+            max=1000,
+            dtype="int",
+        )
+        params_field = (env_field, cli_field, backend_field)
+
+        simulator = FakeSimulator()
+        scheduler = Scheduler(simulator, self.benchmark, self.data_storage)
+        scheduler.update_data_field(params_field)
+
+        simulator.set_resolved_field.assert_called_once_with((cli_field,))
+        simulator.update_command.assert_called_once()
+        self.assertEqual(simulator.data_field, params_field)
+
     def test_backup(self):
         """Test backup delegates to simulator and benchmark"""
         self.scheduler.backup()
