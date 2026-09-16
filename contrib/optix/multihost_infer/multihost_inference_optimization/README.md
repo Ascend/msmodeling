@@ -241,6 +241,14 @@ docker_use_sudo = false
 chips_per_node = 16              # 每节点芯片数：A3=16, A2=8，用于校验单节点 DP 不超配
 # data_parallel_rpc_port = 13389 # 可选，DP 握手 RPC 端口；不配置时每次生成脚本自动选空闲端口
 
+# 静态环境变量：渲染进每个生成脚本的头部（export KEY=VALUE）
+[vllm_mix.env]
+OMP_PROC_BIND = false            # 布尔值渲染为小写 true/false
+OMP_NUM_THREADS = 1
+HCCL_BUFFSIZE = 1024
+TASK_QUEUE_ENABLE = 1
+HCCL_OP_EXPANSION_MODE = "AIV"
+
 [[vllm_mix.node]]
 host = "<node_ip>"               # 主节点 IP，例如 192.168.0.10
 # nic_name = "<nic_name>"  # 可选，不配置时寻优前自动探测（detect_nic.py）
@@ -364,6 +372,7 @@ value = 1
 | ------------------------ | ---- | ----------------------------------------------------------------------------- |
 | `chips_per_node`         | 否   | 每节点芯片数（A3=16, A2=8），默认 8，用于校验单节点 DP 不超配                 |
 | `data_parallel_rpc_port` | 否   | DP 握手 RPC 端口（`--data-parallel-rpc-port`）；不配置或配 0 时自动选空闲端口 |
+| `env`                    | 否   | 静态环境变量表（`[vllm_mix.env]`），以 `export KEY=VALUE` 注入每个生成脚本     |
 
 **work 工作节点**（`[[vllm_mix.workers]]`）通过 SSH 远程拉起：
 
@@ -496,6 +505,8 @@ export ASCEND_RT_VISIBLE_DEVICES=5
 ```
 
 适用于不作为 vllm CLI 参数、而是被运行时环境读取的变量（如 `ASCEND_RT_VISIBLE_DEVICES` 由 NPU 驱动识别）。
+
+> **静态环境变量**：除寻优变量外，插件 `config.toml` 的 `[vllm_mix.env]` 段也可以配置固定环境变量（如 `OMP_PROC_BIND`、`HCCL_BUFFSIZE`），以同样方式注入脚本头部。二者同名时寻优变量优先。
 
 **2. CLI 参数（通过 `others` 字段）**
 

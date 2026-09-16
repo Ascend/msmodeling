@@ -7,6 +7,15 @@ docker_use_sudo = false
 chips_per_node = 8              # A3=16, A2=8; used by build_shell_scripts.py to compute dp_size_local
 #data_parallel_rpc_port = 13389  # Optional, the DP handshake RPC port; when unset, a free port is picked automatically each optimization cycle
 
+# Static environment variables exported into every generated startup script.
+# Booleans render as lowercase true/false; numbers and strings are kept as-is.
+[vllm_mix.env]
+OMP_PROC_BIND = false
+OMP_NUM_THREADS = 1
+HCCL_BUFFSIZE = 1024
+TASK_QUEUE_ENABLE = 1
+HCCL_OP_EXPANSION_MODE = "AIV"
+
 [[vllm_mix.node]]
 host = "<node_ip>"              # Master node IP, e.g. 192.168.0.10
 #nic_name = "<nic_name>"  # Optional; when unset, detected automatically before optimization (detect_nic.py)

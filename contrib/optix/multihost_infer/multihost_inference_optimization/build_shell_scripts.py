@@ -16,6 +16,7 @@ How values are taken from config.toml:
     - NIC_NAME    ← nic_name of each [[vllm_mix.workers]] entry
     - node count  ← number of [[vllm_mix.workers]] entries (can be checked with --num-nodes)
     - DP_RPC_PORT ← data_parallel_rpc_port under [vllm_mix] (a free port is picked automatically when unset)
+    - ENV_EXPORTS ← [vllm_mix.env] entries merged with the --env-vars tuning variables
 
 The generated scripts can be copied to the corresponding nodes and run as-is, with no
 extra arguments.
@@ -75,7 +76,7 @@ except ImportError:
 
 
 def load_cluster_config(path=None):
-    """Read config.toml and return (node_ip, all_nodes, chips_per_node, rpc_port).
+    """Read config.toml and return (node_ip, all_nodes, chips_per_node, rpc_port, env).
 
     - node_ip: host of the first [[vllm_mix.node]] entry, used as
       --data-parallel-address for all nodes (NODE_IP in the template).
@@ -86,6 +87,7 @@ def load_cluster_config(path=None):
       Each item holds host (the node's LOCAL_IP) and nic_name (NIC_NAME).
     - chips_per_node: chips per node (A3=16, A2=8), used to compute dp_size_local.
     - rpc_port: [vllm_mix].data_parallel_rpc_port, or None when unset.
+    - env: static environment variables from [vllm_mix.env].
 
     Config parsing is delegated to cluster_config (the single source of truth); this
     function only turns exceptions into CLI-friendly errors and exits.
@@ -363,7 +365,7 @@ def main():
 
     # Read NODE_IP from config.toml along with all nodes ordered by rank
     # (rank 0 = the [[vllm_mix.node]] master node, ranks 1.. = the workers)
-    node_ip, all_nodes, chips_per_node, configured_rpc_port = load_cluster_config(args.config_file)
+    node_ip, all_nodes, chips_per_node, configured_rpc_port, config_env_vars = load_cluster_config(args.config_file)
 
     # RPC port precedence: --dp-rpc-port > config.toml > auto-picked free port.
     # Decided once here and rendered into every node's script, so the port the node
@@ -402,6 +404,11 @@ def main():
                 if "=" in item:
                     k, v = item.split("=", 1)
                     env_vars[k.strip()] = v.strip()
+
+    # Static environment variables from [vllm_mix.env] provide the base for every node;
+    # tuning variables passed via --env-vars (from the optimizer) override them on name
+    # conflicts, so the optimizer's actively-searched values always win.
+    env_vars = {**config_env_vars, **env_vars}
 
     # data-parallel-size comes in through --vllm-params (others) as a tuning variable;
     # the script divides it evenly across the nodes to get the local DP count per node.

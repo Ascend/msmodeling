@@ -43,16 +43,13 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
 # export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-# Tuning variables (injected by the optimizer)
+# Static cluster env vars ([vllm_mix.env] in config.toml) and the optimizer's tuning
+# variables are both rendered here as `export KEY=VALUE` statements by
+# build_shell_scripts.py (tuning variables win on name conflicts).
 {{ ENV_EXPORTS }}
 
 # --data-parallel-size comes in through others (--vllm-params) as a tuning variable; when
