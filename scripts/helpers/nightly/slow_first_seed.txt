@@ -1,0 +1,17 @@
+# Cold-start slow-first prefixes for Wave A.
+# Used only when this host has no duration-history.json yet.
+# After the first nightly, measured durations take over.
+# Keep prefixes stable; do not pin parametrized suffixes.
+tests/regression/tensor_cast/test_deepseek_v4.py::TestDeepseekV4ModelNightly::test_model_initialization
+tests/regression/tensor_cast/test_mtp.py::MtpNightlyTestCase::test_deepseek_prefill
+tests/regression/tensor_cast/test_quant_linear.py::TestQuantLinearNightly::test_deepseek_mtp_quant_tensorcast_static_w8a8
+tests/regression/cli/test_throughput_optimizer.py::TestThroughputOptimizerNightly::test_VL_MOE_model_aggregation
+tests/regression/cli/test_throughput_optimizer.py::TestThroughputOptimizerNightly::test_vl_model_aggregation
+tests/regression/tensor_cast/test_mtp_ep.py::MtpEpNightlyTestCase::test_deepseek
+tests/regression/tensor_cast/test_video_generate.py::TestVideoGeneration::test_video_inference_with_raw_tencent_hunyuanvideo15
+tests/regression/tensor_cast/test_runtime.py::PerfAnalysisNightlyTestCase::test_deepseek
+tests/regression/tensor_cast/test_model_load.py::ModelLoadNightlyTestCase::test_deepseek
+tests/regression/cli/test_throughput_optimizer.py::TestThroughputOptimizer::test_deepseek_model_pd_ratio
+tests/regression/tensor_cast/test_kimi_k3.py::TestKimiK3
+tests/regression/tensor_cast/test_parallel_linear.py::ParallelLinearNightlyTestCase::test_deepseek_quant_with_tp_and_dp
+tests/smoke/test_throughput_optimizer_smoke.py::TestThroughputOptimizerSmoke::test_vl_moe_aggregation_compile_smoke
