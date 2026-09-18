@@ -90,6 +90,11 @@ class VLLMWorkerManager:
                 f"{len(failures)}/{len(self._all_workers)} worker(s): " + "; ".join(failures)
             )
 
+    # Upper bound for one worker's cleanup: stop_vllm_process.sh may spend up to
+    # MAX_RETRY(5) * WAIT_SECONDS(2) = 10s killing a single process name, and the SSH plus
+    # docker exec round trip is on top of that.
+    _CLEANUP_TIMEOUT_SECONDS = 30
+
     def cleanup_all_workers(self):
         seen: set = set()
         for worker in self._all_workers:
@@ -99,7 +104,17 @@ class VLLMWorkerManager:
             seen.add(key)
             try:
                 executor = self._get_executor(worker)
-                stop = executor.run("bash /tmp/vllm/stop_vllm_process.sh vllm", hide=True, warn=True, timeout=10)
+                # stop_vllm_process.sh retries MAX_RETRY=5 times with WAIT_SECONDS=2 between
+                # attempts, so its own worst case is already 10s per process name. The
+                # timeout has to leave room for that plus the SSH / docker exec round trip,
+                # otherwise a worker that simply needs a couple of retries always reports a
+                # spurious cleanup failure.
+                stop = executor.run(
+                    "bash /tmp/vllm/stop_vllm_process.sh vllm",
+                    hide=True,
+                    warn=True,
+                    timeout=self._CLEANUP_TIMEOUT_SECONDS,
+                )
                 logger.info(f"[{key}] cleanup:\n{stop.stdout.strip()}")
             except Exception as e:
                 logger.warning(f"[{key}] cleanup failed: {e}")

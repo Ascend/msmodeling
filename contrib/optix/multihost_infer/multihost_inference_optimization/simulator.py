@@ -5,6 +5,7 @@ from optix.config.config import get_settings, OptimizerConfigField
 from optix.config.constant import ProcessState, Stage
 from optix.optimizer.interfaces.simulator import SimulatorInterface
 from optix.optimizer.utils import close_file_fp
+from optix.io_utils import open_file
 from multihost_inference_optimization.settings import MultiHostCommandConfig
 from multihost_inference_optimization.vllm_worker_manager import VLLMWorkerManager
 from multihost_inference_optimization.nic_resolver import resolve_nic_names
@@ -75,6 +76,12 @@ class MultiHostSimulator(SimulatorInterface):
         # Per-node NIC names {host: nic_name}: detected once before optimization starts
         # and reused in later cycles
         self._nic_names: Optional[dict] = None
+        # Cluster-ready latch for the current cycle, plus the carry-over log buffer feeding
+        # it. See _cluster_ready_from_log for why the match cannot be re-derived per poll.
+        self._cluster_ready: bool = False
+        self._ready_log_buffer: str = ""
+        self._ready_log_offset: int = 0
+        self._ready_pattern_warned: bool = False
 
     @property
     def base_url(self) -> str:
@@ -85,20 +92,57 @@ class MultiHostSimulator(SimulatorInterface):
         """
         return f"http://127.0.0.1:{self.config.command.port}/health"
 
-    def test_cluster_simple(self, served_model_name: str) -> bool:
-        """Send one real inference request to verify the whole multi-node cluster is ready and working together."""
-        url = f"http://127.0.0.1:{self.config.command.port}/v1/completions"
-        payload = {"model": served_model_name, "prompt": "Hello", "max_tokens": 10}
+    # Bounded tail kept between polls so a ready pattern split across two read chunks is
+    # still matched, without letting the buffer grow for the life of the service.
+    _READY_LOG_BUFFER_LIMIT = 65536
+
+    def _cluster_ready_from_log(self) -> bool:
+        """Return True when the node's startup log shows the DP cluster is fully ready.
+
+        One-shot latch: after the first match, health() stops validating remote workers and
+        relies only on master liveness + /health-200. A worker crashing between ready and the
+        first benchmark request surfaces as a failed/hung benchmark, not a wrong verdict here.
+        """
+        if self._cluster_ready:
+            return True
+
+        pattern = self.remote_executor.config.ready_log_pattern
         try:
-            response = requests.post(url, json=payload, timeout=30)
-            if response.status_code == 200:
-                return True
-            else:
-                logger.info(f"Cluster not ready: HTTP {response.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"Connection failed {e}")
+            compiled = re.compile(pattern)
+        except re.error:
+            if not self._ready_pattern_warned:
+                logger.warning(
+                    f"ready_log_pattern is not a valid regex: {pattern!r}; "
+                    "treating the cluster as ready on /health-200."
+                )
+                self._ready_pattern_warned = True
+            self._cluster_ready = True
+            return True
+
+        # Accumulate across polls as well: a chunk boundary can fall in the middle of the
+        # ready line, so matching only the newest chunk could miss it permanently.
+        # Read through a cursor of our own, not get_log()
+        if self.run_log and Path(self.run_log).exists():
+            try:
+                with open_file(self.run_log, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(self._ready_log_offset)
+                    self._ready_log_buffer += f.read()
+                    self._ready_log_offset = f.tell()
+            except (UnicodeError, OSError) as e:
+                # health() is polled before the log is flushed; retry from the same offset.
+                logger.debug(f"failed reading node startup log for readiness check: {e}")
+        if compiled.search(self._ready_log_buffer) is None:
+            # Keep only a bounded tail, enough for a pattern to straddle a chunk boundary,
+            # so a long-running service does not grow this buffer without limit.
+            if len(self._ready_log_buffer) > self._READY_LOG_BUFFER_LIMIT:
+                self._ready_log_buffer = self._ready_log_buffer[-self._READY_LOG_BUFFER_LIMIT :]
             return False
+
+        logger.info("DP cluster reported ready (matched ready_log_pattern in the node startup log)")
+        self._cluster_ready = True
+        # The buffer has done its job; drop it so the matched text is not retained.
+        self._ready_log_buffer = ""
+        return True
 
     def health(self) -> ProcessState:
         """
@@ -107,11 +151,13 @@ class MultiHostSimulator(SimulatorInterface):
         Returns: None
 
         When vllm serve on the master node has started but the worker node processes have
-        not, the master's /health endpoint usually still responds normally.
-        The most reliable check: once the workers have finished starting, send a real
-        inference request; if it returns normally, the whole distributed system is fully
-        ready. This works because in a multi-node data parallel architecture, handling a
-        single request requires all nodes to work together.
+        not, the master's /health endpoint usually still responds normally. So once
+        /health returns 200, readiness is confirmed by matching ``ready_log_pattern``
+        against the node's own startup log (see _cluster_ready_from_log) — by default
+        uvicorn's "Application startup complete" line, which fires only after the DP
+        engine has finished rendezvous with all workers. This avoids sending a real
+        inference request, which would warm up the model and pollute the first benchmark
+        request's latency.
 
         """
         last_process_stage = self.process_stage
@@ -126,11 +172,11 @@ class MultiHostSimulator(SimulatorInterface):
             return ProcessState(stage=Stage.error, info=str(e))
         else:
             if res.status_code == 200:
-                if self.test_cluster_simple(self.config.command.served_model_name):
+                if self._cluster_ready_from_log():
                     return ProcessState(stage=Stage.running)
                 else:
-                    # The master is healthy but the cluster is not yet working together,
-                    # so keep waiting
+                    # The master is healthy but the cluster is not yet working together
+                    # (the DP-ready log line has not appeared), so keep waiting
                     return ProcessState(stage=Stage.start, info="Health OK but cluster not fully ready")
             # 503 means the service process has started but is not ready yet (e.g. the
             # model is still loading), which should count as "starting" and keep waiting
@@ -279,6 +325,13 @@ class MultiHostSimulator(SimulatorInterface):
         # scripts) and only needs the log file, so it is created separately here.
         self.run_log_fp, self.run_log = tempfile.mkstemp(prefix="ms_serviceparam_optimizer_")
         self.run_log_offset = 0
+        # A fresh log file means the previous cycle's ready signal no longer applies: this
+        # cycle's cluster has to prove itself ready again.
+        self._cluster_ready = False
+        self._ready_log_buffer = ""
+        # Rewind with it: a stale offset would start reading the new, shorter log past its
+        # end and skip the ready line.
+        self._ready_log_offset = 0
 
         try:
             # Generate the per-node startup scripts (from config.toml and template.sh),
@@ -296,6 +349,57 @@ class MultiHostSimulator(SimulatorInterface):
             self.run_log_fp = None
             raise
 
+    # A Unix domain socket path cannot exceed sizeof(sockaddr_un.sun_path), 108 bytes
+    # including the NUL terminator, so 107 usable characters. vLLM's DP Coordinator binds a
+    # ZMQ ipc:// socket named "<cwd>/<uuid4>", which spends 1 separator + 36 UUID characters
+    # on top of the working directory.
+    _UNIX_SOCKET_PATH_MAX = 107
+    _DP_SOCKET_NAME_BUDGET = 1 + 36
+
+    def _resolve_node_work_dir(self) -> str:
+        """Pick the working directory for the local node process.
+
+        vLLM's DP Coordinator creates its ZMQ ipc:// socket relative to the process's cwd,
+        and a Unix socket path is hard-limited to 107 characters by the kernel. The generated
+        scripts live under the per-cycle backup directory (``.../back_up/default_001/1/
+        Reproduce``), which is already deep enough that appending a UUID overflows that limit
+        and makes the coordinator die with ZMQError before the engine ever starts.
+
+        Nothing actually requires the process to run from the script's directory: the script
+        is invoked by absolute path and does not reference relative paths. So the cwd only
+        needs to be a real directory short enough to leave room for the socket name, which is
+        checked here rather than assumed.
+        """
+        budget = self._UNIX_SOCKET_PATH_MAX - self._DP_SOCKET_NAME_BUDGET
+        candidates = [Path(self.remote_executor.get_build_scripts_dir())]
+
+        work_path = getattr(self, "work_path", None)
+        if work_path:
+            candidates.append(Path(work_path))
+
+        for candidate in candidates:
+            if candidate.is_dir() and len(str(candidate)) <= budget:
+                return str(candidate)
+
+        # Every candidate is too long (a deep checkout, a long user name). Fall back to a
+        # short private directory under the system temp dir so the coordinator can bind.
+        fallback = Path(tempfile.gettempdir()) / "ms_optix_dp"
+        fallback.mkdir(parents=True, exist_ok=True, mode=0o700)
+        resolved = str(fallback)
+        if len(resolved) > budget:
+            # Nothing left to try: report the real constraint instead of letting vLLM fail
+            # with an opaque ZMQError deep inside the coordinator.
+            raise RuntimeError(
+                f"cannot find a working directory short enough for vLLM's DP Coordinator ipc socket: "
+                f"{resolved!r} leaves no room within the {self._UNIX_SOCKET_PATH_MAX}-character "
+                f"Unix socket path limit. Set TMPDIR to a shorter path."
+            )
+        logger.warning(
+            f"Script and work directories are too long for the DP Coordinator ipc socket "
+            f"(limit {budget} characters); running the node from {resolved} instead."
+        )
+        return resolved
+
     def _launch_node_local(self):
         """Launch start_node.sh in the background on the local machine (the node that shares a machine with the optimizer).
 
@@ -311,7 +415,8 @@ class MultiHostSimulator(SimulatorInterface):
         # Reuse the base class's log file mechanism: before_run already created self.run_log
         log_path = self.run_log
         cmd = ["bash", "-l", str(node_script)]
-        logger.info(f"[start_node] launching locally: {' '.join(cmd)}, log={log_path}")
+        work_dir = self._resolve_node_work_dir()
+        logger.info(f"[start_node] launching locally: {' '.join(cmd)}, log={log_path}, cwd={work_dir}")
 
         # Close the fd left behind by mkstemp in before_run and hand the subprocess an
         # append-mode handle instead, to avoid leaking the fd
@@ -328,14 +433,14 @@ class MultiHostSimulator(SimulatorInterface):
                     cmd,
                     stdout=log_fp,
                     stderr=subprocess.STDOUT,
-                    cwd=str(node_script.parent),
+                    cwd=work_dir,
                 )
         else:
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.STDOUT,
-                cwd=str(node_script.parent),
+                cwd=work_dir,
             )
         self.process_stage = ProcessState(stage=Stage.start)
         logger.info(f"[start_node] started locally, pid={self.process.pid}")

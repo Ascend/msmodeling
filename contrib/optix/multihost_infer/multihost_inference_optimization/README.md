@@ -24,7 +24,7 @@ vLLM 多机混合部署插件，基于 **多节点 DP（Data Parallel）+ headle
 │   │  optimizer              │  bash -l     │                  │
 │   └───────────┬─────────────┘  start_node.sh                  │
 │               │ 轮询 127.0.0.1:<port>/health                  │
-│               │ + 一次真实推理                ▼               │
+│               │ + 匹配就绪日志行                ▼               │
 │               │            ┌──────────────────────────────┐   │
 │               └───────────▶│  API Server                  │   │
 │                            │  --host 0.0.0.0 --port PORT  │   │
@@ -104,7 +104,7 @@ vLLM 多机混合部署插件，基于 **多节点 DP（Data Parallel）+ headle
    │               │                   │                 │ （dummy batch 对齐）
 ```
 
-关键点：work 节点从不接收 HTTP，只通过 RPC 拿任务；一个请求虽只落在单个 DP 副本上，但 decode 阶段所有副本要参与 HCCL 同步，因此任一节点未就绪整集群都无法出正确结果——这也是 `health()` 在 200 之后还要补一次真实推理的原因。
+关键点：work 节点从不接收 HTTP，只通过 RPC 拿任务；一个请求虽只落在单个 DP 副本上，但 decode 阶段所有副本要参与 HCCL 同步，因此任一节点未就绪整集群都无法出正确结果——这也是 `health()` 在 `/health` 返回 200 之后，还要再匹配 node 启动日志里的 `Application startup complete`（`ready_log_pattern`）才判定就绪的原因：该行在 FastAPI lifespan 完成（即所有 worker 完成 rendezvous）之后才打印。
 
 ### 流程关键点说明
 
@@ -240,6 +240,7 @@ docker_use_sudo = false
 [vllm_mix]
 chips_per_node = 16              # 每节点芯片数：A3=16, A2=8，用于校验单节点 DP 不超配
 # data_parallel_rpc_port = 13389 # 可选，DP 握手 RPC 端口；不配置时每次生成脚本自动选空闲端口
+ready_log_pattern = "Application startup complete" # 匹配 node 启动日志判定 DP 集群就绪的正则，默认即 uvicorn 的该行
 
 # 静态环境变量：渲染进每个生成脚本的头部（export KEY=VALUE）
 [vllm_mix.env]
@@ -372,6 +373,7 @@ value = 1
 | ------------------------ | ---- | ----------------------------------------------------------------------------- |
 | `chips_per_node`         | 否   | 每节点芯片数（A3=16, A2=8），默认 8，用于校验单节点 DP 不超配                 |
 | `data_parallel_rpc_port` | 否   | DP 握手 RPC 端口（`--data-parallel-rpc-port`）；不配置或配 0 时自动选空闲端口 |
+| `ready_log_pattern`      | 否   | 正则；匹配 node 启动日志判定集群就绪，默认 `Application startup complete`        |
 | `env`                    | 否   | 静态环境变量表（`[vllm_mix.env]`），以 `export KEY=VALUE` 注入每个生成脚本     |
 
 **work 工作节点**（`[[vllm_mix.workers]]`）通过 SSH 远程拉起：
@@ -436,13 +438,15 @@ msserviceprofiler optimizer -e multihost_infer -b evalscopeperf --backup
 - **Stage 4 启动 node**：本机以子进程 `bash -l start_node.sh` 拉起主节点（DP 协调者），非阻塞
 - **Stage 5 启动 worker**：各 worker 通过 SSH `nohup` 后台拉起 `start_work_{i}.sh`，非阻塞
 - **快速失败检查**：每个 worker 启动后等待约 3s 回探进程是否存活，起步即崩则抓日志尾部统一报错
-- **健康等待**：优化器轮询 `127.0.0.1:<port>/health` 并发一次真实推理，确认整集群就绪
+- **健康等待**：优化器轮询 `127.0.0.1:<port>/health`，200 后再匹配 node 启动日志中的就绪关键词（`ready_log_pattern`），确认整集群就绪
 
 > **为什么先 node 再 worker**：所有节点的 `--data-parallel-address` 都指向 node，node 是 DP 握手的协调者。先拉起协调者，再让各 worker 连入 RPC 端口，rendezvous 更稳。两步均为非阻塞启动，进程在各节点上**并发运行**。
 >
 > **RPC 端口**：`--data-parallel-rpc-port` 不再硬编码。`build_shell_scripts.py` 在生成脚本时统一定一次值，渲染进所有节点脚本（node 监听、worker 连接，必须一致）。取值优先级为 `--dp-rpc-port` > `config.toml` 的 `[vllm_mix].data_parallel_rpc_port` > 本机在 `[20000, 32000)` 内自动挑选的空闲端口。默认不配置即每个寻优周期换一个空闲端口，避免上一周期残留进程或 `TIME_WAIT` 让固定端口起不来。
 >
-> **健康判定**：在多节点 DP 架构下，一个请求需所有节点协同才能完成。node 的 `/health` 在 worker 未就绪时也可能返回 200，因此 `health()` 在 200 之后会再发一次真实推理请求，成功才判定为 `running`。
+> **健康判定**：在多节点 DP 架构下，一个请求需所有节点协同才能完成。node 的 `/health` 在 worker 未就绪时也可能返回 200，因此 `health()` 在 200 之后会再匹配 node 启动日志中的就绪关键词（`ready_log_pattern`，默认 `Application startup complete`），命中才判定为 `running`。**不再发真实推理请求**——真实请求会预热模型 / 触发 CUDA Graph 捕获，污染后续 benchmark 首个请求的延迟测量。
+>
+> `ready_log_pattern` 默认取 uvicorn 的 `Application startup complete`：该行在 FastAPI lifespan 完成（含所有 data-parallel worker 的 rendezvous）之后才打印，因此可作为集群就绪信号。可按需在 `[vllm_mix]` 中覆盖为其它日志行。
 
 ### 停止流程
 

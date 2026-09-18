@@ -53,6 +53,12 @@ def _normalize_env_value(value: Any) -> str:
     return str(value)
 
 
+#: Default regex matched against the node's startup log to decide the DP cluster is
+#: fully ready. This is uvicorn's line printed after the FastAPI lifespan completes
+#: (which, in vLLM data-parallel mode, includes the rendezvous with all headless workers).
+DEFAULT_READY_LOG_PATTERN = "Application startup complete"
+
+
 @dataclass
 class Config:
     """Cluster configuration, loaded from config.toml."""
@@ -67,6 +73,9 @@ class Config:
     # Static environment variables ([vllm_mix.env]) exported into every generated
     # startup script. Values are pre-normalized to strings (booleans become lowercase).
     env: Dict[str, str] = field(default_factory=dict)
+    # Regex matched against the node's startup log to decide the DP cluster is fully
+    # ready. Defaults to uvicorn's "Application startup complete" line.
+    ready_log_pattern: str = DEFAULT_READY_LOG_PATTERN
 
     @classmethod
     def from_file(cls, path: Optional[str] = None) -> "Config":
@@ -83,6 +92,10 @@ class Config:
         rpc_port_raw = vllm_mix.get("data_parallel_rpc_port")
         rpc_port = int(rpc_port_raw) if rpc_port_raw else None
         env = {str(k): _normalize_env_value(v) for k, v in vllm_mix.get("env", {}).items()}
+        ready_log_pattern = vllm_mix.get("ready_log_pattern")
+        if ready_log_pattern is None:
+            ready_log_pattern = DEFAULT_READY_LOG_PATTERN
+
         return cls(
             node=node,
             workers=workers,
@@ -90,6 +103,7 @@ class Config:
             chips_per_node=chips_per_node,
             data_parallel_rpc_port=rpc_port,
             env=env,
+            ready_log_pattern=ready_log_pattern,
         )
 
 
