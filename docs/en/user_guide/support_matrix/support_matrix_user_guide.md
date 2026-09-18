@@ -28,6 +28,7 @@ This document summarizes the currently supported model types and simulation feat
 | Text models | ERNIE | ERNIE 4.5 MoE |
 | Text models | Bailing/MiMo/MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2 |
 | Vision-language models | VL Models | Qwen3-VL, Qwen3-VL MoE, GLM-4V, GLM-4V MoE, InternVL |
+| Image generation/editing models | Diffusers DiT image models | FLUX.1-dev, Qwen-Image-Edit |
 | Video generation models | Diffusers DiT | Wan, HunyuanVideo, HunyuanVideo1.5 |
 
 ## Feature Support
@@ -48,8 +49,9 @@ This document summarizes the currently supported model types and simulation feat
 | Model configuration sources | Supports local model directories and loading model configurations from remote sources such as Hugging Face and ModelScope. |
 | Performance model switching | Supports Roofline-based analytical estimation and performance modeling based on measured data, allowing you to combine and compare results from different estimation paths as needed. |
 | Chrome Trace/Debug | Outputs operator-level timeline, shape, graph structure, and bound analysis information for bottleneck identification, result validation, and visual analysis. |
+| Image generation DiT simulation | Supports multi-step denoising workload simulation for FLUX.1-dev and Qwen-Image-Edit series, covering output/source image sizes, text condition length, sampling steps, and quantization. |
 | Video generation DiT simulation | Supports multi-step denoising simulation for Diffusers DiT video models such as Wan and HunyuanVideo, covering resolution, frame count, sampling steps, and quantization configuration. |
-| Ulysses parallelism simulation | Models the attention communication and compute overhead under sequence-dimension Ulysses parallel splitting, supporting multi-device video DiT inference performance analysis. |
+| Ulysses parallelism simulation | Models the attention communication and compute overhead under sequence-dimension Ulysses parallel splitting, supporting multi-device image/video DiT inference performance analysis. |
 | CFG simulation | Models the forward overhead of the conditional and unconditional paths under Classifier-Free Guidance (CFG) and evaluates the impact of guidance on single-step denoising time. |
 | Parallel CFG simulation | Models the cross-device collaboration and result aggregation behavior when the two CFG paths execute in parallel, and analyzes the benefit of parallel guidance over serial execution. |
 | DiT cache simulation | Models the cache strategy that reuses intermediate results by sampling step and block range during denoising, and evaluates the impact of the effective cache range on total time. |

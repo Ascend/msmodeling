@@ -42,6 +42,7 @@ The entry points most relevant to you in the repository are as follows:
 | python -m web_ui.web_ui_start                   | Start the Gradio frontend | Interactive configuration, result visualization, and use by non-developers |
 | python -m cli.inference.text_generate           | LLM/VL forward inference simulation | Single or scripted LLM/VL performance analysis |
 | python -m cli.inference.video_generate          | Video generation model simulation | Scenarios such as Diffusion Transformer/Wan/HunyuanVideo |
+| python -m cli.inference.image_generate          | Image generation model simulation (Transformer denoising stage) | Scenarios such as Diffusion Transformer/FLUX/Qwen-Image-Edit |
 | python -m cli.inference.throughput_optimizer    | Serving throughput optimization | Find the optimal parallelism and batch under TTFT/TPOT/SLO constraints |
 
 ---
