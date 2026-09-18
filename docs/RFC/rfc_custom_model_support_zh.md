@@ -59,7 +59,7 @@ with self.set_default_dtype():
 所有转换函数都已抽取到独立的 `transformations.py` 文件中：
 
 ```python
-# transformtions.py 中的独立转换函数
+# transformations.py 中的独立转换函数
 def wrap_model(model) -> None:
     # 标准化前向接口包装
 

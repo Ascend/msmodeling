@@ -116,7 +116,7 @@ class EmpiricalPerformanceModel(PerformanceModel):
 ### 2.3.2 DataSource抽象基类
 
 ```python
-# tensor_cast/performance_model/profiligdatabase/data_source.py
+# tensor_cast/performance_model/profilingdatabase/data_source.py
 class DataSource(ABC):
     """通用数据源抽象基类。
     TensorCast 只通过 OpInvokeInfo 查询，不感知底层映射关系和数据格式。"""
