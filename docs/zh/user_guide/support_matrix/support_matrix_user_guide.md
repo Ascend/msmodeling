@@ -28,6 +28,7 @@
 | 文本模型 | ERNIE 系列 | ERNIE 4.5 MoE |
 | 文本模型 | Bailing / MiMo / MiniMax | Bailing MoE、MiMo v2 Flash、MiniMax M2.7、MiniMax M2.5、MiniMax M3 |
 | 视觉-语言模型 | VL 模型 | Qwen3-VL、Qwen3-VL MoE、GLM-4V、GLM-4V MoE、InternVL |
+| 图像生成 / 编辑模型 | Diffusers DiT 图像模型 | FLUX.1-dev、Qwen-Image-Edit |
 | 视频生成模型 | Diffusers DiT 视频生成模型 | Wan、HunyuanVideo、HunyuanVideo1.5 |
 
 ## 特性支持
@@ -48,8 +49,9 @@
 | 模型配置来源 | 支持本地模型目录，以及从 Hugging Face、ModelScope 等远程源加载模型配置。 |
 | 性能模型切换 | 支持基于 Roofline 的解析估算与基于实测数据的性能建模，可按需组合对比不同估算路径的结果。 |
 | Chrome Trace / Debug | 输出算子级 timeline、shape、图结构与 bound 分析信息，用于瓶颈定位、结果校验与可视化分析。 |
+| 图像生成 DiT 仿真 | 支持 FLUX.1-dev 与 Qwen-Image-Edit 系列的多步去噪 workload 仿真，覆盖输出/源图尺寸、文本条件长度、采样步数、量化。 |
 | 视频生成 DiT 仿真 | 支持 Wan、HunyuanVideo 等 Diffusers DiT 视频模型的多步去噪仿真，覆盖分辨率、帧数、采样步数与量化配置。 |
-| Ulysses 并行仿真 | 建模序列维度 Ulysses 并行切分下的 attention 通信与计算开销，支持多卡视频 DiT 推理性能分析。 |
+| Ulysses 并行仿真 | 建模序列维度 Ulysses 并行切分下的 attention 通信与计算开销，支持多卡图像/视频 DiT 推理性能分析。 |
 | CFG 仿真 | 建模 Classifier-Free Guidance 条件下条件路与非条件路的前向开销，评估 guidance 对单步去噪耗时的影响。 |
 | CFG 并行仿真 | 建模 CFG 双路并行执行时的跨卡协同与结果汇聚行为，分析并行 guidance 相对串行执行的收益。 |
 | DiT Cache 仿真 | 建模去噪过程中按采样 step 与 block 范围复用中间结果的 cache 策略，评估 cache 生效区间对总耗时的影响。 |

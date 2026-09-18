@@ -219,17 +219,17 @@ python -m cli.inference.image_generate black-forest-labs/FLUX.1-dev \
 
 **关键参数：** `model_id` / `--model-id`、`--device`、`--batch-size`、`--output-image-size`、`--text-seq-len`、`--source-image-size`、`--sample-step`、`--use-cfg`、`--num-devices`、`--ulysses-size`、`--cfg-parallel`、`--dit-cache`、`--chrome-trace-file`
 
-**输出：** 性能汇总表；若设置了 `--chrome-trace-file`，还可选输出 Chrome trace 文件。
+**输出：** `Runtime execution time`，随后输出性能汇总表；若设置了 `--chrome-trace-file`，最后导出 Chrome trace 文件并打印其路径。
 
 ### 2.6 结果（图像生成）
 
-`image_generate` 报告 Transformer 去噪阶段的 critical path 与逻辑测量工作量，只输出性能汇总表和可选的 Chrome trace。输出指标与视频生成一致：
+`image_generate` 报告 Transformer 去噪阶段的 critical path 与逻辑测量工作量，依次输出 `Runtime execution time`、性能汇总表；若设置了 `--chrome-trace-file`，随后导出 Chrome trace 并打印其路径。
 
+- `Runtime execution time`：仿真器在宿主机上的运行时间，而非模型在硬件上的真实编译或执行时间。
 - `analytic total`：算子估算总耗时。
 - `analytic avg`：算子每次调用的平均耗时。
 - `# of Calls`：算子被调用的次数。
 - `Total time for analytic`：解析算子耗时的总和。
-- `Model compilation execution time`：仿真器在宿主机上的运行时间，而非模型在硬件上的真实编译或执行时间。
 
 具体数值会随设备配置、模型配置和输入尺寸变化。
 
@@ -699,7 +699,6 @@ msmodeling inference image-generate MODEL --batch-size <N> --output-image-size H
 | `--chrome-trace-file` | options | 可选 | 指定 Chrome trace JSON 输出路径，用于导出性能时间线。<br>1. 类型：Str。<br>2. 取值范围：文件路径。<br>3. 默认值：`None`。<br>4. 仅在 Runtime 成功后生成。旧名 `--chrome-trace` 仍可解析。 |
 
 > **说明：** 当前已支持 FLUX.1-dev 与 Qwen-Image-Edit（`Qwen/Qwen-Image-Edit`、`Qwen/Qwen-Image-Edit-2509`、`Qwen/Qwen-Image-Edit-2511` 三个子版本）的去噪 workload 仿真。
-
 > **限制：** Qwen-Image-Edit 当前不支持 Ulysses 序列并行（`--ulysses-size > 1`），对应输入 sharding 尚未实现；传入 `--ulysses-size` 大于 `1` 时仿真会在 Runtime 前以 Qwen-specific 错误失败，不会回退到非并行路径。
 
 运行 `python -m cli.inference.image_generate --help` 查看详情。
