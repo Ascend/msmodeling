@@ -280,10 +280,11 @@ After automatic optimization is complete, a result file in CSV format is generat
 
 ## Output File Description
 
-Each row in the output CSV corresponds to a parameter set, and the first four columns are performance metrics. You can filter the performance rows that meet your requirements and change the vLLM/MindIE parameters and the vllm_benchmark/AISBench parameters to the values in the CSV.
+Each row in the output CSV corresponds to a parameter set. The first column, `case_id`, identifies the case, and the next five columns are performance metrics. You can filter the performance rows that meet your requirements and change the vLLM/MindIE parameters and the vllm_benchmark/AISBench parameters to the values in the CSV.
 
 | Field | Description |
 | --- | --- |
+| case_id | Case identifier that associates the main result with its metrics sampling trace. |
 | generate_speed | Throughput. |
 | time_to_first_token | TTFT latency, in seconds. |
 | time_per_output_token | TPOT latency, in seconds. |
@@ -296,8 +297,18 @@ Each row in the output CSV corresponds to a parameter set, and the first four co
 | real_evaluation | Marks whether the data is obtained from real test results. `false` indicates that this set of data is predicted by the gp model. |
 | fitness | Optimization value of the optimization algorithm. A smaller value indicates a better parameter set. |
 | num_prompts | Number of requests sent by the benchmark tool during this optimization. |
+| would_early_exit | Whether the early-exit condition was met. This can also be `true` in `report` mode. |
+| early_exit | Whether the current case was actually terminated early. Only `terminate` mode can set this to `true`. |
+| early_exit_reason | Reason that triggered the early-exit decision. |
+| early_exit_decision_elapsed_seconds | Elapsed time from case start until the early-exit decision, in seconds. |
+| estimated_time_saved_seconds | Estimated time that would have been saved in `report` mode, in seconds. |
+| estimated_time_saved_ratio | Estimated saved time divided by the complete case duration. |
+| result_source | Result source. An actually terminated result uses `early_exit_metrics`. |
+| usable_as_best | Whether the result can participate in best-result and reference selection. It is `false` only when the case is actually terminated early; a case that meets the condition in `report` mode completes normally and remains `true`. |
 
-The remaining columns are the corresponding `config.toml` parameters of vLLM or MindIE.
+Additional result columns contain internal early-exit sampling and warmup metadata, such as `metrics_window_*` and `warmup_*`; these fields are empty when early exit is disabled. They are followed by the corresponding `config.toml` parameters of vLLM or MindIE.
+
+When `action = "report"`, the tool also generates `metrics_samples_*.csv`. Use `case_id` to associate its sampling trace with the main result in `data_storage_*.csv`. Results actually terminated by early exit do not participate in best-candidate, reference, or refinement selection.
 
 ## Appendixes
 
@@ -318,6 +329,45 @@ Consistent with the comments in `optix/config.toml`:
 [deploy]
 # path_prefix = "/path/to/custom-deploy-root"
 ```
+
+**Benchmark Early Exit `[benchmark_early_exit]`**
+
+Benchmark early exit reduces service parameter optimization time by terminating ordinary PSO candidates whose performance is significantly worse than historical complete results. The feature is disabled by default and currently supports only `-e vllm`.
+
+Early exit applies only to ordinary PSO evaluation. Baseline, request-rate calibration, refinement, and best-candidate validation runs are not terminated early, ensuring that reference and final results remain complete.
+
+When enabling the feature for the first time, use `action = "report"` to validate the policy:
+
+```toml
+[benchmark_early_exit]
+enabled = true
+action = "report"
+metrics_url = "http://127.0.0.1:8000/metrics"
+```
+
+| Parameter | Mandatory | Default | Description |
+|---|---|---|---|
+| enabled | No | `false` | Whether to enable early exit. |
+| action | No | `"terminate"` | `report` records when the case would have exited without terminating it. `terminate` actually stops the current benchmark and service. |
+| metrics_url | No | `"http://127.0.0.1:8000/metrics"` | vLLM Prometheus metrics endpoint. It must match the actual service listening address and port. |
+
+After the feature is enabled, the system first establishes a reference from the baseline or another complete case. After warmup, if an ordinary PSO candidate remains significantly worse than the reference for multiple consecutive eligible windows, the system makes an early-exit decision.
+
+Use the following rollout procedure:
+
+1. Set `action = "report"` and complete an optimization run.
+2. Inspect `data_storage_*.csv` and `metrics_samples_*.csv`.
+3. After confirming that there are no obvious false positives, change `action` to `"terminate"`.
+4. Continue optimization with the same model, dataset, and business workload.
+
+> **NOTE:** `report` mode does not shorten runtime. It validates early-exit decisions and generates the `metrics_samples_*.csv` sampling trace. Only `terminate` mode actually saves time.
+
+**Warning:**
+
+- Only the `vllm` engine is currently supported. `mindie`, `vllm_pd`, and other extension engines are not supported.
+- Early exit is not performed for short cases, when no usable reference exists, or while `/metrics` is temporarily unavailable.
+- After changing the model, dataset, or business workload, establish a new complete reference with the same measurement scope.
+- Early exit identifies candidates whose service is healthy but whose performance is poor. It does not replace service startup failure, health-check, or request failure handling.
 
 **Optimization Parameters**: `n_particles` (number of optimization seeds), `iters` (number of iteration rounds), and `tpot_slo` (latency constraint of `time_per_output_token`), and so on.
 You can configure the number of seeds and iterations based on the estimated time. The time for a single seed is the time for starting the service plus testing the data. For example, if starting the service and completing the test takes 9 to 10 minutes, and you are willing to spend 8 hours on optimization, you can run about 50 seeds in total. You are advised to configure 5 × 10. Set the number of seeds to 10 and the number of iterations to 5. You are advised to set the number of seeds to about twice the number of iterations.
@@ -704,6 +754,16 @@ msmodeling optix -e vllm -b ais_bench
 | `Deployment command not found: vllm` or `mindieservice_daemon` | No command is found in the system PATH after stripping the venv | First confirm that vLLM or MindIE is installed in the system. If necessary, set `OPTIX_DEPLOY_PATH` or `[deploy] path_prefix`. |
 | `Command vllm resolves to the msmodeling virtual environment` | vllm is mistakenly installed in the msModeling venv | Run `pip uninstall vllm` in that venv and use the vLLM in the system. |
 | `Deployment command vllm → ...` and the path is on the system side | Normal | No change is required. |
+
+**Benchmark Early Exit Troubleshooting**
+
+| Symptom | Possible Cause | Suggestion |
+|---|---|---|
+| Early exit is enabled but the case is not stopped. | `action = "report"` is configured. | After validating the decisions, change it to `action = "terminate"`. |
+| The log reports that early exit is unsupported. | The engine is not `vllm`. | Early exit is currently enabled only with `-e vllm`. |
+| Ordinary candidates always run to completion. | No complete reference exists, the case is too short, or there are insufficient eligible window samples. | Confirm that the baseline completed and inspect the metrics sampling trace. |
+| Baseline, calibration, or refinement is not terminated early. | This is the complete-result protection mechanism. | No action is required. |
+| Fetching `/metrics` fails. | The `metrics_url`, listening address, or port is incorrect. | Verify the vLLM `/metrics` endpoint. A single sampling failure does not actively terminate the benchmark. |
 
 ### Log Description
 

@@ -106,6 +106,7 @@ uv pip uninstall msmodeling
 | `[ais_bench.command]`  / `[vllm_benchmark.command]`| 测评工具参数                  | [测评工具参数](#测评工具参数) |
 | `[deploy]`                                           | 部署环境根目录（可选）             | [高级配置 → 部署环境](#部署环境) |
 | `[data_storage]`                                     | 结果存储与精调（可选）             | [高级配置 → 结果存储与精调](#结果存储与精调) |
+| `[benchmark_early_exit]`                             | vLLM benchmark 早停策略（可选）    | [高级配置 → Benchmark 早停](#benchmark-早停) |
 | `[health_check]`                                     | 运行时日志异常检测（可选）           | [高级配置 → 日志检测](#日志检测) |
 
 ### 寻优参数
@@ -389,6 +390,46 @@ PSO 阶段结束后，工具会从结果中选出若干组候选进入精调（f
 pso_top_k = 0
 ```
 
+### Benchmark 早停
+
+Benchmark 早停用于提前结束性能明显差于历史完整结果的普通 PSO 候选，减少服务化实测寻优时间。该功能默认关闭，目前仅支持 `-e vllm`。
+
+早停只作用于普通 PSO evaluation。baseline、request-rate calibration、refinement 和最优候选复测不会被提前终止，以保证基准和最终结果完整。
+
+首次启用时，建议先使用 `action = "report"` 验证策略：
+
+```toml
+[benchmark_early_exit]
+enabled = true
+action = "report"
+metrics_url = "http://127.0.0.1:8000/metrics"
+```
+
+|参数|可选/必选|默认值|说明|
+|---|---|---|---|
+|`enabled`|可选|`false`|是否启用早停。|
+|`action`|可选|`"terminate"`|`report` 仅记录本应早停的时刻，不终止当前 Case；`terminate` 实际停止当前 benchmark 和服务。|
+|`metrics_url`|可选|`"http://127.0.0.1:8000/metrics"`|vLLM Prometheus metrics 地址，应与实际服务监听地址和端口一致。|
+
+启用后，系统先从 baseline 或其他完整 Case 建立 reference。后续普通 PSO 候选经过 warmup 后，若连续多个有效窗口显著差于 reference，系统生成早停决定。
+
+推荐按以下步骤启用：
+
+1. 设置 `action = "report"`，完成一轮寻优；
+2. 检查 `data_storage_*.csv` 和 `metrics_samples_*.csv`；
+3. 确认不存在明显误判后，将 `action` 改为 `"terminate"`；
+4. 使用相同模型、数据集和业务负载继续寻优。
+
+> [!NOTE]
+> `report` 模式不会缩短运行时间，只用于验证早停判断，并生成 `metrics_samples_*.csv` 采样轨迹。`terminate` 模式才会实际节省时间。
+
+**注意：**
+
+- 当前仅支持 `vllm` engine，不支持 `mindie` 或 `vllm_pd` 等扩展 engine。
+- 短 Case、没有可用 reference 或 `/metrics` 暂时不可访问时，系统不会执行早停。
+- 修改模型、数据集或业务负载后，应重新建立相同口径的完整 reference。
+- 早停用于识别“服务正常但性能较差”的候选，不能替代服务启动失败、健康检查或请求失败处理。
+
 ### 日志检测
 
 检查日志中出现的异常信息，区分致命错误和可重试错误，实现智能错误处理和重试机制。可检测的错误类型包括内存溢出（OOM）、设备故障（NPU）、网络错误和 IO 错误等。致命错误（如 OOM、NPU 故障）会立即停止调度器，可重试错误（如网络抖动、IO 失败）会触发自动重试（最多 3 次），日志检测配置位于 `config.toml` 中的 `[health_check]`：
@@ -508,10 +549,11 @@ OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并
 
 ## 结果文件说明
 
-输出 CSV 中的每一行对应一组参数，前几列为性能指标。用户可以根据需求筛选满足要求的性能行，将 VLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
+输出 CSV 中的每一行对应一组参数。第一列 `case_id` 用于标识 Case，后续五列为性能指标。用户可以根据需求筛选满足要求的性能行，将 VLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
 
 |字段|说明|
 |---|---|
+|`case_id`|关联主结果和 metrics 采样轨迹的 Case 标识。|
 |`generate_speed`|吞吐。|
 |`time_to_first_token`|TTFT 时延，单位为秒。|
 |`time_per_output_token`|TPOT 时延，单位为秒。|
@@ -524,8 +566,18 @@ OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并
 |`real_evaluation`|标记数据是否由真实测试结果得到。`false` 代表该组数据由 GP 模型预测得到。|
 |`fitness`|寻优算法优化值，该值越小代表该组参数效果越好。|
 |`num_prompts`|记录这次寻优测评工具发送的请求数。|
+|`would_early_exit`|是否满足早停条件；`report` 模式下也可能为 `true`。|
+|`early_exit`|当前 Case 是否被实际提前终止；仅 `terminate` 模式可能为 `true`。|
+|`early_exit_reason`|触发早停的原因。|
+|`early_exit_decision_elapsed_seconds`|从 Case 开始到形成早停决定的时间，单位为秒。|
+|`estimated_time_saved_seconds`|`report` 模式下估算的可节省时间，单位为秒。|
+|`estimated_time_saved_ratio`|估算可节省时间占完整 Case 时长的比例。|
+|`result_source`|结果来源；实际早停结果为 `early_exit_metrics`。|
+|`usable_as_best`|该结果能否参与最优结果和 reference 选择；仅实际提前终止的结果为 `false`。`report` 模式下满足条件的 Case 会完整运行，该字段仍为 `true`。|
 
-其余列为对应的 VLLM 或 MindIE 的 `config.toml` 参数。
+上表未列出的结果列还包括早停内部采样和预热元数据（如 `metrics_window_*` 和 `warmup_*`）；未启用早停时，这些字段为空。随后为对应的 VLLM 或 MindIE 的 `config.toml` 参数。
+
+当 `action = "report"` 时，还会生成 `metrics_samples_*.csv`。可以通过 `case_id` 将采样轨迹与 `data_storage_*.csv` 中的主结果关联。实际早停结果不会参与最优候选、reference 或 refinement 选择。
 
 ## 附录
 
@@ -603,6 +655,11 @@ baseline 失败时 CLI 边界仅输出一次含 `exit=`、`command:`、`log:` �
 |`SimulatorUnavailableError` 启动即失败|所选 `-e` 插件声明的 CLI 不在 `PATH`|安装推理框架 CLI 或更换 `-e`；发生在寻优开始前|
 |`BaselineRunError` 含 `exit=` / `log:`|baseline 子进程失败|先看控制台末尾日志；需要时再打开完整 log 文件|
 |`--config` 指向不存在文件|路径错误或文件未部署|检查路径；抛出 `ConfigFileNotFoundError`（退出码 `1`）|
+|启用了早停但 Case 未被停止|配置为 `action = "report"`|验证判断结果后改为 `action = "terminate"`|
+|日志提示 early exit unsupported|engine 不是 `vllm`|当前仅在 `-e vllm` 下启用早停|
+|普通候选一直完整运行|尚无完整 reference、Case 太短或有效窗口数据不足|确认 baseline 已完成，并检查 metrics 采样轨迹|
+|baseline、calibration 或 refinement 未早停|这是完整结果保护机制|无需处理|
+|`/metrics` 获取失败|`metrics_url`、监听地址或端口不正确|验证 vLLM `/metrics` 地址；单次采集失败不会主动终止 benchmark|
 
 ### CLI 退出码
 
