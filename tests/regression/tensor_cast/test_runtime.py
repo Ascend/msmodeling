@@ -7,6 +7,7 @@ import pytest
 import torch
 from parameterized import parameterized
 from tensor_cast.compilation import get_backend
+from tensor_cast.core.input_generator import _resolve_decoder_layers
 from tensor_cast.core.model_builder import build_model
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import TEST_DEVICE
@@ -589,7 +590,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             quantize_linear_action=QuantizeLinearAction.DISABLED,
         )
         model = build_model(user_config)
-        linear_attn = model.unwrap().language_model.layers[0].linear_attn
+        linear_attn = _resolve_decoder_layers(model)[0].linear_attn
         hidden_states = torch.randn(1, 8, model.hidden_size, device="meta")
 
         device_profile = TEST_DEVICE

@@ -716,7 +716,7 @@ def test_partial_returns_none_when_interpolation_fails(interp_data_dir):
 
 
 def test_decomposed_interpolation_partial_preserves_diagnostics_and_uses_full_analytic_fallback(tmp_path, monkeypatch):
-    """A later missing composite leaf keeps the hit diagnostic but never its subtotal."""
+    """A later missing composite leaf is a wrapper miss; empirical uses full-op analytic."""
     func_name = "tensor_cast.fake_partial.default"
     (tmp_path / "op_mapping.yaml").write_text(
         f'version: "test"\noperator_mappings:\n  "{func_name}":\n    composite: true\n',
@@ -751,12 +751,10 @@ def test_decomposed_interpolation_partial_preserves_diagnostics_and_uses_full_an
 
     result = data_source.lookup(op)
 
-    assert result is not None
-    assert result.source == QuerySource.PARTIAL
-    assert result.latency_us == pytest.approx(10.0)
-    assert result.details["method"] == "decomposed_interpolation_partial"
-    assert result.details["hit_kernels"] == ["MatMulV2"]
-    assert result.details["missed_kernels"] == ["Add"]
+    assert result is None
+    assert data_source.last_miss_reason == "composite_sub_kernel_failed"
+    assert data_source.last_miss_details["fallback_from"] == "composite"
+    assert data_source.last_miss_details["kernel_type"] == "Add"
 
     analytic_result = PerformanceModel.Result(execution_time_s=123e-6, statistics={})
     fallback = MagicMock()
@@ -766,10 +764,9 @@ def test_decomposed_interpolation_partial_preserves_diagnostics_and_uses_full_an
     final_result = model.process_op(op)
 
     assert final_result.execution_time_s == pytest.approx(123e-6)
-    assert final_result.statistics["source"] == "ANALYTIC"
-    assert final_result.statistics["fallback_from"] == QuerySource.PARTIAL.name
-    assert model.op_records[-1].lookup_result is not None
-    assert model.op_records[-1].lookup_result.source == QuerySource.PARTIAL
+    assert final_result.statistics["shape_match_rule"] == "analytic"
+    assert model.op_records[-1].lookup_result is None
+    assert model.op_records[-1].miss_reason == "composite_sub_kernel_failed"
 
 
 def test_candidate_latency_uses_alternate_after_zero_preferred_column():
