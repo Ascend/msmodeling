@@ -475,7 +475,7 @@ tools/perf_data_collection/comm_bench/generate_comm_microbench.py \
 * **无 NPU 测试**：`parse_kernel_details.py`、`fill_fia_runtime_metadata.py`、`generate_shape_grid.py`、`validate_comm_alignment.py` 以及所有单元测试可在无 NPU 环境运行
 * **数据量**：shape grid 生成可能产生大量 CSV 行（默认 10,000 行上限），需监控磁盘空间
 * **Replay 覆盖限制**：CSV 可能存在但没有对应 replay 脚本；部分脚本只支持其面向的已记录 shape/API 模式
-* **工具链独立性**：`tools/` 目录可独立进行运行，不依赖实测算子建模部分。
+* **工具链独立性**：`tools/` 目录可独立运行，不依赖实测算子建模部分。
 
 ## 4. Test Design (测试设计)
 
