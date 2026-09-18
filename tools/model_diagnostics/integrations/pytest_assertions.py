@@ -13,18 +13,40 @@
 # limitations under the License.
 """Minimal pytest-compatible assertion adapter."""
 
-from tools.model_diagnostics.domain import DiagnosticsResult, FindingStatus
+from tools.model_diagnostics.domain import DiagnosticsResult, Finding, FindingStatus
 
 
 def assert_diagnostics_passed(result: DiagnosticsResult) -> None:
+    """Explain non-PASS findings without rendering reports or writing files."""
+    __tracebackhide__ = True
     if result.summary.overall_status is FindingStatus.PASS:
         return
-    failing = tuple(finding for finding in result.findings if finding.status is not FindingStatus.PASS)
-    preview = "; ".join(
-        f"{item.status.value}:{item.region_id}/{item.stage_id}:{item.message_code}" for item in failing[:5]
-    )
-    suffix = "" if len(failing) <= 5 else f"; ... {len(failing) - 5} more"
+    failing_count = 0
+    previews: list[str] = []
+    for finding in result.findings:
+        if finding.status is FindingStatus.PASS:
+            continue
+        failing_count += 1
+        if len(previews) < 5:
+            previews.append(_finding_preview(finding))
+    preview = "\n".join(previews)
+    suffix = "" if failing_count <= 5 else f"\n... {failing_count - 5} more finding(s)"
     raise AssertionError(
-        f"model diagnostics {result.summary.overall_status.value}: "
-        f"{len(failing)} non-pass finding(s): {preview}{suffix}"
+        f"model diagnostics {result.summary.overall_status.value} for "
+        f"{result.context.model_name} ({result.context.phase.value if result.context.phase else 'unknown'}): "
+        f"{failing_count} non-pass finding(s)\n{preview}{suffix}"
+    )
+
+
+def _finding_preview(finding: Finding) -> str:
+    layer = "" if finding.layer_index is None else f"/layer[{finding.layer_index}]"
+    difference = ""
+    if finding.expected is not None or finding.actual is not None:
+        difference = f"; expected {finding.expected!r}, got {finding.actual!r}"
+    evidence = finding.left_evidence or finding.right_evidence
+    slot = next((item.tensor_slot for item in evidence if item.tensor_slot is not None), None)
+    tensor = f" {slot}" if slot is not None else ""
+    return (
+        f"- {finding.region_id}{layer}/{finding.stage_id}{tensor}: "
+        f"{finding.message}{difference}"
     )

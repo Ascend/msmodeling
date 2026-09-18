@@ -68,7 +68,11 @@ class RuntimeArtifactOrganizer:
                 evidence_exhausted = True
                 continue
             starts.append(start)
-            cursor = start + 1
+            cursor = start + _matched_boundary_width(
+                calls,
+                start,
+                options.boundary_operators,
+            )
 
         region_stages: dict[str, list[StageExecutionRecord]] = {}
         layer_stages: dict[str, dict[int, list[StageExecutionRecord]]] = {}
@@ -82,9 +86,15 @@ class RuntimeArtifactOrganizer:
             next_start = starts[expected_index + 1] if expected_index + 1 < len(starts) else None
             end = next_start if next_start is not None else len(calls)
             options = self._runtime_options(item.stage)
+            # The first declared stage owns the execution prefix as well as its
+            # boundary. Otherwise undeclared calls before the first boundary
+            # disappear from comparison and can turn an incomplete contract
+            # into a false PASS. Legitimate pre-boundary mechanics must be
+            # declared in this stage's ignored operators.
+            slice_start = 0 if expected_index == 0 else start
             stage_calls = tuple(
                 call
-                for call in calls[start:end]
+                for call in calls[slice_start:end]
                 if not any(_matches_operator_name(call.operator_name, ignored) for ignored in options.ignored_operators)
             )
             record = StageExecutionRecord(stage_id=item.stage.stage_id, operator_calls=stage_calls)
@@ -231,6 +241,20 @@ def _matches_operator_name(operator_name: str, pattern: str) -> bool:
     return len(parts) >= 3 and parts[-2] == pattern
 
 
+def _composite_boundary_width(calls, index: int, boundary: str) -> int:
+    """Return the matched RMSNorm sequence length, or 0 when it does not match."""
+
+    if boundary != "rms_norm":
+        return 0
+    for signature in _RMSNORM_SIGNATURES:
+        if index + len(signature) <= len(calls) and all(
+            _canonical_operator_field(calls[index + offset].operator_name) == expected
+            for offset, expected in enumerate(signature)
+        ):
+            return len(signature)
+    return 0
+
+
 def _matches_composite_boundary(calls, index: int, boundary: str) -> bool:
     """Match a boundary that Runtime expands into an ATen operator sequence.
 
@@ -242,13 +266,20 @@ def _matches_composite_boundary(calls, index: int, boundary: str) -> bool:
     evidence is never mutated (U-c008-08).
     """
 
-    if boundary != "rms_norm":
-        return False
-    return any(
-        index + len(signature) <= len(calls)
-        and all(
-            _canonical_operator_field(calls[index + offset].operator_name) == expected
-            for offset, expected in enumerate(signature)
-        )
-        for signature in _RMSNORM_SIGNATURES
-    )
+    return _composite_boundary_width(calls, index, boundary) > 0
+
+
+def _matched_boundary_width(
+    calls,
+    index: int,
+    boundary_operators: tuple[str, ...],
+) -> int:
+    """Advance past a complete composite boundary, or one direct call."""
+
+    for boundary in boundary_operators:
+        if _matches_operator_name(calls[index].operator_name, boundary):
+            return 1
+        width = _composite_boundary_width(calls, index, boundary)
+        if width:
+            return width
+    return 1

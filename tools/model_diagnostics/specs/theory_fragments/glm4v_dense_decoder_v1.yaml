@@ -16,33 +16,14 @@ stages:
     runtime:
       # Match the complete input RMSNorm sequence, not one of its dtype casts.
       boundary_operators: [rms_norm]
+      ignored_operator_groups: [quantization, dtype_cast, rotary_embedding, layout_permute, shape_views, tensor_storage, broadcast_shapes, norm_math_with_add, slice_select, tensor_split]
       ignored_operators:
-        - _to_copy
-        - pow
-        - mean
-        - add
-        - rsqrt
-        - mul
-        - view
-        - t
-        - transpose
         - index
         - index_select
-        - unsqueeze
-        - expand
-        - slice
-        - select
-        - split_with_sizes
-        - alias
-        - copy_
         - neg
         - cat
         - stack
         - reshape_and_cache
-        - apply_rope
-        - clone
-        - _unsafe_view
-        - dynamic_quantize_symmetric
   - id: attention
     modules:
       - name: attention
@@ -53,24 +34,7 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [attention]
-      ignored_operators:
-        - view
-        - t
-        - transpose
-        - alias
-        - copy_
-        - slice
-        - select
-        - dynamic_quantize_symmetric
-        - quantize
-        - all_reduce
-        - add
-        - _unsafe_view
-        - _to_copy
-        - pow
-        - mean
-        - rsqrt
-        - mul
+      ignored_operator_groups: [collective_communication, quantization, dtype_cast, layout_permute, shape_views, tensor_storage, norm_math_with_add, slice_select]
   - id: dense_ffn
     modules:
       - name: gate_up_projection
@@ -85,24 +49,4 @@ stages:
     runtime:
       # Match the complete pre-FFN RMSNorm sequence, not one of its dtype casts.
       boundary_operators: [rms_norm]
-      ignored_operators:
-        - _to_copy
-        - pow
-        - mean
-        - add
-        - rsqrt
-        - mul
-        - view
-        - split
-        - split_with_sizes
-        - slice
-        - select
-        - t
-        - _unsafe_view
-        - alias
-        - copy_
-        - dynamic_quantize_symmetric
-        - quantize
-        - rms_norm
-        - device_put
-        - all_reduce
+      ignored_operator_groups: [collective_communication, rms_norm_kernels, quantization, dtype_cast, layout_permute, shape_views, tensor_storage, norm_math_with_add, slice_select, tensor_split]

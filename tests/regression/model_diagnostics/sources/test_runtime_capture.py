@@ -259,27 +259,29 @@ def test_moe_config_detection_requires_top_k() -> None:
     assert _is_moe_config(SimpleNamespace(n_routed_experts=256)) is False
 
 
-def test_model_moe_classification_caches_only_the_boolean(monkeypatch) -> None:
+def test_model_moe_classification_reloads_same_name_to_avoid_stale_layout(monkeypatch) -> None:
     from tools.model_diagnostics.sources.runtime_capture import _model_is_moe
 
     calls: list[str] = []
 
+    configs = iter(
+        (
+            SimpleNamespace(num_experts=128, num_experts_per_tok=8),
+            SimpleNamespace(),
+        )
+    )
+
     def _load_config(_loader, model_name: str):
         calls.append(model_name)
-        return SimpleNamespace(num_experts=128, num_experts_per_tok=8)
+        return next(configs)
 
     monkeypatch.setattr(
         "tensor_cast.transformers.utils.AutoModelConfigLoader.load_config",
         _load_config,
     )
-    _model_is_moe.cache_clear()
-    try:
-        assert _model_is_moe("test/moe-cache-model") is True
-        assert _model_is_moe("test/moe-cache-model") is True
-        assert calls == ["test/moe-cache-model"]
-        assert _model_is_moe.cache_parameters() == {"maxsize": 32, "typed": False}
-    finally:
-        _model_is_moe.cache_clear()
+    assert _model_is_moe("test/moe-model") is True
+    assert _model_is_moe("test/moe-model") is False
+    assert calls == ["test/moe-model", "test/moe-model"]
 
 
 def _producer(*, package_version: str = "0.2.0", git_revision: str | None = "abc1234") -> ProducerInfo:

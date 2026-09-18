@@ -45,7 +45,7 @@ class RuntimeHtmlRenderer:
         cards = []
         for call in artifact.operator_calls:
             rows = "".join(
-                f"<tr><td>{html.escape(str(tensor.slot))}</td><td><code>{html.escape(str(tensor.shape))}</code></td><td>{html.escape(tensor.dtype)}</td></tr>"
+                f"<tr><td>{html.escape(str(tensor.slot))}</td><td><code>{html.escape(str(tensor.shape) if tensor.shape is not None else 'unknown')}</code></td><td>{html.escape(tensor.dtype or 'unknown')}</td></tr>"
                 for tensor in call.tensors
             )
             cards.append(

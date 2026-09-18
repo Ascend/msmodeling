@@ -16,30 +16,13 @@ stages:
     runtime:
       # Match the complete input RMSNorm sequence, not one of its casts.
       boundary_operators: [rms_norm]
+      ignored_operator_groups: [norm_math_with_add, layout_permute, slice_select, quantization, dtype_cast, rotary_embedding, shape_views, tensor_storage, broadcast_shapes, tensor_split]
       ignored_operators:
-        - _to_copy
-        - pow
-        - mean
-        - add
-        - rsqrt
-        - mul
-        - view
-        - t
-        - transpose
         - index
         - index_select
-        - unsqueeze
-        - expand
-        - slice
-        - select
-        - split_with_sizes
-        - alias
-        - copy_
         - neg
         - cat
         - reshape_and_cache
-        - apply_rope
-        - dynamic_quantize_symmetric
   - id: attention
     modules:
       - name: attention
@@ -50,16 +33,7 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [attention]
+      ignored_operator_groups: [layout_permute, slice_select, collective_communication, quantization, dtype_cast, shape_views, tensor_storage]
       ignored_operators:
-        - view
-        - t
-        - transpose
-        - alias
-        - copy_
-        - slice
-        - select
-        - dynamic_quantize_symmetric
-        - quantize
-        - all_reduce
         - add
 

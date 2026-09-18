@@ -21,21 +21,10 @@ stages:
         - rms_norm
         - rms_norm_dynamic_quant_symmetric
         - rms_norm_quant
+      ignored_operator_groups: [slice_select, rms_norm_kernels, quantization, dtype_cast, rotary_embedding, layout_permute, shape_views, tensor_storage, tensor_split]
       ignored_operators:
-        - rms_norm
-        - rms_norm_dynamic_quant_symmetric
-        - rms_norm_quant
-        - view
         - index
         - reshape_and_cache
-        - split_with_sizes
-        - alias
-        - copy_
-        - slice
-        - select
-        - apply_rope
-        - permute
-        - dynamic_quantize_symmetric
     comparisons:
       theory-runtime:
         strategy: concat_shape
@@ -53,6 +42,7 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [attention]
+      ignored_operator_groups: [slice_select, quantization]
       ignored_operators:
         - view
         - index
@@ -60,10 +50,5 @@ stages:
         - split_with_sizes
         - alias
         - copy_
-        - slice
-        - select
         - apply_rope
-        - dynamic_quantize_symmetric
-        - quantize
-        # TP>1: o_projection all_reduce collapses TP partials on token dim.
         - all_reduce

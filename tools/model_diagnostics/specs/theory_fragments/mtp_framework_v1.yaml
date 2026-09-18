@@ -21,7 +21,7 @@ stages:
       # Compiled wrappers use aten.index.Tensor; the Qwen3-VL eager wrapper
       # uses index_select for the same request-row selection.
       boundary_operators: [aten.index.Tensor, index_select]
-      ignored_operators: [device_put, alias, t]
+      ignored_operator_groups: [layout_permute, tensor_storage]
   - id: target_lm_head
     modules:
       - name: lm_head
@@ -35,15 +35,9 @@ stages:
         - static_quant_linear_int4
         - fp8_linear
         - mxfp4_linear
+      ignored_operator_groups: [slice_select, collective_communication, shape_views, tensor_storage]
       ignored_operators:
-        - view
-        - slice
-        - alias
-        - copy_
-        - device_put
-        - select
         - argmax
-        - all_gather
   - id: verification_sampler
     modules:
       - name: mtp_target_sampler
@@ -53,7 +47,8 @@ stages:
       boundary_operators: [cat]
       # PyTorch 2.10 may place output-buffer update mechanics before the
       # following select_scatter boundary.
-      ignored_operators: [select, copy, copy_, detach, unsqueeze, expand, _to_copy, view, _unsafe_view, transpose, bmm]
+      ignored_operator_groups: [layout_permute, dtype_cast, shape_views, tensor_storage, broadcast_shapes]
+      ignored_operators: [select, bmm]
   - id: mtp_output
     modules:
       - name: mtp_output
@@ -63,26 +58,13 @@ stages:
       # Older graphs expose the initialized output through slice; PyTorch 2.10
       # can eliminate that slice and expose the updated buffer as select_scatter.
       boundary_operators: [slice, select_scatter, empty]
+      ignored_operator_groups: [slice_select, quantization, dtype_cast, layout_permute, shape_views, tensor_storage, broadcast_shapes]
       ignored_operators:
-        - select
-        - copy
         - slice_scatter
-        - unsqueeze
-        - expand
         - bmm
-        - permute
-        - clone
         - cos
         - sin
         - mul
-        - convert_element_type
-        - detach
-        - copy_
-        - _to_copy
-        - view
-        - _unsafe_view
-        - transpose
-        - slice
         - cat
     # Runtime retains multiple slice calls in this stage. Select the wrapper
     # output boundary explicitly instead of using call-count-sensitive one_to_one.
@@ -120,16 +102,8 @@ stages:
     runtime:
       boundary_operators: [embedding]
       # Ignore fused and expanded RMSNorm mechanics between embedding and fusion.
+      ignored_operator_groups: [norm_math_with_add, rms_norm_kernels, quantization, dtype_cast]
       ignored_operators:
-        - convert_element_type
-        - pow
-        - mean
-        - add
-        - rsqrt
-        - mul
-        - rms_norm
-        - rms_norm_dynamic_quant_symmetric
-        - _to_copy
         - add_
   - id: input_fusion
     modules:
@@ -139,19 +113,9 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [cat]
+      ignored_operator_groups: [norm_math_with_add, quantization, dtype_cast, layout_permute, shape_views]
       ignored_operators:
         - cat
-        - view
-        - _unsafe_view
-        - t
-        - transpose
-        - convert_element_type
-        - pow
-        - mean
-        - add
-        - rsqrt
-        - mul
-        - dynamic_quantize_symmetric
   # --- proposal_suffix ---
   - id: proposal_selection
     modules:
@@ -164,7 +128,7 @@ stages:
           OUTPUT[0]: {shape: "[Rprop, H]", dtype: ACT}
     runtime:
       boundary_operators: [aten.index.Tensor, index_select]
-      ignored_operators: [device_put, alias, t]
+      ignored_operator_groups: [layout_permute, tensor_storage]
   - id: proposal_lm_head
     modules:
       - name: mtp_proposal_lm_head
@@ -183,10 +147,7 @@ stages:
           OUTPUT[0]: {shape: "[B, 1]", dtype: int64}
     runtime:
       boundary_operators: [argmax]
+      ignored_operator_groups: [slice_select, tensor_storage]
       ignored_operators:
-        - slice
-        - select
-        - copy
         - select_scatter
         - slice_scatter
-        - copy_

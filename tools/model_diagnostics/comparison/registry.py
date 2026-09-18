@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from tools.model_diagnostics.domain import ComparisonOptions
+from tools.model_diagnostics.errors import ModelDiagnosticsError
 
 from .models import StageComparisonStrategy
 
@@ -28,7 +29,7 @@ class StrategyRegistrationError(ValueError):
     """A strategy registry entry is internally inconsistent."""
 
 
-class StrategyResolutionError(LookupError):
+class StrategyResolutionError(ModelDiagnosticsError):
     """A validated strategy id cannot be resolved at runtime."""
 
 

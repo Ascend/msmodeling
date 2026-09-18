@@ -35,33 +35,12 @@ regions:
                   OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
           runtime:
             boundary_operators: [embedding]
+            ignored_operator_groups: [norm_math_with_add, sigmoid_scaffold, slice_select, cat_split, collective_communication, quantization, dtype_cast, layout_permute, shape_views, tensor_storage, broadcast_shapes]
             ignored_operators:
-              - view
               - index
-              - alias
-              - slice
-              - unsqueeze
               - bitwise_not
               - where
               - masked_fill_
-              - all_gather
-              - all_reduce
-              - mean
-              - pow
-              - rsqrt
-              - mul
-              - add
-              - convert_element_type
-              - expand
-              - clone
-              - neg
-              - sigmoid
-              - select
-              - cat
-              - permute
-              - split
-              - split_with_sizes
-              - copy_
 
   language:
     layer_layout_rule:
@@ -103,30 +82,7 @@ regions:
                   OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
           runtime:
             boundary_operators: [rms_norm]
+            ignored_operator_groups: [norm_math_with_add, sigmoid_scaffold, quantization, dtype_cast, slice_select, cat_split, collective_communication, rms_norm_kernels, layout_permute, shape_views, tensor_storage, broadcast_shapes]
             ignored_operators:
-              - rms_norm
-              - view
-              - slice
-              - alias
-              - copy_
-              - dynamic_quantize_symmetric
-              - device_put
-              - select
               - argmax
               - index
-              - all_gather
-              - mean
-              - pow
-              - rsqrt
-              - mul
-              - add
-              - convert_element_type
-              - expand
-              - clone
-              - neg
-              - sigmoid
-              - cat
-              - permute
-              - split
-              - split_with_sizes
-              - unsqueeze

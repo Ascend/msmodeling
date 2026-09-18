@@ -31,6 +31,7 @@ from tools.model_diagnostics.domain import (
     ParallelContext,
 )
 from tools.model_diagnostics.errors import InvalidDiagnosticsRequest
+from tools.model_diagnostics.schema_utils import load_yaml_strict
 from tools.model_diagnostics.specification.errors import SpecificationLoadError
 
 _ALLOWED_KEYS = frozenset(
@@ -64,6 +65,16 @@ _FORBIDDEN_KEYS = frozenset(
         "model_config",
         "quantization_config",
         "capture",
+    }
+)
+_ALLOWED_PARALLEL_KEYS = frozenset(
+    {
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "data_parallel_size",
+        "expert_parallel_size",
+        "moe_data_parallel_size",
+        "moe_dp_size",
     }
 )
 _QUANTIZE_LINEAR_ACTIONS = frozenset(
@@ -295,7 +306,7 @@ def load_diagnostics_run_profile(path: str | Path) -> DiagnosticsRunProfile:
 
     source = Path(path)
     try:
-        raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+        raw = load_yaml_strict(source.read_text(encoding="utf-8"))
     except OSError as error:
         raise SpecificationLoadError(f"cannot read run profile {source}") from error
     except yaml.YAMLError as error:
@@ -334,6 +345,11 @@ def _parse_profile(raw: Mapping[str, Any]) -> DiagnosticsRunProfile:
             "parallel field(s) not supported: "
             + ", ".join(unsupported_parallel)
             + ". MoE tensor parallel is fixed at 1 by this module; sizes greater than 1 are unsupported."
+        )
+    unknown_parallel = sorted(set(parallel_raw) - _ALLOWED_PARALLEL_KEYS, key=repr)
+    if unknown_parallel:
+        raise SpecificationLoadError(
+            "unsupported parallel field(s): " + ", ".join(map(str, unknown_parallel))
         )
     if "moe_data_parallel_size" in parallel_raw and "moe_dp_size" in parallel_raw:
         raise SpecificationLoadError(

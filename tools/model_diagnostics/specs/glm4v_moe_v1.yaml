@@ -47,37 +47,21 @@ regions:
                   OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
           runtime:
             boundary_operators: [embedding]
+            ignored_operator_groups: [collective_communication, layout_permute, dtype_cast, shape_views, tensor_storage, broadcast_shapes, slice_select]
             ignored_operators:
-              - view
               - index
-              - alias
-              - slice
-              - unsqueeze
-              - expand
               - bitwise_not
               - where
               - masked_fill_
-              - all_gather
-              - all_reduce
-              # Vision position/grid preparation precedes the patch
-              # convolution. Filter these framework mechanics in the
-              # embedding window instead of declaring a Runtime-only Stage.
               - linspace
-              - detach
-              - _to_copy
               - add
               - clamp
               - sub
               - mul
               - arange
-              - transpose
-              - clone
-              - _unsafe_view
-              - repeat
               - cat
               - stack
               - lift_fresh
-              - select
               - repeat_interleave
               - index_select
               - cumsum
@@ -111,36 +95,22 @@ regions:
                   OUTPUT[0]: {shape: "[VTok, VH, 1, 1, 1]", dtype: ACT}
           runtime:
             boundary_operators: [convolution]
+            ignored_operator_groups: [layout_permute, dtype_cast, shape_views, tensor_storage, norm_math_with_add, slice_select]
             ignored_operators:
-              - _to_copy
-              - view
               - arange
-              - detach
               - embedding
-              - unsqueeze
-              - mul
               - sum
-              - add
               - cat
-              - clone
               - cos
               - sin
-              - pow
-              - mean
-              - rsqrt
-              - slice
               - sub
-              - select
               - index
               - div
               - stack
               - cumsum
               - ge
               - grid_sampler_2d
-              - squeeze
-              - permute
               - neg
-              - t
 
       - id: vision_post_conv_layernorm
         source_options:
@@ -154,7 +124,8 @@ regions:
                   OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
           runtime:
             boundary_operators: [pow]
-            ignored_operators: [pow, mean, add, rsqrt, _to_copy]
+            ignored_operator_groups: [dtype_cast]
+            ignored_operators: [pow, mean, add, rsqrt]
 
       - id: vision_position_interpolation
         source_options:
@@ -167,18 +138,14 @@ regions:
             # Start at the first rotary/interpolation setup op after
             # post_conv_layernorm; grid_sampler_2d remains the only kept call.
             boundary_operators: [unsqueeze]
+            ignored_operator_groups: [layout_permute, dtype_cast, shape_views, tensor_storage, slice_select]
             ignored_operators:
-              - unsqueeze
               - mul
-              - view
               - cat
               - cos
               - sin
-              - slice
               - sub
-              - select
               - arange
-              - detach
               - cumsum
               - ge
               - sum
@@ -186,9 +153,6 @@ regions:
               - add
               - div
               - stack
-              - squeeze
-              - permute
-              - _to_copy
 
   vision_encoder:
     activation: vision_prefill
@@ -224,31 +188,12 @@ regions:
               - rms_norm
               - rms_norm_dynamic_quant_symmetric
               - rms_norm_quant
+            ignored_operator_groups: [rms_norm_kernels, quantization, dtype_cast, rotary_embedding, layout_permute, shape_views, tensor_storage, norm_math_with_add, slice_select, tensor_split]
             ignored_operators:
-              - rms_norm
-              - rms_norm_dynamic_quant_symmetric
-              - rms_norm_quant
-              - view
               - index
               - reshape_and_cache
-              - split_with_sizes
-              - alias
-              - copy_
-              - slice
-              - select
-              - apply_rope
-              - permute
-              - dynamic_quantize_symmetric
-              - mean
-              - pow
-              - rsqrt
-              - add
-              - mul
-              - _to_copy
-              - unsqueeze
               - neg
               - cat
-              - clone
       glm4v_moe_text_decoder:
         include_fragment: glm4v_moe_decoder_v1
 
@@ -271,15 +216,8 @@ regions:
                   OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
           runtime:
             boundary_operators: [rms_norm]
+            ignored_operator_groups: [rms_norm_kernels, quantization, dtype_cast, shape_views, tensor_storage, slice_select]
             ignored_operators:
-              - rms_norm
-              - view
-              - slice
-              - alias
-              - copy_
-              - dynamic_quantize_symmetric
-              - device_put
-              - select
               - argmax
 
   # The MTP predictor reuses the source Glm4vMoeTextDecoderLayer. Because the

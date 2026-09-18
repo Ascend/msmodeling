@@ -22,7 +22,8 @@ stages:
           OUTPUT[0]: {shape: "[1, T, HCm, H]", dtype: ACT}
     runtime:
       boundary_operators: [unsqueeze]
-      ignored_operators: [convert_element_type, view]
+      ignored_operator_groups: [quantization, dtype_cast]
+      ignored_operators: [view]
 
   - id: hc_reduce
     modules:
@@ -32,4 +33,5 @@ stages:
           OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
     runtime:
       boundary_operators: [hc_head]
-      ignored_operators: [view, select, device_put]
+      ignored_operator_groups: [tensor_storage]
+      ignored_operators: [view, select]

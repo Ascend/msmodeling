@@ -283,3 +283,17 @@ def test_simulation_execution_artifact_freezes_operator_calls() -> None:
 
     assert isinstance(artifact.operator_calls, tuple)
     assert artifact.operator_calls == (call,)
+
+
+def test_simulation_execution_artifact_rejects_unsupported_schema_version() -> None:
+    with pytest.raises(ValueError, match="unsupported artifact schema_version '999'"):
+        SimulationExecutionArtifact(
+            schema_version="999",
+            producer=ProducerInfo(
+                package_version="0.0.0",
+                git_revision=None,
+                capture_backend="test",
+            ),
+            run_context=_context(),
+            operator_calls=(),
+        )

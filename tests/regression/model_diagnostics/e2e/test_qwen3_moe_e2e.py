@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from tools.model_diagnostics import create_model_diagnostics_application
-from tools.model_diagnostics.domain import ExecutionPhase, FindingStatus, ParallelContext, SourceKind
+from tools.model_diagnostics.domain import ExecutionPhase, ParallelContext, SourceKind
 from tools.model_diagnostics.integrations import assert_diagnostics_passed
 from tools.model_diagnostics.sources.runtime_capture import capture_artifact_for_profile
 from tools.model_diagnostics.specification import DiagnosticsRunProfile
@@ -131,7 +131,6 @@ def _assert_qwen3_moe_case(case) -> None:
     assert result.spec_id == "qwen3_moe_v1"
     assert result.left_source.source_kind is SourceKind.THEORY
     assert result.right_source.source_kind is SourceKind.RUNTIME
-    assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)
     expected_stages = {
         "embedding",
@@ -183,7 +182,6 @@ def _assert_qwen3_moe_mtp_case(case) -> None:
     request = profile.to_request(context=artifact.run_context, spec=spec)
     result = application.run_against_artifact(request, artifact)
     assert result.spec_id == "qwen3_moe_v1"
-    assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)
 
 

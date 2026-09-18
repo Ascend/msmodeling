@@ -113,7 +113,6 @@ def test_deepseek_v4_mtp_capture_and_compare() -> None:
         "proposal_selection",
     }.issubset(predictor_stages)
 
-    assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)
     mtp_findings = tuple(finding for finding in result.findings if finding.region_id == "mtp")
     assert mtp_findings
@@ -159,5 +158,4 @@ def test_deepseek_v4_compressed_attention_paths_capture_and_compare() -> None:
         sum(call.operator_name == "tensor_cast.quant_lightning_indexer.default" for call in artifact.operator_calls)
         == 1
     )
-    assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)

@@ -36,21 +36,13 @@ regions:
                   OUTPUT[0]: {shape: "[1, T, EO]", dtype: ACT}
           runtime:
             boundary_operators: [embedding]
+            ignored_operator_groups: [collective_communication, quantization, dtype_cast, shape_views, tensor_storage, broadcast_shapes]
             ignored_operators:
-              - view
               - index
-              - repeat
-              - as_strided
-              - expand
-              - convert_element_type
-              - alias
               - slice
-              - unsqueeze
               - bitwise_not
               - where
               - masked_fill_
-              - all_gather
-              - all_reduce
 
   language:
     layer_layout_rule:
@@ -67,21 +59,24 @@ regions:
           # model's post-decoder HC reduction remains inside this final
           # language-stage window. It is not part of the decoder fragment.
           hc_post_moe:
-            ignored_operators: [hc_head, rms_norm, device_put]
+            ignored_operator_groups: [rms_norm_kernels, tensor_storage]
+            ignored_operators: [hc_head]
       compressed_sparse_attention:
         include_fragment:
           fragment: deepseek_v4_decoder_v1
           stage_group: compressed_sparse_attention
         runtime_options:
           hc_post_moe:
-            ignored_operators: [hc_head, rms_norm, device_put]
+            ignored_operator_groups: [rms_norm_kernels, tensor_storage]
+            ignored_operators: [hc_head]
       heavily_compressed_attention:
         include_fragment:
           fragment: deepseek_v4_decoder_v1
           stage_group: heavily_compressed_attention
         runtime_options:
           hc_post_moe:
-            ignored_operators: [hc_head, rms_norm, device_put]
+            ignored_operator_groups: [rms_norm_kernels, tensor_storage]
+            ignored_operators: [hc_head]
 
   output:
     stages:
@@ -102,18 +97,10 @@ regions:
                   OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
           runtime:
             boundary_operators: [hc_head]
+            ignored_operator_groups: [slice_select, collective_communication, rms_norm_kernels, quantization, dtype_cast, shape_views, tensor_storage]
             ignored_operators:
               - hc_head
-              - rms_norm
-              - view
-              - slice
-              - alias
-              - copy_
-              - dynamic_quantize_symmetric
-              - device_put
-              - select
               - argmax
-              - all_gather
 
   mtp:
     activation: mtp_enabled

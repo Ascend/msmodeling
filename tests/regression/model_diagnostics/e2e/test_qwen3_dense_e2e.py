@@ -20,7 +20,6 @@ import pytest
 from tools.model_diagnostics import create_model_diagnostics_application
 from tools.model_diagnostics.domain import (
     ExecutionOrganizationRequest,
-    FindingStatus,
     SourceKind,
 )
 from tools.model_diagnostics.integrations import assert_diagnostics_passed
@@ -47,7 +46,6 @@ def test_qwen3_dense_capture_organize_and_compare(qwen3_dense_case) -> None:
     assert result.spec_id == "qwen3_dense_v1"
     assert result.left_source.source_kind is SourceKind.THEORY
     assert result.right_source.source_kind is SourceKind.RUNTIME
-    assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)
     expected_stages = {
         "embedding",
@@ -121,5 +119,4 @@ def test_qwen3_dense_mtp_decode_passes_diagnostics(qwen3_dense_mtp_case) -> None
     spec = application.spec_provider.get(artifact.run_context)
     request = profile.to_request(context=artifact.run_context, spec=spec)
     result = application.run_against_artifact(request, artifact)
-    assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)

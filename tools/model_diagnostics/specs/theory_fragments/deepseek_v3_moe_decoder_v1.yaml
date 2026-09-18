@@ -14,7 +14,8 @@ stages:
           OUTPUT[3]: {shape: "[T, Qlora]", dtype: ACT}
     runtime:
       boundary_operators: [rms_norm]
-      ignored_operators: [rms_norm, view, index, mla_q_absorb_projection, mla_q_absorb_projection_quant]
+      ignored_operator_groups: [rms_norm_kernels, shape_views]
+      ignored_operators: [index, mla_q_absorb_projection, mla_q_absorb_projection_quant]
 
   - id: dsa_indexer
     modules:
@@ -26,7 +27,8 @@ stages:
           OUTPUT[0]: {shape: "[B, Q, Dsa_k]", dtype: int64}
     runtime:
       boundary_operators: [dsa_indexer]
-      ignored_operators: [view, mla_q_absorb_projection, mla_q_absorb_projection_quant]
+      ignored_operator_groups: [shape_views]
+      ignored_operators: [mla_q_absorb_projection, mla_q_absorb_projection_quant]
 
   - id: mla_kv_projection
     activation: mla_prefill_kv_projection
@@ -38,7 +40,7 @@ stages:
           OUTPUT[0]: {shape: "[Tprefill, Lh, QKnope + Vh]", dtype: ACT}
     runtime:
       boundary_operators: [mla_kv_projection]
-      ignored_operators: [view]
+      ignored_operator_groups: [shape_views]
 
   - id: sparse_attention
     modules:
@@ -61,7 +63,8 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [concat_and_cache_mla]
-      ignored_operators: [concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_v_up_projection, mla_v_up_projection_quant, view, dynamic_quantize_symmetric, all_reduce, add_rms_norm2, all_gather, all_to_all, constant_pad_nd, slice, add, copy_, alias]
+      ignored_operator_groups: [collective_communication, rms_norm_kernels, quantization, dtype_cast, shape_views, tensor_storage]
+      ignored_operators: [concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_v_up_projection, mla_v_up_projection_quant, constant_pad_nd, slice, add]
 
   - id: moe_gate
     modules:
@@ -90,7 +93,8 @@ stages:
       # The fused moe_gating_top_k_softmax is the validated top-k contract; the
       # unfused expansion ops (topk/sum/scatter/bitwise_not/where/gather/...) only
       # appear on alternate compile/quant paths and remain mechanical.
-      ignored_operators: [add_rms_norm2, view, dynamic_quantize_symmetric, convert_element_type, sigmoid, add, topk, sum, scatter, unsqueeze, expand, clone, bitwise_not, where, gather, div, mul, constant_pad_nd, slice, all_gather]
+      ignored_operator_groups: [quantization, dtype_cast, collective_communication, rms_norm_kernels, shape_views, tensor_storage, broadcast_shapes]
+      ignored_operators: [sigmoid, add, topk, sum, scatter, bitwise_not, where, gather, div, mul, constant_pad_nd, slice]
 
   - id: moe_dispatch
     modules:
@@ -99,7 +103,8 @@ stages:
           OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
     runtime:
       boundary_operators: [init_routing_v2]
-      ignored_operators: [view, split_with_sizes, all_to_all, dynamic_quantize_symmetric, cat]
+      ignored_operator_groups: [collective_communication, quantization, dtype_cast, shape_views, tensor_split]
+      ignored_operators: [cat]
 
   - id: moe_experts
     modules:
@@ -111,7 +116,8 @@ stages:
           OUTPUT[0]: {shape: "[Te, H]", dtype: OUT}
     runtime:
       boundary_operators: [grouped_matmul_swiglu, grouped_matmul_quant_swiglu, grouped_matmul_quant_int4_swiglu, grouped_matmul_fp8_swiglu, grouped_matmul_mxfp4_swiglu]
-      ignored_operators: [split_with_sizes, slice, cat, all_to_all, dynamic_quantize_symmetric]
+      ignored_operator_groups: [collective_communication, quantization, dtype_cast, tensor_split]
+      ignored_operators: [slice, cat]
 
   - id: moe_combine
     modules:
@@ -126,7 +132,8 @@ stages:
           OUTPUT[0]: {shape: "[Tmoe, H]", dtype: MOE_COMBINE_DTYPE}
     runtime:
       boundary_operators: [unpermute_tokens]
-      ignored_operators: [unsqueeze, view, split_with_sizes, slice, cat, dynamic_quantize_symmetric, all_gather]
+      ignored_operator_groups: [collective_communication, quantization, dtype_cast, shape_views, tensor_split]
+      ignored_operators: [slice, cat]
 
   - id: shared_ffn
     modules:
@@ -146,4 +153,5 @@ stages:
       # observable operation is the gate/up linear, so a linear boundary is the
       # narrowest boundary that preserves the complete shared FFN contract.
       boundary_operators: [mm, static_quant_linear, static_quant_linear_int4, fp8_linear, mxfp4_linear]
-      ignored_operators: [view, split_with_sizes, add, copy_, convert_element_type, dynamic_quantize_symmetric, rms_norm, device_put, select, all_reduce, all_gather, slice]
+      ignored_operator_groups: [quantization, dtype_cast, slice_select, collective_communication, rms_norm_kernels, shape_views, tensor_storage, tensor_split]
+      ignored_operators: [add]

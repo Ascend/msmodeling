@@ -33,38 +33,22 @@ regions:
                   OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
           runtime:
             boundary_operators: [embedding]
+            ignored_operator_groups: [collective_communication, layout_permute, dtype_cast, shape_views, tensor_storage, broadcast_shapes, slice_select]
             ignored_operators:
-              - view
               - index
-              - alias
-              - slice
-              - unsqueeze
-              - expand
               - bitwise_not
               - where
               - masked_fill_
-              - all_gather
-              - all_reduce
-              # Vision position/grid preparation runs before the patch
-              # convolution. Keep those framework mechanics outside the
-              # embedding contract without a Runtime-only pseudo Stage.
               - linspace
-              - detach
-              - _to_copy
               - add
               - clamp
               - sub
               - rsub
               - mul
               - arange
-              - transpose
-              - clone
-              - _unsafe_view
-              - repeat
               - cat
               - stack
               - lift_fresh
-              - select
               - repeat_interleave
               - index_select
               - cumsum
@@ -98,11 +82,9 @@ regions:
                   OUTPUT[0]: {shape: "[VTok, VH, 1, 1, 1]", dtype: ACT}
           runtime:
             boundary_operators: [convolution]
+            ignored_operator_groups: [dtype_cast, shape_views]
             ignored_operators:
-              - _to_copy
-              - view
               - embedding
-              - unsqueeze
               - mul
               - sum
               - add
@@ -146,28 +128,10 @@ regions:
               - rms_norm
               - rms_norm_dynamic_quant_symmetric
               - rms_norm_quant
+            ignored_operator_groups: [norm_math_with_add, slice_select, rms_norm_kernels, quantization, dtype_cast, rotary_embedding, layout_permute, shape_views, tensor_storage, tensor_split]
             ignored_operators:
-              - rms_norm
-              - rms_norm_dynamic_quant_symmetric
-              - rms_norm_quant
-              - view
               - index
               - reshape_and_cache
-              - split_with_sizes
-              - alias
-              - copy_
-              - slice
-              - select
-              - apply_rope
-              - permute
-              - dynamic_quantize_symmetric
-              - mean
-              - pow
-              - rsqrt
-              - add
-              - mul
-              - _to_copy
-              - unsqueeze
 
   output:
     stages:
@@ -188,15 +152,8 @@ regions:
                   OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
           runtime:
             boundary_operators: [rms_norm]
+            ignored_operator_groups: [slice_select, rms_norm_kernels, quantization, dtype_cast, shape_views, tensor_storage]
             ignored_operators:
-              - rms_norm
-              - view
-              - slice
-              - alias
-              - copy_
-              - dynamic_quantize_symmetric
-              - device_put
-              - select
               - argmax
 
   # The simulation command enables TensorCast MTP. The predictor reuses the

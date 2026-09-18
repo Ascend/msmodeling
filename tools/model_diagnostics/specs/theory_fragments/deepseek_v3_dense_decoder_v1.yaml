@@ -13,7 +13,8 @@ stages:
           OUTPUT[3]: {shape: "[T, Qlora]", dtype: ACT}
     runtime:
       boundary_operators: [rms_norm]
-      ignored_operators: [rms_norm, view, index, mla_q_absorb_projection, mla_q_absorb_projection_quant]
+      ignored_operator_groups: [rms_norm_kernels, shape_views]
+      ignored_operators: [index, mla_q_absorb_projection, mla_q_absorb_projection_quant]
 
   - id: dsa_indexer
     modules:
@@ -25,7 +26,8 @@ stages:
           OUTPUT[0]: {shape: "[B, Q, Dsa_k]", dtype: int64}
     runtime:
       boundary_operators: [dsa_indexer]
-      ignored_operators: [view, mla_q_absorb_projection, mla_q_absorb_projection_quant]
+      ignored_operator_groups: [shape_views]
+      ignored_operators: [mla_q_absorb_projection, mla_q_absorb_projection_quant]
 
   - id: mla_kv_projection
     activation: mla_prefill_kv_projection
@@ -37,7 +39,7 @@ stages:
           OUTPUT[0]: {shape: "[Tprefill, Lh, QKnope + Vh]", dtype: ACT}
     runtime:
       boundary_operators: [mla_kv_projection]
-      ignored_operators: [view]
+      ignored_operator_groups: [shape_views]
 
   - id: sparse_attention
     modules:
@@ -60,7 +62,8 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [concat_and_cache_mla]
-      ignored_operators: [concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_v_up_projection, mla_v_up_projection_quant, view, dynamic_quantize_symmetric, all_reduce, add, copy_, alias]
+      ignored_operator_groups: [collective_communication, quantization, dtype_cast, shape_views, tensor_storage]
+      ignored_operators: [concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_v_up_projection, mla_v_up_projection_quant, add]
 
   - id: dense_ffn
     modules:
@@ -77,4 +80,5 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2, add_rms_norm, rms_norm]
-      ignored_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2, add_rms_norm, rms_norm, view, split_with_sizes, add, copy_, dynamic_quantize_symmetric, all_reduce, convert_element_type, mla_kv_projection, mla_kv_projection_quant, mla_merge_phase_outputs]
+      ignored_operator_groups: [quantization, dtype_cast, collective_communication, rms_norm_kernels, shape_views, tensor_storage, tensor_split]
+      ignored_operators: [add, mla_kv_projection, mla_kv_projection_quant, mla_merge_phase_outputs]

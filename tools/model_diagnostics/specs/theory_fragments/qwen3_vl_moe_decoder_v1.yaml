@@ -19,26 +19,12 @@ stages:
     runtime:
       # Match the complete pre-FFN RMSNorm sequence, not one of its casts.
       boundary_operators: [rms_norm]
+      ignored_operator_groups: [norm_math_with_add, slice_select, quantization, dtype_cast, layout_permute, shape_views, tensor_storage]
       ignored_operators:
-        - _to_copy
-        - pow
-        - mean
-        - add
-        - rsqrt
-        - mul
-        - view
-        - t
-        - slice
-        - select
-        - alias
-        - copy_
         - _softmax
         - sum
         - div_
-        - unsqueeze
-        - squeeze
         - all_gather
-        - dynamic_quantize_symmetric
   - id: moe_dispatch
     modules:
       - name: init_routing_v2
@@ -46,21 +32,9 @@ stages:
           OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
     runtime:
       boundary_operators: [init_routing_v2]
+      ignored_operator_groups: [slice_select, quantization, dtype_cast, layout_permute, shape_views, tensor_storage, cat_split]
       ignored_operators:
-        - view
-        - reshape
-        - alias
-        - copy_
-        - cat
-        - split
-        - split_with_sizes
-        - slice
-        - select
         - pad
-        - permute
-        - transpose
-        - dynamic_quantize_symmetric
-        - quantize
         - all_to_all
   - id: moe_experts
     # Empty per-expert slices return before gate/up/down projections, so only
@@ -81,23 +55,11 @@ stages:
           OUTPUT[0]: {shape: "[Tmoe, H]", dtype: OUT}
     runtime:
       boundary_operators: [static_quant_linear]
+      ignored_operator_groups: [layout_permute, slice_select, quantization, dtype_cast, shape_views, tensor_storage, cat_split]
       ignored_operators:
-        - view
-        - reshape
-        - alias
-        - copy_
-        - cat
-        - split
-        - split_with_sizes
-        - slice
-        - select
         - pad
-        - t
-        - transpose
         - silu
         - mul
-        - dynamic_quantize_symmetric
-        - quantize
         - all_to_all
   - id: moe_combine
     modules:
@@ -112,22 +74,11 @@ stages:
           OUTPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
     runtime:
       boundary_operators: [unpermute_tokens]
+      ignored_operator_groups: [slice_select, rms_norm_kernels, dtype_cast, shape_views, tensor_storage]
       ignored_operators:
-        - view
-        - reshape
-        - alias
-        - copy_
-        - unsqueeze
-        - squeeze
-        - slice
-        - select
-        - to
-        - _to_copy
+        - add
         - all_to_all
         - all_gather
-        - add
-        - rms_norm
-        - device_put
     comparisons:
       theory-runtime:
         # Final RMSNorm/request bookkeeping can share this Runtime window when

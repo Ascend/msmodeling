@@ -19,6 +19,55 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Reject explicit duplicate keys while preserving YAML merge precedence."""
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._checked_mappings: set[MappingNode] = set()
+
+    def flatten_mapping(self, node: MappingNode) -> None:
+        # Aliases can revisit a node after its inherited keys have been inserted.
+        if node in self._checked_mappings:
+            return
+        key_marks: dict[object, object] = {}
+        for key_node, _ in node.value:
+            if key_node.tag in {"tag:yaml.org,2002:merge", "tag:yaml.org,2002:value"}:
+                key = key_node.value
+            else:
+                key = self.construct_object(key_node, deep=True)
+            try:
+                duplicate = key in key_marks
+            except TypeError as error:
+                raise ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found an unhashable mapping key",
+                    key_node.start_mark,
+                ) from error
+            if duplicate:
+                raise ConstructorError(
+                    "while constructing a mapping",
+                    key_marks[key],
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            key_marks[key] = key_node.start_mark
+        self._checked_mappings.add(node)
+        # SafeLoader recursively calls this override for merged mappings too.
+        super().flatten_mapping(node)
+
+
+def load_yaml_strict(text: str) -> object:
+    """Safely parse YAML while rejecting duplicate keys at every depth."""
+
+    return yaml.load(text, Loader=_UniqueKeySafeLoader)
+
 
 @dataclass(frozen=True)
 class SchemaGuard:

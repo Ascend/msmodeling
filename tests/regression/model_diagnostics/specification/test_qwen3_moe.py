@@ -140,17 +140,17 @@ def test_qwen3_moe_yaml_declares_runtime_stage_boundaries() -> None:
     )
     assert moe_stages[1].source_options[SourceKind.RUNTIME].boundary_operators == ("attention",)
     assert moe_stages[1].source_options[SourceKind.RUNTIME].ignored_operators == (
+        "slice",
+        "select",
+        "dynamic_quantize_symmetric",
+        "quantize",
         "view",
         "index",
         "reshape_and_cache",
         "split_with_sizes",
         "alias",
         "copy_",
-        "slice",
-        "select",
         "apply_rope",
-        "dynamic_quantize_symmetric",
-        "quantize",
         "all_reduce",
     )
     assert moe_stages[3].source_options[SourceKind.RUNTIME].boundary_operators == ("init_routing_v2",)

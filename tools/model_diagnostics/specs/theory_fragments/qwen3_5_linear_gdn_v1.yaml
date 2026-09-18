@@ -23,30 +23,11 @@ stages:
           OUTPUT[1]: {shape: "[T, Lv_lin, Vlin]", dtype: ACT}
     runtime:
       boundary_operators: [rms_norm, rms_norm_dynamic_quant_symmetric, rms_norm_quant]
+      ignored_operator_groups: [norm_math_with_add, sigmoid_scaffold, quantization, dtype_cast, slice_select, cat_split, layout_permute, shape_views, tensor_storage, broadcast_shapes]
       ignored_operators:
-        - view
-        - permute
-        - split_with_sizes
-        - mul
-        - add
         - linear_attn_causal_conv
         - linear_attn_causal_conv_update
-        - convert_element_type
-        - mean
-        - pow
-        - rsqrt
-        - expand
-        - clone
-        - neg
-        - sigmoid
-        - select
-        - cat
-        - slice
         - index
-        - split
-        - unsqueeze
-        - copy_
-        - dynamic_quantize_symmetric
   - id: linear_delta_rule
     modules:
       - name: linear_attn_chunk_gated_delta_rule
@@ -55,20 +36,11 @@ stages:
           OUTPUT[0]: {shape: "[T, Lv_lin, Vlin]", dtype: ACT}
     runtime:
       boundary_operators: [linear_attn_chunk_gated_delta_rule, linear_attn_recurrent_gated_delta_rule]
+      ignored_operator_groups: [slice_select, cat_split, quantization, dtype_cast, layout_permute, shape_views, tensor_storage]
       ignored_operators:
-        - view
-        - permute
-        - split_with_sizes
         - mul
         - add
-        - clone
-        - convert_element_type
-        - cat
-        - slice
-        - select
         - index
-        - split
-        - copy_
   - id: linear_output
     modules:
       - name: linear_attn_gated_rmsnorm
@@ -81,23 +53,7 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [linear_attn_gated_rmsnorm]
+      ignored_operator_groups: [norm_math_with_add, sigmoid_scaffold, quantization, dtype_cast, slice_select, collective_communication, layout_permute, shape_views, tensor_storage, broadcast_shapes]
       ignored_operators:
-        - view
-        - permute
-        - mul
-        - add
-        - copy_
-        - convert_element_type
         - reshape_and_cache
-        - all_reduce
-        - mean
-        - pow
-        - rsqrt
-        - clone
         - cat
-        - slice
-        - select
-        - expand
-        - neg
-        - sigmoid
-        - dynamic_quantize_symmetric

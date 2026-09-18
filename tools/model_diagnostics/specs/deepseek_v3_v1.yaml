@@ -29,7 +29,8 @@ regions:
                   OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
           runtime:
             boundary_operators: [embedding]
-            ignored_operators: [view, index, alias, slice, all_gather, all_reduce]
+            ignored_operator_groups: [collective_communication, shape_views, tensor_storage]
+            ignored_operators: [index, slice]
 
   language:
     layer_layout_rule:
@@ -60,7 +61,8 @@ regions:
                   OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
           runtime:
             boundary_operators: [rms_norm]
-            ignored_operators: [rms_norm, view, slice, copy_, convert_element_type, all_gather, all_reduce, alias]
+            ignored_operator_groups: [collective_communication, rms_norm_kernels, quantization, dtype_cast, shape_views, tensor_storage]
+            ignored_operators: [slice]
 
   mtp:
     activation: mtp_enabled

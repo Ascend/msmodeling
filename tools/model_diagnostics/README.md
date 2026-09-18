@@ -390,6 +390,22 @@ proposal lm-head 是否量化必须以模型 Runtime 实际行为及 Theory 契�
 - 完整 Theory↔Runtime、所有型号、量化和 MTP 矩阵保留在 regression。
 - 不为本模块增加自定义层级 marker；遵循仓库 `tests/SKILL.md` 和 `tests/README.md`。
 
+### 4.5 测试入口边界
+
+- 只有 Run Profile Loader 和 CLI 专项用例从 Profile YAML 文件进入；
+- Spec/fragment Loader 测试读取正式 Spec YAML，因为 YAML 本身是产品契约；
+- domain、organization、comparison、runner 等组件测试直接构造最小类型化对象；
+- 模型 E2E 直接构造 `DiagnosticsRunProfile`，但必须执行真实 capture → compare；
+- `profiles/*.yaml` 是用户样例，不能作为回归测试夹具。
+
+失败断言简洁展示模型、阶段、问题位置和具体原因；存在预期/实际差异时并列显示。
+UT/E2E 断言仅输出文本，不渲染报告、不写文件。需要完整 HTML 时，通过 CLI
+`--comparison-report` 显式生成。单个诊断失败使用普通 AssertionError，遵循 pytest
+自身的继续执行策略（调用方显式使用 `-x`/`--maxfail` 时除外）。
+
+Ignore 组合规则：组间及组与本地列表的重叠按声明顺序去重，先组后本地；
+未知组名、重复引用同一组及单个列表内部的重复算子仍报错。
+
 ## 5. Model Spec YAML
 
 一个模型类别对应 `specs/<spec_id>.yaml`。文件名 stem 必须与 `spec_id` 一致，composition
@@ -535,6 +551,10 @@ Runtime 约束：
 - `boundary_operators` 必填，可以有多个候选规范名；
 - `ignored_operators` 可省略，空列表也应省略；
 - ignored 只用于 stage 组织，Artifact 始终保留原始完整调用；
+- 重复的机械算子优先通过 `ignored_operator_groups` 引用
+  `specs/runtime/ignore_groups.yaml` 中的语义组；每个 stage 必须显式选择组，并可用
+  `ignored_operators` 追加该 stage 特有项。组不是全局默认，不能按列表大小或为了 PASS
+  扩大忽略范围；
 - `boundary_operators` 太普通时容易误切分，应先捕获 Runtime HTML，优先选择稳定的语义
   wrapper。只有 Runtime 没有更具体的可观测边界时才使用 `mm` 等通用线性算子；DeepSeek V3
   shared expert 的首个 gate/up linear 就属于这一例外，并同时列出各量化形态；

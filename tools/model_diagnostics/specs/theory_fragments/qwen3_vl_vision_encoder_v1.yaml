@@ -12,22 +12,16 @@ stages:
           OUTPUT[0]: {shape: "[VTok, 3 * VH]", dtype: ACT}
     runtime:
       boundary_operators: [native_layer_norm]
+      ignored_operator_groups: [layout_permute, dtype_cast, shape_views, tensor_split]
       ignored_operators:
         - native_layer_norm
-        - t
-        - view
-        - permute
         - unbind
-        - _to_copy
-        - unsqueeze
         - mul
         - slice
         - neg
         - cat
         - add
-        - transpose
         - sub
-        - split_with_sizes
 
   - id: vision_attention
     modules:
@@ -39,10 +33,9 @@ stages:
           OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
     runtime:
       boundary_operators: [attention]
+      ignored_operator_groups: [layout_permute, shape_views]
       ignored_operators:
         - cat
-        - view
-        - t
         - add
 
   - id: vision_mlp
@@ -58,11 +51,10 @@ stages:
           OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
     runtime:
       boundary_operators: [native_layer_norm]
+      ignored_operator_groups: [layout_permute, shape_views]
       ignored_operators:
         - native_layer_norm
-        - t
         - add
-        - view
 
   - id: vision_deepstack_merger
     modules:
@@ -77,10 +69,9 @@ stages:
           OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
     runtime:
       boundary_operators: [native_layer_norm]
+      ignored_operator_groups: [layout_permute, shape_views]
       ignored_operators:
         - native_layer_norm
-        - view
-        - t
 
   - id: vision_final_merger
     modules:
@@ -95,18 +86,12 @@ stages:
           OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
     runtime:
       boundary_operators: [native_layer_norm]
+      ignored_operator_groups: [slice_select, layout_permute, shape_views, broadcast_shapes, tensor_split]
       ignored_operators:
         - native_layer_norm
-        - view
-        - t
         - prod
         - div
-        - split_with_sizes
         - eq
-        - unsqueeze
-        - expand
-        - slice
-        - select
         - index
 
 stage_groups:

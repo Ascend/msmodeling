@@ -44,6 +44,7 @@ from tools.model_diagnostics.specification.errors import (
     SpecificationLoadError,
     UnsupportedModelSpec,
 )
+from tools.model_diagnostics.specification.ignore_groups import load_builtin_ignore_groups
 from tools.model_diagnostics.specification.loader import (
     LoadedSpecDocument,
     YamlModelDiagnosticsSpecLoader,
@@ -249,7 +250,7 @@ def test_included_runtime_override_replaces_boundary_and_appends_ignored() -> No
                         "include_fragment": "qwen3_dense_decoder_v1",
                         "runtime_options": {
                             "attention": {
-                                "ignored_operators": ["mean", "clone"],
+                                "ignored_operators": ["custom_attention_ignore", "custom_attention_tail"],
                             },
                             "dense_ffn": {
                                 "boundary_operators": ["rms_norm"],
@@ -275,7 +276,7 @@ def test_included_runtime_override_replaces_boundary_and_appends_ignored() -> No
 
     assert attention_runtime.boundary_operators == fragment.stage("attention").runtime_options.boundary_operators
     assert "apply_rope" in attention_runtime.ignored_operators
-    assert attention_runtime.ignored_operators[-2:] == ("mean", "clone")
+    assert attention_runtime.ignored_operators[-2:] == ("custom_attention_ignore", "custom_attention_tail")
     assert ffn_runtime.boundary_operators == ("rms_norm",)
     assert "add_rms_norm2" in ffn_runtime.ignored_operators
     assert ffn_runtime.ignored_operators[-1] == "custom_ignore_marker"
@@ -995,3 +996,22 @@ def test_parse_theory_operator_rejects_duplicate_tensor_slots() -> None:
             },
             0,
         )
+
+
+@pytest.mark.parametrize("source", ["spec", "fragment", "ignore_groups"])
+def test_yaml_load_errors_preserve_duplicate_key_location(source: str, monkeypatch) -> None:
+    loader = _loader()
+    monkeypatch.setattr(Path, "read_text", lambda *args, **kwargs: "size: 1\nsize: 2\n")
+
+    with pytest.raises(SpecificationLoadError, match="duplicate key 'size'") as caught:
+        if source == "spec":
+            loader.load("qwen3_dense_v1")
+        elif source == "fragment":
+            load_builtin_theory_fragment_registry()
+        else:
+            # Exercise parsing independently of the process-wide builtin cache.
+            load_builtin_ignore_groups.__wrapped__()
+
+    assert "line 2, column 1" in str(caught.value)
+    assert ".yaml" in str(caught.value)
+    assert isinstance(caught.value.__cause__, yaml.constructor.ConstructorError)

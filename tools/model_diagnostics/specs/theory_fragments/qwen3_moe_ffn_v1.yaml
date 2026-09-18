@@ -39,46 +39,15 @@ stages:
         - rms_norm
         - rms_norm_dynamic_quant_symmetric
         - rms_norm_quant
+      ignored_operator_groups: [norm_math_with_add, sigmoid_scaffold, quantization, dtype_cast, slice_select, cat_split, rms_norm_kernels, collective_communication, layout_permute, shape_views, tensor_storage, broadcast_shapes]
       ignored_operators:
-        - add_rms_norm2
-        - add_rms_norm_dynamic_quant2_symmetric
-        - add_rms_norm_quant2
-        - rms_norm
-        - rms_norm_dynamic_quant_symmetric
-        - rms_norm_quant
-        - add
-        - view
-        - reshape
-        - alias
-        - copy_
-        - slice
-        - select
         - constant_pad_nd
-        - device_put
-        - to
-        - _to_copy
-        - convert_element_type
         - amax
         - sub
         - exp
         - div
         - sum
-        - mean
-        - pow
-        - rsqrt
-        - mul
-        - permute
-        - cat
-        - split
-        - unsqueeze
-        - expand
-        - clone
-        - neg
-        - sigmoid
         - index
-        - dynamic_quantize_symmetric
-        # MoE-DP>1 gathers tokens onto the MoE group before the gate mm.
-        - all_gather
   - id: moe_dispatch
     modules:
       # Flat [Tmoe,H] (or leading-product-equivalent [B,Q,H] when MDP=1);
@@ -90,23 +59,9 @@ stages:
           OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
     runtime:
       boundary_operators: [init_routing_v2]
+      ignored_operator_groups: [slice_select, cat_split, collective_communication, quantization, dtype_cast, layout_permute, shape_views, tensor_storage]
       ignored_operators:
-        - view
-        - reshape
-        - alias
-        - copy_
-        - cat
-        - split
-        - split_with_sizes
-        - slice
-        - select
         - pad
-        - permute
-        - transpose
-        - dynamic_quantize_symmetric
-        - quantize
-        # EP>1 dispatch all_to_all sits between init_routing_v2 and experts.
-        - all_to_all
   - id: moe_experts
     modules:
       # Fe = Fmoe (MTPt fixed at 1); Te is EP-local routed tokens (EP=1: Te=Tmoe*Ktop)
@@ -125,22 +80,9 @@ stages:
         - grouped_matmul_quant_int4_swiglu
         - grouped_matmul_fp8_swiglu
         - grouped_matmul_mxfp4_swiglu
+      ignored_operator_groups: [slice_select, cat_split, collective_communication, quantization, dtype_cast, shape_views, tensor_storage]
       ignored_operators:
-        - view
-        - reshape
-        - alias
-        - copy_
-        - cat
-        - split
-        - split_with_sizes
-        - slice
-        - select
         - pad
-        - dynamic_quantize_symmetric
-        - quantize
-        # EP>1 combine all_to_all sits before unpermute, so it falls in this
-        # stage window (experts start .. combine boundary), not moe_combine.
-        - all_to_all
   - id: moe_combine
     modules:
       # EP>1: all_to_all combine precedes unpermute; EP=1 starts at unpermute_tokens.
@@ -160,27 +102,9 @@ stages:
           OUTPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
     runtime:
       boundary_operators: [unpermute_tokens]
+      ignored_operator_groups: [slice_select, collective_communication, rms_norm_kernels, dtype_cast, shape_views, tensor_storage]
       ignored_operators:
-        - view
-        - reshape
-        - alias
-        - copy_
-        - unsqueeze
-        - squeeze
-        - slice
-        - select
-        - to
-        - _to_copy
-        # EP>1 combine all_to_all precedes unpermute_tokens.
-        - all_to_all
-        # EP>1 with DP!=EP restores the original token domain after combine.
-        - all_gather
-        # Residual add after MoE block (post-combine); not part of combine contract.
         - add
-        # MTP: final rms_norm + device_put sit before target_selection when
-        # non_mtp lm_head is inactive; mirror dense_ffn mechanical ignores.
-        - rms_norm
-        - device_put
   - id: shared_ffn
     activation: qwen3_5_moe_ffn
     modules:
@@ -199,29 +123,6 @@ stages:
           OUTPUT[0]: {shape: "[Tmoe, H]", dtype: OUT}
     runtime:
       boundary_operators: [mm, static_quant_linear, static_quant_linear_int4, fp8_linear, mxfp4_linear]
+      ignored_operator_groups: [norm_math_with_add, sigmoid_scaffold, quantization, dtype_cast, slice_select, cat_split, collective_communication, rms_norm_kernels, layout_permute, shape_views, tensor_storage, broadcast_shapes]
       ignored_operators:
-        - view
-        - split_with_sizes
-        - add
-        - copy_
-        - convert_element_type
-        - dynamic_quantize_symmetric
-        - rms_norm
-        - device_put
-        - select
-        - all_reduce
-        - all_gather
-        - slice
-        - mean
-        - pow
-        - rsqrt
-        - mul
-        - sigmoid
-        - unsqueeze
-        - permute
-        - cat
-        - split
-        - expand
-        - clone
-        - neg
         - index

@@ -18,12 +18,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 from tools.model_diagnostics.domain.models import (
+    INPUT,
     ExecutionPhase,
     ModelExecutionRecord,
     ModelRunContext,
     OperatorCallRecord,
     ParallelContext,
     SourceKind,
+    TensorInfo,
 )
 from tools.model_diagnostics.builtin import create_stage_comparison_registry
 from tools.model_diagnostics.specification import create_builtin_source_options_parsers
@@ -161,6 +163,42 @@ def test_theory_source_and_organizer_selected_global_slice() -> None:
     assert select_output.shape == (2, 1, 4096)
 
 
+def test_theory_organizer_preserves_source_tensor_evidence() -> None:
+    context = _context(layers=1)
+    loader = YamlModelDiagnosticsSpecLoader(
+        comparison_registry=create_stage_comparison_registry(),
+        activation_registry=create_builtin_operator_activation_registry(),
+        source_options_parsers=create_builtin_source_options_parsers(),
+    )
+    spec = loader.materialize(loader.load("qwen3_dense_v1"), context)
+    execution = TheoryOperatorRecordSource().load_execution(
+        context,
+        spec,
+        {"language": (0,)},
+        ("input",),
+    )
+    first = replace(
+        execution.operator_calls[0],
+        tensors=(TensorInfo(INPUT[0], (999, 4), "float16"),),
+        source_reference="independent-source",
+    )
+    supplied = replace(
+        execution,
+        operator_calls=(first, *execution.operator_calls[1:]),
+    )
+
+    organized = TheoryExecutionOrganizationStrategy().execute(
+        ExecutionOrganizationRequest(
+            execution=supplied,
+            spec=spec,
+            selected_layers={"language": (0,)},
+            selected_stage_regions=("input",),
+        )
+    )
+
+    assert organized[0].stages[0].operator_calls[0] is first
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_weight", "expected_output"),
     (
@@ -243,7 +281,7 @@ def test_theory_organizer_rejects_execution_stream_that_diverges_from_spec() -> 
         ),
     )
 
-    with pytest.raises(SourceLoadError, match="diverges from Spec at call\\[0\\]"):
+    with pytest.raises(SourceLoadError, match="diverges in stage 'embedding' at call\\[0\\]"):
         TheoryExecutionOrganizationStrategy().execute(
             ExecutionOrganizationRequest(
                 execution=tampered,
@@ -276,7 +314,7 @@ def test_theory_organizer_rejects_execution_stream_with_wrong_call_count() -> No
         operator_calls=execution.operator_calls[:-1],
     )
 
-    with pytest.raises(SourceLoadError, match="call count diverges"):
+    with pytest.raises(SourceLoadError, match="ended while organizing stage 'dense_ffn'"):
         TheoryExecutionOrganizationStrategy().execute(
             ExecutionOrganizationRequest(
                 execution=truncated,

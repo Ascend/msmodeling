@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 from tools.model_diagnostics.domain.models import ModelRunContext, OperatorCallRecord
 
+ARTIFACT_SCHEMA_VERSION = "1"
+
 
 @dataclass(frozen=True)
 class ProducerInfo:
@@ -39,8 +41,11 @@ class SimulationExecutionArtifact:
     operator_calls: tuple[OperatorCallRecord, ...]
 
     def __post_init__(self) -> None:
-        if not self.schema_version.strip():
-            raise ValueError("schema_version must not be empty")
+        if self.schema_version != ARTIFACT_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported artifact schema_version {self.schema_version!r}; "
+                f"expected {ARTIFACT_SCHEMA_VERSION!r}"
+            )
         object.__setattr__(self, "operator_calls", tuple(self.operator_calls))
         indices = tuple(call.call_index for call in self.operator_calls)
         if indices != tuple(range(len(indices))):

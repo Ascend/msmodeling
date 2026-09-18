@@ -84,6 +84,18 @@ def test_one_to_one_positional_reports_pass_for_equal_stage() -> None:
     assert findings[0].actual == findings[0].expected
 
 
+def test_one_to_one_reports_incomplete_for_empty_theory_tensor_contract() -> None:
+    options = OneToOneOptions(TensorMapping(TensorMappingMode.POSITIONAL))
+    theory = OperatorCallRecord(10, "mm", None, ())
+    request = _request([theory], [_call(20, "mm")], options, "one_to_one")
+
+    findings = OneToOneEqualStrategy().execute(request)
+
+    assert len(findings) == 1
+    assert findings[0].status is FindingStatus.INCOMPLETE
+    assert findings[0].message_code == "tensor.contract_empty"
+
+
 @pytest.mark.parametrize(
     ("flat", "expanded"),
     [
@@ -559,6 +571,21 @@ def test_concat_default_uses_all_left_outputs_and_unique_right_output() -> None:
     assert findings[0].status is FindingStatus.PASS
     assert findings[0].expected == "(2, 6)/float16"
     assert findings[0].actual == "(2, 6)/float16"
+
+
+def test_concat_default_honors_configured_axis() -> None:
+    request = _request(
+        [_call(10, "q", (2, 3)), _call(11, "k", (4, 3))],
+        [_call(20, "qk", (6, 3))],
+        ConcatOptions(TensorMapping(TensorMappingMode.COMPOSITE), axis=0),
+        "concat_shape",
+    )
+
+    findings = ConcatShapeStrategy().execute(request)
+
+    assert len(findings) == 1
+    assert findings[0].status is FindingStatus.PASS
+    assert findings[0].expected == "(6, 3)/float16"
 
 
 def test_concat_default_rejects_non_unique_runtime_call() -> None:

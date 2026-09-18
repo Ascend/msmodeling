@@ -39,7 +39,7 @@ from tools.model_diagnostics.comparison import (
     ComparisonOptionParseError,
     StrategyResolutionError,
 )
-from tools.model_diagnostics.schema_utils import SchemaGuard
+from tools.model_diagnostics.schema_utils import SchemaGuard, load_yaml_strict
 from tools.model_diagnostics.specification.errors import SpecificationLoadError
 from tools.model_diagnostics.specification.mtp_window import (
     effective_num_mtp_layers,
@@ -436,13 +436,13 @@ class YamlModelDiagnosticsSpecLoader:
     def load(self, spec_id: str) -> LoadedSpecDocument:
         path = self._resolve_spec_path(spec_id)
         try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            raw = load_yaml_strict(path.read_text(encoding="utf-8"))
         except OSError as exc:
             raise SpecificationLoadError(f"cannot read spec file for {spec_id!r}: {path}") from exc
         except UnicodeDecodeError as exc:
             raise SpecificationLoadError(f"cannot decode spec file for {spec_id!r}: {path}") from exc
         except yaml.YAMLError as exc:
-            raise SpecificationLoadError(f"invalid YAML for {spec_id!r}") from exc
+            raise SpecificationLoadError(f"invalid YAML for {spec_id!r} ({path}): {exc}") from exc
         return self.load_mapping(raw)
 
     def _resolve_spec_path(self, spec_id: str) -> Path:

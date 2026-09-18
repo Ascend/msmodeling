@@ -169,7 +169,6 @@ def test_deepseek_v3_mtp_capture_organize_and_compare(model_name: str) -> None:
     request = profile.to_request(context=artifact.run_context, spec=spec)
     result = application.run_against_artifact(request, artifact)
 
-    assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)
     mtp_stages = {finding.stage_id for finding in result.findings if finding.region_id == "mtp"}
     expected_mtp_stages = {

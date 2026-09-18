@@ -13,7 +13,11 @@
 # limitations under the License.
 """Immutable values shared by diagnostics sources and strategies."""
 
-from tools.model_diagnostics.domain.artifact import ProducerInfo, SimulationExecutionArtifact
+from tools.model_diagnostics.domain.artifact import (
+    ARTIFACT_SCHEMA_VERSION,
+    ProducerInfo,
+    SimulationExecutionArtifact,
+)
 from tools.model_diagnostics.domain.models import (
     INPUT,
     OUTPUT,
@@ -115,6 +119,7 @@ __all__ = [
     "TheoryStageOptions",
     "TheoryTensorSpec",
     "ProducerInfo",
+    "ARTIFACT_SCHEMA_VERSION",
     "SimulationExecutionArtifact",
     "DiagnosticValue",
     "DiagnosticsResult",

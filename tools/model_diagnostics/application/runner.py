@@ -75,18 +75,20 @@ class ModelDiagnosticsRunner:
         request: DiagnosticsRequest,
         left_source: OperatorRecordSource,
         right_source: OperatorRecordSource,
+        *,
+        spec: ModelDiagnosticsSpec | None = None,
     ) -> DiagnosticsResult:
         if left_source.source_kind is right_source.source_kind:
             raise InvalidDiagnosticsRequest("diagnostics requires two distinct source kinds")
         left_description = _describe_source(left_source)
         right_description = _describe_source(right_source)
-        spec = self._spec_provider.get(request.context)
-        _validate_request_against_spec(request, spec.regions)
-        left_regions = self._load_and_organize(request, spec, left_source)
-        right_regions = self._load_and_organize(request, spec, right_source)
+        resolved_spec = spec or self._spec_provider.get(request.context)
+        _validate_request_against_spec(request, resolved_spec.regions)
+        left_regions = self._load_and_organize(request, resolved_spec, left_source)
+        right_regions = self._load_and_organize(request, resolved_spec, right_source)
         findings = self._compare_selected(
             request,
-            spec,
+            resolved_spec,
             left_source.source_kind,
             right_source.source_kind,
             left_regions,
@@ -95,8 +97,8 @@ class ModelDiagnosticsRunner:
         context = request.context
         return DiagnosticsResult(
             schema_version=_RESULT_SCHEMA_VERSION,
-            spec_id=spec.spec_id,
-            spec_version=spec.spec_version,
+            spec_id=resolved_spec.spec_id,
+            spec_version=resolved_spec.spec_version,
             context=ModelRunContextSummary(
                 model_name=context.model_name,
                 entrypoint=context.entrypoint,
@@ -112,7 +114,7 @@ class ModelDiagnosticsRunner:
             selected_stage_regions=request.selected_stage_regions,
             findings=findings,
             summary=summarize_findings(findings),
-            limitations=_known_limitations(context, spec),
+            limitations=_known_limitations(context, resolved_spec),
         )
 
     def _load_and_organize(self, request, spec, source) -> tuple[RegionExecutionRecord, ...]:
@@ -169,7 +171,7 @@ class ModelDiagnosticsRunner:
                     )
             for layer_index in request.selected_layers.get(region_id, ()):
                 if layer_index < 0 or layer_index >= len(region_spec.layer_layout):
-                    raise AssertionError("request layer validation drifted after Source loading")
+                    raise SourceLoadError("request layer validation drifted after Source loading")
                 layer_kind = region_spec.layer_layout[layer_index]
                 for stage_spec in region_spec.layer_specs[layer_kind].stages:
                     findings.extend(

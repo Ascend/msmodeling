@@ -20,7 +20,10 @@ from dataclasses import replace
 from tools.model_diagnostics import create_model_diagnostics_application
 from tools.model_diagnostics.domain import ExecutionPhase, ModelRunContext, ParallelContext, SourceKind
 from tools.model_diagnostics.organization.theory import build_theory_regions, flatten_theory_calls
-from tools.model_diagnostics.sources.runtime_capture import _is_moe_config, _qwen3_vl_moe_layer_kinds
+from tools.model_diagnostics.sources.runtime_capture import _is_moe_config
+from tools.model_diagnostics.specification.layer_layout import (
+    qwen3_vl_moe_layer_kinds,
+)
 
 
 class _TextMoeConfig:
@@ -122,7 +125,7 @@ def test_qwen3_vl_moe_language_layout_follows_hf_dense_moe_rule() -> None:
         "decoder_sparse_step": 2,
         "mlp_only_layers": [3],
     }
-    model_config["language_layer_kinds"] = _qwen3_vl_moe_layer_kinds(
+    model_config["language_layer_kinds"] = qwen3_vl_moe_layer_kinds(
         model_config,
         start=0,
         count=6,

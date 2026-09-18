@@ -23,17 +23,13 @@ regions:
                   OUTPUT[0]: {shape: "[B, Q, EO]", dtype: ACT}
           runtime:
             boundary_operators: [embedding]
+            ignored_operator_groups: [collective_communication, shape_views, tensor_storage]
             ignored_operators:
-              - view
               - index
-              - alias
               - slice
-              - unsqueeze
               - bitwise_not
               - where
               - masked_fill_
-              - all_gather
-              - all_reduce
 
   language:
     layer_layout_rule:
@@ -65,15 +61,8 @@ regions:
                   OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
           runtime:
             boundary_operators: [rms_norm]
+            ignored_operator_groups: [slice_select, rms_norm_kernels, quantization, dtype_cast, shape_views, tensor_storage]
             ignored_operators:
-              - rms_norm
-              - view
-              - slice
-              - alias
-              - copy_
-              - dynamic_quantize_symmetric
-              - device_put
-              - select
               - argmax
 
   # The framework owns one-shot request stages and repeated proposal scaffolding;

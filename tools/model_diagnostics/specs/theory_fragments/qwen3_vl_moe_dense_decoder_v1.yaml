@@ -21,18 +21,4 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [rms_norm]
-      ignored_operators:
-        - _to_copy
-        - pow
-        - mean
-        - add
-        - rsqrt
-        # Ignore both RMSNorm scaling and the elementwise SwiGLU product; the
-        # surrounding gate/SiLU/up/down shapes still pin the FFN contract.
-        - mul
-        - view
-        - t
-        - transpose
-        - dynamic_quantize_symmetric
-        - quantize
-        - all_reduce
+      ignored_operator_groups: [collective_communication, quantization, dtype_cast, layout_permute, shape_views, norm_math_with_add]

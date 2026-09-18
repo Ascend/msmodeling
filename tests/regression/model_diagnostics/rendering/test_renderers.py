@@ -16,6 +16,7 @@ from dataclasses import replace
 import pytest
 
 from tools.model_diagnostics.domain import (
+    INPUT,
     DiagnosticsResult,
     EvidenceRef,
     ExecutionPhase,
@@ -30,6 +31,7 @@ from tools.model_diagnostics.domain import (
     SimulationExecutionArtifact,
     SourceDescription,
     SourceKind,
+    TensorInfo,
     summarize_findings,
 )
 from tools.model_diagnostics.integrations import assert_diagnostics_passed
@@ -115,6 +117,34 @@ def test_runtime_html_lists_every_call_and_writes_atomically(tmp_path) -> None:
     assert report.read_text(encoding="utf-8") == rendered
 
 
+def test_runtime_html_renders_missing_tensor_metadata_as_unknown() -> None:
+    artifact = SimulationExecutionArtifact(
+        schema_version="1",
+        producer=ProducerInfo("1.0", None, "test-backend"),
+        run_context=ModelRunContext(
+            model_name="model",
+            entrypoint="test",
+            phase=ExecutionPhase.DECODE,
+            batch_size=1,
+            query_length=1,
+            context_length=8,
+            parallel=ParallelContext(),
+            model_config={},
+            quantization_config={},
+        ),
+        operator_calls=(
+            OperatorCallRecord(
+                0,
+                "aten.mm.default",
+                None,
+                (TensorInfo(INPUT[0], None, None),),
+            ),
+        ),
+    )
+
+    assert RuntimeHtmlRenderer().render(artifact).count("unknown") == 2
+
+
 def test_console_renderer_expands_problem_details() -> None:
     rendered = ConsoleResultRenderer().render(_result(FindingStatus.FAIL))
 
@@ -188,5 +218,25 @@ def test_console_show_all_overrides_fail_only() -> None:
 def test_pytest_adapter_returns_only_for_pass() -> None:
     assert_diagnostics_passed(_result(FindingStatus.PASS))
 
-    with pytest.raises(AssertionError, match="tensor.fail"):
+    with pytest.raises(AssertionError, match="shape differs"):
         assert_diagnostics_passed(_result(FindingStatus.FAIL))
+
+
+def test_pytest_adapter_keeps_failure_summary_short() -> None:
+    with pytest.raises(AssertionError) as caught:
+        assert_diagnostics_passed(_result(FindingStatus.FAIL))
+    message = str(caught.value)
+    assert "language/layer[0]/attention: shape differs; expected (2, 4), got (2, 5)" in message
+    assert "call[" not in message
+
+
+def test_pytest_adapter_explains_missing_evidence_without_empty_values() -> None:
+    result = _result(FindingStatus.INCOMPLETE)
+    finding = replace(result.findings[0], message="Runtime stage is missing", expected=None, actual=None)
+    result = replace(result, findings=(finding,) * 7)
+    with pytest.raises(AssertionError) as caught:
+        assert_diagnostics_passed(result)
+    message = str(caught.value)
+    assert message.count("Runtime stage is missing") == 5
+    assert "2 more finding(s)" in message
+    assert "None" not in message

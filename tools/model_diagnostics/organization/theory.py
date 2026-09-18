@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared Theory organization builder (Source flattens; Organizer reuses this)."""
+"""Theory generation and evidence-preserving organization."""
 
 from __future__ import annotations
 
@@ -194,41 +194,107 @@ def flatten_theory_calls(
 
 
 class TheoryExecutionOrganizationStrategy:
-    """Organize Theory by rebuilding from Spec, then checking the Source stream.
-
-    Rebuild avoids Source→Organizer round-trip redundancy. The cheap assertion
-    against ``execution.operator_calls`` keeps third-party Theory Sources honest:
-    call count and ordered operator names must still match the Spec materialization.
-    """
+    """Organize Source calls by Spec hierarchy while preserving their evidence."""
 
     strategy_id = "theory_organization"
 
     def execute(self, request: ExecutionOrganizationRequest) -> tuple[RegionExecutionRecord, ...]:
         if request.execution.source_kind is not SourceKind.THEORY:
             raise SourceLoadError("Theory organizer requires THEORY execution records")
-        regions = build_theory_regions(
+        return _organize_execution_calls(
+            request.execution.operator_calls,
             request.execution.run_context,
             request.spec,
             request.selected_layers,
             request.selected_stage_regions,
         )
-        _assert_execution_matches_regions(request.execution.operator_calls, regions)
-        return regions
 
 
-def _assert_execution_matches_regions(
+def _organize_execution_calls(
     execution_calls: tuple[OperatorCallRecord, ...],
-    regions: tuple[RegionExecutionRecord, ...],
-) -> None:
-    expected = flatten_theory_calls(regions)
-    if len(execution_calls) != len(expected):
-        raise SourceLoadError(
-            "theory execution call count diverges from Spec organization: "
-            f"execution has {len(execution_calls)}, Spec expects {len(expected)}"
+    context: ModelRunContext,
+    spec: ModelDiagnosticsSpec,
+    selected_layers: Mapping[str, tuple[int, ...]],
+    selected_stage_regions: tuple[str, ...],
+) -> tuple[RegionExecutionRecord, ...]:
+    """Apply Spec hierarchy to Source evidence without rebuilding its tensors."""
+
+    env = build_theory_env(context)
+    cursor = 0
+
+    def consume(
+        stage_id: str,
+        theory: TheoryStageOptions,
+        stage_env: Mapping[str, object] = env,
+    ) -> StageExecutionRecord:
+        nonlocal cursor
+        repeat = evaluate_positive_integer(theory.repeat, stage_env) if theory.repeat else 1
+        expected_names = tuple(
+            operator.operator_name
+            for _ in range(repeat)
+            for operator in theory.operators
         )
-    for index, (actual, want) in enumerate(zip(execution_calls, expected)):
-        if actual.operator_name != want.operator_name:
+        end = cursor + len(expected_names)
+        calls = execution_calls[cursor:end]
+        if len(calls) != len(expected_names):
             raise SourceLoadError(
-                f"theory execution diverges from Spec at call[{index}]: "
-                f"expected {want.operator_name!r}, got {actual.operator_name!r}"
+                f"theory execution ended while organizing stage {stage_id!r}: "
+                f"expected {len(expected_names)} call(s), found {len(calls)}"
             )
+        for offset, (call, expected_name) in enumerate(zip(calls, expected_names)):
+            if call.operator_name != expected_name:
+                raise SourceLoadError(
+                    f"theory execution diverges in stage {stage_id!r} at call[{cursor + offset}]: "
+                    f"expected {expected_name!r}, got {call.operator_name!r}"
+                )
+        cursor = end
+        return StageExecutionRecord(stage_id=stage_id, operator_calls=calls)
+
+    records: list[RegionExecutionRecord] = []
+    selected_stage_set = set(selected_stage_regions)
+    for region in spec.regions:
+        emit_stages = region.region_id in selected_stage_set
+        layer_selection = selected_layers.get(region.region_id)
+        if not emit_stages and layer_selection is None:
+            continue
+        stages = tuple(
+            consume(stage.stage_id, _theory_options(stage))
+            for stage in region.stages
+        ) if emit_stages else ()
+        layers: list[LayerExecutionRecord] = []
+        for layer_index in layer_selection or ():
+            layer_kind = region.layer_layout[layer_index]
+            layers.append(
+                LayerExecutionRecord(
+                    layer_index=layer_index,
+                    layer_kind=layer_kind,
+                    stages=tuple(
+                        consume(
+                            stage.stage_id,
+                            _theory_options(stage),
+                            {**env, "LAYER": layer_index},
+                        )
+                        for stage in region.layer_specs[layer_kind].stages
+                    ),
+                )
+            )
+        if stages or layers:
+            records.append(
+                RegionExecutionRecord(
+                    region_id=region.region_id,
+                    stages=stages,
+                    layers=tuple(layers),
+                )
+            )
+    if cursor != len(execution_calls):
+        raise SourceLoadError(
+            f"theory execution has {len(execution_calls) - cursor} unorganized trailing call(s)"
+        )
+    return tuple(records)
+
+
+def _theory_options(stage) -> TheoryStageOptions:
+    theory = stage.source_options.get(SourceKind.THEORY)
+    if not isinstance(theory, TheoryStageOptions):
+        raise SpecificationLoadError(f"stage {stage.stage_id!r} missing theory source_options")
+    return theory

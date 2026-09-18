@@ -320,6 +320,47 @@ def test_run_profile_rejects_invalid_parallel_degrees(tmp_path: Path, value: str
         load_diagnostics_run_profile(path)
 
 
+def test_run_profile_rejects_unknown_parallel_field(tmp_path: Path) -> None:
+    path = tmp_path / "misspelled_parallel.yaml"
+    path.write_text(
+        "\n".join(
+            (
+                "model_name: Qwen/Qwen3-8B",
+                "phase: prefill",
+                "batch_size: 1",
+                "query_length: 2",
+                "parallel:",
+                "  tensor_paralell_size: 8",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SpecificationLoadError, match="tensor_paralell_size"):
+        load_diagnostics_run_profile(path)
+
+
+def test_run_profile_rejects_duplicate_yaml_key(tmp_path: Path) -> None:
+    path = tmp_path / "duplicate_parallel.yaml"
+    path.write_text(
+        "\n".join(
+            (
+                "model_name: Qwen/Qwen3-8B",
+                "phase: prefill",
+                "batch_size: 1",
+                "query_length: 2",
+                "parallel:",
+                "  tensor_parallel_size: 2",
+                "  tensor_parallel_size: 4",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SpecificationLoadError, match="duplicate key 'tensor_parallel_size'"):
+        load_diagnostics_run_profile(path)
+
+
 def test_run_profile_accepts_zero_context_length(tmp_path: Path) -> None:
     path = tmp_path / "zero_context.yaml"
     path.write_text(

@@ -568,7 +568,7 @@ def test_model_runner_assertion_is_not_reclassified_as_external_shared_error(mon
 
 def test_deepseek_routed_expert_config_rejects_illegal_moe_layout_before_model_build(monkeypatch) -> None:
     from tools.model_diagnostics.errors import SourceLoadError
-    from tools.model_diagnostics.sources.runtime_capture import _model_is_moe, capture_artifact_for_profile
+    from tools.model_diagnostics.sources.runtime_capture import capture_artifact_for_profile
     from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
 
     model_runner_called = False
@@ -587,7 +587,6 @@ def test_deepseek_routed_expert_config_rejects_illegal_moe_layout_before_model_b
             num_experts_per_tok=8,
         ),
     )
-    _model_is_moe.cache_clear()
     profile = DiagnosticsRunProfile(
         schema_version="1",
         model_name="test/deepseek-v32-illegal-layout",
@@ -606,9 +605,6 @@ def test_deepseek_routed_expert_config_rejects_illegal_moe_layout_before_model_b
         word_embedding_tp=None,
     )
 
-    try:
-        with pytest.raises(SourceLoadError, match="must equal pipeline stage world_size"):
-            capture_artifact_for_profile(profile)
-    finally:
-        _model_is_moe.cache_clear()
+    with pytest.raises(SourceLoadError, match="must equal pipeline stage world_size"):
+        capture_artifact_for_profile(profile)
     assert model_runner_called is False

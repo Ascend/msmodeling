@@ -13,24 +13,13 @@ stages:
     runtime:
       # The decomposed RMSNorm immediately before fused QKV starts at pow.
       boundary_operators: [pow]
+      ignored_operator_groups: [layout_permute, dtype_cast, shape_views, norm_math_with_add, tensor_split]
       ignored_operators:
-        - pow
-        - mean
-        - add
-        - rsqrt
-        - mul
-        - _to_copy
-        - t
-        - view
-        - permute
         - unbind
-        - unsqueeze
         - slice
         - neg
         - cat
-        - transpose
         - sub
-        - split_with_sizes
 
   - id: vision_attention
     modules:
@@ -39,12 +28,10 @@ stages:
           OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
     runtime:
       boundary_operators: [attention]
+      ignored_operator_groups: [layout_permute, dtype_cast, shape_views]
       ignored_operators:
         - cat
-        - view
-        - t
         - add
-        - _to_copy
 
   - id: vision_o_projection
     modules:
@@ -53,14 +40,7 @@ stages:
           OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
     runtime:
       boundary_operators: [mm]
-      ignored_operators:
-        - add
-        - _to_copy
-        - pow
-        - mean
-        - rsqrt
-        - mul
-        - t
+      ignored_operator_groups: [layout_permute, dtype_cast, norm_math_with_add]
 
   - id: vision_mlp_gate
     modules:
@@ -106,16 +86,7 @@ stages:
           OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
     runtime:
       boundary_operators: [mm]
-      ignored_operators:
-        - pow
-        - mean
-        - add
-        - rsqrt
-        - _to_copy
-        - t
-        - mul
-        - view
-        - permute
+      ignored_operator_groups: [layout_permute, dtype_cast, shape_views, norm_math_with_add]
 
   - id: vision_post_layernorm
     modules:
@@ -127,7 +98,8 @@ stages:
           OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
     runtime:
       boundary_operators: [pow]
-      ignored_operators: [pow, mean, add, rsqrt, _to_copy, view, permute]
+      ignored_operator_groups: [layout_permute, dtype_cast, shape_views]
+      ignored_operators: [pow, mean, add, rsqrt]
 
   - id: vision_downsample
     modules:
@@ -139,10 +111,9 @@ stages:
           OUTPUT[0]: {shape: "[VProjTok, VOH, 1, 1]", dtype: ACT}
     runtime:
       boundary_operators: [convolution]
+      ignored_operator_groups: [layout_permute, shape_views]
       ignored_operators:
         - convolution_backward
-        - view
-        - t
 
   - id: vision_merger_projection
     modules:
@@ -157,8 +128,7 @@ stages:
           OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
     runtime:
       boundary_operators: [mm]
-      ignored_operators:
-        - t
+      ignored_operators: [t]
 
   - id: vision_merger_mlp
     modules:
@@ -179,25 +149,17 @@ stages:
           OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
     runtime:
       boundary_operators: [mm]
+      ignored_operator_groups: [layout_permute, dtype_cast, shape_views, tensor_storage, broadcast_shapes, slice_select, tensor_split]
       ignored_operators:
-        - t
-        - view
         - prod
         - div
         - floor_divide
-        - split_with_sizes
         - cat
         - eq
         - sum
         - empty_like
-        - detach
-        - unsqueeze
-        - expand
-        - slice
-        - select
         - index
         - index_select
-        - _to_copy
 
 stage_groups:
   block:

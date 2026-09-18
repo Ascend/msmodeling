@@ -121,7 +121,7 @@ class ConcatShapeStrategy:
                     left=tuple(TensorSlotRef(call_index=index, slot=OUTPUT[0]) for index in range(left_count)),
                     right=(TensorSlotRef(call_index=0, slot=OUTPUT[0]),),
                     operation="concat",
-                    axis=-1,
+                    axis=options.axis,
                 ),
             )
         findings: list[Finding] = []
@@ -178,6 +178,19 @@ def _compare_positional_calls(request: StageComparisonRequest) -> list[Finding]:
         # Theory declarations are the comparison contract. Runtime may capture
         # additional implementation/control tensors without making them required.
         slots = set(left_tensors)
+        if not slots:
+            call_findings.append(
+                _finding(
+                    request,
+                    rule_id=f"call[{call_position}]",
+                    comparison_kind="tensor_completeness",
+                    status=FindingStatus.INCOMPLETE,
+                    message_code="tensor.contract_empty",
+                    message="Theory operator declares no Tensor contract",
+                    left_evidence=(_call_evidence(SourceKind.THEORY, left_call, call_position),),
+                    right_evidence=(_call_evidence(SourceKind.RUNTIME, right_call, call_position),),
+                )
+            )
         matched_left: list[_LocatedTensor] = []
         matched_right: list[_LocatedTensor] = []
         for slot in sorted(slots, key=_slot_sort_key):

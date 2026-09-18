@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
 import torch
 
 from tools.model_diagnostics.domain import (
+    ARTIFACT_SCHEMA_VERSION,
     INPUT,
     OUTPUT,
     ModelRunContext,
@@ -35,48 +35,12 @@ from tools.model_diagnostics.domain import (
 )
 from tools.model_diagnostics.domain.constants import VISION_IMAGE_BOUNDARY_TOKEN_COUNT
 from tools.model_diagnostics.errors import SourceLoadError
+from tools.model_diagnostics.specification.layer_layout import (
+    qwen3_vl_moe_layer_kinds,
+)
 from tensor_cast.runtime import Runtime
 
 _CAPTURE_BACKEND = "tensor_cast.runtime_observer"
-_SCHEMA_VERSION = "1"
-_QWEN3_VL_MOE_DENSE_LAYER = "qwen3_vl_moe_dense_text_decoder"
-_QWEN3_VL_MOE_LAYER = "qwen3_vl_moe_text_decoder"
-
-
-def _qwen3_vl_moe_layer_kinds(
-    config: Mapping[str, object],
-    *,
-    start: int,
-    count: int,
-) -> tuple[str, ...]:
-    """Mirror Hugging Face Qwen3-VL MoE's per-layer MLP selection rule."""
-
-    sparse_step = config.get("decoder_sparse_step")
-    if isinstance(sparse_step, bool) or not isinstance(sparse_step, int) or sparse_step <= 0:
-        raise SourceLoadError("Qwen3-VL MoE decoder_sparse_step must be a positive integer")
-    mlp_only_layers = config.get("mlp_only_layers")
-    if not isinstance(mlp_only_layers, (list, tuple)) or any(
-        isinstance(index, bool) or not isinstance(index, int) or index < 0
-        for index in mlp_only_layers
-    ):
-        raise SourceLoadError("Qwen3-VL MoE mlp_only_layers must contain non-negative integers")
-    if len(mlp_only_layers) != len(set(mlp_only_layers)):
-        raise SourceLoadError("Qwen3-VL MoE mlp_only_layers must not contain duplicates")
-    num_experts = config.get("num_experts")
-    if isinstance(num_experts, bool) or not isinstance(num_experts, int) or num_experts <= 0:
-        raise SourceLoadError("Qwen3-VL MoE num_experts must be a positive integer")
-    if isinstance(start, bool) or not isinstance(start, int) or start < 0:
-        raise SourceLoadError("Qwen3-VL MoE layer start must be a non-negative integer")
-    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-        raise SourceLoadError("Qwen3-VL MoE layer count must be a non-negative integer")
-
-    dense_layers = set(mlp_only_layers)
-    return tuple(
-        _QWEN3_VL_MOE_LAYER
-        if layer_index not in dense_layers and (layer_index + 1) % sparse_step == 0
-        else _QWEN3_VL_MOE_DENSE_LAYER
-        for layer_index in range(start, start + count)
-    )
 
 
 def _is_moe_config(config: object) -> bool:
@@ -95,14 +59,8 @@ def _is_moe_config(config: object) -> bool:
     return has_routed_experts and has_topk
 
 
-@lru_cache(maxsize=32)
 def _model_is_moe(model_name: str) -> bool:
-    """Classify a model once without retaining its mutable HF config object.
-
-    Assumes the config loaded here matches what ModelRunner loads for the same
-    model id. If a runner applies config patches before building the model,
-    keep this classification and the runner's MoE execution flags in sync.
-    """
+    """Classify a model from a fresh config to avoid stale same-name layouts."""
 
     from tensor_cast.transformers.utils import AutoModelConfigLoader
 
@@ -276,7 +234,7 @@ def _build_runtime_artifact(
             )
         )
     return SimulationExecutionArtifact(
-        schema_version=_SCHEMA_VERSION,
+        schema_version=ARTIFACT_SCHEMA_VERSION,
         producer=producer,
         run_context=run_context,
         operator_calls=tuple(calls),
@@ -602,7 +560,7 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
     if isinstance(layer_types, list) and isinstance(effective, int) and len(layer_types) > effective:
         model_config["layer_types"] = layer_types[:effective]
     if root_model_type == "qwen3_vl_moe" and _is_moe_config(hf_config) and isinstance(effective, int):
-        model_config["language_layer_kinds"] = _qwen3_vl_moe_layer_kinds(
+        model_config["language_layer_kinds"] = qwen3_vl_moe_layer_kinds(
             model_config,
             start=0,
             count=effective,
@@ -614,7 +572,7 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         if root_model_type == "qwen3_vl_moe" and _is_moe_config(hf_config) and isinstance(effective, int):
             model_config["mtp_layer_kinds"] = tuple(
                 kind.replace("_text_decoder", "_mtp")
-                for kind in _qwen3_vl_moe_layer_kinds(
+                for kind in qwen3_vl_moe_layer_kinds(
                     model_config,
                     start=effective,
                     count=num_mtp_tokens,

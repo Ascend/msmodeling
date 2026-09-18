@@ -11,6 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import replace
+
+from tools.model_diagnostics.specification.ignore_groups import load_builtin_ignore_groups
+
 from tools.model_diagnostics.domain import (
     INPUT,
     OUTPUT,
@@ -148,6 +152,46 @@ def test_runtime_organizer_only_filters_operators_declared_by_the_stage() -> Non
 
     attention = regions[0].layers[0].stages[0]
     assert [call.operator_name for call in attention.operator_calls] == ["rms_norm", "q_proj"]
+
+
+def test_runtime_organizer_preserves_calls_before_first_boundary() -> None:
+    execution = _execution()
+    prefixed_calls = (
+        OperatorCallRecord(
+            call_index=0,
+            operator_name="unexpected_prefix",
+            original_operator_name=None,
+            tensors=(),
+        ),
+        *(
+            OperatorCallRecord(
+                call_index=call.call_index + 1,
+                operator_name=call.operator_name,
+                original_operator_name=call.original_operator_name,
+                tensors=call.tensors,
+            )
+            for call in execution.operator_calls
+        ),
+    )
+    request = ExecutionOrganizationRequest(
+        execution=ModelExecutionRecord(
+            source_kind=SourceKind.RUNTIME,
+            run_context=execution.run_context,
+            operator_calls=prefixed_calls,
+        ),
+        spec=_spec(),
+        selected_layers={"language": (0,)},
+        selected_stage_regions=(),
+    )
+
+    regions = RuntimeArtifactOrganizer().execute(request)
+
+    attention = regions[0].layers[0].stages[0]
+    assert [call.operator_name for call in attention.operator_calls] == [
+        "unexpected_prefix",
+        "rms_norm",
+        "q_proj",
+    ]
 
 
 def test_runtime_operator_patterns_match_exact_operator_field_not_substrings() -> None:
@@ -446,3 +490,80 @@ def test_runtime_boundary_matches_cast_wrapped_aten_rmsnorm_sequence() -> None:
 
     assert _matches_composite_boundary(calls, 0, "rms_norm") is True
     assert _matches_composite_boundary(calls, 1, "rms_norm") is False
+    from tools.model_diagnostics.organization.runtime import _composite_boundary_width
+
+    assert _composite_boundary_width(calls, 0, "rms_norm") == 8
+    assert _composite_boundary_width(calls, 1, "rms_norm") == 0
+
+
+def test_semantic_ignore_families_preserve_boundaries_and_core_evidence() -> None:
+    groups = load_builtin_ignore_groups()
+    ignored = tuple(
+        name
+        for group in (
+            "collective_communication",
+            "rms_norm_kernels",
+            "quantization",
+            "dtype_cast",
+            "layout_permute",
+            "shape_views",
+            "tensor_storage",
+            "tensor_split",
+            "rotary_embedding",
+        )
+        for name in groups[group]
+    )
+    spec = replace(
+        _spec(),
+        regions=(
+            RegionSpec(
+                region_id="language",
+                stages=(
+                    _stage("projection", "rms_norm", *ignored),
+                    _stage("output", "linear_attn_gated_rmsnorm", *ignored),
+                ),
+            ),
+        ),
+    )
+    names = (
+        "rms_norm",
+        *ignored,
+        "prims.convert_element_type.default",
+        "q_proj",
+        "linear_attn_gated_rmsnorm",
+        "native_layer_norm",
+        "quant_lightning_indexer",
+        "permute_tokens",
+        "unpermute_tokens",
+        "cat",
+        "mul",
+        "sum",
+    )
+    execution = replace(
+        _execution(),
+        operator_calls=tuple(
+            OperatorCallRecord(call_index=i, operator_name=name, original_operator_name=None, tensors=())
+            for i, name in enumerate(names)
+        ),
+    )
+    organized = RuntimeArtifactOrganizer().execute(
+        ExecutionOrganizationRequest(
+            execution=execution,
+            spec=spec,
+            selected_layers={},
+            selected_stage_regions=("language",),
+        )
+    )
+    first, second = organized[0].stages
+    assert tuple(call.operator_name for call in first.operator_calls) == ("q_proj",)
+    assert tuple(call.operator_name for call in second.operator_calls) == (
+        "linear_attn_gated_rmsnorm",
+        "native_layer_norm",
+        "quant_lightning_indexer",
+        "permute_tokens",
+        "unpermute_tokens",
+        "cat",
+        "mul",
+        "sum",
+    )
+    assert first.operator_calls[0] is execution.operator_calls[names.index("q_proj")]

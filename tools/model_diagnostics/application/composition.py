@@ -22,6 +22,7 @@ from tools.model_diagnostics.builtin import create_stage_comparison_registry
 from tools.model_diagnostics.domain import (
     DiagnosticsRequest,
     DiagnosticsResult,
+    ModelDiagnosticsSpec,
     SimulationExecutionArtifact,
     SourceKind,
 )
@@ -59,6 +60,8 @@ class ModelDiagnosticsApplication:
         self,
         request: DiagnosticsRequest,
         artifact: SimulationExecutionArtifact,
+        *,
+        spec: ModelDiagnosticsSpec | None = None,
     ) -> DiagnosticsResult:
         """Compare Theory expectations with one in-memory Runtime Artifact."""
 
@@ -66,6 +69,7 @@ class ModelDiagnosticsApplication:
             request,
             self.theory_source,
             SimulationArtifactSource(artifact),
+            spec=spec,
         )
 
     def run_profile_against_artifact(
@@ -77,7 +81,7 @@ class ModelDiagnosticsApplication:
 
         spec = self.spec_provider.get(artifact.run_context)
         request = profile.to_request(context=artifact.run_context, spec=spec)
-        return self.run_against_artifact(request, artifact)
+        return self.run_against_artifact(request, artifact, spec=spec)
 
     def run_from_profile(self, profile_path: Path) -> DiagnosticsResult:
         """End-to-end: load run profile → capture Runtime → Theory↔Runtime compare."""

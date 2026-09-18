@@ -22,7 +22,7 @@ from typing import Mapping
 import yaml
 
 from tools.model_diagnostics.domain.specification import RuntimeStageOptions, TheoryOperatorSpec
-from tools.model_diagnostics.schema_utils import SchemaGuard
+from tools.model_diagnostics.schema_utils import SchemaGuard, load_yaml_strict
 from tools.model_diagnostics.specification.errors import SpecificationLoadError
 from tools.model_diagnostics.specification.source_options import (
     RuntimeSourceOptionsParser,
@@ -142,9 +142,9 @@ def load_builtin_theory_fragment_registry(
     parsed: dict[str, _ParsedFragmentFile] = {}
     for path in sorted(root.glob("*.yaml")):
         try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+            raw = load_yaml_strict(path.read_text(encoding="utf-8"))
         except yaml.YAMLError as error:
-            raise SpecificationLoadError(f"invalid theory fragment YAML {path}") from error
+            raise SpecificationLoadError(f"invalid theory fragment YAML {path}: {error}") from error
         document = _parse_fragment_file(raw, source=path.name)
         if document.fragment_id in parsed:
             raise SpecificationLoadError(f"duplicate theory fragment id: {document.fragment_id!r}")

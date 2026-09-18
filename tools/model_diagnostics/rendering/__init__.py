@@ -16,4 +16,9 @@
 from .console_renderer import ConsoleResultRenderer
 from .html_renderer import ComparisonHtmlRenderer, RuntimeHtmlRenderer, write_html_report
 
-__all__ = ["ComparisonHtmlRenderer", "ConsoleResultRenderer", "RuntimeHtmlRenderer", "write_html_report"]
+__all__ = [
+    "ComparisonHtmlRenderer",
+    "ConsoleResultRenderer",
+    "RuntimeHtmlRenderer",
+    "write_html_report",
+]

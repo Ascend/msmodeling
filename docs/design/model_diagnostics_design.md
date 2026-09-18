@@ -11,6 +11,7 @@ Status: Initial Release Review
 | 2026-08-14 | 1.2 | 分类 3 扩展为 DeepSeek V3/V3.2、GLM-5/5.1、Kimi K2/K2.5/K2.6 文本兼容矩阵，并增加代表性 TP/EP、DP/MDP 覆盖 | ChenHuiwen | N/A |
 | 2026-08-15 | 1.3 | 分类 3 并行覆盖改为逐型号（每型号 TP=2/EP=2、DP=2/MDP=2 组合）；新增 `MOE_GATE_TOKENS` 契约并补充 sparse_attention 机械算子忽略 | ChenHuiwen | N/A |
 | 2026-08-15 | 1.4 | 评审修复：lm_head TP 默认值单测、`explicit_moe_gate` 语义说明、config 一致性注释；E2E 按例行代表集 + nightly 全矩阵分层 | ChenHuiwen | N/A |
+| 2026-09-11 | 1.5 | 质量评优整改：YAML 重复键/parallel 严格校验、首边界证据完整性、语义化 ignore groups（stage 按 Tensor 契约整族忽略，集合可大于原手写列表）、Artifact 版本门禁、Source 证据保留、报告边界及测试入口分层；删除 §4.0 Independent Oracle 开发流程（Theory 独立于实测 Runtime 的原则仍由 skill 与本文其它章节约束） | ChenHuiwen | N/A |
 
 ---
 
@@ -434,6 +435,11 @@ Context 将其展开为领域 `RegionSpec.layer_layout: tuple[str, ...]`，其�
 `run_context` 同一字段关联；`num_hidden_layers` 仅表示模型结构深度，不直接驱动 layout
 展开。Theory 仍只构建请求选中的物理层；Runtime 按展开后的 layout 顺序扫描。
 
+所有 Profile、Spec 和 fragment YAML 必须使用同一个安全严格 Loader，并在任意嵌套层级
+拒绝同一 mapping 内显式重复的 key；YAML `<<` 合并允许显式字段覆盖继承值，保持原有合并优先级。
+后置 schema 校验不能替代重复键检测，因为普通 YAML mapping
+构造会在校验前覆盖旧值。
+
 除单一 kind 的 `repeat` 外，Loader 支持 `prefix_then_repeat`：总层数取
 `count_from`，前缀长度取 `prefix_count_from`，前缀与后续分别引用
 `prefix_layer_kind` 和 `repeated_layer_kind`。DeepSeek V3 使用捕获后的
@@ -762,6 +768,28 @@ Runtime 组织实现包含边界识别、调用规范化和过滤步骤；RMSNor
 原全局 `call_index`；未知调用不得静默丢弃。边界/状态错误产生可定位的 `INCOMPLETE`。
 组织阶段**不**求期望 Tensor、**不**产生比较结论。
 
+首个声明 stage 同时拥有执行流起点到首边界的前缀；未显式忽略的前缀调用必须进入比较，
+不得因边界搜索从中间命中而消失。重复机械算子可引用
+`specs/runtime/ignore_groups.yaml` 的语义化 `ignored_operator_groups`，但每个 stage
+必须显式选择；组与 stage 本地 `ignored_operators` 做稳定去重并集，不存在全局默认组。
+当 stage 的 Tensor 契约不校验通信、普通 RMSNorm、量化/类型转换或 RoPE 时，可选择
+`collective_communication`、`rms_norm_kernels`、`quantization`、`dtype_cast`、`rotary_embedding` 整类忽略，
+不要求该组的每种实现都已出现在当前调用流中。边界识别先于 ignore 过滤，因此仅用于分段的
+算子也可以被忽略。`linear_attn_gated_rmsnorm`、视觉 LayerNorm、`quant_lightning_indexer`
+等明确校验的算子不属于这些辅助组。布局辅助操作 `t/transpose/permute` 通过
+`layout_permute` 引用，类型转换 `to/_to_copy/convert_element_type` 通过 `dtype_cast` 引用；
+形状辅助操作通过 `shape_views`、广播通过 `broadcast_shapes`、复制及存储辅助操作通过
+`tensor_storage` 引用。DeepSeek V4 MTP adapter 的 `unsqueeze/repeat` 是明确校验目标，
+该 stage 保留局部 ignore，不使用对应形状/广播组。
+MoE 的 `permute_tokens/unpermute_tokens` 不属于布局辅助组，继续参与校验；`slice/index/mul/add` 等上下文敏感算子仍按 stage 选择。
+
+`tensor_split` 仅忽略 `split/split_with_sizes`；只有明确不校验拼接的 stage 才使用
+`cat_split`。`norm_math_with_add` 用于已忽略完整归一化展开及 `add` 的 stage；
+其余 `add` 保持局部声明，不扩大 `mul/sum` 等参与校验的算术操作的忽略范围。
+
+Ignore 组合规则：组间及组与本地列表的重叠按声明顺序去重，先组后本地；
+未知组名、重复引用同一组及单个列表内部的重复算子仍报错。语义组按上述契约整族忽略时，展开后的忽略集合可以大于该 stage 原先的手写名单；仅当 Tensor 契约仍校验某类实现（例如只忽略 `t`、或 `all_gather` 与 `all_to_all` 分属不同 stage）时保持局部 `ignored_operators`，不引用对应宽族。
+
 ### 2.8 Stage Comparison (阶段比较)
 
 应用层按 `region_id + optional layer_index + stage_id` 配对后，对每个被选 StageSpec 解析：
@@ -886,11 +914,15 @@ Runtime `boundary_operators` 与 `ignored_operators` 的名称匹配允许两种
 | UNSUPPORTED | StageSpec 未配置当前有序来源对 |
 | SKIP | 仅跳过规格明确声明为可选的检查。**当前首版不产生 SKIP Finding**：尚无 Spec 级可选检查 DSL；已知收窄比较面以 `DiagnosticsResult.limitations` 透明化，而非 SKIP |
 
-Theory Organizer（v1.42）：从 Spec 直接重建 region 记录（避免展平-猜回），并对
-`execution.operator_calls` 做廉价一致性断言（调用数量 + 有序算子名），防止第三方
-Theory Source 的调用流被静默丢弃。
+Theory Organizer 按 Spec 声明顺序、所选 region/layer/stage 及 repeat 数量组织
+`execution.operator_calls`，校验调用数量和有序算子名。组织结果保留 Source 的原始
+调用对象、Tensor 证据及来源引用，不从 Spec 重新生成或覆盖这些证据。
 
 ### 2.9 Application and Result (应用编排与结果)
+
+`run` 接受关键字参数 `spec`：传入时复用该 Spec，省略时通过 Spec Provider 按请求
+Context 获取。`ModelDiagnosticsApplication.run_against_artifact` 将该参数透传给 Runner。
+两条路径都执行请求与 Spec 的一致性校验。
 
 ```python
 class ModelDiagnosticsRunner:
@@ -906,6 +938,18 @@ class ModelDiagnosticsRunner:
         request: DiagnosticsRequest,
         left_source: OperatorRecordSource,
         right_source: OperatorRecordSource,
+        *,
+        spec: ModelDiagnosticsSpec | None = None,
+    ) -> DiagnosticsResult: ...
+
+
+class ModelDiagnosticsApplication:
+    def run_against_artifact(
+        self,
+        request: DiagnosticsRequest,
+        artifact: SimulationExecutionArtifact,
+        *,
+        spec: ModelDiagnosticsSpec | None = None,
     ) -> DiagnosticsResult: ...
 
 
@@ -1035,6 +1079,8 @@ class ResultRenderer(Protocol):
 ```
 
 Renderer 只能表达既有 Result，不得重新组织调用、执行比较或改变 Summary。
+pytest 失败摘要突出问题位置、原因及预期/实际差异，最多展开五项。
+UT/E2E 断言不渲染报告、不写文件，使用普通 AssertionError；完整 HTML 由 CLI 显式生成。
 
 `TheoryOperatorSpec` 可选声明稳定的 `activation` 策略 ID，用于表达由完整运行上下文
 决定的条件算子；省略表示该算子始终参与校验。Loader 通过注入的
@@ -1378,26 +1424,6 @@ Runtime Artifact 保留这些通信和 mask 算子的原始证据，阶段 Spec 
 
 ## 4. Test Design (测试设计)
 
-### 4.0 Independent Oracle Development (独立 Oracle 开发)
-
-Theory 与 Runtime 证据由隔离的开发职责产生，避免 Theory 从 msmodeling 当前建模或
-Runtime 观察结果反向拟合：
-
-- Runtime 负责人实现采集、Artifact、Runtime 组织及公共比较/应用框架，可以保留从
-  msmodeling 执行结构整理的 Python 临时 Theory 数据，但必须标记为非权威候选。
-- Theory 负责人只依据批准的独立模型架构、配置、论文/官方资料和本设计，实现
-  YAML 结构、Theory 表达式、Source 与 Organizer；不得读取或使用 TensorCast 实现、
-  Runtime Artifact、捕获算子列表、阶段调用数、Tensor 结果或 Python Spike Spec。
-- 双方分别记录输入、假设、限制和验证命令并冻结结果。冻结前不得交换具体算子、数量、
-  shape/dtype 或映射。
-- 揭示后的差异先分类为 Theory 缺陷、Runtime 建模缺陷、Spec/集成缺陷、不支持能力或
-  证据不足；禁止仅为使 Runtime 通过而调整 Theory。
-- 并行开发必须按文件声明唯一所有者。共享领域接口和本设计如需变化，先暂停依赖工作、
-  提案并经专员确认，由单一所有者修改后再继续。
-
-最终 builtin 仍收敛为本设计规定的一份严格类型化 YAML Spec。Python 临时数据只用于
-冻结后的交叉例证，不替代或改写独立 Theory YAML。
-
 ### 4.1 Unit Tests (单元测试)
 
 | Area | Cases |
@@ -1422,6 +1448,10 @@ Runtime 观察结果反向拟合：
 | Defect injection | 缺失算子、错误 shape、错误 dtype → FAIL/INCOMPLETE 可定位 |
 | Dependency boundary | 仅 `sources/runtime_capture.py` 可 import/读取 Runtime；包级 `sources`、domain 与 Artifact 后链路可在无 Runtime import 下加载、组织和比较 |
 | Result adapters | `assert_diagnostics_passed()` 摘要简洁；Console 与两类 HTML 验证转义、完整性和原子写入 |
+
+测试入口遵循隔离原则：仅 Run Profile Loader/CLI 专项用例读取 Profile YAML；组件 UT
+直接构造最小类型化对象；模型 E2E 直接构造 `DiagnosticsRunProfile` 并执行真实
+capture→compare；Spec/fragment 测试仍读取正式 YAML，因为它们本身就是产品契约。
 
 ### 4.3 Coverage Gate (覆盖门禁)
 

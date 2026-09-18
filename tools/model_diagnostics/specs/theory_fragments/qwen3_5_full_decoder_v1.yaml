@@ -6,82 +6,35 @@ include_fragments:
   - {fragment: qwen3_moe_ffn_v1, activation: qwen3_5_moe_ffn}
 runtime_options:
   attention_qkv:
-    ignored_operators:
-    - mean
-    - pow
-    - rsqrt
-    - mul
-    - add
-    - convert_element_type
-    - expand
-    - clone
-    - neg
-    - sigmoid
-    - cat
-    - split
-    - unsqueeze
+    ignored_operator_groups: [norm_math_with_add, sigmoid_scaffold, cat_split, quantization, dtype_cast, shape_views, tensor_storage, broadcast_shapes]
   attention:
+    ignored_operator_groups: [norm_math_with_add, quantization, dtype_cast, tensor_storage]
     ignored_operators:
-    - mean
-    - pow
-    - rsqrt
-    - mul
-    - add
-    - convert_element_type
-    - sigmoid
-    - clone
+      - sigmoid
   dense_ffn:
     boundary_operators:
     - rms_norm
     - rms_norm_dynamic_quant_symmetric
     - rms_norm_quant
+    ignored_operator_groups: [norm_math, sigmoid_scaffold, cat_split, collective_communication, quantization, dtype_cast, layout_permute, shape_views, tensor_storage, broadcast_shapes]
     ignored_operators:
-    - copy_
-    - all_reduce
-    - mean
-    - pow
-    - rsqrt
-    - mul
-    - convert_element_type
-    - expand
-    - clone
-    - neg
-    - sigmoid
-    - cat
-    - permute
-    - split
-    - unsqueeze
-    - index
+      - index
   moe_gate:
     boundary_operators:
     - add_rms_norm2
     - add_rms_norm_dynamic_quant2_symmetric
     - add_rms_norm_quant2
     - rms_norm
+    ignored_operator_groups: [norm_math, sigmoid_scaffold, cat_split, quantization, dtype_cast, layout_permute, shape_views, tensor_storage, broadcast_shapes]
     ignored_operators:
-    - mean
-    - pow
-    - rsqrt
-    - mul
-    - permute
-    - cat
-    - split
-    - unsqueeze
-    - expand
-    - clone
-    - neg
-    - sigmoid
-    - index
-    - dynamic_quantize_symmetric
+      - index
   moe_dispatch:
+    ignored_operator_groups: [quantization, dtype_cast, tensor_storage, broadcast_shapes]
     ignored_operators:
-    - index
-    - expand
-    - clone
-    - mul
-    - neg
-    - convert_element_type
-    - constant_pad_nd
+      - index
+      - mul
+      - neg
+      - constant_pad_nd
   moe_experts:
     boundary_operators:
     - grouped_matmul_swiglu
@@ -97,16 +50,9 @@ runtime_options:
     ignored_operators:
     - constant_pad_nd
   moe_combine:
+    ignored_operator_groups: [sigmoid_scaffold, cat_split, quantization, dtype_cast, layout_permute, tensor_storage, broadcast_shapes]
     ignored_operators:
-    - mean
-    - pow
-    - rsqrt
-    - convert_element_type
-    - sigmoid
-    - expand
-    - clone
-    - neg
-    - permute
-    - cat
-    - split
-    - index
+      - mean
+      - pow
+      - rsqrt
+      - index

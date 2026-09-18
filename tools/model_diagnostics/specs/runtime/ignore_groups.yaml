@@ -1,0 +1,90 @@
+schema_version: "1"
+
+# Groups are explicitly selected per stage; no global defaults.
+# Only operators outside that stage's Tensor contract may be ignored.
+
+groups:
+  layout_permute:
+    - t
+    - transpose
+    - permute
+
+  slice_select:
+    - slice
+    - select
+
+  norm_math:
+    - mean
+    - pow
+    - rsqrt
+    - mul
+
+  sigmoid_scaffold:
+    - expand
+    - clone
+    - neg
+    - sigmoid
+
+  cat_split:
+    - cat
+    - split
+    - split_with_sizes
+
+  dtype_cast:
+    - to
+    - _to_copy
+    - convert_element_type
+
+  quantization:
+    - dynamic_quantize_symmetric
+    - quantize
+
+  collective_communication:
+    - all_gather
+    - all_reduce
+    - all_to_all
+
+  rms_norm_kernels:
+    - rms_norm
+    - rms_norm_dynamic_quant_symmetric
+    - rms_norm_quant
+    - add_rms_norm2
+    - add_rms_norm_dynamic_quant2_symmetric
+    - add_rms_norm_quant2
+    - add_rms_norm
+
+  rotary_embedding:
+    - apply_rope
+    - apply_rope_inplace
+
+  shape_views:
+    - view
+    - reshape
+    - _unsafe_view
+    - as_strided
+    - squeeze
+    - unsqueeze
+
+  tensor_storage:
+    - alias
+    - copy
+    - copy_
+    - clone
+    - detach
+    - contiguous
+    - device_put
+
+  broadcast_shapes:
+    - expand
+    - repeat
+
+  tensor_split:
+    - split
+    - split_with_sizes
+
+  norm_math_with_add:
+    - mean
+    - pow
+    - rsqrt
+    - mul
+    - add

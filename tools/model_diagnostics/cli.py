@@ -10,6 +10,7 @@ import io
 import logging
 import re
 import sys
+import uuid
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -102,7 +103,8 @@ def _report_paths(args) -> tuple[Path | None, Path | None]:
     default_dir = None
     if _DEFAULT_REPORT_PATH in (args.runtime_report, args.comparison_report):
         stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", args.profile.stem)
-        default_dir = _REPO_ROOT / "outputs" / "model_diagnostics" / f"{stem}-{datetime.now():%Y%m%d-%H%M%S}"
+        run_id = f"{datetime.now():%Y%m%d-%H%M%S-%f}-{uuid.uuid4().hex[:8]}"
+        default_dir = _REPO_ROOT / "outputs" / "model_diagnostics" / f"{stem}-{run_id}"
     runtime = default_dir / "runtime.html" if args.runtime_report is _DEFAULT_REPORT_PATH else args.runtime_report
     comparison = default_dir / "theory_runtime.html" if args.comparison_report is _DEFAULT_REPORT_PATH else args.comparison_report
     paths = [path for path, enabled in zip((runtime, comparison), requested, strict=True) if enabled]

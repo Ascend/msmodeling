@@ -44,38 +44,22 @@ regions:
                   OUTPUT[0]: {shape: "[1, T, EO]", dtype: ACT}
           runtime:
             boundary_operators: [embedding]
+            ignored_operator_groups: [collective_communication, layout_permute, dtype_cast, shape_views, tensor_storage, broadcast_shapes, slice_select]
             ignored_operators:
-              - view
               - index
-              - alias
-              - slice
-              - unsqueeze
-              - expand
               - bitwise_not
               - where
               - masked_fill_
-              - all_gather
-              - all_reduce
-              # Vision position/grid preparation runs before the patch
-              # convolution. Keep those framework mechanics outside the
-              # embedding contract without a Runtime-only pseudo Stage.
               - linspace
-              - detach
-              - _to_copy
               - add
               - clamp
               - sub
               - rsub
               - mul
               - arange
-              - transpose
-              - clone
-              - _unsafe_view
-              - repeat
               - cat
               - stack
               - lift_fresh
-              - select
               - repeat_interleave
               - index_select
               - cumsum
@@ -109,11 +93,9 @@ regions:
                   OUTPUT[0]: {shape: "[VTok, VH, 1, 1, 1]", dtype: ACT}
           runtime:
             boundary_operators: [convolution]
+            ignored_operator_groups: [dtype_cast, shape_views]
             ignored_operators:
-              - _to_copy
-              - view
               - embedding
-              - unsqueeze
               - mul
               - sum
               - add
@@ -175,25 +157,9 @@ regions:
             # Match the complete final RMSNorm sequence. Its internal casts are
             # ignored below and never serve as boundaries on their own.
             boundary_operators: [rms_norm]
+            ignored_operator_groups: [norm_math_with_add, slice_select, collective_communication, rms_norm_kernels, quantization, dtype_cast, layout_permute, shape_views, tensor_storage]
             ignored_operators:
-              - rms_norm
-              - _to_copy
-              - pow
-              - mean
-              - add
-              - rsqrt
-              - mul
-              - t
-              - view
-              - _unsafe_view
-              - slice
-              - alias
-              - copy_
-              - dynamic_quantize_symmetric
-              - device_put
-              - select
               - argmax
-              - all_gather
 
   # TensorCast constructs predictor blocks at the indices following the
   # captured language layers, so the same HF Dense/MoE rule applies.

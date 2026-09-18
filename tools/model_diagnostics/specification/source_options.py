@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from typing import TYPE_CHECKING, Protocol
 
@@ -32,6 +32,11 @@ from tools.model_diagnostics.domain.specification import (
 )
 from tools.model_diagnostics.schema_utils import SchemaGuard
 from tools.model_diagnostics.specification.errors import SpecificationLoadError
+from tools.model_diagnostics.specification.ignore_groups import (
+    expand_ignore_groups,
+    load_builtin_ignore_groups,
+    merge_operator_names,
+)
 
 if TYPE_CHECKING:
     from tools.model_diagnostics.specification.theory_fragments import TheoryFragmentRegistry
@@ -115,12 +120,15 @@ class TheorySourceOptionsParser:
 class RuntimeSourceOptionsParser:
     source_kind = SourceKind.RUNTIME
     yaml_key = "runtime"
+    ignore_groups: Mapping[str, tuple[str, ...]] = field(
+        default_factory=load_builtin_ignore_groups
+    )
 
     def parse(self, raw: Mapping[str, object]) -> RuntimeStageOptions:
         _exact_keys(
             raw,
             required={"boundary_operators"},
-            optional={"ignored_operators"},
+            optional={"ignored_operator_groups", "ignored_operators"},
             label="runtime options",
         )
         return RuntimeStageOptions(
@@ -128,9 +136,9 @@ class RuntimeSourceOptionsParser:
                 raw.get("boundary_operators"),
                 "runtime.boundary_operators",
             ),
-            ignored_operators=self._operator_names(
-                raw.get("ignored_operators", []),
-                "runtime.ignored_operators",
+            ignored_operators=self._ignored_operators(
+                raw,
+                label="runtime",
             ),
         )
 
@@ -143,10 +151,10 @@ class RuntimeSourceOptionsParser:
         _exact_keys(
             raw,
             required=set(),
-            optional={"boundary_operators", "ignored_operators"},
+            optional={"boundary_operators", "ignored_operator_groups", "ignored_operators"},
             label=label,
         )
-        if "boundary_operators" not in raw and "ignored_operators" not in raw:
+        if not {"boundary_operators", "ignored_operator_groups", "ignored_operators"}.intersection(raw):
             raise SpecificationLoadError(
                 f"{label} must declare boundary_operators and/or ignored_operators"
             )
@@ -158,7 +166,28 @@ class RuntimeSourceOptionsParser:
                 f"{label}.boundary_operators",
             )
         )
-        ignored = (
+        ignored = self._ignored_operators(raw, label=label)
+        return boundaries, ignored
+
+    def _ignored_operators(
+        self,
+        raw: Mapping[str, object],
+        *,
+        label: str,
+    ) -> tuple[str, ...]:
+        groups = (
+            ()
+            if "ignored_operator_groups" not in raw
+            else expand_ignore_groups(
+                _require_list(
+                    raw.get("ignored_operator_groups"),
+                    f"{label}.ignored_operator_groups",
+                ),
+                registry=self.ignore_groups,
+                label=f"{label}.ignored_operator_groups",
+            )
+        )
+        local = (
             ()
             if "ignored_operators" not in raw
             else self._operator_names(
@@ -166,11 +195,14 @@ class RuntimeSourceOptionsParser:
                 f"{label}.ignored_operators",
             )
         )
-        return boundaries, ignored
+        return merge_operator_names(groups, local)
 
     @staticmethod
     def _operator_names(raw: object, label: str) -> tuple[str, ...]:
-        return tuple(_as_str(item, "runtime operator") for item in _require_list(raw, label))
+        names = tuple(_as_str(item, "runtime operator") for item in _require_list(raw, label))
+        if len(names) != len(set(names)):
+            raise SpecificationLoadError(f"{label} contains duplicate operators")
+        return names
 
 
 def create_builtin_source_options_parsers(
@@ -206,6 +238,8 @@ def parse_theory_operator(value: object, index: int) -> TheoryOperatorSpec:
     raw = _require_mapping(value, location)
     _exact_keys(raw, required={"name", "tensors"}, optional={"activation"}, label=location)
     tensors_raw = _require_mapping(raw.get("tensors"), f"{location}.tensors")
+    if not tensors_raw:
+        raise SpecificationLoadError(f"{location}.tensors must not be empty")
     tensors: dict[TensorSlot, TheoryTensorSpec] = {}
     for key, tensor in tensors_raw.items():
         slot = _tensor_slot_key(key, f"{location}.tensor key")

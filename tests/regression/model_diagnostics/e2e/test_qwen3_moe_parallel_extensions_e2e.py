@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from tools.model_diagnostics import create_model_diagnostics_application
-from tools.model_diagnostics.domain import ExecutionPhase, FindingStatus, ParallelContext, SourceKind
+from tools.model_diagnostics.domain import ExecutionPhase, ParallelContext, SourceKind
 from tools.model_diagnostics.integrations import assert_diagnostics_passed
 from tools.model_diagnostics.sources.runtime_capture import capture_artifact_for_profile
 from tools.model_diagnostics.specification.context_env import build_theory_env
@@ -105,7 +105,6 @@ def test_qwen3_moe_e2e_with_enable_redundant_experts() -> None:
         profile.to_request(context=artifact.run_context, spec=spec),
         artifact,
     )
-    assert result.summary.overall_status is FindingStatus.PASS
     assert_diagnostics_passed(result)
 
 
