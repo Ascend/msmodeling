@@ -867,7 +867,8 @@ def shard_model_by_tp(
                     tp_plan.update(mla_cls.build_o_proj_tp_plan_extras(prefix, params, config_info))
 
             model_profile = get_model_profile(self.hf_config.model_type)
-            if model_profile is not None and model_profile.model_family == "qwen3_5":
+            if model_profile is not None and model_profile.model_family in {"qwen3_5", "qwen3_next"}:
+                model_name = "Qwen3-Next" if model_profile.model_family == "qwen3_next" else "Qwen3.5"
                 linear_num_key_heads = getattr(config_info, "linear_num_key_heads", None)
                 linear_num_value_heads = getattr(config_info, "linear_num_value_heads", None)
                 linear_key_head_dim = getattr(config_info, "linear_key_head_dim", None)
@@ -878,20 +879,20 @@ def shard_model_by_tp(
                     linear_key_head_dim,
                     linear_value_head_dim,
                 ):
-                    raise ValueError("Qwen3.5 linear attention TP plan requires linear attention config fields.")
+                    raise ValueError(f"{model_name} linear attention TP plan requires linear attention config fields.")
                 if linear_key_head_dim != linear_value_head_dim:
                     raise ValueError(
-                        "Qwen3.5 linear attention TP plan requires linear_key_head_dim to equal "
+                        f"{model_name} linear attention TP plan requires linear_key_head_dim to equal "
                         f"linear_value_head_dim, but got {linear_key_head_dim} and {linear_value_head_dim}."
                     )
                 if linear_num_key_heads % tp_group.world_size != 0:
                     raise ValueError(
-                        "Qwen3.5 linear attention TP plan requires tp_size to divide "
+                        f"{model_name} linear attention TP plan requires tp_size to divide "
                         f"linear_num_key_heads, but got {linear_num_key_heads} and {tp_group.world_size}."
                     )
                 if linear_num_value_heads % tp_group.world_size != 0:
                     raise ValueError(
-                        "Qwen3.5 linear attention TP plan requires tp_size to divide "
+                        f"{model_name} linear attention TP plan requires tp_size to divide "
                         f"linear_num_value_heads, but got {linear_num_value_heads} and {tp_group.world_size}."
                     )
 
@@ -901,35 +902,61 @@ def shard_model_by_tp(
                 }
                 qkv_head_num = 2 * linear_num_key_heads + linear_num_value_heads
                 for prefix in layer_prefixes:
-                    tp_plan.update(
-                        {
-                            tp_plan_module_path(prefix, "linear_attn.in_proj_qkv"): (
-                                COLWISE_LINEAR,
-                                {**linear_attn_col_params, "head_num": qkv_head_num},
-                            ),
-                            tp_plan_module_path(prefix, "linear_attn.in_proj_z"): (
-                                COLWISE_LINEAR,
-                                {**linear_attn_col_params, "head_num": linear_num_value_heads},
-                            ),
-                            tp_plan_module_path(prefix, "linear_attn.in_proj_b"): (
-                                COLWISE_LINEAR,
-                                {**linear_attn_col_params, "head_num": linear_num_value_heads},
-                            ),
-                            tp_plan_module_path(prefix, "linear_attn.in_proj_a"): (
-                                COLWISE_LINEAR,
-                                {**linear_attn_col_params, "head_num": linear_num_value_heads},
-                            ),
-                            tp_plan_module_path(prefix, "linear_attn.out_proj"): (
-                                ROWWISE_LINEAR,
-                                {
-                                    "tp_group": o_proj_tp_group,
-                                    "global_tp_group": tp_group,
-                                    "head_num": linear_num_value_heads,
-                                    "reduce_output": True,
-                                },
-                            ),
-                        }
-                    )
+                    if model_profile.model_family == "qwen3_next":
+                        tp_plan.update(
+                            {
+                                tp_plan_module_path(prefix, "linear_attn.in_proj_qkvz"): (
+                                    COLWISE_LINEAR,
+                                    {
+                                        **linear_attn_col_params,
+                                        "head_num": 2 * linear_num_key_heads + 2 * linear_num_value_heads,
+                                    },
+                                ),
+                                tp_plan_module_path(prefix, "linear_attn.in_proj_ba"): (
+                                    COLWISE_LINEAR,
+                                    {**linear_attn_col_params, "head_num": 2 * linear_num_value_heads},
+                                ),
+                                tp_plan_module_path(prefix, "linear_attn.out_proj"): (
+                                    ROWWISE_LINEAR,
+                                    {
+                                        "tp_group": o_proj_tp_group,
+                                        "global_tp_group": tp_group,
+                                        "head_num": linear_num_value_heads,
+                                        "reduce_output": True,
+                                    },
+                                ),
+                            }
+                        )
+                    else:
+                        tp_plan.update(
+                            {
+                                tp_plan_module_path(prefix, "linear_attn.in_proj_qkv"): (
+                                    COLWISE_LINEAR,
+                                    {**linear_attn_col_params, "head_num": qkv_head_num},
+                                ),
+                                tp_plan_module_path(prefix, "linear_attn.in_proj_z"): (
+                                    COLWISE_LINEAR,
+                                    {**linear_attn_col_params, "head_num": linear_num_value_heads},
+                                ),
+                                tp_plan_module_path(prefix, "linear_attn.in_proj_b"): (
+                                    COLWISE_LINEAR,
+                                    {**linear_attn_col_params, "head_num": linear_num_value_heads},
+                                ),
+                                tp_plan_module_path(prefix, "linear_attn.in_proj_a"): (
+                                    COLWISE_LINEAR,
+                                    {**linear_attn_col_params, "head_num": linear_num_value_heads},
+                                ),
+                                tp_plan_module_path(prefix, "linear_attn.out_proj"): (
+                                    ROWWISE_LINEAR,
+                                    {
+                                        "tp_group": o_proj_tp_group,
+                                        "global_tp_group": tp_group,
+                                        "head_num": linear_num_value_heads,
+                                        "reduce_output": True,
+                                    },
+                                ),
+                            }
+                        )
 
             params = {
                 "tp_group": mlp_tp_group,

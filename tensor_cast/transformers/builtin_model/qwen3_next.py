@@ -3,14 +3,33 @@ import logging
 import torch
 
 from ...model_config import MoEFieldNames
+from ...utils import exact_division
 from ..custom_model_registry import ModelProfile, register_model_profile
 from ..utils import has_previous_linear_attention_state, is_recurrent_linear_attention_decode_batch
 
 logger = logging.getLogger(__name__)
 
 
-def patch_method_for_qwen3_next(_model):
+def patch_method_for_qwen3_next(model):
     from transformers.models.qwen3_next import modeling_qwen3_next
+
+    tp_size = model.parallel_group_manager.tp_group.world_size
+    if tp_size > 1:
+        for module in model._inner.modules():
+            if not isinstance(module, modeling_qwen3_next.Qwen3NextGatedDeltaNet):
+                continue
+            if module.num_k_heads % tp_size != 0 or module.num_v_heads % tp_size != 0:
+                raise ValueError(
+                    "Qwen3-Next linear attention requires tp_size to divide both "
+                    f"head counts, but got num_k_heads={module.num_k_heads}, "
+                    f"num_v_heads={module.num_v_heads}, and tp_size={tp_size}."
+                )
+            if module.head_k_dim != module.head_v_dim:
+                raise ValueError(
+                    "Qwen3-Next fused linear-attention TP sharding requires equal "
+                    f"key/value head dimensions, but got {module.head_k_dim} and {module.head_v_dim}."
+                )
+            module.tensor_cast_tp_size = tp_size
 
     def _patched_update_linear_attn_mask(self, attention_mask, cache_position):
         """
@@ -67,7 +86,11 @@ def patch_method_for_qwen3_next(_model):
         attention_mask=None,
         **kwargs,
     ):
-        local_num_k_heads, local_num_v_heads = self.num_k_heads, self.num_v_heads
+        tp_size = getattr(self, "tensor_cast_tp_size", 1)
+        if tp_size <= 0:
+            raise ValueError(f"Qwen3-Next linear attention TP size must be positive, but got {tp_size}.")
+        local_num_k_heads = exact_division(self.num_k_heads, tp_size)
+        local_num_v_heads = exact_division(self.num_v_heads, tp_size)
         batch_size, seq_len, _ = hidden_states.shape
 
         has_previous_state = has_previous_linear_attention_state(cache_params, cache_position, self.layer_idx)
@@ -179,6 +202,7 @@ register_model_profile(
             shared_experts="shared_expert",
             shared_experts_gate="shared_expert_gate",
         ),
+        model_family="qwen3_next",
         patch_method=patch_method_for_qwen3_next,
     )
 )

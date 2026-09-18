@@ -199,7 +199,7 @@ def test_qwen35_mtp_decode_capture_organize_and_compare(model_name: str) -> None
     # Six-layer override trims layer_types to [lin, lin, lin, full, lin, lin];
     # last_kind_from therefore repeats linear_attention for every MTP layer.
     if model_name == _QWEN3_NEXT:
-        assert "linear_attention" in mtp_stages
+        assert {"linear_projection", "linear_delta_rule", "linear_output"}.issubset(mtp_stages)
         assert {"moe_gate", "moe_experts", "moe_combine", "shared_ffn"}.issubset(mtp_stages)
     else:
         assert {"linear_projection", "linear_delta_rule", "linear_output"}.issubset(mtp_stages)

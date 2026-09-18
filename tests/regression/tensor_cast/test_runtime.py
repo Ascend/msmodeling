@@ -589,8 +589,8 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
             quantize_linear_action=QuantizeLinearAction.DISABLED,
         )
         model = build_model(user_config)
-        linear_attn = model.unwrap().language_model.layers[0].linear_attn
-        hidden_states = torch.randn(1, 8, model.hidden_size, device="meta")
+        linear_attn = model.unwrap().layers[0].linear_attn
+        hidden_states = torch.randn(1, 8, model.hidden_size, device="meta", dtype=torch.bfloat16)
 
         device_profile = TEST_DEVICE
         perf_model = AnalyticPerformanceModel(device_profile)
@@ -612,7 +612,7 @@ class PerfAnalysisTestCase(PerfAnalysisTestMixin, unittest.TestCase):
         cache_position.tensor_cast_has_previous_state = True
         cache_position.tensor_cast_query_lens = (1,)
         cache_position.tensor_cast_is_decode = (True,)
-        hidden_states = torch.randn(1, 1, model.hidden_size, device="meta")
+        hidden_states = torch.randn(1, 1, model.hidden_size, device="meta", dtype=torch.bfloat16)
         with (
             Runtime(perf_model, device_profile, memory_tracker=MemoryTracker(device_profile)) as runtime,
             torch.no_grad(),
