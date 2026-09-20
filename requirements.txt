@@ -31,6 +31,9 @@ matplotlib
 plotext
 
 # web ui
-gradio>=6.7.0,<7
 openpyxl
 psutil
+uvicorn>=0.30
+
+# OptiX TOML round-trip configuration
+tomlkit>=0.13

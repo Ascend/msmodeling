@@ -10,6 +10,7 @@ from scripts.helpers.common.pyproject_toml import read_pyproject_data
 
 _REMOVED_RUNTIME_DEPENDENCIES = {
     "filelock",
+    "gradio",
     "pillow",
     "requests",
     "scikit-learn",
@@ -17,6 +18,8 @@ _REMOVED_RUNTIME_DEPENDENCIES = {
 _REQUIRED_RUNTIME_DEPENDENCIES = {
     "greenlet",
     "optree",
+    "tomlkit",
+    "uvicorn",
 }
 _TEST_DEPENDENCIES = {
     "parameterized",
