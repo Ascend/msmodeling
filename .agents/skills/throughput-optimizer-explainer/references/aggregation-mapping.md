@@ -15,7 +15,7 @@ concurrency = batch_size * DP * PP
 
 The optimizer runs or caches two phase simulations:
 
-- Prefill: `is_decode=False`, `query_len=effective_input_length`, `seq_len=input_length`, `concurrency=prefill_batch_size`.
+- Prefill: `is_decode=False`, `query_len=effective_input_length`, `seq_len=None` (resolved downstream to `cached_prefix + query_len == input_length`), `concurrency=prefill_batch_size`.
 - Decode: `is_decode=True`, `query_len=num_mtp_tokens + 1`, `seq_len=decode_context_length + output_length // 2 + query_len`, `concurrency=batch_size * DP * PP`.
 
 Then it combines these phase latencies into TTFT, TPOT, and output throughput.

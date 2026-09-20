@@ -497,13 +497,17 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
                 summary = OptimizerSummary(optimizer_data)
                 summary.set_early_stop_flag(-1.0, None, None, reason=early_stop_reason)
                 return summary
+            # Cached prefix is not recomputed here: query_len is the effective
+            # (cache-miss) length, and seq_len is left to the downstream resolver to
+            # infer cached_prefix + query_len (== full input_length). The throughput
+            # numerator below still counts the full input_length.
             wave = self._evaluate_pp_wave(
                 batch_size,
                 optimizer_data,
                 is_decode=False,
                 repeat=True,
                 query_len=effective_input_length,
-                seq_len=effective_input_length,
+                seq_len=None,
                 resident_policy="inflight",
                 chunk_shapes=[(c.query_len, c.seq_len) for c in chunk_plan] if len(chunk_plan) > 1 else None,
             )
@@ -523,7 +527,7 @@ class DisaggThroughputOptimizer(BaseThroughputOptimizer):
             # period (measured_interval_s), matching the decode branch above.
             ttft = wave.prefill_request_ttft_s * 1000.0 + serving_cost_ms
             tpot = None
-            completed_tokens = batch_size * effective_input_length
+            completed_tokens = batch_size * input_length
             throughput_interval_s = wave.repeated.measured_interval_s + serving_cost_ms / 1000.0
             output_throughput = completed_tokens * self.dp / throughput_interval_s if throughput_interval_s > 0 else 0.0
 

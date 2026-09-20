@@ -846,13 +846,16 @@ class AggThroughputOptimizer(BaseThroughputOptimizer):
                 prefill_breakdowns="",
                 decode_breakdowns="",
             )
+        # Cached prefix is not recomputed here: query_len is the effective
+        # (cache-miss) length, and seq_len is left to the downstream resolver to
+        # infer cached_prefix + query_len (== full input_length).
         prefill_wave = self._evaluate_pp_wave(
             batch_size,
             optimizer_data,
             is_decode=False,
             repeat=True,
             query_len=effective_input_length,
-            seq_len=effective_input_length,
+            seq_len=None,
             resident_policy=("inflight" if remaining_decode_tokens == 0 else "full"),
             chunk_shapes=[(c.query_len, c.seq_len) for c in chunk_plan] if len(chunk_plan) > 1 else None,
         )

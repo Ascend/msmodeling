@@ -1250,6 +1250,44 @@ class TestDisaggPipelineParallel(unittest.TestCase):
         self.assertNotEqual(row["ttft"], 4595.0)
         self.assertAlmostEqual(row["token/s"], 2 * 8 / 2.5, places=3)
 
+    def test_prefill_cached_prefix_keeps_full_seq_len_and_token_basis(self):
+        """PP>1 prefill with a cache hit keeps full input_length as seq_len and throughput basis.
+
+        Regression for the PP>1 explicit-override path: ``seq_len=None`` must let the
+        base resolver rebuild ``cached_prefix + query_len == input_length`` instead of
+        shrinking attention/KV context to the cache-miss length. The throughput
+        numerator still counts the complete prompt (``batch_size * dp * input_length``),
+        matching the PP=1 ``concurrency * input_length`` basis.
+        """
+        strategy = _make_pp_disagg_strategy(dp=2, pp=2, tp=1)
+        profile = _pp_profile((2.0, 2.0), include_transfers=False)
+        captured = []
+
+        def fake_forward(concurrency, optimizer_data, is_decode, **kwargs):
+            captured.append((concurrency, is_decode, kwargs["query_len"], kwargs["seq_len"]))
+            return _PPMetrics(profile)
+
+        optimizer_data = OptimizerData(
+            ttft_limits=100000,
+            tpot_limits=None,
+            batch_size=2,
+            input_length=200,
+            output_length=8,
+            prefix_cache_hit_rate=0.5,
+            max_batched_tokens=400,
+            serving_cost=5,
+        )
+        with patch.object(strategy, "_get_forward_info", side_effect=fake_forward):
+            row = strategy.get_inference_info(optimizer_data).get_summary_df().iloc[0]
+
+        # query_len is the cache-miss length (100); seq_len stays the full input_length
+        # (200) so attention/KV still attends to the retained cached prefix.
+        self.assertEqual(captured, [(2, False, 100, 200)])
+        # Steady-state throughput: numerator is the full prompt basis
+        # (batch_size * dp * input_length), denominator is the steady wave
+        # period (measured_interval_s = K*b = 4.0s) plus serving cost.
+        self.assertAlmostEqual(row["token/s"], 2 * 200 * 2 / (4.0 + 0.005), places=3)
+
     def test_decode_formula_separates_worst_tpot_and_measured_interval(self):
         strategy = _make_pp_disagg_strategy(dp=1, pp=2, tp=1)
         profile = _pp_profile((2.0, 2.0), include_transfers=False)
