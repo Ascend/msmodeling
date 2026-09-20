@@ -49,7 +49,7 @@
 
 ### 环境隔离原则
 
-服务化实测寻优 optix 推荐装在虚拟环境里。在仓库根目录执行 `uv sync` 即可自动创建 `.venv` 并完成安装。
+确认系统已部署 vLLM/MindIE：例如一个vLLM服务容器，容器内安装服务化实测寻优 optix 工具，推荐装在虚拟环境里。在仓库根目录执行 `uv sync` 即可自动创建 `.venv` 并完成安装。
 
 安装 msmodeling 会同时装上 `torch`、`transformers` 等包，如果在系统 Python 里安装 msModeling，可能会与系统里原有的 `torch`、`transformers` 版本冲突，导致：
 

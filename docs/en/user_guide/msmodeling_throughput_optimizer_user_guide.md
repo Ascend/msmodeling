@@ -195,7 +195,7 @@ python -m cli.inference.throughput_optimizer deepseek-ai/DeepSeek-V3.1 \
 
 ## 3 Result Information
 
-The script outputs performance metrics (throughput, TTFT, TPOT, concurrency, and mode-specific fields such as QPS or PD ratio). Example:
+The script outputs performance metrics (throughput, TTFT, TPOT, concurrency, and mode-specific fields such as QPS or PD ratio). The following example shows the output of the PD aggregation scenario in 2.1:
 
 ```bash
 ********************************************************************************

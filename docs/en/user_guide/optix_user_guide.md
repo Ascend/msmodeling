@@ -73,7 +73,7 @@ In the system environment, or in the path specified by `[deploy]`, confirm that 
 ## Tool Installation
 
 > [!IMPORTANT]
-> **OptiX must be installed in a virtual environment.** Run `uv sync` in the repository root directory. It automatically creates `.venv` and completes the installation.
+> **OptiX must be installed in a virtual environment.** Confirm that vLLM/MindIE has already been deployed in the system, for example in a vLLM serving container, and install OptiX inside that container. Run `uv sync` in the repository root directory. It automatically creates `.venv` and completes the installation.
 >
 > Installing msModeling also installs packages such as `torch` and `transformers`. These dependencies are used for TensorCast simulation, and real-device optimization does not rely on them. If you install msModeling in the system Python, the existing versions of `torch` and `transformers` in the system are often changed. As a result:
 >
