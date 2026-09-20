@@ -72,7 +72,9 @@ bash serving_cast/example/pd_disaggregation/run_pd_disaggregation.sh --enable_pr
 
 请求在 PD 分离下的完整流转：
 
-1. 客户端产生请求（`LEAVES_CLIENT`），进入 Serving（`ARRIVES_SERVER`）；
+1. 客户端按 `request_rate` 逐个尝试发送请求：获得并发槽后离开客户端（`LEAVES_CLIENT`）并进入
+   Serving（`ARRIVES_SERVER`）；服务端并发（`max_concurrency`）已满时，请求停留在客户端排队，
+   各项客户端计时指标从真正获得并发槽的时刻起算；
 2. `PdDisaggregationServing` 把 `need_kv_transfer` 置为 `True`，通过负载均衡器选中一个 Prefill 实例；
 3. Prefill 实例完成 prefill 后进入 `KVS_TRANSFERRING` 状态，按 `device2device_bandwidth`
    与 `device2device_rate` 计算 KV Cache 传输时延；
@@ -159,10 +161,18 @@ output_token_throughput(tok/s) ...
 指标含义：
 
 - `E2E_TIME(s)`：端到端时延，`decode_done_time - leaves_client_time`；
-- `TTFT(s)`：首 token 时延，`prefill_done_time - arrives_server_time`，PD 分离下由 Prefill 池排队与算力决定；
+- `CLIENT_TTFT(s)`：客户端首 token 时延，`prefill_done_time - leaves_client_time`；
+- `SERVER_TTFT(s)`：服务端首 token 时延，`prefill_done_time - arrives_server_time`，PD 分离下由
+  Prefill 池排队与算力决定；
+- `ADMISSION_WAIT(s)`：离开客户端到到达服务端的时延（仅传输时延，仿真中近似为 0）；
 - `TPOT(s)`：单输出 token 时延，由 Decode 池决定，同时包含 KV 传输带来的起步延迟；
 - `OUTPUT_TOKEN_THROUGHPUT(tok/s)`：单请求维度的出词速率；
 - `Overall Summary`：基于首个请求离开客户端到最后一个请求解码完成的墙钟跨度计算的整体吞吐。
+
+> 客户端并发语义（与 AIPerf 对齐）：`request_rate` 的每个时间点表示一次“尝试发送”；
+> 服务端并发已满时请求停留在客户端排队，只有真正获得并发槽后才记录 `leaves_client_time`
+> 与 `arrives_server_time`。因此 `CLIENT_TTFT`、`ADMISSION_WAIT`、`E2E_TIME` 的起点均为
+> 实际发送时刻，不含客户端排队时间。
 
 同时会生成 `--output_json` 指定的 JSON 文件，结构为：
 

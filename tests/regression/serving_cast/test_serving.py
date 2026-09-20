@@ -132,8 +132,11 @@ class ServingTestCase(unittest.TestCase):
             num_output_tokens=1,
             request_rate=0,
         )
-        _, interval = load_gen.next_request()
+        request, interval = load_gen.next_request()
         self.assertEqual(interval, 0)
+        # next_request only pops an attempt; the request stays at the client
+        # (INITIAL) until it actually obtains a concurrency slot.
+        self.assertEqual(request.state, RequestState.INITIAL)
 
         with self.assertRaisesRegex(ValueError, "request_rate must be non-negative"):
             FixedLengthLoadGen(
@@ -143,6 +146,61 @@ class ServingTestCase(unittest.TestCase):
                 num_output_tokens=1,
                 request_rate=-1,
             )
+
+    def test_concurrency_gate_defers_client_departure(self):
+        # Fixed-clock regression test (request_rate=2, max_concurrency=4,
+        # 8 requests): while the server concurrency gate is full a request
+        # must stay at the client. LEAVES_CLIENT is recorded only once the
+        # request actually obtains a concurrency slot, so the per-request
+        # timers (CLIENT_TTFT / ADMISSION_WAIT / E2E_TIME) start at the real
+        # send time, matching AIPerf's per-request records.
+        self.mock_cfg.common_config.serving_config.max_concurrency = 4
+        instance_config = InstanceConfig(
+            num_instances=1,
+            num_devices_per_instance=4,
+            device_type="TEST_DEVICE",
+            pd_role="prefill_decode",
+            parallel_config=ParallelConfig(tp_size=4, dp_size=1),
+            communication_config=CommunicationConfig(),
+        )
+        serving = PdAggregationServing([Instance(instance_config)])
+        load_gen = FixedLengthLoadGen(
+            model_name=self.mock_cfg.common_config.model_config.name,
+            num_requests=8,
+            num_input_tokens=2048,
+            num_output_tokens=50,
+            request_rate=2.0,
+        )
+        # next_request pops in creation order, so ascending ids == attempt order.
+        attempt_order_ids = sorted(load_gen.requests)
+
+        stime.CallableTask(main_processing, serving, load_gen)
+        stime.start_simulation()
+
+        requests = load_gen.get_finished_requests()
+        self.assertEqual(len(requests), 8)
+        by_attempt = [requests[request_id] for request_id in attempt_order_ids]
+        for request in by_attempt:
+            self.assertEqual(request.num_decoded_tokens, 50)
+
+        # Requests 1-4 are admitted immediately at their attempt times.
+        for request, expected_departure in zip(by_attempt[:4], (0.0, 0.5, 1.0, 1.5)):
+            self.assertAlmostEqual(request.leaves_client_time, expected_departure, places=6)
+
+        # Request 5 and later must not leave the client before the gate
+        # releases them, i.e. only after one of the first four finishes.
+        first_slot_release = min(request.decode_done_time for request in by_attempt[:4])
+        for request in by_attempt[4:]:
+            self.assertGreaterEqual(request.leaves_client_time, first_slot_release)
+        # Queued requests are admitted in FIFO order.
+        self.assertTrue(
+            all(a.leaves_client_time <= b.leaves_client_time for a, b in zip(by_attempt[4:], by_attempt[5:]))
+        )
+
+        # Client-side queuing is excluded from the metrics: departure and
+        # server arrival coincide for every request.
+        for request in by_attempt:
+            self.assertEqual(request.arrives_server_time, request.leaves_client_time)
 
     def test_zero_rate_batches_requests_before_scheduler_runs(self):
         self.mock_cfg.common_config.serving_config.max_concurrency = 11

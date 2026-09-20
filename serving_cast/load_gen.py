@@ -14,11 +14,15 @@ class LoadGen(ABC):
     @abstractmethod
     def next_request(self) -> tuple[Request, float]:
         """
-        Each request is a stime object (i.e. has a timestamp attached to it) meaning its
-        expected arriving time.
-        When the caller invokes this method and get a request, the timestamp of the caller
-        thread would be aligned to the timestamp of the returned request if the current
-        timestamp of the thread is no later than the arriving time of the request.
+        Pop the next request to attempt and return it together with the
+        interval to the next attempt.
+
+        The returned request is still in the INITIAL state: a rate tick only
+        means an *attempt* to send. While the server concurrency gate is full
+        the request stays at the client; the caller records LEAVES_CLIENT
+        only after the request actually obtains a concurrency slot, so that
+        client-side timers (CLIENT_TTFT / ADMISSION_WAIT / E2E_TIME) start
+        at the real send time (AIPerf-compatible semantics).
         """
         raise NotImplementedError
 
@@ -56,12 +60,14 @@ class FixedLengthLoadGen(LoadGen):
         self.finished_requests = {}
 
     def next_request(self) -> tuple[Request, float]:
+        """Return the next request (in INITIAL state) and the interval to
+        the next attempt; see LoadGen.next_request.
+        """
         if not self.requests:
             raise ValueError("self.requests is None")
         first_key = next(iter(self.requests))
         request = self.requests.pop(first_key)
         request.decode_done_signal.connect(self._decode_done_callback)
-        request.state = RequestState.LEAVES_CLIENT
         interval = 0 if self.request_rate == 0 else 1 / self.request_rate
         return request, interval
 

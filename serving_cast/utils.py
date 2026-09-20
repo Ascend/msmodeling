@@ -1,6 +1,7 @@
 # Copyright Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import json
 import os
+from collections import deque
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -9,18 +10,76 @@ import numpy as np
 import pandas as pd
 
 from serving_cast import stime
+from serving_cast.request import RequestState
 
 logger = stime.get_logger(__name__)
 
+# Granularity (s) of the client-side polling loop that waits for a free
+# concurrency slot.
+_CONCURRENCY_POLL_INTERVAL = 0.1
+# Tolerance for floating-point accumulation when slicing an interval into
+# poll steps (e.g. 0.3 - 3 * 0.1 leaves ~5.5e-17 due to IEEE 754 rounding).
+_FLOAT_TOLERANCE = 1e-9
+
+
+def _admit_pending_requests(serving, pending):
+    """Admit FIFO-ordered requests as long as concurrency slots are free.
+
+    A request only leaves the client once it actually obtains a concurrency
+    slot; client-side queuing must not start the per-request timers.
+    """
+    while pending and not serving.exceed_concurrency_limit():
+        request = pending.popleft()
+        request.state = RequestState.LEAVES_CLIENT
+        serving.serve(request)
+
 
 def main_processing(serving, load_gen):
-    while load_gen.has_request():
+    """Drive the load generator against the serving system.
+
+    Requests are attempted at the load generator's configured rate. A rate
+    tick is only an *attempt*: while the server concurrency gate is full the
+    request stays at the client in a FIFO queue and is admitted by
+    ``_admit_pending_requests`` within ``_CONCURRENCY_POLL_INTERVAL`` seconds
+    of a slot freeing up. LEAVES_CLIENT is recorded only when a request
+    actually obtains a slot, so per-request client timers
+    (CLIENT_TTFT / ADMISSION_WAIT / E2E_TIME) start at the real send time.
+
+    Returns only after all requests have been generated and their responses
+    completed (``load_gen.is_finished()``), then stops the simulation.
+    """
+    # Requests that were attempted while the concurrency gate was full and
+    # are still waiting at the client (FIFO order).
+    pending = deque()
+    while load_gen.has_request() or pending:
+        _admit_pending_requests(serving, pending)
+        if not load_gen.has_request():
+            # All requests attempted; wait for slots for the queued ones.
+            stime.elapse(_CONCURRENCY_POLL_INTERVAL)
+            continue
         request, interval = load_gen.next_request()
-        while serving.exceed_concurrency_limit():
-            stime.elapse(0.1)
-        serving.serve(request)
+        # A new attempt never jumps ahead of earlier queued requests.
+        if pending or serving.exceed_concurrency_limit():
+            pending.append(request)
+        else:
+            request.state = RequestState.LEAVES_CLIENT
+            serving.serve(request)
         if interval > 0:
-            stime.elapse(interval)
+            if pending:
+                # Keep attempts on schedule while polling for free slots so
+                # queued requests are admitted within the poll granularity.
+                remaining = interval
+                while remaining > _FLOAT_TOLERANCE and pending:
+                    step = min(_CONCURRENCY_POLL_INTERVAL, remaining)
+                    stime.elapse(step)
+                    remaining -= step
+                    _admit_pending_requests(serving, pending)
+                if remaining > _FLOAT_TOLERANCE:
+                    # pending drained early: sleep the rest of the interval
+                    # in one hold instead of polling with an empty queue.
+                    stime.elapse(remaining)
+            else:
+                stime.elapse(interval)
     while not load_gen.is_finished():
         stime.elapse(10)
 
@@ -59,10 +118,19 @@ def summarize(requests_list, output_json_path: str | None = None):
 
     Notes
     -----
-    - E2E_TIME  : end-to-end latency (decode_done - leaves_client)
+    Client-side concurrency semantics (AIPerf-compatible): each request_rate
+    tick is an *attempt* to send. While the server concurrency gate is full
+    the request stays at the client; `leaves_client_time` is recorded only
+    when the request actually obtains a concurrency slot and is sent.
+    Therefore all client-side timers start at the real send time and exclude
+    client-side queuing.
+
+    - E2E_TIME      : end-to-end latency (decode_done - leaves_client)
     - CLIENT_TTFT   : client departure to prefill completion
     - SERVER_TTFT   : server arrival to prefill completion
-    - ADMISSION_WAIT: client departure to server arrival
+    - ADMISSION_WAIT: client departure to server arrival (transport delay
+                      only; ~0 in simulation, since client-side queuing
+                      happens before leaves_client_time)
     - TPOT          : time-per-output-token from Request.time_per_output_token()
     - All throughput figures are computed against the *wall-clock* span from
       the first request leaving the client to the last response finishing decode.
