@@ -43,6 +43,9 @@ JSON_SUBKEY_MAP = {
     "num_speculative_tokens": ("speculative-config", "num_speculative_tokens"),
     # 投机容器内 eager（容器原子性：必须与 method/model 底座成对，见合并段 O2 防御）
     "speculative_enforce_eager": ("speculative-config", "enforce_eager"),
+    # vLLM Ascend MoE 开关：官方只支持经 --additional-config 下发
+    "enable_shared_expert_dp": ("additional-config", "enable_shared_expert_dp"),
+    "multistream_overlap_shared_expert": ("additional-config", "multistream_overlap_shared_expert"),
 }
 
 #: Benchmark-only env fields consumed by the benchmark command's
@@ -76,8 +79,8 @@ def _field_to_cli_flag(name: str, value) -> list[str]:
     """Convert a parameter name+value into CLI flag(s).
 
     Rules:
-    - JSON sub-key params (cudagraph_mode / num_speculative_tokens /
-      speculative_enforce_eager) are wrapped into their container flag with a JSON value.
+    - JSON sub-key params (see JSON_SUBKEY_MAP) are wrapped into their container flag
+      with a JSON value.
     - bool True  -> ['--flag']  (flag only, no value)
     - bool False -> []  (skip)
     - other      -> ['--flag', str(value)]
@@ -108,7 +111,9 @@ def _field_to_cli_flag(name: str, value) -> list[str]:
 #: launch `others` may carry the *full* container dict. The two must be merged, never
 #: emitted as duplicates: argparse last-wins would otherwise silently drop the
 #: search-side value (e.g. num_speculative_tokens) in favour of the `others` dict.
-CONTAINER_FLAGS = ("--speculative-config", "--compilation-config")
+#: MUST list every container used by JSON_SUBKEY_MAP, otherwise the sub-key renders as
+#: a duplicate flag and `_dedupe_plain_flags` silently keeps only the last dict.
+CONTAINER_FLAGS = ("--speculative-config", "--compilation-config", "--additional-config")
 
 
 def _split_container_flags(flags: list) -> tuple[dict, list]:

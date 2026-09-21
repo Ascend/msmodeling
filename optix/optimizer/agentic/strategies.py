@@ -297,7 +297,7 @@ class AgentCandidateStrategy:
                     "name": param_name,
                     "value": param_value,
                     "dtype": schema_entry.get("dtype", "str"),
-                    "config_position": schema_entry.get("config_position", "env"),
+                    "config_position": schema_entry.get("config_position", "run"),
                     "min": schema_entry.get("min", 0.0),
                     "max": schema_entry.get("max", 1.0),
                 }
@@ -317,7 +317,7 @@ class AgentCandidateStrategy:
                 field = OptimizerConfigField(
                     name=param_name,
                     value=param_value,
-                    config_position=schema_entry.get("config_position", "env"),
+                    config_position=schema_entry.get("config_position", "run"),
                 )
             resolved.append(field)
 

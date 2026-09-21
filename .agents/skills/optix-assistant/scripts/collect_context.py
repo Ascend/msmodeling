@@ -14,18 +14,46 @@ from common import (
 )
 
 
-def default_parallel_search_space(world_size: int):
+def default_parallel_search_space(engine: str, world_size: int):
+    # run 字段仅 vLLM 有渲染方（VllmSimulator.set_resolved_field）；其他引擎保持 env，
+    # 避免注入的并行/显存参数被静默忽略（BackendConfig 通道接线另开 issue）。
+    position = "run" if engine == "vllm" else "env"
     choices = [value for value in (1, 2, 4, 8, 16, 32, 64) if value <= max(world_size, 1) and world_size % value == 0]
     if not choices:
         choices = [1]
     pp_choices = [value for value in choices if value <= min(world_size, 8)]
     return {
         "parameters": [
-            {"name": "tp", "dtype": "enum", "min": 0, "max": 1, "choices": choices, "default": 1},
-            {"name": "dp", "dtype": "enum", "min": 0, "max": 1, "choices": choices, "default": 1},
-            {"name": "pp", "dtype": "enum", "min": 0, "max": 1, "choices": pp_choices, "default": 1},
+            {
+                "name": "tp",
+                "config_position": position,
+                "dtype": "enum",
+                "min": 0,
+                "max": 1,
+                "choices": choices,
+                "default": 1,
+            },
+            {
+                "name": "dp",
+                "config_position": position,
+                "dtype": "enum",
+                "min": 0,
+                "max": 1,
+                "choices": choices,
+                "default": 1,
+            },
+            {
+                "name": "pp",
+                "config_position": position,
+                "dtype": "enum",
+                "min": 0,
+                "max": 1,
+                "choices": pp_choices,
+                "default": 1,
+            },
             {
                 "name": "GPU_MEMORY_UTILIZATION",
+                "config_position": position,
                 "dtype": "ratio",
                 "default": 0.9,
                 "min": 0.0,
@@ -244,7 +272,9 @@ def _parse_config_toml(path: Path, engine: str) -> dict:
     return {"target_fields": target_fields}
 
 
-def _inject_model_derived_params(search_space: dict, model_info: dict) -> dict:
+def _inject_model_derived_params(engine: str, search_space: dict, model_info: dict) -> dict:
+    # 同 default_parallel_search_space：位置跟引擎走，mindie 保持 env 通道。
+    position = "run" if engine == "vllm" else "env"
     """Add search-space entries derived from model architecture analysis.
 
     - MoE models: ensure enable_expert_parallel, enable_shared_expert_dp exist
@@ -263,7 +293,7 @@ def _inject_model_derived_params(search_space: dict, model_info: dict) -> dict:
             injected.append(
                 {
                     "name": "enable_expert_parallel",
-                    "config_position": "env",
+                    "config_position": position,
                     "dtype": "enum",
                     "default": True,
                     "choices": [False, True],
@@ -276,7 +306,7 @@ def _inject_model_derived_params(search_space: dict, model_info: dict) -> dict:
             injected.append(
                 {
                     "name": "enable_shared_expert_dp",
-                    "config_position": "env",
+                    "config_position": position,
                     "dtype": "enum",
                     "default": True,
                     "choices": [False, True],
@@ -291,7 +321,7 @@ def _inject_model_derived_params(search_space: dict, model_info: dict) -> dict:
         injected.append(
             {
                 "name": "num_speculative_tokens",
-                "config_position": "env",
+                "config_position": position,
                 "dtype": "enum",
                 # 0 = 关闭投机解码（O2b 关闭档，恒合法）；渲染端 num_spec==0 时
                 # 整个 speculative-config 容器不渲染，等效"无投机基线"。
@@ -307,7 +337,7 @@ def _inject_model_derived_params(search_space: dict, model_info: dict) -> dict:
         injected.append(
             {
                 "name": "cudagraph_mode",
-                "config_position": "env",
+                "config_position": position,
                 "dtype": "enum",
                 "default": "FULL_DECODE_ONLY",
                 "choices": ["FULL_DECODE_ONLY"],
@@ -469,7 +499,7 @@ def main():
     )
 
     # --- Search space decision (3 sources, in priority order) ---
-    search_space = default_parallel_search_space(world_size)
+    search_space = default_parallel_search_space(engine, world_size)
     source = {}
     config_handoff = {}
     parallel_aliases = {}
@@ -499,7 +529,7 @@ def main():
         if parsed.get("target_fields"):
             search_space = search_space_from_target_fields(parsed["target_fields"])
             # Merge tp/dp/pp from default search space if not already present
-            default_ss = default_parallel_search_space(world_size)
+            default_ss = default_parallel_search_space(engine, world_size)
             existing_names = {p["name"].lower() for p in search_space.get("parameters", [])}
             for param in default_ss.get("parameters", []):
                 if param["name"].lower() not in existing_names:
@@ -595,7 +625,7 @@ def main():
 
     # NEW: model-derived injection
     model_info = context.get("model_info", {}) or {}
-    context["search_space"] = _inject_model_derived_params(context["search_space"], model_info)
+    context["search_space"] = _inject_model_derived_params(engine, context["search_space"], model_info)
 
     knowledge = {"known_patterns": known} if known else {}
     if knowledge:
@@ -691,11 +721,14 @@ def _inject_knowledge_params(search_space: dict, known_hints: list, engine: str)
 
 def _param_from_knowledge(name: str, value, section: str) -> dict | None:
     """Convert a known_patterns param value into a search_space parameter entry."""
+    # run 字段仅 vLLM 有渲染方（VllmSimulator.set_resolved_field）；mindie 等引擎
+    # 保持 env（_prepare_run_params 导出环境变量），避免注入参数被静默忽略。
+    position = "run" if section == "vllm" else "env"
     if isinstance(value, bool):
         return {
             "name": name,
             "section": section,
-            "config_position": "env",
+            "config_position": position,
             "dtype": "enum",
             "default": value,
             "min": 0,
@@ -710,7 +743,7 @@ def _param_from_knowledge(name: str, value, section: str) -> dict | None:
             return {
                 "name": name,
                 "section": section,
-                "config_position": "env",
+                "config_position": position,
                 "dtype": "enum",
                 "default": explore[0],
                 "min": 0,
@@ -723,7 +756,7 @@ def _param_from_knowledge(name: str, value, section: str) -> dict | None:
         return {
             "name": name,
             "section": section,
-            "config_position": "env",
+            "config_position": position,
             "dtype": "enum",
             "default": value,
             "min": 0,
@@ -739,7 +772,7 @@ def _param_from_knowledge(name: str, value, section: str) -> dict | None:
         return {
             "name": name,
             "section": section,
-            "config_position": "env",
+            "config_position": position,
             "dtype": "int" if is_int else "float",
             "default": value,
             "min": 1 if is_int else 0.0,
@@ -759,7 +792,7 @@ def _param_from_knowledge(name: str, value, section: str) -> dict | None:
         return {
             "name": name,
             "section": section,
-            "config_position": "env",
+            "config_position": position,
             "dtype": "str",
             "default": json.dumps(value, ensure_ascii=False, separators=(",", ":")),
             "min": 0,
@@ -865,7 +898,7 @@ def _param_from_vendor_preset(name: str, value, preset: dict, scenario: dict) ->
     if isinstance(value, bool):
         return {
             "name": name,
-            "config_position": "env",
+            "config_position": "run",
             "dtype": "enum",
             "default": value,
             "min": 0,
@@ -877,7 +910,7 @@ def _param_from_vendor_preset(name: str, value, preset: dict, scenario: dict) ->
     if isinstance(value, int):
         return {
             "name": name,
-            "config_position": "env",
+            "config_position": "run",
             "dtype": "int",
             "default": value,
             "min": max(1, value // 2),
@@ -888,7 +921,7 @@ def _param_from_vendor_preset(name: str, value, preset: dict, scenario: dict) ->
     if isinstance(value, float):
         return {
             "name": name,
-            "config_position": "env",
+            "config_position": "run",
             "dtype": "ratio",
             "default": value,
             "min": max(0.0, value - 0.1),
@@ -899,7 +932,7 @@ def _param_from_vendor_preset(name: str, value, preset: dict, scenario: dict) ->
     if isinstance(value, str):
         return {
             "name": name,
-            "config_position": "env",
+            "config_position": "run",
             "dtype": "enum",
             "default": value,
             "min": 0,
@@ -984,7 +1017,7 @@ def _register_engine_fixed_params(
             search_space.setdefault("parameters", []).append(
                 {
                     "name": search_name,
-                    "config_position": "env",
+                    "config_position": "run",
                     "dtype": "enum",
                     "default": leaf["value"],
                     "min": 0,

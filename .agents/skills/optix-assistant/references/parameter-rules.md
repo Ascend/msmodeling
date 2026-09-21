@@ -79,4 +79,4 @@ benchmark 类型会影响 benchmark 侧 target field 和性能指标解释，但
 
 `config_skill_handoff.apply_commands` 只生成当前 `config_writer.py`（optix-assistant `scripts/`）CLI 能表达的命令：每条写命令为
 `python <SKILL_ROOT>/scripts/config_writer.py --config <path> --target-field engine=<engine> name=<NAME> config_position=<Z> dtype=<D> [value=<V>] [min=<MIN>] [max=<MAX>] [dtype_param=<json>]`，
-且只对**引擎段**（mindie/vllm）生成（`--target-field` 的 `engine` 只接受引擎段）。vLLM 字段的命令接线（`--flag $NAME` 进 `[vllm.command].others`）统一由 handoff 的 `vllm_command_others` 承担，不再从写命令里带 `--cli-arg`，避免双写。`ais_bench` 相关字段（含 CONCURRENCY/REQUESTRATE 等 scheduler env）保留在 `target_fields` 和 `notes` 中，不写入 `toml_snippet` 的 target-field 块、也不生成写命令，因为当前 Settings loader 对 `ais_bench` target field 的处理存在兼容风险。
+且只对**引擎段**（mindie/vllm）生成（`--target-field` 的 `engine` 只接受引擎段）。vLLM 服务参数自 `#825` 起是 `run` 字段，由字段模型渲染成 `--kebab-case`（`Scheduler.update_data_field`），**不再需要** `--flag $NAME` 两步接线，写命令也不再带 `--cli-arg`，避免双写。`ais_bench` 相关字段（含 CONCURRENCY/REQUESTRATE 等 scheduler env）保留在 `target_fields` 和 `notes` 中，不写入 `toml_snippet` 的 target-field 块、也不生成写命令，因为当前 Settings loader 对 `ais_bench` target field 的处理存在兼容风险。

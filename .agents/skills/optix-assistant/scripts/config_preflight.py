@@ -268,7 +268,7 @@ def check_completeness(
 
     # --- 多卡并行拆分：vllm target_field 必须含 tp（baseline 唯一读源） -----------
     # baseline 用 config target_field 起服务（scheduler.update_data_field 只注入
-    # config_position=="env" 的字段）。多卡且无 tp 时 baseline 以 tp=1 起服务必 OOM；
+    # config_position=="run" 的字段）。多卡且无 tp 时 baseline 以 tp=1 起服务必 OOM；
     # trial 路径不崩只是靠 collect_context 兜底合成——并行维度必须声明在 optix 认的
     # 字段源里。只拦多卡、只报错引导（config_writer 是写 target_field 的唯一入口）。
     if engine == "vllm" and world_size is not None and world_size > 1:
@@ -280,7 +280,7 @@ def check_completeness(
                 f"[{engine}.target_field] 缺少并行拆分参数 tp（world_size={world_size}）—— "
                 f"baseline 将以 tp=1 起服务，多卡必 OOM。运行（保持单一写入入口，勿手改 TOML）：\n"
                 f"  config_writer --config <config 路径> --target-field engine={engine} "
-                f"name=tp config_position=env dtype=enum value={world_size} "
+                f"name=tp config_position=run dtype=enum value={world_size} "
                 f"dtype_param='{factors}'\n"
                 f"（因数集={factors}；dp/pp 可留空，collect_context 会兜底补齐）"
             )
