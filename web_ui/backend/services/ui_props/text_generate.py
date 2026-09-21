@@ -13,7 +13,7 @@ from cli.registry.modules import get_spec
 # ── Module metadata ─────────────────────────────────────────────
 
 MODULE_ID = "text_generate"
-VERSION = "2.9.14"
+VERSION = "2.9.15"
 TITLE = I18nText("文本生成", "Text Generation")
 RUNNER = "ModelRunner"
 
@@ -60,6 +60,17 @@ OPTION_SOURCE_REGISTRY = {
 # ── Validator UI mappings ─────────────────────────────────────────
 
 VALIDATOR_UI = {
+    "prefillDecodeMutex": {
+        "fields": ["prefill", "decode"],
+        "message": I18nText(
+            "--prefill 与 --decode 互斥；请选择其一",
+            "--prefill and --decode are mutually exclusive; pass exactly one",
+        ),
+        "hint": I18nText(
+            "未指定 --prefill 或 --decode 时默认使用 prefill 阶段，建议显式指定",
+            "When neither --prefill nor --decode is specified, prefill phase is used by default. Consider specifying explicitly.",
+        ),
+    },
     "productEqNumDevices": {
         "fields": ["tp-size", "dp-size", "pp-size", "num-devices"],
         "message": I18nText(
@@ -227,7 +238,22 @@ UI: dict[str, UIFieldProps] = {
     ),
     "decode": UIFieldProps(
         label=I18nText('自回归解码', 'Autoregressive Decode'),
-        tooltip=I18nText('启用自回归解码阶段。', 'Enable the autoregressive decode stage.'),
+        tooltip=I18nText(
+            '启用自回归解码阶段。与 --prefill 互斥；两者都不设置时默认按 prefill 处理（向后兼容）。',
+            'Enable the autoregressive decode stage. Mutually exclusive with --prefill; '
+            'when neither is passed, prefill is assumed by default (backward compatible).',
+        ),
+        default=False,
+        group={'zh': '请求', 'en': 'Request'},
+        control='switch',
+    ),
+    "prefill": UIFieldProps(
+        label=I18nText('Prefill 阶段', 'Prefill Phase'),
+        tooltip=I18nText(
+            '显式指定 prefill 阶段，便于识别 phase。与 --decode 互斥；两者都不设置时默认按 prefill 处理（向后兼容）。',
+            'Explicitly selects the prefill phase, so the phase is obvious at a glance. '
+            'Mutually exclusive with --decode; when neither is passed, prefill is assumed by default (backward compatible).',
+        ),
         default=True,
         group={'zh': '请求', 'en': 'Request'},
         control='switch',

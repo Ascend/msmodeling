@@ -45,7 +45,13 @@ TensorCast 是一个面向 PyTorch 程序的性能仿真与分析框架。它使
 python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 3500 --device TEST_DEVICE --compile
 ```
 
-Prefill 模式下不添加 `--decode`；`--query-length` 表示新输入长度，`--context-length` 表示每个请求的 context 长度。
+也可显式添加 `--prefill` 标志（与上条命令等价，便于读者一眼识别 phase）：
+
+```bash
+python -m cli.inference.text_generate Qwen/Qwen3-32B --prefill --num-queries 2 --query-length 3500 --context-length 3500 --device TEST_DEVICE --compile
+```
+
+Prefill 模式下不添加 `--decode`（或显式指定 `--prefill`）；`--query-length` 表示新输入长度，`--context-length` 表示每个请求的 context 长度。`--prefill` 与 `--decode` 互斥，同时传入会报错；两者都未传入时默认按 prefill 处理（向后兼容）。
 
 也可使用多种量化方案对线性层进行量化，例如 W8A8 动态量化，并以 4500 token 的 context 作为前缀：
 
@@ -289,7 +295,7 @@ usage: text_generate.py [-h]
                         [--device <NAME>]
                         [--num-devices NUM_DEVICES] [--reserved-memory-gb RESERVED_MEMORY_GB]
                         [--log-level {debug,info,warning,error,critical}] --num-queries NUM_QUERIES
-                        --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--decode]
+                        --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--prefill] [--decode]
                         [--prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE] [--num-mtp-tokens NUM_MTP_TOKENS]
                         [--no-repetition] [--compile] [--compile-allow-graph-break]
                         [--speculative-method {mtp,dflash,dspark}] [--num-speculative-tokens NUM_SPECULATIVE_TOKENS]
@@ -332,7 +338,8 @@ Run a simulated LLM inference pass and dump the perf result.
 | `--num-queries` | LLM Options | 必选 | 本次仿真的 query 数量。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。 |
 | `--query-length` | LLM Options | 必选 | 每个 query 的新输入 token 长度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：无。 |
 | `--context-length` | LLM Options | 可选 | 每个 query 的已有上下文 token 长度。<br>1. 类型：Int。<br>2. 取值范围：非负整数。<br>3. 默认值：`0`。 |
-| `--decode` | LLM Options | 可选 | 启用自回归 decode 模式；不设置时按 prefill 模式运行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
+| `--decode` | LLM Options | 可选 | 启用自回归 decode 模式；不设置时按 prefill 模式运行。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 与 `--prefill` 互斥。 |
+| `--prefill` | LLM Options | 可选 | 显式指定 prefill 阶段；便于读者一眼识别 phase。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 与 `--decode` 互斥；两者都未传入时默认按 prefill 处理（向后兼容）。 |
 | `--prefix-cache-hit-rate` | LLM Options | 可选 | 指定 prefix cache 命中率，用于 prefill token 复用近似。<br>1. 类型：Float。<br>2. 取值范围：`[0, 1)`。<br>3. 默认值：`0.0`。 |
 | `--num-mtp-tokens` | LLM Options | 可选 | 指定 Multi-Token Prediction（MTP）token 数量，`0` 表示不启用。<br>1. 类型：Int。<br>2. 取值范围：非负整数。<br>3. 默认值：`0`。<br>4. 仅支持具备 MTP 能力的模型，例如 DeepSeek。<br>5. 旧 MTP 入口，不可与 `--speculative-method` / `--num-speculative-tokens` 混用。<br>6. 建议优先使用统一接口 `--speculative-method mtp --num-speculative-tokens N`（语义等价）。本参数目前仍可单独兼容使用，后续版本将逐步弃用。|
 | `--no-repetition` | LLM Options | 可选 | 禁用 transformer 重复模式优化，保留原始模型行为。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。 |
@@ -570,9 +577,9 @@ Stats breakdowns:
 
 ##### Prefill 与 Decode 中的长度参数分别表示什么？
 
-Prefill 阶段不设置 `--decode`。首次 Prefill 通常设置 `--context-length 0`，并使用 `--query-length` 表示完整文本 prompt 的 token 数；分块或增量 Prefill 时，`--context-length` 表示 KV cache 中已有的模型侧 token 数，`--query-length` 表示当前块的新 token 数。
+Prefill 阶段不设置 `--decode`（或显式指定 `--prefill`）。首次 Prefill 通常设置 `--context-length 0`，并使用 `--query-length` 表示完整文本 prompt 的 token 数；分块或增量 Prefill 时，`--context-length` 表示 KV cache 中已有的模型侧 token 数，`--query-length` 表示当前块的新 token 数。
 
-Decode 阶段设置 `--decode`。普通单 token Decode 通常设置 `--query-length 1`。启用投机解码时，CLI 会将 Decode 的 `--query-length` 对齐为 `N + 1`，其中 `N` 为投机 token 数；MTP 建议使用统一接口 `--speculative-method mtp --num-speculative-tokens N`，原有 `--num-mtp-tokens N` 仅保留用于向后兼容。`--context-length` 表示本轮 Decode 前 KV cache 中已有的模型侧 token 数；对于 VL 模型，该长度还应包含 Prefill 阶段产生的图片 token。
+Decode 阶段设置 `--decode`（此时不能再设置 `--prefill`，二者互斥）。普通单 token Decode 通常设置 `--query-length 1`。启用投机解码时，CLI 会将 Decode 的 `--query-length` 对齐为 `N + 1`，其中 `N` 为投机 token 数；MTP 建议使用统一接口 `--speculative-method mtp --num-speculative-tokens N`，原有 `--num-mtp-tokens N` 仅保留用于向后兼容。`--context-length` 表示本轮 Decode 前 KV cache 中已有的模型侧 token 数；对于 VL 模型，该长度还应包含 Prefill 阶段产生的图片 token。
 
 ##### 命令执行成功但显存不足时如何处理？
 

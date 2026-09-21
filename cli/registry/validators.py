@@ -4,7 +4,47 @@ Validators check relationships between multiple parameters.
 Return None on success, str (error message) on failure.
 """
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def prefill_decode_mutex(params: dict[str, Any], provided: set[str]) -> str | None:
+    """--prefill and --decode are mutually exclusive.
+
+    When neither is set, prefill is assumed (backward compatible).
+    An info-level log is emitted to encourage explicit phase specification,
+    but this is NOT an error — it's the documented default path.
+
+    Note: CLI uses store_true flags (presence in ``provided`` is sufficient).
+    Web UI may have default values (e.g., prefill=True by default), so we also
+    check actual param values to catch cases where both end up True even if
+    only one was explicitly touched (prevents validation bypass in Web UI).
+
+    Args:
+        params: Dict keyed by kebab-case param names.
+        provided: Set of explicitly passed kebab-case param names.
+
+    Returns:
+        None if valid, error message string if invalid.
+    """
+    # Check actual values (catches Web UI defaults + explicit touches)
+    prefill_val = params.get("prefill")
+    decode_val = params.get("decode")
+    prefill_on = prefill_val is True or ("prefill" in provided and bool(prefill_val))
+    decode_on = decode_val is True or ("decode" in provided and bool(decode_val))
+
+    if prefill_on and decode_on:
+        return "--prefill and --decode are mutually exclusive; pass exactly one"
+    if not prefill_on and not decode_on:
+        # Info-level: this is the backward-compatible default path, not an error.
+        # All existing scripts/CI that omit both flags will see this message.
+        logger.info(
+            "Neither --prefill nor --decode specified; defaulting to prefill phase. "
+            "Consider passing --prefill or --decode explicitly for clarity."
+        )
+    return None
 
 
 def product_eq_num_devices(params: dict[str, Any]) -> str | None:
