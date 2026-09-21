@@ -157,16 +157,27 @@ def test_vllm_recommendation_defaults_to_ais_bench_and_parallel_constraint(tmp_p
     assert handoff["handoff_type"] == "target_fields_and_commands"
     assert not any(field["name"] == "ENABLE_PREFIX_CACHING" for field in handoff["target_fields"])
     assert any("--target-field" in command for command in handoff["apply_commands"])
-    # --cli-arg 冗余已删除：写命令只 upsert target_field 块，命令接线统一由 vllm_command_others 承担
+    # --cli-arg 冗余已删除：写命令只 upsert target_field 块
     assert not any("--cli-arg" in command for command in handoff["apply_commands"])
     assert not any("$TENSOR_PARALLEL_SIZE" in command for command in handoff["apply_commands"])
     # ais_bench 段 scheduler env（CONCURRENCY/REQUESTRATE）不生成写命令，保留在 target_fields JSON
     assert not any("engine=ais_bench" in command for command in handoff["apply_commands"])
     assert any(field["name"] == "CONCURRENCY" for field in handoff["target_fields"])
-    assert "--tensor_parallel_size $TENSOR_PARALLEL_SIZE" in handoff["vllm_command_others"]
-    assert "--enable-prefix-caching" not in handoff["vllm_command_others"]
-    assert "--enable-chunked-prefill" not in handoff["vllm_command_others"]
-    assert "$ENABLE_PREFIX_CACHING" not in handoff["vllm_command_others"]
+    # #825 起 vLLM 服务参数是 run 字段：others 生成 `--flag $NAME` 占位符兜底，
+    # 真值由字段模型渲染成同名 --flag，经渲染层 last-wins 去重压制占位符
+    # （$NAME↔target_field 一致性由 config_writer 的协议校验兜底）。
+    others = handoff["vllm_command_others"]
+    assert "--max-model-len $MAX_MODEL_LEN" in others
+    assert "--tensor-parallel-size $TENSOR_PARALLEL_SIZE" in others
+    assert "--gpu-memory-utilization $GPU_MEMORY_UTILIZATION" in others
+    assert "$COMPILATION_CONFIG" in others
+    # 容量字段走 BUILTIN_COMMAND_FIELDS 例外，不生成占位符（由字段模型渲染）
+    assert "$MAX_NUM_SEQS" not in others
+    assert "$MAX_NUM_BATCHED_TOKENS" not in others
+    # benchmark 负载参数属 env 位置，绝不进 serve others
+    assert "$CONCURRENCY" not in others
+    assert "$REQUESTRATE" not in others
+    assert all(field["config_position"] == "run" for field in handoff["target_fields"] if field["section"] == "vllm")
     assert_handoff_commands_parse(handoff, tmp_path)
 
 

@@ -15,6 +15,7 @@
 # -------------------------------------------------------------------------
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -26,13 +27,21 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
 from optix.config.custom_command import (
+    CONTAINER_FLAGS,
+    JSON_SUBKEY_MAP,
     AisBenchCommand,
     AisBenchCommandConfig,
     VllmBenchmarkCommand,
     VllmBenchmarkCommandConfig,
     VllmCommand,
     VllmCommandConfig,
+    param_to_cli_flag,
 )
+
+
+def _container_dict(cmd: list[str], flag: str) -> dict[str, Any]:
+    """Return the merged JSON dict carried by ``flag`` in a rendered command."""
+    return json.loads(cmd[cmd.index(flag) + 1])
 
 
 def _require_resolve_mindie_argv() -> Callable[[Mapping[str, str]], list[str]]:
@@ -122,6 +131,111 @@ class TestVllmCommand:
         cmd = VllmCommand(config, []).command
         assert "--max-num-batched-tokens" not in cmd
         assert "--max-num-seqs" not in cmd
+
+    def test_benchmark_only_fields_never_render_as_serve_flags(self) -> None:
+        # CONCURRENCY / REQUESTRATE are consumed by the benchmark command through
+        # the $CONCURRENCY / $REQUESTRATE placeholders (rendered to
+        # --max-concurrency / --request-rate in `vllm bench serve`). They are not
+        # vLLM serve flags: rendering them here crashes `vllm serve`. The guard is
+        # name-based (BENCHMARK_ONLY_FIELDS), so it must hold even when the field
+        # is declared config_position="run" — position alone cannot save it.
+        config = VllmCommandConfig(host="localhost", port="8000", model="m", served_model_name="m", others="")
+        fields = [
+            SimpleNamespace(name="CONCURRENCY", value=100),
+            SimpleNamespace(name="REQUESTRATE", value=20),
+            SimpleNamespace(name="MAX_NUM_SEQS", value=64),
+        ]
+
+        cmd = VllmCommand(config, fields).command
+        joined = " ".join(cmd).lower()
+
+        assert "concurrency" not in joined
+        assert "request-rate" not in joined
+        # Not a blanket skip: an ordinary run field in the same batch must render.
+        assert "--max-num-seqs" in cmd
+
+    def test_container_flags_cover_every_json_subkey_container(self) -> None:
+        # Structural guard for the whole class of bug: a JSON sub-key param renders
+        # `--<container> '{...}'`, so its container MUST be in CONTAINER_FLAGS for the
+        # merge to happen. A container missing from the tuple makes the sub-key emit a
+        # *duplicate* flag, and _dedupe_plain_flags then keeps only the last dict —
+        # silently dropping the search-side value (or the `others` base keys).
+        # Fails whenever JSON_SUBKEY_MAP gains a container without CONTAINER_FLAGS.
+        containers = {json_container for json_container, _ in JSON_SUBKEY_MAP.values()}
+        missing = sorted("--" + container for container in containers if "--" + container not in CONTAINER_FLAGS)
+        assert not missing, f"containers missing from CONTAINER_FLAGS: {missing}"
+
+    def test_moe_additional_config_subkeys_merge_into_one_container(self) -> None:
+        # vLLM Ascend MoE switches (enable_shared_expert_dp /
+        # multistream_overlap_shared_expert) have NO top-level CLI flag; they are
+        # sub-keys of --additional-config. Rendering them as top-level flags makes
+        # `vllm serve` reject the launch (unrecognized arguments).
+        config = VllmCommandConfig(
+            host="localhost",
+            port="8000",
+            model="m",
+            served_model_name="m",
+            others="""--additional-config '{"enable_cpu_binding": true, "weight_nz_mode": 2}'""",
+        )
+        fields = [
+            SimpleNamespace(name="enable_shared_expert_dp", value=True),
+            SimpleNamespace(name="multistream_overlap_shared_expert", value=True),
+        ]
+
+        cmd = VllmCommand(config, fields).command
+
+        assert "--enable-shared-expert-dp" not in cmd
+        assert "--multistream-overlap-shared-expert" not in cmd
+        # Single merged occurrence: argparse last-wins would otherwise drop one dict.
+        assert cmd.count("--additional-config") == 1
+        assert _container_dict(cmd, "--additional-config") == {
+            "enable_cpu_binding": True,
+            "weight_nz_mode": 2,
+            "enable_shared_expert_dp": True,
+            "multistream_overlap_shared_expert": True,
+        }
+
+    def test_additional_config_subkey_renders_without_others_baseline(self) -> None:
+        # Same params with no preset baseline must still produce the container (an
+        # empty `others` must not make the sub-key vanish) — and must not degrade to a
+        # bogus top-level flag.
+        config = VllmCommandConfig(host="localhost", port="8000", model="m", served_model_name="m", others="")
+        fields = [
+            SimpleNamespace(name="enable_shared_expert_dp", value=True),
+            SimpleNamespace(name="multistream_overlap_shared_expert", value=True),
+        ]
+
+        cmd = VllmCommand(config, fields).command
+
+        assert cmd.count("--additional-config") == 1
+        assert _container_dict(cmd, "--additional-config") == {
+            "enable_shared_expert_dp": True,
+            "multistream_overlap_shared_expert": True,
+        }
+
+    def test_additional_config_subkey_false_renders_explicit_off(self) -> None:
+        # additional_config.get(key, False) semantics: an explicit false must reach
+        # vLLM as an off switch instead of being dropped (which would let the preset
+        # baseline turn the feature back on).
+        config = VllmCommandConfig(
+            host="localhost",
+            port="8000",
+            model="m",
+            served_model_name="m",
+            others="""--additional-config '{"enable_shared_expert_dp": true}'""",
+        )
+        fields = [SimpleNamespace(name="enable_shared_expert_dp", value=False)]
+
+        cmd = VllmCommand(config, fields).command
+
+        assert _container_dict(cmd, "--additional-config") == {"enable_shared_expert_dp": False}
+
+    def test_additional_config_subkey_maps_to_container_flag(self) -> None:
+        # Runtime validation resolves a param back to its flag via param_to_cli_flag;
+        # it must agree with the command side or a legal param is rejected as
+        # "not supported by the current vllm runtime".
+        assert param_to_cli_flag("enable_shared_expert_dp") == "additional-config"
+        assert param_to_cli_flag("multistream_overlap_shared_expert") == "additional-config"
 
 
 class TestVllmBenchmarkCommand:

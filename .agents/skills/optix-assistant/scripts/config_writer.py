@@ -34,8 +34,11 @@ optix 的 pydantic Settings 校验在依赖可用时自动生效（见 --check �
     --append-others ais_bench="--datasets my_datasets --num-prompts 3000"
 
   # 搜索/固定参数（--add-search-param / --add-fixed-param 的替代；可重复）
+  # config_position 二选一，由参数归属决定、不要按名字猜：
+  #   run = vLLM 命令行参数（字段名自动渲染成 --kebab-case，JSON 子键走容器渲染）
+  #   env = 真环境变量（benchmark 侧的 CONCURRENCY/REQUESTRATE 等）
   python config_writer.py --config <path> \
-    --target-field engine=vllm name=num_speculative_tokens min=3 max=12 dtype=int config_position=env
+    --target-field engine=vllm name=num_speculative_tokens min=3 max=12 dtype=int config_position=run
 
   # JSON-container 结构化写入（推荐，取代 --set-others 手拼 JSON 字符串）：
   #   --set <engine>.command.others.<flag>='{...JSON dict...}'
@@ -334,7 +337,7 @@ def _print_sections(doc, engines=ENGINES) -> None:
         if section in engines:
             for f in blk.get("target_field") or []:
                 name = f.get("name")
-                if name and (f.get("config_position") == "env" or name == "num_speculative_tokens"):
+                if name:  # 打印引擎段全部 target_field（run 迁移后仅按 env 过滤会隐藏排障信息）
                     extra = [
                         f"{k}={f.get(k)}"
                         for k in ("min", "max", "dtype", "value", "dtype_param")

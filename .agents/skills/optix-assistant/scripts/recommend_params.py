@@ -32,9 +32,9 @@ CONFIG_SKILL_SCRIPT = ".agents/skills/optix-assistant/scripts/config_writer.py"
 CONFIG_PATH_HINT = "optix/config.toml"
 VLLM_COMMAND_ARG_BY_NAME = {
     "MAX_MODEL_LEN": "--max-model-len",
-    "TENSOR_PARALLEL_SIZE": "--tensor_parallel_size",
+    "TENSOR_PARALLEL_SIZE": "--tensor-parallel-size",
     "PIPELINE_PARALLEL_SIZE": "--pipeline-parallel-size",
-    "GPU_MEMORY_UTILIZATION": "--gpu_memory_utilization",
+    "GPU_MEMORY_UTILIZATION": "--gpu-memory-utilization",
     "BLOCK_SIZE": "--block-size",
     "MAX_NUM_PARTIAL_PREFILLS": "--max-num-partial-prefills",
     "LONG_PREFILL_TOKEN_THRESHOLD": "--long-prefill-token-threshold",  # nosec B105
@@ -553,7 +553,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "Fixed to first-run max input plus max output, capped by model context length.",
             max_model_len,
             max_model_len,
-            "env",
+            "run",
             search=False,
         ),
         recommendation(
@@ -564,7 +564,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "Bounded by estimated KV cache capacity under the first-run workload.",
             max_num_seqs_lo,
             max_num_seqs_hi,
-            "env",
+            "run",
         ),
         recommendation(
             "MAX_NUM_BATCHED_TOKENS",
@@ -574,7 +574,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "Covers expected prefill pressure without starting from an overly wide range.",
             batched_tokens_lo,
             batched_tokens_hi,
-            "env",
+            "run",
         ),
         recommendation(
             "TENSOR_PARALLEL_SIZE",
@@ -584,7 +584,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "Selected from attention-head-compatible divisors of world_size.",
             0,
             1,
-            "env",
+            "run",
             dtype_param=sorted(set([1, parallel["tp"]])),
         ),
         recommendation(
@@ -595,7 +595,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "Keep at 1 for first run unless multi-node or very large model requires PP.",
             0,
             1,
-            "env",
+            "run",
             dtype_param=sorted(set([1, parallel["pp"]])),
         ),
         recommendation(
@@ -606,7 +606,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "Derived to satisfy DP * TP * PP == world_size; wire into startup only if your vLLM mode supports it.",
             parallel["dp"],
             parallel["dp"],
-            "env",
+            "run",
             search=False,
         ),
         recommendation(
@@ -617,7 +617,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "Conservative first-run utilization for avoiding startup OOM.",
             0.85,
             0.92,
-            "env",
+            "run",
         ),
         recommendation(
             "BLOCK_SIZE",
@@ -627,7 +627,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "KV cache block-size candidate; verify available values with `vllm serve --help` on your environment.",
             0,
             1,
-            "env",
+            "run",
             dtype_param=[16, 32, 64, 128],
         ),
         default_presence_setting(
@@ -644,7 +644,7 @@ def recommend_vllm(context: Dict[str, Any], parallel: Dict[str, int], capacity: 
             "Optional compile/cudagraph candidate; leave empty for the safest first run unless help output confirms support.",
             0,
             1,
-            "env",
+            "run",
             dtype_param=["", "{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}"],
         ),
     ] + benchmark_recommendations(capacity)
@@ -697,7 +697,7 @@ def discover_vllm_optional_recommendations(context: Dict[str, Any], help_text: s
                     "Discovered from vLLM help; useful for long-prefill workloads with chunked prefill.",
                     1,
                     4,
-                    "env",
+                    "run",
                 ),
                 "--max-num-partial-prefills",
             )
@@ -716,7 +716,7 @@ def discover_vllm_optional_recommendations(context: Dict[str, Any], help_text: s
                     "Discovered from vLLM help; separates long prompts for chunked-prefill scheduling.",
                     0,
                     input_max,
-                    "env",
+                    "run",
                 ),
                 "--long-prefill-token-threshold",
             )
