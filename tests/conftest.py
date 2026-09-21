@@ -19,6 +19,7 @@ import pytest
 
 logger = logging.getLogger(__name__)
 
+
 def _torch_available() -> bool:
     try:
         import torch  # noqa: F401
