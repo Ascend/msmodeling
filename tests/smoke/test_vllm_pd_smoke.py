@@ -471,7 +471,7 @@ class TestPdResetRoundDirProducesNewDir(unittest.TestCase):
         obj._reset_round_dir()
         new = obj._get_round_dir()
         # _reset_round_dir clears cache; _get_round_dir recreates the same fixed path
-        self.assertEqual(new, old)  # same path (fixed remote_dir design)
+        self.assertEqual(new, old)  # same path (fixed _gen_dir staging design)
         self.assertTrue(new.exists())
         obj._cleanup_round_dir()
 
@@ -495,6 +495,75 @@ class TestPdCleanupRoundDirNoneSafe(unittest.TestCase):
         obj = _make_pd()  # never called _get_round_dir
         obj._cleanup_round_dir()  # must not raise
         self.assertIsNone(obj._round_tmp_dir)
+
+
+class TestPdGenDirSeparation(unittest.TestCase):
+    """20260831-04: 本地生成目录 (_gen_dir) 与远端目录 (_remote_dir) 分离。"""
+
+    def test_gen_dir_has_gen_suffix(self):
+        obj = _make_pd()
+        obj._cluster_id = 0
+        self.assertEqual(obj._gen_dir, "/tmp/vllm_pd_0_gen")
+        obj._cluster_id = 3
+        self.assertEqual(obj._gen_dir, "/tmp/vllm_pd_3_gen")
+
+    def test_remote_dir_unchanged_and_differs_from_gen_dir(self):
+        obj = _make_pd()
+        obj._cluster_id = 0
+        self.assertEqual(obj._remote_dir, "/tmp/vllm_pd_0")
+        self.assertNotEqual(obj._gen_dir, obj._remote_dir)
+
+    def test_get_round_dir_points_to_gen_dir(self):
+        obj = _make_pd()
+        round_dir = obj._get_round_dir()
+        try:
+            self.assertEqual(round_dir, Path(obj._gen_dir))
+            self.assertNotEqual(round_dir, Path(obj._remote_dir))
+        finally:
+            obj._cleanup_round_dir()
+
+    def test_upload_all_scripts_always_uploads(self):
+        """TC7 — 不再 self-skip：即使远端目录已存在，也总是上传。"""
+        obj = _make_pd()
+        round_dir = obj._get_round_dir()
+        (round_dir / "run.sh").write_text("#!/bin/bash\n")
+        obj._ssh_cmd_timeout = 30
+        node = MagicMock()
+        obj._all_nodes = lambda: [node]
+        obj._container_key = lambda n: "key1"
+        executor = MagicMock()
+        executor.run.return_value = MagicMock(ok=True)
+        put_calls = []
+        executor.put = lambda local, remote: put_calls.append(remote)
+        obj._exec_for_node = lambda n: executor
+        try:
+            obj._upload_all_scripts()
+            self.assertTrue(put_calls, "must always upload scripts")
+            self.assertTrue(any(p.endswith("run.sh") for p in put_calls))
+            # 不应再调用 [ -d remote_dir ] self-skip 检查
+            skip_checks = [c for c in executor.run.call_args_list if c[0][0].startswith("[ -d ")]
+            self.assertEqual(skip_checks, [])
+        finally:
+            obj._cleanup_round_dir()
+
+    def test_clear_remote_dirs_docker_runs_both_sides(self):
+        """20260915-01 TC8 — Docker 节点清理：同一 [ -d ] 守卫命令以 container_exec=True/False 各执行一次。"""
+        obj = _make_pd()
+        obj._ssh_cmd_timeout = 30
+        node = MagicMock()
+        obj._all_nodes = lambda: [node]
+        obj._container_key = lambda n: "key1"
+        executor = MagicMock()
+        executor.run.return_value = MagicMock(ok=True)
+        obj._exec_for_node = lambda n: executor
+        obj._clear_remote_dirs()
+        calls = executor.run.call_args_list
+        self.assertEqual(len(calls), 2)
+        # 两种 container_exec 各发生一次
+        self.assertEqual(sorted(c.kwargs["container_exec"] for c in calls), [False, True])
+        # 两次执行的是同一 [ -d ] 守卫清理命令
+        self.assertEqual(len({c.args[0] for c in calls}), 1)
+        self.assertTrue(next(iter(calls)).args[0].startswith("if [ -d "))
 
 
 class TestPdBackupCopiesFromTmpDir(unittest.TestCase):
