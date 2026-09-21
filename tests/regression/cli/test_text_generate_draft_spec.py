@@ -126,3 +126,157 @@ class TestTextGenerateDraftSpecCli(TestCase):
     def test_explicit_n_zero_with_mtp_method_fails(self):
         with self.assertRaises(SystemExit):
             self._parse(["--speculative-method=mtp", "--num-speculative-tokens=0"])
+
+    # ── Phase (--prefill / --decode) tests ────────────────────────────
+
+    def test_prefill_decode_mutex_rejects_both(self):
+        """--prefill and --decode are mutually exclusive."""
+        with self.assertRaises(SystemExit):
+            self._parse(["--prefill", "--decode"])
+
+    def test_prefill_explicit_flag(self):
+        """--prefill sets phase=prefill and does not conflict with other params.
+
+        Note: There is no args.phase field; phase is determined by decode flag.
+        When --prefill is passed, decode=False, which means prefill phase.
+        """
+        args = self._parse(["--prefill"])
+        self.assertTrue(args.prefill)
+        self.assertFalse(args.decode)
+        # Verify prefill phase
+        is_prefill_phase = not args.decode
+        self.assertTrue(is_prefill_phase)
+
+    def test_decode_explicit_flag_with_mtp_auto_aligns(self):
+        """--decode with MTP auto-aligns query_length to N+1."""
+        args = self._parse(
+            [
+                "--decode",
+                "--context-length",
+                "4096",
+                "--speculative-method=mtp",
+                "--num-speculative-tokens=3",
+            ]
+        )
+        mod.align_decode_query_length(args)
+        self.assertEqual(args.query_length, 4)  # 3 + 1
+
+    def test_decode_without_mtp_keeps_query_length(self):
+        """--decode without MTP/Draft keeps query_length unchanged."""
+        args = self._parse(["--decode", "--query-length=3"])
+        mod.align_decode_query_length(args)
+        self.assertEqual(args.query_length, 3)
+
+    def test_default_phase_is_prefill(self):
+        """Backward compat: neither --prefill nor --decode means prefill phase.
+
+        Phase determination: decode=False implies prefill phase (see align_decode_query_length).
+        Downstream code (e.g., UserInputConfig.decode) uses this flag to determine phase.
+        """
+        args = self._parse([])
+        # Both flags False means prefill phase (backward compatible)
+        self.assertFalse(args.prefill)
+        self.assertFalse(args.decode)
+        # Verify decode flag is the phase indicator
+        is_prefill_phase = not args.decode
+        self.assertTrue(is_prefill_phase)
+
+    def test_neither_prefill_nor_decode_warns(self):
+        """Neither --prefill nor --decode emits an info log but succeeds.
+
+        Note: This info-level log fires on ALL existing CLI calls that omit both
+        flags (backward-compatible default path). It's intentionally NOT a warning
+        to avoid confusing users into thinking they're doing something wrong.
+        """
+        import logging
+
+        with self.assertLogs("cli.registry.validators", level=logging.INFO) as cm:
+            args = self._parse([])
+        # Should still parse successfully
+        self.assertFalse(args.prefill)
+        self.assertFalse(args.decode)
+        # Should have logged an info message
+        self.assertTrue(any("prefill" in msg.lower() and "decode" in msg.lower() for msg in cm.output))
+
+    def test_explicitly_provided_tracks_phase_flags(self):
+        """Verify _explicitly_provided correctly tracks --prefill/--decode presence.
+
+        This test directly validates the provided set computation that the
+        prefillDecodeMutex validator relies on. Since both flags are store_true
+        with no cli_off_flag, presence in provided is the sole determinant.
+        """
+        from cli.registry.argparse_adapter import _explicitly_provided, build_argparser
+        from cli.registry.modules import get_spec
+
+        spec = get_spec("text_generate")
+        parser = build_argparser(spec)
+
+        # Case 1: --prefill only
+        args = parser.parse_args(
+            ["--num-queries", "1", "--query-length", "8", "--prefill", "Qwen/Qwen3-32B", "--device=TEST_DEVICE"]
+        )
+        provided = _explicitly_provided(
+            spec,
+            parser,
+            args,
+            ["--num-queries", "1", "--query-length", "8", "--prefill", "Qwen/Qwen3-32B", "--device=TEST_DEVICE"],
+        )
+        self.assertIn("prefill", provided)
+        self.assertNotIn("decode", provided)
+
+        # Case 2: --decode only
+        args = parser.parse_args(
+            ["--num-queries", "1", "--query-length", "8", "--decode", "Qwen/Qwen3-32B", "--device=TEST_DEVICE"]
+        )
+        provided = _explicitly_provided(
+            spec,
+            parser,
+            args,
+            ["--num-queries", "1", "--query-length", "8", "--decode", "Qwen/Qwen3-32B", "--device=TEST_DEVICE"],
+        )
+        self.assertIn("decode", provided)
+        self.assertNotIn("prefill", provided)
+
+        # Case 3: neither
+        args = parser.parse_args(
+            ["--num-queries", "1", "--query-length", "8", "Qwen/Qwen3-32B", "--device=TEST_DEVICE"]
+        )
+        provided = _explicitly_provided(
+            spec, parser, args, ["--num-queries", "1", "--query-length", "8", "Qwen/Qwen3-32B", "--device=TEST_DEVICE"]
+        )
+        self.assertNotIn("prefill", provided)
+        self.assertNotIn("decode", provided)
+
+    def test_prefill_decode_mutex_validator_is_registered(self):
+        """Verify prefillDecodeMutex validator is registered in text_generate spec.
+
+        This ensures the validator is actually wired up via ValidatorRef and will
+        be called during parse_module_args. If this ValidatorRef is accidentally
+        removed, this test will catch it.
+        """
+        from cli.registry.modules import get_spec
+
+        spec = get_spec("text_generate")
+        validator_names = [v.name for v in spec.validators]
+        self.assertIn("prefillDecodeMutex", validator_names)
+
+        # Verify it has wants_provided=True (needed for the provided set)
+        mutex_validator = next(v for v in spec.validators if v.name == "prefillDecodeMutex")
+        self.assertTrue(mutex_validator.wants_provided)
+
+    def test_prefill_decode_mutex_catches_web_ui_bypass(self):
+        """Validator rejects both=True even if only one is in provided.
+
+        Web UI may have prefill=True as default. If user only toggles decode
+        (so provided={'decode'} but params={'prefill': True, 'decode': True}),
+        the validator must still reject — otherwise the CLI would see
+        --prefill --decode and fail, creating inconsistent behavior.
+        """
+        from cli.registry.validators import prefill_decode_mutex
+
+        # Scenario: Web UI sends prefill=True (default) + decode=True (touched)
+        params = {"prefill": True, "decode": True}
+        provided = {"decode"}  # only decode was explicitly touched
+        error = prefill_decode_mutex(params, provided)
+        self.assertIsNotNone(error)
+        self.assertIn("mutually exclusive", error)

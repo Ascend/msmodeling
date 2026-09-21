@@ -45,7 +45,13 @@ To run prefill for Qwen3-32B on `TEST_DEVICE` with two requests, each with a 3,5
 python -m cli.inference.text_generate Qwen/Qwen3-32B --num-queries 2 --query-length 3500 --context-length 3500 --device TEST_DEVICE --compile
 ```
 
-In prefill mode, do not add `--decode`. `--query-length` specifies the new input length, and `--context-length` specifies the context length of each request.
+You can also add the explicit `--prefill` flag (equivalent to the command above, and makes the phase obvious at a glance):
+
+```bash
+python -m cli.inference.text_generate Qwen/Qwen3-32B --prefill --num-queries 2 --query-length 3500 --context-length 3500 --device TEST_DEVICE --compile
+```
+
+In prefill mode, do not add `--decode` (or explicitly pass `--prefill`). `--query-length` specifies the new input length, and `--context-length` specifies the context length of each request. `--prefill` and `--decode` are mutually exclusive — passing both produces an error. When neither is passed, prefill is assumed by default (backward compatible).
 
 You can also quantize the linear layers with various quantization schemes, such as `W8A8` dynamic quantization, using a 4500-token context as the prefix:
 
@@ -230,7 +236,7 @@ usage: text_generate.py [-h]
                         [--device {TEST_DEVICE,ATLAS_800_A2_376T_64G,ATLAS_800_A2_313T_64G,ATLAS_800_A2_280T_64G,ATLAS_800_A2_280T_64G_PCIE,ATLAS_800_A2_280T_32G_PCIE,ATLAS_800_A3_752T_128G_DIE,ATLAS_800_A3_560T_128G_DIE,ATLAS_800_A3_560T_128G_DIE_ROCE,ATLAS_350_425T_112G,ATLAS_350_425T_84G}]
                         [--num-devices NUM_DEVICES] [--enable-multistream] [--reserved-memory-gb RESERVED_MEMORY_GB]
                         [--log-level {debug,info,warning,error,critical}] --num-queries NUM_QUERIES
-                        --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--decode]
+                        --query-length QUERY_LENGTH [--context-length CONTEXT_LENGTH] [--prefill] [--decode]
                         [--prefix-cache-hit-rate PREFIX_CACHE_HIT_RATE] [--num-mtp-tokens NUM_MTP_TOKENS]
                         [--disable-repetition] [--compile] [--compile-allow-graph-break]
                         [--enable-sequence-parallel]
@@ -269,7 +275,8 @@ The main parameters are as follows:
 | --num-queries                        | LLM Options | Required | Number of queries in this simulation.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: None. |
 | --query-length                       | LLM Options | Required | New input token length of each query.<br>1. Type: Int.<br>2. Value range: positive integer.<br>3. Default: None. |
 | --context-length                     | LLM Options | Optional | Existing context token length of each query.<br>1. Type: Int.<br>2. Value range: non-negative integer.<br>3. Default: 0. |
-| --decode                             | LLM Options | Optional | Enables autoregressive decode mode. When not set, the simulation runs in prefill mode.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
+| --decode                             | LLM Options | Optional | Enables autoregressive decode mode. When not set, the simulation runs in prefill mode.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`.<br>4. Mutually exclusive with `--prefill`. |
+| --prefill                            | LLM Options | Optional | Explicitly selects the prefill phase, so the phase is obvious at a glance.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`.<br>4. Mutually exclusive with `--decode`; when neither is passed, prefill is assumed by default (backward compatible). |
 | --prefix-cache-hit-rate              | LLM Options | Optional | Specifies the prefix cache hit rate, used to approximate prefill token reuse.<br>1. Type: Float.<br>2. Value range: [0, 1).<br>3. Default: 0.0. |
 | --num-mtp-tokens                     | LLM Options | Optional | Specifies the number of Multi-Token Prediction (MTP) tokens. 0 disables MTP.<br>1. Type: Int.<br>2. Value range: non-negative integer.<br>3. Default: 0.<br>4. Supported only by models with MTP capability, for example DeepSeek. |
 | --disable-repetition                 | LLM Options | Optional | Disables the transformer repetition pattern optimization and preserves the original model behavior.<br>1. Type: Bool.<br>2. Value range: on/off flag.<br>3. Default: `False`. |
@@ -504,9 +511,9 @@ The model processor adjusts the image to dimensions compatible with its patch an
 
 ##### What do the length parameters mean in Prefill and Decode?
 
-For Prefill, omit `--decode`. Initial Prefill normally uses `--context-length 0`, with `--query-length` representing the token count of the complete text prompt. For chunked or incremental Prefill, `--context-length` represents the model-side tokens already stored in the KV cache, while `--query-length` represents the new tokens in the current chunk.
+For Prefill, omit `--decode` (or pass `--prefill` explicitly). Initial Prefill normally uses `--context-length 0`, with `--query-length` representing the token count of the complete text prompt. For chunked or incremental Prefill, `--context-length` represents the model-side tokens already stored in the KV cache, while `--query-length` represents the new tokens in the current chunk.
 
-For Decode, set `--decode`. Standard single-token Decode normally uses `--query-length 1`. When speculative decoding is enabled, the CLI aligns the Decode `--query-length` to `N + 1`, where `N` is the number of speculative tokens. For MTP, prefer the unified interface `--speculative-method mtp --num-speculative-tokens N`; the legacy `--num-mtp-tokens N` option is retained for backward compatibility. `--context-length` represents the model-side tokens already stored in the KV cache before the current Decode step. For a VL model, this length also includes image tokens produced during Prefill.
+For Decode, set `--decode` (and do not also set `--prefill` — the two are mutually exclusive). Standard single-token Decode normally uses `--query-length 1`. When speculative decoding is enabled, the CLI aligns the Decode `--query-length` to `N + 1`, where `N` is the number of speculative tokens. For MTP, prefer the unified interface `--speculative-method mtp --num-speculative-tokens N`; the legacy `--num-mtp-tokens N` option is retained for backward compatibility. `--context-length` represents the model-side tokens already stored in the KV cache before the current Decode step. For a VL model, this length also includes image tokens produced during Prefill.
 
 ##### What should be done if the command succeeds but memory is insufficient?
 
@@ -606,7 +613,6 @@ The main parameters are as follows:
 | `--chrome-trace-file` | options | Optional | Specifies the Chrome trace JSON output path for exporting the performance timeline.<br>1. Type: Str.<br>2. Value range: file path.<br>3. Default: `None`.<br>4. Generated only after Runtime succeeds. The old name `--chrome-trace` is still parsed. |
 
 > **Note:** Denoising workload simulation currently supports FLUX.1-dev and Qwen-Image-Edit (the three variants `Qwen/Qwen-Image-Edit`, `Qwen/Qwen-Image-Edit-2509`, and `Qwen/Qwen-Image-Edit-2511`).
-
 > **Limitation:** Qwen-Image-Edit currently does not support Ulysses sequence parallelism (`--ulysses-size > 1`), because input sharding has not been implemented. When `--ulysses-size` is greater than `1`, simulation fails with a Qwen-specific error before Runtime and does not fall back to the non-parallel path.
 
 Run `python -m cli.inference.image_generate --help` for details.

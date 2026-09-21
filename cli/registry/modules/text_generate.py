@@ -50,6 +50,19 @@ DECODE = Param(
     cli_help="Enable autoregressive decoding mode for text generation. [default: off]",
 )
 
+PREFILL = Param(
+    name="prefill",
+    data_type="boolean",
+    default=False,
+    cli_action="store_true",
+    group="Request",
+    cli_help=(
+        "Explicitly run in prefill phase. Mutually exclusive with --decode. "
+        "When neither flag is passed, prefill is assumed by default (backward compatible). "
+        "[default: off]"
+    ),
+)
+
 NUM_MTP_TOKENS = Param(
     name="num-mtp-tokens",
     data_type="integer",
@@ -375,6 +388,7 @@ SPEC = ModuleSpec(
         QUERY_LENGTH,
         CONTEXT_LENGTH,
         DECODE,
+        PREFILL,
         S.PREFIX_CACHE_HIT_RATE,
         NUM_MTP_TOKENS,
         # Unified speculative decoding (G2/G3 checks in validators.py)
@@ -436,6 +450,7 @@ SPEC = ModuleSpec(
         EXPORT_EMPIRICAL_METRICS,
     ],
     validators=[
+        ValidatorRef(name="prefillDecodeMutex", fn=V.prefill_decode_mutex, wants_provided=True),
         ValidatorRef(name="productEqNumDevices", fn=V.product_eq_num_devices),
         ValidatorRef(name="moeProductEqNumDevices", fn=V.moe_product_eq_num_devices),
         ValidatorRef(name="perLayerProductEqNumDevices", fn=V.per_layer_product_eq_num_devices),
