@@ -137,6 +137,19 @@ def _jitter_overlapping_points(xs: list[float], ys: list[float]) -> list[tuple[f
     return jittered
 
 
+def _set_plotext_canvas_size(plx: object, width: int, height: int) -> None:
+    """Set terminal canvas size across plotext API spellings.
+
+    plotext 5.3+ exposes ``plot_size``; 5.2 and earlier only have ``plotsize``.
+    Skip silently if neither exists so optimizer output still prints.
+    """
+    setter = getattr(plx, "plot_size", None) or getattr(plx, "plotsize", None)
+    if not callable(setter):
+        logger.warning("plotext has neither plot_size nor plotsize; using default canvas size.")
+        return
+    setter(width, height)
+
+
 def _sorted_curve_subset(curve_df: pd.DataFrame, parallel: str, sort_cols: list[str]) -> pd.DataFrame:
     sub = curve_df.loc[curve_df["parallel"].astype(str) == parallel]
     if "batch_size" in sub.columns:
@@ -174,8 +187,10 @@ def _emit_terminal_optimizer_curve_ascii(
         x_label: str,
         sort_cols: list[str],
     ) -> None:
-        plx.plot_size(_TERMINAL_PLOT_COLS, _TERMINAL_PLOT_ROWS)
-        plx.theme("clear")
+        _set_plotext_canvas_size(plx, _TERMINAL_PLOT_COLS, _TERMINAL_PLOT_ROWS)
+        theme = getattr(plx, "theme", None)
+        if callable(theme):
+            theme("clear")
         x_all: list[float] = []
         y_all: list[float] = []
         series: list[tuple[int, str, list[float], list[float]]] = []
