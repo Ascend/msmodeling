@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shlex
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
@@ -398,6 +399,39 @@ class OptixPhaseRunner:
         for phase_name in PHASES:
             phase = getattr(config, phase_name)
             self._resolve_and_validate_plugins(phase_name, phase)
+        self._warn_if_decode_aisbench_not_stable(config)
+
+    def _warn_if_decode_aisbench_not_stable(self, config: PdDisaggConfig) -> None:
+        """Warn when Decode AISBench is not configured to summarize steady-state results."""
+
+        phase = config.decode
+        if phase.benchmark_policy.strip().lower() != "ais_bench":
+            return
+
+        overrides = phase.benchmark_command_overrides
+        if "others" in overrides:
+            others = overrides["others"]
+        else:
+            others = self.settings.ais_bench.command.others
+        try:
+            tokens = shlex.split(str(others or ""))
+        except ValueError:
+            tokens = str(others or "").split()
+        has_stable_stage = False
+        for index, token in enumerate(tokens):
+            option, separator, value = token.partition("=")
+            if option.removeprefix("--") != "summarizer":
+                continue
+            if (separator and value == "stable_stage") or (
+                not separator and index + 1 < len(tokens) and tokens[index + 1] == "stable_stage"
+            ):
+                has_stable_stage = True
+                break
+        if not has_stable_stage:
+            logger.warning(
+                "Decode phase uses ais_bench without '--summarizer stable_stage' in command others; "
+                "add '--summarizer stable_stage' to enable steady-state result summarization."
+            )
 
     @staticmethod
     def _configure_phase_hook(plugin: Any, phase_name: str, phase_config: PdDisaggPhaseConfig) -> None:

@@ -17,7 +17,7 @@ import json
 import shutil
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
@@ -25,6 +25,7 @@ from optix.config.config import PerformanceIndex, get_settings
 from optix.deploy_env import RuntimeContext
 from optix.io_utils import open_file as _patch_open_file
 from optix.optimizer.plugins.benchmark import (
+    AisBench,
     VllmBenchMark,
     parse_result,
 )
@@ -466,6 +467,67 @@ class TestAisBenchGetPerformanceIndex(unittest.TestCase):
         assert result.throughput == 4.5
         assert result.success_rate == 0.95
         assert result.generate_speed == 2000.0
+
+
+@pytest.mark.parametrize("summary_keys", [("total",), ("stable",), ("total", "stable")])
+@pytest.mark.parametrize("concurrency, expected", [(71.1558, 100), (20, 30), (0, 10)])
+def test_aisbench_summary_concurrency(summary_keys, concurrency, expected):
+    data = {
+        "Concurrency": {key: concurrency if i == 0 else 99 for i, key in enumerate(summary_keys)},
+        "Max Concurrency": {key: 100 if i == 0 else 200 for i, key in enumerate(summary_keys)},
+    }
+    bench = MagicMock()
+    bench.config.output_path = "/output"
+    bench.config.best_concurrency_coefficient = 1.5
+    bench.config.best_concurrency_threshold = 10
+    with (
+        patch("optix.optimizer.plugins.benchmark.glob.glob", return_value=["/output/result.csv"]),
+        patch("optix.optimizer.plugins.benchmark.open_file", mock_open(read_data=json.dumps(data))),
+    ):
+        assert AisBench.get_best_concurrency(bench) == expected
+
+
+@pytest.mark.parametrize("summary_keys", [("total",), ("stable",), ("total", "stable")])
+@pytest.mark.parametrize("total_requests, success_requests", [(34, 34), (34, 30), (0, 0)])
+def test_aisbench_summary_performance(summary_keys, total_requests, success_requests):
+    values = {
+        "Total Requests": (total_requests, 100),
+        "Success Requests": (success_requests, 50),
+        "Request Throughput": ("3.357 req/s", "10 req/s"),
+        "Output Token Throughput": ("1570.7643 token/s", "2000 token/s"),
+    }
+    data = {metric: dict(zip(summary_keys, results)) for metric, results in values.items()}
+    bench = MagicMock()
+    bench.config.output_path = "/output"
+    bench.get_performance_metric.side_effect = [0.1, 0.05]
+    with (
+        patch("optix.optimizer.plugins.benchmark.glob.glob", return_value=["/output/result.csv"]),
+        patch("optix.optimizer.plugins.benchmark.open_file", mock_open(read_data=json.dumps(data))),
+    ):
+        result = AisBench.get_performance_index(bench)
+    assert result.throughput == 3.357
+    assert result.time_to_first_token == 0.1
+    assert result.time_per_output_token == 0.05
+    if total_requests:
+        assert result.success_rate == pytest.approx(success_requests / total_requests)
+        assert result.generate_speed == 1570.7643
+    else:
+        assert result.success_rate is None
+        assert result.generate_speed is None
+
+
+@pytest.mark.parametrize(
+    ("data", "metric", "message"),
+    [
+        ({}, "Concurrency", "missing metric 'Concurrency'"),
+        ({"Concurrency": {}}, "Concurrency", "metric 'Concurrency' has neither 'total' nor 'stable'"),
+    ],
+)
+def test_aisbench_summary_value_reports_invalid_structure(data, metric, message):
+    from optix.optimizer.plugins.benchmark import _get_aisbench_summary_value
+
+    with pytest.raises(ValueError, match=message):
+        _get_aisbench_summary_value(data, metric)
 
 
 class TestAisBenchBeforeRun(unittest.TestCase):

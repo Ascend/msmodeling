@@ -54,6 +54,20 @@ MS_TO_S = 10**3
 US_TO_S = 10**6
 
 
+def _get_aisbench_summary_value(data, metric):
+    """Read total results, falling back to stable results for steady-state runs."""
+    try:
+        values = data[metric]
+    except KeyError as exc:
+        raise ValueError(f"AISBench result is missing metric {metric!r}") from exc
+
+    if "total" in values:
+        return values["total"]
+    if "stable" in values:
+        return values["stable"]
+    raise ValueError(f"AISBench metric {metric!r} has neither 'total' nor 'stable' result")
+
+
 def parse_result(res):
     if isinstance(res, str):
         _res = res.strip().split()
@@ -167,9 +181,9 @@ class AisBench(BenchmarkInterface):
                 raise ValueError(
                     f"JSON file format error, cannot find concurrency value. File path: {json_file}"
                 ) from e
-        _concurrency = float(data["Concurrency"]["total"])
+        _concurrency = float(_get_aisbench_summary_value(data, "Concurrency"))
         _concurrency *= self.config.best_concurrency_coefficient
-        _max_concurrency = float(data["Max Concurrency"]["total"])
+        _max_concurrency = float(_get_aisbench_summary_value(data, "Max Concurrency"))
         if _concurrency < self.config.best_concurrency_threshold:
             best_concurrency = self.config.best_concurrency_threshold
         else:
@@ -200,12 +214,12 @@ class AisBench(BenchmarkInterface):
                 raise ValueError(
                     f"JSON file format error, cannot find total number of requests. File path: {json_file}"
                 ) from e
-        total_requests = data["Total Requests"]["total"]
-        success_req = data["Success Requests"]["total"]
-        performance_index.throughput = float(data["Request Throughput"]["total"].split()[0])
+        total_requests = _get_aisbench_summary_value(data, "Total Requests")
+        success_req = _get_aisbench_summary_value(data, "Success Requests")
+        performance_index.throughput = float(_get_aisbench_summary_value(data, "Request Throughput").split()[0])
         if total_requests != 0:
             performance_index.success_rate = success_req / total_requests
-            output_average = data["Output Token Throughput"]["total"]
+            output_average = _get_aisbench_summary_value(data, "Output Token Throughput")
             performance_index.generate_speed = float(output_average.split()[0])
         return performance_index
 

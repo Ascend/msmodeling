@@ -359,6 +359,70 @@ class _SimulatorPlugin:
 
 
 class TestOptixPhaseRunner:
+    @pytest.mark.parametrize(
+        ("global_others", "phase_others", "should_warn"),
+        [
+            ("--datasets decode_data", None, True),
+            ("--datasets decode_data --summarizer stable_stage", None, False),
+            ("--datasets decode_data", "--datasets decode_data --summarizer stable_stage", False),
+            ("--datasets decode_data --summarizer stable_stage", "--datasets decode_data", True),
+        ],
+    )
+    def test_decode_aisbench_stable_stage_warning(self, tmp_path, global_others, phase_others, should_warn):
+        settings = Settings(output=tmp_path)
+        settings.ais_bench.command.others = global_others
+        runner = OptixPhaseRunner(
+            settings,
+            runtime_ctx=MagicMock(),
+            deploy_env={},
+            bak_path=None,
+            load_breakpoint=False,
+            top_k=3,
+        )
+        phase = PdDisaggPhaseConfig(
+            benchmark_policy="ais_bench",
+            benchmark_command_overrides={} if phase_others is None else {"others": phase_others},
+        )
+        with patch("optix.optimizer.pd_disagg.logger.warning") as warning:
+            runner._warn_if_decode_aisbench_not_stable(PdDisaggConfig(decode=phase))
+
+        assert warning.called is should_warn
+
+    def test_decode_aisbench_warning_does_not_apply_to_other_benchmarks(self, tmp_path):
+        settings = Settings(output=tmp_path)
+        settings.ais_bench.command.others = "--datasets decode_data"
+        runner = OptixPhaseRunner(
+            settings,
+            runtime_ctx=MagicMock(),
+            deploy_env={},
+            bak_path=None,
+            load_breakpoint=False,
+            top_k=3,
+        )
+        with patch("optix.optimizer.pd_disagg.logger.warning") as warning:
+            runner._warn_if_decode_aisbench_not_stable(PdDisaggConfig())
+
+        warning.assert_not_called()
+
+    def test_preflight_checks_decode_aisbench_summary_mode(self, tmp_path):
+        settings = Settings(output=tmp_path)
+        runner = OptixPhaseRunner(
+            settings,
+            runtime_ctx=MagicMock(),
+            deploy_env={},
+            bak_path=None,
+            load_breakpoint=False,
+            top_k=3,
+        )
+        config = PdDisaggConfig()
+        with (
+            patch.object(runner, "_resolve_and_validate_plugins"),
+            patch.object(runner, "_warn_if_decode_aisbench_not_stable") as warn,
+        ):
+            runner.preflight(config)
+
+        warn.assert_called_once_with(config)
+
     def test_resolve_and_validate_plugins_returns_registered_classes(self, tmp_path):
         runtime_ctx = MagicMock()
         deploy_env = {"PATH": "/usr/bin"}
