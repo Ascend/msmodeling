@@ -141,8 +141,10 @@ MSMODELING_WHEEL_OUTPUT_DIR=/tmp/wheels bash scripts/build.sh
 **Not recommended locally.** Nightly targets CI: parallel `tests/` waves, shared self-timeout, failure attribution, and optional Feishu. For local runs use `build.py test` / smoke / regression.
 
 - **Parallel waves** (shared `MSMODELING_NIGHTLY_TIMEOUT_SECONDS` budget):
-  - Non-benchmark / non-network: `pytest tests/ -m "not npu and not benchmark and not network"` with xdist (`-n auto --dist worksteal`) + coverage + `-vv --tb=line`.
+  - Non-benchmark / non-network: `pytest tests/ -m "not npu and not benchmark and not network"` with xdist (`-n` capped at `MSMODELING_NIGHTLY_XDIST_WORKERS`, default 128, or remaining resume items; `--dist worksteal`) + coverage + `-vv --tb=line`.
   - Benchmark or network: `pytest tests/ -m "not npu and (benchmark or network)"` serially (no xdist; Hub cache-safe); separate coverage data files are combined after both waves finish.
+- **Resume**: set `MSMODELING_NIGHTLY_RESUME=1` to skip completed node ids in `.pytest_cache/nightly/progress.*.jsonl` when the session fingerprint still matches.
+- **Slow-first**: move the historically slowest `MSMODELING_NIGHTLY_SLOW_FIRST` (default 16) node ids to the front using `.pytest_cache/nightly/duration-history.json`. A new host falls back to `scripts/helpers/nightly/slow_first_seed.txt`. `0` disables.
 - **Attribution**: Asia/Shanghai calendar day-walk (up to 7 days) to find good; linear oldest→newest when `good..bad` ≤16 commits, else bisect; shares the same process deadline; per-node conclusion; lookback miss / incomplete attribution → exit 3.
 - **Self-timeout**: default 3000s via `MSMODELING_NIGHTLY_TIMEOUT_SECONDS`; skip Hub drift when already timed out; partial Feishu report on timeout.
 - Optional Feishu (`FEISHU_WEBHOOK_URL`); pipeline log URL via `MSMODELING_PIPELINE_LOG_URL` (not PR links).
@@ -168,6 +170,9 @@ Defaults below come from [`scripts/defaults.env`](defaults.env) (not shipped in 
 | `FEISHU_WEBHOOK_URL` | Optional | — | nightly | Feishu notification webhook |
 | `MSMODELING_PIPELINE_LOG_URL` | Optional | — | nightly | CI pipeline log URL shown in Feishu (not PR links) |
 | `MSMODELING_NIGHTLY_TIMEOUT_SECONDS` | Optional | `3000` | nightly | Self-timeout seconds; on timeout kill pytest then Feishu partial results |
+| `MSMODELING_NIGHTLY_RESUME` | Optional | `0` | nightly | `1` → skip completed progress-journal node ids when the session fingerprint still matches |
+| `MSMODELING_NIGHTLY_SLOW_FIRST` | Optional | `16` | nightly | how many historically slow tests to start first; `0` keeps collection order |
+| `MSMODELING_NIGHTLY_XDIST_WORKERS` | Optional | `128` | nightly | Wave A xdist cap; resume uses `min(cap, remaining)` |
 | `GITCODE_OWNER` | Optional | — | ci_gate | GitCode repo owner (PR comments) |
 | `GITCODE_REPO` | Optional | — | ci_gate | GitCode repo name |
 | `GITCODE_PR_NUMBER` | Optional | — | ci_gate | PR number for comment API |

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scheduled nightly (CI only — not recommended locally): parallel UT waves, attribution, Feishu.
-# Wave A: tests/ -m "not npu and not benchmark and not network" (-n auto --dist worksteal, coverage).
+# Wave A: tests/ -m "not npu and not benchmark and not network" (-n min(128, remaining) --dist worksteal, coverage).
 # Wave B: tests/ -m "not npu and (benchmark or network)" (serial pytest — Hub cache-safe; separate coverage).
 # Waves share one MSMODELING_NIGHTLY_TIMEOUT_SECONDS budget; coverage is combined after both finish.
 # Non-blocking: config drift check (skipped when already timed out).
@@ -14,6 +14,9 @@
 #   FEISHU_WEBHOOK_URL                      Feishu webhook (optional)
 #   MSMODELING_PIPELINE_LOG_URL             CI pipeline log URL for failure reports (optional; never PR links)
 #   MSMODELING_NIGHTLY_TIMEOUT_SECONDS      self-timeout seconds (default: 3000)
+#   MSMODELING_NIGHTLY_RESUME               skip completed journal node ids (default: 0)
+#   MSMODELING_NIGHTLY_SLOW_FIRST           start this many historically slow tests first (default: 16)
+#   MSMODELING_NIGHTLY_XDIST_WORKERS        Wave A xdist cap (default: 128)
 #   PYTHON                                  absolute path to interpreter; if unset, uses uv or python3
 #
 # Optional (not set by default):

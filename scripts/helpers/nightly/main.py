@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 from scripts.helpers._config import Config
 from scripts.helpers._paths import REPO_ROOT
 from scripts.helpers.common._logging import log_env_audit, setup_logger
-from scripts.helpers.common.coverage_config import cov_pytest_args, pytest_xdist_args
+from scripts.helpers.common.coverage_config import cov_pytest_args
+from scripts.helpers.common.pytest_runner import xdist_worker_args
 from scripts.helpers.common.coverage_gate import (
     GateConfig,
     check_thresholds,
@@ -46,6 +47,17 @@ from scripts.helpers.nightly.feishu_notifier import (
     display_status,
     push_feishu_report,
 )
+from scripts.helpers.nightly.progress_journal import (
+    PROGRESS_JOURNAL_ENV,
+    PROGRESS_JOURNALS,
+    RESUME_ACTIVE_ENV,
+    WAVE_A_MARKER,
+    WAVE_B_MARKER,
+    estimate_wave_a_remaining,
+    prepare_progress_session,
+    resolve_resume_enabled,
+    resolve_wave_a_worker_count,
+)
 from scripts.helpers.nightly.pytest_parser import (
     NightlyRunStats,
     merge_nightly_run_stats,
@@ -60,13 +72,14 @@ from scripts.helpers.nightly.report_models import (
 )
 from tensor_cast.core.model_source_security import warn_remote_code_risk
 
-_PYTEST_MARKER_WAVE_A = "not npu and not benchmark and not network"
-_PYTEST_MARKER_WAVE_B = "not npu and (benchmark or network)"
+_PYTEST_MARKER_WAVE_A = WAVE_A_MARKER
+_PYTEST_MARKER_WAVE_B = WAVE_B_MARKER
 _PROCESS_TERMINATE_TIMEOUT_SECONDS: Final[float] = 5.0
 _PYTEST_CAPTURE_MAX_CHARS: Final[int] = 10 * 1024 * 1024
 _HAS_PROCESS_GROUPS: Final[bool] = sys.platform != "win32"
 _DEFAULT_NIGHTLY_TIMEOUT_SECONDS: Final[float] = 50 * 60
 PYTEST_TIMEOUT_EXIT_CODE: Final[int] = 124
+PYTEST_NO_TESTS_EXIT_CODE: Final[int] = 5
 ATTRIBUTION_HARD_FAIL_EXIT_CODE: Final[int] = 3
 _TIMEOUT_ENV: Final = "MSMODELING_NIGHTLY_TIMEOUT_SECONDS"
 _COVERAGE_MERGED_FILE: Final = ".coverage"
@@ -107,8 +120,9 @@ def resolve_nightly_timeout_seconds() -> float:
     return value
 
 
-def _build_pytest_cmd_wave_a(python_exe: str) -> list[str]:
+def _build_pytest_cmd_wave_a(python_exe: str, *, worker_count: int | None = None) -> list[str]:
     """Non-benchmark, non-network tests/ UT with xdist and coverage."""
+    workers = worker_count if worker_count is not None else resolve_wave_a_worker_count(REPO_ROOT, resume_active=False)
     return [
         python_exe,
         "-m",
@@ -116,10 +130,13 @@ def _build_pytest_cmd_wave_a(python_exe: str) -> list[str]:
         "tests/",
         "-m",
         _PYTEST_MARKER_WAVE_A,
-        *pytest_xdist_args(),
+        *xdist_worker_args(workers),
         *cov_pytest_args(),
+        "-p",
+        "scripts.helpers.nightly.progress_journal",
         "-vv",
         "--tb=line",
+        "--durations=0",
         "--disable-warnings",
     ]
 
@@ -134,8 +151,11 @@ def _build_pytest_cmd_wave_b(python_exe: str) -> list[str]:
         "-m",
         _PYTEST_MARKER_WAVE_B,
         *cov_pytest_args(),
+        "-p",
+        "scripts.helpers.nightly.progress_journal",
         "-vv",
         "--tb=line",
+        "--durations=0",
         "--disable-warnings",
     ]
 
@@ -379,18 +399,39 @@ def _run_pytest_waves(
 ) -> tuple[int, str, int, str]:
     """Run non-benchmark and benchmark waves in parallel under one shared deadline."""
     _cleanup_coverage_artifacts()
-    wave_a_cmd = _build_pytest_cmd_wave_a(python_exe)
+    resume_active = prepare_progress_session(
+        REPO_ROOT,
+        resume=resolve_resume_enabled(),
+        logger=logger,
+    )
+    wave_a_workers = resolve_wave_a_worker_count(REPO_ROOT, resume_active=resume_active)
+    remaining = estimate_wave_a_remaining(REPO_ROOT) if resume_active else None
+    logger.info(
+        "Wave A xdist workers: %d (resume=%s remaining=%s)",
+        wave_a_workers,
+        resume_active,
+        remaining if remaining is not None else "n/a",
+    )
+    wave_a_cmd = _build_pytest_cmd_wave_a(python_exe, worker_count=wave_a_workers)
     wave_b_cmd = _build_pytest_cmd_wave_b(python_exe)
 
     def _run_wave(label: str, cmd: list[str], coverage_file: str) -> tuple[int, str]:
         logger.info("Running pytest %s: %s", label, shlex.join(cmd))
+        progress_path = REPO_ROOT / PROGRESS_JOURNALS[label]
         exit_code, stdout = _stream_pytest(
             cmd,
             cwd=REPO_ROOT,
             deadline=deadline,
-            env_extra={"COVERAGE_FILE": str(REPO_ROOT / coverage_file)},
+            env_extra={
+                "COVERAGE_FILE": str(REPO_ROOT / coverage_file),
+                PROGRESS_JOURNAL_ENV: str(progress_path),
+                RESUME_ACTIVE_ENV: "1" if resume_active else "0",
+            },
             log_prefix=label,
         )
+        if resume_active and exit_code == PYTEST_NO_TESTS_EXIT_CODE:
+            logger.info("Pytest %s exit=5 (no tests left after resume); treating as success", label)
+            exit_code = 0
         logger.info("Pytest %s finished with exit=%d", label, exit_code)
         return exit_code, stdout
 
