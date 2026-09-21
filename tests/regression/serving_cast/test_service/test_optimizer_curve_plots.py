@@ -38,6 +38,23 @@ class TestCurvePlotHelpers(TestCase):
         self.assertIsNotNone(lim2)
         self.assertGreaterEqual(lim2[0], 0.0)
 
+    def test_set_plotext_canvas_size_uses_plot_size_then_plotsize(self):
+        class _Modern:
+            plot_size = MagicMock()
+            plotsize = MagicMock()
+
+        modern = _Modern()
+        ocp._set_plotext_canvas_size(modern, 128, 38)
+        modern.plot_size.assert_called_once_with(128, 38)
+        modern.plotsize.assert_not_called()
+
+        class _Legacy:
+            plotsize = MagicMock()
+
+        legacy = _Legacy()
+        ocp._set_plotext_canvas_size(legacy, 80, 24)
+        legacy.plotsize.assert_called_once_with(80, 24)
+
     def test_compact_scatter_legend_collapses_double_marker(self):
         label = "parallel_a"
         marker = ocp._TERMINAL_MARKER
@@ -216,13 +233,13 @@ class TestRenderCrossHardwareSummary(TestCase):
         self.assertTrue(_mock_print.called)
 
 
-def _install_fake_plotext():
+def _install_fake_plotext(*, canvas_size_attr: str = "plot_size"):
     """Minimal fake ``plotext`` so _emit_terminal_optimizer_curve_ascii runs without the real package."""
     import types
 
     m = types.ModuleType("plotext")
     for name in (
-        "plot_size",
+        canvas_size_attr,
         "theme",
         "scatter",
         "xlim",
@@ -271,6 +288,25 @@ class TestOptimizerCurvePlotsWithFakePlotext(TestCase):
             ocp._emit_terminal_optimizer_curve_ascii(
                 df, title_prefix="ut", chart2_x_col="tpot", chart2_x_label="TPOT (ms)"
             )
+
+    def test_emit_terminal_optimizer_curve_runs_with_legacy_plotsize(self):
+        import sys
+
+        fake = _install_fake_plotext(canvas_size_attr="plotsize")
+        self.assertFalse(hasattr(fake, "plot_size"))
+        sys.modules["plotext"] = fake
+        df = pd.DataFrame(
+            {
+                "parallel": ["tp1"],
+                "concurrency": [1.0],
+                "batch_size": [1],
+                "token/s": [10.0],
+                "tpot": [30.0],
+            }
+        )
+        with patch("builtins.print"):
+            ocp._emit_terminal_optimizer_curve_ascii(df, title_prefix="ut")
+        getattr(fake, "plotsize").assert_called()
 
     def test_emit_terminal_plotext_build_failure_is_handled(self):
         import sys
