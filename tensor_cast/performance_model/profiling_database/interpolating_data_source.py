@@ -271,11 +271,19 @@ class InterpolatingDataSource(DataSourcePerformanceModel):
         if result is not None and result.source != QuerySource.PARTIAL:
             return result
         if is_registered_composite:
+            if result is not None:
+                # Preserve PARTIAL only as diagnostic evidence; EmpiricalPerformanceModel
+                # ignores its incomplete latency and uses the full analytic fallback.
+                # "method" retains the legacy diagnostic tag, not a shape-match rule.
+                return replace(
+                    result,
+                    details={**result.details, "method": "decomposed_interpolation_partial"},
+                )
             if not self._last_miss_reason:
                 self._record_miss(
-                    "composite_sub_kernel_failed",
+                    "composite_decompose_failed",
                     base_miss_reason=self.base.last_miss_reason,
-                    fallback_from=("partial" if result is not None else "exact_miss"),
+                    fallback_from="composite",
                 )
             return None
         # PARTIAL or None: try interpolation.
