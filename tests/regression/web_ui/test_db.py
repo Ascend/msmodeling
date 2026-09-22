@@ -423,5 +423,5 @@ class TestAdoptLegacyDb:
         eng = db.get_engine(orphan)
         with Session(eng) as s:
             row = s.exec(text("SELECT version_num FROM alembic_version")).first()
-        assert row is not None and row[0] == "0001_initial"  # re-stamped to valid head
+        assert row is not None and row[0] == "0002_inflight_dedup"  # re-stamped to valid head
         db.reset_engine()

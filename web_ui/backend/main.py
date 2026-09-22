@@ -135,10 +135,15 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Application factory."""
+    # SECURITY: Swagger/ReDoc/OpenAPI docs are disabled to prevent endpoint
+    # exposure in production.
     app = FastAPI(
         title="msmodeling Web Console",
         version="0.1.0",
         lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
     app.include_router(modules_router)
     app.include_router(options_router)

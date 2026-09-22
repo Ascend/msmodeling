@@ -13,13 +13,13 @@ from services.job_manager import JobManager, _utcnow_iso
 
 
 def _make_mock_repo(**overrides):
-    """Create a MagicMock repo with count_jobs returning 0 (no in-flight jobs).
+    """Create a MagicMock repo with count_inflight returning 0 (no in-flight jobs).
 
     Tests that need a different count can override via kwargs or set
-    ``mock_repo.count_jobs.return_value`` directly after creation.
+    ``mock_repo.count_inflight.return_value`` directly after creation.
     """
     repo = MagicMock()
-    repo.count_jobs.return_value = overrides.get("count_jobs_return", 0)
+    repo.count_inflight.return_value = overrides.get("count_inflight_return", 0)
     return repo
 
 
@@ -668,20 +668,18 @@ class TestInflightLimit:
     """Tests for the in-flight job cap (local DoS defense)."""
 
     def test_inflight_total_counts_pending_and_running(self):
-        """_inflight_total sums pending + running from the repository."""
+        """_inflight_total returns the count from count_inflight."""
         mock_repo = _make_mock_repo()
-        # count_jobs is called twice: once for PENDING, once for RUNNING
-        mock_repo.count_jobs.side_effect = [3, 5]
+        mock_repo.count_inflight.return_value = 8
         manager = JobManager(mock_repo)
         assert manager._inflight_total() == 8
-        mock_repo.count_jobs.assert_any_call(status=JobStatus.PENDING)
-        mock_repo.count_jobs.assert_any_call(status=JobStatus.RUNNING)
+        mock_repo.count_inflight.assert_called_once()
 
     def test_submit_raises_when_inflight_limit_exceeded(self):
         """submit() raises InflightLimitExceeded when at capacity."""
         mock_repo = _make_mock_repo()
         # 16 in-flight (max_workers=8 → max_inflight=16)
-        mock_repo.count_jobs.side_effect = [8, 8]
+        mock_repo.count_inflight.return_value = 16
         manager = JobManager(mock_repo, max_workers=8)
         job = Job(id="j1", module_id="test", params={}, form_schema_version="1.0")
         import pytest
@@ -693,7 +691,7 @@ class TestInflightLimit:
         """submit() works normally when below the in-flight cap."""
         mock_repo = _make_mock_repo()
         # 15 in-flight (below 16 limit)
-        mock_repo.count_jobs.side_effect = [8, 7]
+        mock_repo.count_inflight.return_value = 15
         manager = JobManager(mock_repo, max_workers=8)
         manager.set_run_job(MagicMock())
         job = Job(id="j1", module_id="test", params={}, form_schema_version="1.0")
@@ -704,7 +702,7 @@ class TestInflightLimit:
         """submit_many() raises if adding all jobs would exceed the cap."""
         mock_repo = _make_mock_repo()
         # 14 in-flight, requesting 3 more → 17 > 16
-        mock_repo.count_jobs.side_effect = [7, 7]
+        mock_repo.count_inflight.return_value = 14
         manager = JobManager(mock_repo, max_workers=8)
         jobs = [Job(id=f"j{i}", module_id="test", params={}, form_schema_version="1.0") for i in range(3)]
         import pytest
@@ -716,7 +714,7 @@ class TestInflightLimit:
         """submit_many() works when total stays within the cap."""
         mock_repo = _make_mock_repo()
         # 10 in-flight, requesting 3 more → 13 ≤ 16
-        mock_repo.count_jobs.side_effect = [5, 5]
+        mock_repo.count_inflight.return_value = 10
         manager = JobManager(mock_repo, max_workers=8)
         manager.set_run_job(MagicMock())
         jobs = [Job(id=f"j{i}", module_id="test", params={}, form_schema_version="1.0") for i in range(3)]

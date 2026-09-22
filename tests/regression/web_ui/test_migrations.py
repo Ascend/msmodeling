@@ -199,6 +199,60 @@ class TestMigrationUpgrade:
         finally:
             conn.close()
 
+    def test_partial_unique_index_prevents_duplicate_inflight(self, tmp_path: Path):
+        """uq_jobs_inflight_params_hash prevents duplicate PENDING/RUNNING jobs.
+
+        The partial unique index on (module_id, params_hash) WHERE status IN
+        ('pending', 'running') prevents duplicate in-flight jobs from being
+        created via concurrent submissions (TOCTOU race condition protection).
+
+        SUCCEEDED/FAILED/CANCELLED jobs with the same params_hash are allowed
+        (the index only applies to in-flight statuses).
+        """
+        db_file = tmp_path / "uq.db"
+        alembic.command.upgrade(_make_config(db_file), "head")
+        conn = sqlite3.connect(db_file)
+        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            conn.execute("INSERT INTO modules(id,display_name,runner_class) VALUES('m','M','R')")
+
+            # Insert first PENDING job with params_hash
+            conn.execute(
+                "INSERT INTO jobs(id,module_id,status,params,form_schema_version,params_hash) "
+                "VALUES('j1','m','pending','{}','1.0.0','hash-abc')"
+            )
+            conn.commit()
+
+            # Inserting a second PENDING job with same (module_id, params_hash) must fail
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                conn.execute(
+                    "INSERT INTO jobs(id,module_id,status,params,form_schema_version,params_hash) "
+                    "VALUES('j2','m','pending','{}','1.0.0','hash-abc')"
+                )
+
+            # Inserting a RUNNING job with same params_hash must also fail
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                conn.execute(
+                    "INSERT INTO jobs(id,module_id,status,params,form_schema_version,params_hash) "
+                    "VALUES('j3','m','running','{}','1.0.0','hash-abc')"
+                )
+
+            # But SUCCEEDED job with same params_hash is allowed (not in-flight)
+            conn.execute(
+                "INSERT INTO jobs(id,module_id,status,params,form_schema_version,params_hash) "
+                "VALUES('j4','m','succeeded','{}','1.0.0','hash-abc')"
+            )
+            conn.commit()
+
+            # And a new PENDING job with DIFFERENT params_hash is allowed
+            conn.execute(
+                "INSERT INTO jobs(id,module_id,status,params,form_schema_version,params_hash) "
+                "VALUES('j5','m','pending','{}','1.0.0','hash-different')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
 
 class TestMigrationIdempotency:
     """`upgrade head` is idempotent — re-running against an already-current DB
@@ -214,7 +268,7 @@ class TestMigrationIdempotency:
         conn = sqlite3.connect(db_file)
         try:
             ver = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-            assert ver == "0001_initial"
+            assert ver == "0002_inflight_dedup"
             assert _table_names(conn) == _EXPECTED_TABLES
         finally:
             conn.close()

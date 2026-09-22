@@ -19,6 +19,9 @@ from models.enums import JobStatus
 
 _logger = logging.getLogger(__name__)
 
+# Inflight statuses for dedup queries. Centralized to avoid magic-string repetition.
+_INFLIGHT_STATUSES: tuple[str, ...] = (JobStatus.PENDING.value, JobStatus.RUNNING.value)
+
 
 def _new_record_id() -> str:
     """Fresh id for a cloned result record (ResultRecordRow.id has no default)."""
@@ -208,6 +211,33 @@ class JobRepository:
             row = session.exec(stmt).first()
             return _row_to_job(row) if row else None
 
+    def find_inflight_by_params_hash(self, module_id: str, params_hash: str) -> Job | None:
+        """Return the most recent PENDING or RUNNING job with the same
+        (module_id, params_hash), or ``None``.
+
+        Requires params_hash to be set at job creation time (see create_job).
+        Used for idempotent submission (M-0028).
+
+        SECURITY: Enables duplicate detection for in-flight jobs.
+        Combined with find_succeeded_by_params_hash(), prevents redundant work
+        from retry loops or accidental double-clicks. Returns the existing job
+        instead of creating a duplicate.
+        """
+        from sqlmodel import select
+
+        orm, session_scope = _imports()
+        with session_scope() as session:
+            stmt = (
+                select(orm.JobRow)
+                .where(orm.JobRow.module_id == module_id)
+                .where(orm.JobRow.params_hash == params_hash)
+                .where(orm.JobRow.status.in_(_INFLIGHT_STATUSES))
+                .order_by(orm.JobRow.created_at.desc())
+                .limit(1)
+            )
+            row = session.exec(stmt).first()
+            return _row_to_job(row) if row else None
+
     def add(self, job: Job) -> Job:
         """Insert a new job row and return the persisted ``Job`` (with row id)."""
         orm, session_scope = _imports()
@@ -225,6 +255,7 @@ class JobRepository:
                 created_at=job.created_at or _utcnow_iso(),
                 started_at=job.started_at,
                 completed_at=job.completed_at,
+                params_hash=job.params_hash,
             )
             session.add(row)
             session.commit()
@@ -346,7 +377,25 @@ class JobRepository:
         if status:
             stmt = stmt.where(orm.JobRow.status == status.value)
         with session_scope() as session:
-            return int(session.exec(stmt).one())
+            return session.exec(stmt).one()
+
+    def count_inflight(self) -> int:
+        """Count pending + running jobs in a single query.
+
+        Replaces two separate count_jobs() calls to narrow the TOCTOU window
+        where a concurrent submit could slip between the two SELECTs (L-0029).
+
+        SECURITY: Atomic single-query count prevents race condition
+        in in-flight cap enforcement. Two separate queries (one for PENDING,
+        one for RUNNING) allowed concurrent submits to both pass the cap check
+        if they read between the two SELECTs.
+        """
+        from sqlmodel import func, select
+
+        orm, session_scope = _imports()
+        with session_scope() as session:
+            stmt = select(func.count()).select_from(orm.JobRow).where(orm.JobRow.status.in_(_INFLIGHT_STATUSES))
+            return session.exec(stmt).one()
 
     def sweep_interrupted(self) -> int:
         """Startup sweep: pending/running -> interrupted (server died mid-run)."""
@@ -356,7 +405,7 @@ class JobRepository:
         with session_scope() as session:
             result = session.exec(
                 update(orm.JobRow.__table__)  # type: ignore[arg-type]
-                .where(orm.JobRow.status.in_(["pending", "running"]))
+                .where(orm.JobRow.status.in_(_INFLIGHT_STATUSES))
                 .values(status=JobStatus.INTERRUPTED.value)
             )
             session.commit()
