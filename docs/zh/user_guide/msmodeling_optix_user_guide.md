@@ -1,27 +1,28 @@
 # 服务化实测寻优使用指南
 
-## 简介
+## 1. 简介
 
-**服务化实测寻优**（msmodeling optix）是一项基于 PSO 粒子寻优算法的服务化参数实测寻优功能，支持在真实服务框架上自动搜索，获取符合TTFT/TPOT等时延要求的最佳吞吐参数组合。
+**服务化实测寻优**（msmodeling optix）是一项服务化参数实测寻优功能，提供基于 PSO 粒子寻优算法的自动寻优和基于 AI agent 的闭环调优两种寻优模式，支持在真实服务框架上自动搜索，获取符合TTFT/TPOT等时延要求的最佳吞吐参数组合。两种模式的差异见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。
 
 工具主要包括两大核心功能模块：
 
-- **参数寻优模块**：利用 PSO 粒子寻优算法自动生成服务化参数组合，不断逼近最优解。
+- **参数寻优模块**：自动生成服务化参数组合，不断逼近最优解。PSO 模式下由工具内置的 PSO 粒子寻优算法生成，Agent 模式下由 AI agent 逐轮生成。
 - **参数验证模块**：自动化启动服务化进程与测评工具进程，进行参数测试，获取性能结果。当前已支持的服务框架包括 `vLLM` 和 `MindIE`，测评工具包括 `AISBench`、`vllm_benchmark`。
 
 目前工具已基于 DeepSeek V3.1、GLM5 和 Qwen3.5-27b 通过验证，理论上不限制支持模型范围。
 
-## 适用对象与阅读路径
+## 2. 适用对象与阅读路径
 
 本文适用于需要对 vLLM、MindIE 服务化部署参数进行自动寻优的性能工程师和部署工程师。建议按以下顺序阅读：
 
-1. [环境准备与安装](#环境准备与安装) — 在 uv 虚拟环境中安装 msmodeling，确认系统已部署 vLLM/MindIE。
-2. [快速入门](#快速入门) — 完成一次默认寻优。
-3. [配置文件说明](#配置文件说明) 和 [命令参数说明](#命令参数说明) — 了解全部参数与配置项。
-4. [结果文件说明](#结果文件说明) — 根据业务 SLO 筛选最优参数。
-5. [附录](#附录) — 运维与排障，三元派生类型用法按需查阅。
+1. [环境准备与安装](#4-环境准备与安装) — 在 uv 虚拟环境中安装 msmodeling，确认系统已部署 vLLM/MindIE。
+2. [快速入门](#5-快速入门) — 完成一次默认寻优。
+3. [寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent) — 了解两种寻优模式的差异与选择依据。
+4. [配置文件说明](#7-配置文件说明) 和 [命令参数说明](#8-命令参数说明) — 了解全部参数与配置项。
+5. [结果文件说明](#9-结果文件说明) — 根据业务 SLO 筛选最优参数。
+6. [附录](#10-附录) — 运维与排障，三元派生类型用法按需查阅。
 
-## 插件支持
+## 3. 插件支持
 
 服务化实测寻优支持用户自定义搜索参数配置以及测试工具，只需适配插件模式注册对应插件即可。内置插件随 `optix` 包发布，通过 `-e`/`-b` 直接选用；也可通过插件模式接入自定义插件。
 
@@ -45,7 +46,7 @@
 
 > 插件通过 Python entry points 注册，自定义插件开发与使用详见[插件开发操作步骤](msmodeling_optix_plugin_user_guide.md)。
 
-## 环境准备与安装
+## 4. 环境准备与安装
 
 ### 环境隔离原则
 
@@ -73,7 +74,7 @@ uv sync
 uv run msmodeling optix --help
 ```
 
-能正常打印 `msmodeling optix` 帮助信息即表示工具安装成功；部署栈检查与正式寻优见[快速入门](#快速入门)。
+能正常打印 `msmodeling optix` 帮助信息即表示工具安装成功；部署栈检查与正式寻优见[快速入门](#5-快速入门)。
 
 ### 卸载
 
@@ -81,29 +82,69 @@ uv run msmodeling optix --help
 uv pip uninstall msmodeling
 ```
 
-## 快速入门
+## 5. 快速入门
 
-1. **修改配置文件**：完成[环境准备与安装](#环境准备与安装)，按实际情况修改配置文件 `config.toml`，包括寻优参数、测评工具参数、服务化参数。详见 [配置文件说明](#配置文件说明)。
+1. **修改配置文件**：完成[环境准备与安装](#4-环境准备与安装)，按实际情况修改配置文件 `config.toml`，包括寻优参数、测评工具参数、服务化参数。详见 [配置文件说明](#7-配置文件说明)。
 
    > **说明：** 若不确定该调哪些参数及参数范围，可使用 **`optix-assistant` 寻优 skill**（统一入口，AGENTS.md 中已路由）的 PSO 模式，输入硬件、模型、负载和优化目标后即可获得推荐参数与搜索范围，再按实际部署环境（显存、卡数、时延要求等）核对并由其写入 `config.toml`。
 
-2. **启动寻优**：默认执行的是基于 `AISBench` 的 `vLLM` 服务化参数寻优，其它用法详见 [命令参数说明](#命令参数说明)。
+2. **启动寻优**：默认执行的是基于 `AISBench` 的 `vLLM` 服务化参数寻优（PSO 模式），其它用法详见 [命令参数说明](#8-命令参数说明)；如需改用 Agent 模式，见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。
 
     ```bash
     msmodeling optix
     ```
 
-3. **查看结果**：寻优时间由模型大小、数据集大小和寻优次数等决定，结束后会生成 `data_storage_*.csv` 文件并保存在**当前工作目录下的 `result/store`** 子目录中（可用 `[data_storage].store_dir` 修改），详见 [结果文件说明](#结果文件说明)。
+3. **查看结果**：寻优时间由模型大小、数据集大小和寻优次数等决定，结束后会生成 `data_storage_*.csv` 文件并保存在**当前工作目录下的 `result/store`** 子目录中（可用 `[data_storage].store_dir` 修改），详见 [结果文件说明](#9-结果文件说明)。
 
-## 配置文件说明
+## 6. 寻优模式：PSO 与 Agent
+
+服务化实测寻优提供两种寻优模式，通过配置文件顶层 `optimizer_strategy` 字段选择，默认为 `pso`：
+
+|寻优模式|配置取值|寻优方式|特点|适用场景|
+|---|---|---|---|---|
+|PSO 模式（默认）|`optimizer_strategy = "pso"`|由工具内置的 PSO 粒子寻优算法自动生成参数组合并迭代寻优|全自动运行，无需人工介入，搜索规模由 `n_particles` 与 `iters` 直接控制|常规自动寻优，以及无人值守的长时间寻优|
+|Agent 模式|`optimizer_strategy = "agent"`|由 AI agent 逐轮生成候选参数，工具负责候选校验、执行实测与结果写回，agent 依据每轮结果决策下一轮方向|每个候选带有可解释的选择依据，可吸收历史经验与失败信息，支持人工确认或修改候选|需要结合调优经验进行方向决策，或希望人工参与候选评审的场景|
+
+两种模式共用[配置文件说明](#7-配置文件说明)中的寻优参数、测评工具参数和服务化参数，差异主要体现在搜索控制方式上：
+
+- PSO 模式由 `n_particles` 与 `iters` 控制搜索规模；Agent 模式由 `[agent_optimizer]` 配置节控制轮数、单轮 trial 数量与时间预算。
+- Agent 模式要求 `use_request_rate_calibration = false`，此时 `CONCURRENCY` 参与搜索、`REQUESTRATE` 固定为最大施压速率，以便逐 trial 观测并发与时延的关系；若保持默认 `true`，候选中的 `CONCURRENCY` 会被固定为 `max`，并发搜索维度失效。
+
+### Agent 模式工作方式
+
+Agent 模式下，工具不在内部运行 PSO，而是从 `[agent_optimizer].run_dir` 对应的运行目录读取 AI agent 生成的候选文件 `candidates.round-N.json`，校验通过后逐个执行实测，并写回 `results.round-N.json` 与 `progress.round-N.json`；仅当下一轮候选文件尚未生成时，本轮执行完成即退出。收敛退出需同时满足趋势条件（连续 `convergence_rounds` 轮改善幅度低于 1%）与覆盖条件（已完成轮次不少于 `min_rounds`、已完成 trial 不少于 `min_trials`），并受 `max_rounds` 轮数上限约束，每轮 trial 执行受 `time_limit_minutes` 时长限制。
+
+`[agent_optimizer]` 配置节字段说明（均可选）：
+
+|参数|默认值|说明|
+|---|---|---|
+|`run_id`|`"default"`|寻优运行标识，候选与结果文件按该标识组织于运行目录中。|
+|`run_dir`|空|运行目录，留空时自动解析为 `.agent_optimizer/runs/{run_id}`。|
+|`max_rounds`|`32`|最大寻优轮数，达到后自然终止。|
+|`candidates_per_round`|`0`|单轮候选数量，`0` 表示由 agent 根据上一轮结果动态决定，大于 0 时按固定数量执行。|
+|`max_trials`|`12`|单轮执行的 trial 数量上限，超出部分不执行。|
+|`time_limit_minutes`|`1440`|单轮执行 trial 的时长上限（分钟），默认 1440；全局预算由 agent 跨轮累计。|
+|`convergence_rounds`|`6`|触发收敛检测所需的连续无显著改善轮数。|
+|`min_rounds`|`4`|收敛前至少完成的寻优轮数。|
+|`min_trials`|`12`|收敛前至少完成的 trial 数。|
+
+推荐通过 **`optix-assistant` 寻优 skill** 使用 Agent 模式。该 skill 提供配置预检（config_preflight）、上下文采集（collect_context）、经验注入（experience_injector）与最优配置导出（export_best_config）等配套脚本，并对候选生成、失败分析与判优规则遵循统一的行为契约。典型使用流程：
+
+1. 按[环境准备与安装](#4-环境准备与安装)完成安装，并确认部署栈可用；
+2. 通过 `optix-assistant` skill 进入 Agent 模式，按提示选择全自动或交互式执行方式；
+3. 完成配置预检后，由 agent 逐轮生成候选、执行实测并汇总结果，收敛后导出最优配置与最终报告。
+
+## 7. 配置文件说明
 
 寻优配置文件默认位于`./msmodeling/optix/config.toml`。文件按 TOML 段组织，各段对应一项功能：
 
 | TOML 段                                               | 用途                      | 文档章节 |
 |------------------------------------------------------|-------------------------|---|
 | 顶层                                                   | 寻优所需参数                  | [寻优参数](#寻优参数) |
+| 顶层 `optimizer_strategy` | 寻优模式选择 | [寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent) |
 | `[vllm]` / `[mindie]` | vLLM / MindIE 服务化参数与寻优字段 | [服务化参数](#服务化参数) |
 | `[ais_bench.command]`  / `[vllm_benchmark.command]`| 测评工具参数                  | [测评工具参数](#测评工具参数) |
+| `[agent_optimizer]`                                 | Agent 模式运行控制（可选）       | [寻优模式 → Agent 模式工作方式](#agent-模式工作方式) |
 | `[deploy]`                                           | 部署环境根目录（可选）             | [高级配置 → 部署环境](#部署环境) |
 | `[data_storage]`                                     | 结果存储与精调（可选）             | [高级配置 → 结果存储与精调](#结果存储与精调) |
 | `[benchmark_early_exit]`                             | vLLM benchmark 早停策略（可选）    | [高级配置 → Benchmark 早停](#benchmark-早停) |
@@ -122,6 +163,7 @@ uv pip uninstall msmodeling
 |`success_rate_penalty`|必选| 请求成功率惩罚系数，取值范围为：1-1000 的整数。建议设为 5。                                                                         |
 |`ttft_slo`|必选| `time_to_first_token` 的限制时延。如对 `time_to_first_token` 限制为 2s 内，则设为 2，取值范围：(0, 100]，单位 s。                    |
 |`tpot_slo`|必选| `time_per_output_token` 的限制时延。如对 `time_per_output_token` 限制为 50ms 内，则设为 0.05，取值范围：(0, 100]，单位 s。           |
+|`optimizer_strategy`|可选| 寻优模式，取值 `pso`（默认）或 `agent`，详见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。|
 |`use_request_rate_calibration`|可选| 是否对 `REQUESTRATE` 做实测校准，默认 `true`。详见下方说明。                                                                  |
 
 **`use_request_rate_calibration` 两种模式**：该开关决定 `CONCURRENCY` 与 `REQUESTRATE` 两个特殊字段在 PSO 中的行为。
@@ -131,7 +173,7 @@ uv pip uninstall msmodeling
 |`true`（默认）| 在 `CONCURRENCY` 固定的情况下，搜索较优的 `REQUESTRATE` |固定为 `max`，不参与搜索|先以最大施压速率实测，再按实测吞吐校准|
 |`false`| 开箱阶段，目标搜索较优的 `CONCURRENCY`    |在 `[min, max]` 内参与 PSO 搜索|固定为最大施压速率|
 
-`REQUESTRATE=0` 表示不限速，因此“最大施压速率”按业务语义取值：范围包含 `0` 时取 `0`，否则取配置的数值 `max`。
+`REQUESTRATE=0` 表示不限速，因此“最大施压速率”按业务语义取值：范围包含 `0` 时取 `0`，否则取配置的数值 `max`。Agent 模式下该开关必须为 `false`，原因见[寻优模式：PSO 与 Agent](#6-寻优模式pso-与-agent)。
 
 > [!NOTE]
 > 用户可根据预估时间自行配置种子和迭代次数。单个种子使用时间为拉起服务 + 测试数据。比如用户拉起服务 + 完成测试需 15min，且愿意用 8 小时来进行寻优，则一共可跑约 50 个种子，建议配置 `n_particles=8`、`iters=4`（种子数为迭代次数的 2 倍左右）。
@@ -471,7 +513,7 @@ io_error = []
 
 </details>
 
-## 命令参数说明
+## 8. 命令参数说明
 
 ### 命令格式
 
@@ -482,7 +524,7 @@ msmodeling optix [options]
 ### 注意事项
 
 - 启动寻优前，确认 `vllm` 或 `mindie` 以及 `ais_bench` 或 `vllm_benchmark` 已在系统部署环境里能正常运行，且未部署在 msmodeling 虚拟环境中。
-- 配置文件如 `config.toml` 中的模型路径、端口、数据集路径和服务启动参数需与实际部署环境保持一致，详见[配置文件说明](#配置文件说明)。
+- 配置文件如 `config.toml` 中的模型路径、端口、数据集路径和服务启动参数需与实际部署环境保持一致，详见[配置文件说明](#7-配置文件说明)。
 - 服务化实测寻优会反复拉起服务化框架并执行测评，耗时通常较长（4-10h），建议在独占或资源稳定的环境中运行。
 - 环境隔离异常时，日志前缀 `[optix/env]` 会给出原因与修复建议，详见[环境变量与排障](#环境变量与排障)。
 
@@ -545,9 +587,9 @@ msmodeling optix -c my_config.toml
 
 OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并推荐 P/D 实例配比：先通过 `--mode pd_disagg` 分别搜索 P/D 参数，再由用户部署完整 PD 服务，最后通过普通 `standard` 模式微调并发和请求速率。
 
-详细配置、操作步骤、配比解读和结果说明见[使用案例：OptiX PD 分离两步寻优](../use_cases/optix_pd_disaggregation.md)。其他 PD 分离或 PD 混部寻优可使用[插件支持](#插件支持)中列出的现有插件。
+详细配置、操作步骤、配比解读和结果说明见[使用案例：OptiX PD 分离两步寻优](../use_cases/optix_pd_disaggregation.md)。其他 PD 分离或 PD 混部寻优可使用[插件支持](#3-插件支持)中列出的现有插件。
 
-## 结果文件说明
+## 9. 结果文件说明
 
 输出 CSV 中的每一行对应一组参数。第一列 `case_id` 用于标识 Case，后续五列为性能指标。用户可以根据需求筛选满足要求的性能行，将 VLLM/MindIE 参数以及 vllm_benchmark/AISBench 的参数改为 CSV 中的数据即可。
 
@@ -579,7 +621,7 @@ OptiX 支持为 vLLM 的 PD（Prefill-Decode）分离部署搜索服务参数并
 
 当 `action = "report"` 时，还会生成 `metrics_samples_*.csv`。可以通过 `case_id` 将采样轨迹与 `data_storage_*.csv` 中的主结果关联。实际早停结果不会参与最优候选、reference 或 refinement 选择。
 
-## 附录
+## 10. 附录
 
 ### 环境变量与排障
 
