@@ -35,6 +35,7 @@ from .service.utils import (
     UnsupportedPPConfigurationError,
     build_pp_search_candidates,
     count_search_combinations,
+    is_valid_ep_domain,
     load_length_distribution,
     resolve_parallel_search_candidates,
     resolve_search_sizes,
@@ -567,6 +568,16 @@ class ParallelRunner:
 
         num_hidden_layers = self._resolve_num_hidden_layers(base_user_input)
 
+        # EP token-domain enforcement (issue #456) applies only to the model
+        # path that actually fails on domain-broken EP shapes: sequence
+        # parallel / dispatch_ffn_combine. moe_tp > 1 with EP stays a formal
+        # contract elsewhere (cli/registry/validators.py), so the filter must
+        # not shrink those search spaces.
+        enforce_ep_domain = bool(
+            getattr(base_user_input, "enable_sequence_parallel", False)
+            or getattr(base_user_input, "enable_dispatch_ffn_combine", False)
+        )
+
         def _build_user_input(candidate: ParallelSearchCandidate) -> UserInputConfig:
             tmp_user_input = copy.copy(base_user_input)
             tmp_user_input.tp_size = candidate.tp_size
@@ -638,6 +649,7 @@ class ParallelRunner:
             pp_layer_partitions=getattr(self.args, "pp_layer_partitions", None),
             # DCP is decode-only; prefill forces dcp_sizes=None (→ [1]).
             dcp_sizes=None if is_prefill else getattr(self.args, "dcp_sizes", None),
+            enforce_ep_domain=enforce_ep_domain,
         )
 
         total_combinations = len(candidates)
@@ -769,14 +781,35 @@ class ParallelRunner:
                 len(mtp_list),
                 len(dcp_list),
             )
+        # EP token-domain enforcement (issue #456) applies only to the model
+        # path that actually fails on domain-broken EP shapes: sequence
+        # parallel / dispatch_ffn_combine. moe_tp > 1 with EP stays a formal
+        # contract elsewhere (cli/registry/validators.py).
+        enforce_ep_domain = bool(
+            getattr(base_user_input, "enable_sequence_parallel", False)
+            or getattr(base_user_input, "enable_dispatch_ffn_combine", False)
+        )
         for tp in tp_list:
             if target_devices % tp != 0:
                 continue
+            dp = target_devices // tp
+            # PP=1: tp * dp always equals target_devices; hoisted per review
+            # note on PR #894.
+            token_domain = target_devices
             for ep in ep_list:
                 if target_devices % ep != 0:
                     continue
                 for moe_dp in moe_dp_list:
                     if target_devices % (ep * moe_dp) != 0:
+                        continue
+                    # EP token-domain conservation (issue #456): same constraint
+                    # as the PP-aware builder. With PP=1, tp * dp always equals
+                    # target_devices, so EP * MOE-DP must too (vLLM-style
+                    # EP = TP * DP); domain-broken combos like TP=2 x EP=4 on 8
+                    # devices are skipped instead of crashing torch.compile.
+                    # Gated on SP / dispatch_ffn_combine: moe_tp > 1 with EP
+                    # stays a formal contract on other model paths.
+                    if enforce_ep_domain and not is_valid_ep_domain(ep, moe_dp, tp, dp, token_domain):
                         continue
                     for num_mtp_tokens in mtp_list:
                         for dcp in dcp_list:

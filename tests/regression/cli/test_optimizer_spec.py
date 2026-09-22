@@ -95,7 +95,9 @@ workloads:
     max_batched_tokens: 320000
     batch_range: [1, 32]
     tp_sizes: [2]
-    ep_sizes: [4]
+    # EP must equal TP x DP = 32 (issue #456 domain conservation); the former
+    # EP=4 was a domain-broken combo now rejected at candidate generation.
+    ep_sizes: [32]
     moe_dp_sizes: [1]
     dcp_sizes: [1]
     num_mtp_tokens: [0, 2]

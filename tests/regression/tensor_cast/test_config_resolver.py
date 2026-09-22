@@ -8,14 +8,29 @@ from tensor_cast.core.config_resolver import ConfigResolver, _resolve_model_dtyp
 from tensor_cast.model_config import ParallelConfig
 
 
-def _make_resolver(ep_size: int = 1) -> ConfigResolver:
-    """Build a ConfigResolver with mocked internals, no network needed."""
+def _make_resolver(
+    ep_size: int = 1, tp_size: int = 2, dp_size: int = 2, moe_dp_size: int = 1, sp_or_dfc: bool = False
+) -> ConfigResolver:
+    """Build a ConfigResolver with mocked internals, no network needed.
+
+    Defaults keep the EP token domain consistent (ep * moe_dp == tp * dp) so
+    callers that only care about other constraints stay unaffected; pass
+    explicit values to exercise the EP-domain validation. ``sp_or_dfc`` turns
+    on enable_sequence_parallel (the model path the EP-domain check guards).
+    """
     resolver = object.__new__(ConfigResolver)
     parallel_config = MagicMock(spec=ParallelConfig)
     parallel_config.expert_parallel_size = ep_size
+    parallel_config.tensor_parallel_size = tp_size
+    parallel_config.data_parallel_size = dp_size
+    parallel_config.moe_data_parallel_size = moe_dp_size
     model_config = MagicMock()
     model_config.parallel_config = parallel_config
     resolver.model_config = model_config
+    resolver.user_input = SimpleNamespace(
+        enable_sequence_parallel=sp_or_dfc,
+        enable_dispatch_ffn_combine=False,
+    )
     return resolver
 
 
@@ -49,6 +64,61 @@ class ValidateMoeParallelConfigTestCase(unittest.TestCase):
         resolver = _make_resolver(ep_size=4)
         moe_config = MagicMock()
         moe_config.enable_shared_expert_tp = True
+        moe_config.host_external_shared_experts = False
+        resolver.model_config.moe_config = moe_config
+        resolver.validate_moe_parallel_config()  # should not raise
+
+    def test_ep_domain_mismatch_raises(self):
+        """EP x MOE-DP != TP x DP is rejected under SP (issue #456: TP=2, DP=4, EP=4)."""
+        resolver = _make_resolver(ep_size=4, tp_size=2, dp_size=4, moe_dp_size=1, sp_or_dfc=True)
+        moe_config = MagicMock()
+        moe_config.enable_shared_expert_tp = False
+        moe_config.host_external_shared_experts = False
+        resolver.model_config.moe_config = moe_config
+        with self.assertRaises(ValueError) as ctx:
+            resolver.validate_moe_parallel_config()
+        self.assertIn("Invalid expert-parallel domain", str(ctx.exception))
+        self.assertIn("EP (4) x MOE-DP (1)", str(ctx.exception))
+        self.assertIn("TP (2) x DP (4)", str(ctx.exception))
+        self.assertIn("--moe-tp-size", str(ctx.exception))
+
+    def test_ep_domain_mismatch_allowed_without_sp_or_dfc(self):
+        """moe_tp > 1 with EP stays a formal contract without SP / dispatch_ffn_combine.
+
+        The EP token-domain check (issue #456) must not fire on other model
+        paths: cli/registry/validators.py accepts moe_tp x moe_dp x ep ==
+        num_devices regardless of TP x DP.
+        """
+        resolver = _make_resolver(ep_size=4, tp_size=2, dp_size=4, moe_dp_size=1, sp_or_dfc=False)
+        moe_config = MagicMock()
+        moe_config.enable_shared_expert_tp = False
+        moe_config.host_external_shared_experts = False
+        resolver.model_config.moe_config = moe_config
+        resolver.validate_moe_parallel_config()  # should not raise
+
+    def test_ep_domain_conservation_with_moe_dp_passes(self):
+        """EP x MOE-DP == TP x DP with MOE-DP > 1 is a valid expert-replicated domain."""
+        resolver = _make_resolver(ep_size=4, tp_size=2, dp_size=4, moe_dp_size=2, sp_or_dfc=True)
+        moe_config = MagicMock()
+        moe_config.enable_shared_expert_tp = False
+        moe_config.host_external_shared_experts = False
+        resolver.model_config.moe_config = moe_config
+        resolver.validate_moe_parallel_config()  # should not raise
+
+    def test_ep_domain_vllm_style_passes(self):
+        """vLLM-style EP = TP x DP with MOE-DP = 1 passes."""
+        resolver = _make_resolver(ep_size=8, tp_size=2, dp_size=4, moe_dp_size=1, sp_or_dfc=True)
+        moe_config = MagicMock()
+        moe_config.enable_shared_expert_tp = False
+        moe_config.host_external_shared_experts = False
+        resolver.model_config.moe_config = moe_config
+        resolver.validate_moe_parallel_config()  # should not raise
+
+    def test_ep_domain_check_skipped_without_ep(self):
+        """EP=1 disables expert parallelism; the domain check must not apply."""
+        resolver = _make_resolver(ep_size=1, tp_size=2, dp_size=4, moe_dp_size=2)
+        moe_config = MagicMock()
+        moe_config.enable_shared_expert_tp = False
         moe_config.host_external_shared_experts = False
         resolver.model_config.moe_config = moe_config
         resolver.validate_moe_parallel_config()  # should not raise

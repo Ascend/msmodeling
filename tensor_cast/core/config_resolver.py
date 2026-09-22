@@ -414,6 +414,10 @@ class ConfigResolver:
             ValueError: If enable_shared_expert_tp is True but EP size <= 1.
             ValueError: If enable_shared_expert_tp and host_external_shared_experts
                 are both True (mutually exclusive).
+            ValueError: If EP > 1 and EP * MOE-DP != TP * DP while sequence
+                parallel or dispatch_ffn_combine is enabled (EP token-domain
+                conservation, issue #456; moe_tp > 1 with EP stays legal on
+                other model paths).
         """
         moe_config = self.model_config.moe_config
         if moe_config is None:
@@ -434,3 +438,34 @@ class ConfigResolver:
                 "experts across the EP group, while host_external_shared_experts "
                 "dedicates separate ranks to run shared experts. Set at most one."
             )
+
+        # EP token-domain conservation (issue #456): with expert parallelism
+        # enabled, the EP group must span the whole attention token world
+        # (vLLM derives EP = TP x DP, i.e. moe_tp == 1), otherwise the MoE
+        # DP-domain transform in tensor_cast/layers/moe_layer.py is
+        # inconsistent and SP prefill fails with a residual broadcast error in
+        # torch.compile. Enforce it ONLY for the model path that actually
+        # fails on domain-broken EP shapes (sequence parallel /
+        # dispatch_ffn_combine): moe_tp > 1 with EP remains a formal contract
+        # elsewhere (cli/registry/validators.py moe_product_eq_num_devices).
+        user_input = getattr(self, "user_input", None)
+        ep_domain_enforced = bool(user_input) and bool(
+            getattr(user_input, "enable_sequence_parallel", False)
+            or getattr(user_input, "enable_dispatch_ffn_combine", False)
+        )
+        if expert_parallel_size > 1 and ep_domain_enforced:
+            parallel_config = self.model_config.parallel_config
+            token_world = parallel_config.tensor_parallel_size * parallel_config.data_parallel_size
+            ep_token_world = expert_parallel_size * parallel_config.moe_data_parallel_size
+            if ep_token_world != token_world:
+                raise ValueError(
+                    "Invalid expert-parallel domain for sequence parallel / dispatch_ffn_combine: "
+                    "EP "
+                    f"({expert_parallel_size}) x MOE-DP ({parallel_config.moe_data_parallel_size}) "
+                    "must equal TP "
+                    f"({parallel_config.tensor_parallel_size}) x DP ({parallel_config.data_parallel_size}) "
+                    f"when EP > 1 (vLLM semantics: EP = TP x DP). Got EP x MOE-DP = {ep_token_world} "
+                    f"vs TP x DP = {token_world}. Set --moe-tp-size 1 (the default when --moe-tp-size is "
+                    "omitted) or scale --ep-sizes/--moe-dp-sizes together so that EP x MOE-DP = TP x DP; "
+                    "e.g. with TP=2 and DP=4, use EP=8 with MOE-DP=1, or EP=4 with MOE-DP=2."
+                )
