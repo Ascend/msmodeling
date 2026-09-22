@@ -1,9 +1,12 @@
+from tests.helpers.model_assets import vendored_model_config_path
 from tests.helpers.model_builder import build_or_get_cached_model, make_user_input_config
+
+_QWEN3_32B = "Qwen/Qwen3-32B"
 
 
 def test_make_user_input_config_sets_defaults():
-    user_config = make_user_input_config(model_id="Qwen/Qwen3-32B")
-    assert user_config.model_id == "Qwen/Qwen3-32B"
+    user_config = make_user_input_config(model_id=_QWEN3_32B)
+    assert user_config.model_id == vendored_model_config_path(_QWEN3_32B)
     assert user_config.device == "TEST_DEVICE"
     assert user_config.query_len == 32
 
@@ -17,10 +20,11 @@ def test_build_or_get_cached_model_reuses_cache(monkeypatch):
 
     monkeypatch.setattr("tests.helpers.model_builder.build_model", _fake_build_model)
     cache = {}
-    user_config = make_user_input_config(model_id="Qwen/Qwen3-32B")
+    user_config = make_user_input_config(model_id=_QWEN3_32B)
+    expected_model_id = vendored_model_config_path(_QWEN3_32B)
 
     model_a = build_or_get_cached_model(user_config, cache)
     model_b = build_or_get_cached_model(user_config, cache)
 
     assert model_a == model_b
-    assert calls == ["Qwen/Qwen3-32B"]
+    assert calls == [expected_model_id]

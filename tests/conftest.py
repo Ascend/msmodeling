@@ -35,6 +35,23 @@ def pytest_collection_modifyitems(items) -> None:
             item.add_marker(nightly)
 
 
+@pytest.fixture(autouse=True)
+def remap_registered_hub_ids_for_wave_a(request, monkeypatch):
+    """Load vendored configs for registered Hub ids unless the test is marked network."""
+    if request.node.get_closest_marker("network"):
+        return
+    from tensor_cast.core.user_config import UserInputConfig
+    from tests.helpers.model_assets import resolve_offline_model_id
+
+    original = UserInputConfig.__post_init__
+
+    def _post_init(self):
+        self.model_id = resolve_offline_model_id(self.model_id)
+        original(self)
+
+    monkeypatch.setattr(UserInputConfig, "__post_init__", _post_init)
+
+
 _REPO_CACHE = Path.cwd() / ".msmodeling_cache"
 
 

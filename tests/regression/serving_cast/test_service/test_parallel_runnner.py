@@ -12,6 +12,7 @@ from serving_cast.service.optimizer_summary import OptimizerSummary
 from serving_cast.service.utils import OptimizerData, UnsupportedPPConfigurationError
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
+from tests.helpers.model_assets import vendored_model_config_path
 
 from .test_common import SimpleArgs
 
@@ -668,7 +669,7 @@ class TestTaskRunner(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIsInstance(result, OptimizerSummary)
         row = result.get_summary_df().iloc[0]
-        self.assertEqual(row["model_id"], self.args.model_id)
+        self.assertEqual(row["model_id"], vendored_model_config_path(self.args.model_id))
         self.assertEqual(row["parallel"], "TP=1 | PP=1 | DP=1")
 
     def test_submit_task_skips_candidate_on_unsupported_pp_configuration(self):

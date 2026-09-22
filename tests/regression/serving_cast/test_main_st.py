@@ -6,6 +6,7 @@ import tempfile
 import pytest
 import yaml
 from tests.helpers.cli_runner import run_module_main
+from tests.helpers.model_assets import vendored_model_config_path
 
 SERVING_CAST_MODULE = "serving_cast.main"
 
@@ -30,7 +31,7 @@ VALID_INSTANCE_CONFIG = {
 
 VALID_COMMON_CONFIG = {
     "model_config": {
-        "name": "Qwen/Qwen3-32B",
+        "name": vendored_model_config_path("Qwen/Qwen3-32B"),
     },
     "load_gen": {
         "load_gen_type": "fixed_length",

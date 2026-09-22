@@ -88,8 +88,17 @@ _COVERAGE_BENCHMARK_FILE: Final = ".coverage.benchmark"
 
 # Vendored remote configs whose live Hub counterpart we watch for drift.
 _DRIFT_FIXTURE_MAP: Final[dict[str, str]] = {
-    "deepseek-ai/DeepSeek-V3.1": "deepseekv3.1_remote",
     "MiniMaxAI/MiniMax-M2": "minimax_m2",
+    "MiniMaxAI/MiniMax-M2.7": "minimax_m2_7",
+    "Qwen/Qwen2.5-7B": "qwen2_5_7b",
+    "Qwen/Qwen3-30B-A3B": "qwen3_moe_30b_a3b",
+    "Qwen/Qwen3-Next-80B-A3B-Instruct": "qwen3_next_80b_a3b",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct": "qwen3_vl_moe_235b_a22b",
+    "XiaomiMiMo/MiMo-V2-Flash": "mimo_v2_flash",
+    "deepseek-ai/DeepSeek-V3.1": "deepseekv3.1_remote",
+    "inclusionAI/Ling-flash-2.0": "ling_flash_2_0",
+    "moonshotai/Kimi-K2-Thinking": "kimi_k2_thinking",
+    "zai-org/GLM-4.7": "glm4_7",
 }
 _DRIFT_COMPARE_KEYS: Final[tuple[str, ...]] = (
     "model_type",

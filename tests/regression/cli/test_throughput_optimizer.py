@@ -10,6 +10,7 @@ import pytest
 from serving_cast.service.optimizer_summary import SHOW_COLUMNS
 from serving_cast.service.utils import build_pp_search_candidates
 from tests.helpers.cli_runner import run_module_main
+from tests.helpers.model_assets import vendored_model_config_path
 
 THROUGHPUT_OPTIMIZER_MODULE = "cli.inference.throughput_optimizer"
 LENGTH_DISTRIBUTION_PATH = "serving_cast/example/length_distribution.yaml"
@@ -816,7 +817,7 @@ class TestThroughputOptimizerNightly(TestCase):
         args = [
             "--input-length=20",
             "--output-length=128",
-            "Qwen/Qwen3-VL-235B-A22B-Instruct",
+            vendored_model_config_path("Qwen/Qwen3-VL-235B-A22B-Instruct"),
             "--device=TEST_DEVICE",
             "--num-devices=8",
             "--image-height=1080",

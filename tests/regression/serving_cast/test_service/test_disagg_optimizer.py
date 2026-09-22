@@ -20,6 +20,7 @@ from serving_cast.service.utils import (
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
+from tests.helpers.model_assets import vendored_model_config_path
 from tensor_cast.pipeline_parallel import (
     PipelineProfile,
     PipelineStageProfile,
@@ -114,7 +115,7 @@ class TestDisaggStrategy(unittest.TestCase):
 
         # Check key columns
         row = summary_df.iloc[0]
-        self.assertEqual(row["model_id"], "Qwen/Qwen3-32B")
+        self.assertEqual(row["model_id"], vendored_model_config_path("Qwen/Qwen3-32B"))
         self.assertEqual(row["input_length"], 512)
         self.assertEqual(row["output_length"], 128)
         self.assertIsNone(row["ttft"])
@@ -188,7 +189,7 @@ class TestDisaggStrategy(unittest.TestCase):
         # Check key columns
         summary_df = result.get_summary_df()
         row = summary_df.iloc[0]
-        self.assertEqual(row["model_id"], "Qwen/Qwen3-32B")
+        self.assertEqual(row["model_id"], vendored_model_config_path("Qwen/Qwen3-32B"))
         self.assertEqual(row["input_length"], 1024)
         self.assertEqual(row["output_length"], 50)
         self.assertIsNone(row["tpot"])

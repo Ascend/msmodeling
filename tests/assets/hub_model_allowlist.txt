@@ -1,5 +1,6 @@
 # Hub model ids approved for scripts/prefetch_model_configs.py discovery.
 MiniMaxAI/MiniMax-M2
+MiniMaxAI/MiniMax-M2.7
 Qwen/Qwen2-VL-7B
 Qwen/Qwen2.5-7B
 Qwen/Qwen3-235B-A22B

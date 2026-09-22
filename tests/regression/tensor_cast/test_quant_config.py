@@ -38,7 +38,7 @@ class QuantConfigTestCase(unittest.TestCase):
             # []
             ["deepseekv3.1_remote", ConfigMode.local, [False, False, False]],
             # ["lm_head", "re:.*self_attn.*", "re:.*shared_experts.*", "re:.*mlp\\.(gate|up|gate_up|down)_proj.*"]
-            ["moonshotai/Kimi-K2-Thinking", ConfigMode.remote, [True, True, True]],
+            ["kimi_k2_thinking", ConfigMode.local, [True, True, True]],
             # ["gate","e_score_correction_bias","lm_head"]
             ["minimax_m2", ConfigMode.local, [True, True, False]],
         ]

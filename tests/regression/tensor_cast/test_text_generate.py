@@ -639,7 +639,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
         [
             ["baidu/ERNIE-4.5-300B-A47B-PT"],
             [vendored_model_config_path("XiaomiMiMo/MiMo-V2-Flash")],
-            ["MiniMaxAI/MiniMax-M2"],
+            [vendored_model_config_path("MiniMaxAI/MiniMax-M2")],
             # Qwen3.5-397B (>4m30s on 2026-09-14 compile) is listed in
             # tests/helpers/slow_ci_compile_nightly.py; remaining models stay in CI.
             [vendored_model_config_path("Qwen/Qwen3.5-397B-A17B")],
@@ -1657,7 +1657,7 @@ class TestTextGenerateNightly(TextGenerateTestMixin, unittest.TestCase):
         """Test vl moe tp ep different parallel"""
         user_input = UserInputConfig(
             device=self.device,
-            model_id="Qwen/Qwen3-VL-235B-A22B-Instruct",
+            model_id=vendored_model_config_path("Qwen/Qwen3-VL-235B-A22B-Instruct"),
             num_queries=4,
             query_len=20,
             image_batch_size=4,
@@ -2019,7 +2019,10 @@ class TestUserInputConfigPrintInfo(unittest.TestCase):
 
         output = mock_stdout.getvalue()
         self.assertIn("Device: TEST_DEVICE", output)
-        self.assertIn("Model ID: Qwen/Qwen3-VL-8B-Instruct", output)
+        self.assertIn(
+            f"Model ID: {vendored_model_config_path('Qwen/Qwen3-VL-8B-Instruct')}",
+            output,
+        )
         self.assertIn("Number of Queries: 2", output)
         self.assertIn("Input Length (per query): 128", output)
         self.assertIn("Context Length (per query): 256", output)
