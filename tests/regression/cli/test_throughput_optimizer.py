@@ -1061,15 +1061,36 @@ class TestPPCandidateGeneration:
             assert self._candidates(**overrides) == []
 
     def test_moe_tp_uses_stage_local_devices(self):
+        # Stage-local arithmetic: moe_tp = (num_devices / pp) / (ep * moe_dp).
+        # With EP=1 (expert parallelism off) moe_tp > 1 stays meaningful, so
+        # moe_dp=2 keeps exercising the stage-local division (issue #456).
+        configs = self._candidates(
+            num_devices=16,
+            tp_sizes=[2],
+            pp_sizes=[2],
+            ep_sizes=[1],
+            moe_dp_sizes=[2],
+        )
+        assert len(configs) == 1
+        assert configs[0].moe_tp_size == 4
+        assert configs[0].dp_size == 4
+
+    def test_ep_domain_broken_candidates_filtered(self):
+        """Issue #456: EP > 1 requires EP * MOE-DP == TP * DP.
+
+        num_devices=16, pp=2 -> stage=8, tp=2 -> dp=4, so the vLLM-valid EP is
+        8. EP=2 previously produced an inconsistent moe_tp=4 candidate
+        (EP groups holding only a fraction of the token world) and is now
+        filtered at candidate generation instead of failing in torch.compile.
+        """
         configs = self._candidates(
             num_devices=16,
             tp_sizes=[2],
             pp_sizes=[2],
             ep_sizes=[2],
+            enforce_ep_domain=True,
         )
-        assert len(configs) == 1
-        assert configs[0].moe_tp_size == 4
-        assert configs[0].dp_size == 4
+        assert configs == []
 
     @pytest.mark.parametrize(
         ("pp_size", "partition"),
@@ -1244,3 +1265,100 @@ class TestPPCandidateGeneration:
         assert len(configs) >= 1
         assert all(c.pp_size == 2 for c in configs)
         assert all(c.dp_size == 1 for c in configs)
+
+    def test_ep_domain_mismatch_candidates_filtered(self):
+        """Issue #456: TP=2 x DP=4 x EP=4 (EP != TP x DP) must not be generated.
+
+        num_devices=32, pp=4 -> stage=8 devices, tp=2 -> dp=4. The vLLM-valid
+        EP is tp * dp = 8; EP=4 previously passed stage-local divisibility
+        (8 % 4 == 0) and crashed torch.compile with a residual broadcast error
+        under SP + dispatch_ffn_combine.
+        """
+        configs = self._candidates(
+            num_devices=32,
+            tp_sizes=[2],
+            pp_sizes=[4],
+            ep_sizes=[4, 8, 16, 32],
+            moe_dp_sizes=[1],
+            enforce_ep_domain=True,
+        )
+        ep_sizes_used = {c.ep_size for c in configs}
+        assert ep_sizes_used == {8}
+        assert all(c.moe_tp_size == 1 for c in configs)
+        assert all(c.dp_size == 4 for c in configs)
+
+    def test_ep_domain_filter_off_by_default(self):
+        """Without SP / dispatch_ffn_combine, moe_tp > 1 with EP stays searchable.
+
+        cli/registry/validators.py accepts moe_tp x moe_dp x ep == num_devices
+        regardless of TP x DP, so the EP token-domain filter must be opt-in
+        (review note on PR #894 by ChenHuiwen).
+        """
+        configs = self._candidates(
+            num_devices=32,
+            tp_sizes=[2],
+            pp_sizes=[4],
+            ep_sizes=[4, 8],
+            moe_dp_sizes=[1],
+        )
+        ep_sizes_used = {c.ep_size for c in configs}
+        assert ep_sizes_used == {4, 8}
+        target = next(c for c in configs if c.ep_size == 4)
+        assert target.moe_tp_size == 2
+
+    def test_ep_domain_conservation_keeps_moe_dp_replication(self):
+        """EP x MOE-DP == TP x DP with MOE-DP > 1 stays a valid candidate."""
+        configs = self._candidates(
+            num_devices=32,
+            tp_sizes=[2],
+            pp_sizes=[4],
+            ep_sizes=[4],
+            moe_dp_sizes=[2],
+            enforce_ep_domain=True,
+        )
+        assert len(configs) == 1
+        assert configs[0].ep_size == 4
+        assert configs[0].moe_dp_size == 2
+        assert configs[0].moe_tp_size == 1
+        assert configs[0].dp_size == 4
+
+    def test_ep_domain_check_skipped_without_ep(self):
+        """EP=1 candidates are unaffected by the EP-domain constraint."""
+        configs = self._candidates(
+            num_devices=32,
+            tp_sizes=[2],
+            pp_sizes=[4],
+            ep_sizes=[1],
+            moe_dp_sizes=[1],
+            enforce_ep_domain=True,
+        )
+        assert len(configs) == 1
+        assert configs[0].ep_size == 1
+        assert configs[0].moe_tp_size == 8
+
+    def test_ep_search_all_powers_of_two_yields_only_valid_domain(self):
+        """`--ep-sizes` with no values searches powers of two; only EP = TP x DP survives above EP=1."""
+        configs = self._candidates(
+            num_devices=32,
+            tp_sizes=[2],
+            pp_sizes=[4],
+            ep_sizes=[],
+            moe_dp_sizes=[1],
+            enforce_ep_domain=True,
+        )
+        ep_sizes_used = {c.ep_size for c in configs}
+        # EP=1 (expert parallelism off) is unconstrained; EP>1 must equal TP x DP.
+        assert ep_sizes_used == {1, 8}
+
+    def test_is_valid_ep_domain_unit(self):
+        from serving_cast.service.utils import is_valid_ep_domain
+
+        # Issue #456 repro: TP=2, DP=4, EP=4, MOE-DP=1 is domain-broken.
+        assert not is_valid_ep_domain(ep=4, moe_dp=1, tp=2, dp=4)
+        # vLLM semantics: EP = TP x DP.
+        assert is_valid_ep_domain(ep=8, moe_dp=1, tp=2, dp=4)
+        # Expert replication across MOE-DP sub-groups conserves the token domain.
+        assert is_valid_ep_domain(ep=4, moe_dp=2, tp=2, dp=4)
+        # EP disabled: no constraint.
+        assert is_valid_ep_domain(ep=1, moe_dp=2, tp=2, dp=4)
+        assert is_valid_ep_domain(ep=1, moe_dp=1, tp=8, dp=1)

@@ -5,10 +5,14 @@ from tensor_cast.core.config_resolver import ConfigResolver
 from tensor_cast.model_config import ParallelConfig
 
 
-def _make_resolver(ep_size: int = 1) -> ConfigResolver:
+def _make_resolver(ep_size: int = 1, tp_size: int = 2, dp_size: int = 2, moe_dp_size: int = 1) -> ConfigResolver:
+    # Defaults keep the EP token domain consistent (ep * moe_dp == tp * dp, issue #456).
     resolver = object.__new__(ConfigResolver)
     parallel_config = MagicMock(spec=ParallelConfig)
     parallel_config.expert_parallel_size = ep_size
+    parallel_config.tensor_parallel_size = tp_size
+    parallel_config.data_parallel_size = dp_size
+    parallel_config.moe_data_parallel_size = moe_dp_size
     model_config = MagicMock()
     model_config.parallel_config = parallel_config
     resolver.model_config = model_config

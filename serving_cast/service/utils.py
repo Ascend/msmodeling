@@ -545,6 +545,40 @@ def resolve_search_sizes(values: list[int] | None, target_devices: int, default_
     return normalized
 
 
+def is_valid_ep_domain(ep: int, moe_dp: int, tp: int, dp: int, token_domain: int | None = None) -> bool:
+    """Check EP token-domain consistency (issue #456).
+
+    With expert parallelism enabled, vLLM derives ``EP = TP x DP``: the EP
+    group must span the whole attention token world so every token slice is
+    visible to exactly one expert-partition member. This simulator generalizes
+    that to token-domain conservation ``EP x MOE-DP == TP x DP`` (MOE-DP > 1
+    replicates experts across DP sub-groups, each still covering its replicas'
+    tokens completely, which forces ``moe_tp == 1``). Combinations such as
+    ``TP=2 x DP=4 x EP=4`` leave half of the token slices outside every EP
+    group, so the MoE DP-domain transform in ``tensor_cast/layers/moe_layer.py``
+    becomes inconsistent and SP prefill fails with a residual broadcast error
+    in ``torch.compile``.
+
+    Args:
+        ep: Expert parallel size; ``ep <= 1`` disables expert parallelism and
+            skips the constraint.
+        moe_dp: MoE data parallel size.
+        tp: Attention tensor parallel size.
+        dp: Attention data parallel size.
+        token_domain: Optional precomputed ``tp * dp`` so candidate loops can
+            hoist the invariant product out of inner iterations (review note
+            on PR #894); computed from ``tp * dp`` when omitted.
+
+    Returns:
+        True when the candidate satisfies EP token-domain conservation.
+    """
+    if ep <= 1:
+        return True
+    if token_domain is None:
+        token_domain = tp * dp
+    return ep * moe_dp == token_domain
+
+
 def resolve_parallel_search_candidates(
     tp_sizes: list[int] | None,
     ep_sizes: list[int] | None,
@@ -742,6 +776,7 @@ def build_pp_search_candidates(
     num_mtp_tokens: int = 0,
     pp_layer_partitions: list[list[int] | str] | None = None,
     dcp_sizes: list[int] | None = None,
+    enforce_ep_domain: bool = False,
 ) -> list[ParallelSearchCandidate]:
     """Enumerate PP-aware parallel search candidates with stage-local arithmetic.
 
@@ -751,6 +786,16 @@ def build_pp_search_candidates(
     and partition constraints. Combinations that violate stage-local
     divisibility or exceed ``num_hidden_layers`` are filtered; malformed PP
     sizes and partitions raise ``ValueError``.
+
+    ``enforce_ep_domain`` (issue #456): when True, EP-enabled candidates must
+    additionally satisfy EP token-domain conservation (``ep * moe_dp == tp * dp``,
+    see :func:`is_valid_ep_domain`), so vLLM-style ``EP = TP x DP`` is enforced
+    and domain-broken combos such as ``TP=2 x DP=4 x EP=4`` never reach
+    evaluation. Keep it False for callers that do not run the SP /
+    dispatch_ffn_combine model path: ``moe_tp > 1`` with EP remains a formal
+    contract there (cli/registry/validators.py ``moe_product_eq_num_devices``),
+    and domain-broken EP shapes only fail under sequence parallel /
+    dispatch_ffn_combine.
 
     PP=1 compatibility: when ``pp_sizes`` is None, only PP=1 is searched and
     the TP/EP/MOE-DP defaults match the legacy ``resolve_parallel_search_candidates``
@@ -829,12 +874,26 @@ def build_pp_search_candidates(
             if num_devices % (tp * pp) != 0:
                 continue
             dp = num_devices // (tp * pp)
+            # Invariant product for the EP-domain check, hoisted out of the
+            # ep/moe_dp inner loops (review note on PR #894).
+            token_domain = tp * dp
             for dcp in dcp_list_pp:
                 if tp % dcp != 0:
                     continue
                 for ep in ep_list_pp:
                     for moe_dp in moe_dp_list:
                         if stage_devices % (ep * moe_dp) != 0:
+                            continue
+                        # EP token-domain conservation (issue #456): with EP
+                        # enabled the expert-parallel group must span the whole
+                        # attention token world (tp * dp == stage_devices), so
+                        # EP * MOE-DP != TP * DP combos are rejected here before
+                        # they can reach torch.compile and fail with a residual
+                        # broadcast error (e.g. TP=2 x DP=4 x EP=4). Only
+                        # enforced for the SP / dispatch_ffn_combine model path
+                        # (enforce_ep_domain=True); moe_tp > 1 with EP remains a
+                        # formal contract elsewhere.
+                        if enforce_ep_domain and not is_valid_ep_domain(ep, moe_dp, tp, dp, token_domain):
                             continue
                         moe_tp = stage_devices // (ep * moe_dp)
                         # Base combination (TP/EP/MoE-DP) is valid for this pp_size.
@@ -866,7 +925,9 @@ def build_pp_search_candidates(
             "--tp-sizes/--pp-sizes/--ep-sizes/--moe-dp-sizes under "
             "--num-devices=%d. Check stage-local divisibility "
             "(dp = num_devices / (tp * pp), "
-            "moe_tp = (num_devices / pp) / (ep * moe_dp)).",
+            "moe_tp = (num_devices / pp) / (ep * moe_dp)) and EP token-domain "
+            "consistency (EP * MOE-DP == TP * DP when EP > 1, i.e. vLLM-style "
+            "EP = TP * DP).",
             num_devices,
         )
     return candidates

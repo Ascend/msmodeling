@@ -590,6 +590,13 @@ def _expand_with_optimizer_candidates(
                 if source_scenario.pp_sizes
                 else list(source_scenario.dcp_sizes)
             ),
+            # EP token-domain enforcement (issue #456) applies only when the
+            # scenario runs the SP / dispatch_ffn_combine model path; moe_tp > 1
+            # with EP stays a formal contract elsewhere.
+            enforce_ep_domain=(
+                "enable_sequence_parallel" in source_scenario.compilation_config
+                or "enable_dispatch_ffn_combine" in source_scenario.compilation_config
+            ),
         )
     except ValueError as error:
         raise OptimizerSpecError(f"workload '{source_scenario.sweep_name}': {error}") from error
