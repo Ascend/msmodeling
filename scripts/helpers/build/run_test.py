@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from scripts.helpers._paths import REPO_ROOT
+from scripts.helpers.build.argv import BuildSuite
 from scripts.helpers.build.bootstrap import bootstrap
 from scripts.helpers.common._logging import setup_logger
 from scripts.helpers.common.subprocess_stream import run_merged_output
@@ -28,12 +29,15 @@ logger: Final = setup_logger("build")
 def run_test(options: BuildOptions) -> int:
     """Run full ``pytest tests``, or CI gate when test_map is provided."""
     raw = options.extras.get("test_map_path") or os.environ.get("MSMODELING_TEST_MAP_PATH")
-    if not raw or not raw.strip():
+    if options.suite == BuildSuite.FULL:
+        return _run_full_suite(options)
+    if raw and raw.strip():
+        return _run_ci_gate(options, raw.strip())
+    if options.suite == BuildSuite.CI_GATE or options.suite is None:
         logger.warning(
             "MSMODELING_TEST_MAP_PATH not set; falling back to full pytest suite. Set it explicitly to use CI gate.",
         )
-        return _run_full_suite(options)
-    return _run_ci_gate(options, raw.strip())
+    return _run_full_suite(options)
 
 
 def _run_teed(cmd: list[str], *, env: dict[str, str], log_path: Path) -> int:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.helpers.build.argv import BuildOptions, parse_argv
+from scripts.helpers.build.argv import BuildOptions, BuildSuite, parse_argv
 
 
 def test_parse_argv_defaults() -> None:
@@ -120,4 +120,15 @@ def test_parse_argv_extra_empty_key_exits_2() -> None:
 def test_parse_argv_duplicate_extra_key_exits_2() -> None:
     with pytest.raises(SystemExit) as exc_info:
         parse_argv(["--extra", "a=1", "--extra", "a=2"])
+    assert exc_info.value.code == 2
+
+
+def test_parse_argv_ci_gate_suite() -> None:
+    options = parse_argv(["test", "--suite", "ci_gate"])
+    assert options.suite == BuildSuite.CI_GATE
+
+
+def test_parse_argv_suite_requires_test_command() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        parse_argv(["--suite", "ci_gate"])
     assert exc_info.value.code == 2
