@@ -63,20 +63,52 @@ exclude_lines = [
     "raise NotImplementedError",
 ]
 
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
 [dependency-groups]
 lint = [
     "pre-commit>=4.3.0",
 ]
 ci = [
+    "aenum>=3.1.17",
+    "blinker>=1.9.0",
+    "colorama>=0.4.6",
+    "compressed-tensors>=0.16.0",
+    "diffusers>=0.38.0",
+    "fastapi>=0.133.0,<0.137",
+    "filelock",
+    "gradio>=6.7.0,<7",
+    "greenlet>=3.5.1",
+    "matplotlib>=3.10.9",
+    "modelscope>=1.37.1",
+    "openpyxl>=3.1.5",
+    "optree>=0.13.0",
+    "overrides>=7.7.0",
     "parameterized>=0.9.0",
     "pathspec>=0.12",
+    "pillow>=12.2.0",
     "pydantic>=2",
+    "plotext>=5.3.2",
+    "prettytable>=3.17.0",
     "pytest>=8.4.2",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "pyyaml>=6",
+    "salabim>=26.0.6",
+    "scikit-learn>=1.7.2",
+    "strenum>=0.4.15",
     "tomli>=2.0; python_version < '3.11'",
     "types-colorama>=0.4.15",
+    "torch>=2.8,<=2.10",
+    "torchvision>=0.23.0",
+    "transformers>=5.6.0,<5.8.0",
 ]
 build = [
     "tomli>=2.0 ; python_full_version < '3.11'",
