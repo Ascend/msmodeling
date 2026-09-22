@@ -55,6 +55,17 @@ class TestCreateApp:
         routes = [route.path for route in test_app.routes]
         assert any("/api/options" in str(route) for route in routes)
 
+    def test_docs_disabled_by_default(self):
+        """Swagger/ReDoc/OpenAPI docs are disabled by default.
+
+        Security fix: disable endpoint exposure in production.
+        All doc endpoints (/docs, /redoc, /openapi.json) return 404.
+        """
+        test_app = create_app()
+        assert test_app.docs_url is None, "docs_url must be None (Swagger disabled)"
+        assert test_app.redoc_url is None, "redoc_url must be None (ReDoc disabled)"
+        assert test_app.openapi_url is None, "openapi_url must be None (OpenAPI JSON disabled)"
+
 
 class TestInitStorage:
     """Tests for _init_storage function."""

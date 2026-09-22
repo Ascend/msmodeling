@@ -31,6 +31,7 @@ from api.routers.jobs import (
 from fastapi import HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from models.enums import JobStatus
+from services.job_manager import JobManager
 
 
 def _run(coro):
@@ -147,6 +148,9 @@ class TestCreateJob:
         submitted = _job(JobStatus.PENDING, params={"model-id": "test-model", "num-queries": 1, "query-length": 128})
         job_manager = AsyncMock()
         job_manager.submit_async.return_value = submitted
+        job_repo = MagicMock()
+        job_repo.find_succeeded_by_params_hash.return_value = None
+        job_repo.find_inflight_by_params_hash.return_value = None
         with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
             mock_reg.return_value.get_form_schema.return_value = {"fields": []}
             # Provide valid params including all required fields
@@ -155,7 +159,7 @@ class TestCreateJob:
                 form_schema_version="1.0.0",
                 params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
             )
-            result = _run(create_job(req, MagicMock(), job_manager, MagicMock()))
+            result = _run(create_job(req, job_repo, job_manager, MagicMock()))
         job_manager.submit_async.assert_awaited_once()
         # Verify the Job entity that was passed to submit_async has the right fields.
         call_args = job_manager.submit_async.call_args
@@ -178,6 +182,9 @@ class TestCreateJob:
         submitted = _job(JobStatus.PENDING, params={"model-id": "test-model"})
         job_manager = AsyncMock()
         job_manager.submit_async.return_value = submitted
+        job_repo = MagicMock()
+        job_repo.find_succeeded_by_params_hash.return_value = None
+        job_repo.find_inflight_by_params_hash.return_value = None
         with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
             mock_reg.return_value.get_form_schema.return_value = {"fields": []}
             req = JobSubmitRequest(
@@ -186,7 +193,7 @@ class TestCreateJob:
                 params={"model-id": "test-model"},
                 explicitly_touched=["model-id", "num-queries"],
             )
-            _run(create_job(req, MagicMock(), job_manager, MagicMock()))
+            _run(create_job(req, job_repo, job_manager, MagicMock()))
         call_args = job_manager.submit_async.call_args
         submitted_job = call_args.args[0] if call_args.args else call_args.kwargs.get("job")
         assert submitted_job.explicitly_touched == ["model-id", "num-queries"]
@@ -196,6 +203,9 @@ class TestCreateJob:
         submitted = _job(JobStatus.PENDING, params={"model-id": "test-model"})
         job_manager = AsyncMock()
         job_manager.submit_async.return_value = submitted
+        job_repo = MagicMock()
+        job_repo.find_succeeded_by_params_hash.return_value = None
+        job_repo.find_inflight_by_params_hash.return_value = None
         with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
             mock_reg.return_value.get_form_schema.return_value = {"fields": []}
             req = JobSubmitRequest(
@@ -203,7 +213,7 @@ class TestCreateJob:
                 form_schema_version="1.0.0",
                 params={"model-id": "test-model"},
             )
-            _run(create_job(req, MagicMock(), job_manager, MagicMock()))
+            _run(create_job(req, job_repo, job_manager, MagicMock()))
         call_args = job_manager.submit_async.call_args
         submitted_job = call_args.args[0] if call_args.args else call_args.kwargs.get("job")
         assert submitted_job.explicitly_touched is None
@@ -232,6 +242,9 @@ class TestCreateJob:
         job_manager = AsyncMock()
         job_manager.InflightLimitExceeded = JobManager.InflightLimitExceeded
         job_manager.submit_async.side_effect = JobManager.InflightLimitExceeded("worker pool saturated")
+        job_repo = MagicMock()
+        job_repo.find_succeeded_by_params_hash.return_value = None
+        job_repo.find_inflight_by_params_hash.return_value = None
         with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
             mock_reg.return_value.get_form_schema.return_value = {"fields": []}
             # Provide valid params including all required fields
@@ -241,9 +254,146 @@ class TestCreateJob:
                 params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
             )
             with pytest.raises(HTTPException) as exc:
-                _run(create_job(req, MagicMock(), job_manager, MagicMock()))
+                _run(create_job(req, job_repo, job_manager, MagicMock()))
         assert exc.value.status_code == 429
         assert "saturated" in exc.value.detail
+
+    def test_chrome_trace_file_string_normalized_and_preserved(self):
+        """String chrome-trace-file is normalized to True for Job, request.params unchanged.
+
+        Regression test: params_hash must be computed on normalized params (True),
+        not the raw string, so idempotent dedup works across retries with the same
+        original payload. The Job.params should store the normalized True, not the
+        original string.
+        """
+        submitted = _job(JobStatus.PENDING, params={"model-id": "test-model", "chrome-trace-file": True})
+        job_manager = AsyncMock()
+        job_manager.submit_async.return_value = submitted
+        job_repo = MagicMock()
+        job_repo.find_succeeded_by_params_hash.return_value = None
+        job_repo.find_inflight_by_params_hash.return_value = None
+        with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
+            mock_reg.return_value.get_form_schema.return_value = {"fields": []}
+            req = JobSubmitRequest(
+                module_id="text_generate",
+                form_schema_version="1.0.0",
+                params={"model-id": "test-model", "chrome-trace-file": "true"},  # Valid boolean-like string
+            )
+            original_params = dict(req.params)  # snapshot before call
+            _run(create_job(req, job_repo, job_manager, MagicMock()))
+        # request.params should NOT be mutated (preserved for audit trail)
+        assert req.params == original_params
+        assert req.params["chrome-trace-file"] == "true"
+        # Job.params should have normalized value (True, not the string)
+        call_args = job_manager.submit_async.call_args
+        submitted_job = call_args.args[0] if call_args.args else call_args.kwargs.get("job")
+        assert submitted_job.params["chrome-trace-file"] is True
+        # params_hash should be computed on normalized params (same as if client sent True)
+        from services.params_hash import compute_params_hash
+
+        expected_hash = compute_params_hash(
+            "text_generate", "1.0.0", {"model-id": "test-model", "chrome-trace-file": True}
+        )
+        assert submitted_job.params_hash == expected_hash
+
+    def test_chrome_trace_file_invalid_string_rejected(self):
+        """Invalid chrome-trace-file strings are rejected with 400.
+
+        Security test: arbitrary file paths like "/etc/passwd" must be rejected,
+        not silently normalized to True. This prevents arbitrary file write attacks
+        via direct HTTP requests.
+        """
+        job_manager = AsyncMock()
+        job_repo = MagicMock()
+        job_repo.find_succeeded_by_params_hash.return_value = None
+        job_repo.find_inflight_by_params_hash.return_value = None
+        with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
+            mock_reg.return_value.get_form_schema.return_value = {"fields": []}
+            req = JobSubmitRequest(
+                module_id="text_generate",
+                form_schema_version="1.0.0",
+                params={"model-id": "test-model", "chrome-trace-file": "/etc/passwd"},
+            )
+            with pytest.raises(HTTPException) as exc:
+                _run(create_job(req, job_repo, job_manager, MagicMock()))
+        assert exc.value.status_code == 400
+        assert "chrome-trace-file must be a boolean-like value" in exc.value.detail
+
+    def test_integrity_error_returns_existing_inflight_job(self):
+        """IntegrityError from partial unique index returns existing in-flight job.
+
+        Regression test: when two concurrent requests with identical params both
+        pass the application-level duplicate check, the database's partial unique
+        index (uq_jobs_inflight_params_hash) rejects the second INSERT. The API
+        should catch IntegrityError and return the existing job instead of failing.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        existing_job = _job(JobStatus.RUNNING, job_id="existing-job-id")
+        job_manager = AsyncMock()
+        job_manager.submit_async.side_effect = IntegrityError("mock", "mock", Exception())
+        job_manager.InflightLimitExceeded = JobManager.InflightLimitExceeded
+        job_repo = MagicMock()
+        job_repo.find_succeeded_by_params_hash.return_value = None
+        # First call (pre-submission check) returns None so execution proceeds
+        # to submit_async; second call (post-IntegrityError re-check) returns
+        # the existing job that won the race.
+        job_repo.find_inflight_by_params_hash.side_effect = [None, existing_job]
+
+        with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
+            mock_reg.return_value.get_form_schema.return_value = {"fields": []}
+            req = JobSubmitRequest(
+                module_id="text_generate",
+                form_schema_version="1.0.0",
+                params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+            )
+            result = _run(create_job(req, job_repo, job_manager, MagicMock()))
+
+        # Should return the existing job, not raise an error
+        assert result.job_id == "existing-job-id"
+        assert result.status == "running"
+        # submit_async must have been called (proves the pre-submission check
+        # didn't short-circuit) and raised IntegrityError on the way.
+        job_manager.submit_async.assert_awaited_once()
+        # Both calls accounted for: pre-submission check + post-IntegrityError re-check.
+        assert job_repo.find_inflight_by_params_hash.call_count == 2
+
+    def test_integrity_error_returns_cached_succeeded_job(self):
+        """IntegrityError followed by missing in-flight returns cached succeeded job.
+
+        Edge case: if the in-flight job completes (SUCCEEDED) between the INSERT
+        failure and the SELECT, we should fall back to the succeeded cache.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        cached_job = _job(JobStatus.SUCCEEDED, job_id="cached-job-id")
+        job_manager = AsyncMock()
+        job_manager.submit_async.side_effect = IntegrityError("mock", "mock", Exception())
+        job_manager.InflightLimitExceeded = JobManager.InflightLimitExceeded
+        job_repo = MagicMock()
+        # First call (pre-submission cache check) returns None so execution
+        # proceeds to submit_async; second call (post-IntegrityError fallback)
+        # returns the cached job.
+        job_repo.find_succeeded_by_params_hash.side_effect = [None, cached_job]
+        # Both in-flight queries return None: the pre-submission check and the
+        # post-IntegrityError re-check (job completed between INSERT and SELECT).
+        job_repo.find_inflight_by_params_hash.side_effect = [None, None]
+
+        with patch("api.routers.jobs.SchemaRegistry") as mock_reg:
+            mock_reg.return_value.get_form_schema.return_value = {"fields": []}
+            req = JobSubmitRequest(
+                module_id="text_generate",
+                form_schema_version="1.0.0",
+                params={"model-id": "test-model", "num-queries": 1, "query-length": 128},
+            )
+            result = _run(create_job(req, job_repo, job_manager, MagicMock()))
+
+        # Should return the cached job
+        assert result.job_id == "cached-job-id"
+        assert result.status == "succeeded"
+        # submit_async must have been called (proves the pre-submission cache
+        # didn't short-circuit) and raised IntegrityError on the way.
+        job_manager.submit_async.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

@@ -378,6 +378,19 @@ def build_run_job(job_manager: "JobManager") -> "JobManager | None":
                 )
                 logger.warning(f"Job {job.id}: all {len(all_records)} case(s) failed validation")
             else:
+                # SECURITY: Second cancel_flag check before SUCCEEDED write.
+                # Covers IO window between run() return and status persistence.
+                if cancel_flag and cancel_flag():
+                    _w(
+                        lambda: job_repo.update(
+                            job.id,
+                            status=JobStatus.CANCELLED,
+                            completed_at=_utcnow(),
+                        )
+                    )
+                    logger.info(f"Job {job.id}: cancelled by user (post-run checkpoint)")
+                    return
+
                 # Some or no cases failed — mark as SUCCEEDED
                 _w(
                     lambda: job_repo.update(

@@ -138,12 +138,10 @@ class JobManager:
     def _inflight_total(self) -> int:
         """Count pending + running jobs (the "in-flight" total).
 
-        Used by submit guards to enforce the in-flight cap — prevents unbounded
-        queue growth from batch-submit (local DoS on multi-user hosts). Reads
-        from the repository (two SQL counts), so it's eventually consistent
-        with concurrent submits — acceptable for a defensive rate limit.
+        SECURITY: Single count_inflight() query narrows TOCTOU window
+        where concurrent submits could bypass the in-flight cap.
         """
-        return self._jobs.count_jobs(status=JobStatus.PENDING) + self._jobs.count_jobs(status=JobStatus.RUNNING)
+        return self._jobs.count_inflight()
 
     class InflightLimitExceeded(Exception):
         """Raised when submit would exceed the in-flight job cap."""

@@ -327,6 +327,95 @@ class TestJobRepositoryJobs:
         assert found.id == "succ-1"
         assert repo.find_succeeded_by_params_hash("text_generate", "nope") is None
 
+    def test_add_persists_params_hash(self, repo_db):
+        """JobRepository.add() must save params_hash to database.
+
+        Regression test: previously add() didn't include params_hash in the
+        JobRow constructor, so dedup queries couldn't find existing jobs.
+        """
+        repo = JobRepository()
+        j = self._job(status=JobStatus.PENDING)
+        j.id = "job-with-hash"
+        j.params_hash = "test-hash-12345"
+        added = repo.add(j)
+        assert added.params_hash == "test-hash-12345"
+        # Verify it persisted to DB
+        fetched = repo.get("job-with-hash")
+        assert fetched is not None
+        assert fetched.params_hash == "test-hash-12345"
+
+    def test_find_inflight_by_params_hash(self, repo_db):
+        """find_inflight_by_params_hash() finds PENDING/RUNNING jobs.
+
+        Used for idempotent submission: prevents duplicate job creation from
+        retry loops or accidental double-clicks.
+        """
+        repo = JobRepository()
+        # Create PENDING job with params_hash
+        j1 = self._job(status=JobStatus.PENDING)
+        j1.id = "pending-job"
+        j1.params_hash = "hash-inflight"
+        repo.add(j1)
+        # Create RUNNING job with different hash
+        j2 = self._job(status=JobStatus.RUNNING)
+        j2.id = "running-job"
+        j2.params_hash = "hash-other"
+        repo.add(j2)
+        # Create SUCCEEDED job with a unique hash (no PENDING/RUNNING shares it)
+        j3 = self._job(status=JobStatus.SUCCEEDED)
+        j3.id = "succeeded-job"
+        j3.params_hash = "hash-succeeded-only"
+        j3.completed_at = "2026-01-01"
+        repo.add(j3)
+
+        # Should find PENDING job
+        found = repo.find_inflight_by_params_hash("text_generate", "hash-inflight")
+        assert found is not None
+        assert found.id == "pending-job"
+        assert found.status == JobStatus.PENDING
+
+        # Should find RUNNING job by its hash
+        found = repo.find_inflight_by_params_hash("text_generate", "hash-other")
+        assert found is not None
+        assert found.id == "running-job"
+        assert found.status == JobStatus.RUNNING
+
+        # SUCCEEDED job must be filtered out: its hash exists in the DB but not
+        # as PENDING/RUNNING, so the inflight query must return None.
+        assert repo.find_inflight_by_params_hash("text_generate", "hash-succeeded-only") is None
+
+    def test_count_inflight(self, repo_db):
+        """count_inflight() returns PENDING + RUNNING count in single query.
+
+        Replaces two separate count_jobs() calls to narrow TOCTOU window where
+        a concurrent submit could slip between the two SELECTs.
+        """
+        repo = JobRepository()
+        # Create jobs in various states
+        for i, status in enumerate(
+            [
+                JobStatus.PENDING,
+                JobStatus.PENDING,
+                JobStatus.RUNNING,
+                JobStatus.RUNNING,
+                JobStatus.RUNNING,
+                JobStatus.SUCCEEDED,
+                JobStatus.FAILED,
+                JobStatus.CANCELLED,
+            ]
+        ):
+            j = self._job(status=status)
+            j.id = f"job-{i}"
+            repo.add(j)
+
+        # Should count only PENDING + RUNNING (2 + 3 = 5)
+        assert repo.count_inflight() == 5
+
+        # Verify it matches the sum of individual counts (but in single query)
+        pending = repo.count_jobs(status=JobStatus.PENDING)
+        running = repo.count_jobs(status=JobStatus.RUNNING)
+        assert pending + running == 5
+
     def test_sweep_interrupted(self, repo_db):
         repo = JobRepository()
         j1 = self._job(status=JobStatus.PENDING)

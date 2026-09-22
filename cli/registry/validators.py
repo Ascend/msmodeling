@@ -40,7 +40,7 @@ def prefill_decode_mutex(params: dict[str, Any], provided: set[str]) -> str | No
     if not prefill_on and not decode_on:
         # Info-level: this is the backward-compatible default path, not an error.
         # All existing scripts/CI that omit both flags will see this message.
-        logger.info(
+        logger.warning(
             "Neither --prefill nor --decode specified; defaulting to prefill phase. "
             "Consider passing --prefill or --decode explicitly for clarity."
         )

@@ -296,6 +296,72 @@ class TestRunJobFailures:
         updates = [c.kwargs for c in mock_job_repo.return_value.update.call_args_list]
         assert any(u.get("status") == JobStatus.CANCELLED for u in updates)
 
+    def test_second_cancel_flag_check_before_succeeded(self):
+        """Second cancel_flag check before SUCCEEDED write.
+
+        Security fix: covers the IO window between run() return and final
+        status persistence (trace materialization, result_records persistence,
+        case log writes). Without this check, a user who cancels during the
+        IO window would see the job marked SUCCEEDED instead of CANCELLED.
+
+        This test simulates: cancel_flag is False during run() but becomes
+        True after run() completes (during the IO window). The job should
+        be marked CANCELLED, not SUCCEEDED.
+        """
+        # Cancel flag stays False until runner.run() returns, then flips to True.
+        # This ties the cancel state to run() completion, not arbitrary call count,
+        # so the test would fail if the cancel check were moved before run().
+        phase = {"after_run": False}
+
+        def cancel_flag_side_effect():
+            return phase["after_run"]
+
+        cancel_flag = MagicMock(side_effect=cancel_flag_side_effect)
+        manager = MagicMock()
+        manager.write_queue = MagicMock()
+        manager.write_queue.enqueue.side_effect = lambda thunk: _Future(thunk)
+        manager.cancel_flag.return_value = cancel_flag
+
+        run_job = _run_job_from(manager)
+        job = _make_job()
+        fake_record = MagicMock()
+        fake_record.case_hash = None
+        fake_record.case_log = None
+        runner = MagicMock()
+        # runner.run flips the phase on its way out, simulating the IO window
+        # between run() return and final status persistence.
+        runner.run.side_effect = lambda *a, **k: (phase.update(after_run=True) or ([fake_record], []))
+
+        with (
+            patch("services.job_runner.JobRepository") as mock_job_repo,
+            patch("services.job_runner.ResultRepository") as mock_res_repo,
+            patch("services.params_hash.compute_params_hash", return_value="hash123"),
+            patch("runners.registry.create_runner", return_value=runner),
+            patch("services.sim_warmup.ensure_sim_stack_warmed"),
+            patch("services.job_runner.capture_job") as mock_capture,
+        ):
+            mock_job_repo.return_value.find_succeeded_by_params_hash.return_value = None
+            mock_res_repo.return_value.succeeded_case_hashes_for_module.return_value = []
+            ring = MagicMock()
+            ring.get_all.return_value = []
+            mock_capture.return_value.__enter__.return_value = ring
+            mock_capture.return_value.__exit__.return_value = False
+
+            run_job(job)
+
+        # runner.run must have been called (proves the cancel check that returned
+        # True happened AFTER run() completed, in the IO window).
+        runner.run.assert_called_once()
+        # Final status should be CANCELLED, not SUCCEEDED
+        updates = [c.kwargs for c in mock_job_repo.return_value.update.call_args_list]
+        assert any(u.get("status") == JobStatus.CANCELLED for u in updates), (
+            f"Expected CANCELLED status, got updates: {updates}"
+        )
+        # Should NOT have SUCCEEDED status (the second cancel_flag check prevented it)
+        assert not any(u.get("status") == JobStatus.SUCCEEDED for u in updates), (
+            "Job should not be marked SUCCEEDED when cancel_flag is True"
+        )
+
     def test_no_results_marks_failed(self):
         manager = _make_manager()
         run_job = _run_job_from(manager)
