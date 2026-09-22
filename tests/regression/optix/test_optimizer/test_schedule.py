@@ -472,6 +472,7 @@ class TestSchedulerMonitoringStatus(unittest.TestCase):
         mock_time.side_effect = [0, 100, 100, 100, 100, 100]
         # Remove check_success to go directly to health path
         del self.simulator.check_success
+        del self.benchmark.check_success
         self.simulator.__class__ = type("OtherSim", (), {})
         self.simulator.health = MagicMock(return_value=MagicMock(stage=Stage.running))
         # First iter: running so we reach duration check; second iter: stop so we return
@@ -661,6 +662,7 @@ class TestMonitoringStatusBranches(unittest.TestCase):
         mock_settings.return_value.particles_time_out = 2
         mock_time.side_effect = list(range(10))
         del self.simulator.check_success
+        del self.benchmark.check_success
         from optix.config.constant import ProcessState
 
         self.simulator.__class__ = type("OtherSim", (), {})
