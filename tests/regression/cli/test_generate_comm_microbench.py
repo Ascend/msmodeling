@@ -19,14 +19,13 @@ Tests are split into two categories:
 
 # pylint: disable=no-name-in-module
 import csv
+import importlib.util
 import inspect
 import sys
 from pathlib import Path
 from unittest import mock
 
 import pytest
-
-pytest.importorskip("torch", reason="torch not installed")
 
 from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
     _DISPATCH_OVERHEAD,
@@ -42,6 +41,11 @@ from tools.perf_data_collection.comm_bench.generate_comm_microbench import (
     build_group_for_tier,
     resolve_topology_tier,
     run_benchmark,
+)
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("torch") is None,
+    reason="torch not installed",
 )
 
 # NOTE: _run_bench_profiler_batch is imported locally in @pytest.mark.npu tests
