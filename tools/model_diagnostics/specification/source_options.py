@@ -72,7 +72,7 @@ class TheorySourceOptionsParser:
         _exact_keys(
             raw,
             required=set(),
-            optional={"modules", "include_module_groups", "include_stages"},
+            optional={"modules", "include_module_groups", "include_stages", "repeat"},
             label="theory options",
         )
         operators: list[TheoryOperatorSpec] = []
@@ -113,7 +113,12 @@ class TheorySourceOptionsParser:
             raise SpecificationLoadError(
                 "theory options must declare modules, include_module_groups, and/or include_stages"
             )
-        return TheoryStageOptions(operators=tuple(operators))
+        return TheoryStageOptions(
+            operators=tuple(operators),
+            repeat=(
+                _as_str(raw.get("repeat"), "theory.repeat") if "repeat" in raw else None
+            ),
+        )
 
 
 @dataclass(frozen=True)

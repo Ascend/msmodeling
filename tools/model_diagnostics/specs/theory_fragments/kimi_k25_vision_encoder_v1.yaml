@@ -1,0 +1,57 @@
+# Kimi-K2.5 MoonViT block from modeling_kimi_k25.MoonViTEncoderLayer.
+# Each source block executes norm0 -> QKV -> attention -> O -> residual,
+# followed by norm1 -> MLP fc0 -> GELU -> fc1 -> residual.
+fragment_id: kimi_k25_vision_encoder_v1
+fragment_kind: vision_encoder
+
+stages:
+  - id: vision_attention_qkv
+    modules:
+      - name: vision_qkv_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, 3 * VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [native_layer_norm, layer_norm]
+      ignored_operators:
+        - native_layer_norm
+        - layer_norm
+        - t
+        - view
+        - reshape
+        - permute
+        - unbind
+        - unsqueeze
+        - select
+        - slice
+        - cat
+        - mul
+        - _to_copy
+        - view_as_complex
+        - view_as_real
+
+  - id: vision_attention
+    modules:
+      - name: vision_attention
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+      - name: vision_o_projection
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [attention]
+      ignored_operators: [view, reshape, t, add]
+
+  - id: vision_mlp
+    modules:
+      - name: vision_mlp_fc0
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VF]", dtype: ACT}
+      - name: gelu
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VF]", dtype: ACT}
+      - name: vision_mlp_fc1
+        tensors:
+          OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+    runtime:
+      boundary_operators: [native_layer_norm, layer_norm]
+      ignored_operators: [native_layer_norm, layer_norm, t, view, reshape, add]

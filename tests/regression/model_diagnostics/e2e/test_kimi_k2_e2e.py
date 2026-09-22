@@ -172,8 +172,8 @@ def test_kimi_k25_compatible_text_capture_organize_and_compare(
         quantization=quantization,
     )
 
-    assert artifact.run_context.model_config["model_type"] == "kimi_k2"
-    assert result.spec_id == "deepseek_v3_v1"
+    assert artifact.run_context.model_config["model_type"] == "kimi_k25"
+    assert result.spec_id == "kimi_k25_v1"
     assert_diagnostics_passed(result)
     assert result.summary.overall_status is FindingStatus.PASS
     if profile.quantize_linear_action == "W8A8_DYNAMIC":
@@ -198,7 +198,8 @@ def test_kimi_k25_compatible_text_mtp_capture_organize_and_compare(model_name: s
         num_mtp_tokens=1,
     )
 
-    assert artifact.run_context.model_config["model_type"] == "kimi_k2"
+    assert artifact.run_context.model_config["model_type"] == "kimi_k25"
+    assert result.spec_id == "kimi_k25_v1"
     assert_diagnostics_passed(result)
     assert result.summary.overall_status is FindingStatus.PASS
     mtp_stages = {finding.stage_id for finding in result.findings if finding.region_id == "mtp"}

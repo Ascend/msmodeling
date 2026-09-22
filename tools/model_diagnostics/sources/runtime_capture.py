@@ -43,6 +43,44 @@ from tensor_cast.runtime import Runtime
 _CAPTURE_BACKEND = "tensor_cast.runtime_observer"
 
 
+def _vision_spatial_merge_size(vision_config: object) -> int | None:
+    """Return the scalar side length used by square vision patch merging."""
+
+    field_name = "spatial_merge_size"
+    value = getattr(vision_config, field_name, None)
+    if value is None:
+        field_name = "merge_kernel_size"
+        value = getattr(vision_config, field_name, None)
+    if value is None:
+        return None
+
+    if isinstance(value, (list, tuple)):
+        if len(value) != 2:
+            raise SourceLoadError(
+                f"vision_config.{field_name} must be a square two-element kernel, got {value!r}"
+            )
+        merge_height, merge_width = value
+        if (
+            isinstance(merge_height, bool)
+            or not isinstance(merge_height, int)
+            or merge_height <= 0
+            or isinstance(merge_width, bool)
+            or not isinstance(merge_width, int)
+            or merge_width <= 0
+            or merge_height != merge_width
+        ):
+            raise SourceLoadError(
+                f"vision_config.{field_name} must be a positive square kernel, got {value!r}"
+            )
+        return merge_height
+
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise SourceLoadError(
+            f"vision_config.{field_name} must be a positive integer or square kernel, got {value!r}"
+        )
+    return value
+
+
 def _is_moe_config(config: object) -> bool:
     """Return whether the loaded HF config exposes routed-MoE fields."""
 
@@ -421,11 +459,11 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         if value is not None:
             model_config[key] = value
     root_model_type = getattr(root_config, "model_type", None)
-    # Qwen3-VL and GLM-4V Specs intentionally match their multimodal root
+    # Qwen3-VL, GLM-4V and Kimi-K2.5 Specs intentionally match their multimodal root
     # types. Other nested configs keep the effective text type copied above;
     # in particular, Qwen3.5 Specs match ``qwen3_5_text`` /
     # ``qwen3_5_moe_text`` rather than their multimodal root types.
-    if root_model_type in {"qwen3_vl", "qwen3_vl_moe", "glm4v", "glm4v_moe"}:
+    if root_model_type in {"qwen3_vl", "qwen3_vl_moe", "glm4v", "glm4v_moe", "kimi_k25"}:
         model_config["model_type"] = root_model_type
     if "index_topk" not in model_config:
         topk_limit = getattr(hf_config, "topk_limit", None)
@@ -439,16 +477,16 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         model_config["enable_redundant_experts"] = profile.enable_redundant_experts
         model_config["enable_external_shared_experts"] = profile.enable_external_shared_experts
     vision_config = getattr(root_config, "vision_config", None)
+    vision_merge_size = None
     if vision_config is not None:
         for source_keys, target_key in (
-            (("hidden_size",), "vision_hidden_size"),
-            (("intermediate_size",), "vision_intermediate_size"),
-            (("depth", "num_hidden_layers"), "vision_num_hidden_layers"),
+            (("hidden_size", "vt_hidden_size"), "vision_hidden_size"),
+            (("intermediate_size", "vt_intermediate_size"), "vision_intermediate_size"),
+            (("depth", "num_hidden_layers", "vt_num_hidden_layers"), "vision_num_hidden_layers"),
             (("patch_size",), "vision_patch_size"),
-            (("spatial_merge_size",), "vision_spatial_merge_size"),
             (("temporal_patch_size",), "vision_temporal_patch_size"),
             (("in_channels",), "vision_in_channels"),
-            (("out_hidden_size",), "vision_out_hidden_size"),
+            (("out_hidden_size", "text_hidden_size"), "vision_out_hidden_size"),
         ):
             value = next(
                 (
@@ -460,6 +498,9 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
             )
             if value is not None:
                 model_config[target_key] = value
+        vision_merge_size = _vision_spatial_merge_size(vision_config)
+        if vision_merge_size is not None:
+            model_config["vision_spatial_merge_size"] = vision_merge_size
 
         depth = model_config.get("vision_num_hidden_layers")
         deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", ())
@@ -496,7 +537,7 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
         from tensor_cast.core.input_generator import resize_image
 
         patch_size = getattr(vision_config, "patch_size", None)
-        merge_size = getattr(vision_config, "spatial_merge_size", None) or 2
+        merge_size = vision_merge_size or 2
         temporal_patch_size = getattr(vision_config, "temporal_patch_size", None) or 2
         if isinstance(patch_size, int) and patch_size > 0:
             resized_height, resized_width = resize_image(
@@ -511,7 +552,15 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
             grid_t = 1
             grid_h = resized_height // patch_size
             grid_w = resized_width // patch_size
-            patch_tokens = profile.image_batch_size * grid_t * grid_h * grid_w
+            image_batch = profile.image_batch_size
+            if root_model_type == "kimi_k25":
+                # MoonViT patch/projector tensors are flattened across every
+                # request assigned to this rank, so their totals are rank-local.
+                local_batch = (
+                    profile.batch_size + profile.parallel.data_parallel_size - 1
+                ) // profile.parallel.data_parallel_size
+                image_batch *= local_batch
+            patch_tokens = image_batch * grid_t * grid_h * grid_w
             model_config.update(
                 {
                     "image_resized_height": resized_height,
@@ -521,6 +570,8 @@ def _run_context_after_model_load(profile: object, model_runner: object) -> Mode
                     "vision_grid_w": grid_w,
                     "vision_patch_tokens": patch_tokens,
                     "vision_projector_tokens": patch_tokens // (merge_size**2),
+                    # Text tokens remain per request: build_theory_env adds them
+                    # to Q before multiplying the resulting sequence by local_batch.
                     "vision_text_tokens": profile.image_batch_size
                     * (grid_t * grid_h * grid_w // (merge_size**2) + VISION_IMAGE_BOUNDARY_TOKEN_COUNT),
                 }

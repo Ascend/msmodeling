@@ -1,0 +1,119 @@
+# Kimi K2.5 DeepSeek-V3 MLA + routed/shared-expert decoder.
+fragment_id: kimi_k25_moe_decoder_v1
+fragment_kind: model_decoder
+stages:
+  - id: mla_preprocess
+    modules:
+      - name: input_layer_norm
+        tensors:
+          INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+      - name: mlapo
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lh, Hmla]", dtype: OUT}
+          OUTPUT[1]: {shape: "[T, KVlora]", dtype: OUT}
+          OUTPUT[2]: {shape: "[T, QKrope]", dtype: OUT}
+    runtime:
+      boundary_operators: [rms_norm]
+      ignored_operators: [view, reshape, apply_rope, concat_and_cache_mla, mla_kv_projection, mla_kv_projection_quant, mla_q_absorb_projection, mla_q_absorb_projection_quant, dynamic_quantize_symmetric]
+  - id: mla_attention
+    modules:
+      - name: multihead_latent_attention
+        tensors:
+          INPUT[0]: {shape: "[T, Lh, Hmla]", dtype: ACT}
+      - name: mla_attention_output
+        tensors:
+          OUTPUT[0]: {shape: "[T, Lh, Vh]", dtype: OUT}
+      - name: o_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Lh * Vh]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [multihead_latent_attention, multihead_latent_attention_quant]
+      ignored_operators: [concat_and_cache_mla, mla_v_up_projection, mla_v_up_projection_quant, view, reshape, quantize, all_reduce]
+  - id: moe_gate
+    modules:
+      - name: post_attention_norm
+        tensors:
+          INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+      - name: moe_gate_linear
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[Tmoe, E]", dtype: ACT}
+      - name: topk
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop]", dtype: float32}
+          OUTPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+    runtime:
+      boundary_operators: [add_rms_norm2, add_rms_norm_dynamic_quant2_symmetric, add_rms_norm_quant2]
+      ignored_operators: [add, rms_norm, view, reshape, sigmoid, softmax, mul, div, sum, gather, all_gather]
+    comparisons:
+      theory-runtime:
+        strategy: boundary_equal
+        options:
+          mapping:
+            mode: explicit
+            pairs:
+              # Runtime's fused MoE wrapper consumes the HF gate's indices and
+              # weights but does not expose the gate internals to the observer.
+              # Keep the complete HF gate in Theory and compare only the
+              # observable post-attention normalization boundary here.
+              - left_call_index: 0
+                left_slot: {direction: output, index: 0, name: null}
+                right_call_index: 0
+                right_slot: {direction: output, index: 0, name: null}
+            relations: []
+  - id: moe_dispatch
+    modules:
+      - name: init_routing_v2
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+          OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [init_routing_v2]
+      ignored_operators: [view, reshape, cat, split, split_with_sizes, slice, permute, dynamic_quantize_symmetric, all_to_all]
+  - id: moe_experts
+    modules:
+      - name: grouped_matmul_swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[Te, Fe]", dtype: OUT}
+      - name: grouped_matmul
+        tensors:
+          OUTPUT[0]: {shape: "[Te, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [grouped_matmul_swiglu, grouped_matmul_quant_swiglu, grouped_matmul_quant_int4_swiglu]
+      ignored_operators: [view, reshape, cat, split, split_with_sizes, slice, dynamic_quantize_symmetric, all_to_all]
+  - id: moe_combine
+    modules:
+      - name: unpermute_tokens
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: mul
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: sum
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [unpermute_tokens]
+      ignored_operators: [view, reshape, unsqueeze, all_to_all, all_gather, add]
+  - id: shared_expert
+    modules:
+      - name: gate_up_projection
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, 2 * Fshared]", dtype: OUT}
+      - name: swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, Fshared]", dtype: ACT}
+      - name: down_projection
+        tensors:
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [mm, static_quant_linear]
+      # The MTP wrapper prepares proposal indices immediately after the shared
+      # expert. Keep those shape-neutral framework calls outside the HF-backed
+      # gate/up, SwiGLU and down-projection contract.
+      ignored_operators: [view, reshape, split_with_sizes, silu, mul, add, copy_, dynamic_quantize_symmetric, all_reduce, all_gather, slice, select, device_put]

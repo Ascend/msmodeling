@@ -95,6 +95,7 @@ def test_qwen3_vl_theory_derives_tokens_from_materialized_resize_shape() -> None
     assert env["VTok"] == 256
     assert env["VProjTok"] == 64
     assert env["Q"] == 194
+    assert {"ViB", "VgH", "VgW", "VIn"}.isdisjoint(env)
 
 
 def test_qwen3_vl_vision_layout_marks_configured_deepstack_layers() -> None:

@@ -190,6 +190,7 @@ def test_run_context_uses_resolved_runtime_dtype_when_hf_declares_bf16(quantizat
         ("qwen3_vl_moe", "qwen3_vl_moe_text", "qwen3_vl_moe"),
         ("glm4v", "glm4v_text", "glm4v"),
         ("glm4v_moe", "glm4v_moe_text", "glm4v_moe"),
+        ("kimi_k25", "kimi_k2", "kimi_k25"),
     ),
 )
 def test_run_context_selects_multimodal_spec_matching_model_type(
@@ -238,6 +239,68 @@ def test_run_context_selects_multimodal_spec_matching_model_type(
     context = _run_context_after_model_load(profile, runner)
 
     assert context.model_config["model_type"] == expected_model_type
+
+
+def test_run_context_normalizes_kimi_merge_kernel_size(monkeypatch) -> None:
+    from tools.model_diagnostics.sources.runtime_capture import _run_context_after_model_load
+    from tools.model_diagnostics.specification.run_profile import DiagnosticsRunProfile
+
+    resize_arguments = {}
+
+    def _resize_image(_model_id, _model_type, _height, _width, **kwargs):
+        resize_arguments.update(kwargs)
+        return 64, 64
+
+    monkeypatch.setattr("tensor_cast.core.input_generator.resize_image", _resize_image)
+    profile = DiagnosticsRunProfile(
+        schema_version="1",
+        model_name="test/kimi-k2.5",
+        entrypoint="text_generate",
+        phase=ExecutionPhase.PREFILL,
+        batch_size=1,
+        query_length=2,
+        context_length=0,
+        num_mtp_tokens=0,
+        parallel=ParallelContext(),
+        selected_stage_regions=(),
+        num_hidden_layers_override=1,
+        do_compile=False,
+        device="TEST_DEVICE",
+        quantize_linear_action="DISABLED",
+        word_embedding_tp=None,
+        image_batch_size=1,
+        image_height=64,
+        image_width=64,
+    )
+    text_config = SimpleNamespace(model_type="kimi_k2", torch_dtype="float16")
+    root_config = SimpleNamespace(
+        model_type="kimi_k25",
+        torch_dtype="float16",
+        vision_config=SimpleNamespace(
+            patch_size=8,
+            merge_kernel_size=[4, 4],
+            temporal_patch_size=1,
+        ),
+    )
+    runner = SimpleNamespace(
+        model=SimpleNamespace(hf_config=root_config, text_config=text_config),
+        user_input=SimpleNamespace(num_mtp_tokens=0, block_size=128),
+    )
+
+    context = _run_context_after_model_load(profile, runner)
+
+    assert resize_arguments["merge_size"] == 4
+    assert context.model_config["vision_spatial_merge_size"] == 4
+    assert context.model_config["vision_patch_tokens"] == 64
+    assert context.model_config["vision_projector_tokens"] == 4
+
+
+def test_run_context_rejects_non_square_kimi_merge_kernel() -> None:
+    from tools.model_diagnostics.errors import SourceLoadError
+    from tools.model_diagnostics.sources.runtime_capture import _vision_spatial_merge_size
+
+    with pytest.raises(SourceLoadError, match="positive square kernel"):
+        _vision_spatial_merge_size(SimpleNamespace(merge_kernel_size=[2, 4]))
 
 
 def test_run_context_derives_qwen3_vl_moe_language_and_mtp_layer_kinds() -> None:

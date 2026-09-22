@@ -108,7 +108,7 @@ class ExplicitMoeGateActivation:
     policy_id = "explicit_moe_gate"
 
     def is_active(self, request: OperatorActivationRequest) -> bool:
-        return request.context.model_config.get("model_type") != "kimi_k2"
+        return request.context.model_config.get("model_type") not in {"kimi_k2", "kimi_k25"}
 
 
 class MoEFusedTopkActivation:

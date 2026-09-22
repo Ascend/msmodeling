@@ -658,6 +658,8 @@ class TestKimiK25Patches(unittest.TestCase):
             _km._resize_image_patched = False
 
     def _install_kimi_model_wrapper_patch(self):
+        import sys
+        import types
         from unittest.mock import patch
         from tensor_cast.transformers.builtin_model.kimi_k25 import _patch_model_classes_for_kimi_k25
         from tensor_cast.transformers.model import ModelWrapper
@@ -679,18 +681,46 @@ class TestKimiK25Patches(unittest.TestCase):
             def moe_infer(self, *args, **kwargs):
                 return None
 
+        class _FakeVisionRemote(_FakeRemote):
+            pass
+
+        dynamic_package = "transformers_modules.test_kimi_k25_hash"
+        kimi_module_name = f"{dynamic_package}.modeling_kimi_k25"
+        deepseek_module_name = f"{dynamic_package}.modeling_deepseek"
+        _FakeVLRemote.__module__ = kimi_module_name
+        _FakeVisionRemote.__module__ = kimi_module_name
+        _FakeRemote.__module__ = deepseek_module_name
+
         fake_classes = {
             "modeling_kimi_k25.KimiK25ForConditionalGeneration": _FakeVLRemote,
-            "modeling_kimi_k25.MoonViT3dEncoder": _FakeRemote,
+            "modeling_kimi_k25.MoonViT3dEncoder": _FakeVisionRemote,
             "modeling_deepseek.DeepseekV3MoE": _FakeRemote,
             "modeling_deepseek.MoEGate": _FakeRemote,
             "modeling_deepseek.DeepseekV3DecoderLayer": _FakeRemote,
-            "modeling_kimi_k25.MoonVision3dPatchEmbed": _FakeRemote,
+            "modeling_kimi_k25.MoonVision3dPatchEmbed": _FakeVisionRemote,
             "modeling_deepseek.DeepseekV3RotaryEmbedding": _FakeRemote,
         }
 
         def _fake_get_class(class_ref, *args, **kwargs):
             return fake_classes[class_ref]
+
+        kimi_module = types.ModuleType(kimi_module_name)
+        kimi_module.KimiK25ForConditionalGeneration = _FakeVLRemote
+        kimi_module.MoonViT3dEncoder = _FakeVisionRemote
+        kimi_module.MoonVision3dPatchEmbed = _FakeVisionRemote
+        kimi_module.VL_VISION_ATTENTION_FUNCTIONS = {}
+        deepseek_module = types.ModuleType(deepseek_module_name)
+        deepseek_module.DeepseekV3MoE = _FakeRemote
+        deepseek_module.MoEGate = _FakeRemote
+        deepseek_module.DeepseekV3DecoderLayer = _FakeRemote
+        deepseek_module.DeepseekV3RotaryEmbedding = _FakeRemote
+        deepseek_module.ATTENTION_CLASSES = {"eager": _FakeRemote}
+        original_dynamic_modules = {
+            kimi_module_name: sys.modules.get(kimi_module_name),
+            deepseek_module_name: sys.modules.get(deepseek_module_name),
+        }
+        sys.modules[kimi_module_name] = kimi_module
+        sys.modules[deepseek_module_name] = deepseek_module
 
         original_model_wrapper_forward = ModelWrapper.forward
         had_model_wrapper_flag = hasattr(ModelWrapper, "_patched_for_mtp")
@@ -702,6 +732,11 @@ class TestKimiK25Patches(unittest.TestCase):
                 ModelWrapper._patched_for_mtp = original_model_wrapper_flag
             elif hasattr(ModelWrapper, "_patched_for_mtp"):
                 delattr(ModelWrapper, "_patched_for_mtp")
+            for module_name, original_module in original_dynamic_modules.items():
+                if original_module is None:
+                    sys.modules.pop(module_name, None)
+                else:
+                    sys.modules[module_name] = original_module
 
         try:
             with patch("transformers.dynamic_module_utils.get_class_from_dynamic_module", side_effect=_fake_get_class):
@@ -709,7 +744,73 @@ class TestKimiK25Patches(unittest.TestCase):
         except Exception:
             _restore_model_wrapper()
             raise
+        self._fake_kimi_vl_class = _FakeVLRemote
         return ModelWrapper, _restore_model_wrapper
+
+    def test_merge_meta_inputs_without_image_features_uses_text_hidden_size(self):
+        """Text-only capture must not call ``Tensor.to`` on ``sum([])``'s integer zero."""
+        from types import SimpleNamespace
+
+        _, restore_model_wrapper = self._install_kimi_model_wrapper_patch()
+        try:
+            model = self._fake_kimi_vl_class()
+            model.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=7168))
+            model.dtype = torch.bfloat16
+            input_ids = torch.empty((1, 32), dtype=torch.long, device='meta')
+
+            merged_embeddings, attention_mask, labels, position_ids = model._merge_input_ids_with_image_features(
+                [], [], input_ids
+            )
+
+            self.assertEqual(merged_embeddings.shape, (1, 32, 7168))
+            self.assertEqual(merged_embeddings.device.type, 'meta')
+            self.assertEqual(merged_embeddings.dtype, torch.bfloat16)
+            self.assertIsNone(attention_mask)
+            self.assertIsNone(labels)
+            self.assertIsNone(position_ids)
+        finally:
+            restore_model_wrapper()
+
+    def test_merge_meta_inputs_with_image_features_uses_projected_width(self):
+        """Image capture keeps the zero-valued dependency on projected vision features."""
+        from types import SimpleNamespace
+
+        _, restore_model_wrapper = self._install_kimi_model_wrapper_patch()
+        try:
+            model = self._fake_kimi_vl_class()
+            model.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=7168))
+            model.dtype = torch.bfloat16
+            input_ids = torch.empty((1, 32), dtype=torch.long, device='meta')
+            image_features = [torch.empty((8, 7168), dtype=torch.float32, device='meta')]
+
+            merged_embeddings, *_ = model._merge_input_ids_with_image_features(
+                image_features,
+                [8],
+                input_ids,
+            )
+
+            self.assertEqual(merged_embeddings.shape, (1, 32, 7168))
+            self.assertEqual(merged_embeddings.device.type, 'meta')
+            self.assertEqual(merged_embeddings.dtype, torch.bfloat16)
+        finally:
+            restore_model_wrapper()
+
+    def test_merge_meta_inputs_rejects_empty_image_feature(self):
+        """Invalid zero-token images fail explicitly instead of indexing past the tensor."""
+        from types import SimpleNamespace
+
+        _, restore_model_wrapper = self._install_kimi_model_wrapper_patch()
+        try:
+            model = self._fake_kimi_vl_class()
+            model.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=7168))
+            model.dtype = torch.bfloat16
+            input_ids = torch.empty((1, 32), dtype=torch.long, device='meta')
+            image_features = [torch.empty((0, 7168), dtype=torch.float32, device='meta')]
+
+            with self.assertRaisesRegex(ValueError, "image_features must not contain empty tensors"):
+                model._merge_input_ids_with_image_features(image_features, [0], input_ids)
+        finally:
+            restore_model_wrapper()
 
     def test_model_wrapper_mtp_patch_prunes_hidden_states_before_kimi_lm_head(self):
         """Kimi MTP wrapper must select target rows before running the internal lm_head."""

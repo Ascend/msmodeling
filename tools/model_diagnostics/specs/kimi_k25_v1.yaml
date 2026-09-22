@@ -1,0 +1,230 @@
+schema_version: "1"
+spec_id: kimi_k25_v1
+spec_version: 1.0.2
+model_category: kimi_k25
+matches:
+  entrypoints: [text_generate]
+  model_types: [kimi_k25]
+
+# HF source: moonshotai/Kimi-K2.5. The top-level model combines MoonViT3d,
+# PatchMergerMLP and a DeepSeek-V3 MLA/MoE language model.
+operator_aliases:
+  tensor_cast.mlapo.default: mlapo
+  tensor_cast.mlapo_quant.default: mlapo
+  tensor_cast.multihead_latent_attention.default: multihead_latent_attention
+  tensor_cast.multihead_latent_attention_quant.default: multihead_latent_attention
+  tensor_cast.mla_merge_phase_outputs.default: mla_attention_output
+  vision_patch_embedding: addmm
+  vision_qkv_projection: addmm
+  vision_attention: attention
+  vision_o_projection: addmm
+  vision_mlp_fc0: addmm
+  vision_mlp_fc1: addmm
+  vision_final_norm: native_layer_norm
+  vision_projector_fc0: addmm
+  vision_projector_fc1: addmm
+  final_norm: rms_norm
+  logits_select: index
+  input_layer_norm: rms_norm
+  post_attention_norm: add_rms_norm2
+  vision_projector_norm: layer_norm
+  logits_cast: prims.convert_element_type.default
+  tpool_mean: mean
+  tpool_patch_merger: view
+
+regions:
+  input:
+    stages:
+      - id: text_embedding
+        source_options:
+          theory:
+            modules:
+              - name: embedding
+                tensors:
+                  INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[1, T]", dtype: int64}
+                  OUTPUT[0]: {shape: "[1, T, EO]", dtype: ACT}
+          runtime:
+            boundary_operators: [embedding]
+            ignored_operators: [view, index, slice, unsqueeze, all_gather, all_reduce]
+        comparisons:
+          theory-runtime:
+            strategy: boundary_equal
+            options:
+              mapping:
+                mode: explicit
+                pairs:
+                  - left_call_index: 0
+                    left_slot: {direction: output, index: 0, name: null}
+                    right_call_index: 0
+                    right_slot: {direction: output, index: 0, name: null}
+                relations: []
+
+  vision_prelude:
+    activation: vision_prefill
+    stages:
+      - id: vision_patch_embedding
+        source_options:
+          theory:
+            modules:
+              - name: vision_patch_embedding
+                tensors:
+                  INPUT[0]: {shape: "[VH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[VTok, VIn]", dtype: ACT}
+                  INPUT[2]: {shape: "[VIn, VH]", dtype: WEIGHT}
+                  OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+          runtime:
+            boundary_operators: [addmm]
+            # Position/grid construction runs after patch embedding and before
+            # the first vision block. It is Runtime bookkeeping rather than a
+            # Theory operator, so keep it inside this real stage's window and
+            # filter the mechanics instead of declaring a Runtime-only stage.
+            ignored_operators:
+              - view
+              - reshape
+              - cat
+              - add
+              - _to_copy
+              - convolution
+              - slice
+              - t
+              - empty_strided
+              - arange
+              - detach
+              - remainder
+              - floor_divide
+              - div
+              - pow
+              - reciprocal
+              - mul
+              - ones_like
+              - polar
+              - unsqueeze
+              - clone
+              - _unsafe_view
+              - repeat
+              - zeros
+              - select
+              - max
+              - cumsum
+
+  vision_encoder:
+    activation: vision_prefill
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: kimi_k25_vision_block
+      count_from: model_config.vision_num_hidden_layers
+    layer_specs:
+      kimi_k25_vision_block:
+        include_fragment: kimi_k25_vision_encoder_v1
+
+  vision_postlude:
+    activation: vision_prefill
+    stages:
+      - id: vision_final_norm
+        source_options:
+          theory:
+            modules:
+              - name: vision_final_norm
+                tensors:
+                  INPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[VTok, VH]", dtype: ACT}
+          runtime:
+            boundary_operators: [native_layer_norm, layer_norm]
+            ignored_operators: [slice, view, reshape, permute, clone]
+      - id: tpool_patch_merger
+        source_options:
+          theory:
+            repeat: ViB
+            modules:
+              - name: tpool_mean
+                tensors:
+                  INPUT[0]: {shape: "[VgT, VgH / Vm, VgW / Vm, Vm, Vm, VH]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[VgH / Vm, VgW / Vm, Vm, Vm, VH]", dtype: ACT}
+              - name: tpool_patch_merger
+                tensors:
+                  INPUT[0]: {shape: "[VgH / Vm, VgW / Vm, Vm, Vm, VH]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[VProjImg, Vm * Vm, VH]", dtype: ACT}
+          runtime:
+            boundary_operators: [mean]
+            ignored_operators: [slice, reshape, permute, clone]
+      - id: patch_merger_projector
+        source_options:
+          theory:
+            modules:
+              - name: vision_projector_norm
+                tensors:
+                  INPUT[0]: {shape: "[VProjTok, Vm * Vm, VH]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[VProjTok, Vm * Vm, VH]", dtype: ACT}
+              - name: vision_projector_fc0
+                tensors:
+                  INPUT[0]: {shape: "[VMH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[VProjTok, VMH]", dtype: LINEAR_IN}
+                  INPUT[2]: {shape: "[VMH, VMH]", dtype: WEIGHT}
+                  OUTPUT[0]: {shape: "[VProjTok, VMH]", dtype: ACT}
+              - name: gelu
+                tensors:
+                  INPUT[0]: {shape: "[VProjTok, VMH]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[VProjTok, VMH]", dtype: ACT}
+              - name: vision_projector_fc1
+                tensors:
+                  INPUT[0]: {shape: "[VOH]", dtype: WEIGHT}
+                  INPUT[1]: {shape: "[VProjTok, VMH]", dtype: LINEAR_IN}
+                  INPUT[2]: {shape: "[VMH, VOH]", dtype: WEIGHT}
+                  OUTPUT[0]: {shape: "[VProjTok, VOH]", dtype: ACT}
+          runtime:
+            boundary_operators: [native_layer_norm, layer_norm]
+            ignored_operators: [view, reshape, select, add, mul]
+
+  language:
+    layer_layout_rule:
+      strategy: prefix_then_repeat
+      prefix_layer_kind: kimi_k25_dense_decoder
+      prefix_count_from: model_config.first_k_dense_replace
+      repeated_layer_kind: kimi_k25_moe_decoder
+      count_from: model_config.effective_num_hidden_layers
+    layer_specs:
+      kimi_k25_dense_decoder:
+        include_fragment: kimi_k25_dense_decoder_v1
+      kimi_k25_moe_decoder:
+        include_fragment: kimi_k25_moe_decoder_v1
+
+  output:
+    activation: non_mtp_lm_head
+    stages:
+      - id: lm_head
+        source_options:
+          theory:
+            modules:
+              - name: final_norm
+                tensors:
+                  OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+              - name: lm_head
+                tensors:
+                  INPUT[0]: {shape: "[T, H]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[T, Vtp]", dtype: OUT}
+              - name: logits_cast
+                tensors:
+                  INPUT[0]: {shape: "[1, T, Vtp]", dtype: OUT}
+                  OUTPUT[0]: {shape: "[1, T, Vtp]", dtype: float32}
+              - name: logits_select
+                activation: lm_head_token_selection
+                tensors:
+                  INPUT[0]: {shape: "[1, T, Vtp]", dtype: float32}
+                  OUTPUT[0]: {shape: "[1, B, Vtp]", dtype: float32}
+          runtime:
+            boundary_operators: [rms_norm]
+            ignored_operators: [view, slice, index_select, dynamic_quantize_symmetric, all_gather]
+
+  # TensorCast MTP reuses the HF DeepseekV3DecoderLayer as its predictor.
+  # The decoder internals remain source-backed even when the checkpoint does
+  # not carry a native next-token-prediction block.
+  mtp:
+    activation: mtp_enabled
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: kimi_k25_mtp
+      count_from: model_config.effective_num_mtp_layers
+    compose:
+      framework: mtp_framework_v1
+      predictor: kimi_k25_moe_decoder_v1

@@ -419,6 +419,8 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
                 "image_batch_size/image_height/image_width must be non-negative integers"
             )
         image_batch, image_height, image_width = image_values
+        grid_t = 1
+        grid_h = grid_w = 0
         patch_tokens = projector_tokens = text_tokens = 0
         if image_batch and image_height and image_width:
             token_keys = (
@@ -430,6 +432,14 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
                 patch_tokens = _config_int(config, "vision_patch_tokens")
                 projector_tokens = _config_int(config, "vision_projector_tokens")
                 text_tokens = _config_int(config, "vision_text_tokens")
+                # MoonViT's spatial unshuffle Theory uses the concrete grid.
+                # Other multimodal specs consume only the materialized token
+                # counts and must retain the upstream master behaviour, which
+                # does not require grid fields in hand-built contexts.
+                if config.get("model_type") == "kimi_k25":
+                    grid_t = _config_int(config, "vision_grid_t")
+                    grid_h = _config_int(config, "vision_grid_h")
+                    grid_w = _config_int(config, "vision_grid_w")
             else:
                 resized_height = config.get("image_resized_height")
                 resized_width = config.get("image_resized_width")
@@ -458,10 +468,15 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
                     "vision_grid_w",
                     default=resized_width // vision_patch,
                 )
+                default_patch_tokens = image_batch * grid_t * grid_h * grid_w
+                if config.get("model_type") == "kimi_k25":
+                    # MoonViT flattens every image assigned to this rank before
+                    # patch embedding, so its patch/projector totals are rank-local.
+                    default_patch_tokens *= local_batch
                 patch_tokens = _optional_config_int(
                     config,
                     "vision_patch_tokens",
-                    default=image_batch * grid_t * grid_h * grid_w,
+                    default=default_patch_tokens,
                 )
                 projector_tokens = _optional_config_int(
                     config,
@@ -486,6 +501,18 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
             "VMH": vision_hidden * (vision_merge**2),
             "VOH": vision_out_hidden,
         }
+        if config.get("model_type") == "kimi_k25":
+            local_image_batch = local_batch * image_batch
+            vision_env.update(
+                {
+                    "ViB": local_image_batch,
+                    "VgT": grid_t,
+                    "VgH": grid_h,
+                    "VgW": grid_w,
+                    "VProjImg": grid_h * grid_w // (vision_merge**2),
+                    "VIn": vision_channels * vision_temporal * vision_patch * vision_patch,
+                }
+            )
         if text_tokens:
             if context.phase is ExecutionPhase.PREFILL:
                 query += text_tokens

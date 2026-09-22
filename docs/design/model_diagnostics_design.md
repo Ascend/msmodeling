@@ -12,6 +12,7 @@ Status: Initial Release Review
 | 2026-08-15 | 1.3 | 分类 3 并行覆盖改为逐型号（每型号 TP=2/EP=2、DP=2/MDP=2 组合）；新增 `MOE_GATE_TOKENS` 契约并补充 sparse_attention 机械算子忽略 | ChenHuiwen | N/A |
 | 2026-08-15 | 1.4 | 评审修复：lm_head TP 默认值单测、`explicit_moe_gate` 语义说明、config 一致性注释；E2E 按例行代表集 + nightly 全矩阵分层 | ChenHuiwen | N/A |
 | 2026-09-11 | 1.5 | 质量评优整改：YAML 重复键/parallel 严格校验、首边界证据完整性、语义化 ignore groups（stage 按 Tensor 契约整族忽略，集合可大于原手写列表）、Artifact 版本门禁、Source 证据保留、报告边界及测试入口分层；删除 §4.0 Independent Oracle 开发流程（Theory 独立于实测 Runtime 的原则仍由 skill 与本文其它章节约束） | ChenHuiwen | N/A |
+| 2026-09-20 | 1.6 | Kimi K2.5/K2.6 纯文本与视觉路径统一使用顶层 `kimi_k25` 上下文和 `kimi_k25_v1` 契约；Kimi 专用 MoonViT 符号不再注入其他多模态模型 | ChenHuiwen | N/A |
 
 ---
 
@@ -1364,7 +1365,9 @@ W8A8_DYNAMIC 还覆盖公开 CLI；量化 decode 必须验证跳过 `lm_head_sel
 Spec 声明规则。
 
 分类 3 共用 DeepSeek V3-family 的 Dense 前缀、MoE/shared-expert、MLA/DSA sparse MLA
-组合契约，正式 E2E 覆盖 DeepSeek V3/V3.2、GLM-5/5.1 与 Kimi K2/K2.5/K2.6 文本路径。
+组合契约，正式 E2E 覆盖 DeepSeek V3/V3.2、GLM-5/5.1 与 Kimi-K2-Base 文本路径。
+Kimi K2.5/K2.6 的纯文本与视觉路径统一保留顶层 `model_type=kimi_k25`，由
+`kimi_k25_v1` 契约覆盖，避免同一模型因输入模态不同而选择不同 Spec。
 每个型号至少包含 prefill、decode、W8A8_DYNAMIC 与 MTP decode；DeepSeek V3.2 额外覆盖
 W4A8_DYNAMIC。并行 shape 逐型号覆盖 `TP=2/EP=2` 与 `DP=2/MDP=2` 两个组合布局。量化 E2E
 除最终诊断 PASS 外，还断言对应 int8/int4 linear 和 grouped-MoE kernels 确实出现在
@@ -1375,9 +1378,9 @@ V3/V3.1、GLM-5/5.1、Kimi-K2-Base）在 EP>1 时 gate 运行于全量序列 `T`
 运行于交换后域 `Tmoe`（DeepSeek V3.2、Kimi K2.5/K2.6）。sparse_attention 阶段忽略
 MoE 域机械算子（`all_gather`/`all_to_all`/`constant_pad_nd`/`slice`），避免
 `moe_gate` 因 `explicit_moe_gate` 关闭时这些调用被计入注意力阶段。Kimi K2.5/K2.6
-（`kimi_k2`）的 Runtime patch 将 routing 融合进 MoE 内核、无独立 gate 调用，因此
+（`kimi_k25`）的 Runtime patch 将 routing 融合进 MoE 内核、无独立 gate 调用，因此
 `explicit_moe_gate=False` 省略其 gate 阶段；其余 DeepSeek 族型号暴露独立 gate mm。
-若带视觉输入还需叠加分类 6，该视觉路径不由分类 3 文本 E2E 代替。
+视觉输入由同一 `kimi_k25_v1` 契约中的 MoonViT regions 覆盖。
 
 例行门禁只保留每个 `model_type` 的 prefill/decode 代表用例与 DeepSeek V3.2 完整
 纵向（量化/MTP/并行）；其余量化变体、MTP 与并行组合标记 nightly 全量执行，场景不删除。
@@ -1444,7 +1447,8 @@ Runtime Artifact 保留这些通信和 mask 算子的原始证据，阶段 Spec 
 | Export observer | 禁用零影响；启用失败不留部分文件；region/copy 展开后顺序稳定；mock 只用于单测 |
 | Synthetic artifact | 测试代码在内存中构造；仓库不保存或重放 Artifact JSON |
 | Category 1 live path | Qwen3 Dense 单层样例：每次采集+比较；禁止缓存 Qwen3 Artifact 文件 |
-| Classification 3 live path | DeepSeek V3/V3.2、GLM-5/5.1、Kimi K2/K2.5/K2.6 文本路径逐型号覆盖 prefill/decode、量化与 MTP，以及 `TP=2/EP=2`、`DP=2/MDP=2` 两个并行组合；每次真实采集并要求全部 finding PASS |
+| Classification 3 live path | DeepSeek V3/V3.2、GLM-5/5.1、Kimi-K2-Base 文本路径逐型号覆盖 prefill/decode、量化与 MTP，以及 `TP=2/EP=2`、`DP=2/MDP=2` 两个并行组合；每次真实采集并要求全部 finding PASS |
+| Kimi K2.5 live path | Kimi K2.5/K2.6 纯文本与视觉路径使用 `kimi_k25_v1`，覆盖 prefill/decode、量化、MTP、MoonViT，以及 `TP=2/EP=2`、`DP=2/MDP=2` 两个并行组合；每次真实采集并要求全部 finding PASS |
 | Defect injection | 缺失算子、错误 shape、错误 dtype → FAIL/INCOMPLETE 可定位 |
 | Dependency boundary | 仅 `sources/runtime_capture.py` 可 import/读取 Runtime；包级 `sources`、domain 与 Artifact 后链路可在无 Runtime import 下加载、组织和比较 |
 | Result adapters | `assert_diagnostics_passed()` 摘要简洁；Console 与两类 HTML 验证转义、完整性和原子写入 |

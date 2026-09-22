@@ -1001,10 +1001,12 @@ stage override。未知调用不得静默丢弃。
 | --- | --- |
 | `deepseek-ai/DeepSeek-V3`、`deepseek-ai/DeepSeek-V3.2` | prefill、decode、W8A8_DYNAMIC、MTP；V3.2 额外覆盖 W4A8_DYNAMIC |
 | `zai-org/GLM-5`、`zai-org/GLM-5.1` | prefill、decode、W8A8_DYNAMIC、MTP |
-| `moonshotai/Kimi-K2-Base`、`moonshotai/Kimi-K2.5`、`moonshotai/Kimi-K2.6` | 文本路径的 prefill、decode、W8A8_DYNAMIC、MTP |
+| `moonshotai/Kimi-K2-Base` | `deepseek_v3_v1` 文本路径的 prefill、decode、W8A8_DYNAMIC、MTP |
+| `moonshotai/Kimi-K2.5`、`moonshotai/Kimi-K2.6` | `kimi_k25_v1` 路径的 prefill、decode、W8A8_DYNAMIC、MTP；带视觉输入时额外覆盖 MoonViT |
 
-Kimi K2.5/K2.6 的顶层 VL config 均暴露 `text_config.model_type: kimi_k2`，因此文本诊断
-共享分类 `3` 契约；带视觉输入时还需叠加分类 `6`，不由本节文本 E2E 代替。TensorCast 的
+Kimi K2.5/K2.6 的顶层 VL config 使用 `model_type: kimi_k25`，采集上下文保留该顶层类型，
+因此纯文本与视觉输入均由 `kimi_k25_v1` 契约覆盖；Kimi-K2-Base 仍通过 `kimi_k2` 使用分类 `3`
+的 `deepseek_v3_v1` 契约。TensorCast 的
 公开运行方式是一进程一模型；参数化测试在同一 pytest worker 中覆盖多个 Kimi 型号时，只在
 测试侧重置远端类 patch guard，以模拟彼此独立的 CLI 运行，不扩展产品生命周期契约。
 
@@ -1013,7 +1015,7 @@ GLM-5/5.1、Kimi K2/K2.5/K2.6）。所有场景均执行真实 Runtime capture�
 Theory↔Runtime findings 必须全部 PASS；量化场景还必须断言对应量化 kernel 实际出现。
 
 例行门禁保留**最小代表集**：每个 `model_type`（`deepseek_v32`/`deepseek_v3`/
-`glm_moe_dsa`/`kimi_k2`）至少覆盖 prefill 与 decode，DeepSeek V3.2 作为旗舰型号
+`glm_moe_dsa`/`kimi_k2`/`kimi_k25`）至少覆盖 prefill 与 decode，DeepSeek V3.2 作为旗舰型号
 完整覆盖量化/MTP/并行；其余量化变体、MTP 与并行组合标记 `@pytest.mark.nightly`，
 保留在仓库 nightly 层完整执行，不删除任何场景。
 

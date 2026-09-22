@@ -114,6 +114,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
 
     Requires ``model_id`` to locate and import the remote modeling files.
     """
+    import importlib
     import logging
     import sys
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
@@ -154,6 +155,38 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
             _patched_resolve._tensor_cast_patched = True
             transformers.dynamic_module_utils.resolve_trust_remote_code = _patched_resolve
 
+    class_ref_vl = "modeling_kimi_k25.KimiK25ForConditionalGeneration"
+    vl_cls = get_class_from_dynamic_module(class_ref_vl, model_id, force_download=False)
+    dynamic_package, separator, _ = vl_cls.__module__.rpartition(".")
+    if not separator:
+        raise RuntimeError(
+            f"Kimi K2.5 dynamic module {vl_cls.__module__!r} is not package-qualified; "
+            "cannot safely resolve sibling model classes"
+        )
+
+    class _DynamicPackageError(RuntimeError):
+        """The loaded Kimi cache package cannot supply a required sibling class."""
+
+    def _dynamic_class(module_name, class_name):
+        qualified_module = f"{dynamic_package}.{module_name}"
+        module = sys.modules.get(qualified_module)
+        if module is None:
+            try:
+                module = importlib.import_module(qualified_module)
+            except ModuleNotFoundError as error:
+                if error.name != qualified_module:
+                    raise
+                raise _DynamicPackageError(
+                    f"Kimi K2.5 sibling module {qualified_module!r} is unavailable "
+                    f"in dynamic package {dynamic_package!r}"
+                ) from error
+        try:
+            return getattr(module, class_name)
+        except AttributeError as error:
+            raise _DynamicPackageError(
+                f"Kimi K2.5 sibling module {qualified_module!r} does not define {class_name!r}"
+            ) from error
+
     try:
         # ----------------------------------------------------------------
         # Patch 4: Filter KimiK25ForConditionalGeneration.forward kwargs
@@ -163,8 +196,6 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #        original VL forward only accepts standard HF keys.
         #        Passing unexpected kwargs causes TypeError.
         # WITHOUT: TypeError from unexpected keyword arguments.
-        class_ref_vl = "modeling_kimi_k25.KimiK25ForConditionalGeneration"
-        vl_cls = get_class_from_dynamic_module(class_ref_vl, model_id, force_download=False)
 
         if not hasattr(vl_cls, "_original_vl_forward"):
             vl_cls._original_vl_forward = vl_cls.forward
@@ -239,11 +270,27 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         ):
             batch_size, sequence_length = input_ids.shape
             if input_ids.device.type == 'meta':
-                embed_dim = (
-                    image_features[0].shape[-1] if len(image_features) > 0 else self.config.text_config.hidden_size
+                has_image_features = len(image_features) > 0
+                if any(feature.numel() == 0 for feature in image_features):
+                    raise ValueError("image_features must not contain empty tensors")
+                embed_dim = image_features[0].shape[-1] if has_image_features else self.config.text_config.hidden_size
+                # Preserve the HF value edge from MoonViT -> PatchMergerMLP ->
+                # merged embeddings while avoiding the data-dependent indexing
+                # in the original helper.  A bare ``torch.empty`` makes the
+                # projected image features dead during Dynamo capture, which
+                # incorrectly erases PatchMergerMLP from the Runtime artifact.
+                merged_embeddings = torch.empty(
+                    batch_size,
+                    sequence_length,
+                    embed_dim,
+                    device='meta',
+                    dtype=self.dtype,
                 )
+                if has_image_features:
+                    image_anchor = sum(feature.reshape(-1)[0] for feature in image_features)
+                    merged_embeddings = merged_embeddings + image_anchor.to(self.dtype) * 0
                 return (
-                    torch.empty(batch_size, sequence_length, embed_dim, device='meta', dtype=self.dtype),
+                    merged_embeddings,
                     attention_mask,
                     labels,
                     position_ids,
@@ -276,14 +323,13 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #        and avoids O(n²) computation for very long sequences.
         # WITHOUT: AttributeError for missing use_deterministic_attn;
         #          KeyError for missing "tensor_cast" attention backend.
-        class_ref_enc = "modeling_kimi_k25.MoonViT3dEncoder"
-        encoder_cls = get_class_from_dynamic_module(class_ref_enc, model_id, force_download=False)
+        encoder_cls = _dynamic_class("modeling_kimi_k25", "MoonViT3dEncoder")
         if not hasattr(encoder_cls, "use_deterministic_attn"):
             setattr(encoder_cls, "use_deterministic_attn", False)
             patched = True
 
             for name, module in sys.modules.items():
-                if "moonshotai" in name and "modeling_kimi_k25" in name:
+                if name == encoder_cls.__module__:
                     if hasattr(module, "VL_VISION_ATTENTION_FUNCTIONS"):
 
                         def visual_tc_adapter(
@@ -401,8 +447,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #        which wraps these modules with fused MoELayer wrappers.
         # WITHOUT: torch.compile failure (untraceable dynamic dispatch)
         #          or OOM during graph capture.
-        class_ref_moe = "modeling_deepseek.DeepseekV3MoE"
-        moe_cls = get_class_from_dynamic_module(class_ref_moe, model_id, force_download=False)
+        moe_cls = _dynamic_class("modeling_deepseek", "DeepseekV3MoE")
 
         def patched_forward(_self, hidden_states):
             return torch.zeros_like(hidden_states)
@@ -427,8 +472,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #        shapes during graph capture.
         # WITHOUT: Non-deterministic / un-traceable routing logic during
         #          torch.compile; shape mismatches downstream.
-        class_ref_gate = "modeling_deepseek.MoEGate"
-        gate_cls = get_class_from_dynamic_module(class_ref_gate, model_id, force_download=False)
+        gate_cls = _dynamic_class("modeling_deepseek", "MoEGate")
 
         def patched_gate_forward(self, hidden_states, **kwargs):
             if hidden_states.dim() == 3:
@@ -521,8 +565,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #            _extra_forward_kwargs (injected by model_runner).
         # WITHOUT: ValueError from tuple unpacking; missing RoPE;
         #          missing attention_meta leading to broken KV cache ops.
-        class_ref_decoder = "modeling_deepseek.DeepseekV3DecoderLayer"
-        decoder_cls = get_class_from_dynamic_module(class_ref_decoder, model_id, force_download=False)
+        decoder_cls = _dynamic_class("modeling_deepseek", "DeepseekV3DecoderLayer")
 
         # ----------------------------------------------------------------
         # Patch 10a: Register 'tensor_cast' in ATTENTION_CLASSES
@@ -633,12 +676,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         #        input.  This patch reshapes 2D input back to 4D chunks
         #        and uses linear projection instead.
         # WITHOUT: RuntimeError from Conv2d receiving 2D input.
-        class_ref_patch_embed = "modeling_kimi_k25.MoonVision3dPatchEmbed"
-        patch_embed_cls = get_class_from_dynamic_module(
-            class_ref_patch_embed,
-            model_id,
-            force_download=False,
-        )
+        patch_embed_cls = _dynamic_class("modeling_kimi_k25", "MoonVision3dPatchEmbed")
 
         if not hasattr(patch_embed_cls, "_original_patch_embed_forward"):
             patch_embed_cls._original_patch_embed_forward = patch_embed_cls.forward
@@ -953,8 +991,7 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
         # WITHOUT: ``TypeError: arange() received an invalid combination
         #          of arguments - got (Tensor, ...)`` at the
         #          ``rotary_emb`` call in ``MtpWrapper.forward()``.
-        class_ref_rotary = "modeling_deepseek.DeepseekV3RotaryEmbedding"
-        rotary_cls = get_class_from_dynamic_module(class_ref_rotary, model_id, force_download=False)
+        rotary_cls = _dynamic_class("modeling_deepseek", "DeepseekV3RotaryEmbedding")
 
         if not hasattr(rotary_cls, "_patched_for_kimi_k25"):
             _original_rotary_forward = rotary_cls.forward
@@ -988,6 +1025,8 @@ def _patch_model_classes_for_kimi_k25(config, model_id):
             rotary_cls._patched_for_kimi_k25 = True
             patched = True
 
+    except _DynamicPackageError:
+        raise
     except Exception as e:
         logger.warning(f"Could not patch remote modules: {e}")
 
