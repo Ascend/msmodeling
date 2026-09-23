@@ -161,7 +161,6 @@ id = "rank0"
 ssh_ip = "192.0.2.10"             # 容器的 SSH IP
 ssh_port = 22222                    # 容器的 SSH 端口
 ssh_user = "root"
-password = "******"      # Base64 编码的密码
 service_ip = "127.0.0.1"
 network_interface = "eth0"
 
@@ -170,7 +169,6 @@ id = "rank1"
 ssh_ip = "192.0.2.11"
 ssh_port = 22222
 ssh_user = "root"
-password = "******"
 service_ip = "127.0.0.1"
 network_interface = "eth0"
 
@@ -235,7 +233,6 @@ id = "rank0"
 ssh_ip = "192.0.2.10"             # 宿主机的 SSH IP
 ssh_port = 22                       # 宿主机的 SSH 端口
 ssh_user = "root"
-password = "******"
 service_ip = "127.0.0.1"
 network_interface = "eth0"
 docker_container_id = "pd-container-0"   # 容器 ID 或名称
@@ -246,7 +243,6 @@ id = "rank1"
 ssh_ip = "192.0.2.11"
 ssh_port = 22
 ssh_user = "root"
-password = "******"
 service_ip = "127.0.0.1"
 network_interface = "eth0"
 docker_container_id = "pd-container-1"
@@ -288,7 +284,7 @@ service_port = 8000
 
 **docker exec 权限不足**
 
-如果 docker 命令需要 sudo，设置 `docker_use_sudo = true`，并配合 `password` 字段自动输入密码。
+如果 docker 命令需要 sudo，设置 `docker_use_sudo = true`。需保证宿主机已配置 SSH 互信免密登录（含 sudo 免密，如 `NOPASSWD`），插件不接收密码。
 
 **docker cp 失败**
 
@@ -322,8 +318,7 @@ service_port = 8000
 | `id` | 是 | - | 主机唯一标识，供节点 `hosts` 字段引用 |
 | `ssh_ip` | 是 | `localhost` | SSH 连接 IP |
 | `ssh_port` | 是 | `22` | SSH 端口 |
-| `ssh_user` | 是 | `root` | SSH 用户名 |
-| `password` | 否 | - | SSH 密码，支持明文或 Base64 编码；不填走密钥免密 |
+| `ssh_user` | 是 | `root` | SSH 用户名（需已配置互信免密登录） |
 | `docker_container_id` | 否 | - | Docker 容器 ID 或名称，填写后通过 `docker exec` 操作（场景2） |
 | `docker_use_sudo` | 否 | `false` | docker 命令是否需要 sudo |
 | `service_ip` | 否 | `ssh_ip` | vLLM 服务绑定 IP |
@@ -480,7 +475,7 @@ ms_serviceparam_optimizer optimizer -e vllm_pd -b evalscopeperf
 
 **SSH 连接失败**
 
-在本地先验证：`ssh -p <port> <user>@<host> "echo ok"`。常见原因：密钥未配置、密码错误、防火墙未放行。
+在本地先验证：`ssh -p <port> <user>@<host> "echo ok"`。常见原因：SSH 互信（密钥免密）未配置、防火墙未放行。
 
 **启动后节点一直卡在等待健康**
 

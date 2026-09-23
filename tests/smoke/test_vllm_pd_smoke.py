@@ -92,7 +92,6 @@ class TestPdSshRemoteConfig(unittest.TestCase):
             port=2202,
             user="worker",
             config=fabric_config,
-            connect_kwargs={},
             connect_timeout=45,
         )
 
