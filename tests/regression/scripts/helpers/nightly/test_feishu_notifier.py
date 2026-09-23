@@ -1,7 +1,24 @@
+# -------------------------------------------------------------------------
+# This file is part of the MindStudio project.
+# Copyright (c) 2026 Huawei Technologies Co.,Ltd.
+#
+# MindStudio is licensed under Mulan PSL v2.
+# You can use this software according to the terms and conditions of the Mulan PSL v2.
+# You may obtain a copy of Mulan PSL v2 at:
+#
+#          http://license.coscl.org.cn/MulanPSL2
+#
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+# See the Mulan PSL v2 for more details.
+# -------------------------------------------------------------------------
+
 """Tests for nightly.feishu_notifier — build_feishu_payload, push_feishu."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -43,7 +60,7 @@ def _report(**overrides: object) -> FeishuReportInput:
     )
     if not overrides:
         return report
-    fields = {field.name: getattr(report, field.name) for field in report.__dataclass_fields__.values()}
+    fields = {field.name: getattr(report, field.name) for field in dataclasses.fields(report)}
     fields.update(overrides)
     return FeishuReportInput(**fields)
 
@@ -316,7 +333,7 @@ def test_push_feishu_posts_json(
         def read(self) -> bytes:
             return b'{"code":0,"msg":"ok"}'
 
-        def __enter__(self) -> _Resp:
+        def __enter__(self) -> "_Resp":
             return self
 
         def __exit__(self, *_args: object) -> None:

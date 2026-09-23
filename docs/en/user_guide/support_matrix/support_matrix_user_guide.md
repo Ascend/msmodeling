@@ -22,7 +22,7 @@ This document summarizes the currently supported model types and simulation feat
 | Model Type | Model Family | Supported Models |
 | --- | --- | --- |
 | Text models | DeepSeek | DeepSeek V4, DeepSeek V3.2, DeepSeek V3 |
-| Text models | Kimi | Kimi-K2.6, Kimi-K2.5, Kimi-K2 (supported through the DeepSeek V3 compatibility path) |
+| Text models | Kimi | Kimi-K2.6, Kimi K2.5, Kimi-K2 (supported through the DeepSeek V3 compatibility path) |
 | Text models | Qwen | Qwen3.5, Qwen3.5 MoE, Qwen3-Next, Qwen3 Dense, Qwen3 MoE |
 | Text models | GLM | GLM5.1, GLM5, GLM-4 MoE |
 | Text models | ERNIE | ERNIE 4.5 MoE |

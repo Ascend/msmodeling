@@ -1,3 +1,11 @@
+# Copyright (c) 2025 inclusionAI
+# Modifications Copyright (c) 2026 Huawei Technologies Co., Ltd.
+#
+# This file is derived from configuration_bailing_moe_v2.py in
+# https://huggingface.co/inclusionAI/Ling-flash-2.0 (MIT License). The
+# model_type declaration and the super().__init__ call are local adaptations.
+# See tensor_cast/transformers/builtin_model/licenses/LICENSE-inclusionAI-Ling-MIT
+
 """Bailing MoE V2 model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig

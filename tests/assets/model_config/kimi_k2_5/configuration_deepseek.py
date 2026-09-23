@@ -1,3 +1,13 @@
+# Copyright (c) 2023 DeepSeek
+# Modifications Copyright (c) 2026 Huawei Technologies Co., Ltd.
+#
+# This file is derived from configuration_deepseek.py in
+# https://huggingface.co/deepseek-ai/DeepSeek-V3 (MIT License), and carries the
+# pretraining_tp handling of configuration_deepseek_v3.py in
+# https://github.com/huggingface/transformers (Apache License 2.0,
+# Copyright 2025 bzantium and the HuggingFace Inc. team).
+# See tensor_cast/transformers/builtin_model/licenses/ for both full texts.
+
 # Copy from https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/configuration_deepseek.py
 
 from transformers.configuration_utils import PretrainedConfig

@@ -1,3 +1,19 @@
+# -------------------------------------------------------------------------
+# This file is part of the MindStudio project.
+# Copyright (c) 2026 Huawei Technologies Co.,Ltd.
+#
+# MindStudio is licensed under Mulan PSL v2.
+# You can use this software according to the terms and conditions of the Mulan PSL v2.
+# You may obtain a copy of Mulan PSL v2 at:
+#
+#          http://license.coscl.org.cn/MulanPSL2
+#
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+# See the Mulan PSL v2 for more details.
+# -------------------------------------------------------------------------
+
 import json
 import sys
 import tempfile
@@ -1067,7 +1083,7 @@ class TestTextGenerate(TextGenerateTestMixin, unittest.TestCase):
         embedding_layer = max(embedding_layers, key=lambda module: module.num_embeddings)
         self.assertEqual(embedding_layer.shard_mode, WordEmbeddingTPMode(embedding_tp_mode))
         sharded_vocab, sharded_hidden = embedding_layer._inner.weight.shape
-        if embedding_tp_mode == WordEmbeddingTPMode.col.value:
+        if embedding_tp_mode == WordEmbeddingTPMode.col:
             self.assertEqual(sharded_vocab, embedding_layer.num_embeddings)
             self.assertLess(sharded_hidden, embedding_layer.embedding_dim)
             self.assertGreaterEqual(sharded_hidden * embedding_layer.tp_size, embedding_layer.embedding_dim)

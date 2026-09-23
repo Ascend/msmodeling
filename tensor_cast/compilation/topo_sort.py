@@ -1,3 +1,10 @@
+# Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
+# Modifications Copyright (c) 2026 Huawei Technologies Co., Ltd.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+# This file contains code derived from PyTorch
+# (https://github.com/pytorch/pytorch). See the PyTorch LICENSE.
+
 import heapq
 import operator
 

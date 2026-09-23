@@ -1,3 +1,19 @@
+# -------------------------------------------------------------------------
+# This file is part of the MindStudio project.
+# Copyright (c) 2026 Huawei Technologies Co.,Ltd.
+#
+# MindStudio is licensed under Mulan PSL v2.
+# You can use this software according to the terms and conditions of the Mulan PSL v2.
+# You may obtain a copy of Mulan PSL v2 at:
+#
+#          http://license.coscl.org.cn/MulanPSL2
+#
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+# See the Mulan PSL v2 for more details.
+# -------------------------------------------------------------------------
+
 """FLUX.1-dev image Transformer workload helpers."""
 
 from __future__ import annotations
@@ -20,6 +36,7 @@ from .model_resolver import DiffusersModelSelection
 KIND = "flux1-dev"
 MODEL_ID = "black-forest-labs/FLUX.1-dev"
 DIFFUSERS_BASELINE = "0.38.0"
+SUPPORTED_REMOTE_SOURCE = str(RemoteSource.huggingface)
 
 _ROOT_COMPONENTS = {
     "vae": ["diffusers", "AutoencoderKL"],
@@ -72,8 +89,7 @@ def _source_value(remote_source: str) -> str:
 def _identity_error(model_id: str, remote_source: str) -> ValueError:
     actual = (_source_value(remote_source), model_id)
     return ValueError(
-        "FLUX.1-dev remote identity mismatch: "
-        f"expected ({RemoteSource.huggingface.value!r}, {MODEL_ID!r}); actual {actual!r}."
+        f"FLUX.1-dev remote identity mismatch: expected ({SUPPORTED_REMOTE_SOURCE!r}, {MODEL_ID!r}); actual {actual!r}."
     )
 
 
@@ -85,7 +101,7 @@ def resolve_model_kind(
 ) -> str:
     del model_config
     if model_selection.is_remote:
-        if _source_value(remote_source) != RemoteSource.huggingface.value or model_id != MODEL_ID:
+        if _source_value(remote_source) != SUPPORTED_REMOTE_SOURCE or model_id != MODEL_ID:
             raise _identity_error(model_id, remote_source)
     return KIND
 

@@ -1,3 +1,19 @@
+# -------------------------------------------------------------------------
+# This file is part of the MindStudio project.
+# Copyright (c) 2026 Huawei Technologies Co.,Ltd.
+#
+# MindStudio is licensed under Mulan PSL v2.
+# You can use this software according to the terms and conditions of the Mulan PSL v2.
+# You may obtain a copy of Mulan PSL v2 at:
+#
+#          http://license.coscl.org.cn/MulanPSL2
+#
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+# See the Mulan PSL v2 for more details.
+# -------------------------------------------------------------------------
+
 import inspect
 import logging
 
@@ -10,9 +26,7 @@ from ...layers.glm5 import Glm5SparseAttention
 from ...layers.internal import CopyLayerWrapper, RegionMarkerWrapper
 from ..custom_model_registry import ModelProfile, MoeExpertMLP, register_model_profile
 
-
 logger = logging.getLogger(__name__)
-
 
 _GLM5_ATTENTION_OUTPUT_HIDDEN_STATES_INDEX = 0
 _GLM5_ATTENTION_OUTPUT_TOPK_INDICES_INDEX = 2

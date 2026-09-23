@@ -1,3 +1,10 @@
+# Copyright (c) 2023 DeepSeek
+#
+# This file is a copy of configuration_deepseek.py in
+# https://huggingface.co/deepseek-ai/DeepSeek-V3.1 (MIT License), reformatted to
+# the repository's lint conventions.
+# See tensor_cast/transformers/builtin_model/licenses/LICENSE-DeepSeek-MIT
+
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
