@@ -5,7 +5,7 @@ Structure of config.toml:
     [[vllm_mix.node]]      Master node (same machine as the optimizer, launched locally, no SSH info needed)
     [[vllm_mix.workers]]   Worker nodes (launched remotely over SSH)
     [vllm_mix.env]         Static environment variables exported into every generated startup script
-    docker_use_sudo        Whether docker commands are prefixed with sudo
+    docker_use_sudo        Whether commands are prefixed with non-interactive sudo -n
 
 This is a pure configuration module: it only depends on the standard library and does
 not depend back on executor / simulator, so it can be imported both from inside the
@@ -30,13 +30,22 @@ class NodeConfig:
     host: str
     ssh_port: int = 22
     ssh_user: str = "root"
-    password: Optional[str] = None
     docker_container_id: Optional[str] = None
     nic_name: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "NodeConfig":
-        # Keep only known fields, ignoring extra keys in config.toml
+        # Reject credentials instead of silently accepting an unsafe legacy config.
+        auth_fields = {"password", "ssh_password", "private_key", "key_filename", "pkey", "passphrase"}
+        invalid_fields = auth_fields.intersection(data)
+        if invalid_fields:
+            names = ", ".join(sorted(invalid_fields))
+            raise ValueError(
+                "SSH authentication fields are not supported in node configuration. "
+                f"Remove {names}; "
+                "configure passwordless SSH in the optimizer's runtime environment."
+            )
+        # Keep only known fields, ignoring other extra keys in config.toml
         valid = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in valid})
 

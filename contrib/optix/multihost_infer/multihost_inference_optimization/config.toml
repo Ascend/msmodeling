@@ -1,6 +1,6 @@
 # Cluster configuration
 
-# Whether to prefix docker commands with sudo
+# Use non-interactive sudo -n; the remote user must have passwordless sudo permissions
 docker_use_sudo = false
 
 [vllm_mix]
@@ -24,7 +24,7 @@ host = "<node_ip>"              # Master node IP, e.g. 192.168.0.10
 host = "<worker_ip>"            # Worker node IP, e.g. 192.168.0.11
 ssh_port = 22
 ssh_user = "<ssh_user>"
-password = "<ssh_password>"     # Plaintext or Base64; prefer SSH key auth (omit this key) — see README
+# Passwordless SSH must be configured by the user; do not put credentials in this file.
 #nic_name = "<nic_name>"  # Optional; when unset, detected automatically before optimization (detect_nic.py)
 docker_container_id = "<container_id>"
 

@@ -1,4 +1,3 @@
-import base64
 import os
 import shlex
 from typing import Optional
@@ -17,6 +16,9 @@ class DockerCopyError(RuntimeError):
 
 class SshRemote:
     """Remote executor wrapping SSH connections, file uploads, and command execution.
+
+    Authentication relies on user-managed SSH agent / local SSH keys only.
+    No passwords or key passphrases are accepted by this plugin.
 
     Two modes are supported (chosen by docker_container_id):
 
@@ -51,7 +53,6 @@ class SshRemote:
         host: str,
         ssh_port: int = 22,
         ssh_user: str = "root",
-        password: Optional[str] = None,
         docker_container_id: Optional[str] = None,
         docker_use_sudo: bool = False,
     ):
@@ -60,7 +61,6 @@ class SshRemote:
         self.ssh_user = ssh_user
         self.docker_container_id = docker_container_id
         self._docker_use_sudo = docker_use_sudo
-        self._password = password
         self._conn: Optional[Connection] = None
 
     @property
@@ -68,20 +68,18 @@ class SshRemote:
         if self._conn is not None:
             return self._conn
 
-        connect_kwargs = {}
-        password = self._password
-        if password:
-            try:
-                password = base64.b64decode(password).decode('utf-8')
-            except Exception:  # nosec B110
-                pass
-            connect_kwargs["password"] = password
-
         self._conn = Connection(
             host=self.host,
             port=self.ssh_port,
             user=self.ssh_user,
-            connect_kwargs=connect_kwargs,
+            # Explicitly disable password/passphrase authentication, including
+            # values inherited from Fabric configuration.
+            connect_kwargs=dict(
+                password=None,
+                passphrase=None,
+                allow_agent=True,
+                look_for_keys=True,
+            ),
             connect_timeout=30,
         )
         return self._conn
@@ -103,23 +101,11 @@ class SshRemote:
         cid = self.docker_container_id or ""
         return f"{self.host}:{self.ssh_port}:{cid}"
 
-    @staticmethod
-    def _mask_password(cmd: str) -> str:
-        import re
-
-        return re.sub(r"printf\s+(?:'[^']*'\s+)+\|", r"printf '******' |", cmd)
-
     def _build_sudo_cmd(self, raw_cmd: str) -> str:
         if not self._docker_use_sudo:
             return raw_cmd
-        if not self._password:
-            return f"sudo {raw_cmd}"
-        password = self._password
-        try:
-            password = base64.b64decode(password).decode('utf-8')
-        except Exception:  # nosec B110
-            pass
-        return f"printf '%s\\n' {shlex.quote(password)} | sudo -S sh -c {shlex.quote(raw_cmd)}"
+        # Fail immediately if the remote user has not configured passwordless sudo.
+        return f"sudo -n {raw_cmd}"
 
     def docker_cp(self, remote_path: str):
         """Copy a file that already exists on the host into the container.
@@ -167,7 +153,7 @@ class SshRemote:
         full_cmd = self._build_sudo_cmd(run_cmd)
         nohup_cmd = f"nohup bash -l -c {shlex.quote(full_cmd)} > {shlex.quote(log_file)} 2>&1 & echo $!"
 
-        logger.info(f"[{node_label}] running: {self._mask_password(full_cmd)}, log={log_file}")
+        logger.info(f"[{node_label}] running: {full_cmd}, log={log_file}")
         try:
             result = self.conn.run(nohup_cmd, hide=True, warn=True, pty=False, timeout=30)
         except Exception as e:
@@ -221,7 +207,6 @@ class SshRemote:
             host=node.host,
             ssh_port=getattr(node, 'ssh_port', 22),
             ssh_user=getattr(node, 'ssh_user', 'root'),
-            password=getattr(node, 'password', None),
             docker_container_id=getattr(node, 'docker_container_id', None),
             docker_use_sudo=docker_use_sudo,
         )

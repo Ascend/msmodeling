@@ -234,7 +234,7 @@ hccn_tool -i 0 -ping -g address x.x.x.x
 ```toml
 # 集群配置
 
-# 是否在 docker 命令前加 sudo
+# 是否使用非交互 sudo -n；启用前须由用户配置远端免密 sudo 权限
 docker_use_sudo = false
 
 [vllm_mix]
@@ -258,7 +258,7 @@ host = "<node_ip>"               # 主节点 IP，例如 192.168.0.10
 host = "<worker_ip>"             # 工作节点 IP，例如 192.168.0.11
 ssh_port = 22
 ssh_user = "<ssh_user>"
-password = "<ssh_password>"      # 明文或 Base64；建议改用 SSH 密钥免密，见"SSH 认证方式"
+# 用户须提前配置 SSH 免密登录；此文件不配置密码、私钥或私钥口令
 # nic_name = "<nic_name>"  # 可选，不配置时寻优前自动探测（detect_nic.py）
 ```
 
@@ -347,14 +347,34 @@ value = 1
 
 ### SSH 认证方式
 
-`password` 字段支持三种模式（不配置时自动走 SSH 密钥免密登录）：
+本插件**仅支持免密登录**。用户须自行保证：在优化器实际运行的机器或容器内，以运行优化器的同一操作系统用户，能够按配置的 `host`、`ssh_port`、`ssh_user` 无交互登录每个 worker 的 SSH 目标。
 
+插件复用运行环境中的 SSH agent 或本地 SSH 密钥，不接收、保存或传递登录密码、私钥内容或私钥口令。密钥由用户在插件之外管理；使用带口令的私钥时，须提前加载到优化器可访问的 SSH agent 中。SSH 连接、文件上传和网卡探测均使用同一免密认证方式，认证失败时不会回退到密码登录。
 
-| 方式        | 示例                            | 说明                 |
-| ----------- | ------------------------------- | -------------------- |
-| 密钥免密    | 不写`password`                  | 走 SSH key 认证      |
-| 明文密码    | `password = "my_password"`      | 直接传 SSH           |
-| Base64 编码 | `password = "bXlfcGFzc3dvcmQ="` | 代码自动解码后传 SSH |
+推荐使用业界标准的 **Ed25519** 算法配置 SSH 免密。在优化器实际运行的同一用户或容器中执行，使用 `-t ed25519` 指定密钥类型（替换邮箱或机器标识及远端连接信息）：
+
+```bash
+ssh-keygen -t ed25519 -C "你的邮箱或机器标识"
+ssh-copy-id -i ~/.ssh/id_ed25519.pub -p <ssh_port> <ssh_user>@<worker_ip>
+```
+
+生成时使用默认保存路径 `~/.ssh/id_ed25519`，已有密钥请勿直接覆盖。首次连接应核对远端主机指纹；复制公钥通常需要输入一次远端账户密码。私钥只保存在本地，不写入配置文件或发送给他人。
+
+**加密私钥**：生成密钥时在 `Enter passphrase` 提示中设置非空密码短语即可加密私钥；直接回车则生成无口令密钥。如使用带口令的私钥，请先通过 `ssh-add ~/.ssh/id_ed25519` 加载到 SSH agent；无口令密钥无需此步。
+
+SSH 客户端默认不会打印远端命令的返回码。远端可能先输出登录提示语；下面的 `ssh exit code` 为 `0`，就表示免密登录和远端命令执行成功。必须在 SSH 命令后立即读取返回码：
+
+```bash
+ssh -o BatchMode=yes -p <ssh_port> <ssh_user>@<worker_ip> true
+rc=$?
+printf 'ssh exit code: %s\n' "$rc"
+```
+
+配置了 `docker_container_id` 时，免密登录的目标是容器所在宿主机；直接 SSH 到容器时，则需保证容器的 SSH 端口可免密访问。
+
+启用 `docker_use_sudo = true` 时，用户还须为插件执行的远端命令配置免密 sudo 权限。插件使用 `sudo -n`，没有相应权限会直接失败，不会请求或传递 sudo 密码。
+
+**旧配置迁移**：删除节点配置中的 `password`（包括明文、Base64 或空字符串）以及 `ssh_password`、`private_key`、`key_filename`、`pkey`、`passphrase` 等认证字段。配置加载时会拒绝这些字段并提示迁移；SSH 配置仅保留主机、端口和用户名，免密认证由用户在运行环境中配置。
 
 ### 节点配置字段说明
 
@@ -385,7 +405,6 @@ value = 1
 | `nic_name`            | 否   | 通信网卡名；不配置时寻优前自动探测，见"网卡名探测" |
 | `ssh_port`            | 否   | SSH 端口（默认 22）                                |
 | `ssh_user`            | 否   | SSH 用户名（默认 root）                            |
-| `password`            | 否   | SSH 密码，支持明文 / Base64；不填走密钥免密        |
 | `docker_container_id` | 否   | 配置后通过`docker exec / docker cp` 操作容器       |
 
 ---
@@ -400,7 +419,7 @@ value = 1
 
 1. 用配置中的默认参数（model、TP、DP、MAX_NUM_SEQS 等）在多机环境上能**正常启动 vllm serve**
 2. `min`/`max` 范围只包含物理上可行的值（例如 8 卡机器不要把 TP 设为 16）
-3. 各节点 SSH 连通、NPU 通信正常（参考上方"多节点部署通信验证"章节）
+3. 优化器运行环境到各 worker 已配置并验证 SSH 免密登录，NPU 通信正常（参考上方"多节点部署通信验证"章节）
 
 建议在寻优前先手动执行一次验证：
 
