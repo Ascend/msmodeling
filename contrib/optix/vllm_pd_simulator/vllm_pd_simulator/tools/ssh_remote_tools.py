@@ -3,6 +3,7 @@ import os
 import shlex
 from typing import Optional
 
+from fabric import Config as FabricConfig
 from fabric import Connection
 from loguru import logger
 
@@ -48,10 +49,15 @@ class SshRemote:
                 pass
             connect_kwargs["password"] = password
 
+        # Cluster nodes are addressed explicitly by the plugin configuration.
+        # Do not let unrelated controller-side OpenSSH directives (for example,
+        # ``Match final all``) prevent Fabric from creating the connection.
+        fabric_config = FabricConfig(overrides={"load_ssh_configs": False})
         self._conn = Connection(
             host=self.host,
             port=self.ssh_port,
             user=self.ssh_user,
+            config=fabric_config,
             connect_kwargs=connect_kwargs,
             connect_timeout=self._ssh_command_timeout,
         )

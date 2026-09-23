@@ -2,6 +2,7 @@ import os
 import shlex
 from typing import Optional
 
+from fabric import Config as FabricConfig
 from fabric import Connection
 from loguru import logger
 
@@ -68,10 +69,15 @@ class SshRemote:
         if self._conn is not None:
             return self._conn
 
+        # Cluster nodes are addressed explicitly by the plugin configuration.
+        # Avoid parsing unrelated controller-side OpenSSH directives before the
+        # connection is created (for example, ``Match final all``).
+        fabric_config = FabricConfig(overrides={"load_ssh_configs": False})
         self._conn = Connection(
             host=self.host,
             port=self.ssh_port,
             user=self.ssh_user,
+            config=fabric_config,
             # Explicitly disable password/passphrase authentication, including
             # values inherited from Fabric configuration.
             connect_kwargs=dict(

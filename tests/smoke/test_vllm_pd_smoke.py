@@ -39,10 +39,46 @@ def _install_heavy_dep_mocks():
         _make_module("transformers")
     if "fabric" not in sys.modules:
         fab = _make_module("fabric")
+        fab.Config = MagicMock()
         fab.Connection = MagicMock()
 
 
 _install_heavy_dep_mocks()
+
+
+class TestPdSshRemoteConfig(unittest.TestCase):
+    """Regression coverage for controller-side OpenSSH configuration loading."""
+
+    def test_connection_uses_explicit_node_settings_without_ssh_config(self):
+        contrib_pd = str(ROOT / "contrib/optix/vllm_pd_simulator")
+        if contrib_pd not in sys.path:
+            sys.path.insert(0, contrib_pd)
+        ssh_tools = importlib.import_module("vllm_pd_simulator.tools.ssh_remote_tools")
+        fabric_config = MagicMock()
+        connection = MagicMock()
+
+        with (
+            patch.object(ssh_tools, "FabricConfig", return_value=fabric_config) as config_cls,
+            patch.object(ssh_tools, "Connection", return_value=connection) as connection_cls,
+        ):
+            remote = ssh_tools.SshRemote(
+                host="192.0.2.10",
+                ssh_port=2202,
+                ssh_user="worker",
+                ssh_command_timeout=45,
+            )
+
+            self.assertIs(remote.conn, connection)
+
+        config_cls.assert_called_once_with(overrides={"load_ssh_configs": False})
+        connection_cls.assert_called_once_with(
+            host="192.0.2.10",
+            port=2202,
+            user="worker",
+            config=fabric_config,
+            connect_kwargs={},
+            connect_timeout=45,
+        )
 
 
 def _import_pd_cls():
