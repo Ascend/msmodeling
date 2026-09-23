@@ -25,7 +25,6 @@ class SshConnectable(BaseModel):
     ssh_ip: str = Field(default="localhost")
     ssh_port: int = Field(default=22)
     ssh_user: str = Field(default="root")
-    password: Optional[str] = Field(default=None, description="SSH 密码（支持 base64 编码）")
     docker_container_id: Optional[str] = Field(default=None, description="Docker 容器 ID（走 docker exec）")
     docker_use_sudo: bool = Field(default=False, description="docker 命令是否需要 sudo")
 
@@ -54,7 +53,6 @@ def _resolve_host_ref(node_data: dict, hosts_map: Dict[str, HostConfig]):
     node_data["ssh_ip"] = host.ssh_ip
     node_data["ssh_port"] = host.ssh_port
     node_data["ssh_user"] = host.ssh_user
-    node_data["password"] = host.password
     node_data["docker_container_id"] = host.docker_container_id
     node_data["docker_use_sudo"] = host.docker_use_sudo
     # gpu_ids is determined by the node config itself, not inherited from host

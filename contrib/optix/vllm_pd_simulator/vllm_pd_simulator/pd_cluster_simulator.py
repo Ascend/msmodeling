@@ -819,7 +819,6 @@ class PdClusterSimulator(SimulatorInterface):
                         "ssh_ip",
                         "ssh_port",
                         "ssh_user",
-                        "password",
                         "bind_ip",
                         "port",
                         "gpu_ids",

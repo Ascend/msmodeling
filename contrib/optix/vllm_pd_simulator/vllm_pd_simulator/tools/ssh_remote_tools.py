@@ -1,4 +1,3 @@
-import base64
 import os
 import shlex
 from typing import Optional
@@ -21,7 +20,6 @@ class SshRemote:
         host: str,
         ssh_port: int = 22,
         ssh_user: str = "root",
-        password: Optional[str] = None,
         docker_container_id: Optional[str] = None,
         docker_use_sudo: bool = False,
         ssh_command_timeout: int = 30,
@@ -31,7 +29,6 @@ class SshRemote:
         self.ssh_user = ssh_user
         self.docker_container_id = docker_container_id
         self._docker_use_sudo = docker_use_sudo
-        self._password = password
         self._ssh_command_timeout = ssh_command_timeout
         self._conn: Optional[Connection] = None
 
@@ -40,25 +37,17 @@ class SshRemote:
         if self._conn is not None:
             return self._conn
 
-        connect_kwargs = {}
-        password = self._password
-        if password:
-            try:
-                password = base64.b64decode(password).decode("utf-8")
-            except Exception:  # nosec B110
-                pass
-            connect_kwargs["password"] = password
-
         # Cluster nodes are addressed explicitly by the plugin configuration.
         # Do not let unrelated controller-side OpenSSH directives (for example,
         # ``Match final all``) prevent Fabric from creating the connection.
         fabric_config = FabricConfig(overrides={"load_ssh_configs": False})
+        # 密码已移除：connect_kwargs 恒为空字典，但保留传参以兼容既有测试断言。
         self._conn = Connection(
             host=self.host,
             port=self.ssh_port,
             user=self.ssh_user,
             config=fabric_config,
-            connect_kwargs=connect_kwargs,
+            connect_kwargs={},
             connect_timeout=self._ssh_command_timeout,
         )
         return self._conn
@@ -80,27 +69,15 @@ class SshRemote:
         cid = self.docker_container_id or ""
         return f"{self.host}:{self.ssh_port}:{cid}"
 
-    @staticmethod
-    def _mask_password(cmd: str) -> str:
-        import re
-
-        # 兼容新旧两种形式：旧 printf 管道 + 新 here-string
-        cmd = re.sub(r"printf\s+(?:'[^']*'\s+)+\|", r"printf '******' |", cmd)
-        cmd = re.sub(r"<<<\s*[^ ]+", r"<<< '******'", cmd)
-        return cmd
-
     def _build_sudo_cmd(self, raw_cmd: str) -> str:
         if not self._docker_use_sudo:
             return raw_cmd
-        if not self._password:
-            return f"sudo {raw_cmd}"
-        password = self._password
-        try:
-            password = base64.b64decode(password).decode('utf-8')
-        except Exception:  # nosec B110
-            pass
-        # 密码经 here-string 从 stdin 喂给 sudo -S，不出现在命令行参数（ps/proc 不可见）
-        return f"sudo -S sh -c {shlex.quote(raw_cmd)} <<< {shlex.quote(password)}"
+        # 免密登录场景：sudo 已配置 NOPASSWD（互信后免密）。
+        # sh -c 包裹整条命令交给 root 的 sh 解释执行，与移除前密码分支
+        # （sudo -S sh -c ...）语义一致；直接 `sudo {raw_cmd}` 只会 root 化第一个
+        # 单词，管道/重定向/环境变量赋值/shell 内建会落到普通用户外层 shell。
+        # -n 让未配置 NOPASSWD 时快速失败而非挂起。
+        return f"sudo -n sh -c {shlex.quote(raw_cmd)}"
 
     def docker_cp(self, remote_path: str):
         if not self.docker_container_id:
@@ -161,7 +138,7 @@ class SshRemote:
         redir = ">>" if append else ">"
         nohup_cmd = f"nohup bash -l -c {shlex.quote(full_cmd)} {redir} {shlex.quote(log_file)} 2>&1 & echo $!"
 
-        logger.info(f"[{node_label}] running: {self._mask_password(full_cmd)}, log={log_file}")
+        logger.info(f"[{node_label}] running: {full_cmd}, log={log_file}")
         try:
             result = self.conn.run(nohup_cmd, hide=True, warn=True, pty=False, timeout=self._ssh_command_timeout)
         except Exception as e:
@@ -222,7 +199,6 @@ class SshRemote:
             host=getattr(node, 'ssh_ip', None) or getattr(node, 'host', 'localhost'),
             ssh_port=getattr(node, 'ssh_port', 22),
             ssh_user=getattr(node, 'ssh_user', None) or getattr(node, 'user_name', 'root'),
-            password=getattr(node, 'password', None),
             docker_container_id=getattr(node, 'docker_container_id', None),
             docker_use_sudo=getattr(node, 'docker_use_sudo', docker_use_sudo),
             ssh_command_timeout=ssh_command_timeout,

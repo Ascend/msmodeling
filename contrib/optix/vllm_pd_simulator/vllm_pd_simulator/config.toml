@@ -15,7 +15,6 @@ id = "rank0"                              # 主机唯一标识，供 hosts 字�
 ssh_ip = "10.246.63.26"                   # SSH 连接 IP
 ssh_port = 30774                          # SSH 端口
 ssh_user = "root"                         # SSH 用户名
-password = "******"             # SSH 密码（Base64 编码）
 service_ip = "127.0.0.1"                  # 服务绑定 IP（vLLM 对外服务地址）
 network_interface = "eth0"                # 网络接口名（用于 HCCL 通信）
 
@@ -24,7 +23,6 @@ id = "rank1"
 ssh_ip = "10.246.63.26"
 ssh_port = 30775
 ssh_user = "root"
-password = "******"
 service_ip = "127.0.0.1"
 network_interface = "eth0"
 
@@ -33,7 +31,6 @@ id = "rank2"
 ssh_ip = "10.246.63.26"
 ssh_port = 30775
 ssh_user = "root"
-password = "******"
 service_ip = "127.0.0.1"
 network_interface = "eth0"
 
@@ -42,7 +39,6 @@ id = "rank3"
 ssh_ip = "10.246.63.26"
 ssh_port = 30775
 ssh_user = "root"
-password = "******"
 service_ip = "127.0.0.1"
 network_interface = "eth0"
 
@@ -51,7 +47,6 @@ id = "26-30859"
 ssh_ip = "10.246.63.26"
 ssh_port = 30859
 ssh_user = "root"
-password = "******"
 service_ip = "192.168.82.110"
 network_interface = "lo"
 
@@ -60,7 +55,6 @@ id = "28-30118"
 ssh_ip = "10.246.63.28"
 ssh_port = 30118
 ssh_user = "root"
-password = "******"
 service_ip = "192.168.191.120"
 network_interface = "lo"
 
