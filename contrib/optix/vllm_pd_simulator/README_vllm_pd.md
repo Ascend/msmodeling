@@ -329,6 +329,10 @@ service_port = 8000
 | `service_ip` | 否 | `ssh_ip` | vLLM 服务绑定 IP |
 | `network_interface` | 否 | `lo` | 网卡名，用于 HCCL 通信 |
 
+插件使用上述字段中显式配置的 SSH IP、端口和用户，默认不加载控制节点的 `~/.ssh/config` 或
+`/etc/ssh/ssh_config`，避免 `Match final all` 等控制节点配置影响多机 PD 拉起。不配置 `password` 时，仍可使用
+SSH agent 或标准默认密钥完成免密认证；`Host` 别名、`ProxyJump` 和自定义 `IdentityFile` 不会从 SSH config 中继承。
+
 ### 节点段 `[[vllm_pd.prefill_groups.nodes]]` / `[[vllm_pd.decode_groups.nodes]]`
 
 | 字段 | 必填 | 默认值 | 说明 |

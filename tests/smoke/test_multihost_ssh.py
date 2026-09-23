@@ -12,11 +12,34 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "contrib/optix/multihost_infer"
+
+
+def test_real_fabric_skips_invalid_controller_ssh_config(tmp_path, monkeypatch):
+    """Exercise the Fabric/Paramiko parsing path when the dependency is installed."""
+    fabric = pytest.importorskip("fabric")
+    paramiko = pytest.importorskip("paramiko")
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir()
+    (ssh_dir / "config").write_text("Match final all\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+
+    with pytest.raises(
+        paramiko.ssh_exception.ConfigParseError,
+        match=r"Match does not allow 'all'.*canonical",
+    ):
+        fabric.Config()
+
+    config = fabric.Config(overrides={"load_ssh_configs": False})
+    assert config.load_ssh_configs is False
 
 
 def _load_modules():
     fabric = ModuleType("fabric")
+    fabric.Config = MagicMock()
     fabric.Connection = MagicMock()
     loguru = ModuleType("loguru")
     loguru.logger = MagicMock()
@@ -68,13 +91,19 @@ class TestMultihostSsh(unittest.TestCase):
 
     def test_connection_uses_environment_authentication_and_is_cached(self):
         node = self.config.NodeConfig(host="worker", ssh_port=2222, ssh_user="runner")
-        with patch.object(self.ssh, "Connection") as connection:
+        fabric_config = MagicMock()
+        with (
+            patch.object(self.ssh, "FabricConfig", return_value=fabric_config) as config,
+            patch.object(self.ssh, "Connection") as connection,
+        ):
             remote = self.ssh.SshRemote.from_node(node)
             self.assertIs(remote.conn, remote.conn)
+            config.assert_called_once_with(overrides={"load_ssh_configs": False})
             connection.assert_called_once_with(
                 host="worker",
                 port=2222,
                 user="runner",
+                config=fabric_config,
                 connect_kwargs={"password": None, "passphrase": None, "allow_agent": True, "look_for_keys": True},
                 connect_timeout=30,
             )

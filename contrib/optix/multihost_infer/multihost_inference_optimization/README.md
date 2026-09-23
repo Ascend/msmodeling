@@ -376,6 +376,10 @@ printf 'ssh exit code: %s\n' "$rc"
 
 **旧配置迁移**：删除节点配置中的 `password`（包括明文、Base64 或空字符串）以及 `ssh_password`、`private_key`、`key_filename`、`pkey`、`passphrase` 等认证字段。配置加载时会拒绝这些字段并提示迁移；SSH 配置仅保留主机、端口和用户名，免密认证由用户在运行环境中配置。
 
+为保证多机寻优不受控制节点环境影响，插件使用 `config.toml` 中显式配置的 worker IP、端口和用户，默认不加载
+控制节点的 `~/.ssh/config` 或 `/etc/ssh/ssh_config`。SSH agent 和标准默认密钥仍可用于免密认证；`Host` 别名、
+`ProxyJump` 和自定义 `IdentityFile` 不会从 SSH config 中继承。
+
 ### 节点配置字段说明
 
 **node 主节点**（`[[vllm_mix.node]]`）与优化器同机，本地拉起，无需 SSH 信息：
