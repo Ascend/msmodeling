@@ -14,13 +14,18 @@ on:
     comments: [ '^compile$' ]
 
 env:
-  REPO_NAME: ${{ atomgit.event.repository.name }}
+  org_name: Ascend
+  REPO_NAME: msmodeling
   REMOTE_URL: ${{ atomgit.repositoryurl }}
   PR_ID: ${{ atomgit.event.pull_request.number }}
 
 permissions:
+  project: read
   repository: read
   id-token: write
+  pr: write
+  note: write
+  action: read
 
 stages:
   stage_0:
@@ -48,7 +53,7 @@ stages:
               base: ${{ atomgit.event.pull_request.base.ref }}
               repo: ${{ atomgit.repository }}
               number: ${{ env.PR_ID }}
-              token: ${{ atomgit.ATOMGIT_TOKEN }}
+              token: ${{ secrets.GIT_TOKEN }}
               list-files: json
               predicate-quantifier: every
               filters: |
@@ -77,6 +82,24 @@ stages:
               echo "${{ steps.filter.outputs.changed_files }}" | tr -d '[]" ' | tr ',' '\n' > modify_files.txt
               cat modify_files.txt
 
+      associate_pr_comment:
+        name: associate_pr_comment
+        select: selected_by_default
+        runs-on: [ self-hosted, x86, cpu=2 ]
+        steps:
+          - name: associate-pr-comment
+            uses: associate-pr-comment
+          - name: pre_pipeline
+            id: pre_pipeline
+            uses: cann/.gitcode/actions/pre-pipeline@689551d6b29a77d8c2a005b8f1b3883db24820ef
+            with:
+              owner: ${{ env.org_name }}
+              repo: ${{ env.REPO_NAME }}
+              pr_number: ${{ atomgit.event.pull_request.number }}
+              token: ${{ secrets.GIT_TOKEN }}
+              apply_label: 'true'
+              run_url: https://gitcode.com/${{ env.org_name }}/${{ atomgit.event.repository.name }}/actions/runs/${{ atomgit.workflow_run_id }}
+
   stage_1:
     name: CodeCheck_Build_Test
     select: selected_by_default
@@ -96,6 +119,8 @@ stages:
             run: |
               wget -q --no-host-directories -c --no-check-certificate https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta-codecheck/gitleaks
               chmod +x gitleaks
+              cp gitleaks /usr/local/bin/
+              gitleaks version
           - name: setup-python311
             run: |
               ln -sf /usr/local/bin/python3.11 /usr/bin/python
@@ -130,6 +155,7 @@ stages:
             uses: openlibing/malicious-code-scan-action/malicious-code-pr-scan-action@v1.0.0
             with:
               project-name: MindStudio
+
   stage_2:
     name: build
     select: selected_by_default
@@ -143,6 +169,15 @@ stages:
           runs_on_arch: "x64"
           ARTIFACT_NAME: "msmodeling-run-x86-test"
 
+      Build_msmodeling_arm:
+        name: Build_msmodeling_arm
+        if: ${{ jobs.Detect_file_changes.outputs.need_build == 'yes' }}
+        uses: .gitcode/workflows/.build_mindstudio_job.yml
+        with:
+          IMAGE_FLAG: "mindstudio-build:26.1.0"
+          runs_on_arch: "arm64"
+          ARTIFACT_NAME: "msmodeling-run-arm-test"
+
   stage_3:
     name: UT
     select: selected_by_default
@@ -154,3 +189,18 @@ stages:
         with:
           IMAGE_FLAG: "mindstudio-build:26.1.0"
           runs_on_arch: "x64"
+
+post:
+  jobs:
+    query_pipeline:
+      steps:
+        - name: query_pipeline
+          id: query_pipeline
+          uses: cann/.gitcode/actions/query-pipeline@689551d6b29a77d8c2a005b8f1b3883db24820ef
+          with:
+            owner: ${{ env.org_name }}
+            repo: ${{ env.REPO_NAME }}
+            run_id: ${{ atomgit.workflow_run_id }}
+            token: ${{ secrets.GIT_TOKEN }}
+            pr_number: ${{ atomgit.event.pull_request.number }}
+            apply_label: 'true'
