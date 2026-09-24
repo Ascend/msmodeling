@@ -7,7 +7,7 @@
 | **Status** | Draft |
 | **Author** | Codex |
 | **Updated Date** | 2026-07-13 |
-| **Related Links** | https://github.com/vllm-project/vllm/issues/30055 |
+| **Related Links** | <https://github.com/vllm-project/vllm/issues/30055> |
 
 ---
 

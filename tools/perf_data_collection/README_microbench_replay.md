@@ -45,7 +45,6 @@ DispatchFFNCombine 需要一个完整的 EP 通信进程组，不参与普通的
 
 Shape 与 Microbench 仅通过 CSV + runtime metadata schema 衔接，可分别从 `master` 独立运行和验证。
 
-
 ## A3 实测验证（2026-08-21）
 
 ### 单卡和 2 卡并行
@@ -58,6 +57,7 @@ Shape 与 Microbench 仅通过 CSV + runtime metadata schema 衔接，可分别�
 ### DFC EP16 单节点
 
 在 16 卡 A3 容器上验证 DFC EP16：
+
 ```bash
 python tools/perf_data_collection/start_microbench.py \
   --database-path /path/to/db \
@@ -66,11 +66,13 @@ python tools/perf_data_collection/start_microbench.py \
   --dispatch-ffn-combine-nproc-per-node 16 \
   --repeat-count 1
 ```
+
 5 行 replay + msprof profiling + CSV 回填全部成功。
 
 ### DFC EP32 双节点（待验证）
 
 需要两台同 Super Pod 的 16 卡 A3 容器：
+
 ```bash
 # Node 0
 python tools/perf_data_collection/op_replay/DispatchFFNCombine_run.py \
