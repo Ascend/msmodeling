@@ -11,7 +11,7 @@
 
 ## 项目结构
 
-```
+```text
 Vllm-Ascend-Serviceparam-Optimizer-Plugins/
 ├── src/
 │   └── vllm_msserviceprofiler/
@@ -26,37 +26,43 @@ Vllm-Ascend-Serviceparam-Optimizer-Plugins/
 ## 核心组件
 
 ### 1. 插件注册 (`__init__.py`)
+
 - 注册自定义 vLLM 模拟器
 - 注册自定义设置
 
 ### 2. 性能测试 (`benchmark.py`)
+
 支持自定义性能指标，包括生成速度、首 token 时间、输出 token 时间、成功率和吞吐量，代码中并没有使用。**可忽略此文件**。
 
 ### 3. 配置管理 (`settings.py`)
+
 - `CusSettings` 类：管理插件配置
 
 ### 4. 双机服务模拟器 (`simulator.py`)
+
 - `CustomVllmDockerSimulator` 类：管理本地和远程 vLLM 服务
 - 通过SSH完成Docker容器中的vLLM服务的启停
 
 ## 安装方法
 
 1. 克隆项目：
-```bash
-git clone <repository-url>
-cd contrib
-```
+
+    ```bash
+    git clone <repository-url>
+    cd contrib
+    ```
 
 2. 安装依赖：
-参考[自定义插件开发指导](https://gitcode.com/Ascend/msmodeling/blob/develop/docs/zh/user_guide/msmodeling_optix_plugin_user_guide.md)完成插件安装
+
+参考[自定义插件开发指导](https://gitcode.com/Ascend/msmodeling/blob/master/docs/zh/user_guide/msmodeling_optix_plugin_user_guide.md)完成插件安装。
+
 ```bash
 pip install -e .
 ```
 
-
 ## 注意事项
 
-1. 确保本地和远程机器已安装 Docker
-2. 确保 SSH 连接已配置免密
-3. 确保双机 vLLM-Ascend 服务可以正常运行并完成aisbench/vllm bench性能测试
-4. 已完成安装msserviceparam_optimizer
+1. 确保本地和远程机器已安装 Docker；
+2. 确保 SSH 连接已配置免密；
+3. 确保双机 vLLM-Ascend 服务可以正常运行并完成aisbench/vllm bench性能测试；
+4. 已完成安装msserviceparam_optimizer。

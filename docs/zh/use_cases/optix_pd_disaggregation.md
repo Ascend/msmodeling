@@ -12,9 +12,9 @@
 
 ## 准备环境和配置文件
 
-先按[环境准备与安装](../user_guide/msmodeling_optix_user_guide.md#环境准备与安装)安装 OptiX，并确认运行环境中可以使用 `vllm` 和所选压测工具。
+先按[环境准备与安装](../user_guide/msmodeling_optix_user_guide.md#4-环境准备与安装)安装 OptiX，并确认运行环境中可以使用 `vllm` 和所选压测工具。
 
-本文以 `vllm_benchmark` 为例，使用 16 卡、P 单实例 4 卡、D 单实例 2 卡，输入 1024 token、输出 256 token、每次测评 500 个请求。这些数值用于说明配置方法，实际使用时请替换为自己的硬件、负载和时延目标。配置模板及其他通用字段见 [optix/config.toml](../../../optix/config.toml) 和[配置文件说明](../user_guide/msmodeling_optix_user_guide.md#配置文件说明)。
+本文以 `vllm_benchmark` 为例，使用 16 卡、P 单实例 4 卡、D 单实例 2 卡，输入 1024 token、输出 256 token、每次测评 500 个请求。这些数值用于说明配置方法，实际使用时请替换为自己的硬件、负载和时延目标。配置模板及其他通用字段见 [optix/config.toml](../../../optix/config.toml) 和[配置文件说明](../user_guide/msmodeling_optix_user_guide.md#7-配置文件说明)。
 
 ## 第一步：搜索 P/D 服务参数
 
@@ -333,7 +333,7 @@ value = 100
 msmodeling optix --mode standard -e vllm -b vllm_benchmark -c ./pd_fine_tune.toml
 ```
 
-这一阶段先测初始负载，再尝试调整并发和请求率，结果单独写入 `result/pd_fine_tune/`。查看结果 CSV 时，结合 TTFT、TPOT、成功率和吞吐量判断是否满足业务目标，字段含义见[结果文件说明](../user_guide/msmodeling_optix_user_guide.md#结果文件说明)。本流程无需安装 `contrib/optix/vllm_pd_simulator`。
+这一阶段先测初始负载，再尝试调整并发和请求率，结果单独写入 `result/pd_fine_tune/`。查看结果 CSV 时，结合 TTFT、TPOT、成功率和吞吐量判断是否满足业务目标，字段含义见[结果文件说明](../user_guide/msmodeling_optix_user_guide.md#9-结果文件说明)。本流程无需安装 `contrib/optix/vllm_pd_simulator`。
 
 ## 常见问题
 
@@ -345,4 +345,4 @@ msmodeling optix --mode standard -e vllm -b vllm_benchmark -c ./pd_fine_tune.tom
 | 修改了压测地址仍连接旧端口 | 使用 `vllm_benchmark` 时改 `[vllm.command]`；使用 AISBench 时检查其模型 Python 配置。 |
 | AISBench 找不到模型或数据集配置 | 先用对应短名执行 `ais_bench --models ... --datasets ... --search`，确认能唯一解析。 |
 
-更多日志说明与排查方法见[主指南附录](../user_guide/msmodeling_optix_user_guide.md#附录)。
+更多日志说明与排查方法见[主指南附录](../user_guide/msmodeling_optix_user_guide.md#10-附录)。

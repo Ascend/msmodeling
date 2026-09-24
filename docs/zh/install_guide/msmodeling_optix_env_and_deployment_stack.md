@@ -35,7 +35,7 @@ MindIE 场景请确认 `mindieservice_daemon` 可用，或 `MIES_INSTALL_PATH` �
 export OPTIX_DEPLOY_PATH=/path/to/custom-deploy-root
 ```
 
-也可写入 `optix/config.toml`，字段说明见《使用指南》的[配置文件说明](../user_guide/msmodeling_optix_user_guide.md#配置文件说明)中的「高级配置 → 部署环境 `[deploy]`」：
+也可写入 `optix/config.toml`，字段说明见《使用指南》的[配置文件说明](../user_guide/msmodeling_optix_user_guide.md#7-配置文件说明)中的「高级配置 → 部署环境 `[deploy]`」：
 
 ```toml
 [deploy]

@@ -351,7 +351,7 @@ Output Data Types
 - 新建或更新的 CSV 文件列表。
 - 来自 `run_all_op_status.json` 的 replay 状态摘要。
 - 来自 `start_microbench.py` 的 profile update report。
-- 当 replay 和整网 profiling 都有耗时时，产出 duration-gap hotspot CSV。
+- 当 replay 和整网 profiling 都有耗时的情况下，产出 duration-gap hotspot CSV。
 - 被跳过的算子或缺失 replay 脚本列表。
 - 仍然没有有效耗时的生成行列表。
 

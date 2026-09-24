@@ -4,7 +4,7 @@ Status（状态）：Approved
 Author(s)（作者）：huqixing
 Created（创建日期）：2026-08-08
 Updated（更新日期）：2026-08-08
-Related Issue/PR (相关 Issue/PR): https://gitcode.com/Ascend/msmodeling/pull/542
+Related Issue/PR (相关 Issue/PR): <https://gitcode.com/Ascend/msmodeling/pull/542>
 
 ---
 
