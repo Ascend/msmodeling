@@ -5,9 +5,11 @@
 
 """Optimizer curve plots: terminal ASCII throughput/QPS curves (plotext).
 
-The terminal path relies on the optional ``plotext`` package, which exposes plotting
-through module-level functions backed by shared canvas state. See
-``_emit_terminal_optimizer_curve_ascii`` for concurrency/thread-safety notes.
+The terminal path relies on the optional ``plotext`` package and a shared canvas.
+plotext 5.x exposes that canvas through module-level functions (``scatter``,
+``xlim``, ``build``, ...). plotext 6.x removed those names; the same chart is
+drawn on ``plotext.figure``. See ``_emit_terminal_optimizer_curve_ascii`` for
+concurrency/thread-safety notes.
 """
 
 from __future__ import annotations
@@ -40,8 +42,9 @@ _PALETTE = [
     (221, 160, 221),
 ]
 
-# Terminal canvas (plotext): shared internal canvas; not safe across overlapping calls /
-# threads unless serialized externally (see _emit_terminal_optimizer_curve_ascii).
+# Terminal canvas (plotext): shared internal canvas (module-level in 5.x, plotext.figure
+# in 6.x); not safe across overlapping calls / threads unless serialized externally
+# (see _emit_terminal_optimizer_curve_ascii).
 _TERMINAL_PLOT_COLS = 128
 _TERMINAL_PLOT_ROWS = 38
 _TERMINAL_MARKER = "●"
@@ -161,6 +164,78 @@ def _sorted_curve_subset(curve_df: pd.DataFrame, parallel: str, sort_cols: list[
     return sub.drop(columns=["_batch_sort"], errors="ignore")
 
 
+def _plotext_figure_api(plx) -> bool:
+    """True for plotext 6+, which dropped the module-level ``scatter`` function."""
+    return hasattr(plx, "figure") and not hasattr(plx, "scatter")
+
+
+def _terminal_canvas_text(canvas) -> str:
+    if isinstance(canvas, str):
+        return canvas
+    return str(canvas)
+
+
+def _print_terminal_chart(buf: str, parallels: list[str]) -> None:
+    if not buf:
+        return
+    buf = _compact_scatter_legend(buf, [_parallel_label(p) for p in parallels])
+    print("\n" + buf + "\n")
+
+
+def _emit_plotext6_chart(
+    plx,
+    plotted: list[tuple[int, str, list[float], list[float]]],
+    xlim: tuple[float, float] | None,
+    ylim: tuple[float, float] | None,
+    *,
+    title: str,
+    title_prefix: str,
+    x_label: str,
+    y_axis_label: str,
+    parallels: list[str],
+) -> None:
+    """Draw one scatter chart with the plotext 6 figure API."""
+    fig = plx.figure
+    terminal = getattr(plx, "terminal", None)
+    saved_limit = None
+    if terminal is not None and hasattr(terminal, "limit"):
+        raw_limit = getattr(terminal, "_limit", None)
+        if isinstance(raw_limit, (list, tuple)) and len(raw_limit) >= 2:
+            saved_limit = [bool(raw_limit[0]), bool(raw_limit[1])]
+        # plot_size is clamped to the terminal unless this limit is off.
+        terminal.limit(False, False)
+    try:
+        fig.clear()
+        fig.plot_size(_TERMINAL_PLOT_COLS, _TERMINAL_PLOT_ROWS)
+        # "clear" was a 5.x theme name. "colorless" keeps explicit marker RGB colors.
+        fig.theme("colorless")
+        for idx, parallel, jx, jy in plotted:
+            point_marker = plx.marker(
+                _TERMINAL_MARKER,
+                pixel=plx.pixel(foreground=_PALETTE[idx % len(_PALETTE)]),
+            )
+            fig.draw(fig.signal(jx, jy, marker=point_marker).label(_parallel_label(parallel)))
+        if xlim is not None:
+            fig.ruler("x").lim(*xlim)
+        if ylim is not None:
+            fig.ruler("y").lim(*ylim)
+        fig.title(f"{title_prefix}: {title}")
+        fig.label(x_label, axis="x")
+        fig.label(y_axis_label, axis="y")
+        fig.ruler().grid(False)
+        try:
+            buf = _terminal_canvas_text(fig.build())
+        except Exception:
+            logger.exception("plotext failed to build chart: %s", title)
+            buf = ""
+        finally:
+            fig.clear.data()
+        _print_terminal_chart(buf, parallels)
+    finally:
+        if terminal is not None and saved_limit is not None:
+            terminal.limit(*saved_limit)
+
+
 def _emit_terminal_optimizer_curve_ascii(
     curve_df: pd.DataFrame,
     title_prefix: str,
@@ -187,10 +262,6 @@ def _emit_terminal_optimizer_curve_ascii(
         x_label: str,
         sort_cols: list[str],
     ) -> None:
-        _set_plotext_canvas_size(plx, _TERMINAL_PLOT_COLS, _TERMINAL_PLOT_ROWS)
-        theme = getattr(plx, "theme", None)
-        if callable(theme):
-            theme("clear")
         x_all: list[float] = []
         y_all: list[float] = []
         series: list[tuple[int, str, list[float], list[float]]] = []
@@ -216,6 +287,7 @@ def _emit_terminal_optimizer_curve_ascii(
         cursor = 0
         jittered_x_all: list[float] = []
         jittered_y_all: list[float] = []
+        plotted: list[tuple[int, str, list[float], list[float]]] = []
         for idx, parallel, xv, yv in series:
             n_points = len(xv)
             jittered = jittered_points[cursor : cursor + n_points]
@@ -224,6 +296,28 @@ def _emit_terminal_optimizer_curve_ascii(
             jy = [y for _, y in jittered]
             jittered_x_all.extend(jx)
             jittered_y_all.extend(jy)
+            plotted.append((idx, parallel, jx, jy))
+        xlim = _padded_axis_limits(x_all + jittered_x_all)
+        ylim = _padded_axis_limits(y_all + jittered_y_all)
+        if _plotext_figure_api(plx):
+            _emit_plotext6_chart(
+                plx,
+                plotted,
+                xlim,
+                ylim,
+                title=title,
+                title_prefix=title_prefix,
+                x_label=x_label,
+                y_axis_label=y_axis_label,
+                parallels=parallels,
+            )
+            return
+
+        _set_plotext_canvas_size(plx, _TERMINAL_PLOT_COLS, _TERMINAL_PLOT_ROWS)
+        theme = getattr(plx, "theme", None)
+        if callable(theme):
+            theme("clear")
+        for idx, parallel, jx, jy in plotted:
             plx.scatter(
                 jx,
                 jy,
@@ -231,8 +325,6 @@ def _emit_terminal_optimizer_curve_ascii(
                 color=_PALETTE[idx % len(_PALETTE)],
                 marker=_TERMINAL_MARKER,
             )
-        xlim = _padded_axis_limits(x_all + jittered_x_all)
-        ylim = _padded_axis_limits(y_all + jittered_y_all)
         if xlim is not None:
             plx.xlim(*xlim)
         if ylim is not None:
@@ -248,9 +340,7 @@ def _emit_terminal_optimizer_curve_ascii(
             buf = ""
         finally:
             plx.clear_data()
-        if buf:
-            buf = _compact_scatter_legend(buf, [_parallel_label(p) for p in parallels])
-            print("\n" + buf + "\n")
+        _print_terminal_chart(buf, parallels)
 
     try:
         chart_specs = (
