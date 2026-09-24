@@ -8,7 +8,7 @@
 | **作者** | wendellX |
 | **创建日期** | 2026-05-21 |
 | **最后更新** | 2026-05-30 |
-| **相关链接** | [Skill 文档](../../.agents/skills/optix-param-recommend/SKILL.md) |
+| **相关链接** | [Skill 文档](../../.agents/skills/optix-assistant/SKILL.md) |
 
 ---
 
@@ -276,7 +276,7 @@ config = {
 
 ## 4. 参考资料
 
-- [《Skill 文档》](../../.agents/skills/optix-param-recommend/SKILL.md)
-- [《输入格式说明》](../../.agents/skills/optix-param-recommend/references/input-schema.md)
-- [《参数推荐规则》](../../.agents/skills/optix-param-recommend/references/parameter-rules.md)
+- [《Skill 文档》](../../.agents/skills/optix-assistant/SKILL.md)
+- [《输入格式说明》](../../.agents/skills/optix-assistant/references/input-schema.md)
+- [《参数推荐规则》](../../.agents/skills/optix-assistant/references/parameter-rules.md)
 - [《服务化自动寻优工具文档》](../zh/user_guide/msmodeling_optix_user_guide.md)
