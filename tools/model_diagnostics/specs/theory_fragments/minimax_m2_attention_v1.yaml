@@ -1,0 +1,65 @@
+# MiniMax-M2 GQA attention from MiniMaxM2Attention.forward.
+# TensorCast fuses Q/K/V projections into one Runtime linear, so concat_shape
+# compares the three independent source projections with that fused output.
+fragment_id: minimax_m2_attention_v1
+fragment_kind: model_decoder
+stages:
+  - id: attention_qkv
+    modules:
+      - name: q_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: k_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+      - name: v_projection
+        tensors:
+          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, Lkv * Dh]", dtype: OUT}
+    runtime:
+      boundary_operators: [rms_norm, rms_norm_dynamic_quant_symmetric, rms_norm_quant]
+      ignored_operators: [rms_norm, rms_norm_dynamic_quant_symmetric, rms_norm_quant, view, split_with_sizes]
+    comparisons:
+      theory-runtime:
+        strategy: concat_shape
+
+  - id: q_norm
+    modules:
+      - name: q_norm
+        tensors:
+          # generate_inputs packs all local request tokens into [1, T].
+          INPUT[0]: {shape: "[1, T, Lh * Dh]", dtype: ACT}
+          INPUT[1]: {shape: "[Lh * Dh]", dtype: WEIGHT}
+          OUTPUT[0]: {shape: "[1, T, Lh * Dh]", dtype: ACT}
+    runtime:
+      boundary_operators: [rms_norm]
+      ignored_operators: [view]
+
+  - id: k_norm
+    modules:
+      - name: k_norm
+        tensors:
+          INPUT[0]: {shape: "[1, T, Lkv * Dh]", dtype: ACT}
+          INPUT[1]: {shape: "[Lkv * Dh]", dtype: WEIGHT}
+          OUTPUT[0]: {shape: "[1, T, Lkv * Dh]", dtype: ACT}
+    runtime:
+      boundary_operators: [rms_norm]
+      ignored_operators: [view, index, reshape_and_cache, split_with_sizes, alias, copy_, slice, select, apply_rope, permute]
+
+  - id: attention
+    modules:
+      - name: attention
+        tensors:
+          INPUT[0]: {shape: "[T, Lh * Dh]", dtype: ACT}
+          INPUT[1]: {shape: "[Nblk, Bs, Lkv, Dh]", dtype: ACT}
+          INPUT[2]: {shape: "[Nblk, Bs, Lkv, Dh]", dtype: ACT}
+          OUTPUT[0]: {shape: "[T, Lh * Dh]", dtype: OUT}
+      - name: o_projection
+        tensors:
+          INPUT[0]: {shape: "[T, Lh * Dh]", dtype: LINEAR_IN}
+          OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
+    runtime:
+      boundary_operators: [attention]
+      ignored_operators: [view, quantize, all_reduce]

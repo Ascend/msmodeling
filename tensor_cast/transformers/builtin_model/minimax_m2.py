@@ -41,9 +41,9 @@ from ..model import TransformerModel
 
 def shard_qk_norm(model: TransformerModel) -> TransformerModel:
     """
-    Shard q_norm and k_norm weights for MiniMax-M2.5 model with tensor parallelism.
+    Shard q_norm and k_norm weights for MiniMax-M2 models with tensor parallelism.
 
-    MiniMax-M2.5 uses QK normalization where:
+    MiniMax-M2 uses QK normalization where:
     - q_proj output: num_attention_heads * head_dim (e.g., 48 * 128 = 6144)
     - q_norm weight: num_attention_heads * head_dim
 
@@ -65,26 +65,27 @@ def shard_qk_norm(model: TransformerModel) -> TransformerModel:
     if not getattr(model.hf_config, "use_qk_norm", False):
         return model
 
-    unwrapped = model.unwrap()
-    if not hasattr(unwrapped, "layers"):
-        return model
-
     tp_rank = tp_group.rank_in_group
     num_attention_heads = model.hf_config.num_attention_heads
     num_key_value_heads = model.hf_config.num_key_value_heads
 
-    for layer in unwrapped.layers:
-        # Get the self_attn module, handling wrapper layers
-        self_attn = layer
-        while hasattr(self_attn, "_inner"):
-            self_attn = self_attn._inner
-        if hasattr(self_attn, "self_attn"):
-            self_attn = self_attn.self_attn
-
-        # Shard q_norm if it exists
-        if hasattr(self_attn, "q_norm") and hasattr(self_attn.q_norm, "weight"):
+    # MTP constructs independent decoder blocks under mtp.layers.*.mtp_block.
+    # Walk the complete wrapper tree so both ordinary and MTP attention norms
+    # follow the same Q/K projection TP layout. Wrapper delegation can expose
+    # individual norms more than once or in different pairs, so de-duplicate
+    # each Q/K role independently by module identity.
+    seen_q_norms: set[int] = set()
+    seen_k_norms: set[int] = set()
+    for module in model.modules():
+        q_norm = getattr(module, "q_norm", None)
+        k_norm = getattr(module, "k_norm", None)
+        if q_norm is None or k_norm is None or not hasattr(q_norm, "weight") or not hasattr(k_norm, "weight"):
+            continue
+        q_norm_id = id(q_norm)
+        if q_norm_id not in seen_q_norms:
+            seen_q_norms.add(q_norm_id)
             replace_with_sharded_tensor(
-                self_attn.q_norm,
+                q_norm,
                 "weight",
                 tp_size,
                 tp_rank,
@@ -92,10 +93,11 @@ def shard_qk_norm(model: TransformerModel) -> TransformerModel:
                 head_num=num_attention_heads,
             )
 
-        # Shard k_norm if it exists
-        if hasattr(self_attn, "k_norm") and hasattr(self_attn.k_norm, "weight"):
+        k_norm_id = id(k_norm)
+        if k_norm_id not in seen_k_norms:
+            seen_k_norms.add(k_norm_id)
             replace_with_sharded_tensor(
-                self_attn.k_norm,
+                k_norm,
                 "weight",
                 tp_size,
                 tp_rank,
@@ -171,9 +173,9 @@ def _(model: TransformerModel):
 
 register_model_profile(
     ModelProfile(
+        language_layers_path_str="layers",
         model_type="minimax_m2",
         moe_module_name="MiniMaxM2SparseMoeBlock",
-        moe_gate_returns_raw_logits=False,
-        moe_num_experts_key="num_local_experts",
+        mtp_block_module_name="MiniMaxM2DecoderLayer",
     )
 )

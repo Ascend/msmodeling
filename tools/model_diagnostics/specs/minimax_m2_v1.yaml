@@ -1,0 +1,71 @@
+schema_version: "1"
+spec_id: minimax_m2_v1
+spec_version: 1.0.0
+model_category: minimax_m2
+matches:
+  entrypoints: [text_generate]
+  model_types: [minimax_m2]
+
+operator_aliases:
+  q_norm: rms_norm
+  k_norm: rms_norm
+
+regions:
+  input:
+    stages:
+      - id: embedding
+        source_options:
+          theory:
+            modules:
+              - name: embedding
+                tensors:
+                  INPUT[0]: {shape: "[EV, EH]", dtype: WEIGHT}
+                  # TensorCast packs all request tokens into one leading row.
+                  INPUT[1]: {shape: "[1, T]", dtype: int64}
+                  OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+          runtime:
+            boundary_operators: [embedding]
+            ignored_operators: [view, index, alias, slice, all_gather, all_reduce]
+
+  language:
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: moe
+      count_from: model_config.effective_num_hidden_layers
+    layer_specs:
+      moe:
+        include_fragment: minimax_m2_decoder_v1
+
+  output:
+    stages:
+      - id: lm_head
+        source_options:
+          theory:
+            modules:
+              - name: lm_head_select
+                activation: lm_head_token_selection
+                tensors:
+                  INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+                  INPUT[1]: {shape: "[B]", dtype: int64}
+                  OUTPUT[0]: {shape: "[1, B, H]", dtype: ACT}
+              - name: lm_head
+                activation: non_mtp_lm_head
+                tensors:
+                  INPUT[0]: {shape: "[Rout, H]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[Rout, Vtp]", dtype: OUT}
+          runtime:
+            boundary_operators: [rms_norm]
+            ignored_operators: [rms_norm, view, slice, alias, copy_, device_put, select, argmax, all_gather]
+
+  # MiniMax-M2 enables TensorCast's general MTP path. The Region belongs to the
+  # model contract and is materialized only for Decode profiles with MTP > 0.
+  # Each proposal layer uses the same MiniMax-M2 GQA+MoE decoder structure.
+  mtp:
+    activation: mtp_enabled
+    layer_layout_rule:
+      strategy: repeat
+      layer_kind: minimax_m2_mtp
+      count_from: model_config.effective_num_mtp_layers
+    compose:
+      framework: mtp_framework_v1
+      predictor: minimax_m2_decoder_v1

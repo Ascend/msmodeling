@@ -1,0 +1,7 @@
+# MiniMax-M2 decoder from the HF MiniMaxM2DecoderLayer structure:
+# packed GQA attention with Q/K RMSNorm, followed by a routed SwiGLU MoE.
+fragment_id: minimax_m2_decoder_v1
+fragment_kind: model_decoder
+include_fragments:
+  - minimax_m2_attention_v1
+  - minimax_m2_moe_ffn_v1

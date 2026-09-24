@@ -16,11 +16,14 @@
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from parameterized import parameterized
 from tensor_cast.model_config import ModelConfig, ParallelConfig, QuantConfig
 from tensor_cast.transformers.builtin_model.minimax_m2 import shard_qk_norm
+from tensor_cast.transformers.custom_model_registry import get_model_profile, get_mtp_block_module_name
 from tensor_cast.transformers.model import TransformerModel
 from torch import nn
 
@@ -28,6 +31,19 @@ from torch import nn
 class MiniMaxM2ShardQkNormTestCase(unittest.TestCase):
     def setUp(self):
         self.model_id = str(Path(__file__).resolve().parents[2] / "assets" / "model_config" / "minimax_m2")
+
+    def test_model_profile_declares_mtp_decoder(self):
+        self.assertEqual(get_mtp_block_module_name("minimax_m2"), "MiniMaxM2DecoderLayer")
+
+    def test_model_profile_declares_model_structure(self):
+        profile = get_model_profile("minimax_m2")
+
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.language_layers_path_str, "layers")
+        self.assertEqual(profile.moe_module_name, "MiniMaxM2SparseMoeBlock")
+        self.assertFalse(profile.moe_gate_returns_raw_logits)
+        self.assertEqual(profile.moe_num_experts_key, "num_experts")
+        self.assertEqual(profile.mtp_block_module_name, "MiniMaxM2DecoderLayer")
 
     def _build_model(self):
         model_config = ModelConfig(
@@ -171,6 +187,32 @@ class MiniMaxM2ShardQkNormTestCase(unittest.TestCase):
         self.assertIs(self_attn.k_norm.weight, original_k_weight)
         self.assertEqual(self_attn.q_norm.weight.shape, torch.Size([6144]))
         self.assertEqual(self_attn.k_norm.weight.shape, torch.Size([1024]))
+
+    def test_shard_qk_norm_deduplicates_each_norm_independently(self):
+        q_norm_1 = nn.LayerNorm(8)
+        q_norm_2 = nn.LayerNorm(8)
+        shared_k_norm = nn.LayerNorm(8)
+        modules = (
+            SimpleNamespace(q_norm=q_norm_1, k_norm=shared_k_norm),
+            SimpleNamespace(q_norm=q_norm_2, k_norm=shared_k_norm),
+        )
+        model = SimpleNamespace(
+            parallel_group_manager=SimpleNamespace(
+                tp_group=SimpleNamespace(world_size=2, rank_in_group=0),
+            ),
+            hf_config=SimpleNamespace(
+                use_qk_norm=True,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+            ),
+            modules=lambda: iter(modules),
+        )
+
+        with patch("tensor_cast.transformers.builtin_model.minimax_m2.replace_with_sharded_tensor") as replace:
+            shard_qk_norm(model)
+
+        self.assertEqual(replace.call_count, 3)
+        self.assertEqual([call.args[0] for call in replace.call_args_list], [q_norm_1, shared_k_norm, q_norm_2])
 
 
 if __name__ == "__main__":

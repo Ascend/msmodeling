@@ -594,7 +594,15 @@ def build_theory_env(context: ModelRunContext) -> dict[str, object]:
     if has_routed or "num_experts_per_tok" in config or "moe_intermediate_size" in config:
         experts = _routed_expert_count(config)
         ktop = _config_int(config, "num_experts_per_tok")
-        fmoe = _config_int(config, "moe_intermediate_size")
+        # MiniMax-M2 calls the routed expert width ``intermediate_size``.
+        # ``mlp_intermediate_size`` is unrelated model metadata, so keep this
+        # fallback model-specific and fail loudly for every other MoE family.
+        if "moe_intermediate_size" in config:
+            fmoe = _config_int(config, "moe_intermediate_size")
+        elif config.get("model_type") == "minimax_m2":
+            fmoe = _config_int(config, "intermediate_size")
+        else:
+            raise SpecificationLoadError("model_config.moe_intermediate_size must be a positive integer")
         fe = fmoe  # MTPt is fixed at 1: Fe = Fmoe.
         tmoe = _moe_input_token_count(tokens=tokens, tp=tp, dp=dp, ep=ep)
         enable_external = _optional_config_bool(config, "enable_external_shared_experts")

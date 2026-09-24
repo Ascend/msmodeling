@@ -1,0 +1,95 @@
+# MiniMax-M2 routed MoE from MiniMaxM2SparseMoeBlock / MiniMaxM2MLP.
+# The source performs sigmoid + correction bias + top-k, normalizes selected
+# weights, dispatches Ktop copies of each token, applies SwiGLU experts, and
+# reduces weighted expert outputs in float32.
+fragment_id: minimax_m2_moe_ffn_v1
+fragment_kind: model_decoder
+stages:
+  - id: moe_gate
+    modules:
+      - name: moe_gate_linear
+        tensors:
+          INPUT[0]: {shape: "[MOE_GATE_TOKENS, H]", dtype: ACT}
+          OUTPUT[0]: {shape: "[MOE_GATE_TOKENS, E]", dtype: ACT}
+      - name: topk
+        tensors:
+          INPUT[0]: {shape: "[MOE_GATE_TOKENS, E]", dtype: float32}
+          OUTPUT[0]: {shape: "[MOE_GATE_TOKENS, Ktop]", dtype: float32}
+          OUTPUT[1]: {shape: "[MOE_GATE_TOKENS, Ktop]", dtype: int64}
+    runtime:
+      boundary_operators: [add_rms_norm2]
+      ignored_operators:
+        - add_rms_norm2
+        - view
+        - reshape
+        - constant_pad_nd
+        - slice
+        - convert_element_type
+        - sigmoid
+        - add
+        - gather
+        - sum
+        - div
+        - all_gather
+
+  - id: moe_dispatch
+    modules:
+      - name: init_routing_v2
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+          OUTPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
+    runtime:
+      boundary_operators: [init_routing_v2]
+      ignored_operators: [view, reshape, split_with_sizes, slice, cat, quantize, all_to_all]
+
+  - id: moe_experts
+    modules:
+      - name: grouped_matmul_swiglu
+        tensors:
+          OUTPUT[0]: {shape: "[Te, Fe]", dtype: OUT}
+      - name: grouped_matmul
+        tensors:
+          OUTPUT[0]: {shape: "[Te, H]", dtype: OUT}
+    runtime:
+      boundary_operators:
+        - grouped_matmul_swiglu
+        - grouped_matmul_quant_swiglu
+        - grouped_matmul_quant_int4_swiglu
+        - grouped_matmul_fp8_swiglu
+        - grouped_matmul_mxfp4_swiglu
+      ignored_operators: [view, reshape, split_with_sizes, slice, cat, quantize, all_to_all]
+
+  - id: moe_combine
+    modules:
+      - name: unpermute_tokens
+        tensors:
+          INPUT[0]: {shape: "[Tmoe * Ktop, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Tmoe, Ktop]", dtype: int64}
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+      - name: mul
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: ACT}
+          INPUT[1]: {shape: "[Tmoe, Ktop, 1]", dtype: float32}
+          OUTPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: float32}
+      - name: sum
+        tensors:
+          INPUT[0]: {shape: "[Tmoe, Ktop, H]", dtype: float32}
+          OUTPUT[0]: {shape: "[Tmoe, H]", dtype: float32}
+    runtime:
+      boundary_operators: [unpermute_tokens]
+      ignored_operators:
+        - view
+        - reshape
+        - unsqueeze
+        - slice
+        - convert_element_type
+        - all_to_all
+        - all_gather
+        - add
+        - rms_norm
+        - copy_
+        # MTP request/proposal index preparation can share the tail of this
+        # Runtime window; neither operation belongs to the MoE combine.
+        - device_put
+        - select
