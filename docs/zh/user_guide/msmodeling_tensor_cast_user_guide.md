@@ -318,8 +318,10 @@ usage: text_generate.py [-h]
                         [--host-external-shared-experts] [--vision-tp-size VISION_TP_SIZE]
                         [--image-batch-size IMAGE_BATCH_SIZE] [--image-height IMAGE_HEIGHT]
                         [--image-width IMAGE_WIDTH]
-                        [--remote-source {huggingface,modelscope}] [--performance-model {analytic,profiling}]
-                        [--profiling-database-path PROFILING_DATABASE]
+                        [--remote-source {huggingface,modelscope}] [--performance-model {analytic,calibrated,profiling}]
+                        [--profiling-database-path PROFILING_DATABASE] [--disable-profiling-interpolation]
+                        [--analytic-calibration-profile ANALYTIC_CALIBRATION_PROFILE]
+                        [--analytic-calibration-stack ANALYTIC_CALIBRATION_STACK]
                         [--export-empirical-metrics EXPORT_EMPIRICAL_METRICS]
                         model_id
 
@@ -383,8 +385,11 @@ Run a simulated LLM inference pass and dump the perf result.
 | `--image-height` | MultiModal Options | 可选 | 指定输入图像高度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |
 | `--image-width` | MultiModal Options | 可选 | 指定输入图像宽度。<br>1. 类型：Int。<br>2. 取值范围：正整数。<br>3. 默认值：`None`。 |
 | `--remote-source` | Options | 可选 | 指定远端模型来源。<br>1. 类型：Str。<br>2. 参考值：`huggingface`、`modelscope`。<br>3. 默认值：`huggingface`。 |
-| `--performance-model` | Options | 可选 | 指定性能模型，可重复指定一个或多个模型。<br>1. 类型：List[Str]。<br>2. 参考值：`analytic`、`profiling`。<br>3. 默认值：未指定时使用 `analytic`。<br>4. `analytic` 为 Roofline 模型，无需 profiling 数据；`profiling` 为基于 profiling CSV 数据库的经验性能模型，需配合 `--profiling-database-path` 使用。 |
+| `--performance-model` | Options | 可选 | 指定性能模型，可重复指定一个或多个模型。<br>1. 类型：List[Str]。<br>2. 参考值：`analytic`、`calibrated`、`profiling`。<br>3. 默认值：未指定时使用 `analytic`。<br>4. `analytic` 为 Roofline 模型，无需 profiling 数据；`calibrated` 为由 `--analytic-calibration-profile` 校准的解析模型；`profiling` 为基于 profiling CSV 数据库的经验性能模型，需配合 `--profiling-database-path` 使用。 |
 | `--profiling-database-path` | Options | 可选 | 使用 `profiling` 性能模型时指定 profiling 数据库路径。<br>1. 类型：Str。<br>2. 取值范围：包含 `op_mapping.yaml` 和各 kernel 类型 CSV 文件的目录路径。<br>3. 默认值：`None`。 |
+| `--disable-profiling-interpolation` | Options | 可选 | 禁用 profiling 插值，仅使用精确和部分匹配。<br>1. 类型：Bool。<br>2. 取值范围：开关参数。<br>3. 默认值：`False`。<br>4. 需配合 `--performance-model profiling` 使用。 |
+| `--analytic-calibration-profile` | Options | 可选 | 指定用于校准解析模型的 SQLite profile。<br>1. 类型：Str。<br>2. 取值范围：SQLite 文件路径。<br>3. 默认值：`None`。<br>4. 校准 analytic 延迟，无需 profiling OP mapping。 |
+| `--analytic-calibration-stack` | Options | 可选 | 指定多栈 analytic profile 的实际软件栈；单栈 profile 自动选择。<br>1. 类型：Str。<br>2. 取值范围：软件栈名称。<br>3. 默认值：`None`，自动选择。 |
 | `--export-empirical-metrics` | Options | 可选 | 导出 M1-M5 metrics JSON，用于离线 M6 计算。<br>1. 类型：Str。<br>2. 取值范围：JSON 文件路径。<br>3. 默认值：`None`。<br>4. 仅开发调试使用，需配合 `--performance-model profiling` 使用。 |
 
 对于 VL 模型，可同时设置 `--image-batch-size`、`--image-height` 和 `--image-width` 来描述输入图像数量与分辨率；纯文本模型可省略这些参数。
