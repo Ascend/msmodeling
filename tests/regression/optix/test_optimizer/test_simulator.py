@@ -865,7 +865,7 @@ class TestMindieSimulatorStop(unittest.TestCase):
         simulator.process = None
         simulator.run_log_fp = None
         simulator.run_log = None
-        with patch("optix.optimizer.plugins.simulate.remove_file"):
+        with patch("optix.optimizer.plugins.simulate.SimulatorInterface.stop"):
             simulator.stop(del_log=True)
 
         restored = json.loads(config_path.read_text())
@@ -1050,3 +1050,106 @@ class TestMindieSimulatorUpdateConfig(unittest.TestCase):
         current = json.loads(config_path.read_text())
         # No BackendConfig param, so config should remain same
         assert current == config_data
+
+
+class TestMindieSimulatorConfigPermissions(unittest.TestCase):
+    """Regression tests for config.json permission preservation (issue #480).
+
+    MindIE's mindieservice_daemon rejects config.json when the Other group has
+    any permission bit set (requires 0o640). The simulator rewrites config.json
+    on each trial; the rewrite must preserve the original file mode instead of
+    recreating the file with the umask default (0o644).
+    """
+
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
+    @patch(
+        "optix.deploy_env.shutil.which",
+        return_value="/usr/bin/mindie",
+    )
+    def test_update_config_preserves_file_mode(self, mock_cmd_which, mock_isfile):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from optix.config.config import OptimizerConfigField
+
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        config_data = {"BackendConfig": {"ScheduleConfig": {"maxBatchSize": 100}}}
+        config_path = Path(tmp_dir) / "config.json"
+        config_path.write_text(json.dumps(config_data), encoding="utf-8")
+        config_path.chmod(0o640)
+        bak_path = Path(tmp_dir) / "config.json.bak"
+
+        mock_config = MagicMock()
+        mock_config.config_path = config_path
+        mock_config.config_bak_path = bak_path
+        mock_config.process_name = "mindie"
+        mock_config.command = MagicMock()
+
+        simulator = Simulator(config=mock_config)
+        params = (
+            OptimizerConfigField(
+                name="max_batch_size",
+                config_position="BackendConfig.ScheduleConfig.maxBatchSize",
+                value=200,
+            ),
+        )
+        simulator.update_config(params)
+
+        mode = config_path.stat().st_mode & 0o777
+        assert mode == 0o640, f"expected 0o640, got {oct(mode)}"
+        updated = json.loads(config_path.read_text(encoding="utf-8"))
+        assert updated["BackendConfig"]["ScheduleConfig"]["maxBatchSize"] == 200
+
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
+    @patch(
+        "optix.deploy_env.shutil.which",
+        return_value="/usr/bin/mindie",
+    )
+    def test_stop_preserves_file_mode(self, mock_cmd_which, mock_isfile):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        config_data = {"BackendConfig": {"ScheduleConfig": {"maxBatchSize": 100}}}
+        config_path = Path(tmp_dir) / "config.json"
+        config_path.write_text(json.dumps(config_data), encoding="utf-8")
+        config_path.chmod(0o640)
+        bak_path = Path(tmp_dir) / "config.json.bak"
+
+        mock_config = MagicMock()
+        mock_config.config_path = config_path
+        mock_config.config_bak_path = bak_path
+        mock_config.process_name = "mindie"
+        mock_config.command = MagicMock()
+
+        simulator = Simulator(config=mock_config)
+        simulator.process = None
+        simulator.run_log_fp = None
+        simulator.run_log = None
+        with patch("optix.optimizer.plugins.simulate.SimulatorInterface.stop"):
+            simulator.stop(del_log=True)
+
+        mode = config_path.stat().st_mode & 0o777
+        assert mode == 0o640, f"expected 0o640, got {oct(mode)}"
+        restored = json.loads(config_path.read_text(encoding="utf-8"))
+        assert restored == config_data
+
+    def test_write_mindie_config_default_mode_when_missing(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from optix.optimizer.plugins.simulate import _write_mindie_config
+
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        config_path = Path(tmp_dir) / "config.json"
+        _write_mindie_config(config_path, {"a": 1})
+
+        mode = config_path.stat().st_mode & 0o777
+        assert mode == 0o640, f"expected 0o640, got {oct(mode)}"
+        assert json.loads(config_path.read_text(encoding="utf-8")) == {"a": 1}
