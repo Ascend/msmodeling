@@ -64,3 +64,6 @@ msmodeling-govern-logs/
 # Model adaptation working artifacts (doctor/verify reports stay local; only
 # code, tests, docs, and optional ST guardrail cases are committed)
 reports/
+
+# optix runtime log artifact produced in repo cwd by mindie/ais_bench runs (issue #480)
+report.log
