@@ -15,6 +15,7 @@
 # -------------------------------------------------------------------------
 import json
 import shutil
+import stat
 import subprocess
 import time
 from copy import deepcopy
@@ -53,7 +54,10 @@ _MINDIE_CONFIG_FILE_MODE = 0o640
 
 
 def _write_mindie_config(config_path: Path, data: Any) -> None:
-    mode = config_path.stat().st_mode & 0o777 if config_path.exists() else _MINDIE_CONFIG_FILE_MODE
+    try:
+        mode = stat.S_IMODE(config_path.stat().st_mode)
+    except FileNotFoundError:
+        mode = _MINDIE_CONFIG_FILE_MODE
     with open_file(config_path, "w") as fout:
         json.dump(data, fout, indent=4, ensure_ascii=False)
     config_path.chmod(mode)
