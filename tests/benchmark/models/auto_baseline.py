@@ -52,11 +52,11 @@ class AutoBaselineResult:
     error: Optional[str] = None
 
 
-def _parse_total_time_s(table_result: str, model_name: str = "analytic") -> float:
-    pattern = rf"Total time for {model_name}:\s*([\d.]+)\s*(ns|us|ms|s)"
+def _parse_total_time_s(table_result: str, performance_model_name: str = "analytic") -> float:
+    pattern = rf"Total time for {performance_model_name}:\s*([\d.]+)\s*(ns|us|ms|s)"
     m = re.search(pattern, table_result)
     if not m:
-        raise ValueError(f"Could not find 'Total time for {model_name}' in output:\n{table_result}")
+        raise ValueError(f"Could not find 'Total time for {performance_model_name}' in output:\n{table_result}")
     value = float(m.group(1))
     unit = m.group(2)
     return value * {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}[unit]
