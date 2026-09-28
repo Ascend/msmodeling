@@ -756,45 +756,40 @@ class TestMindieSimulatorBeforeRun(unittest.TestCase):
 class TestMindieSimulatorHealth(unittest.TestCase):
     """Test Simulator.health (Mindie variant with daemon check)"""
 
+    def _make_simulator(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
+        config_data = {"BackendConfig": {"ScheduleConfig": {"maxBatchSize": 100}}}
+        config_path = Path(tmp_dir) / "config.json"
+        config_path.write_text(json.dumps(config_data), encoding="utf-8")
+        bak_path = Path(tmp_dir) / "config.json.bak"
+
+        mock_config = MagicMock()
+        mock_config.config_path = config_path
+        mock_config.config_bak_path = bak_path
+        mock_config.process_name = "mindie"
+        mock_config.command = MagicMock()
+
+        simulator = Simulator(config=mock_config)
+        simulator.process = MagicMock()
+        simulator.process.poll.return_value = None
+        return simulator
+
     @patch("optix.deploy_env.os.path.isfile", return_value=True)
     @patch(
         "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
     def test_health_running_via_daemon(self, mock_cmd_which, mock_isfile):
-        import json
-        import tempfile
-        from pathlib import Path
+        from optix.config.constant import Stage
 
-        from optix.config.constant import ProcessState, Stage
-
-        tmp_dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
-        config_data = {"BackendConfig": {"ScheduleConfig": {"maxBatchSize": 100}}}
-        config_path = Path(tmp_dir) / "config.json"
-        config_path.write_text(json.dumps(config_data), encoding="utf-8")
-        bak_path = Path(tmp_dir) / "config.json.bak"
-
-        mock_config = MagicMock()
-        mock_config.config_path = config_path
-        mock_config.config_bak_path = bak_path
-        mock_config.process_name = "mindie"
-        mock_config.command = MagicMock()
-
-        simulator = Simulator(config=mock_config)
-        simulator.process = MagicMock()
-        simulator.process.poll.return_value = None
-
-        # First super().health() returns non-running
-        non_running_state = ProcessState(stage=Stage.start)
-        # Simulating the proxy_status returns running
-        running_state = ProcessState(stage=Stage.running)
-        simulator.run_log_offset = 0
-
-        with patch.object(type(simulator).__mro__[1], "health", return_value=non_running_state):
-            with patch.object(type(simulator).__mro__[2], "health", return_value=running_state):
-                with patch.object(simulator, "get_log", return_value="Daemon start success!"):
-                    result = simulator.health()
+        simulator = self._make_simulator()
+        with patch.object(simulator, "get_log", return_value="Daemon start success!"):
+            result = simulator.health()
         assert result.stage == Stage.running
 
     @patch("optix.deploy_env.os.path.isfile", return_value=True)
@@ -802,34 +797,66 @@ class TestMindieSimulatorHealth(unittest.TestCase):
         "optix.deploy_env.shutil.which",
         return_value="/usr/bin/mindie",
     )
-    def test_health_returns_process_result_when_running(self, mock_cmd_which, mock_isfile):
-        import json
-        import tempfile
-        from pathlib import Path
+    def test_health_waits_for_daemon_ready_marker(self, mock_cmd_which, mock_isfile):
+        from optix.config.constant import Stage
 
-        from optix.config.constant import ProcessState, Stage
-
-        tmp_dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp_dir, ignore_errors=True)
-        config_data = {"BackendConfig": {"ScheduleConfig": {"maxBatchSize": 100}}}
-        config_path = Path(tmp_dir) / "config.json"
-        config_path.write_text(json.dumps(config_data), encoding="utf-8")
-        bak_path = Path(tmp_dir) / "config.json.bak"
-
-        mock_config = MagicMock()
-        mock_config.config_path = config_path
-        mock_config.config_bak_path = bak_path
-        mock_config.process_name = "mindie"
-        mock_config.command = MagicMock()
-
-        simulator = Simulator(config=mock_config)
-        simulator.process = MagicMock()
-        simulator.process.poll.return_value = None
-
-        running_state = ProcessState(stage=Stage.running)
-        with patch.object(type(simulator).__mro__[1], "health", return_value=running_state):
+        simulator = self._make_simulator()
+        with patch.object(simulator, "get_log", return_value="ConfigManager initialized"):
             result = simulator.health()
+        assert result.stage == Stage.start
+        assert result.info == "Waiting for MindIE daemon readiness"
+
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
+    @patch(
+        "optix.deploy_env.shutil.which",
+        return_value="/usr/bin/mindie",
+    )
+    def test_health_does_not_use_http_probe(self, mock_cmd_which, mock_isfile):
+        from optix.config.constant import Stage
+
+        simulator = self._make_simulator()
+        with patch("optix.optimizer.interfaces.simulator.urlopen") as mock_urlopen:
+            with patch.object(simulator, "get_log", return_value="Daemon start success!"):
+                result = simulator.health()
         assert result.stage == Stage.running
+        mock_urlopen.assert_not_called()
+
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
+    @patch(
+        "optix.deploy_env.shutil.which",
+        return_value="/usr/bin/mindie",
+    )
+    def test_health_caches_daemon_readiness(self, mock_cmd_which, mock_isfile):
+        from optix.config.constant import Stage
+
+        simulator = self._make_simulator()
+        with patch.object(simulator, "get_log", return_value="Daemon start success!") as mock_get_log:
+            first_result = simulator.health()
+            second_result = simulator.health()
+        assert first_result.stage == Stage.running
+        assert second_result.stage == Stage.running
+        mock_get_log.assert_called_once()
+
+    @patch("optix.deploy_env.os.path.isfile", return_value=True)
+    @patch(
+        "optix.deploy_env.shutil.which",
+        return_value="/usr/bin/mindie",
+    )
+    def test_health_returns_process_error(self, mock_cmd_which, mock_isfile):
+        from optix.config.constant import Stage
+
+        simulator = self._make_simulator()
+        simulator.process.poll.return_value = 1
+        simulator.process.returncode = 1
+        simulator._mindie_ready = True
+        simulator._startup_log_buffer = "Daemon start suc"
+        with patch.object(simulator, "get_log") as mock_get_log:
+            result = simulator.health()
+        assert result.stage == Stage.error
+        assert "exit_code=1" in result.info
+        assert simulator._mindie_ready is False
+        assert simulator._startup_log_buffer == ""
+        mock_get_log.assert_not_called()
 
 
 class TestMindieSimulatorStop(unittest.TestCase):
