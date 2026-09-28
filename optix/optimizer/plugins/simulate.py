@@ -31,7 +31,7 @@ from ...config.config import (
     VllmConfig,
     get_settings,
 )
-from ...config.constant import Stage
+from ...config.constant import ProcessState, Stage
 from ...config.custom_command import VLLM_SERVE_CAPACITY_FIELDS, VllmCommand
 from ...deploy_env import materialize_command, resolve_mindie_argv
 from ...io_utils import open_file
@@ -51,6 +51,8 @@ def _find_executable(name: str, env: dict[str, str]) -> str | None:
 
 
 _MINDIE_CONFIG_FILE_MODE = 0o640
+_MINDIE_READY_MARKER = "Daemon start success!"
+_MINDIE_STARTUP_LOG_BUFFER_SIZE = 8192
 
 
 def _write_mindie_config(config_path: Path, data: Any) -> None:
@@ -106,6 +108,8 @@ class Simulator(SimulatorInterface):
             self.config.config_bak_path.unlink()
         with open_file(self.config.config_bak_path, "w") as fout:
             json.dump(self.default_config, fout, indent=4)
+        self._mindie_ready = False
+        self._startup_log_buffer = ""
         self.update_command()
 
     @property
@@ -244,6 +248,8 @@ class Simulator(SimulatorInterface):
         self.command = materialize_command(raw_command, self.env, self._runtime_ctx, cwd=self.work_path)
 
     def before_run(self, run_params: Optional[tuple[OptimizerConfigField]] = None):
+        self._mindie_ready = False
+        self._startup_log_buffer = ""
         self.update_config(run_params)
         super().before_run(run_params)
 
@@ -277,21 +283,26 @@ class Simulator(SimulatorInterface):
         super().backup()
         backup(self.config.config_path, self.bak_path, self.__class__.__name__)
 
-    def health(self):
-        """
-        Get the current service status.
-        Current implementation based on vllm url
-        Returns: None
+    def health(self) -> ProcessState:
+        """Return MindIE readiness without using the HTTP health probe."""
+        process_state = super(SimulatorInterface, self).health()
+        if process_state.stage != Stage.running:
+            self._mindie_ready = False
+            self._startup_log_buffer = ""
+            return process_state
 
-        """
-        process_res = super().health()
-        if process_res.stage != Stage.running:
-            proxy_status = super(SimulatorInterface, self).health()
-            self.run_log_offset = 0
-            output = self.get_log()
-            if output and "Daemon start success!" in output and proxy_status.stage == Stage.running:
-                return proxy_status
-        return process_res
+        if self._mindie_ready:
+            return process_state
+
+        output = self.get_log() or ""
+        startup_log = self._startup_log_buffer + output
+        if _MINDIE_READY_MARKER in startup_log:
+            self._mindie_ready = True
+            self._startup_log_buffer = ""
+            return process_state
+
+        self._startup_log_buffer = startup_log[-_MINDIE_STARTUP_LOG_BUFFER_SIZE:]
+        return ProcessState(stage=Stage.start, info="Waiting for MindIE daemon readiness")
 
     def update_config(self, params: Optional[tuple[OptimizerConfigField]] = None):
         if not params:
