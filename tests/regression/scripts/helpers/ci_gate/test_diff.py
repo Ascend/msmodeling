@@ -80,28 +80,71 @@ def test_is_git_ancestor_true_when_git_succeeds(monkeypatch: pytest.MonkeyPatch,
     assert is_git_ancestor(tmp_path, "aaa", "bbb") is True
 
 
+def _git_argv(cmd: list[str]) -> list[str]:
+    return cmd[1:]
+
+
 def test_resolve_base_ref_merge_base_success_returns_sha(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(0, "abc123\n", ""))
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        if _git_argv(cmd)[:2] == ["rev-parse", "HEAD"]:
+            return FakeCompleted(0, "head111\n", "")
+        return FakeCompleted(0, "abc123\n", "")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
     result = resolve_base_ref(tmp_path, "main")
     assert result == "abc123"
 
 
 def test_resolve_base_ref_fallback_to_origin_returns_sha(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    calls = iter(
-        [
-            FakeCompleted(1, "", ""),
-            FakeCompleted(0, "def456\n", ""),
-        ]
-    )
-    monkeypatch.setattr("subprocess.run", lambda *a, **kw: next(calls))
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        argv = _git_argv(cmd)
+        if argv[:2] == ["rev-parse", "HEAD"]:
+            return FakeCompleted(0, "head111\n", "")
+        if argv[-1] == "main":
+            return FakeCompleted(1, "", "")
+        return FakeCompleted(0, "def456\n", "")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
     result = resolve_base_ref(tmp_path, "main")
     assert result == "def456"
+
+
+def test_resolve_base_ref_skips_ref_that_already_contains_head(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        argv = _git_argv(cmd)
+        if argv[:2] == ["rev-parse", "HEAD"]:
+            return FakeCompleted(0, "head111\n", "")
+        if argv[-1] == "master":
+            return FakeCompleted(0, "head111\n", "")
+        return FakeCompleted(0, "base222\n", "")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    assert resolve_base_ref(tmp_path, "master") == "base222"
+
+
+def test_resolve_base_ref_uses_first_ref_when_every_candidate_contains_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    recorded: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        recorded.append(cmd)
+        return FakeCompleted(0, "head111\n", "")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    assert resolve_base_ref(tmp_path, "master") == "head111"
+    assert not any("fetch" in _git_argv(cmd) for cmd in recorded)
 
 
 def test_resolve_base_ref_both_fail_raises_config_error_with_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr("subprocess.run", lambda *a, **kw: FakeCompleted(1, "", "not found"))
+    def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        if _git_argv(cmd)[:2] == ["rev-parse", "HEAD"]:
+            return FakeCompleted(0, "head111\n", "")
+        return FakeCompleted(1, "", "not found")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
     with pytest.raises(ConfigError, match=r"Cannot resolve base ref.*'nonexistent'.*not found either"):
         resolve_base_ref(tmp_path, "nonexistent")
 
@@ -133,24 +176,27 @@ def test_fetch_deepen_invokes_git_fetch_with_remote_and_branch(monkeypatch: pyte
 def test_resolve_base_ref_deepens_with_split_fetch_before_retry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    calls = iter(
-        [
-            FakeCompleted(1, "", ""),
-            FakeCompleted(1, "", ""),
-            FakeCompleted(0, "", ""),
-            FakeCompleted(0, "mergebase\n", ""),
-        ]
-    )
+    merge_base_calls = 0
     recorded: list[list[str]] = []
 
     def _fake_run(cmd: list[str], **_kwargs: object) -> FakeCompleted:
+        nonlocal merge_base_calls
         recorded.append(cmd)
-        return next(calls)
+        argv = _git_argv(cmd)
+        if argv[:2] == ["rev-parse", "HEAD"]:
+            return FakeCompleted(0, "head111\n", "")
+        if "fetch" in argv:
+            return FakeCompleted(0, "", "")
+        merge_base_calls += 1
+        if merge_base_calls < 3:
+            return FakeCompleted(1, "", "")
+        return FakeCompleted(0, "mergebase\n", "")
 
     monkeypatch.setattr("subprocess.run", _fake_run)
     result = resolve_base_ref(tmp_path, "master")
     assert result == "mergebase"
-    assert recorded[2][-4:] == ["fetch", "--depth=50", "origin", "master"]
+    fetch_cmds = [cmd for cmd in recorded if "fetch" in _git_argv(cmd)]
+    assert fetch_cmds[0][-4:] == ["fetch", "--depth=50", "origin", "master"]
 
 
 # ---------------------------------------------------------------------------

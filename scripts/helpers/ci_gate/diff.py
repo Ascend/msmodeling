@@ -90,6 +90,51 @@ def resolve_head_commit(repo_root: Path) -> str:
     return proc.stdout.strip()
 
 
+def _merge_base_with_head(repo_root: Path, ref: str) -> tuple[str | None, str]:
+    """Return ``(merge_base_sha, stderr)``. Sha is None when git cannot resolve *ref*."""
+    proc = _run_git(repo_root, "merge-base", "HEAD", ref)
+    sha = proc.stdout.strip()
+    if proc.returncode == 0 and sha:
+        return sha, ""
+    return None, proc.stderr.strip()
+
+
+def _scan_base_refs(
+    repo_root: Path,
+    refs: list[str],
+    head: str,
+    *,
+    after_deepen: bool,
+) -> tuple[str | None, list[tuple[str, str]], list[str], str]:
+    """Pick the first ref whose merge-base is not HEAD.
+
+    A merge-base equal to HEAD means that ref already contains the checked-out
+    commit, so ``git diff <merge-base>...HEAD`` would be empty. Those refs are
+    returned in *contained* and skipped. Refs that fail to resolve are returned
+    in *unresolved*.
+    """
+    contained: list[tuple[str, str]] = []
+    unresolved: list[str] = []
+    last_stderr = ""
+    suffix = " after deepen fetch" if after_deepen else ""
+    for ref in refs:
+        sha, err = _merge_base_with_head(repo_root, ref)
+        if sha is None:
+            unresolved.append(ref)
+            last_stderr = err
+            continue
+        if sha == head:
+            logger.info(
+                "Base ref %s already contains HEAD; three-dot diff would be empty, trying next candidate",
+                ref,
+            )
+            contained.append((ref, sha))
+            continue
+        logger.info("Resolved base ref using %s%s", ref, suffix)
+        return sha, contained, unresolved, last_stderr
+    return None, contained, unresolved, last_stderr
+
+
 def resolve_base_ref(repo_root: Path, branch: str) -> str:
     """Resolve merge-base between HEAD and *branch* (``MSMODELING_TEST_BASE_BRANCH``).
 
@@ -97,24 +142,37 @@ def resolve_base_ref(repo_root: Path, branch: str) -> str:
     ``develop``, or ``origin/master``). If *branch* contains ``/``, it is used
     as-is (e.g. ``center/develop``). Otherwise tries bare *branch* first, then
     ``origin/<branch>``.
+
+    A candidate whose merge-base equals HEAD already contains the checked-out
+    commit (UT merged the PR onto local ``master`` while ``origin/master`` is
+    still the target tip). Skip it and try the next candidate. If every
+    resolved candidate contains HEAD, keep the first one so an empty diff still
+    skips pytest.
     """
     refs = [branch] if "/" in branch else [branch, f"origin/{branch}"]
+    head = resolve_head_commit(repo_root)
 
-    last_stderr = ""
-    for ref in refs:
-        proc = _run_git(repo_root, "merge-base", "HEAD", ref)
-        if proc.returncode == 0 and proc.stdout.strip():
-            logger.info("Resolved base ref using %s", ref)
-            return proc.stdout.strip()
-        last_stderr = proc.stderr.strip()
+    chosen, contained, unresolved, last_stderr = _scan_base_refs(repo_root, refs, head, after_deepen=False)
+    if chosen is not None:
+        return chosen
 
-    for ref in refs:
-        _fetch_deepen(repo_root, ref)
-        proc = _run_git(repo_root, "merge-base", "HEAD", ref)
-        if proc.returncode == 0 and proc.stdout.strip():
-            logger.info("Resolved base ref using %s after deepen fetch", ref)
-            return proc.stdout.strip()
-        last_stderr = proc.stderr.strip()
+    if unresolved:
+        for ref in unresolved:
+            _fetch_deepen(repo_root, ref)
+        chosen, deepened_contained, _still_unresolved, last_stderr = _scan_base_refs(
+            repo_root,
+            unresolved,
+            head,
+            after_deepen=True,
+        )
+        contained.extend(deepened_contained)
+        if chosen is not None:
+            return chosen
+
+    if contained:
+        ref, sha = contained[0]
+        logger.info("Every resolved base ref already contains HEAD; using %s", ref)
+        return sha
 
     raise ConfigError(
         f"Cannot resolve base ref between HEAD and {refs[0]!r}."
