@@ -16,10 +16,11 @@
 
 """Portable, device-independent Runtime workload traces.
 
-The trace intentionally contains tensor *metadata* only.  It can therefore be
-sent to another process without retaining FakeTensor storage, a Runtime, or a
-DeviceProfile.  Unsupported values fail closed through ``WorkloadFreezeError``
-so callers can use the existing direct simulation path instead.
+The trace contains tensor metadata plus the values of bounded CPU control
+tensors. It can therefore be sent to another process without retaining
+FakeTensor storage, a Runtime, or a DeviceProfile. Unsupported values fail
+closed through ``WorkloadFreezeError`` so callers can use the existing direct
+simulation path instead.
 """
 
 from __future__ import annotations
@@ -32,19 +33,27 @@ import torch
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo, Region
 
 
+# Sequence lengths and similar control tensors affect analytic performance
+# estimates. Keep their values when they are small, while ensuring workload
+# reuse never serializes model activations or other large tensor payloads.
+_MAX_FROZEN_TENSOR_VALUE_ELEMENTS = 4096
+_MAX_FROZEN_TRACE_VALUE_ELEMENTS = 4096
+
+
 class WorkloadFreezeError(ValueError):
     """Raised when a recorded Runtime cannot be safely represented as an IR."""
 
 
 @dataclass(frozen=True)
 class FrozenTensor:
-    """Metadata required to recreate a meta tensor for performance estimation."""
+    """Information required to recreate a tensor for performance estimation."""
 
     tensor_id: int
     shape: tuple[int, ...]
     stride: tuple[int, ...]
     dtype: str
     requires_grad: bool
+    flat_values: tuple[Any, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +172,7 @@ class RuntimeWorkloadTrace:
 class _ValueFreezer:
     def __init__(self) -> None:
         self.tensors: dict[int, FrozenTensor] = {}
+        self._frozen_tensor_value_elements = 0
 
     def freeze(self, value: Any) -> Any:
         if value is None or isinstance(value, (bool, int, float, str)):
@@ -177,8 +187,9 @@ class _ValueFreezer:
                         stride=tuple(int(dim) for dim in value.stride()),
                         dtype=str(value.dtype),
                         requires_grad=bool(value.requires_grad),
+                        flat_values=self._freeze_tensor_values(value),
                     )
-                except (TypeError, ValueError) as error:
+                except (RuntimeError, TypeError, ValueError) as error:
                     raise WorkloadFreezeError(f"unsupported tensor metadata: {value!r}") from error
             return ("tensor", tensor_id)
         if isinstance(value, torch.dtype):
@@ -199,6 +210,24 @@ class _ValueFreezer:
             return (type(value).__name__, str(value))
         raise WorkloadFreezeError(f"unsupported runtime value: {type(value).__module__}.{type(value).__name__}")
 
+    def _freeze_tensor_values(self, value: torch.Tensor) -> tuple[Any, ...] | None:
+        try:
+            numel = value.numel()
+            if (
+                value.device.type != "cpu"
+                or value.layout != torch.strided
+                or value.is_quantized
+                or not value.is_contiguous()
+                or numel > _MAX_FROZEN_TENSOR_VALUE_ELEMENTS
+                or self._frozen_tensor_value_elements + numel > _MAX_FROZEN_TRACE_VALUE_ELEMENTS
+            ):
+                return None
+            frozen_values = tuple(value.detach().reshape(-1).tolist())
+            self._frozen_tensor_value_elements += numel
+            return frozen_values
+        except (RuntimeError, TypeError, ValueError):
+            return None
+
 
 class _ValueThawer:
     def __init__(self, tensors: tuple[FrozenTensor, ...]) -> None:
@@ -210,14 +239,21 @@ class _ValueThawer:
             try:
                 frozen = self._tensor_metadata[tensor_id]
                 dtype = getattr(torch, frozen.dtype.removeprefix("torch."))
-                self._tensors[tensor_id] = torch.empty_strided(
-                    frozen.shape,
-                    frozen.stride,
-                    dtype=dtype,
-                    device="meta",
-                    requires_grad=frozen.requires_grad,
-                )
-            except (AttributeError, KeyError, RuntimeError) as error:
+                if frozen.flat_values is None:
+                    restored = torch.empty_strided(
+                        frozen.shape,
+                        frozen.stride,
+                        dtype=dtype,
+                        device="meta",
+                        requires_grad=frozen.requires_grad,
+                    )
+                else:
+                    restored = torch.empty_strided(frozen.shape, frozen.stride, dtype=dtype, device="cpu")
+                    source = torch.tensor(frozen.flat_values, dtype=dtype).reshape(frozen.shape)
+                    restored.copy_(source)
+                    restored.requires_grad_(frozen.requires_grad)
+                self._tensors[tensor_id] = restored
+            except (AttributeError, KeyError, RuntimeError, TypeError, ValueError) as error:
                 raise WorkloadFreezeError(f"unable to recreate tensor {tensor_id}") from error
         return self._tensors[tensor_id]
 

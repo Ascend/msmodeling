@@ -39,7 +39,9 @@ from tensor_cast.runtime_workload import RuntimeWorkloadTrace, WorkloadFreezeErr
 
 
 logger = logging.getLogger(__name__)
-_WORKLOAD_TRACE_SCHEMA_VERSION = 2
+# v3 stores bounded CPU control-tensor values in workload traces. Invalidate v2
+# keys because their metadata-only traces lose value-dependent sequence lengths.
+_WORKLOAD_TRACE_SCHEMA_VERSION = 3
 _DEFAULT_WORKLOAD_CACHE_MAX_BYTES = 512 * 1024**2
 _DEFAULT_WORKLOAD_INFLIGHT_TIMEOUT_S = 600.0
 _MODEL_KEY_FIELDS = (
@@ -138,11 +140,6 @@ class WorkloadCache:
         # is killed before it can publish/abandon, waiters can expire the
         # stale single-flight slot instead of waiting forever.
         self._inflight: dict[str, tuple[float, str]] = {}
-        # Compile shape-mode decisions are keyed by graph-affecting inputs.
-        # Keep them separate from workload entries: they must not be evicted
-        # as the workload LRU fills up.
-        self._compile_mode_decisions: dict[str, bytes] = {}
-        self._compile_mode_decision_inflight: dict[str, tuple[float, str]] = {}
         self._condition = threading.Condition()
         self.analysis_count = 0
         self.hit_count = 0
@@ -324,73 +321,6 @@ class WorkloadCache:
             self.bypass_count += 1
             self._condition.notify_all()
         logger.debug("Workload reuse bypass for %s: %s", workload_key, reason)
-        return True
-
-    def claim_compile_mode_decision(self, decision_key: str) -> tuple[str, Any | None, str | None]:
-        """Reserve one keyed compile-mode calibration exactly once.
-
-        The manager hosts this state, so workers created with ``spawn`` can
-        coordinate without serializing a local lock into their payload.
-        """
-        with self._condition:
-            decision = self._compile_mode_decisions.get(decision_key)
-            if decision is not None:
-                return "hit", self._deserialize(decision), None
-            if self._expire_compile_mode_decision_locked(decision_key):
-                logger.warning("Expired stale compile shape-mode calibration lease")
-            if decision_key in self._compile_mode_decision_inflight:
-                return "wait", None, None
-            owner_token = uuid.uuid4().hex
-            self._compile_mode_decision_inflight[decision_key] = (time.monotonic(), owner_token)
-            return "owner", None, owner_token
-
-    def _expire_compile_mode_decision_locked(self, decision_key: str, now: float | None = None) -> bool:
-        lease = self._compile_mode_decision_inflight.get(decision_key)
-        if lease is None:
-            return False
-        started_at, _ = lease
-        now = time.monotonic() if now is None else now
-        if now - started_at < self.inflight_timeout_s:
-            return False
-        self._compile_mode_decision_inflight.pop(decision_key, None)
-        self._condition.notify_all()
-        return True
-
-    def wait_compile_mode_decision(self, decision_key: str) -> Any | None:
-        """Wait for the shared decision, returning ``None`` after a timeout."""
-        with self._condition:
-            while decision_key not in self._compile_mode_decisions:
-                if self._expire_compile_mode_decision_locked(decision_key):
-                    return None
-                lease = self._compile_mode_decision_inflight.get(decision_key)
-                if lease is None:
-                    return None
-                remaining = self.inflight_timeout_s - (time.monotonic() - lease[0])
-                self._condition.wait(timeout=max(remaining, 0.0))
-            return self._deserialize(self._compile_mode_decisions[decision_key])
-
-    def publish_compile_mode_decision(self, decision_key: str, decision: Any, owner_token: str) -> bool:
-        """Publish a calibration decision and release all waiting workers."""
-        serialized = pickle.dumps(decision, protocol=pickle.HIGHEST_PROTOCOL)
-        with self._condition:
-            lease = self._compile_mode_decision_inflight.get(decision_key)
-            if lease is None or lease[1] != owner_token:
-                logger.debug("Discarding compile shape-mode decision from expired owner")
-                return False
-            self._compile_mode_decisions[decision_key] = serialized
-            self._compile_mode_decision_inflight.pop(decision_key, None)
-            self._condition.notify_all()
-            return True
-
-    def abandon_compile_mode_decision(self, decision_key: str, reason: str, owner_token: str) -> bool:
-        """Release a failed calibration reservation without publishing a mode."""
-        with self._condition:
-            lease = self._compile_mode_decision_inflight.get(decision_key)
-            if lease is None or lease[1] != owner_token:
-                return False
-            self._compile_mode_decision_inflight.pop(decision_key, None)
-            self._condition.notify_all()
-        logger.debug("Compile shape-mode calibration reservation released: %s", reason)
         return True
 
     # Compatibility helpers used by lightweight unit tests and callers that do

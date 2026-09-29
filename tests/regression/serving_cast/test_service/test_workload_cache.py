@@ -25,7 +25,11 @@ import torch
 from serving_cast.service.workload_cache import RuntimeWorkload, WorkloadCache, WorkloadReuseModelRunner
 from tensor_cast.core.input_generator import RequestInfo, generate_inputs
 from tensor_cast.performance_model.op_invoke_info import OpInvokeInfo, Region
-from tensor_cast.runtime_workload import RuntimeWorkloadTrace
+from tensor_cast.runtime_workload import (
+    _MAX_FROZEN_TENSOR_VALUE_ELEMENTS,
+    _MAX_FROZEN_TRACE_VALUE_ELEMENTS,
+    RuntimeWorkloadTrace,
+)
 from tensor_cast.utils import EquivalentKeyManager
 
 
@@ -92,6 +96,171 @@ class TestWorkloadCache(TestCase):
         self.assertIsNot(rebuilt_op.args[0], input_tensor)
         self.assertEqual(rebuilt_op.args[0].device.type, "meta")
         self.assertEqual(rebuilt_op.args[0].shape, input_tensor.shape)
+
+    def test_frozen_trace_preserves_small_cpu_tensor_values(self):
+        source = MagicMock()
+        sequence_lengths = torch.tensor([128000, 128001, 128002], dtype=torch.int64)
+        op = OpInvokeInfo(
+            torch.ops.aten.add.Tensor,
+            (sequence_lengths, sequence_lengths),
+            {},
+            sequence_lengths,
+        )
+        source.op_info_group = [op]
+        source._iter_flat_invocations.return_value = [(op, 0)]
+
+        trace = RuntimeWorkloadTrace.from_runtime(source)
+        restored_trace = pickle.loads(pickle.dumps(trace))
+        target = MagicMock()
+        restored_trace.replay(target)
+
+        rebuilt_op, _ = target.replay_flat_op_invoke_infos.call_args.args[0][0]
+        self.assertEqual(rebuilt_op.args[0].device.type, "cpu")
+        self.assertTrue(torch.equal(rebuilt_op.args[0], sequence_lengths))
+        self.assertIs(rebuilt_op.args[0], rebuilt_op.args[1])
+
+    def test_frozen_trace_keeps_large_cpu_tensor_metadata_only(self):
+        source = MagicMock()
+        large_tensor = torch.arange(_MAX_FROZEN_TENSOR_VALUE_ELEMENTS + 1)
+        op = OpInvokeInfo(torch.ops.aten.add.Tensor, (large_tensor, large_tensor), {}, large_tensor)
+        source.op_info_group = [op]
+        source._iter_flat_invocations.return_value = [(op, 0)]
+
+        trace = RuntimeWorkloadTrace.from_runtime(source)
+        target = MagicMock()
+        trace.replay(target)
+
+        rebuilt_op, _ = target.replay_flat_op_invoke_infos.call_args.args[0][0]
+        self.assertEqual(rebuilt_op.args[0].device.type, "meta")
+        self.assertEqual(rebuilt_op.args[0].shape, large_tensor.shape)
+
+    def test_frozen_trace_limits_total_cpu_tensor_values(self):
+        source = MagicMock()
+        tensor_size = _MAX_FROZEN_TRACE_VALUE_ELEMENTS // 2 + 1
+        first_tensor = torch.arange(tensor_size)
+        second_tensor = torch.arange(tensor_size)
+        op = OpInvokeInfo(torch.ops.aten.add.Tensor, (first_tensor, second_tensor), {}, first_tensor)
+        source.op_info_group = [op]
+        source._iter_flat_invocations.return_value = [(op, 0)]
+
+        trace = RuntimeWorkloadTrace.from_runtime(source)
+        target = MagicMock()
+        trace.replay(target)
+
+        rebuilt_op, _ = target.replay_flat_op_invoke_infos.call_args.args[0][0]
+        self.assertEqual(rebuilt_op.args[0].device.type, "cpu")
+        self.assertTrue(torch.equal(rebuilt_op.args[0], first_tensor))
+        self.assertEqual(rebuilt_op.args[1].device.type, "meta")
+        self.assertEqual(rebuilt_op.args[1].shape, second_tensor.shape)
+
+    def test_frozen_trace_keeps_tensor_metadata_when_numel_fails(self):
+        source = MagicMock()
+        input_tensor = torch.tensor([128, 256], dtype=torch.int64)
+        op = OpInvokeInfo(torch.ops.aten.add.Tensor, (input_tensor, input_tensor), {}, input_tensor)
+        source.op_info_group = [op]
+        source._iter_flat_invocations.return_value = [(op, 0)]
+
+        with patch.object(torch.Tensor, "numel", side_effect=RuntimeError("unable to calculate tensor size")):
+            trace = RuntimeWorkloadTrace.from_runtime(source)
+        target = MagicMock()
+        trace.replay(target)
+
+        rebuilt_op, _ = target.replay_flat_op_invoke_infos.call_args.args[0][0]
+        self.assertEqual(rebuilt_op.args[0].device.type, "meta")
+        self.assertEqual(rebuilt_op.args[0].shape, input_tensor.shape)
+
+    def test_replayed_attention_preserves_value_dependent_properties(self):
+        query = torch.empty((2, 128), dtype=torch.bfloat16, device="meta")
+        key = torch.empty((200, 16, 1, 128), dtype=torch.bfloat16, device="meta")
+        block_table = torch.empty((2, 100), dtype=torch.int32, device="meta")
+        query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+        sequence_lengths = torch.tensor([128, 256], dtype=torch.int64)
+        query_lengths = torch.tensor([1, 1], dtype=torch.int64)
+        output = torch.empty_like(query)
+        op = OpInvokeInfo(
+            torch.ops.tensor_cast.attention.default,
+            (
+                query,
+                key,
+                key,
+                None,
+                block_table,
+                query_start_loc,
+                sequence_lengths,
+                query_lengths,
+            ),
+            {},
+            output,
+        )
+        source = SimpleNamespace(op_info_group=[op], _iter_flat_invocations=lambda: [(op, 0)])
+        expected = op.get_perf_properties()
+
+        trace = RuntimeWorkloadTrace.from_runtime(source)
+        target = MagicMock()
+        trace.replay(target)
+
+        rebuilt_op, _ = target.replay_flat_op_invoke_infos.call_args.args[0][0]
+        self.assertEqual(rebuilt_op.get_perf_properties(), expected)
+
+    def test_replayed_sparse_quant_mla_preserves_value_dependent_properties(self):
+        num_tokens = 2
+        num_heads = 4
+        kv_lora_rank = 512
+        rope_head_dim = 64
+        q = torch.empty((num_tokens, num_heads, 192), dtype=torch.bfloat16, device="meta")
+        projected_kv = torch.empty((0, num_heads, 256), dtype=torch.bfloat16, device="meta")
+        absorbed_q = torch.empty(
+            (num_tokens, num_heads, kv_lora_rank + rope_head_dim), dtype=torch.bfloat16, device="meta"
+        )
+        kv_cache = torch.empty((200, 16, kv_lora_rank + rope_head_dim), dtype=torch.bfloat16, device="meta")
+        block_table = torch.empty((2, 100), dtype=torch.int32, device="meta")
+        query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+        sequence_lengths = torch.tensor([128, 256], dtype=torch.int64)
+        query_lengths = torch.tensor([1, 1], dtype=torch.int64)
+        scale = torch.tensor(1.0)
+        output = (
+            torch.empty((0, num_heads, 128), dtype=torch.bfloat16, device="meta"),
+            torch.empty((num_tokens, num_heads, kv_lora_rank), dtype=torch.bfloat16, device="meta"),
+        )
+        op = OpInvokeInfo(
+            torch.ops.tensor_cast.mla_sparse_attention_quant.default,
+            (
+                q,
+                projected_kv,
+                absorbed_q,
+                kv_cache,
+                block_table,
+                query_start_loc,
+                sequence_lengths,
+                query_lengths,
+                128,
+                kv_lora_rank,
+                2048,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                scale,
+                None,
+                None,
+                None,
+                None,
+            ),
+            {"is_decode_values": [True, True]},
+            output,
+        )
+        source = SimpleNamespace(op_info_group=[op], _iter_flat_invocations=lambda: [(op, 0)])
+        expected = op.get_perf_properties()
+
+        trace = RuntimeWorkloadTrace.from_runtime(source)
+        target = MagicMock()
+        trace.replay(target)
+
+        rebuilt_op, _ = target.replay_flat_op_invoke_infos.call_args.args[0][0]
+        self.assertEqual(rebuilt_op.get_perf_properties(), expected)
 
     def test_frozen_trace_preserves_region_aliases(self):
         logical_input = torch.empty((2, 4), dtype=torch.float16, device="meta")
@@ -250,38 +419,6 @@ class TestWorkloadCache(TestCase):
         self.assertEqual(cache.timeout_count, 1)
         state, _, _ = cache.claim_workload("stale")
         self.assertEqual(state, "owner")
-
-    def test_compile_mode_decision_is_single_flight(self):
-        cache = WorkloadCache()
-        decision = SimpleNamespace(dynamic_shapes=False)
-        decision_key = "compile-key"
-
-        state, _, owner_token = cache.claim_compile_mode_decision(decision_key)
-        self.assertEqual(state, "owner")
-        state, _, _ = cache.claim_compile_mode_decision(decision_key)
-        self.assertEqual(state, "wait")
-        self.assertTrue(cache.publish_compile_mode_decision(decision_key, decision, owner_token))
-
-        state, cached, _ = cache.claim_compile_mode_decision(decision_key)
-        self.assertEqual(state, "hit")
-        self.assertEqual(cached, decision)
-
-    def test_compile_mode_decisions_are_isolated_by_key(self):
-        cache = WorkloadCache()
-        first_key = "compile-key-a"
-        second_key = "compile-key-b"
-        first_decision = SimpleNamespace(dynamic_shapes=False)
-
-        state, _, owner_token = cache.claim_compile_mode_decision(first_key)
-        self.assertEqual(state, "owner")
-        self.assertTrue(cache.publish_compile_mode_decision(first_key, first_decision, owner_token))
-
-        state, cached, _ = cache.claim_compile_mode_decision(first_key)
-        self.assertEqual(state, "hit")
-        self.assertEqual(cached, first_decision)
-        state, _, second_owner_token = cache.claim_compile_mode_decision(second_key)
-        self.assertEqual(state, "owner")
-        self.assertIsNotNone(second_owner_token)
 
     def test_owner_slot_is_released_for_process_level_interruptions(self):
         runner = WorkloadReuseModelRunner.__new__(WorkloadReuseModelRunner)

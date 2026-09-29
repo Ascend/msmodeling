@@ -681,10 +681,9 @@ def run_multi_device_loop(
 ) -> MultiDeviceComparisonRows:
     """Run each device profile and collect cross-hardware rows.
 
-    A manager-hosted coordinator shares frozen workload traces and keyed
-    compile shape-mode decisions between existing process-pool workers. Device
-    profiles intentionally share the first calibration for the same key.
-    The optimizer's ``--jobs`` parallelism is deliberately unchanged.
+    A manager-hosted coordinator shares frozen workload traces between existing
+    process-pool workers. The optimizer's ``--jobs`` parallelism is deliberately
+    unchanged.
     """
     from serving_cast.parallel_runner import ParallelRunner
     from serving_cast.service.workload_cache import create_workload_cache_manager

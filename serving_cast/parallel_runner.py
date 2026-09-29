@@ -29,16 +29,9 @@ import pandas as pd
 import torch
 
 from tensor_cast import config
-from tensor_cast.core.input_generator import generate_inputs
 from tensor_cast.core.model_runner import ModelRunner
 from tensor_cast.core.user_config import UserInputConfig
 from tensor_cast.device import DeviceProfile
-from .service.compile_shape_mode import (
-    CompileDecisionKey,
-    CompileModeDecision,
-    CompileModeDecisionCache,
-    decide_compile_shape_mode,
-)
 from .service.optimizer_factory import OptimizerFactory
 from .service.optimizer_summary import OptimizerSummary
 from .service.pd_ratio_throughput_optimizer import PDRatioThroughputOptimizer
@@ -99,7 +92,6 @@ class ParallelRunner:
         self._executor_class = executor_class or ProcessPoolExecutor
         self._worker_initializer = worker_initializer or self._init_worker
         self._workload_cache = workload_cache
-        self._compile_mode_decision_cache = CompileModeDecisionCache()
 
         self.summary_result = []
         max_batched_tokens = getattr(self.args, "max_batched_tokens", None)
@@ -336,225 +328,23 @@ class ParallelRunner:
             capture_runner=capture_runner,
         )
 
-    @staticmethod
-    def _compile_phase(disagg_mode: bool, optimizer_data: OptimizerData) -> tuple[str, bool]:
-        """Return the decision-cache phase and the request phase used for probing."""
-        if not disagg_mode:
-            # Aggregation intentionally uses Decode as its sole calibration basis.
-            return "aggregation", True
-        if optimizer_data.ttft_limits is None:
-            return "decode", True
-        return "prefill", False
-
-    @staticmethod
-    def _compile_probe_batch_size(batch_range: list[int] | None) -> int:
-        return max(batch_range) if batch_range else 512
-
-    def _compile_mode_fallback_reason(
-        self,
-        optimizer_data: OptimizerData,
-        phase: str,
-    ) -> str | None:
-        """Return a documented fallback reason for unsupported auto-calibration inputs."""
-        if optimizer_data.length_distribution is not None:
-            return "variable_length_uses_dynamic"
-        if any(
-            value is not None
-            for value in (
-                optimizer_data.image_batch_size,
-                optimizer_data.image_height,
-                optimizer_data.image_width,
-            )
-        ):
-            return "image_input_uses_dynamic"
-        if phase != "decode" and optimizer_data.max_batched_tokens:
-            effective_input_length = optimizer_data.get_effective_input_length()
-            if effective_input_length and effective_input_length > optimizer_data.max_batched_tokens:
-                return "chunked_prefill_uses_dynamic"
-        return None
-
     def _create_strategy(self, model_runner: ModelRunner, disagg_mode: bool):
         return OptimizerFactory.create_strategy(model_runner, disagg_mode)
 
-    def _log_compile_shape_mode(
-        self,
-        decision: CompileModeDecision,
-        key: CompileDecisionKey | None,
-        probe_concurrency: int | None = None,
-    ) -> None:
-        selected = "dynamic" if decision.dynamic_shapes else "static"
-        logger.info(
-            "compile_shape_mode selected=%s reason=%s key=%s probe_concurrency=%s "
-            "probe_static_s=%s probe_dynamic_s=%s probe_ratio=%s threshold=%.3f",
-            selected,
-            decision.reason,
-            key.short_hash if key is not None else "none",
-            probe_concurrency if probe_concurrency is not None else "none",
-            decision.static_run_time_s,
-            decision.dynamic_run_time_s,
-            decision.ratio,
-            decision.threshold,
-        )
-
-    def _build_selected_compile_runner(
+    def _build_static_runner(
         self,
         user_input: UserInputConfig,
-        decision: CompileModeDecision,
         disagg_mode: bool,
     ) -> tuple[ModelRunner | None, object | None]:
-        selected_input = copy.copy(user_input)
-        selected_input.dynamic_shapes = decision.dynamic_shapes
-        # Probing resets Dynamo between static and dynamic modes.  Rebuild the
-        # final runner after applying its selected configuration so no probe's
-        # global compiler state can leak into the optimizer search.
-        torch.compiler.reset()
-        self._apply_compilation_config(selected_input)
-        model_runner = self._build_model_runner(selected_input)
+        """Build one static-shape runner without calibration forwards."""
+        static_input = copy.copy(user_input)
+        static_input.dynamic_shapes = False
+        self._apply_compilation_config(static_input)
+        logger.info("compile_shape_mode selected=static reason=throughput_optimizer_static")
+        model_runner = self._build_model_runner(static_input)
         if model_runner is None:
             return None, None
         return model_runner, self._create_strategy(model_runner, disagg_mode)
-
-    def _claim_shared_compile_mode_decision(
-        self, decision_key: CompileDecisionKey
-    ) -> tuple[CompileModeDecision | None, str | None]:
-        """Get a keyed shared decision or reserve its one calibration."""
-        if self._workload_cache is None:
-            return None, None
-        while True:
-            state, decision, owner_token = self._workload_cache.claim_compile_mode_decision(decision_key.digest)
-            if state == "owner":
-                return None, owner_token
-            if state == "hit":
-                return decision, None
-            decision = self._workload_cache.wait_compile_mode_decision(decision_key.digest)
-            if decision is not None:
-                return decision, None
-
-    def _publish_shared_compile_mode_decision(
-        self, decision_key: CompileDecisionKey, decision: CompileModeDecision, owner_token: str | None
-    ) -> None:
-        if owner_token is not None:
-            self._workload_cache.publish_compile_mode_decision(decision_key.digest, decision, owner_token)
-
-    def _resolve_compile_shape_mode(
-        self,
-        user_input: UserInputConfig,
-        optimizer_data: OptimizerData,
-        disagg_mode: bool,
-    ) -> tuple[ModelRunner | None, object | None]:
-        """Build the selected runner and strategy, calibrating static/dynamic when needed."""
-        phase, is_decode = self._compile_phase(disagg_mode, optimizer_data)
-        probe_batch_size = self._compile_probe_batch_size(self.args.batch_range)
-        decision_key = CompileDecisionKey.from_inputs(
-            user_input,
-            optimizer_data,
-            phase=phase,
-            probe_batch_size=probe_batch_size,
-            is_decode=is_decode,
-        )
-        shared_decision, shared_owner_token = self._claim_shared_compile_mode_decision(decision_key)
-        if shared_decision is not None:
-            decision = CompileModeDecision(
-                dynamic_shapes=shared_decision.dynamic_shapes,
-                reason="multi_device_shared_decision",
-                static_run_time_s=shared_decision.static_run_time_s,
-                dynamic_run_time_s=shared_decision.dynamic_run_time_s,
-                ratio=shared_decision.ratio,
-                threshold=shared_decision.threshold,
-            )
-            self._log_compile_shape_mode(decision, decision_key)
-            return self._build_selected_compile_runner(user_input, decision, disagg_mode)
-
-        if not self.args.compile:
-            decision = CompileModeDecision(
-                dynamic_shapes=not user_input.enable_sequence_parallel,
-                reason="compile_disabled",
-            )
-            self._publish_shared_compile_mode_decision(decision_key, decision, shared_owner_token)
-            return self._build_selected_compile_runner(user_input, decision, disagg_mode)
-
-        if user_input.enable_sequence_parallel:
-            decision = CompileModeDecision(dynamic_shapes=False, reason="sequence_parallel_requires_static")
-            self._publish_shared_compile_mode_decision(decision_key, decision, shared_owner_token)
-            self._log_compile_shape_mode(decision, decision_key)
-            return self._build_selected_compile_runner(user_input, decision, disagg_mode)
-
-        fallback_reason = self._compile_mode_fallback_reason(optimizer_data, phase)
-        if fallback_reason is not None:
-            decision = CompileModeDecision(dynamic_shapes=True, reason=fallback_reason)
-            self._publish_shared_compile_mode_decision(decision_key, decision, shared_owner_token)
-            self._log_compile_shape_mode(decision, decision_key)
-            return self._build_selected_compile_runner(user_input, decision, disagg_mode)
-
-        cached_decision = self._compile_mode_decision_cache.get(decision_key)
-        if cached_decision is not None:
-            cached_decision = CompileModeDecision(
-                dynamic_shapes=cached_decision.dynamic_shapes,
-                reason="decision_cache_hit",
-                static_run_time_s=cached_decision.static_run_time_s,
-                dynamic_run_time_s=cached_decision.dynamic_run_time_s,
-                ratio=cached_decision.ratio,
-                threshold=cached_decision.threshold,
-            )
-            self._publish_shared_compile_mode_decision(decision_key, cached_decision, shared_owner_token)
-            self._log_compile_shape_mode(cached_decision, decision_key)
-            return self._build_selected_compile_runner(user_input, cached_decision, disagg_mode)
-
-        probes: dict[bool, tuple[object, object]] = {}
-        try:
-            for dynamic_shapes in (False, True):
-                probe_input = copy.copy(user_input)
-                probe_input.dynamic_shapes = dynamic_shapes
-                torch.compiler.reset()
-                self._apply_compilation_config(probe_input)
-                model_runner = self._build_model_runner(probe_input)
-                if model_runner is None:
-                    raise RuntimeError("failed to build calibration runner")
-                strategy = self._create_strategy(model_runner, disagg_mode)
-                probe_key, request = strategy.get_compile_calibration_probe(
-                    optimizer_data,
-                    self.args.batch_range or [],
-                    is_decode=is_decode,
-                )
-                metrics = model_runner.run_inference([request], generate_inputs_func=generate_inputs)
-                probes[dynamic_shapes] = (probe_key, metrics)
-                # The probe runner may retain a complete compiled model. Only
-                # its scalar metrics and cache key are needed after this point.
-                model_runner = None
-                strategy = None
-
-            decision = decide_compile_shape_mode(
-                probes[False][1].run_time_s,
-                probes[True][1].run_time_s,
-            )
-            self._compile_mode_decision_cache.set(decision_key, decision)
-            self._publish_shared_compile_mode_decision(decision_key, decision, shared_owner_token)
-            selected_key, selected_metrics = probes[decision.dynamic_shapes]
-            selected_runner, selected_strategy = self._build_selected_compile_runner(
-                user_input,
-                decision,
-                disagg_mode,
-            )
-            if selected_runner is None or selected_strategy is None:
-                return None, None
-            selected_strategy.cache_compile_calibration_metrics(selected_key, selected_metrics)
-            self._log_compile_shape_mode(decision, decision_key, selected_key.model_concurrency)
-            return selected_runner, selected_strategy
-        except Exception:
-            logger.exception("Compile shape-mode calibration failed; falling back to dynamic shapes.")
-            decision = CompileModeDecision(dynamic_shapes=True, reason="calibration_failed_fallback_dynamic")
-            self._publish_shared_compile_mode_decision(decision_key, decision, shared_owner_token)
-            self._log_compile_shape_mode(decision, decision_key)
-            torch.compiler.reset()
-            return self._build_selected_compile_runner(user_input, decision, disagg_mode)
-        except BaseException:
-            # Keep waiters from waiting for the lease timeout when a worker is
-            # interrupted before it can publish its fallback decision.
-            if shared_owner_token is not None:
-                self._workload_cache.abandon_compile_mode_decision(
-                    decision_key.digest, "calibration interrupted", shared_owner_token
-                )
-            raise
 
     def _get_user_config(
         self, num_devices: Optional[int] = None, is_prefill: bool = False
@@ -633,7 +423,7 @@ class ParallelRunner:
             tmp_user_input.pp_layer_partition = candidate.layer_partition
             tmp_user_input.parallel_search_candidate = candidate
             tmp_user_input.dcp_size = candidate.dcp_size
-            tmp_user_input.dynamic_shapes = not tmp_user_input.enable_sequence_parallel
+            tmp_user_input.dynamic_shapes = False
             if base_chrome_trace:
                 name, ext = os.path.splitext(base_chrome_trace)
                 trace_suffix = f"tp{tmp_user_input.tp_size}pp{tmp_user_input.pp_size}dp{tmp_user_input.dp_size}"
@@ -741,7 +531,7 @@ class ParallelRunner:
                 layer_partition=None,
                 dcp_size=dcp,
             )
-            tmp_user_input.dynamic_shapes = not tmp_user_input.enable_sequence_parallel
+            tmp_user_input.dynamic_shapes = False
             tmp_user_input.dcp_size = dcp
             if base_chrome_trace:
                 name, ext = os.path.splitext(base_chrome_trace)
@@ -1024,15 +814,11 @@ class ParallelRunner:
                 task_optimizer_data.speculative_method = None
                 task_optimizer_data.acceptance_length = None
 
-            # 2. Select a compile shape mode before constructing the runner used by
-            # the actual optimizer search. Aggregation intentionally calibrates on
-            # Decode, while disaggregated Prefill and Decode remain independent.
+            # 2. Build one static-shape runner. Each shape is evaluated once and
+            # then served from the latency table, so dynamic calibration only adds
+            # expensive forwards for current large-model searches.
             resolved_disagg_mode = self.args.disagg if disagg_mode is None else disagg_mode
-            model_runner, strategy = self._resolve_compile_shape_mode(
-                user_input,
-                task_optimizer_data,
-                resolved_disagg_mode,
-            )
+            model_runner, strategy = self._build_static_runner(user_input, resolved_disagg_mode)
             if model_runner is None or strategy is None:
                 return None
 
