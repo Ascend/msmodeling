@@ -208,6 +208,29 @@ def _load_vendored_config(fixture_dir: str) -> dict[str, object] | None:
     return raw
 
 
+def _published_model_type(model_id: str) -> object | None:
+    """Read ``model_type`` from the Hub ``config.json`` cached by ``AutoConfig``.
+
+    ``PretrainedConfig.to_dict()`` reports the Python class attribute. Remote-code
+    configs can leave that attribute empty or set to a parent type while the
+    published JSON uses a different string. A cache miss keeps the class value.
+    """
+    from pathlib import Path
+
+    from transformers.utils import cached_file
+
+    try:
+        config_path = cached_file(model_id, "config.json", local_files_only=True)
+        if not config_path:
+            return None
+        raw = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict) or "model_type" not in raw:
+        return None
+    return raw["model_type"]
+
+
 def _fetch_hub_config(model_id: str) -> dict[str, object]:
     from transformers import AutoConfig
 
@@ -220,6 +243,9 @@ def _fetch_hub_config(model_id: str) -> dict[str, object]:
     if not isinstance(hub, dict):
         msg = f"AutoConfig.to_dict() returned {type(hub).__name__}, expected dict"
         raise TypeError(msg)
+    published_model_type = _published_model_type(model_id)
+    if published_model_type is not None:
+        hub["model_type"] = published_model_type
     return hub
 
 

@@ -401,6 +401,86 @@ def test_drift_check_reports_key_mismatch(monkeypatch: pytest.MonkeyPatch) -> No
     assert any("model_type: vendored='deepseek_v3' hub='deepseek_v4'" in w for w in warnings)
 
 
+def test_fetch_hub_config_prefers_published_json_model_type(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"model_type": "kimi_k2"}), encoding="utf-8")
+
+    class _FakeConfig:
+        def to_dict(self) -> dict[str, object]:
+            return {"model_type": "deepseek_v3", "hidden_size": 7168}
+
+    class _FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id: str, trust_remote_code: bool = False) -> _FakeConfig:
+            del model_id, trust_remote_code
+            return _FakeConfig()
+
+    monkeypatch.setattr("transformers.AutoConfig", _FakeAutoConfig)
+    monkeypatch.setattr("transformers.utils.cached_file", lambda *_args, **_kwargs: str(config_path))
+
+    hub = _fetch_hub_config("moonshotai/Kimi-K2-Thinking")
+
+    assert hub["model_type"] == "kimi_k2"
+    assert hub["hidden_size"] == 7168
+
+
+def test_fetch_hub_config_keeps_class_model_type_when_json_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConfig:
+        def to_dict(self) -> dict[str, object]:
+            return {"model_type": "deepseek_v3"}
+
+    class _FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id: str, trust_remote_code: bool = False) -> _FakeConfig:
+            del model_id, trust_remote_code
+            return _FakeConfig()
+
+    def _unreadable(*_args: object, **_kwargs: object) -> str:
+        raise OSError("cache miss")
+
+    monkeypatch.setattr("transformers.AutoConfig", _FakeAutoConfig)
+    monkeypatch.setattr("transformers.utils.cached_file", _unreadable)
+
+    hub = _fetch_hub_config("some/Model")
+
+    assert hub["model_type"] == "deepseek_v3"
+
+
+def test_drift_check_reports_published_json_model_type(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from scripts.helpers.nightly import main as nightly_main
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"model_type": "deepseek_v4"}), encoding="utf-8")
+
+    class _FakeConfig:
+        def to_dict(self) -> dict[str, object]:
+            return {"model_type": "deepseek_v3", "hidden_size": 7168}
+
+    class _FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_id: str, trust_remote_code: bool = False) -> _FakeConfig:
+            del model_id, trust_remote_code
+            return _FakeConfig()
+
+    monkeypatch.setattr(nightly_main, "_DRIFT_FIXTURE_MAP", {"some/Model": "some_fixture"})
+    monkeypatch.setattr(
+        nightly_main, "_load_vendored_config", lambda _fixture: {"model_type": "kimi_k2", "hidden_size": 7168}
+    )
+    monkeypatch.setattr("transformers.AutoConfig", _FakeAutoConfig)
+    monkeypatch.setattr("transformers.utils.cached_file", lambda *_args, **_kwargs: str(config_path))
+
+    warnings = _run_config_drift_check()
+
+    assert any("model_type: vendored='kimi_k2' hub='deepseek_v4'" in warning for warning in warnings)
+    assert all("hub='deepseek_v3'" not in warning for warning in warnings)
+
+
 def test_stream_pytest_returns_captured_stdout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _Stdout:
         def __iter__(self) -> Iterator[str]:
