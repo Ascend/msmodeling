@@ -10,7 +10,9 @@ stages:
           OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
       - name: mlapo
         tensors:
-          INPUT[0]: {shape: "[T, H]", dtype: LINEAR_IN}
+          # The fused MLA projection receives the activation before its
+          # internal dynamic quantization step.
+          INPUT[0]: {shape: "[T, H]", dtype: ACT}
           OUTPUT[0]: {shape: "[T, Lh, Hmla]", dtype: OUT}
           OUTPUT[1]: {shape: "[T, KVlora]", dtype: OUT}
           OUTPUT[2]: {shape: "[T, QKrope]", dtype: OUT}
@@ -31,7 +33,7 @@ stages:
           OUTPUT[0]: {shape: "[T, H]", dtype: OUT}
     runtime:
       boundary_operators: [multihead_latent_attention, multihead_latent_attention_quant]
-      ignored_operators: [concat_and_cache_mla, mla_v_up_projection, mla_v_up_projection_quant, view, reshape, quantize, all_reduce]
+      ignored_operators: [concat_and_cache_mla, mla_v_up_projection, mla_v_up_projection_quant, view, reshape, quantize, dynamic_quantize_symmetric, all_reduce]
   - id: moe_gate
     modules:
       - name: post_attention_norm
@@ -116,4 +118,4 @@ stages:
       # The MTP wrapper prepares proposal indices immediately after the shared
       # expert. Keep those shape-neutral framework calls outside the HF-backed
       # gate/up, SwiGLU and down-projection contract.
-      ignored_operators: [view, reshape, split_with_sizes, silu, mul, add, copy_, dynamic_quantize_symmetric, all_reduce, all_gather, slice, select, device_put]
+      ignored_operators: [view, reshape, split_with_sizes, silu, mul, add, copy_, rms_norm, dynamic_quantize_symmetric, all_reduce, all_gather, slice, select, device_put]

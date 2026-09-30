@@ -1,6 +1,6 @@
 schema_version: "1"
 spec_id: kimi_k25_v1
-spec_version: 1.0.2
+spec_version: 1.0.3
 model_category: kimi_k25
 matches:
   entrypoints: [text_generate]
@@ -25,6 +25,8 @@ operator_aliases:
   vision_projector_fc1: addmm
   final_norm: rms_norm
   logits_select: index
+  text_logits_select: index
+  text_lm_head: mm
   input_layer_norm: rms_norm
   post_attention_norm: add_rms_norm2
   vision_projector_norm: layer_norm
@@ -199,22 +201,34 @@ regions:
               - name: final_norm
                 tensors:
                   OUTPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+              - name: text_logits_select
+                activation: kimi_text_prefill
+                tensors:
+                  INPUT[0]: {shape: "[1, T, H]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[1, B, H]", dtype: ACT}
+              - name: text_lm_head
+                activation: kimi_text_prefill
+                tensors:
+                  INPUT[0]: {shape: "[B, H]", dtype: ACT}
+                  OUTPUT[0]: {shape: "[B, Vtp]", dtype: OUT}
               - name: lm_head
+                activation: kimi_non_text_prefill
                 tensors:
                   INPUT[0]: {shape: "[T, H]", dtype: ACT}
                   OUTPUT[0]: {shape: "[T, Vtp]", dtype: OUT}
               - name: logits_cast
+                activation: kimi_non_text_prefill
                 tensors:
                   INPUT[0]: {shape: "[1, T, Vtp]", dtype: OUT}
                   OUTPUT[0]: {shape: "[1, T, Vtp]", dtype: float32}
               - name: logits_select
-                activation: lm_head_token_selection
+                activation: vision_prefill
                 tensors:
                   INPUT[0]: {shape: "[1, T, Vtp]", dtype: float32}
                   OUTPUT[0]: {shape: "[1, B, Vtp]", dtype: float32}
           runtime:
             boundary_operators: [rms_norm]
-            ignored_operators: [view, slice, index_select, dynamic_quantize_symmetric, all_gather]
+            ignored_operators: [view, slice, index_select, dynamic_quantize_symmetric, all_gather, alias]
 
   # TensorCast MTP reuses the HF DeepseekV3DecoderLayer as its predictor.
   # The decoder internals remain source-backed even when the checkpoint does

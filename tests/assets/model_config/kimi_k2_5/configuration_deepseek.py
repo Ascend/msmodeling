@@ -7,7 +7,6 @@
 # https://github.com/huggingface/transformers (Apache License 2.0,
 # Copyright 2025 bzantium and the HuggingFace Inc. team).
 # See tensor_cast/transformers/builtin_model/licenses/ for both full texts.
-
 # Copy from https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/configuration_deepseek.py
 
 from transformers.configuration_utils import PretrainedConfig

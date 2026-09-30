@@ -57,23 +57,46 @@ class NonMtpLmHeadActivation:
         return not is_mtp_enabled(request.context)
 
 
+def _has_complete_image_dimensions(request: OperatorActivationRequest) -> bool:
+    image_dimensions = tuple(
+        request.context.model_config.get(key, 0)
+        for key in ("image_batch_size", "image_height", "image_width")
+    )
+    return all(
+        isinstance(value, int) and not isinstance(value, bool) and value > 0
+        for value in image_dimensions
+    )
+
+
 class VisionPrefillActivation:
     """Enable vision-front-end regions only for image prefill captures."""
 
     policy_id = "vision_prefill"
 
     def is_active(self, request: OperatorActivationRequest) -> bool:
-        image_dimensions = tuple(
-            request.context.model_config.get(key, 0)
-            for key in ("image_batch_size", "image_height", "image_width")
-        )
+        return request.context.phase is ExecutionPhase.PREFILL and _has_complete_image_dimensions(request)
+
+
+class KimiTextPrefillActivation:
+    """Select hidden states before lm_head for Kimi text-only prefill."""
+
+    policy_id = "kimi_text_prefill"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
         return (
             request.context.phase is ExecutionPhase.PREFILL
-            and all(
-                isinstance(value, int) and not isinstance(value, bool) and value > 0
-                for value in image_dimensions
-            )
+            and request.context.model_config.get("model_type") == "kimi_k25"
+            and not _has_complete_image_dimensions(request)
         )
+
+
+class KimiNonTextPrefillActivation:
+    """Use Kimi's full-logits path for vision prefill and decode."""
+
+    policy_id = "kimi_non_text_prefill"
+
+    def is_active(self, request: OperatorActivationRequest) -> bool:
+        return not KimiTextPrefillActivation().is_active(request)
 
 
 class DsaEnabledActivation:
@@ -160,6 +183,8 @@ def create_builtin_operator_activation_registry() -> OperatorActivationRegistry:
     registry.register(MtpEnabledActivation())
     registry.register(NonMtpLmHeadActivation())
     registry.register(VisionPrefillActivation())
+    registry.register(KimiTextPrefillActivation())
+    registry.register(KimiNonTextPrefillActivation())
     registry.register(DsaEnabledActivation())
     registry.register(MlaPrefillKvProjectionActivation())
     registry.register(ExplicitMoeGateActivation())

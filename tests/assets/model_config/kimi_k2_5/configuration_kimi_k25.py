@@ -4,7 +4,6 @@
 # https://huggingface.co/moonshotai/Kimi-K2.5, licensed under the Modified MIT
 # License, reformatted to the repository's lint conventions.
 # See tensor_cast/transformers/builtin_model/licenses/LICENSE-Kimi-K2.5-Modified-MIT
-
 from transformers.configuration_utils import PretrainedConfig
 
 try:

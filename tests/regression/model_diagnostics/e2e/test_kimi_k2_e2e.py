@@ -206,7 +206,7 @@ def test_kimi_k25_compatible_text_mtp_capture_organize_and_compare(model_name: s
     assert_diagnostics_passed(result)
     assert result.summary.overall_status is FindingStatus.PASS
     mtp_stages = {finding.stage_id for finding in result.findings if finding.region_id == "mtp"}
-    assert {"sparse_attention", "moe_experts", "moe_combine", "proposal_selection"}.issubset(mtp_stages)
+    assert {"mla_attention", "moe_experts", "moe_combine", "proposal_selection"}.issubset(mtp_stages)
 
 
 @pytest.mark.parametrize(

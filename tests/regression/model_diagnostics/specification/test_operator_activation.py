@@ -27,6 +27,8 @@ from tools.model_diagnostics.domain import (
 from tools.model_diagnostics.specification.builtin_activation import (
     DsaEnabledActivation,
     ExplicitMoeGateActivation,
+    KimiNonTextPrefillActivation,
+    KimiTextPrefillActivation,
     LmHeadTokenSelectionActivation,
     MlaPrefillKvProjectionActivation,
     MtpEnabledActivation,
@@ -179,6 +181,36 @@ def test_vision_prefill_requires_complete_image_dimensions(
     )
 
     assert VisionPrefillActivation().is_active(request) is expected
+
+
+@pytest.mark.parametrize(
+    ("phase", "image_config", "text_prefill", "non_text_prefill"),
+    (
+        (ExecutionPhase.PREFILL, {}, True, False),
+        (
+            ExecutionPhase.PREFILL,
+            {"image_batch_size": 1, "image_height": 224, "image_width": 224},
+            False,
+            True,
+        ),
+        (ExecutionPhase.DECODE, {}, False, True),
+    ),
+)
+def test_kimi_lm_head_path_activation(
+    phase: ExecutionPhase,
+    image_config: dict[str, object],
+    text_prefill: bool,
+    non_text_prefill: bool,
+) -> None:
+    request = _request(
+        phase=phase,
+        query_length=2,
+        num_mtp_tokens=0,
+        model_config={"model_type": "kimi_k25", **image_config},
+    )
+
+    assert KimiTextPrefillActivation().is_active(request) is text_prefill
+    assert KimiNonTextPrefillActivation().is_active(request) is non_text_prefill
 
 
 @pytest.mark.parametrize(("index_topk", "expected"), ((None, False), (2048, True)))
