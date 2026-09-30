@@ -22,11 +22,11 @@ This document summarizes the currently supported model types and simulation feat
 | Model Type | Model Family | Supported Models |
 | --- | --- | --- |
 | Text models | DeepSeek | DeepSeek V4, DeepSeek V3.2, DeepSeek V3 |
-| Text models | Kimi | Kimi-K2.6, Kimi K2.5, Kimi-K2 (supported through the DeepSeek V3 compatibility path) |
-| Text models | Qwen | Qwen3.5, Qwen3.5 MoE, Qwen3-Next, Qwen3 Dense, Qwen3 MoE |
-| Text models | GLM | GLM5.1, GLM5, GLM-4 MoE |
+| Text models | Kimi | Kimi-K3, Kimi-K2.6, Kimi K2.5, Kimi-K2 (supported through the DeepSeek V3 compatibility path) |
+| Text models | Qwen | Qwen3.8, Qwen3.6, Qwen3.6 MoE, Qwen3.5, Qwen3.5 MoE, Qwen3-Next, Qwen3 Dense, Qwen3 MoE |
+| Text models | GLM | GLM-5.3-Flash, GLM5.2, GLM5.1, GLM5, GLM-4 MoE |
 | Text models | ERNIE | ERNIE 4.5 MoE |
-| Text models | Bailing/MiMo/MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2 |
+| Text models | Bailing/MiMo/MiniMax | Bailing MoE, MiMo v2 Flash, MiniMax M2.7, MiniMax M2.5, MiniMax M2, MiniMax M3 |
 | Vision-language models | VL Models | Qwen3-VL, Qwen3-VL MoE, GLM-4V, GLM-4V MoE, InternVL |
 | Image generation/editing models | Diffusers DiT image models | FLUX.1-dev, Qwen-Image-Edit |
 | Video generation models | Diffusers DiT | Wan, HunyuanVideo, HunyuanVideo1.5 |
@@ -37,17 +37,19 @@ This document summarizes the currently supported model types and simulation feat
 
 | Feature | Description |
 | --- | --- |
-| Multi-hardware simulation | Supports built-in profiles for Ascend devices such as Atlas 800 A2/A3 and Atlas 350, as well as custom device profiles, estimating operator latency, communication overhead, and memory usage in multi-device scenarios without real hardware. |
+| Multi-hardware simulation | Supports built-in profiles for Ascend devices such as Atlas 800 A2/A3 and the Atlas 350/850/850E/950 (A5) series, as well as custom device profiles, estimating operator latency, communication overhead, and memory usage in multi-device scenarios without real hardware. |
 | Phased LLM prefill/decode simulation | Differentiates the two compute paths of prefill and decode, and models the attention, KV cache growth, and per-token generation overhead of each phase. |
 | Prefix cache simulation | Approximately models the prefill reuse benefit of prefix cache hits and evaluates the impact of the cache on first-token latency. |
-| MTP speculative decoding simulation | Models the extra draft/verify computation of Multi-Token Prediction (MTP) and evaluates the impact of MTP on latency and throughput. |
+| Speculative decoding simulation | Supports MTP, DFlash, and DSpark; models the extra proposal/draft and verify computation and evaluates the impact of speculative decoding on latency and throughput. |
 | Compilation and graph optimization | Compiles and rewrites the forward computation graph, fusing typical subgraphs such as RMSNorm and Grouped Matmul into unified performance operators to more closely match the execution behavior in real deployments. |
 | Multi-stream compute-communication overlap | In the compilation path, splits computation and communication across different execution streams through multi-stream scheduling, modeling inter-stream synchronization overhead and the end-to-end benefit of compute-communication overlap. |
 | Quantization simulation | Models the quantization compute and memory-access cost of paths such as Linear, non-Expert Linear, LMHead, and Attention, and supports strategy combinations such as `W8A8`, `W4A8`, `FP8`, and `MXFP4`. |
 | Parallelism and MoE extensions | Models the communication and compute overhead after splitting with global TP/DP/EP and fine-grained parallelism (Embedding TP, Vision TP, and so on), covering MoE deployment modes such as redundant experts and external/shared experts. |
+| Pipeline Parallel (PP) simulation | Supports stage-local model construction, logical send/receive communication, per-stage memory estimation, and explicit layer partitioning. |
+| Decode Context Parallel (DCP) simulation | Splits the decode-stage KV cache along the sequence dimension and models DCP memory, attention compute, and collective communication changes; this does not imply Prefill Context Parallel support. |
 | VL multimodal input | Incorporates visual inputs such as image batch and resolution, as well as the vision encoder parallelism strategy, into forward simulation, supporting joint analysis of text and multimodal inputs. |
 | Model configuration sources | Supports local model directories and loading model configurations from remote sources such as Hugging Face and ModelScope. |
-| Performance model switching | Supports Roofline-based analytical estimation and performance modeling based on measured data, allowing you to combine and compare results from different estimation paths as needed. |
+| Performance model switching | Supports Roofline analytical estimation, a calibration-profile-corrected analytical model, and Profiling performance models based on measured data, allowing combined comparison of different estimation paths. |
 | Chrome Trace/Debug | Outputs operator-level timeline, shape, graph structure, and bound analysis information for bottleneck identification, result validation, and visual analysis. |
 | Image generation DiT simulation | Supports multi-step denoising workload simulation for FLUX.1-dev and Qwen-Image-Edit series, covering output/source image sizes, text condition length, sampling steps, and quantization. |
 | Video generation DiT simulation | Supports multi-step denoising simulation for Diffusers DiT video models such as Wan and HunyuanVideo, covering resolution, frame count, sampling steps, and quantization configuration. |
@@ -64,8 +66,10 @@ This document summarizes the currently supported model types and simulation feat
 | PD aggregation | Jointly evaluates prefill and decode in the same instance to quickly obtain overall serving throughput and parallel configuration recommendations. |
 | PD disaggregation | Searches for the optimal configurations of prefill and decode instances separately, suitable for evaluating PD disaggregated deployment scenarios. |
 | PD ratio optimization | Searches for the optimal prefill/decode instance ratio under a fixed hardware scale, balancing resource investment and serving capability between the two instance types. |
-| Parallel strategy search | Performs combinatorial search across dimensions such as TP, EP, and MoE-DP. |
-| MTP configuration search | Searches configurations such as the MTP token count and acceptance rate to evaluate the impact of speculative decoding on serving throughput. |
+| Parallel strategy search | Performs combinatorial search across dimensions such as TP, EP, MoE-DP, PP, and DCP. |
+| Pipeline Parallel (PP) search | Enables PP search with `--pp-sizes`, derives DP/MoE-TP by stage-local arithmetic, and uses a forward blocking scheduler to compute makespan, bubble ratio, bottleneck stage, and schedule-aware throughput for PP>1 candidates; supports explicit layer partitioning via `--pp-layer-partitions` and can be searched jointly with DCP; PP=1 keeps the original path and remains fully backward compatible. |
+| Decode Context Parallel (DCP) search | Searches Decode Context Parallel candidates through `--dcp-sizes`, jointly with TP, EP, MoE-DP, and PP. |
+| Speculative decoding configuration search | Searches MTP, DFlash, and DSpark options such as speculative-token count and acceptance length, including joint search with PP, and evaluates their impact on serving throughput and TPOT. |
 | Batch and concurrency search | Automatically searches for batch size and request concurrency combinations that satisfy the SLO, considering service constraints such as the maximum number of batched tokens per step. |
 | Chunked prefill simulation | When the effective input length exceeds the per-step prefill token budget, automatically splits the long prompt into multiple prefill chunks for step-by-step modeling, providing a more accurate evaluation of TTFT, P-phase throughput, aggregation scheduling behavior, and memory usage. This can be analyzed in combination with Prefix Cache. |
 | Prefix Cache simulation | Supports modeling of the prefix cache hit rate and evaluates the impact of the cache on serving capability. |
@@ -101,5 +105,6 @@ This document summarizes the currently supported model types and simulation feat
 | Feature | Description |
 | --- | --- |
 | Framework-based measurement optimization | Combines Particle Swarm Optimization (PSO) and Early Rejection to automatically search for the optimal deployment parameters that satisfy latency constraints on real serving frameworks. |
+| AI-agent-based closed-loop optimization | An AI agent generates candidates round by round; the tool validates and measures them, writes back results, and uses prior outcomes to guide the next search round. |
 | Multiple engines and evaluation strategies | Supports inference engines such as vLLM and MindIE, as well as measurement-based optimization under multiple benchmark evaluation strategies. |
 | Custom configuration and breakpoint resume | Supports custom optimization space configuration and can resume optimization tasks from checkpoints after an interruption. |

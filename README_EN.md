@@ -32,6 +32,7 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>Kimi Series</b></summary>
 
+🔹 **[Aug 27, 2026]**: msModeling adds support for the **Kimi-K3** model.<br>
 🔹 **[Jun 11, 2026]**: msModeling adds support for the **Kimi-K2.6** model.<br>
 🔹 **[May 27, 2026]**: msModeling adds support for the **Kimi-K2.5** model.<br>
 🔹 **[Sep 6, 2025]**: msModeling adds support for the **Kimi-K2** model.
@@ -41,6 +42,9 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>Qwen Series</b></summary>
 
+🔹 **[Aug 27, 2026]**: msModeling adds support for the **Qwen3.8 model family**.<br>
+🔹 **[Jul 14, 2026]**: msModeling adds image-input support for **Qwen3.6**.<br>
+🔹 **[Jul 14, 2026]**: msModeling adds text-input support for **Qwen3.6 Dense / MoE**.<br>
 🔹 **[Apr 20, 2026]**: msModeling adds image-input support for **Qwen3.5**.<br>
 🔹 **[Mar 31, 2026]**: msModeling adds text-input support for **Qwen3.5 Dense / MoE**.<br>
 🔹 **[Dec 25, 2025]**: msModeling adds support for the **Qwen3 MoE** model.<br>
@@ -52,6 +56,8 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>GLM Series</b></summary>
 
+🔹 **[Sep 16, 2026]**: msModeling adds support for the **GLM-5.3-Flash** model.<br>
+🔹 **[Jul 7, 2026]**: msModeling adds support for the **GLM5.2** model.<br>
 🔹 **[Jun 4, 2026]**: msModeling adds support for the **GLM5.1** model.<br>
 🔹 **[Apr 30, 2026]**: msModeling adds support for the **GLM5** model.<br>
 🔹 **[Mar 31, 2026]**: msModeling adds support for the **GLM-4 MoE** model.
@@ -61,7 +67,25 @@ We continue to support mainstream Chinese LLMs, including DeepSeek, Kimi, Qwen, 
 <details>
 <summary><b>MiniMax Series</b></summary>
 
+🔹 **[Jul 31, 2026]**: msModeling adds support for the **MiniMax M3** model.<br>
+🔹 **[Jun 25, 2026]**: msModeling adds support for the **MiniMax M2.7** model.<br>
+🔹 **[May 29, 2026]**: msModeling adds support for the **MiniMax M2.5** model.<br>
 🔹 **[Dec 18, 2025]**: msModeling adds support for the **MiniMax M2** model.
+
+</details>
+
+<details>
+<summary><b>Recent Feature Updates</b></summary>
+
+🔹 **[Sep 15, 2026]**: Adds a calibrated analytical performance model that corrects Roofline latency estimates with a calibration profile.<br>
+🔹 **[Sep 14, 2026]**: Pipeline Parallel (PP) can be searched jointly with MTP, DFlash, and DSpark speculative decoding.<br>
+🔹 **[Sep 8, 2026]**: OptiX adds an AI-agent-based closed-loop optimization mode.<br>
+🔹 **[Sep 2, 2026]**: Serving throughput optimization adds Pipeline Parallel (PP) search and explicit layer partitioning.<br>
+🔹 **[Aug 27, 2026]**: Profiling data tooling adds query-driven shape-grid generation and independent MicroBench replay.<br>
+🔹 **[Aug 26, 2026]**: Adds built-in device profiles for the Atlas A5 series.<br>
+🔹 **[Aug 21, 2026]**: Model and serving simulation add DFlash and DSpark speculative decoding.<br>
+🔹 **[Aug 4, 2026]**: Adds Theory↔Runtime model diagnostics for structural and operator-call reconciliation.<br>
+🔹 **[Aug 3, 2026]**: Adds Decode Context Parallel (DCP) simulation and search.
 
 </details>
 
@@ -74,14 +98,14 @@ Click a module name to expand the list of **supported features**.
 <details>
 <summary><b>Model Inference Performance Simulation</b></summary>
 
-🔹 Multi-hardware simulation for Ascend devices, including Atlas 800 A2/A3 and Atlas 350, with support for custom device profiles<br>
+🔹 Multi-hardware simulation for Ascend devices, including Atlas 800 A2/A3 and the Atlas 350/850/850E/950 (A5) series, with support for custom device profiles<br>
 🔹 Separate simulation of the LLM prefill and decode stages<br>
 🔹 Prefix Cache simulation<br>
-🔹 MTP speculative decoding simulation<br>
+🔹 MTP, DFlash, and DSpark speculative decoding simulation<br>
 🔹 Compilation and graph optimization, and multi-stream compute-communication overlap<br>
 🔹 Quantization simulation, including `W8A8`, `W4A8`, `FP8`, and `MXFP4`<br>
-🔹 Parallelism and MoE extensions, including TP, DP, EP, and fine-grained parallelism such as Embedding TP and Vision TP<br>
-🔹 Switching between the Roofline and Profiling performance models<br>
+🔹 Parallelism and MoE extensions, including TP, DP, EP, PP, DCP, and fine-grained parallelism such as Embedding TP and Vision TP<br>
+🔹 Switching among the Roofline, calibrated analytical, and Profiling performance models<br>
 🔹 Chrome Trace and debugging<br>
 🔹 DiT simulation for video generation, including Ulysses, CFG, and DiT Cache
 
@@ -92,8 +116,8 @@ Click a module name to expand the list of **supported features**.
 
 🔹 Throughput optimization for LLM and VLM workloads under constraints such as TTFT, TPOT, and serving cost<br>
 🔹 PD modes, including colocation, disaggregation, and ratio-based deployment<br>
-🔹 Parallel strategy search, including TP, EP, and MOE-DP<br>
-🔹 MTP configuration search<br>
+🔹 Parallel strategy search, including TP, EP, MOE-DP, PP, and DCP<br>
+🔹 MTP, DFlash, and DSpark speculative-decoding configuration search, including joint search with PP<br>
 🔹 Chunked prefill simulation<br>
 🔹 Prefix Cache simulation<br>
 🔹 Variable-length workload simulation<br>
@@ -115,7 +139,7 @@ Click a module name to expand the list of **supported features**.
 <details>
 <summary><b>Serving Optimization Based on Real-World Measurements</b></summary>
 
-🔹 Serving framework optimization based on real-world measurements using particle swarm optimization (PSO) and Early Rejection<br>
+🔹 Serving framework optimization based on real-world measurements using PSO and Early Rejection, plus AI-agent-based closed-loop optimization<br>
 🔹 Multi-engine support, including vLLM and MindIE, as well as evaluation strategies<br>
 🔹 Custom optimization configurations and checkpoint-based resumption
 

@@ -32,6 +32,7 @@
 <details>
 <summary><b>Kimi 系列</b></summary>
 
+🔹 [2026.08.27] msModeling 新增 **Kimi-K3** 模型支持<br>
 🔹 [2026.06.11] msModeling 新增 **Kimi-K2.6** 模型支持<br>
 🔹 [2026.05.27] msModeling 新增 **Kimi-K2.5** 模型支持<br>
 🔹 [2025.09.06] msModeling 新增 **Kimi-K2** 模型支持<br>
@@ -41,6 +42,7 @@
 <details>
 <summary><b>Qwen 系列</b></summary>
 
+🔹 [2026.08.27] msModeling 新增 **Qwen3.8 系列**模型支持<br>
 🔹 [2026.07.14] msModeling 新增 **Qwen3.6** 图片输入支持<br>
 🔹 [2026.07.14] msModeling 新增 **Qwen3.6 Dense / MoE** 文本输入支持<br>
 🔹 [2026.04.20] msModeling 新增 **Qwen3.5** 图片输入支持<br>
@@ -54,6 +56,7 @@
 <details>
 <summary><b>GLM 系列</b></summary>
 
+🔹 [2026.09.16] msModeling 新增 **GLM-5.3-Flash** 模型支持<br>
 🔹 [2026.07.07] msModeling 新增 **GLM5.2** 模型支持<br>
 🔹 [2026.06.04] msModeling 新增 **GLM5.1** 模型支持<br>
 🔹 [2026.04.30] msModeling 新增 **GLM5** 模型支持<br>
@@ -66,6 +69,22 @@
 🔹 [2026.07.31] msModeling 新增 MiniMax M3 模型支持<br>
 🔹 [2026.06.25] msModeling 新增 **MiniMax M2.7** 模型支持<br>
 🔹 [2026.05.29] msModeling 新增 **MiniMax M2.5** 模型支持<br>
+🔹 [2025.12.18] msModeling 新增 **MiniMax M2** 模型支持<br>
+
+</details>
+
+<details>
+<summary><b>近期特性更新</b></summary>
+
+🔹 [2026.09.15] 新增校准解析性能模型，可使用校准画像修正 Roofline 延迟估算<br>
+🔹 [2026.09.14] 流水线并行（PP）支持与 MTP、DFlash、DSpark 投机解码联合搜索<br>
+🔹 [2026.09.08] OptiX 新增 AI Agent 闭环寻优模式<br>
+🔹 [2026.09.02] 服务化吞吐优化新增流水线并行（PP）搜索与显式层划分<br>
+🔹 [2026.08.27] Profiling 数据工具新增查询驱动 Shape 网格生成与独立 MicroBench 回放<br>
+🔹 [2026.08.26] 新增 Atlas A5 系列设备画像支持<br>
+🔹 [2026.08.21] 模型与服务化仿真新增 DFlash、DSpark 投机解码支持<br>
+🔹 [2026.08.04] 新增 Theory↔Runtime 模型诊断工具，支持结构与算子调用对账<br>
+🔹 [2026.08.03] 新增解码上下文并行（Decode Context Parallel，DCP）仿真与搜索<br>
 
 </details>
 
@@ -78,14 +97,14 @@
 <details>
 <summary><b>模型推理性能仿真</b></summary>
 
-🔹 多硬件仿真（Atlas 800 A2/A3、Atlas 350/850/850E/950 等昇腾设备），支持自定义设备画像<br>
+🔹 多硬件仿真（Atlas 800 A2/A3、Atlas 350/850/850E/950（A5）等昇腾设备），支持自定义设备画像<br>
 🔹 LLM Prefill / Decode 分阶段仿真<br>
 🔹 Prefix Cache 仿真<br>
-🔹 MTP 投机解码仿真<br>
+🔹 MTP、DFlash、DSpark 投机解码仿真<br>
 🔹 编译与图优化、多流通算掩盖<br>
 🔹 量化仿真（W8A8 / W4A8 / FP8 / MXFP4 等）<br>
-🔹 并行与 MoE 扩展（TP / DP / EP，及 Embedding TP、Vision TP 等细粒度并行）<br>
-🔹 性能模型切换（Roofline / Profiling）<br>
+🔹 并行与 MoE 扩展（TP / DP / EP / PP / DCP，及 Embedding TP、Vision TP 等细粒度并行）<br>
+🔹 性能模型切换（Roofline / 校准解析模型 / Profiling）<br>
 🔹 Chrome Trace / Debug<br>
 🔹 视频生成 DiT 仿真（Ulysses、CFG、DiT Cache）<br>
 
@@ -96,8 +115,8 @@
 
 🔹 LLM / VLM 约束下吞吐优化（TTFT / TPOT / 服务成本）<br>
 🔹 PD 模式（混部 / 分离 / 配比）<br>
-🔹 并行策略搜索（TP / EP / MOE-DP）<br>
-🔹 MTP 配置搜索<br>
+🔹 并行策略搜索（TP / EP / MOE-DP / PP / DCP）<br>
+🔹 MTP / DFlash / DSpark 投机解码配置搜索，支持与 PP 联合搜索<br>
 🔹 Chunked Prefill 仿真<br>
 🔹 Prefix Cache 仿真<br>
 🔹 变长负载仿真<br>
@@ -119,7 +138,7 @@
 <details>
 <summary><b>服务化实测寻优</b></summary>
 
-🔹 服务框架实测寻优（PSO + Early Rejection）<br>
+🔹 服务框架实测寻优（PSO + Early Rejection）与 AI Agent 闭环寻优<br>
 🔹 多引擎支持（vLLM、MindIE）与评测策略<br>
 🔹 自定义寻优配置与断点续跑<br>
 
