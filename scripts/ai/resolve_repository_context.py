@@ -45,8 +45,7 @@ def parse_repository_slug(remote_url: str) -> str:
     scp_match = re.match(r"^[^@]+@[^:]+:(?P<path>.+)$", value)
     path = scp_match.group("path") if scp_match else urlparse(value).path
     slug = path.strip("/")
-    if slug.endswith(".git"):
-        slug = slug[:-4]
+    slug = slug.removesuffix(".git")
     try:
         return validate_repository_slug(slug)
     except ValueError as exc:
@@ -84,6 +83,7 @@ def resolve_context(
     operation_repository: str | None,
     write: bool,
     source_remote: str | None = None,
+    require_fork_source: bool = False,
 ) -> dict:
     """Resolve repository identities and enforce explicit remote write targets."""
     contract = load_contract(repo_root)
@@ -92,11 +92,20 @@ def resolve_context(
     if write and not operation_repository:
         raise ValueError("remote writes require an explicit --repo owner/repository")
     target = validate_repository_slug(operation_repository or canonical)
+    source_repository = get_source_repository(repo_root, remote)
+    source_is_fork = source_repository.lower() != canonical.lower()
+    source_contract = contract["source_repository"]
+    if require_fork_source and source_contract.get("required_distinct_from_canonical", False) and not source_is_fork:
+        raise ValueError(
+            "code contribution source repository must be a personal Fork distinct from "
+            f"canonical repository {canonical}; use --source-remote <fork-remote>"
+        )
     return {
         "canonical_repository": canonical,
         "default_base_branch": contract["default_base_branch"],
         "source_remote": remote,
-        "source_repository": get_source_repository(repo_root, remote),
+        "source_repository": source_repository,
+        "source_repository_is_fork": source_is_fork,
         "operation_target": target,
         "operation_kind": "write" if write else "read",
         "canonical_target": target == canonical,
@@ -112,6 +121,11 @@ def main() -> int:
     parser.add_argument("--repo", help="Explicit operation target owner/repository")
     parser.add_argument("--source-remote", help="Git remote used for branch push")
     parser.add_argument("--write", action="store_true", help="Require an explicit target")
+    parser.add_argument(
+        "--require-fork-source",
+        action="store_true",
+        help="Require the branch-push source repository to differ from canonical",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     try:
@@ -120,6 +134,7 @@ def main() -> int:
             operation_repository=args.repo,
             write=args.write,
             source_remote=args.source_remote,
+            require_fork_source=args.require_fork_source,
         )
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         if args.json:

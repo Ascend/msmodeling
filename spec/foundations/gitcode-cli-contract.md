@@ -4,7 +4,7 @@
 
 - canonical repository：`Ascend/msmodeling`
 - 默认分支：`master`
-- source repository：从当前可写 Git remote 动态识别，通常为 Fork 的 `origin`
+- source repository：从当前可写 Git remote 动态识别，代码贡献必须是与 canonical 不同的个人 Fork
 - operation target：当前 CLI 命令实际读写的 `owner/repository`
 - 跨平台命令：`gitcode`
 - 最低推荐版本：`0.8.0`
@@ -29,7 +29,8 @@ python scripts/ai/resolve_repository_context.py --json
 ## 3. 目标选择
 
 - 正式 Issue、PR、Review 和 CI 默认面向 canonical repository。
-- 本地分支 push 到 source repository；有主仓写权限时 source 可以等于 canonical。
+- 本地分支必须 push 到个人 Fork source repository；source repository 不得等于 canonical repository。
+- 所有角色都禁止在 canonical repository 直接创建或推送功能分支，包括 `codex/*` 分支。
 - Fork 临时调测必须显式把 operation target 设置为 Fork。
 - 所有远端写操作都必须显式传入 `-R <operation-target>`，并在执行前展示目标仓。
 - canonical 默认值只适用于只读操作，不代表写授权。
@@ -39,7 +40,8 @@ python scripts/ai/resolve_repository_context.py --json
 
 ```bash
 python scripts/ai/resolve_repository_context.py \
-  --write --repo Ascend/msmodeling --json
+  --write --require-fork-source --source-remote <fork-remote> \
+  --repo Ascend/msmodeling --json
 ```
 
 ## 4. 远端边界

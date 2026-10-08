@@ -1,10 +1,18 @@
 {
+  "routing_policy": {
+    "exclude_pr_author_from": ["chair", "reviewer", "approver"],
+    "reviewer_priority": "chair_then_reviewer_pool",
+    "approver_candidates_default": "approver_only",
+    "exclude_selected_reviewer_from_approver": true,
+    "empty_candidate_action": "blocked_and_escalate"
+  },
   "sigs": [
     {
       "name": "模型适配",
       "chair": "ChenHuiwen",
       "reviewers": ["stormchasingg", "jhon-117", "weixin_43113933"],
       "approver": "lutean",
+      "approver_candidates": ["lutean", "ChenHuiwen"],
       "paths": [
         "tensor_cast/transformers/builtin_model/",
         "tensor_cast/layers/",
@@ -44,7 +52,7 @@
     {
       "name": "Throughput寻优",
       "chair": "jia_ya_nan",
-      "reviewers": ["yuyinkai1"],
+      "reviewers": ["yuyinkai1", "minghang_c"],
       "approver": "jhon-117",
       "paths": [
         "cli/inference/throughput_optimizer.py",
@@ -62,29 +70,21 @@
       ]
     },
     {
-      "name": "实测算子查询",
-      "chair": "Horacehxw",
-      "reviewers": ["zhenghaojie"],
-      "approver": "yaohan404",
-      "paths": [
-        "tensor_cast/performance_model/"
-      ]
-    },
-    {
-      "name": "实测算子工具链",
+      "name": "实测算子",
       "chair": "Secluded_Ocean",
       "reviewers": ["zhenghaojie"],
-      "approver": "Horacehxw",
+      "approver": "lutean",
       "paths": [
+        "tensor_cast/performance_model/",
+        "tensor_cast/performance_model/profiling_database/",
         "tools/perf_data_collection/",
-        "tools/perf_data_analysis/",
-        "tensor_cast/performance_model/profiling_database/"
+        "tools/perf_data_analysis/"
       ]
     },
     {
       "name": "测试与基础设施",
       "chair": "AvadaKedavrua",
-      "reviewers": ["jhon-117"],
+      "reviewers": ["jhon-117", "eveyin1"],
       "approver": "lutean",
       "paths": [
         "tests/",
@@ -125,7 +125,7 @@
     "cli/": "模型适配",
     "optix/": "Optix",
     "contrib/": "Optix",
-    "tools/": "实测算子工具链",
+    "tools/": "实测算子",
     "tests/": "测试与基础设施",
     "scripts/": "测试与基础设施",
     "pre-commit/": "测试与基础设施",

@@ -38,6 +38,7 @@ dist/
 
 # Local pre-commit binary (downloaded, not committed)
 /gitleaks
+/gitleaks.exe
 
 # web_ui runtime artifacts (sqlite db, job logs, chrome traces)
 .msmodeling_ui/

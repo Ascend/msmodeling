@@ -30,7 +30,8 @@ TensorCast 在 Qwen3.6 MoE 的 decode 阶段吞吐结果明显偏高。我只有
 ```
 
 预期：创建非 `master` 分支，按领域选择模型适配、op mapping、ServingCast 或 OptiX Skills；CI 通过或给出
-明确阻塞后才建议 Ready。
+明确阻塞后才建议 Ready。用户确认 Ready 且当前 head 的适用 CI 全绿后，自动评论 `/merge`，但不自动
+评论 `/lgtm`、`/approve` 或合并。
 
 ## 4. 限定范围的自动交付
 

@@ -12,8 +12,8 @@
       "adaptations": ["metadata", "repository contract"]
     },
     "gitcode-pr-create": {
-      "version": "1.0.0",
-      "adaptations": ["metadata", "master base branch", "repository contract"]
+      "version": "1.1.0",
+      "adaptations": ["metadata", "master base branch", "repository contract", "fork-only source branches"]
     },
     "gitcode-pipeline-analyzer": {
       "version": "1.0.0",

@@ -38,7 +38,7 @@ verified
 
 - 不在 `master` 直接开发；
 - Fork 模式从最新 canonical 基线建分支并 push 到 source repository；
-- 主仓模式从最新 canonical 基线建主仓开发分支；
+- 所有角色统一使用 Fork 模式；禁止在 canonical repository 直接创建或推送功能分支；
 - 遵守 AGENTS 中的业务架构约束；
 - 修改行为时同步测试和文档。
 
@@ -57,8 +57,8 @@ python build.py
 
 ### 7. Commit、Push 和 PR
 
-Commit 使用 Conventional Commits 并 sign-off。push 面向 source repository，最终 PR 面向 canonical repository，
-按 `pr-workflow.md` 执行。
+Commit 使用 Conventional Commits 并 sign-off。push 必须面向个人 Fork source repository，最终通过跨仓 PR
+面向 canonical repository，按 `pr-workflow.md` 执行。
 
 ### 8. CI 和自检
 
@@ -66,5 +66,7 @@ PR 创建后**默认立即**按 `ci-recovery-workflow.md` 触发 CI 并监控至
 
 ## 完成标准
 
-工作流只有在 canonical PR 达到 CI 通过后才推进到 `ready-for-review`。Fork 内部 PR 只作为 staging 证据。
-独立评审、审批和合并不属于作者自动交付的默认完成范围。
+工作流只有在 canonical PR 达到 CI 通过后才推进到 `ready-for-review`。用户确认 Ready 后，
+当前 head 的代码 CI 和适用的文档 CI 全绿时，按 `ci-recovery-workflow.md` 的幂等规则自动评论 `/merge`。
+Fork 内部 PR 只作为 staging 证据。独立评审、审批和合并不属于作者自动交付的默认完成范围；
+`/merge` 仅作为合入流程启动信号，不等于审批或合并。

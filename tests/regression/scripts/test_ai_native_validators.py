@@ -31,8 +31,10 @@ from scripts.ai.check_gitcode_cli import (
     _resolve_binary,
     _run,
     check_cli,
-    main as check_cli_main,
     parse_semantic_version,
+)
+from scripts.ai.check_gitcode_cli import (
+    main as check_cli_main,
 )
 from scripts.ai.install_gitleaks import (
     GITLEAKS_VERSION,
@@ -43,25 +45,33 @@ from scripts.ai.install_gitleaks import (
     _extract_member,
     detect_asset,
     install,
+)
+from scripts.ai.install_gitleaks import (
     main as install_gitleaks_main,
 )
 from scripts.ai.resolve_repository_context import (
     load_contract,
-    main as resolve_repository_main,
     parse_repository_slug,
     resolve_context,
     validate_repository_slug,
 )
+from scripts.ai.resolve_repository_context import (
+    main as resolve_repository_main,
+)
 from scripts.ai.validate_remote_boundary import (
     main as validate_remote_boundary_main,
+)
+from scripts.ai.validate_remote_boundary import (
     validate_boundary,
     validate_repository_identity,
 )
 from scripts.ai.validate_skills import (
     SEMVER_PATTERN,
-    main as validate_skills_main,
     parse_frontmatter,
     validate_skills,
+)
+from scripts.ai.validate_skills import (
+    main as validate_skills_main,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -130,6 +140,7 @@ def test_repository_contract_uses_canonical_upstream() -> None:
     contract = load_contract(REPO_ROOT)
     assert contract["canonical_repository"] == "Ascend/msmodeling"
     assert contract["source_repository"]["strategy"] == "git-remote"
+    assert contract["source_repository"]["required_distinct_from_canonical"] is True
     assert contract["operation_target"]["write_requires_explicit_repository"] is True
 
 
@@ -149,6 +160,32 @@ def test_repository_context_separates_source_and_target() -> None:
     assert context["operation_target"] == "Ascend/msmodeling"
     assert context["canonical_target"] is True
     assert context["target_pull_request_ci_required"] is True
+
+
+def test_repository_context_requires_fork_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "scripts.ai.resolve_repository_context.get_source_repository",
+        lambda repo_root, remote: "contributor/msmodeling",
+    )
+    context = resolve_context(
+        REPO_ROOT,
+        operation_repository="Ascend/msmodeling",
+        write=True,
+        require_fork_source=True,
+    )
+    assert context["source_repository_is_fork"] is True
+
+    monkeypatch.setattr(
+        "scripts.ai.resolve_repository_context.get_source_repository",
+        lambda repo_root, remote: "Ascend/msmodeling",
+    )
+    with pytest.raises(ValueError, match="personal Fork"):
+        resolve_context(
+            REPO_ROOT,
+            operation_repository="Ascend/msmodeling",
+            write=True,
+            require_fork_source=True,
+        )
 
 
 def test_repository_context_requires_explicit_write_target() -> None:

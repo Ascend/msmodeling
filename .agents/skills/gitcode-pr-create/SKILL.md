@@ -2,7 +2,7 @@
 name: gitcode-pr-create
 description: Guide creation of GitCode pull requests using GitCode CLI with branch checks, diff review, body-file support, fork PR support, and JSON result parsing. Trigger when users want to open, draft, or update a GitCode PR.
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   source: gitcode-cli/skills@6f0d8b0-adapted
 ---
 
@@ -18,7 +18,7 @@ Use `gitcode` for cross-platform instructions. Linux/macOS may use `gc`; Windows
 
 1. Verify current branch and working tree.
 2. Run the pre-commit readiness check (see Pre-commit Check).
-3. Confirm remote and target repository.
+3. Confirm the source remote is a personal Fork and the target repository is canonical.
 4. Review diff and test evidence.
 5. Draft PR body in a file.
 6. Create PR with `--body-file` and `--json`.
@@ -30,6 +30,15 @@ git status --short --branch
 git remote -v
 git log --oneline --decorate -5
 git diff --stat origin/master...HEAD
+```
+
+Before a code contribution write, verify that the branch-push source is not the
+canonical repository:
+
+```bash
+python scripts/ai/resolve_repository_context.py \
+  --write --require-fork-source --source-remote <fork-remote> \
+  --repo Ascend/msmodeling --json
 ```
 
 ## Pre-commit Check
@@ -71,14 +80,6 @@ gitcode precommit check --run
 ## Create
 
 ```bash
-gitcode pr create -R Ascend/msmodeling --base master --head feature-branch --title "feat: summary" --body-file pr.md --json
-gitcode pr create -R owner/repo --title "fix: summary" --body-file pr.md --draft --json
-echo "PR body" | gitcode pr create -R owner/repo --title "docs: update" --body-file - --json
-```
-
-Fork:
-
-```bash
 gitcode pr create -R Ascend/msmodeling --fork <fork-owner>/msmodeling --head feature-branch --base master --title "feat: summary" --body-file pr.md --json
 ```
 
@@ -95,6 +96,8 @@ gitcode pr ready 123 -R owner/repo --ready --yes --json
 - `pr create` supports `--body-file`; prefer it for multi-line descriptions.
 - Use `--json` to capture the created PR URL/number.
 - Do not create from `master`.
+- The source branch must be pushed to a personal Fork; never create or push a feature branch in `Ascend/msmodeling`.
+- Always pass `--fork` when the target is `Ascend/msmodeling`.
 - Use SSH for push/clone operations.
 - Do not include secrets in the PR body.
 - Treat `Ascend/msmodeling` as canonical; resolve the writable source from Git remotes.

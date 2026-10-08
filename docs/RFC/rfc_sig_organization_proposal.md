@@ -37,15 +37,18 @@ msmodeling（MindStudio Modeling）是一个全系统性能仿真与分析框架
 
 | 角色 | 职责 | 关键约束 |
 |------|------|----------|
-| **主 Chair** | 子 SIG 负责人，为所属子系统的**质量与发展**负责；主导技术方向、分配检视任务、对子系统质量兜底 | 不可 approve 自己的 PR |
-| **备 Reviewer** | chair 缺位或 chair 自身提交 PR 时代行质量看护；须实质性参与检视 | 须独立给出判断，不得附和 chair |
-| **Approver** | 架构 SIG 成员轮值，最终合入把关，提供跨 SIG 仲裁视角 | 不可同时为本 SIG 的 chair / 备 |
+| **主 Chair** | 子 SIG 负责人，为所属子系统的**质量与发展**负责；主导技术方向、分配检视任务、对子系统质量兜底 | 不得参与本人 PR 的 Chair、Reviewer 或 Approver 流程 |
+| **备 Reviewer** | chair 缺位或 chair/候选 reviewer 自身提交 PR 时代行质量看护；须实质性参与检视 | 须独立给出判断，不得附和 chair；不得检视本人 PR |
+| **Approver** | 架构 SIG 成员轮值，最终合入把关，提供跨 SIG 仲裁视角 | 不得审批本人 PR；不得与作者角色冲突 |
 | **成员** | 参与 SIG 内开发与检视 | 遵循检视质量规范 |
 
 核心原则：
 
 - **chair 是子 SIG 的负责人**，为相关子系统的质量与发展负责。
-- **当 chair 在自己的子 SIG 范围内提交 PR 时，由 reviewer 代为行使质量看护责任**——chair 不自审、不自合，由备 Reviewer 接管该 PR 的检视与流程推动。
+- **当 chair 在自己的子 SIG 范围内提交 PR 时，由非作者 reviewer 代为行使质量看护责任**——chair 不自审、不自合，由备 Reviewer 接管该 PR 的检视与流程推动。
+- **Reviewer 路由优先选择非作者 Chair**；若 Chair 是 PR 作者，则从 Reviewer 候选池中排除作者后选择其他 Reviewer。
+- **Chair、Reviewer、Approver 均排除 PR 作者**；若排除后没有可用候选人，流程进入 blocked 并升级人工处理。
+- **Approver 与该 PR 实际 Reviewer 由不同人担任**。候选人以 `sig_ownership.json` 为准：配置了 `approver_candidates` 时按列表顺序筛选，未配置时仅使用 `approver`；不从 Reviewer 池自动补人，过滤后为空则阻塞升级。
 
 ---
 
@@ -159,7 +162,7 @@ PR 提交 ──► chair/代行 reviewer 检视 ──► @ approver ──► 
 | `tensor_cast/core/` | 模型适配 | model_builder 等 |
 | `tensor_cast/config.py`、`model_config.py`、`model_hub.py` | 模型适配 | 配置 |
 | `cli/inference/text_generate.py`、`model_adapter.py` | 模型适配 | 文本生成 |
-| `tensor_cast/ops/` | 模型适配 | 仿真算子定义；实测算子查询 SIG 可提映射诉求 |
+| `tensor_cast/ops/` | 模型适配 | 仿真算子定义；实测算子 SIG 可提映射诉求 |
 | `tensor_cast/diffusers/` | 视频生成 | 视频模型 |
 | `cli/inference/video_generate.py` | 视频生成 | 视频生成入口 |
 | `serving_cast/` | ServingCast | 整体；`service/` 下 optimizer 改动需 Throughput SIG 双签 |
@@ -168,10 +171,10 @@ PR 提交 ──► chair/代行 reviewer 检视 ──► @ approver ──► 
 | `cli/inference/throughput_optimizer.py` | Throughput 寻优 | 寻优入口 |
 | `optix/run_throughput_optimizer_cases.py` | Throughput 寻优 | 寻优用例 |
 | `optix/`、`contrib/optix/` | Optix | 整体 |
-| `tensor_cast/performance_model/`（empirical / analytic 等逻辑、builtin_model/、custom_op/） | 实测算子查询 | 性能模型逻辑 |
-| `tensor_cast/performance_model/profiling_database/` | 实测算子工具链 | profiling 数据与 op_mapping.yaml |
-| `tools/perf_data_collection/` | 实测算子工具链 | microbench / op_replay / comm_bench |
-| `tools/perf_data_analysis/` | 实测算子工具链 | 数据分析工具 |
+| `tensor_cast/performance_model/`（empirical / analytic 等逻辑、builtin_model/、custom_op/） | 实测算子 | 性能模型逻辑 |
+| `tensor_cast/performance_model/profiling_database/` | 实测算子 | profiling 数据与 op_mapping.yaml |
+| `tools/perf_data_collection/` | 实测算子 | microbench / op_replay / comm_bench |
+| `tools/perf_data_analysis/` | 实测算子 | 数据分析工具 |
 | `tests/`、`scripts/`、`pre-commit/`、`build.py` | 测试与基础设施 | 测试与构建 |
 | `.pre-commit-config.yaml`、`pyproject.toml` | 测试与基础设施 | 构建配置 |
 | `docs/`、`.agents/skills/`、`AGENTS.md`、`CLAUDE.md` | 文档与 Skill | 文档与 AI 约束 |
@@ -184,28 +187,27 @@ PR 提交 ──► chair/代行 reviewer 检视 ──► @ approver ──► 
 
 ## 八、子SIG 完整汇总表
 
-> 以下表格为 11 个 SIG 的完整汇总，每行一个 SIG，便于一览全貌。
+> 以下表格为 10 个 SIG 的完整汇总，每行一个 SIG，便于一览全貌。
 
 | # | SIG 名称 | 类型 | Chair | Reviewer | Approver | 负责目录范围 | 边界说明 |
 |---|---------|------|----------|------------|----------|-------------|---------|
 | 1 | 架构治理 SIG | 仲裁层 | jhon-117 | Horacehxw、yaohan404、lutean | jiangruitao | 无固定业务目录（仲裁层） | 跨 SIG 仲裁 / RFC 评审 / CODEOWNERS 维护 / .importlinter.ini 配置；跨模块改动共审 |
-| 2 | 模型适配 SIG | 业务领域 | ChenHuiwen | stormchasingg、jhon-117、weixin_43113933、wangshen001等模型owner | lutean | tensor_cast/transformers/builtin_model/、tensor_cast/layers/、tensor_cast/compilation/、tensor_cast/adapter/、tensor_cast/core/、tensor_cast/config.py、model_config.py、model_hub.py、cli/inference/text_generate.py、model_adapter.py、tensor_cast/ops/ | 新增语言模型适配必须走 10 步标准流程；视频模型走视频生成 SIG；ops/ 为纯仿真算子定义，实测算子查询 SIG 可提映射诉求 |
+| 2 | 模型适配 SIG | 业务领域 | ChenHuiwen | stormchasingg、jhon-117、weixin_43113933、wangshen001等模型owner | lutean、ChenHuiwen（按候选顺序过滤作者和已选 Reviewer） | tensor_cast/transformers/builtin_model/、tensor_cast/layers/、tensor_cast/compilation/、tensor_cast/adapter/、tensor_cast/core/、tensor_cast/config.py、model_config.py、model_hub.py、cli/inference/text_generate.py、model_adapter.py、tensor_cast/ops/ | 新增语言模型适配必须走 10 步标准流程；视频模型走视频生成 SIG；ops/ 为纯仿真算子定义，实测算子 SIG 可提映射诉求；所有角色排除 PR 作者 |
 | 3 | 视频生成 SIG | 业务领域 | minghang_c | jia_ya_nan | yaohan404 | tensor_cast/diffusers/（含 cache_agent/、diffusers_model.py 等）、cli/inference/video_generate.py | 视频模型（diffusers 系列）与语言模型分离；适配流程可参考 10 步但允许裁剪 |
 | 4 | ServingCast SIG | 业务领域 | yuyinkai1 | yaohan404 | lutean | serving_cast/（整体）、serving_cast/service/、tensor_cast/device.py、tensor_cast/device_profiles/、tensor_cast/quantize_utils.py、docs/RFC/rfc_precision_protection.md 相关实现 | serving_cast/service/ 下 optimizer 接口设计由本 SIG 主导；寻优调用逻辑修改需 Throughput SIG 共审（双签） |
-| 5 | Throughput 寻优 SIG | 业务领域 | jia_ya_nan | yuyinkai1 | jhon-117 | cli/inference/throughput_optimizer.py、optix/run_throughput_optimizer_cases.py | 对 serving_cast/service/ 下 optimizer 文件修改需 ServingCast SIG 共审（双签）；jia_ya_nan 与 yuyinkai1 互为备，需额外 approver |
+| 5 | Throughput 寻优 SIG | 业务领域 | jia_ya_nan | yuyinkai1、minghang_c | jhon-117 | cli/inference/throughput_optimizer.py、optix/run_throughput_optimizer_cases.py | 对 serving_cast/service/ 下 optimizer 文件修改需 ServingCast SIG 共审（双签）；jia_ya_nan 与 yuyinkai1 互为备，需额外 approver；所有角色排除 PR 作者 |
 | 6 | Optix SIG | 业务领域 | tt0cool | h7star | jhon-117 | optix/（config / optimizer / plugins 等）、contrib/optix/ | 3 人全职；optix/run_throughput_optimizer_cases.py 归 Throughput SIG（跨 SIG 改动双签） |
-| 7 | 实测算子查询 SIG | 业务领域 | Horacehxw | zhenghaojie | yaohan404 | tensor_cast/performance_model/（empirical / analytic / bound_analyzer 等性能模型逻辑、builtin_model/、custom_op/） | 查询实测数据用于性能估算；profiling_database 数据由工具链 SIG 产出，跨改双签；ops/ 归模型适配 SIG，映射不匹配时向其提诉求 |
-| 8 | 实测算子工具链 SIG | 业务领域 | Secluded_Ocean | zhenghaojie | Horacehxw | tools/perf_data_collection/（microbench、op_replay、comm_bench 等）、tools/perf_data_analysis/、tensor_cast/performance_model/profiling_database/（含 op_mapping.yaml） | microbench 工具链与 profiling 数据采集 / 入库；op_mapping 维护；产出数据供查询 SIG 消费 |
-| 9 | 测试与基础设施 SIG | 支撑层 | AvadaKedavrua | jhon-117 | lutean | tests/（UT / ST / skill_eval / perf_database）、scripts/（build / ci_gate / nightly / common）、pre-commit/、build.py、.pre-commit-config.yaml、pyproject.toml | CI 门禁脚本（ci_gate）改动需架构 SIG 共审（影响全局） |
-| 10 | 文档与 Skill SIG | 支撑层 | wendellX | eveyin1 | yaohan404 | docs/（RFC / design / user_guide / install_guide / perf_database）、.agents/skills/、AGENTS.md、CLAUDE.md、CONTRIBUTING.md、README.md | AGENTS.md 的架构约束条款改动需架构 SIG 共审 |
-| 11 | UI SIG | 支撑层 | zwt__ | lutean | jhon-117 | web_ui/（前端代码）、docs/design/web_ui_frontend_design.md、docs/zh/user_guide/msmodeling_web_ui_user_guide.md、docs/en/user_guide/msmodeling_web_ui_user_guide.md | 如 web_ui 目录尚未建立，以 design 文档为锚点，后续代码目录确定后更新 |
+| 7 | 实测算子 SIG | 业务领域 | Secluded_Ocean | zhenghaojie | lutean | tensor_cast/performance_model/（含 profiling_database/）、tools/perf_data_collection/、tools/perf_data_analysis/ | 统一负责性能模型、profiling 数据、op_mapping、microbench、op_replay 和数据分析；所有角色排除 PR 作者 |
+| 8 | 测试与基础设施 SIG | 支撑层 | AvadaKedavrua | jhon-117、eveyin1 | lutean | tests/（UT / ST / skill_eval / perf_database）、scripts/（build / ci_gate / nightly / common）、pre-commit/、build.py、.pre-commit-config.yaml、pyproject.toml | CI 门禁脚本（ci_gate）改动需架构 SIG 共审（影响全局）；所有角色排除 PR 作者 |
+| 9 | 文档与 Skill SIG | 支撑层 | wendellX | eveyin1 | yaohan404 | docs/（RFC / design / user_guide / install_guide / perf_database）、.agents/skills/、AGENTS.md、CLAUDE.md、CONTRIBUTING.md、README.md | AGENTS.md 的架构约束条款改动需架构 SIG 共审；所有角色排除 PR 作者 |
+| 10 | UI SIG | 支撑层 | zwt__ | lutean | jhon-117 | web_ui/（前端代码）、docs/design/web_ui_frontend_design.md、docs/zh/user_guide/msmodeling_web_ui_user_guide.md、docs/en/user_guide/msmodeling_web_ui_user_guide.md | 如 web_ui 目录尚未建立，以 design 文档为锚点，后续代码目录确定后更新；所有角色排除 PR 作者 |
 
 ### 补充说明
 
 - **根目录文件**（如 tensor_cast/runtime.py、parallel_group.py、patch_torch.py、__init__.py）：由改动者所属 SIG 负责，跨 SIG 改动需架构 SIG 共审。
-- **兼任规则**：任何人兼任不超过 2 个 SIG（兼任 7 人：Horacehxw、zhenghaojie、jia_ya_nan、yuyinkai1、yaohan404、jhon-117、lutean）。
-- **Approver 轮值**：jhon-117 负责 3 个 SIG、yaohan404 负责 3 个、lutean 负责 3 个、Horacehxw 负责 1 个、jiangruitao 负责架构 SIG 1 个。
-- **Secluded_Ocean**：现担任实测算子工具链 SIG 主 Chair（原外部参与者，转正后承担工具链质量责任）。
+- **兼任规则**：任何人兼任不超过 2 个业务 SIG 的实质性角色（Chair / Reviewer / 成员）；Approver 轮值和架构治理 SIG 不计入上限。具体人选以本节表格和 `sig_ownership.json` 为准。
+- **Approver 轮值**：9 个业务 SIG 中，jhon-117 负责 3 个、yaohan404 负责 2 个、lutean 负责 4 个；架构治理 SIG 由 jiangruitao 负责。
+- **Secluded_Ocean**：现担任实测算子 SIG 主 Chair，统一承担性能模型与实测工具链质量责任。
 - **jiangruitao**：主管，无代码背景，仅做最终决策，不参与技术 review。
 
 ---

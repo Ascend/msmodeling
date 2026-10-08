@@ -31,7 +31,8 @@ idle -> triggered -> running -> passed
 7. **CI 修复循环默认自动**：诊断根因并本地复现后，无需逐次向用户确认，直接修复——运行受影响门禁、commit、push、在 PR 评论 `compile` 重新触发流水线，等待 `ci-pipeline-running` label 后回到步骤 1。这是 CI 恢复的默认执行模式，覆盖 guided 模式下"push 前确认"的一般规则，但仍受硬停止约束：不得以"强制测试通过"代替根因修复，不得绕过质量门禁。
 8. `ci-pipeline-passed` 则结束循环；`ci-pipeline-failed` 则回到步骤 4 诊断并修复。
 9. 重复直到通过或进入 blocked。**只有**遇到以下情形才停下交给用户：证据充分的责任/基础设施问题、无法自动定位根因（证据不足）、或修复会触及硬停止点。blocked 时必须在 PR 评论记录证据、责任和下一步。
-10. **完成后报告**：CI 全绿后，向用户报告本轮 CI 修复共新增 N 个 commit（列出每个 commit 的摘要和 SHA），提示用户关注这些修复提交。无修复（首次即通过）时报告"CI 一次通过，无额外修复 commit"。
+10. **Ready 后自动启动合入**：当前 head 的代码 CI 和适用的文档 CI 全绿、PR 已由用户确认并处于 Ready，且该 `PR number + head SHA` 尚未触发过 `/merge` 时，自动评论单独一行的 `/merge`。PR 仍为 Draft、CI 未全绿、角色候选冲突或已有相同 `/merge` 时不得触发。
+11. **完成后报告**：CI 全绿后，向用户报告本轮 CI 修复共新增 N 个 commit（列出每个 commit 的摘要和 SHA），并报告是否已按 Ready + 全绿条件自动评论 `/merge`。无修复（首次即通过）时报告"CI 一次通过，无额外修复 commit"。
 
 ## 文档 CI
 

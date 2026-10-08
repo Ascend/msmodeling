@@ -102,7 +102,7 @@ git remote add upstream https://gitcode.com/Ascend/msmodeling.git
 git fetch upstream
 ```
 
-> **注意**：外部贡献者默认通过 Fork 提交 PR；具备权限的维护者也可在上游功能分支开发。任何角色都不得直接推送到 `master`。
+> **注意**：所有贡献者（包括具备主仓权限的维护者）都必须通过个人 Fork 创建和推送功能分支。主仓只作为 PR 目标，任何角色都不得在主仓直接创建或推送功能分支，也不得直接推送到 `master`。
 
 ### 3. 配置开发环境
 
@@ -282,6 +282,9 @@ git fetch upstream
 git checkout -b feat/your-feature-name upstream/master
 ```
 
+功能分支必须创建在个人 Fork 的本地副本中；禁止在 `Ascend/msmodeling` 直接创建
+`feat/*`、`fix/*`、`codex/*` 等开发分支。
+
 ### 5. 本地测试与检查
 
 **代码上库前必须在本地通过以下检查：**
@@ -327,6 +330,12 @@ git commit -s -m "feat(tensor_cast): add new operator support
 ### 7. 推送并创建 Pull Request
 
 ```bash
+python scripts/ai/resolve_repository_context.py \
+  --write \
+  --require-fork-source \
+  --source-remote origin \
+  --repo Ascend/msmodeling \
+  --json
 git push origin feat/your-feature-name
 gitcode pr create \
   -R Ascend/msmodeling \
@@ -340,7 +349,8 @@ gitcode pr create \
 
 AI 或自动化创建 PR、添加评论、设置标签和提交评审时必须使用 `gitcode` CLI。人工可使用 GitCode 页面，
 但 PR 仍应遵循 [PR 规范](#pr-规范)。创建前可运行 `gitcode schema "pr create"` 核对当前 CLI 参数。
-有主仓分支写权限时可以省略 `--fork`，但仍不得直接在 `master` 开发。
+`--fork` 为强制参数；如果本地 `origin` 指向 canonical repository，请将
+`--source-remote` 改为个人 Fork 对应的 remote，并显式填写 `--fork`。
 
 创建 PR 后，对 AI agent 说“请求检视”，即可按 SIG 路由执行深度检视；经确认后，AI 使用 CLI 提交
 准确的行内评论和总体结论（详见 `.agents/skills/sig-review/SKILL.md`）。

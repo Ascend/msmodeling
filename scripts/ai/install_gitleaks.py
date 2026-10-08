@@ -19,7 +19,7 @@
 """Install the local gitleaks binary required by the pre-commit gitleaks hook.
 
 The ``.pre-commit-config.yaml`` ``gitleaks-offline-scan`` hook uses
-``language: system`` with ``entry: ./gitleaks``, so pre-commit cannot
+``language: system`` with a repository launcher, so pre-commit cannot
 auto-install it. This script is an idempotent, cross-platform installer with a
 pinned version so AI agents and contributors can prepare the binary without
 ad-hoc reasoning.
@@ -50,6 +50,7 @@ from typing import Final
 GITLEAKS_VERSION: Final = "8.21.2"
 RELEASE_BASE: Final = "https://github.com/gitleaks/gitleaks/releases/download"
 BINARY_NAME: Final = "gitleaks"
+WINDOWS_BINARY_NAME: Final = "gitleaks.exe"
 
 
 @dataclass(frozen=True)
@@ -93,20 +94,28 @@ def _binary_version(binary: Path) -> str | None:
             capture_output=True,
             text=True,
             timeout=15,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout.strip().splitlines()[0] if proc.stdout.strip() else None
 
 
+def _binary_path(repo_root: Path) -> Path:
+    name = WINDOWS_BINARY_NAME if platform.system().lower() == "windows" else BINARY_NAME
+    return repo_root / name
+
+
 def _ensure_gitignore(repo_root: Path) -> bool:
     gitignore = repo_root / ".gitignore"
-    marker = "/gitleaks"
+    markers = ("/gitleaks", "/gitleaks.exe")
     existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    if any(line.strip() == marker for line in existing.splitlines()):
+    missing = [marker for marker in markers if not any(line.strip() == marker for line in existing.splitlines())]
+    if not missing:
         return False
     prefix = "" if existing.endswith("\n") else "\n"
-    addition = f"{prefix}\n# Local pre-commit binary (downloaded, not committed)\n{marker}\n"
+    addition = prefix + "\n# Local pre-commit binary (downloaded, not committed)\n"
+    addition += "".join(f"{marker}\n" for marker in missing)
     with gitignore.open("a", encoding="utf-8") as handle:
         handle.write(addition)
     return True
@@ -131,7 +140,7 @@ def _extract_member(archive: Path, asset: PlatformAsset, repo_root: Path) -> Pat
 
 def install(repo_root: Path, version: str, force: bool) -> InstallResult:
     errors: list[str] = []
-    binary = repo_root / BINARY_NAME
+    binary = _binary_path(repo_root)
     try:
         current = _binary_version(binary)
         if current == version and not force:
@@ -175,7 +184,7 @@ def main() -> int:
         status = "installed" if result.installed else "present"
         print(f"gitleaks {result.version}: {status} at {result.binary}")
         if result.gitignore_updated:
-            print("gitignore: added /gitleaks")
+            print("gitignore: ensured /gitleaks and /gitleaks.exe are ignored")
         for error in result.errors:
             print(f"[ERROR] {error}", file=sys.stderr)
     return 0 if result.ok else 1

@@ -12,7 +12,12 @@ metadata:
 
 本技能是 msmodeling 项目 **SIG 化代码检视工具**，让 PR 作者和检视者通过自然语言与 AI agent 交互完成检视全流程，无需手动操作 GitCode 网页。
 
-msmodeling 按目录划分为 10 个子 SIG，每个 SIG 有明确的 chair（负责人）、reviewer（备审）、approver（评审）。**合入流程的启动（SIG 路由、reviewer 分配、CI/lgtm/approve 标签监控、催审）由后台运行的合入管理工具 MergeTrack 驱动**：只要在 PR 评论区评论 `/merge`，后台合入管理服务即自动接手。本技能不再手动指派 assignee 或打 `sig:XXX` 标签——SIG 路由由后台服务完成，agent 不获取变更文件、不计算 SIG 归属。本技能聚焦三件事：①评论 `/merge` 启动合入；②reviewer 实际检视并提交意见、通过时评论 `/lgtm`；③分析已有检视意见并给出修改建议。
+msmodeling 按目录划分为 9 个子 SIG，每个 SIG 有明确的 chair（负责人）、reviewer（备审）、approver（评审）。**合入流程的启动（SIG 路由、reviewer 分配、CI/lgtm/approve 标签监控、催审）由后台运行的合入管理工具 MergeTrack 驱动**：评论 `/merge` 后，后台合入管理服务即自动接手。本技能不再手动指派 assignee 或打 `sig:XXX` 标签——SIG 路由由后台服务完成，agent 不获取变更文件、不计算 SIG 归属。本技能聚焦三件事：①在用户请求或 Ready + CI 全绿的自动条件满足时评论 `/merge` 启动合入；②reviewer 实际检视并提交意见、通过时评论 `/lgtm`；③分析已有检视意见并给出修改建议。
+
+**角色独立性规则：** PR 作者不得被分配为 Chair、Reviewer 或 Approver。Reviewer 路由优先选择非作者 Chair；
+若 Chair 是 PR 作者，则从 Reviewer 候选池中排除作者后选择其他 Reviewer。Approver 只从明确配置的
+`approver_candidates` 中按顺序选择；未配置时只使用 `approver`，排除 PR 作者和该 PR 已选 Reviewer，不从
+Reviewer 池自动补人。没有可用候选人时必须报告 `blocked` 并升级人工处理。该过滤规则按每个涉及的 SIG 独立执行。
 
 **核心能力：**
 
@@ -28,7 +33,7 @@ msmodeling 按目录划分为 10 个子 SIG，每个 SIG 有明确的 chair（�
 
 **当用户询问"你能做什么"或"这个技能是干什么的"时，按以下方式回答：**
 
-> 这是 msmodeling 项目的 SIG 化代码检视工具。msmodeling 分为 10 个子 SIG，每个 SIG 有明确的负责人和评审人。合入流程的启动由常驻服务 后台合入管理服务 驱动——评论 `/merge` 即自动路由 SIG、分配 reviewer、监控 CI/lgtm/approve 和催审。这个工具能帮你完成检视全流程：
+> 这是 msmodeling 项目的 SIG 化代码检视工具。msmodeling 分为 9 个子 SIG，每个 SIG 有明确的负责人和评审人。合入流程的启动由常驻服务 后台合入管理服务 驱动——评论 `/merge` 即自动路由 SIG、分配 reviewer、监控 CI/lgtm/approve 和催审。这个工具能帮你完成检视全流程：
 >
 > - **你是 PR 作者**：推送代码后说"请求检视"或"启动合入"，我在 PR 评论区评论 `/merge`，后台合入管理服务 自动分配 reviewer 并飞书通知
 > - **你是检视者**：说"我有哪些待检视PR"查看任务，说"检视PR 123"开始检视。检视完如果没问题说"完成检视"，我评论 `/lgtm`，后台合入管理服务 自动通知 approver；如果有修改意见，提交行内意见后等作者修改重评
@@ -44,7 +49,7 @@ msmodeling 按目录划分为 10 个子 SIG，每个 SIG 有明确的 chair（�
 
 | 工作流 | 触发者 | 触发词 | 命令 |
 |--------|--------|--------|------|
-| **启动合入** | PR 作者或任何成员 | "请求检视" / "启动合入" | `gitcode pr comment "/merge"` |
+| **启动合入** | PR 作者或任何成员；Ready + CI 全绿的交付工作流 | "请求检视" / "启动合入" / 自动条件满足 | `gitcode pr comment "/merge"` |
 | **查看待检视** | reviewer / chair | "我有哪些待检视PR" | `gitcode pr list` |
 | **查看状态** | 任何人 | "PR 123 状态" | `gitcode pr view --json` |
 | **代码检视** | reviewer / chair | "检视PR {number}" | `gitcode pr diff` → `gitcode pr comment` |
@@ -100,14 +105,14 @@ gitcode auth status
 
 ## 启动合入流程（请求检视）
 
-当 PR 作者推送代码后说"请求检视"或"启动合入"，agent 在 PR 评论区评论 `/merge` 启动后台合入管理服务。SIG 路由、reviewer 分配、催审等均由后台服务完成，**agent 不需要获取变更文件、不计算 SIG 归属、不展示 SIG 信息**。
+当 PR 作者说"请求检视"或"启动合入"，或者交付工作流确认 PR 已 Ready 且当前 head 的代码 CI 和适用的文档 CI 均通过时，agent 在 PR 评论区评论 `/merge` 启动后台合入管理服务。SIG 路由、reviewer 分配、催审等均由后台服务完成，**agent 不需要获取变更文件、不计算 SIG 归属、不展示 SIG 信息**。
 
-> **`/merge` 由用户主动请求触发，agent 不自动发起**。若 agent 所处工作流（如 issue-delivery）需要推进合入，必须**先确保 CI 全绿**再评论 `/merge`——CI 未通过时先走 `msmodeling-ci-recovery` 修复至全绿，然后再评论 `/merge`。
+> `/merge` 可由用户主动请求触发；若交付工作流确认 PR 已 Ready 且当前 head 的代码 CI 和适用的文档 CI 均全绿，agent 也可按 `PR number + head SHA` 幂等规则自动评论 `/merge`。CI 未通过或 PR 仍为 Draft 时不得评论。
 
 ### 命令
 
 ```bash
-# 1. 前置检查：确认当前 head CI 已全绿（ci-pipeline-passed / docs-ci-pipeline-success label）
+# 1. 前置检查：确认 PR 已 Ready，且当前 head CI 已全绿（ci-pipeline-passed / docs-ci-pipeline-success label）
 gitcode pr view <PR编号> -R <TARGET_REPO> --json
 
 # 2. 在 PR 评论区评论 /merge 启动合入流程
@@ -123,7 +128,12 @@ gitcode pr comment <PR编号> -R <TARGET_REPO> --body "/merge"
 2. 在 PR 评论区评论 `/merge`
 3. 后台合入管理服务检测到 `/merge` 后自动：路由 SIG、分配 reviewer、飞书通知 reviewer、监控 CI/lgtm/approve、催审
 
-### 幂等
+### 角色与幂等
+
+路由服务必须在分配前过滤 PR 作者：Reviewer 优先使用非作者 Chair，再从 Reviewer 候选池选择；
+Approver 从该 SIG 的明确候选池中选择非作者且非该 PR 已选 Reviewer；未配置 `approver_candidates` 时，
+候选池仅含 `approver`。若 Chair 是 PR 作者，Chair 不得以 Reviewer 身份代行，必须改从其他 Reviewer
+候选中选择。候选池为空时不得自审或自批，应进入 `blocked`。
 
 若 PR 评论区已存在 `/merge` 评论且 后台合入管理服务 已启动（PR 已有 reviewer 分配迹象），提示而不重复评论。
 
@@ -575,4 +585,6 @@ PR#123: 优化推理引擎的批处理逻辑，主要变更在 tensor_cast/layer
 
 ## 后台服务与通知
 
-合入流程的流转通知（分配 reviewer、CI 通过后通知 approver、催审、返工通知作者等）由 后台合入管理服务 统一驱动，agent 不写治理评论，避免与 后台合入管理服务 双重通知。
+合入流程的流转通知（分配 reviewer、CI 通过后通知 approver、催审、返工通知作者等）由 后台合入管理服务 统一驱动。
+agent 仅在用户明确请求，或 Ready + CI 全绿且当前 head 尚未触发过 `/merge` 时评论 `/merge`；不评论 `/lgtm`
+或 `/approve`，避免与后台服务重复发送治理信号。

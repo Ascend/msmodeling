@@ -29,10 +29,21 @@
 
 agent **不执行 assignee 指派、不打 `sig:XXX` 标签**——SIG 路由、assignee 分配和标签由后台合入管理服务统一完成，agent 不获取变更文件或计算 SIG 归属。
 
+### 角色排除与 Reviewer 优先级
+
+- PR 作者不得被分配为该 PR 的 Chair、Reviewer 或 Approver。
+- Reviewer 路由优先选择非作者 Chair；若 Chair 是 PR 作者，则从 Reviewer 候选池中排除作者后选择其他 Reviewer。
+- Approver 仅从该 SIG 的明确候选人中按顺序选择：有 `approver_candidates` 时使用该列表，否则只使用 `approver`。排除 PR 作者和该 PR 已选 Reviewer；不自动从 Reviewer 池补人。过滤后无人可用时进入 `blocked` 并升级人工处理。
+- 跨 SIG PR 对每个涉及的 SIG 分别执行上述过滤；不得通过自审或自批绕过独立检视。
+- 合并后的“实测算子” SIG 统一负责 `tensor_cast/performance_model/`、
+  `tensor_cast/performance_model/profiling_database/`、`tools/perf_data_collection/` 和
+  `tools/perf_data_analysis/`，角色为 Chair `Secluded_Ocean`、Reviewer `zhenghaojie`、
+  Approver `lutean`。
+
 ## 检视步骤
 
 1. CLI 读取 PR、评论、关联 Issue 和权威 diff。
-2. 参考 `sig_ownership.json` 了解变更所属 SIG（信息性，不执行指派或打标签）。
+2. 参考 `sig_ownership.json` 了解变更所属 SIG 和候选角色（信息性，不执行指派或打标签）。
 3. 读取变更文件的必要上下文和相关规范。
 4. 生成候选 finding。
 5. 对每条 finding 核验准确性、影响、行号、严重度、建议和重复情况。

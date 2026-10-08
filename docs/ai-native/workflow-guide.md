@@ -13,7 +13,7 @@ Windows PowerShell 请使用 `gitcode`，不要使用别名 `gc`。
 
 ## 两种模式
 
-- `guided`：默认，在 Issue 提交、分析结论、设计、远端写入、push、CI 修复和 Ready 前确认。
+- `guided`：默认，在 Issue 提交、分析结论、设计、远端写入、push、CI 修复和 Ready 前确认；Ready 之后若适用 CI 全绿，可按幂等规则自动评论 `/merge`。
 - `autonomous`：用户明确限定仓库、Issue、分支和目标后连续执行。
 
 两种模式都不能自动越过安全问题、权限不足、门禁绕过、破坏性操作、审批或合并。
@@ -51,7 +51,7 @@ gitcode pr create -R Ascend/msmodeling \
   --fork <fork-owner>/msmodeling --head feat/example --base master
 ```
 
-主仓分支模式省略 `--fork`，但 source branch、canonical target 和 base 仍需显式确认。Fork 内部临时 PR
+Issue 创建时若未指定里程碑，工作流会提醒用户设置，但不阻塞创建。主仓分支模式省略 `--fork`，但 source branch、canonical target 和 base 仍需显式确认。Fork 内部临时 PR
 可以没有 CI；最终 canonical PR 必须完成 openLiBing。
 
 ## 暂停与恢复

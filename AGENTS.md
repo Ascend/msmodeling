@@ -20,12 +20,12 @@ GitCode 配置：
 
 - canonical repository：`Ascend/msmodeling`
 - 默认分支：`master`
-- source repository：从当前可写 Git remote 动态识别，贡献者通常使用 Fork 的 `origin`
+- source repository：从当前可写 Git remote 动态识别；代码贡献必须使用个人 Fork，不能使用 canonical repository
 - operation target：每次远端写操作必须显式指定；正式 Issue、PR、Review 和 CI 面向 canonical repository
 - GitCode 命令：`gitcode`
 - canonical PR 流水线：openLiBing，通过 PR 机器人评论反馈
 
-禁止在 `master` 直接开发。
+禁止在 `master` 直接开发，也禁止在 canonical repository 直接创建或推送功能分支（包括 `codex/*`）。
 
 ## 2. 读取顺序
 
@@ -108,8 +108,10 @@ python scripts/ai/resolve_repository_context.py --json
 
 规则：
 
-- Fork 开发时从 canonical 基线建分支并 push 到 source repository，再向 canonical repository 创建 PR；
-- 有主仓权限时可以在主仓分支开发，但 PR target 仍为 canonical `master`；
+- 所有代码贡献统一从 canonical 基线在个人 Fork 建分支并 push 到 source repository，再向 canonical repository 创建跨仓 PR；
+- canonical repository 只作为正式 PR 的 target，不作为代码贡献的 source branch repository；
+- 创建 PR 前必须验证 source repository 与 canonical repository 不同：
+  `python scripts/ai/resolve_repository_context.py --write --require-fork-source --source-remote <fork-remote> --repo Ascend/msmodeling --json`；
 - Fork 内部临时 Issue/PR 必须显式选择 Fork 作为 operation target，不能改变 canonical 身份；
 - canonical 只定义正式目标，不构成远端写授权；远端写必须显示目标仓并确认；
 - 读取类命令优先 `--json`；
@@ -220,7 +222,7 @@ python build.py test
 python build.py
 ```
 
-`pre-commit` 的 `gitleaks-offline-scan` hook 用 `language: system` + `entry: ./gitleaks`，pre-commit 不自动安装；首次运行前用 `python scripts/ai/install_gitleaks.py` 准备本地二进制（幂等、平台感知、自动维护 `.gitignore`）。
+`pre-commit` 的 `gitleaks-offline-scan` hook 用 `language: system` + `entry: python scripts/ai/run_gitleaks.py`，pre-commit 不自动安装；首次运行前用 `python scripts/ai/install_gitleaks.py` 准备本地二进制（幂等、平台感知、自动维护 `.gitignore`）。
 
 AI Native 资产额外执行：
 

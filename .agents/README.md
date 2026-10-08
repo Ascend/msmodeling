@@ -56,8 +56,9 @@ python scripts/ai/check_gitcode_cli.py
 python scripts/ai/resolve_repository_context.py --json
 ```
 
-canonical repository 为 `Ascend/msmodeling`，默认分支为 `master`；source repository 从 Git remote
-动态识别。所有写操作显式指定 operation target。canonical PR 的 openLiBing 流水线由
+canonical repository 为 `Ascend/msmodeling`，默认分支为 `master`；代码贡献的 source repository
+必须是与 canonical 不同的个人 Fork，并从 Git remote 动态识别。所有写操作显式指定 operation target。
+canonical PR 的 openLiBing 流水线由
 `gitcode-pipeline-analyzer` 分析。上游 Skills 版本与本仓适配记录在 `.agents/gitcode-skills.lock.json`。
 
 ## msmodeling-env-installer
@@ -451,7 +452,7 @@ GitCode CLI 驱动的 SIG 检视技能。它保留目录到 SIG 的路由、多�
 | File | Purpose |
 | ---- | ------- |
 | `sig-review/SKILL.md` | Skill 定义、分配检视流程、代码检视流程、评论格式规范 |
-| `sig-review/sig_ownership.json` | SIG 目录归属映射表（10 个 SIG 的路径、chair、reviewer、approver） |
+| `sig-review/sig_ownership.json` | SIG 目录归属映射表（9 个 SIG 的路径、chair、reviewer、approver） |
 | `sig-review/ref/review-checklist.md` | 检视质量标准、什么该 / 不该检视、msmodeling 专项关注 |
 
 ### Quick start

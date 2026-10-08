@@ -31,15 +31,16 @@ metadata:
 4. 分析相关代码、测试、文档和历史，明确标注事实、推断和待确认项。
 5. 按 Bug、Feature 或 RFC 模板生成完整草稿。
 6. 使用 `gitcode label list` 获取真实标签；没有合适标签时不添加。
-7. 将正文写入临时 UTF-8 文件，执行：
+7. 检查里程碑：用户已提供里程碑时校验其真实名称或编号；未提供时在最终草稿和创建结果中明确提醒“请设置里程碑”，但不阻塞创建、不猜测或自动创建。
+8. 将正文写入临时 UTF-8 文件，执行：
 
    ```bash
    gitcode issue create -R <TARGET_REPO> \
      --title "<title>" --body-file <file> --dry-run --json
    ```
 
-8. **SIG 路由**：根据 Issue 标题、正文和标签推断归属 SIG（规则见下文），输出 chair 列表。
-9. 向用户展示最终标题、正文、元数据和 SIG 路由结果，先 dry-run 预览，确认后正式创建。
+9. **SIG 路由**：根据 Issue 标题、正文和标签推断归属 SIG（规则见下文），输出 chair 列表。
+10. 向用户展示最终标题、正文、元数据、里程碑状态和 SIG 路由结果，先 dry-run 预览，确认后正式创建。
 
    ```bash
    # dry-run 预览（含 assignee）
@@ -85,8 +86,8 @@ Issue 无文件 diff，路由依据按优先级从高到低：
 | 设备/device/DeviceProfile/拓扑 | ServingCast |
 | 吞吐/throughput/optimizer | Throughput寻优 |
 | optix/服务化寻优 | Optix |
-| profiling/算子/kernel/microbench | 实测算子查询 |
-| perf_data/工具链 | 实测算子工具链 |
+| profiling/算子/kernel/microbench | 实测算子 |
+| perf_data/工具链 | 实测算子 |
 | 模型适配/attention/MLA/MoE/transformer | 模型适配 |
 | 视频/diffuser/video | 视频生成 |
 | UI/web_ui | UI |
@@ -147,6 +148,7 @@ gitcode issue create -R <TARGET_REPO> --title "<title>" --body-file <file> --iss
 
 - 重复检查结论；
 - 最终 Issue 草稿；
+- 里程碑状态（已设置 / 未设置，未设置时包含提醒）；
 - SIG 路由结果（归属 SIG、chair、assignee）；
 - dry-run 结果；
 - 创建后的 Issue 编号和 URL；

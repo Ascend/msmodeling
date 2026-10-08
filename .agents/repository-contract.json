@@ -4,7 +4,8 @@
   "default_base_branch": "master",
   "source_repository": {
     "strategy": "git-remote",
-    "default_remote": "origin"
+    "default_remote": "origin",
+    "required_distinct_from_canonical": true
   },
   "upstream_remote": "upstream",
   "operation_target": {
