@@ -33,6 +33,8 @@ UI concepts); choices match spec_cli.STANDARD_LOG_LEVELS, default="info".
 
 from __future__ import annotations
 
+import argparse
+
 from tensor_cast.core.compilation_config import COMPILATION_CONFIG_OPTIONS
 
 # Enum imports (pure StrEnum, safe to import — no torch dependency)
@@ -74,6 +76,25 @@ def get_device_choices() -> list[str]:
 # when cli_positional=True + cli_flag="model-path". cli_aliases are DEPRECATED
 # names (one-shot warning); --model-id is a formal sibling registered separately
 # by the adapter.
+
+
+def _model_id_cli_type(v: str) -> str:
+    """argparse type for model-id: legacy check_string_valid semantics.
+
+    Existing local filesystem paths (including Windows absolute paths with
+    drive letters and backslashes) bypass the character whitelist, matching
+    the legacy model-adapter entry (cli.utils.check_string_valid). The
+    whitelist itself is NOT loosened: non-existent strings with invalid
+    characters are still rejected.
+    """
+    if v is argparse.SUPPRESS:  # nargs="?" default passthrough (align _string_type)
+        return v
+    # Lazy import: avoids import-order coupling between registry and cli.utils.
+    from cli.utils import check_string_valid
+
+    return check_string_valid(v, max_len=256)
+
+
 MODEL_ID = Param(
     name="model-id",
     data_type="string",
@@ -81,6 +102,7 @@ MODEL_ID = Param(
     nargs="?",
     pattern=r"^[a-zA-Z0-9_/.-]+$",
     max_length=256,
+    cli_type=_model_id_cli_type,
     cli_positional=True,
     cli_flag="model-path",  # positional+flag combo: formal --model-path flag (different from positional name)
     cli_aliases=("model_id",),  # no -- prefix; deprecated underscore form
